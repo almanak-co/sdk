@@ -167,3 +167,145 @@ class TestOtherKinds:
 
         with pytest.raises(ValueError, match="Unknown wallet kind: frobnicate"):
             service._create_signer_from_resolved(wallet)
+
+
+# =============================================================================
+# _get_orchestrator — chain/wallet orchestrator construction and caching
+# =============================================================================
+
+_ORCH_PATCH = "almanak.framework.execution.orchestrator.ExecutionOrchestrator"
+_SIM_PATCH = "almanak.framework.execution.simulator.create_simulator"
+_SUB_PATCH = "almanak.framework.execution.submitter.PublicMempoolSubmitter"
+_RPC_PATCH = "almanak.gateway.utils.get_rpc_url"
+_RPC_URL = "http://rpc.test.local:8545"
+
+
+def _orchestrator_harness():
+    """Patch the four collaborators _get_orchestrator imports lazily."""
+    import contextlib
+
+    stack = contextlib.ExitStack()
+    orch_cls = stack.enter_context(patch(_ORCH_PATCH))
+    orch_cls.return_value.tx_risk_config.max_gas_price_gwei = 321
+    sim = stack.enter_context(patch(_SIM_PATCH))
+    sub = stack.enter_context(patch(_SUB_PATCH))
+    rpc = stack.enter_context(patch(_RPC_PATCH, return_value=_RPC_URL))
+    return stack, orch_cls, sim, sub, rpc
+
+
+def _eoa_service() -> ExecutionServiceServicer:
+    service = _service(private_key=TEST_PRIVATE_KEY)
+    # Deterministic non-Safe default-signer path regardless of local .env.
+    service.settings.safe_address = None
+    service.settings.safe_mode = None
+    return service
+
+
+class TestGetOrchestrator:
+    @pytest.mark.asyncio
+    async def test_cache_hit_returns_existing_orchestrator_untouched(self):
+        service = _eoa_service()
+        cached = MagicMock(name="cached-orchestrator")
+        service._orchestrator_cache["arbitrum:0xabc"] = cached
+
+        stack, orch_cls, _sim, _sub, rpc = _orchestrator_harness()
+        with stack:
+            result = await service._get_orchestrator("arbitrum", "0xabc")
+
+        assert result is cached
+        orch_cls.assert_not_called()
+        rpc.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_default_signer_path_builds_and_caches_orchestrator(self):
+        service = _eoa_service()
+
+        stack, orch_cls, sim, sub, rpc = _orchestrator_harness()
+        with stack:
+            result = await service._get_orchestrator("arbitrum", TEST_DERIVED_EOA)
+
+        assert result is orch_cls.return_value
+        rpc.assert_called_once_with("arbitrum", network=service.settings.network)
+        sub.assert_called_once_with(rpc_url=_RPC_URL)
+        sim.assert_called_once_with(rpc_url=_RPC_URL)
+
+        kwargs = orch_cls.call_args.kwargs
+        assert isinstance(kwargs["signer"], LocalKeySigner)
+        assert kwargs["signer"].address == TEST_DERIVED_EOA
+        assert kwargs["chain"] == "arbitrum"
+        assert kwargs["rpc_url"] == _RPC_URL
+        assert kwargs["submitter"] is sub.return_value
+        assert kwargs["simulator"] is sim.return_value
+
+        cache_key = f"arbitrum:{TEST_DERIVED_EOA}"
+        assert service._orchestrator_cache[cache_key] is result
+        assert cache_key in service._orchestrator_locks
+        assert service._orchestrator_default_gas_caps[cache_key] == 321
+
+    @pytest.mark.asyncio
+    async def test_registry_resolved_wallet_supplies_signer(self):
+        service = _eoa_service()
+        registry = MagicMock()
+        registry.resolve.return_value = SimpleNamespace(kind="direct", private_key=WALLET_PRIVATE_KEY)
+        service.wallet_registry = registry
+
+        stack, orch_cls, _sim, _sub, _rpc = _orchestrator_harness()
+        with stack:
+            await service._get_orchestrator("base", TEST_DERIVED_EOA)
+
+        registry.resolve.assert_called_once_with("base")
+        signer = orch_cls.call_args.kwargs["signer"]
+        assert isinstance(signer, LocalKeySigner)
+        # Registry wallet key wins over the settings key.
+        assert signer.address == WALLET_DERIVED_EOA
+
+    @pytest.mark.asyncio
+    async def test_registry_returning_none_falls_back_to_default_signer(self):
+        service = _eoa_service()
+        registry = MagicMock()
+        registry.resolve.return_value = None
+        service.wallet_registry = registry
+
+        stack, orch_cls, _sim, _sub, _rpc = _orchestrator_harness()
+        with stack:
+            await service._get_orchestrator("base", TEST_DERIVED_EOA)
+
+        signer = orch_cls.call_args.kwargs["signer"]
+        assert isinstance(signer, LocalKeySigner)
+        assert signer.address == TEST_DERIVED_EOA
+
+    @pytest.mark.asyncio
+    async def test_chain_missing_from_registry_falls_back_to_default_signer(self):
+        service = _eoa_service()
+        registry = MagicMock()
+        registry.resolve.side_effect = KeyError("unknown chain")
+        service.wallet_registry = registry
+
+        stack, orch_cls, _sim, _sub, _rpc = _orchestrator_harness()
+        with stack:
+            await service._get_orchestrator("base", TEST_DERIVED_EOA)
+
+        signer = orch_cls.call_args.kwargs["signer"]
+        assert isinstance(signer, LocalKeySigner)
+        assert signer.address == TEST_DERIVED_EOA
+
+    @pytest.mark.asyncio
+    async def test_resolved_wallet_signer_failure_fails_closed(self):
+        # Registry resolves a wallet but signer construction fails: the
+        # gateway must refuse to fall back to the default signer (funds
+        # could otherwise route through the wrong wallet).
+        service = _service()  # no settings key either
+        service.settings.safe_address = None
+        service.settings.safe_mode = None
+        registry = MagicMock()
+        registry.resolve.return_value = SimpleNamespace(kind="direct", private_key=None)
+        service.wallet_registry = registry
+
+        stack, orch_cls, _sim, _sub, _rpc = _orchestrator_harness()
+        with stack:
+            with pytest.raises(ValueError, match="Refusing to fall back to default signer"):
+                await service._get_orchestrator("base", TEST_DERIVED_EOA)
+            orch_cls.assert_not_called()
+
+        assert service._orchestrator_cache == {}
+        assert service._orchestrator_locks == {}

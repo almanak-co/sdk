@@ -503,3 +503,94 @@ class TestJupiterAdapterPriorityFeeThreading:
         call_kwargs = mock_client.get_swap_transaction.call_args[1]
         assert call_kwargs["priority_fee_level"] is None
         assert call_kwargs["priority_fee_max_lamports"] is None
+
+
+# ---------------------------------------------------------------------------
+# _resolve_all_amount tests
+# ---------------------------------------------------------------------------
+
+
+def _token_account(amount: str, decimals: int) -> dict:
+    """Build a getTokenAccountsByOwner account entry with a parsed balance."""
+    return {
+        "account": {
+            "data": {
+                "parsed": {
+                    "info": {
+                        "tokenAmount": {"amount": amount, "decimals": decimals},
+                    }
+                }
+            }
+        }
+    }
+
+
+class TestJupiterAdapterResolveAllAmount:
+    RPC_URL = "http://rpc.test/solana"
+
+    @pytest.fixture
+    def adapter(self, jupiter_config, mock_token_resolver, price_provider):
+        return JupiterAdapter(
+            config=jupiter_config,
+            price_provider=price_provider,
+            token_resolver=mock_token_resolver,
+            rpc_url=self.RPC_URL,
+        )
+
+    @staticmethod
+    def _mock_response(payload: dict) -> MagicMock:
+        response = MagicMock()
+        response.json.return_value = payload
+        return response
+
+    def test_sums_balances_across_token_accounts(self, adapter):
+        payload = {"result": {"value": [_token_account("100", 6), _token_account("50", 6)]}}
+
+        with patch("requests.post", return_value=self._mock_response(payload)) as mock_post:
+            assert adapter._resolve_all_amount(USDC_MINT) == (150, 6)
+
+        mock_post.assert_called_once()
+        args, kwargs = mock_post.call_args
+        assert args[0] == self.RPC_URL
+        assert kwargs["timeout"] == 10
+        body = kwargs["json"]
+        assert body["method"] == "getTokenAccountsByOwner"
+        assert body["params"][0] == adapter.wallet_address
+        assert body["params"][1] == {"mint": USDC_MINT}
+
+    def test_rpc_error_payload_returns_none(self, adapter):
+        payload = {"error": {"code": -32000, "message": "rate limited"}}
+
+        with patch("requests.post", return_value=self._mock_response(payload)):
+            assert adapter._resolve_all_amount(USDC_MINT) is None
+
+    def test_no_token_accounts_returns_zero_balance(self, adapter):
+        payload = {"result": {"value": []}}
+
+        with patch("requests.post", return_value=self._mock_response(payload)):
+            assert adapter._resolve_all_amount(USDC_MINT) == (0, 0)
+
+    def test_malformed_accounts_are_skipped(self, adapter):
+        payload = {
+            "result": {
+                "value": [
+                    _token_account("100", 6),
+                    {"account": {}},  # KeyError path
+                    _token_account("not-a-number", 6),  # ValueError path
+                ]
+            }
+        }
+
+        with patch("requests.post", return_value=self._mock_response(payload)):
+            assert adapter._resolve_all_amount(USDC_MINT) == (100, 6)
+
+    def test_transport_failure_returns_none(self, adapter):
+        with patch("requests.post", side_effect=ConnectionError("connection refused")):
+            assert adapter._resolve_all_amount(USDC_MINT) is None
+
+    def test_http_error_status_returns_none(self, adapter):
+        response = MagicMock()
+        response.raise_for_status.side_effect = RuntimeError("500 server error")
+
+        with patch("requests.post", return_value=response):
+            assert adapter._resolve_all_amount(USDC_MINT) is None

@@ -352,6 +352,88 @@ class TestFundTokens:
         result = await mgr._fund_single_token("SomeAddress", "UNKNOWN_TOKEN", Decimal("100"))
         assert result is False
 
+    @staticmethod
+    def _running_manager() -> SolanaForkManager:
+        mgr = SolanaForkManager(rpc_url="https://api.mainnet-beta.solana.com")
+        mgr._is_running = True
+        keypair = MagicMock()
+        keypair.pubkey.return_value = "AuthorityPubkey11111111111111111111111111111"
+        mgr._mint_authority_keypair = keypair
+        return mgr
+
+    @pytest.mark.asyncio
+    async def test_fund_tokens_all_succeed_skips_airdrop_when_authority_funded(self):
+        mgr = self._running_manager()
+
+        with patch.object(mgr, "_get_sol_balance", new_callable=AsyncMock, return_value=5_000_000_000), \
+             patch.object(mgr, "_rpc_call", new_callable=AsyncMock) as mock_rpc, \
+             patch.object(mgr, "_fund_single_token", new_callable=AsyncMock, return_value=True) as mock_fund:
+            result = await mgr.fund_tokens(
+                "SomeAddress", {"USDC": Decimal("1000"), "USDT": Decimal("500")}
+            )
+
+        assert result is True
+        # Authority already has > 0.1 SOL — no airdrop RPC issued
+        mock_rpc.assert_not_awaited()
+        assert mock_fund.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_fund_tokens_airdrops_when_authority_balance_low(self):
+        mgr = self._running_manager()
+
+        with patch.object(mgr, "_get_sol_balance", new_callable=AsyncMock, return_value=0), \
+             patch.object(mgr, "_rpc_call", new_callable=AsyncMock, return_value="airdrop_sig") as mock_rpc, \
+             patch.object(mgr, "_confirm_transaction", new_callable=AsyncMock) as mock_confirm, \
+             patch.object(mgr, "_fund_single_token", new_callable=AsyncMock, return_value=True):
+            result = await mgr.fund_tokens("SomeAddress", {"USDC": Decimal("1000")})
+
+        assert result is True
+        mock_rpc.assert_awaited_once_with(
+            "requestAirdrop", ["AuthorityPubkey11111111111111111111111111111", 2_000_000_000]
+        )
+        mock_confirm.assert_awaited_once_with("airdrop_sig")
+
+    @pytest.mark.asyncio
+    async def test_fund_tokens_failed_airdrop_skips_confirmation(self):
+        mgr = self._running_manager()
+
+        with patch.object(mgr, "_get_sol_balance", new_callable=AsyncMock, return_value=0), \
+             patch.object(mgr, "_rpc_call", new_callable=AsyncMock, return_value=None), \
+             patch.object(mgr, "_confirm_transaction", new_callable=AsyncMock) as mock_confirm, \
+             patch.object(mgr, "_fund_single_token", new_callable=AsyncMock, return_value=True):
+            result = await mgr.fund_tokens("SomeAddress", {"USDC": Decimal("1000")})
+
+        assert result is True
+        mock_confirm.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_fund_tokens_one_failure_returns_false_but_continues(self):
+        mgr = self._running_manager()
+
+        async def _fund(address, symbol, amount):
+            return symbol != "USDC"
+
+        with patch.object(mgr, "_get_sol_balance", new_callable=AsyncMock, return_value=5_000_000_000), \
+             patch.object(mgr, "_fund_single_token", new_callable=AsyncMock, side_effect=_fund) as mock_fund:
+            result = await mgr.fund_tokens(
+                "SomeAddress", {"USDC": Decimal("1000"), "USDT": Decimal("500")}
+            )
+
+        assert result is False
+        # The USDT funding still ran despite the USDC failure
+        assert mock_fund.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_fund_tokens_exception_in_single_token_returns_false(self):
+        mgr = self._running_manager()
+
+        with patch.object(mgr, "_get_sol_balance", new_callable=AsyncMock, return_value=5_000_000_000), \
+             patch.object(mgr, "_fund_single_token", new_callable=AsyncMock,
+                          side_effect=RuntimeError("mint tx failed")):
+            result = await mgr.fund_tokens("SomeAddress", {"USDC": Decimal("1000")})
+
+        assert result is False
+
 
 # =============================================================================
 # Mint Modification Tests

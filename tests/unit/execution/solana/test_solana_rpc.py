@@ -200,6 +200,98 @@ class TestSolanaRpcClientAsync:
 
 
 # ---------------------------------------------------------------------------
+# confirm_transaction tests
+# ---------------------------------------------------------------------------
+
+
+class TestConfirmTransaction:
+    """Branch coverage for the confirmation polling loop.
+
+    ``get_signature_statuses`` is patched per-test; the poll interval is
+    shrunk via monkeypatch so retry paths run in milliseconds.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _fast_poll(self, monkeypatch):
+        monkeypatch.setattr(
+            "almanak.framework.execution.solana.rpc.POLL_INTERVAL_SECONDS", 0.001
+        )
+
+    @pytest.mark.asyncio
+    async def test_zero_timeout_returns_unconfirmed_without_polling(self, client):
+        with patch.object(client, "get_signature_statuses") as statuses:
+            result = await client.confirm_transaction("sig1", timeout_seconds=0)
+        assert result == ConfirmationResult(signature="sig1", confirmed=False)
+        statuses.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_on_chain_error_returns_confirmed_with_err(self, client):
+        err = {"InstructionError": [0, "Custom"]}
+        with patch.object(
+            client,
+            "get_signature_statuses",
+            return_value=[{"confirmationStatus": "processed", "err": err}],
+        ):
+            result = await client.confirm_transaction("sig_fail")
+        assert result.confirmed is True
+        assert result.err == err
+        # No "slot" key in the status -> defaults to 0.
+        assert result.slot == 0
+
+    @pytest.mark.asyncio
+    async def test_confirmed_status_meets_default_commitment(self, client):
+        with patch.object(
+            client,
+            "get_signature_statuses",
+            return_value=[{"confirmationStatus": "confirmed", "slot": 123, "err": None}],
+        ) as statuses:
+            result = await client.confirm_transaction("sig_ok")
+        assert result == ConfirmationResult(signature="sig_ok", confirmed=True, slot=123)
+        statuses.assert_awaited_once_with(["sig_ok"], search_transaction_history=True)
+
+    @pytest.mark.asyncio
+    async def test_commitment_override_polls_until_finalized(self, client):
+        with patch.object(
+            client,
+            "get_signature_statuses",
+            side_effect=[
+                [{"confirmationStatus": "confirmed", "slot": 100, "err": None}],
+                [{"confirmationStatus": "finalized", "slot": 101, "err": None}],
+            ],
+        ) as statuses:
+            result = await client.confirm_transaction("sig2", commitment="finalized")
+        assert result.confirmed is True
+        assert result.slot == 101
+        assert statuses.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_empty_and_none_statuses_are_retried(self, client):
+        with patch.object(
+            client,
+            "get_signature_statuses",
+            side_effect=[
+                [],  # falsy statuses list -> status None
+                [None],  # unknown signature -> status None
+                [{"confirmationStatus": "confirmed", "slot": 5, "err": None}],
+            ],
+        ) as statuses:
+            result = await client.confirm_transaction("sig3")
+        assert result.confirmed is True
+        assert result.slot == 5
+        assert statuses.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_processed_only_times_out(self, client):
+        with patch.object(
+            client,
+            "get_signature_statuses",
+            return_value=[{"confirmationStatus": "processed", "slot": 7, "err": None}],
+        ):
+            result = await client.confirm_transaction("sig4", timeout_seconds=0.02)
+        assert result == ConfirmationResult(signature="sig4", confirmed=False)
+
+
+# ---------------------------------------------------------------------------
 # TransactionReceipt tests
 # ---------------------------------------------------------------------------
 

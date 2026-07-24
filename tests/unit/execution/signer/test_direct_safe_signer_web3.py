@@ -1,4 +1,4 @@
-"""Unit tests for DirectSafeSigner.sign_with_web3.
+"""Unit tests for DirectSafeSigner.sign_with_web3 and the MultiSend bundle path.
 
 Covers almanak/framework/execution/signer/safe/direct.py sign_with_web3:
 
@@ -12,6 +12,13 @@ Covers almanak/framework/execution/signer/safe/direct.py sign_with_web3:
 - Enso delegate target uses DELEGATECALL
 - sign_transaction failure wrapped in SigningError
 - "0x" prefix normalization branches for raw_tx / tx_hash
+
+And sign_bundle_with_web3 / _sign_multisend_with_web3:
+
+- empty bundle rejection; nonce-cache clear on bundle start
+- MultiSend payload shape (DELEGATECALL, multiSend selector, summed gas)
+- EIP-1559 vs legacy gas-parameter propagation into the multisend tx
+- missing 'to' rejection, sign failure wrapping, hex-prefix normalization
 
 All web3 interaction is mocked; no RPC.
 """
@@ -36,6 +43,7 @@ from almanak.framework.execution.signer.safe.config import (
     SafeWalletConfig,
 )
 from almanak.framework.execution.signer.safe.constants import (
+    MULTISEND_SELECTOR,
     SAFE_EXEC_TRANSACTION_ABI,
     SAFE_GET_OWNERS_ABI,
     SAFE_GET_THRESHOLD_ABI,
@@ -43,6 +51,7 @@ from almanak.framework.execution.signer.safe.constants import (
     SAFE_NONCE_ABI,
     ZERO_ADDRESS,
     SafeOperation,
+    get_multisend_address,
 )
 from almanak.framework.execution.signer.safe.direct import DirectSafeSigner
 
@@ -355,3 +364,173 @@ async def test_threshold_above_one_raises():
 
     with pytest.raises(SigningError, match="threshold=2"):
         await signer.sign_with_web3(make_tx(), web3, eoa_nonce=0)
+
+
+# =============================================================================
+# sign_bundle_with_web3
+# =============================================================================
+
+MULTISEND_ETHEREUM = to_checksum_address(get_multisend_address("ethereum"))
+
+
+@pytest.mark.asyncio
+async def test_bundle_empty_list_raises_value_error():
+    signer = make_signer()
+
+    with pytest.raises(ValueError, match="empty transaction bundle"):
+        await signer.sign_bundle_with_web3([], make_web3(), eoa_nonce=0, chain="ethereum")
+
+
+@pytest.mark.asyncio
+async def test_bundle_happy_path_eip1559():
+    signer = make_signer()
+    web3 = make_web3(safe_nonce=7, estimate=500_000)
+    tx1 = make_tx()
+    tx2 = make_tx(value=5, data="0xbeef01")
+
+    result = await signer.sign_bundle_with_web3([tx1, tx2], web3, eoa_nonce=4, chain="ethereum")
+
+    assert isinstance(result, SignedTransaction)
+    assert Account.recover_transaction(result.raw_tx) == EOA
+
+    # The unsigned multisend tx targets the chain's MultiSend contract with
+    # summed inner gas and first-tx EIP-1559 gas params
+    ms_tx = result.unsigned_tx
+    assert ms_tx.to == MULTISEND_ETHEREUM
+    assert ms_tx.value == 0
+    assert ms_tx.data.startswith(MULTISEND_SELECTOR)
+    assert ms_tx.gas_limit == tx1.gas_limit + tx2.gas_limit
+    assert ms_tx.from_address == SAFE
+    assert ms_tx.tx_type == TransactionType.EIP_1559
+    assert ms_tx.max_fee_per_gas == tx1.max_fee_per_gas
+    assert ms_tx.max_priority_fee_per_gas == tx1.max_priority_fee_per_gas
+    assert ms_tx.gas_price is None
+
+    # getTransactionHash uses DELEGATECALL and the chain Safe nonce (pos=0)
+    (hash_args, _) = web3.mock_hash.functions.getTransactionHash.call_args
+    assert hash_args[0] == MULTISEND_ETHEREUM
+    assert hash_args[3] == SafeOperation.DELEGATE_CALL
+    assert hash_args[-1] == 7
+
+    # execTransaction mirrors the DELEGATECALL operation with a 65-byte sig
+    (exec_args, _) = web3.mock_exec.functions.execTransaction.call_args
+    assert exec_args[3] == SafeOperation.DELEGATE_CALL
+    signature = exec_args[-1]
+    assert len(signature) == 65
+    assert signature[64] in (27, 28)
+
+    # Wrapper: EOA nonce, EIP-1559 marker, buffered estimate
+    wrapper = web3.built_wrappers[0]
+    assert wrapper["nonce"] == 4
+    assert wrapper["type"] == 2
+    assert wrapper["value"] == 0
+    assert wrapper["gas"] == int(500_000 * 1.3)
+
+
+@pytest.mark.asyncio
+async def test_bundle_legacy_gas_params():
+    signer = make_signer()
+    web3 = make_web3()
+    tx = make_tx(tx_type=TransactionType.LEGACY)
+
+    result = await signer.sign_bundle_with_web3([tx], web3, eoa_nonce=1, chain="ethereum")
+
+    ms_tx = result.unsigned_tx
+    assert ms_tx.tx_type == TransactionType.LEGACY
+    assert ms_tx.gas_price == tx.gas_price
+    assert ms_tx.max_fee_per_gas is None
+    assert ms_tx.max_priority_fee_per_gas is None
+
+    wrapper = web3.built_wrappers[0]
+    assert wrapper["gasPrice"] == tx.gas_price
+    assert "type" not in wrapper
+    assert "maxFeePerGas" not in wrapper
+    assert Account.recover_transaction(result.raw_tx) == EOA
+
+
+@pytest.mark.asyncio
+async def test_bundle_clears_stale_nonce_cache():
+    signer = make_signer()
+    web3 = make_web3(safe_nonce=7)
+    signer._safe_nonce_cache["stale-key"] = 99
+
+    await signer.sign_bundle_with_web3([make_tx()], web3, eoa_nonce=0, chain="ethereum")
+
+    # Stale entries are dropped at bundle start; the fresh chain nonce is used
+    assert "stale-key" not in signer._safe_nonce_cache
+    (hash_args, _) = web3.mock_hash.functions.getTransactionHash.call_args
+    assert hash_args[-1] == 7
+
+
+# =============================================================================
+# _sign_multisend_with_web3
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_multisend_missing_to_raises():
+    signer = make_signer()
+
+    with pytest.raises(SigningError, match="requires 'to' address"):
+        await signer._sign_multisend_with_web3(
+            make_tx(to=None), make_web3(), eoa_nonce=0, operation=SafeOperation.DELEGATE_CALL
+        )
+
+
+@pytest.mark.asyncio
+async def test_multisend_sign_failure_wrapped_in_signing_error():
+    signer = make_signer()
+    web3 = make_web3()
+    account = make_mock_account("dead", "beef")
+    account.sign_transaction.side_effect = RuntimeError("kaput")
+    signer._account = account
+
+    with pytest.raises(SigningError, match="Failed to sign MultiSend bundle: RuntimeError: kaput"):
+        await signer._sign_multisend_with_web3(
+            make_tx(), web3, eoa_nonce=0, operation=SafeOperation.DELEGATE_CALL
+        )
+
+
+@pytest.mark.asyncio
+async def test_multisend_adds_hex_prefix_when_missing():
+    signer = make_signer()
+    web3 = make_web3()
+    signer._account = make_mock_account("f8bb22", "feed")
+
+    result = await signer._sign_multisend_with_web3(
+        make_tx(), web3, eoa_nonce=0, operation=SafeOperation.DELEGATE_CALL
+    )
+
+    assert result.raw_tx == "0xf8bb22"
+    assert result.tx_hash == "0xfeed"
+
+
+@pytest.mark.asyncio
+async def test_multisend_keeps_existing_hex_prefix():
+    signer = make_signer()
+    web3 = make_web3()
+    signer._account = make_mock_account("0xf8bb22", "0xfeed")
+
+    result = await signer._sign_multisend_with_web3(
+        make_tx(), web3, eoa_nonce=0, operation=SafeOperation.DELEGATE_CALL
+    )
+
+    assert result.raw_tx == "0xf8bb22"
+    assert result.tx_hash == "0xfeed"
+
+
+@pytest.mark.asyncio
+async def test_multisend_legacy_gas_params_branch():
+    signer = make_signer()
+    web3 = make_web3(estimate=100_000)
+    tx = make_tx(tx_type=TransactionType.LEGACY)
+
+    result = await signer._sign_multisend_with_web3(
+        tx, web3, eoa_nonce=3, operation=SafeOperation.DELEGATE_CALL
+    )
+
+    wrapper = web3.built_wrappers[0]
+    assert wrapper["gasPrice"] == tx.gas_price
+    assert "type" not in wrapper
+    assert wrapper["gas"] == int(100_000 * 1.3)
+    assert Account.recover_transaction(result.raw_tx) == EOA

@@ -5,7 +5,7 @@ subgraph responses. Covers V3-style pools, V2-style pools, Liquidity Book,
 Balancer, and Curve protocols.
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1017,3 +1017,240 @@ class TestBalancerPoolIdNormalization:
         )
 
         assert captured.get("poolAddress") == full_id[:42]
+
+
+# =============================================================================
+# Test V2/Solidly pairDayDatas query helper (direct)
+# =============================================================================
+
+
+class TestV2LiquidityQueryDirect:
+    """Directly exercise ``_query_v2_liquidity`` (solidly_v2 family handler).
+
+    No declared connector currently routes here through ``get_liquidity_depth``
+    (aerodrome's subgraph is a v3 fork, ALM-2930), so the ``pairDayDatas``
+    handler is pinned directly against the mocked client to keep its
+    contract from silently rotting.
+    """
+
+    TS = datetime(2024, 1, 15, 12, 0, tzinfo=UTC)
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_no_subgraph_deployment(self, provider, mock_subgraph_client, monkeypatch):
+        monkeypatch.setattr(provider, "_get_subgraph_id", lambda *_a, **_k: None)
+
+        result = await provider._query_v2_liquidity("0xPAIR", "base", self.TS, "aerodrome")
+
+        assert result is None
+        mock_subgraph_client.query.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_success_selects_most_recent_reserve_usd(self, provider, mock_subgraph_client, monkeypatch):
+        monkeypatch.setattr(provider, "_get_subgraph_id", lambda *_a, **_k: "deployment-id")
+        mock_subgraph_client.query.return_value = {
+            "pairDayDatas": [
+                {"id": "0xpair-19722", "date": 1704067200, "reserveUSD": "7000000", "dailyVolumeUSD": "1"},
+                {"id": "0xpair-19723", "date": 1704153600, "reserveUSD": "9000000", "dailyVolumeUSD": "2"},
+            ]
+        }
+
+        result = await provider._query_v2_liquidity("0xPAIR", "base", self.TS, "aerodrome")
+
+        assert result is not None
+        # Point-in-time (no TWAP): most recent point wins.
+        assert result.depth == Decimal("9000000")
+        assert result.source_info.source == "aerodrome_subgraph"
+        assert result.source_info.confidence == DataConfidence.HIGH
+        assert result.source_info.timestamp == self.TS
+        # The pair address is lowercased into the query variables.
+        variables = mock_subgraph_client.query.call_args[0][2]
+        assert variables["pairAddress"] == "0xpair"
+
+    @pytest.mark.asyncio
+    async def test_naive_timestamp_stamped_utc(self, provider, mock_subgraph_client, monkeypatch):
+        monkeypatch.setattr(provider, "_get_subgraph_id", lambda *_a, **_k: "deployment-id")
+        mock_subgraph_client.query.return_value = {
+            "pairDayDatas": [
+                {"id": "0xpair-19723", "date": 1704153600, "reserveUSD": "5000000", "dailyVolumeUSD": "1"},
+            ]
+        }
+
+        result = await provider._query_v2_liquidity(
+            "0xpair", "base", datetime(2024, 1, 15, 12, 0), "aerodrome"
+        )
+
+        assert result is not None
+        assert result.source_info.timestamp == datetime(2024, 1, 15, 12, 0, tzinfo=UTC)
+
+    @pytest.mark.asyncio
+    async def test_twap_window_averages_points(self, provider_with_twap, mock_subgraph_client, monkeypatch):
+        monkeypatch.setattr(provider_with_twap, "_get_subgraph_id", lambda *_a, **_k: "deployment-id")
+        # Target Jan 2 12:00 UTC; both points inside the 24h TWAP window.
+        mock_subgraph_client.query.return_value = {
+            "pairDayDatas": [
+                {"id": "0xpair-a", "date": 1704110400, "reserveUSD": "4000000", "dailyVolumeUSD": "1"},
+                {"id": "0xpair-b", "date": 1704153600, "reserveUSD": "6000000", "dailyVolumeUSD": "1"},
+            ]
+        }
+
+        result = await provider_with_twap._query_v2_liquidity(
+            "0xpair", "base", datetime(2024, 1, 2, 12, 0, tzinfo=UTC), "aerodrome"
+        )
+
+        assert result is not None
+        assert Decimal("4000000") <= result.depth <= Decimal("6000000")
+        assert result.source_info.confidence == DataConfidence.HIGH
+
+    @pytest.mark.asyncio
+    async def test_empty_result_returns_none(self, provider, mock_subgraph_client, monkeypatch):
+        monkeypatch.setattr(provider, "_get_subgraph_id", lambda *_a, **_k: "deployment-id")
+        mock_subgraph_client.query.return_value = {"pairDayDatas": []}
+
+        result = await provider._query_v2_liquidity("0xpair", "base", self.TS, "aerodrome")
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_query_error_degrades_to_none(self, provider, mock_subgraph_client, monkeypatch):
+        from almanak.framework.backtesting.pnl.providers.subgraph_client import (
+            SubgraphQueryError,
+        )
+
+        monkeypatch.setattr(provider, "_get_subgraph_id", lambda *_a, **_k: "deployment-id")
+        mock_subgraph_client.query.side_effect = SubgraphQueryError("boom")
+
+        result = await provider._query_v2_liquidity("0xpair", "base", self.TS, "aerodrome")
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_rate_limit_degrades_to_none(self, provider, mock_subgraph_client, monkeypatch):
+        from almanak.framework.backtesting.pnl.providers.subgraph_client import (
+            SubgraphRateLimitError,
+        )
+
+        monkeypatch.setattr(provider, "_get_subgraph_id", lambda *_a, **_k: "deployment-id")
+        mock_subgraph_client.query.side_effect = SubgraphRateLimitError()
+
+        result = await provider._query_v2_liquidity("0xpair", "base", self.TS, "aerodrome")
+
+        assert result is None
+
+
+# =============================================================================
+# Test Curve (Messari day-numbered) query helper (direct)
+# =============================================================================
+
+
+class TestCurveLiquidityQueryDirect:
+    """Directly exercise ``_query_curve_liquidity`` (stableswap family handler).
+
+    The declared curve deployment routes through ``_query_messari_liquidity``
+    (timestamp-keyed), so the day-numbered handler is pinned directly against
+    the mocked client.
+    """
+
+    TS = datetime(2024, 1, 15, 12, 0, tzinfo=UTC)
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_no_subgraph_deployment(self, provider, mock_subgraph_client, monkeypatch):
+        monkeypatch.setattr(provider, "_get_subgraph_id", lambda *_a, **_k: None)
+
+        result = await provider._query_curve_liquidity("0xCURVE", "ethereum", self.TS, "curve")
+
+        assert result is None
+        mock_subgraph_client.query.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_success_parses_day_numbered_snapshots(self, provider, mock_subgraph_client, monkeypatch):
+        monkeypatch.setattr(provider, "_get_subgraph_id", lambda *_a, **_k: "deployment-id")
+        mock_subgraph_client.query.return_value = {
+            "liquidityPoolDailySnapshots": [
+                {"id": "0xcurve-19736", "day": 19736, "totalValueLockedUSD": "80000000", "dailyVolumeUSD": "1"},
+                {"id": "0xcurve-19737", "day": 19737, "totalValueLockedUSD": "100000000", "dailyVolumeUSD": "2"},
+            ]
+        }
+
+        result = await provider._query_curve_liquidity("0xCURVE", "ethereum", self.TS, "curve")
+
+        assert result is not None
+        assert result.depth == Decimal("100000000")
+        assert result.source_info.source == "curve_subgraph"
+        assert result.source_info.confidence == DataConfidence.HIGH
+        assert result.source_info.timestamp == self.TS
+        # Day-number window derives from the Messari day math + lowercased address.
+        variables = mock_subgraph_client.query.call_args[0][2]
+        assert variables["poolAddress"] == "0xcurve"
+        assert variables["endDay"] == provider._date_to_day_number(self.TS)
+        assert variables["startDay"] == provider._date_to_day_number(self.TS - timedelta(days=1))
+
+    @pytest.mark.asyncio
+    async def test_naive_timestamp_stamped_utc(self, provider, mock_subgraph_client, monkeypatch):
+        monkeypatch.setattr(provider, "_get_subgraph_id", lambda *_a, **_k: "deployment-id")
+        mock_subgraph_client.query.return_value = {
+            "liquidityPoolDailySnapshots": [
+                {"id": "0xcurve-19737", "day": 19737, "totalValueLockedUSD": "1", "dailyVolumeUSD": "0"},
+            ]
+        }
+
+        result = await provider._query_curve_liquidity(
+            "0xcurve", "ethereum", datetime(2024, 1, 15, 12, 0), "curve"
+        )
+
+        assert result is not None
+        assert result.source_info.timestamp == datetime(2024, 1, 15, 12, 0, tzinfo=UTC)
+
+    @pytest.mark.asyncio
+    async def test_twap_window_averages_points(self, provider_with_twap, mock_subgraph_client, monkeypatch):
+        monkeypatch.setattr(provider_with_twap, "_get_subgraph_id", lambda *_a, **_k: "deployment-id")
+        target = datetime(2024, 1, 2, 12, 0, tzinfo=UTC)
+        # Days 19723 (Jan 1) and 19724 (Jan 2); Jan 2 00:00 is in the 24h window.
+        mock_subgraph_client.query.return_value = {
+            "liquidityPoolDailySnapshots": [
+                {"id": "0xcurve-19723", "day": 19723, "totalValueLockedUSD": "40000000", "dailyVolumeUSD": "1"},
+                {"id": "0xcurve-19724", "day": 19724, "totalValueLockedUSD": "60000000", "dailyVolumeUSD": "1"},
+            ]
+        }
+
+        result = await provider_with_twap._query_curve_liquidity("0xcurve", "ethereum", target, "curve")
+
+        assert result is not None
+        assert Decimal("40000000") <= result.depth <= Decimal("60000000")
+        # TWAP mode widens the day window to the full TWAP span.
+        variables = mock_subgraph_client.query.call_args[0][2]
+        assert variables["startDay"] == provider_with_twap._date_to_day_number(target - timedelta(hours=24))
+
+    @pytest.mark.asyncio
+    async def test_empty_result_returns_none(self, provider, mock_subgraph_client, monkeypatch):
+        monkeypatch.setattr(provider, "_get_subgraph_id", lambda *_a, **_k: "deployment-id")
+        mock_subgraph_client.query.return_value = {"liquidityPoolDailySnapshots": []}
+
+        result = await provider._query_curve_liquidity("0xcurve", "ethereum", self.TS, "curve")
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_query_error_degrades_to_none(self, provider, mock_subgraph_client, monkeypatch):
+        from almanak.framework.backtesting.pnl.providers.subgraph_client import (
+            SubgraphQueryError,
+        )
+
+        monkeypatch.setattr(provider, "_get_subgraph_id", lambda *_a, **_k: "deployment-id")
+        mock_subgraph_client.query.side_effect = SubgraphQueryError("boom")
+
+        result = await provider._query_curve_liquidity("0xcurve", "ethereum", self.TS, "curve")
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_rate_limit_degrades_to_none(self, provider, mock_subgraph_client, monkeypatch):
+        from almanak.framework.backtesting.pnl.providers.subgraph_client import (
+            SubgraphRateLimitError,
+        )
+
+        monkeypatch.setattr(provider, "_get_subgraph_id", lambda *_a, **_k: "deployment-id")
+        mock_subgraph_client.query.side_effect = SubgraphRateLimitError()
+
+        result = await provider._query_curve_liquidity("0xcurve", "ethereum", self.TS, "curve")
+
+        assert result is None

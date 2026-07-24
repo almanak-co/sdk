@@ -1,17 +1,20 @@
 """Branch coverage for ChainExecutor execute_transaction / execute_transaction_safe /
-execute_bundle.
+execute_bundle / wait_for_receipt.
 
 The full-flow entry points are driven with the sign/submit/confirm seams replaced
 by AsyncMock so no RPC ever happens. Covers the success paths (with and without
-confirmation waits), the submitted=False early return, and each of the three
+confirmation waits), the submitted=False early return, each of the three
 error-classification except branches (execution errors, SubmissionError with and
-without a tx hash, and the unexpected-Exception fallback). No RPC access.
+without a tx hash, and the unexpected-Exception fallback), and the receipt-wait
+mapping / revert / timeout / generic-error paths in wait_for_receipt. No RPC
+access.
 """
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from hexbytes import HexBytes
 
 from almanak.framework.execution.chain_executor import ChainExecutor
 from almanak.framework.execution.interfaces import (
@@ -388,3 +391,111 @@ class TestExecuteBundle:
         assert result.success is False
         assert result.tx_hash == ""
         assert result.error == "Unexpected error: multisend down"
+
+
+# =============================================================================
+# wait_for_receipt
+# =============================================================================
+
+
+def _raw_receipt(**overrides) -> dict:
+    raw = {
+        "transactionHash": HexBytes(_TX_HASH),
+        "blockNumber": 123,
+        "blockHash": HexBytes("0x" + "cd" * 32),
+        "gasUsed": 21000,
+        "effectiveGasPrice": 55,
+        "status": 1,
+        "logs": [{"address": "0x" + "ee" * 20, "data": "0x"}],
+        "contractAddress": None,
+        "from": "0x" + "aa" * 20,
+        "to": "0x" + "bb" * 20,
+    }
+    raw.update(overrides)
+    return raw
+
+
+def _wire_receipt(executor: ChainExecutor, response) -> MagicMock:
+    """Point the executor at a web3 mock whose receipt wait yields ``response``."""
+    web3 = MagicMock(name="web3")
+    if isinstance(response, Exception):
+        web3.eth.wait_for_transaction_receipt = AsyncMock(side_effect=response)
+    else:
+        web3.eth.wait_for_transaction_receipt = AsyncMock(return_value=response)
+    executor._get_web3 = AsyncMock(return_value=web3)
+    return web3
+
+
+class TestWaitForReceipt:
+    def test_success_maps_receipt_fields(self, executor):
+        web3 = _wire_receipt(executor, _raw_receipt())
+
+        receipt = asyncio.run(executor.wait_for_receipt(_TX_HASH))
+
+        assert receipt.tx_hash == HexBytes(_TX_HASH).hex()
+        assert receipt.block_number == 123
+        assert receipt.block_hash == HexBytes("0x" + "cd" * 32).hex()
+        assert receipt.gas_used == 21000
+        assert receipt.effective_gas_price == 55
+        assert receipt.status == 1
+        assert receipt.logs == [{"address": "0x" + "ee" * 20, "data": "0x"}]
+        assert receipt.contract_address is None
+        assert receipt.from_address == "0x" + "aa" * 20
+        assert receipt.to_address == "0x" + "bb" * 20
+        # Default timeout comes from the executor config (120s).
+        web3.eth.wait_for_transaction_receipt.assert_awaited_once_with(
+            HexBytes(_TX_HASH), timeout=executor._tx_timeout_seconds
+        )
+
+    def test_explicit_timeout_overrides_default(self, executor):
+        web3 = _wire_receipt(executor, _raw_receipt())
+
+        asyncio.run(executor.wait_for_receipt(_TX_HASH, timeout=5))
+
+        web3.eth.wait_for_transaction_receipt.assert_awaited_once_with(
+            HexBytes(_TX_HASH), timeout=5
+        )
+
+    def test_missing_optional_fields_default(self, executor):
+        raw = _raw_receipt()
+        for key in ("effectiveGasPrice", "logs", "contractAddress", "from", "to"):
+            del raw[key]
+        _wire_receipt(executor, raw)
+
+        receipt = asyncio.run(executor.wait_for_receipt(_TX_HASH))
+
+        assert receipt.effective_gas_price == 0
+        assert receipt.logs == []
+        assert receipt.contract_address is None
+        assert receipt.from_address is None
+        assert receipt.to_address is None
+
+    def test_reverted_status_raises(self, executor):
+        _wire_receipt(executor, _raw_receipt(status=0))
+
+        with pytest.raises(TransactionRevertedError) as excinfo:
+            asyncio.run(executor.wait_for_receipt(_TX_HASH))
+
+        assert excinfo.value.tx_hash == _TX_HASH
+        assert excinfo.value.gas_used == 21000
+        assert excinfo.value.block_number == 123
+
+    def test_timeout_wrapped_as_recoverable_submission_error(self, executor):
+        _wire_receipt(executor, TimeoutError())
+
+        with pytest.raises(SubmissionError) as excinfo:
+            asyncio.run(executor.wait_for_receipt(_TX_HASH))
+
+        assert "Timeout waiting for transaction" in str(excinfo.value)
+        assert excinfo.value.tx_hash == _TX_HASH
+        assert excinfo.value.recoverable is True
+
+    def test_generic_error_wrapped_as_submission_error(self, executor):
+        _wire_receipt(executor, ValueError("bad rpc payload"))
+
+        with pytest.raises(SubmissionError) as excinfo:
+            asyncio.run(executor.wait_for_receipt(_TX_HASH))
+
+        assert "Failed to get receipt" in str(excinfo.value)
+        assert "bad rpc payload" in str(excinfo.value)
+        assert excinfo.value.recoverable is True

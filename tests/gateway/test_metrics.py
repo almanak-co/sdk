@@ -3,7 +3,10 @@
 import asyncio
 import socket
 import time
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
+import grpc
 import pytest
 from prometheus_client import REGISTRY
 
@@ -485,3 +488,150 @@ class TestMetricsRegistry:
         # RPC metrics
         assert "gateway_rpc_requests" in metric_names or "gateway_rpc_requests_total" in metric_names
         assert "gateway_rpc_latency_seconds" in metric_names
+
+
+class TestInterceptService:
+    """Branch coverage for MetricsInterceptor.intercept_service handler dispatch."""
+
+    METHOD = "/almanak.gateway.MarketService/GetPrice"
+
+    @pytest.fixture
+    def interceptor(self) -> MetricsInterceptor:
+        return MetricsInterceptor()
+
+    def _details(self) -> SimpleNamespace:
+        return SimpleNamespace(method=self.METHOD)
+
+    @staticmethod
+    def _continuation(handler):
+        return AsyncMock(return_value=handler)
+
+    @pytest.mark.asyncio
+    async def test_none_handler_passes_through(self, interceptor):
+        result = await interceptor.intercept_service(self._continuation(None), self._details())
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_unary_unary_handler_rewrapped_and_still_calls_behavior(self, interceptor):
+        calls = []
+
+        async def behavior(request, context):
+            calls.append(request)
+            return "resp"
+
+        original = grpc.unary_unary_rpc_method_handler(
+            behavior,
+            request_deserializer="req-deser",
+            response_serializer="resp-ser",
+        )
+
+        result = await interceptor.intercept_service(self._continuation(original), self._details())
+
+        assert result is not original
+        assert result.unary_unary is not behavior
+        # Serialization plumbing is preserved from the original handler.
+        assert result.request_deserializer == "req-deser"
+        assert result.response_serializer == "resp-ser"
+        # The wrapped behavior still reaches the original handler.
+        response = await result.unary_unary("request-1", MagicMock())
+        assert response == "resp"
+        assert calls == ["request-1"]
+
+    @pytest.mark.asyncio
+    async def test_unary_stream_handler_rewrapped_and_streams(self, interceptor):
+        async def behavior(request, context):
+            yield "a"
+            yield "b"
+
+        original = grpc.unary_stream_rpc_method_handler(
+            behavior,
+            request_deserializer="req-deser",
+            response_serializer="resp-ser",
+        )
+
+        result = await interceptor.intercept_service(self._continuation(original), self._details())
+
+        assert result is not original
+        assert result.unary_stream is not behavior
+        assert result.request_deserializer == "req-deser"
+        items = [item async for item in result.unary_stream("req", MagicMock())]
+        assert items == ["a", "b"]
+
+    @pytest.mark.asyncio
+    async def test_stream_unary_handler_rewrapped_and_consumes_iterator(self, interceptor):
+        async def behavior(request_iterator, context):
+            return [item async for item in request_iterator]
+
+        original = grpc.stream_unary_rpc_method_handler(
+            behavior,
+            request_deserializer="req-deser",
+            response_serializer="resp-ser",
+        )
+
+        result = await interceptor.intercept_service(self._continuation(original), self._details())
+
+        assert result is not original
+        assert result.stream_unary is not behavior
+        assert result.response_serializer == "resp-ser"
+
+        async def request_iterator():
+            yield "x"
+            yield "y"
+
+        response = await result.stream_unary(request_iterator(), MagicMock())
+        assert response == ["x", "y"]
+
+    @pytest.mark.asyncio
+    async def test_stream_stream_handler_rewrapped_and_streams(self, interceptor):
+        async def behavior(request_iterator, context):
+            async for item in request_iterator:
+                yield item.upper()
+
+        original = grpc.stream_stream_rpc_method_handler(
+            behavior,
+            request_deserializer="req-deser",
+            response_serializer="resp-ser",
+        )
+
+        result = await interceptor.intercept_service(self._continuation(original), self._details())
+
+        assert result is not original
+        assert result.stream_stream is not behavior
+
+        async def request_iterator():
+            yield "a"
+            yield "b"
+
+        items = [item async for item in result.stream_stream(request_iterator(), MagicMock())]
+        assert items == ["A", "B"]
+
+    @pytest.mark.asyncio
+    async def test_handler_with_no_recognized_kind_passes_through(self, interceptor):
+        bare = SimpleNamespace(
+            unary_unary=None,
+            unary_stream=None,
+            stream_unary=None,
+            stream_stream=None,
+        )
+
+        result = await interceptor.intercept_service(self._continuation(bare), self._details())
+
+        assert result is bare
+
+    @pytest.mark.asyncio
+    async def test_wrapped_unary_unary_records_request_metrics(self, interceptor):
+        async def behavior(request, context):
+            return "resp"
+
+        original = grpc.unary_unary_rpc_method_handler(behavior)
+        before = (
+            REQUEST_COUNT.labels(service="MarketService", method="GetPrice", status="ok")._value.get()
+        )
+
+        result = await interceptor.intercept_service(self._continuation(original), self._details())
+        await result.unary_unary("req", MagicMock())
+
+        after = (
+            REQUEST_COUNT.labels(service="MarketService", method="GetPrice", status="ok")._value.get()
+        )
+        assert after == before + 1

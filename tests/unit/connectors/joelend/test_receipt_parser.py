@@ -50,6 +50,9 @@ MINT_TOPIC = EVENT_TOPICS["Mint"]
 REDEEM_TOPIC = EVENT_TOPICS["Redeem"]
 BORROW_TOPIC = EVENT_TOPICS["Borrow"]
 REPAY_TOPIC = EVENT_TOPICS["RepayBorrow"]
+LIQUIDATE_TOPIC = EVENT_TOPICS["LiquidateBorrow"]
+TRANSFER_TOPIC = EVENT_TOPICS["Transfer"]
+APPROVAL_TOPIC = EVENT_TOPICS["Approval"]
 
 UNDERLYING_DECIMALS = 18
 
@@ -292,6 +295,172 @@ class TestMalformed:
         assert len(result.events) == 1
         assert result.events[0].data == {}
         assert result.supply_amount == Decimal("0")
+
+
+# ---------------------------------------------------------------------------
+# LiquidateBorrow
+# ---------------------------------------------------------------------------
+
+LIQUIDATOR = "0x4444444444444444444444444444444444444444"
+COLLATERAL_JTOKEN = "0x5555555555555555555555555555555555555555"
+
+
+def make_liquidate_log(
+    repay_amount_raw: int,
+    seize_tokens_raw: int,
+    address: str = JTOKEN,
+) -> dict:
+    """LiquidateBorrow(address liquidator, address borrower, uint256 repayAmount,
+    address cTokenCollateral, uint256 seizeTokens) — 5 data words."""
+    return {
+        "address": address,
+        "topics": [LIQUIDATE_TOPIC],
+        "data": (
+            "0x"
+            + addr_word(LIQUIDATOR)
+            + addr_word(USER)
+            + word(repay_amount_raw)
+            + addr_word(COLLATERAL_JTOKEN)
+            + word(seize_tokens_raw)
+        ),
+        "logIndex": 4,
+    }
+
+
+class TestLiquidateBorrow:
+    def test_liquidate_decodes_actors_amounts_and_collateral(self, parser):
+        receipt = make_receipt([make_liquidate_log(6 * 10**18, 550 * 10**8)])
+        result = parser.parse_receipt(receipt)
+
+        assert result.success is True
+        ev = result.events[0]
+        assert ev.event_type == JoeLendEventType.LIQUIDATE_BORROW
+        assert ev.data["liquidator"].lower() == LIQUIDATOR.lower()
+        assert ev.data["borrower"].lower() == USER.lower()
+        assert ev.data["repay_amount"] == "6"
+        assert ev.data["ctoken_collateral"].lower() == COLLATERAL_JTOKEN.lower()
+        assert ev.data["seize_tokens"] == "550"
+        # LiquidateBorrow does not feed the supply/borrow/repay aggregates
+        assert result.repay_amount == Decimal("0")
+
+    def test_truncated_liquidate_data_yields_empty_data_dict(self, parser):
+        truncated = {
+            "address": JTOKEN,
+            "topics": [LIQUIDATE_TOPIC],
+            "data": "0x" + addr_word(LIQUIDATOR) + addr_word(USER),  # 2 of 5 words
+            "logIndex": 4,
+        }
+        result = parser.parse_receipt(make_receipt([truncated]))
+
+        assert len(result.events) == 1
+        assert result.events[0].data == {}
+
+
+# ---------------------------------------------------------------------------
+# Transfer / Approval (ERC20 events on the jToken)
+# ---------------------------------------------------------------------------
+
+
+class TestTransferAndApproval:
+    def test_transfer_decodes_indexed_topics_and_value(self, parser):
+        log = {
+            "address": JTOKEN,
+            "topics": [TRANSFER_TOPIC, "0x" + addr_word(USER), "0x" + addr_word(PAYER)],
+            "data": "0x" + word(100 * 10**8),
+            "logIndex": 5,
+        }
+        result = parser.parse_receipt(make_receipt([log]))
+
+        ev = result.events[0]
+        assert ev.event_type == JoeLendEventType.TRANSFER
+        assert ev.data["from"].lower() == USER.lower()
+        assert ev.data["to"].lower() == PAYER.lower()
+        # Transfer value stays RAW (no decimals scaling)
+        assert ev.data["value"] == str(100 * 10**8)
+
+    def test_transfer_missing_indexed_topics_decodes_value_only(self, parser):
+        log = {
+            "address": JTOKEN,
+            "topics": [TRANSFER_TOPIC],  # anonymous-style: no indexed topics
+            "data": "0x" + word(42),
+            "logIndex": 5,
+        }
+        result = parser.parse_receipt(make_receipt([log]))
+
+        ev = result.events[0]
+        assert "from" not in ev.data
+        assert "to" not in ev.data
+        assert ev.data["value"] == "42"
+
+    def test_transfer_empty_data_decodes_topics_only(self, parser):
+        log = {
+            "address": JTOKEN,
+            "topics": [TRANSFER_TOPIC, "0x" + addr_word(USER), "0x" + addr_word(PAYER)],
+            "data": "0x",
+            "logIndex": 5,
+        }
+        result = parser.parse_receipt(make_receipt([log]))
+
+        ev = result.events[0]
+        assert ev.data["from"].lower() == USER.lower()
+        assert "value" not in ev.data
+
+    def test_approval_decodes_owner_spender_and_value(self, parser):
+        log = {
+            "address": JTOKEN,
+            "topics": [APPROVAL_TOPIC, "0x" + addr_word(USER), "0x" + addr_word(PAYER)],
+            "data": "0x" + word(2**256 - 1),
+            "logIndex": 6,
+        }
+        result = parser.parse_receipt(make_receipt([log]))
+
+        ev = result.events[0]
+        assert ev.event_type == JoeLendEventType.APPROVAL
+        assert ev.data["owner"].lower() == USER.lower()
+        assert ev.data["spender"].lower() == PAYER.lower()
+        assert ev.data["value"] == str(2**256 - 1)
+
+    def test_approval_missing_topics_and_data_yields_empty_dict(self, parser):
+        log = {
+            "address": JTOKEN,
+            "topics": [APPROVAL_TOPIC],
+            "data": "0x",
+            "logIndex": 6,
+        }
+        result = parser.parse_receipt(make_receipt([log]))
+
+        assert result.events[0].data == {}
+
+
+# ---------------------------------------------------------------------------
+# _decode_event_data direct edge cases
+# ---------------------------------------------------------------------------
+
+
+class TestDecodeEventDataDirect:
+    def test_raw_data_without_0x_prefix_is_decoded(self, parser):
+        """The decoder strips an optional 0x prefix; bare hex must decode identically."""
+        bare = addr_word(USER) + word(2 * 10**18) + word(100 * 10**8)
+        data = parser._decode_event_data("Mint", [MINT_TOPIC], bare)
+
+        assert data["mint_amount"] == "2"
+        assert data["mint_tokens"] == "100"
+
+    def test_unknown_event_name_returns_empty_dict(self, parser):
+        data = parser._decode_event_data("SomethingElse", [MINT_TOPIC], "0x" + word(1))
+        assert data == {}
+
+    def test_truncated_redeem_returns_empty_dict(self, parser):
+        data = parser._decode_event_data("Redeem", [REDEEM_TOPIC], "0x" + word(1))
+        assert data == {}
+
+    def test_truncated_borrow_returns_empty_dict(self, parser):
+        data = parser._decode_event_data("Borrow", [BORROW_TOPIC], "0x" + addr_word(USER) + word(1))
+        assert data == {}
+
+    def test_truncated_repay_returns_empty_dict(self, parser):
+        data = parser._decode_event_data("RepayBorrow", [REPAY_TOPIC], "0x" + addr_word(USER))
+        assert data == {}
 
 
 # ---------------------------------------------------------------------------

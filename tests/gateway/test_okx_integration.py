@@ -2215,3 +2215,69 @@ class TestCacheAddress:
 
     def test_unknown_chain_lowercases_address(self):
         assert OkxIntegration._cache_address(self._EVM_ADDR, "notachain") == self._EVM_ADDR.lower()
+
+
+class TestSumPositionValuesStaticMethod:
+    """Branch coverage for the class-level ``OkxIntegration._sum_position_values``.
+
+    This staticmethod is the original of the module-local ``_sum_position_values``
+    mirror (tested above); production callers use the module-level function, but
+    the staticmethod remains part of the class surface and must stay
+    behaviourally identical to the mirror.
+    """
+
+    def test_sums_currency_amounts_across_positions_and_assets(self):
+        positions = [
+            {
+                "assetsTokenList": [
+                    {"currencyAmount": "10.25"},
+                    {"currencyAmount": "5.75"},
+                ]
+            },
+            {"assetsTokenList": [{"currencyAmount": "4.00"}]},
+        ]
+        assert OkxIntegration._sum_position_values(positions) == "20.00"
+
+    def test_empty_list_returns_zero(self):
+        assert OkxIntegration._sum_position_values([]) == "0"
+
+    def test_non_list_inputs_return_zero(self):
+        assert OkxIntegration._sum_position_values(None) == "0"
+        assert OkxIntegration._sum_position_values("oops") == "0"
+        assert OkxIntegration._sum_position_values(7) == "0"
+        assert OkxIntegration._sum_position_values({"assetsTokenList": []}) == "0"
+
+    def test_malformed_positions_and_assets_are_skipped(self):
+        positions = [
+            "not-a-dict",  # non-dict position skipped
+            {"assetsTokenList": None},  # assets not a list skipped
+            {"assetsTokenList": "bad"},  # assets not a list skipped
+            {},  # no assets key skipped
+            {
+                "assetsTokenList": [
+                    "not-a-dict",  # non-dict asset skipped
+                    {"currencyAmount": "1.50"},
+                    {"currencyAmount": "invalid"},  # unparseable -> 0
+                    {"currencyAmount": "2.50"},
+                ]
+            },
+        ]
+        assert OkxIntegration._sum_position_values(positions) == "4.00"
+
+    def test_missing_currency_amount_defaults_to_zero(self):
+        positions = [
+            {
+                "assetsTokenList": [
+                    {"tokenSymbol": "A"},  # no currencyAmount
+                    {"currencyAmount": "3.50"},
+                ]
+            },
+        ]
+        assert OkxIntegration._sum_position_values(positions) == "3.50"
+
+    def test_matches_module_level_mirror(self):
+        positions = [
+            {"assetsTokenList": [{"currencyAmount": "0.1"}, {"currencyAmount": "0.2"}]},
+            {"assetsTokenList": [{"currencyAmount": "7"}]},
+        ]
+        assert OkxIntegration._sum_position_values(positions) == _sum_position_values(positions)

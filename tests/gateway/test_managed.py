@@ -1002,3 +1002,405 @@ class TestAnvilFundingPrivateKeyResolution:
         assert any("skipping Anvil funding" in w for w in warning_calls), (
             f"Expected the skip-funding warning, got: {warning_calls}"
         )
+
+
+class TestStartAnvilForksBranches:
+    """Branch coverage for ManagedGateway._start_anvil_forks.
+
+    All process/network seams are mocked: ``shutil.which``, the archive-RPC
+    gate, ``RollingForkManager``, ``get_rpc_url``/``PUBLIC_RPC_URLS``, and the
+    managed-module env seam (``env_value``/``set_env_value``) so no real
+    ``os.environ`` mutation or subprocess launch happens.
+    """
+
+    def _make_gateway(self, chains, external_ports=None):
+        settings = GatewaySettings(
+            grpc_port=50097,
+            metrics_enabled=False,
+            audit_enabled=False,
+            allow_insecure=True,
+            network="anvil",
+        )
+        return ManagedGateway(settings, anvil_chains=chains, external_anvil_ports=external_ports)
+
+    @staticmethod
+    def _manager(start_ok=True):
+        manager = AsyncMock()
+        manager.start.return_value = start_ok
+        return manager
+
+    def _patches(
+        self,
+        fake_env,
+        *,
+        managers,
+        free_ports,
+        rpc_url="https://eth-mainnet.g.alchemy.com/v2/TOPSECRETKEY",
+        public_rpc_urls=None,
+        fork_block=None,
+        port_in_use=True,
+        which="/usr/bin/anvil",
+    ):
+        """Build the full patch stack for a _start_anvil_forks run."""
+        rfm_cls = MagicMock(side_effect=managers)
+        return (
+            rfm_cls,
+            (
+                patch("shutil.which", return_value=which),
+                patch("almanak.framework.anvil.fork_manager.RollingForkManager", rfm_cls),
+                patch("almanak.gateway.utils.rpc_provider.get_rpc_url", return_value=rpc_url),
+                patch("almanak.gateway.utils.rpc_provider.PUBLIC_RPC_URLS", public_rpc_urls or {}),
+                patch("almanak.gateway.managed.find_free_port", side_effect=free_ports),
+                patch("almanak.gateway.managed.is_port_in_use", return_value=port_in_use),
+                patch("almanak.gateway.managed.anvil_fork_block_for_chain", return_value=fork_block),
+                patch("almanak.gateway.managed.env_value", side_effect=fake_env.get),
+                patch(
+                    "almanak.gateway.managed.set_env_value",
+                    side_effect=lambda name, value: fake_env.__setitem__(name, value),
+                ),
+            ),
+        )
+
+    @pytest.mark.asyncio
+    async def test_missing_anvil_binary_raises_install_error(self):
+        """No anvil on PATH -> actionable install error before any fork work."""
+        gw = self._make_gateway(["arbitrum"])
+        fake_env: dict[str, str] = {}
+        rfm_cls, patches = self._patches(fake_env, managers=[], free_ports=[], which=None)
+        from contextlib import ExitStack
+
+        with ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            gate = stack.enter_context(patch.object(gw, "_check_archive_rpc_availability"))
+            with pytest.raises(RuntimeError, match="Anvil is not installed"):
+                await gw._start_anvil_forks()
+
+        gate.assert_not_called()
+        rfm_cls.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_managed_happy_path_starts_fork_sets_env_and_redacts_url(self, caplog):
+        """Managed chain: fork started, env routed, archive gate run, URL redacted."""
+        import logging
+
+        gw = self._make_gateway(["arbitrum"])
+        fake_env: dict[str, str] = {}
+        manager = self._manager(start_ok=True)
+        rfm_cls, patches = self._patches(fake_env, managers=[manager], free_ports=[7101])
+        from contextlib import ExitStack
+
+        with ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            gate = stack.enter_context(patch.object(gw, "_check_archive_rpc_availability"))
+            with caplog.at_level(logging.INFO, logger="almanak.gateway.managed"):
+                await gw._start_anvil_forks()
+
+        gate.assert_called_once()
+        manager.start.assert_awaited_once()
+        assert gw._anvil_managers["arbitrum"] is manager
+        assert fake_env["ANVIL_ARBITRUM_PORT"] == "7101"
+        assert gw._original_env == {"ANVIL_ARBITRUM_PORT": None}
+        kwargs = rfm_cls.call_args.kwargs
+        assert kwargs["chain"] == "arbitrum"
+        assert kwargs["anvil_port"] == 7101
+        assert kwargs["fork_block_number"] is None
+        assert kwargs["startup_timeout_seconds"] == 30.0  # arbitrum is not cold-start slow
+        assert kwargs["keep_alive_detached"] is False
+        # API key must never leak into logs; path tail is redacted to /***
+        assert "TOPSECRETKEY" not in caplog.text
+        assert "/***" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_cold_start_slow_chain_gets_extended_timeout_and_fork_pin(self):
+        """Ethereum: 90s startup budget and the pinned fork block is threaded through."""
+        gw = self._make_gateway(["ethereum"])
+        fake_env = {"ANVIL_ETHEREUM_PORT": "1111"}  # pre-existing value must be preserved
+        manager = self._manager(start_ok=True)
+        rfm_cls, patches = self._patches(
+            fake_env, managers=[manager], free_ports=[7102], fork_block=123_456
+        )
+        from contextlib import ExitStack
+
+        with ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            stack.enter_context(patch.object(gw, "_check_archive_rpc_availability"))
+            await gw._start_anvil_forks()
+
+        kwargs = rfm_cls.call_args.kwargs
+        assert kwargs["startup_timeout_seconds"] == 90.0
+        assert kwargs["fork_block_number"] == 123_456
+        # Original env value snapshotted for restore-on-stop
+        assert gw._original_env == {"ANVIL_ETHEREUM_PORT": "1111"}
+        assert fake_env["ANVIL_ETHEREUM_PORT"] == "7102"
+
+    @pytest.mark.asyncio
+    async def test_external_chain_sets_env_without_starting_manager(self):
+        """External Anvil: env var routed to the external port, no fork process."""
+        gw = self._make_gateway(["arbitrum"], external_ports={"arbitrum": 9999})
+        fake_env: dict[str, str] = {}
+        rfm_cls, patches = self._patches(fake_env, managers=[], free_ports=[], port_in_use=True)
+        from contextlib import ExitStack
+
+        with ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            stack.enter_context(patch.object(gw, "_check_archive_rpc_availability"))
+            await gw._start_anvil_forks()
+
+        rfm_cls.assert_not_called()
+        assert gw._anvil_managers == {}
+        assert fake_env["ANVIL_ARBITRUM_PORT"] == "9999"
+        assert gw._original_env == {"ANVIL_ARBITRUM_PORT": None}
+
+    @pytest.mark.asyncio
+    async def test_external_chain_unreachable_raises_and_cleans_up(self):
+        """Unreachable external Anvil: RuntimeError + forced fork cleanup."""
+        gw = self._make_gateway(["arbitrum"], external_ports={"arbitrum": 9999})
+        fake_env: dict[str, str] = {}
+        _, patches = self._patches(fake_env, managers=[], free_ports=[], port_in_use=False)
+        from contextlib import ExitStack
+
+        with ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            stack.enter_context(patch.object(gw, "_check_archive_rpc_availability"))
+            stop = stack.enter_context(patch.object(gw, "_stop_anvil_forks", AsyncMock()))
+            with pytest.raises(RuntimeError, match="not reachable on port 9999"):
+                await gw._start_anvil_forks()
+
+        stop.assert_awaited_once_with(force=True)
+
+    @pytest.mark.asyncio
+    async def test_primary_failure_falls_back_to_public_rpc(self):
+        """Primary RPC start failure retries once against the public endpoint."""
+        gw = self._make_gateway(["arbitrum"])
+        fake_env: dict[str, str] = {}
+        failed = self._manager(start_ok=False)
+        ok = self._manager(start_ok=True)
+        rfm_cls, patches = self._patches(
+            fake_env,
+            managers=[failed, ok],
+            free_ports=[7101, 7102],
+            public_rpc_urls={"arbitrum": "https://arb-public.example/rpc"},
+        )
+        from contextlib import ExitStack
+
+        with ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            stack.enter_context(patch.object(gw, "_check_archive_rpc_availability"))
+            await gw._start_anvil_forks()
+
+        assert rfm_cls.call_count == 2
+        retry_kwargs = rfm_cls.call_args_list[1].kwargs
+        assert retry_kwargs["rpc_url"] == "https://arb-public.example/rpc"
+        assert retry_kwargs["anvil_port"] == 7102
+        assert gw._anvil_managers["arbitrum"] is ok
+        assert fake_env["ANVIL_ARBITRUM_PORT"] == "7102"
+
+    @pytest.mark.asyncio
+    async def test_primary_failure_without_public_fallback_raises(self):
+        """No public fallback URL for the chain: fail fast and clean up."""
+        gw = self._make_gateway(["arbitrum"])
+        fake_env: dict[str, str] = {}
+        failed = self._manager(start_ok=False)
+        rfm_cls, patches = self._patches(
+            fake_env, managers=[failed], free_ports=[7101], public_rpc_urls={}
+        )
+        from contextlib import ExitStack
+
+        with ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            stack.enter_context(patch.object(gw, "_check_archive_rpc_availability"))
+            stop = stack.enter_context(patch.object(gw, "_stop_anvil_forks", AsyncMock()))
+            with pytest.raises(RuntimeError, match="Failed to start Anvil fork for arbitrum"):
+                await gw._start_anvil_forks()
+
+        assert rfm_cls.call_count == 1  # no retry without a distinct public URL
+        stop.assert_awaited_once_with(force=True)
+
+    @pytest.mark.asyncio
+    async def test_primary_failure_public_same_as_primary_raises_without_retry(self):
+        """Public URL identical to the failed primary: retry is pointless, raise."""
+        gw = self._make_gateway(["arbitrum"])
+        fake_env: dict[str, str] = {}
+        failed = self._manager(start_ok=False)
+        rfm_cls, patches = self._patches(
+            fake_env,
+            managers=[failed],
+            free_ports=[7101],
+            rpc_url="https://arb-public.example/rpc",
+            public_rpc_urls={"arbitrum": "https://arb-public.example/rpc"},
+        )
+        from contextlib import ExitStack
+
+        with ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            stack.enter_context(patch.object(gw, "_check_archive_rpc_availability"))
+            stack.enter_context(patch.object(gw, "_stop_anvil_forks", AsyncMock()))
+            with pytest.raises(RuntimeError, match="Failed to start Anvil fork"):
+                await gw._start_anvil_forks()
+
+        assert rfm_cls.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_fallback_also_failing_raises(self):
+        """Both primary and public fallback fail to start: RuntimeError."""
+        gw = self._make_gateway(["arbitrum"])
+        fake_env: dict[str, str] = {}
+        rfm_cls, patches = self._patches(
+            fake_env,
+            managers=[self._manager(start_ok=False), self._manager(start_ok=False)],
+            free_ports=[7101, 7102],
+            public_rpc_urls={"arbitrum": "https://arb-public.example/rpc"},
+        )
+        from contextlib import ExitStack
+
+        with ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            stack.enter_context(patch.object(gw, "_check_archive_rpc_availability"))
+            stop = stack.enter_context(patch.object(gw, "_stop_anvil_forks", AsyncMock()))
+            with pytest.raises(RuntimeError, match="Failed to start Anvil fork"):
+                await gw._start_anvil_forks()
+
+        assert rfm_cls.call_count == 2
+        stop.assert_awaited_once_with(force=True)
+
+    @pytest.mark.asyncio
+    async def test_failure_on_second_chain_triggers_forced_cleanup(self):
+        """A later chain failing must force-stop forks already started."""
+        gw = self._make_gateway(["arbitrum", "base"])
+        fake_env: dict[str, str] = {}
+        first_ok = self._manager(start_ok=True)
+        second_fail = self._manager(start_ok=False)
+        rfm_cls, patches = self._patches(
+            fake_env,
+            managers=[first_ok, second_fail],
+            free_ports=[7101, 7102],
+            public_rpc_urls={},
+        )
+        from contextlib import ExitStack
+
+        with ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            stack.enter_context(patch.object(gw, "_check_archive_rpc_availability"))
+            stop = stack.enter_context(patch.object(gw, "_stop_anvil_forks", AsyncMock()))
+            with pytest.raises(RuntimeError, match="Failed to start Anvil fork for base"):
+                await gw._start_anvil_forks()
+
+        # First chain had already registered its manager before the failure
+        assert gw._anvil_managers == {"arbitrum": first_ok}
+        stop.assert_awaited_once_with(force=True)
+
+
+class TestResetAnvilForks:
+    """Branch coverage for ManagedGateway.reset_anvil_forks (thread-safe reset)."""
+
+    def _make_gateway(self):
+        settings = GatewaySettings(
+            grpc_port=50098,
+            metrics_enabled=False,
+            audit_enabled=False,
+            allow_insecure=True,
+            network="anvil",
+        )
+        return ManagedGateway(settings, anvil_chains=["arbitrum"])
+
+    @pytest.fixture
+    def bg_loop(self):
+        """A real event loop running in a background thread (mirrors serve())."""
+        import asyncio
+
+        loop = asyncio.new_event_loop()
+        thread = threading.Thread(target=loop.run_forever, daemon=True)
+        thread.start()
+        yield loop
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=5)
+        loop.close()
+
+    def test_no_managers_returns_false(self):
+        gw = self._make_gateway()
+        assert gw.reset_anvil_forks() is False
+
+    def test_missing_loop_returns_false(self):
+        gw = self._make_gateway()
+        gw._anvil_managers["arbitrum"] = AsyncMock()
+        gw._loop = None
+        assert gw.reset_anvil_forks() is False
+
+    def test_closed_loop_returns_false(self):
+        import asyncio
+
+        gw = self._make_gateway()
+        gw._anvil_managers["arbitrum"] = AsyncMock()
+        loop = asyncio.new_event_loop()
+        loop.close()
+        gw._loop = loop
+        assert gw.reset_anvil_forks() is False
+
+    def test_all_resets_succeed_returns_true_and_refunds(self, bg_loop):
+        gw = self._make_gateway()
+        m1 = AsyncMock()
+        m1.reset_to_latest.return_value = True
+        m2 = AsyncMock()
+        m2.reset_to_latest.return_value = True
+        gw._anvil_managers = {"arbitrum": m1, "base": m2}
+        gw._loop = bg_loop
+        with patch.object(gw, "_fund_anvil_wallets", AsyncMock()) as fund:
+            assert gw.reset_anvil_forks() is True
+        m1.reset_to_latest.assert_awaited_once()
+        m2.reset_to_latest.assert_awaited_once()
+        fund.assert_awaited_once()
+        # Watchdog guard set must be restored after the reset completes
+        assert gw._resetting_chains == set()
+
+    def test_single_reset_failure_returns_false_and_skips_funding(self, bg_loop):
+        gw = self._make_gateway()
+        failing = AsyncMock()
+        failing.reset_to_latest.return_value = False
+        gw._anvil_managers = {"arbitrum": failing}
+        gw._loop = bg_loop
+        with patch.object(gw, "_fund_anvil_wallets", AsyncMock()) as fund:
+            assert gw.reset_anvil_forks() is False
+        fund.assert_not_awaited()
+        assert gw._resetting_chains == set()
+
+    def test_reset_exception_returns_false(self, bg_loop):
+        gw = self._make_gateway()
+        exploding = AsyncMock()
+        exploding.reset_to_latest.side_effect = RuntimeError("anvil gone")
+        gw._anvil_managers = {"arbitrum": exploding}
+        gw._loop = bg_loop
+        with patch.object(gw, "_fund_anvil_wallets", AsyncMock()) as fund:
+            assert gw.reset_anvil_forks() is False
+        fund.assert_not_awaited()
+        assert gw._resetting_chains == set()
+
+    def test_timeout_returns_false(self, bg_loop):
+        import concurrent.futures
+
+        gw = self._make_gateway()
+        gw._anvil_managers = {"arbitrum": AsyncMock()}
+        gw._loop = bg_loop
+
+        class _NeverDoneFuture:
+            def result(self, timeout=None):
+                raise concurrent.futures.TimeoutError()
+
+        def fake_run_coroutine_threadsafe(coro, loop):
+            coro.close()  # avoid "coroutine never awaited" warnings
+            return _NeverDoneFuture()
+
+        with patch(
+            "almanak.gateway.managed.asyncio.run_coroutine_threadsafe",
+            side_effect=fake_run_coroutine_threadsafe,
+        ):
+            assert gw.reset_anvil_forks() is False

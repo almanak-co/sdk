@@ -244,3 +244,80 @@ class TestErrorBundle:
         assert bundle.transactions == []
         assert bundle.metadata["error"] == "Something went wrong"
         assert bundle.metadata["protocol"] == "drift"
+
+
+class TestGetOraclePrice:
+    """Test oracle price resolution: price_oracle -> Data API -> error."""
+
+    def setup_method(self):
+        config = DriftConfig(wallet_address=TEST_WALLET)
+        self.adapter = DriftAdapter(config)
+        self.adapter.client = MagicMock()
+
+    def test_dict_oracle_hit_skips_data_api(self):
+        price = self.adapter._get_oracle_price(0, price_oracle={"SOL": 150.5})
+
+        assert price == Decimal("150.5")
+        self.adapter.client.get_oracle_price.assert_not_called()
+
+    def test_object_oracle_hit_skips_data_api(self):
+        oracle = MagicMock()
+        oracle.get_price.return_value = Decimal("64000")
+
+        price = self.adapter._get_oracle_price(1, price_oracle=oracle)
+
+        assert price == Decimal("64000")
+        oracle.get_price.assert_called_once_with("BTC")
+        self.adapter.client.get_oracle_price.assert_not_called()
+
+    def test_dict_oracle_miss_falls_back_to_data_api(self):
+        self.adapter.client.get_oracle_price.return_value = Decimal("151")
+
+        price = self.adapter._get_oracle_price(0, price_oracle={"ETH": 3000})
+
+        assert price == Decimal("151")
+        self.adapter.client.get_oracle_price.assert_called_once_with(0)
+
+    def test_dict_oracle_non_positive_price_falls_back(self):
+        self.adapter.client.get_oracle_price.return_value = Decimal("151")
+
+        price = self.adapter._get_oracle_price(0, price_oracle={"SOL": 0})
+
+        assert price == Decimal("151")
+        self.adapter.client.get_oracle_price.assert_called_once_with(0)
+
+    def test_object_oracle_error_falls_back(self):
+        oracle = MagicMock()
+        oracle.get_price.side_effect = RuntimeError("oracle offline")
+        self.adapter.client.get_oracle_price.return_value = Decimal("151")
+
+        price = self.adapter._get_oracle_price(0, price_oracle=oracle)
+
+        assert price == Decimal("151")
+
+    def test_unknown_market_index_skips_oracle(self):
+        """No PERP_MARKETS symbol -> empty base asset -> oracle never consulted."""
+        oracle = MagicMock()
+        self.adapter.client.get_oracle_price.return_value = Decimal("2")
+
+        price = self.adapter._get_oracle_price(9999, price_oracle=oracle)
+
+        assert price == Decimal("2")
+        oracle.get_price.assert_not_called()
+
+    def test_no_oracle_uses_data_api(self):
+        self.adapter.client.get_oracle_price.return_value = Decimal("151")
+
+        assert self.adapter._get_oracle_price(0) == Decimal("151")
+
+    def test_data_api_none_raises_validation_error(self):
+        self.adapter.client.get_oracle_price.return_value = None
+
+        with pytest.raises(DriftValidationError, match="Could not get oracle price"):
+            self.adapter._get_oracle_price(0)
+
+    def test_data_api_zero_raises_validation_error(self):
+        self.adapter.client.get_oracle_price.return_value = Decimal("0")
+
+        with pytest.raises(DriftValidationError, match="oracle price"):
+            self.adapter._get_oracle_price(0)

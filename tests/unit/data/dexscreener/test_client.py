@@ -111,6 +111,88 @@ class TestGetTokenPairs:
 
 
 # ---------------------------------------------------------------------------
+# Tests: get_tokens
+# ---------------------------------------------------------------------------
+
+
+class TestGetTokens:
+    @pytest.mark.asyncio
+    async def test_empty_addresses_short_circuits_without_request(self):
+        client = DexScreenerClient()
+        with patch.object(client, "_request", new_callable=AsyncMock) as mock_request:
+            result = await client.get_tokens("solana", [])
+
+        assert result == []
+        mock_request.assert_not_awaited()
+        await client.close()
+
+    @pytest.mark.asyncio
+    async def test_array_response_parsed(self):
+        """v1 endpoint returns a direct array of pairs."""
+        client = DexScreenerClient()
+        pairs_json = [_sample_pair_json("BONK"), _sample_pair_json("WIF")]
+
+        mock_session = MagicMock()
+        mock_session.get = MagicMock(return_value=_mock_response(200, pairs_json))
+
+        with patch.object(client, "_get_session", new_callable=AsyncMock, return_value=mock_session):
+            pairs = await client.get_tokens("solana", ["mint_BONK", "mint_WIF"])
+
+        assert len(pairs) == 2
+        assert all(isinstance(p, DexPair) for p in pairs)
+        assert {p.base_token.symbol for p in pairs} == {"BONK", "WIF"}
+        # Addresses are comma-joined into the path.
+        url = mock_session.get.call_args[0][0]
+        assert url.endswith("/tokens/v1/solana/mint_BONK,mint_WIF")
+        await client.close()
+
+    @pytest.mark.asyncio
+    async def test_dict_response_parsed_via_pairs_key(self):
+        client = DexScreenerClient()
+        response_data = {"pairs": [_sample_pair_json("BONK")]}
+
+        mock_session = MagicMock()
+        mock_session.get = MagicMock(return_value=_mock_response(200, response_data))
+
+        with patch.object(client, "_get_session", new_callable=AsyncMock, return_value=mock_session):
+            pairs = await client.get_tokens("solana", ["mint_BONK"])
+
+        assert len(pairs) == 1
+        assert pairs[0].base_token.symbol == "BONK"
+        await client.close()
+
+    @pytest.mark.asyncio
+    async def test_dict_response_with_null_pairs_is_empty(self):
+        client = DexScreenerClient()
+        mock_session = MagicMock()
+        mock_session.get = MagicMock(return_value=_mock_response(200, {"pairs": None}))
+
+        with patch.object(client, "_get_session", new_callable=AsyncMock, return_value=mock_session):
+            pairs = await client.get_tokens("solana", ["mint_UNKNOWN"])
+
+        assert pairs == []
+        await client.close()
+
+    @pytest.mark.asyncio
+    async def test_addresses_truncated_to_thirty(self):
+        """The API accepts at most 30 addresses per batch."""
+        client = DexScreenerClient()
+        addresses = [f"mint_{i}" for i in range(35)]
+
+        mock_session = MagicMock()
+        mock_session.get = MagicMock(return_value=_mock_response(200, []))
+
+        with patch.object(client, "_get_session", new_callable=AsyncMock, return_value=mock_session):
+            pairs = await client.get_tokens("ethereum", addresses)
+
+        assert pairs == []
+        url = mock_session.get.call_args[0][0]
+        sent = url.rsplit("/", 1)[1].split(",")
+        assert sent == addresses[:30]
+        await client.close()
+
+
+# ---------------------------------------------------------------------------
 # Tests: get_pair
 # ---------------------------------------------------------------------------
 

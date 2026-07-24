@@ -297,6 +297,120 @@ class TestLoadFlow:
         assert call_count == 0, "Must not fire network fetch while inside backoff window"
 
 
+class _FakeResponse:
+    """Minimal aiohttp response stand-in (status + json body)."""
+
+    def __init__(self, status=200, body=None):
+        self.status = status
+        self._body = body
+
+    async def json(self, content_type=None):
+        return self._body
+
+
+class _FakeRequestContext:
+    def __init__(self, response):
+        self._response = response
+
+    async def __aenter__(self):
+        return self._response
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class _FakeSession:
+    """Stands in for aiohttp.ClientSession."""
+
+    def __init__(self, response):
+        self._response = response
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    def get(self, url, timeout=None):
+        return _FakeRequestContext(self._response)
+
+    def post(self, url, json=None, timeout=None):
+        return _FakeRequestContext(self._response)
+
+
+def _patch_aiohttp(monkeypatch, response=None, raise_exc=None):
+    """Patch aiohttp so `_fetch_from_network` never opens a socket."""
+    import aiohttp
+
+    if raise_exc is not None:
+
+        def _boom(*_a, **_k):
+            raise raise_exc
+
+        monkeypatch.setattr(aiohttp, "ClientSession", _boom)
+    else:
+        monkeypatch.setattr(aiohttp, "ClientSession", lambda *_a, **_k: _FakeSession(response))
+    monkeypatch.setattr(aiohttp, "TCPConnector", lambda *_a, **_k: None)
+
+
+class TestFetchFromNetwork:
+    """Tests for `_fetch_from_network` with a fully mocked aiohttp layer."""
+
+    @pytest.fixture
+    def lookup(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "almanak.connectors.pendle.gateway.market_lookup.CACHE_PATH",
+            tmp_path / "pendle_market_cache.json",
+        )
+        return PendleMarketLookup()
+
+    def test_non_200_returns_none(self, lookup, monkeypatch):
+        _patch_aiohttp(monkeypatch, response=_FakeResponse(status=503))
+        assert asyncio.run(lookup._fetch_from_network()) is None
+
+    def test_wrapped_assets_envelope_returned_and_cached(self, lookup, tmp_path, monkeypatch):
+        _patch_aiohttp(monkeypatch, response=_FakeResponse(body={"assets": SAMPLE_ASSETS}))
+
+        result = asyncio.run(lookup._fetch_from_network())
+
+        assert result == SAMPLE_ASSETS
+        cache_path = tmp_path / "pendle_market_cache.json"
+        assert cache_path.exists()
+        assert json.loads(cache_path.read_text()) == SAMPLE_ASSETS
+
+    def test_bare_list_body_returned_and_cached(self, lookup, tmp_path, monkeypatch):
+        _patch_aiohttp(monkeypatch, response=_FakeResponse(body=SAMPLE_ASSETS))
+
+        result = asyncio.run(lookup._fetch_from_network())
+
+        assert result == SAMPLE_ASSETS
+        assert (tmp_path / "pendle_market_cache.json").exists()
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"assets": "not-a-list"},  # wrong assets type
+            {"unexpected": True},  # dict without assets
+            "just a string",  # neither dict nor list
+            42,
+        ],
+    )
+    def test_unexpected_format_returns_none(self, lookup, monkeypatch, body):
+        _patch_aiohttp(monkeypatch, response=_FakeResponse(body=body))
+        assert asyncio.run(lookup._fetch_from_network()) is None
+
+    @pytest.mark.parametrize("body", [{"assets": []}, []])
+    def test_empty_assets_returns_none(self, lookup, tmp_path, monkeypatch, body):
+        _patch_aiohttp(monkeypatch, response=_FakeResponse(body=body))
+        assert asyncio.run(lookup._fetch_from_network()) is None
+        # An empty payload must never be pinned to disk.
+        assert not (tmp_path / "pendle_market_cache.json").exists()
+
+    def test_network_exception_returns_none(self, lookup, monkeypatch):
+        _patch_aiohttp(monkeypatch, raise_exc=RuntimeError("connection reset"))
+        assert asyncio.run(lookup._fetch_from_network()) is None
+
+
 class TestPendleTokenMetadata:
     """Sanity checks on the dataclass."""
 

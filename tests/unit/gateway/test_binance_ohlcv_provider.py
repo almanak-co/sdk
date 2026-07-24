@@ -327,3 +327,118 @@ class TestGetOhlcvTransportErrors:
                 await provider.get_ohlcv("WETH", timeframe="1h")
 
         assert provider.get_health_metrics()["errors"] == 1
+
+
+class TestGetSession:
+    """Branch coverage for the loop-aware session factory ``_get_session``.
+
+    ``aiohttp.ClientSession`` is patched out at the module seam so no real
+    connector/socket is ever created; existing-session states are modelled
+    with plain mocks carrying ``closed`` / ``close``.
+    """
+
+    @staticmethod
+    def _open_session(close_side_effect: Exception | None = None) -> MagicMock:
+        session = MagicMock()
+        session.closed = False
+        session.close = AsyncMock(side_effect=close_side_effect)
+        return session
+
+    @pytest.mark.asyncio()
+    async def test_creates_session_with_configured_timeout_when_none_exists(self):
+        import asyncio
+
+        provider = BinanceOHLCVProvider(request_timeout=7.5)
+        new_session = MagicMock(closed=False)
+
+        with patch.object(bp.aiohttp, "ClientSession", return_value=new_session) as factory:
+            session = await provider._get_session()
+
+        assert session is new_session
+        assert provider._session is new_session
+        assert provider._session_loop is asyncio.get_running_loop()
+        assert factory.call_count == 1
+        assert factory.call_args.kwargs["timeout"].total == 7.5
+
+    @pytest.mark.asyncio()
+    async def test_reuses_open_session_from_current_loop(self, provider):
+        import asyncio
+
+        existing = self._open_session()
+        provider._session = existing
+        provider._session_loop = asyncio.get_running_loop()
+
+        with patch.object(bp.aiohttp, "ClientSession") as factory:
+            session = await provider._get_session()
+
+        assert session is existing
+        factory.assert_not_called()
+        existing.close.assert_not_awaited()
+
+    @pytest.mark.asyncio()
+    async def test_open_session_without_recorded_loop_is_reused(self, provider):
+        # _session_loop is None: the cross-loop check is skipped entirely and
+        # the open session is returned as-is (no close, no re-create).
+        existing = self._open_session()
+        provider._session = existing
+        provider._session_loop = None
+
+        with patch.object(bp.aiohttp, "ClientSession") as factory:
+            session = await provider._get_session()
+
+        assert session is existing
+        assert provider._session_loop is None
+        factory.assert_not_called()
+        existing.close.assert_not_awaited()
+
+    @pytest.mark.asyncio()
+    async def test_closed_session_is_replaced_without_closing_it_again(self, provider):
+        import asyncio
+
+        stale = MagicMock()
+        stale.closed = True
+        stale.close = AsyncMock()
+        provider._session = stale
+        provider._session_loop = asyncio.get_running_loop()
+        replacement = MagicMock(closed=False)
+
+        with patch.object(bp.aiohttp, "ClientSession", return_value=replacement):
+            session = await provider._get_session()
+
+        assert session is replacement
+        assert provider._session is replacement
+        # Already-closed sessions are simply dropped, never re-closed.
+        stale.close.assert_not_awaited()
+
+    @pytest.mark.asyncio()
+    async def test_session_from_other_loop_is_closed_and_recreated(self, provider):
+        import asyncio
+
+        foreign = self._open_session()
+        provider._session = foreign
+        provider._session_loop = MagicMock(name="other-loop")  # not the running loop
+        replacement = MagicMock(closed=False)
+
+        with patch.object(bp.aiohttp, "ClientSession", return_value=replacement):
+            session = await provider._get_session()
+
+        foreign.close.assert_awaited_once()
+        assert session is replacement
+        assert provider._session is replacement
+        assert provider._session_loop is asyncio.get_running_loop()
+
+    @pytest.mark.asyncio()
+    async def test_close_failure_on_foreign_loop_session_is_swallowed(self, provider):
+        import asyncio
+
+        foreign = self._open_session(close_side_effect=RuntimeError("event loop is closed"))
+        provider._session = foreign
+        provider._session_loop = MagicMock(name="other-loop")
+        replacement = MagicMock(closed=False)
+
+        with patch.object(bp.aiohttp, "ClientSession", return_value=replacement):
+            session = await provider._get_session()
+
+        foreign.close.assert_awaited_once()
+        assert session is replacement
+        assert provider._session_loop is asyncio.get_running_loop()

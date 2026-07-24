@@ -275,3 +275,261 @@ class TestReplayCommand:
         result = cli.invoke(replay, ["--bundle", "some-id"])
         assert result.exit_code == 1
         assert "anvil crashed" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Bundle storage: find_bundle_file
+# ---------------------------------------------------------------------------
+
+from almanak.framework.cli.replay import find_bundle_file  # noqa: E402
+from almanak.framework.cli.replay import ReplayStep  # noqa: E402
+from almanak.framework.models.reproduction_bundle import (  # noqa: E402
+    ActionBundle,
+    TransactionReceipt,
+)
+
+
+class TestFindBundleFile:
+    def _patch_paths(self, monkeypatch, paths):
+        monkeypatch.setattr("almanak.framework.cli.replay.DEFAULT_BUNDLE_PATHS", paths)
+
+    def test_missing_base_paths_are_skipped(self, monkeypatch, tmp_path):
+        missing = tmp_path / "does-not-exist"
+        base = tmp_path / "bundles"
+        base.mkdir()
+        target = base / "abc123.json"
+        target.write_text("{}")
+        self._patch_paths(monkeypatch, [missing, base])
+
+        assert find_bundle_file("abc123") == target
+
+    def test_direct_json_extension_hit(self, monkeypatch, tmp_path):
+        base = tmp_path / "bundles"
+        base.mkdir()
+        target = base / "my-bundle.json"
+        target.write_text("{}")
+        self._patch_paths(monkeypatch, [base])
+
+        assert find_bundle_file("my-bundle") == target
+
+    def test_extensionless_file_hit(self, monkeypatch, tmp_path):
+        base = tmp_path / "bundles"
+        base.mkdir()
+        target = base / "raw-bundle"
+        target.write_text("{}")
+        self._patch_paths(monkeypatch, [base])
+
+        assert find_bundle_file("raw-bundle") == target
+
+    def test_recursive_stem_substring_match(self, monkeypatch, tmp_path):
+        base = tmp_path / "bundles"
+        nested = base / "2024" / "01"
+        nested.mkdir(parents=True)
+        target = nested / "strat_abc123_17000000.json"
+        target.write_text("{}")
+        self._patch_paths(monkeypatch, [base])
+
+        assert find_bundle_file("abc123") == target
+
+    def test_direct_hit_wins_over_recursive_match(self, monkeypatch, tmp_path):
+        base = tmp_path / "bundles"
+        nested = base / "old"
+        nested.mkdir(parents=True)
+        (nested / "abc123_stale.json").write_text("{}")
+        direct = base / "abc123.json"
+        direct.write_text("{}")
+        self._patch_paths(monkeypatch, [base])
+
+        assert find_bundle_file("abc123") == direct
+
+    def test_not_found_returns_none(self, monkeypatch, tmp_path):
+        base = tmp_path / "bundles"
+        base.mkdir()
+        (base / "unrelated.json").write_text("{}")
+        self._patch_paths(monkeypatch, [base])
+
+        assert find_bundle_file("abc123") is None
+
+
+# ---------------------------------------------------------------------------
+# ReplayEngine._execute_action (real implementation, simulated execution)
+# ---------------------------------------------------------------------------
+
+
+def _receipt(status: int, revert_reason: str | None = None) -> TransactionReceipt:
+    return TransactionReceipt(
+        transaction_hash="0x" + "ab" * 32,
+        block_number=123456,
+        block_hash="0x" + "cd" * 32,
+        status=status,
+        gas_used=210000,
+        effective_gas_price=10**9,
+        revert_reason=revert_reason,
+    )
+
+
+def _real_action(tx_count: int = 2) -> ActionBundle:
+    return ActionBundle(
+        intent_type="SWAP",
+        transactions=[
+            {"to": f"0x{i:040x}", "data": "0x" + "de" * 40} for i in range(tx_count)
+        ],
+    )
+
+
+class TestExecuteAction:
+    def test_simulated_result_shape(self, capsys):
+        engine = ReplayEngine(verbose=False)
+        result = engine._execute_action(
+            _real_action(tx_count=2), ReplayContext(bundle=_bundle())
+        )
+
+        assert result == {
+            "intent_type": "SWAP",
+            "transaction_count": 2,
+            "simulated": True,
+            "gas_estimate": 300000,
+        }
+        out = capsys.readouterr().out
+        assert "Executing: SWAP" in out
+        assert "Transactions:" not in out  # verbose-only detail
+
+    def test_verbose_prints_transaction_details(self, capsys):
+        engine = ReplayEngine(verbose=True)
+        engine._execute_action(
+            _real_action(tx_count=1), ReplayContext(bundle=_bundle(), verbose=True)
+        )
+
+        out = capsys.readouterr().out
+        assert "Transactions: 1" in out
+        assert "[1] To: 0x" in out
+        assert "Data: 0x" in out
+
+    def test_successful_receipt_included_without_revert_warning(self, capsys):
+        engine = ReplayEngine(verbose=False)
+        bundle = _bundle(receipt=_receipt(status=1))
+        result = engine._execute_action(_real_action(), ReplayContext(bundle=bundle))
+
+        assert result["original_receipt"] == {
+            "status": 1,
+            "gas_used": 210000,
+            "revert_reason": None,
+        }
+        assert "REVERTED" not in capsys.readouterr().out
+
+    def test_failed_receipt_prints_revert_warning_and_reason(self, capsys):
+        engine = ReplayEngine(verbose=False)
+        bundle = _bundle(receipt=_receipt(status=0, revert_reason="STF"))
+        result = engine._execute_action(_real_action(), ReplayContext(bundle=bundle))
+
+        assert result["original_receipt"]["status"] == 0
+        out = capsys.readouterr().out
+        assert "Original transaction REVERTED" in out
+        assert "Reason: STF" in out
+
+    def test_failed_receipt_without_reason_skips_reason_line(self, capsys):
+        engine = ReplayEngine(verbose=False)
+        bundle = _bundle(receipt=_receipt(status=0))
+        engine._execute_action(_real_action(), ReplayContext(bundle=bundle))
+
+        out = capsys.readouterr().out
+        assert "Original transaction REVERTED" in out
+        assert "Reason:" not in out
+
+
+# ---------------------------------------------------------------------------
+# ReplayEngine._print_state / _print_action_result (verbose formatters)
+# ---------------------------------------------------------------------------
+
+
+class TestPrintState:
+    def test_formats_each_value_kind(self, capsys):
+        engine = ReplayEngine()
+        engine._print_state(
+            "Current State",
+            {
+                "nested": {"a": 1},
+                "big_list": [1, 2, 3, 4],
+                "small_list": [1, 2],
+                "long_text": "x" * 80,
+                "plain": "open",
+            },
+        )
+
+        out = capsys.readouterr().out
+        assert "Current State:" in out
+        # dict branch: key echoed on its own line, JSON-indented content after.
+        assert "nested:" in out
+        assert '"a": 1' in out
+        # >3-item list branch collapses to a count.
+        assert "big_list: [4 items]" in out
+        # <=3-item list falls through to plain str().
+        assert "small_list: [1, 2]" in out
+        # >60-char strings are truncated with an ellipsis.
+        assert "long_text: " + "x" * 60 + "..." in out
+        assert "x" * 61 not in out
+        assert "plain: open" in out
+
+    def test_keys_printed_in_sorted_order(self, capsys):
+        engine = ReplayEngine()
+        engine._print_state("S", {"b": "2", "a": "1"})
+
+        out = capsys.readouterr().out
+        assert out.index("a: 1") < out.index("b: 2")
+
+
+class TestPrintActionResult:
+    def _step(self, **overrides) -> ReplayStep:
+        defaults = {
+            "step_number": 5,
+            "step_type": ReplayStepType.EXECUTE_ACTION,
+            "description": "Executing action bundle",
+            "success": True,
+        }
+        defaults.update(overrides)
+        return ReplayStep(**defaults)
+
+    def test_success_without_states_prints_basics_only(self, capsys):
+        engine = ReplayEngine()
+        engine._print_action_result(_real_action(), self._step())
+
+        out = capsys.readouterr().out
+        assert "Intent Type: SWAP" in out
+        assert "Success: True" in out
+        assert "Error:" not in out
+        assert "State Changes:" not in out
+
+    def test_error_line_printed_when_step_failed(self, capsys):
+        engine = ReplayEngine()
+        engine._print_action_result(
+            _real_action(), self._step(success=False, error="slippage exceeded")
+        )
+
+        out = capsys.readouterr().out
+        assert "Success: False" in out
+        assert "Error: slippage exceeded" in out
+
+    def test_state_diff_printed_with_change_markers(self, capsys):
+        engine = ReplayEngine()
+        step = self._step(
+            state_before={"position": "open", "balance": "10", "stale": "x"},
+            state_after={"position": "closed", "balance": "10", "fresh": "y"},
+        )
+        engine._print_action_result(_real_action(), step)
+
+        out = capsys.readouterr().out
+        assert "State Changes:" in out
+        assert "~ position: open -> closed" in out
+        assert "- stale: x" in out
+        assert "+ fresh: y" in out
+        assert "balance" not in out  # unchanged keys are not listed
+
+    def test_identical_states_print_no_change_section(self, capsys):
+        engine = ReplayEngine()
+        step = self._step(
+            state_before={"position": "open"},
+            state_after={"position": "open"},
+        )
+        engine._print_action_result(_real_action(), step)
+
+        assert "State Changes:" not in capsys.readouterr().out

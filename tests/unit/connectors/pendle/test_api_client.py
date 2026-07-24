@@ -269,3 +269,75 @@ class TestHealthMetrics:
                 client.get_market_data("0xmarket")
 
         assert client.health["error_count"] == 1
+
+
+# =========================================================================
+# Market List Tests
+# =========================================================================
+
+
+class TestGetMarketList:
+    """Test get_market_list method."""
+
+    def test_parses_results_wrapper(self, client, mock_market_response):
+        response = {
+            "results": [
+                {**mock_market_response, "address": "0xMarket1"},
+                {**mock_market_response, "address": "0xMarket2"},
+            ]
+        }
+        with patch.object(client, "_request", return_value=response) as mock_req:
+            result = client.get_market_list()
+
+        assert [m.market_address for m in result] == ["0xmarket1", "0xmarket2"]
+        assert all(isinstance(m, PendleMarketData) for m in result)
+        method, url = mock_req.call_args[0]
+        assert method == "GET"
+        assert url.endswith("/v1/1/markets")
+        assert mock_req.call_args[1]["params"] == {"order_by": "liquidity:desc", "limit": 100}
+
+    def test_parses_bare_list_response(self, client, mock_market_response):
+        response = [{**mock_market_response, "address": "0xMarket1"}]
+        with patch.object(client, "_request", return_value=response):
+            result = client.get_market_list()
+
+        assert len(result) == 1
+        assert result[0].market_address == "0xmarket1"
+        assert result[0].implied_apy == Decimal("0.05")
+
+    def test_market_key_fallback_when_address_missing(self, client):
+        response = {"results": [{"market": "0xViaMarketKey", "impliedApy": 0.04}]}
+        with patch.object(client, "_request", return_value=response):
+            result = client.get_market_list()
+
+        assert len(result) == 1
+        assert result[0].market_address == "0xviamarketkey"
+        assert result[0].implied_apy == Decimal("0.04")
+
+    def test_skips_entries_without_address(self, client, mock_market_response):
+        response = {
+            "results": [
+                {"impliedApy": 0.02},  # No "address" or "market" key -> skipped
+                {**mock_market_response, "address": "0xKeep"},
+            ]
+        }
+        with patch.object(client, "_request", return_value=response):
+            result = client.get_market_list()
+
+        assert [m.market_address for m in result] == ["0xkeep"]
+
+    def test_unexpected_payload_shape_returns_empty_list(self, client):
+        with patch.object(client, "_request", return_value="unexpected"):
+            assert client.get_market_list() == []
+
+    def test_caches_result(self, mock_market_response):
+        client = PendleAPIClient(chain="ethereum", cache_ttl_seconds=60.0)
+        client._min_interval = 0
+        response = {"results": [{**mock_market_response, "address": "0xMarket1"}]}
+        mock_req = MagicMock(return_value=response)
+        with patch.object(client, "_request", mock_req):
+            first = client.get_market_list()
+            second = client.get_market_list()
+
+        assert mock_req.call_count == 1
+        assert second == first

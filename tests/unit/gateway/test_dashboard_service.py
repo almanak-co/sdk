@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import grpc
 import pytest
@@ -379,3 +379,185 @@ async def test_get_trade_tape_ledger_failure_returns_unavailable() -> None:
     details_arg = context.set_details.call_args.args[0]
     assert "secret-host" not in details_arg
     assert "postgres" not in details_arg.lower()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# _ensure_initialized
+# ──────────────────────────────────────────────────────────────────────────────
+
+_STATE_MANAGER_PATCH = "almanak.framework.state.state_manager.StateManager"
+_PORTFOLIO_CHAIN_PATCH = "almanak.gateway.services.dashboard_service.build_portfolio_chain"
+
+
+def _make_uninitialized_servicer(*, database_url: str | None = None) -> DashboardServiceServicer:
+    """Servicer via ``__new__`` with only the state ``_ensure_initialized`` touches."""
+    svc = DashboardServiceServicer.__new__(DashboardServiceServicer)
+    svc.settings = SimpleNamespace(
+        database_url=database_url,
+        portfolio_providers="zerion",
+        portfolio_api_key="test-key",
+        portfolio_api_provider="zerion",
+        portfolio_api_cache_ttl=300,
+    )
+    svc._initialized = False
+    svc._state_manager = None
+    svc._strategies_root = None
+    svc._portfolio_chain = None
+    return svc
+
+
+class TestEnsureInitialized:
+    """Branch coverage for DashboardServiceServicer._ensure_initialized."""
+
+    @pytest.mark.asyncio
+    async def test_already_initialized_returns_without_side_effects(self):
+        svc = _make_uninitialized_servicer()
+        svc._initialized = True
+
+        with (
+            patch(_STATE_MANAGER_PATCH) as sm_cls,
+            patch(_PORTFOLIO_CHAIN_PATCH) as chain_factory,
+        ):
+            await svc._ensure_initialized()
+
+        sm_cls.assert_not_called()
+        chain_factory.assert_not_called()
+        assert svc._strategies_root is None
+
+    @pytest.mark.asyncio
+    async def test_discovers_repo_strategies_root_and_initializes(self):
+        svc = _make_uninitialized_servicer()
+        sentinel_chain = MagicMock(name="portfolio-chain")
+
+        with (
+            patch(_STATE_MANAGER_PATCH) as sm_cls,
+            patch(_PORTFOLIO_CHAIN_PATCH, return_value=sentinel_chain) as chain_factory,
+        ):
+            sm_cls.return_value.initialize = AsyncMock()
+            await svc._ensure_initialized()
+
+        assert svc._initialized is True
+        # The repo checkout has a strategies/ directory next to almanak/.
+        assert svc._strategies_root is not None
+        assert svc._strategies_root.name == "strategies"
+        assert svc._strategies_root.exists()
+        assert svc._state_manager is sm_cls.return_value
+        sm_cls.return_value.initialize.assert_awaited_once()
+        assert svc._portfolio_chain is sentinel_chain
+        chain_factory.assert_called_once_with(
+            portfolio_providers_csv="zerion",
+            portfolio_api_key="test-key",
+            portfolio_api_provider="zerion",
+            portfolio_api_cache_ttl=300,
+        )
+
+    @pytest.mark.asyncio
+    async def test_missing_strategies_root_falls_back_to_cwd(self, monkeypatch):
+        from pathlib import Path
+
+        svc = _make_uninitialized_servicer()
+        monkeypatch.setattr(Path, "exists", lambda self, **kwargs: False)
+
+        with (
+            patch(_STATE_MANAGER_PATCH) as sm_cls,
+            patch(_PORTFOLIO_CHAIN_PATCH, return_value=None),
+        ):
+            sm_cls.return_value.initialize = AsyncMock()
+            await svc._ensure_initialized()
+
+        assert svc._strategies_root == Path.cwd() / "strategies"
+        assert svc._initialized is True
+
+    @pytest.mark.asyncio
+    async def test_database_url_selects_postgres_backend(self):
+        from almanak.framework.state.state_manager import WarmBackendType
+
+        url = "postgresql://user:pw@localhost:5432/gateway"
+        svc = _make_uninitialized_servicer(database_url=url)
+
+        with (
+            patch(_STATE_MANAGER_PATCH) as sm_cls,
+            patch(_PORTFOLIO_CHAIN_PATCH, return_value=None),
+        ):
+            sm_cls.return_value.initialize = AsyncMock()
+            await svc._ensure_initialized()
+
+        config = sm_cls.call_args.args[0]
+        assert config.warm_backend is WarmBackendType.POSTGRESQL
+        assert config.database_url == url
+
+    @pytest.mark.asyncio
+    async def test_no_database_url_selects_sqlite_backend(self):
+        from almanak.framework.state.state_manager import WarmBackendType
+
+        svc = _make_uninitialized_servicer(database_url=None)
+
+        with (
+            patch(_STATE_MANAGER_PATCH) as sm_cls,
+            patch(_PORTFOLIO_CHAIN_PATCH, return_value=None),
+        ):
+            sm_cls.return_value.initialize = AsyncMock()
+            await svc._ensure_initialized()
+
+        config = sm_cls.call_args.args[0]
+        assert config.warm_backend is WarmBackendType.SQLITE
+        assert config.database_url is None
+
+    @pytest.mark.asyncio
+    async def test_state_manager_failure_degrades_to_none_but_still_initializes(self):
+        svc = _make_uninitialized_servicer()
+        sentinel_chain = MagicMock(name="portfolio-chain")
+
+        with (
+            patch(_STATE_MANAGER_PATCH, side_effect=RuntimeError("db down")),
+            patch(_PORTFOLIO_CHAIN_PATCH, return_value=sentinel_chain),
+        ):
+            await svc._ensure_initialized()
+
+        assert svc._state_manager is None
+        assert svc._initialized is True
+        # Portfolio chain init still runs after the StateManager failure.
+        assert svc._portfolio_chain is sentinel_chain
+
+    @pytest.mark.asyncio
+    async def test_state_manager_initialize_await_failure_degrades_to_none(self):
+        svc = _make_uninitialized_servicer()
+
+        with (
+            patch(_STATE_MANAGER_PATCH) as sm_cls,
+            patch(_PORTFOLIO_CHAIN_PATCH, return_value=None),
+        ):
+            sm_cls.return_value.initialize = AsyncMock(side_effect=ConnectionError("refused"))
+            await svc._ensure_initialized()
+
+        assert svc._state_manager is None
+        assert svc._initialized is True
+
+    @pytest.mark.asyncio
+    async def test_portfolio_chain_failure_degrades_to_none(self):
+        svc = _make_uninitialized_servicer()
+
+        with (
+            patch(_STATE_MANAGER_PATCH) as sm_cls,
+            patch(_PORTFOLIO_CHAIN_PATCH, side_effect=ValueError("bad provider csv")),
+        ):
+            sm_cls.return_value.initialize = AsyncMock()
+            await svc._ensure_initialized()
+
+        assert svc._portfolio_chain is None
+        assert svc._initialized is True
+
+    @pytest.mark.asyncio
+    async def test_second_call_is_a_noop(self):
+        svc = _make_uninitialized_servicer()
+
+        with (
+            patch(_STATE_MANAGER_PATCH) as sm_cls,
+            patch(_PORTFOLIO_CHAIN_PATCH, return_value=None) as chain_factory,
+        ):
+            sm_cls.return_value.initialize = AsyncMock()
+            await svc._ensure_initialized()
+            await svc._ensure_initialized()
+
+        assert sm_cls.call_count == 1
+        assert chain_factory.call_count == 1

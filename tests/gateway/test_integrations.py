@@ -395,3 +395,214 @@ class TestZerionIntegration:
         assert snapshot.total_value_usd == "152.25"
         assert snapshot.chain == "base"
 
+
+
+# =============================================================================
+# TheGraph query() HTTP-path tests (mocked session; no network)
+# =============================================================================
+
+
+class _GraphResponse:
+    """Minimal stand-in for aiohttp.ClientResponse for TheGraph POSTs."""
+
+    def __init__(self, status: int = 200, body: object = None, text_body: str = "") -> None:
+        self.status = status
+        self._body = body
+        self._text = text_body
+
+    async def json(self):
+        return self._body
+
+    async def text(self):
+        return self._text
+
+
+def _graph_session(
+    responses: list[_GraphResponse],
+    calls: list[dict] | None = None,
+    post_exc: Exception | None = None,
+):
+    """Build a fake aiohttp session whose ``post`` serves canned responses."""
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def fake_post(url, json=None, headers=None):
+        if calls is not None:
+            calls.append({"url": url, "json": json, "headers": headers})
+        if post_exc is not None:
+            raise post_exc
+        yield responses.pop(0)
+
+    session = AsyncMock()
+    session.post = fake_post
+    return session
+
+
+class TestTheGraphQuery:
+    """Branch coverage for TheGraphIntegration.query (mocked HTTP)."""
+
+    SUBGRAPH = "uniswap-v3-ethereum"
+    QUERY = "{ pools(first: 1) { id } }"
+
+    @pytest.fixture
+    def thegraph(self):
+        return TheGraphIntegration()
+
+    def _patched(self, thegraph, session):
+        return patch.object(thegraph, "_get_session", AsyncMock(return_value=session))
+
+    @pytest.mark.asyncio
+    async def test_success_without_errors_returns_data_and_caches(self, thegraph):
+        calls: list[dict] = []
+        body = {"data": {"pools": [{"id": "0xpool"}]}}
+        session = _graph_session([_GraphResponse(body=body)], calls)
+
+        with self._patched(thegraph, session):
+            result = await thegraph.query(self.SUBGRAPH, self.QUERY)
+            again = await thegraph.query(self.SUBGRAPH, self.QUERY)
+
+        assert result == {"data": {"pools": [{"id": "0xpool"}]}, "success": True}
+        # Second call is served from cache: only one HTTP POST happened.
+        assert again == result
+        assert len(calls) == 1
+        assert thegraph._metrics.successful_requests == 1
+        # Alias resolved through the allowlist to the subgraph URL.
+        assert calls[0]["url"] == thegraph.get_subgraph_url(self.SUBGRAPH)
+        assert calls[0]["json"] == {"query": self.QUERY}
+
+    @pytest.mark.asyncio
+    async def test_variables_included_in_payload(self, thegraph):
+        calls: list[dict] = []
+        session = _graph_session([_GraphResponse(body={"data": {}})], calls)
+        variables = {"first": 5, "skip": 10}
+
+        with self._patched(thegraph, session):
+            await thegraph.query(self.SUBGRAPH, self.QUERY, variables=variables)
+
+        assert calls[0]["json"] == {"query": self.QUERY, "variables": variables}
+
+    @pytest.mark.asyncio
+    async def test_graphql_errors_with_partial_data_reports_success(self, thegraph):
+        errors = [{"message": "indexing delay"}]
+        body = {"data": {"pools": []}, "errors": errors}
+        session = _graph_session([_GraphResponse(body=body)])
+
+        with self._patched(thegraph, session):
+            result = await thegraph.query(self.SUBGRAPH, self.QUERY)
+
+        assert result == {"data": {"pools": []}, "errors": errors, "success": True}
+
+    @pytest.mark.asyncio
+    async def test_graphql_errors_without_data_reports_failure(self, thegraph):
+        errors = [{"message": "syntax error"}]
+        session = _graph_session([_GraphResponse(body={"errors": errors})])
+
+        with self._patched(thegraph, session):
+            result = await thegraph.query(self.SUBGRAPH, self.QUERY)
+
+        assert result == {"data": None, "errors": errors, "success": False}
+
+    @pytest.mark.asyncio
+    async def test_http_429_raises_rate_limit_error(self, thegraph):
+        session = _graph_session([_GraphResponse(status=429)])
+
+        with self._patched(thegraph, session):
+            with pytest.raises(IntegrationRateLimitError):
+                await thegraph.query(self.SUBGRAPH, self.QUERY)
+
+        assert thegraph._metrics.rate_limited_requests == 1
+
+    @pytest.mark.asyncio
+    async def test_http_error_raises_integration_error_with_status_code(self, thegraph):
+        session = _graph_session([_GraphResponse(status=502, text_body="bad gateway")])
+
+        with self._patched(thegraph, session):
+            with pytest.raises(IntegrationError, match="HTTP 502: bad gateway") as exc_info:
+                await thegraph.query(self.SUBGRAPH, self.QUERY)
+
+        assert exc_info.value.code == "HTTP_502"
+        assert thegraph._metrics.failed_requests == 1
+
+    @pytest.mark.asyncio
+    async def test_network_error_wrapped_as_integration_error(self, thegraph):
+        import aiohttp
+
+        session = _graph_session([], post_exc=aiohttp.ClientError("connection reset"))
+
+        with self._patched(thegraph, session):
+            with pytest.raises(IntegrationError, match="connection reset") as exc_info:
+                await thegraph.query(self.SUBGRAPH, self.QUERY)
+
+        assert exc_info.value.code == "NETWORK_ERROR"
+        assert thegraph._metrics.failed_requests == 1
+        assert isinstance(exc_info.value.__cause__, aiohttp.ClientError)
+
+    @pytest.mark.asyncio
+    async def test_unallowed_subgraph_raises_before_any_http(self, thegraph):
+        calls: list[dict] = []
+        session = _graph_session([], calls)
+
+        with self._patched(thegraph, session):
+            with pytest.raises(IntegrationError, match="not in allowlist") as exc_info:
+                await thegraph.query("definitely-not-allowed", self.QUERY)
+
+        assert exc_info.value.code == "SUBGRAPH_NOT_ALLOWED"
+        assert calls == []
+
+
+# =============================================================================
+# Zerion _extract_protocol tests
+# =============================================================================
+
+
+class TestZerionExtractProtocol:
+    """Branch coverage for ZerionIntegration._extract_protocol."""
+
+    @pytest.fixture
+    def zerion(self):
+        return ZerionIntegration(api_key="test-portfolio-key", cache_ttl=60)
+
+    def test_item_level_string_protocol_wins(self, zerion):
+        assert zerion._extract_protocol({"protocol": "aave-v3"}, {"protocol": "ignored"}) == "aave-v3"
+
+    def test_dict_candidate_prefers_name(self, zerion):
+        item = {"protocol": {"name": "Aave V3", "slug": "aave-v3", "id": "aave3"}}
+        assert zerion._extract_protocol(item, {}) == "Aave V3"
+
+    def test_dict_candidate_falls_back_to_slug_then_id(self, zerion):
+        assert zerion._extract_protocol({"protocol": {"slug": "aave-v3", "id": "aave3"}}, {}) == "aave-v3"
+        assert zerion._extract_protocol({"protocol": {"id": "aave3"}}, {}) == "aave3"
+
+    def test_empty_dict_candidate_skipped_in_favor_of_attributes(self, zerion):
+        # {} is a dict candidate that resolves to None -> falls through to
+        # the attributes-level candidates.
+        assert zerion._extract_protocol({"protocol": {}}, {"protocol": "compound"}) == "compound"
+
+    def test_attribute_fallback_order(self, zerion):
+        assert zerion._extract_protocol({}, {"protocol_slug": "uniswap-v3"}) == "uniswap-v3"
+        assert zerion._extract_protocol({}, {"protocol_name": "Uniswap V3"}) == "Uniswap V3"
+        # protocol beats protocol_slug beats protocol_name
+        attrs = {"protocol": "one", "protocol_slug": "two", "protocol_name": "three"}
+        assert zerion._extract_protocol({}, attrs) == "one"
+
+    def test_relationships_data_id_used_when_no_direct_candidates(self, zerion):
+        item = {"relationships": {"protocol": {"data": {"id": "lido"}}}}
+        assert zerion._extract_protocol(item, {}) == "lido"
+
+    def test_relationships_data_name_used_when_id_missing(self, zerion):
+        item = {"relationships": {"protocol": {"data": {"name": "Lido"}}}}
+        assert zerion._extract_protocol(item, {}) == "Lido"
+
+    def test_malformed_relationships_shapes_fall_through_to_unknown(self, zerion):
+        # relationships not a dict
+        assert zerion._extract_protocol({"relationships": ["nope"]}, {}) == "unknown"
+        # protocol relationship not a dict
+        assert zerion._extract_protocol({"relationships": {"protocol": "nope"}}, {}) == "unknown"
+        # data not a dict
+        assert zerion._extract_protocol({"relationships": {"protocol": {"data": None}}}, {}) == "unknown"
+        # data dict but id/name empty
+        item = {"relationships": {"protocol": {"data": {"id": "", "name": ""}}}}
+        assert zerion._extract_protocol(item, {}) == "unknown"
+
+    def test_no_signals_at_all_returns_unknown(self, zerion):
+        assert zerion._extract_protocol({}, {}) == "unknown"

@@ -331,7 +331,7 @@ def _make_rpc_dispatcher(handlers: dict):
     Unknown methods raise AssertionError so the test fails loudly.
     """
 
-    async def _dispatch(method, params):
+    async def _dispatch(method, params, timeout_override=None):
         if method not in handlers:
             raise AssertionError(f"Unexpected RPC call: {method} {params!r}")
         h = handlers[method]
@@ -528,3 +528,303 @@ def test_cbbtc_base_whale_entry_present():
     """
     assert "base" in fm.WHALE_FUNDED_TOKENS
     assert "CBBTC" in fm.WHALE_FUNDED_TOKENS["base"]
+
+
+def _make_running_manager(chain: str = "arbitrum") -> RollingForkManager:
+    """Manager that reports is_running=True without a real subprocess."""
+    _clear_flags_cache()
+    mgr = RollingForkManager(rpc_url="http://rpc.test", chain=chain, anvil_port=9999)
+    mgr._is_running = True
+    process = AsyncMock()  # container only; poll is a plain MagicMock attr
+    process.poll = lambda: None  # alive
+    mgr._process = process
+    return mgr
+
+
+class TestResetToLatest:
+    """reset_to_latest: in-place anvil_reset vs stop/start fallback paths."""
+
+    @pytest.mark.asyncio()
+    async def test_in_place_reset_success_updates_block_and_clears_pin(self):
+        mgr = _make_running_manager()
+        mgr.fork_block_number = 12345
+        rpc_mock = _make_rpc_dispatcher(
+            {
+                "anvil_reset": (True, None),
+                "eth_blockNumber": (True, "0x10"),
+            }
+        )
+        with (
+            patch.object(mgr, "_rpc_call_raw", rpc_mock),
+            patch.object(mgr, "_assert_chain_id_after_reset", new_callable=AsyncMock) as mock_assert,
+            patch.object(mgr, "stop", new_callable=AsyncMock) as mock_stop,
+            patch.object(mgr, "start", new_callable=AsyncMock) as mock_start,
+        ):
+            result = await mgr.reset_to_latest()
+
+        assert result is True
+        # Pinned block cleared so the next auto-restart forks latest too
+        assert mgr.fork_block_number is None
+        assert mgr._current_block == 16
+        # VIB-2552 chain-id integrity assertion runs after the in-place reset
+        mock_assert.assert_awaited_once()
+        # No process restart on the fast path
+        mock_stop.assert_not_called()
+        mock_start.assert_not_called()
+        reset_calls = [c for c in rpc_mock.call_args_list if c[0][0] == "anvil_reset"]
+        assert reset_calls[0][0][1] == [{"forking": {"jsonRpcUrl": "http://rpc.test"}}]
+
+    @pytest.mark.asyncio()
+    async def test_in_place_reset_tolerates_missing_block_number(self):
+        """A failed eth_blockNumber read must not fail the reset."""
+        mgr = _make_running_manager()
+        rpc_mock = _make_rpc_dispatcher(
+            {
+                "anvil_reset": (True, None),
+                "eth_blockNumber": (False, None),
+            }
+        )
+        with (
+            patch.object(mgr, "_rpc_call_raw", rpc_mock),
+            patch.object(mgr, "_assert_chain_id_after_reset", new_callable=AsyncMock),
+        ):
+            result = await mgr.reset_to_latest()
+
+        assert result is True
+        assert mgr._current_block is None
+
+    @pytest.mark.asyncio()
+    async def test_anvil_reset_failure_falls_back_to_stop_start(self):
+        mgr = _make_running_manager()
+        rpc_mock = _make_rpc_dispatcher({"anvil_reset": (False, None)})
+        with (
+            patch.object(mgr, "_rpc_call_raw", rpc_mock),
+            patch.object(mgr, "_assert_chain_id_after_reset", new_callable=AsyncMock) as mock_assert,
+            patch.object(mgr, "stop", new_callable=AsyncMock) as mock_stop,
+            patch.object(mgr, "start", new_callable=AsyncMock, return_value=True) as mock_start,
+        ):
+            result = await mgr.reset_to_latest()
+
+        assert result is True
+        mock_stop.assert_awaited_once()
+        mock_start.assert_awaited_once()
+        # Chain-id assertion also runs after the stop/start fallback
+        mock_assert.assert_awaited_once()
+        assert mgr.fork_block_number is None
+
+    @pytest.mark.asyncio()
+    async def test_anvil_reset_exception_falls_back_to_stop_start(self):
+        mgr = _make_running_manager()
+        with (
+            patch.object(
+                mgr, "_rpc_call_raw", AsyncMock(side_effect=RuntimeError("rpc boom"))
+            ),
+            patch.object(mgr, "_assert_chain_id_after_reset", new_callable=AsyncMock),
+            patch.object(mgr, "stop", new_callable=AsyncMock) as mock_stop,
+            patch.object(mgr, "start", new_callable=AsyncMock, return_value=True),
+        ):
+            result = await mgr.reset_to_latest()
+
+        assert result is True
+        mock_stop.assert_awaited_once()
+
+    @pytest.mark.asyncio()
+    async def test_not_running_skips_in_place_reset(self):
+        _clear_flags_cache()
+        mgr = RollingForkManager(rpc_url="http://rpc.test", chain="arbitrum", anvil_port=9999)
+        rpc_mock = AsyncMock()
+        with (
+            patch.object(mgr, "_rpc_call_raw", rpc_mock),
+            patch.object(mgr, "_assert_chain_id_after_reset", new_callable=AsyncMock),
+            patch.object(mgr, "stop", new_callable=AsyncMock) as mock_stop,
+            patch.object(mgr, "start", new_callable=AsyncMock, return_value=True),
+        ):
+            result = await mgr.reset_to_latest()
+
+        assert result is True
+        rpc_mock.assert_not_called()
+        mock_stop.assert_awaited_once()
+
+    @pytest.mark.asyncio()
+    async def test_fallback_start_failure_restores_pinned_block(self):
+        mgr = _make_running_manager()
+        mgr.fork_block_number = 777
+        rpc_mock = _make_rpc_dispatcher({"anvil_reset": (False, None)})
+        with (
+            patch.object(mgr, "_rpc_call_raw", rpc_mock),
+            patch.object(mgr, "_assert_chain_id_after_reset", new_callable=AsyncMock) as mock_assert,
+            patch.object(mgr, "stop", new_callable=AsyncMock),
+            patch.object(mgr, "start", new_callable=AsyncMock, return_value=False),
+        ):
+            result = await mgr.reset_to_latest()
+
+        assert result is False
+        assert mgr.fork_block_number == 777
+        mock_assert.assert_not_called()
+
+    @pytest.mark.asyncio()
+    async def test_fallback_stop_exception_restores_pinned_block(self):
+        mgr = _make_running_manager()
+        mgr.fork_block_number = 888
+        rpc_mock = _make_rpc_dispatcher({"anvil_reset": (False, None)})
+        with (
+            patch.object(mgr, "_rpc_call_raw", rpc_mock),
+            patch.object(mgr, "_assert_chain_id_after_reset", new_callable=AsyncMock),
+            patch.object(mgr, "stop", AsyncMock(side_effect=OSError("kill failed"))),
+            patch.object(mgr, "start", new_callable=AsyncMock) as mock_start,
+        ):
+            result = await mgr.reset_to_latest()
+
+        assert result is False
+        assert mgr.fork_block_number == 888
+        mock_start.assert_not_called()
+
+
+class TestAdvanceTime:
+    """advance_time: evm_increaseTime + evm_mine + block refresh."""
+
+    @pytest.mark.asyncio()
+    async def test_not_running_returns_false_without_rpc(self):
+        _clear_flags_cache()
+        mgr = RollingForkManager(rpc_url="http://rpc.test", chain="arbitrum", anvil_port=9999)
+        rpc_mock = AsyncMock()
+        with patch.object(mgr, "_rpc_call_raw", rpc_mock):
+            assert await mgr.advance_time(60) is False
+        rpc_mock.assert_not_called()
+
+    @pytest.mark.asyncio()
+    async def test_success_advances_and_refreshes_block(self):
+        mgr = _make_running_manager()
+        rpc_mock = _make_rpc_dispatcher(
+            {
+                "evm_increaseTime": (True, None),
+                "evm_mine": (True, None),
+                "eth_blockNumber": (True, "0x2a"),
+            }
+        )
+        with patch.object(mgr, "_rpc_call_raw", rpc_mock):
+            assert await mgr.advance_time(3600) is True
+
+        assert mgr._current_block == 42
+        methods = [c[0][0] for c in rpc_mock.call_args_list]
+        assert methods == ["evm_increaseTime", "evm_mine", "eth_blockNumber"]
+        assert rpc_mock.call_args_list[0][0][1] == [3600]
+
+    @pytest.mark.asyncio()
+    async def test_success_without_block_number_still_true(self):
+        mgr = _make_running_manager()
+        rpc_mock = _make_rpc_dispatcher(
+            {
+                "evm_increaseTime": (True, None),
+                "evm_mine": (True, None),
+                "eth_blockNumber": (False, None),
+            }
+        )
+        with patch.object(mgr, "_rpc_call_raw", rpc_mock):
+            assert await mgr.advance_time(10) is True
+        assert mgr._current_block is None
+
+    @pytest.mark.asyncio()
+    async def test_increase_time_failure_stops_before_mine(self):
+        mgr = _make_running_manager()
+        rpc_mock = _make_rpc_dispatcher({"evm_increaseTime": (False, None)})
+        with patch.object(mgr, "_rpc_call_raw", rpc_mock):
+            assert await mgr.advance_time(60) is False
+        methods = [c[0][0] for c in rpc_mock.call_args_list]
+        assert methods == ["evm_increaseTime"]
+
+    @pytest.mark.asyncio()
+    async def test_mine_failure_returns_false(self):
+        mgr = _make_running_manager()
+        rpc_mock = _make_rpc_dispatcher(
+            {
+                "evm_increaseTime": (True, None),
+                "evm_mine": (False, None),
+            }
+        )
+        with patch.object(mgr, "_rpc_call_raw", rpc_mock):
+            assert await mgr.advance_time(60) is False
+        methods = [c[0][0] for c in rpc_mock.call_args_list]
+        assert methods == ["evm_increaseTime", "evm_mine"]
+
+    @pytest.mark.asyncio()
+    async def test_rpc_exception_returns_false(self):
+        mgr = _make_running_manager()
+        with patch.object(mgr, "_rpc_call_raw", AsyncMock(side_effect=RuntimeError("boom"))):
+            assert await mgr.advance_time(60) is False
+
+
+class TestAssertChainIdAfterReset:
+    """VIB-2552: chain-id integrity check + anvil_setChainId repair."""
+
+    @pytest.mark.asyncio()
+    async def test_unknown_chain_skips_assertion(self):
+        mgr = _make_running_manager()
+        mgr.chain = "not-a-chain"  # post-init: bypasses __post_init__ validation
+        rpc_mock = AsyncMock()
+        with patch.object(mgr, "_rpc_call_raw", rpc_mock):
+            await mgr._assert_chain_id_after_reset()
+        rpc_mock.assert_not_called()
+
+    @pytest.mark.asyncio()
+    async def test_unreadable_chain_id_returns_without_fix(self):
+        mgr = _make_running_manager()
+        rpc_mock = _make_rpc_dispatcher({"eth_chainId": (False, None)})
+        with patch.object(mgr, "_rpc_call_raw", rpc_mock):
+            await mgr._assert_chain_id_after_reset()
+        methods = [c[0][0] for c in rpc_mock.call_args_list]
+        assert "anvil_setChainId" not in methods
+
+    @pytest.mark.asyncio()
+    async def test_matching_chain_id_needs_no_fix(self):
+        mgr = _make_running_manager(chain="arbitrum")
+        rpc_mock = _make_rpc_dispatcher({"eth_chainId": (True, hex(42161))})
+        with patch.object(mgr, "_rpc_call_raw", rpc_mock):
+            await mgr._assert_chain_id_after_reset()
+        methods = [c[0][0] for c in rpc_mock.call_args_list]
+        assert methods == ["eth_chainId"]
+
+    @pytest.mark.asyncio()
+    async def test_mismatch_fixed_via_set_chain_id(self):
+        mgr = _make_running_manager(chain="arbitrum")
+        rpc_mock = _make_rpc_dispatcher(
+            {
+                "eth_chainId": (True, hex(31337)),  # Anvil default leaked through
+                "anvil_setChainId": (True, None),
+            }
+        )
+        with patch.object(mgr, "_rpc_call_raw", rpc_mock):
+            await mgr._assert_chain_id_after_reset()
+        fix_calls = [c for c in rpc_mock.call_args_list if c[0][0] == "anvil_setChainId"]
+        assert len(fix_calls) == 1
+        assert fix_calls[0][0][1] == [42161]
+
+    @pytest.mark.asyncio()
+    async def test_mismatch_fix_failure_is_swallowed(self):
+        """A failed anvil_setChainId logs but must not raise."""
+        mgr = _make_running_manager(chain="arbitrum")
+        rpc_mock = _make_rpc_dispatcher(
+            {
+                "eth_chainId": (True, hex(31337)),
+                "anvil_setChainId": (False, None),
+            }
+        )
+        with patch.object(mgr, "_rpc_call_raw", rpc_mock):
+            await mgr._assert_chain_id_after_reset()  # must not raise
+
+    @pytest.mark.asyncio()
+    async def test_mismatch_fix_exception_is_swallowed(self):
+        mgr = _make_running_manager(chain="arbitrum")
+
+        call_count = 0
+
+        async def _dispatch(method, params, timeout_override=None):
+            nonlocal call_count
+            call_count += 1
+            if method == "eth_chainId":
+                return (True, hex(31337))
+            raise RuntimeError("setChainId transport error")
+
+        with patch.object(mgr, "_rpc_call_raw", AsyncMock(side_effect=_dispatch)):
+            await mgr._assert_chain_id_after_reset()  # must not raise
+        assert call_count == 2

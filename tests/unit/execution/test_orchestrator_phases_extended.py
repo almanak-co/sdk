@@ -55,6 +55,7 @@ from almanak.framework.execution.orchestrator import (
     ExecutionResult,
     TransactionResult,
 )
+from almanak.framework.execution.session import TransactionStatus
 from almanak.framework.models.reproduction_bundle import ActionBundle
 from almanak.framework.strategies.base import RiskGuardResult
 
@@ -531,6 +532,163 @@ class TestPhaseSubmitAndConfirmExtended:
         assert state.use_sequential is True
         assert state.receipts == receipts
         fake_submitter.submit_sequential.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_multi_tx_safe_signer_uses_parallel_path(self, orchestrator):
+        """2+ txs with a SafeSigner bundle atomically -> parallel path, no submit_sequential."""
+        from almanak.framework.execution.signer.safe.base import SafeSigner
+
+        orchestrator.signer = MagicMock(spec=SafeSigner)
+        orchestrator.signer.address = "0x1234567890abcdef1234567890abcdef12345678"
+        state = _make_state(
+            orchestrator,
+            transactions=[
+                {"to": "0x0", "data": "0x", "value": 0},
+                {"to": "0x0", "data": "0x", "value": 0},
+            ],
+        )
+        state.signed_txs = [MagicMock(), MagicMock()]
+
+        submissions = [
+            MagicMock(submitted=True, tx_hash="0xa", error=None),
+            MagicMock(submitted=True, tx_hash="0xb", error=None),
+        ]
+        orchestrator.submitter.submit = AsyncMock(return_value=submissions)
+        orchestrator.submitter.get_receipts = AsyncMock(
+            return_value=[
+                _make_receipt(success=True, tx_hash="0xa"),
+                _make_receipt(success=True, tx_hash="0xb"),
+            ]
+        )
+
+        early = await orchestrator._phase_submit_and_confirm(state)
+
+        assert early is None
+        assert state.use_sequential is False
+        orchestrator.submitter.submit.assert_awaited_once()
+        orchestrator.submitter.get_receipts.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_multi_tx_non_public_submitter_falls_back_to_parallel(self, orchestrator):
+        """2+ txs, non-Safe signer, but submitter is NOT PublicMempoolSubmitter:
+        the sequential branch is entered, then falls back to submit-all + parallel receipts."""
+        state = _make_state(
+            orchestrator,
+            transactions=[
+                {"to": "0x0", "data": "0x", "value": 0},
+                {"to": "0x0", "data": "0x", "value": 0},
+            ],
+        )
+        state.signed_txs = [MagicMock(), MagicMock()]
+
+        submissions = [
+            MagicMock(submitted=True, tx_hash="0xa", error=None),
+            MagicMock(submitted=True, tx_hash="0xb", error=None),
+        ]
+        # orchestrator.submitter is a plain MagicMock -> isinstance check fails
+        orchestrator.submitter.submit = AsyncMock(return_value=submissions)
+        orchestrator.submitter.get_receipts = AsyncMock(
+            return_value=[
+                _make_receipt(success=True, tx_hash="0xa"),
+                _make_receipt(success=True, tx_hash="0xb"),
+            ]
+        )
+
+        early = await orchestrator._phase_submit_and_confirm(state)
+
+        assert early is None
+        # use_sequential was flipped back to False by the fallback
+        assert state.use_sequential is False
+        orchestrator.submitter.submit.assert_awaited_once()
+        orchestrator.submitter.get_receipts.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_sequential_exception_records_partial_hashes_and_reraises(self, orchestrator):
+        """A sequential failure with partial_results must copy confirmed tx hashes
+        onto the session transactions (so retry logic can detect them) and re-raise."""
+        from almanak.framework.execution.submitter.public import PublicMempoolSubmitter
+
+        state = _make_state(
+            orchestrator,
+            transactions=[
+                {"to": "0x0", "data": "0x", "value": 0},
+                {"to": "0x0", "data": "0x", "value": 0},
+            ],
+        )
+        state.signed_txs = [MagicMock(), MagicMock()]
+
+        session = MagicMock()
+        tx_state_0 = MagicMock(tx_hash=None)
+        tx_state_1 = MagicMock(tx_hash=None)
+        session.transactions = [tx_state_0, tx_state_1]
+        state.session = session
+
+        exc = RuntimeError("second tx timed out")
+        exc.partial_results = [
+            MagicMock(submitted=True, tx_hash="0xconfirmed"),
+            MagicMock(submitted=False, tx_hash=None),
+        ]
+        fake_submitter = MagicMock(spec=PublicMempoolSubmitter)
+        fake_submitter.submit_sequential = AsyncMock(side_effect=exc)
+        orchestrator.submitter = fake_submitter
+        orchestrator._checkpoint_session = MagicMock()
+
+        with pytest.raises(RuntimeError, match="second tx timed out"):
+            await orchestrator._phase_submit_and_confirm(state)
+
+        # Confirmed partial hash copied onto the session transaction state
+        assert tx_state_0.tx_hash == "0xconfirmed"
+        assert tx_state_0.status == TransactionStatus.SUBMITTED
+        # Unsubmitted partial left untouched
+        assert tx_state_1.tx_hash is None
+        # SUBMITTED checkpoint written for the partials
+        orchestrator._checkpoint_session.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_sequential_exception_without_partials_skips_checkpoint(self, orchestrator):
+        """A sequential failure carrying no partial_results re-raises without checkpointing."""
+        from almanak.framework.execution.submitter.public import PublicMempoolSubmitter
+
+        state = _make_state(
+            orchestrator,
+            transactions=[
+                {"to": "0x0", "data": "0x", "value": 0},
+                {"to": "0x0", "data": "0x", "value": 0},
+            ],
+        )
+        state.signed_txs = [MagicMock(), MagicMock()]
+
+        fake_submitter = MagicMock(spec=PublicMempoolSubmitter)
+        fake_submitter.submit_sequential = AsyncMock(side_effect=RuntimeError("boom"))
+        orchestrator.submitter = fake_submitter
+        orchestrator._checkpoint_session = MagicMock()
+
+        with pytest.raises(RuntimeError, match="boom"):
+            await orchestrator._phase_submit_and_confirm(state)
+
+        orchestrator._checkpoint_session.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_parallel_path_updates_session_transactions_with_hashes(self, orchestrator):
+        """TX_SENT loop copies tx_hash/status/submitted_at onto session transactions."""
+        state = _make_state(orchestrator, transactions=[{"to": "0x0", "data": "0x", "value": 0}])
+        state.signed_txs = [MagicMock()]
+
+        session = MagicMock()
+        tx_state = MagicMock(tx_hash=None, submitted_at=None)
+        session.transactions = [tx_state]
+        state.session = session
+
+        submission = MagicMock(submitted=True, tx_hash="0xabc", error=None)
+        orchestrator.submitter.submit = AsyncMock(return_value=[submission])
+        orchestrator.submitter.get_receipts = AsyncMock(return_value=[_make_receipt(success=True, tx_hash="0xabc")])
+
+        early = await orchestrator._phase_submit_and_confirm(state)
+
+        assert early is None
+        assert tx_state.tx_hash == "0xabc"
+        assert tx_state.status == TransactionStatus.SUBMITTED
+        assert tx_state.submitted_at is not None
 
 
 # =============================================================================

@@ -249,6 +249,72 @@ class TestConsumeSignals:
         assert len(provider.get_signals()) == 1
 
 
+class TestInjectSignals:
+    def test_inject_into_empty_queue(self, provider):
+        sig = _make_signal(event_id="e1")
+
+        provider.inject_signals([sig])
+
+        assert provider.get_signals() == [sig]
+
+    def test_duplicate_of_pending_signal_skipped(self, provider):
+        existing = _make_signal(event_id="e1")
+        provider.inject_signals([existing])
+
+        # Same event_id (signal_id defaults to event_id) -> deduplicated.
+        provider.inject_signals([_make_signal(event_id="e1"), _make_signal(event_id="e2")])
+
+        signals = provider.get_signals()
+        assert len(signals) == 2
+        assert signals[0] is existing
+        assert signals[1].event_id == "e2"
+
+    def test_batch_internal_duplicates_deduplicated(self, provider):
+        first = _make_signal(event_id="dup")
+        second = _make_signal(event_id="dup")
+
+        provider.inject_signals([first, second])
+
+        signals = provider.get_signals()
+        assert len(signals) == 1
+        assert signals[0] is first
+
+    def test_dedupe_prefers_explicit_signal_id(self, provider):
+        replay = _make_signal(event_id="e1")
+        object.__setattr__(replay, "signal_id", "replay-1")
+        provider.inject_signals([replay])
+
+        # Different event_id but the same explicit signal_id -> skipped.
+        duplicate = _make_signal(event_id="e2")
+        object.__setattr__(duplicate, "signal_id", "replay-1")
+        provider.inject_signals([duplicate])
+
+        assert provider.get_signals() == [replay]
+
+    def test_falls_back_to_event_id_when_signal_id_missing(self, provider):
+        # Defensive branch: signal_id forced to None -> event_id used for dedupe.
+        pending = _make_signal(event_id="e1")
+        object.__setattr__(pending, "signal_id", None)
+        provider.inject_signals([pending])
+
+        duplicate = _make_signal(event_id="e1")
+        object.__setattr__(duplicate, "signal_id", None)
+        provider.inject_signals([duplicate])
+
+        assert provider.get_signals() == [pending]
+
+    def test_injected_signals_visible_alongside_polled(self, provider, mock_monitor, mock_engine):
+        polled = _make_signal(event_id="polled")
+        mock_monitor.poll.return_value = ([_make_event()], {"last_processed_block": 101})
+        mock_engine.process_events.return_value = [polled]
+        provider.poll_and_process()
+
+        injected = _make_signal(event_id="injected")
+        provider.inject_signals([injected])
+
+        assert provider.get_signals() == [polled, injected]
+
+
 class TestStateManagement:
     def test_state_roundtrip(self, provider):
         state = {"last_processed_block": 42, "extra": "data"}

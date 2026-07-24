@@ -461,3 +461,104 @@ class TestPrintTraceResult:
         empty_out = capsys.readouterr().out
         assert "EXECUTION TRACE" in empty_out
         assert "FINAL RESULT" in empty_out
+
+
+# ---------------------------------------------------------------------------
+# create_example_intent: one branch per intent type + params merging
+# ---------------------------------------------------------------------------
+
+
+class TestCreateExampleIntent:
+    def test_swap_defaults(self) -> None:
+        from decimal import Decimal
+
+        intent = ide.create_example_intent("SWAP")
+
+        assert isinstance(intent, ide.SwapIntent)
+        assert intent.from_token == "USDC"
+        assert intent.to_token == "ETH"
+        assert intent.amount_usd == Decimal("1000")
+
+    def test_swap_params_override_defaults(self) -> None:
+        from decimal import Decimal
+
+        intent = ide.create_example_intent(
+            "SWAP", {"from_token": "WBTC", "amount_usd": "250"}
+        )
+
+        assert isinstance(intent, ide.SwapIntent)
+        assert intent.from_token == "WBTC"
+        # Unspecified keys keep the DEFAULT_EXAMPLE_INTENTS values.
+        assert intent.to_token == "ETH"
+        assert intent.amount_usd == Decimal("250")
+
+    def test_lp_open_defaults(self) -> None:
+        from decimal import Decimal
+
+        intent = ide.create_example_intent("LP_OPEN")
+
+        assert isinstance(intent, ide.LPOpenIntent)
+        assert intent.pool == "WETH/USDC/3000"
+        assert intent.amount0 == Decimal("1.0")
+        assert intent.amount1 == Decimal("2000.0")
+        assert intent.range_lower == Decimal("1800.0")
+        assert intent.range_upper == Decimal("2200.0")
+        assert intent.protocol == "uniswap_v3"
+
+    def test_lp_close_defaults(self) -> None:
+        intent = ide.create_example_intent("LP_CLOSE")
+
+        assert isinstance(intent, ide.LPCloseIntent)
+        assert intent.position_id == "123456"
+        assert intent.pool == "WETH/USDC/3000"
+        assert intent.protocol == "uniswap_v3"
+
+    def test_borrow_defaults_are_rejected_by_bundled_borrow_ban(self) -> None:
+        # Known defect (pinned, not endorsed): DEFAULT_EXAMPLE_INTENTS["BORROW"]
+        # still ships collateral_amount="1.0", but bundled collateralized
+        # borrow was outlawed for accounting-correct lending, so the example
+        # intent can no longer be constructed with its own defaults.
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="Bundled collateralized borrow"):
+            ide.create_example_intent("BORROW")
+
+    def test_borrow_with_zero_collateral_param_succeeds(self) -> None:
+        from decimal import Decimal
+
+        intent = ide.create_example_intent("BORROW", {"collateral_amount": "0"})
+
+        assert isinstance(intent, ide.BorrowIntent)
+        assert intent.protocol == "aave_v3"
+        assert intent.collateral_token == "ETH"
+        assert intent.collateral_amount == Decimal("0")
+        assert intent.borrow_token == "USDC"
+        assert intent.borrow_amount == Decimal("1500.0")
+
+    def test_repay_defaults(self) -> None:
+        from decimal import Decimal
+
+        intent = ide.create_example_intent("REPAY")
+
+        assert isinstance(intent, ide.RepayIntent)
+        assert intent.protocol == "aave_v3"
+        assert intent.token == "USDC"
+        assert intent.amount == Decimal("1500.0")
+
+    def test_hold_defaults(self) -> None:
+        intent = ide.create_example_intent("HOLD")
+
+        assert isinstance(intent, ide.HoldIntent)
+        assert intent.reason == "No action needed"
+
+    def test_unknown_type_falls_back_to_hold(self) -> None:
+        intent = ide.create_example_intent("TELEPORT")
+
+        assert isinstance(intent, ide.HoldIntent)
+        assert intent.reason == "No action needed"
+
+    def test_unknown_type_with_params_uses_param_reason(self) -> None:
+        intent = ide.create_example_intent("TELEPORT", {"reason": "custom hold"})
+
+        assert isinstance(intent, ide.HoldIntent)
+        assert intent.reason == "custom hold"

@@ -433,3 +433,303 @@ class TestCoinGeckoGetMarketChartRange:
         ctx.set_details.assert_called_once_with("api exploded")
         assert response.success is False
         assert response.error == "api exploded"
+
+
+# =============================================================================
+# BinanceGetOrderBook
+# =============================================================================
+
+
+class TestBinanceGetOrderBook:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bad_symbol", ["", "btc/usdt", "BTC USDT"])
+    async def test_invalid_symbol_returns_invalid_argument(self, service, bad_symbol):
+        ctx = _make_context()
+        request = gateway_pb2.BinanceOrderBookRequest(symbol=bad_symbol)
+
+        response = await service.BinanceGetOrderBook(request, ctx)
+
+        ctx.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
+        assert len(response.bids) == 0
+        assert len(response.asks) == 0
+        service._binance.get_order_book.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_defaults_applied_and_symbol_normalized(self, service):
+        ctx = _make_context()
+        service._binance.get_order_book = AsyncMock(return_value={})
+        request = gateway_pb2.BinanceOrderBookRequest(symbol="ethusdt")
+
+        response = await service.BinanceGetOrderBook(request, ctx)
+
+        service._binance.get_order_book.assert_awaited_once_with(symbol="ETHUSDT", limit=100)
+        ctx.set_code.assert_not_called()
+        # Missing bids/asks/last_update_id keys degrade to empty response.
+        assert response.last_update_id == 0
+        assert len(response.bids) == 0
+        assert len(response.asks) == 0
+
+    @pytest.mark.asyncio
+    async def test_success_maps_order_book(self, service):
+        ctx = _make_context()
+        service._binance.get_order_book = AsyncMock(
+            return_value={
+                "last_update_id": 987654,
+                "bids": [
+                    {"price": "3000.10", "quantity": "1.5"},
+                    {"price": "2999.90", "quantity": "0.25"},
+                ],
+                "asks": [{"price": "3000.20", "quantity": "2.0"}],
+            }
+        )
+        request = gateway_pb2.BinanceOrderBookRequest(symbol="ETHUSDT", limit=5)
+
+        response = await service.BinanceGetOrderBook(request, ctx)
+
+        service._binance.get_order_book.assert_awaited_once_with(symbol="ETHUSDT", limit=5)
+        assert response.last_update_id == 987654
+        assert [(b.price, b.quantity) for b in response.bids] == [
+            ("3000.10", "1.5"),
+            ("2999.90", "0.25"),
+        ]
+        assert [(a.price, a.quantity) for a in response.asks] == [("3000.20", "2.0")]
+        ctx.set_code.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_missing_entry_fields_default_to_empty_strings(self, service):
+        ctx = _make_context()
+        service._binance.get_order_book = AsyncMock(
+            return_value={"bids": [{}], "asks": [{"price": "1.0"}]}
+        )
+        request = gateway_pb2.BinanceOrderBookRequest(symbol="ETHUSDT")
+
+        response = await service.BinanceGetOrderBook(request, ctx)
+
+        assert (response.bids[0].price, response.bids[0].quantity) == ("", "")
+        assert (response.asks[0].price, response.asks[0].quantity) == ("1.0", "")
+
+    @pytest.mark.asyncio
+    async def test_upstream_error_maps_to_internal(self, service):
+        ctx = _make_context()
+        service._binance.get_order_book = AsyncMock(side_effect=RuntimeError("binance down"))
+        request = gateway_pb2.BinanceOrderBookRequest(symbol="ETHUSDT")
+
+        response = await service.BinanceGetOrderBook(request, ctx)
+
+        ctx.set_code.assert_called_once_with(grpc.StatusCode.INTERNAL)
+        ctx.set_details.assert_called_once_with("binance down")
+        assert len(response.bids) == 0
+
+
+# =============================================================================
+# CoinGeckoGetPrices
+# =============================================================================
+
+
+class TestCoinGeckoGetPrices:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bad_token", ["has spaces", "UPPER_CASE!", "a" * 100])
+    async def test_invalid_token_id_returns_invalid_argument(self, service, bad_token):
+        ctx = _make_context()
+        request = gateway_pb2.CoinGeckoGetPricesRequest(token_ids=["ethereum", bad_token])
+
+        response = await service.CoinGeckoGetPrices(request, ctx)
+
+        ctx.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
+        assert len(response.tokens) == 0
+        service._coingecko.get_prices.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_defaults_and_token_normalization(self, service):
+        ctx = _make_context()
+        service._coingecko.get_prices = AsyncMock(return_value={})
+        request = gateway_pb2.CoinGeckoGetPricesRequest(token_ids=["Ethereum", "BITCOIN"])
+
+        await service.CoinGeckoGetPrices(request, ctx)
+
+        service._coingecko.get_prices.assert_awaited_once_with(
+            token_ids=["ethereum", "bitcoin"],
+            vs_currencies=["usd"],
+        )
+        ctx.set_code.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_explicit_vs_currencies_propagated(self, service):
+        ctx = _make_context()
+        service._coingecko.get_prices = AsyncMock(return_value={})
+        request = gateway_pb2.CoinGeckoGetPricesRequest(
+            token_ids=["ethereum"],
+            vs_currencies=["eur", "btc"],
+        )
+
+        await service.CoinGeckoGetPrices(request, ctx)
+
+        service._coingecko.get_prices.assert_awaited_once_with(
+            token_ids=["ethereum"],
+            vs_currencies=["eur", "btc"],
+        )
+
+    @pytest.mark.asyncio
+    async def test_success_maps_token_prices_and_timestamp(self, service):
+        ctx = _make_context()
+        # CoinGeckoIntegration.get_prices returns string prices (proto map is
+        # map<string, string>).
+        service._coingecko.get_prices = AsyncMock(
+            return_value={
+                "ethereum": {"usd": "3000.5", "eur": "2800.25"},
+                "bitcoin": {"usd": "60000.0"},
+            }
+        )
+        request = gateway_pb2.CoinGeckoGetPricesRequest(token_ids=["ethereum", "bitcoin"])
+
+        response = await service.CoinGeckoGetPrices(request, ctx)
+
+        by_id = {t.token_id: dict(t.prices) for t in response.tokens}
+        assert by_id == {
+            "ethereum": {"usd": "3000.5", "eur": "2800.25"},
+            "bitcoin": {"usd": "60000.0"},
+        }
+        assert response.timestamp > 0
+        ctx.set_code.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_empty_token_ids_passes_empty_list_upstream(self, service):
+        ctx = _make_context()
+        service._coingecko.get_prices = AsyncMock(return_value={})
+        request = gateway_pb2.CoinGeckoGetPricesRequest()
+
+        response = await service.CoinGeckoGetPrices(request, ctx)
+
+        service._coingecko.get_prices.assert_awaited_once_with(token_ids=[], vs_currencies=["usd"])
+        assert len(response.tokens) == 0
+        ctx.set_code.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_upstream_error_maps_to_internal(self, service):
+        ctx = _make_context()
+        service._coingecko.get_prices = AsyncMock(side_effect=RuntimeError("coingecko down"))
+        request = gateway_pb2.CoinGeckoGetPricesRequest(token_ids=["ethereum"])
+
+        response = await service.CoinGeckoGetPrices(request, ctx)
+
+        ctx.set_code.assert_called_once_with(grpc.StatusCode.INTERNAL)
+        ctx.set_details.assert_called_once_with("coingecko down")
+        assert len(response.tokens) == 0
+
+
+# =============================================================================
+# TheGraphQuery
+# =============================================================================
+
+
+class TestTheGraphQueryHandler:
+    QUERY = "{ pools(first: 1) { id } }"
+
+    @pytest.fixture
+    def graph_service(self, service):
+        service._thegraph = MagicMock()
+        return service
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bad_query", ["", "{ __schema { types { name } } }"])
+    async def test_invalid_query_returns_invalid_argument_with_errors_json(self, graph_service, bad_query):
+        import json
+
+        ctx = _make_context()
+        request = gateway_pb2.TheGraphQueryRequest(subgraph_id="uniswap-v3-ethereum", query=bad_query)
+
+        response = await graph_service.TheGraphQuery(request, ctx)
+
+        ctx.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
+        assert response.success is False
+        errors = json.loads(response.errors)
+        assert len(errors) == 1 and "message" in errors[0]
+        graph_service._thegraph.query.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_invalid_variables_json_returns_invalid_argument(self, graph_service):
+        ctx = _make_context()
+        request = gateway_pb2.TheGraphQueryRequest(
+            subgraph_id="uniswap-v3-ethereum",
+            query=self.QUERY,
+            variables="{not json",
+        )
+
+        response = await graph_service.TheGraphQuery(request, ctx)
+
+        ctx.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
+        ctx.set_details.assert_called_once_with("Invalid variables JSON")
+        assert response.success is False
+        graph_service._thegraph.query.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_variables_parsed_and_passed_upstream(self, graph_service):
+        ctx = _make_context()
+        graph_service._thegraph.query = AsyncMock(return_value={"data": {}, "success": True})
+        request = gateway_pb2.TheGraphQueryRequest(
+            subgraph_id="uniswap-v3-ethereum",
+            query=self.QUERY,
+            variables='{"first": 5}',
+        )
+
+        await graph_service.TheGraphQuery(request, ctx)
+
+        graph_service._thegraph.query.assert_awaited_once_with(
+            subgraph_id="uniswap-v3-ethereum",
+            query=self.QUERY,
+            variables={"first": 5},
+        )
+
+    @pytest.mark.asyncio
+    async def test_success_serializes_data_and_omits_empty_errors(self, graph_service):
+        import json
+
+        ctx = _make_context()
+        graph_service._thegraph.query = AsyncMock(
+            return_value={"data": {"pools": [{"id": "0xpool"}]}, "success": True}
+        )
+        request = gateway_pb2.TheGraphQueryRequest(subgraph_id="uniswap-v3-ethereum", query=self.QUERY)
+
+        response = await graph_service.TheGraphQuery(request, ctx)
+
+        assert response.success is True
+        assert json.loads(response.data) == {"pools": [{"id": "0xpool"}]}
+        assert response.errors == ""
+        # No variables supplied -> None passed upstream.
+        graph_service._thegraph.query.assert_awaited_once_with(
+            subgraph_id="uniswap-v3-ethereum",
+            query=self.QUERY,
+            variables=None,
+        )
+        ctx.set_code.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_graphql_errors_serialized_and_empty_data_omitted(self, graph_service):
+        import json
+
+        ctx = _make_context()
+        graph_service._thegraph.query = AsyncMock(
+            return_value={"data": None, "errors": [{"message": "boom"}], "success": False}
+        )
+        request = gateway_pb2.TheGraphQueryRequest(subgraph_id="uniswap-v3-ethereum", query=self.QUERY)
+
+        response = await graph_service.TheGraphQuery(request, ctx)
+
+        assert response.success is False
+        assert response.data == ""
+        assert json.loads(response.errors) == [{"message": "boom"}]
+
+    @pytest.mark.asyncio
+    async def test_upstream_error_maps_to_internal_with_errors_json(self, graph_service):
+        import json
+
+        ctx = _make_context()
+        graph_service._thegraph.query = AsyncMock(side_effect=RuntimeError("thegraph down"))
+        request = gateway_pb2.TheGraphQueryRequest(subgraph_id="uniswap-v3-ethereum", query=self.QUERY)
+
+        response = await graph_service.TheGraphQuery(request, ctx)
+
+        ctx.set_code.assert_called_once_with(grpc.StatusCode.INTERNAL)
+        ctx.set_details.assert_called_once_with("thegraph down")
+        assert response.success is False
+        assert json.loads(response.errors) == [{"message": "thegraph down"}]

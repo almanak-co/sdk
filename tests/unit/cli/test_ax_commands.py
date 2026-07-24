@@ -1639,3 +1639,207 @@ class TestAxJsonStreamRouting:
         payload = json.loads(result.stdout)
         assert payload == {"status": "error", "message": "gateway exploded"}
         assert "gateway exploded" not in result.stderr
+
+
+class TestAxBridge:
+    _BASE_ARGS = ["bridge", "USDC", "100", "--from-chain", "arbitrum", "--to-chain", "base"]
+
+    @patch("almanak.framework.cli.ax._get_executor")
+    def test_bridge_dry_run(self, mock_get_exec):
+        mock_executor, mock_client = _mock_executor_and_client()
+        mock_get_exec.return_value = (mock_executor, mock_client)
+
+        response = ToolResponse(
+            status="simulated",
+            data={"estimated_output": "99.8 USDC", "bridge": "across"},
+        )
+        captured_args = {}
+
+        async def mock_execute(tool_name, args):
+            assert tool_name == "bridge_tokens"
+            captured_args.update(args)
+            return response
+
+        mock_executor.execute = mock_execute
+
+        runner = CliRunner()
+        result = runner.invoke(almanak, ["ax", "--dry-run", *self._BASE_ARGS])
+        assert result.exit_code == 0
+        assert "DRY RUN" in result.output
+        assert captured_args["token"] == "USDC"
+        assert captured_args["amount"] == "100"
+        assert captured_args["from_chain"] == "arbitrum"
+        assert captured_args["to_chain"] == "base"
+        assert captured_args["slippage_bps"] == 50
+        assert captured_args["dry_run"] is True
+        assert "preferred_bridge" not in captured_args
+
+    @patch("almanak.framework.cli.ax._get_executor")
+    def test_bridge_dry_run_error_exits_nonzero(self, mock_get_exec):
+        mock_executor, mock_client = _mock_executor_and_client()
+        mock_get_exec.return_value = (mock_executor, mock_client)
+
+        response = ToolResponse(status="error", error={"message": "no route"})
+
+        async def mock_execute(tool_name, args):
+            return response
+
+        mock_executor.execute = mock_execute
+
+        runner = CliRunner()
+        result = runner.invoke(almanak, ["ax", "--dry-run", *self._BASE_ARGS])
+        assert result.exit_code == 1
+
+    @patch("almanak.framework.cli.ax._get_executor")
+    def test_bridge_preferred_bridge_and_slippage_options(self, mock_get_exec):
+        mock_executor, mock_client = _mock_executor_and_client()
+        mock_get_exec.return_value = (mock_executor, mock_client)
+
+        response = ToolResponse(status="simulated", data={})
+        captured_args = {}
+
+        async def mock_execute(tool_name, args):
+            captured_args.update(args)
+            return response
+
+        mock_executor.execute = mock_execute
+
+        runner = CliRunner()
+        result = runner.invoke(
+            almanak,
+            ["ax", "--dry-run", *self._BASE_ARGS, "--bridge", "across", "--slippage", "100"],
+        )
+        assert result.exit_code == 0
+        assert captured_args["preferred_bridge"] == "across"
+        assert captured_args["slippage_bps"] == 100
+
+    @patch("almanak.framework.cli.ax._get_executor")
+    def test_bridge_with_yes_executes(self, mock_get_exec):
+        mock_executor, mock_client = _mock_executor_and_client()
+        mock_get_exec.return_value = (mock_executor, mock_client)
+
+        response = ToolResponse(
+            status="success",
+            data={"tx_hash": "0xbr1d6e", "amount_out": "99.8"},
+        )
+        captured_args = {}
+
+        async def mock_execute(tool_name, args):
+            assert tool_name == "bridge_tokens"
+            captured_args.update(args)
+            return response
+
+        mock_executor.execute = mock_execute
+
+        runner = CliRunner()
+        result = runner.invoke(almanak, ["ax", "--yes", *self._BASE_ARGS])
+        assert result.exit_code == 0
+        assert "0xbr1d6e" in result.output
+        # Execution path must not silently flip into simulation.
+        assert "dry_run" not in captured_args
+
+    @patch("almanak.framework.cli.ax._get_executor")
+    def test_bridge_execute_error_exits_nonzero(self, mock_get_exec):
+        mock_executor, mock_client = _mock_executor_and_client()
+        mock_get_exec.return_value = (mock_executor, mock_client)
+
+        response = ToolResponse(status="error", error={"message": "insufficient balance"})
+
+        async def mock_execute(tool_name, args):
+            return response
+
+        mock_executor.execute = mock_execute
+
+        runner = CliRunner()
+        result = runner.invoke(almanak, ["ax", "--yes", *self._BASE_ARGS])
+        assert result.exit_code == 1
+
+    @patch("almanak.framework.cli.ax._get_executor")
+    def test_bridge_non_interactive_without_yes_requires_flag(self, mock_get_exec):
+        mock_executor, mock_client = _mock_executor_and_client()
+        mock_get_exec.return_value = (mock_executor, mock_client)
+        executed = []
+
+        async def mock_execute(tool_name, args):
+            executed.append(tool_name)
+
+        mock_executor.execute = mock_execute
+
+        runner = CliRunner()
+        # CliRunner streams are not TTYs -> the safety gate raises a
+        # ClickException instead of prompting.
+        result = runner.invoke(almanak, ["ax", *self._BASE_ARGS])
+        assert result.exit_code != 0
+        assert "requires --yes" in result.output
+        assert executed == []
+
+    @patch("almanak.framework.cli.ax_render.is_interactive", return_value=True)
+    @patch("almanak.framework.cli.ax._get_executor")
+    def test_bridge_interactive_confirm(self, mock_get_exec, _mock_tty):
+        mock_executor, mock_client = _mock_executor_and_client()
+        mock_get_exec.return_value = (mock_executor, mock_client)
+
+        response = ToolResponse(status="success", data={"tx_hash": "0xok"})
+
+        async def mock_execute(tool_name, args):
+            return response
+
+        mock_executor.execute = mock_execute
+
+        runner = CliRunner()
+        result = runner.invoke(almanak, ["ax", *self._BASE_ARGS], input="y\n")
+        assert result.exit_code == 0
+        assert "0xok" in result.output
+
+    @patch("almanak.framework.cli.ax_render.is_interactive", return_value=True)
+    @patch("almanak.framework.cli.ax._get_executor")
+    def test_bridge_interactive_cancel(self, mock_get_exec, _mock_tty):
+        mock_executor, mock_client = _mock_executor_and_client()
+        mock_get_exec.return_value = (mock_executor, mock_client)
+        executed = []
+
+        async def mock_execute(tool_name, args):
+            executed.append(tool_name)
+
+        mock_executor.execute = mock_execute
+
+        runner = CliRunner()
+        result = runner.invoke(almanak, ["ax", *self._BASE_ARGS], input="n\n")
+        assert result.exit_code == 0
+        assert "Cancelled" in result.output
+        assert executed == []
+
+    @patch("almanak.framework.cli.ax._get_executor")
+    def test_bridge_unexpected_error_renders_and_exits(self, mock_get_exec):
+        mock_executor, mock_client = _mock_executor_and_client()
+        mock_get_exec.return_value = (mock_executor, mock_client)
+
+        async def mock_execute(tool_name, args):
+            raise RuntimeError("bridge adapter offline")
+
+        mock_executor.execute = mock_execute
+
+        runner = CliRunner()
+        result = runner.invoke(almanak, ["ax", "--dry-run", *self._BASE_ARGS])
+        assert result.exit_code == 1
+        assert "bridge adapter offline" in result.output
+
+    @patch("almanak.framework.cli.ax._get_executor")
+    def test_bridge_sub_flags_merge_with_group_flags(self, mock_get_exec):
+        mock_executor, mock_client = _mock_executor_and_client()
+        mock_get_exec.return_value = (mock_executor, mock_client)
+
+        response = ToolResponse(status="simulated", data={})
+        captured_args = {}
+
+        async def mock_execute(tool_name, args):
+            captured_args.update(args)
+            return response
+
+        mock_executor.execute = mock_execute
+
+        runner = CliRunner()
+        # --dry-run given at the subcommand level rather than the group level.
+        result = runner.invoke(almanak, ["ax", *self._BASE_ARGS, "--dry-run"])
+        assert result.exit_code == 0
+        assert captured_args["dry_run"] is True

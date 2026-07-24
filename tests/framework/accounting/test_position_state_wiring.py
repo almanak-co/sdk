@@ -406,3 +406,84 @@ async def test_runner_caller_swallows_save_errors(monkeypatch):
     # Must NOT raise.
     result = await _persist_position_state_snapshots(runner, snapshot, snapshot_id=1)
     assert result == 0
+
+
+# ─── _confidence_from: worst-of per-asset confidence fold ─────────────────
+#
+# The per-asset ``prices`` map is the same shape ``PriceSnapshot.confidence()``
+# consumes; ``_confidence_from`` must propagate the WORST underlying
+# confidence instead of collapsing any non-empty map to HIGH (a STALE oracle
+# must never stamp a HIGH row — G14 / Track-C reconciliation would silently
+# accept it).
+
+from almanak.framework.accounting.position_state import _confidence_from  # noqa: E402
+
+
+def _priced(*confidences: str) -> dict:
+    """Build a per-asset confidence map in AttemptNo17 §1.2 G12 shape."""
+    return {f"TOK{i}": {"confidence": c, "price_usd": "1"} for i, c in enumerate(confidences)}
+
+
+def test_confidence_read_failed_is_unavailable():
+    assert _confidence_from({"read_failed": True, "liquidity": 1}, _priced("HIGH")) == "UNAVAILABLE"
+
+
+def test_confidence_empty_details_is_unavailable():
+    assert _confidence_from({}, _priced("HIGH")) == "UNAVAILABLE"
+
+
+@pytest.mark.parametrize("explicit", ["HIGH", "ESTIMATED", "STALE", "UNAVAILABLE"])
+def test_confidence_explicit_stamp_wins(explicit):
+    """A connector-stamped value_confidence short-circuits the price fold."""
+    details = {"liquidity": 1, "value_confidence": explicit}
+    assert _confidence_from(details, _priced("STALE")) == explicit
+
+
+def test_confidence_unrecognised_explicit_stamp_falls_through_to_fold():
+    details = {"liquidity": 1, "value_confidence": "BOGUS"}
+    assert _confidence_from(details, _priced("HIGH", "HIGH")) == "HIGH"
+
+
+@pytest.mark.parametrize("prices", [None, {}])
+def test_confidence_no_prices_is_estimated(prices):
+    assert _confidence_from({"liquidity": 1}, prices) == "ESTIMATED"
+
+
+def test_confidence_all_high_is_high():
+    assert _confidence_from({"liquidity": 1}, _priced("HIGH", "HIGH", "HIGH")) == "HIGH"
+
+
+def test_confidence_any_stale_propagates_stale():
+    assert _confidence_from({"liquidity": 1}, _priced("HIGH", "STALE")) == "STALE"
+
+
+def test_confidence_stale_beats_estimated():
+    assert _confidence_from({"liquidity": 1}, _priced("ESTIMATED", "STALE")) == "STALE"
+
+
+def test_confidence_any_estimated_downgrades_high():
+    assert _confidence_from({"liquidity": 1}, _priced("HIGH", "ESTIMATED")) == "ESTIMATED"
+
+
+def test_confidence_mixed_unavailable_is_estimated_not_unavailable():
+    """Partial pricing failure degrades, but doesn't declare the row dead."""
+    assert _confidence_from({"liquidity": 1}, _priced("HIGH", "UNAVAILABLE")) == "ESTIMATED"
+
+
+def test_confidence_all_unavailable_is_unavailable():
+    assert _confidence_from({"liquidity": 1}, _priced("UNAVAILABLE", "UNAVAILABLE")) == "UNAVAILABLE"
+
+
+def test_confidence_unrecognised_asset_confidence_is_estimated():
+    prices = {"WETH": {"confidence": "MYSTERY", "price_usd": "3500"}}
+    assert _confidence_from({"liquidity": 1}, prices) == "ESTIMATED"
+
+
+def test_confidence_legacy_flat_price_map_is_estimated():
+    """Flat ``{symbol: price}`` legacy shape carries no confidence — ESTIMATED."""
+    assert _confidence_from({"liquidity": 1}, {"USDC": "1.00", "WETH": "3500"}) == "ESTIMATED"
+
+
+def test_confidence_flat_and_typed_mix_downgrades_to_estimated():
+    prices = {"USDC": "1.00", "WETH": {"confidence": "HIGH", "price_usd": "3500"}}
+    assert _confidence_from({"liquidity": 1}, prices) == "ESTIMATED"

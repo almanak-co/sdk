@@ -213,3 +213,121 @@ class TestGlobalInstall:
         assert result.exit_code == 0, result.output
         assert _global_path(Platform.CLAUDE, fake_home).exists()
         assert list(project.iterdir()) == []
+
+
+class TestInteractivePlatformSelect:
+    """Direct tests for the arrow-key selector helper (menu faked)."""
+
+    @staticmethod
+    def _make_tty(monkeypatch: pytest.MonkeyPatch) -> None:
+        import sys
+
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: True, raising=False)
+        monkeypatch.setattr(sys.stdout, "isatty", lambda: True, raising=False)
+
+    @staticmethod
+    def _fake_menu_module(indices: tuple[int, ...] | None, recorded: dict) -> object:
+        import types
+
+        mod = types.ModuleType("simple_term_menu")
+
+        class TerminalMenu:
+            def __init__(self, entries, **kwargs):
+                recorded["entries"] = list(entries)
+                recorded["kwargs"] = kwargs
+
+            def show(self):
+                return indices
+
+        mod.TerminalMenu = TerminalMenu
+        return mod
+
+    def test_non_interactive_terminal_raises_usage_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import sys
+
+        import click
+
+        from almanak.cli.agent import _interactive_platform_select
+
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: False, raising=False)
+
+        with pytest.raises(click.UsageError) as excinfo:
+            _interactive_platform_select()
+
+        assert "non-interactive" in str(excinfo.value)
+        assert "almanak agent install -p <platform>" in str(excinfo.value)
+
+    def test_missing_dependency_raises_usage_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import sys
+
+        import click
+
+        from almanak.cli.agent import _interactive_platform_select
+
+        self._make_tty(monkeypatch)
+        # ``None`` in sys.modules makes ``import simple_term_menu`` raise
+        # ImportError even when the package is installed.
+        monkeypatch.setitem(sys.modules, "simple_term_menu", None)
+
+        with pytest.raises(click.UsageError) as excinfo:
+            _interactive_platform_select()
+
+        assert "simple-term-menu" in str(excinfo.value)
+        assert "almanak agent install -p <platform>" in str(excinfo.value)
+
+    def test_cancel_returns_none_and_echoes_cancelled(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        import sys
+
+        from almanak.cli.agent import _interactive_platform_select
+
+        self._make_tty(monkeypatch)
+        recorded: dict = {}
+        monkeypatch.setitem(
+            sys.modules, "simple_term_menu", self._fake_menu_module(None, recorded)
+        )
+
+        assert _interactive_platform_select() is None
+        out = capsys.readouterr().out
+        assert "No agent platforms detected" in out
+        assert "Cancelled." in out
+
+    def test_empty_selection_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import sys
+
+        from almanak.cli.agent import _interactive_platform_select
+
+        self._make_tty(monkeypatch)
+        monkeypatch.setitem(
+            sys.modules, "simple_term_menu", self._fake_menu_module((), {})
+        )
+
+        assert _interactive_platform_select() is None
+
+    def test_selection_maps_indices_to_platforms(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import sys
+
+        from almanak.cli.agent import _interactive_platform_select
+
+        self._make_tty(monkeypatch)
+        recorded: dict = {}
+        monkeypatch.setitem(
+            sys.modules, "simple_term_menu", self._fake_menu_module((0, 2), recorded)
+        )
+
+        all_platforms = list(Platform)
+        selected = _interactive_platform_select()
+
+        assert selected == [all_platforms[0], all_platforms[2]]
+        # One menu entry per platform, each carrying its value + description.
+        assert len(recorded["entries"]) == len(all_platforms)
+        assert recorded["entries"][0].startswith(all_platforms[0].value)
+        assert "Claude Code" in recorded["entries"][0]
+        assert recorded["kwargs"]["multi_select"] is True

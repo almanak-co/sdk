@@ -8,6 +8,7 @@ import pytest
 from almanak.connectors.silo_v2.adapter import (
     MAX_UINT256,
     SILO_V2_FUNCTION_SELECTORS,
+    SILO_V2_MARKETS,
     SiloV2Adapter,
     SiloV2Config,
 )
@@ -21,6 +22,47 @@ def adapter():
         wallet_address="0x1234567890123456789012345678901234567890",
     )
     return SiloV2Adapter(config)
+
+
+class TestSiloV2FindMarket:
+    """Test market lookup by asset-pair symbols."""
+
+    def test_exact_order_match(self, adapter):
+        market = adapter.find_market("WAVAX", "USDC")
+        assert market is SILO_V2_MARKETS["WAVAX/USDC"]
+
+    def test_reversed_order_match(self, adapter):
+        """Pair lookup must be order-independent (collateral/borrow sides swap)."""
+        market = adapter.find_market("USDC", "WAVAX")
+        assert market is SILO_V2_MARKETS["WAVAX/USDC"]
+
+    def test_case_insensitive_symbols(self, adapter):
+        market = adapter.find_market("savax", "wavax")
+        assert market is SILO_V2_MARKETS["sAVAX/WAVAX"]
+
+    def test_mixed_case_dotted_symbol(self, adapter):
+        market = adapter.find_market("btc.B", "WAVAX")
+        assert market is SILO_V2_MARKETS["BTC.b/WAVAX"]
+
+    def test_unknown_pair_returns_none(self, adapter):
+        assert adapter.find_market("WAVAX", "DAI") is None
+
+    def test_assets_from_different_markets_return_none(self, adapter):
+        """Both symbols exist in the registry but never as one pair."""
+        assert adapter.find_market("USDC", "sAVAX") is None
+
+    def test_missing_asset0_returns_none(self, adapter):
+        assert adapter.find_market(None, "USDC") is None
+
+    def test_missing_asset1_returns_none(self, adapter):
+        assert adapter.find_market("WAVAX", None) is None
+
+    def test_no_arguments_returns_none(self, adapter):
+        assert adapter.find_market() is None
+
+    def test_empty_string_asset_returns_none(self, adapter):
+        """Empty strings are falsy and must not match any market."""
+        assert adapter.find_market("", "USDC") is None
 
 
 class TestSiloV2WithdrawAll:

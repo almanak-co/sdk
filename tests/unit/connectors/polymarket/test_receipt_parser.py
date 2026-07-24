@@ -1248,3 +1248,124 @@ class TestV2PolymarketContractsSet:
         always work without per-call normalization."""
         for addr in POLYMARKET_CONTRACTS:
             assert addr == addr.lower(), f"{addr} is not lowercase"
+
+
+# =============================================================================
+# Result-Enrichment Extraction Tests
+# =============================================================================
+
+ZERO_ADDRESS = "0x" + "0" * 40
+USER_ADDRESS = "0x742d35Cc6634C0532925a3b844Bc9e7595f5ABCD"
+
+
+def _transfer_single_log(to_addr: str, value: int, token_id: int = 7, log_index: int = 0) -> dict:
+    """Build a TransferSingle log with a controllable recipient and value."""
+
+    def _topic(addr: str) -> str:
+        return "0x" + addr[2:].lower().rjust(64, "0")
+
+    return {
+        "address": CONDITIONAL_TOKENS,
+        "topics": [
+            TRANSFER_SINGLE_TOPIC,
+            _topic("0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"),  # operator
+            _topic(USER_ADDRESS),  # from
+            _topic(to_addr),  # to
+        ],
+        "data": f"0x{token_id:064x}{value:064x}",
+        "logIndex": log_index,
+    }
+
+
+def _ctf_receipt(logs: list[dict]) -> dict:
+    return {
+        "transactionHash": "0xfeed" + "00" * 30,
+        "blockNumber": 12345,
+        "status": 1,
+        "logs": logs,
+    }
+
+
+class TestExtractionMethods:
+    """Tests for the result-enrichment extraction helpers."""
+
+    # -- extract_outcome_tokens_received --
+
+    def test_received_sums_all_transfer_single_values(self, parser: PolymarketReceiptParser) -> None:
+        receipt = _ctf_receipt(
+            [
+                _transfer_single_log(USER_ADDRESS, 100_000_000, log_index=0),
+                _transfer_single_log(USER_ADDRESS, 50, log_index=1),
+            ]
+        )
+        assert parser.extract_outcome_tokens_received(receipt) == 100_000_050
+
+    def test_received_returns_none_without_transfer_singles(self, parser: PolymarketReceiptParser) -> None:
+        assert parser.extract_outcome_tokens_received(_ctf_receipt([])) is None
+
+    def test_received_returns_none_for_zero_value_transfers(self, parser: PolymarketReceiptParser) -> None:
+        receipt = _ctf_receipt([_transfer_single_log(USER_ADDRESS, 0)])
+        assert parser.extract_outcome_tokens_received(receipt) is None
+
+    def test_received_returns_none_when_parsing_raises(
+        self, parser: PolymarketReceiptParser, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _boom(receipt: dict, filter_by_contract: bool = True) -> None:
+            raise RuntimeError("decode blew up")
+
+        monkeypatch.setattr(parser, "parse_ctf_receipt", _boom)
+        assert parser.extract_outcome_tokens_received(_ctf_receipt([])) is None
+
+    # -- extract_outcome_tokens_sold --
+
+    def test_sold_sums_all_transfer_single_values(self, parser: PolymarketReceiptParser) -> None:
+        receipt = _ctf_receipt(
+            [
+                _transfer_single_log(CTF_EXCHANGE_V2, 60, log_index=0),
+                _transfer_single_log(CTF_EXCHANGE_V2, 40, log_index=1),
+            ]
+        )
+        assert parser.extract_outcome_tokens_sold(receipt) == 100
+
+    def test_sold_returns_none_without_transfer_singles(self, parser: PolymarketReceiptParser) -> None:
+        assert parser.extract_outcome_tokens_sold(_ctf_receipt([])) is None
+
+    def test_sold_returns_none_for_zero_value_transfers(self, parser: PolymarketReceiptParser) -> None:
+        receipt = _ctf_receipt([_transfer_single_log(CTF_EXCHANGE_V2, 0)])
+        assert parser.extract_outcome_tokens_sold(receipt) is None
+
+    def test_sold_returns_none_when_parsing_raises(
+        self, parser: PolymarketReceiptParser, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _boom(receipt: dict, filter_by_contract: bool = True) -> None:
+            raise RuntimeError("decode blew up")
+
+        monkeypatch.setattr(parser, "parse_ctf_receipt", _boom)
+        assert parser.extract_outcome_tokens_sold(_ctf_receipt([])) is None
+
+    # -- extract_redemption_amount --
+
+    def test_redemption_counts_only_burns_to_zero_address(self, parser: PolymarketReceiptParser) -> None:
+        receipt = _ctf_receipt(
+            [
+                _transfer_single_log(ZERO_ADDRESS, 75, log_index=0),  # burn
+                _transfer_single_log(USER_ADDRESS, 100, log_index=1),  # not a burn
+            ]
+        )
+        assert parser.extract_redemption_amount(receipt) == 75
+
+    def test_redemption_returns_none_without_burn_transfers(self, parser: PolymarketReceiptParser) -> None:
+        receipt = _ctf_receipt([_transfer_single_log(USER_ADDRESS, 100)])
+        assert parser.extract_redemption_amount(receipt) is None
+
+    def test_redemption_returns_none_without_transfer_singles(self, parser: PolymarketReceiptParser) -> None:
+        assert parser.extract_redemption_amount(_ctf_receipt([])) is None
+
+    def test_redemption_returns_none_when_parsing_raises(
+        self, parser: PolymarketReceiptParser, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _boom(receipt: dict, filter_by_contract: bool = True) -> None:
+            raise RuntimeError("decode blew up")
+
+        monkeypatch.setattr(parser, "parse_ctf_receipt", _boom)
+        assert parser.extract_redemption_amount(_ctf_receipt([])) is None

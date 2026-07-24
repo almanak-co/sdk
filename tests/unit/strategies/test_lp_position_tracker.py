@@ -377,5 +377,44 @@ def test_lp_close_amount_chaining_supported(protocol, expected) -> None:
     assert lp_close_amount_chaining_supported(protocol) is expected
 
 
+# ---------------------------------------------------------------------------
+# _extract_position_id
+# ---------------------------------------------------------------------------
+
+
+class TestExtractPositionId:
+    """Branch coverage for the static NFT position_id extraction helper."""
+
+    def test_none_result_returns_none(self) -> None:
+        assert LPPositionTracker._extract_position_id(None) is None
+
+    def test_direct_attribute_wins(self) -> None:
+        result = SimpleNamespace(position_id=12345, extracted_data={"position_id": "999"})
+        assert LPPositionTracker._extract_position_id(result) == "12345"
+
+    def test_falls_back_to_extracted_data(self) -> None:
+        result = SimpleNamespace(position_id=None, extracted_data={"position_id": "678"})
+        assert LPPositionTracker._extract_position_id(result) == "678"
+
+    def test_extracted_data_none_returns_none(self) -> None:
+        result = SimpleNamespace(position_id=None, extracted_data=None)
+        assert LPPositionTracker._extract_position_id(result) is None
+
+    def test_extracted_data_not_a_dict_returns_none(self) -> None:
+        result = SimpleNamespace(position_id=None, extracted_data=["position_id", "1"])
+        assert LPPositionTracker._extract_position_id(result) is None
+
+    def test_extracted_data_missing_key_returns_none(self) -> None:
+        result = SimpleNamespace(position_id=None, extracted_data={"bin_ids": [1]})
+        assert LPPositionTracker._extract_position_id(result) is None
+
+    def test_result_without_attributes_returns_none(self) -> None:
+        assert LPPositionTracker._extract_position_id(SimpleNamespace()) is None
+
+    def test_int_position_id_stringified(self) -> None:
+        result = SimpleNamespace(position_id=None, extracted_data={"position_id": 42})
+        assert LPPositionTracker._extract_position_id(result) == "42"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

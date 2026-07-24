@@ -265,3 +265,187 @@ class TestMultiDexPriceServiceMultiChain:
 
         decimals = service._get_token_decimals("USDC")
         assert decimals == 6
+
+
+# =============================================================================
+# MultiDexPriceResult.price_spread_bps
+# =============================================================================
+
+
+def _quote(dex: str, amount_out: str, amount_in: str = "100") -> "DexQuote":
+    from almanak.gateway.data.price.multi_dex import DexQuote
+
+    amt_in = Decimal(amount_in)
+    amt_out = Decimal(amount_out)
+    return DexQuote(
+        dex=dex,
+        token_in="USDC",
+        token_out="WETH",
+        amount_in=amt_in,
+        amount_out=amt_out,
+        price=amt_out / amt_in if amt_in > 0 else Decimal("0"),
+    )
+
+
+def _result(quotes: dict) -> "MultiDexPriceResult":
+    from almanak.gateway.data.price.multi_dex import MultiDexPriceResult
+
+    return MultiDexPriceResult(
+        token_in="USDC",
+        token_out="WETH",
+        amount_in=Decimal("100"),
+        quotes=quotes,
+    )
+
+
+class TestPriceSpreadBps:
+    """Branch coverage for MultiDexPriceResult.price_spread_bps."""
+
+    def test_no_quotes_returns_zero(self):
+        assert _result({}).price_spread_bps == 0
+
+    def test_single_quote_returns_zero(self):
+        assert _result({"curve": _quote("curve", "1.0")}).price_spread_bps == 0
+
+    def test_two_quotes_but_only_one_valid_returns_zero(self):
+        quotes = {
+            "curve": _quote("curve", "1.0"),
+            "enso": _quote("enso", "0"),  # amount_out=0 -> is_valid False
+        }
+        assert _result(quotes).price_spread_bps == 0
+
+    def test_spread_computed_between_best_and_worst_valid_quotes(self):
+        quotes = {
+            "curve": _quote("curve", "1.00"),
+            "uniswap_v3": _quote("uniswap_v3", "1.02"),
+            "enso": _quote("enso", "0"),  # invalid, excluded from the spread
+        }
+        # (1.02 - 1.00) / 1.00 * 10000 = 200 bps
+        assert _result(quotes).price_spread_bps == 200
+
+    def test_identical_quotes_have_zero_spread(self):
+        quotes = {
+            "curve": _quote("curve", "1.0"),
+            "enso": _quote("enso", "1.0"),
+        }
+        assert _result(quotes).price_spread_bps == 0
+
+    def test_spread_truncates_toward_zero(self):
+        quotes = {
+            "curve": _quote("curve", "3"),
+            "enso": _quote("enso", "1"),
+        }
+        # (3 - 1) / 1 * 10000 = 20000 bps exactly
+        assert _result(quotes).price_spread_bps == 20000
+
+
+# =============================================================================
+# MultiDexPriceService._get_curve_quote
+# =============================================================================
+
+
+class TestGetCurveQuote:
+    """Branch coverage for the simulated Curve quote path."""
+
+    @pytest.fixture
+    def service(self):
+        return MultiDexPriceService(chain="ethereum", token_resolver=MagicMock())
+
+    @pytest.mark.asyncio
+    async def test_mock_quote_short_circuits(self, service):
+        from almanak.gateway.data.price.multi_dex import DexQuote
+
+        sentinel = DexQuote(
+            dex="curve",
+            token_in="USDC",
+            token_out="USDT",
+            amount_in=Decimal("1"),
+            amount_out=Decimal("1"),
+            price=Decimal("1"),
+        )
+        captured = []
+
+        def mock_fn(token_in, token_out, amount_in):
+            captured.append((token_in, token_out, amount_in))
+            return sentinel
+
+        service.set_mock_quote("curve", mock_fn)
+
+        quote = await service._get_curve_quote("USDC", "USDT", Decimal("123"))
+
+        assert quote is sentinel
+        assert captured == [("USDC", "USDT", Decimal("123"))]
+
+    @pytest.mark.asyncio
+    async def test_stable_pair_uses_peg_price_and_stable_parameters(self, service):
+        amount = Decimal("100000")
+        quote = await service._get_curve_quote("USDC", "USDT", amount)
+
+        assert quote.dex == "curve"
+        assert quote.chain == "ethereum"
+        assert quote.route == "3pool"
+        assert quote.fee_bps == 4
+        assert quote.slippage_estimate_bps == 1
+        # $100k stable trade: max(1, int(100000 / 1e6)) = 1 bp impact.
+        assert quote.price_impact_bps == 1
+        assert quote.amount_out == amount * (Decimal(10000 - 1) / Decimal(10000))
+        assert quote.price == quote.amount_out / amount
+
+    @pytest.mark.asyncio
+    async def test_large_stable_trade_scales_impact_per_million(self, service):
+        amount = Decimal("5000000")
+        quote = await service._get_curve_quote("USDT", "DAI", amount)
+
+        assert quote.price_impact_bps == 5  # 1 bp per $1M
+        assert quote.route == "3pool"
+
+    @pytest.mark.asyncio
+    async def test_lst_pair_keeps_full_price_but_uses_crypto_pool_parameters(self, service):
+        amount = Decimal("10")
+        with patch.object(service, "_get_default_price", return_value=Decimal("1")) as price_fn:
+            quote = await service._get_curve_quote("WETH", "stETH", amount)
+
+        price_fn.assert_called_once_with("WETH", "stETH")
+        # LST pair: no 0.995 discount, but crypto-pool fee and slippage model.
+        assert quote.route == "CryptoSwap"
+        assert quote.fee_bps == 30
+        # $25k notional (10 * 2500): 1 bp per $1M floor.
+        assert quote.price_impact_bps == 1
+        # _estimate_slippage(25000, "curve") = max(1, int(2 * 0.5)) = 1
+        assert quote.slippage_estimate_bps == 1
+        assert quote.amount_out == amount * (Decimal(10000 - 1) / Decimal(10000))
+
+    @pytest.mark.asyncio
+    async def test_non_stable_non_lst_pair_gets_discounted_quote(self, service):
+        amount = Decimal("40")  # 40 * 2500 = $100k notional
+        with patch.object(service, "_get_default_price", return_value=Decimal("0.05")):
+            quote = await service._get_curve_quote("WETH", "WBTC", amount)
+
+        assert quote.route == "CryptoSwap"
+        assert quote.fee_bps == 30
+        # _estimate_price_impact(100000, "curve") = int(5 * 1.0) = 5 bps
+        assert quote.price_impact_bps == 5
+        # _estimate_slippage(100000, "curve") = int(2 * 1.0) = 2 bps
+        assert quote.slippage_estimate_bps == 2
+        expected_out = (
+            amount * Decimal("0.05") * Decimal("0.995") * (Decimal(10000 - 5) / Decimal(10000))
+        )
+        assert quote.amount_out == expected_out
+        assert quote.price == expected_out / amount
+
+    @pytest.mark.asyncio
+    async def test_zero_amount_yields_zero_price_without_division_error(self, service):
+        quote = await service._get_curve_quote("USDC", "USDT", Decimal("0"))
+
+        assert quote.amount_out == Decimal("0")
+        assert quote.price == Decimal("0")
+        assert quote.is_valid is False
+
+    @pytest.mark.asyncio
+    async def test_non_stable_pair_without_price_feed_fails_loud(self, service):
+        from almanak.gateway.data.price.multi_dex import QuoteUnavailableError
+
+        # No mock and no oracle: the simulation refuses to invent a price
+        # (VIB-3137) and the error propagates out of _get_curve_quote.
+        with pytest.raises(QuoteUnavailableError, match="No simulated price for WETH->WBTC"):
+            await service._get_curve_quote("WETH", "WBTC", Decimal("1"))

@@ -1,9 +1,12 @@
-"""Branch coverage for BridgeSelector score calculation.
+"""Branch coverage for BridgeSelector score calculation and selection.
 
 Covers ``_calculate_overall_scores`` normalization (empty input, quoteless
 scores, min-max scaling, degenerate ranges, liquidity ratio guards,
-reliability lookup) and the per-priority weighting in
-``_calculate_weighted_score``. Pure math — no bridges are queried.
+reliability lookup), the per-priority weighting in
+``_calculate_weighted_score``, the end-to-end ``select_bridge`` flow
+(priority parsing, availability filtering, ranking, reasoning), and
+``select_bridge_with_fallback`` exclusion handling. Pure in-memory fakes —
+no bridges are queried.
 """
 
 from decimal import Decimal
@@ -11,9 +14,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from almanak.connectors._strategy_base.bridge_base import BridgeQuoteError
 from almanak.framework.intents.bridge_selector import (
     BridgeScore,
     BridgeSelector,
+    NoBridgeAvailableError,
     SelectionPriority,
 )
 
@@ -112,3 +117,155 @@ class TestCalculateWeightedScore:
             setattr(score, field, 0.0)
         setattr(score, dominant, 1.0)
         assert selector._calculate_weighted_score(score, priority) == pytest.approx(0.6)
+
+
+def _quote(fee="10", time=60, *, expired=False):
+    return SimpleNamespace(
+        fee_amount=Decimal(fee),
+        estimated_time_seconds=time,
+        input_amount=Decimal("100"),
+        output_amount=Decimal("99"),
+        token="USDC",
+        is_expired=expired,
+    )
+
+
+class _FakeBridge:
+    """Minimal in-memory BridgeAdapter double."""
+
+    def __init__(self, name, *, valid=True, reason=None, quote=None, error=None):
+        self.name = name
+        self._valid = valid
+        self._reason = reason
+        self._quote = quote
+        self._error = error
+
+    def validate_transfer(self, **kwargs):
+        return (self._valid, self._reason)
+
+    def get_quote(self, **kwargs):
+        if self._error is not None:
+            raise self._error
+        return self._quote
+
+
+def _select(selector, **overrides):
+    kwargs = {
+        "token": "USDC",
+        "amount": Decimal("1000"),
+        "from_chain": "arbitrum",
+        "to_chain": "optimism",
+    }
+    kwargs.update(overrides)
+    return selector.select_bridge(**kwargs)
+
+
+class TestSelectBridge:
+    def test_selects_cheapest_for_cost_priority(self):
+        cheap = _FakeBridge("across", quote=_quote(fee="10", time=300))
+        pricey = _FakeBridge("stargate", quote=_quote(fee="30", time=60))
+        selector = BridgeSelector(bridges=[pricey, cheap])
+
+        result = _select(selector, priority="cost")
+
+        assert result.is_success
+        assert result.bridge is cheap
+        assert result.quote is cheap._quote
+        assert len(result.scores) == 2
+        assert "Selected across based on cost priority" in result.selection_reasoning
+        assert "Fallback: stargate" in result.selection_reasoning
+        assert "All bridges ranked" in result.selection_reasoning
+
+    def test_speed_priority_selects_fastest(self):
+        cheap_slow = _FakeBridge("across", quote=_quote(fee="10", time=300))
+        pricey_fast = _FakeBridge("stargate", quote=_quote(fee="30", time=60))
+        selector = BridgeSelector(bridges=[cheap_slow, pricey_fast])
+
+        result = _select(selector, priority="speed")
+
+        assert result.bridge is pricey_fast
+
+    def test_unknown_priority_falls_back_to_default(self):
+        cheap = _FakeBridge("across", quote=_quote(fee="10"))
+        pricey = _FakeBridge("stargate", quote=_quote(fee="30"))
+        selector = BridgeSelector(bridges=[pricey, cheap])
+
+        result = _select(selector, priority="warp-speed")
+
+        # Default priority is COST, so the cheapest bridge still wins.
+        assert result.bridge is cheap
+
+    def test_no_bridge_available_raises_with_reasons(self):
+        down = _FakeBridge("across", valid=False, reason="route unsupported")
+        selector = BridgeSelector(bridges=[down])
+
+        with pytest.raises(NoBridgeAvailableError, match="across: route unsupported"):
+            _select(selector)
+
+    def test_quote_error_reason_included(self):
+        broken = _FakeBridge("across", error=BridgeQuoteError("no liquidity"))
+        selector = BridgeSelector(bridges=[broken])
+
+        with pytest.raises(NoBridgeAvailableError, match="Quote error: no liquidity"):
+            _select(selector)
+
+    def test_expired_quote_excluded_from_selection(self):
+        expired = _FakeBridge("across", quote=_quote(fee="1", expired=True))
+        live = _FakeBridge("stargate", quote=_quote(fee="30"))
+        selector = BridgeSelector(bridges=[expired, live])
+
+        result = _select(selector)
+
+        assert result.bridge is live
+        expired_score = next(s for s in result.scores if s.bridge is expired)
+        assert not expired_score.is_available
+        assert expired_score.unavailable_reason == "Quote expired immediately"
+
+    def test_single_available_bridge_has_no_fallback(self):
+        only = _FakeBridge("across", quote=_quote())
+        selector = BridgeSelector(bridges=[only])
+
+        result = _select(selector)
+
+        assert result.bridge is only
+        assert "Fallback:" not in result.selection_reasoning
+        assert "All bridges ranked" not in result.selection_reasoning
+
+
+class TestSelectBridgeWithFallback:
+    def _selector(self):
+        cheap = _FakeBridge("across", quote=_quote(fee="10"))
+        pricey = _FakeBridge("stargate", quote=_quote(fee="30"))
+        return BridgeSelector(bridges=[cheap, pricey]), cheap, pricey
+
+    def _select_with_fallback(self, selector, **overrides):
+        kwargs = {
+            "token": "USDC",
+            "amount": Decimal("1000"),
+            "from_chain": "arbitrum",
+            "to_chain": "optimism",
+        }
+        kwargs.update(overrides)
+        return selector.select_bridge_with_fallback(**kwargs)
+
+    def test_no_exclusions_selects_best(self):
+        selector, cheap, _ = self._selector()
+        result = self._select_with_fallback(selector)
+        assert result.bridge is cheap
+
+    def test_excluded_bridge_not_selected(self):
+        selector, _, pricey = self._selector()
+        # Exclusion is case-insensitive.
+        result = self._select_with_fallback(selector, excluded_bridges=["ACROSS"])
+        assert result.bridge is pricey
+
+    def test_excluding_all_bridges_raises(self):
+        selector, _, _ = self._selector()
+        with pytest.raises(NoBridgeAvailableError, match="after excluding"):
+            self._select_with_fallback(selector, excluded_bridges=["across", "stargate"])
+
+    def test_propagates_inner_no_bridge_error(self):
+        down = _FakeBridge("across", valid=False, reason="paused")
+        selector = BridgeSelector(bridges=[down])
+        with pytest.raises(NoBridgeAvailableError, match="across: paused"):
+            self._select_with_fallback(selector)

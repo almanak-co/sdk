@@ -373,6 +373,123 @@ class TestLoadFlow:
         assert call_count == 0, "Must not fire network fetch while inside backoff window"
 
 
+class _FakeResponse:
+    """Minimal aiohttp response stand-in (status + json body)."""
+
+    def __init__(self, status=200, body=None):
+        self.status = status
+        self._body = body
+
+    async def json(self, content_type=None):
+        return self._body
+
+
+class _FakeRequestContext:
+    def __init__(self, response):
+        self._response = response
+
+    async def __aenter__(self):
+        return self._response
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class _FakeSession:
+    """Stands in for aiohttp.ClientSession — records the POSTed payload."""
+
+    last_payload = None
+
+    def __init__(self, response):
+        self._response = response
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    def post(self, url, json=None, timeout=None):
+        type(self).last_payload = json
+        return _FakeRequestContext(self._response)
+
+    def get(self, url, timeout=None):
+        return _FakeRequestContext(self._response)
+
+
+def _patch_aiohttp(monkeypatch, response=None, raise_exc=None):
+    """Patch aiohttp so `_fetch_from_network` never opens a socket."""
+    import aiohttp
+
+    if raise_exc is not None:
+
+        def _boom(*_a, **_k):
+            raise raise_exc
+
+        monkeypatch.setattr(aiohttp, "ClientSession", _boom)
+    else:
+        monkeypatch.setattr(aiohttp, "ClientSession", lambda *_a, **_k: _FakeSession(response))
+    monkeypatch.setattr(aiohttp, "TCPConnector", lambda *_a, **_k: None)
+
+
+class TestFetchFromNetwork:
+    """Tests for `_fetch_from_network` with a fully mocked aiohttp layer."""
+
+    @pytest.fixture
+    def lookup(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "almanak.connectors.aave_v3.gateway.market_lookup.CACHE_PATH",
+            tmp_path / "aave_market_cache.json",
+        )
+        return AaveMarketLookup()
+
+    def test_non_200_returns_none(self, lookup, monkeypatch):
+        _patch_aiohttp(monkeypatch, response=_FakeResponse(status=502))
+        assert asyncio.run(lookup._fetch_from_network()) is None
+
+    def test_non_dict_body_returns_none(self, lookup, monkeypatch):
+        _patch_aiohttp(monkeypatch, response=_FakeResponse(body=["not", "a", "graphql", "envelope"]))
+        assert asyncio.run(lookup._fetch_from_network()) is None
+
+    def test_graphql_errors_returns_none(self, lookup, monkeypatch):
+        _patch_aiohttp(
+            monkeypatch,
+            response=_FakeResponse(body={"errors": [{"message": "rate limited"}], "data": None}),
+        )
+        assert asyncio.run(lookup._fetch_from_network()) is None
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"data": {}},  # markets key missing -> defaults to []
+            {"data": {"markets": []}},  # empty market list
+            {"data": {"markets": "not-a-list"}},  # wrong type
+            {},  # no data envelope at all
+        ],
+    )
+    def test_missing_or_empty_markets_returns_none(self, lookup, monkeypatch, body):
+        _patch_aiohttp(monkeypatch, response=_FakeResponse(body=body))
+        assert asyncio.run(lookup._fetch_from_network()) is None
+
+    def test_success_returns_markets_and_writes_disk_cache(self, lookup, tmp_path, monkeypatch):
+        _patch_aiohttp(monkeypatch, response=_FakeResponse(body={"data": {"markets": SAMPLE_MARKETS}}))
+
+        result = asyncio.run(lookup._fetch_from_network())
+
+        assert result == SAMPLE_MARKETS
+        cache_path = tmp_path / "aave_market_cache.json"
+        assert cache_path.exists()
+        assert json.loads(cache_path.read_text()) == SAMPLE_MARKETS
+        # The GraphQL request asks for every mapped chain in one call.
+        from almanak.connectors.aave_v3.gateway.market_lookup import AAVE_CHAIN_IDS
+
+        assert _FakeSession.last_payload["variables"]["chainIds"] == list(AAVE_CHAIN_IDS.values())
+
+    def test_network_exception_returns_none(self, lookup, monkeypatch):
+        _patch_aiohttp(monkeypatch, raise_exc=RuntimeError("connection reset"))
+        assert asyncio.run(lookup._fetch_from_network()) is None
+
+
 class TestReserveTokenDataclass:
     def test_fields(self):
         meta = AaveReserveToken(
