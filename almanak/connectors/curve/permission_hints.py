@@ -55,9 +55,12 @@ def build_discovery_vectors(
     WETH=$2000, WBTC=$45000, …) — every pool's coin pair resolves to a
     finite, positive price_ratio.
 
-    For polygon's am3pool which sets ``use_underlying=True``, the compiler
-    routes to ``exchange_underlying`` automatically based on the pool's
-    pool_type; no special-casing is needed here.
+    No registered pool sets ``use_underlying`` today — polygon's aave-type
+    am3pool was removed under VIB-5551 (frozen Aave V2 Polygon reserves made
+    it non-executable); polygon's representative is now the frxUSD/USDT
+    StableSwap-NG pool. If an aave-type pool is ever re-registered, the
+    compiler routes to ``exchange_underlying`` automatically based on the
+    pool's flags; no special-casing is needed here.
 
     Returns ``None`` for any ``intent_type`` other than ``SWAP`` so the
     framework default takes over for non-SWAP intents (curve only owns

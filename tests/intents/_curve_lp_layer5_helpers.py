@@ -218,7 +218,7 @@ def assert_curve_money_surface(payload: dict, *, event_type: str, expect_usd_agg
     """Pin the Curve LP money-surface contract per intent shape (Empty ≠ Zero).
 
     ``expect_usd_aggregates`` is the TEST'S declaration of its pool type — ``True``
-    for a recognized USD-stable pool (3pool, 2pool, crvUSD/USDC, am3pool: the
+    for a recognized USD-stable pool (3pool, 2pool, crvUSD/USDC, frxUSD/USDT: the
     $1-peg numeraire applies), ``False`` for a non-stable pool (tricrypto,
     weth/cbETH). It is an INDEPENDENT oracle (the test knows what pool it set up),
     NOT the production stable predicate — so a misclassification BUG in

@@ -81,8 +81,11 @@ class TestCoinAmountsMapping:
     def test_three_coin_pool_targets_idx1_and_idx2_skipping_idx0(self) -> None:
         """The bug fixture: 3pool deposit of idx1 + idx2 leaving idx0 (DAI) at zero.
 
-        Polygon 3pool coins = [DAI (0), USDC.e (1), USDT (2)]. The two-slot mapping
-        could never express this; coin_amounts can.
+        Ethereum 3pool coins = [DAI (0), USDC (1), USDT (2)]. The two-slot mapping
+        could never express this; coin_amounts can. (Was polygon's am3pool until
+        VIB-5551 removed it — frozen Aave V2 made it non-executable; polygon's
+        registered pool is now the 2-coin frxusd_usdt, so the canonical 3-coin
+        example lives on ethereum.)
         """
         intent = LPOpenIntent(
             pool="3pool",
@@ -93,7 +96,7 @@ class TestCoinAmountsMapping:
             protocol="curve",
             coin_amounts=[Decimal("0"), Decimal("500"), Decimal("500")],
         )
-        amounts = _amounts(_compile(intent, "polygon"))
+        amounts = _amounts(_compile(intent, "ethereum"))
         assert amounts == [Decimal("0"), Decimal("500"), Decimal("500")]
         # Index 0 (DAI) must be untouched — this is the whole point of the ticket.
         assert amounts[0] == Decimal("0")
@@ -145,7 +148,7 @@ class TestCoinAmountsMapping:
             protocol="curve",
             coin_amounts=[Decimal("750"), Decimal("0"), Decimal("0")],
         )
-        assert _amounts(_compile(intent, "polygon")) == [Decimal("750"), Decimal("0"), Decimal("0")]
+        assert _amounts(_compile(intent, "ethereum")) == [Decimal("750"), Decimal("0"), Decimal("0")]
 
 
 # =============================================================================
@@ -164,7 +167,7 @@ class TestCoinAmountsLengthValidation:
             protocol="curve",
             coin_amounts=[Decimal("100"), Decimal("100")],  # 2 entries, pool has 3
         )
-        result = _compile(intent, "polygon")
+        result = _compile(intent, "ethereum")
         assert result.status == CompilationStatus.FAILED
         assert "coin_amounts has 2 entries" in (result.error or "")
         assert "3 coins" in (result.error or "")
@@ -197,7 +200,7 @@ class TestAmount0Amount1BackCompat:
             # 2-coin: amount0/amount1 map to idx0/idx1, no tail.
             ("arbitrum", "2pool", [Decimal("100"), Decimal("200")]),
             # 3-coin: amount0/amount1 -> idx0/idx1, idx2 zero-filled.
-            ("polygon", "3pool", [Decimal("100"), Decimal("200"), Decimal("0")]),
+            ("ethereum", "3pool", [Decimal("100"), Decimal("200"), Decimal("0")]),
             # 4-coin: amount0/amount1 -> idx0/idx1, idx2/idx3 zero-filled.
             ("base", "4pool", [Decimal("100"), Decimal("200"), Decimal("0"), Decimal("0")]),
         ],
@@ -240,7 +243,7 @@ class TestAmount0Amount1BackCompat:
             protocol="curve",
             coin_amounts=[Decimal("123"), Decimal("456"), Decimal("0")],
         )
-        assert _amounts(_compile(legacy, "polygon")) == _amounts(_compile(explicit, "polygon"))
+        assert _amounts(_compile(legacy, "ethereum")) == _amounts(_compile(explicit, "ethereum"))
 
 
 # =============================================================================
@@ -254,7 +257,7 @@ class TestLPOpenIntentCoinAmountsField:
             pool="3pool",
             coin_amounts=[Decimal("0"), Decimal("500"), Decimal("500")],
             protocol="curve",
-            chain="polygon",
+            chain="ethereum",
         )
         assert intent.coin_amounts == [Decimal("0"), Decimal("500"), Decimal("500")]
         # amount0/amount1 default to zero in the multi-coin ergonomic path.

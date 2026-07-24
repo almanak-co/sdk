@@ -329,37 +329,35 @@ CURVE_POOLS: dict[str, dict[str, dict[str, Any]]] = {
         },
     },
     "polygon": {
-        # Curve am3pool on Polygon (aave lending pool variant)
-        # Pool address: 0x445FE580eF8d70FF569aB36e80c647af338db351
-        # (VIB-5434: the prior literal 0x445Fe580…898ed8631406dB5f had NO code on
-        # Polygon — a transcription error that nulled accounting coin-symbol
-        # resolution and would revert execution. Verified on-fork 2026-06-30:
-        # coins(0)=amDAI, underlying_coins(0)=DAI, lp_token()=am3CRV,
-        # get_virtual_price()≈1.145e18.)
-        # LP token (am3CRV): 0xE7a24EF0C5e95Ffb0f6684b813A78F2a3AD7D171
-        # This is an aave-type pool: coins() are the aTokens (amDAI/amUSDC/amUSDT),
-        # underlying_coins() are DAI/USDC.e/USDT. Users approve/receive the UNDERLYING
-        # and swap them via exchange_underlying(); coin_addresses below are therefore
-        # the UNDERLYING token addresses (not the aTokens).
-        # Underlying coin order: underlying_coins(0)=DAI, (1)=USDC.e, (2)=USDT.
-        # NOTE (VIB-5551): add_liquidity/exchange_underlying deposit the underlying into
-        # the (now FROZEN) Aave V2 Polygon LendingPool, so the underlying-deposit flow
-        # reverts (VL_RESERVE_FROZEN) on current forks — the Polygon Curve intent tests
-        # are strict-xfail'd for that reason, not a parser gap.
-        # TECH_DEBT(VIB-581): virtual_price is a snapshot; query pool.virtual_price() at runtime.
-        "3pool": {
-            "address": "0x445FE580eF8d70FF569aB36e80c647af338db351",
-            "lp_token": "0xE7a24EF0C5e95Ffb0f6684b813A78F2a3AD7D171",  # am3CRV LP token
-            "coins": ["DAI", "USDC.e", "USDT"],
+        # frxUSD/USDT StableSwap NG pool on Polygon (VIB-5551).
+        # Replaces the aave-type am3pool (0x445FE580eF8d70FF569aB36e80c647af338db351):
+        # am3pool's deposit flow routes the underlying into the FROZEN Aave V2
+        # Polygon LendingPool, so every add_liquidity / exchange_underlying
+        # reverts (VL_RESERVE_FROZEN) on mainnet and current forks. It is removed
+        # from the registry entirely so swap/LP pool resolution can never route
+        # into a non-executable pool. Its receipt DECODE regression is kept in
+        # tests/unit/connectors/curve/test_am3pool_real_logs.py (uncurated-pool
+        # semantics); real-fork proof for THIS pool:
+        # tests/reports/vib-5551-polygon-frxusd-usdt-realfork.md.
+        # StableSwap NG: LP token IS the pool address.
+        # Coin order verified on-chain 2026-07-24 via cast call coins(0..1):
+        #   coins(0) = USDT   (0xc2132D05..., 6 dec; on-chain symbol rebranded "USDT0")
+        #   coins(1) = frxUSD (0x80Eede..., 18 dec; LayerZero OFT, ERC1967 proxy)
+        # Pool reserves (2026-07-24): ~45.2K USDT + ~47.3K frxUSD (~$92.5K, balanced).
+        # TECH_DEBT(VIB-581): virtual_price is a snapshot; query pool.get_virtual_price() at runtime.
+        # Queried on-chain 2026-07-24: get_virtual_price() = 1003956972289260014 -> 1.0039
+        "frxusd_usdt": {
+            "address": "0x5BC930b8f81F4cEEE3E3527159C3bDF453BcaAe9",
+            "lp_token": "0x5BC930b8f81F4cEEE3E3527159C3bDF453BcaAe9",  # StableSwap NG: LP = pool
+            "coins": ["USDT", "frxUSD"],
             "coin_addresses": [
-                "0x8f3Cf7ad23Cd3CaDbD9735AFf958023239c6A063",  # DAI on Polygon
-                "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",  # USDC.e (bridged USDC) on Polygon
-                "0xc2132D05D31c914a87C6611C10748AEb04B58e8F",  # USDT on Polygon
+                "0xc2132D05D31c914a87C6611C10748AEb04B58e8F",  # USDT on Polygon (coins[0])
+                "0x80Eede496655FB9047dd39d9f418d5483ED600df",  # frxUSD on Polygon (coins[1])
             ],
             "pool_type": "stableswap",
-            "n_coins": 3,
-            "virtual_price": Decimal("1.02"),
-            "use_underlying": True,  # exchange_underlying() required for non-aToken swaps
+            "n_coins": 2,
+            "virtual_price": Decimal("1.0039"),
+            "is_ng": True,  # StableSwap NG variant (VIB-4836)
         },
     },
 }

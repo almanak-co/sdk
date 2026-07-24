@@ -10,9 +10,17 @@ so the open/close were executed via the aToken-direct path
 
 This is the receipt-parser deliverable for VIB-5434: it proves the parser already
 decodes am3pool's events (the VIB-4307 "missing signatures" xfail reason was
-STALE — every am3pool topic0 was already in ``EVENT_TOPICS``). The intent test in
-``tests/intents/polygon/test_curve_lp.py`` stays strict-xfail'd for the SEPARATE
-execution blocker (Aave V2 frozen, VIB-5551), not for any parser gap.
+STALE — every am3pool topic0 was already in ``EVENT_TOPICS``).
+
+VIB-5551 REMOVED am3pool from ``CURVE_POOLS["polygon"]`` (the frozen Aave V2
+backing made every deposit revert; the registered representative is now the
+frxUSD/USDT NG pool — see ``test_frxusd_usdt_real_logs.py``). am3pool is
+therefore an UNCURATED pool: raw event decode still works (topics are
+registry-independent) and stays locked here so a legacy am3CRV position remains
+parseable, but accounting ``coin_symbols`` resolution correctly returns ``None``
+on the registry miss (Empty ≠ Zero — never fabricate symbols for an uncurated
+pool). The registry-backed coin_symbols surface is locked by the frxusd_usdt
+real-log regression instead.
 
 Provenance (real on-fork txs):
 - LP_OPEN  add_liquidity([100 amDAI,0,0],0,false): tx 0x3be9ed60…b1f1913a
@@ -24,8 +32,9 @@ from unittest.mock import patch
 
 from almanak.connectors.curve.receipt_parser import CurveEventType, CurveReceiptParser
 
-# Real am3pool pool contract (the AddLiquidity/RemoveLiquidity emitter) — matches
-# CURVE_POOLS["polygon"]["3pool"]["address"] (corrected in VIB-5434).
+# Real am3pool pool contract (the AddLiquidity/RemoveLiquidity emitter). No longer
+# in CURVE_POOLS — removed under VIB-5551 (frozen Aave V2 backing); decode of a
+# legacy position's receipts must keep working registry-free.
 AM3POOL = "0x445fe580ef8d70ff569ab36e80c647af338db351"
 AM3CRV_LP = "0xe7a24ef0c5e95ffb0f6684b813a78f2a3ad7d171"
 PROVIDER_TOPIC = "0x000000000000000000000000f39fd6e51aad88f6f4ce6ab8827279cfffb92266"
@@ -131,10 +140,12 @@ class TestAm3poolRealLogDecode:
         assert open_data.pool_address == AM3POOL
         assert open_data.amount0 == 100_000_000_000_000_000_000
         assert open_data.amount1 == 0
-        # The registry-address fix (VIB-5434) restores coin-symbol resolution:
-        # a Curve LP_OPEN ledger row carries no token0/token1, so accounting needs
-        # these to price each coin. Was None while the registry held the dead address.
-        assert open_data.coin_symbols == ["DAI", "USDC.e", "USDT"]
+        # VIB-5551 removed am3pool from CURVE_POOLS (frozen Aave V2 backing), so
+        # coin-symbol resolution now correctly MISSES the registry: an uncurated
+        # pool yields None, never fabricated symbols (Empty ≠ Zero). The
+        # registry-backed resolution surface is locked by
+        # test_frxusd_usdt_real_logs.py::test_lp_open_data_pool_and_symbols.
+        assert open_data.coin_symbols is None
 
     def test_lp_tokens_received(self):
         parser = CurveReceiptParser(chain="polygon")
@@ -166,4 +177,6 @@ class TestAm3poolRealLogDecode:
         assert close_data.amount0_collected == REMOVE_AMOUNTS[0]
         assert close_data.amount1_collected == REMOVE_AMOUNTS[1]
         assert close_data.additional_amounts == {2: REMOVE_AMOUNTS[2]}
-        assert close_data.coin_symbols == ["DAI", "USDC.e", "USDT"]
+        # Uncurated pool after VIB-5551's registry removal: None, not fabricated
+        # symbols (see test_lp_open_data_pool_and_symbols above).
+        assert close_data.coin_symbols is None

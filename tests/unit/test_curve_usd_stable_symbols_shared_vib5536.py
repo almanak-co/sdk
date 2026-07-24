@@ -41,6 +41,10 @@ _EXPECTED_MEMBERSHIP = frozenset(
         "USDE",
         "USDBC",
         "AXLUSDC",
+        # VIB-5551: frxUSD (Frax USD) — fully-reserved $1 numeraire, the FRAX v3
+        # successor. Added with the Polygon frxUSD/USDT NG pool that replaces the
+        # frozen-Aave am3pool as the Polygon Curve representative.
+        "FRXUSD",
     }
 )
 

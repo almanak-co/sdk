@@ -89,6 +89,7 @@ CURVE_USD_STABLE_SYMBOLS: frozenset[str] = frozenset(
         "GHO",
         "PYUSD",
         "USDE",
+        "FRXUSD",  # Frax USD — fully-reserved $1 successor to FRAX (VIB-5551). Polygon frxUSD/USDT NG pool.
         # Bridged / wrapped USDC variants held by PLAIN USD-stable Curve pools
         # (audit P0-3). Each is a 1:1 USD-pegged wrapper of canonical USDC, so the
         # peg = $1 numeraire holds exactly as for native USDC:

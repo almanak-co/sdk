@@ -207,8 +207,8 @@ class TestLpOpenSlippage:
         assert tight > default
 
     def test_three_coin_pool_honors_slippage(self) -> None:
-        default = _open_min_mint(_compile_open(_open_intent("3pool", None), "polygon"))
-        wide = _open_min_mint(_compile_open(_open_intent("3pool", Decimal("0.01")), "polygon"))
+        default = _open_min_mint(_compile_open(_open_intent("3pool", None), "ethereum"))
+        wide = _open_min_mint(_compile_open(_open_intent("3pool", Decimal("0.01")), "ethereum"))
         assert wide < default
 
 
@@ -236,8 +236,8 @@ class TestLpCloseSlippage:
         assert any(t > d for t, d in zip(tight, default, strict=True))
 
     def test_three_coin_pool_honors_slippage(self) -> None:
-        default = _close_min_amounts(_compile_close(_close_intent("3pool", None), "polygon"), 3)
-        wide = _close_min_amounts(_compile_close(_close_intent("3pool", Decimal("0.01")), "polygon"), 3)
+        default = _close_min_amounts(_compile_close(_close_intent("3pool", None), "ethereum"), 3)
+        wide = _close_min_amounts(_compile_close(_close_intent("3pool", Decimal("0.01")), "ethereum"), 3)
         assert all(w < d for w, d in zip(wide, default, strict=True))
 
 

@@ -1,19 +1,24 @@
-"""Curve am3pool LP Intent tests for Polygon (VIB-4307).
+"""Curve frxUSD/USDT LP Intent tests for Polygon (VIB-4307, reworked for VIB-5551).
 
 Tests the full Intent -> Compile -> Execute -> Parse -> Verify flow for:
-- LPOpenIntent: Adding liquidity to Curve am3pool (DAI/USDC.e/USDT) on Polygon
+- LPOpenIntent: Adding liquidity to the Curve frxUSD/USDT NG pool on Polygon
 - LPCloseIntent: Removing liquidity proportionally
 
-Pool: Curve am3pool on Polygon (aave-type StableSwap variant)
-- Address: 0x445FE580eF8d70FF569aB36e80c647af338db351
-- LP token: 0xE7a24EF0C5e95Ffb0f6684b813A78F2a3AD7D171 (am3CRV)
-- Coins[0]: DAI (0x8f3Cf7ad...)
-- Coins[1]: USDC.e (0x2791Bca1..., bridged USDC)
-- Coins[2]: USDT (0xc2132D05...)
-- Type: stableswap with use_underlying=True (aave-type)
+Pool: Curve "FrxUSD USDT0 v1" (StableSwap NG) on Polygon
+- Address: 0x5BC930b8f81F4cEEE3E3527159C3bDF453BcaAe9
+- LP token: the pool address itself (StableSwap NG)
+- Coins[0]: USDT (0xc2132D05..., 6 dec)
+- Coins[1]: frxUSD (0x80Eede..., 18 dec)
+- Type: stableswap, is_ng=True
 
-LPOpenIntent supports 2-coin deposits (amount0 + amount1; remaining padded to 0).
-We deposit DAI + USDC.e (USDT=0).
+VIB-5551: this pool replaces the aave-type am3pool
+(0x445FE580eF8d70FF569aB36e80c647af338db351), whose deposit flow routed the
+underlying into the FROZEN Aave V2 Polygon LendingPool (VL_RESERVE_FROZEN)
+and reverted on every current fork. Coin order / liquidity verified on-chain
+2026-07-24; real-fork proof: tests/reports/vib-5551-polygon-frxusd-usdt-realfork.md.
+
+LPOpenIntent supports 2-coin deposits (amount0 = coins[0] = USDT,
+amount1 = coins[1] = frxUSD). We deposit USDT + frxUSD.
 
 NO MOCKING. All tests execute real on-chain transactions on Anvil fork.
 
@@ -51,25 +56,27 @@ logger = logging.getLogger(__name__)
 
 CHAIN_NAME = "polygon"
 
-# Curve am3pool on Polygon (aave-type StableSwap)
-POOL = "3pool"
-# VIB-5434: corrected from the dead 0x445Fe580…898ed8631406dB5f literal (no code on
-# Polygon) to the real am3pool. Verified on-fork 2026-06-30.
-POOL_ADDRESS = "0x445FE580eF8d70FF569aB36e80c647af338db351"
-LP_TOKEN = "0xE7a24EF0C5e95Ffb0f6684b813A78F2a3AD7D171"  # am3CRV LP token
+# Curve frxUSD/USDT StableSwap NG pool on Polygon (VIB-5551).
+POOL = "frxusd_usdt"
+POOL_ADDRESS = "0x5BC930b8f81F4cEEE3E3527159C3bDF453BcaAe9"
+LP_TOKEN = POOL_ADDRESS  # StableSwap NG: the pool IS its own LP token
 
-# Token addresses (coin order: DAI=0, USDC.e=1, USDT=2)
-DAI_ADDRESS = "0x8f3Cf7ad23Cd3CaDbD9735AFf958023239c6A063"
-USDC_E_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"  # bridged USDC (USDC.e)
+# Token addresses (coin order: USDT=0, frxUSD=1)
 USDT_ADDRESS = "0xc2132D05D31c914a87C6611C10748AEb04B58e8F"
+FRXUSD_ADDRESS = "0x80Eede496655FB9047dd39d9f418d5483ED600df"
 
-# Storage slots for token funding (Polygon PoS-bridged tokens use slot 0)
-DAI_BALANCE_SLOT = 0
-USDC_E_BALANCE_SLOT = 0
+# Storage slots for token funding.
+# USDT: Polygon PoS-bridged UChildERC20Proxy — OpenZeppelin _balances at slot 0.
+# frxUSD: LayerZero OFT behind an ERC1967 proxy (OZ-upgradeable v4 layout:
+# Initializable + 50-slot __gaps push ERC20 _balances to slot 101). Probed
+# empirically on an Anvil fork 2026-07-24 (write keccak(wallet,slot) for slots
+# 0..259 and read balanceOf back).
+USDT_BALANCE_SLOT = 0
+FRXUSD_BALANCE_SLOT = 101
 
 # LP deposit amounts (small to keep slippage low)
-LP_AMOUNT_DAI = Decimal("10")  # 10 DAI (18 decimals)
-LP_AMOUNT_USDC_E = Decimal("10")  # 10 USDC.e (6 decimals)
+LP_AMOUNT_USDT = Decimal("10")  # 10 USDT (6 decimals)
+LP_AMOUNT_FRXUSD = Decimal("10")  # 10 frxUSD (18 decimals)
 
 
 # =============================================================================
@@ -77,22 +84,22 @@ LP_AMOUNT_USDC_E = Decimal("10")  # 10 USDC.e (6 decimals)
 # =============================================================================
 
 
-def _fund_dai(wallet: str, rpc_url: str, amount: Decimal = Decimal("10000")) -> None:
-    """Fund test wallet with DAI on Polygon via storage slot manipulation."""
-    decimals = 18
-    amount_wei = int(amount * Decimal(10**decimals))
-    fund_erc20_token(wallet, DAI_ADDRESS, amount_wei, DAI_BALANCE_SLOT, rpc_url)
-
-
-def _fund_usdc_e(wallet: str, rpc_url: str, amount: Decimal = Decimal("10000")) -> None:
-    """Fund test wallet with USDC.e (bridged USDC) on Polygon via storage slot."""
+def _fund_usdt(wallet: str, rpc_url: str, amount: Decimal = Decimal("10000")) -> None:
+    """Fund test wallet with USDT on Polygon via storage slot manipulation."""
     decimals = 6
     amount_wei = int(amount * Decimal(10**decimals))
-    fund_erc20_token(wallet, USDC_E_ADDRESS, amount_wei, USDC_E_BALANCE_SLOT, rpc_url)
+    fund_erc20_token(wallet, USDT_ADDRESS, amount_wei, USDT_BALANCE_SLOT, rpc_url)
+
+
+def _fund_frxusd(wallet: str, rpc_url: str, amount: Decimal = Decimal("10000")) -> None:
+    """Fund test wallet with frxUSD on Polygon via storage slot manipulation."""
+    decimals = 18
+    amount_wei = int(amount * Decimal(10**decimals))
+    fund_erc20_token(wallet, FRXUSD_ADDRESS, amount_wei, FRXUSD_BALANCE_SLOT, rpc_url)
 
 
 def _get_lp_token_balance(web3: Web3, wallet: str) -> int:
-    """Get current LP token (am3CRV) balance for the wallet."""
+    """Get current LP token balance for the wallet (NG: pool address)."""
     return get_token_balance(web3, LP_TOKEN, wallet)
 
 
@@ -114,32 +121,20 @@ def _verify_pool_exists() -> None:
 
 @pytest.mark.polygon
 @pytest.mark.lp
-class TestCurveAm3poolLPOpenPolygon:
-    """Test Curve am3pool LP_OPEN using LPOpenIntent on Polygon.
+class TestCurveFrxusdUsdtLPOpenPolygon:
+    """Test Curve frxusd_usdt LP_OPEN using LPOpenIntent on Polygon.
 
     Verifies the full Intent flow:
-    - LPOpenIntent with pool=3pool, DAI + USDC.e amounts
-    - IntentCompiler generates approve + add_liquidity TXs for Polygon chain
+    - LPOpenIntent with pool=frxusd_usdt, USDT + frxUSD amounts
+    - IntentCompiler generates approve + add_liquidity (NG dynamic-array) TXs
     - Transactions execute on Anvil fork of Polygon
-    - AddLiquidity event parsed from receipt
+    - AddLiquidity (dynamic-array NG variant) event parsed from receipt
     - LP tokens minted and balance delta verified
     """
 
     @pytest.mark.intent(IntentType.LP_OPEN)
     @pytest.mark.asyncio
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "VIB-5551: am3pool LP_OPEN reverts on a current Polygon fork — the aave-type "
-            "underlying deposit routes through the FROZEN Aave V2 Polygon LendingPool "
-            "(VL_RESERVE_FROZEN), and the compiler emits the non-aave "
-            "add_liquidity(uint256[3],uint256) selector. The receipt-parser decode itself "
-            "is PROVEN by tests/unit/connectors/curve/test_am3pool_real_logs.py against real "
-            "on-fork AddLiquidity3/RemoveLiquidity3 logs (the VIB-4307 'missing signatures' "
-            "claim was stale). as of 2026-06-30."
-        ),
-    )
-    async def test_lp_open_dai_usdc_e(
+    async def test_lp_open_usdt_frxusd(
         self,
         web3: Web3,
         funded_wallet: str,
@@ -149,48 +144,48 @@ class TestCurveAm3poolLPOpenPolygon:
         layer5_accounting_harness,
         anvil_eth_call_adapter,
     ):
-        """Test adding DAI + USDC.e to Curve am3pool on Polygon.
+        """Test adding USDT + frxUSD to the Curve NG pool on Polygon.
 
         Flow:
-        1. Fund wallet with DAI and USDC.e via slot manipulation
-        2. Record balances BEFORE (DAI, USDC.e, LP token)
-        3. Create LPOpenIntent for Curve am3pool
-        4. Compile to ActionBundle (approve DAI + approve USDC.e + add_liquidity)
+        1. Fund wallet with USDT and frxUSD via slot manipulation
+        2. Record balances BEFORE (USDT, frxUSD, LP token)
+        3. Create LPOpenIntent for frxusd_usdt
+        4. Compile to ActionBundle (approve USDT + approve frxUSD + add_liquidity)
         5. Execute on-chain
         6. Parse receipt for AddLiquidity event
         7. Verify LP tokens received and token balance deltas
         """
         _verify_pool_exists()
 
-        # Fund DAI and USDC.e (not in standard polygon funded_wallet set)
-        _fund_dai(funded_wallet, anvil_rpc_url)
-        _fund_usdc_e(funded_wallet, anvil_rpc_url)
+        # Fund USDT and frxUSD (frxUSD is not in the standard polygon funded set)
+        _fund_usdt(funded_wallet, anvil_rpc_url)
+        _fund_frxusd(funded_wallet, anvil_rpc_url)
 
-        dai_funded = get_token_balance(web3, DAI_ADDRESS, funded_wallet)
-        usdc_e_funded = get_token_balance(web3, USDC_E_ADDRESS, funded_wallet)
+        usdt_funded = get_token_balance(web3, USDT_ADDRESS, funded_wallet)
+        frxusd_funded = get_token_balance(web3, FRXUSD_ADDRESS, funded_wallet)
         # Fail fast on funding regressions (silent skips were masking storage-
-        # slot regressions on Polygon DAI / USDC.e — VIB-4307 review).
-        assert dai_funded > 0, (
-            f"DAI funding failed at slot {DAI_BALANCE_SLOT}. "
-            "Polygon DAI storage layout may have changed — fail fast to "
+        # slot regressions on Polygon — VIB-4307 review).
+        assert usdt_funded > 0, (
+            f"USDT funding failed at slot {USDT_BALANCE_SLOT}. "
+            "Polygon USDT storage layout may have changed — fail fast to "
             "surface the infra regression."
         )
-        assert usdc_e_funded > 0, (
-            f"USDC.e funding failed at slot {USDC_E_BALANCE_SLOT}. "
-            "Polygon USDC.e storage layout may have changed — fail fast to "
-            "surface the infra regression."
+        assert frxusd_funded > 0, (
+            f"frxUSD funding failed at slot {FRXUSD_BALANCE_SLOT}. "
+            "frxUSD proxy implementation storage layout may have changed — "
+            "fail fast to surface the infra regression."
         )
 
         # --- Layer 4 BEFORE ---
-        dai_before = get_token_balance(web3, DAI_ADDRESS, funded_wallet)
-        usdc_e_before = get_token_balance(web3, USDC_E_ADDRESS, funded_wallet)
+        usdt_before = get_token_balance(web3, USDT_ADDRESS, funded_wallet)
+        frxusd_before = get_token_balance(web3, FRXUSD_ADDRESS, funded_wallet)
         lp_before = _get_lp_token_balance(web3, funded_wallet)
 
         # --- Layer 1: Compile ---
         intent = LPOpenIntent(
             pool=POOL,
-            amount0=LP_AMOUNT_DAI,
-            amount1=LP_AMOUNT_USDC_E,
+            amount0=LP_AMOUNT_USDT,
+            amount1=LP_AMOUNT_FRXUSD,
             range_lower=Decimal("1"),  # Dummy — Curve uses pool-based positions
             range_upper=Decimal("1000000"),  # Dummy — required by LPOpenIntent validation
             protocol="curve",
@@ -246,29 +241,29 @@ class TestCurveAm3poolLPOpenPolygon:
 
         assert lp_open_receipt_parsed, (
             "AddLiquidity event must be found in LP_OPEN receipt. "
-            "Parser must detect Curve AddLiquidity events on Polygon am3pool."
+            "Parser must detect the NG dynamic-array AddLiquidity on Polygon frxusd_usdt."
         )
         assert lp_tokens_from_receipt is not None and lp_tokens_from_receipt > 0, (
             "LP tokens minted must be > 0 and extractable from receipt Transfer event."
         )
 
         # --- Layer 4 AFTER: Balance Deltas ---
-        dai_after = get_token_balance(web3, DAI_ADDRESS, funded_wallet)
-        usdc_e_after = get_token_balance(web3, USDC_E_ADDRESS, funded_wallet)
+        usdt_after = get_token_balance(web3, USDT_ADDRESS, funded_wallet)
+        frxusd_after = get_token_balance(web3, FRXUSD_ADDRESS, funded_wallet)
         lp_after = _get_lp_token_balance(web3, funded_wallet)
 
-        dai_spent = dai_before - dai_after
-        usdc_e_spent = usdc_e_before - usdc_e_after
+        usdt_spent = usdt_before - usdt_after
+        frxusd_spent = frxusd_before - frxusd_after
         lp_received = lp_after - lp_before
 
-        expected_dai_spent = int(LP_AMOUNT_DAI * Decimal(10**18))
-        expected_usdc_e_spent = int(LP_AMOUNT_USDC_E * Decimal(10**6))
+        expected_usdt_spent = int(LP_AMOUNT_USDT * Decimal(10**6))
+        expected_frxusd_spent = int(LP_AMOUNT_FRXUSD * Decimal(10**18))
 
-        assert dai_spent == expected_dai_spent, (
-            f"DAI spent must EXACTLY equal LP_OPEN amount. Expected: {expected_dai_spent}, Got: {dai_spent}"
+        assert usdt_spent == expected_usdt_spent, (
+            f"USDT spent must EXACTLY equal LP_OPEN amount. Expected: {expected_usdt_spent}, Got: {usdt_spent}"
         )
-        assert usdc_e_spent == expected_usdc_e_spent, (
-            f"USDC.e spent must EXACTLY equal LP_OPEN amount. Expected: {expected_usdc_e_spent}, Got: {usdc_e_spent}"
+        assert frxusd_spent == expected_frxusd_spent, (
+            f"frxUSD spent must EXACTLY equal LP_OPEN amount. Expected: {expected_frxusd_spent}, Got: {frxusd_spent}"
         )
         assert lp_received > 0, f"LP tokens received must be > 0, got {lp_received}"
 
@@ -279,20 +274,15 @@ class TestCurveAm3poolLPOpenPolygon:
         )
 
         logger.info(
-            f"LP_OPEN: DAI spent={dai_spent / 10**18:.6f}, "
-            f"USDC.e spent={usdc_e_spent / 10**6:.6f}, "
+            f"LP_OPEN: USDT spent={usdt_spent / 10**6:.6f}, "
+            f"frxUSD spent={frxusd_spent / 10**18:.6f}, "
             f"LP received={lp_received}"
         )
 
         # --- Layer 5: real accounting pipeline (VIB-4968) ---
-        # Post-VIB-4968 the parser stamps a canonical 0x pool address so
-        # lp_handler books a typed LP_OPEN event. NOTE: this test is still
-        # xfail-marked, but for VIB-5551 (the aave-type underlying deposit reverts
-        # at the FROZEN Aave V2 Polygon LendingPool — the test fails at Layer-2
-        # EXECUTION, never reaching here). The receipt parser DOES decode am3pool's
-        # AddLiquidity3/RemoveLiquidity3 events (VIB-4307's "missing signatures"
-        # claim was stale) — proven by
-        # tests/unit/connectors/curve/test_am3pool_real_logs.py.
+        # The parser stamps a canonical 0x pool address so lp_handler books a
+        # typed LP_OPEN event. USD aggregates are expected: USDT and frxUSD are
+        # both CURVE_USD_STABLE_SYMBOLS members ($1-numeraire peg applies).
         await assert_curve_lp_layer5(
             layer5_accounting_harness,
             intent=intent,
@@ -314,29 +304,17 @@ class TestCurveAm3poolLPOpenPolygon:
 
 @pytest.mark.polygon
 @pytest.mark.lp
-class TestCurveAm3poolLPLifecyclePolygon:
-    """Test full Curve am3pool LP lifecycle: LP_OPEN then LP_CLOSE on Polygon.
+class TestCurveFrxusdUsdtLPLifecyclePolygon:
+    """Test full Curve frxusd_usdt LP lifecycle: LP_OPEN then LP_CLOSE on Polygon.
 
     Verifies:
-    - LP_OPEN adds liquidity and mints am3CRV LP tokens
-    - LP_CLOSE burns LP tokens and returns DAI + USDC.e + USDT
-    - RemoveLiquidity event parsed from close receipt
+    - LP_OPEN adds liquidity and mints NG LP tokens (pool address)
+    - LP_CLOSE burns LP tokens and returns USDT + frxUSD
+    - RemoveLiquidity (dynamic-array NG variant) event parsed from close receipt
     """
 
     @pytest.mark.intent(IntentType.LP_OPEN, IntentType.LP_CLOSE)
     @pytest.mark.asyncio
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "VIB-5551: am3pool LP_OPEN→CLOSE reverts on a current Polygon fork — the aave-type "
-            "underlying deposit routes through the FROZEN Aave V2 Polygon LendingPool "
-            "(VL_RESERVE_FROZEN), and the compiler emits the non-aave "
-            "add_liquidity(uint256[3],uint256) selector. The receipt-parser decode itself "
-            "is PROVEN by tests/unit/connectors/curve/test_am3pool_real_logs.py against real "
-            "on-fork AddLiquidity3/RemoveLiquidity3 logs (the VIB-4307 'missing signatures' "
-            "claim was stale). as of 2026-06-30."
-        ),
-    )
     async def test_lp_open_then_close(
         self,
         web3: Web3,
@@ -347,38 +325,38 @@ class TestCurveAm3poolLPLifecyclePolygon:
         layer5_accounting_harness,
         anvil_eth_call_adapter,
     ):
-        """Test full Curve am3pool LP lifecycle on Polygon: open then close.
+        """Test full Curve frxusd_usdt LP lifecycle on Polygon: open then close.
 
         Flow:
-        1. Fund wallet with DAI and USDC.e
-        2. LP_OPEN: deposit DAI + USDC.e into am3pool
+        1. Fund wallet with USDT and frxUSD
+        2. LP_OPEN: deposit USDT + frxUSD into frxusd_usdt
         3. Extract LP token balance
         4. LP_CLOSE: burn all LP tokens proportionally
         5. Verify RemoveLiquidity event + balance deltas
         """
         _verify_pool_exists()
 
-        # Fund DAI and USDC.e
-        _fund_dai(funded_wallet, anvil_rpc_url)
-        _fund_usdc_e(funded_wallet, anvil_rpc_url)
-        dai_funded = get_token_balance(web3, DAI_ADDRESS, funded_wallet)
-        usdc_e_funded = get_token_balance(web3, USDC_E_ADDRESS, funded_wallet)
+        # Fund USDT and frxUSD
+        _fund_usdt(funded_wallet, anvil_rpc_url)
+        _fund_frxusd(funded_wallet, anvil_rpc_url)
+        usdt_funded = get_token_balance(web3, USDT_ADDRESS, funded_wallet)
+        frxusd_funded = get_token_balance(web3, FRXUSD_ADDRESS, funded_wallet)
         # Fail fast on funding regressions (silent skips were masking storage-
-        # slot regressions on Polygon DAI / USDC.e — VIB-4307 review).
-        assert dai_funded > 0, (
-            "DAI funding failed on Polygon. Storage layout may have changed "
+        # slot regressions on Polygon — VIB-4307 review).
+        assert usdt_funded > 0, (
+            "USDT funding failed on Polygon. Storage layout may have changed "
             "— fail fast to surface the infra regression."
         )
-        assert usdc_e_funded > 0, (
-            "USDC.e funding failed on Polygon. Storage layout may have changed "
-            "— fail fast to surface the infra regression."
+        assert frxusd_funded > 0, (
+            "frxUSD funding failed on Polygon. Proxy storage layout may have "
+            "changed — fail fast to surface the infra regression."
         )
 
         # ==================== OPEN ====================
         open_intent = LPOpenIntent(
             pool=POOL,
-            amount0=LP_AMOUNT_DAI,
-            amount1=LP_AMOUNT_USDC_E,
+            amount0=LP_AMOUNT_USDT,
+            amount1=LP_AMOUNT_FRXUSD,
             range_lower=Decimal("1"),
             range_upper=Decimal("1000000"),
             protocol="curve",
@@ -450,9 +428,8 @@ class TestCurveAm3poolLPLifecyclePolygon:
         assert lp_balance > 0, "Must have LP tokens before LP_CLOSE test"
 
         # --- Layer 4 BEFORE close ---
-        dai_before_close = get_token_balance(web3, DAI_ADDRESS, funded_wallet)
-        usdc_e_before_close = get_token_balance(web3, USDC_E_ADDRESS, funded_wallet)
         usdt_before_close = get_token_balance(web3, USDT_ADDRESS, funded_wallet)
+        frxusd_before_close = get_token_balance(web3, FRXUSD_ADDRESS, funded_wallet)
 
         lp_amount_str = str(lp_tokens_received)
 
@@ -505,43 +482,38 @@ class TestCurveAm3poolLPLifecyclePolygon:
                 lp_close_data = extracted
 
         assert remove_liquidity_found, "RemoveLiquidity event must be found in LP_CLOSE receipt."
-        assert len(parsed_token_amounts) == 3, (
-            f"am3pool RemoveLiquidity must emit token_amounts for 3 coins; got {parsed_token_amounts}"
+        assert len(parsed_token_amounts) == 2, (
+            f"frxusd_usdt RemoveLiquidity must emit token_amounts for 2 coins; got {parsed_token_amounts}"
         )
 
         # Layer 4 AFTER close: balance deltas reconciled to parsed amounts.
-        # am3pool index order: 0=DAI, 1=USDC.e, 2=USDT.
+        # frxusd_usdt index order: 0=USDT, 1=frxUSD.
         lp_after_close = _get_lp_token_balance(web3, funded_wallet)
-        dai_after_close = get_token_balance(web3, DAI_ADDRESS, funded_wallet)
-        usdc_e_after_close = get_token_balance(web3, USDC_E_ADDRESS, funded_wallet)
         usdt_after_close = get_token_balance(web3, USDT_ADDRESS, funded_wallet)
+        frxusd_after_close = get_token_balance(web3, FRXUSD_ADDRESS, funded_wallet)
 
         lp_burned = lp_balance - lp_after_close
-        dai_returned = dai_after_close - dai_before_close
-        usdc_e_returned = usdc_e_after_close - usdc_e_before_close
         usdt_returned = usdt_after_close - usdt_before_close
+        frxusd_returned = frxusd_after_close - frxusd_before_close
 
-        assert lp_burned == lp_tokens_received, (
-            f"LP burned must exactly equal requested close amount. requested={lp_tokens_received}, burned={lp_burned}"
+        # lp_tokens_received is HUMAN units (Decimal); lp_burned is raw wei.
+        expected_lp_burned = int(lp_tokens_received * Decimal(10**18))
+        assert lp_burned == expected_lp_burned, (
+            f"LP burned must exactly equal requested close amount. requested={expected_lp_burned}, burned={lp_burned}"
         )
-        assert dai_returned == parsed_token_amounts[0], (
-            f"DAI delta must exactly equal parsed RemoveLiquidity amount. "
-            f"wallet={dai_returned}, parsed={parsed_token_amounts[0]}"
-        )
-        assert usdc_e_returned == parsed_token_amounts[1], (
-            f"USDC.e delta must exactly equal parsed RemoveLiquidity amount. "
-            f"wallet={usdc_e_returned}, parsed={parsed_token_amounts[1]}"
-        )
-        assert usdt_returned == parsed_token_amounts[2], (
+        assert usdt_returned == parsed_token_amounts[0], (
             f"USDT delta must exactly equal parsed RemoveLiquidity amount. "
-            f"wallet={usdt_returned}, parsed={parsed_token_amounts[2]}"
+            f"wallet={usdt_returned}, parsed={parsed_token_amounts[0]}"
+        )
+        assert frxusd_returned == parsed_token_amounts[1], (
+            f"frxUSD delta must exactly equal parsed RemoveLiquidity amount. "
+            f"wallet={frxusd_returned}, parsed={parsed_token_amounts[1]}"
         )
 
         logger.info(
-            f"LP_CLOSE success: burned {lp_burned / 1e18:.6f} am3CRV, "
-            f"received {dai_returned / 10**18:.4f} DAI + "
-            f"{usdc_e_returned / 10**6:.4f} USDC.e + "
-            f"{usdt_returned / 10**6:.4f} USDT"
+            f"LP_CLOSE success: burned {lp_burned / 1e18:.6f} LP, "
+            f"received {usdt_returned / 10**6:.4f} USDT + "
+            f"{frxusd_returned / 10**18:.4f} frxUSD"
         )
 
         # --- Layer 5: real accounting pipeline LP_CLOSE (VIB-4968) ---

@@ -1,16 +1,25 @@
-"""Curve SwapIntent tests for Polygon (VIB-4307).
+"""Curve SwapIntent tests for Polygon (VIB-4307, reworked for VIB-5551).
 
 Tests the full Intent -> Compile -> Execute -> Parse -> Verify flow for
-Curve Finance swaps on Polygon via am3pool (aave-type StableSwap).
+Curve Finance swaps on Polygon via the frxUSD/USDT StableSwap NG pool.
 
-Pool: Curve am3pool (DAI/USDC.e/USDT) on Polygon
-- Address: 0x445FE580eF8d70FF569aB36e80c647af338db351
-- Coin order: DAI (index 0), USDC.e (index 1), USDT (index 2)
-- Type: stableswap with use_underlying=True (aave-type)
-- Swap path: exchange_underlying() with underlying tokens (DAI/USDC.e/USDT)
+Pool: Curve "FrxUSD USDT0 v1" (StableSwap NG) on Polygon
+- Address: 0x5BC930b8f81F4cEEE3E3527159C3bDF453BcaAe9
+- Coin order: USDT (index 0), frxUSD (index 1)
+- Type: stableswap, is_ng=True (LP token IS the pool address)
+- Swap path: exchange(int128,int128,uint256,uint256) — plain NG StableSwap
 
-We test USDC.e -> USDT (both are stablecoins, deep liquidity, lower price impact).
-USDC.e must be funded via storage slot since it's not in CHAIN_CONFIGS for polygon.
+VIB-5551: this pool replaces the aave-type am3pool
+(0x445FE580eF8d70FF569aB36e80c647af338db351) as the Polygon Curve
+representative. am3pool's deposit flow routed the underlying into the FROZEN
+Aave V2 Polygon LendingPool (VL_RESERVE_FROZEN), so every add_liquidity /
+exchange_underlying reverted on current forks — it is removed from
+CURVE_POOLS entirely. Coin order / liquidity verified on-chain 2026-07-24
+(~45.2K USDT + ~47.3K frxUSD); real-fork proof:
+tests/reports/vib-5551-polygon-frxusd-usdt-realfork.md.
+
+We test USDT -> frxUSD (both stablecoins, balanced pool, low price impact).
+USDT is part of the standard polygon funded_wallet seeding.
 
 NO MOCKING. All tests execute real on-chain transactions on Anvil fork.
 
@@ -32,7 +41,6 @@ from almanak.framework.intents.vocabulary import IntentType, SwapIntent
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     SWAP_MAX_SLIPPAGE,
-    fund_erc20_token,
     get_token_balance,
 )
 
@@ -43,34 +51,17 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 CHAIN_NAME = "polygon"
-POOL_KEY = "3pool"
+POOL_KEY = "frxusd_usdt"
 
-# Curve am3pool on Polygon
-# VIB-5434: corrected from the dead 0x445Fe580…898ed8631406dB5f literal (no code on
-# Polygon) to the real am3pool. Verified on-fork 2026-06-30.
-EXPECTED_POOL_ADDRESS = "0x445FE580eF8d70FF569aB36e80c647af338db351"
+# Curve frxUSD/USDT StableSwap NG pool on Polygon (VIB-5551).
+# Coin order verified on-chain 2026-07-24: coins(0)=USDT, coins(1)=frxUSD.
+EXPECTED_POOL_ADDRESS = "0x5BC930b8f81F4cEEE3E3527159C3bDF453BcaAe9"
 
-# Token addresses (coin order: DAI=0, USDC.e=1, USDT=2)
-DAI_ADDRESS = "0x8f3Cf7ad23Cd3CaDbD9735AFf958023239c6A063"
-USDC_E_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"  # bridged USDC
+# Token addresses (coin order: USDT=0, frxUSD=1)
 USDT_ADDRESS = "0xc2132D05D31c914a87C6611C10748AEb04B58e8F"
-
-# Storage slot for USDC.e (Polygon PoS-bridged tokens use slot 0)
-USDC_E_BALANCE_SLOT = 0
+FRXUSD_ADDRESS = "0x80Eede496655FB9047dd39d9f418d5483ED600df"
 
 TEST_WALLET = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
-
-
-# =============================================================================
-# Helpers
-# =============================================================================
-
-
-def _fund_usdc_e(wallet: str, rpc_url: str, amount: Decimal = Decimal("10000")) -> None:
-    """Fund test wallet with USDC.e (bridged USDC) on Polygon via storage slot."""
-    decimals = 6
-    amount_wei = int(amount * Decimal(10**decimals))
-    fund_erc20_token(wallet, USDC_E_ADDRESS, amount_wei, USDC_E_BALANCE_SLOT, rpc_url)
 
 
 # =============================================================================
@@ -79,7 +70,7 @@ def _fund_usdc_e(wallet: str, rpc_url: str, amount: Decimal = Decimal("10000")) 
 
 
 class TestCurvePolygonPoolConfig:
-    """Verify am3pool is correctly configured in CURVE_POOLS."""
+    """Verify frxusd_usdt is correctly configured in CURVE_POOLS."""
 
     @pytest.mark.intent(IntentType.SWAP)
     def test_polygon_in_curve_pools(self):
@@ -87,32 +78,48 @@ class TestCurvePolygonPoolConfig:
         assert "polygon" in CURVE_POOLS
 
     @pytest.mark.intent(IntentType.SWAP)
-    def test_3pool_present(self):
-        """3pool (am3pool) must be in CURVE_POOLS['polygon']."""
+    def test_frxusd_usdt_present(self):
+        """frxusd_usdt must be in CURVE_POOLS['polygon']."""
         assert POOL_KEY in CURVE_POOLS.get("polygon", {}), (
             f"'{POOL_KEY}' not found in CURVE_POOLS['polygon']. Found: {list(CURVE_POOLS.get('polygon', {}).keys())}"
         )
 
     @pytest.mark.intent(IntentType.SWAP)
+    def test_am3pool_removed(self):
+        """The frozen aave-type am3pool must NOT be registered (VIB-5551).
+
+        Its deposit flow reverts at the frozen Aave V2 Polygon LendingPool, so
+        re-adding it would route swaps/LP into a non-executable pool.
+        """
+        for name, data in CURVE_POOLS["polygon"].items():
+            assert data["address"].lower() != "0x445fe580ef8d70ff569ab36e80c647af338db351", (
+                f"am3pool (frozen Aave V2 backing) must stay out of the registry; found as '{name}'"
+            )
+            assert not data.get("use_underlying"), (
+                f"No polygon pool may require the frozen Aave V2 underlying-deposit flow; '{name}' does"
+            )
+
+    @pytest.mark.intent(IntentType.SWAP)
     def test_pool_address_correct(self):
-        """Pool address must match deployed am3pool contract."""
+        """Pool address must match the deployed StableSwap NG contract."""
         pool = CURVE_POOLS["polygon"][POOL_KEY]
         assert pool["address"].lower() == EXPECTED_POOL_ADDRESS.lower()
 
     @pytest.mark.intent(IntentType.SWAP)
-    def test_pool_uses_underlying(self):
-        """am3pool must have use_underlying=True (aave-type)."""
+    def test_pool_is_ng(self):
+        """frxusd_usdt is StableSwap NG: is_ng=True and LP token == pool address."""
         pool = CURVE_POOLS["polygon"][POOL_KEY]
-        assert pool.get("use_underlying") is True, (
-            f"am3pool must have use_underlying=True; got {pool.get('use_underlying')}"
-        )
+        assert pool.get("is_ng") is True, f"frxusd_usdt must have is_ng=True; got {pool.get('is_ng')}"
+        assert pool["lp_token"].lower() == pool["address"].lower(), "StableSwap NG: LP token IS the pool address"
 
     @pytest.mark.intent(IntentType.SWAP)
-    def test_pool_has_3_coins(self):
-        """am3pool is a 3-coin pool: DAI, USDC.e, USDT."""
+    def test_pool_has_2_coins_in_onchain_order(self):
+        """frxusd_usdt is a 2-coin pool: coins(0)=USDT, coins(1)=frxUSD."""
         pool = CURVE_POOLS["polygon"][POOL_KEY]
-        assert pool["n_coins"] == 3
-        assert len(pool["coin_addresses"]) == 3
+        assert pool["n_coins"] == 2
+        assert len(pool["coin_addresses"]) == 2
+        assert pool["coin_addresses"][0].lower() == USDT_ADDRESS.lower(), "coins(0) must be USDT"
+        assert pool["coin_addresses"][1].lower() == FRXUSD_ADDRESS.lower(), "coins(1) must be frxUSD"
 
 
 # =============================================================================
@@ -121,7 +128,7 @@ class TestCurvePolygonPoolConfig:
 
 
 class TestCurvePolygonSwapCompilation:
-    """Layer 1: Verify SwapIntent compiles correctly using am3pool."""
+    """Layer 1: Verify SwapIntent compiles correctly using frxusd_usdt."""
 
     def _make_compiler(self) -> IntentCompiler:
         return IntentCompiler(
@@ -131,11 +138,31 @@ class TestCurvePolygonSwapCompilation:
         )
 
     @pytest.mark.intent(IntentType.SWAP)
-    def test_usdc_e_to_usdt_swap_compiles(self):
-        """SwapIntent USDC.e -> USDT on Polygon am3pool must compile successfully."""
+    def test_usdt_to_frxusd_swap_compiles(self):
+        """SwapIntent USDT -> frxUSD on Polygon frxusd_usdt must compile successfully."""
         compiler = self._make_compiler()
         intent = SwapIntent(
-            from_token="USDC.e",
+            from_token="USDT",
+            to_token="frxUSD",
+            amount=Decimal("100"),
+            max_slippage=Decimal("0.02"),
+            protocol="curve",
+            chain=CHAIN_NAME,
+        )
+
+        result = compiler.compile(intent)
+
+        assert result.status == CompilationStatus.SUCCESS, (
+            f"USDT -> frxUSD Curve swap compilation failed: {result.error}"
+        )
+        assert result.action_bundle is not None
+
+    @pytest.mark.intent(IntentType.SWAP)
+    def test_frxusd_to_usdt_swap_compiles(self):
+        """SwapIntent frxUSD -> USDT (reverse direction) must compile."""
+        compiler = self._make_compiler()
+        intent = SwapIntent(
+            from_token="frxUSD",
             to_token="USDT",
             amount=Decimal("100"),
             max_slippage=Decimal("0.02"),
@@ -146,35 +173,17 @@ class TestCurvePolygonSwapCompilation:
         result = compiler.compile(intent)
 
         assert result.status == CompilationStatus.SUCCESS, (
-            f"USDC.e -> USDT Curve swap compilation failed: {result.error}"
+            f"frxUSD -> USDT Curve swap compilation failed: {result.error}"
         )
         assert result.action_bundle is not None
 
     @pytest.mark.intent(IntentType.SWAP)
-    def test_dai_to_usdt_swap_compiles(self):
-        """SwapIntent DAI -> USDT (alternative direction) must compile."""
+    def test_compiled_swap_targets_frxusd_usdt_pool(self):
+        """Compiled transactions must target the frxusd_usdt pool address."""
         compiler = self._make_compiler()
         intent = SwapIntent(
-            from_token="DAI",
-            to_token="USDT",
-            amount=Decimal("100"),
-            max_slippage=Decimal("0.02"),
-            protocol="curve",
-            chain=CHAIN_NAME,
-        )
-
-        result = compiler.compile(intent)
-
-        assert result.status == CompilationStatus.SUCCESS, f"DAI -> USDT Curve swap compilation failed: {result.error}"
-        assert result.action_bundle is not None
-
-    @pytest.mark.intent(IntentType.SWAP)
-    def test_compiled_swap_targets_am3pool(self):
-        """Compiled transactions must target the am3pool address."""
-        compiler = self._make_compiler()
-        intent = SwapIntent(
-            from_token="USDC.e",
-            to_token="USDT",
+            from_token="USDT",
+            to_token="frxUSD",
             amount=Decimal("50"),
             max_slippage=Decimal("0.02"),
             protocol="curve",
@@ -186,7 +195,7 @@ class TestCurvePolygonSwapCompilation:
 
         swap_txs = [tx for tx in result.transactions if tx.to.lower() == EXPECTED_POOL_ADDRESS.lower()]
         assert len(swap_txs) > 0, (
-            f"No transaction targeting am3pool {EXPECTED_POOL_ADDRESS}. "
+            f"No transaction targeting frxusd_usdt {EXPECTED_POOL_ADDRESS}. "
             f"Transactions: {[(tx.to, tx.description) for tx in result.transactions]}"
         )
 
@@ -201,25 +210,15 @@ class TestCurvePolygonSwapCompilation:
 class TestCurvePolygonSwapExecution:
     """Layers 2-4: Full on-chain Curve swap tests on Polygon Anvil fork.
 
-    Tests USDC.e -> USDT swap via am3pool with:
+    Tests USDT -> frxUSD swap via frxusd_usdt (StableSwap NG) with:
     - Layer 2: Transaction execution on Anvil
-    - Layer 3: TokenExchangeUnderlying event parsing (use_underlying=True)
-    - Layer 4: Exact balance delta verification
+    - Layer 3: TokenExchange event parsing
+    - Layer 4: Exact bilateral balance delta verification
     """
 
     @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.asyncio
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "VIB-5551: am3pool exchange_underlying reverts on a current Polygon fork — the "
-            "aave-type swap deposits the underlying into the FROZEN Aave V2 Polygon "
-            "LendingPool (VL_RESERVE_FROZEN). The TokenExchangeUnderlying signature itself "
-            "IS decoded by CurveReceiptParser (the VIB-4307 'missing signatures' claim was "
-            "stale; see tests/unit/connectors/curve/test_am3pool_real_logs.py). as of 2026-06-30."
-        ),
-    )
-    async def test_usdc_e_to_usdt_full_lifecycle(
+    async def test_usdt_to_frxusd_full_lifecycle(
         self,
         web3: Web3,
         funded_wallet: str,
@@ -227,38 +226,33 @@ class TestCurvePolygonSwapExecution:
         price_oracle: dict[str, Decimal],
         anvil_rpc_url: str,
     ):
-        """Layer 2-4: Execute USDC.e -> USDT Curve swap on Polygon Anvil.
+        """Layer 2-4: Execute USDT -> frxUSD Curve swap on Polygon Anvil.
 
         Verifies:
         - Compilation succeeds with real prices (Layer 1)
         - Execution succeeds on Anvil (Layer 2)
-        - TokenExchange/TokenExchangeUnderlying event parsed (Layer 3)
-        - USDC.e balance decreased exactly, USDT balance increased (Layer 4)
+        - TokenExchange event parsed (Layer 3)
+        - USDT balance decreased exactly, frxUSD balance increased (Layer 4)
         """
-        # Fund USDC.e (not in standard CHAIN_CONFIGS for polygon)
-        _fund_usdc_e(funded_wallet, anvil_rpc_url)
-        usdc_e_funded = get_token_balance(web3, USDC_E_ADDRESS, funded_wallet)
-        if usdc_e_funded == 0:
-            pytest.skip(
-                f"USDC.e funding failed at slot {USDC_E_BALANCE_SLOT}. Polygon USDC.e may use different storage layout."
-            )
-
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
         usdt_addr = tokens["USDT"]
+        assert usdt_addr.lower() == USDT_ADDRESS.lower()
 
-        swap_amount = Decimal("100")  # 100 USDC.e
+        swap_amount = Decimal("100")  # 100 USDT
 
         logger.info(
-            "Test: USDC.e -> USDT Curve swap on Polygon (am3pool)\nPool: %s",
+            "Test: USDT -> frxUSD Curve swap on Polygon (frxusd_usdt NG)\nPool: %s",
             EXPECTED_POOL_ADDRESS,
         )
 
         # --- Layer 4 setup: record balances BEFORE ---
-        usdc_e_before = get_token_balance(web3, USDC_E_ADDRESS, funded_wallet)
         usdt_before = get_token_balance(web3, usdt_addr, funded_wallet)
-        logger.info("USDC.e before: %.2f", usdc_e_before / 10**6)
+        frxusd_before = get_token_balance(web3, FRXUSD_ADDRESS, funded_wallet)
         logger.info("USDT before: %.2f", usdt_before / 10**6)
-        assert usdc_e_before > 0, "Test wallet has no USDC.e — funding failed"
+        logger.info("frxUSD before: %.2f", frxusd_before / 10**18)
+        assert usdt_before >= int(swap_amount * 10**6), (
+            "Test wallet lacks USDT — polygon funded_wallet seeding failed"
+        )
 
         # --- Layer 1: Compile ---
         compiler = IntentCompiler(
@@ -268,8 +262,8 @@ class TestCurvePolygonSwapExecution:
             rpc_url=anvil_rpc_url,
         )
         intent = SwapIntent(
-            from_token="USDC.e",
-            to_token="USDT",
+            from_token="USDT",
+            to_token="frxUSD",
             amount=swap_amount,
             max_slippage=SWAP_MAX_SLIPPAGE,
             protocol="curve",
@@ -287,7 +281,7 @@ class TestCurvePolygonSwapExecution:
         execution_result = await orchestrator.execute(compile_result.action_bundle)
         assert execution_result.success, (
             f"Curve swap execution failed: {execution_result.error}\n"
-            "Check am3pool coin indices and use_underlying setting."
+            "Check frxusd_usdt coin indices and is_ng setting."
         )
 
         logger.info("Execution success")
@@ -305,12 +299,7 @@ class TestCurvePolygonSwapExecution:
 
             if parse_result.success and parse_result.events:
                 for event in parse_result.events:
-                    # Aave-type pools emit TokenExchangeUnderlying instead of
-                    # TokenExchange when called via exchange_underlying().
-                    if event.event_type in (
-                        CurveEventType.TOKEN_EXCHANGE,
-                        CurveEventType.TOKEN_EXCHANGE_UNDERLYING,
-                    ):
+                    if event.event_type == CurveEventType.TOKEN_EXCHANGE:
                         swap_event_found = True
                         assert "tokens_sold" in event.data, "Missing tokens_sold in swap event"
                         assert "tokens_bought" in event.data, "Missing tokens_bought in swap event"
@@ -325,39 +314,39 @@ class TestCurvePolygonSwapExecution:
                         )
 
         assert swap_event_found, (
-            "CurveReceiptParser did not find TokenExchange or TokenExchangeUnderlying event. "
-            "Verify receipt_parser handles aave-type am3pool swaps."
+            "CurveReceiptParser did not find a TokenExchange event. "
+            "Verify receipt_parser handles StableSwap NG frxusd_usdt swaps."
         )
 
-        # --- Layer 4: Balance deltas ---
-        usdc_e_after = get_token_balance(web3, USDC_E_ADDRESS, funded_wallet)
+        # --- Layer 4: Bilateral balance deltas ---
         usdt_after = get_token_balance(web3, usdt_addr, funded_wallet)
+        frxusd_after = get_token_balance(web3, FRXUSD_ADDRESS, funded_wallet)
 
-        usdc_e_spent = usdc_e_before - usdc_e_after
-        usdt_received = usdt_after - usdt_before
-        expected_usdc_e_spent = int(swap_amount * Decimal(10**6))
+        usdt_spent = usdt_before - usdt_after
+        frxusd_received = frxusd_after - frxusd_before
+        expected_usdt_spent = int(swap_amount * Decimal(10**6))
 
         logger.info(
-            "USDC.e after: %.2f (spent: %.2f)",
-            usdc_e_after / 10**6,
-            usdc_e_spent / 10**6,
-        )
-        logger.info(
-            "USDT after: %.2f (received: %.2f)",
+            "USDT after: %.2f (spent: %.2f)",
             usdt_after / 10**6,
-            usdt_received / 10**6,
+            usdt_spent / 10**6,
+        )
+        logger.info(
+            "frxUSD after: %.2f (received: %.2f)",
+            frxusd_after / 10**18,
+            frxusd_received / 10**18,
         )
 
-        assert usdc_e_spent == expected_usdc_e_spent, (
-            f"USDC.e spent must EXACTLY equal swap amount. "
-            f"Expected: {expected_usdc_e_spent} ({swap_amount} USDC.e), Got: {usdc_e_spent}"
+        assert usdt_spent == expected_usdt_spent, (
+            f"USDT spent must EXACTLY equal swap amount. "
+            f"Expected: {expected_usdt_spent} ({swap_amount} USDT), Got: {usdt_spent}"
         )
-        assert usdt_received > 0, (
-            "USDT balance did not increase after Curve swap! Check coin indices in am3pool config."
+        assert frxusd_received > 0, (
+            "frxUSD balance did not increase after Curve swap! Check coin indices in frxusd_usdt config."
         )
 
         logger.info(
-            "SUCCESS: Swapped %.2f USDC.e -> %.2f USDT via am3pool",
-            usdc_e_spent / 10**6,
-            usdt_received / 10**6,
+            "SUCCESS: Swapped %.2f USDT -> %.2f frxUSD via frxusd_usdt",
+            usdt_spent / 10**6,
+            frxusd_received / 10**18,
         )
