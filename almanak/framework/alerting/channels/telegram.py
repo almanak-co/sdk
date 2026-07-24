@@ -173,7 +173,16 @@ class TelegramChannel:
         async with httpx.AsyncClient() as client:
             try:
                 response = await client.post(url, json=payload, timeout=30.0)
-                data = response.json()
+                try:
+                    data = response.json()
+                except ValueError:
+                    # The Telegram API itself always answers JSON; a non-JSON
+                    # body means an intermediary error page (e.g. HTML 502
+                    # from a proxy). Treat as a send failure, never raise.
+                    return TelegramSendResult(
+                        success=False,
+                        error=f"Non-JSON response from Telegram (HTTP {response.status_code})",
+                    )
 
                 if response.status_code == 200 and data.get("ok"):
                     message_id = data.get("result", {}).get("message_id")

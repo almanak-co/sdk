@@ -9,6 +9,7 @@ Covers every response branch of the Telegram Bot API send path with
 - non-200 error -> failure with description / "Unknown error" fallback
 - httpx.TimeoutException -> "Request timeout"
 - httpx.RequestError -> "Request error: ..."
+- non-JSON body (e.g. an HTML 502 page from a proxy) -> failure result, no raise
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ class _FakeAsyncClient:
         self._exc = exc
         self.posts: list[tuple[str, dict, float]] = []
 
-    async def __aenter__(self) -> "_FakeAsyncClient":
+    async def __aenter__(self) -> _FakeAsyncClient:
         return self
 
     async def __aexit__(self, *args) -> bool:
@@ -163,3 +164,40 @@ class TestSendMessageErrors:
 
         assert result.success is False
         assert result.error == "Request error: connection refused"
+
+
+class TestSendMessageNonJsonBody:
+    """A non-JSON body must produce a failure result, never a raised decode error.
+
+    Uses real ``httpx.Response`` objects so ``.json()`` genuinely fails to
+    decode, instead of mocking the raise.
+    """
+
+    def test_html_502_body_returns_failure(self) -> None:
+        channel = _channel()
+        fake = _FakeAsyncClient(response=httpx.Response(502, text="<html><body>Bad Gateway</body></html>"))
+
+        result = _send(channel, fake)
+
+        assert result == TelegramSendResult(success=False, error="Non-JSON response from Telegram (HTTP 502)")
+
+    def test_non_json_body_with_status_200_is_failure_not_success(self) -> None:
+        channel = _channel()
+        fake = _FakeAsyncClient(response=httpx.Response(200, text="OK"))
+
+        result = _send(channel, fake)
+
+        assert result.success is False
+        assert result.error == "Non-JSON response from Telegram (HTTP 200)"
+
+    def test_empty_body_returns_failure(self) -> None:
+        channel = _channel()
+        fake = _FakeAsyncClient(response=httpx.Response(429, text=""))
+
+        result = _send(channel, fake)
+
+        # A proxy-level 429 with no JSON carries no Telegram retry_after;
+        # it falls to the generic non-JSON failure, not the rate-limit branch.
+        assert result.success is False
+        assert result.error == "Non-JSON response from Telegram (HTTP 429)"
+        assert result.retry_after is None
