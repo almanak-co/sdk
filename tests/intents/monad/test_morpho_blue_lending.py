@@ -508,12 +508,12 @@ class TestMorphoBlueBorrowIntent:
     @pytest.mark.intent(IntentType.BORROW)
     @pytest.mark.asyncio
     @pytest.mark.xfail(
-        reason="VIB-4307: wstETH not funded on Monad test wallet (as of 2026-05-12). "
+        reason="VIB-5971: wstETH not funded on Monad test wallet (as of 2026-05-12). "
         "CHAIN_CONFIGS['monad'] in tests/intents/conftest.py funds only WMON/WETH/USDC. "
         "The wstETH/WETH market needs wstETH as collateral; storage-slot funding for "
         "wstETH on Monad (0x10Aeaf63...) is not yet mapped in balance_slots. "
         "Test is structurally complete; unblock by adding wstETH to the Monad "
-        "tokens+balance_slots entries in the root conftest.",
+        "tokens+balance_slots entries in the root conftest. Re-pointed to VIB-5971 2026-07-24.",
         strict=True,
     )
     async def test_borrow_weth_with_wsteth_collateral(
@@ -630,9 +630,9 @@ class TestMorphoBlueRepayIntent:
     @pytest.mark.intent(IntentType.BORROW, IntentType.REPAY)
     @pytest.mark.asyncio
     @pytest.mark.xfail(
-        reason="VIB-4307: wstETH not funded on Monad test wallet (as of 2026-05-12). "
+        reason="VIB-5971: wstETH not funded on Monad test wallet (as of 2026-05-12). "
         "Depends on the borrow setup which is blocked by the same wstETH funding "
-        "gap. See test_borrow_weth_with_wsteth_collateral.",
+        "gap. See test_borrow_weth_with_wsteth_collateral. Re-pointed to VIB-5971 2026-07-24.",
         strict=True,
     )
     async def test_repay_weth_full_after_borrow(
@@ -724,9 +724,9 @@ class TestMorphoBlueWithdrawCollateralIntent:
     @pytest.mark.intent(IntentType.BORROW, IntentType.REPAY, IntentType.WITHDRAW)
     @pytest.mark.asyncio
     @pytest.mark.xfail(
-        reason="VIB-4307: wstETH not funded on Monad test wallet (as of 2026-05-12). "
+        reason="VIB-5971: wstETH not funded on Monad test wallet (as of 2026-05-12). "
         "Depends on the borrow+repay setup which is blocked by the same wstETH funding "
-        "gap. See test_borrow_weth_with_wsteth_collateral.",
+        "gap. See test_borrow_weth_with_wsteth_collateral. Re-pointed to VIB-5971 2026-07-24.",
         strict=True,
     )
     async def test_withdraw_wsteth_collateral_after_repay(

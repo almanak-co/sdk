@@ -244,13 +244,13 @@ class TestCurvanceBorrowIntent:
     @pytest.mark.intent(IntentType.SUPPLY, IntentType.BORROW)
     @pytest.mark.asyncio
     @pytest.mark.xfail(
-        reason="VIB-4307: Curvance MarketManager._canBorrow reverts with "
+        reason="VIB-5970: Curvance MarketManager._canBorrow reverts with "
         "InsufficientCollateral() on Monad Anvil forks because OracleManager.getPrice "
         "returns errorCode=1 (CAUTION) due to adaptor freshness drift (as of 2026-05-12). "
         "Same fork-state artefact documented for SUPPLY-only coverage in the module "
         "docstring; verified live on Monad mainnet. Unblock by aligning Anvil "
         "block.timestamp with the fork block via anvil_setTime, or by mocking the "
-        "oracle at the gateway boundary.",
+        "oracle at the gateway boundary. Re-pointed to VIB-5970 2026-07-24.",
         strict=True,
     )
     async def test_borrow_usdc_with_wmon_collateral(
@@ -360,10 +360,10 @@ class TestCurvanceRepayIntent:
     @pytest.mark.intent(IntentType.SUPPLY, IntentType.BORROW, IntentType.REPAY)
     @pytest.mark.asyncio
     @pytest.mark.xfail(
-        reason="VIB-4307: REPAY depends on a successful BORROW which is blocked by "
+        reason="VIB-5970: REPAY depends on a successful BORROW which is blocked by "
         "the OracleManager CAUTION-breakpoint on Monad Anvil forks (as of 2026-05-12). "
         "See test_borrow_usdc_with_wmon_collateral for the full rationale; same "
-        "fork-state artefact, same unblock path.",
+        "fork-state artefact, same unblock path. Re-pointed to VIB-5970 2026-07-24.",
         strict=True,
     )
     async def test_repay_usdc_after_borrow(
@@ -464,12 +464,12 @@ class TestCurvanceWithdrawIntent:
     @pytest.mark.intent(IntentType.SUPPLY, IntentType.WITHDRAW)
     @pytest.mark.asyncio
     @pytest.mark.xfail(
-        reason="VIB-4307: Curvance MarketManager._canRedeem reverts on Monad Anvil "
+        reason="VIB-5970: Curvance MarketManager._canRedeem reverts on Monad Anvil "
         "forks because OracleManager.getPrice returns errorCode=1 (CAUTION) due to "
         "adaptor freshness drift (as of 2026-05-12). Same fork-state artefact "
         "documented for BORROW. Unblock by aligning Anvil block.timestamp with the "
         "fork block via anvil_setTime, or by mocking the oracle at the gateway "
-        "boundary.",
+        "boundary. Re-pointed to VIB-5970 2026-07-24.",
         strict=True,
     )
     async def test_withdraw_wmon_after_supply(

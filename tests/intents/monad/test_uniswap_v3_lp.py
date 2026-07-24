@@ -730,7 +730,7 @@ class TestUniswapV3CollectFeesIntent:
     @pytest.mark.asyncio
     @pytest.mark.xfail(
         strict=True,
-        reason="VIB-4314: same-pool fee-accrual fixture not yet wired — swap may route to a different fee tier than the LP position (as of 2026-05-13). Tracks the cross-chain blocker noted on ethereum/arbitrum sister tests.",
+        reason="VIB-5968: same-pool fee-accrual fixture not yet wired — swap may route to a different fee tier than the LP position (as of 2026-05-13). Tracks the cross-chain blocker noted on ethereum/arbitrum sister tests. Re-pointed to VIB-5968 2026-07-24.",
     )
     async def test_collect_fees_wmon_usdc(
         self,
