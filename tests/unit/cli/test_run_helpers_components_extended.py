@@ -637,10 +637,22 @@ class TestBuildOrchestratorExtras:
         rm_calls: list[Any] = []
 
         class _FakeRateMonitor:
-            def __init__(self, chain: str, rpc_url: Any, *, _internal: bool = False) -> None:
-                rm_calls.append((chain, rpc_url, _internal))
+            def __init__(
+                self,
+                chain: str,
+                rpc_url: Any,
+                *,
+                gateway_client: Any = None,
+                _internal: bool = False,
+            ) -> None:
+                rm_calls.append((chain, rpc_url, gateway_client, _internal))
 
         monkeypatch.setattr(rates_mod, "RateMonitor", _FakeRateMonitor)
+
+        # VIB-5824: the multi-chain site must thread the runner's REAL gateway
+        # client into the RateMonitor (not leave it to the default-port
+        # singleton). Use a sentinel so we can assert identity.
+        sentinel_gateway = MagicMock(name="runner_gateway_client")
 
         cli = CliRunner()
         with cli.isolation():
@@ -651,7 +663,7 @@ class TestBuildOrchestratorExtras:
                 strategy_chains=["arbitrum", "base"],
                 multi_chain=True,
                 resolved_network="mainnet",
-                gateway_client=MagicMock(),
+                gateway_client=sentinel_gateway,
                 chain_wallets={},
                 interval=60,
                 effective_dry_run=False,
@@ -663,7 +675,10 @@ class TestBuildOrchestratorExtras:
                 config_chain=None,
             )
         assert rm_calls and rm_calls[0][0] == "arbitrum"
-        assert rm_calls[0][2] is True  # _internal flag passed by _build_components()
+        # VIB-5824: the runner's real client is threaded in (identity, not just
+        # non-None) so the rate lane dials the managed gateway's actual port.
+        assert rm_calls[0][2] is sentinel_gateway
+        assert rm_calls[0][3] is True  # _internal flag passed by _build_components()
         assert isinstance(strategy_instance._rate_monitor, _FakeRateMonitor)
 
     def test_multi_chain_rate_monitor_init_failure_is_logged(
@@ -824,10 +839,21 @@ class TestBuildOrchestratorExtras:
         rm_calls: list[Any] = []
 
         class _FakeRateMonitor:
-            def __init__(self, chain: str, rpc_url: Any, *, _internal: bool = False) -> None:
-                rm_calls.append((chain, rpc_url, _internal))
+            def __init__(
+                self,
+                chain: str,
+                rpc_url: Any,
+                *,
+                gateway_client: Any = None,
+                _internal: bool = False,
+            ) -> None:
+                rm_calls.append((chain, rpc_url, gateway_client, _internal))
 
         monkeypatch.setattr(rates_mod, "RateMonitor", _FakeRateMonitor)
+
+        # VIB-5824: the single-chain site must thread the runner's REAL gateway
+        # client into the RateMonitor (identity, not the default-port singleton).
+        sentinel_gateway = MagicMock(name="runner_gateway_client")
 
         cli = CliRunner()
         with cli.isolation():
@@ -838,7 +864,7 @@ class TestBuildOrchestratorExtras:
                 strategy_chains=[],
                 multi_chain=False,
                 resolved_network="mainnet",
-                gateway_client=MagicMock(),
+                gateway_client=sentinel_gateway,
                 chain_wallets={},
                 interval=60,
                 effective_dry_run=False,
@@ -850,7 +876,8 @@ class TestBuildOrchestratorExtras:
                 config_chain="arbitrum",
             )
         assert rm_calls and rm_calls[0][0] == "arbitrum"
-        assert rm_calls[0][2] is True  # _internal flag passed by _build_components()
+        assert rm_calls[0][2] is sentinel_gateway  # VIB-5824: real client threaded
+        assert rm_calls[0][3] is True  # _internal flag passed by _build_components()
 
     def test_single_chain_funding_provider_wired(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Single-chain funding provider wired (1748-1754)."""

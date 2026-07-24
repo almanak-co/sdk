@@ -43,18 +43,20 @@ from almanak.framework.data.interfaces import DataSourceUnavailable
 logger = logging.getLogger(__name__)
 
 
-def _monitor_get_connected_gateway_client() -> tuple[Any, Any]:
-    """Return ``(client, gateway_pb2)`` with the client connected, or raise."""
+def _import_gateway_pb2() -> Any:
+    """Import ``gateway_pb2`` or raise ``DataSourceUnavailable`` (offline env)."""
     try:
-        from almanak.framework.gateway_client import get_gateway_client
         from almanak.gateway.proto import gateway_pb2
     except ImportError as exc:
         raise DataSourceUnavailable(
             source="gateway",
             reason=f"Gateway client unavailable: {exc}",
         ) from exc
+    return gateway_pb2
 
-    client = get_gateway_client()
+
+def _connect_gateway_client(client: Any, gateway_pb2: Any) -> tuple[Any, Any]:
+    """Ensure ``client`` is connected and return ``(client, gateway_pb2)``."""
     if not client.is_connected:
         try:
             client.connect()
@@ -64,6 +66,29 @@ def _monitor_get_connected_gateway_client() -> tuple[Any, Any]:
                 reason=f"Gateway connect failed: {exc}",
             ) from exc
     return client, gateway_pb2
+
+
+def _monitor_get_connected_gateway_client() -> tuple[Any, Any]:
+    """Return ``(client, gateway_pb2)`` via the DEFAULT-PORT singleton, connected.
+
+    Back-compat fallback used ONLY when no gateway client was injected into the
+    ``RateMonitor``. The singleton (``get_gateway_client()``) constructs a
+    ``GatewayClient`` bound to the default port 50051, which does NOT match a
+    managed gateway's random port — that mismatch is exactly VIB-5824. Managed
+    runs inject the runner's real client (see :meth:`RateMonitor.__init__`
+    ``gateway_client=`` / :meth:`RateMonitor._get_connected_gateway_client`), so
+    this path is reached only by offline callers with no injected client (kept
+    monkeypatchable for the existing rate-lane tests).
+    """
+    try:
+        from almanak.framework.gateway_client import get_gateway_client
+    except ImportError as exc:
+        raise DataSourceUnavailable(
+            source="gateway",
+            reason=f"Gateway client unavailable: {exc}",
+        ) from exc
+    gateway_pb2 = _import_gateway_pb2()
+    return _connect_gateway_client(get_gateway_client(), gateway_pb2)
 
 
 def _build_lending_rate_from_point(
@@ -333,6 +358,14 @@ class LendingRate:
         timestamp: When the rate was fetched
         chain: Blockchain network
         market_id: Market identifier (for Morpho/Compound)
+        is_placeholder: Provenance flag (VIB-5823). ``True`` marks a rate that
+            came from an offline placeholder table / manifest default, NOT a
+            measured gateway read. Empty != Zero: a placeholder is unmeasured,
+            not "whatever the table said", so accounting/persistence surfaces
+            MUST NOT record a ``is_placeholder=True`` rate as a measured APY.
+            Only reachable when a ``RateMonitor`` was explicitly constructed
+            with ``allow_placeholder_rates=True`` (offline backtests / tests);
+            the production/managed lane raises ``RateUnavailableError`` instead.
     """
 
     protocol: str
@@ -344,6 +377,7 @@ class LendingRate:
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
     chain: str = "ethereum"
     market_id: str | None = None
+    is_placeholder: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
@@ -357,6 +391,7 @@ class LendingRate:
             "timestamp": self.timestamp.isoformat(),
             "chain": self.chain,
             "market_id": self.market_id,
+            "is_placeholder": self.is_placeholder,
         }
 
 
@@ -596,6 +631,7 @@ def _manifest_default_placeholder(protocol: str, token: str, side: str, chain: s
         apy_ray=apy_percent * RAY / Decimal("100"),
         apy_percent=apy_percent,
         chain=chain,
+        is_placeholder=True,
     )
 
 
@@ -629,6 +665,7 @@ def _placeholder_rate(protocol: str, token: str, side: str, chain: str) -> Lendi
         utilization_percent=profile.utilization_pct,
         chain=chain,
         market_id=market_id,
+        is_placeholder=True,
     )
 
 
@@ -696,6 +733,8 @@ class RateMonitor:
         protocols: list[str] | None = None,
         rpc_url: str | None = None,
         *,
+        gateway_client: Any | None = None,
+        allow_placeholder_rates: bool = False,
         _internal: bool = False,
     ) -> None:
         """Initialize the RateMonitor.
@@ -707,6 +746,26 @@ class RateMonitor:
             rpc_url: Ignored. Kept for back-compat with pre-W7 callers
                 that passed an RPC URL — all RPC egress now lives behind
                 the gateway's ``RateHistoryService``.
+            gateway_client: The gateway client to issue rate RPCs through
+                (keyword-only, VIB-5824). Managed gateways bind a RANDOM port,
+                so the default-port ``get_gateway_client()`` singleton is dialled
+                at 50051 and gets connection-refused on every managed run — the
+                rate lane then silently fabricated a placeholder. Production
+                construction sites (runner / ``MarketSnapshot``) thread the
+                runner's real client here so the rate lane reaches the gateway
+                the runner actually started. When ``None`` the monitor falls
+                back to the default-port singleton (offline / legacy callers).
+            allow_placeholder_rates: When ``True`` (keyword-only, VIB-5823), an
+                unreachable-gateway read on a NON-market-scoped lookup degrades
+                to an offline placeholder constant (stamped
+                ``LendingRate.is_placeholder=True``) instead of raising. This is
+                for EXPLICITLY-offline contexts ONLY — unit tests and
+                offline backtests that have no gateway. It defaults to ``False``
+                so the production/managed lane NEVER substitutes a fabricated APY
+                for a measured one (Empty != Zero): it raises
+                ``RateUnavailableError`` and the caller records honest-unmeasured.
+                Market-scoped reads never degrade to a placeholder regardless of
+                this flag (VIB-5729).
             _internal: Framework-internal flag (keyword-only). When ``True``
                 the deprecation warning is suppressed because the caller is
                 the canonical ``MarketSnapshot.lending_rate`` lane (the
@@ -729,6 +788,11 @@ class RateMonitor:
         # Preserved for back-compat with pre-W7 callers — the gateway client
         # ignores it (RPC egress lives gateway-side now).
         self._rpc_url = rpc_url
+        # VIB-5824: the injected gateway client (or None → default-port
+        # singleton fallback). VIB-5823: whether an unreachable gateway may
+        # degrade to an offline placeholder on a non-market-scoped read.
+        self._gateway_client = gateway_client
+        self._allow_placeholder_rates = allow_placeholder_rates
 
         # Determine available protocols for this chain
         available = _protocols_for_chain(chain)
@@ -915,12 +979,33 @@ class RateMonitor:
                     exc,
                 )
                 raise RateUnavailableError(protocol, token, side_str, str(exc)) from exc
-            # Gateway returned success=false (typed "no data" envelope) or
-            # is unreachable. Fall back to the offline placeholder lane so
-            # tests / offline backtests don't break. Production callers
-            # should see the placeholder as a warning, not a real rate.
+            # Gateway returned success=false (typed "no data" envelope) or is
+            # unreachable. Empty != Zero: a placeholder is a hardcoded constant,
+            # NOT a measured rate, and returning it here is exactly the
+            # fabrication VIB-5823 removes (a strategy makes yield-gated entry
+            # decisions on this number, and accounting persists it as
+            # supply_apy_pct/borrow_apy_pct). Only degrade to a placeholder when
+            # the caller EXPLICITLY opted into an offline context
+            # (allow_placeholder_rates=True: unit tests / offline backtests).
+            # Otherwise raise so the caller records honest-unmeasured (None),
+            # never a plausible invention. The production/managed lane never
+            # sets the flag.
+            if not self._allow_placeholder_rates:
+                logger.warning(
+                    "Gateway lending-rate lookup unavailable for %s/%s/%s on %s: %s; "
+                    "NOT falling back to a placeholder (would persist a fabricated APY as measured). "
+                    "Construct RateMonitor(allow_placeholder_rates=True) only for offline "
+                    "backtests/tests.",
+                    protocol,
+                    token,
+                    side_str,
+                    self._chain,
+                    exc,
+                )
+                raise RateUnavailableError(protocol, token, side_str, str(exc)) from exc
             logger.warning(
-                "Gateway lending-rate lookup unavailable for %s/%s/%s on %s: %s; falling back to placeholder.",
+                "Gateway lending-rate lookup unavailable for %s/%s/%s on %s: %s; "
+                "falling back to offline placeholder (allow_placeholder_rates=True).",
                 protocol,
                 token,
                 side_str,
@@ -935,6 +1020,20 @@ class RateMonitor:
         self._set_cached_rate(protocol, token, side_str, rate, market_id)
         return rate
 
+    def _get_connected_gateway_client(self) -> tuple[Any, Any]:
+        """Return ``(client, gateway_pb2)`` connected, preferring the injected client.
+
+        VIB-5824: when the runner threaded its real gateway client into this
+        monitor (``gateway_client=``), use THAT — it knows the managed gateway's
+        actual (random) port. Only when no client was injected do we fall back
+        to the default-port singleton (``_monitor_get_connected_gateway_client``,
+        kept as a distinct module function so offline tests can monkeypatch it).
+        """
+        if self._gateway_client is None:
+            return _monitor_get_connected_gateway_client()
+        gateway_pb2 = _import_gateway_pb2()
+        return _connect_gateway_client(self._gateway_client, gateway_pb2)
+
     async def _fetch_lending_rate_via_gateway(
         self,
         protocol: str,
@@ -948,7 +1047,7 @@ class RateMonitor:
         caller maps that to a placeholder-rate fallback for back-compat), and
         also when a requested ``market_id`` scoping was not honoured (VIB-5729).
         """
-        client, gateway_pb2 = _monitor_get_connected_gateway_client()
+        client, gateway_pb2 = self._get_connected_gateway_client()
         response = await _monitor_call_lending_rate_current(
             client,
             gateway_pb2,

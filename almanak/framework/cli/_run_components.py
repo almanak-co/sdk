@@ -666,7 +666,17 @@ def _build_orchestrator_and_providers(  # noqa: C901
                 # _internal=True: framework wiring of the gateway-backed rate
                 # source onto MarketSnapshot is the canonical lending-rate lane,
                 # not a deprecated strategy-side bypass (VIB-4869).
-                rate_monitor = RateMonitor(chain=primary_chain, rpc_url=chain_rpc_url, _internal=True)
+                # gateway_client=gateway_client (VIB-5824): thread the runner's
+                # REAL client (managed gateways bind a random port) so the rate
+                # lane reaches the gateway the runner actually started, instead
+                # of the default-port 50051 singleton that gets refused and
+                # silently fabricates a placeholder.
+                rate_monitor = RateMonitor(
+                    chain=primary_chain,
+                    rpc_url=chain_rpc_url,
+                    gateway_client=gateway_client,
+                    _internal=True,
+                )
                 strategy_instance._rate_monitor = rate_monitor
                 rate_monitor_wired = True
             except Exception as e:
@@ -825,7 +835,17 @@ def _build_orchestrator_and_providers(  # noqa: C901
                 # _internal=True: framework wiring of the gateway-backed rate
                 # source onto MarketSnapshot is the canonical lending-rate lane,
                 # not a deprecated strategy-side bypass (VIB-4869).
-                rate_monitor = RateMonitor(chain=runtime_config.chain, rpc_url=rpc_url, _internal=True)
+                # gateway_client=gateway_client (VIB-5824): thread the runner's
+                # REAL client (managed gateways bind a random port) so the rate
+                # lane reaches the gateway the runner actually started, instead
+                # of the default-port 50051 singleton that gets refused and
+                # silently fabricates a placeholder.
+                rate_monitor = RateMonitor(
+                    chain=runtime_config.chain,
+                    rpc_url=rpc_url,
+                    gateway_client=gateway_client,
+                    _internal=True,
+                )
                 strategy_instance._rate_monitor = rate_monitor
                 rate_monitor_wired = True
             except Exception as e:

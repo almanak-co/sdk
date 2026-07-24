@@ -24,6 +24,7 @@ from almanak.framework.data.rates.monitor import (
     ProtocolNotSupportedError,
     RateMonitor,
     RateSide,
+    RateUnavailableError,
     TokenNotSupportedError,
 )
 
@@ -32,28 +33,33 @@ from almanak.framework.data.rates.monitor import (
 # =============================================================================
 
 
+# NOTE (VIB-5823): these fixtures run OFFLINE (no gateway), so they opt into
+# ``allow_placeholder_rates=True`` to keep exercising the offline placeholder
+# lane. Production/managed construction (the runner / MarketSnapshot) never sets
+# this flag — the default now RAISES rather than fabricate a measured rate; that
+# default behaviour is pinned in ``TestPlaceholderProvenanceVib5823`` below.
 @pytest.fixture
 def ethereum_monitor() -> RateMonitor:
-    """Create a RateMonitor for Ethereum mainnet."""
-    return RateMonitor(chain="ethereum")
+    """Create a RateMonitor for Ethereum mainnet (offline placeholder lane)."""
+    return RateMonitor(chain="ethereum", allow_placeholder_rates=True)
 
 
 @pytest.fixture
 def arbitrum_monitor() -> RateMonitor:
-    """Create a RateMonitor for Arbitrum."""
-    return RateMonitor(chain="arbitrum")
+    """Create a RateMonitor for Arbitrum (offline placeholder lane)."""
+    return RateMonitor(chain="arbitrum", allow_placeholder_rates=True)
 
 
 @pytest.fixture
 def avalanche_monitor() -> RateMonitor:
     """Create a RateMonitor for Avalanche (a chain without a Morpho rate lane)."""
-    return RateMonitor(chain="avalanche")
+    return RateMonitor(chain="avalanche", allow_placeholder_rates=True)
 
 
 @pytest.fixture
 def mocked_monitor() -> RateMonitor:
-    """Create a RateMonitor with mocked rates."""
-    monitor = RateMonitor(chain="ethereum")
+    """Create a RateMonitor with mocked rates (offline placeholder lane)."""
+    monitor = RateMonitor(chain="ethereum", allow_placeholder_rates=True)
     # Set up mock rates
     monitor.set_mock_rate("aave_v3", "USDC", "supply", Decimal("4.5"))
     monitor.set_mock_rate("aave_v3", "USDC", "borrow", Decimal("6.0"))
@@ -775,3 +781,168 @@ class TestVib5729EchoGuardIsNotDecorative:
         rate = self._fetch(monkeypatch, self._client(echo=""), None)
         assert rate.apy_percent == Decimal("2.7744")
         assert rate.market_id is None
+
+
+# =============================================================================
+# VIB-5824 — the rate lane dials the runner's INJECTED client, not the
+# default-port 50051 singleton.
+# =============================================================================
+
+
+class TestGatewayClientInjectionVib5824:
+    """The lending-rate lane must use the gateway client the runner started.
+
+    Managed gateways bind a random port; the default-port ``get_gateway_client()``
+    singleton is dialled at 50051 and gets connection-refused on every managed
+    run, which is what silently triggered the placeholder fabrication (VIB-5823).
+    The runner now threads its real client via ``gateway_client=``. These tests
+    pin that the injected client is used and the singleton is never constructed.
+    """
+
+    def _stub_client(self, *, supply="4.01", borrow="", util="70.0"):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        response = SimpleNamespace(
+            success=True,
+            error="",
+            source="on_chain",
+            market_id="",
+            point=SimpleNamespace(supply_apy_pct=supply, borrow_apy_pct=borrow, utilization_pct=util),
+        )
+        client = MagicMock()
+        client.is_connected = True
+        client.rate_history.GetLendingRateCurrent = MagicMock(return_value=response)
+        return client
+
+    def test_injected_client_is_used_and_singleton_is_never_dialled(self, monkeypatch):
+        """The runner's client answers; the default-port singleton is not touched.
+
+        Mutation guard: if the wiring is reverted (client no longer injected),
+        the lane falls back to ``get_gateway_client()`` and this test's booby-trap
+        fires — so the test fails exactly when the fix is removed.
+        """
+        from almanak.framework import gateway_client as gc
+
+        def _boom() -> None:
+            raise AssertionError(
+                "default-port get_gateway_client() singleton must not be dialled "
+                "when a gateway_client was injected (VIB-5824)"
+            )
+
+        monkeypatch.setattr(gc, "get_gateway_client", _boom)
+
+        client = self._stub_client(supply="4.01")
+        monitor = RateMonitor(chain="ethereum", gateway_client=client, _internal=True)
+        rate = asyncio.run(monitor.get_lending_rate("aave_v3", "USDC", RateSide.SUPPLY))
+
+        assert rate.apy_percent == Decimal("4.01")
+        assert rate.is_placeholder is False  # a measured read, not a placeholder
+        client.rate_history.GetLendingRateCurrent.assert_called_once()
+
+    def test_no_injected_client_falls_back_to_the_singleton(self, monkeypatch):
+        """Back-compat: with no injected client the module singleton is used.
+
+        This is the offline/legacy path — proving the fallback still resolves
+        through ``_monitor_get_connected_gateway_client`` (the monkeypatch seam
+        the existing rate-lane tests rely on).
+        """
+        from almanak.framework.data.rates import monitor as m
+
+        client = self._stub_client(supply="3.33")
+        called = {"n": 0}
+
+        def _resolve():
+            called["n"] += 1
+            return client, m._import_gateway_pb2()
+
+        monkeypatch.setattr(m, "_monitor_get_connected_gateway_client", _resolve)
+
+        monitor = RateMonitor(chain="ethereum", _internal=True)  # no gateway_client
+        rate = asyncio.run(monitor.get_lending_rate("aave_v3", "USDC", RateSide.SUPPLY))
+
+        assert rate.apy_percent == Decimal("3.33")
+        assert called["n"] == 1
+
+
+# =============================================================================
+# VIB-5823 — a placeholder must never masquerade as a measured rate.
+# =============================================================================
+
+
+class TestPlaceholderProvenanceVib5823:
+    """Empty != Zero: an unreachable gateway is unmeasured, not a table constant.
+
+    The production/managed lane (``allow_placeholder_rates`` unset) must RAISE
+    rather than persist a fabricated APY as measured. The offline lane
+    (``allow_placeholder_rates=True``, tests/backtests only) may still return a
+    placeholder, but it is stamped ``is_placeholder=True`` so no downstream
+    accounting surface can record it as measured.
+    """
+
+    def _make_unreachable(self, monkeypatch):
+        from almanak.framework.data.interfaces import DataSourceUnavailable
+        from almanak.framework.data.rates import monitor as m
+
+        def _unreachable():
+            raise DataSourceUnavailable(source="gateway", reason="connection refused (test)")
+
+        monkeypatch.setattr(m, "_monitor_get_connected_gateway_client", _unreachable)
+
+    def test_production_default_raises_instead_of_placeholder(self, monkeypatch):
+        """The core fix: no placeholder leaks out of the production path."""
+        self._make_unreachable(monkeypatch)
+        monitor = RateMonitor(chain="ethereum", _internal=True)  # default: no placeholder
+        with pytest.raises(RateUnavailableError):
+            asyncio.run(monitor.get_lending_rate("compound_v3", "USDC", RateSide.SUPPLY))
+
+    def test_offline_flag_yields_placeholder_stamped_as_such(self, monkeypatch):
+        """Backtest/test lane still works — but the rate is marked non-measured."""
+        self._make_unreachable(monkeypatch)
+        monitor = RateMonitor(chain="ethereum", allow_placeholder_rates=True, _internal=True)
+        rate = asyncio.run(monitor.get_lending_rate("compound_v3", "USDC", RateSide.SUPPLY))
+
+        assert rate.apy_percent == Decimal("4.85")  # the hardcoded placeholder constant
+        assert rate.is_placeholder is True
+        assert rate.to_dict()["is_placeholder"] is True
+
+    def test_market_scoped_read_never_placeholders_even_with_flag(self, monkeypatch):
+        """VIB-5729 preserved: an accounting-grade market-scoped read never
+        degrades to a placeholder, regardless of the offline flag."""
+        self._make_unreachable(monkeypatch)
+        monitor = RateMonitor(chain="ethereum", allow_placeholder_rates=True, _internal=True)
+        with pytest.raises(RateUnavailableError):
+            asyncio.run(
+                monitor.get_lending_rate(
+                    "morpho_blue",
+                    "USDC",
+                    RateSide.SUPPLY,
+                    market_id="0xb323495f7e4148be5643a4ea4a8221eef163e4bccfdedc2a6f4696baacbc86cc",
+                )
+            )
+
+    def test_measured_rate_is_not_flagged_as_placeholder(self, monkeypatch):
+        """A genuinely measured gateway read carries is_placeholder=False."""
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        from almanak.framework.data.rates import monitor as m
+
+        response = SimpleNamespace(
+            success=True,
+            error="",
+            source="on_chain",
+            market_id="",
+            point=SimpleNamespace(supply_apy_pct="4.85", borrow_apy_pct="", utilization_pct="70.0"),
+        )
+        client = MagicMock()
+        client.is_connected = True
+        client.rate_history.GetLendingRateCurrent = MagicMock(return_value=response)
+        monkeypatch.setattr(m, "_monitor_get_connected_gateway_client", lambda: (client, m._import_gateway_pb2()))
+
+        monitor = RateMonitor(chain="ethereum", _internal=True)
+        rate = asyncio.run(monitor.get_lending_rate("compound_v3", "USDC", RateSide.SUPPLY))
+        # Byte-identical to the placeholder constant (4.85) — but MEASURED, so
+        # the provenance flag, not the value, is what distinguishes it.
+        assert rate.apy_percent == Decimal("4.85")
+        assert rate.is_placeholder is False

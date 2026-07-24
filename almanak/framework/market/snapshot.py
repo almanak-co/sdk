@@ -3190,7 +3190,10 @@ class MarketSnapshot:
         # ``_internal=True``: this IS the canonical lending-rate lane, not a
         # deprecated strategy-side bypass (VIB-4869 disposition). The monitor
         # is the framework-internal gateway gRPC client backing this method.
-        monitor = RateMonitor(chain=requested_chain, _internal=True)
+        # gateway_client=self._gateway_client (VIB-5824): route through the
+        # snapshot's real client so this lazy lane dials the gateway the runner
+        # started, not the default-port 50051 singleton.
+        monitor = RateMonitor(chain=requested_chain, gateway_client=self._gateway_client, _internal=True)
 
         async def _fetch_via_gateway() -> Any:
             # Bypass the monitor's placeholder-fallback wrapper so an
@@ -3302,7 +3305,9 @@ class MarketSnapshot:
         from almanak.framework.data.rates.monitor import BestRateResult, RateMonitor
 
         requested_chain = chain if chain is not None else (self._chain if self._chain is not None else "ethereum")
-        monitor = RateMonitor(chain=requested_chain, _internal=True)
+        # gateway_client=self._gateway_client (VIB-5824): dial the runner's real
+        # gateway, not the default-port 50051 singleton.
+        monitor = RateMonitor(chain=requested_chain, gateway_client=self._gateway_client, _internal=True)
         target_protocols = protocols if protocols else monitor.protocols
 
         async def _best_via_gateway() -> Any:

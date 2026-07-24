@@ -173,7 +173,7 @@ class TestRateMonitorDefaultRates:
     @pytest.mark.asyncio
     async def test_default_rates_are_reasonable(self) -> None:
         """Test that default rates are in reasonable range."""
-        monitor = RateMonitor(chain="ethereum")
+        monitor = RateMonitor(chain="ethereum", allow_placeholder_rates=True)  # offline default-rate lane (VIB-5823)
 
         # Test a few tokens
         for token in ["USDC", "WETH"]:
@@ -186,7 +186,7 @@ class TestRateMonitorDefaultRates:
     @pytest.mark.asyncio
     async def test_borrow_higher_than_supply(self) -> None:
         """Test that borrow rates are higher than supply rates."""
-        monitor = RateMonitor(chain="ethereum")
+        monitor = RateMonitor(chain="ethereum", allow_placeholder_rates=True)  # offline default-rate lane (VIB-5823)
 
         for protocol in ["aave_v3", "morpho_blue", "compound_v3"]:
             for token in ["USDC"]:
@@ -203,7 +203,7 @@ class TestRateMonitorDefaultRates:
     @pytest.mark.asyncio
     async def test_rate_spread(self) -> None:
         """Test that we can calculate rate spread."""
-        monitor = RateMonitor(chain="ethereum")
+        monitor = RateMonitor(chain="ethereum", allow_placeholder_rates=True)  # offline default-rate lane (VIB-5823)
 
         result = await monitor.get_best_lending_rate("USDC", RateSide.SUPPLY)
 

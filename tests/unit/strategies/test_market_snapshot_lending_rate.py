@@ -9,7 +9,7 @@ supports lending_rate(), best_lending_rate(), and set_lending_rate() directly.
 import asyncio
 from decimal import Decimal
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -690,3 +690,101 @@ class TestVib5729MarketScopedLendingRate:
 
         got = snapshot.lending_rate("morpho_blue", "USDG", "borrow")
         assert got.apy_percent == Decimal("9.9999"), "unscoped read must not be served a market-scoped seed"
+
+
+# =============================================================================
+# VIB-5824 — the MarketSnapshot LAZY lending-rate lanes (no injected monitor)
+# must build their RateMonitor with the snapshot's real gateway_client, so the
+# rate lane dials the managed gateway's actual (random) port instead of the
+# default-port 50051 singleton.
+# =============================================================================
+
+
+class TestLazyLaneThreadsGatewayClientVib5824:
+    """When no rate_monitor is injected, ``lending_rate`` / ``best_lending_rate``
+    lazily construct a framework-internal RateMonitor. That construction must
+    thread ``self._gateway_client`` (identity), else the lazy lane falls back to
+    the default-port singleton and silently misses the managed gateway."""
+
+    @staticmethod
+    def _fake_monitor_cls(captured: list, apy: Decimal):
+        class _FakeRateMonitor:
+            def __init__(
+                self,
+                chain: str = "ethereum",
+                cache_ttl_seconds: float = 12.0,
+                protocols=None,
+                rpc_url=None,
+                *,
+                gateway_client=None,
+                allow_placeholder_rates: bool = False,
+                _internal: bool = False,
+            ) -> None:
+                captured.append({"gateway_client": gateway_client, "_internal": _internal})
+                self._chain = chain
+
+            @property
+            def protocols(self):
+                return ["morpho_blue"]
+
+            async def _fetch_lending_rate_via_gateway(self, protocol, token, side, market_id=None):
+                return LendingRate(
+                    protocol=protocol,
+                    token=token,
+                    side=side,
+                    apy_ray=Decimal("0"),
+                    apy_percent=apy,
+                    chain=self._chain,
+                )
+
+        return _FakeRateMonitor
+
+    @staticmethod
+    def _snapshot_no_monitor(gateway_client):
+        """Build a snapshot with NO injected rate_monitor but a wired gateway
+        client, via the sanctioned factory (PRD §5.7 forbids direct
+        ``MarketSnapshot(...)`` construction). ``for_strategy_runner`` sets
+        ``rate_monitor`` from the strategy (None here) and threads
+        ``gateway_client`` onto the snapshot, so the lazy lending-rate lane
+        triggers and must reuse that same client.
+        """
+        return MarketSnapshotBuilder.for_strategy_runner(
+            strategy=SimpleNamespace(rate_monitor=None),
+            chain="ethereum",
+            gateway_client=gateway_client,
+        )
+
+    def test_lending_rate_lazy_lane_threads_gateway_client(self, monkeypatch):
+        from almanak.framework.data.rates import monitor as monitor_mod
+
+        captured: list = []
+        monkeypatch.setattr(monitor_mod, "RateMonitor", self._fake_monitor_cls(captured, Decimal("4.01")))
+
+        sentinel = MagicMock(name="snapshot_gateway_client")
+        snapshot = self._snapshot_no_monitor(sentinel)
+        assert snapshot._rate_monitor is None  # lazy lane will engage
+        assert snapshot._gateway_client is sentinel
+
+        rate = snapshot.lending_rate("morpho_blue", "USDC", "supply")
+
+        assert rate.apy_percent == Decimal("4.01")
+        assert captured, "lazy lane never constructed a RateMonitor"
+        assert captured[0]["gateway_client"] is sentinel  # VIB-5824: real client threaded
+        assert captured[0]["_internal"] is True
+
+    def test_best_lending_rate_lazy_lane_threads_gateway_client(self, monkeypatch):
+        from almanak.framework.data.rates import monitor as monitor_mod
+
+        captured: list = []
+        monkeypatch.setattr(monitor_mod, "RateMonitor", self._fake_monitor_cls(captured, Decimal("5.5")))
+
+        sentinel = MagicMock(name="snapshot_gateway_client")
+        snapshot = self._snapshot_no_monitor(sentinel)
+        assert snapshot._rate_monitor is None  # lazy lane will engage
+
+        result = snapshot.best_lending_rate("USDC", "supply")
+
+        assert result.best_rate is not None
+        assert result.best_rate.apy_percent == Decimal("5.5")
+        assert captured, "lazy lane never constructed a RateMonitor"
+        assert captured[0]["gateway_client"] is sentinel  # VIB-5824: real client threaded
