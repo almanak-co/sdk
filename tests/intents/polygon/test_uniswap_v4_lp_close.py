@@ -28,7 +28,7 @@ from almanak.framework.execution.orchestrator import (
     ExecutionPhase,
     ExecutionResult,
 )
-from almanak.framework.execution.result_enricher import enrich_result
+from almanak.framework.execution.result_enricher import ResultEnricher
 from almanak.framework.intents.compiler import IntentCompiler
 from almanak.framework.intents.vocabulary import IntentType, LPCloseIntent, LPOpenIntent
 from tests.intents.conftest import (
@@ -60,85 +60,6 @@ LP_RANGE_LOWER = Decimal("1000")
 LP_RANGE_UPPER = Decimal("10000")
 
 # =============================================================================
-# Helper: Open a position (setup for close tests)
-# =============================================================================
-
-
-async def _open_v4_position(
-    web3: Web3,
-    funded_wallet: str,
-    orchestrator: ExecutionOrchestrator,
-    price_oracle: dict[str, Decimal],
-) -> tuple[int, int, str, str]:
-    """Open a V4 LP position and return (position_id, liquidity, currency0, currency1).
-
-    Self-sufficient setup that mirrors the arbitrum / base / optimism / ethereum
-    LP_CLOSE goldens so VIB-4364 can land without depending on VIB-4363's
-    parallel LP_OPEN file. Uses the WETH/USDC/3000 pool key (see ``LP_POOL``
-    comment) which matches the Polygon LP_OPEN sibling.
-
-    Raises AssertionError if the setup LP_OPEN fails.
-    """
-    intent = LPOpenIntent(
-        pool=LP_POOL,
-        amount0=LP_AMOUNT_WETH,
-        amount1=LP_AMOUNT_USDC,
-        range_lower=LP_RANGE_LOWER,
-        range_upper=LP_RANGE_UPPER,
-        protocol="uniswap_v4",
-        chain=CHAIN_NAME,
-        # VIB-2180/VIB-2701: V4 StateView.getSlot0 reverts on the Anvil fork -> estimated price; opt in.
-        protocol_params={"allow_estimated_price": True},
-    )
-
-    compiler = IntentCompiler(
-        chain=CHAIN_NAME,
-        wallet_address=funded_wallet,
-        price_oracle=price_oracle,
-    )
-
-    compilation_result = compiler.compile(intent)
-    assert compilation_result.status.value == "SUCCESS", (
-        f"Setup LP_OPEN compilation failed: {compilation_result.error}"
-    )
-    bundle = compilation_result.action_bundle
-    assert bundle is not None
-
-    execution_result = await orchestrator.execute(bundle)
-    assert execution_result.success, f"Setup LP_OPEN execution failed: {execution_result.error}"
-
-    # Extract position_id and liquidity from receipt.
-    # Iterate until both are found, then stop -- avoids spamming the
-    # "no position ID found" parser warning for approval txs.
-    parser = UniswapV4ReceiptParser(chain=CHAIN_NAME)
-    position_id: int | None = None
-    liquidity: int | None = None
-
-    for tx_result in execution_result.transaction_results:
-        if tx_result.receipt:
-            receipt_dict = tx_result.receipt.to_dict()
-            if position_id is None:
-                position_id = parser.extract_position_id(receipt_dict)
-            if liquidity is None:
-                liquidity = parser.extract_liquidity(receipt_dict)
-        if position_id is not None and liquidity is not None:
-            break
-
-    assert position_id is not None, "Setup LP_OPEN must yield a position_id"
-    assert liquidity is not None and liquidity > 0, "Setup LP_OPEN must yield positive liquidity"
-
-    # Get currency addresses from bundle metadata
-    token0 = bundle.metadata.get("token0", {})
-    token1 = bundle.metadata.get("token1", {})
-    currency0 = token0.get("address", "")
-    currency1 = token1.get("address", "")
-
-    assert currency0 and currency1, "Must extract currency addresses from bundle metadata"
-
-    return position_id, liquidity, currency0, currency1
-
-
-# =============================================================================
 # Layer-5 accounting helpers (mirrors tests/intents/ethereum/test_uniswap_v3_lp.py;
 # V4-specific position_hash directional contract per epic VIB-4591 / VIB-4594)
 # =============================================================================
@@ -153,12 +74,34 @@ def _execution_context(wallet: str) -> ExecutionContext:
     )
 
 
+def _weth_usdc_pool_key():
+    """The canonical WETH/USDC/3000 V4 PoolKey on this chain (all-ERC-20).
+
+    Mirrors ``LP_POOL = "WETH/USDC/3000"`` (fee=3000, tick_spacing=60).
+    ``PoolKey.__post_init__`` sorts the currencies into the on-chain
+    ``currency0 < currency1`` invariant order.
+    """
+    from almanak.connectors.uniswap_v4.sdk import PoolKey
+
+    tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
+    return PoolKey(currency0=tokens["WETH"], currency1=tokens["USDC"], fee=3000, tick_spacing=60)
+
+
 def _enrich_for_accounting(execution_result, intent, wallet: str, bundle_metadata: dict | None = None):
-    return enrich_result(
+    # VIB-4426 T07: the V4 close-side parser attributes amounts by the canonical
+    # PoolKey (not by sorting observed Transfers), so the enricher needs a
+    # ``pool_key_lookup`` to resolve currency0/currency1 and stamp the canonical
+    # pool_address. The intent-test harness has no gateway, so inject the known
+    # WETH/USDC pool key directly (mirrors the merged bnb/avalanche goldens).
+    pool_key = _weth_usdc_pool_key()
+    enricher = ResultEnricher(
+        live_mode=False,
+        pool_key_lookup=lambda pool_id_hex, chain: pool_key,
+    )
+    return enricher.enrich(
         execution_result,
         intent,
         _execution_context(wallet),
-        live_mode=False,
         bundle_metadata=bundle_metadata,
     )
 
@@ -312,6 +255,14 @@ async def _open_v4_position_with_accounting(
     execution_result = await orchestrator.execute(bundle)
     assert execution_result.success, f"Setup LP_OPEN execution failed: {execution_result.error}"
 
+    # Enrich the setup OPEN so ``lp_open_data`` (amounts, canonical 32-byte V4
+    # pool_address, position_hash anchor) reaches the accounting writer —
+    # without it the LP handler cannot resolve the V4 pool address off the
+    # receipt and drops the LP_OPEN event (no basis for the close to link to).
+    execution_result = _enrich_for_accounting(
+        execution_result, intent, funded_wallet, bundle_metadata=bundle.metadata
+    )
+
     parser = UniswapV4ReceiptParser(chain=CHAIN_NAME)
     position_id = None
     liquidity = None
@@ -373,10 +324,6 @@ class TestUniswapV4LPCloseIntent:
 
     @pytest.mark.intent(IntentType.LP_OPEN, IntentType.LP_CLOSE)
     @pytest.mark.asyncio
-    @pytest.mark.xfail(
-        reason="VIB-4426 V0 (PR #2335) requires pool_key_lookup callable on UniswapV4ReceiptParser at LP_CLOSE per T07; intent-test harness wiring lands with PR-2 (VIB-4478 lp_v4 fixture). as of 2026-05-17.",
-        strict=True,
-    )
     async def test_lp_close_weth_usdc(
         self,
         web3: Web3,
@@ -487,7 +434,14 @@ class TestUniswapV4LPCloseIntent:
         print(f"Execution successful! {len(execution_result.transaction_results)} transactions confirmed")
 
         # Layer 3: Receipt Parsing
-        parser = UniswapV4ReceiptParser(chain=CHAIN_NAME)
+        # VIB-4426 T07: the V4 close burn attributes amounts by the canonical
+        # PoolKey, so the parser needs the pool_key_lookup to resolve
+        # currency0/currency1 (the intent-test harness has no gateway).
+        _close_pool_key = _weth_usdc_pool_key()
+        parser = UniswapV4ReceiptParser(
+            chain=CHAIN_NAME,
+            pool_key_lookup=lambda pool_id_hex, chain: _close_pool_key,
+        )
         lp_close_data = None
 
         for i, tx_result in enumerate(execution_result.transaction_results):
@@ -542,6 +496,13 @@ class TestUniswapV4LPCloseIntent:
         assert weth_received > 0 and usdc_received > 0, (
             f"LP_CLOSE on a two-token position must return BOTH tokens (no-op guard). "
             f"weth_received={weth_received}, usdc_received={usdc_received}"
+        )
+
+        # VIB-4426 T07: enrich the close result with the pool_key_lookup so
+        # lp_close_data resolves currency0/currency1 + the canonical pool_address
+        # and reaches the accounting writer.
+        execution_result = _enrich_for_accounting(
+            execution_result, close_intent, funded_wallet, bundle_metadata=bundle.metadata
         )
 
         # Layer 5: assert the real accounting pipeline persisted LP_CLOSE.
