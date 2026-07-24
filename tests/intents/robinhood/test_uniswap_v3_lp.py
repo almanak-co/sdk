@@ -651,7 +651,7 @@ class TestUniswapV3CollectFeesIntent:
       3. Issue CollectFeesIntent(protocol="uniswap_v3", protocol_params={"position_id": ...}).
       4. Verify wallet balances increased and deltas equal parsed Collect amounts.
 
-    Unlike the ethereum/arbitrum/monad sister tests (xfail on VIB-4314's
+    Unlike the ethereum/arbitrum/monad sister tests (xfail on VIB-5968's
     cross-fee-tier routing blocker), Robinhood's only pool with real depth IS
     the fee-500 WETH/USDG pool the position sits in — the fee-accrual swap has
     nowhere else to route, so this test asserts the full pass outright.
@@ -699,7 +699,7 @@ class TestUniswapV3CollectFeesIntent:
         # large enough that the router's best-execution fee-tier selection picks
         # the deep fee-500 pool (~$3.5M) the position sits in — a small swap
         # routes to the thin fee-100 pool (~$0.23M) and accrues fees elsewhere
-        # (the VIB-4314 cross-tier blocker on the sister-chain tests). 20,000
+        # (the VIB-5968 cross-tier blocker on the sister-chain tests). 20,000
         # USDG at 0.05% = 10 USDG of fees spread across in-range liquidity.
         swap_intent = SwapIntent(
             from_token="USDG",

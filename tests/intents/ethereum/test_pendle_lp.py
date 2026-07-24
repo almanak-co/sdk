@@ -32,7 +32,7 @@ The conftest ``_default_compute_position_key`` deliberately special-cases
 pendle OUT of the generic ``lp:`` keyed branch, so the persisted Pendle LP
 event carries an empty ``position_key`` / ``market_id`` — a real contract
 divergence vs Uniswap V3 LP, asserted here as such. The WITHDRAW (PT
-redemption) test stays xfail-grandfathered and is NOT rolled into Layer 5.
+redemption) test stays xfailed (VIB-5975) and is NOT rolled into Layer 5.
 
 To run::
 
@@ -621,8 +621,8 @@ class TestPendleWithdrawEthereum:
     time past maturity, then redeem.
 
     Note: this test's pattern mirrors
-    ``tests/intents/arbitrum/test_pendle_redeem.py`` (which is currently
-    marked xfail-grandfathered for a fork-block-pinning flake). The
+    ``tests/intents/arbitrum/test_pendle_redeem.py`` (xfailed under
+    VIB-5975 for the same fork-block-pinning flake). The
     arbitrum test is the reference for the receipt-parsing assertions.
     """
 
@@ -630,13 +630,13 @@ class TestPendleWithdrawEthereum:
     @pytest.mark.xfail(
         strict=False,
         reason=(
-            "VIB-4307: PT redemption pattern has a known Anvil fork-block "
+            "VIB-5975: PT redemption pattern has a known Anvil fork-block "
             "pinning flake (mirrors arbitrum test_pendle_redeem.py: the "
             "PT approval tx mines but its state may not be visible to the "
             "redeem tx during simulation under cached fork state). "
-            "Tracked under #1694 / VIB-3xxx — keep strict=False so a clean "
-            "fork-block passes do not surface as XPASS noise. "
-            "as of 2026-05-12."
+            "Keep strict=False so clean fork-block passes do not surface "
+            "as XPASS noise. as of 2026-05-12; re-pointed to VIB-5975 "
+            "2026-07-24."
         ),
     )
     async def test_redeem_pt_susde_at_maturity(
@@ -677,6 +677,7 @@ class TestPendleWithdrawEthereum:
         assert buy_result.status.value == "SUCCESS", (
             f"PT buy compile failed: {buy_result.error}"
         )
+        assert buy_result.action_bundle is not None, "PT buy ActionBundle must be created"
         buy_exec = await orchestrator.execute(buy_result.action_bundle)
         assert buy_exec.success, f"PT buy execution failed: {buy_exec.error}"
 
@@ -711,6 +712,7 @@ class TestPendleWithdrawEthereum:
         assert compilation_result.status.value == "SUCCESS", (
             f"WithdrawIntent compile failed: {compilation_result.error}"
         )
+        assert compilation_result.action_bundle is not None, "Redeem ActionBundle must be created"
 
         # ── Layer 2: Execute ──────────────────────────────────────────────
         execution_result = await orchestrator.execute(

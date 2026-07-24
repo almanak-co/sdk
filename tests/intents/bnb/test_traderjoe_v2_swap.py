@@ -127,7 +127,7 @@ class TestTraderJoeV2SwapExecution:
     @pytest.mark.asyncio
     @pytest.mark.xfail(
         reason=(
-            "VIB-4376: WBNB->USDT bin_step=15 LBPair has thin / one-sided "
+            "VIB-5973: WBNB->USDT bin_step=15 LBPair has thin / one-sided "
             "reserves on the BSC TJv2 deployment (~467 USDT / 0 WBNB across "
             "all bin steps at the current fork latest as of 2026-05-14). The "
             "LBRouter's swapExactTokensForTokens reverts inside "
@@ -136,7 +136,7 @@ class TestTraderJoeV2SwapExecution:
             "dependent class as the avalanche WAVAX->USDC and arbitrum USDC->"
             "WETH xfails — kept strict=False because a future fork block with "
             "fresh LP activity should let the test pass on its own without a "
-            "CI break."
+            "CI break. Re-pointed to VIB-5973 2026-07-24."
         ),
         strict=False,
     )
@@ -271,7 +271,7 @@ class TestTraderJoeV2SwapExecution:
     @pytest.mark.asyncio
     @pytest.mark.xfail(
         reason=(
-            "VIB-4376: USDT->WBNB reverse direction reverts on the BSC TJv2 "
+            "VIB-5973: USDT->WBNB reverse direction reverts on the BSC TJv2 "
             "fork for the same root cause as the forward direction — the "
             "WBNB/USDT LBPairs on BSC have thin one-sided reserves (all "
             "non-zero side is USDT, the WBNB side is empty across every bin "
@@ -279,7 +279,7 @@ class TestTraderJoeV2SwapExecution:
             "wraps the inner revert as ModuleTransactionFailed (0xd27b44a9). "
             "Mirrors the avalanche WAVAX-side xfails — kept strict=False "
             "because a future fork block with rebalanced LP should let the "
-            "test pass without a CI break."
+            "test pass without a CI break. Re-pointed to VIB-5973 2026-07-24."
         ),
         strict=False,
     )

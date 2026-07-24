@@ -506,12 +506,12 @@ class TestPancakeSwapV3CollectFeesIntent:
     @pytest.mark.xfail(
         strict=False,
         reason=(
-            "VIB-4314: same-pool fee-accrual fixture not yet wired — the setup swap routes to a "
+            "VIB-5968: same-pool fee-accrual fixture not yet wired — the setup swap routes to a "
             "different fee tier than the LP position, so post-open fee accrual is fork-state-dependent "
             "and this test's outcome flip-flops (fees accrue → pass; no fees → the 'positive collected "
             "amounts' assertion fails). strict=False because either outcome is the same unwired condition, "
             "not an implementation signal — matching its sister-chain arbitrum marker so the pair can't "
-            "block unrelated PRs (observed red across #3257/#3258 as of 2026-07-13). as of 2026-05-12"
+            "block unrelated PRs (observed red across #3257/#3258 as of 2026-07-13). as of 2026-05-12; re-pointed to VIB-5968 2026-07-24"
         ),
     )
     async def test_collect_fees_weth_usdc(

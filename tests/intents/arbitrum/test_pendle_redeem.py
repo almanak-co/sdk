@@ -82,14 +82,14 @@ class TestPendlePTRedeemIntent:
     """
 
     @pytest.mark.intent(IntentType.SWAP, IntentType.WITHDRAW)
-    # xfail-grandfathered: #1694 (pre-dates xfail-hygiene rule)
     @pytest.mark.xfail(
         strict=False,
-        reason="PT approval (ERC20: insufficient allowance) is flaky in CI due to Anvil "
+        reason="VIB-5975: PT approval (ERC20: insufficient allowance) is flaky in CI due to Anvil "
         "fork-block pinning + cached state: the approve tx mines but its state is not "
         "visible to the redeem tx during simulation, causing the orchestrator to submit "
-        "both txs but the redeem reverts. Passes reliably on fresh local forks. "
-        "Follow-up: investigate RollingForkManager cache invalidation after evm_increaseTime.",
+        "both txs but the redeem reverts. Passes reliably on fresh local forks. Suspected "
+        "RollingForkManager cache invalidation after evm_increaseTime (as of 2026-07-24; "
+        "re-pointed to VIB-5975 in the VIB-5964 sweep without re-testing).",
     )
     @pytest.mark.asyncio
     async def test_redeem_pt_wsteth_at_maturity(

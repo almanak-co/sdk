@@ -60,8 +60,13 @@ class TestLiFiSwap:
     """
 
     @pytest.mark.intent(IntentType.SWAP)
-    # xfail-grandfathered: #1694 (pre-dates xfail-hygiene rule)
-    @pytest.mark.xfail(reason="LiFi KyberSwap routing reverts with TRANSFER_FROM_FAILED on Anvil fork", strict=False)
+    @pytest.mark.xfail(
+        reason="VIB-5969: LiFi KyberSwap sub-route reverts with TRANSFER_FROM_FAILED on the "
+        "Anvil arbitrum fork — aggregator route non-determinism tolerance per intent-tests "
+        "rule #12 (long-standing flake, pre-dates the hygiene rule; as of 2026-07-24, "
+        "re-pointed to VIB-5969 in the VIB-5964 sweep without re-testing)",
+        strict=False,
+    )
     @pytest.mark.asyncio
     async def test_swap_usdc_to_weth_using_intent(
         self,
@@ -195,8 +200,13 @@ class TestLiFiSwap:
         print("\nALL CHECKS PASSED")
 
     @pytest.mark.intent(IntentType.SWAP)
-    # xfail-grandfathered: #1694 (pre-dates xfail-hygiene rule)
-    @pytest.mark.xfail(reason="Reverse direction (WETH -> USDC) may have different routing and slippage, needs separate test",strict=False)
+    @pytest.mark.xfail(
+        reason="VIB-5969: LiFi reverse-direction (WETH -> USDC) route non-determinism on the "
+        "Anvil arbitrum fork — aggregator route flake tolerance per intent-tests rule #12 "
+        "(long-standing, pre-dates the hygiene rule; as of 2026-07-24, re-pointed to "
+        "VIB-5969 in the VIB-5964 sweep without re-testing)",
+        strict=False,
+    )
     @pytest.mark.asyncio
     async def test_swap_weth_to_usdc_using_intent(
         self,

@@ -57,8 +57,12 @@ class TestPancakeSwapV3SwapIntent:
     """
 
     @pytest.mark.intent(IntentType.SWAP)
-    # xfail-grandfathered: #1694 (pre-dates xfail-hygiene rule)
-    @pytest.mark.xfail(reason="Flaky: PancakeSwap V3 USDT->WETH swap reverts with STF intermittently on Ethereum", strict=False)
+    @pytest.mark.xfail(
+        reason="VIB-5974: PancakeSwap V3 USDT->WETH swap intermittently reverts with STF on the "
+        "ethereum Anvil fork (long-standing flake, pre-dates the hygiene rule; as of "
+        "2026-07-24, re-pointed to VIB-5974 in the VIB-5964 sweep without re-testing)",
+        strict=False,
+    )
     @pytest.mark.asyncio
     async def test_swap_usdt_to_weth_using_intent(
         self,
@@ -186,8 +190,12 @@ class TestPancakeSwapV3SwapIntent:
         print("\nALL CHECKS PASSED ✓")
 
     @pytest.mark.intent(IntentType.SWAP)
-    # xfail-grandfathered: #1694 (pre-dates xfail-hygiene rule)
-    @pytest.mark.xfail(reason="Flaky: PancakeSwap V3 WETH->USDT swap reverts with STF intermittently on Ethereum", strict=False)
+    @pytest.mark.xfail(
+        reason="VIB-5974: PancakeSwap V3 WETH->USDT swap intermittently reverts with STF on the "
+        "ethereum Anvil fork (long-standing flake, pre-dates the hygiene rule; as of "
+        "2026-07-24, re-pointed to VIB-5974 in the VIB-5964 sweep without re-testing)",
+        strict=False,
+    )
     @pytest.mark.asyncio
     async def test_swap_weth_to_usdt_using_intent(
         self,

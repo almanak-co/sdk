@@ -39,7 +39,7 @@ class TestLiFiSwap:
     @pytest.mark.asyncio
     @pytest.mark.xfail(
         strict=False,
-        reason="VIB-4307: LiFi aggregator route flake on Anvil optimism fork — sub-route revert / rate-limit retry stall, needs 10/10 run validation per intent-tests rule #12 (as of 2026-05-13)",
+        reason="VIB-5969: LiFi aggregator route flake on Anvil optimism fork — sub-route revert / rate-limit retry stall, needs 10/10 run validation per intent-tests rule #12 (as of 2026-05-13; re-pointed to VIB-5969 2026-07-24)",
     )
     async def test_swap_usdc_to_weth_using_intent(
         self,

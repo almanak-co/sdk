@@ -49,7 +49,7 @@ class TestLiFiSwap:
     @pytest.mark.asyncio
     @pytest.mark.xfail(
         strict=False,
-        reason="VIB-4307: LiFi aggregator route flake on Anvil avalanche fork — sub-route (Paraswap/1inch) reverts with QUOTE_SWAP_AMOUNT_TOO_SMALL when its dynamic min-amount guard rejects the 100 USDC quote; needs 10/10 run validation per intent-tests rule #12 (as of 2026-05-13)",
+        reason="VIB-5969: LiFi aggregator route flake on Anvil avalanche fork — sub-route (Paraswap/1inch) reverts with QUOTE_SWAP_AMOUNT_TOO_SMALL when its dynamic min-amount guard rejects the 100 USDC quote; needs 10/10 run validation per intent-tests rule #12 (as of 2026-05-13; re-pointed to VIB-5969 2026-07-24)",
     )
     async def test_swap_usdc_to_wavax_using_intent(
         self,

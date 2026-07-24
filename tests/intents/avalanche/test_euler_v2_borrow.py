@@ -238,11 +238,11 @@ class TestEulerV2BorrowIntent:
 
     @pytest.mark.intent(IntentType.SUPPLY, IntentType.BORROW)
     @pytest.mark.asyncio
-    # xfail-grandfathered: #1694 (pre-dates xfail-hygiene rule)
     @pytest.mark.xfail(
-        reason="eWAVAX-2 vault has maxDeposit=0 (supply cap reached). "
-        "Euler V2 borrow requires a valid collateral vault not yet in adapter. "
-        "See VIB-2643 for adding eBTC.b or eWETH.e collateral vaults.",
+        reason="VIB-2643: eWAVAX-2 vault has maxDeposit=0 (supply cap reached). "
+        "Euler V2 borrow requires a valid collateral vault not yet in adapter "
+        "(eBTC.b or eWETH.e — VIB-2643 tracks adding them). Formally re-pointed "
+        "to open VIB-2643 in the VIB-5964 sweep (as of 2026-07-24).",
         strict=True,
     )
     async def test_borrow_usdc_with_wavax_collateral(
@@ -404,11 +404,11 @@ class TestEulerV2BorrowIntent:
 
     @pytest.mark.intent(IntentType.SUPPLY, IntentType.BORROW, IntentType.REPAY)
     @pytest.mark.asyncio
-    # xfail-grandfathered: #1694 (pre-dates xfail-hygiene rule)
     @pytest.mark.xfail(
-        reason="eWAVAX-2 vault has maxDeposit=0 (supply cap reached). "
-        "Euler V2 borrow requires a valid collateral vault not yet in adapter. "
-        "See VIB-2643 for adding eBTC.b or eWETH.e collateral vaults.",
+        reason="VIB-2643: eWAVAX-2 vault has maxDeposit=0 (supply cap reached). "
+        "Euler V2 borrow requires a valid collateral vault not yet in adapter "
+        "(eBTC.b or eWETH.e — VIB-2643 tracks adding them). Formally re-pointed "
+        "to open VIB-2643 in the VIB-5964 sweep (as of 2026-07-24).",
         strict=True,
     )
     async def test_repay_usdc_after_borrow(

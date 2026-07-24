@@ -47,7 +47,7 @@ class TestEnsoSwapIntent:
     @pytest.mark.asyncio
     @pytest.mark.xfail(
         strict=False,
-        reason="VIB-4309: Enso aggregator off-chain route non-determinism on Anvil polygon fork — quote can route through a sub-pool whose fork-block state differs from mainnet, causing execution revert. Needs 10/10 run validation per intent-tests rule #12 (as of 2026-05-13)",
+        reason="VIB-5969: Enso aggregator off-chain route non-determinism on Anvil polygon fork — quote can route through a sub-pool whose fork-block state differs from mainnet, causing execution revert. Needs 10/10 run validation per intent-tests rule #12 (as of 2026-05-13; re-pointed to VIB-5969 2026-07-24)",
     )
     async def test_swap_usdc_to_weth_via_enso(
         self,

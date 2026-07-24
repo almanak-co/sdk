@@ -230,14 +230,14 @@ class TestTraderJoeV2SwapExecution:
     @pytest.mark.asyncio
     @pytest.mark.xfail(
         reason=(
-            "VIB-4374: USDC->WETH bin_step=15 reverts under execTransactionWithRole on the "
+            "VIB-5973: USDC->WETH bin_step=15 reverts under execTransactionWithRole on the "
             "Anvil fork even though mainnet RPC quotes succeed (selector 0xd27b44a9 — "
             "swapExactTokensForTokens). Same fork-specific revert class as the avalanche "
             "USDC->WAVAX xfail; tracked separately because the underlying cause (bin "
             "liquidity simulation vs allowance race) hasn't been root-caused yet "
             "(as of 2026-05-14). strict=False because if a new fork block makes the "
             "swap succeed we want it to pass without breaking CI — the failure is "
-            "fork-state-dependent, not a permanent semantic bug."
+            "fork-state-dependent, not a permanent semantic bug. Re-pointed to VIB-5973 2026-07-24."
         ),
         strict=False,
     )

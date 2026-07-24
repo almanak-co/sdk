@@ -1119,18 +1119,21 @@ class TestAerodromeSlipstreamCollectFeesIntent:
     @pytest.mark.asyncio
     @pytest.mark.xfail(
         reason=(
-            "VIB-4434: fee-accrual swap (auto-routed Aerodrome) reverts "
+            "VIB-5968: fee-accrual swap (auto-routed Aerodrome) reverts "
             "with selector=0xd27b44a9 on the base CI pinned fork block "
             "(as of 2026-05-16). Test passes locally against latest block; "
             "same fork-block flake class as VIB-4465 on the sibling V4 "
-            "collect_fees test. VIB-4434 owns clearing this once the "
+            "collect_fees test. VIB-5968 owns clearing this once the "
             "pinned fork block has stable pool state for the auto-routed "
             "swap path. strict=False because xpass = pool state recovered, "
-            "not a code fix."
+            "not a code fix. Re-pointed to VIB-5968 2026-07-24."
         ),
         strict=False,
     )
-    async def test_collect_fees_zero_accrual_conservation(
+    # noqa: layers -- intentional zero-fee no-op path: asserts zero collected
+    # amounts + bilateral conservation, so the positive-receipt-amount layer
+    # cannot apply (see docstring; positive-accrual coverage lands with VIB-5968).
+    async def test_collect_fees_zero_accrual_conservation(  # noqa: layers
         self,
         web3: Web3,
         funded_wallet: str,
@@ -1147,8 +1150,8 @@ class TestAerodromeSlipstreamCollectFeesIntent:
         wired — the ``SwapIntent(protocol="aerodrome")`` auto-router may
         route through a different pool than the LP position's
         ``WETH/USDC/200`` Slipstream pool, so no fees accrue on the position
-        at this fork block. Until a same-pool fixture lands (separate
-        follow-up ticket, mirrors VIB-4314 for pancakeswap_v3), this test
+        at this fork block. Until a same-pool fixture lands (VIB-5968,
+        same fee-accrual class as pancakeswap_v3), this test
         verifies the *no-fee* path is a structurally clean no-op:
 
           * The compile / execute / parse pipeline runs to completion.

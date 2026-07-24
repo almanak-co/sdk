@@ -111,8 +111,13 @@ class TestTraderJoeV2SwapExecution:
 
     @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.asyncio
-    # xfail-grandfathered: #1694 (pre-dates xfail-hygiene rule)
-    @pytest.mark.xfail(reason="WAVAX->USDC direction can revert on Anvil fork due to bin liquidity state", strict=False)
+    @pytest.mark.xfail(
+        reason="VIB-5973: WAVAX->USDC can revert on the Anvil fork when the active LBPair "
+        "bins are thin / one-sided at the pinned block (long-standing, pre-dates the "
+        "hygiene rule; as of 2026-07-24, re-pointed to VIB-5973 in the VIB-5964 sweep "
+        "without re-testing)",
+        strict=False,
+    )
     async def test_wavax_to_usdc_full_lifecycle(
         self,
         web3: Web3,
@@ -237,8 +242,13 @@ class TestTraderJoeV2SwapExecution:
 
     @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.asyncio
-    # xfail-grandfathered: #1694 (pre-dates xfail-hygiene rule)
-    @pytest.mark.xfail(reason="USDC->WAVAX can revert on Anvil fork due to allowance simulation race or bin liquidity state", strict=False)
+    @pytest.mark.xfail(
+        reason="VIB-5973: USDC->WAVAX can revert on the Anvil fork due to an allowance "
+        "simulation race or thin / one-sided bin liquidity at the pinned block "
+        "(long-standing, pre-dates the hygiene rule; as of 2026-07-24, re-pointed to "
+        "VIB-5973 in the VIB-5964 sweep without re-testing)",
+        strict=False,
+    )
     async def test_usdc_to_wavax_reverse_direction(
         self,
         web3: Web3,

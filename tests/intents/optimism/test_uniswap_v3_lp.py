@@ -601,7 +601,7 @@ class TestUniswapV3CollectFeesIntent:
     @pytest.mark.asyncio
     @pytest.mark.xfail(
         strict=False,
-        reason="VIB-4314: same-pool fee-accrual flake — swap-then-collect on optimism intermittently routes through a fee tier that doesn't credit the LP position; strict=False because flake means xpass is legitimate (as of 2026-05-12)",
+        reason="VIB-5968: same-pool fee-accrual flake — swap-then-collect on optimism intermittently routes through a fee tier that doesn't credit the LP position; strict=False because flake means xpass is legitimate (as of 2026-05-12; re-pointed to VIB-5968 2026-07-24)",
     )
     async def test_collect_fees_weth_usdc(
         self,

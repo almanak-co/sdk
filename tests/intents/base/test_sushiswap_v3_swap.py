@@ -70,7 +70,7 @@ class TestSushiSwapV3SwapIntent:
     @pytest.mark.asyncio
     @pytest.mark.xfail(
         strict=True,
-        reason="VIB-4307: sushiswap_v3 swap pool selection on base — quoter returns no amount or route emits no Swap event (as of 2026-05-12)",
+        reason="VIB-5972: sushiswap_v3 swap pool selection on base — quoter returns no amount or route emits no Swap event (as of 2026-05-12; re-pointed to VIB-5972 2026-07-24)",
     )
     async def test_swap_usdc_to_weth_using_intent(
         self,

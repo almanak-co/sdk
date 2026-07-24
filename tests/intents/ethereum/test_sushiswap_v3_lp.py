@@ -958,7 +958,7 @@ class TestSushiSwapV3CollectFeesIntent:
     @pytest.mark.asyncio
     @pytest.mark.xfail(
         strict=False,
-        reason="VIB-4314: same-pool fee-accrual fixture not yet wired — swap routes to different fee tier than LP position (as of 2026-05-12). strict=False because the ethereum sushiswap_v3 WETH/USDC pool occasionally has stale fee-tier overlap that lets fees accrue on the right pool, producing legitimate XPASS without the fixture (CI run 25726927045 ethereum job).",
+        reason="VIB-5968: same-pool fee-accrual fixture not yet wired — swap routes to different fee tier than LP position (as of 2026-05-12; re-pointed to VIB-5968 2026-07-24). strict=False because the ethereum sushiswap_v3 WETH/USDC pool occasionally has stale fee-tier overlap that lets fees accrue on the right pool, producing legitimate XPASS without the fixture (CI run 25726927045 ethereum job).",
     )
     async def test_collect_fees_weth_usdc(
         self,

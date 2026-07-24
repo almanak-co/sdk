@@ -142,7 +142,7 @@ class TestEthenaStakeOnChain:
     @pytest.mark.asyncio
     @pytest.mark.xfail(
         strict=True,
-        reason="VIB-4307: USDe storage slot funding fails on ethereum Anvil fork — slot mapping in CHAIN_CONFIGS may not match USDe ERC20 (as of 2026-05-12)",
+        reason="VIB-5977: USDe storage slot funding fails on ethereum Anvil fork — slot mapping in CHAIN_CONFIGS may not match USDe ERC20 (as of 2026-05-12; re-pointed to VIB-5977 2026-07-24)",
     )
     async def test_stake_usde_to_susde_full_4_layer(
         self,

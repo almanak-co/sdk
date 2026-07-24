@@ -880,12 +880,12 @@ class TestBenqiBorrowIntent:
     # unreliable on Anvil forks (oracle drift), which is the original xfail
     # reason. End-to-end mainnet validation is tracked at GitHub issue #2128.
     @pytest.mark.intent(IntentType.BORROW)
-    # xfail-grandfathered: #1694 (pre-dates xfail-hygiene rule)
     @pytest.mark.xfail(
-        reason="BENQI Comptroller on Anvil fork does not reliably enforce borrow limits. "
+        reason="VIB-5976: BENQI Comptroller on Anvil fork does not reliably enforce borrow limits. "
         "The oracle price feed on the fork may return values that allow excessive borrows. "
         "Compile-time pre-flight (PR #2129) covers this in production via gateway eth_call; "
-        "intent tests run without a gateway client so the pre-flight is bypassed here.",
+        "intent tests run without a gateway client so the pre-flight is bypassed here "
+        "(as of 2026-07-24; re-pointed to VIB-5976 in the VIB-5964 sweep without re-testing).",
         strict=False,
     )
     @pytest.mark.asyncio

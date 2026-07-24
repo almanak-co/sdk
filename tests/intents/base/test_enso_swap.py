@@ -68,7 +68,7 @@ class TestEnsoSwapIntent:
     @pytest.mark.asyncio
     @pytest.mark.xfail(
         strict=False,
-        reason="VIB-4307: Enso aggregator route flake on Anvil base fork — Enso's quote sometimes routes through a sub-pool whose state on the fork differs from mainnet at quote time, causing execution revert. Needs 10/10 run validation per intent-tests rule #12 (as of 2026-05-13)",
+        reason="VIB-5969: Enso aggregator route flake on Anvil base fork — Enso's quote sometimes routes through a sub-pool whose state on the fork differs from mainnet at quote time, causing execution revert. Needs 10/10 run validation per intent-tests rule #12 (as of 2026-05-13; re-pointed to VIB-5969 2026-07-24)",
     )
     async def test_swap_usdc_to_weth_via_enso(
         self,
@@ -220,7 +220,7 @@ class TestEnsoSwapIntent:
     @pytest.mark.asyncio
     @pytest.mark.xfail(
         strict=False,
-        reason="VIB-4307: Enso WETH->USDC route consistently reverts on Anvil base fork (4/4 in local validation 2026-05-13) — reverse-direction quote appears broken; pending Enso-side investigation. Needs 10/10 run validation per intent-tests rule #12 (as of 2026-05-13)",
+        reason="VIB-5969: Enso WETH->USDC route consistently reverts on Anvil base fork (4/4 in local validation 2026-05-13) — reverse-direction quote appears broken; pending Enso-side investigation. Needs 10/10 run validation per intent-tests rule #12 (as of 2026-05-13; re-pointed to VIB-5969 2026-07-24)",
     )
     async def test_swap_weth_to_usdc_via_enso(
         self,
