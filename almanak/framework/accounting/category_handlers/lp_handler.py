@@ -422,6 +422,136 @@ def _v4_realign_token_pair(
     return (ti0.symbol or c0).upper(), (ti1.symbol or c1).upper()
 
 
+def _lp_data_field(lp_data: Any, name: str) -> Any:
+    """Read ``lp_data.<name>`` whether ``lp_data`` is a typed object or a dict.
+
+    ``deserialize_extracted_data`` returns the dataclass when reconstruction
+    succeeds and a plain dict (with ``_type`` re-added) on failure. Both shapes
+    must be honoured or a realign gate silently reads ``None`` and disables.
+    """
+    if lp_data is None:
+        return None
+    if isinstance(lp_data, dict):
+        return lp_data.get(name)
+    return getattr(lp_data, name, None)
+
+
+def _v3_realign_token_pair(
+    *,
+    lp_data: Any,
+    intent_type_str: str,
+    extracted: Any,
+    chain: str,
+    token0: str,
+    token1: str,
+) -> tuple[str, str]:
+    """VIB-5851 — re-pair ``(token0, token1)`` by on-chain ``token0()``/``token1()``
+    (address-sorted) order for the V3-family concentrated-liquidity / Solidly path.
+
+    The receipt parser stamps ``lp_open_data.amount0`` / ``amount1`` (and the
+    ``LPCloseData`` equivalents) in the pool's canonical **address-sorted** order
+    (``token0()`` is the numerically-lower address). But the token *symbols* the
+    handler resolves come from the config pool label (``"WETH/USDC/500"``) or the
+    swap-style ``token_in``/``token_out`` — i.e. the *unsorted user* order. When
+    the two disagree (Ethereum's WETH/USDC pool is USDC-first, ``0xA0b8… <
+    0xC02a…``), the label-ordered decimals get applied to on-chain-ordered raw
+    amounts: both legs mis-scale and one is mis-priced, producing a ~$1.03bn
+    phantom cost basis on a ~$4 position that still scores green.
+
+    This mirrors the V4 fix (``_v4_realign_token_pair`` / VIB-4636), which re-pairs
+    by the receipt-emitted ``currency0``/``currency1`` addresses. V3 receipts never
+    populate those currency fields, so that guard is a permanent no-op for V3;
+    here we recover the same on-chain order **offline** by resolving each label
+    symbol to its canonical address via the STATIC token registry
+    (``skip_gateway=True`` — accounting code must not make a network call,
+    CLAUDE.md §Gateway boundary) and sorting. The address sort is drift-free and
+    deterministic; the in-repo pattern is ``sushiswap_v3.sdk.sort_tokens`` (sorts
+    *and* re-pairs decimals — here decimals follow from the returned symbols).
+
+    Only fires when the amounts are the on-chain-ordered raw ints. Returns the
+    inputs unchanged (fail-open) for every other shape:
+
+      * either symbol empty (nothing to sort);
+      * ``LP_OPEN`` with declared ``primitive_money_legs`` or no typed
+        ``lp_open_data`` — the amounts are aligned to ``token_in``/``token_out``,
+        NOT address order, so reordering would BREAK them;
+      * a close with no typed ``lp_close_data`` (string-fallback amounts);
+      * V4 (``currency0``/``currency1`` present) — already handled by
+        ``_v4_realign_token_pair``;
+      * fungible N-coin pools (``coin_symbols`` present) — coin ordering is
+        pool-index, not address-sorted; valued via the ``coin_symbols`` path;
+      * the token resolver failing / returning no address — cannot prove order,
+        so keep the label order (no worse than the pre-fix behaviour).
+    """
+    if not token0 or not token1:
+        return token0, token1
+
+    # ``deserialize_extracted_data`` normally returns a dict, but defend against
+    # a non-dict shape so the ``primitive_money_legs`` gate below cannot raise.
+    extracted_map = extracted if isinstance(extracted, dict) else {}
+
+    # Gate to the on-chain-ordered raw-int branch of ``_resolve_lp_amounts``.
+    if intent_type_str == "LP_OPEN":
+        if extracted_map.get("primitive_money_legs") is not None:
+            return token0, token1  # declared legs aligned to token_in/out
+        if _lp_data_field(lp_data, "amount0") is None and _lp_data_field(lp_data, "amount1") is None:
+            # No typed LP_OPEN raw amounts → string-fallback (token_in/out order).
+            return token0, token1
+    else:  # LP_CLOSE / LP_COLLECT_FEES
+        if lp_data is None:
+            return token0, token1  # string-fallback close
+
+    # V4 pairs are re-aligned by ``_v4_realign_token_pair`` via the receipt
+    # currency addresses — never double-process here.
+    if _lp_data_field(lp_data, "currency0") and _lp_data_field(lp_data, "currency1"):
+        return token0, token1
+
+    # Fungible N-coin pools order coins by pool index, not address.
+    if _lp_data_field(lp_data, "coin_symbols"):
+        return token0, token1
+
+    try:
+        from almanak.framework.data.tokens.resolver import get_token_resolver
+
+        resolver = get_token_resolver()
+        ti0 = resolver.resolve(token0, chain=chain, skip_gateway=True, log_errors=False)
+        ti1 = resolver.resolve(token1, chain=chain, skip_gateway=True, log_errors=False)
+    except Exception:  # noqa: BLE001 — accounting path: fail-open, never raise/block
+        logger.warning(
+            "V3 LP accounting: token resolver failed for label pair (%s, %s) on %s; "
+            "keeping label order — amounts may be misattributed if label != chain order",
+            token0,
+            token1,
+            chain,
+        )
+        return token0, token1
+
+    addr0 = getattr(ti0, "address", None) if ti0 is not None else None
+    addr1 = getattr(ti1, "address", None) if ti1 is not None else None
+    if not addr0 or not addr1:
+        logger.warning(
+            "V3 LP accounting: could not resolve on-chain addresses for label pair (%s, %s) on %s; keeping label order",
+            token0,
+            token1,
+            chain,
+        )
+        return token0, token1
+
+    try:
+        int0 = int(str(addr0), 16)
+        int1 = int(str(addr1), 16)
+    except (TypeError, ValueError):
+        # Non-hex address (e.g. a non-EVM identity) — cannot address-sort.
+        return token0, token1
+    if int0 == int1:
+        return token0, token1  # identical/degenerate — nothing to order
+    # On-chain ``token0()`` is the numerically-lower address. Swap the SYMBOLS so
+    # ``token0`` (and thus its decimals + price) pairs with on-chain ``amount0``.
+    if int0 <= int1:
+        return token0, token1
+    return token1, token0
+
+
 def _resolve_lp_tokens(ledger_row: dict[str, Any], position_key: str) -> tuple[str, str]:
     """Resolve (token0, token1) symbols, falling back to position-key descriptor for V3-style closes."""
     # LP_OPEN ledger rows carry token_in/token_out from the swap-style intent
@@ -1582,6 +1712,23 @@ def handle_lp(
     lp_field = "lp_open_data" if intent_type_str == "LP_OPEN" else "lp_close_data"
     lp_data = extracted.get(lp_field) if isinstance(extracted, dict) else None
     token0, token1 = _v4_realign_token_pair(lp_data, chain, token0, token1)
+
+    # VIB-5851 — V3-family concentrated-liquidity / Solidly amounts also ship in
+    # on-chain ``token0()``/``token1()`` (address-sorted) order, but V3 receipts
+    # never populate the ``currency0``/``currency1`` addresses the V4 realign keys
+    # off, so the guard above is a no-op for them. Re-pair ``(token0, token1)`` by
+    # the label symbols' on-chain addresses (offline, static registry) BEFORE
+    # decimals are resolved, so ``_resolve_lp_amounts`` scales each raw amount with
+    # the matching decimals instead of mis-scaling by the config pool-label order.
+    # No-op unless the amounts are the raw on-chain-ordered ints (gated inside).
+    token0, token1 = _v3_realign_token_pair(
+        lp_data=lp_data,
+        intent_type_str=intent_type_str,
+        extracted=extracted,
+        chain=chain,
+        token0=token0,
+        token1=token1,
+    )
 
     amount0, amount1, fees0, fees1, assumed_decimals = _resolve_lp_amounts(
         extracted=extracted,

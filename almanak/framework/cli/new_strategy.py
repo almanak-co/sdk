@@ -2944,8 +2944,9 @@ def _get_template_callbacks(template: StrategyTemplate) -> str:
             '        """Convert a USD price of ``base_token`` into the pool\'s native tick.\n'
             "\n"
             "        Ticks are defined on the pool's canonical token0/token1 pair\n"
-            "        (ordered by address; the compiler rejects non-canonical pool\n"
-            '        strings), so the USD price is rebased to "token1 per token0"\n'
+            "        (ordered by address; the compiler silently REORDERS a\n"
+            "        non-canonical pool string to that order -- it does NOT reject\n"
+            '        it), so the USD price is rebased to "token1 per token0"\n'
             "        before conversion. Token decimals come from the token registry --\n"
             "        never guessed (a wrong decimals pair shifts the tick by ~276k).\n"
             '        """\n'
