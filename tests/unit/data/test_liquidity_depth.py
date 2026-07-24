@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import math
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -602,6 +603,28 @@ class TestSlippageEstimatorV2:
 # ---------------------------------------------------------------------------
 
 
+# Arbitrum WETH/USDC layout used by the V3 simulation tests below. USDC is
+# token0; token_in="WETH" is therefore token1 -> zeroForOne=False (the same
+# direction these tests exercised before VIB-5933 made _is_zero_for_one resolve
+# symbols honestly instead of fabricating a direction).
+_USDC_ARB = "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
+_WETH_ARB = "0x82af49447d8a07e3bd95bd0d56f35241523fbab1"
+
+
+def _token0_word(address: str) -> bytes:
+    """ABI-encode an address as the 32-byte word token0() returns."""
+    return bytes(12) + bytes.fromhex(address[2:])
+
+
+class _WethUsdcResolver:
+    """Resolves the WETH/USDC symbols to their arbitrum addresses."""
+
+    _MAP = {"WETH": _WETH_ARB, "USDC": _USDC_ARB}
+
+    def resolve_for_swap(self, token: str, chain: str):  # noqa: ARG002
+        return SimpleNamespace(address=self._MAP.get(token.upper(), token), decimals=18)
+
+
 class TestSlippageEstimatorV3:
     """Tests for V3 swap simulation through tick ranges."""
 
@@ -664,9 +687,10 @@ class TestSlippageEstimatorV3:
 
         registry = self._make_pool_reader_registry(pool_price=pool_price, pool_address="0xpool")
 
-        # Create liquidity reader that returns some ticks
+        # token0() reads must return a real address so _is_zero_for_one can
+        # resolve swap direction (VIB-5933); USDC is token0.
         def mock_rpc(chain, to, calldata):
-            return b"\x00" * 32
+            return _token0_word(_USDC_ARB)
 
         liq_reader = LiquidityDepthReader(rpc_call=mock_rpc, tick_range_multiplier=5)
 
@@ -702,6 +726,7 @@ class TestSlippageEstimatorV3:
             estimator = SlippageEstimator(
                 liquidity_reader=liq_reader,
                 pool_reader_registry=registry,
+                token_resolver=_WethUsdcResolver(),
             )
 
             envelope = estimator.estimate_slippage(
@@ -766,7 +791,8 @@ class TestSlippageEstimatorV3:
         )
 
         registry = self._make_pool_reader_registry(pool_price=pool_price, pool_address="0xpool")
-        liq_reader = LiquidityDepthReader(rpc_call=lambda *a: b"\x00" * 32)
+        # token0() returns USDC so _is_zero_for_one resolves direction (VIB-5933).
+        liq_reader = LiquidityDepthReader(rpc_call=lambda *a: _token0_word(_USDC_ARB))
 
         # Return empty liquidity -> will give max slippage
         depth = LiquidityDepth(
@@ -792,6 +818,7 @@ class TestSlippageEstimatorV3:
                 liquidity_reader=liq_reader,
                 pool_reader_registry=registry,
                 high_slippage_threshold_bps=50,
+                token_resolver=_WethUsdcResolver(),
             )
 
             with caplog.at_level("WARNING", logger="almanak.framework.data.pools.liquidity"):

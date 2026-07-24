@@ -1241,26 +1241,88 @@ class SlippageEstimator:
     ) -> bool:
         """Determine if swap is token0 -> token1 (zeroForOne = True).
 
-        Reads token0 from the pool contract and compares to token_in.
-        If token_in matches token0, the swap is zeroForOne.
+        Reads token0 from the pool contract and resolves BOTH swap tokens to
+        addresses before comparing. Symbol inputs ("USDC", "WETH") are resolved
+        via the token registry — the pool contract stores token0 as an address,
+        so a bare symbol never matches it directly.
+
+        VIB-5933: the previous implementation fell through to ``return False``
+        for symbol input (the "try resolving" comment was never implemented),
+        silently inverting the swap direction whenever ``token_in`` was the
+        pool's token0, and the bare ``except: return True`` fabricated a
+        direction on any RPC failure. Direction is only well-defined when
+        exactly one of ``token_in`` / ``token_out`` equals token0; when neither
+        or both match (unresolvable token, wrong pool, RPC failure) this raises
+        :class:`DataUnavailableError` so the estimate becomes unavailable rather
+        than being silently inverted.
         """
         from .reader import decode_address
 
         try:
             token0_data = self._rpc_call_for_pool(pool_address, chain, protocol)
-            token0_addr = decode_address(token0_data)
+            token0_addr = decode_address(token0_data).lower()
+        except DataUnavailableError:
+            raise
+        except Exception as exc:
+            raise DataUnavailableError(
+                data_type="slippage_estimate",
+                instrument=pool_address,
+                reason=f"Cannot read token0 for pool {pool_address} on {chain}: {exc}",
+            ) from exc
 
-            # Check if token_in matches token0
-            token_in_lower = token_in.lower()
-            if token_in_lower == token0_addr.lower():
-                return True
-            if token_in_lower.startswith("0x") and len(token_in_lower) == 42:
-                return token_in_lower == token0_addr.lower()
-            # If token_in is a symbol, try resolving
-            return False
+        in_addr = self._resolve_token_address(token_in, chain)
+        out_addr = self._resolve_token_address(token_out, chain)
+
+        # Both sides must resolve. If either is unresolvable, the pair is
+        # unverifiable — a one-sided match (e.g. token_in==token0, token_out
+        # unresolvable) would otherwise fabricate a direction against a possibly
+        # wrong pool and feed it into the tick-walk. Fail closed.
+        if in_addr is None or out_addr is None:
+            raise DataUnavailableError(
+                data_type="slippage_estimate",
+                instrument=f"{token_in}/{token_out}",
+                reason=(f"Cannot resolve swap tokens for {token_in}/{token_out} (in={in_addr}, out={out_addr})"),
+            )
+
+        in_is_token0 = in_addr == token0_addr
+        out_is_token0 = out_addr == token0_addr
+
+        # Exactly one side must be token0. If neither matches (wrong pool) or
+        # both match, direction is genuinely unknown — fail honestly instead of
+        # the old fabricated ``return True``.
+        if in_is_token0 == out_is_token0:
+            raise DataUnavailableError(
+                data_type="slippage_estimate",
+                instrument=f"{token_in}/{token_out}",
+                reason=(
+                    f"Cannot determine swap direction for {token_in}/{token_out} "
+                    f"against pool {pool_address} (token0={token0_addr}, "
+                    f"in={in_addr}, out={out_addr})"
+                ),
+            )
+
+        return in_is_token0
+
+    def _resolve_token_address(self, token: str, chain: str) -> str | None:
+        """Resolve a swap token (symbol or address) to a lowercase address.
+
+        A raw 0x address is used as-is (lowercased). A symbol requires the
+        token resolver; any resolver failure (unknown token, no resolver wired,
+        non-conforming ``None`` return) yields ``None`` so the caller fails
+        honestly rather than guessing swap direction. Uses ``resolve_for_swap``
+        to match the swap-quote fallback wiring, which auto-wraps native tokens
+        to their wrapped ERC-20 (the form the pool contract actually holds).
+        """
+        if token.startswith("0x") and len(token) == 42:
+            return token.lower()
+        if self._token_resolver is None:
+            return None
+        try:
+            resolved = self._token_resolver.resolve_for_swap(token, chain)
         except Exception:
-            # Default: try to infer from sorted address order
-            return True
+            return None
+        address = getattr(resolved, "address", None)
+        return address.lower() if address else None
 
     def _rpc_call_for_pool(self, pool_address: str, chain: str, protocol: str | None) -> bytes:
         """Read token0 from pool contract."""
