@@ -117,8 +117,6 @@ class WebhookChannel:
                         elif resp.status == 429 and attempt < self.max_retries:
                             delay = self.base_delay * (2**attempt)
                             logger.warning(f"Webhook rate limited, retrying in {delay}s")
-                            import asyncio
-
                             await asyncio.sleep(delay)
                             continue
                         else:
@@ -131,8 +129,6 @@ class WebhookChannel:
                 if attempt < self.max_retries:
                     delay = self.base_delay * (2**attempt)
                     logger.warning(f"Webhook send failed ({e}), retrying in {delay}s")
-                    import asyncio
-
                     await asyncio.sleep(delay)
                 else:
                     return WebhookSendResult(success=False, error=str(e))
