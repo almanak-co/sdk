@@ -12,6 +12,7 @@ import json
 import logging
 import time
 import uuid
+from collections.abc import Callable
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -75,6 +76,29 @@ def _canonicalize_chain_args(arguments: dict) -> dict:
             if canonical != value:
                 updates[key] = canonical
     return {**arguments, **updates} if updates else arguments
+
+
+def _str_field(obj: Any, attr: str, fallback: Any = "") -> Any:
+    """str(obj.attr) if obj is truthy and the attr is not None, else fallback."""
+    if not obj:
+        return fallback
+    value = getattr(obj, attr)
+    return str(value) if value is not None else fallback
+
+
+def _raw_field(obj: Any, attr: str, fallback: Any = None) -> Any:
+    """obj.attr if obj is truthy, else fallback (no str() coercion)."""
+    return getattr(obj, attr) if obj else fallback
+
+
+def _lending_amount(args: dict) -> str:
+    """Requested amount, blanking the ``all`` sentinel.
+
+    amount="all" is a sentinel, not a numeric value — don't leak it into a
+    field downstream consumers will parse as a number.
+    """
+    requested = str(args.get("amount", ""))
+    return "" if requested.lower() == "all" else requested
 
 
 # Default protocol fallbacks for agent tools whose ``protocol`` request field
@@ -1589,6 +1613,106 @@ class ToolExecutor:
 
         raise ToolValidationError(f"Unknown action tool: {tool_name}", tool_name=tool_name)
 
+    # ── ACTION RESPONSE BUILDERS (enriched) ─────────────────────────────
+
+    def _swap_response_from_enriched(self, base: dict, enriched: Any, args: dict) -> dict:
+        """swap_tokens response from enriched swap amounts."""
+        swap = enriched.swap_amounts
+        return {
+            **base,
+            "amount_in": _str_field(swap, "amount_in_decimal", args.get("amount", "")),
+            "amount_out": _str_field(swap, "amount_out_decimal"),
+            "effective_price": _str_field(swap, "effective_price"),
+            "price_impact": "",
+            "slippage_bps": _raw_field(swap, "slippage_bps"),
+            "token_in": _raw_field(swap, "token_in", args.get("token_in", "")),
+            "token_out": _raw_field(swap, "token_out", args.get("token_out", "")),
+        }
+
+    def _open_lp_response_from_enriched(self, base: dict, enriched: Any, args: dict) -> dict:
+        """open_lp_position response from enriched position data."""
+        return {
+            **base,
+            "position_id": enriched.position_id,
+            "liquidity": enriched.extracted_data.get("liquidity", ""),
+            "tick_lower": enriched.extracted_data.get("tick_lower", 0),
+            "tick_upper": enriched.extracted_data.get("tick_upper", 0),
+        }
+
+    def _close_lp_response_from_enriched(self, base: dict, enriched: Any, args: dict) -> dict:
+        """close_lp_position response from enriched LP close data."""
+        lp_data = enriched.lp_close_data
+        return {
+            **base,
+            "token_a_received": _str_field(lp_data, "amount0_collected"),
+            "token_b_received": _str_field(lp_data, "amount1_collected"),
+            "fees_collected_a": _str_field(lp_data, "fees0"),
+            "fees_collected_b": _str_field(lp_data, "fees1"),
+        }
+
+    def _supply_response(self, base: dict, enriched: Any, args: dict) -> dict:
+        """supply_lending response (args-only; no enrichment fields)."""
+        return {**base, "amount_supplied": args.get("amount", "")}
+
+    def _borrow_response(self, base: dict, enriched: Any, args: dict) -> dict:
+        """borrow_lending response (args-only; no enrichment fields)."""
+        return {**base, "amount_borrowed": args.get("amount", "")}
+
+    def _repay_response(self, base: dict, enriched: Any, args: dict) -> dict:
+        """repay_lending response (args-only; no enrichment fields)."""
+        return {**base, "amount_repaid": _lending_amount(args)}
+
+    def _withdraw_response(self, base: dict, enriched: Any, args: dict) -> dict:
+        """withdraw_lending response (args-only; no enrichment fields)."""
+        return {**base, "amount_withdrawn": _lending_amount(args)}
+
+    def _bridge_response_from_enriched(self, base: dict, enriched: Any, args: dict) -> dict:
+        """bridge_tokens response from enriched bridge metadata."""
+        metadata = enriched.extracted_data or {}
+        return {
+            **base,
+            "amount_bridged": str(metadata.get("amount", args.get("amount", ""))),
+            "from_chain": metadata.get("from_chain", args.get("from_chain", "")),
+            "to_chain": metadata.get("to_chain", args.get("to_chain", "")),
+            "bridge_used": metadata.get("bridge", args.get("preferred_bridge", "")),
+            "estimated_arrival_seconds": metadata.get("estimated_time"),
+            "gas_usd": "",
+        }
+
+    def _wrap_response_from_enriched(self, base: dict, enriched: Any, args: dict) -> dict:
+        """wrap_native response from enriched wrap metadata."""
+        metadata = enriched.extracted_data or {}
+        return {
+            **base,
+            "amount_wrapped": str(metadata.get("amount_wrapped", args.get("amount", ""))),
+            "token": metadata.get("token", args.get("token", "")),
+            "chain": metadata.get("chain", args.get("chain", self._default_chain)),
+        }
+
+    def _unwrap_response(self, base: dict, enriched: Any, args: dict) -> dict:
+        """unwrap_native response (args-only; no enrichment fields)."""
+        return {
+            **base,
+            "amount_unwrapped": args.get("amount", ""),
+            "token": args.get("token", ""),
+            "chain": args.get("chain", self._default_chain),
+        }
+
+    # Values are plain functions (not bound methods) — the dispatcher passes
+    # ``self`` explicitly. Must appear after the builder defs in the class body.
+    _ENRICHED_RESPONSE_BUILDERS: ClassVar[dict[str, Callable[..., dict]]] = {
+        "swap_tokens": _swap_response_from_enriched,
+        "open_lp_position": _open_lp_response_from_enriched,
+        "close_lp_position": _close_lp_response_from_enriched,
+        "supply_lending": _supply_response,
+        "borrow_lending": _borrow_response,
+        "repay_lending": _repay_response,
+        "withdraw_lending": _withdraw_response,
+        "bridge_tokens": _bridge_response_from_enriched,
+        "wrap_native": _wrap_response_from_enriched,
+        "unwrap_native": _unwrap_response,
+    }
+
     def _build_action_response_from_enriched(self, tool_name: str, enriched: Any, args: dict) -> dict:
         """Build tool-specific response data from EnrichedExecutionResult.
 
@@ -1596,94 +1720,11 @@ class ToolExecutor:
         It uses data extracted by ResultEnricher (via IntentExecutionService)
         to populate response fields that were previously empty strings.
         """
-        tx_hash = enriched.tx_hash
-        base = {"tx_hash": tx_hash, "gas_usd": ""}
-
-        if tool_name == "swap_tokens":
-            swap = enriched.swap_amounts
-            return {
-                **base,
-                "amount_in": str(swap.amount_in_decimal)
-                if swap and swap.amount_in_decimal is not None
-                else args.get("amount", ""),
-                "amount_out": str(swap.amount_out_decimal) if swap and swap.amount_out_decimal is not None else "",
-                "effective_price": str(swap.effective_price) if swap and swap.effective_price is not None else "",
-                "price_impact": "",
-                "slippage_bps": swap.slippage_bps if swap and swap.slippage_bps is not None else None,
-                "token_in": swap.token_in if swap else args.get("token_in", ""),
-                "token_out": swap.token_out if swap else args.get("token_out", ""),
-            }
-
-        if tool_name == "open_lp_position":
-            position_id = enriched.position_id
-            liquidity = enriched.extracted_data.get("liquidity", "")
-            tick_lower = enriched.extracted_data.get("tick_lower", 0)
-            tick_upper = enriched.extracted_data.get("tick_upper", 0)
-            return {
-                **base,
-                "position_id": position_id,
-                "liquidity": liquidity,
-                "tick_lower": tick_lower,
-                "tick_upper": tick_upper,
-            }
-
-        if tool_name == "close_lp_position":
-            lp_data = enriched.lp_close_data
-            return {
-                **base,
-                "token_a_received": str(lp_data.amount0_collected)
-                if lp_data and lp_data.amount0_collected is not None
-                else "",
-                "token_b_received": str(lp_data.amount1_collected)
-                if lp_data and lp_data.amount1_collected is not None
-                else "",
-                "fees_collected_a": str(lp_data.fees0) if lp_data and lp_data.fees0 is not None else "",
-                "fees_collected_b": str(lp_data.fees1) if lp_data and lp_data.fees1 is not None else "",
-            }
-
-        if tool_name == "supply_lending":
-            return {**base, "amount_supplied": args.get("amount", "")}
-        if tool_name == "borrow_lending":
-            return {**base, "amount_borrowed": args.get("amount", "")}
-        if tool_name == "repay_lending":
-            requested = str(args.get("amount", ""))
-            # amount="all" is a sentinel, not a numeric value — don't leak it
-            # into a field downstream consumers will parse as a number.
-            return {**base, "amount_repaid": "" if requested.lower() == "all" else requested}
-        if tool_name == "withdraw_lending":
-            requested = str(args.get("amount", ""))
-            return {**base, "amount_withdrawn": "" if requested.lower() == "all" else requested}
-
-        if tool_name == "bridge_tokens":
-            metadata = enriched.extracted_data or {}
-            return {
-                **base,
-                "amount_bridged": str(metadata.get("amount", args.get("amount", ""))),
-                "from_chain": metadata.get("from_chain", args.get("from_chain", "")),
-                "to_chain": metadata.get("to_chain", args.get("to_chain", "")),
-                "bridge_used": metadata.get("bridge", args.get("preferred_bridge", "")),
-                "estimated_arrival_seconds": metadata.get("estimated_time"),
-                "gas_usd": "",
-            }
-
-        if tool_name == "wrap_native":
-            metadata = enriched.extracted_data or {}
-            return {
-                **base,
-                "amount_wrapped": str(metadata.get("amount_wrapped", args.get("amount", ""))),
-                "token": metadata.get("token", args.get("token", "")),
-                "chain": metadata.get("chain", args.get("chain", self._default_chain)),
-            }
-
-        if tool_name == "unwrap_native":
-            return {
-                **base,
-                "amount_unwrapped": args.get("amount", ""),
-                "token": args.get("token", ""),
-                "chain": args.get("chain", self._default_chain),
-            }
-
-        return base
+        base = {"tx_hash": enriched.tx_hash, "gas_usd": ""}
+        builder = self._ENRICHED_RESPONSE_BUILDERS.get(tool_name)
+        if builder is None:
+            return base
+        return builder(self, base, enriched, args)
 
     def _on_sadflow_event(self, event: Any) -> None:
         """Handle sadflow events from IntentExecutionService.
