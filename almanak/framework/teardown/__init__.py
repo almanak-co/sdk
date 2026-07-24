@@ -48,6 +48,7 @@ from almanak.framework.teardown.lending_unwind import (
     hf_safe_withdraw_slice_usd,
 )
 from almanak.framework.teardown.models import (
+    LARGE_POSITION_WARNING_THRESHOLD_USD,
     TARGET_TOKEN_CHAIN_DEFAULT,
     ApprovalRequest,
     ApprovalResponse,
@@ -110,6 +111,9 @@ __all__ = [
     "ApprovalResponse",
     # Sentinel: "operator expressed no target-token preference" (VIB-5727)
     "TARGET_TOKEN_CHAIN_DEFAULT",
+    # Shared preview threshold — keeps TeardownManager.preview and the
+    # dashboard API preview warning at the same "large position" value
+    "LARGE_POSITION_WARNING_THRESHOLD_USD",
     # Functions
     "calculate_max_acceptable_loss",
     "full_close_intents",

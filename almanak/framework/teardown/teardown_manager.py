@@ -42,6 +42,7 @@ from almanak.framework.teardown.config import TeardownConfig
 from almanak.framework.teardown.decision_log import TeardownDecisionPhase, log_teardown_decision
 from almanak.framework.teardown.error_taxonomy import Disposition, classify_teardown_failure
 from almanak.framework.teardown.models import (
+    LARGE_POSITION_WARNING_THRESHOLD_USD,
     ApprovalRequest,
     ApprovalResponse,
     ClosureVerification,
@@ -3109,7 +3110,7 @@ class TeardownManager:
                 "Consider graceful mode for lower costs."
             )
 
-        if positions.total_value_usd > Decimal("500000"):
+        if positions.total_value_usd > LARGE_POSITION_WARNING_THRESHOLD_USD:
             warnings.append("Large position value. Extra care will be taken to minimize slippage.")
 
         if len(positions.chains_involved) > 1:
@@ -3145,6 +3146,10 @@ class TeardownManager:
                 return "Repay borrowed amount"
             elif intent_type == "WITHDRAW":
                 return "Withdraw collateral"
+            elif intent_type == "VAULT_REDEEM":
+                return "Redeem vault shares"
+            elif intent_type == "UNSTAKE":
+                return "Unstake staked tokens"
             elif intent_type == "SWAP":
                 return "Swap to target token"
             else:

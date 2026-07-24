@@ -5,7 +5,11 @@ The method reads only its arguments, so the manager seam is
 ``test_target_token_resolution.py``) — no runner, gateway, or compiler wiring.
 
 Covers every warning branch: liquidation risk, emergency-mode-without-risk,
-large position value, and multi-chain teardown.
+large position value, and multi-chain teardown. Also asserts parity with the
+dashboard API preview (``almanak/framework/api/teardown.py``): both surfaces
+render the same teardown to the operator, so the "large position" warning must
+fire at the same total value (``LARGE_POSITION_WARNING_THRESHOLD_USD``) —
+pre-PR #3401 the API warned above $100K while the manager warned above $500K.
 """
 
 from __future__ import annotations
@@ -13,13 +17,17 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 
+from almanak.framework.api.teardown import _generate_warnings as api_generate_warnings
 from almanak.framework.teardown.models import (
+    LARGE_POSITION_WARNING_THRESHOLD_USD,
     PositionInfo,
     PositionType,
     TeardownMode,
     TeardownPositionSummary,
 )
 from almanak.framework.teardown.teardown_manager import TeardownManager
+
+LARGE_POSITION_WARNING = "Large position value. Extra care will be taken to minimize slippage."
 
 
 def _manager() -> TeardownManager:
@@ -79,15 +87,15 @@ class TestGenerateWarnings:
         assert "liquidation risk" in warnings[0]
         assert "Emergency mode selected" not in warnings[0]
 
-    def test_large_position_value_warns(self) -> None:
-        summary = _summary([_position(value_usd="600000")])
+    def test_large_position_value_warns_above_shared_threshold(self) -> None:
+        summary = _summary([_position(value_usd=str(LARGE_POSITION_WARNING_THRESHOLD_USD + 1))])
 
         warnings = _manager()._generate_warnings(summary, TeardownMode.SOFT)
 
-        assert warnings == ["Large position value. Extra care will be taken to minimize slippage."]
+        assert warnings == [LARGE_POSITION_WARNING]
 
     def test_value_at_threshold_does_not_warn(self) -> None:
-        summary = _summary([_position(value_usd="500000")])
+        summary = _summary([_position(value_usd=str(LARGE_POSITION_WARNING_THRESHOLD_USD))])
         assert _manager()._generate_warnings(summary, TeardownMode.SOFT) == []
 
     def test_multi_chain_warns_with_chain_count(self) -> None:
@@ -112,3 +120,24 @@ class TestGenerateWarnings:
         assert any("liquidation risk" in w for w in warnings)
         assert any("Large position value" in w for w in warnings)
         assert any("Multi-chain teardown across 2 chains" in w for w in warnings)
+
+
+class TestPreviewSurfaceParity:
+    def test_large_position_threshold_matches_api_preview(self) -> None:
+        """Both preview surfaces must agree on when a position is "large"."""
+        for total_value, expect_warning in [
+            (LARGE_POSITION_WARNING_THRESHOLD_USD + 1, True),
+            (LARGE_POSITION_WARNING_THRESHOLD_USD, False),
+            # The pre-alignment API threshold ($100K) must not have crept back.
+            (Decimal("150_000"), False),
+        ]:
+            manager_warns = LARGE_POSITION_WARNING in _manager()._generate_warnings(
+                _summary([_position(value_usd=str(total_value))]), TeardownMode.SOFT
+            )
+            api_warns = LARGE_POSITION_WARNING in api_generate_warnings(
+                {"total_value_usd": float(total_value)}, mode="graceful"
+            )
+            assert manager_warns == api_warns == expect_warning, (
+                f"Preview surfaces disagree at ${total_value}: "
+                f"manager={manager_warns}, api={api_warns}, expected={expect_warning}"
+            )

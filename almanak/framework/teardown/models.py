@@ -240,6 +240,16 @@ def calculate_max_acceptable_loss(position_value_usd: Decimal) -> Decimal:
         return Decimal("0.01")  # 1% for whale positions (>$2M)
 
 
+# Preview surfaces warn "Large position value..." above this total value.
+# TeardownManager._generate_warnings and the dashboard API preview
+# (almanak/framework/api/teardown.py:_generate_warnings) must BOTH use this
+# constant — the two previews describe the same teardown and may never
+# disagree. $500K is the calculate_max_acceptable_loss tier where "large
+# positions" begin (1.5% cap). Parity guard:
+# tests/unit/teardown/test_teardown_manager_generate_warnings.py.
+LARGE_POSITION_WARNING_THRESHOLD_USD = Decimal("500_000")
+
+
 @dataclass
 class TeardownPositionSummary:
     """Complete summary of positions for teardown."""

@@ -22,6 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from ..teardown import (
+    LARGE_POSITION_WARNING_THRESHOLD_USD,
     PositionInfo,
     PositionType,
     TeardownManager,
@@ -383,21 +384,35 @@ def _build_position_summary(strategy: dict[str, Any]) -> TeardownPositionSummary
     )
 
 
+# Human-readable preview text for closing each position type, keyed by
+# PositionType and emitted in close-order priority (PositionType.priority).
+# Exhaustive over the enum — tests/unit/api/test_teardown_preview_helpers.py
+# fails if a new PositionType lands without preview text, so a position type
+# can never silently disappear from the close preview.
+_STEP_DESCRIPTIONS: dict[PositionType, str] = {
+    PositionType.PERP: "Close perpetual position(s)",
+    PositionType.BORROW: "Repay borrowed amounts",
+    PositionType.SUPPLY: "Withdraw supplied collateral",
+    PositionType.VAULT: "Redeem vault share(s)",
+    PositionType.LP: "Close LP position(s) and collect fees",
+    PositionType.STAKE: "Unstake staked token(s)",
+    PositionType.PREDICTION: "Close prediction market position(s)",
+    PositionType.CEX: "Withdraw CEX holding(s)",
+    PositionType.TOKEN: "Swap all tokens to USDC",
+}
+
+
 def _generate_steps(positions: list[dict], mode: str) -> list[str]:
-    """Generate human-readable steps for teardown."""
-    steps = []
-    position_types = [p["type"] for p in positions]
+    """Generate human-readable steps for teardown, in close-order priority.
 
-    if "PERP" in position_types:
-        steps.append("Close perpetual position(s)")
-    if "BORROW" in position_types:
-        steps.append("Repay borrowed amounts")
-    if "SUPPLY" in position_types:
-        steps.append("Withdraw supplied collateral")
-    if "LP" in position_types:
-        steps.append("Close LP position(s) and collect fees")
-    steps.append("Swap all tokens to USDC")
-
+    The final consolidation swap (the TOKEN step) is always shown: token
+    consolidation runs for every teardown, whether or not the strategy
+    reports an explicit TOKEN position.
+    """
+    present = {PositionType(p["type"]) for p in positions}
+    present.discard(PositionType.TOKEN)
+    steps = [_STEP_DESCRIPTIONS[ptype] for ptype in sorted(present, key=lambda t: t.priority)]
+    steps.append(_STEP_DESCRIPTIONS[PositionType.TOKEN])
     return steps
 
 
@@ -416,7 +431,9 @@ def _generate_warnings(strategy: dict, mode: str) -> list[str]:
             "Consider graceful mode for lower costs."
         )
 
-    if total_value > 100000:
+    # Same threshold as TeardownManager._generate_warnings — the two preview
+    # surfaces describe the same teardown and must not disagree.
+    if total_value > float(LARGE_POSITION_WARNING_THRESHOLD_USD):
         warnings.append("Large position value. Extra care will be taken to minimize slippage.")
 
     return warnings
