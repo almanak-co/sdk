@@ -6,6 +6,101 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.23.0] - 2026-07-24
+
+### Added
+
+- **Teardown exit-asset policy.** A strategy whose mandate forbids terminal
+  swaps can declare `TeardownAssetPolicy.KEEP_OUTPUTS` via the new
+  `TeardownProfile.preferred_asset_policy`, suppressing the framework's
+  post-close consolidation swap into USDC. Resolution order everywhere:
+  explicit `--asset-policy` flag → strategy preference → framework default;
+  honored by platform Stop, the dashboard close API, and `strat test`. The
+  `strat test --teardown` ladder also gains a residual-position gate: measured
+  open positions above dust after teardown now fail the step instead of
+  passing silently, and `strat new` scaffolds document the policy choice.
+  (#3363)
+- **Backtests serve `pool_history`, `pool_analytics`, and
+  `funding_rate_history`.** The three market-API accessors that worked live
+  but refused in backtests are now served from the run's own data lanes —
+  completed-day pool bars, TVL/volume from the newest completed pool-day, and
+  the ascending hourly funding series — no-look-ahead, Empty ≠ Zero, with
+  deliberate refusals kept where serving would fabricate structure
+  (`liquidity_depth`, `pool_reserves`, `twap`, `best_pool`). (#3368, #3374)
+- **Backtest data-provenance manifest + broker seam.** Every run collects a
+  `RunDataManifest` with per-lane serve / refusal / degrade stamps (ohlcv,
+  price, volume, pool-history, funding), exposed on `BacktestResult` and
+  serialized results. Plus: shared process-wide per-provider rate limiting,
+  lending opens failing closed on chain-scope mismatch, address-style LP
+  pools resolved via the token registry, and a gateway hermeticity guard for
+  the unit suite. (#3365)
+
+### Changed
+
+- **Hyperliquid perp opens fail closed on non-1x leverage.** CoreWriter has
+  no set-leverage action, so a requested `leverage` was never applied
+  on-venue — positions opened at the account's per-asset default (e.g. 20x
+  cross), surfaced only as a warning. `PERP_OPEN` requesting non-1x leverage
+  is now rejected at compile time unless the strategy explicitly opts in with
+  the new `Intent.perp_open(accept_venue_leverage=True)` (default `False`);
+  the venue-observed leverage is still recorded post-fill. Venues that do set
+  leverage on-venue (GMX V2) ignore the flag. (#3354)
+- Bump almanak-code to v1.0.30 — codegen prompts require platform validation
+  before proposing venues. (#3364)
+- Dependency updates: pydantic-settings 2.14.2 (#2959), pillow 12.3.0
+  (#3352), pyasn1 0.6.4 (#3359), gitpython 3.1.52 (#3360), soupsieve 2.8.4
+  (#3248).
+
+### Fixed
+
+- **HyperCore perp positions are valued in portfolio snapshots (VIB-5768 /
+  VIB-5576).** Perp discovery now gates on the actual `PerpsReadRegistry`
+  reader set instead of the synthetic permission-discovery set, so
+  hyperliquid (statically-registered CoreWriter permissions) is scanned; a
+  live HyperCore position no longer collapses snapshots to `$0` /
+  "No active position". (#3356)
+- **Perp dashboard truth defects (VIB-5942).** NAV/PnL history now plots
+  wallet NAV (cash included) through the same shared helper as the NAV tile
+  and drawdown series; the G6 reconciliation tile and the reconciliation
+  report are labeled by scope; a snapshot-derived perp story section
+  (direction, market, entry, leverage, notional) ships via the additive
+  `PerpPositionSummary` proto; the cost stack honors Empty ≠ Zero and
+  sub-cent gas. (#3358) The perp story section is also wired into the GMX
+  demo dashboards. (#3369)
+- **Mantle swaps were unsubmittable.** The chain's gas-floor table was ~2000x
+  inflated by a stale historical premise — every real swap exceeded the block
+  gas limit at the compiler floor. Corrected to measured scale. (#3362)
+- **Backtest gas fallbacks retuned to measured reality.** Ethereum 22 → 0.21
+  gwei (~140x overstatement), Avalanche ~470x, BSC 60x, Polygon ~5x
+  understatement; and an unset `gas_fallback_gwei` now falls through to the
+  chain-aware defaults instead of a chain-blind flat 20 gwei. (#3377, #3378,
+  #3379)
+- **Backtest serve gaps and log truthfulness.** Symbol reads resolve through
+  the offline token registry on address-keyed runs; the pool-proxy warn-once
+  fires only after a successful serve; LP fill logs no longer claim
+  "executed" before portfolio acceptance; the hollow-run guard gates on
+  executed fills and distinguishes warm-up from persistent input starvation;
+  the perp open gate consults venue-specific margin floors (e.g. GMX V2 0.5%
+  vs the generic 10% default); the low-health-factor borrow warning reads as
+  the advisory it is. (#3367)
+- **`MarketSnapshot.price` honors `quote` in the seeded fast path.**
+  Backtests no longer return the USD price under a non-USD quote label; quote
+  legs resolve through seeded prices with native↔wrapped 1:1 equivalence.
+  (#3376)
+- **`MarketSnapshot.total_portfolio_usd` counts cash once.** The PnL bridge's
+  per-symbol cash mirrors (USD, USDC/USDT/DAI aliases, address keys) no
+  longer multiply into the wallet total; the live path is byte-identical.
+  (#3381)
+- **Exact-boundary `get_price_at`.** A candle stamped exactly at T is
+  returned instead of the previous interval's close — CoinGecko's
+  aligned-spacing rollout (2026-07-23) made that one-interval lag systematic
+  on every boundary-aligned tick. (#3375)
+- **Three incubating strategies read their `config.json` again.**
+  `silo_v2_lending_lifecycle_avalanche`, `euler_v2_lending_lifecycle_avalanche`,
+  and `aave_velodrome_leverage_optimism` nested parameters under a
+  `"parameters"` key that `get_config()` never reads; configs flattened to
+  the repo convention. (#3355)
+
 ## [2.22.0] - 2026-07-21
 
 ### Added
