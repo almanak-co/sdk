@@ -25,6 +25,13 @@ logger = logging.getLogger(__name__)
 
 # Event signatures (keccak256 of event signature)
 TRANSFER_EVENT_SIGNATURE = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+# LiFiTransferStarted(ILiFi.BridgeData) — emitted by every LiFi Diamond bridge
+# facet's ``_startBridge``. Its presence is the receipt-level proof that a tx
+# actually deposited into a bridge; without it, a status=1 receipt with no
+# wallet-outgoing Transfer (e.g. the bundle's ERC-20 approve tx) must never
+# yield BridgeData from the compiler-provided amount hints.
+# keccak256("LiFiTransferStarted((bytes32,string,string,address,address,address,uint256,uint256,bool,bool))")
+LIFI_TRANSFER_STARTED_TOPIC = "0xcba69f43792f9f399347222505213b55af8e0b0b54b893085c2e27ecbe1644f1"
 
 
 @dataclass
@@ -299,6 +306,11 @@ class LiFiReceiptParser:
         cross-chain — the Diamond proxy emits ERC-20 Transfers that move
         the wallet's tokens to the bridge facet. We use the first
         wallet->contract Transfer to derive ``amount_sent`` and the token.
+        Native-asset deposits (msg.value-funded, no ERC-20 Transfer) fall
+        back to the compiler-provided ``amount`` hint, but only when the
+        receipt carries the Diamond's LiFiTransferStarted event — otherwise
+        a non-deposit receipt in the bundle (the ERC-20 approve) would
+        fabricate BridgeData with the wrong source_tx_hash.
 
         Destination-chain settlement must be tracked via the LiFi status
         API — ``destination_tx_hash`` is intentionally None here.
@@ -326,8 +338,21 @@ class LiFiReceiptParser:
 
         if wallet_outgoing:
             extracted = self._extract_erc20_deposit(wallet_outgoing[0], token, source_chain)
-        else:
+        elif self._has_lifi_transfer_started(logs):
             extracted = self._extract_native_deposit(amount, token, source_chain)
+        else:
+            # A status=1 receipt with no wallet-outgoing Transfer and no
+            # LiFiTransferStarted event is not a bridge deposit — it is
+            # typically the bundle's ERC-20 approve tx (Approval-only logs).
+            # ResultEnricher scans bundle receipts first-wins and always
+            # threads the amount hint, so fabricating BridgeData here would
+            # record the approve tx hash as the bridge's source_tx_hash.
+            logger.debug(
+                "LiFi bridge_data: receipt has no wallet-outgoing Transfer and no "
+                "LiFiTransferStarted event — not a bridge deposit (tx=%s)",
+                self._normalize_tx_hash(receipt.get("transactionHash") or receipt.get("tx_hash")),
+            )
+            return None
         if extracted is None:
             return None
         amount_sent_decimal, amount_sent_raw, source_token_addr = extracted
@@ -391,11 +416,28 @@ class LiFiReceiptParser:
         amount_sent_decimal = Decimal(amount_sent_raw) / Decimal(10**decimals)
         return amount_sent_decimal, amount_sent_raw, source_token_addr
 
+    @staticmethod
+    def _has_lifi_transfer_started(logs: list[dict[str, Any]]) -> bool:
+        """True when any log's topic0 is the LiFi Diamond's LiFiTransferStarted event."""
+        for log in logs:
+            topics = log.get("topics", [])
+            if not topics:
+                continue
+            topic0 = topics[0]
+            if isinstance(topic0, bytes):
+                topic0 = "0x" + topic0.hex()
+            if topic0.lower() == LIFI_TRANSFER_STARTED_TOPIC:
+                return True
+        return False
+
     def _extract_native_deposit(
         self, amount: str | Decimal | None, token: str | None, source_chain: str
     ) -> tuple[Decimal, int, str | None] | None:
         """Native-asset bridge (msg.value-funded, no ERC-20 Transfer).
 
+        Only reached when the receipt carries a LiFiTransferStarted event —
+        the caller gates on it so a transfer-less non-deposit receipt (e.g.
+        an ERC-20 approve) can never fabricate BridgeData from the hints.
         Resolve amount from the compiler-provided quote and the native
         token's decimals via the resolver — never default to 18.
         """
@@ -683,4 +725,4 @@ def _norm_addr(value: Any) -> str:
     return str(value).lower() if value else ""
 
 
-__all__ = ["LiFiReceiptParser", "LiFiSwapResult"]
+__all__ = ["LIFI_TRANSFER_STARTED_TOPIC", "LiFiReceiptParser", "LiFiSwapResult"]

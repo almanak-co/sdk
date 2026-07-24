@@ -22,7 +22,10 @@ from almanak.connectors.across.receipt_parser import (
     V3_FUNDS_DEPOSITED_TOPIC,
     AcrossReceiptParser,
 )
-from almanak.connectors.lifi.receipt_parser import LiFiReceiptParser
+from almanak.connectors.lifi.receipt_parser import (
+    LIFI_TRANSFER_STARTED_TOPIC,
+    LiFiReceiptParser,
+)
 from almanak.connectors.stargate.adapter import STARGATE_ROUTER_ADDRESSES
 from almanak.connectors.stargate.receipt_parser import (
     OFT_SENT_TOPIC,
@@ -173,6 +176,37 @@ def _v3_funds_deposited_log(
         "topics": topics,
         "data": "0x" + data_hex,
         "logIndex": 0,
+    }
+
+
+APPROVAL_TOPIC = "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925"
+LIFI_DIAMOND = "0x1231deb6f5749ef6ce6943a275a1d3e7486f4eae"
+
+
+def _approval_log(token_address: str, owner: str, spender: str, amount: int) -> dict:
+    """ERC-20 Approval event — the only log an approve tx emits."""
+    owner_topic = "0x" + owner.lower().replace("0x", "").zfill(64)
+    spender_topic = "0x" + spender.lower().replace("0x", "").zfill(64)
+    data = "0x" + hex(amount)[2:].zfill(64)
+    return {
+        "address": token_address,
+        "topics": [APPROVAL_TOPIC, owner_topic, spender_topic],
+        "data": data,
+        "logIndex": 0,
+    }
+
+
+def _lifi_transfer_started_log(diamond: str = LIFI_DIAMOND) -> dict:
+    """LiFiTransferStarted(ILiFi.BridgeData) — emitted by every Diamond bridge facet.
+
+    The struct payload is ABI-encoded in ``data``; the parser only gates on
+    topic0, so an empty data field is sufficient for these tests.
+    """
+    return {
+        "address": diamond,
+        "topics": [LIFI_TRANSFER_STARTED_TOPIC],
+        "data": "0x",
+        "logIndex": 1,
     }
 
 
@@ -576,15 +610,18 @@ class TestLiFiReceiptParserBridgeData:
         receipt = {"status": 1, "transactionHash": "0xnosym", "logs": [transfer], "from": WALLET}
         parser = LiFiReceiptParser(chain="base")
         with caplog.at_level("WARNING"):
-            bd = parser.extract_bridge_data(
-                receipt, from_chain="base", to_chain="arbitrum", token="NOTAREALTOKEN"
-            )
+            bd = parser.extract_bridge_data(receipt, from_chain="base", to_chain="arbitrum", token="NOTAREALTOKEN")
         assert bd is None
         assert "cannot resolve token decimals" in caplog.text
 
     def test_extract_bridge_data_native_malformed_amount_returns_none(self):
         """Native path: unparseable quote amount -> None."""
-        receipt = {"status": 1, "transactionHash": "0xnative", "logs": [], "from": WALLET}
+        receipt = {
+            "status": 1,
+            "transactionHash": "0xnative",
+            "logs": [_lifi_transfer_started_log()],
+            "from": WALLET,
+        }
         parser = LiFiReceiptParser(chain="base")
         assert (
             parser.extract_bridge_data(
@@ -595,19 +632,27 @@ class TestLiFiReceiptParserBridgeData:
 
     def test_extract_bridge_data_native_nonpositive_amount_returns_none(self):
         """Native path: zero and non-finite amounts -> None."""
-        receipt = {"status": 1, "transactionHash": "0xnative", "logs": [], "from": WALLET}
+        receipt = {
+            "status": 1,
+            "transactionHash": "0xnative",
+            "logs": [_lifi_transfer_started_log()],
+            "from": WALLET,
+        }
         parser = LiFiReceiptParser(chain="base")
         for bad in (Decimal("0"), "NaN"):
             assert (
-                parser.extract_bridge_data(
-                    receipt, from_chain="base", to_chain="arbitrum", token="ETH", amount=bad
-                )
+                parser.extract_bridge_data(receipt, from_chain="base", to_chain="arbitrum", token="ETH", amount=bad)
                 is None
             )
 
     def test_extract_bridge_data_native_unresolvable_token_returns_none(self, caplog):
         """Native path: resolver failure -> warning + None (never default to 18)."""
-        receipt = {"status": 1, "transactionHash": "0xnative", "logs": [], "from": WALLET}
+        receipt = {
+            "status": 1,
+            "transactionHash": "0xnative",
+            "logs": [_lifi_transfer_started_log()],
+            "from": WALLET,
+        }
         parser = LiFiReceiptParser(chain="base")
         with caplog.at_level("WARNING"):
             bd = parser.extract_bridge_data(
@@ -651,15 +696,17 @@ class TestLiFiReceiptParserBridgeData:
     def test_extract_bridge_data_native_asset_uses_amount_fallback(self):
         """msg.value-funded native bridge has no ERC-20 Transfer.
 
-        The parser falls back to the compiler-provided ``amount`` + the
-        native token's decimals (via the resolver). ``source_token_address``
-        is None since there's no ERC-20 source token.
+        The receipt still carries the Diamond's LiFiTransferStarted event,
+        which gates the fallback. The parser then uses the compiler-provided
+        ``amount`` + the native token's decimals (via the resolver).
+        ``source_token_address`` is None since there's no ERC-20 source token.
         """
-        # Native-asset bridge: no Transfer logs, no wallet_outgoing.
+        # Native-asset bridge: no Transfer logs, no wallet_outgoing — but the
+        # Diamond's deposit event proves this tx is a bridge deposit.
         receipt = {
             "status": 1,
             "transactionHash": "0xlifi-native",
-            "logs": [],
+            "logs": [_lifi_transfer_started_log()],
             "from": WALLET,
         }
         parser = LiFiReceiptParser(chain="base")
@@ -683,11 +730,113 @@ class TestLiFiReceiptParserBridgeData:
 
     def test_extract_bridge_data_native_asset_without_amount_returns_none(self):
         """Native-asset path requires an ``amount`` hint; missing -> None."""
-        receipt = {"status": 1, "transactionHash": "0xlifi-native-2", "logs": [], "from": WALLET}
+        receipt = {
+            "status": 1,
+            "transactionHash": "0xlifi-native-2",
+            "logs": [_lifi_transfer_started_log()],
+            "from": WALLET,
+        }
+        parser = LiFiReceiptParser(chain="base")
+        assert (
+            parser.extract_bridge_data(receipt, from_chain="base", to_chain="arbitrum", token="ETH", amount=None)
+            is None
+        )
+
+    def test_extract_bridge_data_native_without_lifi_event_returns_none(self):
+        """Amount hints alone must not fabricate BridgeData.
+
+        A status=1 receipt with empty logs is not a bridge deposit even when
+        the caller provides token+amount hints — without LiFiTransferStarted
+        the native fallback must not fire.
+        """
+        receipt = {"status": 1, "transactionHash": "0xnot-a-deposit", "logs": [], "from": WALLET}
         parser = LiFiReceiptParser(chain="base")
         assert (
             parser.extract_bridge_data(
-                receipt, from_chain="base", to_chain="arbitrum", token="ETH", amount=None
+                receipt, from_chain="base", to_chain="arbitrum", token="ETH", amount=Decimal("0.5")
             )
             is None
         )
+
+    def test_extract_bridge_data_approve_receipt_never_fabricates(self):
+        """An ERC-20 approve receipt must yield None despite amount hints.
+
+        An approve tx has exactly the shape the old native fallback matched:
+        status=1, no wallet-outgoing Transfers, only an Approval event. With
+        the enricher threading token+amount hints from bundle metadata, the
+        old code fabricated BridgeData whose source_tx_hash was the APPROVE
+        tx hash. The LiFiTransferStarted gate closes that hole.
+        """
+        receipt = {
+            "status": 1,
+            "transactionHash": "0xapprove",
+            "logs": [_approval_log(USDC_BASE, WALLET, LIFI_DIAMOND, 1_000_000_000)],
+            "from": WALLET,
+        }
+        parser = LiFiReceiptParser(chain="base")
+        assert (
+            parser.extract_bridge_data(receipt, from_chain="base", to_chain="arbitrum", token="USDC", amount="1000")
+            is None
+        )
+
+    def test_extract_bridge_data_bytes_topic_lifi_event_gates_fallback(self):
+        """LiFiTransferStarted topic supplied as raw bytes still opens the gate."""
+        event = _lifi_transfer_started_log()
+        event["topics"] = [bytes.fromhex(LIFI_TRANSFER_STARTED_TOPIC[2:])]
+        receipt = {"status": 1, "transactionHash": "0xbytes", "logs": [event], "from": WALLET}
+        parser = LiFiReceiptParser(chain="base")
+        bd = parser.extract_bridge_data(
+            receipt, from_chain="base", to_chain="arbitrum", token="ETH", amount=Decimal("0.25")
+        )
+        assert bd is not None
+        assert bd.amount_sent == Decimal("0.25")
+
+    def test_enricher_lifi_bundle_approve_receipt_does_not_win(self):
+        """ERC-20 LiFi BRIDGE bundle: the approve receipt must not produce bridge_data.
+
+        ResultEnricher scans bundle receipts in order and the first receipt
+        yielding a valid value wins, and its bridge kwargs always thread the
+        ``amount`` hint from bundle metadata. Before the LiFiTransferStarted
+        gate, the approve receipt (first in the bundle) fabricated the winning
+        BridgeData with source_tx_hash="0xapprove" and no source token. The
+        deposit receipt must win instead.
+        """
+        approve_receipt = _FakeReceipt(
+            tx_hash="0xapprove",
+            status=1,
+            logs=[_approval_log(USDC_BASE, WALLET, LIFI_DIAMOND, 1_000_000_000)],
+            from_address=WALLET,
+        )
+        deposit_receipt = _FakeReceipt(
+            tx_hash="0xdeposit",
+            status=1,
+            logs=[
+                _transfer_log(USDC_BASE, WALLET, LIFI_DIAMOND, 1_000_000_000),
+                _lifi_transfer_started_log(),
+            ],
+            from_address=WALLET,
+        )
+        result = _FakeExecResult(
+            transaction_results=[
+                _FakeTxResult(tx_hash="0xapprove", receipt=approve_receipt),
+                _FakeTxResult(tx_hash="0xdeposit", receipt=deposit_receipt),
+            ]
+        )
+        intent = _FakeIntent(intent_type="BRIDGE", protocol=None)
+        context = _FakeContext(chain="base", protocol=None)
+
+        enricher = ResultEnricher(live_mode=False)
+        bundle_metadata = {
+            "from_chain": "base",
+            "to_chain": "arbitrum",
+            "token": "USDC",
+            "bridge": "LiFi",
+            "amount": "1000",
+        }
+        enriched = enricher.enrich(result, intent, context, bundle_metadata=bundle_metadata)
+
+        assert enriched.bridge_data is not None
+        assert enriched.bridge_data.source_tx_hash == "0xdeposit"
+        assert enriched.bridge_data.source_token_address == USDC_BASE.lower()
+        assert enriched.bridge_data.amount_sent == Decimal("1000")
+        assert enriched.bridge_data.amount_sent_raw == 1_000_000_000
