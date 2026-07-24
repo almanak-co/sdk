@@ -433,6 +433,17 @@ class TestCurveCrvUSDUSDCLPLifecycleOptimism:
             f"LP_CLOSE compile failed: {close_result.error}"
         )
         assert close_result.action_bundle is not None
+        close_metadata = close_result.action_bundle.metadata
+        assert close_metadata["operation"] == "remove_liquidity"
+        min_amounts_raw = close_metadata["min_amounts_raw"]
+        assert len(min_amounts_raw) == 2
+        assert all(
+            isinstance(amount, str) and int(amount) > 0 for amount in min_amounts_raw
+        )
+        assert (
+            "mirrors the pool's current reserve composition"
+            in close_metadata["close_shape_note"]
+        )
 
         # Layer 2: Execute LP_CLOSE
         close_exec = await orchestrator.execute(close_result.action_bundle)

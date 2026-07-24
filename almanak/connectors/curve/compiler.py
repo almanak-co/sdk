@@ -1356,7 +1356,11 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
             unbounded cap. StableSwap-family only.
           * coin_index (VIB-5437): withdraw the whole position into one coin
             via remove_liquidity_one_coin (min-out from calc_withdraw_one_coin).
-          * neither (default): proportional remove_liquidity — unchanged.
+          * neither (default): proportional remove_liquidity pays out each coin
+            pro rata to the pool's current reserves, protected by per-coin
+            min-out floors. A skewed pool returns a skewed per-coin mix even
+            when the original deposit was balanced. Callers that need a
+            specific exit shape set coin_index or imbalanced_amounts.
         The vocabulary validator enforces coin_index/imbalanced_amounts mutual
         exclusivity, so the branch order does not mask a conflicting request.
         """
@@ -1438,21 +1442,31 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
             transactions = liq_result.transactions
             total_gas = sum(tx.gas_estimate for tx in transactions)
 
+            metadata: dict[str, Any] = {
+                "pool_address": pool.address,
+                "pool_name": pool.name,
+                "lp_amount": str(lp_amount),
+                "lp_token": pool.data["lp_token"],
+                "protocol": "curve",
+                "operation": liq_result.operation,
+                "coin_index": intent.coin_index,
+                "imbalanced_amounts": (
+                    [str(a) for a in intent.imbalanced_amounts] if intent.imbalanced_amounts is not None else None
+                ),
+            }
+            if liq_result.operation == "remove_liquidity":
+                metadata["min_amounts_raw"] = [str(amount) for amount in (liq_result.amounts or [])]
+                metadata["close_shape_note"] = (
+                    "Proportional withdrawal mirrors the pool's current reserve "
+                    "composition; skewed reserves pay out skewed per-coin amounts "
+                    "with minimum-received floors applied. Set coin_index or "
+                    "imbalanced_amounts to request a different exit shape."
+                )
+
             action_bundle = ActionBundle(
                 intent_type=IntentType.LP_CLOSE.value,
                 transactions=[tx.to_dict() for tx in transactions],
-                metadata={
-                    "pool_address": pool.address,
-                    "pool_name": pool.name,
-                    "lp_amount": str(lp_amount),
-                    "lp_token": pool.data["lp_token"],
-                    "protocol": "curve",
-                    "operation": liq_result.operation,
-                    "coin_index": intent.coin_index,
-                    "imbalanced_amounts": (
-                        [str(a) for a in intent.imbalanced_amounts] if intent.imbalanced_amounts is not None else None
-                    ),
-                },
+                metadata=metadata,
             )
 
             result.action_bundle = action_bundle

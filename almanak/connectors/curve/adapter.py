@@ -1861,6 +1861,17 @@ class CurveAdapter:
     ) -> LiquidityResult:
         """Build a remove_liquidity transaction (LP_CLOSE, proportional).
 
+        A proportional withdrawal mirrors the pool's current reserve
+        composition: burning LP pays out each coin pro rata to the on-chain
+        reserves. A skewed pool therefore returns skewed per-coin amounts even
+        when the position was funded evenly. That output shape is expected.
+        Callers that need a specific exit shape should use
+        ``remove_liquidity_one_coin`` or ``remove_liquidity_imbalance``.
+
+        Per-coin ``min_amounts`` floors are derived from the on-chain
+        proportional estimate after applying ``slippage_bps``. The build fails
+        closed when no non-zero estimate is available.
+
         Args:
             pool_address: Pool contract address
             lp_amount: Amount of LP tokens to burn
@@ -1868,7 +1879,8 @@ class CurveAdapter:
             recipient: Address to receive tokens (default: wallet_address)
 
         Returns:
-            LiquidityResult with transaction data
+            LiquidityResult with transaction data. ``amounts`` contains the
+            per-coin minimum-received floors in native token base units.
         """
         try:
             slippage_bps = slippage_bps or self.config.default_slippage_bps

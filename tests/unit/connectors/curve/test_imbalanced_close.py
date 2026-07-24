@@ -477,6 +477,8 @@ class TestImbalancedCompiler:
         assert meta["operation"] == "remove_liquidity_imbalance"
         assert meta["imbalanced_amounts"] == ["100", "0", "0"]
         assert meta["coin_index"] is None
+        assert "close_shape_note" not in meta
+        assert "min_amounts_raw" not in meta
         tx = next(t for t in result.action_bundle.transactions if t["tx_type"] == "remove_liquidity_imbalance")
         assert tx["data"].startswith(REMOVE_LIQUIDITY_IMBALANCE_SELECTORS[3])
         # max_burn (last word) is bounded above the quote, never unbounded.

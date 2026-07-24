@@ -130,11 +130,18 @@ def _make_mock_swap_result(success: bool = True, error: str | None = None) -> Ma
     return result
 
 
-def _make_mock_liq_result(success: bool = True, error: str | None = None, op: str = "add_liquidity") -> MagicMock:
+def _make_mock_liq_result(
+    success: bool = True,
+    error: str | None = None,
+    op: str = "add_liquidity",
+    amounts: list[int] | None = None,
+) -> MagicMock:
     """Create a mock LiquidityResult."""
     result = MagicMock()
     result.success = success
     result.error = error
+    result.operation = op
+    result.amounts = amounts if amounts is not None else []
     if success:
         tx = _make_mock_tx(f"Curve {op}", 250_000)
         result.transactions = [tx]
@@ -766,6 +773,73 @@ class TestCurveLPClose:
             lp_amount=Decimal("100.5"),
             slippage_bps=50,
         )
+
+    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
+    @patch(CURVE_ADAPTER_CLS)
+    @patch(CURVE_CONFIG_CLS)
+    def test_lp_close_proportional_metadata_carries_shape_note(
+        self,
+        mock_config_cls,
+        mock_adapter_cls,
+        compiler,
+    ):
+        """Proportional close exposes its per-coin floors and output semantics."""
+        mock_adapter = MagicMock()
+        mock_adapter.remove_liquidity.return_value = _make_mock_liq_result(
+            success=True,
+            op="remove_liquidity",
+            amounts=[5_193_789_181_387_575_390_167, 528_468_700],
+        )
+        mock_adapter_cls.return_value = mock_adapter
+
+        intent = LPCloseIntent(
+            position_id="100.5",
+            pool="usdc_usdt",
+            protocol="curve",
+        )
+
+        result = compiler.compile(intent)
+
+        assert result.status == CompilationStatus.SUCCESS
+        metadata = result.action_bundle.metadata
+        assert metadata["operation"] == "remove_liquidity"
+        assert metadata["min_amounts_raw"] == ["5193789181387575390167", "528468700"]
+        assert "mirrors the pool's current reserve composition" in metadata["close_shape_note"]
+
+    @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
+    @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
+    @patch(CURVE_ADAPTER_CLS)
+    @patch(CURVE_CONFIG_CLS)
+    def test_lp_close_one_coin_metadata_has_no_proportional_note(
+        self,
+        mock_config_cls,
+        mock_adapter_cls,
+        compiler,
+    ):
+        """A single-coin close does not claim proportional output semantics."""
+        mock_adapter = MagicMock()
+        mock_adapter.remove_liquidity_one_coin.return_value = _make_mock_liq_result(
+            success=True,
+            op="remove_liquidity_one_coin",
+            amounts=[0, 100_000_000],
+        )
+        mock_adapter_cls.return_value = mock_adapter
+
+        intent = LPCloseIntent(
+            position_id="100.5",
+            pool="usdc_usdt",
+            protocol="curve",
+            coin_index=1,
+        )
+
+        result = compiler.compile(intent)
+
+        assert result.status == CompilationStatus.SUCCESS
+        metadata = result.action_bundle.metadata
+        assert metadata["operation"] == "remove_liquidity_one_coin"
+        assert "close_shape_note" not in metadata
+        assert "min_amounts_raw" not in metadata
 
     @patch(CURVE_POOLS_PATH, MOCK_CURVE_POOLS)
     @patch(CURVE_ADDRESSES_PATH, MOCK_CURVE_ADDRESSES)
