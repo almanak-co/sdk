@@ -336,11 +336,16 @@ omit = [
 #                154 897 covered, 32 582 missing). The backtesting CRAP cleanup added
 #                broad unit coverage across the backtesting layer. Bumped to 82
 #                → 0.62 pt buffer.
+#   2026-07-23 — CI measured 85.49% on claude/sdk-crap-score-reduction-55849e
+#                (PR #3380, run 30048358608, test_pytest / test job: 209 134 stmts,
+#                178 781 covered, 30 353 missing). The CRAP-offender sweep added
+#                branch-complete unit coverage for every non-allowlisted
+#                gate-parity offender >= 100. Bumped to 85 → 0.49 pt buffer.
 #
 # fail_under is a no-regress gate, NOT the goal — the 80% target lives in
 # docs/internal/coverage-improvement-plan.md §3. Ratchet policy (each phase increments
 # fail_under to its exit-criteria number, never decrements) is in §8 Phase 0 of the same doc.
-fail_under = 82
+fail_under = 85
 show_missing = true
 skip_empty = true
 

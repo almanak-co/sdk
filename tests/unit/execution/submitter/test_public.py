@@ -1019,3 +1019,67 @@ class TestDecodeRevertData:
         """Accepts bytes input (FailedInnerCall)."""
         result = submitter._decode_revert_data(bytes.fromhex("1425ea42"))
         assert "FailedInnerCall" in result
+
+
+class _ErrorWithData(Exception):
+    """Mimics web3's ContractLogicError: revert payload on a ``data`` attribute."""
+
+    def __init__(self, message: str, data: Any) -> None:
+        super().__init__(message)
+        self.data = data
+
+
+class TestExtractRevertDataFromError:
+    """Tests for _extract_revert_data_from_error across RPC provider formats."""
+
+    @pytest.fixture
+    def submitter(self) -> PublicMempoolSubmitter:
+        return PublicMempoolSubmitter(rpc_url="https://example.com")
+
+    def test_alchemy_style_dict_with_data(self, submitter: PublicMempoolSubmitter) -> None:
+        error = Exception({"code": 3, "data": "0xfb8f41b2", "message": "execution reverted"})
+        assert submitter._extract_revert_data_from_error(error) == "0xfb8f41b2"
+
+    def test_dict_data_without_hex_prefix_is_skipped(self, submitter: PublicMempoolSubmitter) -> None:
+        error = Exception({"code": 3, "data": "not-hex", "message": "nope"})
+        assert submitter._extract_revert_data_from_error(error) is None
+
+    def test_dict_data_non_string_is_skipped(self, submitter: PublicMempoolSubmitter) -> None:
+        error = Exception({"code": 3, "data": {"nested": True}, "message": "nope"})
+        assert submitter._extract_revert_data_from_error(error) is None
+
+    def test_nested_error_dict_with_data(self, submitter: PublicMempoolSubmitter) -> None:
+        error = Exception({"error": {"code": 3, "data": "0x1425ea42"}})
+        assert submitter._extract_revert_data_from_error(error) == "0x1425ea42"
+
+    def test_nested_error_dict_without_hex_is_skipped(self, submitter: PublicMempoolSubmitter) -> None:
+        error = Exception({"error": {"code": 3, "data": "garbage"}})
+        assert submitter._extract_revert_data_from_error(error) is None
+
+    def test_contract_logic_error_string_data(self, submitter: PublicMempoolSubmitter) -> None:
+        error = _ErrorWithData("execution reverted", "0x118cdaa7")
+        assert submitter._extract_revert_data_from_error(error) == "0x118cdaa7"
+
+    def test_contract_logic_error_unprefixed_string_data(self, submitter: PublicMempoolSubmitter) -> None:
+        error = _ErrorWithData("execution reverted", "118cdaa7")
+        assert submitter._extract_revert_data_from_error(error) == "0x118cdaa7"
+
+    def test_contract_logic_error_bytes_data(self, submitter: PublicMempoolSubmitter) -> None:
+        error = _ErrorWithData("execution reverted", bytes.fromhex("1425ea42"))
+        assert submitter._extract_revert_data_from_error(error) == "0x1425ea42"
+
+    def test_non_string_data_attribute_falls_through(self, submitter: PublicMempoolSubmitter) -> None:
+        error = _ErrorWithData("plain revert without payload", {"weird": "shape"})
+        assert submitter._extract_revert_data_from_error(error) is None
+
+    def test_hex_in_error_message(self, submitter: PublicMempoolSubmitter) -> None:
+        error = Exception("execution reverted: 0xec442f05aabbccdd")
+        assert submitter._extract_revert_data_from_error(error) == "0xec442f05aabbccdd"
+
+    def test_short_hex_in_message_is_rejected(self, submitter: PublicMempoolSubmitter) -> None:
+        # Shorter than a 4-byte selector (10 chars with 0x) — not revert data.
+        error = Exception("failed at block 0x1234")
+        assert submitter._extract_revert_data_from_error(error) is None
+
+    def test_plain_error_returns_none(self, submitter: PublicMempoolSubmitter) -> None:
+        assert submitter._extract_revert_data_from_error(Exception("nonce too low")) is None
