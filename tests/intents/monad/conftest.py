@@ -1,7 +1,18 @@
 """Fixtures for Monad intent tests.
 
 Uses gateway's Anvil fixtures to avoid duplicate fork instances. Mirrors the
-Base conftest pattern — see tests/intents/base/conftest.py for the reference.
+Base conftest pattern (the reference default-on-Zodiac conftest) — see
+``tests/intents/base/conftest.py``.
+
+Default-on Zodiac (Phase G, VIB-5967): every intent test runs through Safe +
+Roles + ``execTransactionWithRole`` by default. The ``funded_wallet`` and
+``orchestrator`` fixtures below substitute the Safe address and a
+``ZodiacOrchestrator`` respectively, so the same test body runs unchanged
+through the Safe path. Tests that carry ``@pytest.mark.no_zodiac(reason="...")``
+opt out and retain the original EOA behaviour (standard ``ExecutionOrchestrator``
+signing for ``TEST_WALLET``). The canonical Safe v1.4.1 + Zodiac Roles v2 stack
+is deployed at the standard CREATE2 addresses on Monad mainnet (verified via
+``eth_getCode`` against ``https://rpc.monad.xyz``, 2026-07-24).
 
 Monad-specific notes:
 - Native token is MON; WMON is the wrapped-native ERC20 (WETH9-style).
@@ -18,6 +29,7 @@ from almanak.framework.execution.signer import LocalKeySigner
 from almanak.framework.execution.simulator import DirectSimulator
 from almanak.framework.execution.submitter import PublicMempoolSubmitter
 from tests.conftest_gateway import AnvilFixture
+from tests.intents._permission_onchain_harness import ZodiacOrchestrator
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     TEST_PRIVATE_KEY,
@@ -25,12 +37,14 @@ from tests.intents.conftest import (
     TEST_TX_TIMEOUT_SECONDS,
     TEST_WALLET,
     TEST_WEB3_REQUEST_TIMEOUT,
+    ZodiacContext,
     _retry_rpc_call,
     _wrap_native_token,
     fund_erc20_token,
     fund_native_token,
     get_token_decimals,
     make_intent_test_web3,
+    reset_fork_to_pristine,
     seed_wallet_state_with_recovery,
 )
 
@@ -104,8 +118,19 @@ def test_private_key() -> str:
 
 
 @pytest.fixture(scope="module")
-def funded_wallet(web3: Web3, anvil_rpc_url: str, anvil_instance: AnvilFixture) -> str:
-    """Fund the test wallet with native MON, WMON (wrap), and ERC20s (storage)."""
+def _eoa_funded_wallet(web3: Web3, anvil_rpc_url: str, anvil_instance: AnvilFixture) -> str:
+    """Module-scoped EOA funding (original ``funded_wallet`` behaviour).
+
+    Kept private so the function-scoped ``funded_wallet`` below can delegate to
+    it for ``no_zodiac``-marked tests without duplicating the module-scoped
+    seeding work. For default-on Zodiac tests, ``funded_wallet`` returns the
+    Safe address instead and this fixture's side effect (seeding the EOA)
+    still pays the member EOA's gas for signing ``execTransactionWithRole``.
+
+    Reverts the fork to session pristine state first so each test module gets a
+    clean slate independent of prior modules on the same chain (VIB-3059).
+    """
+    reset_fork_to_pristine(web3)
     return seed_wallet_state_with_recovery(
         seed_wallet_state=_seed_wallet_state,
         web3=web3,
@@ -113,6 +138,31 @@ def funded_wallet(web3: Web3, anvil_rpc_url: str, anvil_instance: AnvilFixture) 
         anvil_instance=anvil_instance,
         chain_name=CHAIN_NAME,
     )
+
+
+@pytest.fixture
+def funded_wallet(
+    _eoa_funded_wallet: str,
+    zodiac_safe: ZodiacContext | None,
+) -> str:
+    """Return the wallet tests should treat as the token holder.
+
+    Default-on Zodiac: returns the per-test Safe address from ``zodiac_safe``
+    (seeded with the same CHAIN_CONFIGS balances the EOA path receives). With
+    ``@pytest.mark.no_zodiac`` set, ``zodiac_safe`` is ``None`` and this returns
+    the EOA (``TEST_WALLET``).
+
+    Tests that use ``funded_wallet`` as an *EOA signer* outside the
+    orchestrator (raw ``web3.eth.send_transaction({"from": funded_wallet})``)
+    only work under ``no_zodiac`` — the Safe cannot produce raw signatures on
+    arbitrary calls. Default-on tests must route through
+    ``orchestrator.execute(...)`` so this surfaces naturally rather than
+    silently.
+    """
+    if zodiac_safe is not None:
+        _ = _eoa_funded_wallet  # ensure EOA gas funding ran
+        return zodiac_safe.safe_address
+    return _eoa_funded_wallet
 
 
 @pytest.fixture(scope="module")
@@ -127,8 +177,38 @@ def reseed_wallet_state(anvil_instance: AnvilFixture):
 
 
 @pytest.fixture
-def orchestrator(test_private_key: str, anvil_rpc_url: str) -> ExecutionOrchestrator:
-    """Create ExecutionOrchestrator for testing."""
+def orchestrator(
+    test_private_key: str,
+    anvil_rpc_url: str,
+    web3: Web3,
+    zodiac_safe: ZodiacContext | None,
+    _zodiac_intent_recorder: list,
+):
+    """Create the execution orchestrator for this test.
+
+    Returns a ``ZodiacOrchestrator`` by default — every intent test routes
+    through Safe + Roles + ``execTransactionWithRole`` unless it carries
+    ``@pytest.mark.no_zodiac(reason="...")``. The manifest is derived at
+    execute-time from the intents the test compiles (recorded via
+    ``_zodiac_intent_recorder``) and applied to Roles incrementally, so
+    multi-step tests (open-then-close, supply-then-withdraw) extend the
+    authorisation scope as they go. For ``no_zodiac``-marked tests: returns
+    the standard ``ExecutionOrchestrator``.
+    """
+    if zodiac_safe is not None:
+        return ZodiacOrchestrator(
+            web3=web3,
+            roles_address=zodiac_safe.roles_address,
+            role_key=zodiac_safe.role_key,
+            member_eoa=zodiac_safe.member_eoa,
+            member_private_key=zodiac_safe.member_private_key,
+            chain=CHAIN_NAME,
+            rpc_url=anvil_rpc_url,
+            safe_address=zodiac_safe.safe_address,
+            owner_eoa=zodiac_safe.owner_eoa,
+            owner_private_key=zodiac_safe.owner_private_key,
+            recorded_intents=_zodiac_intent_recorder,
+        )
     signer = LocalKeySigner(private_key=test_private_key)
     submitter = PublicMempoolSubmitter(
         rpc_url=anvil_rpc_url,

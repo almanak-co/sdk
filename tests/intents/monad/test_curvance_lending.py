@@ -62,6 +62,8 @@ from tests.intents.conftest import (
 CHAIN_NAME = "monad"
 CURVANCE_MARKET_NAME = "WMON-USDC"
 
+pytestmark = pytest.mark.no_zodiac(reason="curvance connector not in manifest matrix")
+
 
 def _select_market_id(chain: str, market_name: str) -> str:
     for info in CURVANCE_MARKETS.get(chain, {}).values():

@@ -462,6 +462,7 @@ _CHAIN_ID_TO_MULTISEND_KEY: dict[int, str] = {
     56: "bsc",
     100: "gnosis",
     137: "polygon",
+    143: "monad",
     196: "xlayer",
     4663: "robinhood",
     5000: "mantle",
@@ -471,9 +472,31 @@ _CHAIN_ID_TO_MULTISEND_KEY: dict[int, str] = {
     59144: "linea",
 }
 
+# Chains where the canonical Safe v1.4.1 CREATE2 stack (including MultiSend at
+# the safe-global/safe-deployments address) is verified deployed on mainnet,
+# but the chain descriptor does not yet declare
+# ``contracts=safe_stack_contracts()`` — so ``MULTISEND_ADDRESSES`` has no key
+# for them. Monad verified 2026-07-24 via ``eth_getCode`` against
+# ``https://rpc.monad.xyz``: all five Safe/Zodiac addresses return canonical
+# bytecode (VIB-5967). Test-only fallback; remove the entry once the chain's
+# descriptor declares the Safe stack (a framework change with its own review —
+# it enables the production Safe-wallet path for the chain, cf. robinhood's
+# VIB-5708).
+_CANONICAL_MULTISEND_FALLBACK_CHAINS: frozenset[str] = frozenset({"monad"})
+
 
 def _multisend_for_chain_id(chain_id: int) -> str:
     key = _CHAIN_ID_TO_MULTISEND_KEY.get(chain_id)
     if key is None:
         raise ValueError(f"No MultiSend mapping for chain_id={chain_id}")
-    return MULTISEND_ADDRESSES[key]
+    if key in MULTISEND_ADDRESSES:
+        return MULTISEND_ADDRESSES[key]
+    if key in _CANONICAL_MULTISEND_FALLBACK_CHAINS:
+        from almanak.core.chains._contracts import SAFE_STACK_CONTRACTS
+
+        return SAFE_STACK_CONTRACTS["safe_multisend"]
+    raise ValueError(
+        f"Chain '{key}' (chain_id={chain_id}) has no MultiSend address: not in "
+        f"MULTISEND_ADDRESSES (descriptor doesn't declare the Safe stack) and "
+        f"not in the verified canonical-fallback set."
+    )
