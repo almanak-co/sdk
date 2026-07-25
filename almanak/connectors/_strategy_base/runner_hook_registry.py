@@ -82,6 +82,7 @@ class AsyncSettlementVerdict:
     status: AsyncSettlementStatus
     terminal: bool
     orders: tuple[dict[str, Any], ...] = ()
+    receipts: tuple[dict[str, Any], ...] = ()
     reason: str | None = None
     # Connector-private evidence carried between polls by the barrier. It is
     # deliberately excluded from equality/repr/serialization: callers consume

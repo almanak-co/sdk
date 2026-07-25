@@ -75,6 +75,7 @@ class GmxAnvilOrderExecutionResult:
     ok: bool
     executed_order_keys: tuple[str, ...] = ()
     transaction_hashes: tuple[str, ...] = ()
+    execution_receipts: tuple[dict[str, Any], ...] = ()
     reason: str | None = None
 
 
@@ -436,9 +437,9 @@ def _execute_order(
     dependencies: _GmxDependencies,
     keeper: str,
     order_key: str,
-) -> str:
+) -> tuple[str, dict[str, Any]]:
     key = bytes.fromhex(_normalize_order_key(order_key).removeprefix("0x"))
-    return _send_transaction(
+    tx_hash = _send_transaction(
         provider,
         keeper,
         dependencies.order_handler,
@@ -448,6 +449,10 @@ def _execute_order(
             [key, ([], [], [])],
         ),
     )
+    receipt = _rpc(provider, "eth_getTransactionReceipt", [tx_hash])
+    if not isinstance(receipt, dict):
+        raise GmxAnvilOrderExecutionError(f"GMX executeOrder receipt was not a JSON-RPC object: {tx_hash}")
+    return tx_hash, dict(receipt)
 
 
 def _prepare_execution_request(
@@ -539,6 +544,7 @@ def execute_pending_orders_on_anvil(
         keeper = _find_order_keeper(provider, dependencies.role_store)
 
         transaction_hashes: list[str] = []
+        execution_receipts: list[dict[str, Any]] = []
         with _impersonated(provider, dependencies.order_handler), _impersonated(provider, keeper):
             for key in executable_keys:
                 oracle_state_owned = False
@@ -559,7 +565,9 @@ def execute_pending_orders_on_anvil(
                             markets=(market_by_key[key],),
                         )
                     )
-                    transaction_hashes.append(_execute_order(provider, dependencies, keeper, key))
+                    execute_hash, execute_receipt = _execute_order(provider, dependencies, keeper, key)
+                    transaction_hashes.append(execute_hash)
+                    execution_receipts.append(execute_receipt)
                 finally:
                     if oracle_state_owned and _oracle_price_count(provider, dependencies) != 0:
                         transaction_hashes.append(_clear_oracle_prices(provider, dependencies))
@@ -574,6 +582,7 @@ def execute_pending_orders_on_anvil(
             ok=True,
             executed_order_keys=executable_keys,
             transaction_hashes=tuple(transaction_hashes),
+            execution_receipts=tuple(execution_receipts),
         )
     except Exception as exc:
         logger.warning("GMX managed-Anvil order execution failed: %s", exc, exc_info=True)

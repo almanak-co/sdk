@@ -1168,6 +1168,19 @@ def test_successful_receipt_block_explicit_false_success_is_dropped():
     assert _last_receipt_block(result) is None
 
 
+def test_terminal_settlement_receipt_extends_execution_block_bracket():
+    """Async keeper settlement is the post-state anchor, not order submission."""
+    from almanak.framework.runner.strategy_runner import _first_receipt_block, _last_receipt_block
+
+    result = SimpleNamespace(
+        transaction_results=[{"success": True, "receipt": {"blockNumber": 100}}],
+        settlement_receipts=[{"status": "0x1", "blockNumber": "0x69"}],
+    )
+
+    assert _first_receipt_block(result) == 100
+    assert _last_receipt_block(result) == 105
+
+
 # ---------------------------------------------------------------------------
 # VIB-5121 (CodeRabbit Major #1) — _capture_native_lp_amounts_for_result is the
 # shared open+close capture used by BOTH the clean-success path AND the

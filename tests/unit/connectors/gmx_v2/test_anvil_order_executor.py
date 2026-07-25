@@ -83,6 +83,8 @@ def test_executor_rejects_malformed_or_zero_order_keys() -> None:
 def test_executor_seeds_and_cleans_oracle_state_per_exact_order() -> None:
     provider = MagicMock()
     seed_hashes = (("0xseed-a",), ("0xseed-b",))
+    receipt_a = {"transactionHash": "0xexecute-a", "status": "0x1", "logs": []}
+    receipt_b = {"transactionHash": "0xexecute-b", "status": "0x1", "logs": []}
     with (
         patch(
             "almanak.connectors.gmx_v2.anvil_order_executor.read_pending_orders",
@@ -103,7 +105,7 @@ def test_executor_seeds_and_cleans_oracle_state_per_exact_order() -> None:
         ) as seed,
         patch(
             "almanak.connectors.gmx_v2.anvil_order_executor._execute_order",
-            side_effect=("0xexecute-a", "0xexecute-b"),
+            side_effect=(("0xexecute-a", receipt_a), ("0xexecute-b", receipt_b)),
         ) as execute,
         patch("almanak.connectors.gmx_v2.anvil_order_executor._clear_oracle_prices") as clear,
     ):
@@ -118,6 +120,7 @@ def test_executor_seeds_and_cleans_oracle_state_per_exact_order() -> None:
     assert result.ok is True
     assert result.executed_order_keys == (_KEY_A, _KEY_B)
     assert result.transaction_hashes == ("0xseed-a", "0xexecute-a", "0xseed-b", "0xexecute-b")
+    assert result.execution_receipts == (receipt_a, receipt_b)
     assert seed.call_args_list[0].kwargs["markets"] == (_MARKET_A,)
     assert seed.call_args_list[1].kwargs["markets"] == (_MARKET_B,)
     assert execute.call_args_list == [

@@ -46,3 +46,17 @@ def test_position_id_result_crash_is_error(parser: GMXv2ReceiptParser) -> None:
     out = parser.extract_position_id_result({"logs": []})
     assert isinstance(out, ExtractError)
     assert "gmx parse failure" in out.error
+
+
+def test_collateral_returned_result_empty_is_missing(parser: GMXv2ReceiptParser) -> None:
+    assert isinstance(parser.extract_collateral_returned_result({"logs": []}), ExtractMissing)
+
+
+def test_collateral_returned_result_crash_is_error(parser: GMXv2ReceiptParser) -> None:
+    def boom(_receipt: dict[str, Any]) -> Any:
+        raise RuntimeError("gmx close parse failure")
+
+    parser.extract_collateral_returned = boom  # type: ignore[method-assign]
+    out = parser.extract_collateral_returned_result({"logs": []})
+    assert isinstance(out, ExtractError)
+    assert "gmx close parse failure" in out.error

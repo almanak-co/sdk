@@ -200,6 +200,29 @@ class TestResultEnricherBasics:
         assert "HOLD" in enricher.EXTRACTION_SPECS
         assert enricher.EXTRACTION_SPECS["HOLD"] == []
 
+    def test_additional_receipt_normalizes_hex_rpc_numeric_fields(self):
+        receipt = {
+            "transactionHash": "0xkeeper",
+            "status": "0x1",
+            "blockNumber": "0x10",
+            "gasUsed": "0x5208",
+            "effectiveGasPrice": "0x2",
+            "logs": [],
+        }
+
+        collected = ResultEnricher._collect_additional_receipts((receipt,))
+
+        assert collected == [
+            {
+                "transactionHash": "0xkeeper",
+                "status": 1,
+                "blockNumber": 16,
+                "gasUsed": 21_000,
+                "effectiveGasPrice": 2,
+                "logs": [],
+            }
+        ]
+
 
 class TestResultEnricherContextProtocolFallback:
     """Test that enrichment falls back to context.protocol when intent.protocol is None."""

@@ -6,8 +6,10 @@ Updated to use GMX V2 EventEmitter pattern:
 """
 
 import pytest
+from eth_abi import encode as abi_encode
 
 from almanak.connectors.gmx_v2.receipt_parser import (
+    _EVENT_LOG_DATA_ABI_TYPE,
     EVENT_TOPICS,
     GMXv2EventType,
     GMXv2ReceiptParser,
@@ -143,6 +145,79 @@ def create_position_decrease_log(
             key,  # topic[2] = additional indexed param
         ],
         "data": data,
+        "logIndex": 1,
+    }
+
+
+def create_event_utils_position_decrease_log(*, collateral_delta_amount_raw: int) -> dict:
+    """Encode the production EventEmitter/EventUtils PositionDecrease shape."""
+    zero_key = bytes(32)
+    position_key = bytes.fromhex(POSITION_KEY[2:])
+    event_data = (
+        (
+            (
+                ("account", USER_ADDRESS),
+                ("market", MARKET_ADDRESS),
+                ("collateralToken", USDC_ADDRESS),
+            ),
+            (),
+        ),
+        (
+            (
+                ("sizeInUsd", 0),
+                ("sizeInTokens", 0),
+                ("collateralAmount", 0),
+                ("borrowingFactor", 0),
+                ("fundingFeeAmountPerSize", 0),
+                ("longTokenClaimableFundingAmountPerSize", 0),
+                ("shortTokenClaimableFundingAmountPerSize", 0),
+                ("executionPrice", 52_000 * 10**30),
+                ("indexTokenPrice.max", 52_100 * 10**30),
+                ("indexTokenPrice.min", 51_900 * 10**30),
+                ("collateralTokenPrice.max", 10**24),
+                ("collateralTokenPrice.min", 10**24),
+                ("sizeDeltaUsd", 50_000 * 10**30),
+                ("sizeDeltaInTokens", 10**18),
+                ("collateralDeltaAmount", collateral_delta_amount_raw),
+                ("values.priceImpactDiffUsd", 0),
+                ("orderType", 4),
+                ("decreasedAtTime", 1_752_000_000),
+            ),
+            (),
+        ),
+        (
+            (
+                ("priceImpactUsd", 0),
+                ("basePnlUsd", 1_000 * 10**30),
+                ("uncappedBasePnlUsd", 1_000 * 10**30),
+                ("proportionalPendingImpactUsd", 0),
+                ("totalImpactUsd", 0),
+            ),
+            (),
+        ),
+        (((("isLong", True)),), ()),
+        (
+            (
+                ("orderKey", zero_key),
+                ("positionKey", position_key),
+            ),
+            (),
+        ),
+        ((), ()),
+        ((), ()),
+    )
+    encoded = abi_encode(
+        ["address", "string", _EVENT_LOG_DATA_ABI_TYPE],
+        [GMX_ROUTER_ADDRESS, "PositionDecrease", event_data],
+    )
+    return {
+        "address": GMX_ROUTER_ADDRESS,
+        "topics": [
+            EVENT_LOG1_TOPIC,
+            EVENT_TOPICS["PositionDecrease"],
+            "0x" + USER_ADDRESS[2:].rjust(64, "0"),
+        ],
+        "data": "0x" + encoded.hex(),
         "logIndex": 1,
     }
 
@@ -604,3 +679,118 @@ class TestGMXv2ReceiptParser:
         assert float(pos.collateral_token_price_max) == pytest.approx(1.001, rel=1e-6)
         assert float(pos.index_token_price_max) == pytest.approx(52100.0, rel=1e-6)
         assert float(pos.realized_pnl) == pytest.approx(1000.0, rel=1e-6)
+
+
+class TestExtractCollateralReturned:
+    """collateral_returned extraction from PERP_CLOSE receipts (audit fix21).
+
+    Covers both the legacy flat fixture shape and the production dynamic
+    ``EventUtils.EventLogData`` shape emitted by GMX's EventEmitter.
+    """
+
+    def _close_log(self, collateral_delta_amount, realized_pnl=1000.0):
+        return create_position_decrease_log(
+            key=POSITION_KEY,
+            account=USER_ADDRESS,
+            market=MARKET_ADDRESS,
+            collateral_token=USDC_ADDRESS,
+            is_long=True,
+            size_in_usd=0.0,  # full close — nothing remaining
+            size_in_tokens=0.0,
+            collateral_amount=0.0,  # remaining collateral after close
+            execution_price=52000.0,
+            size_delta_usd=50000.0,
+            realized_pnl=realized_pnl,
+            collateral_delta_amount=collateral_delta_amount,
+        )
+
+    def test_full_close_returns_collateral_delta(self):
+        """A full close returns the PositionDecrease collateral_delta_amount."""
+        parser = GMXv2ReceiptParser()
+        receipt = create_receipt([self._close_log(collateral_delta_amount=5000)])
+
+        value = parser.extract_collateral_returned(receipt)
+
+        assert value == 5000 * 10**18
+
+    def test_sums_multiple_position_decreases(self):
+        """Multiple PositionDecrease events in one receipt are summed."""
+        parser = GMXv2ReceiptParser()
+        receipt = create_receipt(
+            [
+                self._close_log(collateral_delta_amount=3000),
+                self._close_log(collateral_delta_amount=2000),
+            ]
+        )
+
+        value = parser.extract_collateral_returned(receipt)
+
+        assert value == 5000 * 10**18
+
+    def test_production_event_utils_payload_returns_raw_collateral_delta(self):
+        """The deployed GMX EventUtils tuple decodes exact token units."""
+        parser = GMXv2ReceiptParser()
+        receipt = create_receipt([create_event_utils_position_decrease_log(collateral_delta_amount_raw=10_000_000)])
+
+        assert parser.extract_collateral_returned(receipt) == 10_000_000
+        parsed = parser.parse_receipt(receipt)
+        assert parsed.position_decreases == []
+        assert parsed.events[0].data["key"] == POSITION_KEY
+        assert parsed.events[0].data["collateral_delta_amount"] == "10"
+
+    def test_no_position_decrease_returns_none(self):
+        """A receipt without PositionDecrease events is unmeasured (None)."""
+        parser = GMXv2ReceiptParser()
+        open_log = create_position_increase_log(
+            key=POSITION_KEY,
+            account=USER_ADDRESS,
+            market=MARKET_ADDRESS,
+            collateral_token=USDC_ADDRESS,
+            is_long=True,
+            size_in_usd=50000.0,
+            size_in_tokens=1.0,
+            collateral_amount=5000.0,
+            execution_price=50000.0,
+            size_delta_usd=50000.0,
+            collateral_delta_amount=5000.0,
+        )
+        receipt = create_receipt([open_log])
+
+        assert parser.extract_collateral_returned(receipt) is None
+
+    def test_decode_fallback_returns_none_not_zero(self):
+        """Empty != Zero: a PositionDecrease whose data cannot be decoded
+        (raw_data fallback) must yield None, never a fabricated Decimal(0)."""
+        parser = GMXv2ReceiptParser()
+        bad_log = {
+            "address": GMX_ROUTER_ADDRESS,
+            "topics": [
+                EVENT_LOG1_TOPIC,
+                EVENT_TOPICS["PositionDecrease"],
+                POSITION_KEY,
+            ],
+            # Non-hex payload spanning every 32-byte slot — the first
+            # int-decoded slot (is_long, offset 96) hits int("zz...", 16),
+            # _decode_position_decrease_data raises and falls back to
+            # {"raw_data": ...} with no collateral_delta_amount key.
+            "data": "0x" + "zz" * 512,
+            "logIndex": 1,
+        }
+        receipt = create_receipt([bad_log])
+
+        assert parser.extract_collateral_returned(receipt) is None
+
+    def test_decoded_zero_is_measured_zero(self):
+        """A size-only decrease (decoded collateral_delta_amount == 0) is a
+        measured zero, returned as Decimal("0")."""
+        from decimal import Decimal
+
+        parser = GMXv2ReceiptParser()
+        receipt = create_receipt([self._close_log(collateral_delta_amount=0)])
+
+        assert parser.extract_collateral_returned(receipt) == Decimal("0")
+
+    def test_supported_extractions_declares_collateral_returned(self):
+        """The enricher gate reads SUPPORTED_EXTRACTIONS — the field must be
+        declared or PERP_CLOSE enrichment skips it with a warning."""
+        assert "collateral_returned" in GMXv2ReceiptParser.SUPPORTED_EXTRACTIONS

@@ -274,6 +274,7 @@ def _successful_receipt_block(execution_result: Any | None, *, first: bool) -> i
     if execution_result is None:
         return None
 
+    tx_block: int | None = None
     tx_results = getattr(execution_result, "transaction_results", None)
     if tx_results is None and isinstance(execution_result, dict):
         tx_results = execution_result.get("transaction_results")
@@ -282,7 +283,10 @@ def _successful_receipt_block(execution_result: Any | None, *, first: bool) -> i
         for tx in ordered:
             block_number = _successful_tx_block(tx)
             if block_number is not None:
-                return block_number
+                if first:
+                    return block_number
+                tx_block = block_number
+                break
 
     # Fallback: Gateway-shaped results (``receipts`` / ``transaction_receipts``)
     # and singular-receipt shapes carry no ``transaction_results`` list. Walk
@@ -291,6 +295,8 @@ def _successful_receipt_block(execution_result: Any | None, *, first: bool) -> i
     # matching, but a bracket anchor only needs the block) and take the min
     # (first) / max (last) positive block — order-independent.
     blocks = [b for r in _iter_receipt_candidates(execution_result) if (b := _any_receipt_block(r)) is not None]
+    if tx_block is not None:
+        blocks.append(tx_block)
     if blocks:
         return min(blocks) if first else max(blocks)
     return None
@@ -306,7 +312,7 @@ def _iter_receipt_candidates(execution_result: Any) -> list[Any]:
     needs a block number.
     """
     out: list[Any] = []
-    for attr in ("receipts", "transaction_receipts"):
+    for attr in ("receipts", "transaction_receipts", "settlement_receipts"):
         lst = getattr(execution_result, attr, None)
         if lst is None and isinstance(execution_result, dict):
             lst = execution_result.get(attr)
@@ -5608,6 +5614,52 @@ class StrategyRunner:
         return None
 
     @staticmethod
+    def _result_attr(result: Any, attr: str) -> Any:
+        """Read one execution-result field from either an object or a dict."""
+        if isinstance(result, dict):
+            return result.get(attr)
+        return getattr(result, attr, None)
+
+    @staticmethod
+    def _set_result_attr(result: Any, attr: str, value: Any) -> None:
+        """Write one execution-result field on either an object or a dict."""
+        if isinstance(result, dict):
+            result[attr] = value
+        else:
+            setattr(result, attr, value)
+
+    @staticmethod
+    def _successful_transaction_receipt(tx: Any) -> Any:
+        """Return one successful transaction-result receipt, if present."""
+        if isinstance(tx, dict):
+            return tx.get("receipt") if tx.get("success", True) else None
+        return getattr(tx, "receipt", None) if getattr(tx, "success", True) else None
+
+    @staticmethod
+    def _coerce_receipt_list(receipts: Any) -> list[dict]:
+        """Return parser-usable receipts from one list-shaped result field."""
+        if not isinstance(receipts, list):
+            return []
+        return [
+            receipt_dict
+            for receipt in receipts
+            if (receipt_dict := StrategyRunner._coerce_receipt_to_dict(receipt)) is not None
+        ]
+
+    @staticmethod
+    def _collect_transaction_result_receipts(result: Any) -> list[dict]:
+        """Return parser-usable receipts from successful transaction results."""
+        tx_results = StrategyRunner._result_attr(result, "transaction_results")
+        if not isinstance(tx_results, list):
+            return []
+        return [
+            receipt_dict
+            for tx in tx_results
+            if (receipt := StrategyRunner._successful_transaction_receipt(tx)) is not None
+            if (receipt_dict := StrategyRunner._coerce_receipt_to_dict(receipt)) is not None
+        ]
+
+    @staticmethod
     def _collect_candidate_receipts(result: Any) -> list[dict]:
         """Collect every dict-shaped receipt candidate from a result.
 
@@ -5619,39 +5671,48 @@ class StrategyRunner:
           dominant shape on Anvil-managed gateway runs).
         - ``receipts`` / ``transaction_receipts`` lists
           (``GatewayExecutionResult``).
+        - ``settlement_receipts`` from a terminal asynchronous keeper.
         """
         candidates: list[dict] = []
 
         for attr in ("transaction_receipt", "receipt", "tx_receipt", "raw_receipt"):
-            d = StrategyRunner._coerce_receipt_to_dict(getattr(result, attr, None))
+            d = StrategyRunner._coerce_receipt_to_dict(StrategyRunner._result_attr(result, attr))
             if d is not None:
                 candidates.append(d)
 
-        tx_results = getattr(result, "transaction_results", None)
-        if tx_results is None and isinstance(result, dict):
-            tx_results = result.get("transaction_results")
-        if isinstance(tx_results, list):
-            for tx in tx_results:
-                if isinstance(tx, dict):
-                    if not tx.get("success", True):
-                        continue
-                    rec = tx.get("receipt")
-                else:
-                    if not getattr(tx, "success", True):
-                        continue
-                    rec = getattr(tx, "receipt", None)
-                d = StrategyRunner._coerce_receipt_to_dict(rec)
-                if d is not None:
-                    candidates.append(d)
+        candidates.extend(StrategyRunner._collect_transaction_result_receipts(result))
 
-        receipts = getattr(result, "receipts", None) or getattr(result, "transaction_receipts", None)
-        if isinstance(receipts, list):
-            for r in receipts:
-                d = StrategyRunner._coerce_receipt_to_dict(r)
-                if d is not None:
-                    candidates.append(d)
+        for attr in ("receipts", "transaction_receipts", "settlement_receipts"):
+            candidates.extend(StrategyRunner._coerce_receipt_list(StrategyRunner._result_attr(result, attr)))
 
         return candidates
+
+    @staticmethod
+    def _receipt_transaction_hash(receipt: dict[str, Any]) -> str:
+        """Return the normalized transaction hash used for receipt de-duplication."""
+        return str(receipt.get("transactionHash") or receipt.get("transaction_hash") or "")
+
+    @staticmethod
+    def _append_settlement_receipts(execution_result: Any, receipts: tuple[dict[str, Any], ...]) -> None:
+        """Persist newly observed keeper receipts without duplicating transaction hashes."""
+        settlement_receipts = StrategyRunner._result_attr(execution_result, "settlement_receipts")
+        if not isinstance(settlement_receipts, list):
+            settlement_receipts = []
+            StrategyRunner._set_result_attr(execution_result, "settlement_receipts", settlement_receipts)
+
+        known_hashes = {
+            receipt_hash
+            for receipt in settlement_receipts
+            if isinstance(receipt, dict)
+            if (receipt_hash := StrategyRunner._receipt_transaction_hash(receipt))
+        }
+        for receipt in receipts:
+            receipt_hash = StrategyRunner._receipt_transaction_hash(receipt)
+            if receipt_hash and receipt_hash in known_hashes:
+                continue
+            settlement_receipts.append(receipt)
+            if receipt_hash:
+                known_hashes.add(receipt_hash)
 
     @staticmethod
     def _receipt_has_lp_topic(rec: dict) -> bool:
@@ -8843,22 +8904,13 @@ class StrategyRunner:
         state.last_execution_result = execution_result
         return execution_result
 
-    async def _single_chain_handle_success(self, state: SingleChainExecutionState) -> IterationResult:
-        """Enrich, slippage-check, reconcile, and commit the success path.
-
-        Runs ResultEnricher, then the slippage circuit breaker, then the
-        post-execution balance reconciliation. Any of those may steer into
-        the failure path (with its own IterationResult). On a clean path
-        emits the success timeline event, writes the ledger entry, fires
-        on_intent_executed(success=True), saves strategy state, and returns
-        IterationStatus.SUCCESS.
-        """
-        strategy = state.strategy
-        intent = state.intent
-        deployment_id = state.deployment_id
-        state_machine = state.state_machine
-
-        # Enrich result with intent-specific extracted data
+    def _single_chain_enrich_execution_result(
+        self,
+        state: SingleChainExecutionState,
+        *,
+        additional_receipts: tuple[dict[str, Any], ...] = (),
+    ) -> None:
+        """Enrich the latest result from submission and optional settlement receipts."""
         if state.last_execution_result and state.last_execution_context:
             try:
                 # VIB-4477 (T08): thread connector-owned pool-key lookup
@@ -8882,11 +8934,14 @@ class StrategyRunner:
                 # metadata snapshot captured inside the state-machine loop
                 # at execution time, not the terminal step_result (which
                 # may be a COMPLETE state with no action_bundle).
+                enrich_kwargs: dict[str, Any] = {"bundle_metadata": state.last_bundle_metadata}
+                if additional_receipts:
+                    enrich_kwargs["additional_receipts"] = additional_receipts
                 state.last_execution_result = enricher.enrich(
                     state.last_execution_result,
-                    intent,
+                    state.intent,
                     state.last_execution_context,
-                    bundle_metadata=state.last_bundle_metadata,
+                    **enrich_kwargs,
                 )
             except CriticalAccountingError:
                 # VIB-3180: receipt parse failure — re-raise so run_iteration's
@@ -8896,6 +8951,23 @@ class StrategyRunner:
                 raise
             except Exception as e:
                 logger.warning(f"Result enrichment failed: {e}")
+
+    async def _single_chain_handle_success(self, state: SingleChainExecutionState) -> IterationResult:
+        """Enrich, slippage-check, reconcile, and commit the success path.
+
+        Runs ResultEnricher, then the async settlement barrier, slippage circuit
+        breaker, and post-execution balance reconciliation. Any of those may
+        steer into the failure path (with its own IterationResult). On a clean
+        path emits the success timeline event, writes the ledger entry, fires
+        on_intent_executed(success=True), saves strategy state, and returns
+        IterationStatus.SUCCESS.
+        """
+        strategy = state.strategy
+        intent = state.intent
+        deployment_id = state.deployment_id
+        state_machine = state.state_machine
+
+        self._single_chain_enrich_execution_result(state)
 
         async_settlement_early = await self._single_chain_async_settlement_guard(state)
         if async_settlement_early is not None:
@@ -9121,6 +9193,8 @@ class StrategyRunner:
         if not self._require_terminal_async_settlement:
             return None
         execution_result = state.last_execution_result
+        if execution_result is None:
+            return None
         orders = tuple(getattr(execution_result, "async_orders", ()) or ())
         if not orders:
             return None
@@ -9150,6 +9224,12 @@ class StrategyRunner:
                 poll_interval_seconds=self.config.async_settlement_poll_interval_seconds,
             )
             if barrier.terminal and barrier.status.value == "SETTLED":
+                if barrier.receipts:
+                    self._append_settlement_receipts(execution_result, barrier.receipts)
+                    self._single_chain_enrich_execution_result(
+                        state,
+                        additional_receipts=barrier.receipts,
+                    )
                 return None
             settlement = barrier.to_dict()
 

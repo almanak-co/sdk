@@ -208,10 +208,12 @@ def test_order_state_change_during_baseline_capture_fails_closed() -> None:
 
 
 def test_managed_anvil_executor_observes_target_after_exact_order_executes() -> None:
+    keeper_receipt = {"transactionHash": "0x1234", "status": "0x1", "logs": []}
     result = GmxAnvilOrderExecutionResult(
         ok=True,
         executed_order_keys=(_KEY,),
         transaction_hashes=("0x1234",),
+        execution_receipts=(keeper_receipt,),
     )
     baseline_state = object()
     baseline = AsyncSettlementVerdict(
@@ -230,11 +232,12 @@ def test_managed_anvil_executor_observes_target_after_exact_order_executes() -> 
             chain="arbitrum",
             wallet_address="0xabc",
             orders=(_order(),),
-            intent=_intent("PERP_OPEN"),
+            intent=_intent("PERP_CLOSE"),
             network="anvil",
         )
 
-    assert verdict is settled
+    assert verdict.status == AsyncSettlementStatus.SETTLED
+    assert verdict.receipts == (keeper_receipt,)
     assert execute.call_args.kwargs["network"] == "anvil"
     assert observe.call_count == 2
     assert observe.call_args_list[0].kwargs.get("observation_state") is None

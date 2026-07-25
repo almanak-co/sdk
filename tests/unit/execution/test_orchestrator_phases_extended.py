@@ -122,6 +122,26 @@ def _install_capture(orchestrator):
 
 
 # =============================================================================
+# ExecutionResult serialization
+# =============================================================================
+
+
+def test_execution_result_serializes_terminal_settlement_receipts() -> None:
+    keeper_receipt = {
+        "transactionHash": "0xkeeper",
+        "status": "0x1",
+        "logs": [],
+    }
+    result = ExecutionResult(
+        success=True,
+        phase=ExecutionPhase.COMPLETE,
+        settlement_receipts=[keeper_receipt],
+    )
+
+    assert result.to_dict()["settlement_receipts"] == [keeper_receipt]
+
+
+# =============================================================================
 # _init_pipeline_state
 # =============================================================================
 

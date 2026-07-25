@@ -485,6 +485,78 @@ class TestSingleChainHandleSuccess:
         strategy.save_state.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_terminal_settlement_receipt_is_enriched_before_reconciliation(self) -> None:
+        """Keeper evidence supplements the submission receipt before accounting."""
+        from almanak.connectors._strategy_base.runner_hook_registry import AsyncSettlementStatus
+        from almanak.framework.runner.async_settlement import AsyncSettlementBarrierResult
+
+        runner = _make_runner()
+        runner._require_terminal_async_settlement = True
+        runner._emit_execution_timeline_event = MagicMock()
+        runner._write_ledger_entry = AsyncMock()
+        runner._reconcile_post_execution_balances = AsyncMock(return_value={"incident": False})
+        strategy = _make_strategy()
+        strategy._gateway_network = "anvil"
+        state = _make_state(
+            strategy,
+            intent=SwapIntent(from_token="USDC", to_token="ETH", amount=Decimal("100")),
+        )
+        state.gateway_client = object()
+        state.state_machine = MagicMock()
+        state.state_machine.retry_count = 0
+        state.last_execution_result = ExecutionResult(
+            success=True,
+            phase=ExecutionPhase.COMPLETE,
+            completed_at=datetime.now(UTC),
+            async_orders=[
+                AsyncOrderData(
+                    protocol="gmx_v2",
+                    order_id="0x" + "ab" * 32,
+                    status=AsyncOrderStatus.PENDING,
+                    kind=AsyncOrderKind.DECREASE,
+                )
+            ],
+        )
+        state.last_execution_context = ExecutionContext(deployment_id=strategy.deployment_id)
+        keeper_receipt = {"transactionHash": "0xkeeper", "status": "0x1", "logs": []}
+        barrier = AsyncSettlementBarrierResult(
+            status=AsyncSettlementStatus.SETTLED,
+            terminal=True,
+            attempts=1,
+            elapsed_seconds=1,
+            receipts=(keeper_receipt,),
+        )
+
+        def _enrich(result: ExecutionResult, *_args, **kwargs) -> ExecutionResult:
+            if kwargs.get("additional_receipts"):
+                result.extracted_data["keeper_receipt_enriched"] = True
+            return result
+
+        async def _assert_reconciliation_state(*_args, **_kwargs) -> dict[str, bool]:
+            assert state.last_execution_result is not None
+            assert state.last_execution_result.settlement_receipts == [keeper_receipt]
+            assert state.last_execution_result.extracted_data["keeper_receipt_enriched"] is True
+            return {"incident": False}
+
+        runner._reconcile_post_execution_balances = AsyncMock(side_effect=_assert_reconciliation_state)
+
+        with (
+            patch("almanak.framework.runner.strategy_runner.ResultEnricher") as mock_enricher,
+            patch(
+                "almanak.framework.runner.async_settlement.await_async_settlement",
+                new=AsyncMock(return_value=barrier),
+            ),
+        ):
+            mock_enricher.return_value.enrich.side_effect = _enrich
+            result = await runner._single_chain_handle_success(state)
+
+        assert result.status == IterationStatus.SUCCESS
+        assert mock_enricher.return_value.enrich.call_count == 2
+        assert mock_enricher.return_value.enrich.call_args_list[1].kwargs["additional_receipts"] == (keeper_receipt,)
+        assert state.last_execution_result.settlement_receipts == [keeper_receipt]
+        runner._reconcile_post_execution_balances.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_enrich_exception_still_proceeds_to_success_path(self) -> None:
         runner = _make_runner()
         runner._emit_execution_timeline_event = MagicMock()

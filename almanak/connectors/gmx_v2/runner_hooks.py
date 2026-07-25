@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
 from typing import Any, ClassVar
 
@@ -310,7 +310,7 @@ class GmxV2RunnerHookConnector(RunnerHookConnector, RunnerAsyncSettlementCapabil
                 reason=result.reason or "GMX managed-Anvil order execution was unavailable",
                 observation_state=baseline.observation_state,
             )
-        return self.observe_async_orders(
+        verdict = self.observe_async_orders(
             gateway_client=gateway_client,
             chain=chain,
             wallet_address=wallet_address,
@@ -318,6 +318,9 @@ class GmxV2RunnerHookConnector(RunnerHookConnector, RunnerAsyncSettlementCapabil
             intent=intent,
             observation_state=baseline.observation_state,
         )
+        intent_type = getattr(getattr(intent, "intent_type", None), "value", "")
+        receipts = result.execution_receipts if intent_type == "PERP_CLOSE" else ()
+        return replace(verdict, receipts=receipts)
 
     def prepare_pending_orders_for_teardown(
         self,

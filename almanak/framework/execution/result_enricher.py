@@ -685,6 +685,7 @@ class ResultEnricher:
         context: ExecutionContext,
         *,
         bundle_metadata: dict[str, Any] | None = None,
+        additional_receipts: tuple[dict[str, Any], ...] = (),
     ) -> ExecutionResult:
         """Enrich execution result with intent-specific extracted data.
 
@@ -706,6 +707,10 @@ class ResultEnricher:
                 compiler. Used to thread compiler-side quote data (e.g.,
                 ``expected_output_human`` for VIB-3203 realized-slippage
                 calculation) through to the extract_* methods.
+            additional_receipts: Successful receipts produced after the
+                submission bundle completed, such as a keeper execution for
+                an asynchronous order. These supplement, rather than replace,
+                the original submission receipts.
 
         Returns:
             Enriched ExecutionResult (same instance, mutated)
@@ -838,6 +843,7 @@ class ResultEnricher:
         # (above) is already attached to ``result`` regardless.
         if parser is not None:
             receipts = self._collect_receipts(result)
+            receipts.extend(self._collect_additional_receipts(additional_receipts))
             if not receipts:
                 if not offchain_extracted:
                     logger.debug(
@@ -2471,6 +2477,50 @@ class ResultEnricher:
             receipts.append(receipt_dict)
 
         return receipts
+
+    @staticmethod
+    def _collect_additional_receipts(receipts: tuple[dict[str, Any], ...]) -> list[dict[str, Any]]:
+        """Normalize successful post-submission receipts for enrichment."""
+        collected: list[dict[str, Any]] = []
+        for receipt in receipts:
+            if not isinstance(receipt, dict):
+                continue
+            status_raw = receipt.get("status", 1)
+            try:
+                status = int(status_raw, 0) if isinstance(status_raw, str) else int(status_raw)
+            except (TypeError, ValueError):
+                logger.warning("Ignoring post-submission receipt with invalid status %r", status_raw)
+                continue
+            if status != 1:
+                logger.warning("Ignoring failed post-submission receipt with status %r", status_raw)
+                continue
+            receipt_dict = dict(receipt)
+            receipt_dict["status"] = status
+            for snake_key, camel_key in _SNAKE_TO_CAMEL.items():
+                if snake_key in receipt_dict and camel_key not in receipt_dict:
+                    receipt_dict[camel_key] = receipt_dict[snake_key]
+            for numeric_key in (
+                "blockNumber",
+                "cumulativeGasUsed",
+                "effectiveGasPrice",
+                "gasUsed",
+                "transactionIndex",
+            ):
+                raw = receipt_dict.get(numeric_key)
+                if not isinstance(raw, str):
+                    continue
+                try:
+                    receipt_dict[numeric_key] = int(raw, 0)
+                except ValueError:
+                    logger.warning(
+                        "Ignoring post-submission receipt with invalid %s %r",
+                        numeric_key,
+                        raw,
+                    )
+                    break
+            else:
+                collected.append(receipt_dict)
+        return collected
 
 
 # =============================================================================

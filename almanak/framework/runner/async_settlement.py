@@ -25,6 +25,7 @@ class AsyncSettlementBarrierResult:
     attempts: int
     elapsed_seconds: float
     orders: tuple[dict[str, Any], ...] = ()
+    receipts: tuple[dict[str, Any], ...] = ()
     reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -50,6 +51,163 @@ def _submitted_orders(orders: tuple[Any, ...], status: AsyncSettlementStatus) ->
     )
 
 
+@dataclass
+class _SettlementPollState:
+    """Mutable evidence accumulated across local execution and observation."""
+
+    started: float
+    attempts: int = 0
+    observation_state: Any = None
+    receipts: tuple[dict[str, Any], ...] = ()
+
+    def absorb(self, verdict: AsyncSettlementVerdict) -> None:
+        self.observation_state = verdict.observation_state
+        if verdict.receipts:
+            self.receipts += tuple(receipt for receipt in verdict.receipts if receipt not in self.receipts)
+
+    def result(
+        self,
+        *,
+        status: AsyncSettlementStatus,
+        terminal: bool,
+        orders: tuple[dict[str, Any], ...],
+        reason: str | None,
+    ) -> AsyncSettlementBarrierResult:
+        return AsyncSettlementBarrierResult(
+            status=status,
+            terminal=terminal,
+            attempts=self.attempts,
+            elapsed_seconds=_monotonic() - self.started,
+            orders=orders,
+            receipts=self.receipts,
+            reason=reason,
+        )
+
+
+def _failure_result(
+    *,
+    state: _SettlementPollState,
+    orders: tuple[Any, ...],
+    status: AsyncSettlementStatus,
+    reason: str,
+) -> AsyncSettlementBarrierResult:
+    return state.result(
+        status=status,
+        terminal=False,
+        orders=_submitted_orders(orders, status),
+        reason=reason,
+    )
+
+
+def _owning_protocol(orders: tuple[Any, ...]) -> ProtocolName | None:
+    protocols = {str(getattr(order, "protocol", "") or "").lower() for order in orders}
+    if len(protocols) != 1 or "" in protocols:
+        return None
+    return ProtocolName(next(iter(protocols)))
+
+
+async def _execute_pending_orders_on_anvil(
+    *,
+    registry: Any,
+    state: _SettlementPollState,
+    protocol: ProtocolName,
+    gateway_client: Any,
+    chain: str,
+    wallet_address: str,
+    orders: tuple[Any, ...],
+    intent: Any,
+    network: str,
+) -> AsyncSettlementBarrierResult | None:
+    state.attempts += 1
+    verdict = await asyncio.to_thread(
+        registry.execute_pending_orders_for_test,
+        protocol=protocol,
+        gateway_client=gateway_client,
+        chain=chain,
+        wallet_address=wallet_address,
+        orders=orders,
+        intent=intent,
+        network=network,
+    )
+    if verdict is None:
+        return _failure_result(
+            state=state,
+            orders=orders,
+            status=AsyncSettlementStatus.INFRASTRUCTURE_UNSUPPORTED,
+            reason=f"Connector {protocol} returned no managed-fork execution verdict",
+        )
+
+    state.absorb(verdict)
+    if verdict.terminal or verdict.status in {
+        AsyncSettlementStatus.INFRASTRUCTURE_UNSUPPORTED,
+        AsyncSettlementStatus.OBSERVATION_FAILED,
+    }:
+        return state.result(
+            status=verdict.status,
+            terminal=verdict.terminal,
+            orders=verdict.orders or _submitted_orders(orders, verdict.status),
+            reason=verdict.reason,
+        )
+    return None
+
+
+async def _poll_until_settled(
+    *,
+    registry: Any,
+    state: _SettlementPollState,
+    protocol: ProtocolName,
+    gateway_client: Any,
+    chain: str,
+    wallet_address: str,
+    orders: tuple[Any, ...],
+    intent: Any,
+    deadline: float,
+    poll_interval: int,
+) -> AsyncSettlementBarrierResult:
+    while True:
+        state.attempts += 1
+        verdict = await asyncio.to_thread(
+            registry.observe_async_orders,
+            protocol=protocol,
+            gateway_client=gateway_client,
+            chain=chain,
+            wallet_address=wallet_address,
+            orders=orders,
+            intent=intent,
+            observation_state=state.observation_state,
+        )
+        if verdict is None:
+            verdict = AsyncSettlementVerdict(
+                status=AsyncSettlementStatus.OBSERVATION_FAILED,
+                terminal=False,
+                reason=f"Connector {protocol} returned no async settlement verdict",
+                observation_state=state.observation_state,
+            )
+        state.absorb(verdict)
+        if verdict.terminal:
+            return state.result(
+                status=verdict.status,
+                terminal=True,
+                orders=verdict.orders,
+                reason=verdict.reason,
+            )
+
+        remaining = deadline - _monotonic()
+        if remaining <= 0:
+            status = (
+                AsyncSettlementStatus.OBSERVATION_FAILED
+                if verdict.status is AsyncSettlementStatus.OBSERVATION_FAILED
+                else AsyncSettlementStatus.PENDING_SETTLEMENT_TIMEOUT
+            )
+            return state.result(
+                status=status,
+                terminal=False,
+                orders=verdict.orders or _submitted_orders(orders, status),
+                reason=verdict.reason or f"Connector {protocol} did not reach terminal settlement before timeout",
+            )
+        await asyncio.sleep(min(poll_interval, remaining))
+
+
 async def await_async_settlement(
     *,
     gateway_client: Any,
@@ -68,6 +226,7 @@ async def await_async_settlement(
     live-settlement timeout on a fork where no keeper can ever arrive.
     """
     started = _monotonic()
+    state = _SettlementPollState(started=started)
     if not orders:
         return AsyncSettlementBarrierResult(
             status=AsyncSettlementStatus.SETTLED,
@@ -76,60 +235,48 @@ async def await_async_settlement(
             elapsed_seconds=0,
         )
 
-    protocols = {str(getattr(order, "protocol", "") or "").lower() for order in orders}
-    if len(protocols) != 1 or "" in protocols:
-        return AsyncSettlementBarrierResult(
+    protocol = _owning_protocol(orders)
+    if protocol is None:
+        return _failure_result(
+            state=state,
+            orders=orders,
             status=AsyncSettlementStatus.OBSERVATION_FAILED,
-            terminal=False,
-            attempts=0,
-            elapsed_seconds=_monotonic() - started,
-            orders=_submitted_orders(orders, AsyncSettlementStatus.OBSERVATION_FAILED),
             reason="Async settlement barrier requires one measured owning protocol per execution result",
         )
-    protocol = ProtocolName(next(iter(protocols)))
 
     from almanak.connectors._strategy_runner_hook_registry import STRATEGY_RUNNER_HOOK_REGISTRY
 
     policy = STRATEGY_RUNNER_HOOK_REGISTRY.async_settlement_policy(protocol)
     if policy is None:
-        return AsyncSettlementBarrierResult(
+        return _failure_result(
+            state=state,
+            orders=orders,
             status=AsyncSettlementStatus.INFRASTRUCTURE_UNSUPPORTED,
-            terminal=False,
-            attempts=0,
-            elapsed_seconds=_monotonic() - started,
-            orders=_submitted_orders(orders, AsyncSettlementStatus.INFRASTRUCTURE_UNSUPPORTED),
             reason=f"Connector {protocol} exposes async orders but no settlement observer",
         )
     if str(network or "").lower() == "anvil" and not policy.supports_local_order_execution:
-        return AsyncSettlementBarrierResult(
+        return _failure_result(
+            state=state,
+            orders=orders,
             status=AsyncSettlementStatus.INFRASTRUCTURE_UNSUPPORTED,
-            terminal=False,
-            attempts=0,
-            elapsed_seconds=_monotonic() - started,
-            orders=_submitted_orders(orders, AsyncSettlementStatus.INFRASTRUCTURE_UNSUPPORTED),
             reason=f"Connector {protocol} cannot execute keeper-settled orders on managed Anvil",
         )
 
     timeout = timeout_seconds if timeout_seconds is not None else policy.timeout_seconds
     poll_interval = poll_interval_seconds if poll_interval_seconds is not None else policy.poll_interval_seconds
     if timeout <= 0 or poll_interval <= 0:
-        return AsyncSettlementBarrierResult(
+        return _failure_result(
+            state=state,
+            orders=orders,
             status=AsyncSettlementStatus.OBSERVATION_FAILED,
-            terminal=False,
-            attempts=0,
-            elapsed_seconds=_monotonic() - started,
-            orders=_submitted_orders(orders, AsyncSettlementStatus.OBSERVATION_FAILED),
             reason="Async settlement timeout and poll interval must be positive",
         )
 
-    attempts = 0
     deadline = started + timeout
-    last: AsyncSettlementVerdict | None = None
-    observation_state: Any = None
     if str(network or "").lower() == "anvil":
-        attempts += 1
-        last = await asyncio.to_thread(
-            STRATEGY_RUNNER_HOOK_REGISTRY.execute_pending_orders_for_test,
+        immediate_result = await _execute_pending_orders_on_anvil(
+            registry=STRATEGY_RUNNER_HOOK_REGISTRY,
+            state=state,
             protocol=protocol,
             gateway_client=gateway_client,
             chain=chain,
@@ -138,75 +285,21 @@ async def await_async_settlement(
             intent=intent,
             network=network,
         )
-        if last is None:
-            return AsyncSettlementBarrierResult(
-                status=AsyncSettlementStatus.INFRASTRUCTURE_UNSUPPORTED,
-                terminal=False,
-                attempts=attempts,
-                elapsed_seconds=_monotonic() - started,
-                orders=_submitted_orders(orders, AsyncSettlementStatus.INFRASTRUCTURE_UNSUPPORTED),
-                reason=f"Connector {protocol} returned no managed-fork execution verdict",
-            )
-        observation_state = last.observation_state
-        if last.terminal or last.status in {
-            AsyncSettlementStatus.INFRASTRUCTURE_UNSUPPORTED,
-            AsyncSettlementStatus.OBSERVATION_FAILED,
-        }:
-            return AsyncSettlementBarrierResult(
-                status=last.status,
-                terminal=last.terminal,
-                attempts=attempts,
-                elapsed_seconds=_monotonic() - started,
-                orders=last.orders or _submitted_orders(orders, last.status),
-                reason=last.reason,
-            )
+        if immediate_result is not None:
+            return immediate_result
 
-    while True:
-        attempts += 1
-        last = await asyncio.to_thread(
-            STRATEGY_RUNNER_HOOK_REGISTRY.observe_async_orders,
-            protocol=protocol,
-            gateway_client=gateway_client,
-            chain=chain,
-            wallet_address=wallet_address,
-            orders=orders,
-            intent=intent,
-            observation_state=observation_state,
-        )
-        if last is None:
-            last = AsyncSettlementVerdict(
-                status=AsyncSettlementStatus.OBSERVATION_FAILED,
-                terminal=False,
-                reason=f"Connector {protocol} returned no async settlement verdict",
-                observation_state=observation_state,
-            )
-        observation_state = last.observation_state
-        if last.terminal:
-            return AsyncSettlementBarrierResult(
-                status=last.status,
-                terminal=True,
-                attempts=attempts,
-                elapsed_seconds=_monotonic() - started,
-                orders=last.orders,
-                reason=last.reason,
-            )
-
-        remaining = deadline - _monotonic()
-        if remaining <= 0:
-            status = (
-                AsyncSettlementStatus.OBSERVATION_FAILED
-                if last.status is AsyncSettlementStatus.OBSERVATION_FAILED
-                else AsyncSettlementStatus.PENDING_SETTLEMENT_TIMEOUT
-            )
-            return AsyncSettlementBarrierResult(
-                status=status,
-                terminal=False,
-                attempts=attempts,
-                elapsed_seconds=_monotonic() - started,
-                orders=last.orders or _submitted_orders(orders, status),
-                reason=last.reason or f"Connector {protocol} did not reach terminal settlement before timeout",
-            )
-        await asyncio.sleep(min(poll_interval, remaining))
+    return await _poll_until_settled(
+        registry=STRATEGY_RUNNER_HOOK_REGISTRY,
+        state=state,
+        protocol=protocol,
+        gateway_client=gateway_client,
+        chain=chain,
+        wallet_address=wallet_address,
+        orders=orders,
+        intent=intent,
+        deadline=deadline,
+        poll_interval=poll_interval,
+    )
 
 
 __all__ = ["AsyncSettlementBarrierResult", "await_async_settlement"]

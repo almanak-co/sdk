@@ -216,6 +216,10 @@ class ExecutionResult:
             is a forward-looking hook and will usually be ``None`` here.
         async_orders: Protocol-issued asynchronous order identifiers and their
             latest observed lifecycle state.
+        settlement_receipts: Terminal protocol settlement receipts observed
+            after the submitted transaction completed. These remain separate
+            from transaction_results because they were sent by a keeper rather
+            than by the strategy wallet.
         bin_ids: TraderJoe V2 bin IDs for LP positions
         protocol_fees: Typed ProtocolFees enrichment, when a receipt parser
             emits it (VIB-159). Top-level slot so strategy callbacks can read
@@ -250,6 +254,7 @@ class ExecutionResult:
     prediction_fill: PredictionFill | None = None
     bridge_data: BridgeData | None = None  # VIB-3226: BRIDGE intent enrichment
     async_orders: list[AsyncOrderData] = field(default_factory=list)
+    settlement_receipts: list[dict[str, Any]] = field(default_factory=list)
     bin_ids: list[int] | None = None  # TraderJoe V2 LP bin IDs
     protocol_fees: ProtocolFees | None = None  # VIB-159: protocol-fee enrichment
     # VIB-159 — connector-declared money legs (US-008/US-009). Type-only import
@@ -349,6 +354,7 @@ class ExecutionResult:
             "prediction_fill": self.prediction_fill.to_dict() if self.prediction_fill else None,
             "bridge_data": self.bridge_data.to_dict() if self.bridge_data else None,
             "async_orders": [order.to_dict() for order in self.async_orders],
+            "settlement_receipts": self.settlement_receipts,
             "extracted_data": self.extracted_data,
             "extraction_warnings": self.extraction_warnings,
         }

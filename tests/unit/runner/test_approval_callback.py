@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import threading
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -22,10 +21,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from almanak.framework.runner.runner_teardown import (
-    _APPROVAL_POLL_INTERVAL_S,
-    _make_approval_callback,
-)
+from almanak.framework.runner.runner_teardown import _make_approval_callback
 from almanak.framework.teardown.models import (
     ApprovalRequest,
     EscalationLevel,
@@ -487,29 +483,34 @@ class TestTimeoutClearsApprovalRow:
 class TestCallbackPersistsRequest:
     @pytest.mark.asyncio
     async def test_request_row_is_created_for_operator(
-        self, adapter: TeardownStateAdapter
+        self,
+        adapter: TeardownStateAdapter,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """The callback must write a pending approval row before polling so the
         API can discover it via get_latest_pending_approval."""
         callback = _make_approval_callback(_make_runner(), adapter)
         request = _make_request()
 
-        async def _check_then_respond() -> None:
-            await asyncio.sleep(0.02)
+        def _assert_persisted_then_respond(
+            teardown_id: str,
+            level: EscalationLevel,
+        ) -> str:
+            assert teardown_id == "td_1"
+            assert level == EscalationLevel.LEVEL_3
             pending = adapter.get_latest_pending_approval("strat_1")
             assert pending is not None, "approval request not persisted before polling started"
             assert pending["level"] == EscalationLevel.LEVEL_3.value
             payload = json.loads(pending["request_json"])
             assert payload["requested_at"]  # included for operator context
             assert payload["expires_at"]
-            adapter.write_approval_response(
-                teardown_id="td_1",
-                level=EscalationLevel.LEVEL_3,
-                response_json=json.dumps({"approved": True, "action": "approve"}),
-            )
+            return json.dumps({"approved": True, "action": "approve"})
 
-        writer = asyncio.create_task(_check_then_respond())
+        monkeypatch.setattr(
+            adapter,
+            "get_approval_response",
+            _assert_persisted_then_respond,
+        )
         response = await callback(request)
-        await writer
 
         assert response.action == "approve"

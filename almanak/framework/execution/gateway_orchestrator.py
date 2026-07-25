@@ -50,6 +50,7 @@ class GatewayExecutionResult:
         - swap_amounts: Swap execution data (for SWAP intents)
         - lp_close_data: LP close data (for LP_CLOSE intents)
         - async_orders: Protocol-issued asynchronous order identifiers and states
+        - settlement_receipts: Terminal receipts sent by an asynchronous keeper
         - bin_ids: TraderJoe V2 bin IDs (for LP positions)
         - extracted_data: Flexible dict for protocol-specific data
 
@@ -137,6 +138,7 @@ class GatewayExecutionResult:
     lp_close_data: "LPCloseData | None" = None
     bridge_data: "BridgeData | None" = None  # VIB-3226: BRIDGE intent enrichment
     async_orders: list["AsyncOrderData"] = field(default_factory=list)
+    settlement_receipts: list[dict[str, Any]] = field(default_factory=list)
     bin_ids: list[int] | None = None
     extracted_data: dict[str, Any] = field(default_factory=dict)
     extraction_warnings: list[str] = field(default_factory=list)

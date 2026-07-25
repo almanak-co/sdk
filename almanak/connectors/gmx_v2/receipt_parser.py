@@ -37,7 +37,10 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any
 
+from eth_abi import decode as abi_decode
+
 from almanak.connectors._strategy_base.base import EventRegistry, HexDecoder
+from almanak.connectors.gmx_v2.addresses import GMX_V2_TOKENS
 from almanak.framework.execution.extract_result import (
     ExtractError,
     ExtractMissing,
@@ -118,6 +121,36 @@ EVENT_TOPICS: dict[str, str] = {
 
 # Reverse lookup: topic -> event name
 TOPIC_TO_EVENT: dict[str, str] = {v: k for k, v in EVENT_TOPICS.items()}
+
+# EventEmitter's non-indexed payload is ``(msgSender, eventName, eventData)``.
+# ``eventData`` is EventUtils.EventLogData, a tuple of seven keyed item groups.
+_EVENT_LOG_DATA_ABI_TYPE = (
+    "("
+    "((string,address)[],(string,address[])[]),"
+    "((string,uint256)[],(string,uint256[])[]),"
+    "((string,int256)[],(string,int256[])[]),"
+    "((string,bool)[],(string,bool[])[]),"
+    "((string,bytes32)[],(string,bytes32[])[]),"
+    "((string,bytes)[],(string,bytes[])[]),"
+    "((string,string)[],(string,string[])[])"
+    ")"
+)
+
+_TOKEN_DECIMALS_BY_SYMBOL = {
+    "USDC": 6,
+    "USDT": 6,
+    "WBTC": 8,
+    "BTC.b": 8,
+    "WETH": 18,
+    "WETH.e": 18,
+    "WAVAX": 18,
+}
+_TOKEN_DECIMALS_BY_ADDRESS = {
+    address.lower(): _TOKEN_DECIMALS_BY_SYMBOL[symbol]
+    for tokens in GMX_V2_TOKENS.values()
+    for symbol, address in tokens.items()
+    if symbol in _TOKEN_DECIMALS_BY_SYMBOL
+}
 
 
 # =============================================================================
@@ -629,6 +662,11 @@ class GMXv2ReceiptParser:
             "realized_pnl",
             "exit_price",
             "fees_paid",
+            # PERP_CLOSE — collateral withdrawn from the position, decoded from
+            # the PositionDecrease event's collateral_delta_amount. See
+            # extract_collateral_returned for the exact semantics (this is the
+            # event's collateral delta, NOT the net wallet payout).
+            "collateral_returned",
             # VIB-3204 — placeholder extract_protocol_fees returning None;
             # real perp-fee extraction lives in follow-up VIB-3211.
             "protocol_fees",
@@ -950,12 +988,110 @@ class GMXv2ReceiptParser:
             logger.warning(f"Failed to decode PositionIncrease data: {e}")
             return {"raw_data": data}
 
+    @staticmethod
+    def _decode_event_utils_data(data: str, expected_event_name: str) -> dict[str, dict[str, Any]] | None:
+        """Decode GMX EventEmitter's keyed ``EventUtils.EventLogData`` payload."""
+        try:
+            _sender, event_name, event_data = abi_decode(
+                ["address", "string", _EVENT_LOG_DATA_ABI_TYPE],
+                bytes.fromhex(data),
+            )
+        except Exception:
+            return None
+        if event_name != expected_event_name:
+            return None
+
+        def _scalars(group: Any) -> dict[str, Any]:
+            return {str(key): value for key, value in group[0]}
+
+        return {
+            "addresses": _scalars(event_data[0]),
+            "uints": _scalars(event_data[1]),
+            "ints": _scalars(event_data[2]),
+            "bools": _scalars(event_data[3]),
+            "bytes32": _scalars(event_data[4]),
+        }
+
+    @staticmethod
+    def _bytes32_hex(value: Any) -> str:
+        if isinstance(value, bytes):
+            return "0x" + value.hex()
+        text = str(value)
+        return text if text.startswith("0x") else "0x" + text
+
+    def _decode_event_utils_position_decrease(self, data: str) -> dict[str, Any] | None:
+        """Decode the reliable collateral fields from production PositionDecrease."""
+        items = self._decode_event_utils_data(data, "PositionDecrease")
+        if items is None:
+            return None
+
+        addresses = items["addresses"]
+        uints = items["uints"]
+        bools = items["bools"]
+        bytes32_items = items["bytes32"]
+        required = {
+            "address": ("account", "market", "collateralToken"),
+            "uint": ("collateralAmount", "collateralDeltaAmount"),
+            "bool": ("isLong",),
+            "bytes32": ("orderKey", "positionKey"),
+        }
+        missing = [
+            f"{group}.{key}"
+            for group, keys in required.items()
+            for key in keys
+            if key
+            not in {
+                "address": addresses,
+                "uint": uints,
+                "bool": bools,
+                "bytes32": bytes32_items,
+            }[group]
+        ]
+        if missing:
+            logger.warning("GMX PositionDecrease EventUtils payload missing required items: %s", ", ".join(missing))
+            return None
+
+        collateral_token = str(addresses["collateralToken"])
+        collateral_decimals = _TOKEN_DECIMALS_BY_ADDRESS.get(collateral_token.lower())
+        if collateral_decimals is None:
+            logger.warning(
+                "GMX PositionDecrease collateral token %s has no declared decimals; "
+                "collateral amount fields remain unmeasured",
+                collateral_token,
+            )
+            collateral_amount = None
+            collateral_delta_amount = None
+        else:
+            token_scale = Decimal(10**collateral_decimals)
+            collateral_amount = Decimal(uints["collateralAmount"]) / token_scale
+            collateral_delta_amount = Decimal(uints["collateralDeltaAmount"]) / token_scale
+
+        result: dict[str, Any] = {
+            "_event_utils_payload": True,
+            "key": self._bytes32_hex(bytes32_items["positionKey"]),
+            "account": str(addresses["account"]),
+            "market": str(addresses["market"]),
+            "collateral_token": collateral_token,
+            "is_long": bool(bools["isLong"]),
+            "collateral_delta_amount_raw": str(uints["collateralDeltaAmount"]),
+            "order_key": self._bytes32_hex(bytes32_items["orderKey"]),
+        }
+        if collateral_amount is not None:
+            result["collateral_amount"] = str(collateral_amount)
+        if collateral_delta_amount is not None:
+            result["collateral_delta_amount"] = str(collateral_delta_amount)
+        return result
+
     def _decode_position_decrease_data(
         self,
         topics: list[Any],
         data: str,
     ) -> dict[str, Any]:
         """Decode PositionDecrease event data."""
+        event_utils = self._decode_event_utils_position_decrease(data)
+        if event_utils is not None:
+            return event_utils
+
         try:
             # GMX uses 10**30 for USD values and 10**18 for token values
             usd_scale = Decimal(10**30)
@@ -982,6 +1118,7 @@ class GMXv2ReceiptParser:
                 "execution_price": str(Decimal(HexDecoder.decode_uint256(data, 224)) / usd_scale),
                 "size_delta_usd": str(Decimal(HexDecoder.decode_uint256(data, 256)) / usd_scale),
                 "collateral_delta_amount": str(Decimal(HexDecoder.decode_uint256(data, 288)) / token_scale),
+                "collateral_delta_amount_raw": str(HexDecoder.decode_uint256(data, 288)),
                 "index_token_price_max": str(Decimal(HexDecoder.decode_uint256(data, 320)) / usd_scale),
                 "index_token_price_min": str(Decimal(HexDecoder.decode_uint256(data, 352)) / usd_scale),
                 "collateral_token_price_max": str(Decimal(HexDecoder.decode_uint256(data, 384)) / usd_scale),
@@ -1112,6 +1249,11 @@ class GMXv2ReceiptParser:
         """Parse a PositionDecrease event into typed data."""
         try:
             data = event.data
+            if data.get("_event_utils_payload"):
+                # This slice decodes exact collateral-returned semantics only.
+                # Do not fabricate typed price/PnL fields from GMX's differently
+                # scaled EventUtils values; their dedicated decoder is separate.
+                return None
             return PositionDecreaseData(
                 key=data.get("key", ""),
                 account=data.get("account", ""),
@@ -1314,6 +1456,14 @@ class GMXv2ReceiptParser:
     def extract_fees_paid_result(self, receipt: dict[str, Any]) -> ExtractResult[int]:
         """Fail-closed variant of :meth:`extract_fees_paid` — see VIB-3159."""
         return self._wrap_extract(self.extract_fees_paid, receipt, "no fees_paid in order")
+
+    def extract_collateral_returned_result(self, receipt: dict[str, Any]) -> ExtractResult[Decimal]:
+        """Fail-closed variant of :meth:`extract_collateral_returned` — see VIB-3159."""
+        return self._wrap_extract(
+            self.extract_collateral_returned,
+            receipt,
+            "no PositionDecrease event with a decoded collateral_delta_amount",
+        )
 
     def extract_swap_amounts(
         self,
@@ -1529,6 +1679,56 @@ class GMXv2ReceiptParser:
             return None
         except Exception as e:
             logger.warning(f"Failed to extract exit price: {e}")
+            return None
+
+    def extract_collateral_returned(self, receipt: dict[str, Any]) -> Decimal | None:
+        """Extract collateral returned at close from a PERP_CLOSE receipt.
+
+        Sums raw ``collateralDeltaAmount`` values (the collateral withdrawn from the
+        position) across every ``PositionDecrease`` event in the receipt. For a
+        full close GMX sets the delta to the position's entire remaining
+        collateral, so this is the raw collateral-token leg of the close payout.
+        Raw smallest-unit semantics match the other perpetual receipt parsers
+        and allow exact wallet-delta reconciliation without a guessed decimal
+        scale.
+
+        Semantics — what this is NOT: the net wallet credit (GMX's
+        ``outputAmount`` = collateral delta ± realized PnL − fees, optionally
+        swapped to another token) lives in the ``EventUtils.EventLogData``
+        payload and is distinct from this collateral delta. PnL and fees are
+        extracted separately (``realized_pnl``, ``fees_paid``).
+
+        Empty != Zero: only values the decoder actually produced are summed.
+        Events whose decode fell back to ``raw_data`` carry no
+        ``collateral_delta_amount`` key and are skipped; if no event carries a
+        decoded value this returns ``None`` (unmeasured), never a fabricated
+        zero. A decoded ``0`` (size-only decrease) is a measured zero and is
+        returned as ``Decimal("0")``.
+
+        Args:
+            receipt: Transaction receipt dict with 'logs' field
+
+        Returns:
+            Total collateral withdrawn across PositionDecrease events, or None
+            when no event carries a decoded collateral_delta_amount.
+        """
+        try:
+            result = self.parse_receipt(receipt)
+            total = Decimal("0")
+            found = False
+            for event in result.events:
+                if event.event_type != GMXv2EventType.POSITION_DECREASE:
+                    continue
+                raw = event.data.get("collateral_delta_amount_raw")
+                if raw is None:
+                    # EventUtils or legacy fixture decoding did not produce the
+                    # raw field. Skip rather than fabricate a zero.
+                    continue
+                total += Decimal(raw)
+                found = True
+            return total if found else None
+        except Exception as e:
+            logger.warning(f"Failed to extract collateral returned: {e}")
             return None
 
     def extract_fees_paid(self, receipt: dict[str, Any]) -> int | None:
