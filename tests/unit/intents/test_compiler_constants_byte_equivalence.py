@@ -307,6 +307,34 @@ class TestSwapQuoterDerivedView:
         camelot_arbitrum = SWAP_QUOTER_ADDRESSES["arbitrum"]["camelot"].lower()
         assert camelot_arbitrum == "0x0Fc73040b26E9bC8514fA028D998E73A254Fa76E".lower()
 
+    def test_sushiswap_v3_optimism_quoter_surfaced(self) -> None:
+        """SushiSwap V3's Optimism QuoterV2 must be surfaced (VIB-5989).
+
+        The legacy quoter dict never carried this entry (registry drift), so
+        the compiler's price-impact guard failed closed
+        (QUOTER_MISSING_FAIL_CLOSED) for every sushi swap on Optimism.
+        The address was verified on-chain: ``factory()`` returns SushiSwap's
+        Optimism V3 factory 0x9c6522117e2ed1fE5bdb72bb0eD5E3f2bdE7DBe0.
+        """
+        from almanak.framework.intents.compiler_constants import SWAP_QUOTER_ADDRESSES
+
+        optimism = SWAP_QUOTER_ADDRESSES.get("optimism", {})
+        assert "sushiswap_v3" in optimism, (
+            "sushiswap_v3 Optimism quoter must be surfaced (VIB-5989); "
+            "did the connector's QUOTER surface_exclusions regress?"
+        )
+        assert optimism["sushiswap_v3"].lower() == "0xb1E835Dc2785b52265711e17fCCb0fd018226a6e".lower()
+
+    def test_avalanche_sushiswap_v3_quoter_still_excluded(self) -> None:
+        """VIB-2069: sushi Avalanche stays out of the quoter table (zero liquidity)."""
+        from almanak.framework.intents.compiler_constants import SWAP_QUOTER_ADDRESSES
+
+        avalanche = SWAP_QUOTER_ADDRESSES.get("avalanche", {})
+        assert "sushiswap_v3" not in avalanche, (
+            "sushiswap_v3 on avalanche must stay excluded from the quoter table "
+            "(VIB-2069 — zero usable liquidity)"
+        )
+
 
 class TestLpPositionManagersDerivedView:
     """LP_POSITION_MANAGERS hot-path spot-checks."""

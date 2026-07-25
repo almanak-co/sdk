@@ -24,12 +24,19 @@ CONTRACT_ROLES: tuple[ContractRoleSpec, ...] = (
         # position_manager (see VIB-4971).
         #
         # Avalanche has a deployed router/position_manager/quoter but zero usable
-        # liquidity (VIB-2069), so it's surfaced in none of the central tables;
-        # the central quoter table also never surfaced its Optimism quoter.
+        # liquidity (VIB-2069), so it's surfaced in none of the central tables.
+        #
+        # Optimism's quoter (QuoterV2 0xb1E835Dc…226a6e, ``factory()`` ==
+        # SushiSwap's Optimism factory 0x9c6522…7DBe0 — verified on-chain,
+        # VIB-5989) was historically missing from the legacy quoter dict, which
+        # made the compiler's price-impact guard fail closed
+        # (QUOTER_MISSING_FAIL_CLOSED) for every sushi swap on Optimism even
+        # though the router IS surfaced. The exclusion was registry drift, not
+        # policy — it is now surfaced so the guard measures real quotes.
         surface_exclusions={
             ContractRole.ROUTER: frozenset({"avalanche"}),
             ContractRole.LP_POSITION_MANAGER: frozenset({"avalanche"}),
-            ContractRole.QUOTER: frozenset({"avalanche", "optimism"}),
+            ContractRole.QUOTER: frozenset({"avalanche"}),
         },
     ),
 )

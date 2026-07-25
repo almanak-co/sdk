@@ -158,7 +158,13 @@ EXPECTED_SWAP_QUOTER_ADDRESSES: dict[str, dict[str, str]] = {
         "pancakeswap_v3": "0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997",
         "camelot": "0x0Fc73040b26E9bC8514fA028D998E73A254Fa76E",
     },
-    "optimism": {"uniswap_v3": "0x61fFE014bA17989E743c5F6cB21bF9697530B21e"},
+    "optimism": {
+        "uniswap_v3": "0x61fFE014bA17989E743c5F6cB21bF9697530B21e",
+        # VIB-5989: surfaced (QuoterV2 verified on-chain; factory() matches
+        # SushiSwap's Optimism factory). Previously excluded by registry drift,
+        # which fail-closed every sushi Optimism swap with QUOTER_MISSING.
+        "sushiswap_v3": "0xb1E835Dc2785b52265711e17fCCb0fd018226a6e",
+    },
     "polygon": {
         "uniswap_v3": "0x61fFE014bA17989E743c5F6cB21bF9697530B21e",
         "sushiswap_v3": "0xb1E835Dc2785b52265711e17fCCb0fd018226a6e",
@@ -396,9 +402,10 @@ def _legacy_build_swap_quoter_addresses() -> dict[str, dict[str, str]]:
     from almanak.connectors.uniswap_v3.addresses import AGNI_FINANCE, UNISWAP_V3
 
     # Pre-PR-3c central exclusions (now connector-declared) — inlined.
-    _SWAP_QUOTER_EXCLUSIONS = frozenset(
-        {("sushiswap_v3", "avalanche"), ("sushiswap_v3", "optimism"), ("uniswap_v3", "blast")}
-    )
+    # VIB-5989 removed ("sushiswap_v3", "optimism"): the on-chain-verified
+    # Optimism QuoterV2 is now surfaced (the historical omission was registry
+    # drift that fail-closed every sushi Optimism swap).
+    _SWAP_QUOTER_EXCLUSIONS = frozenset({("sushiswap_v3", "avalanche"), ("uniswap_v3", "blast")})
 
     quoters: dict[str, dict[str, str]] = {}
     sources: tuple[tuple[str, dict[str, dict[str, str]], str], ...] = (
@@ -565,7 +572,9 @@ class TestConnectorDeclaredSurfaceMetadata:
             ContractRole.QUOTER,
         ):
             assert CONTRACT_ROLE_REGISTRY.surface_exclusions("uniswap_v3", role) == frozenset({"blast"})
-        # sushiswap_v3: avalanche (router/lp/quoter) + optimism (quoter only).
+        # sushiswap_v3: avalanche across all three roles (VIB-2069). The
+        # historical optimism quoter exclusion was registry drift and was
+        # removed by VIB-5989 (QuoterV2 verified on-chain).
         assert CONTRACT_ROLE_REGISTRY.surface_exclusions("sushiswap_v3", ContractRole.ROUTER) == frozenset(
             {"avalanche"}
         )
@@ -573,7 +582,7 @@ class TestConnectorDeclaredSurfaceMetadata:
             {"avalanche"}
         )
         assert CONTRACT_ROLE_REGISTRY.surface_exclusions("sushiswap_v3", ContractRole.QUOTER) == frozenset(
-            {"avalanche", "optimism"}
+            {"avalanche"}
         )
         # A protocol with no declared exclusions returns empty.
         assert CONTRACT_ROLE_REGISTRY.surface_exclusions("pancakeswap_v3", ContractRole.ROUTER) == frozenset()

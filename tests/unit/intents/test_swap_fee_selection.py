@@ -12,6 +12,7 @@ from almanak import (
     IntentCompilerConfig,
     SwapIntent,
 )
+from almanak.connectors._strategy_base.base.swap_adapter import QUOTER_CALL_GAS_CAP
 
 
 class TestIntentCompilerConfigSwapSelection:
@@ -297,7 +298,8 @@ class TestDefaultSwapAdapterFeeSelection:
 
         class FakeFunctionCall:
             @staticmethod
-            def call() -> tuple[int, int, int, int]:
+            def call(tx: dict[str, object] | None = None) -> tuple[int, int, int, int]:
+                _ = tx
                 return (123, 0, 0, 100_000)
 
         class FakeFunctions:
@@ -400,19 +402,41 @@ class TestSelectFeeTierCaching:
 class TestParallelQuoterWithMock:
     """Validate parallel fee tier querying via quoter."""
 
-    def _make_fake_web3_module(self, quote_results: dict[int, int]) -> SimpleNamespace:
-        """Create a fake web3 module where quoteExactInputSingle returns preset results."""
+    def _make_fake_web3_module(
+        self,
+        quote_results: dict[int, int],
+        gas_required: dict[int, int] | None = None,
+        call_txs: list[dict[str, object] | None] | None = None,
+    ) -> SimpleNamespace:
+        """Create a fake web3 module where quoteExactInputSingle returns preset results.
+
+        ``gas_required`` models per-tier eth_call gas consumption: a tier whose
+        requirement exceeds the ``gas`` field of the call's tx dict raises,
+        exactly like a capped eth_call running out of gas on a real node. When
+        the caller passes no tx (or no ``gas``), the call "succeeds" regardless
+        — modelling an uncapped node happily burning 31.8M gas (VIB-5989).
+        ``call_txs`` records the tx dict passed to every ``.call()``.
+        """
 
         class FakeHTTPProvider:
             def __init__(self, url: str, request_kwargs: dict[str, object] | None = None) -> None:
                 pass
 
+        gas_needed = gas_required or {}
+
         class FakeFunctionCall:
-            def __init__(self, amount_out: int) -> None:
+            def __init__(self, fee_tier: int, amount_out: int) -> None:
+                self._fee_tier = fee_tier
                 self._amount_out = amount_out
 
-            def call(self) -> tuple[int, int, int, int]:
-                return (self._amount_out, 0, 0, 100_000)
+            def call(self, tx: dict[str, object] | None = None) -> tuple[int, int, int, int]:
+                if call_txs is not None:
+                    call_txs.append(tx)
+                needed = gas_needed.get(self._fee_tier, 100_000)
+                gas_cap = tx.get("gas") if tx else None
+                if isinstance(gas_cap, int) and needed > gas_cap:
+                    raise ValueError(f"out of gas: required {needed}, allowed {gas_cap}")
+                return (self._amount_out, 0, 0, needed)
 
         results = quote_results
 
@@ -421,7 +445,7 @@ class TestParallelQuoterWithMock:
             def quoteExactInputSingle(params: tuple[str, str, int, int, int]) -> FakeFunctionCall:
                 fee_tier = params[3]
                 if fee_tier in results:
-                    return FakeFunctionCall(results[fee_tier])
+                    return FakeFunctionCall(fee_tier, results[fee_tier])
                 raise Exception(f"No pool for fee tier {fee_tier}")
 
         class FakeContract:
@@ -488,6 +512,158 @@ class TestParallelQuoterWithMock:
         candidates = adapter.last_fee_selection["quoted_candidates"]
         assert len(candidates) == 4
         assert adapter.get_quoted_amount_out() == 5000
+
+    def test_quoter_eth_call_is_gas_capped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Every tier probe must carry the explicit eth_call gas cap (VIB-5989)."""
+        call_txs: list[dict[str, object] | None] = []
+        fake_web3 = self._make_fake_web3_module({500: 5000, 3000: 4900}, call_txs=call_txs)
+        monkeypatch.setitem(sys.modules, "web3", fake_web3)
+
+        adapter = DefaultSwapAdapter(
+            chain="arbitrum",
+            protocol="uniswap_v3",
+            pool_selection_mode="auto",
+            rpc_url="https://example-rpc",
+        )
+        adapter.select_fee_tier(
+            "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+            "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+            1_000_000,
+        )
+        assert call_txs, "expected at least one quoter eth_call"
+        assert all(tx == {"gas": QUOTER_CALL_GAS_CAP} for tx in call_txs), (
+            f"every quoter eth_call must be capped at {QUOTER_CALL_GAS_CAP} gas "
+            f"(VIB-5989 pathological-pool guard); got {call_txs}"
+        )
+
+    def _make_fake_web3_module_v1_fallback(
+        self,
+        amount_out: int,
+        v1_call_txs: list[dict[str, object] | None],
+    ) -> SimpleNamespace:
+        """Fake web3 whose QuoterV2 ABI always reverts, forcing the V1 fallback.
+
+        The adapter builds two contracts off the same quoter address — a
+        QuoterV2 ABI (single ``tuple`` input) and a legacy V1 ABI (five flat
+        inputs). This fake dispatches on that ABI shape so the V2 probe raises
+        and the V1 ``.call()`` is the one that returns a quote, letting the
+        test assert the fallback path is gas-capped too (VIB-5989).
+        """
+
+        class FakeHTTPProvider:
+            def __init__(self, url: str, request_kwargs: dict[str, object] | None = None) -> None:
+                pass
+
+        class FakeV1FunctionCall:
+            def call(self, tx: dict[str, object] | None = None) -> int:
+                v1_call_txs.append(tx)
+                return amount_out
+
+        class FakeV2Functions:
+            @staticmethod
+            def quoteExactInputSingle(params: tuple[str, str, int, int, int]) -> object:
+                raise Exception("QuoterV2 ABI not supported by this quoter")
+
+        class FakeV1Functions:
+            @staticmethod
+            def quoteExactInputSingle(
+                token_in: str,
+                token_out: str,
+                fee: int,
+                amt_in: int,
+                limit: int,
+            ) -> FakeV1FunctionCall:
+                return FakeV1FunctionCall()
+
+        class FakeV2Contract:
+            functions = FakeV2Functions()
+
+        class FakeV1Contract:
+            functions = FakeV1Functions()
+
+        class FakeEth:
+            @staticmethod
+            def contract(address: str, abi: list[dict[str, object]]) -> object:
+                inputs = abi[0]["inputs"]  # type: ignore[index]
+                is_v2 = len(inputs) == 1 and inputs[0]["type"] == "tuple"  # type: ignore[index,call-overload]
+                return FakeV2Contract() if is_v2 else FakeV1Contract()
+
+        class FakeWeb3:
+            HTTPProvider = FakeHTTPProvider
+
+            def __init__(self, _provider: FakeHTTPProvider) -> None:
+                self.eth = FakeEth()
+
+            @staticmethod
+            def is_connected() -> bool:
+                return True
+
+            @staticmethod
+            def to_checksum_address(address: str) -> str:
+                return address
+
+        return SimpleNamespace(Web3=FakeWeb3)
+
+    def test_v1_fallback_eth_call_is_gas_capped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The legacy V1 quoter fallback carries the same gas cap (VIB-5989).
+
+        Regression guard for the fallback branch specifically: a quoter that
+        only speaks the V1 ABI must not escape the cap just because the V2
+        probe raised first.
+        """
+        v1_call_txs: list[dict[str, object] | None] = []
+        fake_web3 = self._make_fake_web3_module_v1_fallback(amount_out=7000, v1_call_txs=v1_call_txs)
+        monkeypatch.setitem(sys.modules, "web3", fake_web3)
+
+        adapter = DefaultSwapAdapter(
+            chain="arbitrum",
+            protocol="uniswap_v3",
+            pool_selection_mode="auto",
+            rpc_url="https://example-rpc",
+        )
+        adapter.select_fee_tier(
+            "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+            "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+            1_000_000,
+        )
+        assert v1_call_txs, "expected the V1 fallback quoter to be reached"
+        assert all(tx == {"gas": QUOTER_CALL_GAS_CAP} for tx in v1_call_txs), (
+            f"every V1-fallback quoter eth_call must be capped at {QUOTER_CALL_GAS_CAP} gas "
+            f"(VIB-5989); got {v1_call_txs}"
+        )
+        assert adapter.get_quoted_amount_out() == 7000
+
+    def test_pathological_tier_exceeding_gas_cap_is_skipped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A tier whose quote burns pathological gas is skipped (VIB-5989 / VIB-5930 class).
+
+        Tier 100 models the near-empty SushiSwap V3 ethereum USDC/WETH
+        tier-100 pool whose quote is a 31.8M-gas eth_call that wedges a fresh
+        managed-Anvil fork post-submit. With the cap the call runs out of gas
+        and the tier is skipped. Mutation-proof: if the gas cap is removed,
+        the fake's uncapped call "succeeds" and tier 100's higher amount_out
+        wins the sweep — flipping the assertions below.
+        """
+        fake_web3 = self._make_fake_web3_module(
+            {100: 6000, 500: 5000, 3000: 4900},
+            gas_required={100: 31_800_000, 500: 120_000, 3000: 130_000},
+        )
+        monkeypatch.setitem(sys.modules, "web3", fake_web3)
+
+        adapter = DefaultSwapAdapter(
+            chain="arbitrum",
+            protocol="uniswap_v3",
+            pool_selection_mode="auto",
+            rpc_url="https://example-rpc",
+        )
+        fee = adapter.select_fee_tier(
+            "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+            "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+            1_000_000,
+        )
+        assert fee == 500, f"pathological tier 100 must be skipped; selected {fee}"
+        assert adapter.get_quoted_amount_out() == 5000
+        quoted_tiers = {q["fee_tier"] for q in adapter.last_fee_selection["quoted_candidates"]}
+        assert 100 not in quoted_tiers, "31.8M-gas tier must not produce a quoted candidate"
 
     def test_quoter_amount_lower_tightens_slippage(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """When quoter amount < price oracle, compilation should use quoter for min_output."""
@@ -564,6 +740,7 @@ class TestAlgebraQuoter:
         dynamic_fee: int = 100,
         *,
         recorder: list[tuple[str, str, int, int]] | None = None,
+        tx_recorder: list[dict[str, object] | None] | None = None,
         raise_exc: type[BaseException] | None = None,
     ) -> SimpleNamespace:
         """Build a fake `web3` module exposing the Algebra quoter ABI."""
@@ -582,9 +759,11 @@ class TestAlgebraQuoter:
             ) -> None:
                 self._args = (token_in, token_out, amt_in, limit)
 
-            def call(self) -> tuple[int, int]:
+            def call(self, tx: dict[str, object] | None = None) -> tuple[int, int]:
                 if recorder is not None:
                     recorder.append(self._args)
+                if tx_recorder is not None:
+                    tx_recorder.append(tx)
                 if raise_exc is not None:
                     raise raise_exc("simulated quoter failure")
                 return amount_out, dynamic_fee
@@ -667,6 +846,31 @@ class TestAlgebraQuoter:
         assert sel["selected_fee_tier"] == 100  # The dynamic fee returned by the pool
         assert sel["candidate_fee_tiers"] == []  # Algebra has no fee tiers
         assert sel["quoted_amount_out"] == 22_073_113_969_137_859
+
+    def test_camelot_quoter_eth_call_is_gas_capped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The Algebra quoter eth_call carries the same gas cap (VIB-5989)."""
+        tx_recorder: list[dict[str, object] | None] = []
+        fake = self._make_fake_algebra_web3(
+            amount_out=1_000_000,
+            dynamic_fee=100,
+            tx_recorder=tx_recorder,
+        )
+        monkeypatch.setitem(sys.modules, "web3", fake)
+
+        adapter = DefaultSwapAdapter(
+            chain="arbitrum",
+            protocol="camelot",
+            pool_selection_mode="auto",
+            rpc_url="https://example-rpc",
+        )
+        adapter.select_fee_tier(
+            "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+            "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+            50_000_000,
+        )
+        assert tx_recorder == [{"gas": QUOTER_CALL_GAS_CAP}], (
+            f"Algebra quoter eth_call must be capped at {QUOTER_CALL_GAS_CAP} gas; got {tx_recorder}"
+        )
 
     def test_camelot_quoter_zero_amount_distinguished_from_unreachable(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """When the quoter returns 0, leave amount as None but record the typed source.

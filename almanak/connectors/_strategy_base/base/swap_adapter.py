@@ -10,6 +10,23 @@ from typing import Any, Literal
 logger = logging.getLogger(__name__)
 
 
+# Hard gas cap for every quoter ``eth_call`` issued by this adapter (VIB-5989).
+#
+# QuoterV2 simulates the swap inside the pool, so its cost scales with the
+# number of initialized ticks the simulated swap crosses. A near-empty
+# "pathological" pool (dust liquidity spread across thousands of initialized
+# ticks — measured: SushiSwap V3 ethereum USDC/WETH tier-100) turns one tier
+# probe into a ~31.8M-gas ``eth_call``, which wedges a fresh managed-Anvil
+# fork post-submit (VIB-5930 class: the next transaction never mines).
+#
+# Healthy quotes cost well under 1M gas (the worst legitimate quote observed
+# in the VIB-5989 sweep was ~1.03M for 18 ticks crossed in a thin pool), so
+# 3M gives >2.9x headroom for real liquidity while making pathological pools
+# fail fast: the capped call runs out of gas, the exception is caught by the
+# per-tier error handling below, and that tier is simply skipped.
+QUOTER_CALL_GAS_CAP: int = 3_000_000
+
+
 # Chains where probing for a bridged USDC variant is meaningful for the
 # fee-tier heuristic. Outside this set the resolver has no entry for
 # ``USDC.e`` / ``USDC_BRIDGED`` and the probe burns ~15s per call against
@@ -408,7 +425,7 @@ class DefaultSwapAdapter:
             try:
                 amount_out, _, _, gas_estimate = contract_v2.functions.quoteExactInputSingle(
                     (from_addr, to_addr, amount_in, fee_tier, 0)
-                ).call()
+                ).call({"gas": QUOTER_CALL_GAS_CAP})
                 if amount_out > 0:
                     return {
                         "fee_tier": fee_tier,
@@ -419,7 +436,7 @@ class DefaultSwapAdapter:
                 try:
                     amount_out = contract_v1.functions.quoteExactInputSingle(
                         from_addr, to_addr, fee_tier, amount_in, 0
-                    ).call()
+                    ).call({"gas": QUOTER_CALL_GAS_CAP})
                     if amount_out > 0:
                         return {
                             "fee_tier": fee_tier,
@@ -561,7 +578,9 @@ class DefaultSwapAdapter:
             )
             from_addr = web3.to_checksum_address(from_token)
             to_addr = web3.to_checksum_address(to_token)
-            amount_out, dynamic_fee = quoter.functions.quoteExactInputSingle(from_addr, to_addr, amount_in, 0).call()
+            amount_out, dynamic_fee = quoter.functions.quoteExactInputSingle(from_addr, to_addr, amount_in, 0).call(
+                {"gas": QUOTER_CALL_GAS_CAP}
+            )
         except Exception as exc:
             self.last_fee_selection["source"] = "algebra_quoter_call_failed"
             self.last_fee_selection["error"] = str(exc)
@@ -637,4 +656,4 @@ class DefaultSwapAdapter:
         return hex(value)[2:].zfill(64)
 
 
-__all__ = ["DefaultSwapAdapter"]
+__all__ = ["QUOTER_CALL_GAS_CAP", "DefaultSwapAdapter"]

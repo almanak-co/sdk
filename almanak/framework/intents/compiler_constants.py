@@ -711,7 +711,7 @@ def _build_swap_quoter_addresses() -> dict[str, dict[str, str]]:
 
     Per-(protocol, chain) surface exclusions are connector-declared
     (``ContractRoleSpec.surface_exclusions``) — SushiSwap V3 drops Avalanche
-    (VIB-2069 zero liquidity) + Optimism (never in the legacy quoter dict),
+    (VIB-2069 zero liquidity; its Optimism quoter is surfaced since VIB-5989),
     Uniswap V3 drops Blast — so this builder names no protocol (VIB-4928 PR-3c).
     """
     from almanak.connectors._strategy_base.address_registry import AddressRegistry
