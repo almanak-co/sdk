@@ -1156,37 +1156,21 @@ class GMXv2Adapter:
     def _parse_raw_positions(self, raw_positions: list) -> list[GMXv2Position]:
         """Parse raw position tuples from Reader contract into GMXv2Position objects.
 
+        Delegates the raw-tuple -> dict decode to the SINGLE canonical parser,
+        ``GMXV2SDK._parse_raw_positions`` (VIB-5950: one Position.Numbers struct
+        mapping, not two independent copies), then maps the dicts to
+        ``GMXv2Position`` via ``_parse_position_dicts``. Behaviour and dict shape
+        are identical to that parser by construction.
+
         Args:
             raw_positions: Raw tuples from getAccountPositions call
 
         Returns:
             List of GMXv2Position objects
         """
-        # Convert raw tuples to dicts then reuse _parse_position_dicts
-        position_dicts = []
-        for raw in raw_positions:
-            addresses = raw[0]
-            numbers = raw[1]
-            flags = raw[2]
-            position_dicts.append(
-                {
-                    "account": addresses[0],
-                    "market": addresses[1],
-                    "collateral_token": addresses[2],
-                    "size_in_usd": numbers[0],
-                    "size_in_tokens": numbers[1],
-                    "collateral_amount": numbers[2],
-                    "borrowing_factor": numbers[3],
-                    "funding_fee_amount_per_size": numbers[4],
-                    "long_token_claimable_funding_per_size": numbers[5],
-                    "short_token_claimable_funding_per_size": numbers[6],
-                    "increased_at_block": numbers[7],
-                    "decreased_at_block": numbers[8],
-                    "increased_at_time": numbers[9],
-                    "decreased_at_time": numbers[10],
-                    "is_long": flags[0],
-                }
-            )
+        from almanak.connectors.gmx_v2.sdk import GMXV2SDK
+
+        position_dicts = GMXV2SDK._parse_raw_positions(raw_positions)
         return self._parse_position_dicts(position_dicts)
 
     def _get_collateral_decimals(self, collateral_address: str) -> int:

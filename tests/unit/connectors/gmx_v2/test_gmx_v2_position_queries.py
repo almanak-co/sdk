@@ -74,7 +74,9 @@ class TestGMXV2SDKGetPositions:
 
     MOCK_POSITION_RAW = (
         ("0xAccount", "0xMarket", "0xCollateral"),  # addresses
-        (1000, 500, 100, 0, 0, 0, 0, 1000, 0, 1700000000, 0),  # numbers
+        # Current 10-field Position.Numbers (VIB-5289/VIB-5950): index 3 is the
+        # signed int256 pendingImpactAmount; no block fields.
+        (1000, 500, 100, -7, 0, 0, 0, 1000, 1700000000, 0),  # numbers
         (True,),  # flags
     )
 
@@ -151,10 +153,15 @@ class TestGMXV2SDKParsePositions:
         """Parse raw Reader tuples into position dicts."""
         from almanak.connectors.gmx_v2.sdk import GMXV2SDK
 
+        # Current 10-field Position.Numbers (VIB-5289/VIB-5950): index 3 is the
+        # signed int256 pendingImpactAmount; the legacy block fields are gone.
+        # numbers[0..9]: size_usd, size_tok, col_amt, pendingImpactAmount,
+        # borrowingFactor, fundingFeeAmountPerSize, longClaimable, shortClaimable,
+        # increasedAtTime, decreasedAtTime.
         raw = [
             (
                 ("0xAcc", "0xMkt", "0xCol"),
-                (10**30, 5 * 10**17, 10**6, 100, 200, 300, 400, 100, 0, 1700000000, 0),
+                (10**30, 5 * 10**17, 10**6, -5, 200, 300, 400, 500, 1700000000, 0),
                 (False,),
             )
         ]
@@ -166,7 +173,12 @@ class TestGMXV2SDKParsePositions:
         assert p["collateral_token"] == "0xCol"
         assert p["size_in_usd"] == 10**30
         assert p["is_long"] is False
-        assert p["increased_at_time"] == 1700000000
+        # Shifted fields read from their new indices, not the stale ones.
+        assert p["borrowing_factor"] == 200  # index 4
+        assert p["increased_at_time"] == 1700000000  # index 8
+        # Block fields no longer exist on-chain — must not be fabricated.
+        assert "increased_at_block" not in p
+        assert "decreased_at_block" not in p
 
 
 class TestGMXv2AdapterPositionsOnchain:

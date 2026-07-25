@@ -476,8 +476,9 @@ class GMXV2SDK:
                             p.get("shortTokenClaimableFundingAmountPerSize", 0),
                             "shortTokenClaimableFundingAmountPerSize",
                         ),
-                        "increased_at_block": _si(p.get("increasedAtBlock", 0), "increasedAtBlock"),
-                        "decreased_at_block": _si(p.get("decreasedAtBlock", 0), "decreasedAtBlock"),
+                        # increasedAtBlock/decreasedAtBlock were removed from the GMX
+                        # Position struct on-chain; drop them here too so the REST-fallback
+                        # dict shape stays identical to _parse_raw_positions() (VIB-5950).
                         "increased_at_time": _si(p.get("increasedAtTime", 0), "increasedAtTime"),
                         "decreased_at_time": _si(p.get("decreasedAtTime", 0), "decreasedAtTime"),
                         "is_long": bool(p.get("isLong", False)),
@@ -501,10 +502,14 @@ class GMXV2SDK:
         for raw in raw_positions:
             # raw is a tuple: (addresses, numbers, flags)
             # addresses: (account, market, collateralToken)
-            # numbers: (sizeInUsd, sizeInTokens, collateralAmount, borrowingFactor,
-            #           fundingFeeAmountPerSize, longTokenClaimableFundingAmountPerSize,
-            #           shortTokenClaimableFundingAmountPerSize, increasedAtBlock,
-            #           decreasedAtBlock, increasedAtTime, decreasedAtTime)
+            # numbers: the CURRENT 10-field Position.Numbers (VIB-5289/VIB-5950) —
+            #   (sizeInUsd, sizeInTokens, collateralAmount, pendingImpactAmount[int256],
+            #    borrowingFactor, fundingFeeAmountPerSize,
+            #    longTokenClaimableFundingAmountPerSize, shortTokenClaimableFundingAmountPerSize,
+            #    increasedAtTime, decreasedAtTime).
+            # The legacy increasedAtBlock/decreasedAtBlock were removed on-chain and an
+            # int256 pendingImpactAmount added at index 3 — decoded, not consumed (matches
+            # perps_read.py and the canonical PerpsPositionOnChain, which carry no block fields).
             # flags: (isLong,)
             addresses = raw[0]
             numbers = raw[1]
@@ -518,14 +523,13 @@ class GMXV2SDK:
                     "size_in_usd": numbers[0],  # 30 decimals
                     "size_in_tokens": numbers[1],  # token decimals
                     "collateral_amount": numbers[2],  # token decimals
-                    "borrowing_factor": numbers[3],
-                    "funding_fee_amount_per_size": numbers[4],
-                    "long_token_claimable_funding_per_size": numbers[5],
-                    "short_token_claimable_funding_per_size": numbers[6],
-                    "increased_at_block": numbers[7],
-                    "decreased_at_block": numbers[8],
-                    "increased_at_time": numbers[9],
-                    "decreased_at_time": numbers[10],
+                    # numbers[3] = pendingImpactAmount (int256) — decoded, not consumed.
+                    "borrowing_factor": numbers[4],
+                    "funding_fee_amount_per_size": numbers[5],
+                    "long_token_claimable_funding_per_size": numbers[6],
+                    "short_token_claimable_funding_per_size": numbers[7],
+                    "increased_at_time": numbers[8],
+                    "decreased_at_time": numbers[9],
                     "is_long": flags[0],
                 }
             )

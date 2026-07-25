@@ -190,19 +190,14 @@ class GMXPerpLifecycleStrategy(IntentStrategy):
         """Create PerpCloseIntent to close the full position."""
         max_slippage = self.max_slippage_pct / Decimal("100")
 
-        # Use tracked size if available, otherwise close full position (size_usd=None)
-        close_size = self._position_size_usd if self._position_size_usd > 0 else None
-
         direction = "LONG" if self.is_long else "SHORT"
-        logger.info(
-            f"Closing {direction}: {self.market}, size={format_usd(close_size) if close_size else 'FULL'}"
-        )
+        logger.info(f"Closing {direction}: {self.market}, size=FULL")
 
         return Intent.perp_close(
             market=self.market,
             collateral_token=self.collateral_token,
             is_long=self.is_long,
-            size_usd=close_size,
+            size_usd=None,  # None = close the FULL on-chain position (never a cached notional — VIB-5950/ALM-2976)
             max_slippage=max_slippage,
             protocol="gmx_v2",
         )
@@ -322,15 +317,16 @@ class GMXPerpLifecycleStrategy(IntentStrategy):
         intents = []
         if self._loop_state == "open":
             slippage = Decimal("0.03") if mode == TeardownMode.HARD else Decimal("0.01")
-            # If size is unknown (corrupt/missing persisted state), emit a full
-            # close by passing size_usd=None. Passing size_usd=0 would be a no-op.
-            close_size = self._position_size_usd if self._position_size_usd > 0 else None
+            # Always emit a full close by passing size_usd=None — the compiler
+            # live-reads the on-chain position size at compile time. Passing a
+            # cached notional would strand residual dust if the position drifted
+            # (VIB-5950/ALM-2976); size_usd=0 would be a no-op.
             intents.append(
                 Intent.perp_close(
                     market=self.market,
                     collateral_token=self.collateral_token,
                     is_long=self.is_long,
-                    size_usd=close_size,
+                    size_usd=None,
                     max_slippage=slippage,
                     protocol="gmx_v2",
                 )

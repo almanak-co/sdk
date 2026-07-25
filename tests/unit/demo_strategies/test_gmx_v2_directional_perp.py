@@ -82,3 +82,29 @@ class TestCollateralUnits:
         intent = strat._enter(_market("100", collateral_price="2500"), module.LONG, Decimal("0"))
         assert intent.intent_type.value == "PERP_OPEN"
         assert intent.collateral_amount == Decimal("0.02")
+
+
+class TestFullCloseSemantics:
+    """VIB-5950 / ALM-2976 regression pin.
+
+    Exit and teardown closes must emit ``size_usd=None`` so the compiler
+    live-reads the on-chain position size. A cached config notional
+    (``position_size_usd``) strands residual dust when the position drifts.
+    """
+
+    def test_exit_close_emits_size_none(self, gmx):
+        module, strat = gmx
+        intent = strat._close(module.LONG, reason="reverse")
+        assert intent.intent_type.value == "PERP_CLOSE"
+        # Must NOT carry the cached config notional.
+        assert intent.size_usd is None
+
+    def test_teardown_close_emits_size_none(self, gmx):
+        from almanak.framework.teardown import TeardownMode
+
+        module, strat = gmx
+        strat._position_side = module.LONG
+        intents = strat.generate_teardown_intents(TeardownMode.SOFT)
+        assert len(intents) == 1
+        assert intents[0].intent_type.value == "PERP_CLOSE"
+        assert intents[0].size_usd is None

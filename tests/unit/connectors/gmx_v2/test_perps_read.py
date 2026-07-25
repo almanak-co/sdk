@@ -74,10 +74,11 @@ def test_reduce_decodes_current_10_field_numbers_struct():
     ``decreased_at_time`` 10→9; the valuation-critical size/collateral/is_long
     stay at 0/1/2.
 
-    Validated against ground truth directly, NOT against ``GMXV2SDK``
-    ``_parse_raw_positions`` — that SDK/adapter oracle is ITSELF on the stale
-    11-field layout (execution path; tracked in VIB-5289 for a separately-
-    validated fix), so asserting parity with it would assert the bug.
+    Validated against ground truth directly. (The ``GMXV2SDK`` /
+    ``GMXv2Adapter`` ``_parse_raw_positions`` oracles + the vendored
+    ``reader.json`` were on the stale 11-field layout until VIB-5950 completed the
+    fix; they now share this 10-field layout — see
+    ``test_reader_json_position_decode.py``.)
     """
     props_list = [
         _props(_ETH_MARKET, size_usd=10**31, size_tok=10**18, col_amt=10**6, is_long=True, bf=71, ffaps=91),

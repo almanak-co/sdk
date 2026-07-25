@@ -293,7 +293,7 @@ class GmxV2DirectionalPerp(IntentStrategy):
             market=self.market,
             collateral_token=self.collateral_token,
             is_long=side == LONG,
-            size_usd=self.position_size_usd,
+            size_usd=None,  # None = close the FULL on-chain position (never a cached notional — VIB-5950/ALM-2976)
             max_slippage=self.max_slippage,
             protocol="gmx_v2",
         )
@@ -443,7 +443,7 @@ class GmxV2DirectionalPerp(IntentStrategy):
                 market=self.market,
                 collateral_token=self.collateral_token,
                 is_long=self._position_side == LONG,
-                size_usd=self.position_size_usd,
+                size_usd=None,  # None = close the FULL on-chain position (never a cached notional — VIB-5950/ALM-2976)
                 max_slippage=slippage,
                 protocol="gmx_v2",
             )

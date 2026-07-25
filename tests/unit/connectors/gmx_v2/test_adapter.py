@@ -1076,21 +1076,20 @@ class TestGMXv2OnchainPositionParsing:
                     GMX_V2_MARKETS["arbitrum"]["ETH/USD"],
                     GMX_V2_TOKENS["arbitrum"]["USDC"],
                 ),
-                # numbers: (sizeInUsd, sizeInTokens, collateralAmount,
-                #           borrowingFactor, fundingFeeAmountPerSize,
-                #           longClaimable, shortClaimable,
-                #           increasedAtBlock, decreasedAtBlock,
+                # numbers: current 10-field Position.Numbers (VIB-5289/VIB-5950) —
+                #           (sizeInUsd, sizeInTokens, collateralAmount,
+                #           pendingImpactAmount[int256], borrowingFactor,
+                #           fundingFeeAmountPerSize, longClaimable, shortClaimable,
                 #           increasedAtTime, decreasedAtTime)
                 (
                     5000 * 10**30,  # sizeInUsd
                     int(2.5 * 10**18),  # sizeInTokens
                     1000 * 10**6,  # collateralAmount (USDC, 6 decimals)
+                    -12345,  # pendingImpactAmount (int256, signed)
                     0,  # borrowingFactor
                     0,  # fundingFeeAmountPerSize
                     0,  # longClaimable
                     0,  # shortClaimable
-                    100,  # increasedAtBlock
-                    0,  # decreasedAtBlock
                     1700000000,  # increasedAtTime
                     0,  # decreasedAtTime
                 ),
