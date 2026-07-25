@@ -627,15 +627,18 @@ def _pair_tokens_from_intent(intent: Any) -> tuple[str | None, str | None]:
     (e.g. TraderJoe V2 fungible-LP closes under a synthetic id) or on a
     cross-process teardown / resume where the cache is empty (VIB-5195).
 
-    Invariant: the ``pool`` descriptor's first two segments are token0 / token1
-    in that order, and a given connector emits the SAME order on OPEN and CLOSE
-    (the CLOSE fallback fires only on a cache miss, so a connector that reversed
-    the order between OPEN and CLOSE would swap the per-leg token columns — the
-    value_usd magnitude is order-invariant, ``a0·p0 + a1·p1``, so the total is
-    unaffected). The pair is parsed POSITIONALLY (not filter-then-index) and is
-    accepted only when BOTH leading segments are symbols; a mixed / partial
+    The ``pool`` descriptor's first two segments are parsed POSITIONALLY as the
+    human / config label order (not filter-then-index). A mixed / partial
     descriptor (an address in either leg) is rejected whole so a trailing symbol
     can never be misattributed onto the wrong slot.
+
+    **VIB-5983 — order is NOT value-invariant.** Receipt ``amount0``/``amount1``
+    are in on-chain ``token0()``/``token1()`` (address-sorted) order. When the
+    label order disagrees (Ethereum ``WETH/USDC/500`` is USDC-first on-chain),
+    pairing label-ordered symbols with chain-ordered amounts mis-scales
+    decimals and mis-prices a leg — the sum ``a0·p0 + a1·p1`` is *not*
+    invariant. Callers that stamp typed raw amounts MUST re-pair symbols via
+    :func:`_realign_event_lp_pair_if_needed` before computing ``value_usd``.
     """
     t0 = getattr(intent, "token0", None) or getattr(intent, "from_token", None)
     t1 = getattr(intent, "token1", None) or getattr(intent, "to_token", None)
@@ -691,6 +694,66 @@ def _pair_tokens_from_declared_legs(extracted: Any) -> tuple[str | None, str | N
     t0 = outputs[0].token if len(outputs) >= 1 and outputs[0].token else None
     t1 = outputs[1].token if len(outputs) >= 2 and outputs[1].token else None
     return (t0, t1)
+
+
+def _lp_data_attr(lp_data: Any, name: str) -> Any:
+    """Read ``lp_data.<name>`` whether typed object or dict."""
+    if lp_data is None:
+        return None
+    if isinstance(lp_data, dict):
+        return lp_data.get(name)
+    return getattr(lp_data, name, None)
+
+
+def _realign_event_lp_pair_if_needed(event: PositionEvent, ctx: IntentEventContext) -> None:
+    """VIB-5983 — re-pair ``event.token0``/``token1`` to on-chain address order.
+
+    Mirrors ``lp_handler._v3_realign_token_pair`` (VIB-5851) for the Layer-3
+    ``position_events`` producer. Receipt amounts are address-sorted; intent
+    pool labels often are not. Without this, ``value_usd`` books a ~$1bn
+    phantom on inverted-order V3 pools (Ethereum WETH/USDC).
+
+    Fail-open / no-op when:
+
+    * either symbol empty, or no typed raw amounts on the event;
+    * fungible N-coin (``coin_symbols``) — pool-index order, not address;
+    * declared ``primitive_money_legs`` — legs already aligned to amounts;
+    * address resolution fails (shared helper keeps label order).
+    """
+    t0 = (event.token0 or "").strip()
+    t1 = (event.token1 or "").strip()
+    if not t0 or not t1:
+        return
+    if not (event.amount0 and event.amount1):
+        return
+
+    extracted = ctx.extracted if isinstance(ctx.extracted, dict) else {}
+    if extracted.get("primitive_money_legs") is not None:
+        return
+
+    # N-coin fungible path (Curve / Balancer) — coin order is pool index.
+    if event.coin_symbols:
+        return
+    lp_data = extracted.get("lp_open_data") or extracted.get("lp_close_data")
+    if _lp_data_attr(lp_data, "coin_symbols"):
+        return
+
+    from almanak.framework.data.tokens.pair_order import realign_token_pair_by_address
+
+    new0, new1 = realign_token_pair_by_address(t0, t1, ctx.chain or event.chain or "")
+    if (new0, new1) == (t0, t1):
+        return
+    logger.info(
+        "VIB-5983: realigned LP position_events pair %s/%s -> %s/%s (chain=%s position_id=%s)",
+        t0,
+        t1,
+        new0,
+        new1,
+        ctx.chain or event.chain,
+        event.position_id,
+    )
+    event.token0 = new0
+    event.token1 = new1
 
 
 def _apply_lp_open(event: PositionEvent, ctx: IntentEventContext) -> None:
@@ -756,6 +819,9 @@ def _apply_lp_open(event: PositionEvent, ctx: IntentEventContext) -> None:
         event.token0 = t0
     if t1:
         event.token1 = t1
+    # VIB-5983 — amount0/amount1 above are on-chain address order; re-pair
+    # label-ordered symbols before ι stamps value_usd.
+    _realign_event_lp_pair_if_needed(event, ctx)
 
 
 def _apply_lp_close(event: PositionEvent, ctx: IntentEventContext) -> None:
@@ -1697,6 +1763,10 @@ def _apply_lp_close_columns(
             event.token0 = t0
         if not event.token1 and t1:
             event.token1 = t1
+    # VIB-5983 — re-pair before value_usd. Cache may carry a pre-fix OPEN's
+    # label-order symbols; intent fallback is also label-order. Amounts on the
+    # close event are on-chain address order.
+    _realign_event_lp_pair_if_needed(event, ctx)
     # in_range is unambiguously False post-close (NFT burned / liquidity
     # withdrawn). The dashboard reads ``in_range=None`` as "unknown" and
     # ``False`` as "out of range". Either is honest; False is more

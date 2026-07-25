@@ -510,46 +510,11 @@ def _v3_realign_token_pair(
     if _lp_data_field(lp_data, "coin_symbols"):
         return token0, token1
 
-    try:
-        from almanak.framework.data.tokens.resolver import get_token_resolver
+    # Shared pure sort (VIB-5851 / VIB-5983) — resolve symbols offline and
+    # order so token0 is the lower address, matching on-chain amount0.
+    from almanak.framework.data.tokens.pair_order import realign_token_pair_by_address
 
-        resolver = get_token_resolver()
-        ti0 = resolver.resolve(token0, chain=chain, skip_gateway=True, log_errors=False)
-        ti1 = resolver.resolve(token1, chain=chain, skip_gateway=True, log_errors=False)
-    except Exception:  # noqa: BLE001 — accounting path: fail-open, never raise/block
-        logger.warning(
-            "V3 LP accounting: token resolver failed for label pair (%s, %s) on %s; "
-            "keeping label order — amounts may be misattributed if label != chain order",
-            token0,
-            token1,
-            chain,
-        )
-        return token0, token1
-
-    addr0 = getattr(ti0, "address", None) if ti0 is not None else None
-    addr1 = getattr(ti1, "address", None) if ti1 is not None else None
-    if not addr0 or not addr1:
-        logger.warning(
-            "V3 LP accounting: could not resolve on-chain addresses for label pair (%s, %s) on %s; keeping label order",
-            token0,
-            token1,
-            chain,
-        )
-        return token0, token1
-
-    try:
-        int0 = int(str(addr0), 16)
-        int1 = int(str(addr1), 16)
-    except (TypeError, ValueError):
-        # Non-hex address (e.g. a non-EVM identity) — cannot address-sort.
-        return token0, token1
-    if int0 == int1:
-        return token0, token1  # identical/degenerate — nothing to order
-    # On-chain ``token0()`` is the numerically-lower address. Swap the SYMBOLS so
-    # ``token0`` (and thus its decimals + price) pairs with on-chain ``amount0``.
-    if int0 <= int1:
-        return token0, token1
-    return token1, token0
+    return realign_token_pair_by_address(token0, token1, chain)
 
 
 def _resolve_lp_tokens(ledger_row: dict[str, Any], position_key: str) -> tuple[str, str]:
