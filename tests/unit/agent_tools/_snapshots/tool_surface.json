@@ -283,19 +283,31 @@
       "name": "list_lending_positions"
     },
     {
-      "description": "List a lending market's reserves with per-reserve borrowable/active/collateral flags (Aave V3).",
+      "description": "List a lending protocol's reserves/markets with borrowable/active/collateral flags. Aave-style reserves enumerate live; market-keyed protocols (morpho_blue) list curated COLLATERAL/LOAN markets with their immutable market_id + LLTV.",
       "inputSchema": {
-        "description": "List a lending protocol's reserves with per-reserve config flags.\n\nRead-only discovery. Answers \"which assets can I actually borrow / use as\ncollateral on this market?\" before configuring a strategy \u2014 so an operator\ndoesn't pick a supply-only or paused reserve and only discover it at the\nborrow step of a lifecycle run (VIB-4925). Enumerates the live on-chain\nreserve set via the PoolDataProvider's ``getAllReservesTokens()`` (not a\ncurated table) and reads each reserve's live ``getReserveConfigurationData``.",
+        "description": "List a lending protocol's reserves with per-reserve config flags.\n\nRead-only discovery. Answers \"which assets can I actually borrow / use as\ncollateral on this market?\" before configuring a strategy \u2014 so an operator\ndoesn't pick a supply-only or paused reserve and only discover it at the\nborrow step of a lifecycle run (VIB-4925). Aave-style protocols enumerate\nthe live on-chain reserve set (PoolDataProvider ``getAllReservesTokens()``\n+ per-reserve ``getReserveConfigurationData``). Market-keyed protocols\n(morpho_blue) list the connector's CURATED catalog of markets \u2014 check the\nresponse's ``enumeration_source``: with ``curated_catalog``, an absent\nmarket may still exist on-chain (VIB-5985).",
         "properties": {
           "asset": {
             "default": "",
-            "description": "Optional single reserve symbol to filter to (e.g. 'WMATIC').",
+            "description": "Optional reserve filter: a full symbol ('WMATIC', 'sUSDe/USDC') or a single token of a pair-keyed market ('sUSDe' matches either leg on Morpho-style markets).",
             "title": "Asset",
             "type": "string"
           },
           "chain": {
             "default": "arbitrum",
             "title": "Chain",
+            "type": "string"
+          },
+          "collateral": {
+            "default": "",
+            "description": "Pair-keyed markets only (e.g. morpho_blue): keep markets whose COLLATERAL leg matches this symbol.",
+            "title": "Collateral",
+            "type": "string"
+          },
+          "loan": {
+            "default": "",
+            "description": "Pair-keyed markets only (e.g. morpho_blue): keep markets whose LOAN leg matches this symbol.",
+            "title": "Loan",
             "type": "string"
           },
           "network": {
@@ -2021,20 +2033,32 @@
     },
     {
       "function": {
-        "description": "List a lending market's reserves with per-reserve borrowable/active/collateral flags (Aave V3).",
+        "description": "List a lending protocol's reserves/markets with borrowable/active/collateral flags. Aave-style reserves enumerate live; market-keyed protocols (morpho_blue) list curated COLLATERAL/LOAN markets with their immutable market_id + LLTV.",
         "name": "list_lending_reserves",
         "parameters": {
-          "description": "List a lending protocol's reserves with per-reserve config flags.\n\nRead-only discovery. Answers \"which assets can I actually borrow / use as\ncollateral on this market?\" before configuring a strategy \u2014 so an operator\ndoesn't pick a supply-only or paused reserve and only discover it at the\nborrow step of a lifecycle run (VIB-4925). Enumerates the live on-chain\nreserve set via the PoolDataProvider's ``getAllReservesTokens()`` (not a\ncurated table) and reads each reserve's live ``getReserveConfigurationData``.",
+          "description": "List a lending protocol's reserves with per-reserve config flags.\n\nRead-only discovery. Answers \"which assets can I actually borrow / use as\ncollateral on this market?\" before configuring a strategy \u2014 so an operator\ndoesn't pick a supply-only or paused reserve and only discover it at the\nborrow step of a lifecycle run (VIB-4925). Aave-style protocols enumerate\nthe live on-chain reserve set (PoolDataProvider ``getAllReservesTokens()``\n+ per-reserve ``getReserveConfigurationData``). Market-keyed protocols\n(morpho_blue) list the connector's CURATED catalog of markets \u2014 check the\nresponse's ``enumeration_source``: with ``curated_catalog``, an absent\nmarket may still exist on-chain (VIB-5985).",
           "properties": {
             "asset": {
               "default": "",
-              "description": "Optional single reserve symbol to filter to (e.g. 'WMATIC').",
+              "description": "Optional reserve filter: a full symbol ('WMATIC', 'sUSDe/USDC') or a single token of a pair-keyed market ('sUSDe' matches either leg on Morpho-style markets).",
               "title": "Asset",
               "type": "string"
             },
             "chain": {
               "default": "arbitrum",
               "title": "Chain",
+              "type": "string"
+            },
+            "collateral": {
+              "default": "",
+              "description": "Pair-keyed markets only (e.g. morpho_blue): keep markets whose COLLATERAL leg matches this symbol.",
+              "title": "Collateral",
+              "type": "string"
+            },
+            "loan": {
+              "default": "",
+              "description": "Pair-keyed markets only (e.g. morpho_blue): keep markets whose LOAN leg matches this symbol.",
+              "title": "Loan",
               "type": "string"
             },
             "network": {

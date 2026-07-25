@@ -193,4 +193,10 @@ def gmx_v2_teardown_post_condition(
     return _verify_open_position(position, wallet_address, gateway_client, block)
 
 
+# Plan-A reconciliation may defer a pending-order residual to this hook ONLY
+# because this declaration proves the hook verifies the exact order key against
+# the on-chain pending set (_verify_pending_order). A post-condition without
+# this declaration keeps pending-order residuals UNVERIFIABLE in Plan-A.
+gmx_v2_teardown_post_condition.handles_pending_orders = True  # type: ignore[attr-defined]
+
 __all__ = ["gmx_v2_teardown_post_condition"]

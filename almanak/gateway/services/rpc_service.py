@@ -434,6 +434,30 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
             f"or start the gateway with --chains {chain}."
         )
 
+    def _network_elevation_error(self, network_override: str | None) -> str | None:
+        """Reject a caller override that would grant Anvil-only semantics.
+
+        Anvil privileges — the ``ANVIL_ONLY_RPC_METHODS`` fork-mutation
+        allowlist (``evm_increaseTime``, ``anvil_setCode``,
+        ``eth_sendTransaction``, ...) and localhost fork routing — are
+        authorized by the gateway's own launch configuration, never by the
+        caller. A request-supplied ``network="anvil"`` on a gateway launched
+        for any other network would otherwise let the strategy container
+        unlock fork mutation and redirect gateway egress to the local fork
+        URL. The reverse direction — an anvil-launched gateway serving a
+        per-request ``"mainnet"`` read (VIB-1713) — stays allowed.
+        """
+        if network_override is None or network_override.strip().lower() != "anvil":
+            return None
+        if str(self.settings.network or "").strip().lower() == "anvil":
+            return None
+        return (
+            "Per-request network override 'anvil' is not permitted on a gateway "
+            f"launched for network '{self.settings.network}': Anvil-only RPC "
+            "semantics are authorized by gateway launch configuration, not by "
+            "the caller"
+        )
+
     def _get_rpc_url(self, chain: str, network_override: str | None = None) -> str | None:
         """Get RPC URL for a chain.
 
@@ -738,8 +762,21 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
                 id=request.id,
             )
 
-        # Resolve effective network so validation and execution use the same policy
-        network_override = request.network if request.network else None
+        # Resolve effective network so validation and execution use the same
+        # policy. Normalize before storing (mirrors the batch path) so the
+        # elevation guard, the method allowlist's exact network == "anvil"
+        # comparison, and URL resolution all see one canonical value.
+        network_override = (request.network or "").strip().lower() or None
+        elevation_error = self._network_elevation_error(network_override)
+        if elevation_error is not None:
+            self._metrics.failed_requests += 1
+            context.set_code(grpc.StatusCode.PERMISSION_DENIED)
+            context.set_details(elevation_error)
+            return gateway_pb2.RpcResponse(
+                success=False,
+                error=json.dumps({"code": -32600, "message": elevation_error}),
+                id=request.id,
+            )
         effective_network = network_override or self.settings.network
 
         # Validate RPC method against allowlist (chain-aware: Solana vs EVM, network-aware: Anvil)
@@ -881,7 +918,17 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
                 "All requests in a batch must use the same network override",
             )
             return None, response
-        return next(iter(batch_networks), None), None
+        network_override = next(iter(batch_networks), None)
+        elevation_error = self._network_elevation_error(network_override)
+        if elevation_error is not None:
+            response = self._failed_batch_response(
+                context,
+                num_requests,
+                grpc.StatusCode.PERMISSION_DENIED,
+                elevation_error,
+            )
+            return None, response
+        return network_override, None
 
     def _validate_batch_methods_or_response(
         self,

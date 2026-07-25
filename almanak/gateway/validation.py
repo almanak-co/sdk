@@ -83,8 +83,11 @@ ANVIL_ONLY_RPC_METHODS = frozenset(
         "anvil_setStorageAt",
         "anvil_setCode",
         # Required for transactions sent from impersonated accounts on a fork.
-        # Production/mainnet requests still fail validation because this method
-        # exists only in the network == "anvil" allowlist.
+        # Production/mainnet requests cannot reach this allowlist: a caller's
+        # per-request network override may never elevate a non-anvil gateway to
+        # anvil semantics (RpcServiceServicer._network_elevation_error), so the
+        # network == "anvil" branch is only reachable when the gateway itself
+        # was launched for Anvil.
         "eth_sendTransaction",
     }
 )

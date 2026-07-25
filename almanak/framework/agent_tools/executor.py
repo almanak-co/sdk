@@ -120,6 +120,30 @@ DEFAULT_LENDING_PROTOCOL = "aave_v3"
 _LENDING_RESERVES_PER_CALL_TIMEOUT_S = 3.0
 _LENDING_RESERVES_LATENCY_BUDGET_S = 25.0
 
+
+def _reserve_matches_filters(symbol: str, asset: str, collateral: str, loan: str) -> bool:
+    """Pair-aware reserve filter for ``list_lending_reserves`` (VIB-5985).
+
+    Reserve-keyed protocols (Aave) use bare token symbols; market-keyed
+    protocols (Morpho Blue) use ``"COLLATERAL/LOAN"`` pair symbols. ``asset``
+    matches the full symbol OR any single leg of a pair, so an operator can
+    find every sUSDe market without knowing the pair spelling. ``collateral``
+    / ``loan`` pin a specific leg (first / last ``/``-component). Empty
+    filters pass. All matching is case-insensitive.
+    """
+    parts = [p.strip().lower() for p in symbol.split("/")]
+    full = symbol.strip().lower()
+    if asset:
+        wanted = asset.strip().lower()
+        if full != wanted and wanted not in parts:
+            return False
+    if collateral and (len(parts) < 2 or parts[0] != collateral.strip().lower()):
+        return False
+    if loan and (len(parts) < 2 or parts[-1] != loan.strip().lower()):
+        return False
+    return True
+
+
 # get_pool_state analytics enrichment: gRPC deadline for the gateway's
 # PoolAnalyticsService, sized to ONE upstream HTTP-provider budget (the
 # gateway's aiohttp total=15s in ``pool_analytics_service.py``).
@@ -2934,9 +2958,12 @@ class ToolExecutor:
         an operator doesn't pick a supply-only or paused reserve and only learn
         it at the borrow step of a lifecycle run.
 
-        The reserve set is enumerated live from the PoolDataProvider's
-        ``getAllReservesTokens()`` — NOT a curated table — so the tool cannot
-        have the very blind spot it exists to remove. For each reserve it then
+        Aave-style reserve sets are enumerated live from the PoolDataProvider's
+        ``getAllReservesTokens()`` — so the tool cannot have the very blind
+        spot it exists to remove. Market-keyed protocols (Morpho) list the
+        connector's curated catalog instead and flag it via
+        ``enumeration_source="curated_catalog"`` (VIB-5985): catalog absence
+        is not on-chain non-existence. For each reserve it then
         reads ``getReserveConfigurationData`` and decodes the
         ``borrowingEnabled`` / ``usageAsCollateralEnabled`` / ``isActive`` /
         ``isFrozen`` / ``ltv`` flags via the same shared decoder the compiler
@@ -2962,6 +2989,8 @@ class ToolExecutor:
         network = args.get("network", "")
         protocol = args.get("protocol", DEFAULT_LENDING_PROTOCOL)
         asset_filter = (args.get("asset") or "").strip()
+        collateral_filter = (args.get("collateral") or "").strip()
+        loan_filter = (args.get("loan") or "").strip()
 
         # VIB-4951: dispatch through the connector-owned reserve-discovery
         # capability — no protocol branches, no Aave imports in this handler.
@@ -3017,24 +3046,14 @@ class ToolExecutor:
         else:
             entries = list(plan.static_entries or ())
 
-        # Optional single-reserve filter (case-insensitive symbol match).
-        # Applied BEFORE the DOS cap so a filtered asset that sorts past the cap
-        # boundary on a huge reserve set isn't wrongly reported as not-active;
-        # the "listed reserves" hint also lists the full enumerated set.
-        if asset_filter:
-            filtered = [e for e in entries if e.symbol.lower() == asset_filter.lower()]
-            if not filtered:
-                known = sorted({e.symbol for e in entries})
-                return ToolResponse(
-                    status="error",
-                    error=_error_dict(
-                        AgentErrorCode.VALIDATION_ERROR,
-                        # Pre-config-read we only know the symbol is listed by
-                        # the enumeration, not that isActive==true.
-                        f"Asset '{asset_filter}' is not a listed reserve on {protocol} {chain}. Listed reserves: {known}",
-                    ),
-                )
-            entries = filtered
+        # Optional reserve filters — applied BEFORE the DOS cap so a filtered
+        # asset that sorts past the cap boundary on a huge reserve set isn't
+        # wrongly reported as not-active (semantics in _filter_reserve_entries).
+        entries, filter_error = self._filter_reserve_entries(
+            entries, protocol, chain, asset_filter, collateral_filter, loan_filter
+        )
+        if filter_error is not None:
+            return filter_error
 
         # DOS cap mirroring list_lp_positions: a hostile / buggy provider can't
         # make us issue an unbounded number of follow-up config reads. (After
@@ -3099,9 +3118,67 @@ class ToolExecutor:
                 "total_matched": total_matched,
                 "truncated": truncated,
                 "truncation_reason": truncation_reason,
+                # Honesty flag (VIB-5985): a static plan lists the connector's
+                # CURATED catalog (e.g. Morpho markets), not the full on-chain
+                # universe — absence here must not read as non-existence.
+                "enumeration_source": ("live" if plan.enumeration_call is not None else "curated_catalog"),
                 "reserves": reserves,
             },
         )
+
+    @staticmethod
+    def _filter_reserve_entries(
+        entries: list[Any],
+        protocol: str,
+        chain: str,
+        asset: str,
+        collateral: str,
+        loan: str,
+    ) -> tuple[list[Any], ToolResponse | None]:
+        """Apply the optional reserve filters, returning ``(entries, error)``.
+
+        Case-insensitive (VIB-5985). ``asset`` matches the full symbol OR a
+        single leg of a pair-keyed market symbol ("sUSDe/USDC" matches
+        asset=sUSDe — requiring the exact pair string made Morpho markets
+        undiscoverable by token). ``collateral`` / ``loan`` pin a specific leg
+        of pair-keyed markets and are rejected with a clear error on
+        protocols whose reserves are not pair-keyed. A filter that matches
+        nothing returns an error listing the full enumerated symbol set —
+        pre-config-read we only know a symbol is listed, not that it is
+        active. Empty filters return ``entries`` unchanged.
+        """
+        if (collateral or loan) and not any("/" in e.symbol for e in entries):
+            return entries, ToolResponse(
+                status="error",
+                error=_error_dict(
+                    AgentErrorCode.VALIDATION_ERROR,
+                    f"list_lending_reserves: --collateral/--loan filter markets by leg, but {protocol} "
+                    f"reserves on {chain} are not pair-keyed. Use --asset instead.",
+                ),
+            )
+        if not (asset or collateral or loan):
+            return entries, None
+        filtered = [e for e in entries if _reserve_matches_filters(e.symbol, asset, collateral, loan)]
+        if not filtered:
+            known = sorted({e.symbol for e in entries})
+            requested = ", ".join(
+                part
+                for part in (
+                    f"asset '{asset}'" if asset else "",
+                    f"collateral '{collateral}'" if collateral else "",
+                    f"loan '{loan}'" if loan else "",
+                )
+                if part
+            )
+            return entries, ToolResponse(
+                status="error",
+                error=_error_dict(
+                    AgentErrorCode.VALIDATION_ERROR,
+                    f"Asset filter ({requested}) is not a listed reserve on {protocol} {chain}. "
+                    f"Listed reserves: {known}",
+                ),
+            )
+        return filtered, None
 
     @staticmethod
     def _build_reserve_rows(plan: Any, entries: list[Any]) -> tuple[list[dict], list[tuple[int, Any, bool]]]:

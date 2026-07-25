@@ -250,7 +250,11 @@ _BUILTIN_TOOLS: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="list_lending_reserves",
-        description="List a lending market's reserves with per-reserve borrowable/active/collateral flags (Aave V3).",
+        description=(
+            "List a lending protocol's reserves/markets with borrowable/active/collateral flags. "
+            "Aave-style reserves enumerate live; market-keyed protocols (morpho_blue) list curated "
+            "COLLATERAL/LOAN markets with their immutable market_id + LLTV."
+        ),
         category=ToolCategory.DATA,
         risk_tier=RiskTier.NONE,
         request_schema=schemas.ListLendingReservesRequest,

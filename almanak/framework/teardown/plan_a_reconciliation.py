@@ -610,9 +610,14 @@ async def _reconcile_one(
                     ReconciliationVerdict.UNVERIFIABLE,
                     "pending-order residual has no authoritative non-zero bytes32 order key",
                 )
-            from almanak.framework.teardown.post_conditions import has_teardown_post_condition
+            from almanak.framework.teardown.post_conditions import get_teardown_post_condition
 
-            if has_teardown_post_condition(str(position.protocol or "")):
+            # Presence of a post-condition is protocol-level; the waiver needs
+            # key-level proof. Only defer when the hook declares it verifies
+            # pending orders (``handles_pending_orders``), otherwise a
+            # position-only closure hook would silently waive the residual.
+            hook = get_teardown_post_condition(str(position.protocol or ""))
+            if hook is not None and getattr(hook, "handles_pending_orders", False) is True:
                 return (
                     ReconciliationVerdict.NOT_APPLICABLE,
                     "pending-order lifecycle is outside generic Plan-A position reads; "
@@ -620,7 +625,8 @@ async def _reconcile_one(
                 )
             return (
                 ReconciliationVerdict.UNVERIFIABLE,
-                "pending-order residual has no registered TD-14 connector post-condition",
+                "pending-order residual has no registered TD-14 connector post-condition "
+                "declaring pending-order coverage",
             )
         if position.position_type is PositionType.LP:
             return await _reconcile_lp(position=position, gateway_client=gateway_client, network=network)

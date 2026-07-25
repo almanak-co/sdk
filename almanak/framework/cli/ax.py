@@ -1570,17 +1570,39 @@ def lending_list(ctx, protocol, wallet_override, lend_network):
 
 @ax.command("lending-reserves")
 @click.option("--protocol", default="aave_v3", help="Lending protocol (default: aave_v3).")
-@click.option("--asset", default="", help="Filter to a single reserve symbol (e.g. 'WMATIC').")
+@click.option(
+    "--asset",
+    default="",
+    help="Filter by reserve symbol ('WMATIC', 'sUSDe/USDC') or one leg of a pair-keyed market ('sUSDe').",
+)
+@click.option(
+    "--collateral",
+    default="",
+    help="Pair-keyed markets (e.g. morpho_blue): keep markets whose COLLATERAL leg matches.",
+)
+@click.option(
+    "--loan",
+    default="",
+    help="Pair-keyed markets (e.g. morpho_blue): keep markets whose LOAN leg matches.",
+)
 @_chain_option
 @click.pass_context
-def lending_reserves(ctx, protocol, asset):
+def lending_reserves(ctx, protocol, asset, collateral, loan):
     """List a lending market's reserves with borrowable / active flags.
 
     Read-only. Shows, per reserve, whether borrowing is enabled, whether the
     reserve is active/frozen, and its LTV — so you can pick a borrowable asset
     before configuring a strategy, instead of discovering a supply-only reserve
-    at the borrow step of a lifecycle run. Reserves are enumerated live from the
-    market's PoolDataProvider, not a curated list.
+    at the borrow step of a lifecycle run. Aave-style reserves are enumerated
+    live from the market's PoolDataProvider.
+
+    Market-keyed protocols (morpho_blue) list one row per market as
+    COLLATERAL/LOAN, from the connector's curated catalog — a market absent
+    here may still exist on-chain. Each row's immutable market id is printed
+    under the table (and in --json under ``detail.market_id``): that id — not
+    the pair name — is the value to pin in strategy config (e.g.
+    ``morpho_market_id``); the LTV column is the market's LLTV. Never leave a
+    market-id key empty in config: an empty id fails ``strat check``.
 
     Network follows the group-level ``--network`` (which also controls
     gateway auto-start): use ``almanak ax --network anvil lending-reserves``
@@ -1591,6 +1613,9 @@ def lending_reserves(ctx, protocol, asset):
         almanak ax --chain polygon lending-reserves          # Aave V3 Polygon
         almanak ax --chain polygon lending-reserves --asset WMATIC
         almanak ax --chain base --json lending-reserves
+        almanak ax --chain ethereum lending-reserves --protocol morpho_blue
+        almanak ax --chain ethereum lending-reserves --protocol morpho_blue --asset sUSDe
+        almanak ax --chain ethereum lending-reserves --protocol morpho_blue --collateral sUSDe --loan USDC
     """
     from almanak.framework.cli.ax_render import render_error, render_result
 
@@ -1604,6 +1629,8 @@ def lending_reserves(ctx, protocol, asset):
                 "chain": ctx.obj["chain"],
                 "protocol": protocol,
                 "asset": asset,
+                "collateral": collateral,
+                "loan": loan,
                 "network": effective_network,
             },
         )
@@ -1637,6 +1664,17 @@ def _render_reserves_table(response, *, protocol: str, chain: str) -> None:
     reserves = data.get("reserves", [])
     header = click.style(f"Lending reserves ({protocol}, {chain})", bold=True)
     click.echo(f"\n{header}  —  {data.get('count', len(reserves))} reserves @ {data.get('pool_data_provider', '?')}")
+    if data.get("enumeration_source") == "curated_catalog":
+        # Honesty note (VIB-5985): a static plan lists the connector's curated
+        # catalog, not the on-chain universe — absence must not read as
+        # non-existence, especially for permissionless venues like Morpho.
+        click.echo(
+            click.style(
+                "  note: curated catalog — markets absent here may still exist on-chain; "
+                "verify any externally-sourced market id on-chain before configuring.",
+                fg="cyan",
+            )
+        )
     if data.get("truncated"):
         reason = data.get("truncation_reason") or "capped"
         click.echo(
@@ -1701,6 +1739,13 @@ def _render_reserves_table(response, *, protocol: str, chain: str) -> None:
     click.echo("  ".join("-" * widths[i] for i in range(len(headers))))
     for row in rows:
         click.echo("  ".join(str(row[i]).ljust(widths[i]) for i in range(len(headers))))
+    # Market-keyed protocols (Morpho): the immutable market id is the value a
+    # strategy config pins — surface it per row instead of leaving it buried
+    # in --json detail (VIB-5985; the 66-char id is too wide for a column).
+    for r in reserves:
+        market_id = (r.get("detail") or {}).get("market_id")
+        if market_id:
+            click.echo(f"  {r.get('symbol', '?')}: market_id={market_id}")
     # Surface any per-reserve read errors below the table (not hidden).
     for r in reserves:
         if r.get("error"):

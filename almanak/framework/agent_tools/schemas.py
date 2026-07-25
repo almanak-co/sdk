@@ -293,14 +293,31 @@ class ListLendingReservesRequest(BaseModel):
     Read-only discovery. Answers "which assets can I actually borrow / use as
     collateral on this market?" before configuring a strategy — so an operator
     doesn't pick a supply-only or paused reserve and only discover it at the
-    borrow step of a lifecycle run (VIB-4925). Enumerates the live on-chain
-    reserve set via the PoolDataProvider's ``getAllReservesTokens()`` (not a
-    curated table) and reads each reserve's live ``getReserveConfigurationData``.
+    borrow step of a lifecycle run (VIB-4925). Aave-style protocols enumerate
+    the live on-chain reserve set (PoolDataProvider ``getAllReservesTokens()``
+    + per-reserve ``getReserveConfigurationData``). Market-keyed protocols
+    (morpho_blue) list the connector's CURATED catalog of markets — check the
+    response's ``enumeration_source``: with ``curated_catalog``, an absent
+    market may still exist on-chain (VIB-5985).
     """
 
     chain: str = Field(default=DEFAULT_CHAIN)
     protocol: str = Field(default="aave_v3", description="Lending protocol (aave_v3 / Aave-V2-fork shaped for v1).")
-    asset: str = Field(default="", description="Optional single reserve symbol to filter to (e.g. 'WMATIC').")
+    asset: str = Field(
+        default="",
+        description=(
+            "Optional reserve filter: a full symbol ('WMATIC', 'sUSDe/USDC') or a single "
+            "token of a pair-keyed market ('sUSDe' matches either leg on Morpho-style markets)."
+        ),
+    )
+    collateral: str = Field(
+        default="",
+        description="Pair-keyed markets only (e.g. morpho_blue): keep markets whose COLLATERAL leg matches this symbol.",
+    )
+    loan: str = Field(
+        default="",
+        description="Pair-keyed markets only (e.g. morpho_blue): keep markets whose LOAN leg matches this symbol.",
+    )
     network: str = Field(default="", description="'mainnet' or 'anvil'; empty means gateway default.")
 
 
@@ -362,6 +379,14 @@ class ListLendingReservesResponse(BaseModel):
     truncation_reason: str = Field(
         default="",
         description="Why the list was truncated: '' | 'max_reserves' | 'latency_budget_exceeded'.",
+    )
+    enumeration_source: str = Field(
+        default="live",
+        description=(
+            "How the reserve set was enumerated: 'live' (on-chain enumeration — complete by "
+            "construction) or 'curated_catalog' (connector's static catalog, e.g. Morpho markets — "
+            "absence of a market here does NOT mean it doesn't exist on-chain)."
+        ),
     )
     reserves: list[LendingReserveSummary] = Field(default_factory=list)
 

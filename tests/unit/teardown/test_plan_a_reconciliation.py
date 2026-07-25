@@ -678,6 +678,78 @@ async def test_pending_order_without_authoritative_key_remains_unverifiable():
 
 
 @pytest.mark.asyncio
+async def test_pending_order_waiver_requires_declared_pending_order_coverage(monkeypatch):
+    """A registered post-condition alone is not proof it verifies pending orders.
+
+    ``has_teardown_post_condition`` is a protocol-level presence check. A future
+    async connector could register a position-only closure hook; deferring a
+    pending-order residual to it would silently waive verification. The waiver
+    must require the hook to declare ``handles_pending_orders = True`` (as
+    gmx_v2 does), otherwise the residual stays UNVERIFIABLE.
+    """
+    from almanak.connectors._strategy_base import teardown_post_condition as tpc
+
+    def _position_only_hook(position, wallet_address, gateway_client=None, rpc_url=None, block=None):
+        raise AssertionError("Plan-A must not invoke the post-condition hook")
+
+    monkeypatch.setitem(tpc._REGISTRY, "fakeasyncperp", _position_only_hook)
+
+    order_key = "0x" + "cd" * 32
+    pending_order = PositionInfo(
+        position_type=PositionType.PERP,
+        position_id=order_key,
+        chain="arbitrum",
+        protocol="fakeasyncperp",
+        value_usd=Decimal("0"),
+        details={"kind": "pending_order", "order_key": order_key},
+    )
+
+    report = await reconcile_known_positions_against_chain(
+        summary=_summary(pending_order),
+        gateway_client=object(),
+        market=None,
+    )
+
+    assert report.entries[0].verdict is ReconciliationVerdict.UNVERIFIABLE
+    assert report.has_unverifiable
+
+
+@pytest.mark.asyncio
+async def test_pending_order_waiver_rejects_truthy_non_boolean_declaration(monkeypatch):
+    """The coverage declaration must be exactly ``True`` — not merely truthy.
+
+    A malformed declaration such as ``handles_pending_orders = "false"`` (a
+    truthy string) must not waive verification.
+    """
+    from almanak.connectors._strategy_base import teardown_post_condition as tpc
+
+    def _malformed_hook(position, wallet_address, gateway_client=None, rpc_url=None, block=None):
+        raise AssertionError("Plan-A must not invoke the post-condition hook")
+
+    _malformed_hook.handles_pending_orders = "false"  # type: ignore[attr-defined]
+    monkeypatch.setitem(tpc._REGISTRY, "fakeasyncperp", _malformed_hook)
+
+    order_key = "0x" + "ef" * 32
+    pending_order = PositionInfo(
+        position_type=PositionType.PERP,
+        position_id=order_key,
+        chain="arbitrum",
+        protocol="fakeasyncperp",
+        value_usd=Decimal("0"),
+        details={"kind": "pending_order", "order_key": order_key},
+    )
+
+    report = await reconcile_known_positions_against_chain(
+        summary=_summary(pending_order),
+        gateway_client=object(),
+        market=None,
+    )
+
+    assert report.entries[0].verdict is ReconciliationVerdict.UNVERIFIABLE
+    assert report.has_unverifiable
+
+
+@pytest.mark.asyncio
 async def test_empty_summary_is_empty_report():
     report = await reconcile_known_positions_against_chain(summary=_summary(), gateway_client=object(), market=None)
     assert report.checked_count == 0
