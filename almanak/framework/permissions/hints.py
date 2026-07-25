@@ -105,10 +105,19 @@ class PermissionHints:
             ``_LP_PROTOCOLS`` / ``_LENDING_PROTOCOLS`` / ``_PERP_PROTOCOLS``
             frozensets (VIB-4928). It is declared per-*slug* (not per-compiler)
             because several distinct protocol slugs share one compiler class
-            with different discovery participation — e.g. ``aerodrome`` and
-            ``aerodrome_slipstream`` share ``AerodromeCompiler`` but slipstream
-            participates in LP only, not SWAP; ``agni_finance`` shares
-            ``UniswapV3Compiler`` but participates in neither. ``LP_COLLECT_FEES``
+            with different discovery participation — e.g. ``agni_finance``
+            shares ``UniswapV3Compiler`` but participates in neither SWAP nor
+            LP. Note the converse trap (VIB-5990): sharing a compiler class is
+            NOT a reason to assume a slug participates in *fewer* intents.
+            ``aerodrome`` and ``aerodrome_slipstream`` share
+            ``AerodromeCompiler``, and this docstring previously cited
+            slipstream as "LP only, not SWAP" — that was wrong. The compiler
+            dispatches SWAP for both slugs, so the omission produced an empty
+            Zodiac manifest and every Safe-path slipstream swap reverted
+            unauthorized. Derive participation from what the compiler can
+            actually build for the slug, and verify with
+            ``discover_permissions(...)`` — never from a sibling slug's
+            declaration. ``LP_COLLECT_FEES``
             stays gated by ``supports_standalone_fee_collection`` and need not be
             listed here. Each listed value must be an intent the protocol's
             compiler can actually build (a subset of the compiler's ``intents``).

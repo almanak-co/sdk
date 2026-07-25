@@ -27,13 +27,39 @@ LP compile paths for both surfaces query on-chain state:
   each scoped to the single intent type that emits it.
 """
 
+from __future__ import annotations
+
+from decimal import Decimal
+from typing import TYPE_CHECKING
+
 from almanak.framework.intents.compiler_constants import (
     NFT_POSITION_COLLECT_SELECTOR,
     NFT_POSITION_DECREASE_SELECTOR,
 )
-from almanak.framework.permissions.hints import PermissionHints, StaticPermissionEntry
+from almanak.framework.permissions.hints import (
+    DiscoveryContext,
+    PermissionHints,
+    StaticPermissionEntry,
+)
 
+from .adapter import CL_EXACT_INPUT_SINGLE_SELECTOR, SWAP_EXACT_TOKENS_SELECTOR
 from .addresses import AERODROME
+
+if TYPE_CHECKING:
+    from almanak.framework.intents.vocabulary import AnyIntent
+
+# Slipstream CL SwapRouter exactInputSingle — selector constant owned by the
+# adapter (``adapter.CL_EXACT_INPUT_SINGLE_SELECTOR``) so the manifest label
+# can never drift from the calldata the adapter actually emits. Slipstream's
+# params use ``int24 tickSpacing`` where Uniswap V3 uses ``uint24 fee``, hence
+# the selector differs from SwapRouter02's ``0x04e45aaf``.
+_CL_EXACT_INPUT_SINGLE_SIG = "exactInputSingle((address,address,int24,address,uint256,uint256,uint256,uint160))"
+
+# Classic (Solidly) router swap — same constant-not-literal discipline. The
+# Slipstream slug needs this label too, because the shared compiler's auto
+# ladder can fall back to the Classic router for a slipstream-slug swap (see
+# ``build_discovery_vectors``).
+_CLASSIC_SWAP_SIG = "swapExactTokensForTokens(uint256,uint256,Route[],address,uint256)"
 
 # =========================================================================
 # Classic (V1/V2 Solidly-fork) — unchanged surface
@@ -61,10 +87,10 @@ PERMISSION_HINTS = PermissionHints(
     synthetic_position_id="{token0}/{token1}/volatile",
     needs_rpc_discovery=True,
     selector_labels={
-        "0xa026383e": "exactInputSingle(ExactInputSingleParams)",
+        CL_EXACT_INPUT_SINGLE_SELECTOR: _CL_EXACT_INPUT_SINGLE_SIG,
         "0x5a47ddc3": "addLiquidity(address,address,bool,uint256,uint256,uint256,uint256,address,uint256)",
         "0x0dede6c4": "removeLiquidity(address,address,bool,uint256,uint256,uint256,address,uint256)",
-        "0xcac88ea9": "swapExactTokensForTokens(uint256,uint256,Route[],address,uint256)",
+        SWAP_EXACT_TOKENS_SELECTOR: _CLASSIC_SWAP_SIG,
     },
     static_permissions=_static_permissions,
     # Synthetic-discovery participation (VIB-4928): classic Solidly-fork
@@ -187,12 +213,92 @@ PERMISSION_HINTS_SLIPSTREAM = PermissionHints(
         _SLIPSTREAM_MINT_SELECTOR: _SLIPSTREAM_MINT_SIG,
         _SLIPSTREAM_DECREASE_SELECTOR: _SLIPSTREAM_DECREASE_SIG,
         _SLIPSTREAM_COLLECT_SELECTOR: _SLIPSTREAM_COLLECT_SIG,
+        CL_EXACT_INPUT_SINGLE_SELECTOR: _CL_EXACT_INPUT_SINGLE_SIG,
+        SWAP_EXACT_TOKENS_SELECTOR: _CLASSIC_SWAP_SIG,
     },
-    # Synthetic-discovery participation (VIB-4928): Slipstream is a CL
-    # NonfungiblePositionManager surface — LP only, NOT SWAP (classic
-    # ``aerodrome`` owns the Solidly SWAP route). This is the asymmetry that a
-    # compiler-class-level declaration could not express, since both slugs
-    # share ``AerodromeCompiler``. LP_COLLECT_FEES stays gated by
+    # Synthetic-discovery participation (VIB-4928, VIB-5990): LP via the CL
+    # NPM, plus SWAP. SWAP was historically excluded on the claim that classic
+    # ``aerodrome`` "owns the Solidly SWAP route" — but ``AerodromeCompiler``
+    # declares SWAP for BOTH slugs and dispatches ``aerodrome_slipstream``
+    # swaps through the shared ``compile_swap_aerodrome`` path (CL SwapRouter
+    # ``exactInputSingle``), so a strategy issuing
+    # ``SwapIntent(protocol="aerodrome_slipstream")`` produced an EMPTY Zodiac
+    # manifest and every Safe-path swap reverted unauthorized at
+    # ``execTransactionWithRole`` (VIB-5990). The swap compile is fully
+    # offline-capable (``_resolve_aerodrome_route`` degrades to CL@100 when
+    # offline), so synthetic discovery — not ``static_permissions`` — is the
+    # drift-proof mechanism. The SWAP synthetic is emitted by
+    # ``build_discovery_vectors`` below because the CL SwapRouter lives in
+    # this connector's ``AERODROME[chain]["cl_router"]``, not in the
+    # framework's ``PROTOCOL_ROUTERS`` (the TraderJoe V2 precedent).
+    # LP_COLLECT_FEES stays gated by
     # ``supports_standalone_fee_collection=True`` above.
-    synthetic_discovery_intents=frozenset({"LP_OPEN", "LP_CLOSE"}),
+    synthetic_discovery_intents=frozenset({"SWAP", "LP_OPEN", "LP_CLOSE"}),
 )
+
+
+def build_discovery_vectors(
+    protocol: str,
+    intent_type: str,
+    chain: str,
+    ctx: DiscoveryContext,
+) -> list[AnyIntent] | None:
+    """Connector-owned synthetic dispatch for the Slipstream SWAP slot (VIB-5990).
+
+    ``_build_swap_intents`` gates the framework-default SWAP synthetic on
+    ``protocol in PROTOCOL_ROUTERS[chain]`` — a table the ``aerodrome_slipstream``
+    slug is deliberately absent from (its swap venue is the Slipstream CL
+    SwapRouter, declared as ``cl_router`` in this connector's
+    :data:`~almanak.connectors.aerodrome.addresses.AERODROME`, while the slug's
+    role-registry slot is ``CL_POSITION_MANAGER``). This override runs BEFORE
+    that gate and emits the SWAP synthetic directly, mirroring the
+    ``traderjoe_v2`` self-containment pattern.
+
+    Every other ``(protocol, intent_type)`` slot returns ``None`` so classic
+    ``aerodrome`` SWAP/LP and Slipstream LP keep their framework-default
+    dispatch unchanged.
+    """
+    if protocol != "aerodrome_slipstream" or intent_type != "SWAP":
+        return None
+    # Only chains where Slipstream CL is deployed (Base today). Velodrome on
+    # Optimism is Classic-only, so the framework default (which finds no router
+    # entry and returns ``[]``) is the right outcome there.
+    #
+    # Reuse the COMPILER's own capability predicate rather than re-deriving it:
+    # it gates on ``cl_router`` AND ``cl_factory``, and a manifest built from a
+    # weaker predicate than the one that picks the route is drift waiting to
+    # happen (a future chain entry with a router but no factory would have the
+    # override emit a CL vector while the compiler routed Classic). Imported
+    # lazily — like ``SwapIntent`` below — to keep this module cheap to load
+    # during manifest discovery.
+    from .compiler import _aerodrome_chain_has_cl
+
+    if not _aerodrome_chain_has_cl(AERODROME.get(chain, {})):
+        return None
+    from almanak.framework.intents.vocabulary import SwapIntent
+
+    def _vector(**swap_params: object) -> AnyIntent:
+        return SwapIntent(
+            from_token=ctx.usdc,
+            to_token=ctx.weth,
+            amount=Decimal("1"),
+            protocol=protocol,
+            chain=chain,
+            swap_params=dict(swap_params),
+        )
+
+    # TWO vectors, because ``compile_swap_aerodrome`` routes on pool existence,
+    # NOT on the protocol slug: the auto ladder probes CL across the candidate
+    # tick spacings and, finding none, *falls back to the Classic router*
+    # (``compiler.py`` step 5). A slipstream-slug swap on a pair with no CL pool
+    # therefore emits ``swapExactTokensForTokens`` on the Classic router — a
+    # (target, selector) pair that a CL-only manifest does not authorise, which
+    # is the same ``execTransactionWithRole`` unauthorized revert as VIB-5990,
+    # merely narrowed to long-tail pairs. Offline discovery cannot observe that
+    # branch (``_aerodrome_is_offline`` short-circuits to CL@100), so the only
+    # drift-proof answer is to emit both route shapes and let the manifest be
+    # their union. ``classic=True`` is evaluated at ladder step (2), BEFORE the
+    # offline short-circuit, and ``_resolve_aerodrome_classic_route`` degrades
+    # on an unverifiable probe — so this compiles offline exactly like the CL
+    # vector does.
+    return [_vector(), _vector(classic=True)]

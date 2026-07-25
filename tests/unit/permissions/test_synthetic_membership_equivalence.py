@@ -15,9 +15,9 @@ before the fold (post-#2557 Radiant removal) as snapshot literals, and asserts
 each derived set equals its snapshot verbatim. The point is to prove the
 refactor preserved the *data* — no widening, no narrowing — independently of
 the new derivation machinery. The registry's broader ``protocols_for_intent``
-view (which adds enso/lifi/jupiter/uniswap_v4/fluid/aerodrome_slipstream-for-SWAP
-/agni_finance, ~15 protocols) must NOT leak into these sets; the opt-in subset
-is deliberate.
+view (which adds enso/lifi/jupiter/agni_finance, ~15 protocols) must NOT leak
+into these sets; the opt-in subset is deliberate. (``aerodrome_slipstream``
+opted into SWAP in VIB-5990 — see the snapshot comment below.)
 
 If a future connector legitimately joins or leaves a synthetic-discovery
 category, update BOTH the connector's declaration AND the matching snapshot
@@ -60,6 +60,15 @@ _SNAPSHOT_SWAP_PROTOCOLS = frozenset(
         # reach it). Not in NATIVE_IN_SWAP — V4's native-ETH path is the UR
         # settle/take flow, not the V3 SwapRouter02 msg.value auto-wrap.
         "uniswap_v4",
+        # VIB-5990: aerodrome_slipstream joins SWAP discovery via the
+        # connector-owned ``build_discovery_vectors`` override (the CL
+        # SwapRouter lives in the connector's AERODROME addresses, not
+        # PROTOCOL_ROUTERS). The historical exclusion ("classic aerodrome owns
+        # the SWAP route") was wrong: AerodromeCompiler dispatches SWAP for
+        # both slugs, so slipstream-slug swaps produced an empty Zodiac
+        # manifest and reverted unauthorized on the Safe path. Not in
+        # NATIVE_IN_SWAP — no msg.value auto-wrap path is compiled.
+        "aerodrome_slipstream",
     }
 )
 _SNAPSHOT_NATIVE_IN_SWAP_PROTOCOLS = frozenset(
@@ -122,11 +131,14 @@ def test_swap_protocols_equivalent() -> None:
     assert set(_SWAP_PROTOCOLS) == set(_SNAPSHOT_SWAP_PROTOCOLS)
     # The deliberately-excluded shared-compiler siblings must NOT leak in.
     assert "agni_finance" not in _SWAP_PROTOCOLS  # shares UniswapV3Compiler
-    assert "aerodrome_slipstream" not in _SWAP_PROTOCOLS  # shares AerodromeCompiler
     assert "enso" not in _SWAP_PROTOCOLS  # in protocols_for_intent(SWAP), not opt-in
     # "fluid" joined the SWAP set in Phase 1 (VIB-5029) — kill-switch removed.
     # "uniswap_v4" joined the SWAP + LP sets in VIB-4421 (see snapshots above).
     assert "uniswap_v4" in _SWAP_PROTOCOLS
+    # "aerodrome_slipstream" joined the SWAP set in VIB-5990 (see snapshot
+    # comment above) — it shares AerodromeCompiler with classic "aerodrome"
+    # but participates in SWAP discovery in its own right.
+    assert "aerodrome_slipstream" in _SWAP_PROTOCOLS
 
 
 def test_native_in_swap_protocols_equivalent() -> None:

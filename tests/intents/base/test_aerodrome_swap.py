@@ -632,6 +632,106 @@ class TestAerodromeSwapIntent:
             f"\ntick_spacing={pinned_tick_spacing} override OK: spent {usdc_spent} USDC, received {weth_received} WETH"
         )
 
+    @pytest.mark.intent(IntentType.SWAP)
+    @pytest.mark.asyncio
+    async def test_swap_usdc_to_weth_slipstream_protocol_using_intent(
+        self,
+        web3: Web3,
+        anvil_rpc_url: str,
+        funded_wallet: str,
+        orchestrator: ExecutionOrchestrator,
+        price_oracle: dict[str, Decimal],
+    ):
+        """USDC -> WETH swap issued under the ``aerodrome_slipstream`` slug.
+
+        ``AerodromeCompiler`` declares SWAP for BOTH protocol slugs and
+        dispatches slipstream-slug swaps through the shared
+        ``compile_swap_aerodrome`` path (CL SwapRouter ``exactInputSingle``).
+        Under default-on Zodiac this test exercises the slipstream-slug SWAP
+        manifest end-to-end: before VIB-5990 the slug was absent from the SWAP
+        synthetic-discovery set, its manifest was empty, and this exact swap
+        reverted unauthorized at ``execTransactionWithRole``. Covers the
+        (aerodrome_slipstream, SWAP) pair for the on-chain coverage gate
+        (tests/unit/permissions/test_onchain_case_coverage.py).
+        """
+        tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
+        token_in = tokens["USDC"]
+        token_out = tokens["WETH"]
+
+        # The deep, executable USDC/WETH CL pool used by the default route.
+        fail_if_aerodrome_cl_pool_missing(web3, CHAIN_NAME, token_in, token_out, 100)
+
+        in_decimals = get_token_decimals(web3, token_in)
+        swap_amount = Decimal("100")  # 100 USDC
+
+        usdc_before = get_token_balance(web3, token_in, funded_wallet)
+        weth_before = get_token_balance(web3, token_out, funded_wallet)
+
+        intent = SwapIntent(
+            from_token="USDC",
+            to_token="WETH",
+            amount=swap_amount,
+            max_slippage=Decimal("0.20"),  # 20% slippage for oracle-based quoting
+            protocol="aerodrome_slipstream",
+            chain=CHAIN_NAME,
+        )
+
+        # Layer 1: compilation.
+        compiler = IntentCompiler(
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            price_oracle=price_oracle,
+            rpc_url=anvil_rpc_url,
+        )
+        compilation_result = compiler.compile(intent)
+        assert compilation_result.status.value == "SUCCESS", f"Compilation failed: {compilation_result.error}"
+        assert compilation_result.action_bundle is not None
+
+        # The slipstream slug must route through a CL (Slipstream) pool — the
+        # CL SwapRouter is the target the VIB-5990 manifest fix authorises.
+        meta = compilation_result.action_bundle.metadata
+        assert meta["routing"] == "cl", f"aerodrome_slipstream swap must route CL, got {meta.get('routing')}"
+
+        # Layer 2: execution (through Safe + Roles under default-on Zodiac).
+        execution_result = await orchestrator.execute(compilation_result.action_bundle)
+        assert execution_result.success, f"Execution failed: {execution_result.error}"
+
+        # Layer 3: receipt parse (Slipstream CL SwapCL event).
+        swap_results_parsed = 0
+        for tx_result in execution_result.transaction_results:
+            if tx_result.receipt is None:
+                continue
+            from almanak.connectors.aerodrome.receipt_parser import AerodromeReceiptParser
+
+            token0_addr, token1_addr = sorted([token_in.lower(), token_out.lower()])
+            parser = AerodromeReceiptParser(chain=CHAIN_NAME, token0_address=token0_addr, token1_address=token1_addr)
+            parse_result = parser.parse_receipt(tx_result.receipt.to_dict())
+            if parse_result.success and parse_result.swap_result:
+                swap_results_parsed += 1
+                assert parse_result.swap_result.amount_in_decimal > 0
+                assert parse_result.swap_result.amount_out_decimal > 0
+                assert parse_result.swap_result.effective_price > 0
+                assert_swap_semantic_match(
+                    intent_amount=swap_amount,
+                    intent_from_token="USDC",
+                    intent_to_token="WETH",
+                    swap_result=parse_result.swap_result,
+                    chain=CHAIN_NAME,
+                )
+        assert swap_results_parsed >= 1, "Layer 3: must parse at least one CL swap event"
+
+        # Layer 4: bilateral balance deltas.
+        usdc_after = get_token_balance(web3, token_in, funded_wallet)
+        weth_after = get_token_balance(web3, token_out, funded_wallet)
+        usdc_spent = usdc_before - usdc_after
+        weth_received = weth_after - weth_before
+
+        assert usdc_spent == int(swap_amount * Decimal(10**in_decimals)), (
+            f"USDC spent must equal swap amount exactly; got {usdc_spent}"
+        )
+        assert weth_received > 0, "Must receive positive WETH (no-op guard)"
+        print(f"\naerodrome_slipstream SWAP OK: spent {usdc_spent} USDC, received {weth_received} WETH")
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])
