@@ -117,38 +117,93 @@ async def _execute_pending_orders_on_anvil(
     orders: tuple[Any, ...],
     intent: Any,
     network: str,
+    deadline: float,
+    poll_interval: int,
 ) -> AsyncSettlementBarrierResult | None:
-    state.attempts += 1
-    verdict = await asyncio.to_thread(
-        registry.execute_pending_orders_for_test,
-        protocol=protocol,
-        gateway_client=gateway_client,
-        chain=chain,
-        wallet_address=wallet_address,
-        orders=orders,
-        intent=intent,
-        network=network,
-    )
-    if verdict is None:
-        return _failure_result(
-            state=state,
-            orders=orders,
-            status=AsyncSettlementStatus.INFRASTRUCTURE_UNSUPPORTED,
-            reason=f"Connector {protocol} returned no managed-fork execution verdict",
-        )
+    while True:
+        if state.observation_state is not None:
+            # A prior attempt already captured the pre-execution baseline. A
+            # retry must observe FIRST: if the transient failure hit after the
+            # keeper transaction landed, the order has left the pending set
+            # and re-executing can never re-capture a baseline — but the
+            # carried baseline can still conclude the fill. Only a
+            # still-PENDING order needs another execution attempt.
+            state.attempts += 1
+            observed = await asyncio.to_thread(
+                registry.observe_async_orders,
+                protocol=protocol,
+                gateway_client=gateway_client,
+                chain=chain,
+                wallet_address=wallet_address,
+                orders=orders,
+                intent=intent,
+                observation_state=state.observation_state,
+            )
+            if observed is not None:
+                state.absorb(observed)
+                if observed.terminal:
+                    return state.result(
+                        status=observed.status,
+                        terminal=True,
+                        orders=observed.orders or _submitted_orders(orders, observed.status),
+                        reason=observed.reason,
+                    )
+                if observed.status is AsyncSettlementStatus.OBSERVATION_FAILED:
+                    remaining = deadline - _monotonic()
+                    if remaining > 0:
+                        await asyncio.sleep(min(poll_interval, remaining))
+                        continue
+                    return state.result(
+                        status=AsyncSettlementStatus.OBSERVATION_FAILED,
+                        terminal=False,
+                        orders=observed.orders or _submitted_orders(orders, AsyncSettlementStatus.OBSERVATION_FAILED),
+                        reason=observed.reason,
+                    )
+                # PENDING: the order is still in the vault — execute below.
 
-    state.absorb(verdict)
-    if verdict.terminal or verdict.status in {
-        AsyncSettlementStatus.INFRASTRUCTURE_UNSUPPORTED,
-        AsyncSettlementStatus.OBSERVATION_FAILED,
-    }:
-        return state.result(
-            status=verdict.status,
-            terminal=verdict.terminal,
-            orders=verdict.orders or _submitted_orders(orders, verdict.status),
-            reason=verdict.reason,
+        state.attempts += 1
+        verdict = await asyncio.to_thread(
+            registry.execute_pending_orders_for_test,
+            protocol=protocol,
+            gateway_client=gateway_client,
+            chain=chain,
+            wallet_address=wallet_address,
+            orders=orders,
+            intent=intent,
+            network=network,
         )
-    return None
+        if verdict is None:
+            return _failure_result(
+                state=state,
+                orders=orders,
+                status=AsyncSettlementStatus.INFRASTRUCTURE_UNSUPPORTED,
+                reason=f"Connector {protocol} returned no managed-fork execution verdict",
+            )
+
+        state.absorb(verdict)
+        if verdict.status is AsyncSettlementStatus.OBSERVATION_FAILED and not verdict.terminal:
+            # A transient measurement blip (cold-fork RPC latency, indexer lag
+            # on the baseline/pending reads) must not abort keeper execution
+            # that the policy's timeout budget can still absorb. Retry within
+            # the shared deadline; a failure that persists past it falls
+            # through to the fail-closed return below. Structural
+            # INFRASTRUCTURE_UNSUPPORTED stays immediate — waiting cannot
+            # conjure a keeper.
+            remaining = deadline - _monotonic()
+            if remaining > 0:
+                await asyncio.sleep(min(poll_interval, remaining))
+                continue
+        if verdict.terminal or verdict.status in {
+            AsyncSettlementStatus.INFRASTRUCTURE_UNSUPPORTED,
+            AsyncSettlementStatus.OBSERVATION_FAILED,
+        }:
+            return state.result(
+                status=verdict.status,
+                terminal=verdict.terminal,
+                orders=verdict.orders or _submitted_orders(orders, verdict.status),
+                reason=verdict.reason,
+            )
+        return None
 
 
 async def _poll_until_settled(
@@ -284,6 +339,8 @@ async def await_async_settlement(
             orders=orders,
             intent=intent,
             network=network,
+            deadline=deadline,
+            poll_interval=poll_interval,
         )
         if immediate_result is not None:
             return immediate_result

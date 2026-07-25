@@ -245,3 +245,142 @@ async def test_repeated_unmeasured_observation_retains_observation_failed_catego
     assert result.status == AsyncSettlementStatus.OBSERVATION_FAILED
     assert result.terminal is False
     assert result.reason == "gateway read was unmeasured"
+
+
+@pytest.mark.asyncio
+async def test_managed_anvil_retries_transient_observation_failure_within_deadline() -> None:
+    """A cold-fork read blip must not abort keeper execution the budget can absorb."""
+    registry = MagicMock()
+    registry.async_settlement_policy.return_value = AsyncSettlementPolicy(360, 5, True, True)
+    registry.execute_pending_orders_for_test.side_effect = [
+        AsyncSettlementVerdict(
+            status=AsyncSettlementStatus.OBSERVATION_FAILED,
+            terminal=False,
+            reason="GMX position baseline was unmeasured while the order was pending",
+        ),
+        AsyncSettlementVerdict(
+            status=AsyncSettlementStatus.SETTLED,
+            terminal=True,
+            orders=({"protocol": "gmx_v2", "order_id": _KEY, "status": "SETTLED"},),
+        ),
+    ]
+    with patch(
+        "almanak.connectors._strategy_runner_hook_registry.STRATEGY_RUNNER_HOOK_REGISTRY",
+        registry,
+    ):
+        result = await await_async_settlement(
+            gateway_client=object(),
+            chain="arbitrum",
+            wallet_address="0xabc",
+            network="anvil",
+            orders=(_order(),),
+            intent=object(),
+            poll_interval_seconds=1,
+        )
+
+    assert result.status == AsyncSettlementStatus.SETTLED
+    assert result.terminal is True
+    assert result.attempts == 2
+    assert registry.execute_pending_orders_for_test.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_managed_anvil_observation_failure_stays_fail_closed_past_deadline() -> None:
+    registry = MagicMock()
+    registry.async_settlement_policy.return_value = AsyncSettlementPolicy(360, 5, True, True)
+    registry.execute_pending_orders_for_test.return_value = AsyncSettlementVerdict(
+        status=AsyncSettlementStatus.OBSERVATION_FAILED,
+        terminal=False,
+        reason="GMX pending-order read was unmeasured",
+    )
+    with patch(
+        "almanak.connectors._strategy_runner_hook_registry.STRATEGY_RUNNER_HOOK_REGISTRY",
+        registry,
+    ):
+        result = await await_async_settlement(
+            gateway_client=object(),
+            chain="arbitrum",
+            wallet_address="0xabc",
+            network="anvil",
+            orders=(_order(),),
+            intent=object(),
+            timeout_seconds=1,
+            poll_interval_seconds=1,
+        )
+
+    assert result.status == AsyncSettlementStatus.OBSERVATION_FAILED
+    assert result.terminal is False
+    assert result.attempts >= 1
+
+
+@pytest.mark.asyncio
+async def test_managed_anvil_infrastructure_unsupported_stays_immediate() -> None:
+    """Waiting cannot conjure a keeper — structural failures must not burn the budget."""
+    registry = MagicMock()
+    registry.async_settlement_policy.return_value = AsyncSettlementPolicy(360, 5, True, True)
+    registry.execute_pending_orders_for_test.return_value = AsyncSettlementVerdict(
+        status=AsyncSettlementStatus.INFRASTRUCTURE_UNSUPPORTED,
+        terminal=False,
+        reason="GMX managed-Anvil order execution was unavailable",
+    )
+    with patch(
+        "almanak.connectors._strategy_runner_hook_registry.STRATEGY_RUNNER_HOOK_REGISTRY",
+        registry,
+    ):
+        result = await await_async_settlement(
+            gateway_client=object(),
+            chain="arbitrum",
+            wallet_address="0xabc",
+            network="anvil",
+            orders=(_order(),),
+            intent=object(),
+        )
+
+    assert result.status == AsyncSettlementStatus.INFRASTRUCTURE_UNSUPPORTED
+    assert result.attempts == 1
+    assert registry.execute_pending_orders_for_test.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_managed_anvil_transient_after_execution_concludes_via_carried_baseline() -> None:
+    """A transient that hits AFTER the keeper tx landed must not strand the verdict.
+
+    Re-executing cannot re-capture a baseline once the order left the pending
+    set (the real connector fails baseline capture then), but the baseline
+    carried on the transient verdict lets a retry conclude by observation —
+    execute must be called exactly once.
+    """
+    registry = MagicMock()
+    registry.async_settlement_policy.return_value = AsyncSettlementPolicy(360, 5, True, True)
+    baseline = object()
+    registry.execute_pending_orders_for_test.return_value = AsyncSettlementVerdict(
+        status=AsyncSettlementStatus.OBSERVATION_FAILED,
+        terminal=False,
+        reason="transient blip during outcome verification",
+        observation_state=baseline,
+    )
+    registry.observe_async_orders.return_value = AsyncSettlementVerdict(
+        status=AsyncSettlementStatus.SETTLED,
+        terminal=True,
+        orders=({"protocol": "gmx_v2", "order_id": _KEY, "status": "SETTLED"},),
+        observation_state=baseline,
+    )
+    with patch(
+        "almanak.connectors._strategy_runner_hook_registry.STRATEGY_RUNNER_HOOK_REGISTRY",
+        registry,
+    ):
+        result = await await_async_settlement(
+            gateway_client=object(),
+            chain="arbitrum",
+            wallet_address="0xabc",
+            network="anvil",
+            orders=(_order(),),
+            intent=object(),
+            poll_interval_seconds=1,
+        )
+
+    assert result.status == AsyncSettlementStatus.SETTLED
+    assert result.terminal is True
+    assert registry.execute_pending_orders_for_test.call_count == 1
+    assert registry.observe_async_orders.call_count == 1
+    assert registry.observe_async_orders.call_args.kwargs["observation_state"] is baseline

@@ -97,6 +97,20 @@ def _position_delta_reached(
     return False
 
 
+def _describe_position_sizes(sizes: dict[_PositionKey, int]) -> str:
+    """Compact measured evidence for a settlement verdict: raw 1e30 USD sizes per key."""
+    if not sizes:
+        return "{} (measured empty)"
+    return (
+        "{"
+        + ", ".join(
+            f"{market}/{collateral}/{'long' if is_long else 'short'}={size}"
+            for (market, collateral, is_long), size in sorted(sizes.items())
+        )
+        + "}"
+    )
+
+
 def _order_verdict_rows(
     requested_keys: set[str],
     status: AsyncSettlementStatus,
@@ -183,18 +197,26 @@ def _final_position_verdict(
         )
 
     intent_type = getattr(getattr(intent, "intent_type", None), "value", "")
+    current_sizes = _active_position_sizes(positions)
     target_reached = _position_delta_reached(
         intent_type,
         requested_deltas,
         baseline,
-        _active_position_sizes(positions),
+        current_sizes,
     )
     status = AsyncSettlementStatus.SETTLED if target_reached else AsyncSettlementStatus.TERMINAL_FAILED
     return AsyncSettlementVerdict(
         status=status,
         terminal=True,
         orders=_order_verdict_rows(requested_keys, status),
-        reason=None if target_reached else "GMX order left the pending set without its exact target position delta",
+        reason=None
+        if target_reached
+        else (
+            "GMX order left the pending set without its exact target position delta "
+            f"(intent={intent_type or 'unmeasured'}, requested={_describe_position_sizes(requested_deltas)}, "
+            f"baseline={_describe_position_sizes(baseline.as_dict())}, "
+            f"measured={_describe_position_sizes(current_sizes)})"
+        ),
         observation_state=baseline,
     )
 
@@ -304,8 +326,18 @@ class GmxV2RunnerHookConnector(RunnerHookConnector, RunnerAsyncSettlementCapabil
             network=network,
         )
         if not result.ok:
+            # A transient cold-fork/upstream failure is retryable within the
+            # barrier's budget (OBSERVATION_FAILED, non-terminal); only a
+            # structural failure (no keeper role, venue rejected the order,
+            # wrong network) is INFRASTRUCTURE_UNSUPPORTED, which the barrier
+            # treats as immediate — waiting cannot fix it.
+            status = (
+                AsyncSettlementStatus.OBSERVATION_FAILED
+                if getattr(result, "transient", False)
+                else AsyncSettlementStatus.INFRASTRUCTURE_UNSUPPORTED
+            )
             return AsyncSettlementVerdict(
-                status=AsyncSettlementStatus.INFRASTRUCTURE_UNSUPPORTED,
+                status=status,
                 terminal=False,
                 reason=result.reason or "GMX managed-Anvil order execution was unavailable",
                 observation_state=baseline.observation_state,

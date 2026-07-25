@@ -319,6 +319,30 @@ def _async_order_kind(intent_type: str | None, raw_order_type: Any) -> AsyncOrde
     return _RAW_ASYNC_ORDER_KINDS.get(raw_order_type, AsyncOrderKind.UNKNOWN)
 
 
+def _keyed_order_created_fields(event: GMXv2Event) -> dict[str, Any]:
+    """Decode OrderCreated settlement fields from the keyed EventUtils payload.
+
+    ``event.data``'s flat fields come from the legacy fixed-word decode, which
+    does NOT match production EventEmitter payloads — their leading words are
+    dynamic-struct offsets, so "market"/"collateral"/"size"/"is_long" read as
+    offset garbage (the VIB-3873 misread class; reproduced live 2026-07-25:
+    requested market decoded as ``0x…a0``). Settlement identity must come from
+    the keyed payload; a field that cannot be decoded stays absent so the
+    settlement barrier measures loudly instead of comparing against garbage.
+    """
+    raw = str(event.raw_data or "").removeprefix("0x")
+    items = GMXv2ReceiptParser._decode_event_utils_data(raw, "OrderCreated")
+    if items is None:
+        return {}
+    return {
+        "market": items["addresses"].get("market"),
+        "initial_collateral_token": items["addresses"].get("initialCollateralToken"),
+        "order_type": items["uints"].get("orderType"),
+        "size_delta_usd": items["uints"].get("sizeDeltaUsd"),
+        "is_long": items["bools"].get("isLong"),
+    }
+
+
 def _async_order_from_created_event(
     event: GMXv2Event,
     *,
@@ -335,18 +359,25 @@ def _async_order_from_created_event(
             )
         )
 
-    raw_size_delta = event.data.get("size_delta_usd")
-    direction = event.data.get("is_long")
+    keyed = _keyed_order_created_fields(event)
+    raw_size_delta = keyed.get("size_delta_usd")
+    direction = keyed.get("is_long")
+    market = str(keyed.get("market") or "") or None
+    collateral_token = str(keyed.get("initial_collateral_token") or "") or None
     return ExtractOk(
         value=AsyncOrderData(
             protocol="gmx_v2",
             order_id=key,
             status=AsyncOrderStatus.PENDING,
-            kind=_async_order_kind(intent_type, event.data.get("order_type")),
-            market=str(event.data.get("market") or "") or None,
-            collateral_token=str(event.data.get("initial_collateral_token") or "") or None,
+            kind=_async_order_kind(intent_type, keyed.get("order_type")),
+            market=market,
+            collateral_token=collateral_token,
             is_long=direction if isinstance(direction, bool) else None,
-            size_delta_usd=Decimal(str(raw_size_delta)) if raw_size_delta is not None else None,
+            size_delta_usd=(
+                Decimal(int(raw_size_delta)) / Decimal(10**30)
+                if isinstance(raw_size_delta, int) and not isinstance(raw_size_delta, bool)
+                else None
+            ),
         )
     )
 

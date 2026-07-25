@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal, InvalidOperation
 from typing import Any
 
+import grpc
 from eth_abi import decode as abi_decode
 from eth_abi import encode as abi_encode
 from eth_typing import HexStr
@@ -34,6 +35,11 @@ from web3 import Web3
 from web3.types import RPCEndpoint
 
 from almanak.connectors.gmx_v2.adapter import GMX_V2_ADDRESSES
+from almanak.connectors.gmx_v2.receipt_parser import (
+    _EVENT_LOG_DATA_ABI_TYPE,
+    GMXv2EventType,
+    GMXv2ReceiptParser,
+)
 from almanak.connectors.gmx_v2.teardown_reads import read_pending_orders
 from almanak.framework.web3.gateway_provider import GatewayWeb3Provider
 from almanak.gateway.proto import gateway_pb2
@@ -43,6 +49,23 @@ logger = logging.getLogger(__name__)
 _GMX_USD_DECIMALS = 30
 _ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 _TX_RECEIPT_TIMEOUT_SECONDS = 30
+
+# Cold-fork keeper execution can exceed GatewayWeb3Provider's default 30s
+# deadline: estimating OrderHandler.executeOrder pulls hundreds of cold
+# storage slots through the fork's upstream RPC one call at a time, and the
+# gateway additionally retries transient upstream failures internally (up to
+# ~3 x 30s). The client deadline must sit above that whole envelope, or a
+# slow first estimate surfaces as an opaque gRPC DEADLINE_EXCEEDED.
+_COLD_FORK_RPC_TIMEOUT_SECONDS = 120.0
+
+# Anvil caches upstream state fetched during a call even when the call itself
+# times out, so a timed-out estimate leaves the fork warmer than it found it;
+# bounded retries converge instead of thrashing. Budget math: worst case is
+# attempts x _COLD_FORK_RPC_TIMEOUT_SECONDS = 240s, which must leave headroom
+# inside the connector's 360s AsyncSettlementPolicy timeout for oracle
+# seeding, executeOrder, and outcome verification — do not raise attempts
+# without rechecking that envelope.
+_ESTIMATE_GAS_ATTEMPTS = 2
 
 _CONTROLLER_ROLE = keccak(abi_encode(["string"], ["CONTROLLER"]))
 _ORDER_KEEPER_ROLE = keccak(abi_encode(["string"], ["ORDER_KEEPER"]))
@@ -77,6 +100,10 @@ class GmxAnvilOrderExecutionResult:
     transaction_hashes: tuple[str, ...] = ()
     execution_receipts: tuple[dict[str, Any], ...] = ()
     reason: str | None = None
+    # True when the failure is a transient cold-fork/upstream class the caller
+    # may retry within its own budget; False = structural (no keeper, wrong
+    # network, venue rejected the order).
+    transient: bool = False
 
 
 @dataclass(frozen=True)
@@ -282,6 +309,48 @@ def _normalize_order_key(order_key: str) -> str:
     return "0x" + key.hex()
 
 
+# Anvil surfaces its own upstream (fork-backend) fetch failures as JSON-RPC
+# errors with these shapes; they are the same transient cold-fork class as a
+# timeout — the missing state is refetched on the next attempt.
+_TRANSIENT_ERROR_MARKERS = (
+    "Request timeout",
+    "failed to get storage",
+    "failed to get account",
+    "error sending request",
+)
+
+
+def _is_transient_execution_error(exc: Exception) -> bool:
+    """True for the shapes a transient cold-fork RPC failure can take."""
+    if isinstance(exc, grpc.RpcError):
+        code = exc.code() if callable(getattr(exc, "code", None)) else None
+        return code is grpc.StatusCode.DEADLINE_EXCEEDED
+    # The gateway maps upstream timeouts, and Anvil maps fork-backend fetch
+    # failures, to JSON-RPC error responses that _rpc re-raises as
+    # GmxAnvilOrderExecutionError.
+    if not isinstance(exc, GmxAnvilOrderExecutionError):
+        return False
+    message = str(exc)
+    return any(marker in message for marker in _TRANSIENT_ERROR_MARKERS)
+
+
+def _estimate_gas_with_warm_retry(provider: GatewayWeb3Provider, transaction: dict[str, str]) -> Any:
+    for attempt in range(1, _ESTIMATE_GAS_ATTEMPTS + 1):
+        try:
+            return _rpc(provider, "eth_estimateGas", [transaction])
+        except (GmxAnvilOrderExecutionError, grpc.RpcError) as exc:
+            if not _is_transient_execution_error(exc) or attempt == _ESTIMATE_GAS_ATTEMPTS:
+                raise
+            logger.warning(
+                "GMX keeper eth_estimateGas hit a transient cold-fork failure (attempt %d/%d): %s; "
+                "state fetched so far stays cached — retrying",
+                attempt,
+                _ESTIMATE_GAS_ATTEMPTS,
+                exc,
+            )
+    raise GmxAnvilOrderExecutionError("eth_estimateGas retry loop exited without a result")  # pragma: no cover
+
+
 def _send_transaction(provider: GatewayWeb3Provider, sender: str, target: str, data: str) -> str:
     sender = to_checksum_address(sender)
     transaction = {
@@ -290,7 +359,7 @@ def _send_transaction(provider: GatewayWeb3Provider, sender: str, target: str, d
         "data": data,
         "value": "0x0",
     }
-    gas_estimate_raw = _rpc(provider, "eth_estimateGas", [transaction])
+    gas_estimate_raw = _estimate_gas_with_warm_retry(provider, transaction)
     try:
         gas_estimate = int(gas_estimate_raw, 16) if isinstance(gas_estimate_raw, str) else int(gas_estimate_raw)
     except (TypeError, ValueError) as exc:
@@ -452,7 +521,85 @@ def _execute_order(
     receipt = _rpc(provider, "eth_getTransactionReceipt", [tx_hash])
     if not isinstance(receipt, dict):
         raise GmxAnvilOrderExecutionError(f"GMX executeOrder receipt was not a JSON-RPC object: {tx_hash}")
+    _verify_execution_outcome(dict(receipt), order_key, tx_hash)
     return tx_hash, dict(receipt)
+
+
+_ORDER_OUTCOME_LABELS = {
+    GMXv2EventType.ORDER_EXECUTED: "executed",
+    GMXv2EventType.ORDER_CANCELLED: "cancelled",
+    GMXv2EventType.ORDER_FROZEN: "frozen",
+}
+
+
+def _verify_execution_outcome(receipt: dict[str, Any], order_key: str, tx_hash: str) -> None:
+    """Fail loud when executeOrder settled the order WITHOUT filling it.
+
+    A successful ``OrderHandler.executeOrder`` transaction is not proof of a
+    fill: GMX cancels or freezes the order inside that same transaction when
+    venue validation fails (acceptable-price bounds, open-interest caps,
+    collateral floors, oracle constraints, ...). Without this check the only
+    downstream signal is the settlement observer's generic "order left the
+    pending set without its exact target position delta" — this surfaces the
+    venue's actual outcome and reason instead.
+    """
+    logs = receipt.get("logs")
+    if not isinstance(logs, list):
+        raise GmxAnvilOrderExecutionError(
+            f"GMX executeOrder receipt carried no log list to verify the outcome: {tx_hash}"
+        )
+    events = GMXv2ReceiptParser().parse_logs([log for log in logs if isinstance(log, dict)])
+    key = _normalize_order_key(order_key)
+    outcomes: dict[str, Any] = {}
+    for event in events:
+        label = _ORDER_OUTCOME_LABELS.get(event.event_type)
+        if label is None:
+            continue
+        # Require an exact key match: an outcome event whose key is missing or
+        # undecodable must never be attributed to this order — tolerating an
+        # empty key as "no opinion" reopens the misattribution class this
+        # verification exists to close.
+        event_key = str(event.data.get("key") or "").lower()
+        if event_key != key:
+            continue
+        outcomes[label] = event
+    if "executed" in outcomes:
+        return
+    if "cancelled" in outcomes or "frozen" in outcomes:
+        label = "cancelled" if "cancelled" in outcomes else "frozen"
+        raise GmxAnvilOrderExecutionError(
+            f"GMX keeper executeOrder {label} order {key} instead of filling it "
+            f"(venue reason: {_venue_outcome_reason(outcomes[label])}; tx: {tx_hash})"
+        )
+    raise GmxAnvilOrderExecutionError(
+        f"GMX executeOrder receipt for order {key} carried no Order outcome event "
+        f"(executed/cancelled/frozen) — outcome unmeasured (tx: {tx_hash})"
+    )
+
+
+def _venue_outcome_reason(event: Any) -> str:
+    """Decode the venue's ``reason`` / ``reasonBytes`` from an Order outcome event.
+
+    The receipt parser's ``cancelled_reason`` field is a static placeholder, so
+    the real reason is decoded here from the EventEmitter payload's string and
+    bytes item groups. Extraction failure must never mask the outcome itself.
+    """
+    raw = str(getattr(event, "raw_data", "") or "").removeprefix("0x")
+    try:
+        _sender, _name, event_data = abi_decode(
+            ["address", "string", _EVENT_LOG_DATA_ABI_TYPE],
+            bytes.fromhex(raw),
+        )
+        strings = {str(k): str(v) for k, v in event_data[6][0]}
+        if strings.get("reason"):
+            return strings["reason"]
+        bytes_items = {str(k): v for k, v in event_data[5][0]}
+        reason_bytes = bytes_items.get("reasonBytes")
+        if isinstance(reason_bytes, bytes) and reason_bytes:
+            return "0x" + reason_bytes.hex()
+    except Exception:  # noqa: BLE001 - reason extraction must never mask the outcome
+        logger.debug("GMX order outcome reason decode failed", exc_info=True)
+    return "unmeasured"
 
 
 def _prepare_execution_request(
@@ -536,7 +683,11 @@ def execute_pending_orders_on_anvil(
         return prepared
     executable_keys, market_by_key = prepared
 
-    provider = GatewayWeb3Provider(gateway_client, chain=chain)
+    provider = GatewayWeb3Provider(
+        gateway_client,
+        chain=chain,
+        request_timeout=_COLD_FORK_RPC_TIMEOUT_SECONDS,
+    )
     try:
         dependencies = _load_dependencies(provider, chain)
         if not _has_role(provider, dependencies.role_store, dependencies.order_handler, _CONTROLLER_ROLE):
@@ -586,7 +737,11 @@ def execute_pending_orders_on_anvil(
         )
     except Exception as exc:
         logger.warning("GMX managed-Anvil order execution failed: %s", exc, exc_info=True)
-        return GmxAnvilOrderExecutionResult(ok=False, reason=f"{type(exc).__name__}: {exc}")
+        return GmxAnvilOrderExecutionResult(
+            ok=False,
+            reason=f"{type(exc).__name__}: {exc}",
+            transient=_is_transient_execution_error(exc),
+        )
 
 
 __all__ = [

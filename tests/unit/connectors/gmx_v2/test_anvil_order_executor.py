@@ -6,6 +6,8 @@ from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
+import pytest
+
 from eth_abi import encode as abi_encode
 
 from almanak.connectors.gmx_v2.anvil_order_executor import (
@@ -246,3 +248,227 @@ def test_impersonated_transaction_tops_up_only_measured_gas_cost() -> None:
         "anvil_setBalance",
         [_ORDER_HANDLER, hex(30_000 * 2)],
     )
+
+
+# ---------------------------------------------------------------------------
+# executeOrder outcome verification (tx success != fill)
+# ---------------------------------------------------------------------------
+
+
+def _empty_group() -> tuple[list, list]:
+    return ([], [])
+
+
+def _event_emitter_data(event_name: str, *, reason: str = "", reason_bytes: bytes = b"") -> str:
+    from eth_abi import encode as abi_encode
+
+    from almanak.connectors.gmx_v2.receipt_parser import _EVENT_LOG_DATA_ABI_TYPE
+
+    strings_group = ([("reason", reason)] if reason else [], [])
+    bytes_group = ([("reasonBytes", reason_bytes)] if reason_bytes else [], [])
+    payload = abi_encode(
+        ["address", "string", _EVENT_LOG_DATA_ABI_TYPE],
+        [
+            "0x" + "11" * 20,
+            event_name,
+            (
+                _empty_group(),  # addresses
+                _empty_group(),  # uints
+                _empty_group(),  # ints
+                _empty_group(),  # bools
+                _empty_group(),  # bytes32
+                bytes_group,
+                strings_group,
+            ),
+        ],
+    )
+    return "0x" + payload.hex()
+
+
+def _outcome_log(event_name: str, order_key: str, data: str) -> dict:
+    from almanak.connectors.gmx_v2.receipt_parser import EVENT_TOPICS
+
+    return {
+        "topics": ["0x" + "ee" * 32, EVENT_TOPICS[event_name], order_key],
+        "data": data,
+        "address": "0x" + "22" * 20,
+        "logIndex": "0x0",
+    }
+
+
+def test_execution_outcome_requires_an_order_outcome_event() -> None:
+    from almanak.connectors.gmx_v2.anvil_order_executor import (
+        GmxAnvilOrderExecutionError,
+        _verify_execution_outcome,
+    )
+
+    with pytest.raises(GmxAnvilOrderExecutionError, match="outcome unmeasured"):
+        _verify_execution_outcome({"logs": []}, _KEY_A, "0xtx")
+    with pytest.raises(GmxAnvilOrderExecutionError, match="no log list"):
+        _verify_execution_outcome({}, _KEY_A, "0xtx")
+
+
+def test_execution_outcome_accepts_executed_order() -> None:
+    from almanak.connectors.gmx_v2.anvil_order_executor import _verify_execution_outcome
+
+    receipt = {"logs": [_outcome_log("OrderExecuted", _KEY_A, _event_emitter_data("OrderExecuted"))]}
+    _verify_execution_outcome(receipt, _KEY_A, "0xtx")  # must not raise
+
+
+def test_execution_outcome_surfaces_venue_cancellation_reason() -> None:
+    from almanak.connectors.gmx_v2.anvil_order_executor import (
+        GmxAnvilOrderExecutionError,
+        _verify_execution_outcome,
+    )
+
+    data = _event_emitter_data("OrderCancelled", reason="OrderNotFulfillableAtAcceptablePrice")
+    receipt = {"logs": [_outcome_log("OrderCancelled", _KEY_A, data)]}
+    with pytest.raises(GmxAnvilOrderExecutionError, match="OrderNotFulfillableAtAcceptablePrice"):
+        _verify_execution_outcome(receipt, _KEY_A, "0xtx")
+
+
+def test_execution_outcome_ignores_other_orders_events() -> None:
+    from almanak.connectors.gmx_v2.anvil_order_executor import (
+        GmxAnvilOrderExecutionError,
+        _verify_execution_outcome,
+    )
+
+    # A cancellation for a DIFFERENT key must not be attributed to ours.
+    data = _event_emitter_data("OrderCancelled", reason="SomeOtherOrder")
+    receipt = {"logs": [_outcome_log("OrderCancelled", _KEY_B, data)]}
+    with pytest.raises(GmxAnvilOrderExecutionError, match="outcome unmeasured"):
+        _verify_execution_outcome(receipt, _KEY_A, "0xtx")
+
+
+# ---------------------------------------------------------------------------
+# Cold-fork estimateGas warm retry
+# ---------------------------------------------------------------------------
+
+
+def test_estimate_gas_retries_on_client_deadline_then_succeeds() -> None:
+    import grpc
+
+    from almanak.connectors.gmx_v2.anvil_order_executor import _estimate_gas_with_warm_retry
+
+    class _Deadline(grpc.RpcError):
+        def code(self):
+            return grpc.StatusCode.DEADLINE_EXCEEDED
+
+    provider = MagicMock()
+    provider.make_request.side_effect = [_Deadline(), {"result": "0x5208"}]
+
+    assert _estimate_gas_with_warm_retry(provider, {"from": "0x0"}) == "0x5208"
+    assert provider.make_request.call_count == 2
+
+
+def test_estimate_gas_retries_on_gateway_request_timeout() -> None:
+    from almanak.connectors.gmx_v2.anvil_order_executor import _estimate_gas_with_warm_retry
+
+    provider = MagicMock()
+    provider.make_request.side_effect = [
+        {"error": {"code": -32603, "message": "Request timeout"}},
+        {"result": "0x5208"},
+    ]
+    assert _estimate_gas_with_warm_retry(provider, {"from": "0x0"}) == "0x5208"
+
+
+def test_estimate_gas_does_not_retry_non_timeout_errors() -> None:
+    from almanak.connectors.gmx_v2.anvil_order_executor import (
+        GmxAnvilOrderExecutionError,
+        _estimate_gas_with_warm_retry,
+    )
+
+    provider = MagicMock()
+    provider.make_request.return_value = {"error": {"code": 3, "message": "execution reverted"}}
+    with pytest.raises(GmxAnvilOrderExecutionError, match="execution reverted"):
+        _estimate_gas_with_warm_retry(provider, {"from": "0x0"})
+    assert provider.make_request.call_count == 1
+
+
+def test_estimate_gas_gives_up_after_bounded_attempts() -> None:
+    import grpc
+
+    from almanak.connectors.gmx_v2.anvil_order_executor import (
+        _ESTIMATE_GAS_ATTEMPTS,
+        _estimate_gas_with_warm_retry,
+    )
+
+    class _Deadline(grpc.RpcError):
+        def code(self):
+            return grpc.StatusCode.DEADLINE_EXCEEDED
+
+    provider = MagicMock()
+    provider.make_request.side_effect = _Deadline()
+    with pytest.raises(grpc.RpcError):
+        _estimate_gas_with_warm_retry(provider, {"from": "0x0"})
+    assert provider.make_request.call_count == _ESTIMATE_GAS_ATTEMPTS
+
+
+def test_transient_upstream_fetch_failure_is_classified_transient() -> None:
+    """Anvil fork-backend fetch failures must be retryable, not structural."""
+    from almanak.connectors.gmx_v2.anvil_order_executor import (
+        GmxAnvilOrderExecutionError,
+        _is_transient_execution_error,
+    )
+
+    assert _is_transient_execution_error(
+        GmxAnvilOrderExecutionError(
+            "eth_estimateGas failed: failed to get storage for 0xFD70 at 123: error sending request for url"
+        )
+    )
+    assert _is_transient_execution_error(GmxAnvilOrderExecutionError("eth_call failed: Request timeout"))
+    assert not _is_transient_execution_error(GmxAnvilOrderExecutionError("execution reverted: OrderNotFound"))
+
+
+def test_entrypoint_marks_transient_failures_on_result() -> None:
+    from almanak.connectors.gmx_v2 import anvil_order_executor as mod
+
+    def _raise_transient(*args, **kwargs):
+        raise mod.GmxAnvilOrderExecutionError("failed to get storage for 0xabc at 1: error sending request for url")
+
+    with (
+        patch.object(mod, "read_pending_orders", return_value=_pending((_KEY_A, _MARKET_A))),
+        patch.object(mod, "GatewayWeb3Provider", return_value=MagicMock()),
+        patch.object(mod, "_load_dependencies", side_effect=_raise_transient),
+    ):
+        result = mod.execute_pending_orders_on_anvil(
+            gateway_client=object(),
+            chain="arbitrum",
+            wallet_address=_WALLET,
+            orders=(SimpleNamespace(order_id=_KEY_A),),
+            network="anvil",
+        )
+    assert result.ok is False
+    assert result.transient is True
+
+    def _raise_structural(*args, **kwargs):
+        raise mod.GmxAnvilOrderExecutionError("GMX OrderHandler does not hold CONTROLLER")
+
+    with (
+        patch.object(mod, "read_pending_orders", return_value=_pending((_KEY_A, _MARKET_A))),
+        patch.object(mod, "GatewayWeb3Provider", return_value=MagicMock()),
+        patch.object(mod, "_load_dependencies", side_effect=_raise_structural),
+    ):
+        result = mod.execute_pending_orders_on_anvil(
+            gateway_client=object(),
+            chain="arbitrum",
+            wallet_address=_WALLET,
+            orders=(SimpleNamespace(order_id=_KEY_A),),
+            network="anvil",
+        )
+    assert result.ok is False
+    assert result.transient is False
+
+
+def test_execution_outcome_never_attributes_a_keyless_event() -> None:
+    """An outcome event with a missing/undecodable key must not count as proof."""
+    from almanak.connectors.gmx_v2.anvil_order_executor import (
+        GmxAnvilOrderExecutionError,
+        _verify_execution_outcome,
+    )
+
+    keyless = _outcome_log("OrderExecuted", _KEY_B, _event_emitter_data("OrderExecuted"))
+    keyless["topics"] = keyless["topics"][:2]  # strip the indexed key topic entirely
+    receipt = {"logs": [keyless]}
+    with pytest.raises(GmxAnvilOrderExecutionError, match="outcome unmeasured"):
+        _verify_execution_outcome(receipt, _KEY_A, "0xtx")

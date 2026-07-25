@@ -23,7 +23,66 @@ _COLLATERAL = "0x" + "44" * 20
 _SIZE_DELTA_USD = 100
 
 
-def _order_created_log(*, key: str | None = _ORDER_KEY, order_type: int = 2) -> dict:
+def _keyed_order_created_data(*, order_type: int = 2, is_long: bool = True) -> str:
+    """Encode OrderCreated exactly as the production EventEmitter emits it.
+
+    The payload is ``(msgSender, eventName, EventUtils.EventLogData)`` — a
+    keyed dynamic struct, NOT a flat word layout. Fixtures must enforce the
+    production encoding: the flat-word shape masked the field-misread bug the
+    2026-07-25 live keeper run exposed (market decoded as an ABI offset).
+    """
+    from eth_abi import encode as abi_encode
+
+    from almanak.connectors.gmx_v2.receipt_parser import _EVENT_LOG_DATA_ABI_TYPE
+
+    payload = abi_encode(
+        ["address", "string", _EVENT_LOG_DATA_ABI_TYPE],
+        [
+            "0x" + "77" * 20,
+            "OrderCreated",
+            (
+                (
+                    [
+                        ("account", "0x" + "88" * 20),
+                        ("receiver", "0x" + "88" * 20),
+                        ("market", _MARKET),
+                        ("initialCollateralToken", _COLLATERAL),
+                    ],
+                    [("swapPath", [])],
+                ),
+                (
+                    [
+                        ("orderType", order_type),
+                        ("sizeDeltaUsd", _SIZE_DELTA_USD * 10**30),
+                        ("initialCollateralDeltaAmount", 10 * 10**6),
+                    ],
+                    [],
+                ),
+                ([], []),
+                ([("isLong", is_long)], []),
+                ([("key", bytes.fromhex(_ORDER_KEY[2:]))], []),
+                ([], []),
+                ([], []),
+            ),
+        ],
+    )
+    return "0x" + payload.hex()
+
+
+def _order_created_log(*, key: str | None = _ORDER_KEY, order_type: int = 2, data: str | None = None) -> dict:
+    topics = [_EVENT_LOG1_TOPIC, EVENT_TOPICS["OrderCreated"]]
+    if key is not None:
+        topics.append(key)
+    return {
+        "address": "0xC8ee91A54287DB53897056e12D9819156D3822Fb",
+        "topics": topics,
+        "data": data if data is not None else _keyed_order_created_data(order_type=order_type),
+        "logIndex": 7,
+    }
+
+
+def _legacy_flat_words_data(*, order_type: int = 2) -> str:
+    """The pre-2026-07-25 fixture shape: flat words that no live event carries."""
     words = [
         0,
         0,
@@ -40,15 +99,7 @@ def _order_created_log(*, key: str | None = _ORDER_KEY, order_type: int = 2) -> 
         0,
         0,
     ]
-    topics = [_EVENT_LOG1_TOPIC, EVENT_TOPICS["OrderCreated"]]
-    if key is not None:
-        topics.append(key)
-    return {
-        "address": "0xC8ee91A54287DB53897056e12D9819156D3822Fb",
-        "topics": topics,
-        "data": "0x" + "".join(f"{word:064x}" for word in words),
-        "logIndex": 7,
-    }
+    return "0x" + "".join(f"{word:064x}" for word in words)
 
 
 def _receipt(logs: list[dict]) -> dict:
@@ -85,7 +136,7 @@ class TestGMXAsyncOrderExtraction:
         assert order.kind is AsyncOrderKind.INCREASE
         assert order.market == _MARKET
         assert order.collateral_token == _COLLATERAL
-        assert order.is_long is False
+        assert order.is_long is True
         assert order.size_delta_usd == _SIZE_DELTA_USD
 
     def test_intent_type_is_authoritative_when_dynamic_event_payload_is_not_positionally_decodable(self) -> None:
@@ -150,7 +201,7 @@ class TestGMXAsyncOrderResultEnrichment:
                 "kind": expected_kind.value,
                 "market": _MARKET,
                 "collateral_token": _COLLATERAL,
-                "is_long": False,
+                "is_long": True,
                 "size_delta_usd": str(_SIZE_DELTA_USD),
             }
         ]
@@ -175,3 +226,27 @@ class TestGMXAsyncOrderResultEnrichment:
             ResultEnricher().enrich(result, intent, context)
 
         assert exc_info.value.field_name == "async_orders"
+
+
+class TestGMXAsyncOrderKeyedPayloadFailClosed:
+    def test_non_keyed_payload_yields_key_only_never_offset_garbage(self) -> None:
+        """A payload that is not the keyed EventUtils struct must not produce fields.
+
+        The legacy flat-word decode read ABI struct offsets as field values
+        (market=0x…a0 — reproduced live 2026-07-25), poisoning the settlement
+        delta check. The key (indexed topic) stays authoritative; every other
+        field must be None so the barrier measures loudly instead of comparing
+        against garbage.
+        """
+        log = _order_created_log(data=_legacy_flat_words_data())
+        parsed = GMXv2ReceiptParser().extract_async_orders_result(_receipt([log]), intent_type="PERP_OPEN")
+
+        assert isinstance(parsed, ExtractOk)
+        order = parsed.value[0]
+        assert order.order_id == _ORDER_KEY
+        assert order.market is None
+        assert order.collateral_token is None
+        assert order.is_long is None
+        assert order.size_delta_usd is None
+        # Kind still resolves from the intent when the payload is unreadable.
+        assert order.kind is AsyncOrderKind.INCREASE
