@@ -251,6 +251,28 @@ def price_ratio_to_tick(
 # ---------------------------------------------------------------------------
 
 
+def _is_zero_address(address: Any) -> bool:
+    """True when ``address`` is absent or the EVM zero address (VIB-5984).
+
+    Tolerates the shapes an ABI decode can produce — ``None``, ``""``, a
+    ``0x``-prefixed or bare hex string, any casing, and short/unpadded forms —
+    by testing the integer value rather than string-matching a canonical
+    spelling. A non-hex value is treated as NOT the zero address: an
+    unparseable token identity is a different failure (it is caught by the
+    ``resolve_token_symbol`` guard below), and treating it as zero here would
+    silently widen this branch.
+    """
+    if address is None:
+        return True
+    text = str(address).strip()
+    if not text:
+        return True
+    try:
+        return int(text, 16) == 0
+    except ValueError:
+        return False
+
+
 def reprice_lp_position(
     lp_reader: Any,
     position: Any,
@@ -277,8 +299,11 @@ def reprice_lp_position(
     Returns:
         ``(total_usd, enriched_details)`` where ``total_usd`` is LP value plus
         uncollected fees, or ``None`` on any unmeasured input (Empty ≠ Zero).
-        A genuinely empty position (zero liquidity and zero fees) returns
-        ``(Decimal("0"), {"position_id": ..., "liquidity": "0"})``.
+        A genuinely empty position — zero liquidity, zero fees, and a real
+        token pair still reported by the struct — returns
+        ``(Decimal("0"), {"position_id": ..., "liquidity": "0"})``. An all-zero
+        struct whose token addresses are also zero is a degraded read, not an
+        empty position, and returns ``None`` (VIB-5984).
     """
     pid = getattr(position, "position_id", "?")
     try:
@@ -305,6 +330,47 @@ def reprice_lp_position(
             return None
 
         if on_chain.liquidity == 0 and on_chain.tokens_owed0 == 0 and on_chain.tokens_owed1 == 0:
+            # VIB-5984 — an all-zero read has two very different causes, and only
+            # one of them is a measured zero.
+            #
+            # A V3-family ``positions(tokenId)`` struct carries ``token0`` /
+            # ``token1`` from mint until the NFT is burned (after a burn the call
+            # reverts, which surfaces as ``None`` above). So a LIVE-but-emptied
+            # position — liquidity withdrawn, fees collected — still reports both
+            # token addresses. That is a genuinely empty position and measured $0
+            # is correct.
+            #
+            # A struct whose token addresses are ALSO zero is structurally
+            # impossible for any position that was ever minted: it is a zero-filled
+            # 12-word response (degraded gateway/RPC read — the VIB-5930 class — or
+            # a position-manager address that answers unknown ids with a default
+            # struct instead of reverting). Booking that as a measured $0 at HIGH is
+            # how the intermittent VIB-4970 ``$0``-valued OPEN LP rows were minted.
+            # Empty ≠ Zero: report it unmeasured (``None`` → ``repriced=False`` →
+            # ``valuation_status=no_path`` → snapshot UNAVAILABLE) so no reader ever
+            # sees a confident zero.
+            #
+            # This discriminates on the read itself rather than on the position
+            # registry deliberately. A registry cross-check ("registry says OPEN, so
+            # distrust the zero") cannot distinguish the two causes either — the
+            # registry lags reality, so a position closed outside the strategy stays
+            # OPEN there — and it would pin such a position to permanently
+            # unmeasured, which suppresses the PortfolioMetrics write for every
+            # remaining iteration (``runner_state._build_metrics_for_snapshot``
+            # returns None on UNAVAILABLE). That trades an intermittent wrong value
+            # for a permanent absence of PnL / drawdown.
+            if _is_zero_address(on_chain.token0) and _is_zero_address(on_chain.token1):
+                logger.warning(
+                    "LP reprice miss for %s (token_id=%s) on %s: all-zero position struct with zero-address "
+                    "tokens (token0=%r, token1=%r) — a minted position always reports its token pair, so this "
+                    "is a degraded read, not an empty position. Reporting unmeasured (VIB-5984).",
+                    pid,
+                    token_id,
+                    chain,
+                    on_chain.token0,
+                    on_chain.token1,
+                )
+                return None
             # Not a miss — a MEASURED empty position (Empty ≠ Zero).
             logger.debug("LP %s on %s is empty (zero liquidity + zero fees) → measured $0", token_id, chain)
             return Decimal("0"), {"position_id": str(token_id), "liquidity": "0"}
