@@ -51,7 +51,9 @@ EXPECTED_PROTOCOL_ROUTERS: dict[str, dict[str, str]] = {
     },
     "optimism": {
         "uniswap_v3": "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45",
-        "sushiswap_v3": "0x8516944E89f296eb6473d79aED1Ba12088016c9e",
+        # VIB-5991: old snapshot value 0x8516944E…16c9e had no code on optimism
+        # (Arbitrum TickLens mispaste); verified canonical SwapRouter on-chain.
+        "sushiswap_v3": "0x8c32Fd078B89Eccb06B40289A539D84A4aA9FDA6",
         "aerodrome": "0xa062aE8A9c5e11aaA026fc2670B0D65cCc8B2858",
         "velodrome": "0xa062aE8A9c5e11aaA026fc2670B0D65cCc8B2858",
     },
@@ -61,14 +63,18 @@ EXPECTED_PROTOCOL_ROUTERS: dict[str, dict[str, str]] = {
     },
     "base": {
         "uniswap_v3": "0x2626664c2603336E57B271c5C0b26F421741e481",
-        "sushiswap_v3": "0xfB7ef66A7e61fF9e400671e4b5BFbaBE2ea025B4",
+        # VIB-5991: old snapshot value 0xfB7ef66A7e61fF9e…25B4 had no code on base
+        # (silent swap no-op); verified canonical SwapRouter on-chain.
+        "sushiswap_v3": "0xFB7eF66a7e61224DD6FcD0D7d9C3be5C8B049b9f",
         "pancakeswap_v3": "0x678Aa4bF4E210cf2166753e054d5b7c31cc7fa86",
         "aerodrome": "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43",
     },
     "avalanche": {"uniswap_v3": "0xbb00FF08d01D300023C629E8fFfFcb65A5a578cE"},
     "bsc": {
         "uniswap_v3": "0xB971eF87ede563556b2ED4b1C0b0019111Dd85d2",
-        "sushiswap_v3": "0xB45e53277a7e0F1D35f2a77160e91e25507f1763",
+        # VIB-5991: old snapshot value 0xB45e5327…1763 had no code on bsc
+        # (ZetaChain factory mispaste); verified canonical SwapRouter on-chain.
+        "sushiswap_v3": "0x909662a99605382dB1E8d69cc1f182bb577d9038",
         "pancakeswap_v3": "0x13f4EA83D0bd40E75C8222255bc855a974568Dd4",
     },
     "linea": {

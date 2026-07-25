@@ -69,10 +69,6 @@ class TestSushiSwapV3SwapIntent:
 
     @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.asyncio
-    @pytest.mark.xfail(
-        strict=True,
-        reason="VIB-5972: sushiswap_v3 swap pool selection on bnb — quoter returns no amount or route emits no Swap event (as of 2026-05-12; re-pointed to VIB-5972 2026-07-24)",
-    )
     async def test_swap_usdt_to_wbnb_using_intent(
         self,
         web3: Web3,

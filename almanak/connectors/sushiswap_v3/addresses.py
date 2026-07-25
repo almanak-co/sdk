@@ -24,7 +24,12 @@ SUSHISWAP_V3: dict[str, dict[str, str]] = {
         "quoter_v2": "0x0524E833cCD057e4d7A296e3aaAb9f7675964Ce1",
     },
     "base": {
-        "swap_router": "0xfB7ef66A7e61fF9e400671e4b5BFbaBE2ea025B4",
+        # VIB-5991: previous value 0xfB7ef66A7e61fF9e400671e4b5BFbaBE2ea025B4 had NO
+        # CODE on base — exactInputSingle to it "succeeded" as a silent no-op.
+        # Canonical SwapRouter from sushiswap/v3-periphery deployments/base;
+        # verified on-chain: 12070 bytes of code, factory() == 0xc35D…c74C4,
+        # WETH9() == 0x4200…0006.
+        "swap_router": "0xFB7eF66a7e61224DD6FcD0D7d9C3be5C8B049b9f",
         "factory": "0xc35DADB65012eC5796536bD9864eD8773aBc74C4",
         "position_manager": "0x80C7DD17B01855a6D2347444a0FCC36136a314de",
         "quoter_v2": "0xb1E835Dc2785b52265711e17fCCb0fd018226a6e",
@@ -36,19 +41,32 @@ SUSHISWAP_V3: dict[str, dict[str, str]] = {
         "quoter_v2": "0xb1E835Dc2785b52265711e17fCCb0fd018226a6e",
     },
     "avalanche": {
-        "swap_router": "0x717b7948AA264DeCf4D780aa6914482e5F46Da3e",
+        # VIB-5991: previous value 0x717b7948AA264DeCf4D780aa6914482e5F46Da3e is a
+        # Sushi RouteProcessor (has processRoute, no exactInputSingle) — V3-style
+        # swaps against it revert. Canonical SwapRouter from sushiswap/v3-periphery
+        # deployments/avalanche; verified on-chain: factory() == 0x3e60…c715,
+        # WETH9() == WAVAX 0xB31f…66c7.
+        "swap_router": "0x8E4638eefee96732C56291fBF48bBB98725c6b31",
         "factory": "0x3e603C14aF37EBdaD31709C4f848Fc6aD5BEc715",
         "position_manager": "0x18350b048AB366ed601fFDbC669110Ecb36016f3",
         "quoter_v2": "0xb1E835Dc2785b52265711e17fCCb0fd018226a6e",
     },
     "bsc": {
-        "swap_router": "0xB45e53277a7e0F1D35f2a77160e91e25507f1763",
+        # VIB-5991: previous value 0xB45e53277a7e0F1D35f2a77160e91e25507f1763 has NO
+        # CODE on bsc (it is Sushi's ZetaChain V3 factory address — mispaste).
+        # Canonical SwapRouter from sushiswap/v3-periphery deployments/bsc; verified
+        # on-chain: factory() == 0x1265…4ABb, WETH9() == WBNB 0xbb4C…095c.
+        "swap_router": "0x909662a99605382dB1E8d69cc1f182bb577d9038",
         "factory": "0x126555dd55a39328F69400d6aE4F782Bd4C34ABb",
         "position_manager": "0xF70c086618dcf2b1A461311275e00D6B722ef914",
         "quoter_v2": "0xb1E835Dc2785b52265711e17fCCb0fd018226a6e",
     },
     "optimism": {
-        "swap_router": "0x8516944E89f296eb6473d79aED1Ba12088016c9e",
+        # VIB-5991: previous value 0x8516944E89f296eb6473d79aED1Ba12088016c9e has NO
+        # CODE on optimism (it is Sushi's Arbitrum TickLens address — mispaste).
+        # Canonical SwapRouter from sushiswap/v3-periphery deployments/optimism;
+        # verified on-chain: factory() == 0x9c65…DBe0, WETH9() == 0x4200…0006.
+        "swap_router": "0x8c32Fd078B89Eccb06B40289A539D84A4aA9FDA6",
         "factory": "0x9c6522117e2ed1fE5bdb72bb0eD5E3f2bdE7DBe0",
         "position_manager": "0x1af415a1EbA07a4986a52B6f2e7dE7003D82231e",
         "quoter_v2": "0xb1E835Dc2785b52265711e17fCCb0fd018226a6e",
