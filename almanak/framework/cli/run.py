@@ -1422,6 +1422,13 @@ def run(  # noqa: C901
         multi_chain=strategy_bootstrap.multi_chain,
         strategy_chains=strategy_bootstrap.strategy_chains,
         chain_wallets=runtime_bootstrap.chain_wallets,
+        # Boot-failure honesty (VIB-5986): construction failures — including
+        # ConfigValidationError from validate_config()/CONFIG_MODEL — are
+        # reported to the lifecycle store as ERROR with a stable reason code
+        # before the nonzero exit, so hosted status-sync never shows a
+        # config-invalid deployment as runnable.
+        gateway_client=gateway_client,
+        deployment_id=runtime_bootstrap.deployment_id,
     )
 
     components = _build_components_or_exit(

@@ -13,7 +13,15 @@ Three layers, in order (each layer runs even if earlier layers produced
 warnings, so the operator sees the full picture per invocation):
 
 1. Load + validate
-   - Parse ``config.json`` / ``config.yaml`` (if present).
+   - Load the EFFECTIVE config through the shared validation engine
+     (``config_validation.load_effective_config``): parse + schema-validate
+     ``config.json`` / ``config.yaml``, then apply the hosted
+     ``ALMANAK_STRATEGY_CONFIG`` deep-merge exactly as the runtime does —
+     ``check`` validates the config the strategy actually runs with, so
+     "check passed, deployment invalid" drift is impossible (VIB-5986).
+   - Validate the optional per-strategy ``CONFIG_MODEL`` Pydantic contract
+     and scan for present-but-empty market-identity keys (the placeholder
+     shape that shipped the 3-day fail-closed HOLD incident).
    - Import ``strategy.py`` and locate the concrete ``IntentStrategy`` class.
    - Instantiate it with the loaded config; the framework calls
      ``validate_config()`` from ``IntentStrategy.__init__`` (a separate hook
@@ -195,32 +203,54 @@ def _is_placeholder_value(value: str) -> str | None:
 # =============================================================================
 
 
-def _load_config_file(strategy_dir: Path) -> tuple[dict[str, Any] | None, Path | None, str | None]:
-    """Load ``config.json`` / ``config.yaml`` from ``strategy_dir``.
+def _load_effective_config(strategy_dir: Path, report: CheckReport) -> tuple[dict[str, Any] | None, Path | None]:
+    """Load the effective config via the shared engine, folding findings into ``report``.
 
-    Returns ``(config_dict, config_path, error_message)``. A missing file is
-    not an error — it just returns ``(None, None, None)``.
+    Delegates to ``config_validation.load_effective_config`` — the same
+    parse + hosted-override merge the runtime uses — and maps the engine's
+    harness-neutral findings into this CLI's ``Finding`` shape.
     """
-    for name in ("config.json", "config.yaml", "config.yml"):
-        path = strategy_dir / name
-        if not path.exists():
-            continue
-        try:
-            if path.suffix.lower() in (".yaml", ".yml"):
-                import yaml  # Lazy import — yaml is already a dep but keep it off the hot path.
+    from .config_validation import load_effective_config
 
-                with open(path, encoding="utf-8") as fh:
-                    data = yaml.safe_load(fh) or {}
-            else:
-                with open(path, encoding="utf-8") as fh:
-                    data = json.load(fh)
-            if not isinstance(data, dict):
-                return None, path, f"Config {path.name} is not a JSON/YAML object (got {type(data).__name__})"
-            return data, path, None
-        except Exception as exc:  # pragma: no cover - bubbled up as a finding
-            return None, path, f"Failed to parse {path.name}: {exc}"
+    config, config_path, engine_findings = load_effective_config(strategy_dir)
+    for ef in engine_findings:
+        report.add(
+            Finding(
+                severity=Severity.ERROR if ef.severity == "error" else Severity.WARNING,
+                layer=Layer.LOAD,
+                code=ef.code,
+                message=ef.message,
+                file=str(config_path) if config_path else None,
+                field=ef.field,
+            )
+        )
+    return config, config_path
 
-    return None, None, None
+
+def _apply_engine_config_findings(
+    strategy_class: type | None,
+    config: dict[str, Any] | None,
+    config_path: Path | None,
+    report: CheckReport,
+) -> None:
+    """CONFIG_MODEL contract + market-identity placeholder scan (shared engine)."""
+    from .config_validation import config_model_findings, scan_market_identity_findings
+
+    engine_findings = list(scan_market_identity_findings(config))
+    if strategy_class is not None:
+        engine_findings.extend(config_model_findings(strategy_class, config))
+
+    for ef in engine_findings:
+        report.add(
+            Finding(
+                severity=Severity.ERROR if ef.severity == "error" else Severity.WARNING,
+                layer=Layer.LOAD,
+                code=ef.code,
+                message=ef.message,
+                file=str(config_path) if config_path else None,
+                field=ef.field,
+            )
+        )
 
 
 def _find_strategy_file(strategy_dir: Path) -> Path | None:
@@ -339,33 +369,44 @@ def _instantiate_strategy(
     # without requiring a real key. No execution happens during ``check``.
     wallet = ANVIL_DEFAULT_ADDRESS
 
-    # Wrap dict config so attribute access inside __init__ doesn't raise.
-    wrapped_config: Any = config if config is not None else {}
-    if isinstance(wrapped_config, dict):
-        wrapped_config = _CheckConfig(wrapped_config)
-
     import inspect as _inspect
 
-    base_kwargs: dict[str, Any] = {
-        "config": wrapped_config,
-        "chain": chain,
-        "wallet_address": wallet,
-    }
+    from ._strategy_config import coerce_strategy_config
 
     try:
-        # Introspect the constructor signature directly from the class — this
-        # avoids the mypy ``unsound __init__`` complaint on instance access
-        # and still gives us the full parameter list including *args/**kwargs.
-        sig = _inspect.signature(strategy_class)
-        params = sig.parameters
-        has_var_keyword = any(p.kind == _inspect.Parameter.VAR_KEYWORD for p in params.values())
-        if not has_var_keyword:
-            base_kwargs = {k: v for k, v in base_kwargs.items() if k in params}
-    except (TypeError, ValueError):
-        # Fall back to the base kwargs — any TypeError below is surfaced as a finding.
-        pass
+        # Coerce through the SAME path the runner uses (dataclass resolution,
+        # Decimal conversion, DictConfigWrapper fallback) so validate_config()
+        # observes the exact config object it would see at boot — a check that
+        # validated a different config type than the runtime was the drift
+        # class VIB-5986 closes. ``enforce_config_model=False`` because the
+        # CONFIG_MODEL contract already ran as its own findings pass; letting
+        # coercion re-raise the same violations would duplicate them.
+        config_instance = coerce_strategy_config(
+            strategy_class,
+            dict(config) if isinstance(config, dict) else {},
+            echo=False,
+            enforce_config_model=False,
+        )
 
-    try:
+        base_kwargs: dict[str, Any] = {
+            "config": config_instance,
+            "chain": chain,
+            "wallet_address": wallet,
+        }
+
+        try:
+            # Introspect the constructor signature directly from the class — this
+            # avoids the mypy ``unsound __init__`` complaint on instance access
+            # and still gives us the full parameter list including *args/**kwargs.
+            sig = _inspect.signature(strategy_class)
+            params = sig.parameters
+            has_var_keyword = any(p.kind == _inspect.Parameter.VAR_KEYWORD for p in params.values())
+            if not has_var_keyword:
+                base_kwargs = {k: v for k, v in base_kwargs.items() if k in params}
+        except (TypeError, ValueError):
+            # Fall back to the base kwargs — any TypeError below is surfaced as a finding.
+            pass
+
         instance = strategy_class(**base_kwargs)
         return instance, findings
     except AttributeError as exc:
@@ -437,53 +478,6 @@ def _format_config_validation_error(exc: Exception) -> Finding | None:
         message=message,
         field=field_name if isinstance(field_name, str) else None,
     )
-
-
-class _CheckConfig:
-    """Minimal dict-wrapper used only during ``check``.
-
-    Strategy ``__init__`` methods typically read config via ``self.config.get``
-    and attribute access. This wrapper provides both without pulling in the
-    full ``DictConfigWrapper`` from ``run.py`` (which drags more imports).
-    """
-
-    def __init__(self, data: dict[str, Any]) -> None:
-        self._data = data
-        for key, value in data.items():
-            # Only set identifier-like keys as attributes to avoid clobbering
-            # dunders or colliding with the wrapper's own API surface.
-            if isinstance(key, str) and key.isidentifier() and not hasattr(self, key):
-                setattr(self, key, value)
-
-    def get(self, key: str, default: Any = None) -> Any:
-        return self._data.get(key, default)
-
-    def to_dict(self) -> dict[str, Any]:
-        return dict(self._data)
-
-    def keys(self):
-        return self._data.keys()
-
-    def values(self):
-        return self._data.values()
-
-    def items(self):
-        return self._data.items()
-
-    def __iter__(self):
-        return iter(self._data)
-
-    def __len__(self) -> int:
-        return len(self._data)
-
-    def __getitem__(self, key: str) -> Any:
-        return self._data[key]
-
-    def __contains__(self, key: str) -> bool:
-        return key in self._data
-
-    def __bool__(self) -> bool:
-        return bool(self._data)
 
 
 # =============================================================================
@@ -1026,19 +1020,10 @@ def run_checks(strategy_dir: Path) -> CheckReport:
         # Nothing more we can do.
         return report
 
-    # Layer 1a: load config (not fatal if missing).
-    config, config_path, load_err = _load_config_file(strategy_dir)
-    if load_err is not None:
-        report.add(
-            Finding(
-                severity=Severity.ERROR,
-                layer=Layer.LOAD,
-                code="config_parse_error",
-                message=load_err,
-                file=str(config_path) if config_path else None,
-            )
-        )
-        # Continue — AST scan is still valuable.
+    # Layer 1a: load the EFFECTIVE config (file parse + hosted env override)
+    # through the shared validation engine. Parse/override failures land as
+    # findings; the AST scan below is still valuable either way.
+    config, config_path = _load_effective_config(strategy_dir, report)
 
     # Layer 1b: try to load the class first so we can anchor the AST pass
     # to the exact concrete class name. Import errors are captured as
@@ -1062,6 +1047,10 @@ def run_checks(strategy_dir: Path) -> CheckReport:
 
     # Config-level placeholder scan (cheap, always run).
     _scan_config_placeholders(config, config_path, report)
+
+    # Shared-engine passes: CONFIG_MODEL contract + market-identity
+    # placeholder scan (both run against the EFFECTIVE config).
+    _apply_engine_config_findings(strategy_class, config, config_path, report)
 
     if strategy_class is not None:
         report.strategy_class = f"{strategy_class.__module__}.{strategy_class.__name__}"

@@ -173,6 +173,8 @@ def _instantiate_strategy(  # noqa: C901
     multi_chain: bool,
     strategy_chains: list[str],
     chain_wallets: dict[str, str],
+    gateway_client: Any | None = None,
+    deployment_id: str | None = None,
 ) -> Any:
     """Instantiate the strategy class with the right config-type branch.
 
@@ -190,7 +192,13 @@ def _instantiate_strategy(  # noqa: C901
 
     Exits the process with status 1 on any failure (preserving the original
     top-level except block's behavior -- `click.echo(..., err=True)` +
-    `sys.exit(1)`).
+    `sys.exit(1)`). Before exiting, a boot failure is reported to the
+    gateway lifecycle store as ``ERROR`` with a stable reason code
+    (``CONFIG_VALIDATION_FAILED`` for ``ConfigValidationError`` /
+    ``CONFIG_MODEL`` violations, ``STRATEGY_INIT_FAILED`` otherwise) so the
+    hosted platform surfaces a failed deployment instead of a silent crash
+    loop — invalid config is a boot failure, never a quiet RUNNING+HOLD
+    (VIB-5986).
 
     Args:
         strategy_class: The loaded strategy class.
@@ -204,6 +212,10 @@ def _instantiate_strategy(  # noqa: C901
             when ``multi_chain`` is True.
         chain_wallets: Mapping of chain -> wallet address resolved from the
             gateway's WalletRegistry. Empty when unused.
+        gateway_client: Optional gateway client used ONLY to report a boot
+            failure to the lifecycle store before exiting. ``None`` skips
+            the write (e.g. ``--no-gateway`` runs).
+        deployment_id: Resolved deployment id for the lifecycle write.
 
     Returns:
         The constructed strategy instance.
@@ -276,8 +288,48 @@ def _instantiate_strategy(  # noqa: C901
         return strategy_instance
 
     except Exception as e:
-        click.echo(f"Error creating strategy instance: {e}", err=True)
+        from ..strategies.exceptions import ConfigValidationError
+        from .config_validation import CONFIG_VALIDATION_FAILED, STRATEGY_INIT_FAILED
+
+        if isinstance(e, ConfigValidationError):
+            reason = f"{CONFIG_VALIDATION_FAILED}: {e}"
+            click.echo(f"Config validation failed: {e}", err=True)
+            click.echo(
+                "The strategy refused to boot on this config. Fix the config "
+                "(run `almanak strat check` for the full report) and redeploy.",
+                err=True,
+            )
+        else:
+            reason = f"{STRATEGY_INIT_FAILED}: {type(e).__name__}: {e}"
+            click.echo(f"Error creating strategy instance: {e}", err=True)
+        _report_boot_failure(gateway_client, deployment_id, reason)
         sys.exit(1)
+
+
+def _report_boot_failure(gateway_client: Any | None, deployment_id: str | None, error_message: str) -> None:
+    """Write lifecycle ``ERROR`` for a strategy that failed to construct.
+
+    Best-effort and non-fatal: the exit code is the primary failure signal;
+    this write is what keeps the hosted platform's status honest (the
+    status-sync maps lifecycle ``ERROR`` + reason instead of showing a pod
+    that never got past ``__init__`` as anything runnable). ``ERROR`` is an
+    accepted state in the gateway's ``_VALID_STATES`` whitelist
+    (``almanak/gateway/services/lifecycle_service.py``).
+    """
+    if gateway_client is None or not deployment_id:
+        return
+    try:
+        from almanak.gateway.proto import gateway_pb2
+
+        gateway_client.lifecycle.WriteState(
+            gateway_pb2.WriteAgentStateRequest(
+                deployment_id=deployment_id,
+                state="ERROR",
+                error_message=error_message,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 - reporting must never mask the boot error
+        logger.debug("Boot-failure lifecycle write failed (non-fatal): %s", exc)
 
 
 def _intent_strategy_runtime() -> type:

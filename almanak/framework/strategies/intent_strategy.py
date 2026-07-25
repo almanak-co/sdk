@@ -177,6 +177,22 @@ class IntentStrategy(StrategyBase[ConfigT]):
 
     # Default strategy metadata (can be overridden by decorator)
     STRATEGY_METADATA: StrategyMetadata | None = None
+
+    # Optional declarative config contract (VIB-5986). Set to a Pydantic v2
+    # ``BaseModel`` subclass declaring the strategy's OWN config keys
+    # (framework-level keys like ``chain`` / ``token_funding`` are stripped
+    # before validation unless the model declares them explicitly). Use
+    # ``model_config = ConfigDict(extra="forbid")`` so unknown keys fail
+    # instead of being silently dropped, and constrained field types
+    # (``min_length=1`` on identity strings, ``gt=0`` on rates) so
+    # placeholder values like ``""`` / ``0`` cannot ship. Enforced on the
+    # shared coercion path (``strat run`` / ``strat backtest``) where a
+    # violation raises ``ConfigValidationError`` and fails boot, and
+    # surfaced by ``almanak strat check`` as ERROR findings. The JSON schema
+    # (``CONFIG_MODEL.model_json_schema()``) is exportable for codegen /
+    # platform tooling. ``validate_config()`` remains the authority for
+    # cross-field and chain-dependent invariants; this covers shape.
+    CONFIG_MODEL: type | None = None
     STRATEGY_NAME: str = "INTENT_STRATEGY"
 
     # Teardown-state posture declaration (VIB-5464 / TD-06).

@@ -113,29 +113,62 @@ def _accepts_decimal(field_type: Any) -> bool:
     return False
 
 
-def coerce_strategy_config(strategy_class: type, strategy_config: dict[str, Any]) -> Any:
+def coerce_strategy_config(
+    strategy_class: type,
+    strategy_config: dict[str, Any],
+    *,
+    echo: bool = True,
+    enforce_config_model: bool = True,
+) -> Any:
     """Coerce a raw config dict into the strategy's declared config type.
 
-    Resolves a dataclass config type from the strategy's ``__orig_bases__``
-    generic parameter, converts ``int``/``float``/``str`` values to
-    ``Decimal`` for ``Decimal``-typed fields (including optional/union
-    annotations), and drops keys the dataclass does not declare (runtime
-    fields and framework meta-keys are expected and not reported; anything
-    else is echoed as ignored). Strategies without a dataclass generic keep
-    their dict config wrapped in ``DictConfigWrapper`` so attribute access
-    still works.
+    First enforces the strategy's optional ``CONFIG_MODEL`` Pydantic contract
+    (VIB-5986): a declared model is validated against the strategy-owned
+    slice of the config, and violations raise ``ConfigValidationError`` —
+    the same failure channel as ``validate_config()`` — so an invalid config
+    fails boot loudly instead of degrading into a silent fallback. This runs
+    here, on the single coercion path shared by ``strat run`` and
+    ``strat backtest``, so no runtime surface can skip it.
 
-    Any failure during inference or dataclass construction falls back to
+    Then resolves a dataclass config type from the strategy's
+    ``__orig_bases__`` generic parameter, converts ``int``/``float``/``str``
+    values to ``Decimal`` for ``Decimal``-typed fields (including
+    optional/union annotations), and drops keys the dataclass does not
+    declare (runtime fields and framework meta-keys are expected and not
+    reported; anything else is echoed as ignored). Strategies without a
+    dataclass generic keep their dict config wrapped in
+    ``DictConfigWrapper`` so attribute access still works.
+
+    Any failure during dataclass inference or construction falls back to
     the wrapped dict -- same forgiving behavior the runner has always had.
+    (CONFIG_MODEL violations do NOT fall back: an explicitly declared
+    contract failing is a boot failure, not a coercion detail.)
 
     Args:
         strategy_class: The strategy class about to be instantiated.
-        strategy_config: Parsed strategy config dict (e.g. ``config.json``).
+        strategy_config: Parsed strategy config dict (e.g. ``config.json``,
+            with the hosted env override already merged by the loader).
+        echo: Emit the informational ``click.echo`` lines. ``strat check``
+            passes ``False`` so ``--json`` output stays machine-parseable.
+        enforce_config_model: Run the ``CONFIG_MODEL`` contract. ``strat
+            check`` passes ``False`` because it already surfaced the same
+            violations as findings and must not duplicate them.
 
     Returns:
         A config dataclass instance, or a ``DictConfigWrapper`` around the
         original dict when no dataclass type is resolvable.
+
+    Raises:
+        ConfigValidationError: When ``enforce_config_model`` is true and the
+            strategy declares a ``CONFIG_MODEL`` the config violates.
     """
+    if enforce_config_model:
+        # Lazy import: this module must stay lightweight at import time
+        # (stdlib + click only); the engine pulls pydantic lazily itself.
+        from .config_validation import enforce_config_model as _enforce
+
+        _enforce(strategy_class, strategy_config)
+
     config_instance: Any = strategy_config
     try:
         bases = getattr(strategy_class, "__orig_bases__", [])
@@ -173,8 +206,9 @@ def coerce_strategy_config(strategy_class: type, strategy_config: dict[str, Any]
                 # (runtime fields like deployment_id/chain are handled separately)
                 if unknown_fields:
                     logger.debug(f"Config class {config_class.__name__} ignoring unknown fields: {unknown_fields}")
-                    click.echo(f"  Config class: {config_class.__name__} (ignored: {unknown_fields})")
-                else:
+                    if echo:
+                        click.echo(f"  Config class: {config_class.__name__} (ignored: {unknown_fields})")
+                elif echo:
                     click.echo(f"  Config class: {config_class.__name__}")
                 config_instance = config_class(**converted_config) if converted_config else config_class()
                 break
@@ -185,6 +219,7 @@ def coerce_strategy_config(strategy_class: type, strategy_config: dict[str, Any]
     # Wrap dict config in DictConfigWrapper for compatibility
     if isinstance(config_instance, dict):
         config_instance = DictConfigWrapper(config_instance)
-        click.echo("  Config wrapped in DictConfigWrapper")
+        if echo:
+            click.echo("  Config wrapped in DictConfigWrapper")
 
     return config_instance
