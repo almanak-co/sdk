@@ -593,6 +593,66 @@ class PerpCloseEventPayload(_Versioned):
         return self
 
 
+# ─── Perp settlement (VIB-3872 WI-3) ────────────────────────────────────────
+
+
+class PerpSettlementEventPayload(_Versioned):
+    """Phase-2 keeper-settlement economics for an async perp order (VIB-3872).
+
+    Additive to the perp primitive: the Phase-1 ``PERP_OPEN`` / ``PERP_CLOSE``
+    payloads are UNCHANGED, no ``primitive_version`` / ``matching_policy_version``
+    bump (settlement correlates by ledger id + order key, NOT by the lot-matching
+    ``position_key``). Every money field is ``Decimal | None`` — ``None`` = the
+    keeper events did not yield it (Empty ≠ Zero); a measured zero (e.g. funding
+    over a short hold) is ``Decimal("0")``. ``settlement_state`` is the measured
+    venue outcome and the discriminator between "measured fill" (EXECUTED) and
+    "no measured fill" (CANCELLED / FROZEN / NOT_FOUND_UNCORRELATED / UNMEASURED),
+    which is why an ``unavailable_reason`` is required on every non-EXECUTED state.
+    """
+
+    event_type: Literal["PERP_SETTLEMENT"] = "PERP_SETTLEMENT"
+    protocol: str
+    position_key: str
+    # Join keys back to the submission event / on-chain settlement.
+    submission_ledger_entry_id: str
+    order_key: str
+    keeper_tx_hash: str | None = None
+    # The measured venue outcome (PerpSettlementState value).
+    settlement_state: str
+    is_open: bool | None = None
+    is_long: bool | None = None
+    market: str | None = None
+    collateral_token: str | None = None
+    # Fill economics — Empty ≠ Zero.
+    entry_price: Decimal | None = None
+    exit_price: Decimal | None = None
+    size_delta_usd: Decimal | None = None
+    collateral_delta_amount: Decimal | None = None
+    price_impact_usd: Decimal | None = None
+    realized_pnl_usd: Decimal | None = None
+    position_fee_usd: Decimal | None = None
+    funding_fee_usd: Decimal | None = None
+    borrowing_fee_usd: Decimal | None = None
+    block_number: int | None = None
+    unavailable_reason: str | None = None
+
+    @model_validator(mode="after")
+    def _enforce_unmeasured_state_reason(self) -> PerpSettlementEventPayload:
+        """Require ``unavailable_reason`` on every non-EXECUTED settlement state.
+
+        A non-EXECUTED terminal outcome carries no measured fill economics, so —
+        mirroring ``PerpCloseEventPayload._enforce_unmeasured_size_reason`` and the
+        WI-2 verdict contract — the reason that money is absent must be auditable,
+        never a silent unmeasured row.
+        """
+        if self.settlement_state != "EXECUTED" and not (self.unavailable_reason or "").strip():
+            raise ValueError(
+                "PerpSettlementEventPayload: a non-blank unavailable_reason is required when "
+                f"settlement_state is {self.settlement_state!r} (Empty ≠ Zero audit trail)."
+            )
+        return self
+
+
 # ─── Swap ─────────────────────────────────────────────────────────────────
 
 
@@ -699,6 +759,7 @@ _PAYLOAD_MODELS: dict[str, type[_Versioned]] = {
     "LP_CLOSE": LPCloseEventPayload,
     "PERP_OPEN": PerpOpenEventPayload,
     "PERP_CLOSE": PerpCloseEventPayload,
+    "PERP_SETTLEMENT": PerpSettlementEventPayload,
     "SWAP": SwapEventPayload,
 }
 

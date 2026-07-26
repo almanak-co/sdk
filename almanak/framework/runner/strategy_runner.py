@@ -1455,6 +1455,14 @@ class StrategyRunner:
             # fill handle is cached for this deployment.
             await self._step_pump_fill_reconciliation(state)
 
+            # Step 1.7: Reconcile keeper-settled perp orders (VIB-3872 WI-3)
+            # BEFORE decide() — book the append-only PERP_SETTLEMENT event for any
+            # order whose keeper fill/cancel/freeze is now observable. Non-blocking,
+            # restart-safe (watch set re-derived from the DB each tick), warn-only;
+            # the AccountingPersistenceError catch boundary lives inside the step so
+            # a settlement-write failure never halts the runner.
+            await self._step_reconcile_perp_settlement(state)
+
             # Step 2: Call strategy.decide() with timeout + overlap guard.
             early = await self._step_decide(state)
             if early is not None:
@@ -3231,6 +3239,37 @@ class StrategyRunner:
                     self._pending_fill_handles.pop(deployment_id, None)
         except Exception as exc:  # noqa: BLE001 — capture must never break the loop
             logger.warning("Pending-fill handle capture raised for %s (ignored): %s", deployment_id, exc)
+
+    async def _step_reconcile_perp_settlement(self, state: RunIterationState) -> None:
+        """Reconcile keeper-settled perp orders before decide() (VIB-3872 WI-3).
+
+        Delegates to the runner-owned perp settlement reconciler: re-derive the
+        pending-settlement watch set from the DB (perp ledger rows with async-order
+        keys MINUS rows that already have a terminal PERP_SETTLEMENT event), resolve
+        each order's keeper verdict via the WI-2 connector capability, and book every
+        terminal verdict through the append-only ``perp_settlement_commit`` lane.
+
+        Design (mirrors ``_step_pump_fill_reconciliation``): fully wrapped, warn-only,
+        never early-exits, never changes ``state``. Non-blocking (never waits on the
+        keeper); restart-safe (watch set is a pure function of persisted rows). The
+        AccountingPersistenceError catch boundary lives INSIDE the reconciler, so a
+        settlement-write failure is loud but never halts the runner.
+        """
+        try:
+            gateway_client = self._get_gateway_client()
+            if gateway_client is None:
+                return  # no gateway (paper/dry-run without a fork) — retried when present
+            from .perp_settlement_reconciler import reconcile_perp_settlements
+
+            await reconcile_perp_settlements(
+                self,
+                state.strategy,
+                deployment_id=state.deployment_id,
+                cycle_id=self._last_cycle_id or state.deployment_id,
+                gateway_client=gateway_client,
+            )
+        except Exception:  # noqa: BLE001 — pre-decide reconciler must never crash the tick
+            logger.warning("perp settlement reconciler step failed (non-blocking)", exc_info=True)
 
     async def _step_pump_fill_reconciliation(self, state: RunIterationState) -> None:
         """Pump the async-settlement fill signal into the strategy each tick (VIB-5614).

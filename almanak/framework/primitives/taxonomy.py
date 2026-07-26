@@ -286,6 +286,28 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             event_kind=EventKind.NONE,
             wallet_delta=WalletDeltaLane.LEDGER_PROJECTION,
         ),
+        # PERP_SETTLEMENT (VIB-3872, WI-3) — the Phase-2 keeper-settlement economics
+        # event. Primitive.PERP + AccountingCategory.PERP so the version-stamp
+        # chokepoint resolves the canonical perp maps and the wallet-delta lane
+        # matches PERP_OPEN/CLOSE (UNMEASURED — the keeper's on-chain deltas are
+        # captured by the portfolio snapshot, NOT projected from a ledger row: there
+        # is NO keeper-tx ledger row, since the keeper pays gas, not us — a ledger row
+        # would poison gas_usd + the capital-flow classifier, the VIB-5952 class; so
+        # LEDGER_PROJECTION would be a lie here). EventKind.NONE: the Phase-1
+        # PERP_OPEN/PERP_CLOSE submission event already owns the position lifecycle and
+        # the lot-matching key, so augment must NOT stamp an OPEN/CLOSE
+        # position_reference for the settlement event (no matching_policy bump). This
+        # event is written DIRECTLY through AccountingWriter and NEVER reaches the
+        # outbox/drain classifier (it has no ledger/outbox row), so the PERP category
+        # is metadata-only for the version stamp and can never route to perp_handler.
+        _record(
+            "PERP_SETTLEMENT",
+            Primitive.PERP,
+            AccountingCategory.PERP,
+            position_type=None,
+            event_kind=EventKind.NONE,
+            wallet_delta=WalletDeltaLane.UNMEASURED,
+        ),
         # ──────────────────────────────────────────────────────────────────
         # Vault (ERC-4626)
         # ──────────────────────────────────────────────────────────────────

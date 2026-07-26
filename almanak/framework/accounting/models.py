@@ -68,6 +68,14 @@ class PerpEventType(StrEnum):
     PERP_INCREASE = "PERP_INCREASE"
     PERP_DECREASE = "PERP_DECREASE"
     PERP_LIQUIDATE = "PERP_LIQUIDATE"
+    # VIB-3872 (WI-3) — keeper-settlement economics for an async perp order. An
+    # append-only Phase-2 event written by the perp settlement reconciler once
+    # the keeper fills/cancels/freezes OUR submitted order; the Phase-1
+    # PERP_OPEN / PERP_CLOSE submission event is UNCHANGED. Carries measured
+    # entry/exit price, fees, funding, and realized PnL keyed back to the
+    # submission ledger row + venue position key. Written DIRECTLY through
+    # AccountingWriter (no keeper-tx ledger row — the keeper pays gas, not us).
+    PERP_SETTLEMENT = "PERP_SETTLEMENT"
 
 
 class VaultEventType(StrEnum):

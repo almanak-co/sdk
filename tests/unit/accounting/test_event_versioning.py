@@ -62,6 +62,7 @@ from almanak.framework.accounting.payload_schemas import (
     PRIMITIVE_VERSIONS,
 )
 from almanak.framework.accounting.perp_accounting import PerpAccountingEvent
+from almanak.framework.accounting.perp_settlement_accounting import PerpSettlementAccountingEvent
 from almanak.framework.accounting.settlement_accounting import SettlementAccountingEvent
 from almanak.framework.accounting.vault_accounting import VaultAccountingEvent
 from almanak.framework.accounting.writer import (
@@ -86,7 +87,13 @@ _TYPED_CLASSES_WITH_SERDE = (
     SwapAccountingEvent,
     TransferAccountingEvent,
 )
-_DUCK_TYPED_CLASSES = (LPAccountingEvent, PerpAccountingEvent, VaultAccountingEvent, SettlementAccountingEvent)
+_DUCK_TYPED_CLASSES = (
+    LPAccountingEvent,
+    PerpAccountingEvent,
+    PerpSettlementAccountingEvent,
+    VaultAccountingEvent,
+    SettlementAccountingEvent,
+)
 _ALL_EVENT_CLASSES = _TYPED_CLASSES_WITH_SERDE + _DUCK_TYPED_CLASSES
 
 
@@ -265,6 +272,34 @@ def _build_event(cls: type, *, primitive_version: int = 1) -> object:
             fee_shares=None,
             assets_usd=Decimal("1000"),
             epoch_id=1,
+            confidence=AccountingConfidence.HIGH,
+        )
+        evt.primitive_version = primitive_version
+        return evt
+    if cls is PerpSettlementAccountingEvent:
+        evt = PerpSettlementAccountingEvent(
+            _identity(event_type_str="PERP_SETTLEMENT"),
+            protocol="gmx_v2",
+            position_key="0xpos",
+            submission_ledger_entry_id="ledger-1",
+            order_key="0xorder",
+            settlement_state="EXECUTED",
+            keeper_tx_hash="0xkeeper",
+            is_open=True,
+            is_long=True,
+            market="0xmkt",
+            collateral_token="0xusdc",
+            entry_price=Decimal("3000"),
+            exit_price=None,
+            size_delta_usd=Decimal("2422"),
+            collateral_delta_amount=Decimal("48"),
+            price_impact_usd=Decimal("-1"),
+            realized_pnl_usd=None,
+            position_fee_usd=Decimal("1.45"),
+            funding_fee_usd=Decimal("0"),
+            borrowing_fee_usd=Decimal("0"),
+            block_number=123,
+            unavailable_reason=None,
             confidence=AccountingConfidence.HIGH,
         )
         evt.primitive_version = primitive_version
@@ -832,6 +867,15 @@ def _minimal_payload_for_model(event_type: str) -> dict:
             "market": "ARB-USDC",
             "is_long": True,
             "size": "1000",
+        }
+    if event_type == "PERP_SETTLEMENT":
+        return {
+            **common,
+            "protocol": "gmx_v2",
+            "position_key": "perp:arbitrum:gmx_v2:wallet:ARB-USDC",
+            "submission_ledger_entry_id": "ledger-1",
+            "order_key": "0xorder",
+            "settlement_state": "EXECUTED",
         }
     if event_type == "SWAP":
         return {

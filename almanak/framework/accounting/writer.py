@@ -35,6 +35,7 @@ from almanak.framework.accounting.payload_schemas import (
     SCHEMA_VERSION,
 )
 from almanak.framework.accounting.perp_accounting import PerpAccountingEvent
+from almanak.framework.accounting.perp_settlement_accounting import PerpSettlementAccountingEvent
 from almanak.framework.accounting.policy import MatchingPolicy, PrimitiveVersion
 from almanak.framework.accounting.position_reference import (
     build_legacy_position_reference,
@@ -63,6 +64,7 @@ AccountingEvent = (
     | PendleAccountingEvent
     | LPAccountingEvent
     | PerpAccountingEvent
+    | PerpSettlementAccountingEvent
     | VaultAccountingEvent
     | SettlementAccountingEvent
     | PredictionAccountingEvent
