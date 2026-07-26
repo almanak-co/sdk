@@ -34,6 +34,10 @@ GMX_V2: dict[str, dict[str, str]] = {
         "data_store": "0xFD70de6b91282D8017aA4E741e9Ae325CAb992d8",
         "order_vault": "0x31eF83a530Fde1B38EE9A18093A333D8Bbbc40D5",
         "reader": "0x470fbC46bcC0f16532691Df360A07d8Bf5ee0789",
+        # Central EventEmitter (all keeper-settlement events: OrderExecuted /
+        # PositionIncrease / PositionDecrease / PositionFeesCollected). Canonical,
+        # matches adapter.GMX_V2_ADDRESSES["arbitrum"]["event_emitter"].
+        "event_emitter": "0xC8ee91A54287DB53897056e12D9819156D3822Fb",
         "eth_usd_market": "0x70d95587d40A2caf56bd97485aB3Eec10Bee6336",
         "btc_usd_market": "0x47c031236e19d024b42f8AE6780E44A573170703",
     },
@@ -47,6 +51,9 @@ GMX_V2: dict[str, dict[str, str]] = {
         "data_store": "0x2F0b22339414ADeD7D5F06f9D604c7fF5b2fe3f6",
         "order_vault": "0xD3D60D22d415aD43b7e64b510D86A30f19B1B12C",
         "reader": "0x62Cb8740E6986B29dC671B2EB596676f60590A5B",
+        # Central EventEmitter (see arbitrum note). Matches
+        # adapter.GMX_V2_ADDRESSES["avalanche"]["event_emitter"].
+        "event_emitter": "0xDb17B211c34240B014ab6d61d4A31FA0C0e20c26",
         # USDC-collateral perp markets (the AVAX-* and BTC-* native-collateral
         # variants are not exposed yet — strategies that need them should be
         # added with a separate market key).

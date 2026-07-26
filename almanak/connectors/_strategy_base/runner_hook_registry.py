@@ -30,9 +30,13 @@ __all__ = [
     "RunnerHookRegistryError",
     "RunnerCurvePoolMetaLookupCapability",
     "RunnerLPReceiptTopicCapability",
+    "RunnerPerpSettlementCapability",
     "RunnerPoolKeyLookupCapability",
     "RunnerResultEnrichmentCapability",
     "RunnerV4PositionStateCapability",
+    "PerpSettlementState",
+    "PerpSettlementVerdict",
+    "PerpSettlementWatchEntry",
 ]
 
 
@@ -140,6 +144,152 @@ class RunnerAsyncSettlementCapability(Protocol):
         residuals: tuple[Any, ...],
         network: str,
     ) -> bool: ...
+
+
+class PerpSettlementState(StrEnum):
+    """Measured venue outcome for a submitted perp order awaiting keeper settlement.
+
+    The STATE says which venue outcome was measured; ``fill_data`` presence on the
+    verdict says whether money fields were measured; ``unavailable_reason`` is
+    mandatory whenever the state itself is an unmeasured verdict. This lets a
+    consumer distinguish "no fill occurred (measured)" from "fill data unavailable
+    (unmeasured)".
+    """
+
+    PENDING = "PENDING"
+    EXECUTED = "EXECUTED"
+    CANCELLED = "CANCELLED"
+    FROZEN = "FROZEN"
+    NOT_FOUND_UNCORRELATED = "NOT_FOUND_UNCORRELATED"
+    UNMEASURED = "UNMEASURED"
+
+
+@dataclass(frozen=True)
+class PerpSettlementWatchEntry:
+    """One order the reconciler is watching for keeper settlement (VIB-3872 WI-2 input).
+
+    These are reconciler-owned correlation inputs (WI-3 derives them from the
+    submission ``transaction_ledger`` row); the connector treats them as
+    read-only.
+
+    Attributes:
+        order_key: The ``OrderCreated.key`` (``0x`` bytes32) — the correlation
+            handle measured at submission (WI-1 ``AsyncOrderData.order_id``).
+        submission_block: Block of OUR ``createOrder`` tx; the lower bound for the
+            keeper-event ``eth_getLogs`` scan (``[submission_block, latest]``).
+        is_open: ``True`` for a PERP_OPEN order, ``False`` for PERP_CLOSE, ``None``
+            when the intent kind is unknown. Selects entry vs exit fill economics.
+        seconds_since_submission: Reconciler-owned elapsed clock used to evaluate
+            the connector's watch horizon. ``None`` ⇒ horizon not yet evaluable
+            (the connector must not expire the entry).
+    """
+
+    order_key: str
+    submission_block: int
+    is_open: bool | None = None
+    seconds_since_submission: int | None = None
+
+
+@dataclass(frozen=True)
+class PerpSettlementVerdict:
+    """One measured settlement verdict for a watched perp order (VIB-3872 WI-2).
+
+    **BINDING per-state payload contract** (design D1, review-hardened), enforced
+    in ``__post_init__`` so a consumer can trust it without re-checking:
+
+    - ``EXECUTED`` MUST carry ``fill_data`` (fields the keeper receipt did not
+      yield stay ``None`` per Empty≠Zero).
+    - ``CANCELLED`` / ``FROZEN`` carry ``fill_data`` only when venue events yielded
+      measurable money movement (execution-fee refund, collateral return); else
+      ``fill_data=None``. Fill-economics fields stay ``None`` on these states.
+    - ``NOT_FOUND_UNCORRELATED`` / ``UNMEASURED`` NEVER carry ``fill_data`` and MUST
+      carry an ``unavailable_reason`` (what could not be measured and why).
+    - ``PENDING`` is non-terminal and carries no fill.
+    - **Terminality is state-determined**: ``EXECUTED`` / ``CANCELLED`` / ``FROZEN`` /
+      ``NOT_FOUND_UNCORRELATED`` are measured-terminal outcomes and MUST be
+      ``terminal=True``; ``PENDING`` MUST be non-terminal. Only ``UNMEASURED`` is
+      free — a transient read failure is retryable (non-terminal) while a
+      horizon-expired one books terminally.
+
+    ``fill_data`` is typed ``Any`` — NOT the connector's ``PerpFillData`` — to keep
+    ``_strategy_base`` free of any concrete-connector import (a
+    ``_strategy_base`` → ``gmx_v2`` import would invert the connector layering).
+    This mirrors ``FillReconciliationVerdict.status: Any`` and
+    ``AsyncSettlementVerdict.orders`` (dicts). In practice the GMX connector places
+    a ``gmx_v2.PerpFillData`` here; consumers import that type from the connector
+    for typed access, or read ``to_dict()``.
+    """
+
+    order_key: str
+    state: PerpSettlementState
+    terminal: bool
+    fill_data: Any = None
+    unavailable_reason: str | None = None
+    keeper_tx_hash: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.state is PerpSettlementState.EXECUTED and self.fill_data is None:
+            raise ValueError("PerpSettlementVerdict EXECUTED must carry fill_data (design D1)")
+        if self.state in (PerpSettlementState.NOT_FOUND_UNCORRELATED, PerpSettlementState.UNMEASURED):
+            if self.fill_data is not None:
+                raise ValueError(f"PerpSettlementVerdict {self.state.value} must NOT carry fill_data")
+            if not self.unavailable_reason:
+                raise ValueError(f"PerpSettlementVerdict {self.state.value} must carry unavailable_reason")
+        if self.state is PerpSettlementState.PENDING:
+            if self.fill_data is not None:
+                raise ValueError("PerpSettlementVerdict PENDING must NOT carry fill_data")
+        # Terminality is state-determined (guard each measured-terminal state on
+        # its own line so a dropped guard fails exactly its own test).
+        if self.state is PerpSettlementState.PENDING and self.terminal:
+            raise ValueError("PerpSettlementVerdict PENDING must be non-terminal")
+        if self.state is PerpSettlementState.EXECUTED and not self.terminal:
+            raise ValueError("PerpSettlementVerdict EXECUTED must be terminal")
+        if self.state is PerpSettlementState.CANCELLED and not self.terminal:
+            raise ValueError("PerpSettlementVerdict CANCELLED must be terminal")
+        if self.state is PerpSettlementState.FROZEN and not self.terminal:
+            raise ValueError("PerpSettlementVerdict FROZEN must be terminal")
+        if self.state is PerpSettlementState.NOT_FOUND_UNCORRELATED and not self.terminal:
+            raise ValueError("PerpSettlementVerdict NOT_FOUND_UNCORRELATED must be terminal")
+
+    def to_dict(self) -> dict[str, Any]:
+        fill = self.fill_data
+        return {
+            "order_key": self.order_key,
+            "state": self.state.value,
+            "terminal": self.terminal,
+            "fill_data": fill.to_dict() if hasattr(fill, "to_dict") else fill,
+            "unavailable_reason": self.unavailable_reason,
+            "keeper_tx_hash": self.keeper_tx_hash,
+        }
+
+
+@runtime_checkable
+class RunnerPerpSettlementCapability(Protocol):
+    """Connector resolves keeper settlement verdicts for submitted perp orders (VIB-3872).
+
+    Multi-handle: the reconciler passes every watched order for this deployment in
+    one call; the connector returns one verdict per entry (order-independent). All
+    reads go through the strategy's own gateway (boundary rule) — the connector
+    correlates each ``order_key`` to its keeper events over
+    ``[submission_block, latest]`` and decodes fill economics from the keeper
+    receipt. The verdict shape FREEZES here — WI-3 consumes it unchanged.
+
+    Distinct from :class:`RunnerFillReconciliationCapability` (ALM-2972 decision
+    #3): that one is single-handle, in-memory, strategy-facing (``reconcile_fill``)
+    and carries NO fill economics. This one is multi-handle, restart-safe by
+    derivation, accounting-facing, and carries a typed fill payload.
+    """
+
+    def perp_settlement_policy(self) -> AsyncSettlementPolicy: ...
+
+    def resolve_perp_settlements(
+        self,
+        *,
+        gateway_client: Any,
+        chain: str,
+        wallet_address: str,
+        watch_entries: tuple[PerpSettlementWatchEntry, ...],
+    ) -> tuple[PerpSettlementVerdict, ...]: ...
 
 
 @runtime_checkable
@@ -295,6 +445,7 @@ class RunnerHookRegistry:
             or isinstance(connector, RunnerCurvePoolMetaLookupCapability)
             or isinstance(connector, RunnerV4PositionStateCapability)
             or isinstance(connector, RunnerAsyncSettlementCapability)
+            or isinstance(connector, RunnerPerpSettlementCapability)
         ):
             raise RunnerHookRegistryError(
                 "register() expects a connector implementing at least one runner hook capability; "
@@ -421,6 +572,55 @@ class RunnerHookRegistry:
         except Exception:
             logger.debug(
                 "resolve_fill_status failed for %s; treating as unmeasured",
+                type(connector).__qualname__,
+                exc_info=True,
+            )
+            return None
+
+    def perp_settlement_policy(self, protocol: ProtocolName) -> AsyncSettlementPolicy | None:
+        """Return the perp-settlement watch policy for ``protocol`` (VIB-3872 WI-2).
+
+        ``None`` when no such connector or it does not implement the capability.
+        """
+        connector = self._connectors.get(protocol)
+        if not isinstance(connector, RunnerPerpSettlementCapability):
+            return None
+        return connector.perp_settlement_policy()
+
+    def resolve_perp_settlements(
+        self,
+        *,
+        protocol: ProtocolName,
+        gateway_client: Any,
+        chain: str,
+        wallet_address: str,
+        watch_entries: tuple[PerpSettlementWatchEntry, ...],
+    ) -> tuple[PerpSettlementVerdict, ...] | None:
+        """Resolve keeper settlement verdicts via the ``protocol`` connector (VIB-3872 WI-2).
+
+        Routes to the connector registered under ``protocol`` and returns one
+        verdict per watch entry. ``None`` when no such connector / it does not
+        implement the capability. Fail-closed: an unexpected raise yields ``None``
+        (the reconciler keeps every entry watched and retries next tick), never a
+        fabricated verdict — the connector itself is responsible for emitting an
+        explicit ``UNMEASURED`` verdict at watch-horizon expiry (never a silent
+        drop, never a fabricated ``CANCELLED``).
+        """
+        connector = self._connectors.get(protocol)
+        if not isinstance(connector, RunnerPerpSettlementCapability):
+            return None
+        try:
+            return tuple(
+                connector.resolve_perp_settlements(
+                    gateway_client=gateway_client,
+                    chain=chain,
+                    wallet_address=wallet_address,
+                    watch_entries=watch_entries,
+                )
+            )
+        except Exception:
+            logger.debug(
+                "resolve_perp_settlements failed for %s; treating as unmeasured",
                 type(connector).__qualname__,
                 exc_info=True,
             )
@@ -622,6 +822,14 @@ class RunnerHookRegistry:
                 "prepare_pending_orders_for_teardown",
                 positional_count=0,
                 keyword_names=("gateway_client", "chain", "wallet_address", "residuals", "network"),
+            )
+        if isinstance(connector, RunnerPerpSettlementCapability):
+            cls._validate_method_signature(connector, "perp_settlement_policy", positional_count=0)
+            cls._validate_method_signature(
+                connector,
+                "resolve_perp_settlements",
+                positional_count=0,
+                keyword_names=("gateway_client", "chain", "wallet_address", "watch_entries"),
             )
 
     @classmethod

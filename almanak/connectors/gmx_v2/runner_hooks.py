@@ -14,10 +14,18 @@ from almanak.connectors._strategy_base.runner_hook_registry import (
     AsyncSettlementPolicy,
     AsyncSettlementStatus,
     AsyncSettlementVerdict,
+    PerpSettlementVerdict,
+    PerpSettlementWatchEntry,
     RunnerAsyncSettlementCapability,
     RunnerHookConnector,
+    RunnerPerpSettlementCapability,
 )
 from almanak.connectors.gmx_v2.anvil_order_executor import execute_pending_orders_on_anvil
+from almanak.connectors.gmx_v2.perp_settlement import (
+    PERP_SETTLEMENT_POLL_INTERVAL_SECONDS,
+    PERP_SETTLEMENT_TIMEOUT_SECONDS,
+    resolve_perp_settlements,
+)
 from almanak.connectors.gmx_v2.teardown_reads import read_open_positions, read_pending_orders
 from almanak.framework.web3.gateway_provider import GatewayWeb3Provider
 
@@ -36,6 +44,20 @@ class _GmxSettlementBaseline:
 
     def as_dict(self) -> dict[_PositionKey, int]:
         return dict(self.position_sizes)
+
+
+def _intent_type_str(intent: Any) -> str:
+    """Normalize ``intent.intent_type`` to its string value.
+
+    ``intent_type`` may be a ``StrEnum`` member (has ``.value``) or already a
+    plain string; the old ``getattr(..., "value", "")`` silently yielded ``""``
+    for the string form, dropping keeper-receipt threading. Return ``.value``
+    when present, else ``str(...)``.
+    """
+    raw = getattr(intent, "intent_type", None)
+    if raw is None:
+        return ""
+    return str(getattr(raw, "value", raw))
 
 
 def _normalize_address(value: Any) -> str | None:
@@ -196,7 +218,7 @@ def _final_position_verdict(
             baseline,
         )
 
-    intent_type = getattr(getattr(intent, "intent_type", None), "value", "")
+    intent_type = _intent_type_str(intent)
     current_sizes = _active_position_sizes(positions)
     target_reached = _position_delta_reached(
         intent_type,
@@ -221,11 +243,64 @@ def _final_position_verdict(
     )
 
 
-class GmxV2RunnerHookConnector(RunnerHookConnector, RunnerAsyncSettlementCapability):
-    """Observe GMX keeper settlement and advance its cancel gate on Anvil."""
+class GmxV2RunnerHookConnector(
+    RunnerHookConnector,
+    RunnerAsyncSettlementCapability,
+    RunnerPerpSettlementCapability,
+):
+    """Observe GMX keeper settlement and advance its cancel gate on Anvil.
+
+    Implements two distinct capabilities:
+
+    - :class:`RunnerAsyncSettlementCapability` — the strat-test lifecycle barrier
+      (ALM-2972): a blocking observe/execute loop used ONLY in the managed-Anvil
+      test lane. Unchanged.
+    - :class:`RunnerPerpSettlementCapability` (VIB-3872 WI-2) — the non-blocking,
+      multi-handle, accounting-facing settlement reconciler seam: given a set of
+      watched order keys it correlates each to its keeper receipt and returns a
+      typed :class:`PerpSettlementVerdict` (carrying WI-1 ``PerpFillData``). WI-3
+      drives this per tick.
+    """
 
     protocol: ClassVar[ProtocolName] = _PROTOCOL
     kind: ClassVar[ProtocolKind] = ProtocolKind.PERP
+
+    def perp_settlement_policy(self) -> AsyncSettlementPolicy:
+        """Connector-owned watch horizon for the non-blocking settlement reconciler.
+
+        Reuses the ``AsyncSettlementPolicy`` shape (design D1). The horizon is the
+        generous upper bound past which an un-settled order books ``UNMEASURED``
+        (never a fabricated ``CANCELLED`` — ratified Q2); GMX keeper settlement is
+        normally seconds.
+        """
+        return AsyncSettlementPolicy(
+            timeout_seconds=PERP_SETTLEMENT_TIMEOUT_SECONDS,
+            poll_interval_seconds=PERP_SETTLEMENT_POLL_INTERVAL_SECONDS,
+            supports_local_order_execution=True,
+            supports_cancellation=True,
+        )
+
+    def resolve_perp_settlements(
+        self,
+        *,
+        gateway_client: Any,
+        chain: str,
+        wallet_address: str,
+        watch_entries: tuple[PerpSettlementWatchEntry, ...],
+    ) -> tuple[PerpSettlementVerdict, ...]:
+        """Correlate each watched order key to its keeper settlement (VIB-3872 WI-2).
+
+        Delegates to :mod:`almanak.connectors.gmx_v2.perp_settlement`; all reads go
+        through the strategy's own gateway. Fail-closed: unmeasured reads yield
+        ``UNMEASURED`` verdicts, never fabricated outcomes.
+        """
+        return resolve_perp_settlements(
+            gateway_client=gateway_client,
+            chain=chain,
+            wallet_address=wallet_address,
+            watch_entries=watch_entries,
+            timeout_seconds=self.perp_settlement_policy().timeout_seconds,
+        )
 
     def async_settlement_policy(self) -> AsyncSettlementPolicy:
         """Return the lifecycle test policy declared by ALM-2972."""
@@ -350,8 +425,12 @@ class GmxV2RunnerHookConnector(RunnerHookConnector, RunnerAsyncSettlementCapabil
             intent=intent,
             observation_state=baseline.observation_state,
         )
-        intent_type = getattr(getattr(intent, "intent_type", None), "value", "")
-        receipts = result.execution_receipts if intent_type == "PERP_CLOSE" else ()
+        # Thread the keeper receipts back for BOTH open and close (VIB-3872 WI-2):
+        # PERP_OPEN's keeper receipt carries the PositionIncrease + fees the
+        # settlement reconciler decodes into fill economics, so the strat-test lane
+        # must not drop it (it previously threaded CLOSE only).
+        intent_type = _intent_type_str(intent)
+        receipts = result.execution_receipts if intent_type in ("PERP_OPEN", "PERP_CLOSE") else ()
         return replace(verdict, receipts=receipts)
 
     def prepare_pending_orders_for_teardown(
