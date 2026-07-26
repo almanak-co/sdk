@@ -319,6 +319,46 @@ def _async_order_kind(intent_type: str | None, raw_order_type: Any) -> AsyncOrde
     return _RAW_ASYNC_ORDER_KINDS.get(raw_order_type, AsyncOrderKind.UNKNOWN)
 
 
+# GMX V2 ``Order.Type`` enum tops out at 7 (Liquidation). A decoded order type
+# above this bound is not a real order kind — it is the fingerprint of the
+# VIB-3873 misread class, where a fixed-word decode reads a dynamic-struct ABI
+# offset (e.g. 32, 160) or an unrelated field as ``orderType``. The keyed
+# EventUtils decode reads ``orderType`` BY NAME, so a real production payload
+# can never exceed the bound; a value that does means the decode is wrong.
+GMX_MAX_ORDER_TYPE = 7
+
+
+class GMXOrderTypeError(ValueError):
+    """Decoded GMX ``order_type`` exceeded the ``Order.Type`` enum bound (>7).
+
+    This is the VIB-3873 tripwire: a flat-word decode of the dynamic EventUtils
+    payload yields garbage (an ABI offset like 32 or 160, or an unrelated word)
+    where a real order type belongs. Failing loud here stops fill economics
+    from being booked against a misdecoded order instead of silently accepting
+    the garbage as a valid order kind.
+    """
+
+
+def _checked_order_type(value: Any, event_name: str) -> int | None:
+    """Return an in-range GMX order type, or raise the VIB-3873 tripwire.
+
+    ``None`` (field absent) stays ``None`` — Empty != Zero. A non-int / bool
+    value is treated as absent. An int outside ``[0, GMX_MAX_ORDER_TYPE]`` is a
+    decode error and raises :class:`GMXOrderTypeError`.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool):
+        return None
+    if value < 0 or value > GMX_MAX_ORDER_TYPE:
+        raise GMXOrderTypeError(
+            f"GMX {event_name} decoded order_type={value} exceeds the Order.Type "
+            f"enum max ({GMX_MAX_ORDER_TYPE}) — dynamic EventUtils payload misread "
+            "(VIB-3873)"
+        )
+    return value
+
+
 def _keyed_order_created_fields(event: GMXv2Event) -> dict[str, Any]:
     """Decode OrderCreated settlement fields from the keyed EventUtils payload.
 
@@ -614,6 +654,88 @@ class OrderEventData:
         }
 
 
+@dataclass(frozen=True)
+class PerpFillData:
+    """Receipt-measured GMX V2 fill economics (VIB-3873 / VIB-3872 WI-1).
+
+    Built from a keeper transaction's ``PositionIncrease`` **or**
+    ``PositionDecrease`` event, merged with its ``PositionFeesCollected`` event,
+    each decoded BY KEY from the dynamic ``EventUtils.EventLogData`` payload (not
+    fixed byte offsets — that is the VIB-3873 misread class). This is the typed
+    verdict payload the WI-2 settlement capability carries into accounting; it is
+    intentionally self-contained (no framework imports) so WI-2 can consume it
+    without new plumbing.
+
+    Empty != Zero — every field is Optional. ``None`` means the keeper receipt
+    did not carry that field (unmeasured); ``Decimal("0")`` means a measured
+    zero (e.g. zero funding over a short hold). Never substitute one for the
+    other.
+
+    Scaling:
+
+    - ``size_delta_usd`` / ``price_impact_usd`` / ``realized_pnl_usd`` are plain
+      USD Decimals (GMX's 30-decimal USD convention divided out).
+    - ``position_fee_usd`` / ``funding_fee_usd`` / ``borrowing_fee_usd`` are plain
+      USD, converted from the fee's collateral-token amount using the SAME
+      ``PositionFeesCollected`` event's ``collateralTokenPrice`` (decimals-free:
+      ``amount * price / 1e30``).
+    - ``entry_price`` / ``exit_price`` carry GMX ``executionPrice`` divided by
+      ``1e30`` (its native price convention). This is USD-per-token only after
+      multiplying by ``10**(index_token_decimals)`` — the index-token decimals
+      are resolved market-side in WI-2. It is left in the GMX-native ratio here
+      rather than shipping a wrongly-scaled plain-USD number.
+    - ``collateral_delta_amount`` is the raw collateral-token smallest-unit
+      integer (matches ``extract_collateral_returned`` semantics — no guessed
+      decimal scale).
+    """
+
+    is_open: bool | None = None
+    is_long: bool | None = None
+    market: str | None = None
+    collateral_token: str | None = None
+    position_key: str | None = None
+    order_key: str | None = None
+    entry_price: Decimal | None = None
+    exit_price: Decimal | None = None
+    size_delta_usd: Decimal | None = None
+    size_delta_in_tokens: Decimal | None = None
+    collateral_delta_amount: Decimal | None = None
+    price_impact_usd: Decimal | None = None
+    realized_pnl_usd: Decimal | None = None
+    position_fee_usd: Decimal | None = None
+    funding_fee_usd: Decimal | None = None
+    borrowing_fee_usd: Decimal | None = None
+    keeper_tx_hash: str | None = None
+    block_number: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to a stable machine-readable dictionary (Empty != Zero preserved)."""
+
+        def _dec(value: Decimal | None) -> str | None:
+            return str(value) if value is not None else None
+
+        return {
+            "is_open": self.is_open,
+            "is_long": self.is_long,
+            "market": self.market,
+            "collateral_token": self.collateral_token,
+            "position_key": self.position_key,
+            "order_key": self.order_key,
+            "entry_price": _dec(self.entry_price),
+            "exit_price": _dec(self.exit_price),
+            "size_delta_usd": _dec(self.size_delta_usd),
+            "size_delta_in_tokens": _dec(self.size_delta_in_tokens),
+            "collateral_delta_amount": _dec(self.collateral_delta_amount),
+            "price_impact_usd": _dec(self.price_impact_usd),
+            "realized_pnl_usd": _dec(self.realized_pnl_usd),
+            "position_fee_usd": _dec(self.position_fee_usd),
+            "funding_fee_usd": _dec(self.funding_fee_usd),
+            "borrowing_fee_usd": _dec(self.borrowing_fee_usd),
+            "keeper_tx_hash": self.keeper_tx_hash,
+            "block_number": self.block_number,
+        }
+
+
 @dataclass
 class ParseResult:
     """Result of parsing a receipt.
@@ -701,12 +823,15 @@ class GMXv2ReceiptParser:
             # VIB-3204 — placeholder extract_protocol_fees returning None;
             # real perp-fee extraction lives in follow-up VIB-3211.
             "protocol_fees",
-            # VIB-3497 — funding fee USD at close. Returns None until the
-            # GMX V2 EventUtils ABI decoder is implemented (prerequisite work
-            # to decode PositionFeesCollected log). The pipeline is wired so
-            # that once the decoder lands, funding_fee_usd flows to
-            # PerpData.funding_fee_usd -> attribution_json -> funding_pnl_usd.
+            # VIB-3497 / VIB-3873 (WI-1) — funding fee USD at close, decoded from
+            # the PositionFeesCollected keyed EventUtils payload and converted to
+            # USD via the event's own collateralTokenPrice (decimals-free). Flows
+            # to PerpData.funding_fee_usd -> attribution_json -> funding_pnl_usd.
             "funding_fee_usd",
+            # VIB-3872 (WI-1) — typed PerpFillData built from PositionIncrease /
+            # PositionDecrease + PositionFeesCollected keyed decodes (the WI-2
+            # settlement verdict payload).
+            "perp_fill",
         }
     )
     EXTRA_EXTRACTIONS_BY_INTENT: dict[str, tuple[str, ...]] = {
@@ -932,6 +1057,11 @@ class GMXv2ReceiptParser:
                 raw_data=data,
             )
 
+        except GMXOrderTypeError:
+            # VIB-3873 tripwire: a decoded order_type above the enum bound is a
+            # misread, not a parseable event. Propagate loudly so parse_receipt
+            # fails closed instead of dropping the event as an unparseable log.
+            raise
         except Exception as e:
             logger.warning(f"Failed to parse log: {e}")
             return None
@@ -974,7 +1104,16 @@ class GMXv2ReceiptParser:
         topics: list[Any],
         data: str,
     ) -> dict[str, Any]:
-        """Decode PositionIncrease event data."""
+        """Decode PositionIncrease event data.
+
+        Production payloads are the keyed EventUtils struct — decoded BY NAME
+        (VIB-3873). The legacy fixed-offset decode below is retained only for
+        synthetic flat-word fixtures; it is NEVER used for a real keyed payload.
+        """
+        event_utils = self._decode_event_utils_position_increase(data)
+        if event_utils is not None:
+            return event_utils
+
         # Simplified decoding - production would use proper ABI decoding
         try:
             # GMX uses 10**30 for USD values and 10**18 for token values
@@ -1050,6 +1189,180 @@ class GMXv2ReceiptParser:
         text = str(value)
         return text if text.startswith("0x") else "0x" + text
 
+    @staticmethod
+    def _usd_from_1e30(raw: Any) -> Decimal | None:
+        """Scale a GMX 30-decimal USD integer to a plain USD ``Decimal``.
+
+        Empty != Zero: ``None`` (field absent) stays ``None``; a measured ``0``
+        becomes ``Decimal("0")``.
+        """
+        if raw is None or isinstance(raw, bool) or not isinstance(raw, int):
+            return None
+        return Decimal(raw) / Decimal(10**30)
+
+    @staticmethod
+    def _fee_amount_to_usd(amount_raw: Any, price_min_raw: Any, price_max_raw: Any) -> Decimal | None:
+        """Convert a collateral-token fee amount to USD using the event's own price.
+
+        GMX ``collateralTokenPrice`` is a raw price with ``30 - tokenDecimals``
+        decimals, and the fee ``amount`` is in the token's smallest units
+        (``tokenDecimals`` decimals). Their product carries ``30`` decimals of
+        USD, so ``amount * price / 1e30`` yields plain USD **without** needing to
+        know the token's decimals (decimals-free). The mid of the min/max price
+        bounds is used so neither bound biases the fee valuation.
+
+        Empty != Zero: any missing input yields ``None`` (unmeasured). A
+        measured zero amount yields ``Decimal("0")``.
+        """
+        for value in (amount_raw, price_min_raw, price_max_raw):
+            if value is None or isinstance(value, bool) or not isinstance(value, int):
+                return None
+        mid_price = (Decimal(price_min_raw) + Decimal(price_max_raw)) / Decimal(2)
+        return Decimal(amount_raw) * mid_price / Decimal(10**30)
+
+    def _decode_event_utils_position_increase(self, data: str) -> dict[str, Any] | None:
+        """Decode PositionIncrease fill economics from the keyed EventUtils payload.
+
+        Production GMX emits PositionIncrease through the EventEmitter's dynamic
+        keyed payload; the legacy fixed-offset decode reads dynamic-struct ABI
+        offsets as field values (the VIB-3873 misread class — the exact same
+        failure #3429 fixed for OrderCreated). This reads every field BY NAME.
+
+        Returns a dict carrying the ``_event_utils_payload`` sentinel (so the
+        legacy typed builder does NOT fabricate positionally-decoded price/PnL
+        fields from it) plus the identity fields and the raw integers WI-1's
+        :class:`PerpFillData` needs. ``None`` when the payload is not a keyed
+        PositionIncrease (the caller then falls back to the legacy decode for
+        synthetic flat-word fixtures).
+
+        Raises:
+            GMXOrderTypeError: decoded ``orderType`` exceeds the enum bound (>7).
+        """
+        items = self._decode_event_utils_data(data, "PositionIncrease")
+        if items is None:
+            return None
+        addresses = items["addresses"]
+        uints = items["uints"]
+        ints = items["ints"]
+        bools = items["bools"]
+        bytes32_items = items["bytes32"]
+
+        order_type = _checked_order_type(uints.get("orderType"), "PositionIncrease")
+        result: dict[str, Any] = {
+            "_event_utils_payload": True,
+            "key": self._bytes32_hex(bytes32_items["positionKey"]) if "positionKey" in bytes32_items else "",
+            "account": str(addresses["account"]) if "account" in addresses else "",
+            "market": str(addresses["market"]) if "market" in addresses else "",
+            "collateral_token": str(addresses["collateralToken"]) if "collateralToken" in addresses else "",
+            "is_long": bool(bools["isLong"]) if "isLong" in bools else None,
+            "order_key": self._bytes32_hex(bytes32_items["orderKey"]) if "orderKey" in bytes32_items else "",
+            "position_key": self._bytes32_hex(bytes32_items["positionKey"]) if "positionKey" in bytes32_items else "",
+            "order_type": order_type,
+            # Raw GMX integers preserved exactly for PerpFillData.
+            "execution_price_raw": uints.get("executionPrice"),
+            "size_delta_usd_raw": uints.get("sizeDeltaUsd"),
+            "size_delta_in_tokens_raw": uints.get("sizeDeltaInTokens"),
+            # PositionIncrease carries collateralDeltaAmount / price impact in the
+            # SIGNED intItems group (int256), unlike PositionDecrease.
+            "collateral_delta_amount_raw": ints.get("collateralDeltaAmount"),
+            "price_impact_usd_raw": ints.get("pendingPriceImpactUsd", ints.get("priceImpactUsd")),
+        }
+        return result
+
+    def _decode_event_utils_position_fees(self, data: str) -> dict[str, Any] | None:
+        """Decode PositionFeesCollected fee economics from the keyed payload.
+
+        Every fee amount is emitted in collateral-token units; this converts
+        each to USD with the event's own ``collateralTokenPrice`` bounds
+        (decimals-free — see :meth:`_fee_amount_to_usd`). ``None`` when the
+        payload is not a keyed PositionFeesCollected event.
+        """
+        items = self._decode_event_utils_data(data, "PositionFeesCollected")
+        if items is None:
+            return None
+        uints = items["uints"]
+        bytes32_items = items["bytes32"]
+        price_min = uints.get("collateralTokenPrice.min")
+        price_max = uints.get("collateralTokenPrice.max")
+        return {
+            "order_key": self._bytes32_hex(bytes32_items["orderKey"]) if "orderKey" in bytes32_items else None,
+            "position_key": self._bytes32_hex(bytes32_items["positionKey"]) if "positionKey" in bytes32_items else None,
+            "funding_fee_usd": self._fee_amount_to_usd(uints.get("fundingFeeAmount"), price_min, price_max),
+            "position_fee_usd": self._fee_amount_to_usd(uints.get("positionFeeAmount"), price_min, price_max),
+            "borrowing_fee_usd": self._fee_amount_to_usd(uints.get("borrowingFeeAmount"), price_min, price_max),
+        }
+
+    def _decode_event_utils_order(self, data: str, event_name: str, key_str: str) -> dict[str, Any] | None:
+        """Decode an Order event's fields from the keyed EventUtils payload.
+
+        Only ``OrderCreated`` carries the full order struct; ``OrderExecuted`` /
+        ``OrderCancelled`` / ``OrderFrozen`` payloads carry a sparse set, so any
+        field that is absent stays absent (Empty != Zero). ``None`` when the
+        payload is not this keyed event (caller falls back to the legacy decode).
+
+        The async-order identity path (#3429) is unaffected: it reads the
+        indexed ``key`` and re-decodes OrderCreated via ``_keyed_order_created_fields``.
+        The ``order_type`` here is intentionally NOT bound-checked — the async
+        path already tolerates an out-of-range value by falling back to the
+        runner's authoritative intent (``_async_order_kind``). The VIB-3873
+        tripwire lives on the fill-economics decoders (Position{Increase,Decrease}).
+        """
+        items = self._decode_event_utils_data(data, event_name)
+        if items is None:
+            return None
+        addresses = items["addresses"]
+        uints = items["uints"]
+        bools = items["bools"]
+
+        usd_scale = Decimal(10**30)
+        token_scale = Decimal(10**18)
+
+        def _usd(key: str) -> str:
+            value = uints.get(key)
+            return str(Decimal(value) / usd_scale) if isinstance(value, int) and not isinstance(value, bool) else "0"
+
+        def _tokens(key: str) -> str:
+            value = uints.get(key)
+            return str(Decimal(value) / token_scale) if isinstance(value, int) and not isinstance(value, bool) else "0"
+
+        order_type_raw = uints.get("orderType")
+        result: dict[str, Any] = {
+            "key": key_str,
+            "account": str(addresses.get("account", "")),
+            "receiver": str(addresses.get("receiver", addresses.get("account", ""))),
+            "market": str(addresses.get("market", "")),
+            "initial_collateral_token": str(addresses.get("initialCollateralToken", "")),
+            "order_type": order_type_raw
+            if isinstance(order_type_raw, int) and not isinstance(order_type_raw, bool)
+            else 0,
+            "decrease_position_swap_type": (
+                uints.get("decreasePositionSwapType", 0)
+                if isinstance(uints.get("decreasePositionSwapType"), int)
+                else 0
+            ),
+            "is_long": bool(bools["isLong"]) if "isLong" in bools else True,
+            "size_delta_usd": _usd("sizeDeltaUsd"),
+            "initial_collateral_delta_amount": _tokens("initialCollateralDeltaAmount"),
+            "trigger_price": _usd("triggerPrice"),
+            "acceptable_price": _usd("acceptablePrice"),
+            "execution_fee": uints.get("executionFee", 0) if isinstance(uints.get("executionFee"), int) else 0,
+            "min_output_amount": _tokens("minOutputAmount"),
+            # GMX renamed updatedAtBlock -> updatedAtTime; expose under the
+            # existing OrderEventData field name for consumer compatibility.
+            "updated_at_block": (
+                uints.get("updatedAtTime", uints.get("updatedAtBlock", 0))
+                if isinstance(uints.get("updatedAtTime", uints.get("updatedAtBlock")), int)
+                else 0
+            ),
+            "event_name": event_name,
+        }
+        if event_name == "OrderCancelled":
+            result["cancelled_reason"] = "User cancelled"
+        elif event_name == "OrderFrozen":
+            result["frozen_reason"] = "Execution failed"
+            result["is_frozen"] = True
+        return result
+
     def _decode_event_utils_position_decrease(self, data: str) -> dict[str, Any] | None:
         """Decode the reliable collateral fields from production PositionDecrease."""
         items = self._decode_event_utils_data(data, "PositionDecrease")
@@ -1097,6 +1410,8 @@ class GMXv2ReceiptParser:
             collateral_amount = Decimal(uints["collateralAmount"]) / token_scale
             collateral_delta_amount = Decimal(uints["collateralDeltaAmount"]) / token_scale
 
+        ints = items["ints"]
+        order_type = _checked_order_type(uints.get("orderType"), "PositionDecrease")
         result: dict[str, Any] = {
             "_event_utils_payload": True,
             "key": self._bytes32_hex(bytes32_items["positionKey"]),
@@ -1106,6 +1421,17 @@ class GMXv2ReceiptParser:
             "is_long": bool(bools["isLong"]),
             "collateral_delta_amount_raw": str(uints["collateralDeltaAmount"]),
             "order_key": self._bytes32_hex(bytes32_items["orderKey"]),
+            "position_key": self._bytes32_hex(bytes32_items["positionKey"]),
+            "order_type": order_type,
+            # Raw GMX integers preserved exactly for PerpFillData. For
+            # PositionDecrease, collateralDeltaAmount is UNSIGNED (uintItems) and
+            # priceImpactUsd / basePnlUsd are SIGNED (intItems).
+            "execution_price_raw": uints.get("executionPrice"),
+            "size_delta_usd_raw": uints.get("sizeDeltaUsd"),
+            "size_delta_in_tokens_raw": uints.get("sizeDeltaInTokens"),
+            "collateral_delta_amount_raw_int": uints.get("collateralDeltaAmount"),
+            "price_impact_usd_raw": ints.get("priceImpactUsd"),
+            "realized_pnl_raw": ints.get("basePnlUsd"),
         }
         if collateral_amount is not None:
             result["collateral_amount"] = str(collateral_amount)
@@ -1170,7 +1496,18 @@ class GMXv2ReceiptParser:
         data: str,
         event_name: str,
     ) -> dict[str, Any]:
-        """Decode Order event data."""
+        """Decode Order event data.
+
+        The indexed order key is authoritative and comes from the strict
+        indexed-topic decode (unchanged, #3429). The order fields come from the
+        keyed EventUtils payload BY NAME (VIB-3873); the legacy fixed-offset
+        decode is retained only for synthetic flat-word fixtures.
+        """
+        key_str = self._strict_indexed_order_key(topics, event_name)
+        event_utils = self._decode_event_utils_order(data, event_name, key_str)
+        if event_utils is not None:
+            return event_utils
+
         try:
             # GMX uses 10**30 for USD values and 10**18 for token values
             usd_scale = Decimal(10**30)
@@ -1252,6 +1589,13 @@ class GMXv2ReceiptParser:
         """Parse a PositionIncrease event into typed data."""
         try:
             data = event.data
+            if data.get("_event_utils_payload"):
+                # Production keyed payload: fill economics are exposed via
+                # PerpFillData (extract_perp_fill), NOT re-derived positionally
+                # here. Returning None keeps the legacy positional builder from
+                # fabricating garbage price/PnL fields from a keyed payload — the
+                # VIB-3873 misread class. (Mirrors _parse_position_decrease.)
+                return None
             return PositionIncreaseData(
                 key=data.get("key", ""),
                 account=data.get("account", ""),
@@ -1792,24 +2136,110 @@ class GMXv2ReceiptParser:
         """Extract accumulated funding fee in USD from a CLOSE receipt (VIB-3497).
 
         GMX V2 emits a ``PositionFeesCollected`` event alongside every
-        ``PositionDecrease``. The ``fundingFeeAmount`` field (collateral token
-        units) lives inside that event's ``EventUtils.EventLogData`` payload,
-        which requires a full ABI decoder for the GMX V2 ``EventUtils`` library
-        (dynamic arrays of key-value pairs, not a simple flat ABI tuple).
+        ``PositionDecrease``. The ``fundingFeeAmount`` field (collateral-token
+        units) lives inside that event's keyed ``EventUtils.EventLogData``
+        payload. This decodes it BY NAME (VIB-3873) and converts it to USD with
+        the SAME event's ``collateralTokenPrice`` bounds — a decimals-free
+        conversion (``amount * price / 1e30``) that needs no live oracle read, so
+        the parser stays a pure function of the receipt.
 
-        Implementing that decoder is prerequisite work tracked separately.
-        Until it lands this method returns ``None`` — "funding cost unknown" —
-        which propagates honestly to ``funding_pnl_usd = None`` in attribution
-        instead of silently reporting ``0`` (measured zero).
-
-        The method is intentionally wired into the extraction pipeline so that
-        adding the EventUtils decoder in a follow-up ticket automatically
-        activates end-to-end funding attribution without further plumbing work.
+        Empty != Zero: returns ``None`` when the receipt carries no
+        ``PositionFeesCollected`` event (or the funding amount / price could not
+        be decoded) — "funding cost unknown" — never a fabricated ``0``. A
+        measured zero funding fee (short hold) returns ``Decimal("0")``.
 
         Returns:
-            None — pending EventUtils decoder implementation.
+            Funding fee in USD, or ``None`` when unmeasured.
         """
+        try:
+            result = self.parse_receipt(receipt)
+        except Exception as e:  # noqa: BLE001 — malformed receipt shape
+            logger.warning(f"Failed to extract funding fee: {e}")
+            return None
+        for event in result.events:
+            if event.event_type != GMXv2EventType.POSITION_FEES_COLLECTED:
+                continue
+            fees = self._decode_event_utils_position_fees(str(event.raw_data or "").removeprefix("0x"))
+            if fees is not None and fees.get("funding_fee_usd") is not None:
+                return fees["funding_fee_usd"]
         return None
+
+    # =========================================================================
+    # Perp fill economics (VIB-3873 / VIB-3872 WI-1)
+    # =========================================================================
+
+    def extract_perp_fill_result(self, receipt: dict[str, Any]) -> ExtractResult[PerpFillData]:
+        """Fail-closed variant of :meth:`extract_perp_fill` — see VIB-3159."""
+        return self._wrap_extract(
+            self.extract_perp_fill,
+            receipt,
+            "no PositionIncrease/PositionDecrease event to build fill economics",
+        )
+
+    def extract_perp_fill(self, receipt: dict[str, Any]) -> PerpFillData | None:
+        """Build typed fill economics from a GMX keeper receipt (VIB-3872 WI-1).
+
+        Merges the receipt's ``PositionIncrease`` **or** ``PositionDecrease``
+        event (position identity, execution price, size / collateral deltas,
+        price impact, realized PnL) with its ``PositionFeesCollected`` event
+        (funding / position / borrowing fees in USD). Every field is decoded BY
+        NAME from the keyed EventUtils payload and follows Empty != Zero.
+
+        Returns ``None`` when the receipt carries neither a PositionIncrease nor
+        a PositionDecrease event (nothing to settle). A keeper receipt that only
+        yields the position event (no fees event) still returns a PerpFillData
+        with the fee fields left ``None`` (unmeasured).
+        """
+        result = self.parse_receipt(receipt)
+        if not result.success:
+            return None
+
+        increase_raw: dict[str, Any] | None = None
+        decrease_raw: dict[str, Any] | None = None
+        fees: dict[str, Any] | None = None
+        for event in result.events:
+            raw = str(event.raw_data or "").removeprefix("0x")
+            if event.event_type == GMXv2EventType.POSITION_INCREASE and increase_raw is None:
+                increase_raw = self._decode_event_utils_position_increase(raw)
+            elif event.event_type == GMXv2EventType.POSITION_DECREASE and decrease_raw is None:
+                decrease_raw = self._decode_event_utils_position_decrease(raw)
+            elif event.event_type == GMXv2EventType.POSITION_FEES_COLLECTED and fees is None:
+                fees = self._decode_event_utils_position_fees(raw)
+
+        position = increase_raw if increase_raw is not None else decrease_raw
+        if position is None:
+            return None
+        is_open = increase_raw is not None
+
+        # collateralDeltaAmount lives in intItems (increase) vs uintItems (decrease).
+        collateral_delta = position.get("collateral_delta_amount_raw")
+        if not is_open:
+            collateral_delta = position.get("collateral_delta_amount_raw_int")
+
+        return PerpFillData(
+            is_open=is_open,
+            is_long=position.get("is_long"),
+            market=position.get("market") or None,
+            collateral_token=position.get("collateral_token") or None,
+            position_key=position.get("position_key") or None,
+            order_key=position.get("order_key") or None,
+            entry_price=self._usd_from_1e30(position.get("execution_price_raw")) if is_open else None,
+            exit_price=self._usd_from_1e30(position.get("execution_price_raw")) if not is_open else None,
+            size_delta_usd=self._usd_from_1e30(position.get("size_delta_usd_raw")),
+            size_delta_in_tokens=(
+                Decimal(position["size_delta_in_tokens_raw"])
+                if isinstance(position.get("size_delta_in_tokens_raw"), int)
+                else None
+            ),
+            collateral_delta_amount=(Decimal(collateral_delta) if isinstance(collateral_delta, int) else None),
+            price_impact_usd=self._usd_from_1e30(position.get("price_impact_usd_raw")),
+            realized_pnl_usd=self._usd_from_1e30(position.get("realized_pnl_raw")) if not is_open else None,
+            position_fee_usd=fees.get("position_fee_usd") if fees else None,
+            funding_fee_usd=fees.get("funding_fee_usd") if fees else None,
+            borrowing_fee_usd=fees.get("borrowing_fee_usd") if fees else None,
+            keeper_tx_hash=result.transaction_hash or None,
+            block_number=result.block_number or None,
+        )
 
     # =============================================================================
     # Protocol Fee Extraction (VIB-3204)
@@ -1838,6 +2268,9 @@ __all__ = [
     "GMXv2ReceiptParser",
     "GMXv2Event",
     "GMXv2EventType",
+    "GMXOrderTypeError",
+    "GMX_MAX_ORDER_TYPE",
+    "PerpFillData",
     "PositionIncreaseData",
     "PositionDecreaseData",
     "OrderEventData",

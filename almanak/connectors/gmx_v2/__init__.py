@@ -59,6 +59,7 @@ if TYPE_CHECKING:
         GMXv2Event,
         GMXv2EventType,
         GMXv2ReceiptParser,
+        PerpFillData,
     )
     from .sdk import (
         GMX_V2_SDK_ADDRESSES,
@@ -90,6 +91,7 @@ __all__ = [
     "GMXv2PositionSide",
     "GMXv2ReceiptParser",
     "OrderType",
+    "PerpFillData",
     "get_allowed_collaterals",
     "get_gmx_v2_sdk",
     "is_market_registered",
@@ -117,6 +119,7 @@ _LAZY: dict[str, tuple[str, str]] = {
     "GMXv2PositionSide": (".adapter", "GMXv2PositionSide"),
     "GMXv2ReceiptParser": (".receipt_parser", "GMXv2ReceiptParser"),
     "OrderType": (".sdk", "OrderType"),
+    "PerpFillData": (".receipt_parser", "PerpFillData"),
     "get_allowed_collaterals": (".market_rules", "get_allowed_collaterals"),
     "get_gmx_v2_sdk": (".sdk", "get_gmx_v2_sdk"),
     "is_market_registered": (".market_rules", "is_market_registered"),
