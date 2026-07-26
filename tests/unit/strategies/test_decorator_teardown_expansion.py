@@ -72,8 +72,14 @@ def test_lp_open_auto_expands_lp_close():
     assert "LP_CLOSE" in TestStrategy.STRATEGY_METADATA.intent_types
 
 
-def test_perp_open_auto_expands_perp_close():
-    """PERP_OPEN should auto-expand to include PERP_CLOSE."""
+def test_perp_open_auto_expands_perp_close_and_cancel():
+    """PERP_OPEN should auto-expand to include PERP_CLOSE and PERP_CANCEL_ORDER.
+
+    VIB-5569: cancel is the teardown-recovery verb for a stranded pending order;
+    auto-expanding it into intent_types is what lets the generated Safe manifest
+    authorise ExchangeRouter.cancelOrder for a gmx_v2 perp strategy that only
+    declared PERP_OPEN.
+    """
 
     @almanak_strategy(
         name="test_perp_expand",
@@ -90,6 +96,7 @@ def test_perp_open_auto_expands_perp_close():
             return []
 
     assert "PERP_CLOSE" in TestStrategy.STRATEGY_METADATA.intent_types
+    assert "PERP_CANCEL_ORDER" in TestStrategy.STRATEGY_METADATA.intent_types
 
 
 def test_vault_deposit_auto_expands_vault_redeem():

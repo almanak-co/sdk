@@ -9,18 +9,20 @@ PERMISSION_HINTS = PermissionHints(
         # (not via multicall). Labelled for discovery observability.
         "0x7489ec23": "cancelOrder(bytes32)",
     },
-    # Synthetic-discovery participation (VIB-4928): perp open + close.
+    # Synthetic-discovery participation (VIB-4928): perp open + close + cancel.
     #
-    # PERP_CANCEL_ORDER (VIB-5568) is intentionally NOT here yet. A cancel is a
-    # direct ``cancelOrder(bytes32)`` call (selector 0x7489ec23 above) — a
-    # different selector than the ``multicall`` PERP_OPEN/PERP_CLOSE grant. On a
-    # hosted SAFE-WALLET deployment its module permission is therefore not
-    # pre-approved by open/close discovery, so a Safe-wallet teardown cancel is
-    # REJECTED by the module and the pending order is surfaced LOUD + fail-closed
+    # PERP_CANCEL_ORDER (VIB-5569) is a direct ``cancelOrder(bytes32)`` call
+    # (selector 0x7489ec23 above) — a DIFFERENT selector than the ``multicall``
+    # PERP_OPEN/PERP_CLOSE grant. Before VIB-5569 it was NOT discovered, so on a
+    # hosted SAFE-WALLET deployment its Zodiac module permission was never
+    # pre-approved by open/close discovery: a Safe-wallet teardown cancel was
+    # REJECTED by the module and the pending order surfaced LOUD + fail-closed
     # (VIB-5116 semantics: no silent loss, manual-check flagged) rather than
-    # recovered. Managed-Anvil (auto-impersonation) and EOA hosted deployments
-    # recover normally. Wiring PERP_CANCEL_ORDER into synthetic discovery (builder
-    # + derived-membership fold + pinned equivalence test) is a separable
-    # hosted-perimeter change tracked as VIB-5569.
-    synthetic_discovery_intents=frozenset({"PERP_OPEN", "PERP_CLOSE"}),
+    # recovered. Declaring it here wires it into synthetic discovery (builder in
+    # ``permissions/synthetic_intents.py`` + derived-membership fold), so the Safe
+    # manifest now authorises (ExchangeRouter, 0x7489ec23) scoped to
+    # PERP_CANCEL_ORDER and the teardown cancel recovers collateral. gmx_v2 is the
+    # ONLY perp connector that supports cancel; the builder gates on this
+    # declaration so no other perp connector inherits a cancel it cannot compile.
+    synthetic_discovery_intents=frozenset({"PERP_OPEN", "PERP_CLOSE", "PERP_CANCEL_ORDER"}),
 )

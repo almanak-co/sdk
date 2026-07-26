@@ -192,21 +192,27 @@ def almanak_strategy(
         # One-way: only open->close, matching the permission generator's
         # _TEARDOWN_COMPLEMENTS. A strategy declaring only close types
         # should not auto-gain open type permissions.
+        # Each open-side type maps to a TUPLE of complements: PERP_OPEN expands to
+        # both PERP_CLOSE and PERP_CANCEL_ORDER (recover collateral from a stranded
+        # pending order — VIB-5569), so the generated Safe manifest authorises the
+        # cancel selector for gmx_v2. Kept in lockstep with the generator's
+        # _TEARDOWN_COMPLEMENTS.
         expanded_intent_types = list(intent_types) if intent_types else []
         if expanded_intent_types:
-            _COMPLEMENT_PAIRS = {
-                "SUPPLY": "WITHDRAW",
-                "BORROW": "REPAY",
-                "LP_OPEN": "LP_CLOSE",
-                "VAULT_DEPOSIT": "VAULT_REDEEM",
-                "PERP_OPEN": "PERP_CLOSE",
+            _COMPLEMENT_PAIRS: dict[str, tuple[str, ...]] = {
+                "SUPPLY": ("WITHDRAW",),
+                "BORROW": ("REPAY",),
+                "LP_OPEN": ("LP_CLOSE",),
+                "VAULT_DEPOSIT": ("VAULT_REDEEM",),
+                "PERP_OPEN": ("PERP_CLOSE", "PERP_CANCEL_ORDER"),
             }
             declared = set(expanded_intent_types)
             missing = sorted(
                 {
                     complement
                     for it in expanded_intent_types
-                    if (complement := _COMPLEMENT_PAIRS.get(it)) and complement not in declared
+                    for complement in _COMPLEMENT_PAIRS.get(it, ())
+                    if complement not in declared
                 }
             )
             if missing:

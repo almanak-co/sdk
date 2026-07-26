@@ -111,6 +111,12 @@ _SNAPSHOT_LENDING_PROTOCOLS = frozenset(
         "fluid_vault",
     }
 )
+# VIB-5569 wired PERP_CANCEL_ORDER into synthetic discovery: gmx_v2 now also
+# declares "PERP_CANCEL_ORDER" in ``synthetic_discovery_intents``. The perp
+# SLUG-membership set below is deliberately UNCHANGED — gmx_v2 was already a perp
+# participant via PERP_OPEN/PERP_CLOSE, and cancel is folded into the same perp
+# bucket, so adding it grants no new slug. (The cancel builder is scoped by the
+# per-connector declaration, not this set, so the other perp slugs stay cancel-free.)
 _SNAPSHOT_PERP_PROTOCOLS = frozenset(
     {
         "gmx_v2",

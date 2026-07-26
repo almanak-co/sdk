@@ -726,10 +726,14 @@ class TestExpandIntentTypesForTeardown:
         assert expanded == ["VAULT_DEPOSIT", "VAULT_REDEEM"]
         assert added == ["VAULT_REDEEM"]
 
-    def test_perp_open_adds_perp_close(self):
+    def test_perp_open_adds_perp_close_and_cancel(self):
+        # VIB-5569: PERP_OPEN expands to BOTH teardown-recovery verbs — PERP_CLOSE
+        # (unwind a filled position) and PERP_CANCEL_ORDER (recover collateral from
+        # a stranded pending order). Appended in complement-tuple order; ``added``
+        # is sorted.
         expanded, added = _expand_intent_types_for_teardown(["PERP_OPEN"])
-        assert expanded == ["PERP_OPEN", "PERP_CLOSE"]
-        assert added == ["PERP_CLOSE"]
+        assert expanded == ["PERP_OPEN", "PERP_CLOSE", "PERP_CANCEL_ORDER"]
+        assert added == ["PERP_CANCEL_ORDER", "PERP_CLOSE"]
 
     def test_no_duplicates_when_both_declared(self):
         """Already-declared complements should not be added again."""

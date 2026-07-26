@@ -90,12 +90,21 @@ INFRASTRUCTURE_NON_LOAD_BEARING_SELECTORS: frozenset[str] = frozenset(
 # declaring only WITHDRAW should not auto-gain SUPPLY permissions.
 # discover_permissions() already skips unsupported (protocol, intent_type) combos
 # so adding complements for irrelevant protocols is a harmless no-op.
-_TEARDOWN_COMPLEMENTS: dict[str, str] = {
-    "SUPPLY": "WITHDRAW",
-    "BORROW": "REPAY",
-    "LP_OPEN": "LP_CLOSE",
-    "VAULT_DEPOSIT": "VAULT_REDEEM",
-    "PERP_OPEN": "PERP_CLOSE",
+#
+# Each open-side type maps to a TUPLE of teardown-recovery complements. PERP_OPEN
+# expands to both PERP_CLOSE (unwind a filled position) and PERP_CANCEL_ORDER
+# (recover collateral from a stranded, never-filled pending order — VIB-5569).
+# Both are risk-reducing verbs the strategy never authors itself, so the Safe
+# permission manifest must authorise them or a hosted Safe-wallet teardown
+# reverts at execTransactionWithRole. Cancel is a gmx_v2-only compile path; every
+# other perp connector emits no cancel synthetic (the builder gates on the
+# connector declaring PERP_CANCEL_ORDER), so their manifests are unaffected.
+_TEARDOWN_COMPLEMENTS: dict[str, tuple[str, ...]] = {
+    "SUPPLY": ("WITHDRAW",),
+    "BORROW": ("REPAY",),
+    "LP_OPEN": ("LP_CLOSE",),
+    "VAULT_DEPOSIT": ("VAULT_REDEEM",),
+    "PERP_OPEN": ("PERP_CLOSE", "PERP_CANCEL_ORDER"),
 }
 
 
@@ -116,11 +125,11 @@ def _expand_intent_types_for_teardown(intent_types: list[str]) -> tuple[list[str
     existing = set(expanded)
     added: list[str] = []
     for it in intent_types:
-        complement = _TEARDOWN_COMPLEMENTS.get(it)
-        if complement and complement not in existing:
-            added.append(complement)
-            existing.add(complement)
-            expanded.append(complement)
+        for complement in _TEARDOWN_COMPLEMENTS.get(it, ()):
+            if complement not in existing:
+                added.append(complement)
+                existing.add(complement)
+                expanded.append(complement)
     return expanded, sorted(added)
 
 

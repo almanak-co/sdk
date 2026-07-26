@@ -32,6 +32,7 @@ from ..intents.vocabulary import (
     IntentType,
     LPCloseIntent,
     LPOpenIntent,
+    PerpCancelIntent,
     PerpCloseIntent,
     PerpOpenIntent,
     PriceBand,
@@ -78,13 +79,25 @@ logger = logging.getLogger(__name__)
 _LP_INTENT_TYPES = frozenset({"LP_OPEN", "LP_CLOSE"})
 _LENDING_INTENT_TYPES = frozenset({"SUPPLY", "WITHDRAW", "BORROW", "REPAY"})
 _PERP_INTENT_TYPES = frozenset({"PERP_OPEN", "PERP_CLOSE"})
+# PERP_CANCEL_ORDER (VIB-5569) is a SEPARATE bucket from ``_PERP_INTENT_TYPES``
+# on purpose. A cancel is a framework teardown-recovery verb supported ONLY by
+# gmx_v2 (a direct ``ExchangeRouter.cancelOrder(bytes32)`` call, selector
+# 0x7489ec23 — distinct from the ``multicall`` selector open/close discovery
+# grants). Keeping it out of the shared ``_PERP_INTENT_TYPES`` set means widening
+# the *validation* universe below does NOT hand a cancel builder to the other
+# perp connectors (hyperliquid / aster_perps / pancakeswap_perps / drift): the
+# builder itself gates on the connector DECLARING PERP_CANCEL_ORDER
+# (``_build_perp_cancel_intents``), and only gmx_v2 does. It still contributes to
+# the ``perp`` slug-membership fold so a hypothetical cancel-only connector would
+# still register as a perp participant.
+_PERP_CANCEL_INTENT_TYPES = frozenset({"PERP_CANCEL_ORDER"})
 # Every intent-type string a connector may legally declare in
 # ``synthetic_discovery_intents`` — derived from the per-category sets above so it
 # cannot drift. A value outside this set is a typo (e.g. ``"L_OPEN"``) that would
 # otherwise be silently ignored, dropping the connector from a membership set;
 # ``_derive_membership_sets`` raises on it instead (VIB-4928).
 _VALID_SYNTHETIC_INTENTS: frozenset[str] = (
-    frozenset({"SWAP"}) | _LP_INTENT_TYPES | _LENDING_INTENT_TYPES | _PERP_INTENT_TYPES
+    frozenset({"SWAP"}) | _LP_INTENT_TYPES | _LENDING_INTENT_TYPES | _PERP_INTENT_TYPES | _PERP_CANCEL_INTENT_TYPES
 )
 
 
@@ -138,7 +151,7 @@ def _derive_membership_sets() -> tuple[frozenset[str], frozenset[str], frozenset
             lp.add(slug)
         if declared & _LENDING_INTENT_TYPES:
             lending.add(slug)
-        if declared & _PERP_INTENT_TYPES:
+        if declared & (_PERP_INTENT_TYPES | _PERP_CANCEL_INTENT_TYPES):
             perp.add(slug)
     return frozenset(swap), frozenset(native_in_swap), frozenset(lp), frozenset(lending), frozenset(perp)
 
@@ -446,6 +459,7 @@ def _dispatch_synthetic_intents(
         IntentType.REPAY: lambda: _build_repay_intents(protocol, chain, usdc, weth),
         IntentType.PERP_OPEN: lambda: _build_perp_open_intents(protocol, chain, usdc),
         IntentType.PERP_CLOSE: lambda: _build_perp_close_intents(protocol, chain, usdc),
+        IntentType.PERP_CANCEL_ORDER: lambda: _build_perp_cancel_intents(protocol, chain),
         IntentType.FLASH_LOAN: lambda: _build_flash_loan_intents(protocol, chain, usdc),
         IntentType.VAULT_DEPOSIT: lambda: _build_vault_deposit_intents(protocol, chain),
         IntentType.VAULT_REDEEM: lambda: _build_vault_redeem_intents(protocol, chain),
@@ -811,6 +825,39 @@ def _build_perp_close_intents(protocol: str, chain: str, usdc: str) -> list[AnyI
             collateral_token=usdc,
             is_long=True,
             size_usd=Decimal("500"),
+            protocol=protocol,
+            chain=chain,
+        )
+    ]
+
+
+# A well-formed placeholder GMX V2 order key for synthetic PERP_CANCEL_ORDER
+# discovery. ``PerpCancelIntent`` fail-closes on any string that is not a strict
+# bytes32 (0x + exactly 64 hex chars), so the placeholder MUST satisfy that regex.
+# The value is never submitted — discovery only compiles the intent to read back
+# the (ExchangeRouter, cancelOrder) target/selector from the emitted calldata; the
+# order key itself is left-padded into the calldata but the cancel is never fired.
+_SYNTHETIC_PERP_CANCEL_ORDER_KEY = "0x" + "11" * 32
+
+
+def _build_perp_cancel_intents(protocol: str, chain: str) -> list[AnyIntent]:
+    """Build the synthetic PERP_CANCEL_ORDER intent for permission discovery.
+
+    Gated on the connector DECLARING ``PERP_CANCEL_ORDER`` in its
+    ``synthetic_discovery_intents`` — NOT on the broad ``_perp_protocols()``
+    membership. Cancel is a gmx_v2-only teardown-recovery verb (VIB-5569); every
+    other perp connector (hyperliquid / aster_perps / pancakeswap_perps / drift)
+    is in ``_perp_protocols()`` but has no cancel compile path, so gating on
+    declaration keeps a cancel builder from being handed to a connector that would
+    fail to compile it. Emits a direct ``ExchangeRouter.cancelOrder(bytes32)`` call
+    so the hosted Safe Zodiac manifest authorises that selector (0x7489ec23),
+    which the ``multicall`` open/close grant does not cover.
+    """
+    if "PERP_CANCEL_ORDER" not in get_permission_hints(protocol).synthetic_discovery_intents:
+        return []
+    return [
+        PerpCancelIntent(
+            order_key=_SYNTHETIC_PERP_CANCEL_ORDER_KEY,
             protocol=protocol,
             chain=chain,
         )
