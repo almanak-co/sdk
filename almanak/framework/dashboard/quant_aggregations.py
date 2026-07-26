@@ -600,6 +600,176 @@ def _accumulate_term(stack: CostStack, attr: str, meter: list[int], value: Decim
         meter[1] += 1
 
 
+def _row_ledger_id(event: Any) -> str:
+    """The accounting_events row's ``ledger_entry_id`` column (the submission link)."""
+    return str(event.get("ledger_entry_id") or "") if isinstance(event, dict) else ""
+
+
+def _executed_settlements_by_link(accounting_events: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Map submission ledger id → EXECUTED ``PERP_SETTLEMENT`` payload (VIB-3872 WI-4).
+
+    The measured settlement event SUPERSEDES the ESTIMATED ``PERP_OPEN`` /
+    ``PERP_CLOSE`` submission event for the same link **component by component** —
+    for each economic field the settlement's MEASURED value wins, and a field the
+    settlement left unmeasured (``None``) falls back to the estimate's value; folding
+    both, or folding a fabricated zero for an unmeasured settlement component, would
+    corrupt the number (Empty≠Zero). Only ``EXECUTED`` settlements carry measured
+    fill economics; ``CANCELLED`` / ``FROZEN`` / ``NOT_FOUND_UNCORRELATED`` /
+    ``UNMEASURED`` do NOT supersede (the submission event stays the estimate). The
+    join key is the settlement payload's ``submission_ledger_entry_id`` (== the
+    settlement row's ``ledger_entry_id`` column == the submission row's
+    ``ledger_entry_id``). Returning the payload (not just the link) is what lets the
+    estimate branch read the settlement's per-field measured values.
+    """
+    by_link: dict[str, dict[str, Any]] = {}
+    for event in accounting_events:
+        row_type = str(event.get("event_type") or "") if isinstance(event, dict) else ""
+        payload = _safe_payload_loads(event.get("payload_json") if isinstance(event, dict) else None)
+        event_type = (row_type or payload.get("event_type") or "").upper()
+        if event_type != "PERP_SETTLEMENT" or payload.get("settlement_state") != "EXECUTED":
+            continue
+        link = payload.get("submission_ledger_entry_id") or _row_ledger_id(event)
+        if link:
+            by_link[str(link)] = payload
+    return by_link
+
+
+def _perp_estimate_links(accounting_events: list[dict[str, Any]]) -> set[str]:
+    """Ledger ids of the ESTIMATED ``PERP_OPEN`` / ``PERP_CLOSE`` submission rows.
+
+    A ``PERP_SETTLEMENT`` whose link is in this set has a submission estimate present
+    — the estimate branch performs the per-component merge, so the settlement branch
+    must NOT fold again (that is the no-double-count property). A settlement whose
+    link is absent (an ORPHAN, e.g. the estimate row is outside the window) is folded
+    on its own, measured-only.
+    """
+    links: set[str] = set()
+    for event in accounting_events:
+        row_type = str(event.get("event_type") or "") if isinstance(event, dict) else ""
+        payload = _safe_payload_loads(event.get("payload_json") if isinstance(event, dict) else None)
+        event_type = (row_type or payload.get("event_type") or "").upper()
+        if event_type in ("PERP_OPEN", "PERP_CLOSE"):
+            link = _row_ledger_id(event)
+            if link:
+                links.add(link)
+    return links
+
+
+def _settlement_fee_usd(payload: dict[str, Any]) -> Decimal | None:
+    """Total measured perp trading fee for an EXECUTED settlement = position_fee +
+    borrowing_fee. Empty≠Zero: ``None`` when either component is unmeasured."""
+    position_fee = _payload_decimal_or_none(payload, "position_fee_usd")
+    borrowing_fee = _payload_decimal_or_none(payload, "borrowing_fee_usd")
+    if position_fee is None or borrowing_fee is None:
+        return None
+    return position_fee + borrowing_fee
+
+
+def _perp_fee_term(settlement: dict[str, Any] | None, estimate: dict[str, Any], estimate_key: str) -> Decimal | None:
+    """The leg's trading-fee term with measured-only, settlement-preferred precedence.
+
+    Settlement total fee (position+borrowing) if MEASURED, else the estimate's
+    ``estimate_key`` (open_fee_usd / close_fee_usd) if measured, else ``None``. Never
+    fabricates a zero for an unmeasured component (Empty≠Zero): when the settlement's
+    fee is partially unmeasured (e.g. borrowing ``None``) the estimate's measured
+    total stands in rather than a settlement partial that silently drops a component.
+    """
+    settled = _settlement_fee_usd(settlement) if settlement else None
+    if settled is not None:
+        return settled
+    return _payload_decimal_or_none(estimate, estimate_key)
+
+
+def _perp_slippage_term(settlement: dict[str, Any] | None, estimate: dict[str, Any]) -> Decimal | None:
+    """price_impact term: settlement measured value, else estimate's, else None."""
+    settled = _payload_decimal_or_none(settlement, "price_impact_usd") if settlement else None
+    if settled is not None:
+        return settled
+    return _payload_decimal_or_none(estimate, "price_impact_usd")
+
+
+def _perp_realized_pnl(settlement: dict[str, Any] | None, estimate: dict[str, Any]) -> Decimal:
+    """Realized PnL: settlement's MEASURED value if present, else the estimate's.
+
+    The estimate fallback uses the legacy None→0 contract (a plain PERP_CLSE with no
+    settlement behaves exactly as before). The point of FIX-1: an EXECUTED settlement
+    whose ``realized_pnl_usd`` is ``None`` must NOT replace a measured estimate with a
+    fabricated zero — it falls back to the estimate's value instead.
+    """
+    settled = _payload_decimal_or_none(settlement, "realized_pnl_usd") if settlement else None
+    if settled is not None:
+        return settled
+    return _payload_decimal(estimate, "realized_pnl_usd")
+
+
+def _apply_signed_funding(stack: CostStack, funding: Decimal) -> None:
+    """Split one SIGNED funding fee into paid (≥0, cost) / earned (<0, received)."""
+    if funding >= 0:
+        stack.funding_paid_usd += funding
+    else:
+        stack.funding_earned_usd += -funding
+
+
+def _fold_perp_event(
+    stack: CostStack,
+    event: Any,
+    payload: dict[str, Any],
+    event_type: str,
+    settlement_by_link: dict[str, dict[str, Any]],
+    estimate_links: set[str],
+    fee_meter: list[int],
+    slip_meter: list[int],
+) -> bool:
+    """Fold one PERP_OPEN / PERP_CLOSE / PERP_SETTLEMENT event into ``stack``.
+
+    Returns ``True`` iff ``event_type`` was a perp event (handled). A measured
+    EXECUTED PERP_SETTLEMENT supersedes the ESTIMATED PERP_OPEN/PERP_CLOSE fold for
+    the same submission ledger link **per component** (VIB-3872 WI-4): for each field
+    the settlement's measured value wins, an unmeasured settlement field falls back to
+    the estimate (never a fabricated zero), and each field is folded from exactly ONE
+    source (no double-count). Extracted from ``compute_cost_stack`` to keep it under
+    the complexity gate.
+    """
+    if event_type == "PERP_OPEN":
+        s = settlement_by_link.get(_row_ledger_id(event))
+        _accumulate_term(stack, "protocol_fees_usd", fee_meter, _perp_fee_term(s, payload, "open_fee_usd"))
+        _accumulate_term(stack, "slippage_usd", slip_meter, _perp_slippage_term(s, payload))
+        return True
+    if event_type == "PERP_CLOSE":
+        s = settlement_by_link.get(_row_ledger_id(event))
+        _accumulate_term(stack, "protocol_fees_usd", fee_meter, _perp_fee_term(s, payload, "close_fee_usd"))
+        _accumulate_term(stack, "slippage_usd", slip_meter, _perp_slippage_term(s, payload))
+        stack.realized_pnl_usd += _perp_realized_pnl(s, payload)
+        s_funding = _payload_decimal_or_none(s, "funding_fee_usd") if s else None
+        if s_funding is not None:
+            _apply_signed_funding(stack, s_funding)
+        else:
+            stack.funding_paid_usd += _payload_decimal(payload, "funding_paid_usd")
+            stack.funding_earned_usd += _payload_decimal(payload, "funding_received_usd")
+        return True
+    if event_type == "PERP_SETTLEMENT":
+        # An EXECUTED settlement whose submission estimate is PRESENT was already
+        # merged by the estimate branch (per component) — folding here double-counts.
+        # Only an ORPHAN settlement (no PERP_OPEN/PERP_CLOSE row for its link) folds
+        # here, and then measured-only (Empty≠Zero: an unmeasured field contributes
+        # nothing, it is NOT zero).
+        if payload.get("settlement_state") != "EXECUTED":
+            return True
+        link = str(payload.get("submission_ledger_entry_id") or _row_ledger_id(event))
+        if link in estimate_links:
+            return True
+        _accumulate_term(stack, "protocol_fees_usd", fee_meter, _settlement_fee_usd(payload))
+        _accumulate_term(stack, "slippage_usd", slip_meter, _payload_decimal_or_none(payload, "price_impact_usd"))
+        realized = _payload_decimal_or_none(payload, "realized_pnl_usd")
+        if realized is not None:
+            stack.realized_pnl_usd += realized
+        funding = _payload_decimal_or_none(payload, "funding_fee_usd")
+        if funding is not None:
+            _apply_signed_funding(stack, funding)
+        return True
+    return False
+
+
 def compute_cost_stack(
     ledger_entries: list[Any] | LedgerQuantStats,
     accounting_events: list[dict[str, Any]],
@@ -619,6 +789,12 @@ def compute_cost_stack(
     # measured only when EVERY applicable event contributed its term.
     fee_meter = [0, 0]
     slip_meter = [0, 0]
+    # VIB-3872 WI-4: per-component supersession. The estimate branch merges each
+    # economic field (settlement-measured-else-estimate); the settlement branch folds
+    # only ORPHAN settlements (no submission estimate present). Together: exactly one
+    # source per field, no double-count, no fabricated zero (Empty≠Zero).
+    settlement_by_link = _executed_settlements_by_link(accounting_events)
+    estimate_links = _perp_estimate_links(accounting_events)
 
     stack.gas_usd += _ledger_stats(ledger_entries).gas_usd_sum
 
@@ -671,19 +847,11 @@ def compute_cost_stack(
             stack.il_usd += _payload_decimal(payload, "il_usd")
             continue
 
-        # PERP family
-        if event_type == "PERP_OPEN":
-            _accumulate_term(stack, "protocol_fees_usd", fee_meter, _payload_decimal_or_none(payload, "open_fee_usd"))
-            _accumulate_term(stack, "slippage_usd", slip_meter, _payload_decimal_or_none(payload, "price_impact_usd"))
-            continue
-        if event_type == "PERP_CLOSE":
-            _accumulate_term(stack, "protocol_fees_usd", fee_meter, _payload_decimal_or_none(payload, "close_fee_usd"))
-            _accumulate_term(stack, "slippage_usd", slip_meter, _payload_decimal_or_none(payload, "price_impact_usd"))
-            stack.realized_pnl_usd += _payload_decimal(payload, "realized_pnl_usd")
-            paid = _payload_decimal(payload, "funding_paid_usd")
-            recv = _payload_decimal(payload, "funding_received_usd")
-            stack.funding_paid_usd += paid
-            stack.funding_earned_usd += recv
+        # PERP family — a measured EXECUTED PERP_SETTLEMENT supersedes the ESTIMATED
+        # PERP_OPEN/PERP_CLOSE submission fold for the same link (VIB-3872 WI-4).
+        if _fold_perp_event(
+            stack, event, payload, event_type, settlement_by_link, estimate_links, fee_meter, slip_meter
+        ):
             continue
 
     # A bucket is MEASURED only if every applicable event contributed its term
@@ -821,6 +989,47 @@ def compute_inventory_unrealized(
     return total
 
 
+def _perp_reconciliation_terms(
+    event: Any,
+    payload: dict[str, Any],
+    event_type: str,
+    settlement_by_link: dict[str, dict[str, Any]],
+    estimate_links: set[str],
+) -> tuple[Decimal, Decimal]:
+    """(Δ perp realized PnL, Δ net funding) for a perp-terminal event (VIB-3872 WI-4).
+
+    Mirrors ``_fold_perp_event``'s per-component supersession for the G6
+    reconciliation sums — kept in lockstep so the cost stack and reconciliation agree
+    on the perp signal. ``sum_funding`` convention: paid funding REDUCES PnL, so a
+    positive ``funding_fee_usd`` (paid) contributes ``-funding_fee_usd``. Empty≠Zero:
+    an unmeasured settlement field falls back to the estimate (PERP_CLOSE) or
+    contributes nothing (orphan settlement) — never a fabricated zero over a measured
+    estimate.
+    """
+    if event_type == "PERP_CLOSE":
+        s = settlement_by_link.get(_row_ledger_id(event))
+        perp = _perp_realized_pnl(s, payload)
+        s_funding = _payload_decimal_or_none(s, "funding_fee_usd") if s else None
+        if s_funding is not None:
+            funding = -s_funding
+        else:
+            funding = _payload_decimal(payload, "funding_received_usd") - _payload_decimal(payload, "funding_paid_usd")
+        return perp, funding
+    # PERP_SETTLEMENT: only an EXECUTED ORPHAN (no submission estimate) folds here;
+    # a linked settlement was already merged by the PERP_CLOSE branch above.
+    if payload.get("settlement_state") != "EXECUTED":
+        return Decimal("0"), Decimal("0")
+    link = str(payload.get("submission_ledger_entry_id") or _row_ledger_id(event))
+    if link in estimate_links:
+        return Decimal("0"), Decimal("0")
+    realized = _payload_decimal_or_none(payload, "realized_pnl_usd")
+    funding_fee = _payload_decimal_or_none(payload, "funding_fee_usd")
+    return (
+        realized if realized is not None else Decimal("0"),
+        -funding_fee if funding_fee is not None else Decimal("0"),
+    )
+
+
 def compute_reconciliation(
     initial_value_usd: Decimal,
     nav_usd: Decimal,
@@ -857,6 +1066,9 @@ def compute_reconciliation(
     sum_fees = Decimal("0")
     sum_funding = Decimal("0")
     sum_interest = Decimal("0")
+    # VIB-3872 WI-4: per-component supersession (see _perp_reconciliation_terms).
+    settlement_by_link = _executed_settlements_by_link(accounting_events)
+    estimate_links = _perp_estimate_links(accounting_events)
 
     for event in accounting_events:
         payload = _safe_payload_loads(event.get("payload_json") if isinstance(event, dict) else None)
@@ -877,11 +1089,15 @@ def compute_reconciliation(
         elif event_type == "LP_CLOSE":
             sum_lp += _payload_decimal(payload, "realized_pnl_usd")
             sum_fees += _payload_decimal(payload, "fees_total_usd")
-        elif event_type == "PERP_CLOSE":
-            sum_perp += _payload_decimal(payload, "realized_pnl_usd")
-            sum_funding += _payload_decimal(payload, "funding_received_usd") - _payload_decimal(
-                payload, "funding_paid_usd"
+        elif event_type in ("PERP_CLOSE", "PERP_SETTLEMENT"):
+            # WI-4: per-component supersession (settlement-measured-else-estimate),
+            # folded from exactly one source per field — no double-count, no
+            # fabricated zero. Mirrors _fold_perp_event.
+            delta_perp, delta_funding = _perp_reconciliation_terms(
+                event, payload, event_type, settlement_by_link, estimate_links
             )
+            sum_perp += delta_perp
+            sum_funding += delta_funding
         elif event_type in ("WITHDRAW",):
             sum_interest += _payload_decimal(payload, "interest_accrued_usd", "interest_delta_usd")
         elif event_type in ("REPAY", "DELEVERAGE"):

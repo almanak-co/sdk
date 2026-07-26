@@ -33,6 +33,12 @@ class TimelineEventType(StrEnum):
     WITHDRAWAL = "WITHDRAWAL"
     LP_OPEN = "LP_OPEN"
     LP_CLOSE = "LP_CLOSE"
+    # Perp lifecycle (VIB-3872 WI-4) — previously fell through to TRADE. PERP_SETTLEMENT
+    # is the Phase-2 keeper-settlement event; giving it a real label stops the timeline
+    # from mislabeling the measured fill as a generic trade.
+    PERP_OPEN = "PERP_OPEN"
+    PERP_CLOSE = "PERP_CLOSE"
+    PERP_SETTLEMENT = "PERP_SETTLEMENT"
     BORROW = "BORROW"
     REPAY = "REPAY"
     ALERT = "ALERT"

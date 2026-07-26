@@ -3163,14 +3163,45 @@ def _cells_perp(
             "needs position_state_snapshots (Track C)",
         )
     )
+    # VIB-3872 WI-4 — the measured Phase-2 ``PERP_SETTLEMENT`` event is the honest
+    # source for the fee split (P3) and realized PnL (P5) on an ASYNC round trip:
+    # the submission-time PERP_OPEN/PERP_CLOSE payload cannot know settled fees /
+    # realized PnL (they only exist after the keeper fills the order — VIB-5717), so
+    # it carries measured-unavailable nulls. The settlement event supersedes it. Join
+    # settlement→submission by ledger_entry_id (the _lp_close_correlation_key
+    # precedent): a settlement's ``submission_ledger_entry_id`` == the submission
+    # row's ``ledger_entry_id``. Only EXECUTED settlements carry measured economics.
+    settlement_by_link: dict[str, dict[str, Any]] = {}
+    for r in acct_events:
+        if r.get("event_type") != "PERP_SETTLEMENT":
+            continue
+        sp = acct_payloads.get(r.get("id"), {})
+        if sp.get("settlement_state") != "EXECUTED":
+            continue
+        link = sp.get("submission_ledger_entry_id") or r.get("ledger_entry_id")
+        if link:
+            settlement_by_link[str(link)] = sp
+
+    def _linked_settlement(row: dict[str, Any]) -> dict[str, Any]:
+        return settlement_by_link.get(str(row.get("ledger_entry_id") or ""), {})
+
     perp_acct = [r for r in acct_events if r.get("event_type") in ("PERP_OPEN", "PERP_CLOSE")]
     blocked_p3 = _payload_block_cell("P3", "Open + close fees + price impact (separable)", perp_acct, payload_errors)
     if blocked_p3 is not None:
         out.append(blocked_p3)
     else:
         has_fee_split = False
+        via_settlement = False
         for r in perp_acct:
             p = acct_payloads.get(r.get("id"), {})
+            s = _linked_settlement(r)
+            # The measured settlement is the HONEST source — check it BEFORE the inline
+            # submission payload so a close carrying stale inline economics AND a linked
+            # EXECUTED settlement reports the settlement as the provenance (VIB-3872 WI-4).
+            if s.get("position_fee_usd") is not None:
+                has_fee_split = True
+                via_settlement = True
+                break
             if p.get("open_fee_usd") is not None or p.get("close_fee_usd") is not None:
                 has_fee_split = True
                 break
@@ -3179,7 +3210,13 @@ def _cells_perp(
                 "P3",
                 "Open + close fees + price impact (separable)",
                 "PASS" if has_fee_split else "XFAIL",
-                "fee fields in PERP_*_PAYLOAD" if has_fee_split else "fee fields not yet populated",
+                (
+                    "measured fee in PERP_SETTLEMENT.position_fee_usd"
+                    if via_settlement
+                    else "fee fields in PERP_*_PAYLOAD"
+                )
+                if has_fee_split
+                else "fee fields not yet populated (no inline fee, no EXECUTED settlement)",
             )
         )
     out.append(CellResult("P4", "Liquidation buffer over time", "XFAIL", "Track C"))
@@ -3191,8 +3228,16 @@ def _cells_perp(
         out.append(blocked_p5)
     else:
         has_realized = False
+        via_settlement = False
         for r in perp_close_acct:
             p = acct_payloads.get(r.get("id"), {})
+            s = _linked_settlement(r)
+            # Settlement is the honest measured source — check it before the inline
+            # payload so the diagnostic names the measured provenance (VIB-3872 WI-4).
+            if s.get("realized_pnl_usd") is not None:
+                has_realized = True
+                via_settlement = True
+                break
             if p.get("realized_pnl_usd") is not None:
                 has_realized = True
                 break
@@ -3201,7 +3246,13 @@ def _cells_perp(
                 "P5",
                 "Realised PnL with funding/fees decomposition",
                 "PASS" if has_realized else "XFAIL",
-                "PERP_CLOSE.realized_pnl_usd present" if has_realized else "realized_pnl_usd null/missing",
+                (
+                    "measured PERP_SETTLEMENT.realized_pnl_usd"
+                    if via_settlement
+                    else "PERP_CLOSE.realized_pnl_usd present"
+                )
+                if has_realized
+                else "realized_pnl_usd null/missing (no inline PnL, no EXECUTED settlement)",
             )
         )
     out.append(CellResult("P6", "Margin utilisation over time", "XFAIL", "Track C"))
