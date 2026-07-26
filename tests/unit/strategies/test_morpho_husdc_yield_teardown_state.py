@@ -1,11 +1,15 @@
 """Teardown-state persistence regression for morpho_husdc_yield (VIB-5486 / TD-06c).
 
-The shipped config ships ``market_id=""`` → ``self.market_id is None``; the Morpho
-Blue market is resolved at runtime into the in-memory ``_resolved_market_id``. Before
-this fix that seed was NOT persisted, so after a restart both
-``get_open_positions()`` and ``generate_teardown_intents()`` computed
-``market_id = self.market_id or self._resolved_market_id = None`` and a live HUSDC
-supply on Morpho Blue was stranded — teardown reported "nothing to do".
+These tests exercise the runtime-resolution posture: whenever ``self.market_id`` is
+None (config omits it, or a caller clears it), the Morpho Blue market is resolved at
+runtime into the in-memory ``_resolved_market_id``. Before this fix that seed was NOT
+persisted, so after a restart both ``get_open_positions()`` and
+``generate_teardown_intents()`` computed
+``market_id = self.market_id or self._resolved_market_id = None`` and a live supply on
+Morpho Blue was stranded — teardown reported "nothing to do". (The shipped config now
+pins a real market_id — see the VIB-5986 retarget — so this path is defensive depth;
+these tests construct the strategy via ``__new__`` with ``market_id=None`` to exercise
+it regardless of config.)
 
 These tests prove the round-trip: with the market identity restored via
 ``load_persistent_state()`` teardown sees the position again; without it, teardown is
