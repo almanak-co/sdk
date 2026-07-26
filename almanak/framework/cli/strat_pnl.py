@@ -41,6 +41,9 @@ from almanak.framework.accounting.reporting.leveraged_lending import (
     LeveragedLendingVerdict,
     detect_leveraged_lending,
 )
+from almanak.framework.accounting.reporting.perp_class_fallback import (
+    detect_closed_perp_primitive,
+)
 from almanak.framework.accounting.reporting.render_json import (
     data_quality_to_dict,
     lending_section_to_dict,
@@ -854,6 +857,39 @@ def _apply_closed_swap_primitive_headline(
         breakdown.headline_suppression_reason = verdict.reason
 
 
+def _apply_closed_perp_primitive_headline(
+    breakdown: PnLBreakdown,
+    metrics: Any,
+    snapshot: Any,
+    ledger_entries: list,
+) -> None:
+    """Suppress the headline for a fully-closed perp-primitive deployment (VIB-5952).
+
+    The perp analog of the VIB-4975 leveraged-lending and VIB-5788 swap-primitive
+    *closed* states: a perp strategy that returned its committed collateral to
+    wallet cash on close/teardown has ``total_value_usd`` collapsed to ~0
+    (VIB-3614 position scope) while ``initial_value_usd`` still reflects the
+    committed collateral, so the verbatim headline reads ≈ −initial (a false
+    near-total loss). On GMX the keeper-executed settlement transfer lands
+    outside the strategy's tx set, so the capital-flow classifier cannot net the
+    returned collateral — when the flows come back measured-zero (VIB-5866 does
+    not catch that case) the headline renders the confident-wrong −initial.
+    Recovering the true ≈ −gas number needs the schema-gated strategy-attributed
+    wallet baseline (VIB-4976 / VIB-4927); until then suppress, matching the two
+    sibling fixes.
+
+    Runs AFTER ``_apply_leveraged_lending_headline`` and
+    ``_apply_closed_swap_primitive_headline`` and no-ops when an earlier verdict
+    already scoped the headline.
+    """
+    if breakdown.headline_suppressed or breakdown.headline_leverage_adjusted:
+        return
+    verdict = detect_closed_perp_primitive(snapshot, ledger_entries, metrics)
+    if verdict.suppressed:
+        breakdown.headline_suppressed = True
+        breakdown.headline_suppression_reason = verdict.reason
+
+
 def _compute_gas(breakdown: PnLBreakdown, metrics: Any, ledger_entries: list) -> int:
     """Gas (sum across ledger). Returns ``measured_gas_count``.
 
@@ -1084,6 +1120,15 @@ def compute_pnl_breakdown(
     # print a confident-wrong near-total loss. No-ops when leveraged already
     # scoped the headline.
     _apply_closed_swap_primitive_headline(breakdown, metrics, snapshot, ledger_entries)
+    # VIB-5952: perp-primitive analog of the leveraged / swap closed cases — a
+    # perp strategy that returned its committed collateral to wallet cash on
+    # close/teardown has total_value_usd collapsed to ~0 while initial_value_usd
+    # reflects the committed collateral, so the verbatim headline reads ≈
+    # −initial. The GMX keeper settlement lands outside the strategy's tx set, so
+    # the capital-flow classifier cannot net the returned collateral; when the
+    # flows come back measured-zero the headline is confidently wrong. Suppress
+    # it (mirrors VIB-4975 / VIB-5788). No-ops when an earlier verdict scoped it.
+    _apply_closed_perp_primitive_headline(breakdown, metrics, snapshot, ledger_entries)
     measured_gas_count = _compute_gas(breakdown, metrics, ledger_entries)
     _compute_slippage(breakdown, ledger_entries)
     _compute_trade_stats(breakdown, ledger_entries)
