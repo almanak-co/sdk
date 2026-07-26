@@ -225,7 +225,10 @@ MORPHO_MARKETS: dict[str, dict[str, dict[str, Any]]] = {
             "irm": "0x870aC11D48B15DB9a138Cf899d20F13F79Ba00BC",
             "lltv": 915000000000000000,  # 91.5%
         },
-        # weETH/WETH market (90% LLTV) - ether.fi wrapped ETH
+        # weETH/WETH market (86% LLTV) - ether.fi wrapped ETH.
+        # VIB-5985: LLTV corrected from a stored 90% to the on-chain 86%
+        # (verified 2026-07-25 via idToMarketParams — the recompute-and-compare
+        # this PR adds rejected the old value, since keccak(params@90%) != this id).
         "0x698fe98247a40c5771537b5786b2f3f9d78eb487b4ce4d75533cd0e94d88a115": {
             "name": "weETH/WETH",
             "loan_token": "WETH",
@@ -234,7 +237,7 @@ MORPHO_MARKETS: dict[str, dict[str, dict[str, Any]]] = {
             "collateral_token_address": "0xCd5fE23C85820F7B72D0926FC9b05b43E359b7ee",
             "oracle": "0x3fa58b74e9a8eA8768eb33c8453e9C2Ed089A40a",
             "irm": "0x870aC11D48B15DB9a138Cf899d20F13F79Ba00BC",
-            "lltv": 900000000000000000,  # 90%
+            "lltv": 860000000000000000,  # 86% (on-chain verified)
         },
         # ezETH/WETH market (86% LLTV) - Renzo restaked ETH
         "0x49bb2d114be9041a787432952927f6f144f05ad3e83196a7d062f374ee11d0ee": {

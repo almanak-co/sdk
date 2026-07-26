@@ -90,6 +90,60 @@ PT_PRICE_CONFIDENCE_BAND_ESTIMATED: PtPriceConfidenceBand.ValueType  # 2
 PT_PRICE_CONFIDENCE_BAND_UNAVAILABLE: PtPriceConfidenceBand.ValueType  # 3
 Global___PtPriceConfidenceBand: _TypeAlias = PtPriceConfidenceBand  # noqa: Y015
 
+class _LendingMarketKind:
+    ValueType = _typing.NewType("ValueType", _builtins.int)
+    V: _TypeAlias = ValueType  # noqa: Y015
+
+class _LendingMarketKindEnumTypeWrapper(_enum_type_wrapper._EnumTypeWrapper[_LendingMarketKind.ValueType], _builtins.type):
+    DESCRIPTOR: _descriptor.EnumDescriptor
+    LENDING_MARKET_KIND_UNSPECIFIED: _LendingMarketKind.ValueType  # 0
+    LENDING_MARKET_KIND_POOLED_RESERVE: _LendingMarketKind.ValueType  # 1
+    """Aave-style shared reserve"""
+    LENDING_MARKET_KIND_ISOLATED_PAIR: _LendingMarketKind.ValueType  # 2
+    """Morpho-style isolated collateral↔loan pair"""
+    LENDING_MARKET_KIND_LENDING_VAULT: _LendingMarketKind.ValueType  # 3
+    """MetaMorpho-style depositor vault"""
+
+class LendingMarketKind(_LendingMarketKind, metaclass=_LendingMarketKindEnumTypeWrapper):
+    """-----------------------------------------------------------------------------
+    VIB-5985 — verified lending-market resolution
+    -----------------------------------------------------------------------------
+
+    Market topology discriminator. UNSPECIFIED=0 so an old gateway that never
+    sets it decodes as "unknown", not a fabricated pooled reserve.
+    """
+
+LENDING_MARKET_KIND_UNSPECIFIED: LendingMarketKind.ValueType  # 0
+LENDING_MARKET_KIND_POOLED_RESERVE: LendingMarketKind.ValueType  # 1
+"""Aave-style shared reserve"""
+LENDING_MARKET_KIND_ISOLATED_PAIR: LendingMarketKind.ValueType  # 2
+"""Morpho-style isolated collateral↔loan pair"""
+LENDING_MARKET_KIND_LENDING_VAULT: LendingMarketKind.ValueType  # 3
+"""MetaMorpho-style depositor vault"""
+Global___LendingMarketKind: _TypeAlias = LendingMarketKind  # noqa: Y015
+
+class _LendingMarketSource:
+    ValueType = _typing.NewType("ValueType", _builtins.int)
+    V: _TypeAlias = ValueType  # noqa: Y015
+
+class _LendingMarketSourceEnumTypeWrapper(_enum_type_wrapper._EnumTypeWrapper[_LendingMarketSource.ValueType], _builtins.type):
+    DESCRIPTOR: _descriptor.EnumDescriptor
+    LENDING_MARKET_SOURCE_UNSPECIFIED: _LendingMarketSource.ValueType  # 0
+    LENDING_MARKET_SOURCE_CURATED_CATALOG: _LendingMarketSource.ValueType  # 1
+    LENDING_MARKET_SOURCE_ONCHAIN_VERIFY: _LendingMarketSource.ValueType  # 2
+
+class LendingMarketSource(_LendingMarketSource, metaclass=_LendingMarketSourceEnumTypeWrapper):
+    """Provenance of a LendingMarket record. UNSPECIFIED=0 (old gateway → treat as
+    unverified). CURATED_CATALOG = candidate from the connector's curated
+    catalog, NOT on-chain verified. ONCHAIN_VERIFY = params read on-chain and the
+    market id recomputed + matched.
+    """
+
+LENDING_MARKET_SOURCE_UNSPECIFIED: LendingMarketSource.ValueType  # 0
+LENDING_MARKET_SOURCE_CURATED_CATALOG: LendingMarketSource.ValueType  # 1
+LENDING_MARKET_SOURCE_ONCHAIN_VERIFY: LendingMarketSource.ValueType  # 2
+Global___LendingMarketSource: _TypeAlias = LendingMarketSource  # noqa: Y015
+
 class _AccountingBackendStatus:
     ValueType = _typing.NewType("ValueType", _builtins.int)
     V: _TypeAlias = ValueType  # noqa: Y015
@@ -1028,6 +1082,198 @@ class LookupV4PoolKeyResponse(_message.Message):
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___LookupV4PoolKeyResponse: _TypeAlias = LookupV4PoolKeyResponse  # noqa: Y015
+
+@_typing.final
+class LendingMarket(_message.Message):
+    """A single lending market. Generic across protocols via ``kind``; Morpho markets
+    are ISOLATED_PAIR. Empty ≠ Zero on the wire: string fields are ABSENT (empty)
+    when unresolvable/not-applicable, NEVER fabricated. ``lltv_bps`` is always a
+    measured value (from catalog or on-chain), so it is a plain int.
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    KIND_FIELD_NUMBER: _builtins.int
+    PROTOCOL_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    MARKET_ID_FIELD_NUMBER: _builtins.int
+    COLLATERAL_TOKEN_FIELD_NUMBER: _builtins.int
+    COLLATERAL_SYMBOL_FIELD_NUMBER: _builtins.int
+    LOAN_TOKEN_FIELD_NUMBER: _builtins.int
+    LOAN_SYMBOL_FIELD_NUMBER: _builtins.int
+    LLTV_BPS_FIELD_NUMBER: _builtins.int
+    ORACLE_FIELD_NUMBER: _builtins.int
+    IRM_FIELD_NUMBER: _builtins.int
+    VERIFIED_FIELD_NUMBER: _builtins.int
+    SOURCE_FIELD_NUMBER: _builtins.int
+    kind: Global___LendingMarketKind.ValueType
+    protocol: _builtins.str
+    chain: _builtins.str
+    market_id: _builtins.str
+    """bytes32 hex (0x…), the market identity + join key"""
+    collateral_token: _builtins.str
+    """collateral address (lowercased 0x…); ABSENT if n/a"""
+    collateral_symbol: _builtins.str
+    """ABSENT when unresolvable — never fabricated"""
+    loan_token: _builtins.str
+    """loan/borrow address (lowercased 0x…)"""
+    loan_symbol: _builtins.str
+    """ABSENT when unresolvable — never fabricated"""
+    lltv_bps: _builtins.int
+    """liquidation LTV in basis points (9150 = 91.5%)"""
+    oracle: _builtins.str
+    """oracle address"""
+    irm: _builtins.str
+    """interest-rate-model address"""
+    verified: _builtins.bool
+    """TRUE only after an on-chain idToMarketParams read whose recomputed id
+    matches ``market_id``. Catalog candidates are FALSE.
+    """
+    source: Global___LendingMarketSource.ValueType
+    def __init__(
+        self,
+        *,
+        kind: Global___LendingMarketKind.ValueType = ...,
+        protocol: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        market_id: _builtins.str = ...,
+        collateral_token: _builtins.str = ...,
+        collateral_symbol: _builtins.str = ...,
+        loan_token: _builtins.str = ...,
+        loan_symbol: _builtins.str = ...,
+        lltv_bps: _builtins.int = ...,
+        oracle: _builtins.str = ...,
+        irm: _builtins.str = ...,
+        verified: _builtins.bool = ...,
+        source: Global___LendingMarketSource.ValueType = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "collateral_symbol", b"collateral_symbol", "collateral_token", b"collateral_token", "irm", b"irm", "kind", b"kind", "lltv_bps", b"lltv_bps", "loan_symbol", b"loan_symbol", "loan_token", b"loan_token", "market_id", b"market_id", "oracle", b"oracle", "protocol", b"protocol", "source", b"source", "verified", b"verified"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___LendingMarket: _TypeAlias = LendingMarket  # noqa: Y015
+
+@_typing.final
+class ListLendingMarketsRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    PROTOCOL_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    COLLATERAL_TOKEN_FIELD_NUMBER: _builtins.int
+    LOAN_TOKEN_FIELD_NUMBER: _builtins.int
+    LLTV_BPS_FIELD_NUMBER: _builtins.int
+    PAGE_SIZE_FIELD_NUMBER: _builtins.int
+    PAGE_TOKEN_FIELD_NUMBER: _builtins.int
+    protocol: _builtins.str
+    """connector slug (e.g. "morpho_blue")"""
+    chain: _builtins.str
+    collateral_token: _builtins.str
+    """symbol OR address; resolved to address before matching; empty = no filter"""
+    loan_token: _builtins.str
+    """symbol OR address; resolved to address before matching; empty = no filter"""
+    lltv_bps: _builtins.int
+    """exact LLTV filter in bps; 0 = no filter"""
+    page_size: _builtins.int
+    """page size; 0 = server default"""
+    page_token: _builtins.str
+    """opaque continuation token; empty = first page"""
+    def __init__(
+        self,
+        *,
+        protocol: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        collateral_token: _builtins.str = ...,
+        loan_token: _builtins.str = ...,
+        lltv_bps: _builtins.int = ...,
+        page_size: _builtins.int = ...,
+        page_token: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "collateral_token", b"collateral_token", "lltv_bps", b"lltv_bps", "loan_token", b"loan_token", "page_size", b"page_size", "page_token", b"page_token", "protocol", b"protocol"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___ListLendingMarketsRequest: _TypeAlias = ListLendingMarketsRequest  # noqa: Y015
+
+@_typing.final
+class ListLendingMarketsResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    MARKETS_FIELD_NUMBER: _builtins.int
+    NEXT_PAGE_TOKEN_FIELD_NUMBER: _builtins.int
+    TOTAL_MATCHES_FIELD_NUMBER: _builtins.int
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    next_page_token: _builtins.str
+    """empty when this is the last page"""
+    total_matches: _builtins.int
+    """total matches across all pages (informational)"""
+    success: _builtins.bool
+    error: _builtins.str
+    @_builtins.property
+    def markets(self) -> _containers.RepeatedCompositeFieldContainer[Global___LendingMarket]:
+        """ALL matches on this page; NEVER auto-ranked/auto-picked"""
+
+    def __init__(
+        self,
+        *,
+        markets: _abc.Iterable[Global___LendingMarket] | None = ...,
+        next_page_token: _builtins.str = ...,
+        total_matches: _builtins.int = ...,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "markets", b"markets", "next_page_token", b"next_page_token", "success", b"success", "total_matches", b"total_matches"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___ListLendingMarketsResponse: _TypeAlias = ListLendingMarketsResponse  # noqa: Y015
+
+@_typing.final
+class GetLendingMarketRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    PROTOCOL_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    MARKET_ID_FIELD_NUMBER: _builtins.int
+    protocol: _builtins.str
+    chain: _builtins.str
+    market_id: _builtins.str
+    """exact bytes32 hex to verify on-chain"""
+    def __init__(
+        self,
+        *,
+        protocol: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        market_id: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "market_id", b"market_id", "protocol", b"protocol"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetLendingMarketRequest: _TypeAlias = GetLendingMarketRequest  # noqa: Y015
+
+@_typing.final
+class LendingMarketResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    MARKET_FIELD_NUMBER: _builtins.int
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    success: _builtins.bool
+    error: _builtins.str
+    @_builtins.property
+    def market(self) -> Global___LendingMarket:
+        """populated only when success && verified"""
+
+    def __init__(
+        self,
+        *,
+        market: Global___LendingMarket | None = ...,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _HasFieldArgType: _TypeAlias = _typing.Literal["market", b"market"]  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "market", b"market", "success", b"success"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___LendingMarketResponse: _TypeAlias = LendingMarketResponse  # noqa: Y015
 
 @_typing.final
 class LoadStateRequest(_message.Message):

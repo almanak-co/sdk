@@ -44,6 +44,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -199,6 +200,26 @@ class _GatewayNativeRpc:
         # The reader does ``json.loads(resp.result)`` and expects a hex string,
         # mirroring how the real gateway encodes RpcResponse.result.
         return _RpcResult(success=True, result=json.dumps(hex_result), error="")
+
+
+def build_gateway_eth_call(
+    *,
+    chain: str,
+    network: str,
+    request_timeout: float = GATEWAY_PT_RPC_TIMEOUT_SECONDS,
+) -> Callable[[str, str], Awaitable[str]]:
+    """Return an async ``eth_call(to, data) -> hex`` on the gateway's audited egress.
+
+    A reusable, non-PT-specific seam over the SAME audited async ``aiohttp``
+    transport :class:`GatewayPtRpcClient` uses (:class:`_NativeEthCall`). Callers
+    that need a bare gateway-side ``eth_call`` — e.g. the VIB-5985 verified
+    lending-market resolution injecting a transport into a connector's
+    ``verify_lending_market`` — get it here rather than instantiating a raw
+    ``Web3(HTTPProvider(...))`` (forbidden on the perimeter) or duplicating the
+    JSON-RPC handling. The returned coroutine raises :class:`GatewayPtRpcError`
+    on missing RPC URL / HTTP error / JSON-RPC error / empty result.
+    """
+    return _NativeEthCall(chain=chain, network=network, request_timeout=request_timeout).eth_call
 
 
 class GatewayPtRpcClient:

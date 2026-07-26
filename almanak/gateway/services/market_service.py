@@ -17,8 +17,16 @@ from typing import Any
 import grpc
 
 from almanak.connectors._base.gateway_capabilities import (
+    LENDING_MARKET_KIND_ISOLATED_PAIR,
+    LENDING_MARKET_KIND_LENDING_VAULT,
+    LENDING_MARKET_KIND_POOLED_RESERVE,
+    LENDING_MARKET_SOURCE_CURATED_CATALOG,
+    LENDING_MARKET_SOURCE_ONCHAIN_VERIFY,
+    GatewayLendingMarketDiscoveryCapability,
     GatewayOraclePriceCapability,
     GatewayPoolKeyCacheCapability,
+    LendingMarketRecord,
+    LendingMarketVerificationError,
     PoolKeyCacheError,
     PoolKeyCacheProtocol,
 )
@@ -38,6 +46,12 @@ from almanak.gateway.validation import (
 
 # Pattern for detecting EVM contract addresses in price requests.
 _EVM_ADDRESS_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
+
+# VIB-5985 — a Morpho market id is ALWAYS a 32-byte bytes32 (exactly 64 hex
+# chars, 0x-prefixed). Validating the shape up front classifies a malformed id
+# as an INVALID_ARGUMENT caller bug rather than letting it become malformed
+# calldata (→ UNAVAILABLE, looks retryable) or fail only at recompute-mismatch.
+_MARKET_ID_RE = re.compile(r"^0x[0-9a-fA-F]{64}$")
 
 # Sentinel map key for a gateway started WITHOUT --chains (CoinGecko-only
 # aggregator). Pricing is keyed by chain in ``_price_aggregators`` (VIB-5651);
@@ -424,6 +438,43 @@ def _build_pt_price_response(
     )
 
 
+# VIB-5985 — lending-market discovery pagination bounds.
+_DEFAULT_LENDING_PAGE_SIZE = 50
+_MAX_LENDING_PAGE_SIZE = 200
+
+# Map the connector-neutral ``LendingMarketRecord`` string enums to their proto
+# counterparts. Kept as explicit dicts (not name-munging) so a renamed constant
+# fails loudly at import rather than silently mapping to UNSPECIFIED.
+_LENDING_MARKET_KIND_TO_PROTO = {
+    LENDING_MARKET_KIND_POOLED_RESERVE: gateway_pb2.LENDING_MARKET_KIND_POOLED_RESERVE,
+    LENDING_MARKET_KIND_ISOLATED_PAIR: gateway_pb2.LENDING_MARKET_KIND_ISOLATED_PAIR,
+    LENDING_MARKET_KIND_LENDING_VAULT: gateway_pb2.LENDING_MARKET_KIND_LENDING_VAULT,
+}
+_LENDING_MARKET_SOURCE_TO_PROTO = {
+    LENDING_MARKET_SOURCE_CURATED_CATALOG: gateway_pb2.LENDING_MARKET_SOURCE_CURATED_CATALOG,
+    LENDING_MARKET_SOURCE_ONCHAIN_VERIFY: gateway_pb2.LENDING_MARKET_SOURCE_ONCHAIN_VERIFY,
+}
+
+
+def _lending_market_to_proto(record: LendingMarketRecord) -> gateway_pb2.LendingMarket:
+    """Map a connector-neutral ``LendingMarketRecord`` to the wire message."""
+    return gateway_pb2.LendingMarket(
+        kind=_LENDING_MARKET_KIND_TO_PROTO.get(record.kind, gateway_pb2.LENDING_MARKET_KIND_UNSPECIFIED),
+        protocol=record.protocol,
+        chain=record.chain,
+        market_id=record.market_id,
+        collateral_token=record.collateral_token,
+        collateral_symbol=record.collateral_symbol,
+        loan_token=record.loan_token,
+        loan_symbol=record.loan_symbol,
+        lltv_bps=record.lltv_bps,
+        oracle=record.oracle,
+        irm=record.irm,
+        verified=record.verified,
+        source=_LENDING_MARKET_SOURCE_TO_PROTO.get(record.source, gateway_pb2.LENDING_MARKET_SOURCE_UNSPECIFIED),
+    )
+
+
 class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
     """Implements MarketService gRPC interface.
 
@@ -481,6 +532,12 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         # first — discarding any in-flight backfill progress.
         self._pool_key_cache: PoolKeyCacheProtocol | None = None
         self._pool_key_cache_lock = asyncio.Lock()
+        # VIB-5985 — lending-market discovery providers, keyed by protocol slug.
+        # Built lazily on first ListLendingMarkets / GetLendingMarket from the
+        # gateway registry (structural capability dispatch — no protocol branches
+        # here). ``None`` until first use so construction order vs. connector
+        # registration cannot matter.
+        self._lending_market_discovery_providers: dict[str, GatewayLendingMarketDiscoveryCapability] | None = None
 
     # Class-level default so a servicer built via ``__new__`` (some unit tests
     # skip ``__init__`` and inject ``_price_aggregator`` directly to mock the
@@ -2190,4 +2247,229 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
                 hooks=cached.hooks,
             ),
             chain=chain,
+        )
+
+    # ---------------------------------------------------------------------
+    # VIB-5985 — verified lending-market resolution
+    # ---------------------------------------------------------------------
+
+    def _lending_discovery_providers(self) -> dict[str, GatewayLendingMarketDiscoveryCapability]:
+        """Lazily build the protocol-slug → discovery-provider dispatch map.
+
+        Structural capability dispatch (no protocol branches): every connector
+        implementing ``GatewayLendingMarketDiscoveryCapability`` is discovered
+        from the registry once and keyed by its ``protocol`` slug. A duplicate
+        slug is a wiring bug and raises loudly, matching ``RateHistoryService``.
+        """
+        providers = self._lending_market_discovery_providers
+        if providers is None:
+            providers = {}
+            for conn in GATEWAY_REGISTRY.capability_providers(GatewayLendingMarketDiscoveryCapability):  # type: ignore[type-abstract]
+                slug = str(getattr(conn, "protocol", "")).lower()
+                existing = providers.get(slug)
+                if existing is not None and existing is not conn:
+                    raise RuntimeError(
+                        f"Duplicate lending-market-discovery provider for protocol {slug!r}: "
+                        f"{type(existing).__qualname__} vs {type(conn).__qualname__}"
+                    )
+                providers[slug] = conn
+            self._lending_market_discovery_providers = providers
+        return providers
+
+    def _resolve_discovery_provider(
+        self,
+        protocol: str,
+        chain: str,
+        context: grpc.aio.ServicerContext,
+    ) -> GatewayLendingMarketDiscoveryCapability | None:
+        """Resolve + chain-check a discovery provider, or set INVALID_ARGUMENT and return None."""
+        providers = self._lending_discovery_providers()
+        provider = providers.get(protocol)
+        if provider is None:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(f"unsupported protocol: {protocol!r} (known: {sorted(providers)})")
+            return None
+        if chain not in provider.lending_market_discovery_chains():
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(
+                f"protocol {protocol!r} does not support chain {chain!r} "
+                f"(supports: {sorted(provider.lending_market_discovery_chains())})"
+            )
+            return None
+        return provider
+
+    @staticmethod
+    def _resolve_list_page_bounds(
+        request: gateway_pb2.ListLendingMarketsRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tuple[int, int] | None:
+        """Resolve (offset, page_size) for a ListLendingMarkets request.
+
+        Returns ``None`` after setting ``INVALID_ARGUMENT`` on a malformed /
+        negative ``page_token``. ``page_size`` defaults and is capped to the
+        server bounds.
+        """
+        page_size = request.page_size if request.page_size > 0 else _DEFAULT_LENDING_PAGE_SIZE
+        page_size = min(page_size, _MAX_LENDING_PAGE_SIZE)
+        if not request.page_token:
+            return 0, page_size
+        try:
+            offset = int(request.page_token)
+        except ValueError:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(f"invalid page_token: {request.page_token!r}")
+            return None
+        if offset < 0:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(f"page_token must be non-negative, got {offset}")
+            return None
+        return offset, page_size
+
+    async def ListLendingMarkets(
+        self,
+        request: gateway_pb2.ListLendingMarketsRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.ListLendingMarketsResponse:
+        """List ALL catalog candidate markets matching the filters (VIB-5985).
+
+        Offline curated-catalog listing dispatched by protocol slug. NEVER ranks
+        or auto-picks — the caller receives every match (paginated) and chooses.
+        Token filters are address-resolved before matching. Candidates are
+        ``verified=False`` / ``source=CURATED_CATALOG``.
+        """
+        protocol = (request.protocol or "").strip().lower()
+        chain = (request.chain or "").strip().lower()
+        if not protocol:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("protocol is required")
+            return gateway_pb2.ListLendingMarketsResponse(success=False, error="protocol is required")
+        if not chain:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("chain is required")
+            return gateway_pb2.ListLendingMarketsResponse(success=False, error="chain is required")
+
+        provider = self._resolve_discovery_provider(protocol, chain, context)
+        if provider is None:
+            return gateway_pb2.ListLendingMarketsResponse(success=False, error=context.details() or "unsupported")
+
+        bounds = self._resolve_list_page_bounds(request, context)
+        if bounds is None:
+            return gateway_pb2.ListLendingMarketsResponse(
+                success=False, error=context.details() or "invalid page_token"
+            )
+        offset, page_size = bounds
+
+        try:
+            records = provider.list_lending_markets(
+                chain=chain,
+                collateral_token=request.collateral_token or None,
+                loan_token=request.loan_token or None,
+                lltv_bps=request.lltv_bps or None,
+            )
+        except ValueError as e:
+            # Unresolvable token filter — an explicit caller error, not empty match.
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return gateway_pb2.ListLendingMarketsResponse(success=False, error=str(e))
+        except Exception:
+            # Sanitized client-visible message — the raw exception can embed the
+            # RPC target address / upstream HTTP body (e.g. GatewayPtRpcError), so
+            # keep full detail in the gateway log and hand the caller a fixed
+            # string (matching the LookupV4PoolKey convention). The caller-
+            # actionable ValueError path above keeps its own (self-authored) detail.
+            logger.exception("ListLendingMarkets failed for %s/%s", protocol, chain)
+            msg = "internal error listing lending markets; see gateway logs"
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(msg)
+            return gateway_pb2.ListLendingMarketsResponse(success=False, error=msg)
+
+        total = len(records)
+        page = records[offset : offset + page_size]
+        next_token = str(offset + page_size) if offset + page_size < total else ""
+        return gateway_pb2.ListLendingMarketsResponse(
+            markets=[_lending_market_to_proto(r) for r in page],
+            next_page_token=next_token,
+            total_matches=total,
+            success=True,
+        )
+
+    async def GetLendingMarket(
+        self,
+        request: gateway_pb2.GetLendingMarketRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.LendingMarketResponse:
+        """Verify one exact market id on-chain (VIB-5985).
+
+        Reads ``idToMarketParams(id)`` through the gateway's audited eth_call,
+        recomputes the market id from the returned params and compares. Returns a
+        ``verified=True`` market only on a match; a recompute mismatch is a hard
+        error and a non-existent market is NOT_FOUND — never a fabricated record.
+        """
+        from almanak.gateway.services.pt_rpc_adapter import build_gateway_eth_call
+
+        protocol = (request.protocol or "").strip().lower()
+        chain = (request.chain or "").strip().lower()
+        market_id = (request.market_id or "").strip()
+        if not protocol:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("protocol is required")
+            return gateway_pb2.LendingMarketResponse(success=False, error="protocol is required")
+        if not chain:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("chain is required")
+            return gateway_pb2.LendingMarketResponse(success=False, error="chain is required")
+        if not market_id:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("market_id is required")
+            return gateway_pb2.LendingMarketResponse(success=False, error="market_id is required")
+        if not _MARKET_ID_RE.match(market_id):
+            # A market id is a 32-byte bytes32 — reject anything else as a caller
+            # bug up front rather than letting a non-hex id become malformed
+            # calldata (surfaces as UNAVAILABLE, misleadingly retryable) or an
+            # over-length id fail only at recompute-mismatch.
+            msg = f"invalid market_id {market_id!r}: expected a 0x-prefixed 32-byte hex string (^0x[0-9a-fA-F]{{64}}$)"
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(msg)
+            return gateway_pb2.LendingMarketResponse(success=False, error=msg)
+
+        provider = self._resolve_discovery_provider(protocol, chain, context)
+        if provider is None:
+            return gateway_pb2.LendingMarketResponse(success=False, error=context.details() or "unsupported")
+
+        eth_call = build_gateway_eth_call(chain=chain, network=self.settings.network)
+        try:
+            record = await provider.verify_lending_market(
+                chain=chain,
+                market_id=market_id,
+                eth_call=eth_call,
+            )
+        except LendingMarketVerificationError as e:
+            # Loud verification failure — a returned id that does not hash to its
+            # on-chain params. NEVER promote it into a config.
+            logger.warning("GetLendingMarket verification failed for %s/%s/%s: %s", protocol, chain, market_id, e)
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return gateway_pb2.LendingMarketResponse(success=False, error=str(e))
+        except Exception:
+            # Sanitized client-visible message — the raw exception (e.g. a
+            # GatewayPtRpcError) can embed the RPC target address / upstream HTTP
+            # body, so keep full detail in the gateway log only. The deliberately
+            # caller-actionable paths keep their detail: LendingMarketVerificationError
+            # above (recompute mismatch / malformed payload) and the NOT_FOUND /
+            # INVALID_ARGUMENT messages below/above.
+            logger.exception("GetLendingMarket failed for %s/%s/%s", protocol, chain, market_id)
+            msg = "lending-market verification unavailable; see gateway logs"
+            context.set_code(grpc.StatusCode.UNAVAILABLE)
+            context.set_details(msg)
+            return gateway_pb2.LendingMarketResponse(success=False, error=msg)
+
+        if record is None:
+            msg = f"market {market_id} does not exist on {protocol}/{chain}"
+            context.set_code(grpc.StatusCode.NOT_FOUND)
+            context.set_details(msg)
+            return gateway_pb2.LendingMarketResponse(success=False, error=msg)
+
+        return gateway_pb2.LendingMarketResponse(
+            market=_lending_market_to_proto(record),
+            success=True,
         )

@@ -7,7 +7,7 @@ This document describes the gRPC API exposed by the Almanak Gateway.
 | Service | Methods | Description |
 |---------|---------|-------------|
 | Health | 3 | Standard gRPC health checks and chain registration |
-| MarketService | 6 | Price data, Pendle PT/YT-USD price, balances, batch balances, technical indicators, and Uniswap V4 pool key lookup |
+| MarketService | 8 | Price data, Pendle PT/YT-USD price, balances, batch balances, technical indicators, Uniswap V4 pool key lookup, and verified lending-market resolution |
 | StateService | 30 | Strategy state persistence, portfolio snapshots/metrics, transaction ledger, accounting events, position events, accounting outbox, atomic ledger+registry writes, and cutover migration state |
 | ExecutionService | 3 | Intent compilation and transaction execution |
 | ObserveService | 4 | Logging, alerts, metrics, and timeline events |
@@ -248,6 +248,83 @@ Resolve a Uniswap V4 `bytes32` pool id back to its structured `PoolKey`. Useful 
 
 ```protobuf
 rpc LookupV4PoolKey(LookupV4PoolKeyRequest) returns (LookupV4PoolKeyResponse)
+```
+
+### ListLendingMarkets
+
+Verified lending-market resolution (VIB-5985), Morpho-first via the connector-owned `GatewayLendingMarketDiscoveryCapability` — no protocol branches in the servicer; an unsupported protocol returns `INVALID_ARGUMENT` listing the supported ones. Returns ALL curated-catalog CANDIDATES matching the filters (paginated). It NEVER ranks or auto-picks: zero matches is an explicit empty page the caller must treat as an error to act on, and multiple matches means the caller chooses. Token filters are address-resolved before matching (symbols are spoofable). Candidate records are `verified=false` / `source=CURATED_CATALOG` — the curated catalog is a candidate source, not proof; verify a chosen id with `GetLendingMarket` before pinning it into a config.
+
+```protobuf
+rpc ListLendingMarkets(ListLendingMarketsRequest) returns (ListLendingMarketsResponse)
+```
+
+**Request:**
+```protobuf
+message ListLendingMarketsRequest {
+  string protocol = 1;          // connector slug (e.g. "morpho_blue")
+  string chain = 2;
+  string collateral_token = 3;  // symbol OR address; empty = no filter
+  string loan_token = 4;        // symbol OR address; empty = no filter
+  int64 lltv_bps = 5;           // exact LLTV filter in bps; 0 = no filter
+  int32 page_size = 6;          // 0 = server default
+  string page_token = 7;        // opaque continuation token; empty = first page
+}
+```
+
+**Response:**
+```protobuf
+message ListLendingMarketsResponse {
+  repeated LendingMarket markets = 1;  // ALL matches on this page; never auto-ranked
+  string next_page_token = 2;          // empty when this is the last page
+  int32 total_matches = 3;             // total matches across all pages
+  bool success = 4;
+  string error = 5;
+}
+```
+
+### GetLendingMarket
+
+Verifies one exact `market_id` on-chain. The gateway reads `idToMarketParams(id)` through its own RPC path, RECOMPUTES the market id from the returned params (keccak of the params tuple, exactly as the protocol defines it) and compares it to the requested id. Only a match returns `verified=true` / `source=ONCHAIN_VERIFY`; a recompute mismatch is a hard `INVALID_ARGUMENT` error and a non-existent market is `NOT_FOUND` — never a fabricated record. This is the only surface that may promote a `market_id` into a config. Immutable market params only (tokens, oracle, IRM, LLTV) — live supply/borrow state is out of scope.
+
+```protobuf
+rpc GetLendingMarket(GetLendingMarketRequest) returns (LendingMarketResponse)
+```
+
+**Request:**
+```protobuf
+message GetLendingMarketRequest {
+  string protocol = 1;
+  string chain = 2;
+  string market_id = 3;  // exact bytes32 hex to verify on-chain
+}
+```
+
+**Response:**
+```protobuf
+message LendingMarketResponse {
+  LendingMarket market = 1;  // populated only when success && verified
+  bool success = 2;
+  string error = 3;
+}
+```
+
+The shared `LendingMarket` message (Empty ≠ Zero: string fields absent when unresolvable, never fabricated):
+```protobuf
+message LendingMarket {
+  LendingMarketKind kind = 1;    // Morpho = ISOLATED_PAIR
+  string protocol = 2;
+  string chain = 3;
+  string market_id = 4;
+  string collateral_token = 5;   // address; absent if n/a
+  string collateral_symbol = 6;  // absent when unresolvable
+  string loan_token = 7;
+  string loan_symbol = 8;
+  int64 lltv_bps = 9;            // 9150 = 91.5%
+  string oracle = 10;
+  string irm = 11;
+  bool verified = 12;            // true only after on-chain recompute+compare
+  LendingMarketSource source = 13;
+}
 ```
 
 ## StateService

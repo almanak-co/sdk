@@ -46,12 +46,15 @@ from typing import Any, ClassVar
 
 from almanak.connectors._base.gateway_capabilities import (
     GatewayAddressCapability,
+    GatewayLendingMarketDiscoveryCapability,
     GatewayLendingRateHistoryCapability,
+    LendingMarketRecord,
 )
 from almanak.connectors._base.gateway_connector import GatewayConnector
 from almanak.connectors._base.types import ProtocolKind, ProtocolName
 
 from ..addresses import MORPHO_BLUE, MORPHO_MARKETS
+from . import market_discovery
 
 logger = logging.getLogger(__name__)
 
@@ -307,6 +310,7 @@ class MorphoBlueGatewayConnector(
     GatewayConnector,
     GatewayAddressCapability,
     GatewayLendingRateHistoryCapability,
+    GatewayLendingMarketDiscoveryCapability,
 ):
     """Gateway-side connector for Morpho Blue."""
 
@@ -483,6 +487,44 @@ class MorphoBlueGatewayConnector(
         raise RateHistoryUnavailable(
             "morpho_blue",
             "lending-history surface lands once the framework consumer rewrite ships (W7 step 4)",
+        )
+
+    # ---------------------------------------------------------------------
+    # GatewayLendingMarketDiscoveryCapability (VIB-5985)
+    # ---------------------------------------------------------------------
+
+    def lending_market_discovery_chains(self) -> frozenset[str]:
+        """Chains for which Morpho markets are resolvable (curated-catalogue keys)."""
+        return market_discovery.morpho_discovery_chains()
+
+    def list_lending_markets(
+        self,
+        *,
+        chain: str,
+        collateral_token: str | None = None,
+        loan_token: str | None = None,
+        lltv_bps: int | None = None,
+    ) -> list[LendingMarketRecord]:
+        """Offline candidate listing from the curated ``MORPHO_MARKETS`` catalogue."""
+        return market_discovery.list_morpho_markets(
+            chain=chain,
+            collateral_token=collateral_token,
+            loan_token=loan_token,
+            lltv_bps=lltv_bps,
+        )
+
+    async def verify_lending_market(
+        self,
+        *,
+        chain: str,
+        market_id: str,
+        eth_call: Any,
+    ) -> LendingMarketRecord | None:
+        """On-chain verify one Morpho market id via the gateway-supplied eth_call."""
+        return await market_discovery.verify_morpho_market(
+            chain=chain,
+            market_id=market_id,
+            eth_call=eth_call,
         )
 
 

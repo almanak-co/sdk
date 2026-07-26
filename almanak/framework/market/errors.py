@@ -193,6 +193,22 @@ class LendingRateUnavailableError(MarketSnapshotError):
     _positional_fields = ("protocol", "token", "reason")
 
 
+class LendingMarketResolutionError(MarketSnapshotError):
+    """Verified lending-market resolution failed (VIB-5985).
+
+    Raised by ``MarketSnapshot.lending_markets`` / ``lending_market`` for a
+    transport failure, an unsupported protocol/chain, a not-found market, or —
+    critically — an on-chain verification MISMATCH. Not retryable: a mismatch or
+    unsupported protocol is a permanent contract error the caller must resolve,
+    not transiently retry. Zero candidates from ``lending_markets`` is NOT an
+    error (an empty list is returned); this error is for the fail-closed cases.
+    """
+
+    severity = "error"
+    retryable = False
+    _positional_fields = ("protocol", "reason")
+
+
 class LendingRateHistoryUnavailableError(MarketSnapshotError):
     severity = "warning"
     retryable = True

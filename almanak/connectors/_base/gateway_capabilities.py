@@ -743,6 +743,171 @@ class GatewayLendingRateHistoryCapability(Protocol):
     ) -> Any: ...
 
 
+# =============================================================================
+# VIB-5985 — GatewayLendingMarketDiscoveryCapability
+# =============================================================================
+#
+# Verified lending-market resolution. A permissionless lender (Morpho Blue is
+# the first) lets ANYONE deploy a market for the same token pair with a hostile
+# oracle / IRM and an attractive transient APY — so a market id may NEVER enter
+# a config on the strength of a symbol match or a catalog lookup alone. This
+# capability splits the two honest halves of the problem:
+#
+#   * ``list_lending_markets`` — offline CANDIDATE listing from the connector's
+#     curated catalog. Returns every match (the gateway paginates); it does NOT
+#     rank, score, or auto-pick. Records are ``verified=False`` /
+#     ``source="curated_catalog"``.
+#   * ``verify_lending_market`` — on-chain VERIFICATION of one exact id. Reads
+#     ``idToMarketParams(id)`` through a gateway-supplied eth_call, RECOMPUTES
+#     the market id from the returned params and compares. Only a match returns
+#     ``verified=True`` / ``source="onchain_verify"``; a recompute mismatch is a
+#     loud :class:`LendingMarketVerificationError`, never a silent record.
+#
+# ``LendingMarketRecord`` is the protocol-neutral hand-off the gateway servicer
+# maps to the ``LendingMarket`` proto envelope, exactly like
+# :class:`PrincipalTokenMarketRef`. Empty ≠ Zero: a field the connector cannot
+# resolve (e.g. an unknown token symbol) is the empty string, never fabricated.
+
+
+# String constants for ``LendingMarketRecord.kind`` — the gateway servicer maps
+# these to the ``LendingMarketKind`` proto enum. Morpho markets are isolated
+# pairs; the others exist so the contract stays generic for future lenders.
+LENDING_MARKET_KIND_POOLED_RESERVE = "pooled_reserve"
+LENDING_MARKET_KIND_ISOLATED_PAIR = "isolated_pair"
+LENDING_MARKET_KIND_LENDING_VAULT = "lending_vault"
+
+# String constants for ``LendingMarketRecord.source`` — mapped to the
+# ``LendingMarketSource`` proto enum by the servicer.
+LENDING_MARKET_SOURCE_CURATED_CATALOG = "curated_catalog"
+LENDING_MARKET_SOURCE_ONCHAIN_VERIFY = "onchain_verify"
+
+
+class LendingMarketVerificationError(Exception):
+    """On-chain verification of a lending market id failed.
+
+    Raised by :meth:`GatewayLendingMarketDiscoveryCapability.verify_lending_market`
+    when the id recomputed from the on-chain ``idToMarketParams`` params does NOT
+    equal the requested id (a compromised / wrong RPC, or a caller-supplied id
+    that does not hash to real params). The gateway servicer surfaces this as a
+    failed response — a verification failure must be loud, NEVER a silently
+    returned record. This is distinct from "market does not exist" (the connector
+    returns ``None`` for a not-created id, which the servicer maps to a not-found
+    error).
+    """
+
+
+@dataclass(frozen=True)
+class LendingMarketRecord:
+    """Protocol-neutral description of one lending market (VIB-5985).
+
+    Returned by :class:`GatewayLendingMarketDiscoveryCapability`. The gateway
+    servicer maps it to the ``LendingMarket`` proto message. Immutable market
+    params (tokens, oracle, IRM, LLTV) only — live supply/borrow/liquidity state
+    is deliberately out of scope for this capability (it is short-TTL and belongs
+    on the rate/analytics surfaces). ``lltv_bps`` is always measured.
+
+    Attributes:
+        kind: One of the ``LENDING_MARKET_KIND_*`` constants (Morpho =
+            ``isolated_pair``).
+        protocol: Owning connector slug (e.g. ``"morpho_blue"``).
+        chain: Chain name.
+        market_id: bytes32 hex (``0x…``) — the market identity + join key.
+        collateral_token: Collateral address (lowercased ``0x…``), or ``""`` when
+            not applicable to ``kind``.
+        collateral_symbol: Human symbol when resolvable, else ``""`` (Empty ≠
+            Zero — never fabricated).
+        loan_token: Loan/borrow token address (lowercased ``0x…``).
+        loan_symbol: Human symbol when resolvable, else ``""``.
+        lltv_bps: Liquidation LTV in basis points (9150 = 91.5%).
+        oracle: Oracle contract address (lowercased ``0x…``).
+        irm: Interest-rate-model contract address (lowercased ``0x…``).
+        verified: ``True`` ONLY after an on-chain recompute-and-compare;
+            catalog candidates are ``False``.
+        source: One of the ``LENDING_MARKET_SOURCE_*`` constants.
+    """
+
+    kind: str
+    protocol: str
+    chain: str
+    market_id: str
+    collateral_token: str
+    collateral_symbol: str
+    loan_token: str
+    loan_symbol: str
+    lltv_bps: int
+    oracle: str
+    irm: str
+    verified: bool
+    source: str
+
+
+@runtime_checkable
+class GatewayLendingMarketDiscoveryCapability(Protocol):
+    """Lending connector resolves + verifies its markets (VIB-5985).
+
+    Dispatched from ``MarketService`` by the connector's ``protocol`` slug via
+    ``GATEWAY_REGISTRY.capability_providers(GatewayLendingMarketDiscoveryCapability)``
+    — no protocol-name branches in the servicer. A lender that does not
+    implement this capability simply is not resolvable, and the servicer returns
+    an "unsupported protocol" error listing the ones that are.
+
+    Contract:
+
+    * ``lending_market_discovery_chains() -> frozenset[str]`` — chains the
+      connector can resolve. Empty is legal.
+
+    * ``list_lending_markets(*, chain, collateral_token, loan_token, lltv_bps)
+      -> list[LendingMarketRecord]`` — OFFLINE candidate listing from the
+      connector's curated catalog. MUST NOT perform network egress. Returns
+      EVERY match; NEVER ranks or auto-picks. Token filters arrive as symbol OR
+      address and MUST be resolved to an address before matching (symbols are
+      spoofable); ``None``/empty means "no filter on that field". ``lltv_bps``
+      of ``None`` means no LLTV filter. Records are ``verified=False`` /
+      ``source="curated_catalog"``. An empty list is a legal, meaningful result
+      (the caller must treat "zero candidates" as an error to act on).
+
+    * ``verify_lending_market(*, chain, market_id, eth_call)
+      -> LendingMarketRecord | None`` — ON-CHAIN verification of one exact id.
+      ``eth_call`` is a gateway-supplied ``async (to_address, calldata_hex) ->
+      result_hex`` transport (the connector performs NO egress of its own — the
+      gateway layer owns the socket). The implementer reads
+      ``idToMarketParams(market_id)`` through it, RECOMPUTES the market id from
+      the returned params (keccak of the params tuple, exactly as the protocol
+      defines it) and compares to ``market_id``:
+
+        - params decode to a non-existent market (zero loan token) → return
+          ``None`` (the servicer maps this to not-found).
+        - recomputed id != requested id → raise
+          :class:`LendingMarketVerificationError` (loud; never a silent record).
+        - match → return a ``LendingMarketRecord`` with ``verified=True`` /
+          ``source="onchain_verify"``, enriching symbols from static metadata
+          when resolvable (else ``""``).
+
+    Immutable params only — live state (supply/borrow/liquidity/APY) is out of
+    scope here. The connector's protocol name is read by the dispatcher from the
+    base ``GatewayConnector.protocol`` ClassVar.
+    """
+
+    def lending_market_discovery_chains(self) -> frozenset[str]: ...
+
+    def list_lending_markets(
+        self,
+        *,
+        chain: str,
+        collateral_token: str | None = None,
+        loan_token: str | None = None,
+        lltv_bps: int | None = None,
+    ) -> list[LendingMarketRecord]: ...
+
+    async def verify_lending_market(
+        self,
+        *,
+        chain: str,
+        market_id: str,
+        eth_call: Any,
+    ) -> LendingMarketRecord | None: ...
+
+
 @runtime_checkable
 class GatewayFundingHistoryCapability(Protocol):
     """Perp connector publishes historical funding-rate series.

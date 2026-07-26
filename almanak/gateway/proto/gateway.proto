@@ -94,6 +94,30 @@ service MarketService {
   // the structured key. The gateway populates the cache from observed
   // PoolManager.Initialize events; unknown ids return NOT_FOUND.
   rpc LookupV4PoolKey(LookupV4PoolKeyRequest) returns (LookupV4PoolKeyResponse);
+
+  // VIB-5985 — verified lending-market resolution (Morpho-first, generic
+  // contract). Dispatched via the connector-owned
+  // ``GatewayLendingMarketDiscoveryCapability`` — no protocol branches in
+  // the servicer; unsupported protocols return INVALID_ARGUMENT listing the
+  // supported ones.
+  //
+  // ListLendingMarkets returns ALL catalog CANDIDATES matching the filters
+  // (paginated). It NEVER ranks or auto-picks — zero matches is an explicit
+  // empty page the caller must treat as an error to act on; multiple matches
+  // means the caller chooses. Candidate records are ``verified=false`` /
+  // ``source=CURATED_CATALOG``: the curated catalog is a candidate source,
+  // not proof. Token filters are address-resolved before matching (symbols
+  // are spoofable).
+  rpc ListLendingMarkets(ListLendingMarketsRequest) returns (ListLendingMarketsResponse);
+
+  // GetLendingMarket verifies one exact market_id on-chain: it reads
+  // ``idToMarketParams(id)`` through the gateway RPC path, RECOMPUTES the
+  // market id from the returned params (keccak of the params tuple, exactly
+  // as the protocol defines it) and compares it to the requested id. Only a
+  // match returns ``verified=true`` / ``source=ONCHAIN_VERIFY``; a mismatch
+  // or a non-existent market is a hard error, never a fabricated record. This
+  // is the ONLY surface that may promote a market_id into a config.
+  rpc GetLendingMarket(GetLendingMarketRequest) returns (LendingMarketResponse);
 }
 
 message PriceRequest {
@@ -273,6 +297,81 @@ message PoolKey {
 message LookupV4PoolKeyResponse {
   PoolKey pool_key = 1;
   string chain = 2;
+}
+
+// -----------------------------------------------------------------------------
+// VIB-5985 — verified lending-market resolution
+// -----------------------------------------------------------------------------
+
+// Market topology discriminator. UNSPECIFIED=0 so an old gateway that never
+// sets it decodes as "unknown", not a fabricated pooled reserve.
+enum LendingMarketKind {
+  LENDING_MARKET_KIND_UNSPECIFIED = 0;
+  LENDING_MARKET_KIND_POOLED_RESERVE = 1;  // Aave-style shared reserve
+  LENDING_MARKET_KIND_ISOLATED_PAIR = 2;   // Morpho-style isolated collateral↔loan pair
+  LENDING_MARKET_KIND_LENDING_VAULT = 3;   // MetaMorpho-style depositor vault
+}
+
+// Provenance of a LendingMarket record. UNSPECIFIED=0 (old gateway → treat as
+// unverified). CURATED_CATALOG = candidate from the connector's curated
+// catalog, NOT on-chain verified. ONCHAIN_VERIFY = params read on-chain and the
+// market id recomputed + matched.
+enum LendingMarketSource {
+  LENDING_MARKET_SOURCE_UNSPECIFIED = 0;
+  LENDING_MARKET_SOURCE_CURATED_CATALOG = 1;
+  LENDING_MARKET_SOURCE_ONCHAIN_VERIFY = 2;
+}
+
+// A single lending market. Generic across protocols via ``kind``; Morpho markets
+// are ISOLATED_PAIR. Empty ≠ Zero on the wire: string fields are ABSENT (empty)
+// when unresolvable/not-applicable, NEVER fabricated. ``lltv_bps`` is always a
+// measured value (from catalog or on-chain), so it is a plain int.
+message LendingMarket {
+  LendingMarketKind kind = 1;
+  string protocol = 2;
+  string chain = 3;
+  string market_id = 4;          // bytes32 hex (0x…), the market identity + join key
+  string collateral_token = 5;   // collateral address (lowercased 0x…); ABSENT if n/a
+  string collateral_symbol = 6;  // ABSENT when unresolvable — never fabricated
+  string loan_token = 7;         // loan/borrow address (lowercased 0x…)
+  string loan_symbol = 8;        // ABSENT when unresolvable — never fabricated
+  int64 lltv_bps = 9;            // liquidation LTV in basis points (9150 = 91.5%)
+  string oracle = 10;            // oracle address
+  string irm = 11;               // interest-rate-model address
+  // TRUE only after an on-chain idToMarketParams read whose recomputed id
+  // matches ``market_id``. Catalog candidates are FALSE.
+  bool verified = 12;
+  LendingMarketSource source = 13;
+}
+
+message ListLendingMarketsRequest {
+  string protocol = 1;          // connector slug (e.g. "morpho_blue")
+  string chain = 2;
+  string collateral_token = 3;  // symbol OR address; resolved to address before matching; empty = no filter
+  string loan_token = 4;        // symbol OR address; resolved to address before matching; empty = no filter
+  int64 lltv_bps = 5;           // exact LLTV filter in bps; 0 = no filter
+  int32 page_size = 6;          // page size; 0 = server default
+  string page_token = 7;        // opaque continuation token; empty = first page
+}
+
+message ListLendingMarketsResponse {
+  repeated LendingMarket markets = 1;  // ALL matches on this page; NEVER auto-ranked/auto-picked
+  string next_page_token = 2;          // empty when this is the last page
+  int32 total_matches = 3;             // total matches across all pages (informational)
+  bool success = 4;
+  string error = 5;
+}
+
+message GetLendingMarketRequest {
+  string protocol = 1;
+  string chain = 2;
+  string market_id = 3;  // exact bytes32 hex to verify on-chain
+}
+
+message LendingMarketResponse {
+  LendingMarket market = 1;  // populated only when success && verified
+  bool success = 2;
+  string error = 3;
 }
 
 // =============================================================================

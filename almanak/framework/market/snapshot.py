@@ -35,6 +35,7 @@ from .models import (
     CCIData,
     IchimokuData,
     IndicatorProvider,
+    LendingMarketInfo,
     MACDData,
     MAData,
     OBVData,
@@ -3069,6 +3070,197 @@ class MarketSnapshot:
                 executor.shutdown(wait=False, cancel_futures=True)
         else:
             return asyncio.run(coro)
+
+    def _lending_market_info_from_proto(self, pb: Any) -> LendingMarketInfo:
+        """Map a gateway ``LendingMarket`` proto to the typed ``LendingMarketInfo``."""
+        from almanak.gateway.proto import gateway_pb2
+
+        kind = {
+            gateway_pb2.LENDING_MARKET_KIND_POOLED_RESERVE: "pooled_reserve",
+            gateway_pb2.LENDING_MARKET_KIND_ISOLATED_PAIR: "isolated_pair",
+            gateway_pb2.LENDING_MARKET_KIND_LENDING_VAULT: "lending_vault",
+        }.get(pb.kind, "unspecified")
+        source = {
+            gateway_pb2.LENDING_MARKET_SOURCE_CURATED_CATALOG: "curated_catalog",
+            gateway_pb2.LENDING_MARKET_SOURCE_ONCHAIN_VERIFY: "onchain_verify",
+        }.get(pb.source, "unspecified")
+        return LendingMarketInfo(
+            protocol=pb.protocol,
+            chain=pb.chain,
+            market_id=pb.market_id,
+            kind=kind,
+            collateral_token=pb.collateral_token,
+            collateral_symbol=pb.collateral_symbol,
+            loan_token=pb.loan_token,
+            loan_symbol=pb.loan_symbol,
+            lltv_bps=pb.lltv_bps,
+            oracle=pb.oracle,
+            irm=pb.irm,
+            verified=pb.verified,
+            source=source,
+        )
+
+    def _connected_market_client(self, op: str, detail: str) -> Any:
+        """Return the connected gateway client or raise ``LendingMarketResolutionError``."""
+        from .errors import LendingMarketResolutionError
+
+        client = self._gateway_client
+        if client is None or not getattr(client, "is_connected", False):
+            reason = (
+                f"{op} requires a connected GatewayClient; none was wired onto this "
+                "MarketSnapshot. Lending-market resolution is a gateway-side surface "
+                "(all chain reads happen server-side) — wire the gateway client."
+            )
+            self._record_critical_data_failure("lending_market", detail, reason)
+            raise LendingMarketResolutionError(reason=reason)
+        return client
+
+    def lending_markets(
+        self,
+        protocol: str,
+        *,
+        collateral: str | None = None,
+        loan: str | None = None,
+        lltv_bps: int | None = None,
+        chain: str | None = None,
+        page_size: int | None = None,
+    ) -> list[LendingMarketInfo]:
+        """List candidate lending markets for ``protocol`` (VIB-5985).
+
+        Returns EVERY catalog candidate matching the filters — the gateway never
+        ranks or auto-picks. Purpose is **verification / re-check** of a market
+        universe at build or boot time, NOT per-iteration market selection: the
+        returned records are ``verified=False`` / ``source="curated_catalog"``.
+        Call :meth:`lending_market` to on-chain-VERIFY a chosen ``market_id``
+        before pinning it into a config (Morpho is permissionless — a same-pair
+        market can carry a hostile oracle/IRM). An empty list means zero
+        candidates matched; the caller MUST treat that as an error to act on, not
+        a silent continue. Chain reads happen entirely gateway-side.
+
+        Args:
+            protocol: Connector slug (e.g. ``"morpho_blue"``). Must implement the
+                gateway's lending-market discovery capability.
+            collateral: Optional collateral filter — symbol OR address (resolved
+                to an address gateway-side before matching).
+            loan: Optional loan/borrow-token filter — symbol OR address.
+            lltv_bps: Optional exact LLTV filter in basis points (9150 = 91.5%).
+            chain: Optional chain override; defaults to the snapshot's chain.
+            page_size: Optional page size hint for the underlying RPC (the
+                accessor transparently follows pagination and returns ALL
+                matches regardless).
+
+        Raises:
+            LendingMarketResolutionError: no connected gateway client, RPC
+                transport failure, or an unsupported protocol/chain.
+        """
+        from almanak.gateway.proto import gateway_pb2
+
+        from .errors import LendingMarketResolutionError
+
+        requested_chain = self._resolve_chain(chain)
+        detail = f"{protocol}@{requested_chain}"
+        client = self._connected_market_client(f"lending_markets({protocol!r})", detail)
+
+        config_timeout = getattr(getattr(client, "config", None), "timeout", None)
+        rpc_timeout = config_timeout if isinstance(config_timeout, int | float) else _GATEWAY_RPC_TIMEOUT_SECONDS
+
+        out: list[LendingMarketInfo] = []
+        page_token = ""
+        # Defensive bound: the catalog is small; a runaway next_page_token loop
+        # (buggy gateway) must not spin forever.
+        for _ in range(1000):
+            request = gateway_pb2.ListLendingMarketsRequest(
+                protocol=protocol,
+                chain=requested_chain,
+                collateral_token=collateral or "",
+                loan_token=loan or "",
+                lltv_bps=lltv_bps or 0,
+                page_size=page_size or 0,
+                page_token=page_token,
+            )
+            try:
+                response = client.market.ListLendingMarkets(request, timeout=rpc_timeout)
+            except Exception as e:  # noqa: BLE001 — fail closed on transport error
+                self._record_critical_data_failure("lending_market", detail, e)
+                raise LendingMarketResolutionError(
+                    protocol=protocol,
+                    reason=f"lending_markets({protocol!r}) gateway request failed on {requested_chain}: {e}",
+                ) from e
+            if not response.success:
+                self._record_critical_data_failure("lending_market", detail, response.error)
+                raise LendingMarketResolutionError(protocol=protocol, reason=response.error)
+            out.extend(self._lending_market_info_from_proto(m) for m in response.markets)
+            page_token = response.next_page_token
+            if not page_token:
+                break
+        return out
+
+    def lending_market(
+        self,
+        protocol: str,
+        market_id: str,
+        *,
+        chain: str | None = None,
+    ) -> LendingMarketInfo:
+        """Verify one exact ``market_id`` on-chain (VIB-5985).
+
+        The gateway reads ``idToMarketParams(market_id)`` on-chain, recomputes the
+        market id from the returned params and compares — only a match returns a
+        record, always ``verified=True`` / ``source="onchain_verify"``. Use this
+        to re-check a configured ``market_id`` at boot (config still PINS the
+        market identity; this does not pick one). A recompute mismatch, a
+        non-existent market, or an unsupported protocol/chain each raise
+        ``LendingMarketResolutionError`` — a market id is NEVER returned unverified.
+
+        Args:
+            protocol: Connector slug (e.g. ``"morpho_blue"``).
+            market_id: Exact bytes32 hex market id to verify.
+            chain: Optional chain override; defaults to the snapshot's chain.
+
+        Raises:
+            LendingMarketResolutionError: transport failure, unsupported
+                protocol/chain, market not found, or verification mismatch.
+        """
+        from almanak.gateway.proto import gateway_pb2
+
+        from .errors import LendingMarketResolutionError
+
+        requested_chain = self._resolve_chain(chain)
+        detail = f"{protocol}:{market_id}@{requested_chain}"
+        client = self._connected_market_client(f"lending_market({protocol!r}, {market_id!r})", detail)
+
+        config_timeout = getattr(getattr(client, "config", None), "timeout", None)
+        rpc_timeout = config_timeout if isinstance(config_timeout, int | float) else _GATEWAY_RPC_TIMEOUT_SECONDS
+
+        request = gateway_pb2.GetLendingMarketRequest(
+            protocol=protocol,
+            chain=requested_chain,
+            market_id=market_id,
+        )
+        try:
+            response = client.market.GetLendingMarket(request, timeout=rpc_timeout)
+        except Exception as e:  # noqa: BLE001 — fail closed on transport error
+            self._record_critical_data_failure("lending_market", detail, e)
+            raise LendingMarketResolutionError(
+                protocol=protocol,
+                reason=f"lending_market({protocol!r}, {market_id!r}) gateway request failed on {requested_chain}: {e}",
+            ) from e
+        if not response.success:
+            self._record_critical_data_failure("lending_market", detail, response.error)
+            raise LendingMarketResolutionError(protocol=protocol, reason=response.error)
+        # Defense-in-depth: the gateway contract guarantees success ⇒ verified,
+        # but the client must not trust that invariant across future gateway
+        # versions — a config-pinning caller only ever wants an on-chain-verified
+        # market, so fail closed if a success response is somehow unverified.
+        if not response.market.verified:
+            reason = (
+                f"gateway returned success but an UNVERIFIED market for "
+                f"{market_id!r} on {protocol}/{requested_chain} — refusing to "
+                "treat it as verified (fail closed)"
+            )
+            self._record_critical_data_failure("lending_market", detail, reason)
+            raise LendingMarketResolutionError(protocol=protocol, reason=reason)
+        return self._lending_market_info_from_proto(response.market)
 
     def lending_rate(
         self,

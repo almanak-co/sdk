@@ -247,6 +247,16 @@ class MarketServiceStub(object):
                 request_serializer=gateway__pb2.LookupV4PoolKeyRequest.SerializeToString,
                 response_deserializer=gateway__pb2.LookupV4PoolKeyResponse.FromString,
                 _registered_method=True)
+        self.ListLendingMarkets = channel.unary_unary(
+                '/almanak.gateway.proto.MarketService/ListLendingMarkets',
+                request_serializer=gateway__pb2.ListLendingMarketsRequest.SerializeToString,
+                response_deserializer=gateway__pb2.ListLendingMarketsResponse.FromString,
+                _registered_method=True)
+        self.GetLendingMarket = channel.unary_unary(
+                '/almanak.gateway.proto.MarketService/GetLendingMarket',
+                request_serializer=gateway__pb2.GetLendingMarketRequest.SerializeToString,
+                response_deserializer=gateway__pb2.LendingMarketResponse.FromString,
+                _registered_method=True)
 
 
 class MarketServiceServicer(object):
@@ -317,6 +327,38 @@ class MarketServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def ListLendingMarkets(self, request, context):
+        """VIB-5985 — verified lending-market resolution (Morpho-first, generic
+        contract). Dispatched via the connector-owned
+        ``GatewayLendingMarketDiscoveryCapability`` — no protocol branches in
+        the servicer; unsupported protocols return INVALID_ARGUMENT listing the
+        supported ones.
+
+        ListLendingMarkets returns ALL catalog CANDIDATES matching the filters
+        (paginated). It NEVER ranks or auto-picks — zero matches is an explicit
+        empty page the caller must treat as an error to act on; multiple matches
+        means the caller chooses. Candidate records are ``verified=false`` /
+        ``source=CURATED_CATALOG``: the curated catalog is a candidate source,
+        not proof. Token filters are address-resolved before matching (symbols
+        are spoofable).
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetLendingMarket(self, request, context):
+        """GetLendingMarket verifies one exact market_id on-chain: it reads
+        ``idToMarketParams(id)`` through the gateway RPC path, RECOMPUTES the
+        market id from the returned params (keccak of the params tuple, exactly
+        as the protocol defines it) and compares it to the requested id. Only a
+        match returns ``verified=true`` / ``source=ONCHAIN_VERIFY``; a mismatch
+        or a non-existent market is a hard error, never a fabricated record. This
+        is the ONLY surface that may promote a market_id into a config.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_MarketServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -349,6 +391,16 @@ def add_MarketServiceServicer_to_server(servicer, server):
                     servicer.LookupV4PoolKey,
                     request_deserializer=gateway__pb2.LookupV4PoolKeyRequest.FromString,
                     response_serializer=gateway__pb2.LookupV4PoolKeyResponse.SerializeToString,
+            ),
+            'ListLendingMarkets': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListLendingMarkets,
+                    request_deserializer=gateway__pb2.ListLendingMarketsRequest.FromString,
+                    response_serializer=gateway__pb2.ListLendingMarketsResponse.SerializeToString,
+            ),
+            'GetLendingMarket': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetLendingMarket,
+                    request_deserializer=gateway__pb2.GetLendingMarketRequest.FromString,
+                    response_serializer=gateway__pb2.LendingMarketResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -517,6 +569,60 @@ class MarketService(object):
             '/almanak.gateway.proto.MarketService/LookupV4PoolKey',
             gateway__pb2.LookupV4PoolKeyRequest.SerializeToString,
             gateway__pb2.LookupV4PoolKeyResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ListLendingMarkets(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.MarketService/ListLendingMarkets',
+            gateway__pb2.ListLendingMarketsRequest.SerializeToString,
+            gateway__pb2.ListLendingMarketsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetLendingMarket(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.MarketService/GetLendingMarket',
+            gateway__pb2.GetLendingMarketRequest.SerializeToString,
+            gateway__pb2.LendingMarketResponse.FromString,
             options,
             channel_credentials,
             insecure,

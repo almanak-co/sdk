@@ -193,6 +193,48 @@ class PtPriceData:
         return self.stale or self.confidence == _VC.STALE
 
 
+@dataclass(frozen=True)
+class LendingMarketInfo:
+    """Typed result of ``MarketSnapshot.lending_markets`` / ``lending_market`` (VIB-5985).
+
+    A pure pass-through of the gateway ``LendingMarket`` contract. Immutable
+    market params only (tokens, oracle, IRM, LLTV) — live supply/borrow state is
+    out of scope for this surface. This exists to VERIFY / re-check a configured
+    ``market_id`` at build or boot time, NOT to pick a market per iteration:
+    ``lending_markets`` returns catalog CANDIDATES (``verified=False``) and
+    ``lending_market`` returns one on-chain-VERIFIED market (``verified=True``).
+
+    Empty ≠ Zero: an unresolvable symbol/address field is ``""`` (the gateway
+    never fabricates it), never a placeholder. ``verified`` is ``True`` ONLY
+    after the gateway read ``idToMarketParams`` and the recomputed id matched.
+
+    Attributes:
+        kind: Market topology — ``"isolated_pair"`` (Morpho), ``"pooled_reserve"``,
+            ``"lending_vault"`` or ``"unspecified"`` (old gateway).
+        source: Provenance — ``"curated_catalog"`` (candidate, unverified) or
+            ``"onchain_verify"`` (recompute-matched).
+    """
+
+    protocol: str
+    chain: str
+    market_id: str
+    kind: str
+    collateral_token: str
+    collateral_symbol: str
+    loan_token: str
+    loan_symbol: str
+    lltv_bps: int
+    oracle: str
+    irm: str
+    verified: bool
+    source: str
+
+    @property
+    def lltv_percent(self) -> Decimal:
+        """Liquidation LTV as a percentage (9150 bps → Decimal('91.5'))."""
+        return Decimal(self.lltv_bps) / Decimal(100)
+
+
 # =============================================================================
 # Indicator DTOs
 # =============================================================================
@@ -636,6 +678,7 @@ __all__ = [
     "CCIData",
     "IchimokuData",
     "IndicatorProvider",
+    "LendingMarketInfo",
     # Lazy-loaded via __getattr__ to keep this module lean (PRD §4.8).
     "StablecoinConfig",  # noqa: F822
     "FreshnessConfig",  # noqa: F822
