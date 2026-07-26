@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, patch
 from almanak.connectors._strategy_base.base.compiler import SwapCompilerContext
 from almanak.connectors.fluid.compiler import FluidCompiler
 from almanak.connectors.fluid.sdk import FluidMinAmountError, FluidSDKError
-from almanak.framework.intents.compiler_models import CompilationStatus, TransactionData
+from almanak.framework.intents.compiler_models import CompilationStatus, IntentCompilerConfig, TransactionData
 from almanak.framework.intents.vocabulary import LPOpenIntent, SwapIntent
 
 POOL = "0x3C0441B42195F4aD6aa9a0978E06096ea616CDa7"
@@ -68,6 +68,9 @@ def _ctx(services: MagicMock, **overrides) -> SwapCompilerContext:
         price_oracle={},
         cache={},
         services=services,
+        # VIB-5924: required — the fixture reads the single source of truth
+        # rather than restating a literal that could drift from production.
+        max_price_impact_pct=IntentCompilerConfig(allow_placeholder_prices=True).max_price_impact_pct,
     )
     defaults.update(overrides)
     return SwapCompilerContext(**defaults)

@@ -35,7 +35,7 @@ from almanak.framework.intents import (
     SupplyIntent,
     WithdrawIntent,
 )
-from almanak.framework.intents.compiler_models import CompilationStatus, TransactionData
+from almanak.framework.intents.compiler_models import CompilationStatus, IntentCompilerConfig, TransactionData
 
 ARB_VAULT = "0xeabbfca72f8a8bf14c4ac59e69ecb2eb69f0811c"  # vault id 1 (ETH -> USDC)
 BASE_VAULT = "0x01f0d07fde184614216e76782c6b7df663f5375e"  # vault id 47 (sUSDai -> USDC)
@@ -348,6 +348,8 @@ class TestProtocolKeyRouting:
             price_oracle={},
             cache={},
             services=services,
+            # VIB-5924: required — read the single source of truth.
+            max_price_impact_pct=IntentCompilerConfig(allow_placeholder_prices=True).max_price_impact_pct,
         )
         with patch.object(FluidCompiler, "_build_sdk", return_value=ftoken_sdk):
             result = FluidCompiler().compile_supply(ctx, intent)

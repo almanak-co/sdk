@@ -23,7 +23,7 @@ from almanak.connectors._strategy_base.protocol_aliases import normalize_protoco
 from almanak.connectors.fluid.compiler import FluidCompiler
 from almanak.connectors.fluid.sdk import FluidSDKError
 from almanak.framework.intents import SupplyIntent, WithdrawIntent
-from almanak.framework.intents.compiler_models import CompilationStatus, TransactionData
+from almanak.framework.intents.compiler_models import CompilationStatus, IntentCompilerConfig, TransactionData
 
 FTOKEN = "0xf42f5795D9ac7e9D757dB633D693cD548Cfd9169"  # base fUSDC
 WALLET = "0x2222222222222222222222222222222222222222"
@@ -78,6 +78,9 @@ def _ctx(services: MagicMock, **overrides) -> SwapCompilerContext:
         "price_oracle": {},
         "cache": {},
         "services": services,
+        # VIB-5924: required — the fixture reads the single source of truth
+        # rather than restating a literal that could drift from production.
+        "max_price_impact_pct": IntentCompilerConfig(allow_placeholder_prices=True).max_price_impact_pct,
     }
     defaults.update(overrides)
     return SwapCompilerContext(**defaults)
