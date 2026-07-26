@@ -661,7 +661,7 @@ def _pair_tokens_from_intent(intent: Any) -> tuple[str | None, str | None]:
     return (str(t0) if t0 else None, str(t1) if t1 else None)
 
 
-def _pair_tokens_from_declared_legs(extracted: Any) -> tuple[str | None, str | None]:
+def _pair_tokens_from_declared_legs(extracted: Any, *, opening: bool = False) -> tuple[str | None, str | None]:
     """Read the LP pair ``(token0, token1)`` from a connector-DECLARED
     ``PrimitiveMoneyLegs`` (VIB-5221 / US-011), when present.
 
@@ -673,6 +673,13 @@ def _pair_tokens_from_declared_legs(extracted: Any) -> tuple[str | None, str | N
     the ``position_id``). Reading the pair from the contract makes the close
     event's token columns a property of what actually moved on-chain rather than
     of the intent's pool descriptor.
+
+    VIB-5988 — ``opening`` selects the role that carries the pair for the
+    lifecycle stage: an LP_CLOSE declares its proceeds as OUTPUT legs, an LP_OPEN
+    declares its deposits as INPUT legs (TraderJoe V2 builds those from the
+    ``DepositedToBins`` wallet → LBPair transfers). Reading OUTPUT legs on an
+    OPEN returns ``(None, None)`` — which is precisely why bare key presence was
+    never evidence that the pair had been resolved from the contract.
 
     Returns ``(None, None)`` when no declared legs are present (a non-migrated
     connector) or a leg's identity is unknown (``""``), so the caller falls back
@@ -690,9 +697,9 @@ def _pair_tokens_from_declared_legs(extracted: Any) -> tuple[str | None, str | N
 
     if not isinstance(legs, PrimitiveMoneyLegs):
         return (None, None)
-    outputs = legs.output_legs
-    t0 = outputs[0].token if len(outputs) >= 1 and outputs[0].token else None
-    t1 = outputs[1].token if len(outputs) >= 2 and outputs[1].token else None
+    pair_legs = legs.input_legs if opening else legs.output_legs
+    t0 = pair_legs[0].token if len(pair_legs) >= 1 and pair_legs[0].token else None
+    t1 = pair_legs[1].token if len(pair_legs) >= 2 and pair_legs[1].token else None
     return (t0, t1)
 
 
@@ -705,7 +712,7 @@ def _lp_data_attr(lp_data: Any, name: str) -> Any:
     return getattr(lp_data, name, None)
 
 
-def _realign_event_lp_pair_if_needed(event: PositionEvent, ctx: IntentEventContext) -> None:
+def _realign_event_lp_pair_if_needed(event: PositionEvent, ctx: IntentEventContext, *, opening: bool) -> None:
     """VIB-5983 — re-pair ``event.token0``/``token1`` to on-chain address order.
 
     Mirrors ``lp_handler._v3_realign_token_pair`` (VIB-5851) for the Layer-3
@@ -713,12 +720,42 @@ def _realign_event_lp_pair_if_needed(event: PositionEvent, ctx: IntentEventConte
     pool labels often are not. Without this, ``value_usd`` books a ~$1bn
     phantom on inverted-order V3 pools (Ethereum WETH/USDC).
 
+    Two independent order provenances exist, and the gate picks by which one
+    the amounts actually came from (VIB-5988 — gating on bare
+    ``primitive_money_legs`` key presence was wrong):
+
+    1. **Declared money legs win.** When the connector stamped a usable
+       role-appropriate pair (INPUT legs on an OPEN, OUTPUT legs on a CLOSE),
+       those symbols are chain truth in the SAME emission order the connector
+       wrote ``amount0`` / ``amount1``, so adopting them is what aligns the pair
+       — and address-sorting them would *break* it. TraderJoe V2 is the live
+       case: ``amount0``/``amount1`` are tokenX/tokenY, explicitly NOT
+       address-sorted (``traderjoe_v2/receipt_parser.py`` — "do NOT sort by
+       token address ... would swap legs whenever tokenX's address > tokenY's").
+    2. **Otherwise address order**, the V3-family convention the shared sort
+       encodes (Uniswap V3/V4, Aerodrome, Camelot — receipt amounts are
+       address-sorted while intent pool labels often are not).
+
     Fail-open / no-op when:
 
     * either symbol empty, or no typed raw amounts on the event;
     * fungible N-coin (``coin_symbols``) — pool-index order, not address;
-    * declared ``primitive_money_legs`` — legs already aligned to amounts;
+    * declared legs are present but do not yield a usable pair — the connector
+      has asserted an ordering convention we cannot read, so neither provenance
+      is established and label order is kept (no worse than pre-fix), with a
+      warning so the gap is visible rather than silent;
     * address resolution fails (shared helper keeps label order).
+
+    Args:
+        opening: whether this event is the position-opening leg. Passed
+            explicitly by the two call sites, which both know it unambiguously
+            (``_apply_lp_open`` runs only with ``lp_open_data``;
+            ``_apply_lp_close_columns`` is gated on ``event_type == "CLOSE"``).
+            Deliberately NOT re-derived from ``event.event_type`` here:
+            ``PositionEventType`` also carries ``INCREASE`` / ``DECREASE`` /
+            ``COLLECT_FEES``, so a future LP partial-withdraw mapped to
+            ``DECREASE`` would sniff as opening and read INPUT legs on a
+            proceeds event — adopting the wrong pair silently.
     """
     t0 = (event.token0 or "").strip()
     t1 = (event.token1 or "").strip()
@@ -728,14 +765,60 @@ def _realign_event_lp_pair_if_needed(event: PositionEvent, ctx: IntentEventConte
         return
 
     extracted = ctx.extracted if isinstance(ctx.extracted, dict) else {}
-    if extracted.get("primitive_money_legs") is not None:
-        return
 
     # N-coin fungible path (Curve / Balancer) — coin order is pool index.
+    # Checked before the declared-legs branch: an N-coin connector also stamps
+    # legs, and its coin universe (not a 2-slot pair) owns the ordering.
     if event.coin_symbols:
         return
     lp_data = extracted.get("lp_open_data") or extracted.get("lp_close_data")
     if _lp_data_attr(lp_data, "coin_symbols"):
+        return
+    # VIB-5988 — second, drift-proof N-coin signal. ``coin_symbols`` is resolved
+    # from a registry lookup (Curve's ``CURVE_POOLS[...]["coins"]``) while the
+    # legs are built from ``coin_addresses``; a future pool entry carrying one
+    # and not the other would silently re-open the mis-pairing this guard
+    # exists to prevent. ``additional_amounts`` comes off the receipt itself
+    # (Curve stamps it whenever the pool has >2 coins), so it cannot drift from
+    # the registry. Curve is the one connector whose legs are per-FUNDED-coin
+    # while amount0/amount1 are per-POOL-INDEX, so leg index does NOT align
+    # with amount slot there — the declared-legs branch must never run for it.
+    if _lp_data_attr(lp_data, "additional_amounts"):
+        return
+
+    if extracted.get("primitive_money_legs") is not None:
+        d0, d1 = _pair_tokens_from_declared_legs(extracted, opening=opening)
+        if d0 and d1:
+            if (d0, d1) != (t0, t1):
+                logger.info(
+                    "VIB-5988: re-paired LP position_events pair %s/%s -> %s/%s from declared "
+                    "money legs (chain=%s position_id=%s event_type=%s)",
+                    t0,
+                    t1,
+                    d0,
+                    d1,
+                    ctx.chain or event.chain,
+                    event.position_id,
+                    event.event_type,
+                )
+                event.token0 = d0
+                event.token1 = d1
+            return
+        # Legs present but unusable for this stage (single-sided add, unknown
+        # leg identity, or a non-LP leg shape such as Pendle's PT input+output).
+        # The connector owns an ordering convention we cannot read here, so an
+        # address sort would be a guess on a money path — keep label order.
+        logger.warning(
+            "VIB-5988: declared money legs present but no usable %s pair for LP position_events "
+            "%s/%s (chain=%s position_id=%s event_type=%s); keeping label order — value_usd may be "
+            "mis-paired if the connector's amount order differs from the pool label",
+            "INPUT" if opening else "OUTPUT",
+            t0,
+            t1,
+            ctx.chain or event.chain,
+            event.position_id,
+            event.event_type,
+        )
         return
 
     from almanak.framework.data.tokens.pair_order import realign_token_pair_by_address
@@ -820,8 +903,9 @@ def _apply_lp_open(event: PositionEvent, ctx: IntentEventContext) -> None:
     if t1:
         event.token1 = t1
     # VIB-5983 — amount0/amount1 above are on-chain address order; re-pair
-    # label-ordered symbols before ι stamps value_usd.
-    _realign_event_lp_pair_if_needed(event, ctx)
+    # label-ordered symbols before ι stamps value_usd. opening=True: this
+    # function only runs with lp_open_data present (guard at the top).
+    _realign_event_lp_pair_if_needed(event, ctx, opening=True)
 
 
 def _apply_lp_close(event: PositionEvent, ctx: IntentEventContext) -> None:
@@ -1765,8 +1849,9 @@ def _apply_lp_close_columns(
             event.token1 = t1
     # VIB-5983 — re-pair before value_usd. Cache may carry a pre-fix OPEN's
     # label-order symbols; intent fallback is also label-order. Amounts on the
-    # close event are on-chain address order.
-    _realign_event_lp_pair_if_needed(event, ctx)
+    # close event are on-chain address order. opening=False: this function is
+    # gated on event_type == "CLOSE" by its caller.
+    _realign_event_lp_pair_if_needed(event, ctx, opening=False)
     # in_range is unambiguously False post-close (NFT burned / liquidity
     # withdrawn). The dashboard reads ``in_range=None`` as "unknown" and
     # ``False`` as "out of range". Either is honest; False is more
