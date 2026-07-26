@@ -57,6 +57,23 @@ def _is_primitive_money_legs(value: Any) -> bool:
     return isinstance(value, PrimitiveMoneyLegs)
 
 
+def stamp_trading_wallet(receipt: dict[str, Any], wallet: str) -> dict[str, Any]:
+    """Stamp the effective trading wallet onto a receipt copy (VIB-6043).
+
+    Thin deferred-import wrapper around the connector-side helper (same
+    framework -> connector boundary discipline as
+    :func:`_is_primitive_money_legs`): the shared resolver lives with the
+    receipt-parser base infrastructure that consumes it
+    (``almanak/connectors/_strategy_base/base/receipt_wallet.py``), and must
+    not load at framework-module import time.
+    """
+    from almanak.connectors._strategy_base.base.receipt_wallet import (
+        stamp_trading_wallet as _stamp,
+    )
+
+    return _stamp(receipt, wallet)
+
+
 # Strictly-typed enriched fields that get a real top-level slot on
 # ``ExecutionResult`` (read directly by strategy callbacks) AND a mirror in
 # ``extracted_data``. Each entry is ``(result_attr, type_validator, type_label)``.
@@ -842,8 +859,13 @@ class ResultEnricher:
         # both a usable parser and at least one receipt. Off-chain enrichment
         # (above) is already attached to ``result`` regardless.
         if parser is not None:
-            receipts = self._collect_receipts(result)
-            receipts.extend(self._collect_additional_receipts(additional_receipts))
+            # VIB-6043: the effective trading wallet (the Safe under Safe /
+            # Zodiac execution, the EOA otherwise) is stamped onto every
+            # receipt so parsers stop inferring it from ``receipt["from"]``
+            # — which is the agent EOA, not the Safe, on the hosted path.
+            trading_wallet = str(getattr(context, "wallet_address", "") or "")
+            receipts = self._collect_receipts(result, trading_wallet)
+            receipts.extend(self._collect_additional_receipts(additional_receipts, trading_wallet))
             if not receipts:
                 if not offchain_extracted:
                     logger.debug(
@@ -2433,11 +2455,19 @@ class ResultEnricher:
         merged["tx_hash"] = synthetic_hash
         return merged
 
-    def _collect_receipts(self, result: ExecutionResult) -> list[dict[str, Any]]:
+    def _collect_receipts(self, result: ExecutionResult, trading_wallet: str = "") -> list[dict[str, Any]]:
         """Collect receipts from successful transaction results.
 
         Args:
             result: ExecutionResult containing transaction results
+            trading_wallet: VIB-6043. The effective execution address for this
+                run (``ExecutionContext.wallet_address`` — the **Safe** under
+                Safe / Zodiac execution, the EOA otherwise). Stamped onto every
+                receipt under ``TRADING_WALLET_KEY`` so receipt parsers resolve
+                the strategy's money legs against the address that actually
+                holds the tokens instead of ``receipt["from"]`` (the agent EOA
+                that merely signs ``execTransactionWithRole``). Empty leaves
+                the receipt unstamped and parsers fall back exactly as before.
 
         Returns:
             List of receipt dicts
@@ -2474,13 +2504,22 @@ class ResultEnricher:
                 if snake_key in receipt_dict and camel_key not in receipt_dict:
                     receipt_dict[camel_key] = receipt_dict[snake_key]
 
-            receipts.append(receipt_dict)
+            # VIB-6043: stamp the effective trading wallet (copy — never mutate
+            # the receipt the ledger / persistence path also holds).
+            receipts.append(stamp_trading_wallet(receipt_dict, trading_wallet))
 
         return receipts
 
     @staticmethod
-    def _collect_additional_receipts(receipts: tuple[dict[str, Any], ...]) -> list[dict[str, Any]]:
-        """Normalize successful post-submission receipts for enrichment."""
+    def _collect_additional_receipts(
+        receipts: tuple[dict[str, Any], ...], trading_wallet: str = ""
+    ) -> list[dict[str, Any]]:
+        """Normalize successful post-submission receipts for enrichment.
+
+        ``trading_wallet`` is stamped exactly as in :meth:`_collect_receipts`
+        (VIB-6043) — a keeper-executed order receipt is parsed by the same
+        parsers and needs the same Safe-aware wallet.
+        """
         collected: list[dict[str, Any]] = []
         for receipt in receipts:
             if not isinstance(receipt, dict):
@@ -2519,7 +2558,7 @@ class ResultEnricher:
                     )
                     break
             else:
-                collected.append(receipt_dict)
+                collected.append(stamp_trading_wallet(receipt_dict, trading_wallet))
         return collected
 
 

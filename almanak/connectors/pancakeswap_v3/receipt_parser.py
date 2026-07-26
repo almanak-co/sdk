@@ -16,6 +16,7 @@ from almanak.connectors._strategy_base.base import (
     EventRegistry,
     HexDecoder,
     resolve_swap_token_symbol,
+    resolve_trading_wallet,
 )
 from almanak.framework.execution.extract_result import (
     ExtractError,
@@ -578,9 +579,16 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
         return False
 
     def _swap_wallet(self, receipt: dict[str, Any]) -> str:
-        """Return the normalized wallet address from ``receipt['from']`` or ''."""
-        raw_wallet = receipt.get("from") or ""
-        return self._normalize_topic(raw_wallet) if raw_wallet else ""
+        """Return the normalized effective trading wallet, or ''.
+
+        VIB-6043: this is the Safe under Safe / Zodiac execution and the EOA
+        otherwise — NOT the raw ``receipt["from"]``, which under Zodiac is the
+        agent EOA signing ``execTransactionWithRole`` while every ERC-20
+        Transfer moves on the Safe. Matching Transfers against the EOA found
+        nothing, so ``extract_swap_amounts`` returned ``None`` and the ledger
+        booked a success row with EMPTY amounts (Empty != Zero violation).
+        """
+        return resolve_trading_wallet(receipt)
 
     def _collect_wallet_transfers(
         self,

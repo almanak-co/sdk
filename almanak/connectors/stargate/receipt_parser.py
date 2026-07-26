@@ -22,6 +22,7 @@ from decimal import Decimal
 from typing import Any
 
 from almanak.connectors._strategy_base.base.hex_utils import HexDecoder
+from almanak.connectors._strategy_base.base.receipt_wallet import resolve_trading_wallet
 from almanak.framework.execution.extracted_data import BridgeData
 
 from .adapter import STARGATE_CHAIN_ID_TO_NAME, STARGATE_ROUTER_ADDRESSES
@@ -183,9 +184,17 @@ class StargateReceiptParser:
         logs: list[dict[str, Any]],
         receipt: dict[str, Any],
     ) -> tuple[int, str | None]:
-        """Find the wallet's ERC-20 Transfer into the Stargate pool."""
-        wallet = _hex(receipt.get("from") or receipt.get("from_address") or "").lower()
-        if not wallet.startswith("0x"):
+        """Find the wallet's ERC-20 Transfer into the Stargate pool.
+
+        VIB-6043: matched against the effective trading wallet (the Safe under
+        Safe / Zodiac execution, the EOA otherwise), not the tx sender. The
+        ``OFTSent`` event carries the amount but never the source token
+        address, so this transfer scan is the ONLY source of the token address
+        — an EOA-keyed match under Safe left it ``None`` and decimals
+        unresolvable.
+        """
+        wallet = resolve_trading_wallet(receipt)
+        if not wallet:
             return 0, None
         for log in logs:
             topics = log.get("topics") or []

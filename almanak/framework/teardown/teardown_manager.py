@@ -445,6 +445,25 @@ class AtomicBundle:
     multisend_data: bytes | None = None
 
 
+def _teardown_wallet_for_chain(strategy: Any, chain: str) -> str:
+    """Effective execution address for ``chain`` (VIB-6043).
+
+    Prefers the strategy's per-chain wallet map (``get_wallet_for_chain``) so a
+    multi-chain teardown leg stamps the wallet that actually holds the funds on
+    that chain; falls back to ``wallet_address`` for single-chain strategies and
+    for any strategy object that does not expose the accessor.
+    """
+    getter = getattr(strategy, "get_wallet_for_chain", None)
+    if callable(getter) and chain:
+        try:
+            resolved = getter(chain)
+        except Exception:  # noqa: BLE001 — never let wallet resolution break teardown
+            resolved = None
+        if resolved:
+            return str(resolved)
+    return str(getattr(strategy, "wallet_address", "") or "")
+
+
 class TeardownManager:
     """Orchestrates teardown operations with safety guarantees.
 
@@ -2004,11 +2023,22 @@ class TeardownManager:
                     # Create execution context
                     from almanak.framework.execution.orchestrator import ExecutionContext
 
+                    intent_chain = getattr(intent_to_exec, "chain", None) or strategy.chain
                     context = ExecutionContext(
                         deployment_id=strategy.deployment_id,
                         intent_id=f"teardown_{teardown_id}_{intent_index}",
-                        chain=getattr(intent_to_exec, "chain", None) or strategy.chain,
+                        chain=intent_chain,
                         intent_description=self._describe_intent(intent_to_exec),
+                        # VIB-6043: the teardown lane historically left this
+                        # empty, so the enricher had no wallet to stamp onto
+                        # receipts and parsers fell back to ``receipt["from"]``
+                        # — the agent EOA under Safe / Zodiac execution.
+                        # Resolved PER CHAIN: multi-chain teardown is supported
+                        # and per-chain wallets can legitimately differ, so the
+                        # primary-chain ``strategy.wallet_address`` would stamp
+                        # the WRONG address on a non-primary leg — worse than
+                        # no stamp, because the stamp outranks receipt["from"].
+                        wallet_address=_teardown_wallet_for_chain(strategy, intent_chain),
                     )
 
                     # VIB-3918 — capture wallet balances IMMEDIATELY before

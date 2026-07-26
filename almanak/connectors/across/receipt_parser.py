@@ -27,6 +27,7 @@ from decimal import Decimal
 from typing import Any
 
 from almanak.connectors._strategy_base.base.hex_utils import HexDecoder
+from almanak.connectors._strategy_base.base.receipt_wallet import resolve_trading_wallet
 from almanak.framework.execution.extracted_data import BridgeData
 
 from .adapter import ACROSS_CHAIN_ID_TO_NAME, ACROSS_SPOKE_POOL_ADDRESSES
@@ -244,11 +245,15 @@ class AcrossReceiptParser:
     ) -> tuple[int, str | None]:
         """Find the wallet's ERC-20 Transfer into the spoke pool.
 
+        VIB-6043: the matched wallet is the effective trading wallet (the Safe
+        under Safe / Zodiac execution, the EOA otherwise), not the tx sender —
+        under Zodiac the deposit Transfer leaves the Safe, not the agent EOA.
+
         Returns (amount_sent_raw, token_address) or (0, None) when no
         matching transfer is found.
         """
-        wallet = _hex(receipt.get("from") or receipt.get("from_address") or "").lower()
-        if not wallet.startswith("0x"):
+        wallet = resolve_trading_wallet(receipt)
+        if not wallet:
             return 0, None
         for log in logs:
             topics = log.get("topics") or []

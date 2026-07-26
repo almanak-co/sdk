@@ -13,6 +13,7 @@ from decimal import Decimal
 from typing import Any
 
 from almanak.connectors._strategy_base.base.hex_utils import HexDecoder
+from almanak.connectors._strategy_base.base.receipt_wallet import resolve_trading_wallet
 from almanak.framework.execution.extracted_data import ProtocolFees, SwapAmounts
 from almanak.framework.utils.log_formatters import format_gas_cost, format_tx_hash
 
@@ -273,8 +274,13 @@ class EnsoReceiptParser:
         events to determine the input and output token amounts.
 
         The heuristic:
-        - amount_in: first Transfer FROM the wallet (tx sender)
+        - amount_in: first Transfer FROM the wallet
         - amount_out: last Transfer TO the wallet (final output after routing)
+
+        VIB-6043: "the wallet" is the effective trading wallet — the Safe under
+        Safe / Zodiac execution, the EOA otherwise — not the tx sender. Enso
+        has no protocol-level Swap event to fall back on, so a wrong wallet
+        here means no measured amounts at all.
 
         Args:
             receipt: Transaction receipt dict with 'logs' and sender fields
@@ -282,7 +288,7 @@ class EnsoReceiptParser:
         Returns:
             SwapAmounts if swap transfers found, None otherwise
         """
-        wallet = self._normalize_address(receipt.get("from") or receipt.get("from_address") or "")
+        wallet = resolve_trading_wallet(receipt)
         if not wallet:
             return None
 

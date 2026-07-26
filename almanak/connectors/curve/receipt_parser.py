@@ -12,7 +12,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from almanak.connectors._strategy_base.base import EventRegistry, HexDecoder
+from almanak.connectors._strategy_base.base import EventRegistry, HexDecoder, resolve_trading_wallet
 from almanak.framework.execution.extract_result import (
     ExtractError,
     ExtractMissing,
@@ -1529,16 +1529,21 @@ class CurveReceiptParser:
         Heuristic: token_in is the Transfer FROM the wallet (first),
         token_out is the Transfer TO the wallet (last).
 
+        VIB-6043: "the wallet" is the **effective trading wallet** — the Safe
+        under Safe / Zodiac execution, the EOA otherwise — never the raw
+        ``receipt["from"]`` (which is the agent EOA that signs
+        ``execTransactionWithRole`` while every Transfer moves on the Safe).
+        Getting this wrong here returned ``("", "")`` -> decimals ``None`` ->
+        ``extract_swap_amounts`` ``None`` -> ``CriticalAccountingError``: money
+        moved on-chain with zero ledger rows.
+
         Args:
             receipt: Transaction receipt dict
 
         Returns:
             Tuple of (token_in_address, token_out_address), empty string if not found
         """
-        wallet = receipt.get("from", "")
-        if isinstance(wallet, bytes):
-            wallet = "0x" + wallet.hex()
-        wallet = str(wallet).lower()
+        wallet = resolve_trading_wallet(receipt)
         if not wallet:
             return ("", "")
 

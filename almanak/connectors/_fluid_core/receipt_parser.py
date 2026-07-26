@@ -22,7 +22,7 @@ from decimal import Decimal
 from typing import Any
 
 from almanak.connectors._fluid_core.sdk import FLUID_ADDRESSES, FLUID_NATIVE_TOKEN
-from almanak.connectors._strategy_base.base import HexDecoder
+from almanak.connectors._strategy_base.base import HexDecoder, resolve_trading_wallet
 from almanak.framework.execution.extracted_data import LPCloseData, SwapAmounts
 
 logger = logging.getLogger(__name__)
@@ -528,11 +528,13 @@ class FluidReceiptParser:
 
     @staticmethod
     def _receipt_wallet(receipt: dict[str, Any]) -> str:
-        """Normalized lowercase wallet (tx sender) from a receipt dict."""
-        wallet = receipt.get("from", "")
-        if isinstance(wallet, bytes):
-            wallet = "0x" + wallet.hex()
-        return wallet.lower() if wallet else ""
+        """Normalized lowercase effective trading wallet from a receipt dict.
+
+        VIB-6043: the Safe under Safe / Zodiac execution, the EOA otherwise —
+        no longer the raw tx sender, which under Zodiac is the agent EOA and
+        matches none of the Safe's Transfer legs.
+        """
+        return resolve_trading_wallet(receipt)
 
     def _extract_swap_token_addresses(self, receipt: dict[str, Any], swap0to1: bool) -> tuple[str | None, str | None]:
         """Extract token_in and token_out addresses from ERC-20 Transfer events.

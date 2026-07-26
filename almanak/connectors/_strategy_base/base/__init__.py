@@ -49,10 +49,17 @@ from almanak.connectors._strategy_base.base.receipt_parser import (
     resolve_swap_token_symbol,
     resolve_swap_token_symbol_with_fallback,
 )
+from almanak.connectors._strategy_base.base.receipt_wallet import (
+    TRADING_WALLET_KEY,
+    resolve_trading_wallet,
+    safe_wallet_from_receipt,
+    stamp_trading_wallet,
+)
 from almanak.connectors._strategy_base.base.registry import EventRegistry
 from almanak.connectors._strategy_base.base.swap_adapter import DefaultSwapAdapter
 
 __all__ = [
+    "TRADING_WALLET_KEY",
     "BaseCompilerContext",
     "BaseConcentratedLiquidityCompiler",
     "BaseEvent",
@@ -67,4 +74,7 @@ __all__ = [
     "ParseResult",
     "resolve_swap_token_symbol",
     "resolve_swap_token_symbol_with_fallback",
+    "resolve_trading_wallet",
+    "safe_wallet_from_receipt",
+    "stamp_trading_wallet",
 ]

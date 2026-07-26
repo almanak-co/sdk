@@ -18,6 +18,7 @@ from decimal import Decimal
 from typing import Any
 
 from almanak.connectors._strategy_base.base.hex_utils import HexDecoder
+from almanak.connectors._strategy_base.base.receipt_wallet import resolve_trading_wallet
 from almanak.framework.execution.extracted_data import BridgeData, ProtocolFees, SwapAmounts
 
 logger = logging.getLogger(__name__)
@@ -321,7 +322,11 @@ class LiFiReceiptParser:
         logs = receipt.get("logs", [])
         transfers = self._get_all_transfers(logs)
 
-        wallet = _norm_addr(receipt.get("from") or receipt.get("from_address") or "")
+        # VIB-6043: the effective trading wallet (Safe under Safe / Zodiac
+        # execution, EOA otherwise) — not the tx sender. Under Zodiac the
+        # deposit leaves the Safe, so an EOA-keyed match found no outgoing
+        # transfer and an ERC-20 bridge was misread as a native deposit.
+        wallet = resolve_trading_wallet(receipt)
         if not wallet:
             return None
 

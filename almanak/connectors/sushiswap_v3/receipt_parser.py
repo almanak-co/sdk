@@ -43,6 +43,7 @@ from almanak.connectors._strategy_base.base import (
     EventRegistry,
     HexDecoder,
     resolve_swap_token_symbol_with_fallback,
+    resolve_trading_wallet,
 )
 from almanak.framework.execution.events import SwapResultPayload
 from almanak.framework.execution.extract_result import (
@@ -1275,12 +1276,17 @@ class SushiSwapV3ReceiptParser:
     def _extract_swap_tokens_from_transfers(self, receipt: dict[str, Any]) -> tuple[str, str, int, int]:
         """Extract token addresses and amounts from ERC-20 Transfer events.
 
+        VIB-6043: the matched wallet is the **effective trading wallet** (the
+        Safe under Safe / Zodiac execution, the EOA otherwise), never the raw
+        ``receipt["from"]`` — under Zodiac that is the agent EOA which signs
+        ``execTransactionWithRole`` while every Transfer moves on the Safe, so
+        nothing matched and token discovery came back empty.
+
         Returns:
             Tuple of (token_in_addr, token_out_addr, amount_in, amount_out).
             Empty strings / 0 for fields that could not be determined.
         """
-        raw_wallet = receipt.get("from") or receipt.get("from_address") or ""
-        wallet = str(raw_wallet).lower() if raw_wallet else ""
+        wallet = resolve_trading_wallet(receipt)
         if not wallet:
             return "", "", 0, 0
 
