@@ -77,6 +77,7 @@ from almanak.framework.backtesting.pnl.providers.funding_rates import (
     DEFAULT_FUNDING_RATE,
     FundingRateProvider,
 )
+from almanak.framework.data.funding import FundingRateUnavailableError
 
 if TYPE_CHECKING:
     from almanak.framework.backtesting.config import BacktestDataConfig
@@ -86,6 +87,7 @@ if TYPE_CHECKING:
         SimulatedPortfolio,
         SimulatedPosition,
     )
+    from almanak.framework.backtesting.pnl.providers.perp.snapshot_funding import SnapshotFundingRateSource
     from almanak.framework.intents.vocabulary import Intent
 
 logger = logging.getLogger(__name__)
@@ -399,6 +401,9 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
         # Cache for funding rate data to avoid repeated queries
         # Key: (protocol, market, timestamp_hour) -> (rate, confidence, source)
         self._funding_cache: dict[tuple[str, str, datetime], tuple[Decimal, str, str]] = {}
+        # Engine-owned run-wide funding plane. Direct adapter users retain the
+        # connector-provider path below; engine runs bind this explicitly.
+        self._funding_history_source: SnapshotFundingRateSource | None = None
 
         # Legacy funding rate provider for backward compatibility
         self._funding_rate_provider: FundingRateProvider | None = None
@@ -412,6 +417,10 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
                 self._config.chain,
                 self._config.protocol,
             )
+
+    def bind_funding_history_source(self, source: "SnapshotFundingRateSource") -> None:
+        """Use the engine-owned funding plane for prewarm and accrual."""
+        self._funding_history_source = source
 
     def _seed_injected_provider(self, protocol: str, provider: HistoricalFundingProvider | None) -> None:
         """Seed one injected provider into the connector-keyed provider cache.
@@ -552,21 +561,10 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
         start_time: datetime,
         end_time: datetime,
     ) -> None:
-        """Pre-fetch the backtest window's hourly funding into ``_funding_cache``.
-
-        Per-tick accrual fetches funding one hour at a time through a worker
-        thread (~1.2s each — minutes of pure fetch latency on an hourly-tick
-        backtest even with a healthy gateway). One whole-window fetch here (a
-        legal await point, right after the PERP_OPEN fill) makes every
-        subsequent tick a cache hit. Best-effort: on failure the per-tick
-        semantics (fetch → fallback rate) are unchanged.
-        """
+        """Materialize the run-wide funding series after a successful open."""
         protocol = str(getattr(intent, "protocol", "") or "").lower()
         raw_market = getattr(intent, "market", None)
         if not protocol or not isinstance(raw_market, str) or not raw_market:
-            return
-        provider = self._get_provider_for_protocol(protocol, chain)
-        if provider is None:
             return
         # Cache market key must match _funding_lookup's "<BASE>-USD". Both
         # sides normalize through the SAME canonical parse + provider-symbol
@@ -578,6 +576,14 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
             return
         base = token_ref_provider_symbol(parsed_base, chain, unwrap_wrapped_native=True).upper()
         market = f"{base}-USD"
+        if self._funding_history_source is not None:
+            warmed = await self._funding_history_source.materialize_history(protocol, market)
+            logger.info("Materialized %d funding points for %s %s", warmed, protocol, market)
+            return
+
+        provider = self._get_provider_for_protocol(protocol, chain)
+        if provider is None:
+            return
         try:
             rates = await provider.get_funding_rates(market=market, start_date=start_time, end_date=end_time)
         except Exception as exc:  # noqa: BLE001 — best-effort prewarm
@@ -1377,6 +1383,9 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
         if lookup.timestamp is None:
             return self._funding_no_timestamp_result(position, lookup)
 
+        if self._funding_history_source is not None:
+            return self._shared_funding_rate_result(position, lookup)
+
         provider = self._get_provider_for_protocol(position.protocol, chain)
         if provider is None:
             return self._funding_provider_unavailable_result(position, lookup)
@@ -1395,6 +1404,45 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
             raise
         except Exception as e:
             return self._funding_fetch_error_result(position, lookup, e)
+
+    def _shared_funding_rate_result(
+        self,
+        position: "SimulatedPosition",
+        lookup: _FundingLookup,
+    ) -> tuple[Decimal, str, str]:
+        """Resolve accrual from the engine-owned run-wide funding plane."""
+        assert lookup.timestamp is not None
+        assert self._funding_history_source is not None
+        try:
+            observation = self._funding_history_source.observation_at(
+                position.protocol,
+                lookup.market,
+                lookup.timestamp,
+            )
+        except FundingRateUnavailableError as exc:
+            self._record_funding_serve(
+                lookup,
+                "refused",
+                "",
+                detail=f"strict mode: {exc.reason}",
+            )
+            raise HistoricalDataUnavailableError(
+                data_type="funding",
+                identifier=lookup.market,
+                timestamp=lookup.timestamp,
+                message=exc.reason,
+                chain=self._config.chain,
+                protocol=position.protocol,
+            ) from exc
+
+        outcome = "degraded" if observation.degraded else "served"
+        self._record_funding_serve(
+            lookup,
+            outcome,
+            observation.source,
+            detail=observation.reason,
+        )
+        return observation.rate, observation.confidence, observation.source
 
     def _funding_lookup(
         self,

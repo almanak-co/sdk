@@ -201,6 +201,12 @@ class GatewaySettings(_GatewaySettingsBase):  # type: ignore[valid-type,misc]
     pool_history_cache_max_entries: int = 5000
     pool_history_cache_max_bytes: int = 64 * 1024 * 1024
 
+    # Funding-history cache caps (ALM-3013). Defaults reuse the gateway's
+    # established bounded-history cache envelope; separate settings prevent
+    # funding traffic from coupling its capacity policy to pool history.
+    funding_history_cache_max_entries: int = 5000
+    funding_history_cache_max_bytes: int = 64 * 1024 * 1024
+
     # PoolHistory TheGraph monthly-query budget breaker (POOL-5 / VIB-4753).
     # The Graph bills per query against a monthly plan quota. Once the
     # gateway's in-memory monthly query count reaches this max, the TheGraph
@@ -485,16 +491,20 @@ class GatewaySettings(_GatewaySettingsBase):  # type: ignore[valid-type,misc]
     @field_validator(
         "pool_history_cache_max_entries",
         "pool_history_cache_max_bytes",
+        "funding_history_cache_max_entries",
+        "funding_history_cache_max_bytes",
         mode="before",
     )
     @classmethod
-    def _validate_pool_history_cache_caps(cls, value: object, info: ValidationInfo) -> int:
+    def _validate_history_cache_caps(cls, value: object, info: ValidationInfo) -> int:
         # Cache caps must be > 0; non-positive or malformed env values
         # fall back to the field default so a typo (``MAX_ENTRIES=0``)
         # can't silently disable the cap.
         defaults: dict[str, int] = {
             "pool_history_cache_max_entries": 5000,
             "pool_history_cache_max_bytes": 64 * 1024 * 1024,
+            "funding_history_cache_max_entries": 5000,
+            "funding_history_cache_max_bytes": 64 * 1024 * 1024,
         }
         field_name = info.field_name or ""
         default = defaults[field_name]

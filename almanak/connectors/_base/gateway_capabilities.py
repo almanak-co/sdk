@@ -908,6 +908,32 @@ class GatewayLendingMarketDiscoveryCapability(Protocol):
     ) -> LendingMarketRecord | None: ...
 
 
+@dataclass(frozen=True, slots=True)
+class FundingHistorySource:
+    """Upstream identity and request budget for funding history.
+
+    ``key`` and ``scope`` define gateway cache and throttle ownership. Two
+    connector venues that proxy the same upstream must return the same pair.
+    Chain-specific upstreams include the canonical chain in ``scope``;
+    chain-agnostic APIs use an empty scope.
+    """
+
+    key: str
+    scope: str
+    requests_per_minute: int
+    burst_size: int
+
+    def __post_init__(self) -> None:
+        if not self.key.strip():
+            raise ValueError("FundingHistorySource.key must be non-empty")
+        if self.requests_per_minute <= 0:
+            raise ValueError("FundingHistorySource.requests_per_minute must be positive")
+        if self.burst_size <= 0:
+            raise ValueError("FundingHistorySource.burst_size must be positive")
+        if self.burst_size > self.requests_per_minute:
+            raise ValueError("FundingHistorySource.burst_size cannot exceed requests_per_minute")
+
+
 @runtime_checkable
 class GatewayFundingHistoryCapability(Protocol):
     """Perp connector publishes historical funding-rate series.
@@ -926,22 +952,27 @@ class GatewayFundingHistoryCapability(Protocol):
     * ``funding_supported_markets() -> frozenset[str]`` — markets the
       connector serves for the historical lane (e.g. ``"ETH-USD"``,
       ``"BTC-USD"``). Empty set is legal.
+    * ``funding_history_source(chain) -> FundingHistorySource`` — upstream
+      cache/throttle identity and request budget. Proxy venues that consume
+      the same upstream return the same identity.
     * ``fetch_funding_history(*, servicer, market, chain, start_ts,
       end_ts) -> list[FundingRatePoint]`` — ascending timestamps,
       never fake-success with empty (raise from the connector when the
       upstream window is empty).
 
-    Cross-venue fallback (GMX V2 historical funding is served by
-    Hyperliquid since GMX has no historical API) is handled by the
-    dispatcher in ``RateHistoryService``, not by the capability — the
-    GMX connector declares an empty market set for its own historical
-    endpoint and the dispatcher fans out to siblings on
-    ``DataSourceUnavailable``.
+    Cross-venue fallback (GMX V2 historical funding is served by Hyperliquid
+    since GMX has no historical API) is connector-owned. Both capabilities
+    return the same upstream source identity so the gateway shares cache,
+    single-flight, throttle, and backoff state across the proxy boundary.
     """
 
     def funding_venue(self) -> str: ...
 
     def funding_supported_markets(self) -> frozenset[str]: ...
+
+    def funding_history_source(self, chain: str) -> FundingHistorySource:
+        """Return the upstream cache/throttle identity for this request."""
+        ...
 
     async def fetch_funding_history(
         self,

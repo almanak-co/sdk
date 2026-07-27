@@ -28,6 +28,7 @@ from almanak.framework.backtesting.pnl.engine import (
     DefaultSlippageModel,
     PnLBacktester,
 )
+from almanak.framework.data.interfaces import DataSourceUnavailable
 from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 # =============================================================================
@@ -203,6 +204,54 @@ def test_detect_strategy_type_lp(backtester, registered_adapters):
     assert hint.source == "tags"
     assert backtester._detected_strategy_type is not None
     assert backtester._detected_strategy_type.strategy_type == "lp"
+
+
+@pytest.mark.asyncio
+async def test_snapshot_funding_is_prewarmed_from_declared_strategy_target() -> None:
+    strategy = MockStrategy(protocols=["gmx_v2"])
+    calls: list[tuple[str, str]] = []
+
+    class _FundingSource:
+        history_capable = True
+
+        async def materialize_history(self, venue: str, market: str) -> int:
+            calls.append((venue, market))
+            return 1
+
+    await _engine_helpers._prewarm_declared_funding_history(
+        _FundingSource(),
+        strategy,
+        {"funding_market": "ETH-USD"},
+    )
+
+    assert calls == [("gmx_v2", "ETH-USD")]
+
+
+@pytest.mark.asyncio
+async def test_snapshot_funding_prewarm_isolates_data_source_failure_per_target(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    strategy = MockStrategy(protocols=["gmx_v2", "hyperliquid"])
+    calls: list[tuple[str, str]] = []
+
+    class _FundingSource:
+        history_capable = True
+
+        async def materialize_history(self, venue: str, market: str) -> int:
+            calls.append((venue, market))
+            if venue == "gmx_v2":
+                raise DataSourceUnavailable(source=venue, reason="gateway unavailable")
+            return 1
+
+    with caplog.at_level("WARNING", logger=_engine_helpers.__name__):
+        await _engine_helpers._prewarm_declared_funding_history(
+            _FundingSource(),
+            strategy,
+            {"funding_market": "ETH-USD"},
+        )
+
+    assert calls == [("gmx_v2", "ETH-USD"), ("hyperliquid", "ETH-USD")]
+    assert "Snapshot funding prewarm unavailable for gmx_v2 ETH-USD" in caplog.text
 
 
 def test_detect_strategy_type_perp(backtester, registered_adapters):

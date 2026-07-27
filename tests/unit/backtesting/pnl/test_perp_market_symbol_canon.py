@@ -22,8 +22,6 @@ from decimal import Decimal
 
 import pytest
 
-from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
-
 from almanak.core.perp_markets import perp_market_base, perp_market_funding_key
 from almanak.framework.backtesting.models import IntentType
 from almanak.framework.backtesting.pnl.data_provider import MarketState, token_ref_provider_symbol
@@ -38,6 +36,7 @@ from almanak.framework.backtesting.pnl.intent_extraction import (
     resolve_perp_base_price,
 )
 from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 from tests.unit.backtesting.pnl._mocks import MockDataProvider
 
 TS = datetime(2026, 6, 16, tzinfo=UTC)
@@ -260,7 +259,11 @@ class TestFundingKeyParity:
             SnapshotFundingRateSource,
         )
 
-        source = SnapshotFundingRateSource(chain="arbitrum")
+        source = SnapshotFundingRateSource(
+            chain="arbitrum",
+            start_time=datetime(2024, 1, 1, tzinfo=UTC),
+            end_time=datetime(2024, 1, 2, tzinfo=UTC),
+        )
         rate = await source.funding_rate_at("hyperliquid", market, TS)
         assert rate.market == "ETH-USD"
 
@@ -270,7 +273,11 @@ class TestFundingKeyParity:
             SnapshotFundingRateSource,
         )
 
-        source = SnapshotFundingRateSource(chain="arbitrum")
+        source = SnapshotFundingRateSource(
+            chain="arbitrum",
+            start_time=datetime(2024, 1, 1, tzinfo=UTC),
+            end_time=datetime(2024, 1, 2, tzinfo=UTC),
+        )
         slash = await source.funding_rate_at("hyperliquid", "ETH/USD", TS)
         dash = await source.funding_rate_at("hyperliquid", "ETH-USD", TS)
         assert slash == dash

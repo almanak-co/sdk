@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import time
 from dataclasses import dataclass
 from decimal import Decimal
@@ -56,6 +57,7 @@ import aiohttp
 import grpc
 
 from almanak.connectors._base.gateway_capabilities import (
+    FundingHistorySource,
     GatewayDexLwapCapability,
     GatewayDexTwapCapability,
     GatewayDexVolumeCapability,
@@ -63,15 +65,35 @@ from almanak.connectors._base.gateway_capabilities import (
     GatewayLendingRateHistoryCapability,
 )
 from almanak.connectors._gateway_registry import GATEWAY_REGISTRY
+from almanak.framework.data.interfaces import DataSourceRateLimited
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.data.gas import fetch_gas_price_at
+from almanak.gateway.integrations.base import RateLimiter
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
+from almanak.gateway.services._grpc_errors import set_error_from_upstream
+from almanak.gateway.services._history_cache import (
+    DEFAULT_FINALIZED_TTL_SECONDS,
+    DEFAULT_PROVISIONAL_TTL_SECONDS,
+    FINALITY_FINALIZED,
+    FINALITY_PROVISIONAL,
+    HistoryCache,
+)
 from almanak.gateway.utils.ssl_context import build_ssl_context
 
 if TYPE_CHECKING:
     from web3 import AsyncWeb3
 
 logger = logging.getLogger(__name__)
+
+FundingHistoryCacheKey = tuple[str, str, str, int, int]
+#                                  source scope market start end
+FundingHistoryLimiterKey = tuple[str, str]
+
+# Reuse the gateway's established idempotent-read retry policy from
+# RpcService. Funding-history POSTs are read-only and safe to retry.
+_FUNDING_RETRY_MAX_ATTEMPTS = 3
+_FUNDING_RETRY_BASE_DELAY_SECONDS = 0.5
+_FUNDING_RETRY_MAX_AFTER_SECONDS = 5.0
 
 
 # =============================================================================
@@ -123,6 +145,11 @@ class FundingRatePoint:
     timestamp: int
     rate_hourly: Decimal | None = None
     rate_annualized: Decimal | None = None
+
+
+def _funding_history_response_size(response: gateway_pb2.FundingRateHistoryResponse) -> int:
+    """Exact protobuf wire size for one neutral cached point series."""
+    return response.ByteSize()
 
 
 @dataclass(frozen=True)
@@ -194,6 +221,10 @@ class RateHistoryUnavailable(Exception):
         self.reason = reason
         self.retry_after = retry_after
         super().__init__(f"{source}: {reason}")
+
+
+class RateHistoryRateLimited(RateHistoryUnavailable):
+    """Connector received an upstream HTTP 429."""
 
 
 # =============================================================================
@@ -357,6 +388,24 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
         # check-and-create and orphan a ``ClientSession`` / ``AsyncWeb3``,
         # leaking sockets. CodeRabbit PR-review feedback (PR #2474).
         self._resource_init_lock = asyncio.Lock()
+
+        # ALM-3013: one bounded, source-keyed cache and one token bucket per
+        # upstream source. GMX and Hyperliquid declare the same source identity,
+        # so they share cache entries, in-flight fetches, and request budget.
+        self._funding_history_cache: HistoryCache[
+            FundingHistoryCacheKey,
+            gateway_pb2.FundingRateHistoryResponse,
+        ] = HistoryCache(
+            max_entries=settings.funding_history_cache_max_entries,
+            max_bytes=settings.funding_history_cache_max_bytes,
+            size_estimator=_funding_history_response_size,
+            provisional_ttl_seconds=DEFAULT_PROVISIONAL_TTL_SECONDS,
+            finalized_ttl_seconds=DEFAULT_FINALIZED_TTL_SECONDS,
+            clock=time.time,
+            name="funding_history",
+        )
+        self._funding_limiters: dict[FundingHistoryLimiterKey, RateLimiter] = {}
+        self._funding_limiter_policies: dict[FundingHistoryLimiterKey, tuple[int, int]] = {}
 
         # VIB-5090: bare pool address → full subgraph pool ID, resolved
         # by ``_dex_volume_subgraph`` for specs that opt in (Balancer V2,
@@ -988,6 +1037,103 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
             success=True,
         )
 
+    async def _funding_limiter(self, source: FundingHistorySource) -> RateLimiter:
+        """Return the shared token bucket for one upstream source."""
+        key = (source.key.strip().lower(), source.scope.strip().lower())
+        policy = (source.requests_per_minute, source.burst_size)
+        async with self._resource_init_lock:
+            existing_policy = self._funding_limiter_policies.get(key)
+            if existing_policy is not None and existing_policy != policy:
+                raise RuntimeError(
+                    f"Conflicting funding-history rate-limit policy for {key!r}: {existing_policy!r} vs {policy!r}"
+                )
+            limiter = self._funding_limiters.get(key)
+            if limiter is None:
+                limiter = RateLimiter(
+                    requests_per_minute=source.requests_per_minute,
+                    bucket_size=source.burst_size,
+                )
+                self._funding_limiters[key] = limiter
+                self._funding_limiter_policies[key] = policy
+            return limiter
+
+    @staticmethod
+    def _funding_finality_band(end_ts: int) -> str:
+        """Current-hour windows are provisional; completed hours are final."""
+        current_hour_start = int(time.time() // 3600) * 3600
+        return FINALITY_FINALIZED if end_ts < current_hour_start else FINALITY_PROVISIONAL
+
+    @staticmethod
+    async def _funding_retry_sleep(attempt: int, retry_after: float | None) -> None:
+        if retry_after is not None:
+            delay = min(retry_after, _FUNDING_RETRY_MAX_AFTER_SECONDS)
+        else:
+            base = _FUNDING_RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1))
+            delay = base * random.uniform(0.5, 1.5)
+        await asyncio.sleep(delay)
+
+    async def _fetch_funding_history_with_retry(
+        self,
+        provider: GatewayFundingHistoryCapability,
+        source: FundingHistorySource,
+        *,
+        market: str,
+        chain: str,
+        start_ts: int,
+        end_ts: int,
+    ) -> Any:
+        """Fetch one source window under the shared budget with bounded 429 retry."""
+        limiter = await self._funding_limiter(source)
+        for attempt in range(1, _FUNDING_RETRY_MAX_ATTEMPTS + 1):
+            await limiter.acquire()
+            try:
+                return await provider.fetch_funding_history(
+                    self,
+                    market=market,
+                    chain=chain,
+                    start_ts=start_ts,
+                    end_ts=end_ts,
+                )
+            except RateHistoryRateLimited as exc:
+                if attempt >= _FUNDING_RETRY_MAX_ATTEMPTS:
+                    raise
+                await self._funding_retry_sleep(attempt, exc.retry_after)
+        raise AssertionError("funding-history retry loop exhausted without returning or raising")
+
+    async def _cached_funding_history(
+        self,
+        provider: GatewayFundingHistoryCapability,
+        *,
+        market: str,
+        chain: str,
+        start_ts: int,
+        end_ts: int,
+    ) -> gateway_pb2.FundingRateHistoryResponse:
+        source = provider.funding_history_source(chain)
+        cache_key: FundingHistoryCacheKey = (
+            source.key.strip().lower(),
+            source.scope.strip().lower(),
+            market,
+            start_ts,
+            end_ts,
+        )
+
+        async def fetcher() -> tuple[gateway_pb2.FundingRateHistoryResponse, str]:
+            points = await self._fetch_funding_history_with_retry(
+                provider,
+                source,
+                market=market,
+                chain=chain,
+                start_ts=start_ts,
+                end_ts=end_ts,
+            )
+            cached = gateway_pb2.FundingRateHistoryResponse(
+                points=[self._encode_funding_point(point) for point in points],
+            )
+            return cached, self._funding_finality_band(end_ts)
+
+        return await self._funding_history_cache.get_or_fetch(cache_key, fetcher)
+
     # ---------------------------------------------------------------------
     # RPC: GetFundingRateHistory
     # ---------------------------------------------------------------------
@@ -1022,12 +1168,29 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
             return gateway_pb2.FundingRateHistoryResponse(success=False, error=msg)
 
         try:
-            points = await provider.fetch_funding_history(
-                self,
+            cached = await self._cached_funding_history(
+                provider,
                 market=market,
                 chain=chain,
                 start_ts=request.start_ts,
                 end_ts=request.end_ts,
+            )
+        except RateHistoryRateLimited as exc:
+            set_error_from_upstream(
+                context,
+                DataSourceRateLimited(
+                    source=exc.source,
+                    retry_after=exc.retry_after if exc.retry_after is not None else 0.0,
+                ),
+                upstream=exc.source,
+            )
+            return gateway_pb2.FundingRateHistoryResponse(
+                venue=venue,
+                market=market,
+                chain=chain,
+                source=exc.source or "none",
+                success=False,
+                error=str(exc),
             )
         except RateHistoryUnavailable as exc:
             return gateway_pb2.FundingRateHistoryResponse(
@@ -1053,7 +1216,7 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
             venue=venue,
             market=market,
             chain=chain,
-            points=[self._encode_funding_point(p) for p in points],
+            points=list(cached.points),
             source=venue,
             success=True,
         )

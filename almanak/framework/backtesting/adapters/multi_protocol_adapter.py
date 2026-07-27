@@ -63,6 +63,7 @@ if TYPE_CHECKING:
         SimulatedPortfolio,
         SimulatedPosition,
     )
+    from almanak.framework.backtesting.pnl.providers.perp.snapshot_funding import SnapshotFundingRateSource
     from almanak.framework.intents.vocabulary import Intent
 
 from almanak.framework.backtesting.pnl.portfolio_aggregator import (
@@ -635,6 +636,12 @@ class MultiProtocolBacktestAdapter(StrategyBacktestAdapter):
         if protocol_type is None:
             return None
         return self._sub_adapters.get(protocol_type)
+
+    def bind_funding_history_source(self, source: "SnapshotFundingRateSource") -> None:
+        """Bind the engine-owned funding plane into the perp sub-adapter."""
+        bind = getattr(self._sub_adapters.get("perp"), "bind_funding_history_source", None)
+        if bind is not None:
+            bind(source)
 
     async def prewarm_history(
         self,

@@ -33,6 +33,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, ClassVar
 
 from almanak.connectors._base.gateway_capabilities import (
+    FundingHistorySource,
     GatewayFundingHistoryCapability,
     GatewayFundingRateCapability,
     GatewayOraclePriceCapability,
@@ -113,10 +114,26 @@ async def _hyperliquid_read_funding_response(response: Any) -> Any:
     Split out of ``_hyperliquid_post_funding_history`` so the outer
     try/except plumbing stays decomposable.
     """
-    from almanak.gateway.services.rate_history_service import RateHistoryUnavailable
+    from almanak.gateway.services.rate_history_service import RateHistoryRateLimited, RateHistoryUnavailable
 
     if response.status != 200:
         text = await response.text()
+        if response.status == 429:
+            headers = getattr(response, "headers", {})
+            retry_after_header = headers.get("Retry-After") if hasattr(headers, "get") else None
+            retry_after: float | None = None
+            if retry_after_header:
+                try:
+                    parsed = float(str(retry_after_header).strip())
+                except ValueError:
+                    parsed = -1.0
+                if parsed >= 0:
+                    retry_after = parsed
+            raise RateHistoryRateLimited(
+                "hyperliquid",
+                f"HTTP 429: {text[:200]}",
+                retry_after=retry_after,
+            )
         raise RateHistoryUnavailable(
             "hyperliquid",
             f"HTTP {response.status}: {text[:200]}",
@@ -448,6 +465,15 @@ class HyperliquidGatewayConnector(
     def funding_supported_markets(self) -> frozenset[str]:
         """Markets the Hyperliquid Info API serves on the historical lane."""
         return frozenset(_HYPER_MARKET_TO_COIN.keys())
+
+    def funding_history_source(self, chain: str) -> FundingHistorySource:
+        """Shared upstream identity and migrated client throttle policy."""
+        return FundingHistorySource(
+            key="hyperliquid_info",
+            scope="",
+            requests_per_minute=30,
+            burst_size=6,
+        )
 
     async def fetch_funding_history(
         self,

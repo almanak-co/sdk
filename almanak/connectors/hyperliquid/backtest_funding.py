@@ -41,7 +41,7 @@ from almanak.framework.backtesting.pnl.providers.perp._gateway_history import (
 )
 from almanak.framework.backtesting.pnl.providers.rate_limiter import TokenBucketRateLimiter
 from almanak.framework.backtesting.pnl.types import DataConfidence, DataSourceInfo, FundingResult
-from almanak.framework.data.interfaces import DataSourceUnavailable
+from almanak.framework.data.interfaces import DataSourceError
 
 logger = logging.getLogger(__name__)
 
@@ -285,7 +285,7 @@ class HyperliquidFundingProvider(HistoricalFundingProvider):
                 start_ts=start_ts,
                 end_ts=end_ts,
             )
-        except DataSourceUnavailable as e:
+        except DataSourceError as e:
             raise HyperliquidAPIError(f"Gateway funding history unavailable: {e}") from e
 
     def _create_fallback_result(self, timestamp: datetime) -> FundingResult:

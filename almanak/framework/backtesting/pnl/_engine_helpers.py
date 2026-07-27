@@ -95,6 +95,7 @@ from almanak.framework.backtesting.pnl.portfolio import (
     SimulatedPortfolio,
 )
 from almanak.framework.backtesting.pnl.run_context import BacktestRunContext
+from almanak.framework.data.interfaces import DataSourceError
 from almanak.framework.market.errors import PriceUnavailableError
 
 if TYPE_CHECKING:
@@ -105,6 +106,7 @@ if TYPE_CHECKING:
     )
     from almanak.framework.backtesting.pnl.indicator_engine import BacktestIndicatorEngine
     from almanak.framework.backtesting.pnl.logging_utils import BacktestLogger
+    from almanak.framework.backtesting.pnl.providers.perp.snapshot_funding import SnapshotFundingRateSource
 
 
 logger = logging.getLogger(__name__)
@@ -157,6 +159,71 @@ def _expected_price_lookup_label(
     if registered_address is not None:
         return token_ref_display(registered_address).upper()
     return token_ref_display(normalized).upper()
+
+
+def _declared_funding_prewarm_targets(
+    strategy: BacktestableStrategy,
+    strategy_config: Mapping[str, Any],
+) -> tuple[tuple[str, str], ...]:
+    """Discover explicit funding targets that are safe to load before tick 1.
+
+    Funding access remains dynamic, so unknown targets still materialize on
+    first use. The standard perp strategy contract declares the market via
+    ``funding_market`` (or ``market``) and the venue via ``protocol`` or
+    strategy metadata; those targets can be prewarmed before data iteration.
+    """
+    raw_market = strategy_config.get("funding_market") or strategy_config.get("market")
+    if not isinstance(raw_market, str) or not raw_market.strip():
+        raw_market = getattr(strategy, "funding_market", None) or getattr(strategy, "market", None)
+    if not isinstance(raw_market, str) or not raw_market.strip():
+        return ()
+    market = raw_market.strip()
+
+    protocols: list[str] = []
+
+    def add_protocol(value: Any) -> None:
+        if not isinstance(value, str) or not value.strip():
+            return
+        normalized = value.strip().lower().replace("-", "_")
+        if normalized not in protocols:
+            protocols.append(normalized)
+
+    explicit_protocol = strategy_config.get("protocol") or getattr(strategy, "protocol", None)
+    if explicit_protocol:
+        add_protocol(explicit_protocol)
+    else:
+        metadata = getattr(strategy, "STRATEGY_METADATA", None)
+        for protocol in getattr(metadata, "supported_protocols", None) or ():
+            add_protocol(protocol)
+
+    return tuple((protocol, market) for protocol in protocols)
+
+
+async def _prewarm_declared_funding_history(
+    source: SnapshotFundingRateSource,
+    strategy: BacktestableStrategy,
+    strategy_config: Mapping[str, Any],
+) -> None:
+    """Materialize declared snapshot funding series before data iteration."""
+    if not source.history_capable:
+        return
+    for venue, market in _declared_funding_prewarm_targets(strategy, strategy_config):
+        try:
+            point_count = await source.materialize_history(venue, market)
+        except DataSourceError as exc:
+            logger.warning(
+                "Snapshot funding prewarm unavailable for %s %s; continuing without prewarm: %s",
+                venue,
+                market,
+                exc,
+            )
+            continue
+        logger.info(
+            "Prewarmed %d snapshot funding points for %s %s before tick 1",
+            point_count,
+            venue,
+            market,
+        )
 
 
 # =============================================================================
@@ -603,12 +670,20 @@ async def execute_iteration_loop(
     # resolves the rate in effect at that instant (no look-ahead).
     funding_rate_source = SnapshotFundingRateSource(
         chain=config.chain,
+        start_time=config.start_time,
+        end_time=config.end_time,
         data_config=backtester.data_config,
         # Snapshot funding reads execute in MarketSnapshot's async bridge
         # worker, where the broker context variable is unavailable. Pass the
         # thread-safe run manifest explicitly so decision-time serves are not
         # lost while position-accrual serves remain broker-routed.
         manifest=state.data_broker.manifest if state.data_broker is not None else None,
+    )
+    backtester._bind_funding_history_source(funding_rate_source)
+    await _prewarm_declared_funding_history(
+        funding_rate_source,
+        strategy,
+        state.strategy_config,
     )
 
     # Stable for the whole run: provider registrations happen during

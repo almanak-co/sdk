@@ -21,7 +21,7 @@ from decimal import Decimal, InvalidOperation
 from functools import partial
 from typing import Any
 
-from almanak.framework.data.interfaces import DataSourceUnavailable
+from almanak.framework.data.interfaces import DataSourceUnavailable, data_source_error_from_grpc
 
 logger = logging.getLogger(__name__)
 
@@ -122,8 +122,8 @@ def fetch_funding_points(
     Raises:
         ValueError: When ``max_window_seconds`` is not positive (the chunk
             loop could not make progress).
-        DataSourceUnavailable: On transport failure or a gateway-side
-            ``success=False`` envelope.
+        DataSourceError: On typed transport, timeout, or rate-limit failure.
+        DataSourceUnavailable: On a gateway-side ``success=False`` envelope.
     """
     if max_window_seconds <= 0:
         raise ValueError(f"max_window_seconds must be > 0, got {max_window_seconds}")
@@ -204,6 +204,9 @@ def _fetch_window(
     try:
         response = client.rate_history.GetFundingRateHistory(request)
     except Exception as exc:
+        typed = data_source_error_from_grpc(exc, default_source="gateway")
+        if typed is not None:
+            raise typed from exc
         raise DataSourceUnavailable(
             source="gateway",
             reason=f"GetFundingRateHistory RPC failed: {exc}",

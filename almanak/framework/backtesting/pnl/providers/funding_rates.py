@@ -45,7 +45,7 @@ from typing import Any
 from almanak.connectors._strategy_base.funding_history_registry import FundingHistoryRegistry
 from almanak.core.chains import DEFAULT_CHAIN
 from almanak.framework.backtesting.config import DEFAULT_FUNDING_FALLBACK_RATE
-from almanak.framework.data.interfaces import DataSourceUnavailable
+from almanak.framework.data.interfaces import DataSourceError
 
 from .perp._gateway_history import fetch_funding_points, run_sync_gateway_call
 
@@ -410,7 +410,7 @@ class FundingRateProvider:
                 start_ts=end_ts - _POINT_LOOKBACK_SECONDS,
                 end_ts=end_ts,
             )
-        except DataSourceUnavailable as exc:
+        except DataSourceError as exc:
             logger.warning(
                 "Gateway funding history unavailable for %s %s: %s",
                 protocol_lower,

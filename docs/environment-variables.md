@@ -311,9 +311,9 @@ If your `.env` contains `ALMANAK_MAX_GAS_PRICE_GWEI=...`:
 
 ---
 
-## Pool History Service
+## Gateway History Services
 
-Operator tunables for the gateway's historical-pool snapshots service. The service ships disabled by default; hosted operators enable it as deployment config once provider egress and keys are provisioned — see the [PoolHistoryService section in the Gateway API reference](gateway/api-reference.md#poolhistoryservice) for behavior and provider order.
+Operator tunables for the gateway's bounded history caches. The pool-history service ships disabled by default; hosted operators enable it as deployment config once provider egress and keys are provisioned — see the [PoolHistoryService section in the Gateway API reference](gateway/api-reference.md#poolhistoryservice) for behavior and provider order. Funding-history cache controls apply whenever the existing rate-history service is running.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
@@ -323,6 +323,8 @@ Operator tunables for the gateway's historical-pool snapshots service. The servi
 | `ALMANAK_GATEWAY_POOL_HISTORY_MAX_DAYS_1D` | Soft cap (days) on 1d-resolution requests. | `730` |
 | `ALMANAK_GATEWAY_POOL_HISTORY_CACHE_MAX_ENTRIES` | In-memory cache entry cap. | `5000` |
 | `ALMANAK_GATEWAY_POOL_HISTORY_CACHE_MAX_BYTES` | In-memory cache byte cap. | `67108864` (64 MiB) |
+| `ALMANAK_GATEWAY_FUNDING_HISTORY_CACHE_MAX_ENTRIES` | Funding-history in-memory cache entry cap. | `5000` |
+| `ALMANAK_GATEWAY_FUNDING_HISTORY_CACHE_MAX_BYTES` | Funding-history in-memory cache byte cap. | `67108864` (64 MiB) |
 
 ---
 

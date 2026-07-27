@@ -6,7 +6,13 @@ Malformed or non-finite rates are SKIPPED, never decoded as a measured 0
 
 from decimal import Decimal
 
-from almanak.connectors.hyperliquid.gateway.provider import _hyperliquid_parse_funding_entries
+import pytest
+
+from almanak.connectors.hyperliquid.gateway.provider import (
+    _hyperliquid_parse_funding_entries,
+    _hyperliquid_read_funding_response,
+)
+from almanak.gateway.services.rate_history_service import RateHistoryRateLimited
 
 
 def _entry(time_ms: int, rate: object) -> dict:
@@ -27,3 +33,18 @@ def test_malformed_and_nonfinite_rates_are_skipped_never_zeroed() -> None:
 
     assert [p.rate_hourly for p in points] == [Decimal("0.0000125")]
     assert points[0].rate_annualized == Decimal("0.0000125") * 8760
+
+
+@pytest.mark.asyncio
+async def test_http_429_captures_retry_after() -> None:
+    class _Response:
+        status = 429
+        headers = {"Retry-After": "7.5"}
+
+        async def text(self) -> str:
+            return "rate limited"
+
+    with pytest.raises(RateHistoryRateLimited) as exc_info:
+        await _hyperliquid_read_funding_response(_Response())
+
+    assert exc_info.value.retry_after == 7.5

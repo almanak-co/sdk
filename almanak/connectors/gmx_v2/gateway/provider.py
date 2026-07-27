@@ -45,6 +45,7 @@ from decimal import Decimal
 from typing import Any, ClassVar
 
 from almanak.connectors._base.gateway_capabilities import (
+    FundingHistorySource,
     GatewayAddressCapability,
     GatewayFundingHistoryCapability,
     GatewayFundingRateCapability,
@@ -137,6 +138,15 @@ class GmxV2GatewayConnector(
     def funding_supported_markets(self) -> frozenset[str]:
         """Markets the Hyperliquid cross-venue fallback can serve for GMX."""
         return _GMX_HISTORICAL_MARKETS
+
+    def funding_history_source(self, chain: str) -> FundingHistorySource:
+        """Identify the same upstream budget Hyperliquid history consumes."""
+        return FundingHistorySource(
+            key="hyperliquid_info",
+            scope="",
+            requests_per_minute=30,
+            burst_size=6,
+        )
 
     async def fetch_funding_history(
         self,

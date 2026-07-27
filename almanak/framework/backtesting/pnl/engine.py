@@ -3433,6 +3433,14 @@ class PnLBacktester:
         )
         logger.info(f"Loaded per-intent adapter router for strategy '{strategy.deployment_id}' (swap_lane={swap_lane})")
 
+    def _bind_funding_history_source(self, source: "SnapshotFundingRateSource") -> None:
+        """Bind the engine-owned funding plane into the active perp adapter."""
+        if self._adapter is None:
+            return
+        bind = getattr(self._adapter, "bind_funding_history_source", None)
+        if bind is not None:
+            bind(source)
+
     def _init_mev_simulator(self, config: PnLBacktestConfig) -> None:
         """Initialize MEV simulator based on config.
 

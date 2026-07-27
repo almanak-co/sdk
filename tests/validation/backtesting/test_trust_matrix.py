@@ -1417,13 +1417,17 @@ def test_perp_funding_lanes_agree_on_measured_rate(monkeypatch: pytest.MonkeyPat
     one-period over-accrual) — one one-hour application at the measured rate.
     """
     measured = Decimal("0.0004")
+    calls = 0
 
     def _fetch(**kwargs):
-        return [FundingHistoryPoint(timestamp=kwargs["end_ts"] - 60, rate_hourly=measured)]
+        nonlocal calls
+        calls += 1
+        return [FundingHistoryPoint(timestamp=kwargs["start_ts"] + 24 * 3600 - 60, rate_hourly=measured)]
 
-    # Both lanes' import-site bindings of the shared gateway seam.
-    monkeypatch.setattr("almanak.framework.backtesting.pnl.providers.funding_rates.fetch_funding_points", _fetch)
-    monkeypatch.setattr("almanak.connectors.gmx_v2.backtest_funding.fetch_funding_points", _fetch)
+    monkeypatch.setattr(
+        "almanak.framework.backtesting.pnl.providers.perp.snapshot_funding.fetch_funding_points",
+        _fetch,
+    )
 
     notional = Decimal("5000")
     strategy = FundingCoherenceProbeStrategy(notional=notional)
@@ -1447,6 +1451,7 @@ def test_perp_funding_lanes_agree_on_measured_rate(monkeypatch: pytest.MonkeyPat
     # ...the position's funding was stamped as measured history, not fallback...
     assert result.data_coverage_metrics.perp_metrics.data_sources == ["historical:gateway"]
     assert result.data_coverage_metrics.perp_metrics.funding_confidence_breakdown["high"] == 1
+    assert calls == 1, "snapshot and accrual must share one run-wide funding series"
     # ...and the position accrued exactly that rate for its one funding hour.
     expected_funding = measured * notional  # one funding hour (t2 mark)
     assert result.final_capital_usd == INITIAL_CAPITAL - expected_funding

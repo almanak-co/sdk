@@ -1999,6 +1999,47 @@ class TestPrewarmHistory:
             return self._rates
 
     @pytest.mark.asyncio
+    async def test_engine_owned_source_serves_prewarm_and_accrual(self, monkeypatch):
+        from almanak.framework.backtesting.pnl.providers.perp.snapshot_funding import BacktestFundingObservation
+
+        class _SharedSource:
+            def __init__(self):
+                self.materialized: list[tuple[str, str]] = []
+
+            async def materialize_history(self, venue, market):
+                self.materialized.append((str(venue), market))
+                return 25
+
+            def observation_at(self, venue, market, timestamp):
+                return BacktestFundingObservation(
+                    rate=Decimal("0.00042"),
+                    confidence="high",
+                    source="historical:gateway",
+                    degraded=False,
+                )
+
+        adapter = self._adapter()
+        source = _SharedSource()
+        adapter.bind_funding_history_source(source)  # type: ignore[arg-type]
+        monkeypatch.setattr(
+            adapter,
+            "_get_provider_for_protocol",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy provider path must not run")),
+        )
+        start, end = self._window()
+
+        await adapter.prewarm_history(self._intent(), "arbitrum", start, end)
+        position = create_perp_long_position(token="ETH", protocol="gmx_v2")
+        rate, confidence, label = adapter._get_historical_funding_rate_v2(
+            position,
+            timestamp=start,
+            chain="arbitrum",
+        )
+
+        assert source.materialized == [("gmx_v2", "ETH-USD")]
+        assert (rate, confidence, label) == (Decimal("0.00042"), "high", "historical:gateway")
+
+    @pytest.mark.asyncio
     async def test_measured_rates_fill_cache_with_hour_keys(self, monkeypatch):
         adapter = self._adapter()
         provider = self._FakeProvider([self._funding_result(0), self._funding_result(1)])
