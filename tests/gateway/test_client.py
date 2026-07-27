@@ -9,6 +9,9 @@ from grpc_health.v1 import health_pb2
 from almanak.framework.gateway_client import (
     GatewayClient,
     GatewayClientConfig,
+    _AuthClientInterceptor,
+    _CycleIdInterceptor,
+    _RateLimitRetryInterceptor,
     get_gateway_client,
     reset_gateway_client,
 )
@@ -186,7 +189,7 @@ class TestGatewayClient:
             assert client.is_connected
 
     def test_client_connect_without_auth_token(self):
-        """Client wraps channel with cycle_id interceptor even without auth."""
+        """Retry + cycle_id interceptors are always active; auth is not added."""
         config = GatewayClientConfig(host="localhost", port=50052, auth_token=None)
         client = GatewayClient(config)
 
@@ -202,12 +205,38 @@ class TestGatewayClient:
 
             # Base channel should be created
             mock_channel.assert_called_once_with("localhost:50052")
-            # intercept_channel is called (cycle_id interceptor always active)
             mock_intercept.assert_called_once()
-            # Only cycle_id interceptor, no auth interceptor
             args = mock_intercept.call_args
             interceptors = args[0][1:]  # Skip base_channel arg
-            assert len(interceptors) == 1
+
+            # ALM-2883: rate-limit retry is unconditional — it absorbs the
+            # gateway's own throttle, which applies with or without auth.
+            assert [type(i) for i in interceptors] == [_RateLimitRetryInterceptor, _CycleIdInterceptor]
+            assert not any(isinstance(i, _AuthClientInterceptor) for i in interceptors)
+
+    def test_retry_interceptor_is_outermost(self):
+        """Retry must wrap the metadata interceptors, not sit inside them.
+
+        ``intercept_channel`` gives control in listed order, so the first entry
+        is outermost. If retry sat inside ``_CycleIdInterceptor``, a second
+        attempt would reuse attempt 1's cycle_id metadata and mis-correlate the
+        call gateway-side.
+        """
+        config = GatewayClientConfig(host="localhost", port=50052, auth_token="tok")
+        client = GatewayClient(config)
+
+        with (
+            patch("grpc.insecure_channel") as mock_channel,
+            patch("grpc.intercept_channel") as mock_intercept,
+        ):
+            mock_channel.return_value = MagicMock()
+            mock_intercept.return_value = MagicMock()
+
+            client.connect()
+
+            interceptors = mock_intercept.call_args[0][1:]
+            assert isinstance(interceptors[0], _RateLimitRetryInterceptor)
+            assert any(isinstance(i, _AuthClientInterceptor) for i in interceptors)
 
     def test_client_disconnect(self):
         """Client closes connection."""

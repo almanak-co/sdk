@@ -47,6 +47,12 @@ logger = logging.getLogger(__name__)
 # lookup site, byte-equivalent to the legacy literal dict.
 CHAIN_RATE_LIMITS: Mapping[str, int] = rpc_rate_limit_map()
 
+# Effective-network values used to partition the rate-limiter cache. Anvil
+# traffic is unthrottled (no upstream quota to protect); everything else shares
+# the chain's real provider budget. See RpcService._get_rate_limiter.
+_ANVIL_NETWORK = "anvil"
+_MAINNET_LIMITER_KEY = ""
+
 
 # StateView.getSlot0(bytes32 poolId) selector — keccak256("getSlot0(bytes32)")[:4].
 # The deployed V4 StateView takes the PoolId (bytes32 = keccak256(abi.encode(PoolKey))),
@@ -287,6 +293,29 @@ class ChainRateLimiter:
             self._append_slots(1)
 
 
+class _UnthrottledRateLimiter(ChainRateLimiter):
+    """Null-object limiter for local Anvil forks (ALM-3025).
+
+    Always admits, never accumulates timestamps. Substituted for the real
+    limiter when a request's *effective* network is Anvil — see
+    :meth:`RpcService._get_rate_limiter` for why a local fork carries no
+    upstream quota to protect. Implemented as a subclass so every call site
+    keeps the same shape (no ``if limiter is not None`` guards to forget at
+    one of the seven throttled entrypoints).
+    """
+
+    def __init__(self) -> None:
+        # ``requests_per_minute`` is inherited for type compatibility only —
+        # both methods below are overridden and never consult it.
+        super().__init__(requests_per_minute=0)
+
+    async def check_rate_limit(self, count: int = 1, *, reserve: bool = False) -> tuple[bool, float]:
+        return True, 0.0
+
+    async def record_request(self) -> None:
+        return None
+
+
 @dataclass
 class RpcMetrics:
     """Metrics for RPC service."""
@@ -348,7 +377,9 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
         """
         self.settings = settings
         self._session: aiohttp.ClientSession | None = None
-        self._rate_limiters: dict[str, ChainRateLimiter] = {}
+        # Keyed by (chain, network-class) — see _get_rate_limiter: Anvil traffic
+        # and real-provider traffic must not share a bucket.
+        self._rate_limiters: dict[tuple[str, str], ChainRateLimiter] = {}
         self._metrics = RpcMetrics()
 
         logger.debug("Initialized RpcService with allowed chains: %s", ALLOWED_CHAINS)
@@ -370,12 +401,40 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
             self._session = None
             logger.info("RpcService HTTP session closed")
 
-    def _get_rate_limiter(self, chain: str) -> ChainRateLimiter:
-        """Get rate limiter for a chain."""
-        if chain not in self._rate_limiters:
-            limit = CHAIN_RATE_LIMITS.get(chain, 100)
-            self._rate_limiters[chain] = ChainRateLimiter(limit)
-        return self._rate_limiters[chain]
+    def _get_rate_limiter(self, chain: str, network: str | None = None) -> ChainRateLimiter:
+        """Get the rate limiter for a chain on a given *effective* network.
+
+        The per-chain RPM budget exists to protect a **paid upstream provider
+        quota**. A local Anvil fork has no such quota: the fork backfills cold
+        state straight from its own upstream connection, which never crosses
+        this gateway, so throttling fork traffic protects nothing while
+        starving the caller (ALM-3025 — a managed-Anvil GMX V2 lifecycle burns
+        ~50-60 gateway RPCs per keeper-settled order and saturates Arbitrum's
+        300 rpm budget mid-test, leaving oracle state seeded and the fork
+        unusable).
+
+        Anvil therefore gets an unthrottled limiter, keyed SEPARATELY from the
+        mainnet one. The separation is load-bearing: an Anvil-launched gateway
+        is allowed to serve a per-request ``network="mainnet"`` override
+        (``_network_elevation_error`` only blocks the reverse elevation), and
+        those calls DO hit the paid provider — they must keep paying the real
+        budget.
+
+        Args:
+            chain: Chain identifier (e.g. ``"arbitrum"``).
+            network: Effective network for this request — the per-request
+                override if one was supplied, else the gateway's launch
+                network. ``None`` is treated as non-Anvil, so any call site
+                that does not resolve a network keeps the mainnet budget
+                (fail-safe: an omission throttles, it never unthrottles).
+        """
+        is_anvil = str(network or "").strip().lower() == _ANVIL_NETWORK
+        key = (chain, _ANVIL_NETWORK if is_anvil else _MAINNET_LIMITER_KEY)
+        limiter = self._rate_limiters.get(key)
+        if limiter is None:
+            limiter = _UnthrottledRateLimiter() if is_anvil else ChainRateLimiter(CHAIN_RATE_LIMITS.get(chain, 100))
+            self._rate_limiters[key] = limiter
+        return limiter
 
     def _chain_not_configured_error(self, chain: str) -> str | None:
         """Return an error message if chain is not in the gateway's configured list.
@@ -792,8 +851,8 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
                 id=request.id,
             )
 
-        # Check rate limit
-        limiter = self._get_rate_limiter(chain)
+        # Check rate limit (Anvil forks are unthrottled — see _get_rate_limiter)
+        limiter = self._get_rate_limiter(chain, effective_network)
         allowed, wait_time = await limiter.check_rate_limit()
         if not allowed:
             self._metrics.rate_limited_requests += 1
@@ -985,7 +1044,7 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
         plan: _RpcBatchPlan,
         context: grpc.aio.ServicerContext,
     ) -> tuple[_RpcBatchTransport | None, gateway_pb2.RpcBatchResponse | None]:
-        limiter = self._get_rate_limiter(plan.chain)
+        limiter = self._get_rate_limiter(plan.chain, plan.effective_network)
         allowed, wait_time = await limiter.check_rate_limit(plan.num_requests)
         if not allowed:
             self._metrics.rate_limited_requests += plan.num_requests
@@ -1158,7 +1217,7 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
             return gateway_pb2.AllowanceResponse(success=False, error=str(e))
 
         # Check rate limit
-        limiter = self._get_rate_limiter(chain)
+        limiter = self._get_rate_limiter(chain, self.settings.network)
         allowed, wait_time = await limiter.check_rate_limit()
         if not allowed:
             self._metrics.rate_limited_requests += 1
@@ -1265,7 +1324,7 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
             return gateway_pb2.BalanceQueryResponse(success=False, error=str(e))
 
         # Check rate limit
-        limiter = self._get_rate_limiter(chain)
+        limiter = self._get_rate_limiter(chain, self.settings.network)
         allowed, wait_time = await limiter.check_rate_limit()
         if not allowed:
             self._metrics.rate_limited_requests += 1
@@ -1377,7 +1436,7 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
             return gateway_pb2.PositionLiquidityResponse(success=False, error=error_msg)
 
         # Check rate limit
-        limiter = self._get_rate_limiter(chain)
+        limiter = self._get_rate_limiter(chain, self.settings.network)
         allowed, wait_time = await limiter.check_rate_limit()
         if not allowed:
             self._metrics.rate_limited_requests += 1
@@ -1506,7 +1565,7 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
             return gateway_pb2.PositionTokensOwedResponse(success=False, error=error_msg)
 
         # Check rate limit
-        limiter = self._get_rate_limiter(chain)
+        limiter = self._get_rate_limiter(chain, self.settings.network)
         allowed, wait_time = await limiter.check_rate_limit()
         if not allowed:
             self._metrics.rate_limited_requests += 1
@@ -1653,7 +1712,7 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
             context.set_details(error_msg)
             return gateway_pb2.V4PositionStateResponse(success=False, error=error_msg)
 
-        limiter = self._get_rate_limiter(chain)
+        limiter = self._get_rate_limiter(chain, self.settings.network)
         # This RPC fires up to 5 eth_calls (liquidity, pool+position info, slot0,
         # position fee snapshot, feeGrowthInside). Reserve all 5 slots atomically
         # up front so concurrent V4 reads can't oversubscribe the per-chain cap

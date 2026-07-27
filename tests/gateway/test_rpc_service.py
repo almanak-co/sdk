@@ -9,8 +9,10 @@ from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2
 from almanak.gateway.services.rpc_service import (
     ALLOWED_CHAINS,
+    CHAIN_RATE_LIMITS,
     ChainRateLimiter,
     RpcServiceServicer,
+    _UnthrottledRateLimiter,
 )
 
 
@@ -395,9 +397,7 @@ class TestRpcServiceBlockPinning:
             wallet_address="0x54776446Aa29Fc49d152B4850bD410eA1E4d24bF",
         )
         with patch.object(rpc_service, "_get_rpc_url", return_value="http://test"):
-            with patch.object(
-                rpc_service, "_make_rpc_call", new=AsyncMock(return_value=("0x1", None))
-            ) as call:
+            with patch.object(rpc_service, "_make_rpc_call", new=AsyncMock(return_value=("0x1", None))) as call:
                 await rpc_service.QueryBalance(request, mock_context)
         assert self._block_arg(call) == "latest"
 
@@ -410,9 +410,7 @@ class TestRpcServiceBlockPinning:
             block="0x1234abc",
         )
         with patch.object(rpc_service, "_get_rpc_url", return_value="http://test"):
-            with patch.object(
-                rpc_service, "_make_rpc_call", new=AsyncMock(return_value=("0x1", None))
-            ) as call:
+            with patch.object(rpc_service, "_make_rpc_call", new=AsyncMock(return_value=("0x1", None))) as call:
                 await rpc_service.QueryBalance(request, mock_context)
         assert self._block_arg(call) == "0x1234abc"
 
@@ -425,9 +423,7 @@ class TestRpcServiceBlockPinning:
             spender_address="0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
         )
         with patch.object(rpc_service, "_get_rpc_url", return_value="http://test"):
-            with patch.object(
-                rpc_service, "_make_rpc_call", new=AsyncMock(return_value=("0x1", None))
-            ) as call:
+            with patch.object(rpc_service, "_make_rpc_call", new=AsyncMock(return_value=("0x1", None))) as call:
                 await rpc_service.QueryAllowance(request, mock_context)
         assert self._block_arg(call) == "latest"
 
@@ -441,9 +437,7 @@ class TestRpcServiceBlockPinning:
             block="0xdeadbeef",
         )
         with patch.object(rpc_service, "_get_rpc_url", return_value="http://test"):
-            with patch.object(
-                rpc_service, "_make_rpc_call", new=AsyncMock(return_value=("0x1", None))
-            ) as call:
+            with patch.object(rpc_service, "_make_rpc_call", new=AsyncMock(return_value=("0x1", None))) as call:
                 await rpc_service.QueryAllowance(request, mock_context)
         assert self._block_arg(call) == "0xdeadbeef"
 
@@ -557,9 +551,7 @@ class TestPositionQueryParsing:
     @pytest.mark.asyncio
     async def test_liquidity_rpc_error_propagates(self, rpc_service, mock_context):
         with patch.object(rpc_service, "_get_rpc_url", return_value="http://test"):
-            with patch.object(
-                rpc_service, "_make_rpc_call", new=AsyncMock(return_value=(None, {"message": "boom"}))
-            ):
+            with patch.object(rpc_service, "_make_rpc_call", new=AsyncMock(return_value=(None, {"message": "boom"}))):
                 request = gateway_pb2.PositionLiquidityRequest(chain="arbitrum", position_manager=self.NPM, token_id=1)
                 response = await rpc_service.QueryPositionLiquidity(request, mock_context)
         assert response.success is False
@@ -599,9 +591,7 @@ class TestPositionQueryParsing:
     @pytest.mark.asyncio
     async def test_tokens_owed_rpc_error_propagates(self, rpc_service, mock_context):
         with patch.object(rpc_service, "_get_rpc_url", return_value="http://test"):
-            with patch.object(
-                rpc_service, "_make_rpc_call", new=AsyncMock(return_value=(None, {"message": "boom"}))
-            ):
+            with patch.object(rpc_service, "_make_rpc_call", new=AsyncMock(return_value=(None, {"message": "boom"}))):
                 request = gateway_pb2.PositionTokensOwedRequest(chain="arbitrum", position_manager=self.NPM, token_id=1)
                 response = await rpc_service.QueryPositionTokensOwed(request, mock_context)
         assert response.success is False
@@ -793,7 +783,9 @@ class TestRpcServiceBatchCall:
             requests=[
                 gateway_pb2.RpcRequest(method="eth_blockNumber", params="[]", id="raises"),
                 gateway_pb2.RpcRequest(method="eth_chainId", params="[]", id="rpc-error"),
-                gateway_pb2.RpcRequest(method="eth_getBalance", params='["0x0000000000000000000000000000000000000001","latest"]', id="ok"),
+                gateway_pb2.RpcRequest(
+                    method="eth_getBalance", params='["0x0000000000000000000000000000000000000001","latest"]', id="ok"
+                ),
             ],
         )
 
@@ -908,3 +900,103 @@ class TestMakeRpcCallErrorMessages:
         assert "Network error" in error["message"]
         # Should NOT mention Anvil for external RPCs
         assert "Anvil" not in error["message"]
+
+
+class TestAnvilRateLimitExemption:
+    """ALM-3025: local Anvil forks carry no upstream quota, so they are not throttled.
+
+    The per-chain RPM budget protects a paid provider. A managed-Anvil fork
+    backfills cold state over its own upstream connection, which never crosses
+    this gateway — throttling it protected nothing while starving the caller
+    (a GMX V2 keeper settlement burns ~50-60 gateway RPCs per order and
+    saturated Arbitrum's 300 rpm mid-lifecycle).
+    """
+
+    @pytest.fixture
+    def anvil_service(self):
+        return RpcServiceServicer(GatewaySettings(network="anvil"))
+
+    @pytest.mark.asyncio
+    async def test_anvil_limiter_admits_far_past_the_chain_budget(self, anvil_service):
+        """Anvil traffic is admitted well beyond the chain's declared rpm."""
+        limiter = anvil_service._get_rate_limiter("arbitrum", "anvil")
+        budget = CHAIN_RATE_LIMITS["arbitrum"]
+
+        for _ in range(budget * 3):
+            allowed, wait = await limiter.check_rate_limit()
+            assert allowed is True
+            assert wait == 0.0
+            await limiter.record_request()
+
+    @pytest.mark.asyncio
+    async def test_anvil_limiter_does_not_accumulate_state(self, anvil_service):
+        """The null-object limiter records nothing — no unbounded timestamp list."""
+        limiter = anvil_service._get_rate_limiter("arbitrum", "anvil")
+
+        for _ in range(50):
+            await limiter.record_request()
+
+        assert limiter.request_times == []
+
+    @pytest.mark.asyncio
+    async def test_mainnet_override_on_anvil_gateway_still_pays_the_budget(self, anvil_service):
+        """A mainnet-override request hits the paid provider and must stay throttled.
+
+        ``_network_elevation_error`` blocks only the anvil-elevation direction,
+        so an Anvil-launched gateway may serve ``network="mainnet"``. Those
+        calls reach the real RPC URL — sharing a bucket with the unthrottled
+        Anvil traffic would hand out the provider quota for free.
+        """
+        limiter = anvil_service._get_rate_limiter("arbitrum", "mainnet")
+        budget = CHAIN_RATE_LIMITS["arbitrum"]
+
+        assert not isinstance(limiter, _UnthrottledRateLimiter)
+        assert limiter.requests_per_minute == budget
+
+        for _ in range(budget):
+            allowed, _wait = await limiter.check_rate_limit()
+            assert allowed is True
+            await limiter.record_request()
+
+        allowed, wait = await limiter.check_rate_limit()
+        assert allowed is False
+        assert wait > 0
+
+    def test_anvil_and_mainnet_get_separate_buckets(self, anvil_service):
+        """The two networks must never resolve to the same limiter instance."""
+        anvil = anvil_service._get_rate_limiter("arbitrum", "anvil")
+        mainnet = anvil_service._get_rate_limiter("arbitrum", "mainnet")
+
+        assert anvil is not mainnet
+        assert anvil is anvil_service._get_rate_limiter("arbitrum", "anvil")
+        assert mainnet is anvil_service._get_rate_limiter("arbitrum", "mainnet")
+
+    def test_unresolved_network_keeps_the_mainnet_budget(self, rpc_service):
+        """Omitting the network must throttle, never unthrottle (fail-safe default)."""
+        limiter = rpc_service._get_rate_limiter("arbitrum")
+
+        assert not isinstance(limiter, _UnthrottledRateLimiter)
+        assert limiter.requests_per_minute == CHAIN_RATE_LIMITS["arbitrum"]
+
+    @pytest.mark.asyncio
+    async def test_call_on_anvil_gateway_is_not_rate_limited(self, anvil_service, mock_context):
+        """End-to-end: Call() past the budget on an Anvil gateway still dispatches."""
+        budget = CHAIN_RATE_LIMITS["arbitrum"]
+        request = gateway_pb2.RpcRequest(
+            chain="arbitrum",
+            method="eth_sendTransaction",
+            params=json.dumps([{"from": "0x" + "11" * 20, "to": "0x" + "22" * 20}]),
+            id="1",
+        )
+
+        with patch.object(anvil_service, "_get_rpc_url", return_value="http://127.0.0.1:8545"):
+            with patch.object(
+                anvil_service, "_make_rpc_call", new=AsyncMock(return_value=("0xdeadbeef", None))
+            ) as make_call:
+                for _ in range(budget + 5):
+                    response = await anvil_service.Call(request, mock_context)
+                    assert response.success is True
+
+        assert make_call.await_count == budget + 5
+        mock_context.set_code.assert_not_called()
+        assert anvil_service.get_metrics()["rate_limited_requests"] == 0

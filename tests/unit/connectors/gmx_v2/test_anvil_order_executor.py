@@ -6,8 +6,8 @@ from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
+import grpc
 import pytest
-
 from eth_abi import encode as abi_encode
 
 from almanak.connectors.gmx_v2.anvil_order_executor import (
@@ -472,3 +472,157 @@ def test_execution_outcome_never_attributes_a_keyless_event() -> None:
     receipt = {"logs": [keyless]}
     with pytest.raises(GmxAnvilOrderExecutionError, match="outcome unmeasured"):
         _verify_execution_outcome(receipt, _KEY_A, "0xtx")
+
+
+def _rpc_error(code: grpc.StatusCode, details: str = "") -> grpc.RpcError:
+    class _Err(grpc.RpcError):
+        def code(self):
+            return code
+
+        def details(self):
+            return details
+
+        def __str__(self):
+            return f"{code}: {details}"
+
+    return _Err()
+
+
+def test_gateway_rate_limit_is_classified_transient() -> None:
+    """ALM-3025: a rate limit is self-healing and the server says exactly when.
+
+    Classifying it structural made the settlement barrier report
+    INFRASTRUCTURE_UNSUPPORTED and give up immediately, 37s short of recovery
+    and well inside its 360s budget.
+    """
+    from almanak.connectors.gmx_v2.anvil_order_executor import _is_transient_execution_error
+
+    assert _is_transient_execution_error(
+        _rpc_error(grpc.StatusCode.RESOURCE_EXHAUSTED, "Rate limited, retry after 37.71s")
+    )
+    # The pre-existing DEADLINE_EXCEEDED case must keep working.
+    assert _is_transient_execution_error(_rpc_error(grpc.StatusCode.DEADLINE_EXCEEDED))
+    # Config/auth defects stay structural — more attempts cannot fix them.
+    assert not _is_transient_execution_error(_rpc_error(grpc.StatusCode.UNAUTHENTICATED))
+    assert not _is_transient_execution_error(_rpc_error(grpc.StatusCode.PERMISSION_DENIED))
+    assert not _is_transient_execution_error(_rpc_error(grpc.StatusCode.INVALID_ARGUMENT))
+
+
+def test_rate_limited_settlement_is_retryable_not_infrastructure_unsupported() -> None:
+    """End-to-end at the executor boundary: transient=True reaches the caller."""
+    from almanak.connectors.gmx_v2 import anvil_order_executor as mod
+
+    with (
+        patch.object(mod, "read_pending_orders", return_value=_pending((_KEY_A, _MARKET_A))),
+        patch.object(mod, "GatewayWeb3Provider", return_value=MagicMock()),
+        patch.object(
+            mod,
+            "_load_dependencies",
+            side_effect=_rpc_error(grpc.StatusCode.RESOURCE_EXHAUSTED, "Rate limited, retry after 37.71s"),
+        ),
+    ):
+        result = mod.execute_pending_orders_on_anvil(
+            gateway_client=object(),
+            chain="arbitrum",
+            wallet_address=_WALLET,
+            orders=(SimpleNamespace(order_id=_KEY_A),),
+            network="anvil",
+        )
+
+    assert result.ok is False
+    assert result.transient is True
+
+
+def test_impersonation_cleanup_failure_does_not_mask_the_body_failure(caplog) -> None:
+    """ALM-3025: cleanup runs on the same channel that just failed the body.
+
+    Python lets an exception raised in a ``finally`` REPLACE the in-flight one,
+    which is how a rate-limited run reported ``anvil_stopImpersonatingAccount``
+    as its root cause and buried the real failure.
+
+    A sustained rate limit fails BOTH cleanup RPCs, so the log must name both —
+    dropping the balance restore would hide that the account was left funded.
+    """
+    from almanak.connectors.gmx_v2 import anvil_order_executor as mod
+
+    provider = MagicMock()
+
+    def _rpc(_provider, method, _params):
+        if method in {"anvil_setBalance", "anvil_stopImpersonatingAccount"}:
+            raise mod.GmxAnvilOrderExecutionError(f"{method} failed: Rate limited, retry after 37.71s")
+        return "0x0"
+
+    with patch.object(mod, "_rpc", side_effect=_rpc), caplog.at_level("ERROR", logger=mod.__name__):
+        with pytest.raises(mod.GmxAnvilOrderExecutionError, match="the original failure"):
+            with mod._impersonated(provider, _ORDER_HANDLER):
+                raise mod.GmxAnvilOrderExecutionError("the original failure")
+
+    cleanup_log = "\n".join(record.getMessage() for record in caplog.records)
+    assert "anvil_setBalance failed" in cleanup_log
+    assert "anvil_stopImpersonatingAccount failed" in cleanup_log
+    assert "left impersonating" in cleanup_log
+
+
+def test_impersonation_cleanup_failure_surfaces_when_the_body_succeeded() -> None:
+    """A dirty fork is not a silent success — nothing else would notice."""
+    from almanak.connectors.gmx_v2 import anvil_order_executor as mod
+
+    provider = MagicMock()
+
+    def _rpc(_provider, method, _params):
+        if method == "anvil_stopImpersonatingAccount":
+            raise mod.GmxAnvilOrderExecutionError("anvil_stopImpersonatingAccount failed: boom")
+        return "0x0"
+
+    with patch.object(mod, "_rpc", side_effect=_rpc):
+        with pytest.raises(mod.GmxAnvilOrderExecutionError, match="stopImpersonating"):
+            with mod._impersonated(provider, _ORDER_HANDLER):
+                pass
+
+
+def test_impersonation_cleanup_raises_the_first_failure_when_both_steps_fail(caplog) -> None:
+    """Both steps are attempted; the balance restore is the one re-raised.
+
+    ``anvil_stopImpersonatingAccount`` must still run after ``anvil_setBalance``
+    fails (leaving the fork impersonating is worse), but the balance failure is
+    the more actionable of the two, so it is the one that surfaces.
+    """
+    from almanak.connectors.gmx_v2 import anvil_order_executor as mod
+
+    attempted: list[str] = []
+
+    def _rpc(_provider, method, _params):
+        if method in {"anvil_setBalance", "anvil_stopImpersonatingAccount"}:
+            attempted.append(method)
+            raise mod.GmxAnvilOrderExecutionError(f"{method} failed: Rate limited, retry after 37.71s")
+        return "0x0"
+
+    with patch.object(mod, "_rpc", side_effect=_rpc), caplog.at_level("ERROR", logger=mod.__name__):
+        with pytest.raises(mod.GmxAnvilOrderExecutionError, match="anvil_setBalance failed"):
+            with mod._impersonated(MagicMock(), _ORDER_HANDLER):
+                pass
+
+    assert attempted == ["anvil_setBalance", "anvil_stopImpersonatingAccount"]
+    cleanup_log = "\n".join(record.getMessage() for record in caplog.records)
+    assert "anvil_setBalance failed" in cleanup_log
+    assert "anvil_stopImpersonatingAccount failed" in cleanup_log
+
+
+def test_oracle_cleanup_failure_does_not_mask_the_body_failure() -> None:
+    """Seeded prices left behind make the fork unusable, but the body's error wins."""
+    from almanak.connectors.gmx_v2 import anvil_order_executor as mod
+
+    hashes: list[str] = []
+    with patch.object(
+        mod,
+        "_oracle_price_count",
+        side_effect=mod.GmxAnvilOrderExecutionError("eth_call failed: Rate limited, retry after 37.71s"),
+    ):
+        # body_failed=True → log the dirty fork, let the original propagate.
+        mod._clear_seeded_oracle_prices(MagicMock(), _DEPENDENCIES, hashes, body_failed=True)
+
+        # body_failed=False → the cleanup failure IS the failure.
+        with pytest.raises(mod.GmxAnvilOrderExecutionError, match="Rate limited"):
+            mod._clear_seeded_oracle_prices(MagicMock(), _DEPENDENCIES, hashes, body_failed=False)
+
+    assert hashes == []

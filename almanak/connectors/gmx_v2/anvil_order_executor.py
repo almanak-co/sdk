@@ -41,6 +41,7 @@ from almanak.connectors.gmx_v2.receipt_parser import (
     GMXv2ReceiptParser,
 )
 from almanak.connectors.gmx_v2.teardown_reads import read_pending_orders
+from almanak.framework.utils.grpc_utils import is_transient_grpc_error
 from almanak.framework.web3.gateway_provider import GatewayWeb3Provider
 from almanak.gateway.proto import gateway_pb2
 
@@ -323,8 +324,16 @@ _TRANSIENT_ERROR_MARKERS = (
 def _is_transient_execution_error(exc: Exception) -> bool:
     """True for the shapes a transient cold-fork RPC failure can take."""
     if isinstance(exc, grpc.RpcError):
-        code = exc.code() if callable(getattr(exc, "code", None)) else None
-        return code is grpc.StatusCode.DEADLINE_EXCEEDED
+        # Defer to the shared classifier rather than a local code list. The
+        # local list admitted only DEADLINE_EXCEEDED, so a gateway rate limit
+        # (RESOURCE_EXHAUSTED — self-healing, and the server states exactly
+        # when) was reported as structural: the caller mapped transient=False
+        # to INFRASTRUCTURE_UNSUPPORTED and the settlement barrier gave up
+        # immediately instead of waiting inside its 360s budget (ALM-3025).
+        # Retrying is safe because the caller re-reads the pending-order set
+        # first and only executes keys still on-chain — an order settled by an
+        # earlier attempt is filtered out, never re-executed.
+        return is_transient_grpc_error(exc)
     # The gateway maps upstream timeouts, and Anvil maps fork-backend fetch
     # failures, to JSON-RPC error responses that _rpc re-raises as
     # GmxAnvilOrderExecutionError.
@@ -411,17 +420,69 @@ def _send_transaction(provider: GatewayWeb3Provider, sender: str, target: str, d
 def _impersonated(provider: GatewayWeb3Provider, account: str) -> Iterator[None]:
     account = to_checksum_address(account)
     original_balance = _rpc(provider, "eth_getBalance", [account, "latest"])
-    impersonating = False
+    # Outside the try: a failed impersonation leaves nothing to undo, and the
+    # error is the caller's to see.
+    _rpc(provider, "anvil_impersonateAccount", [account])
+    body_failed = False
     try:
-        _rpc(provider, "anvil_impersonateAccount", [account])
-        impersonating = True
         yield
+    except BaseException:
+        body_failed = True
+        raise
     finally:
-        if impersonating:
-            try:
-                _rpc(provider, "anvil_setBalance", [account, original_balance])
-            finally:
-                _rpc(provider, "anvil_stopImpersonatingAccount", [account])
+        _undo_impersonation(provider, account, original_balance, body_failed=body_failed)
+
+
+def _undo_impersonation(
+    provider: GatewayWeb3Provider,
+    account: str,
+    original_balance: Any,
+    *,
+    body_failed: bool,
+) -> None:
+    """Undo one impersonation bracket without masking the body's failure.
+
+    Cleanup runs on the same gateway channel that may have just failed the
+    body, so it can fail too. Python would let an exception raised in a
+    ``finally`` REPLACE the in-flight one, which is how a rate-limited GMX run
+    reported ``anvil_stopImpersonatingAccount`` as its root cause and buried
+    the real failure (ALM-3025). When the body already failed we log the
+    residual fork state and let the original propagate; when it did not, a
+    cleanup failure IS the failure and must surface — the fork is left
+    impersonating and a later run would inherit it.
+
+    Both steps are attempted independently rather than bracketed in a nested
+    ``try/finally``: a sustained rate limit fails consecutive cleanup RPCs on
+    the same channel, and ``finally``-replacement would drop the *first*
+    failure — the balance restore, the more actionable of the two — from the
+    operator's log. Every failure is reported; the first is the one re-raised.
+    """
+    failures: list[str] = []
+    first_error: Exception | None = None
+    for method, params in (
+        ("anvil_setBalance", [account, original_balance]),
+        ("anvil_stopImpersonatingAccount", [account]),
+    ):
+        try:
+            _rpc(provider, method, params)
+        except Exception as exc:
+            # Caught per step, not around the loop: a failed balance restore
+            # must not stop us from dropping impersonation.
+            failures.append(str(exc))
+            if first_error is None:
+                first_error = exc
+
+    if first_error is None:
+        return
+
+    logger.error(
+        "GMX managed-Anvil could not undo impersonation of %s: %s. The fork is left impersonating this account%s",
+        account,
+        "; ".join(failures),
+        "; reporting the original failure instead" if body_failed else "",
+    )
+    if not body_failed:
+        raise first_error
 
 
 def _seed_oracle_prices(
@@ -490,6 +551,37 @@ def _oracle_price_count(provider: GatewayWeb3Provider, dependencies: _GmxDepende
         ),
         "Oracle tokens-with-prices count",
     )
+
+
+def _clear_seeded_oracle_prices(
+    provider: GatewayWeb3Provider,
+    dependencies: _GmxDependencies,
+    transaction_hashes: list[str],
+    *,
+    body_failed: bool,
+) -> None:
+    """Clear this pass's transient oracle prices without masking the body's failure.
+
+    Leaving them seeded is what makes a failed run *unrecoverable* rather than
+    merely failed: the next attempt reads a non-zero
+    ``getTokensWithPricesCount()`` and refuses to execute at all, so the fork
+    has to be thrown away (ALM-3025). Same ``finally``-masking rule as
+    :func:`_undo_impersonation` — if the body already failed, that error is the
+    actionable one; a cleanup failure is logged with the residual state named
+    so the operator knows the fork is dirty.
+    """
+    try:
+        if _oracle_price_count(provider, dependencies) != 0:
+            transaction_hashes.append(_clear_oracle_prices(provider, dependencies))
+    except Exception as exc:
+        logger.error(
+            "GMX managed-Anvil could not clear seeded oracle prices: %s. The fork is left with "
+            "transient prices set and the next execution attempt will refuse to run against it%s",
+            exc,
+            "; reporting the original failure instead" if body_failed else "",
+        )
+        if not body_failed:
+            raise
 
 
 def _clear_oracle_prices(provider: GatewayWeb3Provider, dependencies: _GmxDependencies) -> str:
@@ -699,6 +791,7 @@ def execute_pending_orders_on_anvil(
         with _impersonated(provider, dependencies.order_handler), _impersonated(provider, keeper):
             for key in executable_keys:
                 oracle_state_owned = False
+                body_failed = False
                 try:
                     initial_count = _oracle_price_count(provider, dependencies)
                     if initial_count != 0:
@@ -719,9 +812,17 @@ def execute_pending_orders_on_anvil(
                     execute_hash, execute_receipt = _execute_order(provider, dependencies, keeper, key)
                     transaction_hashes.append(execute_hash)
                     execution_receipts.append(execute_receipt)
+                except BaseException:
+                    body_failed = True
+                    raise
                 finally:
-                    if oracle_state_owned and _oracle_price_count(provider, dependencies) != 0:
-                        transaction_hashes.append(_clear_oracle_prices(provider, dependencies))
+                    if oracle_state_owned:
+                        _clear_seeded_oracle_prices(
+                            provider,
+                            dependencies,
+                            transaction_hashes,
+                            body_failed=body_failed,
+                        )
 
         logger.info(
             "GMX managed-Anvil keeper executed %d exact order(s): keys=%s transactions=%s",

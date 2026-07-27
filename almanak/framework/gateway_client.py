@@ -6,6 +6,7 @@ execution) goes through this client.
 """
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -13,12 +14,17 @@ import grpc
 from grpc_health.v1 import health_pb2, health_pb2_grpc
 
 from almanak.connectors._strategy_base.gateway_stub_registry import GatewayStubRegistry
+from almanak.framework.grpc.error_details import unpack_status_details
+from almanak.framework.utils.grpc_utils import get_grpc_retry_after_seconds, get_grpc_status_code
 from almanak.gateway.proto import gateway_pb2_grpc
 
 logger = logging.getLogger(__name__)
 
 # Metadata key for authentication token (matches server-side auth.py)
 AUTH_METADATA_KEY = "authorization"
+
+# ErrorInfo.reason the gateway stamps on upstream 429s (services/_grpc_errors.py).
+_UPSTREAM_RATE_LIMITED_REASON = "UPSTREAM_RATE_LIMITED"
 
 
 def _encode_block_tag(block: int | str | None) -> str:
@@ -255,6 +261,138 @@ class _CycleIdInterceptor(
             client_call_details.compression,
         )
         return continuation(new_details, request_iterator)
+
+
+def _method_path(method: Any) -> str:
+    """Normalize a gRPC method path; ``-bin``-style bytes are decoded, not repr'd."""
+    if isinstance(method, bytes):
+        return method.decode("utf-8", errors="replace")
+    return str(method or "")
+
+
+def _service_name(method_path: str) -> str:
+    """Bare service name from ``/pkg.Service/Method`` (``""`` when unparseable)."""
+    parts = method_path.split("/")
+    if len(parts) < 3:
+        return ""
+    return parts[1].rsplit(".", 1)[-1]
+
+
+class _RateLimitRetryInterceptor(grpc.UnaryUnaryClientInterceptor):
+    """Absorb gateway rate-limit rejections with server-hinted backoff.
+
+    The gateway throttles per (chain, network) to protect a paid upstream
+    provider quota and answers a saturated bucket with ``RESOURCE_EXHAUSTED``
+    plus the exact time to come back ("Rate limited, retry after 37.71s").
+    Before this interceptor nothing acted on that hint: every caller either
+    re-raised (``GatewayWeb3Provider.make_request``) or degraded the read to
+    ``None`` (``GatewayClient.eth_call``), so a *self-healing* condition
+    surfaced as a hard failure — a running deployment silently skipping its
+    price-impact guard (ALM-2883), or a managed-Anvil GMX lifecycle abandoning
+    settlement 37s short of recovery (ALM-3025). Two connectors had grown
+    private retry loops around the same hint; this makes it one behaviour of
+    the channel instead of N copies.
+
+    **Only rate limits, only when the server said so.** A retry fires when the
+    status is ``RESOURCE_EXHAUSTED`` *and* the server supplied a retry-delay
+    hint or tagged the failure ``UPSTREAM_RATE_LIMITED``. A bare
+    ``RESOURCE_EXHAUSTED`` carrying neither is NOT retried — that is the
+    auth-throttle shape ("Too many failed authentication attempts",
+    ``gateway/auth.py``), where retrying would hammer a brute-force lockout.
+
+    **Never retries execution.** ``ExecutionService`` signs and submits
+    transactions; ``Execute`` is not idempotent and a generic retry must never
+    reach it. Rate-limit rejections are raised *before* the gateway forwards a
+    request upstream, so retrying the read/RPC surfaces cannot duplicate work —
+    but that argument is about today's server, and money movement should not
+    depend on it. ``CompileIntent`` keeps its own policy-aware retry in
+    ``framework/intents/compiler.py``; excluding the whole service also avoids
+    stacking two backoffs on it.
+    """
+
+    # Sized to absorb one saturated 60s sliding window (observed hints: 37-53s)
+    # without letting a stall outlive the callers waiting on it — the GMX async
+    # settlement barrier budgets 360s total, and a strategy iteration blocks for
+    # the duration. Past this the failure is no longer transient; surface it.
+    #
+    # This total IS the wall-clock bound, deliberately, because gRPC's own
+    # deadline cannot be one: `client_call_details.timeout` is a PER-ATTEMPT
+    # duration, and every `continuation(...)` starts a fresh RPC that gets the
+    # full value again. Clamping the retry budget to it would also defeat the
+    # fix — the default is 30s (`GatewayClientConfig.timeout`) while the
+    # windows we must outlast are 37-53s, so a clamped retry could never wait
+    # long enough to succeed. Worst case per intercepted call is therefore
+    # ~_MAX_TOTAL_SLEEP_SECONDS of sleep plus (_MAX_ATTEMPTS + 1) RPC
+    # attempts; in practice a throttled call is rejected pre-dispatch and
+    # returns in milliseconds, so the sleep dominates.
+    _MAX_ATTEMPTS = 2
+    _MAX_SLEEP_SECONDS = 60.0
+    _MAX_TOTAL_SLEEP_SECONDS = 90.0
+    # Used only when the server flagged a rate limit without naming a delay.
+    _DEFAULT_BACKOFF_SECONDS = 5.0
+
+    # Matched on the bare service name, not the fully-qualified path: the proto
+    # package ("almanak.gateway.proto") is not this module's to depend on, and a
+    # stale prefix would fail OPEN — silently re-enabling retries on signing.
+    _NO_RETRY_SERVICES = frozenset({"ExecutionService"})
+
+    def intercept_unary_unary(self, continuation, client_call_details, request):
+        method = _method_path(getattr(client_call_details, "method", None))
+        response = continuation(client_call_details, request)
+        if _service_name(method) in self._NO_RETRY_SERVICES:
+            return response
+
+        slept = 0.0
+        for attempt in range(1, self._MAX_ATTEMPTS + 1):
+            delay = self._retry_delay(response)
+            if delay is None:
+                return response
+            # Budget check is separate from the delay clamp: a legitimate 0s
+            # hint (the bucket freed up between check and reply) means "retry
+            # now", not "give up".
+            remaining = self._MAX_TOTAL_SLEEP_SECONDS - slept
+            if remaining <= 0:
+                logger.warning(
+                    "Gateway rate limit on %s: retry budget (%.0fs) exhausted; surfacing the failure",
+                    method,
+                    self._MAX_TOTAL_SLEEP_SECONDS,
+                )
+                return response
+            delay = min(delay, self._MAX_SLEEP_SECONDS, remaining)
+            logger.info(
+                "Gateway rate limited %s; waiting %.2fs before retry %d/%d",
+                method,
+                delay,
+                attempt,
+                self._MAX_ATTEMPTS,
+            )
+            time.sleep(delay)
+            slept += delay
+            response = continuation(client_call_details, request)
+        return response
+
+    def _retry_delay(self, response: Any) -> float | None:
+        """Seconds to wait before retrying ``response``, or None to give up.
+
+        None means "not a retryable rate limit" — either the call succeeded, or
+        it failed for a reason this interceptor must not paper over.
+        """
+        if not isinstance(response, grpc.RpcError):
+            return None
+        if get_grpc_status_code(response) is not grpc.StatusCode.RESOURCE_EXHAUSTED:
+            return None
+
+        # Typed contract first (google.rpc.RetryInfo / ErrorInfo, VIB-3800),
+        # then the plain-text "retry after Ns" the RPC service emits.
+        details = unpack_status_details(response)
+        if details is not None and details.retry_delay_seconds is not None:
+            return max(details.retry_delay_seconds, 0.0)
+        hinted = get_grpc_retry_after_seconds(response)
+        if hinted is not None:
+            return max(hinted, 0.0)
+        if details is not None and details.reason == _UPSTREAM_RATE_LIMITED_REASON:
+            return self._DEFAULT_BACKOFF_SECONDS
+        return None
 
 
 class _ClientCallDetails(
@@ -575,8 +713,13 @@ class GatewayClient:
 
         base_channel = grpc.insecure_channel(self.target)
 
-        # Wrap channel with interceptors
-        interceptors: list[grpc.UnaryUnaryClientInterceptor] = [_CycleIdInterceptor()]
+        # Wrap channel with interceptors. Retry sits OUTERMOST so a retried
+        # attempt re-runs the metadata interceptors below it (a stale cycle_id
+        # on attempt 2 would mis-correlate the call).
+        interceptors: list[grpc.UnaryUnaryClientInterceptor] = [
+            _RateLimitRetryInterceptor(),
+            _CycleIdInterceptor(),
+        ]
         if self.config.auth_token:
             interceptors.append(_AuthClientInterceptor(self.config.auth_token))
             logger.debug("Auth token configured for gateway connection")
