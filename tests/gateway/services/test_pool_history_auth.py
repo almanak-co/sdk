@@ -164,7 +164,9 @@ async def test_authed_call_with_killswitch_on_dispatches():
 
     from almanak.gateway.data.pool_history.dispatcher import _DispatchOutcome
 
-    servicer = PoolHistoryServiceServicer(GatewaySettings(pool_history_enabled=True))
+    servicer = PoolHistoryServiceServicer(
+        GatewaySettings(pool_history_enabled=True, thegraph_api_key="test-key")
+    )
     ctx = _CodeContext()
     failure = _DispatchOutcome(success=False, source="", snapshots=[], error="all providers exhausted")
     with patch.object(servicer._dispatcher, "dispatch", new=AsyncMock(return_value=failure)):
@@ -228,7 +230,11 @@ def test_authenticated_happy_path(allow_insecure: bool):
     from unittest.mock import AsyncMock, patch
 
     rows, start = _load_thegraph_fixture()
-    settings = GatewaySettings(pool_history_enabled=True, allow_insecure=allow_insecure)
+    settings = GatewaySettings(
+        pool_history_enabled=True,
+        thegraph_api_key="test-key",
+        allow_insecure=allow_insecure,
+    )
     servicer = PoolHistoryServiceServicer(settings)
     ctx = _CodeContext()
     req = gateway_pb2.PoolHistoryRequest(

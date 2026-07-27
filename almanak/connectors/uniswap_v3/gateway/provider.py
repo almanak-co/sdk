@@ -4,14 +4,13 @@ Phase 3 (VIB-4811) introduces capability-keyed dispatch at the gateway
 boundary. Uniswap V3 contributes:
 
 * ``GatewayPoolHistoryCapability`` — pool history is supported on
-  Ethereum, Arbitrum, Base, Optimism, and Polygon (the chains with a
-  registered Uniswap V3 subgraph). Previously this set lived in
+  Ethereum, Arbitrum, Base, Optimism, and Polygon through the provider
+  fallback chain. Previously this set lived in
   ``almanak.gateway.services.pool_history_service.SUPPORTED_POOL_PAIRS``.
 * ``GatewayDefillamaSlugCapability`` — DefiLlama project slug
   (``"uniswap-v3"``).
-* ``GatewaySubgraphCapability`` — TheGraph subgraph URLs for the chains
-  where Uniswap V3 pool history is available. Moved verbatim from
-  ``almanak.gateway.integrations.thegraph.DEFAULT_ALLOWED_SUBGRAPHS``.
+* ``GatewaySubgraphCapability`` — schema-typed The Graph Network
+  deployments for the chains with a healthy V3-native deployment.
 * ``GatewayPriceIdCapability`` — Uniswap governance token CoinGecko
   slug (``UNI`` → ``uniswap``). Moved verbatim from
   ``almanak.gateway.data.price.coingecko``'s per-chain token-id tables.
@@ -60,6 +59,7 @@ from almanak.connectors._base.gateway_capabilities import (
     GatewayPoolHistoryCapability,
     GatewayPriceIdCapability,
     GatewaySubgraphCapability,
+    GatewaySubgraphDeployment,
 )
 from almanak.connectors._base.gateway_connector import GatewayConnector
 from almanak.connectors._base.types import ProtocolKind, ProtocolName
@@ -96,17 +96,6 @@ _Q96 = Decimal(2) ** 96
 # moved to the shared gateway-side foundation
 # (almanak.connectors._base.v3_gateway_twap) so the V3 forks reuse the TWAP
 # pipeline without importing this connector.
-
-# Subgraph URLs for Uniswap V3. Keyed by the public alias the strategy
-# caller passes (``"uniswap-v3-<chain>"``). Moved verbatim from
-# ``thegraph.DEFAULT_ALLOWED_SUBGRAPHS``.
-_UNISWAP_V3_SUBGRAPHS: dict[str, str] = {
-    "uniswap-v3-ethereum": "https://api.thegraph.com/subgraphs/name/uniswap/uniswap-v3",
-    "uniswap-v3-arbitrum": "https://api.thegraph.com/subgraphs/name/ianlapham/uniswap-arbitrum-one",
-    "uniswap-v3-optimism": "https://api.thegraph.com/subgraphs/name/ianlapham/optimism-post-regenesis",
-    "uniswap-v3-polygon": "https://api.thegraph.com/subgraphs/name/ianlapham/uniswap-v3-polygon",
-    "uniswap-v3-base": "https://api.studio.thegraph.com/query/48211/uniswap-v3-base/version/latest",
-}
 
 # =============================================================================
 # W7-followup / VIB-4870 — Uniswap V3 daily-volume subgraph spec
@@ -172,8 +161,9 @@ class UniswapV3GatewayConnector(
         Matches the historical
         ``SUPPORTED_POOL_PAIRS`` Uniswap V3 entries in
         ``pool_history_service.py`` (Ethereum, Arbitrum, Base, Optimism,
-        Polygon). The set is closed: a new chain requires a new
-        subgraph URL contribution AND adding it here.
+        Polygon). PoolHistory support is broader than The Graph coverage:
+        Optimism deliberately falls through to later providers because no
+        healthy V3-native Network deployment is currently registered.
         """
         return frozenset(
             {
@@ -193,9 +183,16 @@ class UniswapV3GatewayConnector(
         """No alias variants ride this connector."""
         return {}
 
-    def subgraph_endpoints(self) -> dict[str, str]:
-        """TheGraph subgraph URLs for Uniswap V3 (one per supported chain)."""
-        return dict(_UNISWAP_V3_SUBGRAPHS)
+    def subgraph_deployments(self) -> dict[str, GatewaySubgraphDeployment]:
+        """Healthy V3-native deployments used by queries and PoolHistory."""
+        return {
+            f"uniswap-v3-{chain}": GatewaySubgraphDeployment(
+                deployment_id=deployment_id,
+                schema_family="uniswap_v3",
+                supports_pool_history=True,
+            )
+            for chain, deployment_id in _UNISWAP_V3_VOLUME_SUBGRAPH_IDS.items()
+        }
 
     def coingecko_ids(self) -> dict[str, str]:
         """CoinGecko slug for the Uniswap governance token."""

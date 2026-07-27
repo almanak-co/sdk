@@ -61,7 +61,11 @@ def _fx(name: str) -> Any:
 
 def _enabled_servicer() -> PoolHistoryServiceServicer:
     return PoolHistoryServiceServicer(
-        GatewaySettings(pool_history_enabled=True, coingecko_api_key="test-key")
+        GatewaySettings(
+            pool_history_enabled=True,
+            thegraph_api_key="test-key",
+            coingecko_api_key="test-key",
+        )
     )
 
 
@@ -687,7 +691,7 @@ def test_all_providers_unavailable():
 def test_keyless_coingecko_onchain_fallback_fails_before_egress():
     """A keyless gateway must fail fast before CoinGecko Onchain egress."""
     servicer = PoolHistoryServiceServicer(
-        GatewaySettings(pool_history_enabled=True, coingecko_api_key="")
+        GatewaySettings(pool_history_enabled=True, thegraph_api_key="test-key", coingecko_api_key="")
     )
     ctx = _Ctx()
     start = 1_699_920_000
@@ -848,7 +852,11 @@ def test_budget_trip_falls_back():
     start = dl["meta"]["start_ts"]
     # Force the breaker tripped: budget_max=1, pre-record one query.
     servicer = PoolHistoryServiceServicer(
-        GatewaySettings(pool_history_enabled=True, pool_history_thegraph_monthly_budget_max=1)
+        GatewaySettings(
+            pool_history_enabled=True,
+            thegraph_api_key="test-key",
+            pool_history_thegraph_monthly_budget_max=1,
+        )
     )
     servicer._dispatcher._budget.record_query()
     assert servicer._dispatcher._budget.is_tripped()
@@ -886,7 +894,11 @@ def test_thegraph_budget_counter_health_export():
     rows = fx["poolHourDatas"]
     start = fx["meta"]["start_ts"]
     servicer = PoolHistoryServiceServicer(
-        GatewaySettings(pool_history_enabled=True, pool_history_thegraph_monthly_budget_max=12345)
+        GatewaySettings(
+            pool_history_enabled=True,
+            thegraph_api_key="test-key",
+            pool_history_thegraph_monthly_budget_max=12345,
+        )
     )
     req = _request(
         pool_address=_ARB_POOL,

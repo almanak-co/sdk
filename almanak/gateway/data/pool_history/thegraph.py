@@ -35,6 +35,7 @@ import logging
 from collections.abc import Callable
 from decimal import Decimal
 
+from almanak.gateway.data._thegraph_network import MISSING_THEGRAPH_API_KEY_MESSAGE
 from almanak.gateway.proto import gateway_pb2
 
 from ._base import (
@@ -145,6 +146,12 @@ class TheGraphPoolHistoryProvider:
             # NOT an error. (Aerodrome falls through here.)
             logger.debug("TheGraph: no subgraph URL for (%s, %s); skipping", protocol, chain)
             return _NOT_ATTEMPTED
+
+        # Configuration is checked before the budget or rate limiter so a
+        # missing secret cannot consume quota accounting or throttle capacity.
+        # The transport repeats this guard as defense in depth.
+        if not self._client.is_configured:
+            raise _ProviderError(f"the_graph: {MISSING_THEGRAPH_API_KEY_MESSAGE}")
 
         if self._budget.is_tripped():
             logger.warning(

@@ -32,8 +32,8 @@ dispatch tables with registry queries by adding:
   project slug.
 * ``GatewayFundingRateCapability`` — perp connector publishes per-market
   default rates + a funding-payment helper.
-* ``GatewaySubgraphCapability`` — connector publishes alias → subgraph URL
-  pairs for ``TheGraphIntegration``.
+* ``GatewaySubgraphCapability`` — connector publishes alias → validated
+  The Graph deployment metadata for ``TheGraphIntegration``.
 * ``GatewayPriceIdCapability`` — connector publishes CoinGecko +
   Dexscreener IDs for its protocol token(s).
 * ``GatewayDexQuoteCapability`` — DEX connector publishes a quote
@@ -428,29 +428,72 @@ class GatewayPoolHistoryCapability(Protocol):
     def pool_history_supported_chains(self) -> frozenset[str]: ...
 
 
+@dataclass(frozen=True)
+class GatewaySubgraphDeployment:
+    """Connector-owned metadata for one The Graph Network deployment.
+
+    Connectors publish deployment identity and schema compatibility, never a
+    URL. The gateway owns endpoint construction and authentication so a
+    connector cannot accidentally reintroduce a deprecated host or embed an
+    API key in a URL.
+
+    Attributes:
+        deployment_id: The Graph Network base58 deployment ID.
+        schema_family: Stable connector-defined schema identifier used to
+            prevent consumers from treating unlike GraphQL schemas as
+            interchangeable.
+        supports_pool_history: Whether the deployment exposes the
+            Uniswap-V3-style ``poolHourDatas`` / ``poolDayDatas`` schema
+            required by ``TheGraphPoolHistoryProvider``.
+    """
+
+    deployment_id: str
+    schema_family: str
+    supports_pool_history: bool = False
+
+    def __post_init__(self) -> None:
+        """Reject URLs, empty values, and malformed compatibility flags."""
+        if (
+            not isinstance(self.deployment_id, str)
+            or not self.deployment_id
+            or "/" in self.deployment_id
+            or ":" in self.deployment_id
+        ):
+            raise ValueError("GatewaySubgraphDeployment.deployment_id must be a bare, non-empty deployment ID")
+        if (
+            not isinstance(self.schema_family, str)
+            or not self.schema_family
+            or self.schema_family != self.schema_family.lower()
+        ):
+            raise ValueError("GatewaySubgraphDeployment.schema_family must be a non-empty lowercase string")
+        if not isinstance(self.supports_pool_history, bool):
+            raise ValueError("GatewaySubgraphDeployment.supports_pool_history must be a bool")
+
+
 @runtime_checkable
 class GatewaySubgraphCapability(Protocol):
-    """Connector publishes its TheGraph subgraph URLs.
+    """Connector publishes its The Graph Network deployment metadata.
 
     Replaces the hardcoded ``DEFAULT_ALLOWED_SUBGRAPHS`` dict in
     ``almanak.gateway.integrations.thegraph`` (VIB-4811 / Phase 3).
 
-    The TheGraph integration builds its allowlisted subgraph dict at
+    The TheGraph integration builds its allowlisted deployment dict at
     construction time by iterating ``GATEWAY_REGISTRY.capability_providers(
     GatewaySubgraphCapability)`` and merging each connector's
-    ``subgraph_endpoints()`` mapping into the live dict.
+    ``subgraph_deployments()`` mapping into the live dict.
 
-    ``subgraph_endpoints`` returns a mapping from subgraph alias (the
-    public key, e.g. ``"uniswap-v3-arbitrum"``) to the GraphQL endpoint
-    URL. The alias scheme historically encodes ``<protocol>-<chain>`` so
-    callers may pass ``"uniswap-v3-arbitrum"`` directly; this Protocol
-    keeps that surface unchanged.
+    ``subgraph_deployments`` returns a mapping from subgraph alias (the
+    public key, e.g. ``"uniswap-v3-arbitrum"``) to a validated deployment
+    spec. The alias scheme historically encodes ``<protocol>-<chain>`` so
+    callers may pass ``"uniswap-v3-arbitrum"`` directly; this Protocol keeps
+    that surface unchanged while moving URL and authentication policy into
+    the gateway.
 
     Returning an empty mapping is legal — useful while the connector
     stages in subgraph coverage incrementally.
     """
 
-    def subgraph_endpoints(self) -> dict[str, str]: ...
+    def subgraph_deployments(self) -> dict[str, GatewaySubgraphDeployment]: ...
 
 
 @runtime_checkable

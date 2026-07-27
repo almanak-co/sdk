@@ -20,6 +20,7 @@ These tests exercise every branch of ``query`` with a mocked
   raw errors
 - transport ``aiohttp.ClientError`` -> ``SubgraphConnectionError``
 - Authorization header is built per-request from the api_key and never logged
+- missing API key is rejected before session creation or query accounting
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ import pytest
 from almanak.gateway.data.pool_history._graphql import (
     DEFAULT_TIMEOUT_SECONDS,
     GatewayGraphQLClient,
+    SubgraphConfigurationError,
     SubgraphConnectionError,
     SubgraphQueryError,
     SubgraphRateLimitError,
@@ -71,7 +73,7 @@ def _patch_session(client: GatewayGraphQLClient, session: MagicMock):
 class TestSuccessfulQuery:
     @pytest.mark.asyncio
     async def test_returns_data_object(self):
-        client = GatewayGraphQLClient()
+        client = GatewayGraphQLClient(api_key="test-api-key")
         response = MagicMock()
         response.status = 200
         response.json = AsyncMock(return_value={"data": {"pools": [{"id": "0x1"}]}})
@@ -87,7 +89,7 @@ class TestSuccessfulQuery:
 
     @pytest.mark.asyncio
     async def test_variables_threaded_into_payload(self):
-        client = GatewayGraphQLClient()
+        client = GatewayGraphQLClient(api_key="test-api-key")
         response = MagicMock()
         response.status = 200
         response.json = AsyncMock(return_value={"data": {"pool": {"id": "0x2"}}})
@@ -108,7 +110,7 @@ class TestSuccessfulQuery:
 
     @pytest.mark.asyncio
     async def test_no_variables_omits_variables_key(self):
-        client = GatewayGraphQLClient()
+        client = GatewayGraphQLClient(api_key="test-api-key")
         response = MagicMock()
         response.status = 200
         response.json = AsyncMock(return_value={"data": {}})
@@ -123,7 +125,7 @@ class TestSuccessfulQuery:
 
     @pytest.mark.asyncio
     async def test_missing_data_field_returns_empty_dict(self):
-        client = GatewayGraphQLClient()
+        client = GatewayGraphQLClient(api_key="test-api-key")
         response = MagicMock()
         response.status = 200
         response.json = AsyncMock(return_value={"extensions": {}})  # no "data"
@@ -137,7 +139,7 @@ class TestSuccessfulQuery:
 
     @pytest.mark.asyncio
     async def test_non_dict_json_returns_empty_dict(self):
-        client = GatewayGraphQLClient()
+        client = GatewayGraphQLClient(api_key="test-api-key")
         response = MagicMock()
         response.status = 200
         response.json = AsyncMock(return_value=["unexpected", "list"])
@@ -165,18 +167,17 @@ class TestSuccessfulQuery:
         await client.close()
 
     @pytest.mark.asyncio
-    async def test_no_authorization_header_without_api_key(self):
+    async def test_missing_api_key_rejects_before_session_or_stats(self):
         client = GatewayGraphQLClient(api_key=None)
-        response = MagicMock()
-        response.status = 200
-        response.json = AsyncMock(return_value={"data": {}})
-        session = _mock_session_returning(response)
+        session_getter = AsyncMock()
 
-        with _patch_session(client, session):
-            await client.query(url=_URL, query=_QUERY)
+        with patch.object(client, "_get_session", session_getter):
+            with pytest.raises(SubgraphConfigurationError, match="ALMANAK_GATEWAY_THEGRAPH_API_KEY"):
+                await client.query(url=_URL, query=_QUERY)
 
-        _, kwargs = session.post.call_args
-        assert "Authorization" not in kwargs["headers"]
+        session_getter.assert_not_awaited()
+        assert client._stats.total_queries == 0
+        assert client._stats.failed_queries == 0
         await client.close()
 
 
@@ -188,7 +189,7 @@ class TestSuccessfulQuery:
 class TestRateLimit:
     @pytest.mark.asyncio
     async def test_429_numeric_retry_after(self):
-        client = GatewayGraphQLClient()
+        client = GatewayGraphQLClient(api_key="test-api-key")
         response = MagicMock()
         response.status = 429
         response.headers = {"Retry-After": "60"}
@@ -205,7 +206,7 @@ class TestRateLimit:
     @pytest.mark.asyncio
     async def test_429_non_numeric_retry_after_does_not_raise_valueerror(self):
         # An HTTP-date Retry-After must NOT mask the clean rate-limit error.
-        client = GatewayGraphQLClient()
+        client = GatewayGraphQLClient(api_key="test-api-key")
         response = MagicMock()
         response.status = 429
         response.headers = {"Retry-After": "Wed, 21 Oct 2025 07:28:00 GMT"}
@@ -219,7 +220,7 @@ class TestRateLimit:
 
     @pytest.mark.asyncio
     async def test_429_no_retry_after_header(self):
-        client = GatewayGraphQLClient()
+        client = GatewayGraphQLClient(api_key="test-api-key")
         response = MagicMock()
         response.status = 429
         response.headers = {}
@@ -240,7 +241,7 @@ class TestRateLimit:
 class TestQueryErrors:
     @pytest.mark.asyncio
     async def test_non_200_raises_query_error_with_status(self):
-        client = GatewayGraphQLClient()
+        client = GatewayGraphQLClient(api_key="test-api-key")
         response = MagicMock()
         response.status = 500
         response.text = AsyncMock(return_value="Internal Server Error")
@@ -255,7 +256,7 @@ class TestQueryErrors:
 
     @pytest.mark.asyncio
     async def test_graphql_errors_array_raises_query_error(self):
-        client = GatewayGraphQLClient()
+        client = GatewayGraphQLClient(api_key="test-api-key")
         response = MagicMock()
         response.status = 200
         response.json = AsyncMock(
@@ -286,7 +287,7 @@ class TestQueryErrors:
 class TestConnectionError:
     @pytest.mark.asyncio
     async def test_client_error_raises_connection_error(self):
-        client = GatewayGraphQLClient()
+        client = GatewayGraphQLClient(api_key="test-api-key")
         session = MagicMock()
         session.post = MagicMock(side_effect=aiohttp.ClientError("Connection refused"))
 
@@ -304,7 +305,7 @@ class TestConnectionError:
         # taxonomy as SubgraphQueryError, not escape query() unhandled.
         import json
 
-        client = GatewayGraphQLClient()
+        client = GatewayGraphQLClient(api_key="test-api-key")
         response = MagicMock()
         response.status = 200
         response.json = AsyncMock(side_effect=json.JSONDecodeError("boom", "", 0))
@@ -349,13 +350,13 @@ class TestApiKeyMasking:
 class TestSessionLifecycle:
     @pytest.mark.asyncio
     async def test_close_is_idempotent_without_session(self):
-        client = GatewayGraphQLClient()
+        client = GatewayGraphQLClient(api_key="test-api-key")
         await client.close()
         await client.close()  # must not raise
 
     @pytest.mark.asyncio
     async def test_close_closes_open_session(self):
-        client = GatewayGraphQLClient()
+        client = GatewayGraphQLClient(api_key="test-api-key")
         mock_session = AsyncMock()
         mock_session.closed = False
         client._session = mock_session

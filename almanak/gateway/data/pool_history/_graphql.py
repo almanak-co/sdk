@@ -32,6 +32,10 @@ from typing import Any
 
 import aiohttp
 
+from almanak.gateway.data._thegraph_network import (
+    MISSING_THEGRAPH_API_KEY_MESSAGE,
+    normalize_thegraph_api_key,
+)
 from almanak.gateway.utils.ssl_context import build_ssl_context
 
 logger = logging.getLogger(__name__)
@@ -52,6 +56,10 @@ DEFAULT_TIMEOUT_SECONDS = 30.0
 
 class SubgraphClientError(Exception):
     """Base exception for ``GatewayGraphQLClient`` errors."""
+
+
+class SubgraphConfigurationError(SubgraphClientError):
+    """Raised before transport when required The Graph config is absent."""
 
 
 class SubgraphRateLimitError(SubgraphClientError):
@@ -130,7 +138,7 @@ class GatewayGraphQLClient:
     """
 
     def __init__(self, *, api_key: str | None = None, timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS) -> None:
-        self._api_key = api_key
+        self._api_key = normalize_thegraph_api_key(api_key)
         self._timeout_seconds = timeout_seconds
         self._session: aiohttp.ClientSession | None = None
         self._stats = _GraphQLStats()
@@ -143,6 +151,11 @@ class GatewayGraphQLClient:
     def __repr__(self) -> str:
         """API-key-safe repr. A traceback or debug dump never leaks the key."""
         return f"GatewayGraphQLClient(api_key={_mask_api_key(self._api_key)}, timeout_seconds={self._timeout_seconds})"
+
+    @property
+    def is_configured(self) -> bool:
+        """Whether authenticated The Graph Network requests can be made."""
+        return self._api_key is not None
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -175,10 +188,14 @@ class GatewayGraphQLClient:
         """Execute a single GraphQL POST against ``url`` and return the ``data`` object.
 
         Raises:
+            SubgraphConfigurationError: no gateway-owned API key is configured.
             SubgraphRateLimitError: HTTP 429.
             SubgraphQueryError: non-200 status OR a GraphQL ``errors`` array.
             SubgraphConnectionError: transport-level failure (timeout, DNS, …).
         """
+        if not self.is_configured:
+            raise SubgraphConfigurationError(MISSING_THEGRAPH_API_KEY_MESSAGE)
+
         self._stats.total_queries += 1
         session = await self._get_session()
         headers = self._build_headers()
@@ -242,6 +259,7 @@ class GatewayGraphQLClient:
 __all__ = [
     "GatewayGraphQLClient",
     "SubgraphClientError",
+    "SubgraphConfigurationError",
     "SubgraphConnectionError",
     "SubgraphQueryError",
     "SubgraphRateLimitError",

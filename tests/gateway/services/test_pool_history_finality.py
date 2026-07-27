@@ -161,7 +161,9 @@ def test_finality_re_promotion_concurrent_readers_no_miss() -> None:
 
 
 def test_repromote_public_entry_flips_when_aged() -> None:
-    servicer = PoolHistoryServiceServicer(GatewaySettings(pool_history_enabled=True))
+    servicer = PoolHistoryServiceServicer(
+        GatewaySettings(pool_history_enabled=True, thegraph_api_key="test-key")
+    )
     aged = _response(int(time.time()) - 100 * DAY)  # far past any cutoff
     band = servicer._repromote_public_entry(aged)
     assert band == FINALITY_FINALIZED
@@ -169,7 +171,9 @@ def test_repromote_public_entry_flips_when_aged() -> None:
 
 
 def test_repromote_public_entry_declines_when_recent() -> None:
-    servicer = PoolHistoryServiceServicer(GatewaySettings(pool_history_enabled=True))
+    servicer = PoolHistoryServiceServicer(
+        GatewaySettings(pool_history_enabled=True, thegraph_api_key="test-key")
+    )
     recent = _response(int(time.time()) - HOUR)  # within the 24h cutoff
     band = servicer._repromote_public_entry(recent)
     assert band is None
@@ -181,7 +185,9 @@ def test_provisional_response_when_trailing_bar_recent() -> None:
     # finalized_only=False (the trailing bar is provisional).
     end = (int(time.time()) // HOUR) * HOUR
     start = end - 7 * DAY
-    servicer = PoolHistoryServiceServicer(GatewaySettings(pool_history_enabled=True))
+    servicer = PoolHistoryServiceServicer(
+        GatewaySettings(pool_history_enabled=True, thegraph_api_key="test-key")
+    )
 
     async def _query(*, url: str, query: str, variables: dict) -> dict:
         s = int(variables["start"])

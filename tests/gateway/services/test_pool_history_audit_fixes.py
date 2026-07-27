@@ -315,7 +315,9 @@ def test_dispatch_rejects_invalid_address_before_providers():
 
 
 def test_servicer_close_releases_session_and_is_idempotent():
-    servicer = PoolHistoryServiceServicer(GatewaySettings(pool_history_enabled=True))
+    servicer = PoolHistoryServiceServicer(
+        GatewaySettings(pool_history_enabled=True, thegraph_api_key="test-key")
+    )
 
     async def _run() -> None:
         session = await servicer._dispatcher._get_http_session()

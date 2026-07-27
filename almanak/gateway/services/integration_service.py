@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 import grpc
 
 from almanak.gateway.core.settings import GatewaySettings
-from almanak.gateway.integrations.base import BaseIntegration
+from almanak.gateway.integrations.base import BaseIntegration, IntegrationError
 from almanak.gateway.integrations.binance import BinanceIntegration
 from almanak.gateway.integrations.coingecko import CoinGeckoIntegration
 from almanak.gateway.integrations.models import WalletPortfolioSnapshot
@@ -743,6 +743,21 @@ class IntegrationServiceServicer(gateway_pb2_grpc.IntegrationServiceServicer):
                 success=result.get("success", False),
             )
 
+        except IntegrationError as e:
+            logger.warning(
+                "TheGraphQuery rejected for %s (%s): %s",
+                request.subgraph_id,
+                e.code,
+                e.message,
+            )
+            context.set_code(
+                grpc.StatusCode.FAILED_PRECONDITION if e.code == "MISSING_API_KEY" else grpc.StatusCode.INTERNAL
+            )
+            context.set_details(e.message)
+            return gateway_pb2.TheGraphQueryResponse(
+                success=False,
+                errors=json.dumps([{"message": e.message, "code": e.code}]),
+            )
         except Exception as e:
             logger.exception("TheGraphQuery failed for %s", request.subgraph_id)
             context.set_code(grpc.StatusCode.INTERNAL)

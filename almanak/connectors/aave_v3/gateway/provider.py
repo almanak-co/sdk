@@ -13,9 +13,8 @@ Phase 3 (VIB-4811) adds:
 
 * ``GatewayDefillamaSlugCapability`` — DefiLlama project slug
   (``"aave-v3"``).
-* ``GatewaySubgraphCapability`` — TheGraph subgraph URLs (Ethereum,
-  Arbitrum, Optimism, Polygon). Moved verbatim from
-  ``almanak.gateway.integrations.thegraph.DEFAULT_ALLOWED_SUBGRAPHS``.
+* ``GatewaySubgraphCapability`` — The Graph Network deployment metadata
+  (Ethereum, Arbitrum, Optimism, Polygon).
 * ``GatewayPriceIdCapability`` — Aave governance token CoinGecko slug
   (``AAVE`` → ``aave``). Moved verbatim from
   ``almanak.gateway.data.price.coingecko``'s per-chain token-id tables.
@@ -57,23 +56,18 @@ from almanak.connectors._base.gateway_capabilities import (
     GatewayMarketLookupCapability,
     GatewayPriceIdCapability,
     GatewaySubgraphCapability,
+    GatewaySubgraphDeployment,
 )
 from almanak.connectors._base.gateway_connector import GatewayConnector
 from almanak.connectors._base.types import ProtocolKind, ProtocolName
 
 from ..addresses import AAVE_V3, AAVE_V3_TOKENS
+from ..subgraph_ids import AAVE_V3_SUBGRAPH_IDS
 from .market_lookup import get_aave_lookup
 
 logger = logging.getLogger(__name__)
 
-# Aave v3 subgraph URLs. Moved verbatim from
-# ``thegraph.DEFAULT_ALLOWED_SUBGRAPHS``.
-_AAVE_V3_SUBGRAPHS: dict[str, str] = {
-    "aave-v3-ethereum": "https://api.thegraph.com/subgraphs/name/aave/protocol-v3",
-    "aave-v3-arbitrum": "https://api.thegraph.com/subgraphs/name/aave/protocol-v3-arbitrum",
-    "aave-v3-optimism": "https://api.thegraph.com/subgraphs/name/aave/protocol-v3-optimism",
-    "aave-v3-polygon": "https://api.thegraph.com/subgraphs/name/aave/protocol-v3-polygon",
-}
+_PUBLIC_AAVE_V3_SUBGRAPH_CHAINS = ("ethereum", "arbitrum", "optimism", "polygon")
 
 
 class AaveV3GatewayConnector(
@@ -122,9 +116,15 @@ class AaveV3GatewayConnector(
     def defillama_slug_aliases(self) -> dict[str, str]:
         return {}
 
-    def subgraph_endpoints(self) -> dict[str, str]:
-        """TheGraph subgraph URLs for Aave v3 (one per supported chain)."""
-        return dict(_AAVE_V3_SUBGRAPHS)
+    def subgraph_deployments(self) -> dict[str, GatewaySubgraphDeployment]:
+        """The Graph deployments for the public Aave v3 query aliases."""
+        return {
+            f"aave-v3-{chain}": GatewaySubgraphDeployment(
+                deployment_id=AAVE_V3_SUBGRAPH_IDS[chain],
+                schema_family="aave_v3",
+            )
+            for chain in _PUBLIC_AAVE_V3_SUBGRAPH_CHAINS
+        }
 
     def coingecko_ids(self) -> dict[str, str]:
         """CoinGecko slug for the Aave governance token."""

@@ -71,7 +71,6 @@ SUBGRAPH_ALIASES = {
     # Uniswap V3
     "uniswap-v3-ethereum": "uniswap-v3-ethereum",
     "uniswap-v3-arbitrum": "uniswap-v3-arbitrum",
-    "uniswap-v3-optimism": "uniswap-v3-optimism",
     "uniswap-v3-polygon": "uniswap-v3-polygon",
     "uniswap-v3-base": "uniswap-v3-base",
     # Aave V3
@@ -79,12 +78,6 @@ SUBGRAPH_ALIASES = {
     "aave-v3-arbitrum": "aave-v3-arbitrum",
     "aave-v3-optimism": "aave-v3-optimism",
     "aave-v3-polygon": "aave-v3-polygon",
-    # Curve
-    "curve-ethereum": "curve-ethereum",
-    "curve-arbitrum": "curve-arbitrum",
-    # Balancer
-    "balancer-v2-ethereum": "balancer-v2-ethereum",
-    "balancer-v2-arbitrum": "balancer-v2-arbitrum",
 }
 
 
@@ -172,7 +165,7 @@ def get_uniswap_pools(
     """Get top Uniswap V3 pools.
 
     Args:
-        chain: Chain name (arbitrum, ethereum, optimism, polygon, base)
+        chain: Chain name (arbitrum, ethereum, polygon, base)
         first: Number of pools to return
         order_by: Field to order by (totalValueLockedUSD, volumeUSD, etc.)
 

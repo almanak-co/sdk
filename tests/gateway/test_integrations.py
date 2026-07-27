@@ -1,9 +1,11 @@
 """Tests for gateway integrations."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from typing import cast
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from almanak.gateway.data._thegraph_network import THEGRAPH_GATEWAY_BASE_URL
 from almanak.gateway.integrations.base import (
     BaseIntegration,
     CacheEntry,
@@ -276,6 +278,44 @@ class TestTheGraphIntegration:
         assert "uniswap-v3-arbitrum" in thegraph.list_allowed_subgraphs()
         assert "aave-v3-arbitrum" in thegraph.list_allowed_subgraphs()
 
+    def test_explicit_allowed_subgraphs_are_validated_and_copied(self):
+        deployment_id = "5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV"
+        allowed = {"custom": f"{THEGRAPH_GATEWAY_BASE_URL}/{deployment_id}"}
+
+        thegraph = TheGraphIntegration(allowed_subgraphs=allowed)
+        allowed["added-after-init"] = allowed["custom"]
+
+        assert thegraph.list_allowed_subgraphs() == ["custom"]
+        assert thegraph.get_subgraph_url("custom") == allowed["custom"]
+
+    @pytest.mark.parametrize(
+        "invalid_allowed_subgraphs",
+        [
+            {1: f"{THEGRAPH_GATEWAY_BASE_URL}/{'a' * 40}"},
+            {"": f"{THEGRAPH_GATEWAY_BASE_URL}/{'a' * 40}"},
+            {"Uppercase": f"{THEGRAPH_GATEWAY_BASE_URL}/{'a' * 40}"},
+            {"custom": None},
+            {"custom": f"https://example.com/{'a' * 40}"},
+            {"custom": f"{THEGRAPH_GATEWAY_BASE_URL}/invalid"},
+        ],
+        ids=[
+            "non-string-alias",
+            "empty-alias",
+            "uppercase-alias",
+            "non-string-url",
+            "arbitrary-host",
+            "invalid-deployment-id",
+        ],
+    )
+    def test_explicit_allowed_subgraphs_reject_unsafe_entries(
+        self,
+        invalid_allowed_subgraphs: dict[object, object],
+    ):
+        with pytest.raises(ValueError, match="lowercase aliases"):
+            TheGraphIntegration(
+                allowed_subgraphs=cast(dict[str, str], invalid_allowed_subgraphs),
+            )
+
     def test_get_subgraph_url_returns_url_for_allowed(self, thegraph):
         """get_subgraph_url returns URL for allowed subgraphs."""
         url = thegraph.get_subgraph_url("uniswap-v3-ethereum")
@@ -288,14 +328,17 @@ class TestTheGraphIntegration:
         assert url is None
 
     def test_get_subgraph_url_accepts_base58_deployment_id(self):
-        """Base58 network subgraph ids resolve when a key is present (ALM-2952)."""
+        """Base58 deployment IDs resolve without embedding credentials in the URL."""
         base58_id = "5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV"
         keyed = TheGraphIntegration(api_key="test-key")
         url = keyed.get_subgraph_url(base58_id)
-        assert url == f"https://gateway.thegraph.com/api/test-key/subgraphs/id/{base58_id}"
+        assert url == f"https://gateway.thegraph.com/api/subgraphs/id/{base58_id}"
 
         keyless = TheGraphIntegration(api_key=None)
-        assert keyless.get_subgraph_url(base58_id) is None
+        assert keyless.get_subgraph_url(base58_id) == url
+
+        bytes32_id = "0x" + "ab" * 32
+        assert keyed.get_subgraph_url(bytes32_id) == (f"https://gateway.thegraph.com/api/subgraphs/id/{bytes32_id}")
 
     def test_get_subgraph_url_rejects_non_base58_junk(self, thegraph):
         """Arbitrary strings still fail the allowlist (0/O/I/l are not base58)."""
@@ -303,13 +346,20 @@ class TestTheGraphIntegration:
         base58_id = "5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV"
         assert TheGraphIntegration(api_key="k").get_subgraph_url(base58_id + "\n") is None
         assert thegraph.get_subgraph_url("../../etc/passwd/aaaaaaaaaaaaaaaaaaaaaaaaaaaaa") is None
+        assert thegraph.get_subgraph_url("0x../../arbitrary-path") is None
+        assert thegraph.get_subgraph_url("0x1234") is None
 
     def test_add_allowed_subgraph(self, thegraph):
-        """Subgraphs can be added to allowlist."""
-        thegraph.add_allowed_subgraph("custom", "https://custom.subgraph.url")
+        """Bare deployment IDs can be added without allowing arbitrary hosts."""
+        deployment_id = "5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV"
+        thegraph.add_allowed_subgraph("custom", deployment_id)
 
         url = thegraph.get_subgraph_url("custom")
-        assert url == "https://custom.subgraph.url"
+        assert url == f"https://gateway.thegraph.com/api/subgraphs/id/{deployment_id}"
+
+    def test_add_allowed_subgraph_rejects_url(self, thegraph):
+        with pytest.raises(ValueError, match="deployment ID"):
+            thegraph.add_allowed_subgraph("custom", "https://custom.subgraph.url")
 
     @pytest.mark.asyncio
     async def test_query_rejects_unallowed_subgraph(self, thegraph):
@@ -396,7 +446,6 @@ class TestZerionIntegration:
         assert snapshot.chain == "base"
 
 
-
 # =============================================================================
 # TheGraph query() HTTP-path tests (mocked session; no network)
 # =============================================================================
@@ -446,7 +495,7 @@ class TestTheGraphQuery:
 
     @pytest.fixture
     def thegraph(self):
-        return TheGraphIntegration()
+        return TheGraphIntegration(api_key="test-api-key")
 
     def _patched(self, thegraph, session):
         return patch.object(thegraph, "_get_session", AsyncMock(return_value=session))
@@ -468,6 +517,8 @@ class TestTheGraphQuery:
         assert thegraph._metrics.successful_requests == 1
         # Alias resolved through the allowlist to the subgraph URL.
         assert calls[0]["url"] == thegraph.get_subgraph_url(self.SUBGRAPH)
+        assert "test-api-key" not in calls[0]["url"]
+        assert calls[0]["headers"]["Authorization"] == "Bearer test-api-key"
         assert calls[0]["json"] == {"query": self.QUERY}
 
     @pytest.mark.asyncio
@@ -547,6 +598,19 @@ class TestTheGraphQuery:
                 await thegraph.query("definitely-not-allowed", self.QUERY)
 
         assert exc_info.value.code == "SUBGRAPH_NOT_ALLOWED"
+        assert calls == []
+
+    @pytest.mark.asyncio
+    async def test_missing_api_key_raises_before_any_http(self):
+        calls: list[dict] = []
+        keyless = TheGraphIntegration(api_key=None)
+        session = _graph_session([], calls)
+
+        with self._patched(keyless, session):
+            with pytest.raises(IntegrationError, match="ALMANAK_GATEWAY_THEGRAPH_API_KEY") as exc_info:
+                await keyless.query(self.SUBGRAPH, self.QUERY)
+
+        assert exc_info.value.code == "MISSING_API_KEY"
         assert calls == []
 
 

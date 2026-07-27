@@ -488,12 +488,9 @@ class DexVolumeDecl:
       decentralised TheGraph gateway endpoints used by the backtesting
       ``SubgraphVolumeProvider`` (plan 024). ``None`` = no URLs declared.
       Keys are canonical chain names; values must start with ``"https://"``.
-      NOT named ``subgraph_endpoints`` — that name is taken by the gateway
+      NOT named ``subgraph_deployments`` — that name is taken by the gateway
       side ``GatewaySubgraphCapability`` which has a different key scheme
       (``"<protocol>-<chain>"`` aliases).
-    - ``hosted_volume_subgraph_urls``: same shape, for the free hosted-service
-      fallback endpoints (plan 024). Typically fewer chains than
-      ``volume_subgraph_urls``.
     - ``liquidity_subgraph_ids``: sparse ``{chain: deployment_id}`` map used by
       the direct operator-side liquidity-depth provider until that lane moves to
       the gateway. Values are deployment IDs, not URLs.
@@ -509,7 +506,6 @@ class DexVolumeDecl:
     generic_default: bool = False
     twap_reference_pools: ImportRef | None = None
     volume_subgraph_urls: Mapping[str, str] | None = None
-    hosted_volume_subgraph_urls: Mapping[str, str] | None = None
     liquidity_subgraph_ids: Mapping[str, str] | None = None
     #: AMM family whose depth-query SCHEMA the declared liquidity subgraph
     #: exposes, when it differs from ``amm_family`` (ALM-2930: aerodrome is a
@@ -560,7 +556,6 @@ class DexVolumeDecl:
                 f"DexVolumeDecl.twap_reference_pools must be None or an ImportRef, got {self.twap_reference_pools!r}"
             )
         self._validate_subgraph_urls("volume_subgraph_urls", self.volume_subgraph_urls)
-        self._validate_subgraph_urls("hosted_volume_subgraph_urls", self.hosted_volume_subgraph_urls)
         self._validate_subgraph_ids("liquidity_subgraph_ids", self.liquidity_subgraph_ids)
         _validate_decl_aliases("DexVolumeDecl", self.aliases)
         if self.name is not None and self.name in self.aliases:

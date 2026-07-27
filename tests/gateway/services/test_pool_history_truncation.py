@@ -55,9 +55,13 @@ class _Ctx:
 
 
 def _servicer(**overrides: object) -> PoolHistoryServiceServicer:
-    return PoolHistoryServiceServicer(
-        GatewaySettings(pool_history_enabled=True, coingecko_api_key="test-key", **overrides)
-    )
+    settings = {
+        "pool_history_enabled": True,
+        "thegraph_api_key": "test-key",
+        "coingecko_api_key": "test-key",
+        **overrides,
+    }
+    return PoolHistoryServiceServicer(GatewaySettings(**settings))
 
 
 def _request(

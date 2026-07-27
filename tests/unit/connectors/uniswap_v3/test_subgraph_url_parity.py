@@ -24,9 +24,9 @@ def test_volume_subgraph_url_ids_match_gateway_provider() -> None:
     )
 
     gateway_ids = {**_UNISWAP_V3_VOLUME_SUBGRAPH_IDS, **_UNISWAP_V3_MESSARI_VOLUME_SUBGRAPH_IDS}
-    assert set(_UNISWAP_V3_VOLUME_SUBGRAPH_IDS).isdisjoint(
-        _UNISWAP_V3_MESSARI_VOLUME_SUBGRAPH_IDS
-    ), "a chain must live in exactly one gateway id map (classic or Messari)"
+    assert set(_UNISWAP_V3_VOLUME_SUBGRAPH_IDS).isdisjoint(_UNISWAP_V3_MESSARI_VOLUME_SUBGRAPH_IDS), (
+        "a chain must live in exactly one gateway id map (classic or Messari)"
+    )
 
     connector = CONNECTOR_REGISTRY.get("uniswap_v3")
     assert connector is not None
@@ -67,20 +67,6 @@ def test_liquidity_subgraph_ids_are_derived_from_volume_subgraph_urls() -> None:
     assert liquidity_ids is not None
 
     assert dict(liquidity_ids) == {chain: url.rsplit("/", 1)[-1] for chain, url in urls.items()}
-
-
-def test_hosted_subgraph_urls_match_subgraph_module() -> None:
-    """Hosted-service URLs in DexVolumeDecl must equal the derived UNISWAP_V3_HOSTED_SUBGRAPHS."""
-    from almanak.connectors._connector import CONNECTOR_REGISTRY
-    from almanak.framework.backtesting.pnl.providers.subgraph import UNISWAP_V3_HOSTED_SUBGRAPHS
-
-    connector = CONNECTOR_REGISTRY.get("uniswap_v3")
-    assert connector is not None
-    assert connector.dex_volume is not None
-    hosted = connector.dex_volume.hosted_volume_subgraph_urls
-    assert hosted is not None
-
-    assert dict(hosted) == UNISWAP_V3_HOSTED_SUBGRAPHS
 
 
 def test_volume_subgraph_urls_match_subgraph_module() -> None:

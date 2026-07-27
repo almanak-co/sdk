@@ -42,7 +42,6 @@ class DexVolumeEntry:
     chain_default: tuple[str, ...]
     generic_default: bool
     volume_subgraph_urls: dict[str, str] | None = None  # {chain: https_url} — plan 024
-    hosted_volume_subgraph_urls: dict[str, str] | None = None  # fallback URLs — plan 024
     liquidity_subgraph_ids: dict[str, str] | None = None  # {chain: deployment_id} — liquidity depth
     # Depth-query schema family of the liquidity subgraph; "" = same as
     # amm_family (ALM-2930: aerodrome's subgraph is a v3 fork, not solidly).
@@ -93,9 +92,6 @@ class DexVolumeRegistry:
                 chain_default=decl.chain_default,
                 generic_default=decl.generic_default,
                 volume_subgraph_urls=dict(decl.volume_subgraph_urls) if decl.volume_subgraph_urls is not None else None,
-                hosted_volume_subgraph_urls=(
-                    dict(decl.hosted_volume_subgraph_urls) if decl.hosted_volume_subgraph_urls is not None else None
-                ),
                 liquidity_subgraph_ids=(
                     dict(decl.liquidity_subgraph_ids) if decl.liquidity_subgraph_ids is not None else None
                 ),
@@ -238,17 +234,6 @@ class DexVolumeRegistry:
         # Fresh copy per call so callers cannot mutate registry state
         # (same contract as vendor_chain_map on the chain side).
         return dict(entry.volume_subgraph_urls)
-
-    @classmethod
-    def hosted_volume_subgraph_urls_for(cls, protocol: str | None) -> dict[str, str] | None:
-        """Return the ``{chain: https_url}`` hosted-service fallback URL map for
-        ``protocol``, or ``None`` when the protocol has no declared URLs (plan 024).
-        """
-        entry = cls.entry_for(protocol)
-        if entry is None or entry.hosted_volume_subgraph_urls is None:
-            return None
-        # Fresh copy per call — see volume_subgraph_urls_for.
-        return dict(entry.hosted_volume_subgraph_urls)
 
     @classmethod
     def liquidity_subgraph_ids_for(cls, protocol: str | None) -> dict[str, str] | None:

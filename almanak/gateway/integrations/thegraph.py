@@ -12,11 +12,8 @@ connector registry (VIB-4811 / VIB-4817):
 
 ``GATEWAY_REGISTRY.capability_providers(GatewaySubgraphCapability)`` —
 each registered gateway connector publishes its own
-``subgraph_endpoints()`` mapping and the dispatcher merges them.
-
-VIB-4817 retired the ``_PENDING_SUBGRAPHS`` fallback dict; the two
-Curve entries that previously lived there now ride on
-``CurveGatewayConnector.subgraph_endpoints()``.
+``subgraph_deployments()`` mapping. The gateway validates and converts each
+deployment ID into a Network URL.
 
 ``DEFAULT_ALLOWED_SUBGRAPHS`` is a module-level proxy dict that builds
 itself on first access — building it eagerly at import time would
@@ -25,7 +22,7 @@ trigger a circular import between this module and
 via ``integration_service``). The dict is built once and cached.
 
 Collisions (two connectors publishing the same alias with diverging
-URLs) raise ``RuntimeError`` at first access — a silent overwrite
+deployment metadata) raise ``RuntimeError`` at first access — a silent overwrite
 would make subgraph identity ambiguous and is a registry contract
 violation.
 
@@ -33,52 +30,33 @@ Strategy-side code MUST NOT import this module.
 """
 
 import logging
-import re
 from collections.abc import Iterator
 from typing import Any
 
+from almanak.gateway.data._thegraph_network import (
+    MISSING_THEGRAPH_API_KEY_MESSAGE,
+    THEGRAPH_GATEWAY_BASE_URL,
+    build_registered_subgraph_deployments,
+    is_thegraph_deployment_id,
+    normalize_thegraph_api_key,
+    thegraph_deployment_url,
+)
 from almanak.gateway.integrations.base import BaseIntegration, IntegrationError
 
 logger = logging.getLogger(__name__)
-
-# Decentralized-network subgraph ids are ~44-46 char base58 strings.
-_BASE58_SUBGRAPH_ID_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{40,50}$")
 
 
 def _build_default_allowed_subgraphs() -> dict[str, str]:
     """Assemble the default allowlist from the gateway-connector registry.
 
-    Iterates ``GATEWAY_REGISTRY.capability_providers(GatewaySubgraphCapability)``
-    and merges each connector's ``subgraph_endpoints()`` mapping into a
-    single dict. Collisions on alias with diverging URLs raise — silent
-    overwrite would make subgraph identity ambiguous.
-
-    Imports are local so this module can be imported without immediately
-    triggering ``almanak.connectors._gateway_registry`` loading — that
-    chain pulls in every concrete gateway connector module, which in
-    turn pulls in ``almanak.gateway.services``, which pulls in this
-    module again (circular).
+    Connectors publish only deployment metadata. The common gateway helper
+    validates aliases and collisions, then this function constructs the
+    credential-free Network URLs used by the HTTP transport.
     """
-    from almanak.connectors._base.gateway_capabilities import (
-        GatewaySubgraphCapability,
-    )
-    from almanak.connectors._gateway_registry import GATEWAY_REGISTRY
-
-    merged: dict[str, str] = {}
-    # mypy: ``@runtime_checkable`` Protocol is the registry contract;
-    # see ``pool_history_service._derive_pool_history_tables``.
-    for connector in GATEWAY_REGISTRY.capability_providers(GatewaySubgraphCapability):  # type: ignore[type-abstract]
-        for alias, url in connector.subgraph_endpoints().items():
-            existing = merged.get(alias)
-            if existing is not None and existing != url:
-                raise RuntimeError(
-                    f"Subgraph alias collision for {alias!r}: "
-                    f"already registered as {existing!r}, refusing to "
-                    f"overwrite with {url!r} from "
-                    f"{type(connector).__qualname__}"
-                )
-            merged[alias] = url
-    return merged
+    return {
+        alias: thegraph_deployment_url(deployment.deployment_id)
+        for alias, deployment in build_registered_subgraph_deployments().items()
+    }
 
 
 class _LazyAllowedSubgraphs(dict[str, str]):
@@ -161,15 +139,30 @@ class _LazyAllowedSubgraphs(dict[str, str]):
 DEFAULT_ALLOWED_SUBGRAPHS: dict[str, str] = _LazyAllowedSubgraphs()
 
 
+def _is_valid_allowed_subgraph(alias: object, url: object, prefix: str) -> bool:
+    """Return whether an allowlist entry is a safe Network deployment URL."""
+    if not isinstance(alias, str):
+        return False
+    if not isinstance(url, str):
+        return False
+    return all(
+        (
+            alias,
+            alias == alias.lower(),
+            url.startswith(prefix),
+            is_thegraph_deployment_id(url[len(prefix) :]),
+        )
+    )
+
+
 class TheGraphIntegration(BaseIntegration):
     """TheGraph subgraph query integration.
 
     Provides access to TheGraph subgraphs for on-chain data queries.
-    Supports both hosted service and decentralized network.
+    Supports the decentralized Network gateway.
 
     Rate limits:
-    - Free hosted service: 1000 queries per day
-    - Decentralized network: Based on GRT staking
+    - Decentralized Network: Based on the configured API-key plan
 
     Supported operations:
     - query: Execute a GraphQL query on a subgraph
@@ -195,24 +188,43 @@ class TheGraphIntegration(BaseIntegration):
         """Initialize TheGraph integration.
 
         Args:
-            api_key: Optional TheGraph API key for decentralized network
+            api_key: The Graph API key for decentralized Network queries.
             allowed_subgraphs: Optional dict mapping subgraph names to URLs.
-                If None, uses default allowlist.
+                URLs must be credential-free ``gateway.thegraph.com``
+                deployment endpoints. If None, uses the connector registry.
             request_timeout: HTTP request timeout in seconds
         """
+        normalized_api_key = normalize_thegraph_api_key(api_key)
         super().__init__(
-            api_key=api_key,
+            api_key=normalized_api_key,
             base_url="",  # URLs are per-subgraph
             request_timeout=request_timeout,
         )
 
-        # Set up allowed subgraphs
-        self._allowed_subgraphs = allowed_subgraphs or DEFAULT_ALLOWED_SUBGRAPHS.copy()
+        # Set up allowed subgraphs. An explicit empty mapping stays empty.
+        self._allowed_subgraphs = (
+            self._validate_allowed_subgraphs(allowed_subgraphs)
+            if allowed_subgraphs is not None
+            else DEFAULT_ALLOWED_SUBGRAPHS.copy()
+        )
 
         logger.info(
             "Initialized TheGraph integration with %d allowed subgraphs",
             len(self._allowed_subgraphs),
         )
+
+    @staticmethod
+    def _validate_allowed_subgraphs(allowed_subgraphs: dict[str, str]) -> dict[str, str]:
+        """Reject legacy, arbitrary, and credential-bearing endpoint URLs."""
+        validated: dict[str, str] = {}
+        prefix = f"{THEGRAPH_GATEWAY_BASE_URL}/"
+        for alias, url in allowed_subgraphs.items():
+            if not _is_valid_allowed_subgraph(alias, url, prefix):
+                raise ValueError(
+                    f"allowed_subgraphs must map lowercase aliases to credential-free {prefix}<deployment-id> URLs"
+                )
+            validated[alias] = url
+        return validated
 
     def _get_headers(self) -> dict[str, str]:
         """Get headers for TheGraph API requests."""
@@ -236,23 +248,22 @@ class TheGraphIntegration(BaseIntegration):
             return self._allowed_subgraphs[subgraph_id]
 
         # Direct deployment/subgraph ids: Qm... (legacy IPFS hash), 0x...,
-        # or the decentralized network's base58 subgraph ids (the form the
-        # backtest connector registry declares — ALM-2952).
-        if subgraph_id.startswith(("Qm", "0x")) or _BASE58_SUBGRAPH_ID_RE.fullmatch(subgraph_id):
-            if self._api_key:
-                return f"https://gateway.thegraph.com/api/{self._api_key}/subgraphs/id/{subgraph_id}"
-            return None  # Deployment IDs require API key
+        # or the Network's base58 deployment IDs.
+        if is_thegraph_deployment_id(subgraph_id):
+            return thegraph_deployment_url(subgraph_id)
 
         return None
 
-    def add_allowed_subgraph(self, name: str, url: str) -> None:
-        """Add a subgraph to the allowlist.
+    def add_allowed_subgraph(self, name: str, deployment_id: str) -> None:
+        """Add a deployment to the allowlist.
 
         Args:
             name: Subgraph name/alias
-            url: Subgraph URL
+            deployment_id: Bare The Graph Network deployment ID.
         """
-        self._allowed_subgraphs[name] = url
+        if not isinstance(name, str) or not name or name != name.lower():
+            raise ValueError("Subgraph alias must be a non-empty lowercase string")
+        self._allowed_subgraphs[name] = thegraph_deployment_url(deployment_id)
         logger.info("Added subgraph to allowlist: %s", name)
 
     def list_allowed_subgraphs(self) -> list[str]:
@@ -308,6 +319,12 @@ class TheGraphIntegration(BaseIntegration):
                 self.name,
                 f"Subgraph '{subgraph_id}' is not in allowlist. Allowed: {', '.join(self.list_allowed_subgraphs())}",
                 code="SUBGRAPH_NOT_ALLOWED",
+            )
+        if not self._api_key:
+            raise IntegrationError(
+                self.name,
+                MISSING_THEGRAPH_API_KEY_MESSAGE,
+                code="MISSING_API_KEY",
             )
 
         # Build cache key from query (simple hash)

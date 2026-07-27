@@ -9,10 +9,16 @@ in for the full Cartesian product.
 
 from __future__ import annotations
 
+import logging
+from unittest.mock import AsyncMock
+
 import pytest
 
 from almanak.gateway.core.settings import GatewaySettings
-from almanak.gateway.data.pool_history.dispatcher import PoolHistoryDispatcher
+from almanak.gateway.data.pool_history.dispatcher import (
+    PoolHistoryDispatcher,
+    _resolve_subgraph_url,
+)
 from almanak.gateway.proto import gateway_pb2
 from almanak.gateway.services.pool_history_service import (
     PoolHistoryServiceServicer,
@@ -21,7 +27,9 @@ from almanak.gateway.services.pool_history_service import (
 
 
 def _dispatcher():
-    return PoolHistoryServiceServicer(GatewaySettings(pool_history_enabled=True))._dispatcher
+    return PoolHistoryServiceServicer(
+        GatewaySettings(pool_history_enabled=True, thegraph_api_key="test-key")
+    )._dispatcher
 
 
 # =============================================================================
@@ -76,6 +84,16 @@ def test_dispatcher_is_supported_delegates_to_module_table():
         assert d.is_supported(chain, protocol) == is_supported_pool_pair(chain, protocol)
 
 
+def test_pool_history_resolver_requires_explicit_schema_compatibility():
+    """Only healthy V3-native deployments enter the PoolHistory Graph lane."""
+    arbitrum_url = _resolve_subgraph_url("uniswap_v3", "arbitrum")
+    assert arbitrum_url == (
+        "https://gateway.thegraph.com/api/subgraphs/id/FbCGRftH4a3yZugY7TnbYgPJVEv2LvMT6oF1fxPe9aJM"
+    )
+    assert _resolve_subgraph_url("uniswap_v3", "optimism") is None
+    assert _resolve_subgraph_url("aave_v3", "arbitrum") is None
+
+
 def test_dispatcher_propagates_coingecko_api_key_to_pool_history_provider():
     """PoolHistoryDispatcher wires the CoinGecko key into the fallback provider."""
     dispatcher = PoolHistoryDispatcher(
@@ -116,3 +134,42 @@ def test_servicer_propagates_coingecko_api_key_to_dispatcher():
     provider = servicer._dispatcher._geckoterminal
     assert "pro-api.coingecko.com" in provider._api_base
     assert provider._headers["x-cg-pro-api-key"] == "settings-key"
+
+
+@pytest.mark.asyncio
+async def test_missing_thegraph_key_fails_before_http_or_budget_and_falls_through(caplog):
+    """A missing key is actionable configuration, not an unauthenticated request."""
+    caplog.set_level(logging.WARNING)
+    dispatcher = PoolHistoryDispatcher(
+        thegraph_api_key=None,
+        thegraph_monthly_budget_max=100000,
+        is_supported_fn=lambda _chain, _protocol: True,
+        coingecko_api_key="test-key",
+    )
+    graphql_query = AsyncMock()
+    fallback_snapshot = gateway_pb2.PoolSnapshot(timestamp=1_700_000_000)
+    fallback_fetch = AsyncMock(return_value=[fallback_snapshot])
+    dispatcher._graphql.query = graphql_query
+    dispatcher._geckoterminal.fetch = fallback_fetch
+
+    outcome = await dispatcher.dispatch(
+        chain="arbitrum",
+        pool_address="0xc6962004f452be9203591991d15f6b388e09e8d0",
+        protocol="uniswap_v3",
+        start_ts=1_700_000_000,
+        end_ts=1_700_003_600,
+        resolution=gateway_pb2.Resolution.RESOLUTION_1H,
+    )
+
+    assert outcome.success is True
+    assert outcome.source == "geckoterminal"
+    graphql_query.assert_not_awaited()
+    fallback_fetch.assert_awaited_once()
+    assert dispatcher.the_graph_monthly_queries == 0
+    missing_key_warnings = [
+        record
+        for record in caplog.records
+        if "ALMANAK_GATEWAY_THEGRAPH_API_KEY is not configured" in record.getMessage()
+    ]
+    assert len(missing_key_warnings) == 1
+    await dispatcher.close()

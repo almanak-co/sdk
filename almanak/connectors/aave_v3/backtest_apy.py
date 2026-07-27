@@ -53,6 +53,8 @@ from almanak.framework.backtesting.pnl.providers.subgraph_client import (
 )
 from almanak.framework.backtesting.pnl.types import APYResult, DataConfidence, DataSourceInfo
 
+from .subgraph_ids import AAVE_V3_SUBGRAPH_IDS
+
 logger = logging.getLogger(__name__)
 
 
@@ -69,17 +71,6 @@ def _canonical_chain(chain: str) -> str:
 # =============================================================================
 # Aave V3 Subgraph IDs (from The Graph Explorer)
 # =============================================================================
-
-# Subgraph deployment IDs for Aave V3 on various chains
-# These are from The Graph's decentralized network
-AAVE_V3_SUBGRAPH_IDS: dict[str, str] = {
-    "ethereum": "Cd2gEDVeqnjBn1hSeqFMitw8Q1iiyV9FYUZkLNRcL87g",
-    "arbitrum": "DLuE98kEb5pQNXAcKFQGQgfSQ57Xdou4jnVbAEqMfy3B",
-    "optimism": "DSfLz8oQBUeU5atALgUFQKMTSYV9mZAVYp4noLSXAfvb",
-    "polygon": "Co2URyXjnxaw8WqxKyVHdirq9Ahhm5vcTs4dMedAq211",
-    "base": "GQFbb95cE6d8mV989mL5figjaGaKCQB3xqYrr1bRyXqF",
-    "avalanche": "2h9woxy8RTjHu1HJsCEnmzpPHFArU33avmUh4f71JpVn",
-}
 
 # Supported chains for this provider
 SUPPORTED_CHAINS: list[str] = list(AAVE_V3_SUBGRAPH_IDS.keys())

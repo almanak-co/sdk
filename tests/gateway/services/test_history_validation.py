@@ -409,7 +409,9 @@ class _CodeContext:
 
 
 def _enabled_servicer() -> PoolHistoryServiceServicer:
-    return PoolHistoryServiceServicer(GatewaySettings(pool_history_enabled=True))
+    return PoolHistoryServiceServicer(
+        GatewaySettings(pool_history_enabled=True, thegraph_api_key="test-key")
+    )
 
 
 def test_handler_returns_invalid_argument_for_empty_pool_address():

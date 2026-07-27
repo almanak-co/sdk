@@ -1,38 +1,34 @@
-"""``GatewaySubgraphCapability`` contract tests (VIB-4811 / VIB-4817).
-
-``TheGraphIntegration``'s default allowlist is assembled from
-``GATEWAY_REGISTRY.capability_providers(GatewaySubgraphCapability)``.
-VIB-4817 retired the ``_PENDING_SUBGRAPHS`` fallback dict; Curve is now
-a fully-fledged ``GatewaySubgraphCapability`` provider. Tests pin:
-
-* ``isinstance(connector, GatewaySubgraphCapability)`` is True iff the
-  connector defines ``subgraph_endpoints``.
-* The registered Uniswap V3, Aave v3, Balancer v2, and Curve connectors
-  return the historical alias → URL pairs.
-* The assembled default allowlist is byte-identical to the pre-refactor
-  ``DEFAULT_ALLOWED_SUBGRAPHS`` dict.
-* Collision on alias raises a loud ``RuntimeError`` at assembly time.
-"""
+"""GatewaySubgraphCapability deployment-metadata contract tests."""
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import ClassVar
 
 import pytest
 
 from almanak.connectors._base.gateway_capabilities import (
     GatewaySubgraphCapability,
+    GatewaySubgraphDeployment,
 )
 from almanak.connectors._base.gateway_connector import GatewayConnector
 from almanak.connectors._base.types import ProtocolKind, ProtocolName
+
+_ID_A = "11111111111111111111111111111111111111111111"
+_ID_B = "22222222222222222222222222222222222222222222"
 
 
 class _SubgraphImpl(GatewayConnector):
     protocol: ClassVar[ProtocolName] = ProtocolName("subgraph_demo")
     kind: ClassVar[ProtocolKind] = ProtocolKind.LP
 
-    def subgraph_endpoints(self) -> dict[str, str]:
-        return {"demo-protocol-ethereum": "https://example.com/subgraph"}
+    def subgraph_deployments(self) -> dict[str, GatewaySubgraphDeployment]:
+        return {
+            "demo-protocol-ethereum": GatewaySubgraphDeployment(
+                deployment_id=_ID_A,
+                schema_family="demo",
+            )
+        }
 
 
 class _BareConnector(GatewayConnector):
@@ -45,123 +41,124 @@ def test_subgraph_capability_runtime_isinstance() -> None:
     assert not isinstance(_BareConnector(), GatewaySubgraphCapability)
 
 
-def test_registered_connectors_advertise_capability() -> None:
-    """Uniswap V3, Aave v3, Balancer v2, and Curve each expose the capability."""
+def test_registered_connectors_advertise_only_verified_alias_capability() -> None:
+    """Only connectors with verified replacement deployments expose aliases."""
     from almanak.connectors._gateway_registry import GATEWAY_REGISTRY
 
     providers = GATEWAY_REGISTRY.capability_providers(GatewaySubgraphCapability)
     protocols = {p.protocol for p in providers}
-    # VIB-4811 (Phase 3) registered the first three.
-    # VIB-4817 added curve as a full ``GatewaySubgraphCapability``
-    # provider, retiring the ``_PENDING_SUBGRAPHS`` fallback.
-    assert {
-        ProtocolName("uniswap_v3"),
-        ProtocolName("aave_v3"),
-        ProtocolName("balancer_v2"),
-        ProtocolName("curve"),
-    }.issubset(protocols)
+    assert ProtocolName("uniswap_v3") in protocols
+    assert ProtocolName("aave_v3") in protocols
+    assert ProtocolName("curve") not in protocols
+    assert ProtocolName("balancer_v2") not in protocols
 
 
-def test_curve_subgraph_endpoints_match_legacy_dict() -> None:
-    """VIB-4817: curve connector returns the legacy ``_PENDING_SUBGRAPHS`` rows."""
-    from almanak.connectors.curve.gateway.provider import CurveGatewayConnector
-
-    connector = CurveGatewayConnector()
-    assert isinstance(connector, GatewaySubgraphCapability)
-    expected = {
-        "curve-ethereum": "https://api.thegraph.com/subgraphs/name/convex-community/volume-mainnet",
-        "curve-arbitrum": "https://api.thegraph.com/subgraphs/name/convex-community/volume-arbitrum",
-    }
-    assert connector.subgraph_endpoints() == expected
-
-
-def test_uniswap_v3_subgraph_endpoints_match_legacy_dict() -> None:
-    """Uniswap V3 connector returns the legacy ``DEFAULT_ALLOWED_SUBGRAPHS`` rows."""
+def test_uniswap_v3_deployments_are_v3_native_and_pool_history_compatible() -> None:
     from almanak.connectors.uniswap_v3.gateway.provider import (
+        _UNISWAP_V3_VOLUME_SUBGRAPH_IDS,
         UniswapV3GatewayConnector,
     )
 
-    connector = UniswapV3GatewayConnector()
-    expected = {
-        "uniswap-v3-ethereum": "https://api.thegraph.com/subgraphs/name/uniswap/uniswap-v3",
-        "uniswap-v3-arbitrum": "https://api.thegraph.com/subgraphs/name/ianlapham/uniswap-arbitrum-one",
-        "uniswap-v3-optimism": "https://api.thegraph.com/subgraphs/name/ianlapham/optimism-post-regenesis",
-        "uniswap-v3-polygon": "https://api.thegraph.com/subgraphs/name/ianlapham/uniswap-v3-polygon",
-        "uniswap-v3-base": "https://api.studio.thegraph.com/query/48211/uniswap-v3-base/version/latest",
+    deployments = UniswapV3GatewayConnector().subgraph_deployments()
+    assert set(deployments) == {
+        "uniswap-v3-ethereum",
+        "uniswap-v3-arbitrum",
+        "uniswap-v3-base",
+        "uniswap-v3-polygon",
     }
-    assert connector.subgraph_endpoints() == expected
+    assert "uniswap-v3-optimism" not in deployments
+    for alias, deployment in deployments.items():
+        chain = alias.removeprefix("uniswap-v3-")
+        assert deployment.deployment_id == _UNISWAP_V3_VOLUME_SUBGRAPH_IDS[chain]
+        assert deployment.schema_family == "uniswap_v3"
+        assert deployment.supports_pool_history is True
 
 
-def test_aave_v3_subgraph_endpoints_match_legacy_dict() -> None:
-    """Aave v3 connector returns the legacy ``DEFAULT_ALLOWED_SUBGRAPHS`` rows."""
-    from almanak.connectors.aave_v3.gateway.provider import (
-        AaveV3GatewayConnector,
-    )
+def test_aave_v3_deployments_reuse_canonical_historical_provider_ids() -> None:
+    from almanak.connectors.aave_v3.gateway.provider import AaveV3GatewayConnector
+    from almanak.connectors.aave_v3.subgraph_ids import AAVE_V3_SUBGRAPH_IDS
 
-    connector = AaveV3GatewayConnector()
-    expected = {
-        "aave-v3-ethereum": "https://api.thegraph.com/subgraphs/name/aave/protocol-v3",
-        "aave-v3-arbitrum": "https://api.thegraph.com/subgraphs/name/aave/protocol-v3-arbitrum",
-        "aave-v3-optimism": "https://api.thegraph.com/subgraphs/name/aave/protocol-v3-optimism",
-        "aave-v3-polygon": "https://api.thegraph.com/subgraphs/name/aave/protocol-v3-polygon",
+    deployments = AaveV3GatewayConnector().subgraph_deployments()
+    assert set(deployments) == {
+        "aave-v3-ethereum",
+        "aave-v3-arbitrum",
+        "aave-v3-optimism",
+        "aave-v3-polygon",
     }
-    assert connector.subgraph_endpoints() == expected
+    for alias, deployment in deployments.items():
+        chain = alias.removeprefix("aave-v3-")
+        assert deployment.deployment_id == AAVE_V3_SUBGRAPH_IDS[chain]
+        assert deployment.schema_family == "aave_v3"
+        assert deployment.supports_pool_history is False
 
 
-def test_balancer_v2_subgraph_endpoints_match_legacy_dict() -> None:
-    """Balancer v2 connector returns the legacy ``DEFAULT_ALLOWED_SUBGRAPHS`` rows."""
-    from almanak.connectors.balancer_v2.gateway.provider import (
-        BalancerV2GatewayConnector,
-    )
-
-    connector = BalancerV2GatewayConnector()
-    expected = {
-        "balancer-v2-ethereum": "https://api.thegraph.com/subgraphs/name/balancer-labs/balancer-v2",
-        "balancer-v2-arbitrum": "https://api.thegraph.com/subgraphs/name/balancer-labs/balancer-arbitrum-v2",
-    }
-    assert connector.subgraph_endpoints() == expected
-
-
-def test_default_allowed_subgraphs_is_byte_identical_to_legacy() -> None:
-    """The assembled allowlist matches the pre-refactor hardcoded dict."""
+def test_default_allowlist_uses_only_credential_free_network_urls() -> None:
+    from almanak.gateway.data._thegraph_network import THEGRAPH_GATEWAY_BASE_URL
     from almanak.gateway.integrations.thegraph import DEFAULT_ALLOWED_SUBGRAPHS
 
-    legacy = {
-        # Uniswap V3 subgraphs
-        "uniswap-v3-ethereum": "https://api.thegraph.com/subgraphs/name/uniswap/uniswap-v3",
-        "uniswap-v3-arbitrum": "https://api.thegraph.com/subgraphs/name/ianlapham/uniswap-arbitrum-one",
-        "uniswap-v3-optimism": "https://api.thegraph.com/subgraphs/name/ianlapham/optimism-post-regenesis",
-        "uniswap-v3-polygon": "https://api.thegraph.com/subgraphs/name/ianlapham/uniswap-v3-polygon",
-        "uniswap-v3-base": "https://api.studio.thegraph.com/query/48211/uniswap-v3-base/version/latest",
-        # Aave V3 subgraphs
-        "aave-v3-ethereum": "https://api.thegraph.com/subgraphs/name/aave/protocol-v3",
-        "aave-v3-arbitrum": "https://api.thegraph.com/subgraphs/name/aave/protocol-v3-arbitrum",
-        "aave-v3-optimism": "https://api.thegraph.com/subgraphs/name/aave/protocol-v3-optimism",
-        "aave-v3-polygon": "https://api.thegraph.com/subgraphs/name/aave/protocol-v3-polygon",
-        # Curve subgraphs (VIB-4817: migrated onto CurveGatewayConnector)
-        "curve-ethereum": "https://api.thegraph.com/subgraphs/name/convex-community/volume-mainnet",
-        "curve-arbitrum": "https://api.thegraph.com/subgraphs/name/convex-community/volume-arbitrum",
-        # Balancer subgraphs
-        "balancer-v2-ethereum": "https://api.thegraph.com/subgraphs/name/balancer-labs/balancer-v2",
-        "balancer-v2-arbitrum": "https://api.thegraph.com/subgraphs/name/balancer-labs/balancer-arbitrum-v2",
+    expected_aliases = {
+        "uniswap-v3-ethereum",
+        "uniswap-v3-arbitrum",
+        "uniswap-v3-base",
+        "uniswap-v3-polygon",
+        "aave-v3-ethereum",
+        "aave-v3-arbitrum",
+        "aave-v3-optimism",
+        "aave-v3-polygon",
     }
-    assert DEFAULT_ALLOWED_SUBGRAPHS == legacy
+    assert set(DEFAULT_ALLOWED_SUBGRAPHS) == expected_aliases
+    assert all(url.startswith(f"{THEGRAPH_GATEWAY_BASE_URL}/") for url in DEFAULT_ALLOWED_SUBGRAPHS.values())
+    assert all("/api/subgraphs/id/" in url for url in DEFAULT_ALLOWED_SUBGRAPHS.values())
+
+
+def test_framework_alias_list_matches_gateway_allowlist() -> None:
+    from almanak.framework.integrations.thegraph import SUBGRAPH_ALIASES
+    from almanak.gateway.integrations.thegraph import DEFAULT_ALLOWED_SUBGRAPHS
+
+    assert set(SUBGRAPH_ALIASES) == set(DEFAULT_ALLOWED_SUBGRAPHS)
+
+
+def test_production_python_contains_no_decommissioned_thegraph_hosts() -> None:
+    """Regression guard: dead hosted-service domains cannot return to runtime code."""
+    repository_root = Path(__file__).resolve().parents[4]
+    legacy_hosts = ("api." + "thegraph.com", "api.studio." + "thegraph.com")
+    offenders: list[str] = []
+    for path in (repository_root / "almanak").rglob("*.py"):
+        text = path.read_text()
+        if any(host in text for host in legacy_hosts):
+            offenders.append(str(path.relative_to(repository_root)))
+    assert offenders == []
+
+
+def test_deployment_metadata_rejects_urls() -> None:
+    with pytest.raises(ValueError, match="bare"):
+        GatewaySubgraphDeployment(
+            deployment_id="https://gateway.thegraph.com/api/subgraphs/id/example",
+            schema_family="demo",
+        )
 
 
 def test_subgraph_alias_collision_raises() -> None:
-    """Two providers publishing the same alias with different URLs raises."""
     import almanak.connectors._gateway_registry as registry_mod
-    from almanak.gateway.integrations.thegraph import (
-        _build_default_allowed_subgraphs,
-    )
+    from almanak.gateway.data._thegraph_network import build_registered_subgraph_deployments
 
     class _ProviderA:
-        def subgraph_endpoints(self) -> dict[str, str]:
-            return {"shared-alias": "https://a.example.com"}
+        def subgraph_deployments(self) -> dict[str, GatewaySubgraphDeployment]:
+            return {
+                "shared-alias": GatewaySubgraphDeployment(
+                    deployment_id=_ID_A,
+                    schema_family="demo",
+                )
+            }
 
     class _ProviderB:
-        def subgraph_endpoints(self) -> dict[str, str]:
-            return {"shared-alias": "https://b.example.com"}
+        def subgraph_deployments(self) -> dict[str, GatewaySubgraphDeployment]:
+            return {
+                "shared-alias": GatewaySubgraphDeployment(
+                    deployment_id=_ID_B,
+                    schema_family="demo",
+                )
+            }
 
     class _FakeRegistry:
         def capability_providers(self, _cap: object) -> tuple[object, ...]:
@@ -171,6 +168,6 @@ def test_subgraph_alias_collision_raises() -> None:
     registry_mod.GATEWAY_REGISTRY = _FakeRegistry()  # type: ignore[assignment]
     try:
         with pytest.raises(RuntimeError, match="alias collision"):
-            _build_default_allowed_subgraphs()
+            build_registered_subgraph_deployments()
     finally:
         registry_mod.GATEWAY_REGISTRY = original

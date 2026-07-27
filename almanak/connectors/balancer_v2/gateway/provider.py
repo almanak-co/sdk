@@ -4,12 +4,6 @@ Phase 3 (VIB-4811) introduces a minimal Balancer v2 gateway-side
 scaffold so the protocol can publish capability-keyed metadata without
 the gateway carrying a hardcoded ``"balancer-v2-*"`` table.
 
-Currently contributes:
-
-* ``GatewaySubgraphCapability`` — TheGraph subgraph URLs (Ethereum,
-  Arbitrum). Moved verbatim from
-  ``almanak.gateway.integrations.thegraph.DEFAULT_ALLOWED_SUBGRAPHS``.
-
 W7-followup (VIB-4870) adds:
 
 * ``GatewayDexVolumeCapability`` — daily trading-volume history via the
@@ -34,17 +28,9 @@ from typing import Any, ClassVar
 
 from almanak.connectors._base.gateway_capabilities import (
     GatewayDexVolumeCapability,
-    GatewaySubgraphCapability,
 )
 from almanak.connectors._base.gateway_connector import GatewayConnector
 from almanak.connectors._base.types import ProtocolKind, ProtocolName
-
-# Balancer v2 subgraph URLs. Moved verbatim from
-# ``thegraph.DEFAULT_ALLOWED_SUBGRAPHS``.
-_BALANCER_V2_SUBGRAPHS: dict[str, str] = {
-    "balancer-v2-ethereum": "https://api.thegraph.com/subgraphs/name/balancer-labs/balancer-v2",
-    "balancer-v2-arbitrum": "https://api.thegraph.com/subgraphs/name/balancer-labs/balancer-arbitrum-v2",
-}
 
 # W7-followup / VIB-4870 — Balancer V2 daily-volume subgraph IDs.
 # Migrated verbatim from
@@ -61,17 +47,12 @@ _BALANCER_V2_VOLUME_SUBGRAPH_IDS: dict[str, str] = {
 
 class BalancerV2GatewayConnector(
     GatewayConnector,
-    GatewaySubgraphCapability,
     GatewayDexVolumeCapability,
 ):
     """Gateway-side connector for Balancer v2."""
 
     protocol: ClassVar[ProtocolName] = ProtocolName("balancer_v2")
     kind: ClassVar[ProtocolKind] = ProtocolKind.LP
-
-    def subgraph_endpoints(self) -> dict[str, str]:
-        """TheGraph subgraph URLs for Balancer v2 (one per supported chain)."""
-        return dict(_BALANCER_V2_SUBGRAPHS)
 
     # The CLI support matrix renders Balancer V2's flash-loan row under
     # the historical ``"balancer"`` matrix-name; the override lives on

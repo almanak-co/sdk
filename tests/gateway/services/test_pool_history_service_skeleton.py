@@ -107,7 +107,7 @@ def test_killswitch_on_dispatches_after_pool5():
 
     from almanak.gateway.data.pool_history.dispatcher import _DispatchOutcome
 
-    settings = GatewaySettings(pool_history_enabled=True)
+    settings = GatewaySettings(pool_history_enabled=True, thegraph_api_key="test-key")
     servicer = PoolHistoryServiceServicer(settings)
     ctx = _MockContext()
 

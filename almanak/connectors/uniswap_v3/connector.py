@@ -44,14 +44,6 @@ CONNECTOR = Connector(
         # in almanak/connectors/uniswap_v3/gateway/provider.py — ID-parity test
         # in tests/unit/connectors/uniswap_v3/test_subgraph_url_parity.py pins this.
         volume_subgraph_urls=_VOLUME_SUBGRAPH_URLS,
-        # Free hosted-service fallback endpoints (no API key required — 4 chains;
-        # base is not available on the hosted service).
-        hosted_volume_subgraph_urls={
-            "ethereum": "https://api.thegraph.com/subgraphs/name/uniswap/uniswap-v3",
-            "arbitrum": "https://api.thegraph.com/subgraphs/name/ianlapham/uniswap-arbitrum-one",
-            "optimism": "https://api.thegraph.com/subgraphs/name/ianlapham/optimism-post-regenesis",
-            "polygon": "https://api.thegraph.com/subgraphs/name/ianlapham/uniswap-v3-polygon",
-        },
         liquidity_subgraph_ids={chain: url.rsplit("/", 1)[-1] for chain, url in _VOLUME_SUBGRAPH_URLS.items()},
         liquidity_query_family_overrides={"optimism": "messari_standard"},
     ),

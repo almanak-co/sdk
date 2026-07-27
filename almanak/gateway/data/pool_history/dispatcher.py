@@ -42,6 +42,11 @@ from decimal import Decimal, InvalidOperation
 
 import aiohttp
 
+from almanak.gateway.data._thegraph_network import (
+    MISSING_THEGRAPH_API_KEY_MESSAGE,
+    build_registered_subgraph_deployments,
+    thegraph_deployment_url,
+)
 from almanak.gateway.proto import gateway_pb2
 from almanak.gateway.utils.ssl_context import build_ssl_context
 
@@ -177,6 +182,12 @@ class PoolHistoryDispatcher:
 
         self._http_session: aiohttp.ClientSession | None = None
         self._graphql = GatewayGraphQLClient(api_key=thegraph_api_key)
+        if not self._graphql.is_configured:
+            logger.warning(
+                "The Graph PoolHistory provider is unavailable: %s; "
+                "requests will continue through configured fallback providers",
+                MISSING_THEGRAPH_API_KEY_MESSAGE,
+            )
 
         # Per-provider bucket-refusal accounting (POOL-8 / VIB-4756). The
         # theoretical ms-until-next-token is computed ONCE at construction
@@ -588,39 +599,23 @@ class PoolHistoryDispatcher:
 
 
 def _resolve_subgraph_url(protocol: str, chain: str) -> str | None:
-    """Resolve the TheGraph subgraph URL for ``(protocol, chain)`` from the registry.
+    """Resolve a PoolHistory-compatible Network URL from the registry.
 
-    The registry keys subgraph endpoints by the public alias
+    The registry keys subgraph deployments by the public alias
     ``<protocol-with-hyphens>-<chain>`` (e.g. ``uniswap_v3`` -> alias
     ``uniswap-v3-arbitrum``). Returns ``None`` when no endpoint is registered
-    (e.g. Aerodrome publishes no ``GatewaySubgraphCapability`` -> falls
-    through to the legacy ``geckoterminal`` provider key).
+    or the registered schema is not PoolHistory-compatible.
     """
-    table = _subgraph_endpoint_table()
     alias = f"{protocol.replace('_', '-').lower()}-{chain.lower()}"
-    return table.get(alias)
+    deployment = build_registered_subgraph_deployments().get(alias)
+    if deployment is None or not deployment.supports_pool_history:
+        return None
+    return thegraph_deployment_url(deployment.deployment_id)
 
 
 def _resolve_defillama_slug(protocol: str) -> str | None:
     """Resolve the DefiLlama project slug for ``protocol`` from the registry."""
     return _defillama_slug_table().get(protocol.lower())
-
-
-def _subgraph_endpoint_table() -> dict[str, str]:
-    """Union every connector's ``subgraph_endpoints()`` (lazy, cycle-safe).
-
-    Imports are local: building eagerly at module import races against
-    ``_gateway_registry`` registration (same rationale as the analytics
-    service's ``_build_protocol_to_llama``).
-    """
-    from almanak.connectors._base.gateway_capabilities import GatewaySubgraphCapability
-    from almanak.connectors._gateway_registry import GATEWAY_REGISTRY
-
-    table: dict[str, str] = {}
-    for connector in GATEWAY_REGISTRY.capability_providers(GatewaySubgraphCapability):  # type: ignore[type-abstract]
-        for alias, url in connector.subgraph_endpoints().items():
-            table[alias.lower()] = url
-    return table
 
 
 def _defillama_slug_table() -> dict[str, str]:

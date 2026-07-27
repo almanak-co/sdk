@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, MagicMock
 import grpc
 import pytest
 
-from almanak.gateway.integrations.base import IntegrationRateLimitError
+from almanak.gateway.integrations.base import IntegrationError, IntegrationRateLimitError
 from almanak.gateway.proto import gateway_pb2
 from almanak.gateway.services.integration_service import IntegrationServiceServicer
 
@@ -733,3 +733,32 @@ class TestTheGraphQueryHandler:
         ctx.set_details.assert_called_once_with("thegraph down")
         assert response.success is False
         assert json.loads(response.errors) == [{"message": "thegraph down"}]
+
+    @pytest.mark.asyncio
+    async def test_missing_api_key_maps_to_failed_precondition(self, graph_service):
+        import json
+
+        ctx = _make_context()
+        graph_service._thegraph.query = AsyncMock(
+            side_effect=IntegrationError(
+                "thegraph",
+                "ALMANAK_GATEWAY_THEGRAPH_API_KEY is not configured",
+                code="MISSING_API_KEY",
+            )
+        )
+        request = gateway_pb2.TheGraphQueryRequest(
+            subgraph_id="uniswap-v3-ethereum",
+            query=self.QUERY,
+        )
+
+        response = await graph_service.TheGraphQuery(request, ctx)
+
+        ctx.set_code.assert_called_once_with(grpc.StatusCode.FAILED_PRECONDITION)
+        ctx.set_details.assert_called_once_with("ALMANAK_GATEWAY_THEGRAPH_API_KEY is not configured")
+        assert response.success is False
+        assert json.loads(response.errors) == [
+            {
+                "message": "ALMANAK_GATEWAY_THEGRAPH_API_KEY is not configured",
+                "code": "MISSING_API_KEY",
+            }
+        ]
