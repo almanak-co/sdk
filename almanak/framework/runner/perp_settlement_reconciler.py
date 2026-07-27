@@ -46,8 +46,6 @@ logger = logging.getLogger(__name__)
 
 # Perp submission intent types whose keeper settlement we reconcile.
 _PERP_SUBMISSION_INTENTS = ("PERP_OPEN", "PERP_CLOSE")
-# Bound the per-tick ledger scan; the MINUS keeps the active (unsettled) set tiny.
-_LEDGER_SCAN_LIMIT = 200
 # Parse the order key / direction out of an ``AsyncOrderData`` repr string (the
 # form ``serialize_extracted_data`` persists a ``list[AsyncOrderData]`` as, via
 # ``json.dumps(default=str)``). Structured dicts (future-proof) are handled too.
@@ -129,58 +127,220 @@ class _WatchEntry:
         self.submission_timestamp = submission_timestamp
 
 
+# Warn-once (per state_manager class, per process) that the runtime backend lacks the
+# measured-read API — VIB-6107: this class of interface mismatch must NEVER be silent
+# again (the WI-3 reconciler was dead code in every real strat run because the probe
+# returned {} with no log). Keyed by class name so distinct backends each warn once.
+_MISSING_READER_WARNED: set[str] = set()
+
+
+def _warn_missing_reader_once(sm: Any) -> None:
+    key = type(sm).__name__ if sm is not None else "None"
+    if key in _MISSING_READER_WARNED:
+        return
+    _MISSING_READER_WARNED.add(key)
+    logger.warning(
+        "perp settlement reconciler: state_manager %s lacks the measured-read API "
+        "(read_ledger_entries_measured / read_accounting_events_measured / get_ledger_entry_by_id) — "
+        "reconciler is INERT, NO PERP_SETTLEMENT rows will be booked. This must never be silent (VIB-6107).",
+        key,
+    )
+
+
 async def _derive_watch_set(runner: StrategyRunner, deployment_id: str) -> dict[tuple[str, str], _WatchEntry]:
     """Re-derive the pending-settlement watch set from persisted rows (no new storage).
 
     watch = {perp ledger rows with async-order keys} MINUS {rows that already have a
     terminal PERP_SETTLEMENT accounting event (joined by submission ledger id)}.
+
+    VIB-6107: consumes the PRODUCTION backend's canonical measured-read API. A real
+    ``almanak strat run`` ALWAYS injects ``GatewayStateManager`` (``_run_components.py``
+    — "always use gateway-backed state manager"), which exposes
+    ``read_ledger_entries_measured`` / ``read_accounting_events_measured`` (both return
+    ``(list[dict], measured)``) and ``get_ledger_entry_by_id`` — NOT the plain
+    ``StateManager``'s ``get_ledger_entries`` / ``get_accounting_events``. The old
+    reconciler probed for those latter names and returned ``{}`` silently on every real
+    tick, so it never booked a single settlement (proven on mainnet, WI-5).
+
+    **Empty ≠ Zero (BINDING).** ``measured=False`` on either read means the backend is
+    structurally absent / errored / an old gateway — an UNMEASURED read. We MUST NOT
+    treat its empty result as an authoritative "nothing to settle" (that would fabricate
+    a zero watch set): we skip the tick and retry next tick. Only a ``measured=True``
+    empty is an authoritative "nothing to do".
+
+    The measured list read (``read_ledger_entries_measured`` → the ``LedgerEntryInfo``
+    projection) does NOT carry ``extracted_data_json`` (where ``async_orders`` live): the
+    gateway-server builder ``_ledger_entry_to_proto`` (``state_service.py`` — stops at
+    ``error``) never emits it, so surfacing it on the list read would be a gateway-server
+    change on the **security perimeter** (Infra). Instead we hydrate the small post-MINUS
+    candidate set CLIENT-SIDE via ``get_ledger_entry_by_id`` (``GetLedgerEntry`` →
+    ``LedgerEntryData``, whose dict already carries decoded ``extracted_data_json`` —
+    ``gateway_state_manager.py``), rebuilding a real ``LedgerEntry`` so the downstream
+    commit lane keeps its object contract. Zero perimeter change.
+
+    Decomposed into ``_read_settled_ledger_ids`` / ``_read_perp_candidates`` /
+    ``_needs_hydrate`` / ``_hydrate_watch_entries`` (blueprint 06 — the state read path):
+    the two reads carry the ``None ⇒ UNMEASURED ⇒ skip tick`` contract; only rows passing
+    the MINUS filter are hydrated. Behaviour-preserving vs the inline form.
     """
     sm = runner.state_manager
-    ledger_reader = getattr(sm, "get_ledger_entries", None)
-    events_reader = getattr(sm, "get_accounting_events", None)
-    if sm is None or not callable(ledger_reader) or not callable(events_reader):
+    ledger_reader = getattr(sm, "read_ledger_entries_measured", None)
+    events_reader = getattr(sm, "read_accounting_events_measured", None)
+    hydrate = getattr(sm, "get_ledger_entry_by_id", None)
+    if sm is None or not callable(ledger_reader) or not callable(events_reader) or not callable(hydrate):
+        _warn_missing_reader_once(sm)
         return {}
 
-    # Ledger ids already settled (terminal PERP_SETTLEMENT event exists).
-    settled_ledger_ids: set[str] = set()
-    try:
-        events = await events_reader(deployment_id, event_type="PERP_SETTLEMENT", limit=_LEDGER_SCAN_LIMIT)
-        for ev in events or []:
-            lid = ev.get("ledger_entry_id") if isinstance(ev, dict) else getattr(ev, "ledger_entry_id", None)
-            if lid:
-                settled_ledger_ids.add(str(lid))
-    except Exception as exc:  # noqa: BLE001 — UNMEASURED settled-set ⇒ do not fabricate; skip this tick
-        logger.debug("perp settlement reconciler: settled-event read failed (skipping tick): %s", exc, exc_info=True)
+    settled_ledger_ids = await _read_settled_ledger_ids(events_reader, deployment_id)
+    if settled_ledger_ids is None:  # UNMEASURED read ⇒ skip tick (never fabricate an empty set)
         return {}
+    candidates = await _read_perp_candidates(ledger_reader, deployment_id)
+    if candidates is None:  # UNMEASURED read ⇒ skip tick
+        return {}
+
+    # Only unsettled successful perp submission rows need a hydrate RPC. The MINUS keeps
+    # this tiny in steady state; surface an unexpectedly large fan-out (e.g. a fresh boot
+    # with a long unsettled backlog) so a per-candidate N+1 can never balloon silently.
+    to_hydrate = [row for row in candidates if _needs_hydrate(row, settled_ledger_ids)]
+    logger.debug("perp settlement reconciler: %d perp candidate row(s) need hydration", len(to_hydrate))
+    _notice_large_fanout_once(len(to_hydrate))
 
     watch: dict[tuple[str, str], _WatchEntry] = {}
-    for intent_type in _PERP_SUBMISSION_INTENTS:
-        try:
-            entries = await ledger_reader(deployment_id, intent_type=intent_type, limit=_LEDGER_SCAN_LIMIT)
-        except Exception as exc:  # noqa: BLE001 — ledger read failure ⇒ skip this intent this tick
-            logger.debug("perp settlement reconciler: ledger read failed for %s: %s", intent_type, exc, exc_info=True)
-            continue
-        for ledger in entries or []:
-            ledger_id = str(getattr(ledger, "id", "") or "")
-            if not ledger_id or ledger_id in settled_ledger_ids:
-                continue
-            if not bool(getattr(ledger, "success", False)):
-                continue
-            protocol = str(getattr(ledger, "protocol", "") or "").lower()
-            if not protocol:
-                continue
-            is_open = intent_type == "PERP_OPEN"
-            for order_key, is_long in _parse_async_orders(getattr(ledger, "extracted_data_json", "") or ""):
-                watch[(protocol, order_key.lower())] = _WatchEntry(
+    for row in to_hydrate:
+        for key, entry in await _hydrate_watch_entries(hydrate, row):
+            watch[key] = entry
+    return watch
+
+
+async def _read_settled_ledger_ids(events_reader: Any, deployment_id: str) -> set[str] | None:
+    """Ledger ids that already carry a terminal PERP_SETTLEMENT event, or ``None`` when
+    the read is UNMEASURED (backend absent/errored ⇒ skip the tick, Empty≠Zero)."""
+    try:
+        events, measured = await asyncio.to_thread(events_reader, deployment_id)
+    except Exception as exc:  # noqa: BLE001 — read failure ⇒ UNMEASURED, skip this tick
+        logger.debug(
+            "perp settlement reconciler: accounting-events read failed (skipping tick): %s", exc, exc_info=True
+        )
+        return None
+    if not measured:
+        logger.info(
+            "perp settlement reconciler: accounting-events read UNMEASURED (backend absent/errored) — "
+            "skipping tick (Empty≠Zero), retried next tick"
+        )
+        return None
+    return {
+        str(ev.get("ledger_entry_id"))
+        for ev in events or []
+        if isinstance(ev, dict)
+        and str(ev.get("event_type") or "").upper() == "PERP_SETTLEMENT"
+        and ev.get("ledger_entry_id")
+    }
+
+
+async def _read_perp_candidates(ledger_reader: Any, deployment_id: str) -> list[dict[str, Any]] | None:
+    """The measured ledger-row list (dict rows), or ``None`` when the read is UNMEASURED
+    (backend absent/errored ⇒ skip the tick, Empty≠Zero)."""
+    try:
+        rows, measured = await asyncio.to_thread(ledger_reader, deployment_id)
+    except Exception as exc:  # noqa: BLE001 — read failure ⇒ UNMEASURED, skip this tick
+        logger.debug("perp settlement reconciler: ledger read failed (skipping tick): %s", exc, exc_info=True)
+        return None
+    if not measured:
+        logger.info(
+            "perp settlement reconciler: ledger read UNMEASURED (backend absent/errored) — "
+            "skipping tick (Empty≠Zero), retried next tick"
+        )
+        return None
+    return [row for row in rows or [] if isinstance(row, dict)]
+
+
+# A perp candidate fan-out above this many hydrate RPCs in one tick is unexpected in
+# steady state (the MINUS keeps it near zero); surface it once so a boot-time N+1 is
+# visible rather than silent. NOT a cap — every candidate is still hydrated (dropping
+# some would silently miss settlements).
+_HYDRATE_FANOUT_NOTICE = 50
+_LARGE_FANOUT_NOTICED = False
+
+
+def _notice_large_fanout_once(count: int) -> None:
+    global _LARGE_FANOUT_NOTICED
+    if count <= _HYDRATE_FANOUT_NOTICE or _LARGE_FANOUT_NOTICED:
+        return
+    _LARGE_FANOUT_NOTICED = True
+    logger.info(
+        "perp settlement reconciler: %d unsettled perp candidate rows this tick (> %d) — "
+        "hydrating each via get_ledger_entry_by_id; expected only on a fresh boot with a "
+        "settlement backlog, converges as rows settle (VIB-6107).",
+        count,
+        _HYDRATE_FANOUT_NOTICE,
+    )
+
+
+def _needs_hydrate(row: dict[str, Any], settled_ledger_ids: set[str]) -> bool:
+    """True iff a candidate ledger row needs a ``get_ledger_entry_by_id`` hydrate: a
+    SUCCESSFUL perp submission row (``PERP_OPEN`` / ``PERP_CLOSE``) with an id that is not
+    already settled (the MINUS)."""
+    if str(row.get("intent_type") or "").upper() not in _PERP_SUBMISSION_INTENTS:
+        return False
+    ledger_id = str(row.get("id") or "")
+    if not ledger_id or ledger_id in settled_ledger_ids:
+        return False
+    return bool(row.get("success", False))
+
+
+async def _hydrate_watch_entries(hydrate: Any, row: dict[str, Any]) -> list[tuple[tuple[str, str], _WatchEntry]]:
+    """Zero or more watch entries for one candidate row (assumed to pass ``_needs_hydrate``).
+
+    Hydrates the full ledger row via ``get_ledger_entry_by_id`` (the list projection lacks
+    ``extracted_data_json``) and parses its ``async_orders``. A perp submission row can
+    carry multiple async orders → multiple entries. Returns ``[]`` when the hydrate is
+    UNMEASURED (``None`` ⇒ retry next tick; never fabricate an empty order list) or the
+    hydrated row has no protocol.
+    """
+    from ..observability.ledger import LedgerEntry
+
+    ledger_id = str(row.get("id") or "")
+    # A per-row hydrate failure (RAISE) is the SAME "this row is unmeasured this tick" as a
+    # None return: skip THIS row and let the other candidates proceed — one flaky
+    # per-candidate RPC must never drop every other order's progress this tick (Empty≠Zero:
+    # defer the row, never fabricate). Mirrors the WI-3 per-entry catch-boundary philosophy.
+    try:
+        full = await hydrate(ledger_id)
+    except Exception as exc:  # noqa: BLE001 — unmeasured row this tick ⇒ skip it, retry next tick
+        logger.debug(
+            "perp settlement reconciler: hydrate failed for ledger %s, skipping row this tick: %s",
+            ledger_id,
+            exc,
+            exc_info=True,
+        )
+        return []
+    if not isinstance(full, dict):
+        return []
+    protocol = str(full.get("protocol") or row.get("protocol") or "").lower()
+    if not protocol:
+        return []
+    intent_type = str(row.get("intent_type") or "").upper()
+    ledger = LedgerEntry.from_dict(full)
+    is_open = intent_type == "PERP_OPEN"
+    submission_tx_hash = str(getattr(ledger, "tx_hash", "") or "")
+    submission_timestamp = _ledger_timestamp(ledger)
+    entries: list[tuple[tuple[str, str], _WatchEntry]] = []
+    for order_key, is_long in _parse_async_orders(full.get("extracted_data_json") or ""):
+        entries.append(
+            (
+                (protocol, order_key.lower()),
+                _WatchEntry(
                     order_key=order_key,
                     is_open=is_open,
                     is_long=is_long,
                     protocol=protocol,
                     ledger=ledger,
-                    submission_tx_hash=str(getattr(ledger, "tx_hash", "") or ""),
-                    submission_timestamp=_ledger_timestamp(ledger),
-                )
-    return watch
+                    submission_tx_hash=submission_tx_hash,
+                    submission_timestamp=submission_timestamp,
+                ),
+            )
+        )
+    return entries
 
 
 def _parse_async_orders(extracted_data_json: str) -> list[tuple[str, bool | None]]:

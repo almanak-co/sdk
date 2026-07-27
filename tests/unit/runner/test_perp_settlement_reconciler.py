@@ -23,6 +23,7 @@ import pytest
 
 from almanak.connectors._strategy_base.runner_hook_registry import PerpSettlementState, PerpSettlementVerdict
 from almanak.connectors.gmx_v2.receipt_parser import PerpFillData
+from almanak.framework.observability.ledger import LedgerEntry
 from almanak.framework.runner import perp_settlement_reconciler as psr
 from almanak.framework.state.exceptions import AccountingPersistenceError, AccountingWriteKind
 
@@ -40,14 +41,20 @@ def _async_orders_json(order_key: str, *, is_long: bool = True) -> str:
     return json.dumps({"async_orders": [repr_str]})
 
 
-def _ledger(entry_id: str, intent_type: str, order_key: str) -> SimpleNamespace:
-    return SimpleNamespace(
+def _ledger(entry_id: str, intent_type: str, order_key: str) -> LedgerEntry:
+    """A real LedgerEntry (the object the commit lane consumes and the reconciler
+    rebuilds from the gateway hydrate). ``_FakeStateManager`` serves its dict
+    projections through the GatewayStateManager measured-read API."""
+    return LedgerEntry(
         id=entry_id,
+        deployment_id=_DEPLOYMENT,
+        cycle_id="cyc-0",
+        execution_mode="paper",
         intent_type=intent_type,
         protocol="gmx_v2",
         success=True,
         tx_hash="0xsubmit",
-        timestamp=datetime.now(UTC),
+        chain="arbitrum",
         extracted_data_json=_async_orders_json(order_key),
     )
 
@@ -75,23 +82,37 @@ class _FakeProcessor:
 
 
 class _FakeStateManager:
-    """In-memory state: ledger rows + the accounting_events the writer produced."""
+    """Shape-faithful GatewayStateManager stand-in (VIB-6107).
 
-    def __init__(self, ledgers: list[SimpleNamespace], writer: _FakeWriter) -> None:
-        self._ledgers = ledgers
+    Serves the SAME measured-read API a real ``strat run`` uses — a sync list read
+    returning ``(list[dict], measured)`` (the ``LedgerEntryInfo`` projection, which
+    deliberately DROPS ``extracted_data_json`` so the reconciler must hydrate), an async
+    ``get_ledger_entry_by_id`` returning the FULL row (with ``extracted_data_json``), and
+    a sync measured accounting-events read. It does NOT expose ``get_ledger_entries`` /
+    ``get_accounting_events`` — a revert to the old probe breaks these WI-3 acceptance
+    tests, which is the point.
+    """
+
+    def __init__(self, ledgers: list[LedgerEntry], writer: _FakeWriter) -> None:
+        self._full: list[dict[str, Any]] = [le.to_dict() for le in ledgers]
+        self._by_id: dict[str, dict[str, Any]] = {d["id"]: d for d in self._full}
         self._writer = writer
 
-    async def get_accounting_events(self, deployment_id: str, *, event_type: str | None = None, limit: int = 500):
+    def read_accounting_events_measured(self, deployment_id: str, position_key: str | None = None):
         # Re-derive the terminal-settlement set from what the writer actually wrote,
         # so a second reconciler tick sees the freshly-booked row (restart-safety).
-        return [
-            {"ledger_entry_id": ev.identity.ledger_entry_id, "event_type": ev.event_type}
-            for ev in self._writer.written
-            if event_type is None or ev.event_type == event_type
+        rows = [
+            {"ledger_entry_id": ev.identity.ledger_entry_id, "event_type": ev.event_type} for ev in self._writer.written
         ]
+        return rows, True
 
-    async def get_ledger_entries(self, deployment_id: str, *, intent_type: str | None = None, limit: int = 100):
-        return [le for le in self._ledgers if intent_type is None or le.intent_type == intent_type]
+    def read_ledger_entries_measured(self, deployment_id: str):
+        # LedgerEntryInfo projection: NO extracted_data_json (mirrors the prod list read).
+        info = [{k: v for k, v in d.items() if k != "extracted_data_json"} for d in self._full]
+        return info, True
+
+    async def get_ledger_entry_by_id(self, ledger_entry_id: str) -> dict[str, Any] | None:
+        return self._by_id.get(ledger_entry_id)
 
     async def get_position_history(self, deployment_id: str, position_key: str):
         return []
