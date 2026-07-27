@@ -67,7 +67,7 @@ def _make_compiler(
     *,
     chain: str = "arbitrum",
     price_oracle: dict[str, Decimal] | None = None,
-    max_price_impact_pct: Decimal = Decimal("0.30"),
+    max_price_impact_pct: Decimal = Decimal("0.10"),
     allow_placeholder_prices: bool = False,
 ) -> IntentCompiler:
     """Construct a compiler wired to a real price oracle (not placeholders).

@@ -401,7 +401,7 @@ Intent.swap(
     amount_usd=Decimal("1000"),  # Amount in USD (use amount_usd OR amount)
     amount=Decimal("500"),       # Amount in token units (alternative to amount_usd)
     max_slippage=Decimal("0.005"),  # Max slippage (0.5%)
-    max_price_impact=Decimal("0.30"),  # Optional: max quoter-vs-oracle deviation (default: 30%)
+    max_price_impact=Decimal("0.10"),  # Optional: max quoter-vs-oracle deviation (default: 10%; override for thin venues)
     protocol="uniswap_v3",      # Optional: specific DEX
     chain="arbitrum",            # Optional: override chain
     destination_chain="base",    # Optional: cross-chain swap

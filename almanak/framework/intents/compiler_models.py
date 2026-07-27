@@ -39,8 +39,9 @@ class IntentCompilerConfig:
             Must be valid for the selected protocol.
         max_price_impact_pct: Maximum acceptable price impact as a fraction (0.0 to 1.0).
             If the on-chain quoter returns an amount deviating more than this from the oracle
-            estimate, compilation fails with a clear error. Default: 0.30 (30%).
-            Can be overridden per-intent via SwapIntent.max_price_impact.
+            estimate, compilation fails with a clear error. Default: 0.10 (10%).
+            Configurable at compiler construction; override per-swap via
+            SwapIntent.max_price_impact (e.g. thin venues / Pendle YT).
         permission_discovery: If True, the compiler is being used for offline permission
             discovery. Enables fallbacks for RPC-dependent operations:
             - Uses synthetic LP balances when on-chain balance is 0 or unavailable
@@ -53,7 +54,7 @@ class IntentCompilerConfig:
     polymarket_config: Any = None  # PolymarketConfig (typed Any to avoid a framework->connector import, VIB-4989)
     swap_pool_selection_mode: Literal["auto", "fixed"] = "auto"
     fixed_swap_fee_tier: int | None = None
-    max_price_impact_pct: Decimal = Decimal("0.30")
+    max_price_impact_pct: Decimal = Decimal("0.10")
     permission_discovery: bool = False
 
     def __post_init__(self) -> None:

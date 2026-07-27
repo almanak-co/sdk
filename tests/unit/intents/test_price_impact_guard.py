@@ -43,7 +43,7 @@ REGISTRY_QUOTE = "almanak.connectors.uniswap_v3.compiler.UniswapV3Compiler._quot
 
 
 def _make_compiler(
-    max_price_impact_pct: Decimal = Decimal("0.30"),
+    max_price_impact_pct: Decimal = Decimal("0.10"),
     allow_placeholder_prices: bool = False,
     price_oracle: dict[str, Decimal] | None = None,
 ) -> IntentCompiler:
@@ -123,9 +123,9 @@ def _compile_with_registry_quote(
 class TestIntentCompilerConfigPriceImpact:
     """Validate max_price_impact_pct config behavior."""
 
-    def test_default_is_30_percent(self) -> None:
+    def test_default_is_10_percent(self) -> None:
         config = IntentCompilerConfig(allow_placeholder_prices=True)
-        assert config.max_price_impact_pct == Decimal("0.30")
+        assert config.max_price_impact_pct == Decimal("0.10")
 
     def test_custom_value_accepted(self) -> None:
         config = IntentCompilerConfig(
@@ -263,8 +263,8 @@ class TestPriceImpactGuardCompilation:
         assert "insufficient liquidity" in result.error
 
     @patch(ADAPTER_CLS)
-    def test_guard_allows_20pct_deviation(self, mock_adapter_cls) -> None:
-        """20% deviation should pass with default 30% threshold."""
+    def test_guard_allows_5pct_deviation(self, mock_adapter_cls) -> None:
+        """5% deviation should pass with default 10% threshold."""
         compiler = _make_compiler()
         intent = SwapIntent(
             from_token="USDC",
@@ -273,19 +273,19 @@ class TestPriceImpactGuardCompilation:
         )
 
         # Oracle estimate: ~49850000000000000 wei (0.04985 WETH)
-        # Quoter returns 80% of oracle (20% impact, under 30% threshold)
+        # Quoter returns 95% of oracle (5% impact, under 10% threshold)
         oracle_approx = 49_850_000_000_000_000
-        quoter_at_20pct = oracle_approx * 80 // 100
-        mock_adapter = _make_mock_adapter(quoter_amount=quoter_at_20pct)
+        quoter_at_5pct = oracle_approx * 95 // 100
+        mock_adapter = _make_mock_adapter(quoter_amount=quoter_at_5pct)
         mock_adapter_cls.return_value = mock_adapter
 
-        result = _compile_with_registry_quote(compiler, intent, quoter_at_20pct)
+        result = _compile_with_registry_quote(compiler, intent, quoter_at_5pct)
 
         assert result.status == CompilationStatus.SUCCESS
 
     @patch(ADAPTER_CLS)
     def test_guard_boundary_at_threshold(self, mock_adapter_cls) -> None:
-        """Exactly at 30% threshold should pass (guard uses strict >)."""
+        """Exactly at 10% threshold should pass (guard uses strict >)."""
         compiler = _make_compiler()
         intent = SwapIntent(
             from_token="USDC",
@@ -293,22 +293,20 @@ class TestPriceImpactGuardCompilation:
             amount_usd=Decimal("100"),
         )
 
-        # Calculate oracle estimate: 100 USDC / 2000 * 0.997 = 0.04985 WETH
-        # 0.04985 * 10^18 = 49850000000000000 wei
-        # At exactly 30%: quoter = 49850000000000000 * 70 / 100 = 34895000000000000
+        # At exactly 10%: quoter = 90% of oracle
         oracle_approx = 49_850_000_000_000_000
-        quoter_at_30pct = oracle_approx * 70 // 100
-        mock_adapter = _make_mock_adapter(quoter_amount=quoter_at_30pct)
+        quoter_at_10pct = oracle_approx * 90 // 100
+        mock_adapter = _make_mock_adapter(quoter_amount=quoter_at_10pct)
         mock_adapter_cls.return_value = mock_adapter
 
-        result = _compile_with_registry_quote(compiler, intent, quoter_at_30pct)
+        result = _compile_with_registry_quote(compiler, intent, quoter_at_10pct)
 
         # At exactly the threshold, should NOT block (uses > not >=)
         assert result.status == CompilationStatus.SUCCESS
 
     @patch(ADAPTER_CLS)
     def test_guard_blocks_just_above_threshold(self, mock_adapter_cls) -> None:
-        """Just above 30% threshold should fail."""
+        """Just above 10% threshold should fail."""
         compiler = _make_compiler()
         intent = SwapIntent(
             from_token="USDC",
@@ -316,9 +314,9 @@ class TestPriceImpactGuardCompilation:
             amount_usd=Decimal("100"),
         )
 
-        # Quoter returns slightly less than 70% of oracle (31% impact)
+        # Quoter returns slightly less than 90% of oracle (~11% impact)
         oracle_approx = 49_850_000_000_000_000
-        quoter_just_above = oracle_approx * 69 // 100  # 31% impact
+        quoter_just_above = oracle_approx * 89 // 100
         mock_adapter = _make_mock_adapter(quoter_amount=quoter_just_above)
         mock_adapter_cls.return_value = mock_adapter
 
@@ -444,7 +442,7 @@ class TestPriceImpactGuardCompilation:
             amount_usd=Decimal("100"),
         )
 
-        # 30% deviation — passes default 50% but fails custom 20%
+        # 30% deviation — fails custom 20% config (also would fail default 10%)
         oracle_approx = 49_850_000_000_000_000
         quoter_at_30pct = oracle_approx * 70 // 100
         mock_adapter = _make_mock_adapter(quoter_amount=quoter_at_30pct)

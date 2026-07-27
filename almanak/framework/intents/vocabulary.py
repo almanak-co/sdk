@@ -244,7 +244,7 @@ class SwapIntent(BaseIntent):
         max_slippage: Maximum acceptable slippage (e.g., 0.005 = 0.5%)
         max_price_impact: Maximum acceptable price impact vs oracle price (e.g., 0.50 = 50%).
             If the on-chain quoter returns an amount deviating more than this from the oracle
-            estimate, compilation fails. Defaults to None (uses compiler config default of 30%).
+            estimate, compilation fails. Defaults to None (uses compiler config default of 10%).
         protocol: Preferred protocol for the swap (e.g., "uniswap_v3", "enso")
         chain: Source chain for execution (defaults to strategy's primary chain)
         destination_chain: Destination chain for cross-chain swaps (None for same-chain)
@@ -281,7 +281,7 @@ class SwapIntent(BaseIntent):
         default=None,
         description="Maximum acceptable price impact vs oracle price (e.g., 0.50 = 50%). "
         "Compilation fails if quoter/oracle deviation exceeds this. "
-        "Defaults to None (uses compiler config default of 30%).",
+        "Defaults to None (uses compiler config default of 10%; override per intent for thin venues).",
     )
     protocol: str | None = None
     chain: str | None = None
@@ -1404,7 +1404,7 @@ class Intent:
             max_slippage: Maximum acceptable slippage (default 0.5%)
             max_price_impact: Maximum acceptable price impact vs oracle price (e.g., 0.50 = 50%).
                 Compilation fails if quoter/oracle deviation exceeds this.
-                Defaults to None (uses compiler config default of 30%).
+                Defaults to None (uses compiler config default of 10%).
             protocol: Preferred protocol for the swap
             chain: Source chain for execution (defaults to strategy's primary chain)
             destination_chain: Destination chain for cross-chain swaps (None for same-chain)

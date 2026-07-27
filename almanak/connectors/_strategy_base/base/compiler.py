@@ -116,13 +116,11 @@ class SwapCompilerContext(BaseCompilerContext):
 
     # VIB-5924 — REQUIRED, deliberately no default. This field previously
     # defaulted to Decimal("0.05"), which read like a 5% production cap but was
-    # dead code: ``IntentCompiler._swap_compiler_context_kwargs`` unconditionally
-    # supplies ``IntentCompilerConfig.max_price_impact_pct``, so the default was
-    # unreachable on every real compile and the effective production cap was —
-    # and still is — 30%. A misleading default on a money-path guard is worse
-    # than no default: it hid the real threshold from every reader of this file.
-    # Keep it required so the value always comes from the single source of truth
-    # (``IntentCompilerConfig``) and no construction site can silently invent one.
+    # No default here (VIB-5924): ``IntentCompiler._swap_compiler_context_kwargs``
+    # always supplies ``IntentCompilerConfig.max_price_impact_pct`` (production
+    # default **10%**, fully configurable; per-swap override via
+    # ``SwapIntent.max_price_impact``). A misleading local default is worse than
+    # none — keep this field required so SSOT stays on IntentCompilerConfig.
     max_price_impact_pct: Decimal
     using_placeholders: bool = False
 
