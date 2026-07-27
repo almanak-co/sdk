@@ -52,10 +52,30 @@ logger = logging.getLogger(__name__)
 # here.
 _NPM_PROTOCOLS: tuple[str, ...] = AddressRegistry.protocols_with_abi(AbiFamily.V3_NPM)
 
+# Uniswap-V4-style PositionManagers (VIB-6109). Distinct from the V3 NPM family:
+# the V4 PositionManager is an ERC-721 that is NOT ``ERC721Enumerable`` (its
+# ``supportsInterface(0x780e9d63)`` is false and ``tokenOfOwnerByIndex`` reverts),
+# so a wallet CANNOT be enumerated on-chain the way V3 forks can. Discovery of a
+# wallet's V4 positions therefore walks a set of CANDIDATE token ids (the
+# deployment's own provable LP-open attribution — the SAME ``ownership.token_ids``
+# the recovery lane scopes to) and VERIFIES each against the PositionManager,
+# rather than enumerating. Membership + per-chain address live on the connector's
+# ``AddressTableSpec`` under :attr:`AbiFamily.V4_PM`, so this module never names a
+# protocol — a new V4-family venue joins by tagging its address table.
+_V4_PM_PROTOCOLS: tuple[str, ...] = AddressRegistry.protocols_with_abi(AbiFamily.V4_PM)
+
 # ERC-721 selectors (canonical Uniswap V3 NPM interface)
 _SELECTOR_BALANCE_OF = "0x70a08231"  # balanceOf(address)
 _SELECTOR_TOKEN_OF_OWNER_BY_INDEX = "0x2f745c59"  # tokenOfOwnerByIndex(address,uint256)
 _SELECTOR_POSITIONS = "0x99fbab88"  # positions(uint256)
+
+# Uniswap V4 PositionManager selectors (VIB-6109). ``ownerOf`` is the standard
+# ERC-721 owner read (existence + ownership); ``getPositionLiquidity`` returns the
+# position's current uint128 liquidity — a pure PositionManager mapping read with
+# NO dependency on ``StateView.getSlot0`` (which can revert on some forks), so the
+# still-open check works everywhere the V3 walk does.
+_SELECTOR_OWNER_OF = "0x6352211e"  # ownerOf(uint256)
+_SELECTOR_V4_GET_POSITION_LIQUIDITY = "0x1efeed33"  # getPositionLiquidity(uint256)
 
 # Maximum positions we probe per NPM. A single wallet is very unlikely to
 # hold more than this many live positions; capping guards against pathological
@@ -136,15 +156,30 @@ class PositionReadFailure(Enum):
 # a burned position looks like.
 _MEASURED_REVERT_MARKERS: tuple[str, ...] = ("invalid token id", "position not found")
 
+# Uniswap V4 PositionManager burned/nonexistent-token marker (VIB-6109). The V4
+# PositionManager derives from Solmate's ERC-721: ``ownerOf`` on a burned or never-
+# minted tokenId reverts with ``NOT_MINTED``. That is a node-MEASURED "position not
+# on this PositionManager" signal (Empty != Zero) — the V4 analogue of V3's
+# ``invalid token id`` — so a candidate id that reverts NOT_MINTED is a clean skip
+# (already closed / on a different PositionManager), never an UNMEASURED fault.
+_V4_MEASURED_REVERT_MARKERS: tuple[str, ...] = ("not_minted",)
 
-def _classify_call_failure(error_payload: str) -> PositionReadFailure:
+
+def _classify_call_failure(
+    error_payload: str,
+    measured_markers: tuple[str, ...] = _MEASURED_REVERT_MARKERS,
+) -> PositionReadFailure:
     """Classify a failed gateway ``eth_call`` as MEASURED revert vs FAULT.
 
     ``RpcService.Call`` surfaces failures as a JSON-encoded JSON-RPC error dict
     (``{"code": ..., "message": "execution reverted: Invalid token ID", ...}``
     for a node-measured revert; ``-32603`` HTTP / network wrappers for
-    transport faults). Match the burned-NFT markers against the error message;
+    transport faults). Match ``measured_markers`` against the error message;
     everything unrecognized is :attr:`PositionReadFailure.FAULT` (unmeasured).
+
+    ``measured_markers`` defaults to the V3 NPM burned set; the V4 walker passes
+    :data:`_V4_MEASURED_REVERT_MARKERS` so a ``NOT_MINTED`` revert is recognised
+    as a measured "not on this PositionManager" (VIB-6109), never a fault.
     """
     text = error_payload or ""
     try:
@@ -154,7 +189,7 @@ def _classify_call_failure(error_payload: str) -> PositionReadFailure:
     if isinstance(parsed, dict):
         text = str(parsed.get("message", "")) or text
     lowered = text.lower()
-    if any(marker in lowered for marker in _MEASURED_REVERT_MARKERS):
+    if any(marker in lowered for marker in measured_markers):
         return PositionReadFailure.REVERTED
     return PositionReadFailure.FAULT
 
@@ -192,6 +227,7 @@ async def _eth_call_classified(
     data: str,
     network: str = "",
     timeout: float = 15.0,
+    measured_markers: tuple[str, ...] = _MEASURED_REVERT_MARKERS,
 ) -> tuple[str | None, PositionReadFailure | None]:
     """Issue an ``eth_call`` via the gateway RpcService, classifying failures.
 
@@ -223,7 +259,7 @@ async def _eth_call_classified(
         return None, PositionReadFailure.FAULT
     if not response.success:
         logger.debug("eth_call returned error for %s on %s: %s", to, chain, response.error)
-        return None, _classify_call_failure(response.error)
+        return None, _classify_call_failure(response.error, measured_markers=measured_markers)
     try:
         return json.loads(response.result), None
     except (ValueError, json.JSONDecodeError):
@@ -415,6 +451,24 @@ def _npms_for_chain(chain: str) -> list[tuple[str, str]]:
     return found
 
 
+# V4 PositionManagers record their address under ``position_manager`` in the
+# connector's ``addresses.py`` (VIB-6109).
+_V4_PM_ADDRESS_KEYS = ("position_manager",)
+
+
+def _v4_pms_for_chain(chain: str) -> list[tuple[str, str]]:
+    """Return ``[(protocol_slug, position_manager_address), ...]`` for every
+    registered :attr:`AbiFamily.V4_PM` PositionManager on ``chain`` (VIB-6109).
+    Ordered deterministically by protocol slug so discovery output is stable.
+    """
+    found: list[tuple[str, str]] = []
+    for protocol in sorted(_V4_PM_PROTOCOLS):
+        pm = AddressRegistry.resolve_contract_address(protocol, chain, _V4_PM_ADDRESS_KEYS)
+        if pm:
+            found.append((protocol, pm))
+    return found
+
+
 def npm_for_protocol(protocol: str, chain: str) -> str | None:
     """Resolve the NonfungiblePositionManager for ONE V3-fork protocol on a chain.
 
@@ -478,15 +532,242 @@ class DiscoveryIncomplete(RuntimeError):
     teardown while a position remains orphaned on-chain.
     """
 
-    def __init__(self, chain: str, npm: str, missing: list[int]):
+    def __init__(self, chain: str, npm: str, missing: list[int], detail: str | None = None):
+        # ``detail`` lets a caller describe a non-index failure (e.g. a candidate
+        # id that could not even be parsed) honestly instead of forcing it into
+        # the "unreadable at indices" framing. V3 callers pass no detail and keep
+        # the original message verbatim.
+        reason = detail or f"{len(missing)} position(s) unreadable at indices {missing}."
         super().__init__(
-            f"LP discovery incomplete on {chain} NPM {npm}: "
-            f"{len(missing)} position(s) unreadable at indices {missing}. "
+            f"LP discovery incomplete on {chain} NPM {npm}: {reason} "
             f"Re-run discovery — raw web3 inspection may be needed if failures persist."
         )
         self.chain = chain
         self.npm = npm
         self.missing = missing
+        self.detail = detail
+
+
+def _decode_owner_address(word_hex: str) -> str | None:
+    """Decode an ABI ``address`` word (right-aligned 20 bytes) to lower ``0x``-hex."""
+    cleaned = (word_hex or "").removeprefix("0x")
+    if len(cleaned) < 64:
+        return None
+    return ("0x" + cleaned[-40:]).lower()
+
+
+async def _v4_owner_of(
+    client: GatewayClient,
+    chain: str,
+    pm: str,
+    token_id: int,
+    network: str = "",
+    retries: int = _RPC_RETRIES,
+) -> tuple[str | None, PositionReadFailure | None]:
+    """Read ``ownerOf(tokenId)`` on a V4 PositionManager, classified (VIB-6109).
+
+    Returns ``(owner_lowercase, None)`` on success. A ``NOT_MINTED`` revert is a
+    MEASURED :attr:`PositionReadFailure.REVERTED` (the id is burned or not on this
+    PositionManager — a clean skip, not retried). Any transport/decode fault is an
+    UNMEASURED :attr:`PositionReadFailure.FAULT`, retried up to ``retries`` times
+    before it is surfaced so the caller can mark an owned-but-unverifiable id
+    ``missing`` (the orphan-risk this module guards against).
+    """
+    last_failure: PositionReadFailure = PositionReadFailure.FAULT
+    calldata = _SELECTOR_OWNER_OF + _pad_uint256(token_id)
+    for attempt in range(retries + 1):
+        raw, failure = await _eth_call_classified(
+            client,
+            chain,
+            pm,
+            calldata,
+            network=network,
+            measured_markers=_V4_MEASURED_REVERT_MARKERS,
+        )
+        if failure is PositionReadFailure.REVERTED:
+            return None, PositionReadFailure.REVERTED  # measured "not here" — no retry
+        if failure is None and raw and raw != "0x":
+            owner = _decode_owner_address(raw)
+            if owner is not None:
+                return owner, None
+        last_failure = PositionReadFailure.FAULT
+        logger.debug(
+            "ownerOf(%d) on %s/%s attempt %d unmeasured; retrying",
+            token_id,
+            pm,
+            chain,
+            attempt + 1,
+        )
+    return None, last_failure
+
+
+async def _v4_position_liquidity(
+    client: GatewayClient,
+    chain: str,
+    pm: str,
+    token_id: int,
+    network: str = "",
+) -> int | None:
+    """Read ``getPositionLiquidity(tokenId)`` (uint128) on a V4 PositionManager.
+
+    Returns the liquidity int on success (``0`` is a valid MEASURED drained value),
+    or ``None`` on any RPC/decode fault — UNMEASURED, which the caller MUST treat
+    as "unknown, not zero" (never silently drop an owned position). Depends only on
+    the PositionManager mapping, NOT on ``StateView.getSlot0`` (which can revert on
+    some forks), so the still-open check works everywhere the V3 walk does.
+    """
+    calldata = _SELECTOR_V4_GET_POSITION_LIQUIDITY + _pad_uint256(token_id)
+    raw = await _eth_call(client, chain, pm, calldata, network=network)
+    if not raw or raw == "0x":
+        return None
+    try:
+        return int(raw, 16)
+    except ValueError:
+        logger.debug("getPositionLiquidity(%d) returned unparsable hex %r", token_id, raw)
+        return None
+
+
+def _normalize_candidate_ids(
+    candidate_token_ids: frozenset[str] | set[str] | tuple[str, ...],
+    chain: str,
+    npm: str,
+    strict: bool,
+) -> list[int]:
+    """Parse candidate token ids to ints, failing loud on any that don't parse.
+
+    The ids come from the deployment's PROVABLE ownership set, so silently
+    dropping an unparseable one (the old DEBUG-and-skip) would let strict
+    discovery report a clean, complete result while an owned position is live
+    on-chain — the exact orphan :class:`DiscoveryIncomplete` exists to prevent.
+    Unparseable ids raise in strict mode and warn otherwise. The returned ids
+    are de-duplicated and numerically sorted so output honours the documented
+    (protocol, PositionManager, tokenId) ordering ("9" before "10").
+    """
+    normalized_ids: list[int] = []
+    unparseable: list[str] = []
+    for raw_id in candidate_token_ids:
+        try:
+            normalized_ids.append(int(str(raw_id).strip()))
+        except (ValueError, TypeError):
+            unparseable.append(str(raw_id))
+    if unparseable:
+        detail = (
+            f"{len(unparseable)} deployment-owned candidate id(s) are not parseable "
+            f"as decimal token ids {sorted(unparseable)} — their ownership cannot be verified."
+        )
+        if strict:
+            raise DiscoveryIncomplete(chain=chain, npm=npm, missing=[], detail=detail)
+        logger.warning("V4 discovery on %s: %s Teardown may leave positions orphaned.", chain, detail)
+    return sorted(set(normalized_ids))
+
+
+async def discover_v4_lp_positions(
+    client: GatewayClient,
+    chain: str,
+    wallet: str,
+    candidate_token_ids: frozenset[str] | set[str] | tuple[str, ...],
+    network: str = "",
+    strict: bool = True,
+) -> list[DiscoveredPosition]:
+    """Verify deployment-owned CANDIDATE token ids against V4 PositionManagers (VIB-6109).
+
+    Uniswap V4 PositionManagers are ERC-721 but NOT ``ERC721Enumerable`` (their
+    ``supportsInterface(0x780e9d63)`` is false and ``tokenOfOwnerByIndex`` reverts),
+    so a wallet's V4 positions cannot be enumerated on-chain like V3 forks. This
+    instead takes the SAME deployment-owned ``candidate_token_ids`` the teardown
+    recovery lane already scopes to (``ownership.token_ids`` — the deployment's own
+    provable LP-open attribution) and, for every registered V4 PositionManager on
+    ``chain``, verifies each candidate:
+
+    - ``ownerOf(id)`` reverts ``NOT_MINTED`` → id is burned or not on THIS
+      PositionManager (e.g. a V3-family id) → skip (measured "not here").
+    - ``ownerOf(id) != wallet`` → not owned here → skip.
+    - ``ownerOf(id) == wallet`` and ``getPositionLiquidity(id) > 0`` → OPEN →
+      surface as a :class:`DiscoveredPosition` (``protocol`` = the V4 slug; the
+      recovery ``LP_CLOSE`` resolves currencies + liquidity on-chain via the V4
+      close-by-id compiler, VIB-5361, so token0/token1/ticks are left unset).
+    - ``getPositionLiquidity(id) == 0`` → measured drained → skip.
+    - any UNMEASURED read on a candidate → recorded ``missing``; in ``strict``
+      mode raises :class:`DiscoveryIncomplete` (an owned id we could not verify is
+      exactly the orphan this module exists to prevent).
+
+    Returns the discovered open positions ordered by (protocol, PositionManager,
+    tokenId). Empty when no V4 PM is registered for the chain, no candidates were
+    supplied, or none of the candidates is an open V4 position owned by ``wallet``.
+    """
+    pms = _v4_pms_for_chain(chain)
+    if not pms or not candidate_token_ids:
+        return []
+
+    wallet_lc = (wallet or "").lower()
+    normalized_ids = _normalize_candidate_ids(candidate_token_ids, chain, pms[0][1], strict)
+    if not normalized_ids:
+        return []
+
+    discovered: list[DiscoveredPosition] = []
+    for protocol, pm in pms:
+        missing: list[int] = []
+        for token_id in normalized_ids:
+            owner, failure = await _v4_owner_of(client, chain, pm, token_id, network=network)
+            if failure is PositionReadFailure.REVERTED:
+                continue  # measured: not minted on this PositionManager
+            if owner is None:  # UNMEASURED (fault after retries)
+                missing.append(token_id)
+                continue
+            if owner != wallet_lc:
+                continue  # owned by someone else (or transferred away) — not ours
+
+            liquidity, _ = await _call_with_retries(
+                f"getPositionLiquidity({token_id}) on {protocol}/{chain}",
+                _v4_position_liquidity,
+                client,
+                chain,
+                pm,
+                token_id,
+                network=network,
+            )
+            if liquidity is None:  # owned but UNMEASURED — loud, never a silent drop
+                missing.append(token_id)
+                continue
+            if liquidity == 0:
+                logger.debug(
+                    "Skipping drained V4 position #%d on %s/%s (liquidity=0)",
+                    token_id,
+                    chain,
+                    protocol,
+                )
+                continue
+
+            discovered.append(
+                DiscoveredPosition(
+                    token_id=token_id,
+                    npm_address=pm,
+                    chain=chain,
+                    protocol=protocol,
+                    # V4 close-by-id (VIB-5361) resolves currencies + liquidity
+                    # on-chain from the tokenId, so these are intentionally unset.
+                    token0="",
+                    token1="",
+                    fee=0,
+                    tick_lower=0,
+                    tick_upper=0,
+                    liquidity=liquidity,
+                )
+            )
+
+        if missing:
+            if strict:
+                raise DiscoveryIncomplete(chain=chain, npm=pm, missing=missing)
+            logger.warning(
+                "Partial V4 discovery on %s/%s: %d owned candidate id(s) unreadable %s. "
+                "Teardown may leave positions orphaned.",
+                chain,
+                protocol,
+                len(missing),
+                missing,
+            )
+
+    return discovered
 
 
 async def discover_lp_positions(
@@ -496,6 +777,7 @@ async def discover_lp_positions(
     include_zero_liquidity: bool = False,
     network: str = "",
     strict: bool = True,
+    candidate_token_ids: frozenset[str] | set[str] | tuple[str, ...] | None = None,
 ) -> list[DiscoveredPosition]:
     """Discover all LP positions the wallet holds on NPMs registered for ``chain``.
 
@@ -503,10 +785,16 @@ async def discover_lp_positions(
     (Uniswap V3, Agni, PancakeSwap V3, SushiSwap V3, ...), resolving each
     one's NonfungiblePositionManager address through the strategy-side
     ``AddressRegistry``. A wallet that opened positions on multiple V3-fork
-    protocols on the same chain will have all of them surfaced. Additional
-    protocols (e.g. Aerodrome CL, Uniswap V4) are surfaced automatically once
-    they join ``AbiFamily.V3_NPM`` on the registry — they are deliberately
-    absent today because their NPMs do not share this canonical ABI.
+    protocols on the same chain will have all of them surfaced.
+
+    **Uniswap V4 (VIB-6109):** V4 PositionManagers are ERC-721 but NOT
+    ``ERC721Enumerable``, so a wallet cannot be enumerated on-chain. When
+    ``candidate_token_ids`` is supplied (the teardown recovery lane passes the
+    deployment's provable ``ownership.token_ids``), every registered
+    :attr:`AbiFamily.V4_PM` PositionManager is additionally walked by VERIFYING
+    each candidate id via :func:`discover_v4_lp_positions`. Without candidate ids
+    (wallet-wide ``--discover`` lanes with no prior state) V4 positions are not
+    surfaced — enumerating them would require a log scan, a separate follow-up.
 
     Args:
         client: Connected GatewayClient — positions are read through the
@@ -516,7 +804,8 @@ async def discover_lp_positions(
         wallet: EVM wallet address.
         include_zero_liquidity: When False (default) zero-liquidity NFTs —
             already withdrawn but not yet burned — are filtered out. Set True
-            to surface them so operators can burn the residual NFTs.
+            to surface them so operators can burn the residual NFTs. (V3 only;
+            the V4 pass surfaces measurably-open positions only.)
         network: Per-request network override. Empty string (default) means
             "use the gateway's configured network", which is almost always
             what you want — the gateway already knows whether it's on
@@ -527,19 +816,20 @@ async def discover_lp_positions(
             position the NPM reports cannot be read after retries. When
             False, log a loud warning and return the partial list — only
             appropriate for diagnostics, never for teardown execution.
+        candidate_token_ids: Deployment-owned NFT token ids to additionally
+            verify against registered V4 PositionManagers (VIB-6109). ``None``
+            (default) skips the V4 pass entirely, preserving the pre-existing
+            V3-only wallet-scan behaviour for callers with no ownership context.
 
     Returns:
-        List of DiscoveredPosition ordered by (protocol, NPM address, tokenId).
-        Empty list if no NPM is registered for the chain or the wallet holds
-        no positions.
+        List of DiscoveredPosition ordered by (protocol, NPM/PM address, tokenId)
+        — V3 NPM positions first, then verified-open V4 positions. Empty list if
+        nothing is registered/owned for the chain.
 
     Raises:
         DiscoveryIncomplete: If ``strict`` and any per-position read failed.
     """
     npms = _npms_for_chain(chain)
-    if not npms:
-        logger.info("No V3-fork NPMs registered for chain=%s; skipping LP discovery", chain)
-        return []
 
     discovered: list[DiscoveredPosition] = []
 
@@ -635,6 +925,24 @@ async def discover_lp_positions(
                 missing_indices,
             )
 
+    # V4 pass (VIB-6109): verify deployment-owned candidate ids against the V4
+    # PositionManager family. Runs after the V3 walk and shares its strict-mode
+    # completeness contract (an unverifiable owned id raises DiscoveryIncomplete).
+    if candidate_token_ids:
+        discovered.extend(
+            await discover_v4_lp_positions(
+                client=client,
+                chain=chain,
+                wallet=wallet,
+                candidate_token_ids=candidate_token_ids,
+                network=network,
+                strict=strict,
+            )
+        )
+
+    if not npms and not _v4_pms_for_chain(chain):
+        logger.info("No V3-fork NPMs or V4 PositionManagers registered for chain=%s", chain)
+
     return discovered
 
 
@@ -699,6 +1007,7 @@ __all__ = [
     "DiscoveryIncomplete",
     "PositionReadFailure",
     "discover_lp_positions",
+    "discover_v4_lp_positions",
     "npm_for_protocol",
     "to_teardown_summary",
 ]

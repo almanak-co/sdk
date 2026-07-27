@@ -129,17 +129,20 @@ FIFO replay failure) and the clamp then fails closed. Bound via
 ``get_accounting_events_sync``. Read-only; never raises."""
 
 DiscoverLpPositions = Callable[..., Awaitable[Any]]
-"""Async ``(strategy) -> LpDiscoveryResult``. Runs BOUNDED on-chain LP
-discovery (VIB-5138) for the strategy's wallet/chain via the gateway
+"""Async ``(strategy, candidate_token_ids) -> LpDiscoveryResult``. Runs BOUNDED
+on-chain LP discovery (VIB-5138) for the strategy's wallet/chain via the gateway
 RpcService — the same NPM scan the ``--discover`` CLI flag uses
 (``teardown.discovery``). The teardown manager's auto-fallback path calls
 this when the strategy reports no LP (state desync — NFT live on-chain but
 ``_position_id`` lost, often after an ``AccountingPersistenceError`` on LP
 open) so the orphaned NFT is still closed instead of being silently
-stranded. Returns an ``LpDiscoveryResult`` carrying the discovered
+stranded. ``candidate_token_ids`` is the deployment's provable LP ownership set
+(``ownership.token_ids``); it drives the Uniswap V4 verification pass (VIB-6109),
+which cannot enumerate the wallet because the V4 PositionManager is not
+``ERC721Enumerable``. Returns an ``LpDiscoveryResult`` carrying the discovered
 ``TeardownPositionSummary`` and an ``incomplete`` flag (True when discovery
-could not enumerate every NPM-reported position — strict mode raised
-``DiscoveryIncomplete``). Never raises: discovery failure degrades the
+could not enumerate every NPM-reported / verify every candidate position — strict
+mode raised ``DiscoveryIncomplete``). Never raises: discovery failure degrades the
 teardown loudly but must never block the next risk-reducing intent."""
 
 GetDeploymentLpOwnership = Callable[..., Awaitable[Any]]
@@ -592,7 +595,7 @@ async def _deployment_lp_ownership(runner: Any, strategy: Any, chain: str) -> An
     return await read_deployment_lp_ownership(sm, deployment_id, chain)
 
 
-async def _discover_lp_for_teardown(runner: Any, strategy: Any) -> Any:
+async def _discover_lp_for_teardown(runner: Any, strategy: Any, candidate_token_ids: Any = None) -> Any:
     """Bounded on-chain LP discovery fallback for teardown recovery (VIB-5138).
 
     Reuses the SAME gateway-backed NPM scan the ``--discover`` CLI flag uses
@@ -603,9 +606,14 @@ async def _discover_lp_for_teardown(runner: Any, strategy: Any) -> Any:
     rather than swallowed. Never raises — discovery failure degrades the
     teardown loudly but must never block the next risk-reducing intent.
 
+    ``candidate_token_ids`` is the deployment's provable LP ownership set
+    (``ownership.token_ids``), threaded through so the Uniswap V4 verification
+    pass (VIB-6109) can check each owned id against the V4 PositionManager — V4
+    cannot be wallet-enumerated. Empty/None simply skips the V4 pass.
+
     Bound to the runner via :func:`functools.partial` in
-    :func:`build_runner_helpers` so the consumer calls ``(strategy) ->
-    LpDiscoveryResult``.
+    :func:`build_runner_helpers` so the consumer calls
+    ``(strategy, candidate_token_ids) -> LpDiscoveryResult``.
     """
     from .discovery import DiscoveryIncomplete, discover_lp_positions, to_teardown_summary
     from .lp_recovery import LpDiscoveryResult
@@ -631,6 +639,7 @@ async def _discover_lp_for_teardown(runner: Any, strategy: Any) -> Any:
             chain=chain,
             wallet=wallet,
             strict=True,
+            candidate_token_ids=candidate_token_ids or None,
         )
     except DiscoveryIncomplete as exc:
         return LpDiscoveryResult(summary=empty, incomplete=True, error=str(exc))

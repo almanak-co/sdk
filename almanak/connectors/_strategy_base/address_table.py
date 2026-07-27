@@ -15,6 +15,13 @@ class AbiFamily(StrEnum):
     #: Canonical Uniswap V3 NonfungiblePositionManager
     #: (``balanceOf`` / ``tokenOfOwnerByIndex`` / ``positions(tokenId)``).
     V3_NPM = "v3_npm"
+    #: Uniswap V4 ``PositionManager`` — an ERC-721 NFT position manager that is
+    #: NOT ``ERC721Enumerable`` (no ``tokenOfOwnerByIndex``) and whose position
+    #: read shape differs from V3 (``ownerOf`` / ``getPositionLiquidity``, not
+    #: ``positions(tokenId)``). Teardown LP discovery walks this family by
+    #: VERIFYING deployment-owned candidate token ids on-chain rather than
+    #: enumerating the wallet, which V4 cannot support (VIB-6109).
+    V4_PM = "v4_pm"
 
 
 @dataclass(frozen=True)

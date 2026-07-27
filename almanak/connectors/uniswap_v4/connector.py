@@ -9,7 +9,7 @@ from almanak.connectors._connector import (
     ImportRef,
     StrategyMatrixEntry,
 )
-from almanak.connectors._strategy_base.address_table import AddressTableSpec
+from almanak.connectors._strategy_base.address_table import AbiFamily, AddressTableSpec
 
 CONNECTOR = Connector(
     name="uniswap_v4",
@@ -19,6 +19,12 @@ CONNECTOR = Connector(
             protocol="uniswap_v4",
             module="almanak.connectors.uniswap_v4.addresses",
             attribute="UNISWAP_V4",
+            # VIB-6109: teardown LP-discovery recovery walks the V4 PositionManager
+            # family by verifying deployment-owned candidate token ids on-chain
+            # (V4 is NOT ERC721Enumerable, so the V3 wallet-scan cannot enumerate
+            # it). Declared here so ``discovery.py`` resolves V4 PMs via the
+            # registry — never a hard-coded framework-side address.
+            abi_families=(AbiFamily.V4_PM,),
         ),
     ),
     gateway_connector=ImportRef(

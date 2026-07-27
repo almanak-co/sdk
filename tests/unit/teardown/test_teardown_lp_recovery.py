@@ -749,7 +749,7 @@ async def test_discover_for_teardown_success(monkeypatch) -> None:
     """Happy path: scan returns positions → LpDiscoveryResult, incomplete False."""
     import almanak.framework.teardown.runner_helpers as rh
 
-    async def _fake_scan(*, client, chain, wallet, strict):
+    async def _fake_scan(*, client, chain, wallet, strict, candidate_token_ids=None):
         assert strict is True  # strict mode REQUIRED for recovery
         return [_discovered_position(2359)]
 

@@ -594,7 +594,10 @@ async def _recover_orphaned_lp_intents(
         return teardown_intents, False, None
 
     try:
-        discovery = await discover(strategy)
+        # Pass the deployment's provable ownership set so the V4 verification
+        # pass (VIB-6109) can check each owned id against the V4 PositionManager —
+        # V4 is not ERC721Enumerable and cannot be wallet-enumerated like V3.
+        discovery = await discover(strategy, ownership.token_ids)
     except Exception:  # noqa: BLE001 — discovery must never block risk reduction
         logger.exception(
             "Teardown LP recovery: discovery helper raised for %s — continuing without recovery",
