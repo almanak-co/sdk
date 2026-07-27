@@ -13,12 +13,17 @@ the read side's tx₁ anchor, so booking it again would print a phantom loss.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import multiprocessing as mp
+import os
+import signal
+import time
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -35,6 +40,7 @@ from almanak.framework.runner.capital_flow_state import (
     DETAIL_SCAN_DEFERRED,
     MAX_PENDING_UNCLASSIFIED,
     REASON_CHAIN_UNSCANNABLE,
+    REASON_HOSTED_OWNERSHIP_UNVERIFIED,
     REASON_PENDING_OVERFLOW,
     REASON_SCAN_GAP,
     REASON_SHARED_WALLET,
@@ -52,9 +58,19 @@ from almanak.framework.runner.capital_flow_state import (
 )
 from almanak.framework.runner.runner_state import (
     CAPITAL_FLOWS_KEY,
+    CapitalFlowAttributionError,
+    CapitalFlowMeasurementError,
     _build_metrics_for_snapshot,
     _populate_capital_flows,
+    _recover_capital_flow_record,
     _write_valuation_into_strategy_state,
+)
+from almanak.framework.state.state_manager import (
+    SQLiteConfigLight,
+    StateData,
+    StateManager,
+    StateManagerConfig,
+    WarmBackendType,
 )
 
 WALLET = "0x" + "11" * 20
@@ -70,6 +86,79 @@ DEPLOYMENT = "deployment:0123456789ab"
 # --------------------------------------------------------------------------
 # Fakes
 # --------------------------------------------------------------------------
+
+
+def _sqlite_state_manager(db_path: str) -> StateManager:
+    """Build the production local state facade against one isolated DB."""
+    return StateManager(
+        StateManagerConfig(
+            enable_hot=False,
+            warm_backend=WarmBackendType.SQLITE,
+            sqlite_config=SQLiteConfigLight(db_path=db_path),
+            load_state_on_startup=False,
+        )
+    )
+
+
+def _crash_during_capital_flow_state_mirror(db_path: str, write_started: Any) -> None:
+    """Child process: block after the second mirror's SQLite UPSERT.
+
+    The snapshot mirror is committed first, matching
+    ``capture_portfolio_snapshot``.  The production strategy-state mirror
+    helper then executes its real SQLite UPSERT inside ``BEGIN IMMEDIATE``.
+    The connection proxy announces that the row mutation has executed but the
+    transaction has not committed. The parent delivers SIGTERM at that exact
+    boundary.
+    """
+
+    async def _run_child() -> None:
+        manager = _sqlite_state_manager(db_path)
+        await manager.initialize()
+
+        behind = CapitalFlowRecord(
+            status=STATUS_MEASURED,
+            cursors={CHAIN: 100},
+            era_start={CHAIN: 100},
+            deposits_usd=Decimal("0"),
+        ).to_record()
+        await manager.save_state(
+            StateData(
+                deployment_id=DEPLOYMENT,
+                version=1,
+                state={CAPITAL_FLOWS_KEY: json.dumps(behind, sort_keys=True)},
+            )
+        )
+
+        ahead = CapitalFlowRecord(
+            status=STATUS_MEASURED,
+            cursors={CHAIN: 120},
+            era_start={CHAIN: 100},
+            deposits_usd=Decimal("100"),
+        ).to_record()
+        snapshot = _snapshot()
+        snapshot.snapshot_metadata[CAPITAL_FLOWS_KEY] = ahead
+        await manager.save_portfolio_snapshot(snapshot)
+
+        warm = manager._warm
+        assert warm is not None
+        raw_connection = warm._conn  # type: ignore[attr-defined]
+        assert raw_connection is not None
+
+        class _BlockAfterStrategyStateUpsert:
+            def execute(self, sql: str, *args: Any, **kwargs: Any) -> Any:
+                cursor = raw_connection.execute(sql, *args, **kwargs)
+                if "INSERT INTO strategy_state" in sql or "UPDATE strategy_state" in sql:
+                    write_started.set()
+                    time.sleep(60)
+                return cursor
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(raw_connection, name)
+
+        warm._conn = _BlockAfterStrategyStateUpsert()  # type: ignore[attr-defined]
+        await _write_valuation_into_strategy_state(SimpleNamespace(state_manager=manager), DEPLOYMENT, snapshot)
+
+    asyncio.run(_run_child())
 
 
 def _log(
@@ -104,6 +193,7 @@ class FakeEth:
         txs: dict[str, dict[str, Any]] | None = None,
         logs_raise: Exception | None = None,
         head_raises: Exception | None = None,
+        tx_raises: Exception | None = None,
     ) -> None:
         self._head = head
         self._logs = logs or []
@@ -111,6 +201,7 @@ class FakeEth:
         self._txs = txs or {}
         self._logs_raise = logs_raise
         self._head_raises = head_raises
+        self._tx_raises = tx_raises
         self.get_logs_calls: list[dict[str, Any]] = []
 
     @property
@@ -140,6 +231,8 @@ class FakeEth:
         return self._codes.get(address.lower(), "0x")
 
     def get_transaction(self, tx_hash: str) -> dict[str, Any]:
+        if self._tx_raises is not None:
+            raise self._tx_raises
         return self._txs[tx_hash.lower()]
 
 
@@ -313,7 +406,9 @@ def _snapshot(
     )
 
 
-def _metrics(*, deposits: Decimal | None = Decimal("0"), withdrawals: Decimal | None = Decimal("0")) -> PortfolioMetrics:
+def _metrics(
+    *, deposits: Decimal | None = Decimal("0"), withdrawals: Decimal | None = Decimal("0")
+) -> PortfolioMetrics:
     return PortfolioMetrics(
         deployment_id=DEPLOYMENT,
         timestamp=datetime(2026, 7, 19, 12, 0, tzinfo=UTC),
@@ -427,6 +522,26 @@ class TestEraInitialization:
         assert record["status"] == STATUS_MEASURED
         assert record["cursors"] == {CHAIN: 110}
         assert record["era_start"] == {CHAIN: 110}
+        assert metrics.deposits_usd == Decimal("0")
+
+    @pytest.mark.asyncio
+    async def test_anchor_rpc_failure_is_explicitly_scan_deferred(self):
+        """The known provider boundary degrades; state/programmer errors do not."""
+        sm = FakeStateManager(ledger=[])
+        runner = FakeRunner(sm)
+        first_metrics, first_snapshot = _metrics(), _snapshot()
+        await _run(runner, first_metrics, first_snapshot, {CHAIN: FakeWeb3(FakeEth(head=100))})
+        _persist_mirrors(runner, first_snapshot)
+
+        sm.ledger = [_ledger_row()]
+        metrics, snapshot = _metrics(), _snapshot()
+        failure = ConnectionError("anchor RPC unavailable")
+        await _run(runner, metrics, snapshot, {CHAIN: FakeWeb3(FakeEth(head=120, tx_raises=failure))})
+
+        record = snapshot.snapshot_metadata[CAPITAL_FLOWS_KEY]
+        assert record["status"] == STATUS_PENDING
+        assert record["status_detail"] == DETAIL_SCAN_DEFERRED
+        assert record["cursors"] == {}
         assert metrics.deposits_usd == Decimal("0")
 
     @pytest.mark.asyncio
@@ -753,16 +868,21 @@ class TestDegradedPaths:
         assert metrics.deposits_usd == Decimal("9")
 
     @pytest.mark.asyncio
-    async def test_producer_never_raises_on_unexpected_error(self):
+    async def test_unexpected_producer_error_propagates_typed(self):
         runner = _measured_runner()
         metrics, snapshot = _metrics(deposits=Decimal("3")), _snapshot()
+        failure = RuntimeError("boom")
 
-        with patch(
-            "almanak.framework.runner.runner_state._advance_capital_flows",
-            side_effect=RuntimeError("boom"),
+        with (
+            patch(
+                "almanak.framework.runner.runner_state._advance_capital_flows",
+                side_effect=failure,
+            ),
+            pytest.raises(CapitalFlowMeasurementError, match="outside a known remote degradation") as raised,
         ):
             await _populate_capital_flows(runner, metrics, snapshot, deployment_id=DEPLOYMENT)
 
+        assert raised.value.cause is failure
         assert metrics.deposits_usd == Decimal("3")
         assert CAPITAL_FLOWS_KEY not in snapshot.snapshot_metadata
 
@@ -780,12 +900,119 @@ def _returns(value: Any):
 
 
 class TestAttributionGate:
+    @staticmethod
+    def _metrics_builder_runner() -> FakeRunner:
+        runner = _measured_runner()
+        runner.state_manager.get_portfolio_metrics = _returns(_metrics())  # type: ignore[attr-defined]
+        runner.state_manager.sum_ledger_gas_usd = _returns(Decimal("0"))  # type: ignore[attr-defined]
+        return runner
+
+    @pytest.mark.asyncio
+    async def test_hosted_mode_resolution_failure_propagates(self):
+        """Unknown deployment mode must not preserve a success-shaped metrics row."""
+        runner = _measured_runner()
+        metrics, snapshot = _metrics(deposits=Decimal("17")), _snapshot()
+        failure = RuntimeError("mode registry unavailable")
+
+        with (
+            patch("almanak.framework.runner.runner_state.is_hosted", side_effect=failure),
+            pytest.raises(CapitalFlowAttributionError, match="deployment mode could not be resolved") as raised,
+        ):
+            await _populate_capital_flows(runner, metrics, snapshot, deployment_id=DEPLOYMENT)
+
+        assert raised.value.cause is failure
+        assert raised.value.write_kind == "metrics"
+        assert raised.value.deployment_id == DEPLOYMENT
+        assert metrics.deposits_usd == Decimal("17"), "no success-shaped replacement was projected"
+        assert CAPITAL_FLOWS_KEY not in snapshot.snapshot_metadata
+
+    @pytest.mark.asyncio
+    async def test_local_attribution_enumeration_failure_propagates(self):
+        """A failed callable enumeration seam is unknown, never exclusive."""
+        runner = _measured_runner()
+        metrics, snapshot = _metrics(deposits=Decimal("23")), _snapshot()
+        failure = ConnectionError("state backend unavailable")
+
+        with (
+            patch("almanak.framework.runner.runner_state.is_hosted", return_value=False),
+            patch.object(runner.state_manager, "get_all_deployment_ids", side_effect=failure),
+            pytest.raises(CapitalFlowAttributionError, match="wallet attribution scan failed") as raised,
+        ):
+            await _populate_capital_flows(runner, metrics, snapshot, deployment_id=DEPLOYMENT)
+
+        assert raised.value.cause is failure
+        assert raised.value.write_kind == "metrics"
+        assert raised.value.deployment_id == DEPLOYMENT
+        assert metrics.deposits_usd == Decimal("23"), "failure did not fabricate unmeasured success"
+        assert CAPITAL_FLOWS_KEY not in snapshot.snapshot_metadata
+
+    @pytest.mark.asyncio
+    async def test_hosted_recovery_failure_propagates_through_metrics_builder(self):
+        """Hosted suppression cannot bypass a failed durable-record recovery."""
+        runner = self._metrics_builder_runner()
+        failure = ConnectionError("snapshot store unavailable")
+        runner.state_manager.get_latest_snapshot = AsyncMock(side_effect=failure)  # type: ignore[method-assign]
+
+        with (
+            patch("almanak.framework.runner.runner_state.is_hosted", return_value=True),
+            patch(
+                "almanak.framework.runner.strategy_runner.derive_execution_mode_from_config",
+                return_value="live",
+            ),
+            pytest.raises(CapitalFlowMeasurementError, match="outside a known remote degradation") as raised,
+        ):
+            await _build_metrics_for_snapshot(runner, DEPLOYMENT, _snapshot())
+
+        assert raised.value.cause is failure
+        assert raised.value.write_kind == "metrics"
+
+    @pytest.mark.asyncio
+    async def test_local_state_recovery_failure_propagates_through_metrics_builder(self):
+        """Local strategy-state recovery failure cannot preserve stale flows."""
+        runner = self._metrics_builder_runner()
+        failure = OSError("strategy state unreadable")
+        runner.state_manager.load_state = AsyncMock(side_effect=failure)  # type: ignore[method-assign]
+
+        with (
+            patch("almanak.framework.runner.runner_state.is_hosted", return_value=False),
+            patch(
+                "almanak.framework.runner.strategy_runner.derive_execution_mode_from_config",
+                return_value="live",
+            ),
+            pytest.raises(CapitalFlowMeasurementError, match="outside a known remote degradation") as raised,
+        ):
+            await _build_metrics_for_snapshot(runner, DEPLOYMENT, _snapshot())
+
+        assert raised.value.cause is failure
+
+    @pytest.mark.asyncio
+    async def test_local_ledger_failure_propagates_through_metrics_builder(self):
+        """A canonical local deployment cannot treat a failed ledger read as empty."""
+        runner = self._metrics_builder_runner()
+        failure = ConnectionError("ledger backend unavailable")
+        runner.state_manager.get_ledger_entries = AsyncMock(side_effect=failure)  # type: ignore[method-assign]
+
+        with (
+            patch("almanak.framework.runner.runner_state.is_hosted", return_value=False),
+            patch(
+                "almanak.framework.runner.strategy_runner.derive_execution_mode_from_config",
+                return_value="live",
+            ),
+            pytest.raises(CapitalFlowMeasurementError, match="outside a known remote degradation") as raised,
+        ):
+            await _build_metrics_for_snapshot(runner, DEPLOYMENT, _snapshot())
+
+        assert raised.value.cause is failure
+
     @pytest.mark.asyncio
     async def test_non_canonical_deployment_id_poisons(self):
         runner = _measured_runner()
         metrics, snapshot = _metrics(), _snapshot()
 
-        with patch("almanak.framework.web3.get_gateway_web3", side_effect=AssertionError("must not scan")):
+        with (
+            patch("almanak.framework.runner.runner_state.is_hosted", return_value=False),
+            patch("almanak.framework.web3.get_gateway_web3", side_effect=AssertionError("must not scan")),
+        ):
             await _populate_capital_flows(runner, metrics, snapshot, deployment_id="my-strategy")
 
         record = snapshot.snapshot_metadata[CAPITAL_FLOWS_KEY]
@@ -799,10 +1026,84 @@ class TestAttributionGate:
         runner.state_manager.deployment_ids = [DEPLOYMENT, "deployment:ffffffffffff"]
         metrics, snapshot = _metrics(), _snapshot()
 
-        await _run(runner, metrics, snapshot, {CHAIN: FakeWeb3(FakeEth(head=120))})
+        with patch("almanak.framework.runner.runner_state.is_hosted", return_value=False):
+            await _run(runner, metrics, snapshot, {CHAIN: FakeWeb3(FakeEth(head=120))})
 
         assert snapshot.snapshot_metadata[CAPITAL_FLOWS_KEY]["unmeasured_reason"] == REASON_SHARED_WALLET
         assert metrics.deposits_usd is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("hosted_id", ["live-agent-123", DEPLOYMENT])
+    async def test_hosted_identity_shape_never_asserts_wallet_ownership(self, hosted_id: str):
+        """Platform IDs are opaque; even a local-looking value proves nothing."""
+        runner = _measured_runner()
+        metrics, snapshot = _metrics(), _snapshot()
+
+        with (
+            patch("almanak.framework.runner.runner_state.is_hosted", return_value=True),
+            patch("almanak.framework.web3.get_gateway_web3", side_effect=AssertionError("must not scan")),
+        ):
+            await _populate_capital_flows(runner, metrics, snapshot, deployment_id=hosted_id)
+
+        record = snapshot.snapshot_metadata[CAPITAL_FLOWS_KEY]
+        assert record["status"] == STATUS_UNMEASURED
+        assert record["unmeasured_reason"] == REASON_HOSTED_OWNERSHIP_UNVERIFIED
+        assert metrics.deposits_usd is None
+        assert metrics.withdrawals_usd is None
+
+    @pytest.mark.asyncio
+    async def test_hosted_unverified_reason_replaces_legacy_shape_based_reason(self):
+        """Previously persisted hosted records are reclassified deterministically."""
+        runner = _measured_runner()
+        runner.state_manager.snapshot_mirror = CapitalFlowRecord(
+            status=STATUS_UNMEASURED,
+            deposits_usd=None,
+            withdrawals_usd=None,
+            unmeasured_reason=REASON_SHARED_WALLET,
+        ).to_record()
+        metrics, snapshot = _metrics(), _snapshot()
+
+        with patch("almanak.framework.runner.runner_state.is_hosted", return_value=True):
+            await _populate_capital_flows(runner, metrics, snapshot, deployment_id="live-agent-123")
+
+        assert snapshot.snapshot_metadata[CAPITAL_FLOWS_KEY]["unmeasured_reason"] == REASON_HOSTED_OWNERSHIP_UNVERIFIED
+        assert metrics.deposits_usd is None
+        assert metrics.withdrawals_usd is None
+
+    @pytest.mark.asyncio
+    async def test_hosted_unverified_state_round_trips_through_sqlite(self, tmp_path):
+        """A restarted SQLite store preserves reason and Empty != Zero."""
+        from almanak.framework.state.backends.sqlite import SQLiteConfig, SQLiteStore
+
+        config = SQLiteConfig(db_path=str(tmp_path / "hosted-attribution.sqlite"))
+        store = SQLiteStore(config)
+        await store.initialize()
+        try:
+            runner = _measured_runner()
+            metrics, snapshot = _metrics(), _snapshot()
+
+            with patch("almanak.framework.runner.runner_state.is_hosted", return_value=True):
+                await _populate_capital_flows(runner, metrics, snapshot, deployment_id=DEPLOYMENT)
+
+            snapshot_id = await store.save_snapshot_and_metrics(snapshot, metrics)
+            assert snapshot_id > 0
+        finally:
+            await store.close()
+
+        restarted = SQLiteStore(config)
+        await restarted.initialize()
+        try:
+            loaded_snapshot = await restarted.get_latest_snapshot(DEPLOYMENT)
+            loaded_metrics = await restarted.get_portfolio_metrics(DEPLOYMENT)
+            assert loaded_snapshot is not None
+            assert loaded_metrics is not None
+            record = loaded_snapshot.snapshot_metadata[CAPITAL_FLOWS_KEY]
+            assert record["status"] == STATUS_UNMEASURED
+            assert record["unmeasured_reason"] == REASON_HOSTED_OWNERSHIP_UNVERIFIED
+            assert loaded_metrics.deposits_usd is None
+            assert loaded_metrics.withdrawals_usd is None
+        finally:
+            await restarted.close()
 
 
 # --------------------------------------------------------------------------
@@ -1042,9 +1343,7 @@ class TestDeferAndRecheck:
 
 
 def _measured_mirror(cursor: int = 100) -> dict[str, Any]:
-    return CapitalFlowRecord(
-        status=STATUS_MEASURED, cursors={CHAIN: cursor}, era_start={CHAIN: cursor}
-    ).to_record()
+    return CapitalFlowRecord(status=STATUS_MEASURED, cursors={CHAIN: cursor}, era_start={CHAIN: cursor}).to_record()
 
 
 class TestGatewayLedgerRowShape:
@@ -1179,9 +1478,7 @@ class TestGatewayLedgerRowShape:
 
 class TestRecovery:
     def test_recover_takes_higher_cursor_wholesale(self):
-        newer = CapitalFlowRecord(
-            status=STATUS_MEASURED, cursors={CHAIN: 200}, deposits_usd=Decimal("15")
-        ).to_record()
+        newer = CapitalFlowRecord(status=STATUS_MEASURED, cursors={CHAIN: 200}, deposits_usd=Decimal("15")).to_record()
         older = CapitalFlowRecord(status=STATUS_MEASURED, cursors={CHAIN: 100}, deposits_usd=Decimal("5")).to_record()
 
         for candidates in ([newer, older], [older, newer]):
@@ -1189,6 +1486,36 @@ class TestRecovery:
             assert record is not None
             assert record.cursors == {CHAIN: 200}
             assert record.deposits_usd == Decimal("15"), "fields never mixed across mirrors"
+
+    @pytest.mark.asyncio
+    async def test_mirror_drift_between_reads_recovers_newer_record_wholesale(self):
+        """A state mirror advancing between reads cannot produce mixed fields."""
+        sm = FakeStateManager()
+        older = CapitalFlowRecord(
+            status=STATUS_MEASURED,
+            cursors={CHAIN: 100},
+            deposits_usd=Decimal("5"),
+            withdrawals_usd=Decimal("1"),
+        ).to_record()
+        newer = CapitalFlowRecord(
+            status=STATUS_MEASURED,
+            cursors={CHAIN: 200},
+            deposits_usd=Decimal("15"),
+            withdrawals_usd=Decimal("4"),
+        ).to_record()
+
+        async def _snapshot_then_concurrent_state_advance(deployment_id):
+            del deployment_id
+            sm.state_mirror[CAPITAL_FLOWS_KEY] = json.dumps(newer)
+            return SimpleNamespace(snapshot_metadata={CAPITAL_FLOWS_KEY: older})
+
+        sm.get_latest_snapshot = _snapshot_then_concurrent_state_advance  # type: ignore[method-assign]
+        recovered = await _recover_capital_flow_record(FakeRunner(sm), DEPLOYMENT)
+
+        assert recovered is not None
+        assert recovered.cursors == {CHAIN: 200}
+        assert recovered.deposits_usd == Decimal("15")
+        assert recovered.withdrawals_usd == Decimal("4")
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("snapshot_is_newer", [True, False])
@@ -1217,6 +1544,76 @@ class TestRecovery:
         await _run(runner, metrics, snapshot, {CHAIN: FakeWeb3(eth)})
 
         assert metrics.deposits_usd == Decimal("100"), "the block-110 deposit is booked exactly once"
+
+    @pytest.mark.asyncio
+    async def test_sigterm_between_snapshot_and_state_mirror_recovers_wholesale_without_double_booking(self, tmp_path):
+        """SIGTERM after SQLite UPSERT but before COMMIT recovers the prefix.
+
+        The child runs the production strategy-state mirror helper and blocks
+        after its real SQLite row mutation while the write transaction remains
+        open. A fresh StateManager then reopens the SQLite file. Recovery must
+        select the ahead snapshot wholesale; selecting a torn or behind
+        strategy-state mirror would rescan block 110 and book the same $100
+        deposit twice.
+        """
+        db_path = str(tmp_path / "capital-flow-sigterm.db")
+        # This POSIX-only money-path test needs the child target defined in
+        # this importlib-loaded test module. ``fork`` preserves that target;
+        # the child immediately creates its own asyncio loop and SQLite
+        # connections before doing any work.
+        ctx = mp.get_context("fork")
+        write_started = ctx.Event()
+        child = ctx.Process(
+            target=_crash_during_capital_flow_state_mirror,
+            args=(db_path, write_started),
+            name="capital-flow-mirror-writer",
+        )
+        child.start()
+        try:
+            assert write_started.wait(timeout=20), "child never reached the strategy-state mirror write"
+            assert child.pid is not None
+            os.kill(child.pid, signal.SIGTERM)
+            child.join(timeout=20)
+            assert not child.is_alive(), "SIGTERM did not stop the mirror writer"
+            assert child.exitcode == -signal.SIGTERM
+        finally:
+            if child.is_alive():
+                child.terminate()
+                child.join(timeout=10)
+
+        manager = _sqlite_state_manager(db_path)
+        await manager.initialize()
+
+        class _RestartedState:
+            async def get_latest_snapshot(self, deployment_id: str) -> Any:
+                return await manager.get_latest_snapshot(deployment_id)
+
+            async def load_state(self, deployment_id: str) -> Any:
+                return await manager.load_state(deployment_id)
+
+            async def get_ledger_entries(self, deployment_id: str, limit: int = 100, **kwargs: Any) -> list[Any]:
+                del deployment_id, limit, kwargs
+                return [_ledger_row()]
+
+            async def get_all_deployment_ids(self) -> list[str]:
+                return [DEPLOYMENT]
+
+        runner = FakeRunner(_RestartedState())  # type: ignore[arg-type]
+        metrics, snapshot = _metrics(), _snapshot()
+        eth = FakeEth(
+            head=140,
+            logs=[_log(frm=OUTSIDER, to=WALLET, amount=100_000_000, block=110, tx="0xd1")],
+        )
+
+        with patch("almanak.framework.runner.runner_state.is_hosted", return_value=False):
+            await _run(runner, metrics, snapshot, {CHAIN: FakeWeb3(eth)})
+
+        recovered = snapshot.snapshot_metadata[CAPITAL_FLOWS_KEY]
+        assert metrics.deposits_usd == Decimal("100"), "the committed deposit must not be booked twice"
+        assert recovered["deposits_usd"] == "100"
+        assert recovered["cursors"] == {CHAIN: 140}
+        assert eth.get_logs_calls[0]["fromBlock"] == 121, "restart must resume after the ahead mirror cursor"
+        await manager.close()
 
     def test_unreadable_or_foreign_schema_mirror_is_ignored(self):
         assert recover_record([None, "garbage", {"schema_version": 999}]) is None

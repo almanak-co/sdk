@@ -54,6 +54,7 @@ def _runner(
     state_manager = MagicMock()
     if state_manager_returns_existing:
         from almanak.framework.portfolio import PortfolioMetrics
+
         existing = PortfolioMetrics(
             timestamp=datetime.now(UTC),
             initial_value_usd=Decimal("100"),
@@ -66,6 +67,11 @@ def _runner(
     else:
         state_manager.get_portfolio_metrics = AsyncMock(return_value=None)
     state_manager.sum_ledger_gas_usd = AsyncMock(return_value=sum_ledger_returns)
+    # Capital-flow recovery is part of every metrics build. Keep these mocks
+    # production-shaped so the test exercises identity stamping rather than a
+    # synthetic synchronous-MagicMock backend failure.
+    state_manager.get_latest_snapshot = AsyncMock(return_value=None)
+    state_manager.load_state = AsyncMock(return_value=None)
     runner.state_manager = state_manager
     return runner
 
@@ -86,6 +92,7 @@ def _snapshot(
 
 
 # --- Forward direction: both helpers stamp deployment_id from runner ---------
+
 
 def test_snapshot_helper_stamps_runner_deployment_id() -> None:
     """_stamp_snapshot_identity copies runner.deployment_id onto the snapshot."""
@@ -114,6 +121,7 @@ async def test_metrics_helper_stamps_runner_deployment_id() -> None:
 
 
 # --- Reverse direction: fallback chain (empty runner.deployment_id) ----------
+
 
 def test_snapshot_helper_3_step_fallback() -> None:
     """3-step chain: empty runner + non-empty snapshot.deployment_id → snapshot's value."""
@@ -154,6 +162,7 @@ async def test_metrics_helper_uses_snapshot_deployment_id_when_runner_identity_i
 
 
 # --- Existing-row path on metrics helper ------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_metrics_helper_existing_row_refreshes_deployment_id_when_blank() -> None:

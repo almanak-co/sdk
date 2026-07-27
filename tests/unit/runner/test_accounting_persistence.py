@@ -25,7 +25,9 @@ import pytest
 
 from almanak.framework.intents.vocabulary import SwapIntent
 from almanak.framework.observability.ledger import LedgerEntry
-from almanak.framework.runner.runner_models import IterationStatus
+from almanak.framework.runner._run_loop_helpers import capture_snapshot_with_accounting
+from almanak.framework.runner.runner_models import IterationResult, IterationStatus
+from almanak.framework.runner.runner_state import CapitalFlowMeasurementError
 from almanak.framework.runner.strategy_runner import RunnerConfig, StrategyRunner
 from almanak.framework.state.exceptions import AccountingPersistenceError
 
@@ -577,6 +579,74 @@ async def test_snapshot_acc_error_swallowed_in_paper_mode() -> None:
     result = await _exercise_snapshot_handler(runner)
     assert result is None  # no escalation
     alert_mgr.send_alert.assert_not_called()
+
+
+def _capital_flow_measurement_failure() -> CapitalFlowMeasurementError:
+    cause = ConnectionError("capital-flow recovery unavailable")
+    return CapitalFlowMeasurementError(
+        "s1",
+        "capital-flow producer failed outside a known remote degradation for s1",
+        cause,
+    )
+
+
+def _runner_for_capital_flow_policy(config: RunnerConfig) -> _Runner:
+    runner = _Runner(state_manager=MagicMock(), config=config)
+    runner._iteration_had_trade = False
+    runner._drain_batch = []
+    runner._portfolio_valuer = None
+    runner._total_iterations = 1
+    runner._capture_portfolio_snapshot = AsyncMock(side_effect=_capital_flow_measurement_failure())  # type: ignore[method-assign]
+    runner._alert_accounting_failure = AsyncMock()  # type: ignore[method-assign]
+    return runner
+
+
+@pytest.mark.asyncio
+async def test_capital_flow_measurement_failure_becomes_accounting_failed_in_live_mode() -> None:
+    """The real snapshot wrapper converts typed capital-flow failure to ACCOUNTING_FAILED."""
+    runner = _runner_for_capital_flow_policy(RunnerConfig(dry_run=False))
+    original = IterationResult(
+        status=IterationStatus.SUCCESS,
+        deployment_id="s1",
+        duration_ms=12,
+    )
+
+    result = await capture_snapshot_with_accounting(runner, _Strategy(), "s1", original)
+
+    assert result.status is IterationStatus.ACCOUNTING_FAILED
+    assert result.success is False
+    assert "capital-flow producer failed" in (result.error or "")
+    runner._alert_accounting_failure.assert_awaited_once()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["paper", "dry_run"])
+async def test_capital_flow_measurement_failure_logs_error_and_continues_non_live(
+    mode: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Paper/dry-run keep running, but the attribution failure is ERROR-visible."""
+    config = RunnerConfig(dry_run=mode == "dry_run")
+    if mode == "paper":
+        config.paper_mode = True  # type: ignore[attr-defined]
+    runner = _runner_for_capital_flow_policy(config)
+    original = IterationResult(
+        status=IterationStatus.SUCCESS,
+        deployment_id="s1",
+        duration_ms=12,
+    )
+
+    with caplog.at_level(logging.ERROR, logger="almanak.framework.runner.strategy_runner"):
+        result = await capture_snapshot_with_accounting(runner, _Strategy(), "s1", original)
+
+    assert result is original
+    assert any(
+        rec.levelno == logging.ERROR
+        and "non-live mode" in rec.message
+        and "write_kind=metrics" in rec.message
+        for rec in caplog.records
+    )
+    runner._alert_accounting_failure.assert_not_awaited()  # type: ignore[attr-defined]
 
 
 def test_gateway_state_manager_get_accounting_events_sync_happy_path() -> None:

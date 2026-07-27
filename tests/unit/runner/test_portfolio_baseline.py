@@ -36,6 +36,12 @@ def _make_runner() -> MagicMock:
     runner.state_manager = MagicMock()
     runner.state_manager.get_portfolio_metrics = AsyncMock(return_value=None)
     runner.state_manager.save_portfolio_metrics = AsyncMock()
+    # The metrics builder always executes capital-flow recovery. Model the
+    # real async StateManager seams explicitly; a bare MagicMock here would
+    # fabricate callable synchronous methods and correctly trip the producer's
+    # fail-closed programmer-error path.
+    runner.state_manager.get_latest_snapshot = AsyncMock(return_value=None)
+    runner.state_manager.load_state = AsyncMock(return_value=None)
     # VIB-4225 ACC-02: the runner-side metrics builder calls sum_ledger_gas_usd
     # to populate gas_spent_usd. The bare MagicMock attribute can't be
     # awaited, so we explicitly wire it as an AsyncMock returning 0
@@ -115,10 +121,9 @@ class TestPortfolioBaselineFallback:
         assert metrics is not None
         assert metrics.initial_value_usd == Decimal("0")
         warning_calls = mock_logger.warning.call_args_list
-        assert any(
-            "baseline is zero" in str(call).lower() or "zero" in str(call).lower()
-            for call in warning_calls
-        ), f"Expected baseline-zero warning; warning calls: {warning_calls}"
+        assert any("baseline is zero" in str(call).lower() or "zero" in str(call).lower() for call in warning_calls), (
+            f"Expected baseline-zero warning; warning calls: {warning_calls}"
+        )
 
     @pytest.mark.asyncio
     async def test_existing_metrics_not_overwritten(self):

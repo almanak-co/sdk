@@ -41,6 +41,14 @@ STATUS_UNMEASURED = "unmeasured"
 # re-baselines a poisoned deployment, because a re-baseline would silently
 # forgive whatever flow we failed to measure.
 REASON_SHARED_WALLET = "shared_wallet_unattributable"
+#: Hosted identity is platform-assigned (blueprint 29), so its string shape
+#: cannot prove that the execution wallet is exclusive to this deployment.
+#: Until the trusted gateway/control-plane contract in blueprint 20 exposes a
+#: versioned ownership attestation, hosted transfer provenance must remain
+#: unmeasured.  Keep this distinct from ``REASON_SHARED_WALLET``: the latter is
+#: positive local evidence of ambiguity; this is absence of authoritative
+#: hosted evidence.
+REASON_HOSTED_OWNERSHIP_UNVERIFIED = "hosted_wallet_ownership_unverified"
 REASON_CHAIN_UNSCANNABLE = "chain_unscannable"
 REASON_SCAN_GAP = "scan_gap_unmeasurable"
 REASON_UNPRICEABLE_FLOW = "unpriceable_flow"

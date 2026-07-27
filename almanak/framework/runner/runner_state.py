@@ -26,6 +26,7 @@ from ..accounting.capital_flows import (
     normalize_tx_hash,
     scan_chain_transfers,
 )
+from ..deployment import is_hosted
 from ..intents.vocabulary import AnyIntent, BorrowIntent, HoldIntent, PerpCloseIntent, PerpOpenIntent
 from ..portfolio import (
     PortfolioMetrics,
@@ -39,6 +40,7 @@ from .capital_flow_state import (
     DETAIL_NO_GATEWAY,
     DETAIL_SCAN_DEFERRED,
     REASON_CHAIN_UNSCANNABLE,
+    REASON_HOSTED_OWNERSHIP_UNVERIFIED,
     REASON_SCAN_GAP,
     REASON_SHARED_WALLET,
     STATUS_MEASURED,
@@ -1129,6 +1131,37 @@ async def _populate_gas_spent_usd(
 #: and ``StateData.state`` (→ ``strategy_state``, JSON-encoded).
 CAPITAL_FLOWS_KEY = "capital_flows"
 
+
+class CapitalFlowMeasurementError(AccountingPersistenceError):
+    """Capital-flow measurement failed outside a known remote degradation.
+
+    Known remote failures are converted at their exact I/O boundaries into
+    explicit scan statuses/details. Anything else (state recovery, ledger
+    reads, attribution resolution, or programmer errors) must take the typed
+    accounting-failure path; preserving an old measured row would be
+    success-shaped stale data.
+    """
+
+    def __init__(self, deployment_id: str, message: str, cause: BaseException) -> None:
+        super().__init__(
+            write_kind=AccountingWriteKind.METRICS,
+            deployment_id=deployment_id,
+            message=message,
+            cause=cause,
+        )
+
+
+class CapitalFlowAttributionError(CapitalFlowMeasurementError):
+    """The producer could not determine whether wallet flows are attributable.
+
+    This is an accounting failure rather than a transient chain-read failure:
+    swallowing it would leave the last measured metrics row visible even
+    though the current process cannot establish the attribution boundary.
+    Routing through :class:`AccountingPersistenceError` preserves the runner's
+    live ``ACCOUNTING_FAILED`` / non-live loud-degradation semantics.
+    """
+
+
 #: One page of ledger rows is enough to (a) decide emptiness, (b) find the
 #: era anchor, (c) collect the tx hashes that must be excluded from the
 #: freshly scanned block window. The window is at most
@@ -1186,17 +1219,16 @@ async def _capital_flow_wallet_is_shared(runner: Any, deployment_id: str) -> boo
     one deployment owns the wallet. ``get_all_deployment_ids`` is the only
     enumeration seam the backends expose; when it is absent we have *no
     evidence* of sharing and must not poison on a guess (the canonical-id
-    check above is the other half of the gate).
+    check above is the other half of the gate). A callable seam that raises is
+    different: the attempted attribution check failed, so the caller must
+    propagate a typed accounting failure rather than treat unknown as
+    exclusive.
     """
     state_manager = getattr(runner, "state_manager", None)
     lister = getattr(state_manager, "get_all_deployment_ids", None)
     if not callable(lister):
         return False
-    try:
-        ids = await lister()
-    except Exception as exc:  # noqa: BLE001 — absence of evidence, not evidence
-        logger.debug("capital_flows: deployment enumeration failed: %s", exc)
-        return False
+    ids = await lister()
     return any(str(other) and str(other) != deployment_id for other in (ids or []))
 
 
@@ -1357,7 +1389,11 @@ async def _anchor_block_for_era(
     web3 = handles.get(chain)
     if web3 is None or not tx_hash:
         return None
-    tx = await asyncio.to_thread(web3.eth.get_transaction, normalize_tx_hash(tx_hash))
+    try:
+        tx = await asyncio.to_thread(web3.eth.get_transaction, normalize_tx_hash(tx_hash))
+    except Exception as exc:  # noqa: BLE001 — provider exceptions are opaque
+        logger.warning("capital_flows: anchor transaction read deferred for %s: %s", chain, exc)
+        return None
     block = tx.get("blockNumber") if isinstance(tx, dict) else getattr(tx, "blockNumber", None)
     return None if block is None else (chain, int(block))
 
@@ -1510,11 +1546,43 @@ async def _advance_capital_flows(
     deployment_id: str,
 ) -> tuple[CapitalFlowRecord | None, str | None]:
     """Resolve this cycle's record. ``(None, detail)`` means "change nothing"."""
+    try:
+        hosted = is_hosted()
+    except Exception as exc:
+        raise CapitalFlowAttributionError(
+            deployment_id,
+            f"capital-flow deployment mode could not be resolved for {deployment_id}",
+            exc,
+        ) from exc
+
     prior = await _recover_capital_flow_record(runner, deployment_id)
 
     # Attribution gate first: an unattributable wallet is permanently
     # unmeasured no matter what the chain says.
-    if not is_canonical_deployment_id(deployment_id) or await _capital_flow_wallet_is_shared(runner, deployment_id):
+    #
+    # Hosted identity is deliberately arbitrary (the platform deployment identifier;
+    # blueprint 29), so neither its syntax nor this process's dedicated
+    # gateway proves exclusive ownership of the chain wallet.  The platform
+    # contract required to attest that binding is not available over the
+    # trusted gateway boundary yet (VIB-5917).  Fail closed under a distinct
+    # reason so fleet telemetry does not misreport "shared" as an observed
+    # fact.  This check must precede the local-id regex: a valid hosted id may
+    # coincidentally look like ``deployment:<12hex>``.
+    if hosted:
+        return poison(prior, REASON_HOSTED_OWNERSHIP_UNVERIFIED), None
+
+    if not is_canonical_deployment_id(deployment_id):
+        return poison(prior, REASON_SHARED_WALLET), None
+
+    try:
+        wallet_is_shared = await _capital_flow_wallet_is_shared(runner, deployment_id)
+    except Exception as exc:
+        raise CapitalFlowAttributionError(
+            deployment_id,
+            f"capital-flow wallet attribution scan failed for {deployment_id}",
+            exc,
+        ) from exc
+    if wallet_is_shared:
         return poison(prior, REASON_SHARED_WALLET), None
 
     # Sticky: v1 never re-baselines a poisoned era, but the record is still
@@ -1606,11 +1674,11 @@ async def _populate_capital_flows(
     from birth, and at "now" for every pre-existing deployment — never
     earlier. See :mod:`almanak.framework.runner.capital_flow_state`.
 
-    **Deliberate divergence from ``_populate_gas_spent_usd``: this never
-    raises, in any mode.** The gas aggregator reads the local ledger, so a
-    failure there is local-DB integrity damage and live mode must halt. This
-    reads a remote chain; an RPC hiccup is an expected, recoverable condition
-    that must not stop a strategy that is otherwise healthy. A failed cycle
+    **Deliberate divergence from ``_populate_gas_spent_usd``: expected remote
+    chain-read failures never raise.** The gas aggregator reads the local
+    ledger, so a failure there is local-DB integrity damage and live mode must
+    halt. This reads a remote chain; an RPC hiccup is an expected, recoverable
+    condition that must not stop a strategy that is otherwise healthy. A failed cycle
     keeps the prior record verbatim (cursor unmoved, columns unchanged) and
     stamps a ``status_detail`` so the gap is visible on the snapshot row —
     the next cycle re-scans the same window.
@@ -1618,16 +1686,26 @@ async def _populate_capital_flows(
     Known v1 gaps: native-coin transfers are not observed (ERC-20 logs only —
     VIB-4979 scope), and transfers inside tx₁'s own block fall in the
     one-block anchor window described in ``_initialize_capital_flow_era``.
+
+    Attribution-boundary failures are not remote-chain degradation: if
+    deployment mode cannot be resolved or an available backend enumeration
+    seam raises, the last measured row is no longer trustworthy.
+    ``CapitalFlowAttributionError`` therefore propagates into the runner's
+    standard accounting-failure policy. State recovery, ledger reads, and
+    unexpected producer errors propagate as ``CapitalFlowMeasurementError``
+    for the same reason. Only failures converted at a known remote I/O
+    boundary into an explicit scan status/detail degrade in place.
     """
     try:
         record, detail = await _advance_capital_flows(runner, metrics, snapshot, deployment_id=deployment_id)
-    except Exception as exc:  # noqa: BLE001 — never let a chain read break metrics
-        logger.error(
-            "capital_flows: producer failed for deployment_id=%s; keeping prior record: %s",
+    except CapitalFlowMeasurementError:
+        raise
+    except Exception as exc:
+        raise CapitalFlowMeasurementError(
             deployment_id,
+            f"capital-flow producer failed outside a known remote degradation for {deployment_id}",
             exc,
-        )
-        return
+        ) from exc
 
     if record is None:
         return

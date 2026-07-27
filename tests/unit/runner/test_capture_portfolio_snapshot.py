@@ -32,7 +32,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -41,7 +41,7 @@ from almanak.framework.portfolio import (
     PositionValue,
     ValueConfidence,
 )
-from almanak.framework.runner.runner_state import capture_portfolio_snapshot
+from almanak.framework.runner.runner_state import CapitalFlowMeasurementError, capture_portfolio_snapshot
 from almanak.framework.state.exceptions import AccountingPersistenceError
 from almanak.framework.state.state_manager import StateData
 from almanak.framework.teardown.models import PositionType
@@ -394,6 +394,26 @@ class TestPersistenceShape:
 
 
 class TestErrorPropagation:
+    @pytest.mark.asyncio
+    async def test_hosted_capital_flow_recovery_failure_propagates_through_capture(self):
+        """Capture must not persist fallback/stale metrics when suppression recovery fails."""
+        runner = _make_runner()
+        runner.state_manager.get_latest_snapshot = AsyncMock(  # type: ignore[attr-defined]
+            side_effect=ConnectionError("snapshot mirror unavailable")
+        )
+        runner.state_manager.sum_ledger_gas_usd = AsyncMock(return_value=Decimal("0"))  # type: ignore[attr-defined]
+        runner._portfolio_valuer.value.return_value = _make_snapshot()
+        strategy = _make_strategy()
+
+        with (
+            patch("almanak.framework.runner.runner_state.is_hosted", return_value=True),
+            pytest.raises(CapitalFlowMeasurementError, match="outside a known remote degradation"),
+        ):
+            await capture_portfolio_snapshot(runner, strategy, iteration_number=1)
+
+        runner.state_manager.save_portfolio_snapshot.assert_not_awaited()
+        runner.state_manager.save_portfolio_metrics.assert_not_awaited()
+
     @pytest.mark.asyncio
     async def test_accounting_persistence_error_propagates(self):
         runner = _make_runner()
