@@ -3,7 +3,8 @@
 Every serve that flows through a backtest data lane — price ticks, pool
 volume/TVL days, funding history, OHLCV views, and (future) lending APY /
 pool-state history — appends one manifest observation: which lane served
-which key from which source, over which time range, and with what outcome.
+which key to which consumer, from which source, over which time range, and
+with what outcome.
 The manifest is the run's single lane-keyed provenance record; the two
 pre-existing run structures (``DataQualityTracker``,
 ``DataCoverageMetrics``) remain untouched consumers-to-unify (survey §4).
@@ -16,7 +17,7 @@ Outcomes:
 * ``refused`` — the lane declined to answer (strict mode raise, contract
   refusal) and the caller saw an error instead of a value.
 
-Entries are AGGREGATED per ``(lane, key, source, outcome, ladder)``: a
+Entries are AGGREGATED per ``(lane, consumer, key, source, outcome, ladder)``: a
 90-day hourly run records one row per distinct serve shape with a count
 and a first/last time range, not one row per tick. The source-ladder order
 in effect is recorded PER-SERVE (per aggregate row) so the future as-of
@@ -37,6 +38,8 @@ from datetime import UTC, date, datetime
 from typing import Any
 
 __all__ = [
+    "CONSUMER_POSITION_ACCRUAL",
+    "CONSUMER_STRATEGY_DECISION",
     "DEFAULT_SOURCE_LADDER",
     "LANE_FUNDING",
     "LANE_LENDING_APY",
@@ -69,6 +72,12 @@ LANE_POOL_STATE = "pool_state"
 OUTCOME_SERVED = "served"
 OUTCOME_DEGRADED = "degraded"
 OUTCOME_REFUSED = "refused"
+
+#: Funding data has two independently meaningful consumers. Keeping them
+#: separate prevents a measured accrual read from masking a fallback value
+#: served to strategy decision logic, or vice versa.
+CONSUMER_STRATEGY_DECISION = "strategy_decision"
+CONSUMER_POSITION_ACCRUAL = "position_accrual"
 
 #: The single configurable source-ladder order (highest-fidelity first).
 #: As-of pinning (pending human decision on ordering) will consume the
@@ -111,7 +120,7 @@ class RunDataManifest:
     def __init__(self, *, source_ladder: Sequence[str] = DEFAULT_SOURCE_LADDER) -> None:
         self._lock = threading.Lock()
         self.source_ladder: tuple[str, ...] = tuple(source_ladder)
-        self._entries: dict[tuple[str, str, str, str, tuple[str, ...]], _ManifestAggregate] = {}
+        self._entries: dict[tuple[str, str, str, str, str, tuple[str, ...]], _ManifestAggregate] = {}
         self._dropped = 0
 
     def record(
@@ -119,6 +128,7 @@ class RunDataManifest:
         *,
         lane: str,
         key: str,
+        consumer: str = "",
         source: str,
         outcome: str,
         at: datetime | date | None = None,
@@ -129,8 +139,10 @@ class RunDataManifest:
     ) -> None:
         """Append one serve observation.
 
-        ``at`` is a point-in-time serve (price tick, funding hour); ``start``
-        / ``end`` describe a range serve (a pool-day). ``ladder`` records the
+        ``consumer`` identifies the subsystem using the value when that
+        distinction affects run interpretation. ``at`` is a point-in-time
+        serve (price tick, funding hour); ``start`` / ``end`` describe a range
+        serve (a pool-day). ``ladder`` records the
         source-ladder order in effect for THIS serve; ``None`` uses the
         manifest's configured order. Never raises: provenance bookkeeping
         must not out-fail the lane it observes.
@@ -138,7 +150,7 @@ class RunDataManifest:
         first = _time_marker(start if start is not None else at)
         last = _time_marker(end if end is not None else at)
         ladder_key = tuple(ladder) if ladder is not None else self.source_ladder
-        entry_key = (str(lane), str(key), str(source), str(outcome), ladder_key)
+        entry_key = (str(lane), str(consumer), str(key), str(source), str(outcome), ladder_key)
         with self._lock:
             aggregate = self._entries.get(entry_key)
             if aggregate is None:
@@ -167,6 +179,7 @@ class RunDataManifest:
             return [
                 {
                     "lane": lane,
+                    "consumer": consumer,
                     "key": key,
                     "source": source,
                     "outcome": outcome,
@@ -176,15 +189,37 @@ class RunDataManifest:
                     "last": aggregate.last,
                     "detail": aggregate.detail,
                 }
-                for (lane, key, source, outcome, ladder), aggregate in items
+                for (lane, consumer, key, source, outcome, ladder), aggregate in items
             ]
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-safe manifest payload (str/int/list/None leaves only)."""
+        entries = self.entries()
+        counts: dict[tuple[str, str], dict[str, int | str]] = {}
+        for entry in entries:
+            summary_key = (entry["lane"], entry["consumer"])
+            summary = counts.setdefault(
+                summary_key,
+                {
+                    "lane": entry["lane"],
+                    "consumer": entry["consumer"],
+                    "total": 0,
+                    OUTCOME_SERVED: 0,
+                    OUTCOME_DEGRADED: 0,
+                    OUTCOME_REFUSED: 0,
+                },
+            )
+            count = entry["count"]
+            summary["total"] = int(summary["total"]) + count
+            outcome = entry["outcome"]
+            if outcome in (OUTCOME_SERVED, OUTCOME_DEGRADED, OUTCOME_REFUSED):
+                summary[outcome] = int(summary[outcome]) + count
+
         payload: dict[str, Any] = {
-            "schema_version": 1,
+            "schema_version": 2,
             "source_ladder": list(self.source_ladder),
-            "entries": self.entries(),
+            "summary": [counts[key] for key in sorted(counts)],
+            "entries": entries,
         }
         with self._lock:
             if self._dropped:

@@ -604,6 +604,11 @@ async def execute_iteration_loop(
     funding_rate_source = SnapshotFundingRateSource(
         chain=config.chain,
         data_config=backtester.data_config,
+        # Snapshot funding reads execute in MarketSnapshot's async bridge
+        # worker, where the broker context variable is unavailable. Pass the
+        # thread-safe run manifest explicitly so decision-time serves are not
+        # lost while position-accrual serves remain broker-routed.
+        manifest=state.data_broker.manifest if state.data_broker is not None else None,
     )
 
     # Stable for the whole run: provider registrations happen during

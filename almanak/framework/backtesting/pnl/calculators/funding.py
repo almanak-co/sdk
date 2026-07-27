@@ -50,6 +50,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 
+from almanak.framework.backtesting.config import DEFAULT_FUNDING_FALLBACK_RATE
 from almanak.framework.backtesting.pnl.portfolio import PositionType, SimulatedPosition
 
 
@@ -107,7 +108,8 @@ class FundingRateHandler:
     - For PERP_SHORT: positive funding rate means you RECEIVE (positive payment)
 
     Attributes:
-        default_funding_rate: Default hourly funding rate for simulation (default 0.0001 = 0.01%)
+        default_funding_rate: Default hourly funding rate for simulation
+            (default 0.00001 = 0.001%, 8.76% simple annualized)
         funding_interval_hours: How often funding is applied (default 1 hour for GMX, 8 hours for others)
         max_funding_rate: Maximum absolute funding rate cap (default 0.01 = 1%)
 
@@ -133,7 +135,7 @@ class FundingRateHandler:
         # payment = +50000 * (0.002 - 0.001) = +$50 (received)
     """
 
-    default_funding_rate: Decimal = Decimal("0.0001")  # 0.01% per hour
+    default_funding_rate: Decimal = DEFAULT_FUNDING_FALLBACK_RATE
     funding_interval_hours: int = 1  # GMX uses hourly funding
     max_funding_rate: Decimal = Decimal("0.01")  # 1% max per interval
     protocol_configs: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -370,7 +372,8 @@ class FundingCalculator:
 
     Attributes:
         funding_rate_source: Source of funding rate data (default FIXED)
-        default_funding_rate: Default hourly funding rate (default 0.0001 = 0.01%)
+        default_funding_rate: Default hourly funding rate
+            (default 0.00001 = 0.001%, 8.76% simple annualized)
         protocol_rates: Protocol-specific default rates
         min_funding_rate: Minimum funding rate floor
         max_funding_rate: Maximum funding rate cap
@@ -391,7 +394,7 @@ class FundingCalculator:
     """
 
     funding_rate_source: FundingRateSource = FundingRateSource.FIXED
-    default_funding_rate: Decimal = Decimal("0.0001")  # 0.01% per hour
+    default_funding_rate: Decimal = DEFAULT_FUNDING_FALLBACK_RATE
     protocol_rates: dict[str, Decimal] = field(default_factory=dict)
     min_funding_rate: Decimal = Decimal("-0.01")  # -1% per hour (shorts pay longs)
     max_funding_rate: Decimal = Decimal("0.01")  # +1% per hour (longs pay shorts)
@@ -400,9 +403,9 @@ class FundingCalculator:
         """Initialize protocol-specific funding rates."""
         if not self.protocol_rates:
             self.protocol_rates = {
-                "gmx": Decimal("0.0001"),  # 0.01% per hour
-                "gmx_v2": Decimal("0.0001"),
-                "hyperliquid": Decimal("0.0001"),
+                "gmx": DEFAULT_FUNDING_FALLBACK_RATE,
+                "gmx_v2": DEFAULT_FUNDING_FALLBACK_RATE,
+                "hyperliquid": DEFAULT_FUNDING_FALLBACK_RATE,
                 "binance_perp": Decimal("0.000125"),  # 0.0125% per hour (~0.1% per 8h)
                 "bybit": Decimal("0.000125"),
                 "dydx": Decimal("0.0001"),

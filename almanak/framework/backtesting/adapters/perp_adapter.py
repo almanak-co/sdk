@@ -57,6 +57,7 @@ from almanak.framework.backtesting.adapters.base import (
     StrategyBacktestConfig,
     register_adapter,
 )
+from almanak.framework.backtesting.config import DEFAULT_FUNDING_FALLBACK_RATE
 from almanak.framework.backtesting.exceptions import HistoricalDataUnavailableError
 from almanak.framework.backtesting.models import LiquidationEvent
 from almanak.framework.backtesting.pnl.calculators.funding import (
@@ -120,7 +121,7 @@ class PerpBacktestConfig(StrategyBacktestConfig):
         maintenance_margin_ratio: Maintenance margin for liquidation threshold.
             Default 0.05 (5%).
         default_funding_rate: Default hourly funding rate when not provided.
-            Default 0.0001 (0.01% per hour).
+            Default 0.00001 (0.001% per hour, 8.76% simple annualized).
         funding_rate_source: Source for funding rate data:
             - "fixed": Use default_funding_rate for all calculations
             - "historical": Use historical funding rates from data provider
@@ -153,8 +154,8 @@ class PerpBacktestConfig(StrategyBacktestConfig):
     maintenance_margin_ratio: Decimal = Decimal("0.05")
     """Maintenance margin for liquidation (0.05 = 5%)."""
 
-    default_funding_rate: Decimal = Decimal("0.0001")
-    """Default hourly funding rate (0.01% per hour)."""
+    default_funding_rate: Decimal = DEFAULT_FUNDING_FALLBACK_RATE
+    """Default hourly funding rate (0.001% per hour)."""
 
     funding_rate_source: Literal["fixed", "historical", "protocol"] = "fixed"
     """Source for funding rate data."""
@@ -256,7 +257,7 @@ class PerpBacktestConfig(StrategyBacktestConfig):
             liquidation_model_enabled=data.get("liquidation_model_enabled", True),
             initial_margin_ratio=Decimal(str(data.get("initial_margin_ratio", "0.1"))),
             maintenance_margin_ratio=Decimal(str(data.get("maintenance_margin_ratio", "0.05"))),
-            default_funding_rate=Decimal(str(data.get("default_funding_rate", "0.0001"))),
+            default_funding_rate=Decimal(str(data.get("default_funding_rate", DEFAULT_FUNDING_FALLBACK_RATE))),
             funding_rate_source=data.get("funding_rate_source", "fixed"),
             liquidation_warning_threshold=Decimal(str(data.get("liquidation_warning_threshold", "0.10"))),
             liquidation_critical_threshold=Decimal(str(data.get("liquidation_critical_threshold", "0.05"))),
@@ -1415,11 +1416,12 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
     def _record_funding_serve(self, lookup: _FundingLookup, outcome: str, source: str, detail: str = "") -> None:
         """Stamp the run manifest with a funding-lane observation (ALM-2943)."""
         from almanak.framework.backtesting.pnl.data_broker import record_data_serve
-        from almanak.framework.backtesting.pnl.data_manifest import LANE_FUNDING
+        from almanak.framework.backtesting.pnl.data_manifest import CONSUMER_POSITION_ACCRUAL, LANE_FUNDING
 
         record_data_serve(
             lane=LANE_FUNDING,
             key=lookup.market,
+            consumer=CONSUMER_POSITION_ACCRUAL,
             source=source,
             outcome=outcome,
             at=lookup.timestamp,

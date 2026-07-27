@@ -53,6 +53,11 @@ from almanak.framework.backtesting.pnl.calculators.impermanent_loss import (
 )
 from almanak.framework.backtesting.pnl.calculators.interest import InterestCalculator
 from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
+from almanak.framework.backtesting.pnl.data_manifest import (
+    CONSUMER_STRATEGY_DECISION,
+    LANE_FUNDING,
+    OUTCOME_DEGRADED,
+)
 from almanak.framework.backtesting.pnl.data_provider import MarketState
 from almanak.framework.backtesting.pnl.metrics_calculator import (
     calculate_max_drawdown,
@@ -1342,6 +1347,54 @@ def test_perp_funding_gated_strategy_can_enter() -> None:
     assert all(rate == fallback for rate in strategy.rates_seen)
     assert result.metrics.total_trades == 1
     assert result.trades[0].success
+
+
+@pytest.mark.trust_cell("perp:funding_fallback_provenance")
+def test_perp_default_funding_fallback_is_exact_and_visible() -> None:
+    """The default decision rate is 8.76% annualized and never looks measured."""
+    strategy = FundingGatedPerpStrategy()
+    result = run_backtest(
+        strategy,
+        flat_series(8),
+        hours=4,
+        strategy_type="perp",
+        data_config=BacktestDataConfig(use_historical_funding=False),
+    )
+
+    assert result.success
+    expected_hourly = Decimal("0.00001")
+    assert expected_hourly * Decimal("8760") * Decimal("100") == Decimal("8.76000")
+    assert strategy.rates_seen
+    assert all(rate == expected_hourly for rate in strategy.rates_seen)
+    assert result.data_manifest is not None
+
+    decision_entries = [
+        entry
+        for entry in result.data_manifest["entries"]
+        if entry["lane"] == LANE_FUNDING and entry["consumer"] == CONSUMER_STRATEGY_DECISION
+    ]
+    assert len(decision_entries) == 1
+    (entry,) = decision_entries
+    assert entry["source"] == "fixed:configured"
+    assert entry["outcome"] == OUTCOME_DEGRADED
+    assert entry["count"] == len(strategy.rates_seen)
+    assert "funding_rate_hourly=0.00001" in entry["detail"]
+
+    decision_summary = [
+        summary
+        for summary in result.data_manifest["summary"]
+        if summary["lane"] == LANE_FUNDING and summary["consumer"] == CONSUMER_STRATEGY_DECISION
+    ]
+    assert decision_summary == [
+        {
+            "lane": LANE_FUNDING,
+            "consumer": CONSUMER_STRATEGY_DECISION,
+            "total": len(strategy.rates_seen),
+            "served": 0,
+            "degraded": len(strategy.rates_seen),
+            "refused": 0,
+        }
+    ]
 
 
 @pytest.mark.trust_cell("perp:funding_lane_coherence")

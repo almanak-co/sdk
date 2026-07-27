@@ -107,7 +107,7 @@ class TestPerpBacktestConfig:
         assert config.liquidation_model_enabled is True
         assert config.initial_margin_ratio == Decimal("0.1")
         assert config.maintenance_margin_ratio == Decimal("0.05")
-        assert config.default_funding_rate == Decimal("0.0001")
+        assert config.default_funding_rate == Decimal("0.00001")
         assert config.funding_rate_source == "fixed"
         assert config.liquidation_warning_threshold == Decimal("0.10")
         assert config.liquidation_critical_threshold == Decimal("0.05")
@@ -975,8 +975,8 @@ class TestPositionValuation:
 
         # Value = collateral + unrealized PnL (0) + funding received
         # With constant price, unrealized PnL is 0
-        # Funding received = $50,000 * 0.0001 * 24 = $120
-        expected_value = Decimal("10000") + Decimal("120")
+        # Funding received = $50,000 * 0.00001 * 24 = $12
+        expected_value = Decimal("10000") + Decimal("12")
         assert value == pytest.approx(expected_value, rel=Decimal("0.01"))
 
     def test_strict_value_missing_token_price_raises(self) -> None:
@@ -1338,7 +1338,7 @@ class TestHistoricalFundingRateIntegration:
         )
 
         # Should fall back to default rate
-        assert rate == Decimal("0.0001")  # DEFAULT_FUNDING_RATES["gmx"]
+        assert rate == Decimal("0.00001")
         assert source == "fallback:no_timestamp"
 
     def test_historical_rate_applied_to_position(self, caplog: pytest.LogCaptureFixture) -> None:

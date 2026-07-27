@@ -13,6 +13,7 @@ from decimal import Decimal
 
 import pytest
 
+from almanak.framework.backtesting.config import DEFAULT_FUNDING_FALLBACK_RATE
 from almanak.framework.backtesting.pnl.calculators.funding import FundingCalculator
 from almanak.framework.backtesting.pnl.data_provider import MarketState
 from almanak.framework.backtesting.pnl.portfolio import (
@@ -44,9 +45,9 @@ class TestFundingAccumulationMultipleTicks:
 
         Scenario:
         - PERP_LONG position with $50,000 notional
-        - 0.01% hourly funding rate (longs pay)
+        - 0.001% hourly funding rate (longs pay)
         - 24 hours of mark_to_market calls (hourly)
-        - Expected: ~$120 in funding paid
+        - Expected: ~$12 in funding paid
         """
         entry_time = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
         portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("100000"))
@@ -74,19 +75,15 @@ class TestFundingAccumulationMultipleTicks:
         # Verify funding has accumulated
         position = portfolio.positions[0]
 
-        # Expected funding: $50,000 * 0.0001 * 24 = $120 (paid by long)
-        expected_funding_paid = Decimal("50000") * Decimal("0.0001") * Decimal("24")
+        # Expected funding: $50,000 * 0.00001 * 24 = $12 (paid by long)
+        expected_funding_paid = Decimal("50000") * DEFAULT_FUNDING_FALLBACK_RATE * Decimal("24")
 
         # Long pays funding when rate is positive, so accumulated_funding should be negative
         assert position.accumulated_funding < Decimal("0")
-        assert abs(position.accumulated_funding) == pytest.approx(
-            expected_funding_paid, rel=Decimal("0.01")
-        )
+        assert abs(position.accumulated_funding) == pytest.approx(expected_funding_paid, rel=Decimal("0.01"))
 
         # Cumulative funding paid should track the total
-        assert position.cumulative_funding_paid == pytest.approx(
-            expected_funding_paid, rel=Decimal("0.01")
-        )
+        assert position.cumulative_funding_paid == pytest.approx(expected_funding_paid, rel=Decimal("0.01"))
         assert position.cumulative_funding_received == Decimal("0")
 
     def test_funding_accumulates_over_24_hours_short(self):
@@ -94,9 +91,9 @@ class TestFundingAccumulationMultipleTicks:
 
         Scenario:
         - PERP_SHORT position with $50,000 notional
-        - 0.01% hourly funding rate (shorts receive)
+        - 0.001% hourly funding rate (shorts receive)
         - 24 hours of mark_to_market calls (hourly)
-        - Expected: ~$120 in funding received
+        - Expected: ~$12 in funding received
         """
         entry_time = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
         portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("100000"))
@@ -124,19 +121,15 @@ class TestFundingAccumulationMultipleTicks:
         # Verify funding has accumulated
         position = portfolio.positions[0]
 
-        # Expected funding: $50,000 * 0.0001 * 24 = $120 (received by short)
-        expected_funding_received = Decimal("50000") * Decimal("0.0001") * Decimal("24")
+        # Expected funding: $50,000 * 0.00001 * 24 = $12 (received by short)
+        expected_funding_received = Decimal("50000") * DEFAULT_FUNDING_FALLBACK_RATE * Decimal("24")
 
         # Short receives funding when rate is positive, so accumulated_funding should be positive
         assert position.accumulated_funding > Decimal("0")
-        assert position.accumulated_funding == pytest.approx(
-            expected_funding_received, rel=Decimal("0.01")
-        )
+        assert position.accumulated_funding == pytest.approx(expected_funding_received, rel=Decimal("0.01"))
 
         # Cumulative funding received should track the total
-        assert position.cumulative_funding_received == pytest.approx(
-            expected_funding_received, rel=Decimal("0.01")
-        )
+        assert position.cumulative_funding_received == pytest.approx(expected_funding_received, rel=Decimal("0.01"))
         assert position.cumulative_funding_paid == Decimal("0")
 
     def test_funding_accumulates_over_7_days(self):
@@ -144,9 +137,9 @@ class TestFundingAccumulationMultipleTicks:
 
         Scenario:
         - PERP_LONG position with $100,000 notional
-        - 0.01% hourly funding rate
+        - 0.001% hourly funding rate
         - 7 days of daily mark_to_market calls
-        - Expected: ~$1,680 in funding paid (100000 * 0.0001 * 168 hours)
+        - Expected: ~$168 in funding paid (100000 * 0.00001 * 168 hours)
         """
         entry_time = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
         portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("200000"))
@@ -173,12 +166,10 @@ class TestFundingAccumulationMultipleTicks:
 
         position = portfolio.positions[0]
 
-        # Expected: $100,000 * 0.0001 * 168 hours = $1,680
-        expected_funding = Decimal("100000") * Decimal("0.0001") * Decimal("168")
+        # Expected: $100,000 * 0.00001 * 168 hours = $168
+        expected_funding = Decimal("100000") * DEFAULT_FUNDING_FALLBACK_RATE * Decimal("168")
 
-        assert position.cumulative_funding_paid == pytest.approx(
-            expected_funding, rel=Decimal("0.01")
-        )
+        assert position.cumulative_funding_paid == pytest.approx(expected_funding, rel=Decimal("0.01"))
 
     def test_funding_with_variable_time_intervals(self):
         """Test funding accumulation with irregular time intervals.
@@ -217,12 +208,10 @@ class TestFundingAccumulationMultipleTicks:
         position = portfolio.positions[0]
 
         # Total time: 24 hours
-        # Expected: $15,000 * 0.0001 * 24 = $36 received
-        expected_funding = Decimal("15000") * Decimal("0.0001") * Decimal("24")
+        # Expected: $15,000 * 0.00001 * 24 = $3.60 received
+        expected_funding = Decimal("15000") * DEFAULT_FUNDING_FALLBACK_RATE * Decimal("24")
 
-        assert position.cumulative_funding_received == pytest.approx(
-            expected_funding, rel=Decimal("0.01")
-        )
+        assert position.cumulative_funding_received == pytest.approx(expected_funding, rel=Decimal("0.01"))
 
 
 class TestPositiveFundingRates:
@@ -239,7 +228,7 @@ class TestPositiveFundingRates:
             leverage=Decimal("2"),  # $10,000 notional
             entry_price=Decimal("2000"),
             entry_time=entry_time,
-            protocol="gmx",  # GMX uses 0.01% hourly = positive rate
+            protocol="gmx",  # Generic GMX fallback is 0.001% hourly.
         )
         portfolio.positions.append(long_position)
 
@@ -481,11 +470,13 @@ class TestLongVsShortFunding:
         for p in positions:
             portfolio.positions.append(p)
 
-        market_state = MockMarketState({
-            "ETH": Decimal("2000"),
-            "BTC": Decimal("40000"),
-            "SOL": Decimal("100"),
-        })
+        market_state = MockMarketState(
+            {
+                "ETH": Decimal("2000"),
+                "BTC": Decimal("40000"),
+                "SOL": Decimal("100"),
+            }
+        )
 
         # Initial equity point
         portfolio.mark_to_market(market_state, entry_time)
@@ -496,12 +487,10 @@ class TestLongVsShortFunding:
         metrics = portfolio.get_metrics()
 
         # Total notional: $50,000 + $10,000 + $20,000 = $80,000
-        # Expected funding: $80,000 * 0.0001 * 24 = $192
-        expected_funding = Decimal("80000") * Decimal("0.0001") * Decimal("24")
+        # Expected funding: $80,000 * 0.00001 * 24 = $19.20
+        expected_funding = Decimal("80000") * DEFAULT_FUNDING_FALLBACK_RATE * Decimal("24")
 
-        assert metrics.total_funding_paid == pytest.approx(
-            expected_funding, rel=Decimal("0.01")
-        )
+        assert metrics.total_funding_paid == pytest.approx(expected_funding, rel=Decimal("0.01"))
         assert metrics.total_funding_received == Decimal("0")
 
 
@@ -533,12 +522,10 @@ class TestTotalFundingMetricsAccuracy:
 
         metrics = portfolio.get_metrics()
 
-        # Expected: $50,000 * 0.0001 * 48 = $240
-        expected_paid = Decimal("50000") * Decimal("0.0001") * Decimal("48")
+        # Expected: $50,000 * 0.00001 * 48 = $24
+        expected_paid = Decimal("50000") * DEFAULT_FUNDING_FALLBACK_RATE * Decimal("48")
 
-        assert metrics.total_funding_paid == pytest.approx(
-            expected_paid, rel=Decimal("0.01")
-        )
+        assert metrics.total_funding_paid == pytest.approx(expected_paid, rel=Decimal("0.01"))
         assert metrics.total_funding_received == Decimal("0")
 
     def test_metrics_total_funding_received_short_position(self):
@@ -566,12 +553,10 @@ class TestTotalFundingMetricsAccuracy:
 
         metrics = portfolio.get_metrics()
 
-        # Expected: $50,000 * 0.0001 * 48 = $240
-        expected_received = Decimal("50000") * Decimal("0.0001") * Decimal("48")
+        # Expected: $50,000 * 0.00001 * 48 = $24
+        expected_received = Decimal("50000") * DEFAULT_FUNDING_FALLBACK_RATE * Decimal("48")
 
-        assert metrics.total_funding_received == pytest.approx(
-            expected_received, rel=Decimal("0.01")
-        )
+        assert metrics.total_funding_received == pytest.approx(expected_received, rel=Decimal("0.01"))
         assert metrics.total_funding_paid == Decimal("0")
 
     def test_metrics_include_closed_positions(self):
@@ -605,13 +590,11 @@ class TestTotalFundingMetricsAccuracy:
         # Get metrics after position is closed
         metrics = portfolio.get_metrics()
 
-        # Expected: $50,000 * 0.0001 * 24 = $120
-        expected_received = Decimal("50000") * Decimal("0.0001") * Decimal("24")
+        # Expected: $50,000 * 0.00001 * 24 = $12
+        expected_received = Decimal("50000") * DEFAULT_FUNDING_FALLBACK_RATE * Decimal("24")
 
         # Funding from closed position should be included
-        assert metrics.total_funding_received == pytest.approx(
-            expected_received, rel=Decimal("0.01")
-        )
+        assert metrics.total_funding_received == pytest.approx(expected_received, rel=Decimal("0.01"))
 
     def test_metrics_mixed_long_short_positions(self):
         """Test metrics with a mix of long and short positions.
@@ -644,10 +627,12 @@ class TestTotalFundingMetricsAccuracy:
         portfolio.positions.append(long_position)
         portfolio.positions.append(short_position)
 
-        market_state = MockMarketState({
-            "ETH": Decimal("2000"),
-            "BTC": Decimal("40000"),
-        })
+        market_state = MockMarketState(
+            {
+                "ETH": Decimal("2000"),
+                "BTC": Decimal("40000"),
+            }
+        )
 
         # Record initial equity
         portfolio.mark_to_market(market_state, entry_time)
@@ -657,18 +642,14 @@ class TestTotalFundingMetricsAccuracy:
 
         metrics = portfolio.get_metrics()
 
-        # Long pays: $60,000 * 0.0001 * 24 = $144
-        expected_paid = Decimal("60000") * Decimal("0.0001") * Decimal("24")
+        # Long pays: $60,000 * 0.00001 * 24 = $14.40
+        expected_paid = Decimal("60000") * DEFAULT_FUNDING_FALLBACK_RATE * Decimal("24")
 
-        # Short receives: $40,000 * 0.0001 * 24 = $96
-        expected_received = Decimal("40000") * Decimal("0.0001") * Decimal("24")
+        # Short receives: $40,000 * 0.00001 * 24 = $9.60
+        expected_received = Decimal("40000") * DEFAULT_FUNDING_FALLBACK_RATE * Decimal("24")
 
-        assert metrics.total_funding_paid == pytest.approx(
-            expected_paid, rel=Decimal("0.01")
-        )
-        assert metrics.total_funding_received == pytest.approx(
-            expected_received, rel=Decimal("0.01")
-        )
+        assert metrics.total_funding_paid == pytest.approx(expected_paid, rel=Decimal("0.01"))
+        assert metrics.total_funding_received == pytest.approx(expected_received, rel=Decimal("0.01"))
 
     def test_metrics_serialization_roundtrip(self):
         """Test that funding metrics survive serialization roundtrip."""
@@ -758,12 +739,10 @@ class TestFundingEdgeCases:
 
         position = portfolio.positions[0]
 
-        # Expected: $100 * 0.0001 * 24 = $0.24
-        expected_funding = Decimal("100") * Decimal("0.0001") * Decimal("24")
+        # Expected: $100 * 0.00001 * 24 = $0.024
+        expected_funding = Decimal("100") * DEFAULT_FUNDING_FALLBACK_RATE * Decimal("24")
 
-        assert position.cumulative_funding_paid == pytest.approx(
-            expected_funding, rel=Decimal("0.01")
-        )
+        assert position.cumulative_funding_paid == pytest.approx(expected_funding, rel=Decimal("0.01"))
 
     def test_very_large_position_funding(self):
         """Test funding calculation for very large positions."""
@@ -787,12 +766,10 @@ class TestFundingEdgeCases:
 
         position = portfolio.positions[0]
 
-        # Expected: $1,000,000 * 0.0001 * 24 = $2,400
-        expected_funding = Decimal("1000000") * Decimal("0.0001") * Decimal("24")
+        # Expected: $1,000,000 * 0.00001 * 24 = $240
+        expected_funding = Decimal("1000000") * DEFAULT_FUNDING_FALLBACK_RATE * Decimal("24")
 
-        assert position.cumulative_funding_paid == pytest.approx(
-            expected_funding, rel=Decimal("0.01")
-        )
+        assert position.cumulative_funding_paid == pytest.approx(expected_funding, rel=Decimal("0.01"))
 
     def test_funding_with_price_change(self):
         """Test that funding is calculated based on notional, not affected by price change."""
@@ -817,11 +794,9 @@ class TestFundingEdgeCases:
         position = portfolio.positions[0]
 
         # Funding still based on entry notional of $50,000
-        expected_funding = Decimal("50000") * Decimal("0.0001") * Decimal("24")
+        expected_funding = Decimal("50000") * DEFAULT_FUNDING_FALLBACK_RATE * Decimal("24")
 
-        assert position.cumulative_funding_paid == pytest.approx(
-            expected_funding, rel=Decimal("0.01")
-        )
+        assert position.cumulative_funding_paid == pytest.approx(expected_funding, rel=Decimal("0.01"))
 
     def test_protocol_specific_funding_rate(self):
         """Test that different protocols can have different funding rates."""
@@ -831,8 +806,8 @@ class TestFundingEdgeCases:
         gmx_rate = calculator.get_funding_rate_for_protocol("gmx")
         binance_rate = calculator.get_funding_rate_for_protocol("binance_perp")
 
-        # GMX: 0.01% per hour
-        assert gmx_rate == Decimal("0.0001")
+        # Generic GMX fallback: 0.001% per hour
+        assert gmx_rate == DEFAULT_FUNDING_FALLBACK_RATE
 
         # Binance: ~0.0125% per hour (0.1% per 8h / 8)
         assert binance_rate == Decimal("0.000125")

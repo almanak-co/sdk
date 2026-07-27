@@ -25,12 +25,15 @@ from almanak.framework.backtesting.pnl.data_broker import (
     record_data_serve,
 )
 from almanak.framework.backtesting.pnl.data_manifest import (
+    CONSUMER_POSITION_ACCRUAL,
+    CONSUMER_STRATEGY_DECISION,
     DEFAULT_SOURCE_LADDER,
     LANE_FUNDING,
     LANE_OHLCV,
     LANE_POOL_VOLUME,
     LANE_PRICE,
     OUTCOME_DEGRADED,
+    OUTCOME_REFUSED,
     OUTCOME_SERVED,
     RunDataManifest,
 )
@@ -68,6 +71,52 @@ class TestRunDataManifest:
         entries = manifest.entries()
         assert len(entries) == 2
         assert {e["outcome"] for e in entries} == {OUTCOME_SERVED, OUTCOME_DEGRADED}
+
+    def test_funding_consumers_are_distinct_and_summarized(self):
+        manifest = RunDataManifest()
+        manifest.record(
+            lane=LANE_FUNDING,
+            key="ETH-USD",
+            consumer=CONSUMER_STRATEGY_DECISION,
+            source="fixed:configured",
+            outcome=OUTCOME_DEGRADED,
+        )
+        manifest.record(
+            lane=LANE_FUNDING,
+            key="ETH-USD",
+            consumer=CONSUMER_POSITION_ACCRUAL,
+            source="historical:gateway",
+            outcome=OUTCOME_SERVED,
+        )
+        manifest.record(
+            lane=LANE_FUNDING,
+            key="ETH-USD",
+            consumer=CONSUMER_STRATEGY_DECISION,
+            source="",
+            outcome=OUTCOME_REFUSED,
+        )
+
+        payload = manifest.to_dict()
+
+        assert len(payload["entries"]) == 3
+        assert payload["summary"] == [
+            {
+                "lane": LANE_FUNDING,
+                "consumer": CONSUMER_POSITION_ACCRUAL,
+                "total": 1,
+                "served": 1,
+                "degraded": 0,
+                "refused": 0,
+            },
+            {
+                "lane": LANE_FUNDING,
+                "consumer": CONSUMER_STRATEGY_DECISION,
+                "total": 2,
+                "served": 0,
+                "degraded": 1,
+                "refused": 1,
+            },
+        ]
 
     def test_date_range_serves_use_start_end(self):
         manifest = RunDataManifest()
@@ -114,7 +163,7 @@ class TestRunDataManifest:
         )
         payload = manifest.to_dict()
         round_tripped = json.loads(json.dumps(payload))
-        assert round_tripped["schema_version"] == 1
+        assert round_tripped["schema_version"] == 2
         assert round_tripped["entries"][0]["lane"] == LANE_OHLCV
 
 
@@ -236,7 +285,7 @@ class TestManifestOnBacktestResult:
         assert result.error is None
         manifest = result.data_manifest
         assert manifest is not None
-        assert manifest["schema_version"] == 1
+        assert manifest["schema_version"] == 2
         assert manifest["source_ladder"] == list(DEFAULT_SOURCE_LADDER)
         lanes = {entry["lane"] for entry in manifest["entries"]}
         assert LANE_PRICE in lanes
@@ -275,9 +324,7 @@ class TestManifestOnBacktestResult:
         result = await backtester.backtest(_RefusedCandleStrategy(), _config(4))
 
         assert result.data_manifest is not None
-        refused = [
-            e for e in result.data_manifest["entries"] if e["lane"] == LANE_OHLCV and e["outcome"] == "refused"
-        ]
+        refused = [e for e in result.data_manifest["entries"] if e["lane"] == LANE_OHLCV and e["outcome"] == "refused"]
         assert refused, result.data_manifest["entries"]
         (row,) = refused
         assert row["key"] == "DOGE@1h"
@@ -293,9 +340,7 @@ class TestMissingPriceStamps:
     def test_strict_missing_price_stamps_refused(self):
         from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
 
-        portfolio = SimulatedPortfolio(
-            initial_capital_usd=Decimal("0"), cash_usd=Decimal("0"), chain="arbitrum"
-        )
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"), cash_usd=Decimal("0"), chain="arbitrum")
         broker = BacktestDataBroker()
         with data_broker_scope(broker):
             with pytest.raises(ValueError, match="strict_price_mode"):
@@ -315,9 +360,7 @@ class TestMissingPriceStamps:
     def test_nonstrict_missing_price_stamps_degraded(self):
         from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
 
-        portfolio = SimulatedPortfolio(
-            initial_capital_usd=Decimal("0"), cash_usd=Decimal("0"), chain="arbitrum"
-        )
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"), cash_usd=Decimal("0"), chain="arbitrum")
         broker = BacktestDataBroker()
         with data_broker_scope(broker):
             portfolio._handle_missing_price(

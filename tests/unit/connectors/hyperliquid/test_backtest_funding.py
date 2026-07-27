@@ -47,7 +47,7 @@ class TestHyperliquidFundingProviderInitialization:
         """Test provider initializes with default settings."""
         provider = HyperliquidFundingProvider()
         assert provider.config.requests_per_minute == DEFAULT_REQUESTS_PER_MINUTE
-        assert provider.config.fallback_rate == Decimal("0.0001")
+        assert provider.config.fallback_rate == Decimal("0.00001")
         assert provider._owns_rate_limiter is True
 
     def test_init_with_custom_config(self):
@@ -71,7 +71,7 @@ class TestHyperliquidFundingProviderInitialization:
         ("config", "expected_fallback"),
         [
             (BacktestProviderConfig(funding_fallback_rate=Decimal("0.0007")), Decimal("0.0007")),
-            (BacktestProviderConfig(), Decimal("0.0001")),
+            (BacktestProviderConfig(), Decimal("0.00001")),
         ],
     )
     def test_for_backtest_maps_fallback_rate(
@@ -273,5 +273,5 @@ class TestContextManager:
     async def test_context_manager(self):
         """The provider supports async-with (close is a compat no-op)."""
         async with HyperliquidFundingProvider() as provider:
-            assert provider.config.fallback_rate == Decimal("0.0001")
+            assert provider.config.fallback_rate == Decimal("0.00001")
         await provider.close()

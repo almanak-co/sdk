@@ -32,6 +32,7 @@ from decimal import Decimal
 from typing import Any
 
 from almanak.connectors._strategy_base.funding_history_registry import FundingHistoryRegistry
+from almanak.framework.backtesting.config import DEFAULT_FUNDING_FALLBACK_RATE
 from almanak.framework.backtesting.pnl.providers.base import BacktestProviderConfig, HistoricalFundingProvider
 from almanak.framework.backtesting.pnl.providers.perp._gateway_history import (
     FundingHistoryPoint,
@@ -105,7 +106,7 @@ class HyperliquidClientConfig:
 
     requests_per_minute: int = DEFAULT_REQUESTS_PER_MINUTE
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
-    fallback_rate: Decimal = Decimal("0.0001")  # 0.01% per hour
+    fallback_rate: Decimal = DEFAULT_FUNDING_FALLBACK_RATE
 
 
 @dataclass
@@ -196,7 +197,9 @@ class HyperliquidFundingProvider(HistoricalFundingProvider):
         return cls(
             config=HyperliquidClientConfig(
                 fallback_rate=(
-                    config.funding_fallback_rate if config.funding_fallback_rate is not None else Decimal("0.0001")
+                    config.funding_fallback_rate
+                    if config.funding_fallback_rate is not None
+                    else DEFAULT_FUNDING_FALLBACK_RATE
                 ),
             )
         )

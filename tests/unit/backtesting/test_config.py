@@ -8,9 +8,9 @@ This module tests the BacktestDataConfig dataclass including:
 - Validation logic in __post_init__
 """
 
+import tempfile
 from decimal import Decimal
 from pathlib import Path
-import tempfile
 
 import pytest
 
@@ -57,9 +57,10 @@ class TestBacktestDataConfigDefaults:
         assert isinstance(config.volume_fallback_multiplier, Decimal)
 
     def test_default_funding_fallback_rate(self):
-        """Test that default funding_fallback_rate is Decimal('0.0001')."""
+        """The generic fallback is 8.76% simple annualized, not 87.6%."""
         config = BacktestDataConfig()
-        assert config.funding_fallback_rate == Decimal("0.0001")
+        assert config.funding_fallback_rate == Decimal("0.00001")
+        assert config.funding_fallback_rate * Decimal("8760") * Decimal("100") == Decimal("8.76000")
         assert isinstance(config.funding_fallback_rate, Decimal)
 
     def test_default_supply_apy_fallback(self):

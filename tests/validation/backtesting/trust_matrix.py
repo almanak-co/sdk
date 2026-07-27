@@ -67,6 +67,7 @@ INVARIANT_ROWS: tuple[str, ...] = (
     "borrow_repay_conservation",
     "generic_lane_entry",
     "funding_gated_entry",
+    "funding_fallback_provenance",
     "funding_lane_coherence",
     "rejection_no_state_change",
     "cost_accounting",
@@ -358,6 +359,12 @@ CELLS: tuple[TrustCell, ...] = (
         # over any window. Fixed by SnapshotFundingRateSource / view_at wiring.
     ),
     _cell(
+        "funding_fallback_provenance",
+        "perp",
+        "The generic 8.76% annualized funding fallback is served to strategy decisions "
+        "at exactly 0.00001/hour and reported as degraded, separately from position accrual.",
+    ),
+    _cell(
         "funding_lane_coherence",
         "perp",
         "With historical funding enabled, the rate decide() gates on and the rate the open "
@@ -400,7 +407,7 @@ CELLS: tuple[TrustCell, ...] = (
     _cell(
         "single_owner_resolution",
         "swap",
-        "amount=\"all\" resolves once at lane ingress: a sell-all through the real loop fills at full held size and conserves.",
+        'amount="all" resolves once at lane ingress: a sell-all through the real loop fills at full held size and conserves.',
     ),
 )
 

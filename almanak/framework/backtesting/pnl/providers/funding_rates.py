@@ -44,6 +44,7 @@ from typing import Any
 
 from almanak.connectors._strategy_base.funding_history_registry import FundingHistoryRegistry
 from almanak.core.chains import DEFAULT_CHAIN
+from almanak.framework.backtesting.config import DEFAULT_FUNDING_FALLBACK_RATE
 from almanak.framework.data.interfaces import DataSourceUnavailable
 
 from .perp._gateway_history import fetch_funding_points, run_sync_gateway_call
@@ -66,7 +67,7 @@ DEFAULT_REQUEST_TIMEOUT_SECONDS = 30
 # Default hourly funding rate used when the gateway has no data for a query.
 # One scalar, not a per-protocol table: every supported venue used the same
 # fallback value, and the protocol set now lives on the connector manifests.
-DEFAULT_FUNDING_RATE = Decimal("0.0001")  # 0.01% per hour (~8.76% APR)
+DEFAULT_FUNDING_RATE = DEFAULT_FUNDING_FALLBACK_RATE
 
 # Lookback window for resolving "the rate at timestamp T" from the history
 # series: take the latest point in [T - lookback, T]. One day comfortably

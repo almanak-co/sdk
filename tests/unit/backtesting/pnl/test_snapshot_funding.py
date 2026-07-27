@@ -25,6 +25,14 @@ from unittest.mock import patch
 import pytest
 
 from almanak.framework.backtesting.config import BacktestDataConfig
+from almanak.framework.backtesting.pnl.data_manifest import (
+    CONSUMER_STRATEGY_DECISION,
+    LANE_FUNDING,
+    OUTCOME_DEGRADED,
+    OUTCOME_REFUSED,
+    OUTCOME_SERVED,
+    RunDataManifest,
+)
 from almanak.framework.backtesting.pnl.data_provider import MarketState
 from almanak.framework.backtesting.pnl.engine import create_market_snapshot_from_state
 from almanak.framework.backtesting.pnl.providers.perp._gateway_history import FundingHistoryPoint
@@ -66,12 +74,15 @@ def no_gateway(monkeypatch: pytest.MonkeyPatch):
 
 def test_fixed_lane_serves_configured_fallback_rate_without_network(no_gateway) -> None:
     fallback = Decimal("0.0002")
+    manifest = RunDataManifest()
     source = SnapshotFundingRateSource(
         chain="arbitrum",
         data_config=BacktestDataConfig(use_historical_funding=False, funding_fallback_rate=fallback),
+        manifest=manifest,
     )
 
     rate = _get_rate(source)
+    _get_rate(source, timestamp=TICK + timedelta(minutes=15))
 
     assert rate.rate_hourly == fallback
     assert rate.rate_8h == fallback * 8
@@ -80,6 +91,12 @@ def test_fixed_lane_serves_configured_fallback_rate_without_network(no_gateway) 
     assert rate.timestamp == TICK_HOUR
     assert rate.venue == "gmx_v2"
     assert rate.market == "ETH-USD"
+    (entry,) = manifest.entries()
+    assert entry["consumer"] == CONSUMER_STRATEGY_DECISION
+    assert entry["source"] == "fixed:configured"
+    assert entry["outcome"] == OUTCOME_DEGRADED
+    assert entry["count"] == 2
+    assert f"funding_rate_hourly={fallback}" in entry["detail"]
 
 
 def test_no_data_config_serves_default_rate(no_gateway) -> None:
@@ -104,7 +121,12 @@ def test_spread_view_is_timestamp_bound_and_labelled(no_gateway) -> None:
 # =============================================================================
 
 
-def _historical_source(*, strict: bool = False, chain: str = "arbitrum") -> SnapshotFundingRateSource:
+def _historical_source(
+    *,
+    strict: bool = False,
+    chain: str = "arbitrum",
+    manifest: RunDataManifest | None = None,
+) -> SnapshotFundingRateSource:
     return SnapshotFundingRateSource(
         chain=chain,
         data_config=BacktestDataConfig(
@@ -112,11 +134,13 @@ def _historical_source(*, strict: bool = False, chain: str = "arbitrum") -> Snap
             strict_historical_mode=strict,
             funding_fallback_rate=Decimal("0.0007"),
         ),
+        manifest=manifest,
     )
 
 
 def test_historical_lane_resolves_latest_point_at_or_before_tick(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[dict] = []
+    manifest = RunDataManifest()
 
     def _fetch(**kwargs):
         calls.append(kwargs)
@@ -130,7 +154,7 @@ def test_historical_lane_resolves_latest_point_at_or_before_tick(monkeypatch: py
         "almanak.framework.backtesting.pnl.providers.funding_rates.fetch_funding_points",
         _fetch,
     )
-    source = _historical_source()
+    source = _historical_source(manifest=manifest)
 
     rate = _get_rate(source)
 
@@ -147,6 +171,10 @@ def test_historical_lane_resolves_latest_point_at_or_before_tick(monkeypatch: py
     _get_rate(source, timestamp=TICK + timedelta(hours=1))
     assert len(calls) == 2
     assert calls[1]["end_ts"] == int((TICK_HOUR + timedelta(hours=1)).timestamp())
+    (entry,) = manifest.entries()
+    assert entry["source"] == "historical:gateway"
+    assert entry["outcome"] == OUTCOME_SERVED
+    assert entry["count"] == 3
 
 
 def test_hour_normalization_floors_aware_offsets_in_utc(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -181,14 +209,22 @@ def test_historical_unmeasured_hour_falls_back_to_configured_rate(monkeypatch: p
         "almanak.framework.backtesting.pnl.providers.funding_rates.fetch_funding_points",
         lambda **_kwargs: [],
     )
-    source = _historical_source()
+    manifest = RunDataManifest()
+    source = _historical_source(manifest=manifest)
 
     # The engine-configured fallback governs, not the provider module default.
     assert _get_rate(source).rate_hourly == Decimal("0.0007")
+    (entry,) = manifest.entries()
+    assert entry["lane"] == LANE_FUNDING
+    assert entry["consumer"] == CONSUMER_STRATEGY_DECISION
+    assert entry["source"] == "fallback:no_data"
+    assert entry["outcome"] == OUTCOME_DEGRADED
+    assert "funding_rate_hourly=0.0007" in entry["detail"]
 
 
 def test_historical_unmeasured_hour_raises_in_strict_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[dict] = []
+    manifest = RunDataManifest()
 
     def _fetch(**kwargs):
         calls.append(kwargs)
@@ -198,7 +234,7 @@ def test_historical_unmeasured_hour_raises_in_strict_mode(monkeypatch: pytest.Mo
         "almanak.framework.backtesting.pnl.providers.funding_rates.fetch_funding_points",
         _fetch,
     )
-    source = _historical_source(strict=True)
+    source = _historical_source(strict=True, manifest=manifest)
 
     with pytest.raises(FundingRateUnavailableError):
         _get_rate(source)
@@ -211,6 +247,11 @@ def test_historical_unmeasured_hour_raises_in_strict_mode(monkeypatch: pytest.Mo
     with pytest.raises(FundingRateUnavailableError):
         _get_rate(source, timestamp=TICK + timedelta(hours=1))
     assert len(calls) == 2
+    (entry,) = manifest.entries()
+    assert entry["consumer"] == CONSUMER_STRATEGY_DECISION
+    assert entry["source"] == ""
+    assert entry["outcome"] == OUTCOME_REFUSED
+    assert entry["count"] == 3
 
 
 def test_on_chain_venue_with_undeclared_chain_degrades_without_gateway(no_gateway) -> None:

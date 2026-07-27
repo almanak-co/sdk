@@ -81,7 +81,7 @@ class TestGMXFundingProviderInitialization:
         """Factory defaults to the connector's canonical backtest chain."""
         provider = GMXFundingProvider.for_backtest(BacktestProviderConfig())
         assert provider.config.chain == "arbitrum"
-        assert provider.config.fallback_rate == Decimal("0.0001")
+        assert provider.config.fallback_rate == Decimal("0.00001")
 
     def test_for_backtest_uses_declared_chain_and_fallback_rate(self):
         """Declared chain config resolves through the funding-history registry."""

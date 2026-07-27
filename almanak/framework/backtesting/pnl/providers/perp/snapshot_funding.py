@@ -21,7 +21,7 @@ tick ``T`` is the latest measured point at or before ``T``.
 - ``use_historical_funding=False`` (or no ``data_config``): serve
   ``funding_fallback_rate`` as a fixed rate — zero network. Note the perp
   adapter's own fixed lane charges ``PerpBacktestConfig.default_funding_rate``;
-  both knobs default to the same 0.0001/h scalar, so the default fixed run is
+  both knobs default to the same 0.00001/h scalar, so the default fixed run is
   coherent end to end.
 - ``use_historical_funding=True``: gateway-backed history; hours without a
   measured point fall back to ``funding_fallback_rate`` (the adapter's
@@ -40,12 +40,21 @@ from __future__ import annotations
 
 import logging
 import threading
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from almanak.connectors._strategy_base.funding_history_registry import FundingHistoryRegistry
 from almanak.core.perp_markets import perp_market_funding_key
+from almanak.framework.backtesting.config import DEFAULT_FUNDING_FALLBACK_RATE
+from almanak.framework.backtesting.pnl.data_manifest import (
+    CONSUMER_STRATEGY_DECISION,
+    LANE_FUNDING,
+    OUTCOME_DEGRADED,
+    OUTCOME_REFUSED,
+    OUTCOME_SERVED,
+)
 from almanak.framework.data.funding import (
     HOURS_PER_YEAR,
     FundingRate,
@@ -56,6 +65,7 @@ from almanak.framework.data.funding import (
 
 if TYPE_CHECKING:
     from almanak.framework.backtesting.config import BacktestDataConfig
+    from almanak.framework.backtesting.pnl.data_manifest import RunDataManifest
     from almanak.framework.backtesting.pnl.providers.funding_rates import FundingRateProvider
 
 logger = logging.getLogger(__name__)
@@ -65,7 +75,7 @@ logger = logging.getLogger(__name__)
 #: ``providers.funding_rates.DEFAULT_FUNDING_RATE``, and the perp adapter's
 #: ``PerpBacktestConfig.default_funding_rate`` defaults, so what ``decide()``
 #: gates on matches what the position pays on a default run.
-DEFAULT_FALLBACK_RATE = Decimal("0.0001")  # 0.01% per hour
+DEFAULT_FALLBACK_RATE = DEFAULT_FUNDING_FALLBACK_RATE
 
 _HOURS_PER_8H = Decimal("8")
 
@@ -83,6 +93,17 @@ def _hour_utc(timestamp: datetime) -> datetime:
     return timestamp.astimezone(UTC).replace(minute=0, second=0, microsecond=0)
 
 
+@dataclass(frozen=True, slots=True)
+class _FundingResolution:
+    """Cached value plus the provenance emitted for every consumer read."""
+
+    rate: Decimal | None
+    source: str
+    outcome: str
+    detail: str = ""
+    error: FundingRateUnavailableError | None = None
+
+
 class SnapshotFundingRateSource:
     """Per-backtest-run source behind strategy-facing funding reads.
 
@@ -92,19 +113,25 @@ class SnapshotFundingRateSource:
     ``FundingRateProvider``, so parallel sweeps never share mutable state.
     """
 
-    def __init__(self, *, chain: str, data_config: BacktestDataConfig | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        chain: str,
+        data_config: BacktestDataConfig | None = None,
+        manifest: RunDataManifest | None = None,
+    ) -> None:
         self._chain = chain.strip().lower()
         self._use_historical = bool(data_config is not None and data_config.use_historical_funding)
         self._strict = bool(data_config is not None and data_config.strict_historical_mode)
         self._fallback_rate = data_config.funding_fallback_rate if data_config is not None else DEFAULT_FALLBACK_RATE
+        self._manifest = manifest
         self._provider: FundingRateProvider | None = None
         self._provider_init_done = False
         self._provider_init_lock = threading.Lock()
-        # Cached resolution per (venue, market, hour): the served FundingRate,
-        # or the strict-mode FundingRateUnavailableError — unavailability is as
-        # deterministic per simulated hour as a resolved rate, and caching it
-        # keeps strict runs at one gateway attempt per hour like non-strict.
-        self._cache: dict[tuple[str, str, datetime], FundingRate | FundingRateUnavailableError] = {}
+        # Cached resolution per (venue, market, hour), including provenance and
+        # strict-mode unavailability. Every consumer read is recorded even
+        # when the resolution itself comes from this cache.
+        self._cache: dict[tuple[str, str, datetime], _FundingResolution] = {}
         # Hours that resolved from the FALLBACK rate (non-strict degrade):
         # point reads tolerate this; the HISTORY accessor must refuse rather
         # than emit fallback constants labeled as measured history.
@@ -146,55 +173,79 @@ class SnapshotFundingRateSource:
         market_upper = perp_market_funding_key(market) or market.upper()
         hour = _hour_utc(timestamp)
         key = (venue_value, market_upper, hour)
-        cached = self._cache.get(key)
-        if isinstance(cached, FundingRateUnavailableError):
-            raise cached
-        if cached is not None:
-            return cached
+        resolution = self._cache.get(key)
+        if resolution is None:
+            if self._use_historical:
+                resolution = await self._historical_rate(venue_value, market_upper, hour)
+            else:
+                resolution = _FundingResolution(
+                    rate=self._fallback_rate,
+                    source="fixed:configured",
+                    outcome=OUTCOME_DEGRADED,
+                    detail=f"historical funding disabled; funding_rate_hourly={self._fallback_rate}",
+                )
+            self._cache[key] = resolution
 
-        if self._use_historical:
-            try:
-                rate = await self._historical_rate(venue_value, market_upper, hour)
-            except FundingRateUnavailableError as exc:
-                self._cache[key] = exc
-                raise
-        else:
-            rate = self._fallback_rate
+        self._record_resolution(market_upper, hour, resolution)
+        if resolution.error is not None:
+            raise resolution.error
+        assert resolution.rate is not None
 
         result = FundingRate(
             venue=venue_value,
             market=market_upper,
-            rate_hourly=rate,
-            rate_8h=rate * _HOURS_PER_8H,
-            rate_annualized=rate * HOURS_PER_YEAR,
+            rate_hourly=resolution.rate,
+            rate_8h=resolution.rate * _HOURS_PER_8H,
+            rate_annualized=resolution.rate * HOURS_PER_YEAR,
             timestamp=hour,
             is_live_data=False,
         )
-        self._cache[key] = result
         return result
 
-    async def _historical_rate(self, venue: str, market: str, hour: datetime) -> Decimal:
+    async def _historical_rate(self, venue: str, market: str, hour: datetime) -> _FundingResolution:
         """Latest measured hourly rate at or before ``hour`` (no look-ahead)."""
         declared = FundingHistoryRegistry.declared_chains(venue)
         if declared and self._chain not in declared:
-            return self._degraded(venue, market, f"venue declares no funding data for chain '{self._chain}'", hour=hour)
+            return self._degraded(
+                venue,
+                market,
+                f"venue declares no funding data for chain '{self._chain}'",
+                hour=hour,
+                source="fallback:unsupported_chain",
+            )
 
         provider = self._ensure_provider()
         if provider is None:
-            return self._degraded(venue, market, "no funding-history connector declares this run's chain", hour=hour)
+            return self._degraded(
+                venue,
+                market,
+                "no funding-history connector declares this run's chain",
+                hour=hour,
+                source="fallback:provider_unavailable",
+            )
 
         from almanak.framework.backtesting.pnl.providers.funding_rates import FundingRateError
 
         try:
             data = await provider.get_historical_funding_rate(protocol=venue, market=market, timestamp=hour)
         except FundingRateError as exc:
-            return self._degraded(venue, market, str(exc), hour=hour)
+            return self._degraded(venue, market, str(exc), hour=hour, source="fallback:error")
         if data.source == "fallback":
             # The gateway had no measured point in the lookback window (or was
             # unreachable) — substitute the engine-configured fallback, not the
             # provider's module default, so one knob governs both funding lanes.
-            return self._degraded(venue, market, "no measured funding point at or before the tick", hour=hour)
-        return data.rate
+            return self._degraded(
+                venue,
+                market,
+                "no measured funding point at or before the tick",
+                hour=hour,
+                source="fallback:no_data",
+            )
+        return _FundingResolution(
+            rate=data.rate,
+            source=f"historical:{data.source}",
+            outcome=OUTCOME_SERVED,
+        )
 
     def _ensure_provider(self) -> FundingRateProvider | None:
         """Lazily build the shared gateway-history client (once per run).
@@ -222,11 +273,24 @@ class SnapshotFundingRateSource:
                     self._provider_init_done = True
         return self._provider
 
-    def _degraded(self, venue: str, market: str, reason: str, hour: datetime | None = None) -> Decimal:
+    def _degraded(
+        self,
+        venue: str,
+        market: str,
+        reason: str,
+        *,
+        hour: datetime,
+        source: str,
+    ) -> _FundingResolution:
         if self._strict:
-            raise FundingRateUnavailableError(venue, market, reason)
-        if hour is not None:
-            self._degraded_points.add((venue, market, hour))
+            return _FundingResolution(
+                rate=None,
+                source="",
+                outcome=OUTCOME_REFUSED,
+                detail=reason,
+                error=FundingRateUnavailableError(venue, market, reason),
+            )
+        self._degraded_points.add((venue, market, hour))
         logger.warning(
             "Historical funding unavailable for %s/%s (%s); using fallback rate %s/h",
             venue,
@@ -234,7 +298,26 @@ class SnapshotFundingRateSource:
             reason,
             self._fallback_rate,
         )
-        return self._fallback_rate
+        return _FundingResolution(
+            rate=self._fallback_rate,
+            source=source,
+            outcome=OUTCOME_DEGRADED,
+            detail=f"{reason}; funding_rate_hourly={self._fallback_rate}",
+        )
+
+    def _record_resolution(self, market: str, hour: datetime, resolution: _FundingResolution) -> None:
+        """Record every strategy-decision funding read, including cache hits."""
+        if self._manifest is None:
+            return
+        self._manifest.record(
+            lane=LANE_FUNDING,
+            key=market,
+            consumer=CONSUMER_STRATEGY_DECISION,
+            source=resolution.source,
+            outcome=resolution.outcome,
+            at=hour,
+            detail=resolution.detail,
+        )
 
 
 class SnapshotFundingRateView:

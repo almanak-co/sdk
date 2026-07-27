@@ -523,19 +523,19 @@ class TestFundingRateProviderDefaults:
         """Test getting default rate for GMX."""
         provider = FundingRateProvider()
         rate = provider.get_default_rate("gmx")
-        assert rate == Decimal("0.0001")
+        assert rate == Decimal("0.00001")
 
     def test_get_default_rate_hyperliquid(self):
         """Test getting default rate for Hyperliquid."""
         provider = FundingRateProvider()
         rate = provider.get_default_rate("hyperliquid")
-        assert rate == Decimal("0.0001")
+        assert rate == Decimal("0.00001")
 
     def test_get_default_rate_unknown_protocol(self):
         """Test getting default rate for unknown protocol returns fallback."""
         provider = FundingRateProvider()
         rate = provider.get_default_rate("unknown")
-        assert rate == Decimal("0.0001")
+        assert rate == Decimal("0.00001")
 
     def test_supported_protocols_manifest_derived(self):
         """The accepted identifier set derives from connector manifests."""

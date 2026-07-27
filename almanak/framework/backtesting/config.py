@@ -46,6 +46,9 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Literal
 
+DEFAULT_FUNDING_FALLBACK_RATE = Decimal("0.00001")
+"""Generic hourly funding fallback: 0.001% hourly, 8.76% simple annualized."""
+
 
 @dataclass
 class BacktestDataConfig:
@@ -100,7 +103,8 @@ class BacktestDataConfig:
             for LP fee calculations.
 
         funding_fallback_rate: Hourly funding rate to use when historical
-            funding data is unavailable (e.g., 0.0001 = 0.01%/hr).
+            funding data is unavailable. Defaults to 0.00001 (0.001%/hr,
+            8.76% simple annualized).
 
         supply_apy_fallback: Annual supply APY to use when historical APY
             is unavailable (e.g., 0.03 = 3% APY).
@@ -154,7 +158,7 @@ class BacktestDataConfig:
 
     # Fallback values when historical data is unavailable
     volume_fallback_multiplier: Decimal = Decimal("10")
-    funding_fallback_rate: Decimal = Decimal("0.0001")  # 0.01%/hr
+    funding_fallback_rate: Decimal = DEFAULT_FUNDING_FALLBACK_RATE
     supply_apy_fallback: Decimal = Decimal("0.03")  # 3% APY
     borrow_apy_fallback: Decimal = Decimal("0.05")  # 5% APY
     # None -> the gas provider falls through to the chain-aware
@@ -225,4 +229,4 @@ class BacktestDataConfig:
         return Path(tempfile.gettempdir()) / "almanak_backtest_cache"
 
 
-__all__ = ["BacktestDataConfig"]
+__all__ = ["DEFAULT_FUNDING_FALLBACK_RATE", "BacktestDataConfig"]
