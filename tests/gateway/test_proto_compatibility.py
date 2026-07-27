@@ -33,14 +33,18 @@ PROTO_SPECS: tuple[ProtoSpec, ...] = (
     ProtoSpec(
         proto_dir=Path("almanak/gateway/proto"),
         proto_file="gateway.proto",
-        generated_files=("gateway_pb2.py", "gateway_pb2_grpc.py"),
+        generated_files=("gateway_pb2.py", "gateway_pb2_grpc.py", "gateway_pb2.pyi"),
         import_fix_old="import gateway_pb2 as gateway__pb2",
         import_fix_new="from almanak.gateway.proto import gateway_pb2 as gateway__pb2",
     ),
     ProtoSpec(
         proto_dir=Path("almanak/connectors/polymarket/proto"),
         proto_file="polymarket.proto",
-        generated_files=("polymarket_pb2.py", "polymarket_pb2_grpc.py"),
+        generated_files=(
+            "polymarket_pb2.py",
+            "polymarket_pb2_grpc.py",
+            "polymarket_pb2.pyi",
+        ),
         import_fix_old="import polymarket_pb2 as polymarket__pb2",
         import_fix_new=(
             "from almanak.connectors.polymarket.proto import polymarket_pb2 "
@@ -73,6 +77,7 @@ class TestProtoFilesUpToDate:
                 f"-I{proto_source.parent}",
                 f"--python_out={output_dir}",
                 f"--grpc_python_out={output_dir}",
+                f"--mypy_out={output_dir}",
                 str(proto_source),
             ])
             assert result == 0, f"protoc failed for {spec.proto_file} (rc={result})"

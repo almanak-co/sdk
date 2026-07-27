@@ -15,6 +15,21 @@ reviews:
     - "!docs/internal/reports/**"
     - "!docs/internal/notes/**"
     - "!scripts/ai-discussion/**"
+    # Machine-generated protobuf stubs (~20k lines regenerated on every proto
+    # change): the reviewable artifact is gateway.proto; dragging the stubs
+    # into review context bloats/derails large-PR reviews and burns the
+    # fair-usage budget. tests/gateway/test_proto_compatibility.py::TestProtoFilesUpToDate
+    # regenerates and byte-compares these stubs against gateway.proto on every
+    # proto-touching PR, so drift between the excluded files and the reviewable
+    # .proto source is still caught in CI.
+    - "!almanak/gateway/proto/*_pb2.py"
+    - "!almanak/gateway/proto/*_pb2.pyi"
+    - "!almanak/gateway/proto/*_pb2_grpc.py"
+    # Golden snapshot is regenerated via its documented REGEN flow and pinned
+    # by its own test; the diff to review is the source change, not the
+    # regenerated artifact. Pinned to the exact file (not a directory glob)
+    # so a future golden dropped into this directory isn't silently excluded.
+    - "!tests/unit/agent_tools/_snapshots/tool_surface.json"
 
   path_instructions:
     # -- Global test coverage rule (applies to all Python source files) --
