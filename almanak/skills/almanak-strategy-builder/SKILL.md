@@ -12,7 +12,7 @@ description: >-
   debugging strategy execution on Anvil forks. Do NOT use for general
   smart contract development, Solidity code, or non-strategy SDK internals.
 metadata:
-  version: "2.23.0"
+  version: "2.24.0"
   author: Almanak
   license: Apache-2.0
   type: documentation
@@ -992,6 +992,31 @@ fr = market.funding_rate("binance", "ETH-PERP")               # FundingRate
 spread = market.funding_rate_spread("ETH-PERP", "binance", "hyperliquid")  # FundingRateSpread
 ```
 
+#### Lending market discovery and verification (market-keyed protocols)
+
+For permissionless, market-keyed protocols (`morpho_blue`) a `market_id` must
+be **verified on-chain before it is pinned into a config** — a same-pair market
+can carry a hostile oracle or IRM.
+
+```python
+# List candidates from the curated catalog (verified=False, source="curated_catalog").
+# Returns EVERY match — the gateway never ranks or auto-picks.
+markets = market.lending_markets("morpho_blue", collateral="sUSDe", loan="USDC")  # list[LendingMarketInfo]
+
+# Verify one exact market_id on-chain (verified=True, source="onchain_verify").
+# The gateway reads idToMarketParams(id), recomputes the id and compares;
+# a mismatch / missing market raises LendingMarketResolutionError.
+info = market.lending_market("morpho_blue", "0x...")  # LendingMarketInfo
+```
+
+> Use these at **build or boot time to verify**, not per-iteration to select.
+> An empty `lending_markets(...)` result means zero candidates matched — treat
+> that as an error to act on, never a silent continue. Config still PINS the
+> market identity; these accessors re-check it.
+>
+> The same universe is browsable from the CLI:
+> `almanak ax --chain ethereum lending-reserves --protocol morpho_blue --collateral sUSDe --loan USDC`
+
 ### Impermanent Loss
 
 ```python
@@ -1281,17 +1306,30 @@ with tokens specified in `anvil_funding`. Values are in token units (not USD).
 
 Use `get_token_resolver()` for all token lookups. Never hardcode addresses.
 
+> **Symbol references are deprecated.** Symbols are metadata, not stable asset
+> identity — the same ticker maps to a different contract on every chain and is
+> spoofable. `TokenResolver`, `MarketSnapshot`, and `Intent` construction emit a
+> `SymbolTokenResolutionWarning` (a `FutureWarning`) when handed a bare symbol,
+> once per external callsite. Symbols keep working for the rest of the 2.x line
+> and are **rejected in Almanak SDK 3.0.0** with `SymbolTokenResolutionError`.
+> When writing new strategies, prefer a chain-specific contract address or a
+> CAIP-19 asset identifier; resolve the symbol once at config time rather than
+> per-iteration.
+
 ```python
 from almanak.framework.data.tokens import get_token_resolver
 
 resolver = get_token_resolver()
 
-# Resolve by symbol
-token = resolver.resolve("USDC", "arbitrum")
+# Preferred: resolve by address (stable identity)
+token = resolver.resolve("0xaf88d065e77c8cC2239327C5EDb3A432268e5831", "arbitrum")
 # -> ResolvedToken(symbol="USDC", address="0xaf88...", decimals=6, chain="arbitrum")
 
-# Resolve by address
-token = resolver.resolve("0xaf88d065e77c8cC2239327C5EDb3A432268e5831", "arbitrum")
+# Preferred: resolve by CAIP-19 asset identifier
+token = resolver.resolve_caip19("eip155:42161/erc20:0xaf88d065e77c8cC2239327C5EDb3A432268e5831")
+
+# Deprecated: resolve by symbol (warns now, raises in 3.0.0)
+token = resolver.resolve("USDC", "arbitrum")
 
 # Convenience
 decimals = resolver.get_decimals("arbitrum", "USDC")  # -> 6
@@ -1302,6 +1340,10 @@ token = resolver.resolve_for_swap("ETH", "arbitrum")   # -> WETH
 
 # Resolve trading pair
 usdc, weth = resolver.resolve_pair("USDC", "WETH", "arbitrum")
+
+# Check whether a value already carries address-based identity
+from almanak.framework.data.tokens.deprecation import is_address_based_token_reference
+is_address_based_token_reference("USDC", "arbitrum")  # -> False
 ```
 
 Resolution order: memory cache -> disk cache -> static registry -> gateway on-chain lookup.

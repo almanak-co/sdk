@@ -204,7 +204,7 @@ Read-only tools with no on-chain side effects. Risk tier: **NONE**.
 | `get_lp_position` | Get LP position details (range, liquidity, fees) | `position_id`, `chain` |
 | `list_lp_positions` | List all Uniswap V3-style LP positions owned by a wallet (compact per-position summary) | `wallet_address`, `chain` |
 | `list_lending_positions` | List a wallet's lending positions with account totals and health factor (Aave V3) | `wallet_address`, `chain` |
-| `list_lending_reserves` | List a lending market's reserves with per-reserve borrowable/active/collateral flags (Aave V3) | `chain` |
+| `list_lending_reserves` | List a lending protocol's reserves/markets with borrowable/active/collateral flags. Aave-style reserves enumerate live; market-keyed protocols (`morpho_blue`) list curated COLLATERAL/LOAN markets with their immutable `market_id` + LLTV | `protocol`, `asset`, `collateral`, `loan`, `chain` |
 | `get_portfolio` | Aggregate a wallet's on-chain state (native + ERC20 balances, LP positions, lending) | `wallet_address`, `chain` |
 | `resolve_token` | Resolve token symbol/address to full metadata | `token`, `chain` |
 | `get_risk_metrics` | Get portfolio risk metrics (VaR, Sharpe, vol, drawdown) | `chain` |

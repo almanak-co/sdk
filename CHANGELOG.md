@@ -6,6 +6,60 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.24.0] - 2026-07-28
+
+### Added
+
+- **LiFi compiles `BridgeIntent` directly.** The LiFi manifest advertised
+  `BRIDGE`, but `LiFiCompiler` only declared `SWAP` — so
+  `BridgeIntent(preferred_bridge="lifi")` failed with *"LiFiCompiler does not
+  support intent type IntentType.BRIDGE"*, forcing the production bridge flow
+  through a cross-chain `SwapIntent`. `compile_bridge` now routes through
+  LiFi's cross-chain route path, and the receipt parser's native-asset fallback
+  no longer mis-stamps an ERC-20 bundle's approve leg as `source_tx_hash`.
+  (#3397) The native-asset bridge fallback is additionally gated on
+  `LiFiTransferStarted`. (#3388)
+- **Verified lending-market resolution (VIB-5985).** A `market_id` can now only
+  enter a config after on-chain proof — closing the incident class where a
+  strategy ran 3+ days in permanent fail-closed HOLD on an unverifiable
+  `morpho_market_id`. Two new `MarketService` RPCs: `ListLendingMarkets`
+  returns every curated-catalog candidate matching `collateral` / `loan` /
+  `lltv_bps` (token filters address-resolved before matching, since symbols are
+  spoofable; never ranks or auto-picks; zero matches is an explicit empty page
+  the caller must treat as an error), and `GetLendingMarket` reads
+  `idToMarketParams(id)` on-chain, recomputes the id from the returned params
+  and compares, so a record is never returned unverified. Surfaced to
+  strategies as `MarketSnapshot.lending_markets(...)` and
+  `MarketSnapshot.lending_market(...)`. Generic contract, Morpho-first
+  implementation. (#3430) `ax lending-reserves` gains the matching UX:
+  pair-aware `--asset` filtering plus `--collateral` / `--loan` leg pins, and
+  `morpho_blue` markets list with their immutable `market_id` + LLTV. (#3424)
+- **Perp fill accounting from measured settlement (VIB-3872).** GMX V2 keeper
+  settlements are decoded by key rather than positional index and carried as
+  typed `PerpFillData` (#3440); `RunnerPerpSettlementCapability` correlates a
+  settlement back to the submitting order (#3443); a reconciler books the
+  measured economics through a dedicated `perp_settlement_commit` lane (#3446);
+  and the Accountant Test P3/P5 cells plus the dashboard cost stack now consume
+  the `PERP_SETTLEMENT` row as the measured source, with ESTIMATED open/close
+  folds superseded rather than double-counted (#3450). The reconciler reads
+  through `GatewayStateManager`, so it is live in production rather than inert
+  (#3453).
+- **Safe-wallet Zodiac discovery for `PERP_CANCEL_ORDER`** via synthetic
+  discovery on `gmx_v2`'s `cancelOrder`, so cancelling an order under a Safe no
+  longer reverts unauthorized (VIB-5569). (#3437)
+- **Backtests fall back to gateway-backed The Graph.** Registry-driven subgraph
+  discovery from validated deployment metadata, gateway-routed pool / funding /
+  rate-history fallbacks, and a fail-before-network check when The Graph
+  credentials are missing. (#3464) Funding history is shared run-wide and
+  throttled behind a cache with no look-ahead (#3463), and funding measurements
+  carry the venue that actually served them (#3462).
+- **GMX async orders execute on managed Anvil.** A keeper simulator drives the
+  two-phase GMX order flow through to settlement, and the GMX lifecycle tests
+  are settlement-aware. (#3413, #3409)
+- **`ledger_lp_leg_identity_missing_total`** meters how often LP leg identity
+  falls back to label order instead of on-chain amount provenance (VIB-6053).
+  (#3466)
+
 ### Changed
 
 - **BREAKING: GeckoTerminal naming retired in favour of CoinGecko Onchain.**
@@ -40,6 +94,102 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     modules `gateway/data/ohlcv/geckoterminal_provider.py` →
     `coingecko_onchain_provider.py` and
     `gateway/data/pool_history/geckoterminal.py` → `coingecko_onchain.py`.
+
+  (#3465) The CoinGecko Onchain OHLCV handler additionally validates the
+  `pool_address` shape before egress, skipping the check when the chain family
+  is unknown. (#3467)
+- **Production price-impact BLOCK default lowered to 10%** — it was 30%, nearly
+  inert for real bad fills. 5% was rejected as too tight (it would reject an
+  observed ~9.5% Linea gap). A dead 5% default that no call path read was
+  removed first, so the effective cap is now pinned in one place
+  (`max_price_impact_pct`). (#3448, #3427)
+- **One config-validation engine (VIB-5986).** `almanak strat check` and the
+  runtime boot path validate through the same `CONFIG_MODEL`, so a config that
+  passes `check` cannot fail differently at boot — and an invalid config fails
+  loudly at boot instead of degrading silently. (#3423)
+- **Teardown preview surfaces aligned** between the teardown API and the
+  teardown manager, so both report the same planned closes. (#3406)
+- **Curve exposes proportional close floors**, so a proportional LP close
+  states its own minimum-out floors rather than inheriting a generic one.
+  (#3418)
+
+### Deprecated
+
+- **Symbol-based token resolution.** Token symbols are metadata, not stable
+  asset identity — the same ticker maps to a different contract on every chain
+  and is spoofable. `TokenResolver.resolve(...)`, `MarketSnapshot`, and
+  `Intent` construction now emit a `SymbolTokenResolutionWarning` (a
+  `FutureWarning`) when handed a bare symbol, once per external callsite.
+  Symbols keep working for the remainder of the 2.x line and are **rejected in
+  Almanak SDK 3.0.0** with `SymbolTokenResolutionError`. Use a chain-specific
+  contract address or a CAIP-19 asset identifier instead. New public exports:
+  `SymbolTokenResolutionError`, `SymbolTokenResolutionWarning`,
+  `SYMBOL_TOKEN_REMOVAL_VERSION`. (#3396)
+
+### Fixed
+
+- **Receipt parsers resolve the Safe as the trading wallet (VIB-6043 P0).**
+  Under Safe-wallet execution the parsers read `receipt["from"]` — the EOA that
+  relayed the transaction — instead of the Safe that actually holds the
+  position, so money legs were attributed to the wrong wallet across the shared
+  parser helpers. (#3439; regression sweep recorded in #3442)
+- **LP leg identity is bound to its own amounts at the parser (VIB-6053,
+  VIB-6051, VIB-6045).** Token identity for each LP leg is now carried with the
+  amounts it describes rather than re-paired downstream by label order, which
+  silently swapped token0/token1 economics on pools whose label order differs
+  from on-chain order. (#3451) Related: V3 LP decimals pair by on-chain token
+  order (#3420), `position_events` LP tokens re-pair by on-chain order (#3422),
+  and that realignment is gated on amount-order provenance so it cannot fire on
+  unprovenanced rows (#3425).
+- **A degraded all-zero LP read is no longer booked as a measured $0.**
+  Empty ≠ Zero: an unavailable valuation read stays unmeasured instead of
+  entering the books as a real zero. (#3426) Complementing that, a `$0` open
+  position at HIGH confidence now fails closed rather than persisting
+  (VIB-4970). (#3419)
+- **Perp closes no longer read as a −100% loss (VIB-5952).** A keeper-settled
+  close left the headline PnL reading against a stale open position; closed
+  perp state is now suppressed from the headline. (#3436) GMX closes are
+  enriched from keeper receipts (#3417), and `OrderCreated` is decoded by key
+  for settlement identity with cold-fork transient tolerance in the keeper lane
+  (#3429).
+- **GMX perp demos can fully close (VIB-5950).** `size_usd=None` now means full
+  close, which surfaced and fixed a stale GMX Reader `Position.Props` ABI.
+  (#3434)
+- **Uniswap V4 LP positions are discovered in teardown recovery (VIB-6109).** A
+  V4 position opened before a restart was invisible to teardown discovery and
+  survived teardown open on-chain. (#3460)
+- **Manual teardown consolidation sweeps are clamped (VIB-5938)**, so a sweep
+  cannot exceed the measured residual. (#3373)
+- **`RateMonitor` takes an injected gateway client (VIB-5823, VIB-5824)** rather
+  than constructing its own, and no longer reports a placeholder rate as a
+  measured one. (#3416)
+- **Hosted attribution distinguishes unverified sources (VIB-5917)**, so an
+  unverified hosted attribution is not recorded as verified. (#3371)
+- **Swap quoting.** The fee-tier sweep is bounded so a quote sweep cannot fan
+  out unboundedly, and the SushiSwap V3 quoter is registered on Optimism
+  (VIB-5989) (#3432); SushiSwap V3's codeless Base deployment addresses are
+  corrected (VIB-5991) (#3433); `SlippageEstimator` resolves symbol inputs when
+  determining swap direction (VIB-5933) (#3415).
+- **`aerodrome_slipstream` SWAP appears in the Zodiac manifest (VIB-5990)** —
+  discovery produced no entry, so a Safe-wallet swap on Slipstream reverted
+  unauthorized. (#3435)
+- **Strategy configs pinned to live markets.** Polygon Curve moves off the
+  frozen Aave `am3pool` onto the frxUSD/USDT NG pool (VIB-5551) (#3395, #3398);
+  three incubating Morpho configs pin verified market ids, two of them
+  retargeted, and now raise on an invalid config (#3428); the Compound V3 carry
+  strategy splits its bundled borrow into `SUPPLY` → `BORROW` (#3411, #3414).
+- **OHLCV no longer advertises timeframes `validate_timeframe` rejects.**
+  (#3403)
+- **Alerting.** A non-JSON Telegram response body returns a failure result
+  instead of raising (#3404), and shadowing local `asyncio` imports are removed
+  from `WebhookChannel.send_alert` (#3384).
+
+### Security
+
+- **The gateway rejects caller network-override elevation to Anvil.** A caller
+  could previously override the network to `anvil` on a production gateway; the
+  override path is now forbidden, and the pending-order waiver it interacted
+  with is proof-carrying. (#3421)
 
 ## [2.23.0] - 2026-07-24
 
