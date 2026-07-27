@@ -529,16 +529,54 @@ class TestExtractLpCloseData:
         assert data.amount1_collected == 5 * 10**14
 
     def test_transfer_fallback_path_b_grouping(self) -> None:
-        """When token addresses are unknown but recipient gets 2+ tokens."""
+        """When token addresses are unknown but recipient gets 2+ tokens.
+
+        VIB-6045 — CONTRACT CHANGE. This test previously asserted
+        ``amount0_collected >= amount1_collected`` ("sorted desc — bigger amount
+        first"), pinning a raw-integer magnitude sort ACROSS TOKENS WITH DIFFERENT
+        DECIMALS. That sort is the defect: a 6-dp leg and an 18-dp leg of equal USD
+        value order by decimals, not by anything meaningful, and the token identity
+        was discarded so no consumer could repair it (a $110 close booked as a
+        $29.3bn ledger row, which also sized the teardown swap-back).
+
+        The slots are now assigned BY TOKEN ADDRESS — the Solidly/V3 pool
+        convention — and the identity is emitted alongside, so the pairing is
+        verifiable rather than assumed.
+        """
+        token_low = "0x" + "01" * 20
+        token_high = "0x" + "02" * 20
         parser = AerodromeReceiptParser(chain="base")  # no token addresses
         receipt = _receipt([
-            _transfer_log("0x" + "01" * 20, POOL, WALLET, 1_000_000),
-            _transfer_log("0x" + "02" * 20, POOL, WALLET, 5 * 10**14),
+            _transfer_log(token_low, POOL, WALLET, 1_000_000),
+            _transfer_log(token_high, POOL, WALLET, 5 * 10**14),
         ])
         data = parser.extract_lp_close_data(receipt)
         assert data is not None
-        # Sorted desc — bigger amount first
-        assert data.amount0_collected >= data.amount1_collected
+        # Slot order follows ADDRESS order, not magnitude: the lower address is
+        # slot 0 even though its raw amount is ~9 orders of magnitude smaller.
+        assert data.currency0 == token_low
+        assert data.currency1 == token_high
+        assert data.amount0_collected == 1_000_000
+        assert data.amount1_collected == 5 * 10**14
+
+    def test_transfer_fallback_path_b_slot_order_is_decimals_blind(self) -> None:
+        """Reversing which token holds the large raw amount must NOT reorder slots.
+
+        The regression guard for VIB-6045: with a magnitude sort the two receipts
+        below produce OPPOSITE slot assignments; with address binding they produce
+        the same one, and each amount stays with its own token.
+        """
+        token_low = "0x" + "01" * 20
+        token_high = "0x" + "02" * 20
+        parser = AerodromeReceiptParser(chain="base")
+        receipt = _receipt([
+            _transfer_log(token_low, POOL, WALLET, 5 * 10**14),
+            _transfer_log(token_high, POOL, WALLET, 1_000_000),
+        ])
+        data = parser.extract_lp_close_data(receipt)
+        assert data is not None
+        assert (data.currency0, data.amount0_collected) == (token_low, 5 * 10**14)
+        assert (data.currency1, data.amount1_collected) == (token_high, 1_000_000)
 
     def test_no_burn_no_transfers_returns_none(self) -> None:
         parser = AerodromeReceiptParser(chain="base")

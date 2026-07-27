@@ -712,6 +712,57 @@ def _lp_data_attr(lp_data: Any, name: str) -> Any:
     return getattr(lp_data, name, None)
 
 
+def _pair_tokens_from_parser_currencies(lp_data: Any, chain: str) -> tuple[str, str] | None:
+    """VIB-6053 — the LP pair as the RECEIPT PARSER observed it, or ``None``.
+
+    ``currency0`` / ``currency1`` are stamped by the parser index-aligned with the
+    very ``amount0`` / ``amount1`` it decoded, so they are a DIRECT OBSERVATION of
+    which token holds which slot. Every other branch in
+    :func:`_realign_event_lp_pair_if_needed` *infers* that pairing — the declared-legs
+    branch from a second carrier with its own ordering, the address sort from
+    resolving label symbols against the static registry. **An inference must never
+    override an observation**, so this branch is consulted first and is terminal.
+
+    It is also what makes the Layer-3 (``position_events``) and Layer-1
+    (``transaction_ledger``) producers agree: both read the same stamped identity, so
+    the cross-producer divergence VIB-5988 surfaced cannot recur by one lane
+    re-deriving while the other adopts.
+
+    Returns:
+        ``None`` when the parser emitted no currencies — the caller falls through to
+        the inference branches, exactly as before (this contract is additive).
+        ``(sym0, sym1)`` when both resolved — the caller adopts them.
+        ``("", "")`` when currencies were emitted but neither resolved to a symbol.
+        That is deliberately NOT ``None``: the parser DID observe identity, so falling
+        through to an address-sort derivation would let a weaker signal override a
+        stronger one on a money path. The caller keeps label order instead.
+    """
+    cur0 = _lp_data_attr(lp_data, "currency0")
+    cur1 = _lp_data_attr(lp_data, "currency1")
+    if not (cur0 and cur1):
+        return None
+
+    # Reuse the ledger's address->symbol resolver so BOTH producers map an address to
+    # a symbol identically (native sentinels included) — two implementations would be
+    # a fresh drift seam. Lazy import mirrors this module's ``_classify_sub_tx_role``
+    # borrow (framework-internal, no import cycle).
+    from almanak.framework.observability.ledger import _resolve_lp_close_symbol
+
+    sym0 = _resolve_lp_close_symbol(cur0, chain)
+    sym1 = _resolve_lp_close_symbol(cur1, chain)
+    if sym0 and sym1:
+        return (sym0, sym1)
+
+    logger.warning(
+        "VIB-6053: parser emitted currencies %s/%s on %s but they did not both resolve "
+        "to a symbol; keeping label order rather than deriving one",
+        cur0,
+        cur1,
+        chain,
+    )
+    return ("", "")
+
+
 def _realign_event_lp_pair_if_needed(event: PositionEvent, ctx: IntentEventContext, *, opening: bool) -> None:
     """VIB-5983 — re-pair ``event.token0``/``token1`` to on-chain address order.
 
@@ -784,6 +835,36 @@ def _realign_event_lp_pair_if_needed(event: PositionEvent, ctx: IntentEventConte
     # while amount0/amount1 are per-POOL-INDEX, so leg index does NOT align
     # with amount slot there — the declared-legs branch must never run for it.
     if _lp_data_attr(lp_data, "additional_amounts"):
+        return
+
+    # VIB-6053 — PARSER-EMITTED IDENTITY OUTRANKS EVERY DERIVATION BELOW.
+    #
+    # ``currency0``/``currency1`` are stamped by the receipt parser index-aligned
+    # with the very ``amount0``/``amount1`` it decoded, so they are a DIRECT
+    # observation of which token holds which slot. Everything below this point
+    # *infers* that pairing — the declared-legs branch from a second carrier with
+    # its own ordering, the address sort from resolving label symbols against the
+    # static registry. An inference must never override an observation.
+    #
+    # This is also what makes the Layer-3 (position_events) and Layer-1
+    # (transaction_ledger) producers agree: both now read the same stamped
+    # identity, so the cross-producer divergence VIB-5988 surfaced cannot recur by
+    # one lane re-deriving while the other adopts.
+    parser_pair = _pair_tokens_from_parser_currencies(lp_data, ctx.chain or event.chain)
+    if parser_pair is not None:
+        s0, s1 = parser_pair
+        if s0 and s1 and (s0, s1) != (t0, t1):
+            logger.info(
+                "VIB-6053: re-paired LP position_events pair %s/%s -> %s/%s from "
+                "parser-emitted currencies (position_id=%s event_type=%s)",
+                t0,
+                t1,
+                s0,
+                s1,
+                event.position_id,
+                event.event_type,
+            )
+            event.token0, event.token1 = s0, s1
         return
 
     if extracted.get("primitive_money_legs") is not None:

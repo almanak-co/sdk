@@ -18,6 +18,10 @@ from almanak.connectors._strategy_base.base import (
     resolve_swap_token_symbol_with_fallback,
     resolve_trading_wallet,
 )
+from almanak.connectors._strategy_base.lp_leg_identity import (
+    currencies_for_amounts,
+    transfers_by_token,
+)
 from almanak.framework.execution.extract_result import (
     ExtractError,
     ExtractMissing,
@@ -1662,6 +1666,21 @@ class AerodromeReceiptParser:
                 total_amount0 = sum(b.amount0 for b in result.burn_events)
                 total_amount1 = sum(b.amount1 for b in result.burn_events)
 
+                # VIB-6053 — bind leg IDENTITY to the burned amounts. The Burn's
+                # amount0/amount1 are in the POOL's slot order, which may be the
+                # opposite of the user's pool label; a removeLiquidity transfers
+                # exactly those amounts out of the pool, so the value-match is
+                # exact. ``None`` on a miss — consumers fail closed, never guess.
+                burn_pool = next(
+                    (b.pool_address for b in result.burn_events if getattr(b, "pool_address", "")),
+                    "",
+                )
+                currency0, currency1 = currencies_for_amounts(
+                    transfers_by_token(receipt.get("logs", []), from_address=burn_pool) if burn_pool else {},
+                    total_amount0,
+                    total_amount1,
+                )
+
                 return LPCloseData(
                     amount0_collected=total_amount0,
                     amount1_collected=total_amount1,
@@ -1670,6 +1689,8 @@ class AerodromeReceiptParser:
                     fees0=None,
                     fees1=None,
                     liquidity_removed=None,
+                    currency0=currency0,  # VIB-6053 — index-aligned with amount0_collected
+                    currency1=currency1,  # VIB-6053 — index-aligned with amount1_collected
                 )
 
             # Fallback: use Transfer events for token returns.
@@ -1716,8 +1737,13 @@ class AerodromeReceiptParser:
 
         # Path A: match by known token addresses, take last transfer per token
         if self.token0_address and self.token1_address:
-            amount0 = 0
-            amount1 = 0
+            # VIB-6053 — Empty != Zero (blueprint 27 §10.10). These seed as ``None``
+            # (UNMEASURED), not ``0``: a token with NO Transfer in this receipt was
+            # not observed to return zero, it was not observed at all. Seeding ``0``
+            # made an unobserved leg indistinguishable from a genuinely-zero one and
+            # published a fabricated measured zero downstream.
+            amount0: int | None = None
+            amount1: int | None = None
             for t in transfer_events:
                 addr = t.token_address.lower()
                 to = t.to_addr.lower()
@@ -1729,7 +1755,7 @@ class AerodromeReceiptParser:
                     amount0 = t.value  # last write wins, avoiding router double-count
                 elif addr == self.token1_address:
                     amount1 = t.value
-            if amount0 > 0 or amount1 > 0:
+            if (amount0 or 0) > 0 or (amount1 or 0) > 0:
                 return LPCloseData(
                     amount0_collected=amount0,
                     amount1_collected=amount1,
@@ -1738,6 +1764,11 @@ class AerodromeReceiptParser:
                     fees0=None,
                     fees1=None,
                     liquidity_removed=None,
+                    # VIB-6053 — the slots were assigned BY ADDRESS above, so the
+                    # identity is known exactly; emit it so no consumer has to
+                    # re-derive the pairing from the user's pool label.
+                    currency0=self.token0_address,
+                    currency1=self.token1_address,
                 )
 
         # Path B: group by recipient, find one who received 2+ distinct tokens
@@ -1756,15 +1787,47 @@ class AerodromeReceiptParser:
         # Find a recipient who received 2+ types of tokens (the LP closer)
         for token_amounts in token_amounts_by_recipient.values():
             if len(token_amounts) >= 2:
-                amounts = sorted(token_amounts.values(), reverse=True)
+                # VIB-6045 — assign the slots BY TOKEN ADDRESS, never by amount.
+                #
+                # This previously did ``sorted(token_amounts.values(), reverse=True)``
+                # and took ``amounts[0]`` / ``amounts[1]``: a raw-integer magnitude
+                # sort ACROSS TOKENS WITH DIFFERENT DECIMALS. A WETH leg (18 dp,
+                # raw 2.9e16) always "outranks" a USDC leg (6 dp, raw 5.5e7) of the
+                # same USD value, so slot assignment tracked decimals rather than
+                # anything meaningful — and the identity was discarded entirely, so
+                # no downstream consumer could repair it. On base/optimism this
+                # booked a $110 close as a $29.3bn ledger row, and the same number
+                # sizes the teardown swap-back (ALM-2766 clamp), so it stranded
+                # real funds.
+                #
+                # Ascending address order is the Solidly/V3-family pool convention
+                # (``token0()`` is the numerically-lower address), so this
+                # reproduces the pool's own slot order — and the currencies are
+                # emitted alongside, which is what makes the pairing verifiable
+                # instead of assumed.
+                ordered = sorted(token_amounts.items(), key=lambda kv: int(kv[0], 16))
+                (token0, value0), (token1, value1) = ordered[0], ordered[1]
+                if len(ordered) > 2:
+                    logger.warning(
+                        "Aerodrome LP close transfer fallback: recipient received %d distinct "
+                        "tokens; the 2-slot LPCloseData carries only %s/%s and drops %s "
+                        "(VIB-6052 — surfaced, not silent)",
+                        len(ordered),
+                        token0,
+                        token1,
+                        [t for t, _ in ordered[2:]],
+                    )
                 return LPCloseData(
-                    amount0_collected=amounts[0],
-                    amount1_collected=amounts[1],
+                    amount0_collected=value0,
+                    amount1_collected=value1,
                     # VIB-4470 — Transfer-event fallback doesn't separate fees
                     # from principal (Empty ≠ Zero).
                     fees0=None,
                     fees1=None,
                     liquidity_removed=None,
+                    # VIB-6045 / VIB-6053 — identity travels WITH the amounts.
+                    currency0=token0,
+                    currency1=token1,
                 )
 
         return None
@@ -2229,6 +2292,15 @@ class AerodromeSlipstreamReceiptParser(AerodromeReceiptParser):
                 f"liquidity={liquidity} amount0={amount0} amount1={amount1} "
                 f"ticks=[{tick_lower}, {tick_upper}] current_tick={current_tick}"
             )
+            # VIB-6053 — bind leg IDENTITY to the amounts just decoded (CL pool slot
+            # order, which may be the OPPOSITE of the user's pool label). See the
+            # uniswap_v3 twin for the full rationale.
+            currency0, currency1 = currencies_for_amounts(
+                transfers_by_token(logs, to_address=pool_address) if pool_address else {},
+                amount0,
+                amount1,
+            )
+
             return LPOpenData(
                 position_id=token_id,
                 tick_lower=tick_lower,
@@ -2238,6 +2310,8 @@ class AerodromeSlipstreamReceiptParser(AerodromeReceiptParser):
                 amount1=amount1,
                 current_tick=current_tick,
                 pool_address=pool_address,
+                currency0=currency0,  # VIB-6053 — index-aligned with amount0
+                currency1=currency1,  # VIB-6053 — index-aligned with amount1
             )
 
         return None
@@ -2414,6 +2488,17 @@ class AerodromeSlipstreamReceiptParser(AerodromeReceiptParser):
                 if len(data) >= 2 + 96:
                     amount0 = HexDecoder.decode_uint256(data, 32)
                     amount1 = HexDecoder.decode_uint256(data, 64)
+                    # VIB-6053 — bind leg IDENTITY to the collected amounts. The
+                    # Collect is emitted by the NPM, so the pool address is not the
+                    # log's own address; the amounts land on the Collect's
+                    # ``recipient`` (data word 0), and a Collect transfers exactly
+                    # the collected amounts, so the value-match there is exact.
+                    recipient = HexDecoder.decode_address_from_data(data, 0)
+                    currency0, currency1 = currencies_for_amounts(
+                        transfers_by_token(logs, to_address=recipient) if recipient else {},
+                        amount0,
+                        amount1,
+                    )
                     return LPCloseData(
                         amount0_collected=amount0,
                         amount1_collected=amount1,
@@ -2424,6 +2509,8 @@ class AerodromeSlipstreamReceiptParser(AerodromeReceiptParser):
                         fees0=None,
                         fees1=None,
                         source="collect",
+                        currency0=currency0,  # VIB-6053 — index-aligned with amount0_collected
+                        currency1=currency1,  # VIB-6053 — index-aligned with amount1_collected
                     )
 
             # Pass 2: fall back to DecreaseLiquidity (first tx receipt in two-tx close).

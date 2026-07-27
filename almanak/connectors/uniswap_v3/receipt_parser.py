@@ -15,6 +15,11 @@ from typing import TYPE_CHECKING, Any
 
 from almanak.connectors._strategy_base import v3_receipt_parser_helpers, v3_registry_payload
 from almanak.connectors._strategy_base.base import EventRegistry, HexDecoder
+from almanak.connectors._strategy_base.lp_leg_identity import (
+    currencies_for_amounts,
+    log_emitter_address,
+    transfers_by_token,
+)
 from almanak.framework.execution.events import SwapResultPayload
 from almanak.framework.execution.extract_result import (
     ExtractError,
@@ -1836,6 +1841,22 @@ class UniswapV3ReceiptParser:
                     f"amount0={amount0} amount1={amount1} ticks=[{tick_lower}, {tick_upper}] "
                     f"current_tick={current_tick}"
                 )
+            # VIB-6053 — bind leg IDENTITY to the amounts just decoded. ``amount0``
+            # / ``amount1`` are in the POOL's canonical slot order, which may be the
+            # OPPOSITE of the user's pool label. Emitting each slot's currency is
+            # what lets every consumer pair (token, amount) within ONE layer;
+            # without it the ledger paired a receipt-ordered amount with a
+            # label-ordered symbol and scaled it by the wrong token's decimals
+            # ($100 position recorded as $26.5bn). The V3 mint callback transfers
+            # exactly amount0Owed / amount1Owed, so the value-match against the
+            # wallet -> pool transfers is exact. ``None`` on a miss — consumers
+            # fail closed rather than guess.
+            currency0, currency1 = currencies_for_amounts(
+                transfers_by_token(logs, to_address=pool_address) if pool_address else {},
+                amount0,
+                amount1,
+            )
+
             return LPOpenData(
                 position_id=token_id,
                 tick_lower=tick_lower,
@@ -1846,6 +1867,8 @@ class UniswapV3ReceiptParser:
                 current_tick=current_tick,
                 pool_address=pool_address,  # VIB-3893: framework slot0 fallback
                 position_hash=None,  # VIB-4473: V4-only — V3 lot-matches on position_token_id
+                currency0=currency0,  # VIB-6053 — index-aligned with amount0
+                currency1=currency1,  # VIB-6053 — index-aligned with amount1
             )
 
         return None
@@ -2006,6 +2029,10 @@ class UniswapV3ReceiptParser:
             # burn close path). Mirrors the LPOpenData.pool_address capture
             # from VIB-3893.
             pool_address = ""
+            # VIB-6053 — pool address as seen on the COLLECT log (see the collect
+            # branch below). Separate from ``pool_address`` so the registry anchor
+            # keeps its Burn-only semantics.
+            collect_pool_address = ""
 
             for log in logs:
                 topics = log.get("topics", [])
@@ -2028,6 +2055,13 @@ class UniswapV3ReceiptParser:
                     collect_amount0 += HexDecoder.decode_uint128(data, 32)
                     collect_amount1 += HexDecoder.decode_uint128(data, 64)
                     saw_collect = True
+                    # VIB-6053 — the pool emits Collect as well as Burn, so this
+                    # log's emitter IS the pool. Captured separately because a V3
+                    # close is a SPLIT-TX sequence (decreaseLiquidity -> collect ->
+                    # burn): the collect-only receipt carries no Burn, so the
+                    # Burn-derived ``pool_address`` is empty there and the
+                    # leg-identity scan would silently find no counterparty.
+                    collect_pool_address = collect_pool_address or log_emitter_address(log)
 
                 elif first_topic == burn_topic and len(topics) >= 4:
                     # uint128 amount (padded) ‖ uint256 amount0 ‖ uint256 amount1
@@ -2105,15 +2139,36 @@ class UniswapV3ReceiptParser:
             # receipt, silently dropping real fees from mainnet rows.
             source = "collect" if saw_collect else "decrease_liquidity"
 
+            amount0_collected = collect_amount0 if saw_collect else burn_amount0
+            amount1_collected = collect_amount1 if saw_collect else burn_amount1
+
+            # VIB-6053 — bind leg IDENTITY to the collected amounts (see the
+            # LP_OPEN twin above). A Collect transfers exactly the collected
+            # amounts out of the pool, so the value-match is exact on the
+            # ``source="collect"`` shape — which is also the shape the enricher's
+            # preferred-source picker selects (VIB-4310). A burn-only receipt
+            # moves no tokens (``decreaseLiquidity`` only credits ``tokensOwed``),
+            # so there is nothing to bind and both stay ``None``: honestly
+            # unidentified rather than guessed.
+            currency0, currency1 = currencies_for_amounts(
+                transfers_by_token(logs, from_address=pool_address or collect_pool_address)
+                if (pool_address or collect_pool_address)
+                else {},
+                amount0_collected,
+                amount1_collected,
+            )
+
             return LPCloseData(
-                amount0_collected=collect_amount0 if saw_collect else burn_amount0,
-                amount1_collected=collect_amount1 if saw_collect else burn_amount1,
+                amount0_collected=amount0_collected,
+                amount1_collected=amount1_collected,
                 fees0=fees0,
                 fees1=fees1,
                 liquidity_removed=liquidity_removed,
                 current_tick=current_tick,  # VIB-3940
                 pool_address=pool_address,  # VIB-3940 — for framework slot0 fallback
                 source=source,
+                currency0=currency0,  # VIB-6053 — index-aligned with amount0_collected
+                currency1=currency1,  # VIB-6053 — index-aligned with amount1_collected
             )
 
         except Exception as e:

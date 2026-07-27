@@ -18,6 +18,11 @@ from almanak.connectors._strategy_base.base import (
     resolve_swap_token_symbol,
     resolve_trading_wallet,
 )
+from almanak.connectors._strategy_base.lp_leg_identity import (
+    currencies_for_amounts,
+    log_emitter_address,
+    transfers_by_token,
+)
 from almanak.framework.execution.extract_result import (
     ExtractError,
     ExtractMissing,
@@ -1065,6 +1070,10 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
             # Burn event emitter so the registry-payload builder has the
             # semantic_grouping_key anchor without an off-chain RPC.
             pool_address = ""
+            # VIB-6053 — pool address as seen on the COLLECT log (see the collect
+            # branch below). Separate from ``pool_address`` so the registry anchor
+            # keeps its Burn-only semantics.
+            collect_pool_address = ""
 
             for log in logs:
                 topics = log.get("topics", [])
@@ -1085,6 +1094,15 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
                     collect_amount0 += HexDecoder.decode_uint128(data, 32)
                     collect_amount1 += HexDecoder.decode_uint128(data, 64)
                     saw_collect = True
+                    # VIB-6053 — the pool emits Collect as well as Burn, so this
+                    # log's emitter IS the pool. Captured separately because a V3
+                    # close is a SPLIT-TX sequence (decreaseLiquidity -> collect ->
+                    # burn): the collect-only receipt carries no Burn, so the
+                    # Burn-derived ``pool_address`` above is empty there and the
+                    # leg-identity scan would silently find no counterparty. Kept
+                    # out of ``pool_address`` itself so the VIB-4305 registry
+                    # anchor keeps its existing Burn-only semantics.
+                    collect_pool_address = collect_pool_address or log_emitter_address(log)
 
                 elif first_topic == burn_topic and len(topics) >= 4:
                     # uint128 amount (padded) ‖ uint256 amount0 ‖ uint256 amount1
@@ -1137,15 +1155,32 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
             # for full rationale.
             source = "collect" if saw_collect else "decrease_liquidity"
 
+            amount0_collected = collect_amount0 if saw_collect else burn_amount0
+            amount1_collected = collect_amount1 if saw_collect else burn_amount1
+
+            # VIB-6053 — bind leg IDENTITY to the collected amounts. See the
+            # uniswap_v3 twin: exact on the ``source="collect"`` shape (which the
+            # aggregator prefers); a burn-only receipt moves no tokens, so both
+            # stay ``None`` — honestly unidentified rather than guessed.
+            currency0, currency1 = currencies_for_amounts(
+                transfers_by_token(logs, from_address=pool_address or collect_pool_address)
+                if (pool_address or collect_pool_address)
+                else {},
+                amount0_collected,
+                amount1_collected,
+            )
+
             return LPCloseData(
-                amount0_collected=collect_amount0 if saw_collect else burn_amount0,
-                amount1_collected=collect_amount1 if saw_collect else burn_amount1,
+                amount0_collected=amount0_collected,
+                amount1_collected=amount1_collected,
                 fees0=fees0,
                 fees1=fees1,
                 liquidity_removed=liquidity_removed,
                 current_tick=current_tick,
                 pool_address=pool_address,
                 source=source,
+                currency0=currency0,  # VIB-6053 — index-aligned with amount0_collected
+                currency1=currency1,  # VIB-6053 — index-aligned with amount1_collected
             )
 
         except Exception as e:
@@ -1157,6 +1192,11 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
     # (mirrors uniswap_v3 / aerodrome — see VIB-3887 / VIB-3893)
     # =============================================================================
 
+    # crap-allowlist: VIB-6140 — cc=29 after PR #3451's purely-additive currency0/1
+    # identity emission. The decomposition (the shared `currencies_from_counterparty`
+    # helper) is DELIBERATELY deferred to VIB-6140 per the identity-seam plan's ordering
+    # constraint: that refactor alters leg-identity derivation in every V3 parser, so it
+    # must earn its own real-fork proof + lane re-run and NOT land just to pass this gate.
     def extract_lp_open_data(self, receipt: dict[str, Any]) -> "LPOpenData | None":  # noqa: C901
         """Extract LP open data from a PancakeSwap V3 mint receipt.
 
@@ -1327,6 +1367,15 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
                 f"liquidity={liquidity} amount0={amount0} amount1={amount1} "
                 f"ticks=[{tick_lower}, {tick_upper}] current_tick={current_tick}"
             )
+            # VIB-6053 — bind leg IDENTITY to the amounts just decoded (pool slot
+            # order, which may be the OPPOSITE of the user's pool label). See the
+            # uniswap_v3 twin for the full rationale.
+            currency0, currency1 = currencies_for_amounts(
+                transfers_by_token(logs, to_address=pool_address) if pool_address else {},
+                amount0,
+                amount1,
+            )
+
             return LPOpenData(
                 position_id=token_id,
                 tick_lower=tick_lower,
@@ -1336,6 +1385,8 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
                 amount1=amount1,
                 current_tick=current_tick,
                 pool_address=pool_address,
+                currency0=currency0,  # VIB-6053 — index-aligned with amount0
+                currency1=currency1,  # VIB-6053 — index-aligned with amount1
             )
 
         return None

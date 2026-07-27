@@ -507,22 +507,33 @@ def _extract_from_lp_open(intent: Any, result: Any, chain: str = "") -> _TokensA
     never written; on a decimals-resolve miss we prefer the intent's human
     amount, else leave ``""`` (Empty != Zero).
     """
-    # Token resolution: prefer explicit token0/token1 attrs (test/legacy callers),
-    # then parse symbols from the pool string (e.g. "WETH/USDC"), then fallback.
-    token_in = getattr(intent, "token0", "") or getattr(intent, "from_token", "") or ""
-    token_out = getattr(intent, "token1", "") or getattr(intent, "to_token", "") or ""
-    if not token_in or not token_out:
-        pool_str = (getattr(intent, "pool", "") or "").strip()
-        if "/" in pool_str:
-            pool_parts = [p.strip() for p in pool_str.split("/")]
-            if not token_in and pool_parts:
-                token_in = pool_parts[0]
-            if not token_out and len(pool_parts) > 1:
-                token_out = pool_parts[1]
-
     # Prefer on-chain actuals from LPOpenData; fall back to intent amounts.
     extracted_data = getattr(result, "extracted_data", None) or {} if result else {}
     lp_open_data = extracted_data.get("lp_open_data") if isinstance(extracted_data, dict) else None
+
+    # VIB-6053 — resolve the leg symbols from the SAME layer the amounts come from.
+    #
+    # This helper reads ``LPOpenData.amount0``/``amount1`` — the venue's canonical
+    # slot order (V3-family pool ``token0()``/``token1()``, address-sorted) — but
+    # historically took its symbols from ``intent.token0``/``token1`` and the pool
+    # LABEL, which is the user's ordering and may be the exact opposite. Pairing
+    # across the two layers transposes the row AND scales each leg by the other
+    # token's decimals: on ethereum/optimism/polygon WETH/USDC that recorded a $100
+    # deposit as a $26.5bn ledger row.
+    #
+    # The parser now stamps ``currency0``/``currency1`` index-aligned with the
+    # amounts it decoded, so the symbol can be resolved FROM THE ADDRESS — the same
+    # by-address discipline ``_resolve_lp_close_tokens`` already applies on the
+    # close side. The intent / pool-label fallback survives PER LEG, only where
+    # that leg has no identity, so a connector that emits nothing behaves exactly
+    # as before (this branch is strictly additive).
+    token_in, token_out = _resolve_lp_close_tokens(
+        intent,
+        getattr(lp_open_data, "currency0", None),
+        getattr(lp_open_data, "currency1", None),
+        chain,
+        getattr(lp_open_data, "coin_symbols", None),
+    )
 
     if lp_open_data is not None:
         # On-chain actuals are raw integers (smallest unit) -> scale to human.
@@ -594,7 +605,37 @@ def _resolve_lp_close_symbol(currency: Any, chain: str) -> str:
         return ""
 
 
-def _resolve_lp_close_tokens(intent: Any, currency0: Any, currency1: Any, chain: str) -> tuple[str, str]:
+def _coin_symbol_at(coin_symbols: Any, idx: int) -> str:
+    """Read pool-coin-ordered symbol ``idx`` off an N-coin ``coin_symbols`` carrier.
+
+    VIB-6051 — the fix for Curve's all-empty LP_CLOSE ledger rows. Curve pool ids
+    are registry nicknames (``"2pool"``), so the ``"WETH/USDC"`` pool-string split
+    yields nothing and the intent carries no ``token0``/``token1``; both symbols
+    resolved to ``""``, ``_lp_amount_to_human`` returned ``None`` for every
+    non-zero raw, and all four money columns were persisted empty on a successful
+    close. The identity was present the whole time: the Curve parser stamps
+    ``coin_symbols`` from ``CURVE_POOLS.coin_addresses`` (VIB-5429) in the SAME
+    index order as ``all_amounts`` (coin 0 = ``amount0_collected``, coin 1 =
+    ``amount1_collected``, coin 2+ = ``additional_amounts``) — nothing in the
+    ledger read it.
+
+    Index-aligned by contract, so this is a lookup, not an inference. Returns
+    ``""`` for a missing / non-list carrier or a non-string entry, so a
+    malformed payload degrades to unmeasured rather than to a wrong symbol.
+    """
+    if not isinstance(coin_symbols, list | tuple) or idx >= len(coin_symbols):
+        return ""
+    symbol = coin_symbols[idx]
+    return symbol if isinstance(symbol, str) else ""
+
+
+def _resolve_lp_close_tokens(
+    intent: Any,
+    currency0: Any,
+    currency1: Any,
+    chain: str,
+    coin_symbols: Any = None,
+) -> tuple[str, str]:
     """Resolve ``(token_in, token_out)`` symbols for an LP_CLOSE, address-aligned.
 
     ADDRESS-ALIGNMENT is the money-correctness invariant (codex P2 / CodeRabbit).
@@ -622,6 +663,12 @@ def _resolve_lp_close_tokens(intent: Any, currency0: Any, currency1: Any, chain:
     legs = ((currency0, ("token0", "from_token"), 0), (currency1, ("token1", "to_token"), 1))
     for currency, intent_attrs, idx in legs:
         symbol = _resolve_lp_close_symbol(currency, chain)
+        if currency is None and not symbol:
+            # VIB-6051 — the parser-stamped, pool-coin-ordered ``coin_symbols``
+            # carrier outranks the user-ordered intent / pool-string fallback: it
+            # is index-aligned with the collected amounts BY CONTRACT, while the
+            # intent order is the user's label order and may be the opposite.
+            symbol = _coin_symbol_at(coin_symbols, idx)
         if currency is None and not symbol:
             for attr in intent_attrs:
                 symbol = getattr(intent, attr, "") or ""
@@ -674,7 +721,11 @@ def _extract_from_lp_close(intent: Any, result: Any, chain: str = "") -> _Tokens
     # user-ordered intent / pool fallback is used only for a currency-ABSENT leg.
     currency0 = getattr(lp_close_data, "currency0", None)
     currency1 = getattr(lp_close_data, "currency1", None)
-    token_in, token_out = _resolve_lp_close_tokens(intent, currency0, currency1, chain)
+    # VIB-6051 — pass the N-coin ``coin_symbols`` carrier so a Curve-style close
+    # (registry-nickname pool id, no intent token0/token1) resolves its legs from
+    # chain truth instead of persisting four empty money columns.
+    coin_symbols = getattr(lp_close_data, "coin_symbols", None)
+    token_in, token_out = _resolve_lp_close_tokens(intent, currency0, currency1, chain, coin_symbols)
 
     # Scale on-chain raw collected amounts (smallest unit) to human. ``None``
     # (unmeasured) stays ``""`` (Empty != Zero); a measured ``0`` scales to "0".
@@ -941,8 +992,18 @@ def _extract_tokens_and_amounts(
     below runs unchanged (byte-identical rows).
 
     Legacy dispatch (unchanged): a truthy ``result.swap_amounts`` drives every
-    field (used by SWAP, LP_CLOSE, and anything whose receipt parser emits
-    SwapAmounts). LP_OPEN intents carry amounts in ``LPOpenData`` and have no
+    field (used by SWAP and anything whose receipt parser emits SwapAmounts).
+
+    NOTE (VIB-6053): this docstring previously claimed LP_CLOSE rides the
+    ``swap_amounts`` branch. It does not, and never did — ``EXTRACTION_SPECS``
+    for LP_OPEN / LP_CLOSE contain no ``swap_amounts`` and no protocol overlay
+    adds it, so no LP connector produces one on an LP receipt. The live LP paths
+    are ``_extract_from_lp_open`` / ``_extract_from_lp_close`` below. The stale
+    claim mattered: it made the ``swap_amounts``-before-LP_CLOSE ordering look
+    load-bearing for LP when it is inert, which sent a design review chasing a
+    non-existent interaction.
+
+    LP_OPEN intents carry amounts in ``LPOpenData`` and have no
     ``from_token`` / ``to_token``, so they get a dedicated extraction path.
     PERP_OPEN collateral lives at ``intent.collateral_token`` /
     ``intent.collateral_amount``, not the standard from_token/to_token chain.

@@ -45,6 +45,11 @@ from almanak.connectors._strategy_base.base import (
     resolve_swap_token_symbol_with_fallback,
     resolve_trading_wallet,
 )
+from almanak.connectors._strategy_base.lp_leg_identity import (
+    currencies_for_amounts,
+    log_emitter_address,
+    transfers_by_token,
+)
 from almanak.framework.execution.events import SwapResultPayload
 from almanak.framework.execution.extract_result import (
     ExtractError,
@@ -1648,6 +1653,16 @@ class SushiSwapV3ReceiptParser:
                 f"liquidity={liquidity} amount0={amount0} amount1={amount1} "
                 f"ticks=[{tick_lower}, {tick_upper}] current_tick={current_tick}"
             )
+            # VIB-6053 — bind leg IDENTITY to the amounts just decoded (the
+            # ``amount0``/``amount1`` pair is in the POOL's canonical slot order,
+            # which may be the OPPOSITE of the user's pool label). See the
+            # uniswap_v3 twin for the full rationale.
+            currency0, currency1 = currencies_for_amounts(
+                transfers_by_token(logs, to_address=pool_address) if pool_address else {},
+                amount0,
+                amount1,
+            )
+
             return LPOpenData(
                 position_id=token_id,
                 tick_lower=tick_lower,
@@ -1657,6 +1672,8 @@ class SushiSwapV3ReceiptParser:
                 amount1=amount1,
                 current_tick=current_tick,
                 pool_address=pool_address,  # VIB-3893: framework slot0 fallback
+                currency0=currency0,  # VIB-6053 — index-aligned with amount0
+                currency1=currency1,  # VIB-6053 — index-aligned with amount1
             )
 
         return None
@@ -1838,6 +1855,10 @@ class SushiSwapV3ReceiptParser:
             # empty pool_address as "fall back to save_ledger_entry", per
             # CLAUDE.md "Empty ≠ zero".
             pool_address = ""
+            # VIB-6053 — pool address as seen on the COLLECT log (see the collect
+            # branch below). Separate from ``pool_address`` so the registry anchor
+            # keeps its Burn-only semantics.
+            collect_pool_address = ""
 
             for log in logs:
                 topics = log.get("topics", [])
@@ -1860,6 +1881,13 @@ class SushiSwapV3ReceiptParser:
                     collect_amount0 += HexDecoder.decode_uint128(data, 32)
                     collect_amount1 += HexDecoder.decode_uint128(data, 64)
                     saw_collect = True
+                    # VIB-6053 — the pool emits Collect as well as Burn, so this
+                    # log's emitter IS the pool. Captured separately because a V3
+                    # close is a SPLIT-TX sequence (decreaseLiquidity -> collect ->
+                    # burn): the collect-only receipt carries no Burn, so the
+                    # Burn-derived ``pool_address`` is empty there and the
+                    # leg-identity scan would silently find no counterparty.
+                    collect_pool_address = collect_pool_address or log_emitter_address(log)
 
                 elif first_topic == burn_topic and len(topics) >= 4:
                     # Burn event - liquidity being removed
@@ -1908,14 +1936,31 @@ class SushiSwapV3ReceiptParser:
             # for full rationale.
             source = "collect" if saw_collect else "decrease_liquidity"
 
+            amount0_collected = collect_amount0 if saw_collect else burn_amount0
+            amount1_collected = collect_amount1 if saw_collect else burn_amount1
+
+            # VIB-6053 — bind leg IDENTITY to the collected amounts. See the
+            # uniswap_v3 twin: exact on the ``source="collect"`` shape (which the
+            # aggregator prefers); a burn-only receipt moves no tokens, so both
+            # stay ``None`` — honestly unidentified rather than guessed.
+            currency0, currency1 = currencies_for_amounts(
+                transfers_by_token(logs, from_address=pool_address or collect_pool_address)
+                if (pool_address or collect_pool_address)
+                else {},
+                amount0_collected,
+                amount1_collected,
+            )
+
             return LPCloseData(
-                amount0_collected=collect_amount0 if saw_collect else burn_amount0,
-                amount1_collected=collect_amount1 if saw_collect else burn_amount1,
+                amount0_collected=amount0_collected,
+                amount1_collected=amount1_collected,
                 fees0=fees0,
                 fees1=fees1,
                 liquidity_removed=liquidity_removed,
                 pool_address=pool_address,  # VIB-4198 / T12 — registry-mode close
                 source=source,
+                currency0=currency0,  # VIB-6053 — index-aligned with amount0_collected
+                currency1=currency1,  # VIB-6053 — index-aligned with amount1_collected
             )
 
         except Exception as e:
