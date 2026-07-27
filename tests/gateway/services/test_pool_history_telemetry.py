@@ -12,7 +12,7 @@ Covers the five sub-steps:
 * ``test_bucket_throttle_waits_ms_per_provider`` — D2.M2.b.3: theoretical
   ms-until-next-token (``round(period * 1000 / rate)``) accumulates on
   EVERY bucket refusal (TheGraph ``_ProviderError`` primary AND
-  GeckoTerminal ``_NotAttempted`` fallback); monotonic — a successful
+  CoinGecko Onchain ``_NotAttempted`` fallback); monotonic — a successful
   call NEVER resets the accumulator.
 * ``test_structured_logs_at_boundary`` — D2.M2.b.4 part 1: exactly 2 INFO
   records per happy path (entry + exit), 1 INFO + 1 WARNING per error
@@ -206,7 +206,7 @@ def test_truncated_counter_scalar_and_per_reason(monkeypatch: pytest.MonkeyPatch
     }
 
     # 3) PROVIDER_RETENTION — 400d 1d under the 730d 1d cap; force TheGraph
-    # down so DefiLlama serves only the most recent ~365d. GeckoTerminal
+    # down so DefiLlama serves only the most recent ~365d. CoinGecko Onchain
     # MUST NOT be consulted to fill the gap. Distinct pool address so the
     # cache stays unique from step 1 / step 2. Mirror the canonical DefiLlama
     # fixture shape used by `test_pool_history_truncation.py` (chain segment
@@ -231,7 +231,7 @@ def test_truncated_counter_scalar_and_per_reason(monkeypatch: pytest.MonkeyPatch
         patch.object(servicer._dispatcher._graphql, "query", new=tg_down),
         patch.object(servicer._dispatcher._defillama, "_query_pools", new=AsyncMock(return_value=pools_rows)),
         patch.object(servicer._dispatcher._defillama, "_query_chart", new=AsyncMock(return_value=chart_rows)),
-        patch.object(servicer._dispatcher._geckoterminal, "_query_ohlcv", new=gt_mock),
+        patch.object(servicer._dispatcher._coingecko_onchain, "_query_ohlcv", new=gt_mock),
     ):
         resp_ret = asyncio.run(
             servicer.GetPoolHistory(
@@ -249,7 +249,7 @@ def test_truncated_counter_scalar_and_per_reason(monkeypatch: pytest.MonkeyPatch
     assert resp_ret.source == "defillama"
     assert resp_ret.truncation_reason == _TR.PROVIDER_RETENTION
     assert resp_ret.next_start_ts == 0  # do-not-rechunk sentinel
-    assert gt_mock.call_count == 0  # GeckoTerminal NEVER consulted to "fill the gap"
+    assert gt_mock.call_count == 0  # CoinGecko Onchain NEVER consulted to "fill the gap"
     assert servicer.health()["per_rpc"]["truncated"] == 3
     assert servicer.health()["per_rpc"]["truncated_by_reason"] == {
         "TRUNCATION_REASON_UNSPECIFIED": 0,
@@ -291,12 +291,12 @@ def test_truncated_counter_scalar_and_per_reason(monkeypatch: pytest.MonkeyPatch
     err_mock = AsyncMock(side_effect=SubgraphConnectionError("down"))
     err_pools = AsyncMock(return_value=[])  # DefiLlama returns no match
     err_chart = AsyncMock(return_value=[])
-    err_gt = AsyncMock(return_value=None)  # GeckoTerminal returns "not found"
+    err_gt = AsyncMock(return_value=None)  # CoinGecko Onchain returns "not found"
     with (
         patch.object(servicer._dispatcher._graphql, "query", new=err_mock),
         patch.object(servicer._dispatcher._defillama, "_query_pools", new=err_pools),
         patch.object(servicer._dispatcher._defillama, "_query_chart", new=err_chart),
-        patch.object(servicer._dispatcher._geckoterminal, "_query_ohlcv", new=err_gt),
+        patch.object(servicer._dispatcher._coingecko_onchain, "_query_ohlcv", new=err_gt),
     ):
         resp_err = asyncio.run(
             servicer.GetPoolHistory(
@@ -439,7 +439,7 @@ def test_errors_by_grpc_code_populates() -> None:
         patch.object(servicer._dispatcher._graphql, "query", new=err_tg),
         patch.object(servicer._dispatcher._defillama, "_query_pools", new=err_dl_pools),
         patch.object(servicer._dispatcher._defillama, "_query_chart", new=err_dl_chart),
-        patch.object(servicer._dispatcher._geckoterminal, "_query_ohlcv", new=err_gt),
+        patch.object(servicer._dispatcher._coingecko_onchain, "_query_ohlcv", new=err_gt),
     ):
         ctx_c = _Ctx()
         asyncio.run(
@@ -491,7 +491,7 @@ def test_bucket_throttle_waits_ms_per_provider(monkeypatch: pytest.MonkeyPatch) 
     Two scenarios cover the two refusal paths:
       (a) TheGraph primary bucket empty -> `_ProviderError` -> +errors and
           +bucket_throttle_waits_ms.
-      (b) GeckoTerminal fallback bucket empty -> `_NotAttempted` silent skip
+      (b) CoinGecko Onchain fallback bucket empty -> `_NotAttempted` silent skip
           -> +bucket_throttle_waits_ms WITHOUT +errors.
     Then anti-reset: a successful call MUST NOT reset the accumulator.
     """
@@ -528,10 +528,10 @@ def test_bucket_throttle_waits_ms_per_provider(monkeypatch: pytest.MonkeyPatch) 
         end_ts=end,
         resolution=gateway_pb2.Resolution.RESOLUTION_1H,
     )
-    gt_mock = AsyncMock(return_value=[])  # GeckoTerminal serves empty
+    gt_mock = AsyncMock(return_value=[])  # CoinGecko Onchain serves empty
     with (
         patch.object(servicer._dispatcher._graphql, "query", new=tg_mock),
-        patch.object(servicer._dispatcher._geckoterminal, "_query_ohlcv", new=gt_mock),
+        patch.object(servicer._dispatcher._coingecko_onchain, "_query_ohlcv", new=gt_mock),
     ):
         asyncio.run(servicer.GetPoolHistory(req2, _Ctx()))
     tg_counters = servicer.health()["per_provider"]["the_graph"]
@@ -564,22 +564,22 @@ def test_bucket_throttle_waits_ms_per_provider(monkeypatch: pytest.MonkeyPatch) 
     )
     with (
         patch.object(servicer._dispatcher._graphql, "query", new=tg_mock),
-        patch.object(servicer._dispatcher._geckoterminal, "_query_ohlcv", new=AsyncMock(return_value=[])),
+        patch.object(servicer._dispatcher._coingecko_onchain, "_query_ohlcv", new=AsyncMock(return_value=[])),
     ):
         asyncio.run(servicer.GetPoolHistory(req4, _Ctx()))
     tg_counters = servicer.health()["per_provider"]["the_graph"]
     assert tg_counters["bucket_throttle_waits_ms"] == 2000
 
-    # GeckoTerminal `_NotAttempted` path. Default rate is 30/60s ->
+    # CoinGecko Onchain `_NotAttempted` path. Default rate is 30/60s ->
     # `round(60.0 * 1000 / 30) == 2000` ms per refusal. Drain its bucket
     # then issue a request on (base, aerodrome) where TheGraph is
-    # `_NotAttempted` (no subgraph capability registered) and GeckoTerminal
+    # `_NotAttempted` (no subgraph capability registered) and CoinGecko Onchain
     # is the only viable provider.
     gt_servicer = _servicer()
-    # Drain GeckoTerminal bucket: 30 tokens at start; acquire 30 times.
+    # Drain CoinGecko Onchain bucket: 30 tokens at start; acquire 30 times.
     for _ in range(30):
-        gt_servicer._dispatcher._geckoterminal_bucket.acquire()
-    # Issue ONE request — the GeckoTerminal bucket is empty -> _NotAttempted.
+        gt_servicer._dispatcher._coingecko_onchain_bucket.acquire()
+    # Issue ONE request — the CoinGecko Onchain bucket is empty -> _NotAttempted.
     req_aero = _request(
         pool_address=_BASE_AERO_POOL,
         chain="base",
@@ -589,7 +589,7 @@ def test_bucket_throttle_waits_ms_per_provider(monkeypatch: pytest.MonkeyPatch) 
         resolution=gateway_pb2.Resolution.RESOLUTION_1H,
     )
     asyncio.run(gt_servicer.GetPoolHistory(req_aero, _Ctx()))
-    gt_counters = gt_servicer.health()["per_provider"]["geckoterminal"]
+    gt_counters = gt_servicer.health()["per_provider"]["coingecko_onchain"]
     assert gt_counters["bucket_throttle_waits_ms"] == 2000  # 30/60s formula
     assert gt_counters["errors"] == 0  # _NotAttempted is NOT an error (D2.M2 contract)
 
@@ -608,7 +608,7 @@ def test_bucket_throttle_waits_ms_per_provider(monkeypatch: pytest.MonkeyPatch) 
     boom_tg = AsyncMock(side_effect=RuntimeError("synthetic-not-bucket"))
     with (
         patch.object(boom_servicer._dispatcher._graphql, "query", new=boom_tg),
-        patch.object(boom_servicer._dispatcher._geckoterminal, "_query_ohlcv", new=AsyncMock(return_value=[])),
+        patch.object(boom_servicer._dispatcher._coingecko_onchain, "_query_ohlcv", new=AsyncMock(return_value=[])),
     ):
         asyncio.run(boom_servicer.GetPoolHistory(req, _Ctx()))
     # TheGraph counter exists (errors) but bucket_throttle_waits_ms stays 0.
@@ -677,7 +677,7 @@ def test_structured_logs_at_boundary(caplog: pytest.LogCaptureFixture) -> None:
             patch.object(err_servicer._dispatcher._graphql, "query", new=err_tg),
             patch.object(err_servicer._dispatcher._defillama, "_query_pools", new=err_pools),
             patch.object(err_servicer._dispatcher._defillama, "_query_chart", new=err_chart),
-            patch.object(err_servicer._dispatcher._geckoterminal, "_query_ohlcv", new=err_gt),
+            patch.object(err_servicer._dispatcher._coingecko_onchain, "_query_ohlcv", new=err_gt),
         ):
             asyncio.run(err_servicer.GetPoolHistory(req, _Ctx()))
     svc_records = [r for r in caplog.records if r.name == _LOGGER_NAME]
@@ -718,12 +718,12 @@ def test_api_key_never_in_logs(caplog: pytest.LogCaptureFixture, monkeypatch: py
                     _Ctx(),
                 )
             )
-        # (2) TheGraph error -> fallback to GeckoTerminal (which returns empty -> ultimately UNAVAILABLE)
+        # (2) TheGraph error -> fallback to CoinGecko Onchain (which returns empty -> ultimately UNAVAILABLE)
         with (
             patch.object(servicer._dispatcher._graphql, "query", new=err_tg),
             patch.object(servicer._dispatcher._defillama, "_query_pools", new=AsyncMock(return_value=[])),
             patch.object(servicer._dispatcher._defillama, "_query_chart", new=AsyncMock(return_value=[])),
-            patch.object(servicer._dispatcher._geckoterminal, "_query_ohlcv", new=AsyncMock(return_value=None)),
+            patch.object(servicer._dispatcher._coingecko_onchain, "_query_ohlcv", new=AsyncMock(return_value=None)),
         ):
             asyncio.run(
                 servicer.GetPoolHistory(

@@ -36,11 +36,11 @@ from almanak.core.chains._helpers import vendor_chain_map
 from almanak.core.enums import ChainFamily
 
 #: Chain -> CoinGecko Onchain network slug. Derived compat view (VIB-4851 B1);
-#: canonical home is ``ChainDescriptor.external_ids["geckoterminal"]``.
+#: canonical home is ``ChainDescriptor.external_ids["coingecko_onchain"]``.
 #: INTENTIONALLY the union of this service's historical 9-entry map with the
-#: price-layer geckoterminal map — it gains ``mantle`` (9 -> 10 keys). Pinned by
-#: ``tests/unit/core/test_external_ids_inversion.py::test_geckoterminal_collapse_is_union_with_mantle``.
-_CHAIN_TO_GT_NETWORK: Mapping[str, str] = MappingProxyType(vendor_chain_map("geckoterminal"))
+#: price-layer coingecko_onchain map — it gains ``mantle`` (9 -> 10 keys). Pinned by
+#: ``tests/unit/core/test_external_ids_inversion.py::test_coingecko_onchain_collapse_is_union_with_mantle``.
+_CHAIN_TO_CG_ONCHAIN_NETWORK: Mapping[str, str] = MappingProxyType(vendor_chain_map("coingecko_onchain"))
 
 #: Chain -> DefiLlama display name (DefiLlama uses capitalized chain names).
 #: Derived compat view (VIB-4851 B1); canonical home is
@@ -48,11 +48,10 @@ _CHAIN_TO_GT_NETWORK: Mapping[str, str] = MappingProxyType(vendor_chain_map("gec
 _CHAIN_TO_LLAMA_DISPLAY: Mapping[str, str] = MappingProxyType(vendor_chain_map("defillama_display"))
 
 
-#: CoinGecko Onchain API bases. The org runs the paid CoinGecko key
-#: (CoinGecko acquired GeckoTerminal; Onchain is the same data behind paid
-#: limits) — keyed requests go to the pro host, keyless fall back to the
-#: free host (pool endpoints there reject keyless calls, which surfaces as
-#: an honest provider error naming the env var).
+#: CoinGecko Onchain API bases. The org runs the paid CoinGecko key — keyed
+#: requests go to the pro host, keyless fall back to the free host (pool
+#: endpoints there reject keyless calls, which surfaces as an honest provider
+#: error naming the env var).
 _CG_ONCHAIN_FREE_API = "https://api.coingecko.com/api/v3/onchain"
 _CG_ONCHAIN_PRO_API = "https://pro-api.coingecko.com/api/v3/onchain"
 
@@ -86,7 +85,7 @@ def is_solana_family(chain: str) -> bool:
 __all__ = [
     "_CG_ONCHAIN_FREE_API",
     "_CG_ONCHAIN_PRO_API",
-    "_CHAIN_TO_GT_NETWORK",
+    "_CHAIN_TO_CG_ONCHAIN_NETWORK",
     "_CHAIN_TO_LLAMA_DISPLAY",
     "coingecko_onchain_api_base",
     "coingecko_onchain_headers",

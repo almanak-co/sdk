@@ -55,7 +55,7 @@ DESCRIPTOR = register_chain(
             "usdt0": "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",
         },
         # VIB-4851 (B1): per-vendor external ids, transposed from the legacy
-        # standalone vendor maps (CoinGecko / DexScreener / GeckoTerminal /
+        # standalone vendor maps (CoinGecko / DexScreener / CoinGecko Onchain /
         # DeFiLlama / Zerion / Moralis / OKX). Values verbatim incl. case.
         external_ids={
             "coingecko": "xlayer",

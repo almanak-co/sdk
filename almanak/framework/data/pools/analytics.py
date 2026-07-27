@@ -1,6 +1,6 @@
 """Pool analytics - thin gRPC client over the gateway's PoolAnalyticsService.
 
-This module used to do its own HTTP egress to DefiLlama / GeckoTerminal,
+This module used to do its own HTTP egress to DefiLlama / CoinGecko Onchain,
 which violated the gateway-boundary rule (AGENTS.md "Gateway boundary":
 strategy containers have no outbound network access except the gateway
 gRPC channel). VIB-4727 moves all HTTP egress server-side; this module
@@ -155,7 +155,7 @@ class PoolAnalyticsReader:
     """Thin gRPC client over the gateway's ``PoolAnalyticsService``.
 
     This class no longer owns any HTTP egress. All upstream provider
-    fetching (DefiLlama, GeckoTerminal) happens inside the gateway
+    fetching (DefiLlama, CoinGecko Onchain) happens inside the gateway
     sidecar. The constructor REQUIRES a connected ``GatewayClient`` —
     constructing one without it deliberately raises ``TypeError`` so any
     stale ``PoolAnalyticsReader()`` call from before VIB-4727 fails loudly.

@@ -205,12 +205,12 @@ DESCRIPTOR = register_chain(
         canonical_stable="USDG",
         # Per-vendor chain slugs, all verified 2026-07-09: CoinGecko asset-platform
         # id "robinhood" (chain_identifier 4663), DexScreener "robinhood",
-        # GeckoTerminal "robinhood" (went live 2026-07-09), and DeFiLlama chain slug
+        # CoinGecko Onchain "robinhood" (went live 2026-07-09), and DeFiLlama chain slug
         # "robinhood-chain" (/v2/historicalChainTvl/robinhood-chain returns data).
         external_ids={
             "coingecko": "robinhood",
             "dexscreener": "robinhood",
-            "geckoterminal": "robinhood",
+            "coingecko_onchain": "robinhood",
             "defillama": "robinhood-chain",
         },
         # Managed-Anvil fork-test funding (facts verified at block 5_610_000). WETH

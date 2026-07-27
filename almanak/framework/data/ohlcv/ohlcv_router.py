@@ -3,8 +3,8 @@
 Routes OHLCV requests to the appropriate provider chain based on instrument
 classification:
 
-- **DeFi-native pairs**: GeckoTerminal -> DeFi Llama -> Binance
-  Tokens that have GeckoTerminal pool data but no known CEX symbol.
+- **DeFi-native pairs**: CoinGecko Onchain -> DeFi Llama -> Binance
+  Tokens that have CoinGecko Onchain pool data but no known CEX symbol.
 
 - **Major CEX-listed tokens**: Binance -> CoinGecko -> DeFi Llama
   Tokens with known CEX symbols in CEX_SYMBOL_MAP.
@@ -20,7 +20,7 @@ Example:
     from almanak.framework.data.ohlcv.ohlcv_router import OHLCVRouter
 
     router = OHLCVRouter()
-    router.register_provider(gecko_provider)
+    router.register_provider(cg_onchain_provider)
     router.register_provider(binance_wrapper)
 
     envelope = router.get_ohlcv(
@@ -30,7 +30,7 @@ Example:
         limit=100,
     )
     candles = envelope.value
-    print(envelope.meta.source)  # e.g. "geckoterminal"
+    print(envelope.meta.source)  # e.g. "coingecko_onchain"
 """
 
 from __future__ import annotations
@@ -186,7 +186,7 @@ def _backoff_delay(attempt: int) -> float:
 # DEX-side providers that get bounded retries on transient failures.
 # CEX providers (binance, coingecko) are excluded: their failures are almost
 # always deterministic ("unknown token"), so retrying wastes latency budget.
-_RETRYABLE_PROVIDERS: frozenset[str] = frozenset(["geckoterminal", "defillama", "coingecko_dex"])
+_RETRYABLE_PROVIDERS: frozenset[str] = frozenset(["coingecko_onchain", "defillama", "coingecko_dex"])
 
 
 def _error_text(exc: Exception | None) -> str:
@@ -246,7 +246,7 @@ def classify_instrument(instrument: Instrument) -> str:
 # change so the invariant stays satisfied.
 _PROVIDER_CHAINS: dict[str, list[str]] = {
     "cex_primary": ["binance", "coingecko"],
-    "defi_primary": ["geckoterminal", "binance"],
+    "defi_primary": ["coingecko_onchain", "binance"],
 }
 
 
@@ -326,7 +326,7 @@ _STALE_MIN_BUDGET = timedelta(seconds=300)
 
 # VIB-4875: on-chain DEX OHLCV sources where "no trade in an interval" is the
 # *correct* representation of a quiet market — not a dead feed. For a quiet
-# pool the newest real candle legitimately lags wall-clock (GeckoTerminal only
+# pool the newest real candle legitimately lags wall-clock (CoinGecko Onchain only
 # emits a bucket when a swap occurs, and ``include_empty_intervals`` backfills
 # only *interior* gaps, never past the last trade). For these sources we (1)
 # forward-fill flat candles up to the current bucket so indicators get a
@@ -334,7 +334,7 @@ _STALE_MIN_BUDGET = timedelta(seconds=300)
 # doubles as the "dead pool" horizon. CEX sources (binance/coingecko) are
 # deliberately excluded — there, a stale response means a dead/rebranded ticker
 # (the ALM-2697 case) and must still be rejected on the strict budget.
-_DEX_QUIET_POOL_PROVIDERS = frozenset({"geckoterminal"})
+_DEX_QUIET_POOL_PROVIDERS = frozenset({"coingecko_onchain"})
 
 # Relaxed staleness multiple for DEX quiet-pool sources. This is the dead-pool
 # horizon: a DEX pool with no trade for more than ``_DEX_STALE_TIMEFRAME_MULTIPLE``
@@ -497,7 +497,7 @@ class OHLCVRouter:
         """Register a data provider for OHLCV routing.
 
         Args:
-            provider: A DataProvider implementation (e.g. GeckoTerminalOHLCVProvider).
+            provider: A DataProvider implementation (e.g. CoinGeckoOnchainOHLCVProvider).
         """
         self._providers[provider.name] = provider
         logger.debug("ohlcv_router_registered provider=%s", provider.name)

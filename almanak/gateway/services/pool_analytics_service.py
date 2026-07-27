@@ -10,9 +10,9 @@ first with CoinGecko Onchain as fallback. The matcher lane was structurally
 dead — the upstream catalog keys pools by opaque UUIDs, not addresses, so an
 address-equality match could never hit. CoinGecko
 Onchain is address-keyed and verified end-to-end, so it is now the primary
-and only lane. The org deliberately runs the paid CoinGecko key here
-(CoinGecko acquired GeckoTerminal; Onchain is the same data behind paid
-limits) — do NOT reintroduce a keyless GeckoTerminal client.
+and only lane. The org deliberately runs the paid CoinGecko key here — the
+Onchain pool endpoints reject keyless calls, so do NOT reintroduce a keyless
+onchain client.
 
 API-key resolution (gateway settings conventions):
 
@@ -68,7 +68,7 @@ import grpc
 
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.data._history_common import (
-    _CHAIN_TO_GT_NETWORK,
+    _CHAIN_TO_CG_ONCHAIN_NETWORK,
     coingecko_onchain_api_base,
     coingecko_onchain_headers,
     is_solana_family,
@@ -86,7 +86,7 @@ logger = logging.getLogger(__name__)
 
 _COINGECKO_ONCHAIN_SOURCE = "coingecko_onchain"
 
-# The chain-name map (``_CHAIN_TO_GT_NETWORK``), the CoinGecko Onchain API
+# The chain-name map (``_CHAIN_TO_CG_ONCHAIN_NETWORK``), the CoinGecko Onchain API
 # base / header helpers, and the ``is_solana_family`` helper are imported
 # from the shared ``almanak/gateway/data/_history_common`` home so this
 # service and the pool-history providers agree on chain spelling and API
@@ -355,7 +355,7 @@ class PoolAnalyticsServiceServicer(gateway_pb2_grpc.PoolAnalyticsServiceServicer
                 error="pool_address and chain are required",
             )
 
-        if chain not in _CHAIN_TO_GT_NETWORK:
+        if chain not in _CHAIN_TO_CG_ONCHAIN_NETWORK:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(f"unsupported chain: {chain}")
             return gateway_pb2.PoolAnalyticsResponse(
@@ -462,7 +462,7 @@ class PoolAnalyticsServiceServicer(gateway_pb2_grpc.PoolAnalyticsServiceServicer
 
         if not token_address or not chain:
             return _fail(grpc.StatusCode.INVALID_ARGUMENT, "token_address and chain are required")
-        if chain not in _CHAIN_TO_GT_NETWORK:
+        if chain not in _CHAIN_TO_CG_ONCHAIN_NETWORK:
             return _fail(grpc.StatusCode.INVALID_ARGUMENT, f"unsupported chain: {chain}")
         if not _validate_pool_address(token_address, chain):
             return _fail(
@@ -571,7 +571,7 @@ class PoolAnalyticsServiceServicer(gateway_pb2_grpc.PoolAnalyticsServiceServicer
                 "CoinGecko Onchain API requires a valid COINGECKO_API_KEY for token pools; "
                 "set ALMANAK_GATEWAY_COINGECKO_API_KEY on the gateway"
             )
-        network = _CHAIN_TO_GT_NETWORK[chain]
+        network = _CHAIN_TO_CG_ONCHAIN_NETWORK[chain]
         url = f"{self._coingecko_onchain_api_base}/networks/{network}/tokens/{token_address}/pools"
         pages = [page] if page >= 1 else list(range(1, _TOKEN_POOLS_MAX_UPSTREAM_PAGES + 1))
         session = await self._get_http_session()
@@ -632,7 +632,7 @@ class PoolAnalyticsServiceServicer(gateway_pb2_grpc.PoolAnalyticsServiceServicer
         if not self._rate_limiter_cg.acquire():
             raise _ProviderError("rate limited")
 
-        network = _CHAIN_TO_GT_NETWORK.get(chain)
+        network = _CHAIN_TO_CG_ONCHAIN_NETWORK.get(chain)
         if network is None:
             raise _ProviderError(f"unsupported chain: {chain}")
 

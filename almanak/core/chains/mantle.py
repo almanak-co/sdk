@@ -121,12 +121,12 @@ DESCRIPTOR = register_chain(
         },
         simulation=SimulationProfile(tenderly_supported=True),
         # VIB-4851 (B1): per-vendor external ids, transposed from the legacy
-        # standalone vendor maps (CoinGecko / DexScreener / GeckoTerminal /
+        # standalone vendor maps (CoinGecko / DexScreener / CoinGecko Onchain /
         # DeFiLlama / Zerion / Moralis / OKX). Values verbatim incl. case.
         external_ids={
             "coingecko": "mantle",
             "dexscreener": "mantle",
-            "geckoterminal": "mantle",
+            "coingecko_onchain": "mantle",
         },
         # Safe MultiSendCallOnly v1.4.1 — CREATE2, same address on every
         # chain Safe deploys to; presence here == deployment-verified

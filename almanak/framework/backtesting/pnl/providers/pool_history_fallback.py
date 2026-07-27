@@ -81,7 +81,7 @@ class DailyPoolHistory:
 
     ``None`` fields are unmeasured (Empty != Zero). ``tvl_source`` /
     ``volume_source`` name the serving gateway provider (e.g.
-    ``"defillama"``, ``"geckoterminal"``) and are ``""`` when the field is
+    ``"defillama"``, ``"coingecko_onchain"``) and are ``""`` when the field is
     unmeasured.
     """
 

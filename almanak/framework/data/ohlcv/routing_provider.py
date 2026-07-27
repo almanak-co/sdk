@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Intersection of timeframes supported by both GeckoTerminal and Gateway/Binance
+# Intersection of timeframes supported by both CoinGecko Onchain and Gateway/Binance
 _SUPPORTED_TIMEFRAMES: list[str] = ["1m", "5m", "15m", "1h", "4h", "1d"]
 
 

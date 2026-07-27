@@ -211,8 +211,7 @@ class GatewaySettings(_GatewaySettingsBase):  # type: ignore[valid-type,misc]
     # The Graph bills per query against a monthly plan quota. Once the
     # gateway's in-memory monthly query count reaches this max, the TheGraph
     # provider is skipped and the dispatcher falls through to DefiLlama /
-    # CoinGecko Onchain (legacy geckoterminal provider key; UAT card D3.F11
-    # trip). Operators tune this to their
+    # CoinGecko Onchain (UAT card D3.F11 trip). Operators tune this to their
     # Graph plan via ``ALMANAK_GATEWAY_POOL_HISTORY_THEGRAPH_MONTHLY_BUDGET_MAX``.
     # Non-positive / malformed overrides fall back to the default via
     # ``_validate_pool_history_thegraph_budget`` so a typo can't silently
@@ -226,13 +225,13 @@ class GatewaySettings(_GatewaySettingsBase):  # type: ignore[valid-type,misc]
     # (see ``_history_cache``). DefiLlama revises daily TVL / volume >24h after
     # the fact (PoolX.md §D4), so its cutoff is longer than The Graph's /
     # CoinGecko Onchain's 24h. Operators override via
-    # ``ALMANAK_GATEWAY_POOL_HISTORY_FINALITY_CUTOFF_SECONDS_{THE_GRAPH,DEFILLAMA,GECKOTERMINAL}``.
+    # ``ALMANAK_GATEWAY_POOL_HISTORY_FINALITY_CUTOFF_SECONDS_{THE_GRAPH,DEFILLAMA,COINGECKO_ONCHAIN}``.
     # Non-positive / malformed overrides fall back to the default via
     # ``_validate_pool_history_finality_cutoff`` so a typo can't silently mark
     # provisional data as finalized (which would over-cache revisable rows).
     pool_history_finality_cutoff_seconds_the_graph: int = 86400
     pool_history_finality_cutoff_seconds_defillama: int = 259200
-    pool_history_finality_cutoff_seconds_geckoterminal: int = 86400
+    pool_history_finality_cutoff_seconds_coingecko_onchain: int = 86400
 
     # PoolHistory per-provider response row ceiling — POOL-6 (VIB-4754). When a
     # provider returns MORE rows than this for the (clamped) window, the handler
@@ -243,13 +242,13 @@ class GatewaySettings(_GatewaySettingsBase):  # type: ignore[valid-type,misc]
     # largest clamped window is 90d-1h = 2160 rows); it exists so an operator
     # (or the D3.F7 acceptance test) can lower a single provider's ceiling.
     # Operators override via
-    # ``ALMANAK_GATEWAY_POOL_HISTORY_PAGE_CAP_ROWS_{THE_GRAPH,DEFILLAMA,GECKOTERMINAL}``.
+    # ``ALMANAK_GATEWAY_POOL_HISTORY_PAGE_CAP_ROWS_{THE_GRAPH,DEFILLAMA,COINGECKO_ONCHAIN}``.
     # Non-positive / malformed overrides fall back to the default via
     # ``_validate_pool_history_page_cap_rows`` so a typo can't silently disable
     # the (already huge) ceiling.
     pool_history_page_cap_rows_the_graph: int = 100000
     pool_history_page_cap_rows_defillama: int = 100000
-    pool_history_page_cap_rows_geckoterminal: int = 100000
+    pool_history_page_cap_rows_coingecko_onchain: int = 100000
 
     # Metrics settings
     metrics_enabled: bool = True
@@ -539,7 +538,7 @@ class GatewaySettings(_GatewaySettingsBase):  # type: ignore[valid-type,misc]
     @field_validator(
         "pool_history_finality_cutoff_seconds_the_graph",
         "pool_history_finality_cutoff_seconds_defillama",
-        "pool_history_finality_cutoff_seconds_geckoterminal",
+        "pool_history_finality_cutoff_seconds_coingecko_onchain",
         mode="before",
     )
     @classmethod
@@ -553,7 +552,7 @@ class GatewaySettings(_GatewaySettingsBase):  # type: ignore[valid-type,misc]
         defaults: dict[str, int] = {
             "pool_history_finality_cutoff_seconds_the_graph": 86400,
             "pool_history_finality_cutoff_seconds_defillama": 259200,
-            "pool_history_finality_cutoff_seconds_geckoterminal": 86400,
+            "pool_history_finality_cutoff_seconds_coingecko_onchain": 86400,
         }
         field_name = info.field_name or ""
         default = defaults[field_name]
@@ -570,7 +569,7 @@ class GatewaySettings(_GatewaySettingsBase):  # type: ignore[valid-type,misc]
     @field_validator(
         "pool_history_page_cap_rows_the_graph",
         "pool_history_page_cap_rows_defillama",
-        "pool_history_page_cap_rows_geckoterminal",
+        "pool_history_page_cap_rows_coingecko_onchain",
         mode="before",
     )
     @classmethod
@@ -582,7 +581,7 @@ class GatewaySettings(_GatewaySettingsBase):  # type: ignore[valid-type,misc]
         defaults: dict[str, int] = {
             "pool_history_page_cap_rows_the_graph": 100000,
             "pool_history_page_cap_rows_defillama": 100000,
-            "pool_history_page_cap_rows_geckoterminal": 100000,
+            "pool_history_page_cap_rows_coingecko_onchain": 100000,
         }
         field_name = info.field_name or ""
         default = defaults[field_name]

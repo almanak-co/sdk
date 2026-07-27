@@ -116,7 +116,7 @@ class TestClassifyFailure:
             message="upstream down",
             retry_delay_seconds=None,
             reason="UPSTREAM_UNAVAILABLE",
-            upstream="geckoterminal",
+            upstream="coingecko_onchain",
         )
 
         class _FakeRpcError(Exception):
@@ -440,7 +440,7 @@ class TestAprilIncidentRegressionGuard:
 
     - Strategy holds open LP positions.
     - 3 consecutive transient ``DataSourceUnavailable`` failures
-      (GeckoTerminal OHLCV).
+      (CoinGecko Onchain OHLCV).
 
     Pre-VIB-3803 behavior: breaker tripped at iteration 3, K8s crash-looped
     the pod.
@@ -457,7 +457,7 @@ class TestAprilIncidentRegressionGuard:
 
         for i in range(3):
             exc = DataSourceUnavailable(
-                source="gateway_geckoterminal",
+                source="gateway_coingecko_onchain",
                 reason="upstream temporarily unavailable",
             )
             breaker.record_failure(f"decide() error: {exc}", kind=classify_failure(exc))

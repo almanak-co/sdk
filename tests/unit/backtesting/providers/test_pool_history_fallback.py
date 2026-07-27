@@ -87,7 +87,7 @@ def test_unmeasured_daily_volume_falls_to_hourly_sum():
     fallback = _fallback_with_history(
         {
             "1d": ([_snap(_DAY_START, tvl=Decimal("7583793"))], "defillama"),
-            "1h": (hourly, "geckoterminal"),
+            "1h": (hourly, "coingecko_onchain"),
         }
     )
     history = fallback.daily_history(pool_address=_POOL, chain="base", protocol="aerodrome", day=_DAY)
@@ -95,7 +95,7 @@ def test_unmeasured_daily_volume_falls_to_hourly_sum():
     assert history.tvl == Decimal("7583793")
     assert history.tvl_source == "defillama"
     assert history.volume_24h == Decimal("240")
-    assert history.volume_source == "geckoterminal"
+    assert history.volume_source == "coingecko_onchain"
     assert fallback._calls == ["1d", "1h"]  # type: ignore[attr-defined]
 
 
@@ -105,7 +105,7 @@ def test_hourly_sum_below_coverage_floor_is_a_miss_not_a_floor_estimate():
     fallback = _fallback_with_history(
         {
             "1d": ([_snap(_DAY_START, tvl=Decimal("50"))], "defillama"),
-            "1h": (hourly, "geckoterminal"),
+            "1h": (hourly, "coingecko_onchain"),
         }
     )
     history = fallback.daily_history(pool_address=_POOL, chain="base", protocol="aerodrome", day=_DAY)
@@ -116,7 +116,7 @@ def test_hourly_sum_below_coverage_floor_is_a_miss_not_a_floor_estimate():
 
 
 def test_nothing_measured_returns_none():
-    fallback = _fallback_with_history({"1d": ([], "defillama"), "1h": ([], "geckoterminal")})
+    fallback = _fallback_with_history({"1d": ([], "defillama"), "1h": ([], "coingecko_onchain")})
     assert fallback.daily_history(pool_address=_POOL, chain="base", protocol="aerodrome", day=_DAY) is None
 
 
@@ -246,7 +246,7 @@ def test_served_upstream_miss_is_not_transport():
     """A served success=False (providers exhausted) must not count toward the streak."""
     fallback = PoolHistoryFallback()
     fallback._classify_miss(
-        "the_graph: not found; defillama: not found; geckoterminal: HTTP 503 Service Unavailable",
+        "the_graph: not found; defillama: not found; coingecko_onchain: HTTP 503 Service Unavailable",
         chain="base",
         protocol="aerodrome",
     )
@@ -297,7 +297,7 @@ def test_tvl_only_partial_from_failed_hourly_leg_is_retried_not_cached():
         fallback._calls.append(resolution)  # type: ignore[attr-defined]
         if resolution == "1d":
             return [_snap(_DAY_START, tvl=Decimal("50"))], "defillama"
-        return (None, "") if state["hourly_fails"] else (hourly_ok, "geckoterminal")
+        return (None, "") if state["hourly_fails"] else (hourly_ok, "coingecko_onchain")
 
     fallback._get_history = fake_get_history  # type: ignore[method-assign]
 
@@ -320,7 +320,7 @@ def test_served_below_floor_partial_is_definitive_and_cached():
     fallback = _fallback_with_history(
         {
             "1d": ([_snap(_DAY_START, tvl=Decimal("50"))], "defillama"),
-            "1h": (sparse, "geckoterminal"),
+            "1h": (sparse, "coingecko_onchain"),
         }
     )
     fallback.daily_history(pool_address=_POOL, chain="base", protocol="aerodrome", day=_DAY)
@@ -411,7 +411,7 @@ def test_lp_adapter_volume_hook_serves_medium_confidence():
     from almanak.framework.backtesting.adapters.lp_adapter import LPBacktestAdapter
 
     adapter = LPBacktestAdapter()
-    history = DailyPoolHistory(tvl=None, tvl_source="", volume_24h=Decimal("605043"), volume_source="geckoterminal")
+    history = DailyPoolHistory(tvl=None, tvl_source="", volume_24h=Decimal("605043"), volume_source="coingecko_onchain")
     with _stub_singleton(history):
         result = adapter._pool_history_ladder_volume(_POOL, "base", "aerodrome", _DAY, (_POOL, _DAY))
     assert result == (Decimal("605043"), DataConfidence.MEDIUM)
@@ -456,7 +456,7 @@ def _volume_row(value: str, confidence: DataConfidence, *, day: date = _DAY):
     )
 
 
-_LADDER_HISTORY = DailyPoolHistory(tvl=None, tvl_source="", volume_24h=Decimal("777"), volume_source="geckoterminal")
+_LADDER_HISTORY = DailyPoolHistory(tvl=None, tvl_source="", volume_24h=Decimal("777"), volume_source="coingecko_onchain")
 
 
 def test_fetch_and_cache_volume_routes_empty_low_and_exception_to_ladder():
@@ -582,12 +582,12 @@ def test_ladder_volume_provenance_reaches_fee_resolution():
     adapter = _make_adapter(rows=[])
     with _stub_singleton(_LADDER_HISTORY):
         asyncio.run(adapter._prewarm_volume_lane(_POOL, "aerodrome", "base", [_DAY]))
-    assert adapter._volume_source_labels[(_POOL, _DAY)] == "gateway_pool_history:geckoterminal"
+    assert adapter._volume_source_labels[(_POOL, _DAY)] == "gateway_pool_history:coingecko_onchain"
 
     resolution = adapter._historical_pool_volume_resolution(_DAY_START, _POOL, "aerodrome")
     assert resolution is not None
     assert resolution.volume_usd == Decimal("777")
-    assert resolution.data_source_label == "gateway_pool_history:geckoterminal"
+    assert resolution.data_source_label == "gateway_pool_history:coingecko_onchain"
 
     # A primary-lane day carries no override -> legacy multi_dex label path.
     high = _make_adapter(rows=[_volume_row("1234", DataConfidence.HIGH)])
@@ -650,7 +650,7 @@ def test_prewarm_volume_lane_uses_ladder_when_primary_provider_absent():
     resolution = adapter._historical_pool_volume_resolution(_DAY_START, _POOL, "aerodrome")
     assert resolution is not None
     assert resolution.volume_usd == Decimal("777")
-    assert resolution.data_source_label == "gateway_pool_history:geckoterminal"
+    assert resolution.data_source_label == "gateway_pool_history:coingecko_onchain"
 
 
 def test_failed_daily_leg_does_not_suppress_hourly_volume():
@@ -658,7 +658,7 @@ def test_failed_daily_leg_does_not_suppress_hourly_volume():
     lane. Volume is recovered from the hourly sum, but the day stays
     non-cacheable because its TVL leg is still retryable."""
     hourly = [_snap(datetime(2026, 7, 1, h, tzinfo=UTC), volume=Decimal("10")) for h in range(24)]
-    fallback = _fallback_with_history({"1h": (hourly, "geckoterminal")})  # no "1d" -> 1d fetch returns None
+    fallback = _fallback_with_history({"1h": (hourly, "coingecko_onchain")})  # no "1d" -> 1d fetch returns None
 
     history = fallback.daily_history(pool_address=_POOL, chain="base", protocol="aerodrome", day=_DAY)
     assert history is not None

@@ -102,9 +102,9 @@ class TestQuotaConfig:
 
 class TestProviderConfig:
     def test_basic_construction(self) -> None:
-        pc = ProviderConfig(primary="binance", fallback=["geckoterminal"], timeout_ms=3000)
+        pc = ProviderConfig(primary="binance", fallback=["coingecko_onchain"], timeout_ms=3000)
         assert pc.primary == "binance"
-        assert pc.fallback == ["geckoterminal"]
+        assert pc.fallback == ["coingecko_onchain"]
         assert pc.timeout_ms == 3000
         assert pc.quota is None
 
@@ -115,8 +115,8 @@ class TestProviderConfig:
         assert pc.quota is None
 
     def test_all_providers(self) -> None:
-        pc = ProviderConfig(primary="binance", fallback=["geckoterminal", "defillama"])
-        assert pc.all_providers == ["binance", "geckoterminal", "defillama"]
+        pc = ProviderConfig(primary="binance", fallback=["coingecko_onchain", "defillama"])
+        assert pc.all_providers == ["binance", "coingecko_onchain", "defillama"]
 
     def test_all_providers_no_fallback(self) -> None:
         pc = ProviderConfig(primary="alchemy_rpc")
@@ -166,7 +166,7 @@ class TestDataRoutingConfig:
         config = DataRoutingConfig()
         route = config.get_route("ohlcv")
         assert route.primary == "binance"
-        assert "geckoterminal" in route.fallback
+        assert "coingecko_onchain" in route.fallback
 
     def test_get_route_unknown_type(self) -> None:
         config = DataRoutingConfig()
@@ -175,10 +175,10 @@ class TestDataRoutingConfig:
         assert route.timeout_ms == 2000
 
     def test_custom_routes_override_defaults(self) -> None:
-        custom = {"ohlcv": ProviderConfig(primary="geckoterminal", timeout_ms=3000)}
+        custom = {"ohlcv": ProviderConfig(primary="coingecko_onchain", timeout_ms=3000)}
         config = DataRoutingConfig(routes=custom)
         route = config.get_route("ohlcv")
-        assert route.primary == "geckoterminal"
+        assert route.primary == "coingecko_onchain"
         assert route.timeout_ms == 3000
         # Other defaults still present
         assert "pool_price" in config.routes
@@ -187,14 +187,14 @@ class TestDataRoutingConfig:
         strategy_config: dict[str, Any] = {
             "deployment_id": "test",
             "data_overrides": {
-                "ohlcv": {"primary": "geckoterminal", "fallback": ["defillama"], "timeout_ms": 4000},
+                "ohlcv": {"primary": "coingecko_onchain", "fallback": ["defillama"], "timeout_ms": 4000},
                 "pool_price": "thegraph",
             },
         }
         config = DataRoutingConfig.from_strategy_config(strategy_config)
         # Overridden
         ohlcv = config.get_route("ohlcv")
-        assert ohlcv.primary == "geckoterminal"
+        assert ohlcv.primary == "coingecko_onchain"
         assert ohlcv.fallback == ["defillama"]
         assert ohlcv.timeout_ms == 4000
         # Shorthand override
@@ -246,9 +246,9 @@ class TestDataRoutingConfig:
 
     def test_merge_priority(self) -> None:
         low = DataRoutingConfig(routes={"ohlcv": ProviderConfig(primary="binance")})
-        high = DataRoutingConfig(routes={"ohlcv": ProviderConfig(primary="geckoterminal")})
+        high = DataRoutingConfig(routes={"ohlcv": ProviderConfig(primary="coingecko_onchain")})
         merged = DataRoutingConfig.merge(low, high)
-        assert merged.get_route("ohlcv").primary == "geckoterminal"
+        assert merged.get_route("ohlcv").primary == "coingecko_onchain"
 
     def test_merge_combines_types(self) -> None:
         a = DataRoutingConfig(routes={"ohlcv": ProviderConfig(primary="binance")})
@@ -298,8 +298,8 @@ class TestDataProviderProtocol:
         assert isinstance(provider, DataProvider)
 
     def test_name_property(self) -> None:
-        provider = _MockProvider(name="geckoterminal")
-        assert provider.name == "geckoterminal"
+        provider = _MockProvider(name="coingecko_onchain")
+        assert provider.name == "coingecko_onchain"
 
     def test_data_class_property(self) -> None:
         provider = _MockProvider(classification=DataClassification.EXECUTION_GRADE)

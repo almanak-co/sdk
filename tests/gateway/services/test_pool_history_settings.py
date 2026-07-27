@@ -25,11 +25,11 @@ def test_finality_cutoff_invalid_falls_back_to_default(bad: object) -> None:
     s = GatewaySettings(
         pool_history_finality_cutoff_seconds_the_graph=bad,
         pool_history_finality_cutoff_seconds_defillama=bad,
-        pool_history_finality_cutoff_seconds_geckoterminal=bad,
+        pool_history_finality_cutoff_seconds_coingecko_onchain=bad,
     )
     assert s.pool_history_finality_cutoff_seconds_the_graph == 86400
     assert s.pool_history_finality_cutoff_seconds_defillama == 259200
-    assert s.pool_history_finality_cutoff_seconds_geckoterminal == 86400
+    assert s.pool_history_finality_cutoff_seconds_coingecko_onchain == 86400
 
 
 def test_finality_cutoff_valid_override_kept() -> None:
@@ -42,11 +42,11 @@ def test_page_cap_rows_invalid_falls_back_to_default(bad: object) -> None:
     s = GatewaySettings(
         pool_history_page_cap_rows_the_graph=bad,
         pool_history_page_cap_rows_defillama=bad,
-        pool_history_page_cap_rows_geckoterminal=bad,
+        pool_history_page_cap_rows_coingecko_onchain=bad,
     )
     assert s.pool_history_page_cap_rows_the_graph == 100000
     assert s.pool_history_page_cap_rows_defillama == 100000
-    assert s.pool_history_page_cap_rows_geckoterminal == 100000
+    assert s.pool_history_page_cap_rows_coingecko_onchain == 100000
 
 
 def test_page_cap_rows_valid_override_kept() -> None:
@@ -64,7 +64,7 @@ def test_dispatcher_finality_cutoffs_default_to_provider_specific() -> None:
     )
     assert d._finality_cutoffs["the_graph"] == 86400
     assert d._finality_cutoffs["defillama"] == 259200
-    assert d._finality_cutoffs["geckoterminal"] == 86400
+    assert d._finality_cutoffs["coingecko_onchain"] == 86400
 
 
 def test_dispatcher_finality_cutoffs_override_merges_over_defaults() -> None:

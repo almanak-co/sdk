@@ -105,7 +105,7 @@ def external_id_for(chain: str, vendor: str) -> str | None:
     ``external_ids`` at all, or a chain whose ``external_ids`` simply lacks
     ``vendor`` all return ``None``. The value is returned **verbatim** —
     e.g. ``external_id_for("arbitrum", "coingecko") == "arbitrum-one"`` and
-    ``external_id_for("ethereum", "geckoterminal") == "eth"`` — case included.
+    ``external_id_for("ethereum", "coingecko_onchain") == "eth"`` — case included.
 
     Alias-normalises the chain via ``ChainRegistry.try_resolve`` so an alias
     resolves to its canonical descriptor (e.g.

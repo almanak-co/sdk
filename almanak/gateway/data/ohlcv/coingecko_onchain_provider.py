@@ -12,9 +12,9 @@ Key Features:
     - Implements both OHLCVProvider and DataProvider protocols
 
 Example:
-    from almanak.gateway.data.ohlcv.geckoterminal_provider import GeckoTerminalOHLCVProvider
+    from almanak.gateway.data.ohlcv.coingecko_onchain_provider import CoinGeckoOnchainOHLCVProvider
 
-    provider = GeckoTerminalOHLCVProvider()
+    provider = CoinGeckoOnchainOHLCVProvider()
     candles = await provider.get_ohlcv("WETH", timeframe="1h", limit=100)
 
     # Or via DataProvider protocol:
@@ -51,16 +51,16 @@ from almanak.gateway.utils.rpc_provider import _get_gateway_api_key
 
 logger = logging.getLogger(__name__)
 
-# CoinGecko Onchain API base URLs. The Onchain DEX endpoints share the
-# GeckoTerminal backend, but the requested migration is to route through
-# CoinGecko's API host.
+# CoinGecko Onchain API base URLs (the DEX/pool-level endpoints, distinct
+# from the token-level v3 API used by the CEX-reference CoinGecko provider).
 _FREE_API_BASE = "https://api.coingecko.com/api/v3/onchain"
 _PRO_API_BASE = "https://pro-api.coingecko.com/api/v3/onchain"
 _SOURCE = "coingecko_onchain"
 
-# Chain name -> CoinGecko Onchain network ID mapping. CoinGecko's onchain
-# network ids are the same ids previously used by GeckoTerminal.
-_CHAIN_TO_NETWORK: Mapping[str, str] = MappingProxyType(vendor_chain_map("geckoterminal"))
+# Chain name -> CoinGecko Onchain network ID mapping. Onchain network ids are
+# their own namespace ("eth", "polygon_pos"), distinct from the token-level
+# asset-platform ids under the ``coingecko`` vendor key.
+_CHAIN_TO_NETWORK: Mapping[str, str] = MappingProxyType(vendor_chain_map("coingecko_onchain"))
 
 # CoinGecko Onchain timeframe -> API parameter mapping. The endpoint uses day,
 # hour, minute path segments plus an aggregate query param.
@@ -113,17 +113,17 @@ class _TokenBucket:
             return False
 
 
-class GeckoTerminalOHLCVProvider:
-    """Legacy-named CoinGecko Onchain OHLCV provider for DEX-native candle data.
+class CoinGeckoOnchainOHLCVProvider:
+    """CoinGecko Onchain OHLCV provider for DEX-native candle data.
 
     Fetches OHLCV data from CoinGecko's Onchain API. This provider returns
     data based on actual DEX trades, making it the preferred source for
-    DeFi-native pairs. The class name remains for compatibility.
+    DeFi-native pairs.
 
     Implements both the OHLCVProvider and DataProvider protocols.
 
     Attributes:
-        name: Provider identifier ("geckoterminal").
+        name: Provider identifier ("coingecko_onchain").
         data_class: INFORMATIONAL classification.
     """
 
@@ -164,7 +164,7 @@ class GeckoTerminalOHLCVProvider:
     @property
     def name(self) -> str:
         """Unique provider identifier."""
-        return "geckoterminal"
+        return "coingecko_onchain"
 
     @property
     def data_class(self) -> DataClassification:
@@ -600,7 +600,7 @@ class GeckoTerminalOHLCVProvider:
         self._cache.clear()
         logger.info("Cleared CoinGecko Onchain OHLCV cache")
 
-    async def __aenter__(self) -> GeckoTerminalOHLCVProvider:
+    async def __aenter__(self) -> CoinGeckoOnchainOHLCVProvider:
         """Async context manager entry."""
         return self
 
@@ -614,5 +614,5 @@ class GeckoTerminalOHLCVProvider:
 # =============================================================================
 
 __all__ = [
-    "GeckoTerminalOHLCVProvider",
+    "CoinGeckoOnchainOHLCVProvider",
 ]

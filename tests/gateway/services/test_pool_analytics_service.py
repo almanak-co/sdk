@@ -85,7 +85,7 @@ def test_get_pool_analytics_arbitrum_univ3():
     tvl * 100 = 820000 * 0.0005 * 365 / 1185000 * 100.
     """
     servicer = _make_servicer()
-    payload = _load_fixture("geckoterminal_arbitrum_univ3.json")
+    payload = _load_fixture("coingecko_onchain_arbitrum_univ3.json")
     ctx = _MockContext()
     before = int(time.time())
 
@@ -220,8 +220,8 @@ def test_chain_matrix_coingecko_onchain_url_includes_correct_network():
     servicer = _make_servicer()
     captured_networks: list[str] = []
     fixtures = {
-        "arbitrum": _load_fixture("geckoterminal_arbitrum_univ3.json"),
-        "ethereum": _load_fixture("geckoterminal_ethereum_univ3.json"),
+        "arbitrum": _load_fixture("coingecko_onchain_arbitrum_univ3.json"),
+        "ethereum": _load_fixture("coingecko_onchain_ethereum_univ3.json"),
     }
     expected_tvl = {"arbitrum": "1185000.0", "ethereum": "210000000.0"}
 
@@ -278,7 +278,7 @@ def test_cache_hit_skips_upstream_http():
     third request with a *different* protocol misses the per-pool cache
     (proves protocol is in the cache key) and re-fetches."""
     servicer = _make_servicer()
-    payload = _load_fixture("geckoterminal_arbitrum_univ3.json")
+    payload = _load_fixture("coingecko_onchain_arbitrum_univ3.json")
     call_count = 0
 
     async def counting_query(network: str, pool_address: str) -> dict[str, Any]:
@@ -455,7 +455,7 @@ def test_solana_pool_address_preserves_case():
 
     async def fake_cg(network: str, pool_address: str) -> dict[str, Any]:
         captured_addresses.append(pool_address)
-        return _load_fixture("geckoterminal_arbitrum_univ3.json")
+        return _load_fixture("coingecko_onchain_arbitrum_univ3.json")
 
     with patch.object(servicer, "_query_coingecko_onchain_pool", new=fake_cg):
         asyncio.run(
@@ -477,7 +477,7 @@ def test_per_pool_cache_evicts_expired_on_write_and_caps_size():
     from almanak.gateway.services import pool_analytics_service as svc_mod
 
     servicer = _make_servicer()
-    payload = _load_fixture("geckoterminal_arbitrum_univ3.json")
+    payload = _load_fixture("coingecko_onchain_arbitrum_univ3.json")
 
     # Pre-seed many "expired" entries so the eviction logic has work to do.
     expired_at = time.monotonic() - svc_mod._CACHE_TTL_SECONDS - 10

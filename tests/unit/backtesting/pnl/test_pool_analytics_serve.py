@@ -37,7 +37,7 @@ def _row(tvl: str | None, volume: str | None):
         tvl=Decimal(tvl) if tvl is not None else None,
         tvl_source="defillama" if tvl is not None else "",
         volume_24h=Decimal(volume) if volume is not None else None,
-        volume_source="geckoterminal" if volume is not None else "",
+        volume_source="coingecko_onchain" if volume is not None else "",
     )
 
 

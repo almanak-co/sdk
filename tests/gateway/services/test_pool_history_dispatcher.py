@@ -44,12 +44,12 @@ def test_dispatcher_eligibility_table():
     validator should have rejected it first).
     """
     d = _dispatcher()
-    assert d.eligible_providers(gateway_pb2.Resolution.RESOLUTION_1H) == ("the_graph", "geckoterminal")
-    assert d.eligible_providers(gateway_pb2.Resolution.RESOLUTION_4H) == ("the_graph", "geckoterminal")
+    assert d.eligible_providers(gateway_pb2.Resolution.RESOLUTION_1H) == ("the_graph", "coingecko_onchain")
+    assert d.eligible_providers(gateway_pb2.Resolution.RESOLUTION_4H) == ("the_graph", "coingecko_onchain")
     assert d.eligible_providers(gateway_pb2.Resolution.RESOLUTION_1D) == (
         "the_graph",
         "defillama",
-        "geckoterminal",
+        "coingecko_onchain",
     )
     with pytest.raises(ValueError):
         d.eligible_providers(gateway_pb2.Resolution.RESOLUTION_UNSPECIFIED)
@@ -103,7 +103,7 @@ def test_dispatcher_propagates_coingecko_api_key_to_pool_history_provider():
         coingecko_api_key="test-key",
     )
 
-    provider = dispatcher._geckoterminal
+    provider = dispatcher._coingecko_onchain
     assert "pro-api.coingecko.com" in provider._api_base
     assert provider._headers["x-cg-pro-api-key"] == "test-key"
 
@@ -120,7 +120,7 @@ def test_dispatcher_without_coingecko_api_key_has_no_auth_header(monkeypatch):
         coingecko_api_key=None,
     )
 
-    provider = dispatcher._geckoterminal
+    provider = dispatcher._coingecko_onchain
     assert "api.coingecko.com" in provider._api_base
     assert "x-cg-pro-api-key" not in provider._headers
 
@@ -131,7 +131,7 @@ def test_servicer_propagates_coingecko_api_key_to_dispatcher():
         GatewaySettings(pool_history_enabled=True, coingecko_api_key="settings-key")
     )
 
-    provider = servicer._dispatcher._geckoterminal
+    provider = servicer._dispatcher._coingecko_onchain
     assert "pro-api.coingecko.com" in provider._api_base
     assert provider._headers["x-cg-pro-api-key"] == "settings-key"
 
@@ -150,7 +150,7 @@ async def test_missing_thegraph_key_fails_before_http_or_budget_and_falls_throug
     fallback_snapshot = gateway_pb2.PoolSnapshot(timestamp=1_700_000_000)
     fallback_fetch = AsyncMock(return_value=[fallback_snapshot])
     dispatcher._graphql.query = graphql_query
-    dispatcher._geckoterminal.fetch = fallback_fetch
+    dispatcher._coingecko_onchain.fetch = fallback_fetch
 
     outcome = await dispatcher.dispatch(
         chain="arbitrum",
@@ -162,7 +162,7 @@ async def test_missing_thegraph_key_fails_before_http_or_budget_and_falls_throug
     )
 
     assert outcome.success is True
-    assert outcome.source == "geckoterminal"
+    assert outcome.source == "coingecko_onchain"
     graphql_query.assert_not_awaited()
     fallback_fetch.assert_awaited_once()
     assert dispatcher.the_graph_monthly_queries == 0

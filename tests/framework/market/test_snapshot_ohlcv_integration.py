@@ -35,7 +35,7 @@ def _envelope() -> DataEnvelope[list[OHLCVCandle]]:
             ),
         ],
         meta=DataMeta(
-            source="geckoterminal",
+            source="coingecko_onchain",
             observed_at=datetime.now(UTC),
             confidence=1.0,
         ),

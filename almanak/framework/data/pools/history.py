@@ -1,7 +1,7 @@
 """Pool history - thin gRPC client over the gateway's PoolHistoryService.
 
 This module used to do its own HTTP / GraphQL egress to The Graph,
-DefiLlama, and GeckoTerminal, which violated the gateway-boundary rule
+DefiLlama, and CoinGecko Onchain, which violated the gateway-boundary rule
 (AGENTS.md "Gateway boundary": strategy containers have no outbound
 network access except the gateway gRPC channel). VIB-4728 moves all
 egress server-side; this module (POOL-7 / VIB-4755) becomes a thin
@@ -141,7 +141,7 @@ class PoolSnapshot:
         volume_24h: 24-hour trading volume in USD. ``None`` if unmeasured.
         fee_revenue_24h: 24-hour fee revenue in USD. ``None`` if unmeasured.
         token0_reserve: token0 reserve in human-readable units. ``None``
-            if unmeasured (GeckoTerminal does not report reserves).
+            if unmeasured (CoinGecko Onchain does not report reserves).
         token1_reserve: token1 reserve in human-readable units. ``None``
             if unmeasured.
         unmeasured_fields: Names of fields that are ``None`` on this
@@ -206,7 +206,7 @@ class PoolHistoryReader:
     """Thin gRPC client over the gateway's ``PoolHistoryService``.
 
     This class no longer owns any HTTP / GraphQL egress. All upstream
-    provider fetching (The Graph, DefiLlama, GeckoTerminal) happens
+    provider fetching (The Graph, DefiLlama, CoinGecko Onchain) happens
     inside the gateway sidecar. The constructor REQUIRES a connected
     ``GatewayClient`` — constructing one without it deliberately raises
     ``TypeError`` so any stale ``PoolHistoryReader()`` call from before

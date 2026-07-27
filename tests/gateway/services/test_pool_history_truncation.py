@@ -9,7 +9,7 @@ sentinel for ``PROVIDER_RETENTION`` and ``UNSPECIFIED``):
 * ``test_truncation_reason_provider_page_cap`` — 90d-1h with TheGraph's row
   ceiling forced to 100.
 * ``test_truncation_reason_provider_retention`` — 400d-1d under the 730d cap;
-  TheGraph fails, DefiLlama serves only ~365d; GeckoTerminal is NOT consulted to
+  TheGraph fails, DefiLlama serves only ~365d; CoinGecko Onchain is NOT consulted to
   fill the gap. Inverse: a 300d cap makes the SAME request CAP_EXCEEDED, proving
   the two paths are mechanically distinct.
 * ``test_next_start_ts_zero_sentinel_rejects_reissue`` — a (broken) caller that
@@ -200,7 +200,7 @@ def test_truncation_reason_provider_retention() -> None:
         patch.object(servicer._dispatcher._graphql, "query", new=tg_down),
         patch.object(servicer._dispatcher._defillama, "_query_pools", new=dl_pools),
         patch.object(servicer._dispatcher._defillama, "_query_chart", new=dl_chart),
-        patch.object(servicer._dispatcher._geckoterminal, "_query_ohlcv", new=gt_ohlcv),
+        patch.object(servicer._dispatcher._coingecko_onchain, "_query_ohlcv", new=gt_ohlcv),
     ):
         ctx = _Ctx()
         resp = asyncio.run(
@@ -215,7 +215,7 @@ def test_truncation_reason_provider_retention() -> None:
     assert resp.source == "defillama"  # the provider that DID serve, not the_graph
     assert resp.truncation_reason == _TR.PROVIDER_RETENTION
     assert resp.next_start_ts == 0  # do-not-re-chunk sentinel
-    assert gt_ohlcv.call_count == 0  # GeckoTerminal NOT consulted to fill the gap
+    assert gt_ohlcv.call_count == 0  # CoinGecko Onchain NOT consulted to fill the gap
     # The served slice starts at the provider's retention horizon, not the
     # requested start (~365d, not 400d).
     assert resp.snapshots[0].timestamp >= end - 366 * DAY

@@ -6,6 +6,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING: GeckoTerminal naming retired in favour of CoinGecko Onchain.**
+  The upstream egress moved to CoinGecko's Onchain API in #2640; this removes
+  the leftover `geckoterminal` naming across the proto, gateway, framework, and
+  chain registry so one vendor is named one way. No behaviour changes, and the
+  upstream HTTP endpoints and API keys are untouched — the same
+  `api.coingecko.com/api/v3/onchain` hosts, and `COINGECKO_API_KEY` /
+  `ALMANAK_GATEWAY_COINGECKO_API_KEY` are unchanged. The *internal* gRPC method
+  path does change, and is breaking (see below). Renames:
+  - gRPC: `IntegrationService.GeckoTerminalGetOHLCV` →
+    `CoinGeckoOnchainGetOHLCV`, and `GeckoTerminalOHLCV{Request,Response,Candle}`
+    → `CoinGeckoOnchainOHLCV*`. **Gateway and SDK must be upgraded together** —
+    a new SDK against an old gateway image (or the reverse) fails the OHLCV call
+    with `UNIMPLEMENTED`.
+  - Gateway env vars:
+    `ALMANAK_GATEWAY_POOL_HISTORY_FINALITY_CUTOFF_SECONDS_GECKOTERMINAL` →
+    `..._COINGECKO_ONCHAIN`, and
+    `ALMANAK_GATEWAY_POOL_HISTORY_PAGE_CAP_ROWS_GECKOTERMINAL` →
+    `..._COINGECKO_ONCHAIN`. Both are non-default tuning knobs; an operator
+    still setting the old name silently gets the default.
+  - Data-routing provider id: `"geckoterminal"` → `"coingecko_onchain"` in
+    `data_overrides` strategy config and in the `pool_history` / `pool_analytics`
+    response `source` field.
+  - `ChainDescriptor.external_ids` vendor key `"geckoterminal"` →
+    `"coingecko_onchain"` (values unchanged; still distinct from the
+    token-level `"coingecko"` asset-platform key).
+  - Python: `GeckoTerminalOHLCVProvider` → `CoinGeckoOnchainOHLCVProvider`,
+    `GeckoTerminalPoolHistoryProvider` → `CoinGeckoOnchainPoolHistoryProvider`,
+    `GatewayGeckoTerminalOHLCVProvider` → `GatewayCoinGeckoOnchainOHLCVProvider`,
+    `GeckoTerminalGatewayDataProvider` → `CoinGeckoOnchainGatewayDataProvider`;
+    modules `gateway/data/ohlcv/geckoterminal_provider.py` →
+    `coingecko_onchain_provider.py` and
+    `gateway/data/pool_history/geckoterminal.py` → `coingecko_onchain.py`.
+
 ## [2.23.0] - 2026-07-24
 
 ### Added

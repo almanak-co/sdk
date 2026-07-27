@@ -27,7 +27,7 @@ from almanak.gateway.proto import gateway_pb2
 from almanak.gateway.utils.rpc_provider import _get_gateway_api_key
 
 from ._base import (
-    _CHAIN_TO_GT_NETWORK,
+    _CHAIN_TO_CG_ONCHAIN_NETWORK,
     _NOT_ATTEMPTED,
     ProviderResult,
     _ProviderError,
@@ -46,7 +46,7 @@ _OHLCV_LIMIT = 1000
 #: Defensive backward-pagination ceiling (mirrors TheGraph's ``_MAX_PAGES``) so
 #: a pathological endpoint returning perpetual full pages can't loop forever.
 #: 90d-1h = 2160 bars = 3 pages; this comfortably covers the soft caps.
-_GT_MAX_PAGES = 100
+_CG_ONCHAIN_MAX_PAGES = 100
 
 #: Resolution -> (timeframe path segment, aggregate). CoinGecko Onchain exposes
 #: ``hour`` + ``day`` timeframes; 4h is ``hour`` aggregated by 4.
@@ -57,15 +57,20 @@ _RESOLUTION_TO_OHLCV: dict[int, tuple[str, int]] = {
 }
 
 
-class GeckoTerminalPoolHistoryProvider:
+class CoinGeckoOnchainPoolHistoryProvider:
     """Last-resort pool-history provider backed by CoinGecko Onchain OHLCV.
 
-    The class name and provider id remain for compatibility with the existing
-    pool-history dispatcher/cache knobs. The upstream API host is CoinGecko
-    Onchain, whose pool-history endpoints require a valid CoinGecko Pro API key.
+    The upstream API host is CoinGecko Onchain, whose pool-history endpoints
+    require a valid CoinGecko Pro API key.
+
+    Note: the class name and the ``coingecko_onchain`` provider id are a
+    **breaking rename** from ``GeckoTerminalPoolHistoryProvider`` /
+    ``geckoterminal``. No aliases are kept, so the old import path, the old
+    provider id in the dispatcher/cache knobs, and the old
+    ``..._GECKOTERMINAL`` settings env vars no longer resolve.
     """
 
-    name = "geckoterminal"
+    name = "coingecko_onchain"
 
     def __init__(
         self,
@@ -88,7 +93,7 @@ class GeckoTerminalPoolHistoryProvider:
         end_ts: int,
         resolution: int,
     ) -> ProviderResult:
-        network = _CHAIN_TO_GT_NETWORK.get(chain)
+        network = _CHAIN_TO_CG_ONCHAIN_NETWORK.get(chain)
         if network is None:
             return _NOT_ATTEMPTED
 
@@ -148,14 +153,14 @@ class GeckoTerminalPoolHistoryProvider:
         truncates windows longer than 1000 bars (audit blocker #1) — so we
         page backward via ``before_timestamp`` until the window's ``start_ts``
         is covered, the endpoint runs out of data (short page), or the
-        ``_GT_MAX_PAGES`` ceiling is hit. Returns ``None`` only when the pool
+        ``_CG_ONCHAIN_MAX_PAGES`` ceiling is hit. Returns ``None`` only when the pool
         is genuinely not found (404 on the first page) or no data exists.
         """
         session = await self._session_getter()
         url = f"{self._api_base}/networks/{network}/pools/{pool_address}/ohlcv/{timeframe}"
         all_rows: list[list[Any]] = []
         before_timestamp = int(end_ts)
-        for _page in range(_GT_MAX_PAGES):
+        for _page in range(_CG_ONCHAIN_MAX_PAGES):
             params = {
                 "aggregate": str(aggregate),
                 "limit": str(_OHLCV_LIMIT),
@@ -279,4 +284,4 @@ def _resolution_seconds(resolution: int) -> int:
     raise ValueError(f"unsupported resolution: {resolution}")
 
 
-__all__ = ["GeckoTerminalPoolHistoryProvider"]
+__all__ = ["CoinGeckoOnchainPoolHistoryProvider"]

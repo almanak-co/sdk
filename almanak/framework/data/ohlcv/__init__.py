@@ -5,7 +5,7 @@ efficient historical candlestick data access.
 
 Providers:
     - GatewayOHLCVProvider: Gateway-backed provider (recommended for production)
-    - GatewayGeckoTerminalOHLCVProvider: gRPC client for GeckoTerminal data
+    - GatewayCoinGeckoOnchainOHLCVProvider: gRPC client for CoinGecko Onchain data
     - DedupingOHLCVProvider: Deduplication wrapper
 
 Modules:
@@ -14,7 +14,7 @@ Modules:
     - RoutingOHLCVProvider: Routing-aware provider wrapper
 
 Note:
-    Raw HTTP providers (Binance, GeckoTerminal direct) live under
+    Raw HTTP providers (Binance, CoinGecko, CoinGecko Onchain) live under
     ``almanak.gateway.data.ohlcv`` because they perform outbound network
     egress and are gateway-side only. Strategy-container code must not
     import them directly (VIB-3799).
@@ -40,13 +40,13 @@ from almanak.framework.data.ohlcv.factory import (
 )
 from almanak.framework.data.ohlcv.gateway_data_adapter import (
     CoinGeckoGatewayDataProvider,
+    CoinGeckoOnchainGatewayDataProvider,
     GatewayOHLCVDataProvider,
-    GeckoTerminalGatewayDataProvider,
 )
 from almanak.framework.data.ohlcv.gateway_provider import (
     TOKEN_TO_BINANCE_SYMBOL,
     GatewayCoinGeckoOHLCVProvider,
-    GatewayGeckoTerminalOHLCVProvider,
+    GatewayCoinGeckoOnchainOHLCVProvider,
     GatewayOHLCVProvider,
 )
 from almanak.framework.data.ohlcv.ohlcv_router import (
@@ -65,9 +65,9 @@ __all__ = [
     "CoinGeckoGatewayDataProvider",
     "GatewayCoinGeckoOHLCVProvider",
     "GatewayOHLCVProvider",
-    "GatewayGeckoTerminalOHLCVProvider",
+    "GatewayCoinGeckoOnchainOHLCVProvider",
     "GatewayOHLCVDataProvider",
-    "GeckoTerminalGatewayDataProvider",
+    "CoinGeckoOnchainGatewayDataProvider",
     "OHLCVStack",
     "TOKEN_TO_BINANCE_SYMBOL",
     "DedupingOHLCVProvider",

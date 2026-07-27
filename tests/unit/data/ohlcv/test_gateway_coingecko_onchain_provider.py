@@ -1,4 +1,4 @@
-"""Tests for GatewayGeckoTerminalOHLCVProvider and GeckoTerminalGatewayDataProvider."""
+"""Tests for GatewayCoinGeckoOnchainOHLCVProvider and CoinGeckoOnchainGatewayDataProvider."""
 
 import asyncio
 import time
@@ -10,8 +10,8 @@ import pytest
 
 from almanak.framework.data.interfaces import DataSourceUnavailable, OHLCVCandle
 from almanak.framework.data.models import DataClassification, DataEnvelope
-from almanak.framework.data.ohlcv.gateway_data_adapter import GeckoTerminalGatewayDataProvider
-from almanak.framework.data.ohlcv.gateway_provider import GatewayGeckoTerminalOHLCVProvider
+from almanak.framework.data.ohlcv.gateway_data_adapter import CoinGeckoOnchainGatewayDataProvider
+from almanak.framework.data.ohlcv.gateway_provider import GatewayCoinGeckoOnchainOHLCVProvider
 from almanak.framework.gateway_client import GatewayClient
 from almanak.gateway.proto import gateway_pb2
 
@@ -32,23 +32,23 @@ def _make_mock_client() -> MagicMock:
 
 def _make_grpc_candle(ts: int = 1700000000, o: str = "1800.0", h: str = "1820.0",
                       l: str = "1790.0", c: str = "1810.0", v: str = "50000.0"):
-    return gateway_pb2.GeckoTerminalOHLCVCandle(
+    return gateway_pb2.CoinGeckoOnchainOHLCVCandle(
         timestamp=ts, open=o, high=h, low=l, close=c, volume=v,
     )
 
 
-def _make_grpc_response(n: int = 3) -> gateway_pb2.GeckoTerminalOHLCVResponse:
+def _make_grpc_response(n: int = 3) -> gateway_pb2.CoinGeckoOnchainOHLCVResponse:
     candles = [_make_grpc_candle(ts=1700000000 + i * 3600) for i in range(n)]
-    return gateway_pb2.GeckoTerminalOHLCVResponse(candles=candles)
+    return gateway_pb2.CoinGeckoOnchainOHLCVResponse(candles=candles)
 
 
 # =============================================================================
-# GatewayGeckoTerminalOHLCVProvider
+# GatewayCoinGeckoOnchainOHLCVProvider
 # =============================================================================
 
 
-class TestGatewayGeckoTerminalOHLCVProvider:
-    """Tests for the gateway-backed GeckoTerminal OHLCV provider."""
+class TestGatewayCoinGeckoOnchainOHLCVProvider:
+    """Tests for the gateway-backed CoinGecko Onchain OHLCV provider."""
 
     @pytest.fixture
     def mock_client(self):
@@ -56,7 +56,7 @@ class TestGatewayGeckoTerminalOHLCVProvider:
 
     @pytest.fixture
     def provider(self, mock_client):
-        return GatewayGeckoTerminalOHLCVProvider(
+        return GatewayCoinGeckoOnchainOHLCVProvider(
             gateway_client=mock_client, chain="base",
             cache_ttl_live=15.0, cache_ttl_historical=60.0,
         )
@@ -64,7 +64,7 @@ class TestGatewayGeckoTerminalOHLCVProvider:
     @pytest.mark.asyncio
     async def test_get_ohlcv_success(self, provider, mock_client):
         """Successful gRPC call returns parsed OHLCVCandle list."""
-        mock_client.integration.GeckoTerminalGetOHLCV.return_value = _make_grpc_response(3)
+        mock_client.integration.CoinGeckoOnchainGetOHLCV.return_value = _make_grpc_response(3)
 
         candles = await provider.get_ohlcv(token="ALMANAK", timeframe="1h", limit=3)
 
@@ -76,30 +76,30 @@ class TestGatewayGeckoTerminalOHLCVProvider:
     @pytest.mark.asyncio
     async def test_get_ohlcv_uses_chain_override(self, provider, mock_client):
         """Per-call chain override is forwarded to the gRPC request."""
-        mock_client.integration.GeckoTerminalGetOHLCV.return_value = _make_grpc_response(1)
+        mock_client.integration.CoinGeckoOnchainGetOHLCV.return_value = _make_grpc_response(1)
 
         await provider.get_ohlcv(token="WETH", chain="ethereum")
 
-        call_args = mock_client.integration.GeckoTerminalGetOHLCV.call_args
+        call_args = mock_client.integration.CoinGeckoOnchainGetOHLCV.call_args
         request = call_args[0][0]
         assert request.chain == "ethereum"
 
     @pytest.mark.asyncio
     async def test_request_sets_include_empty_intervals(self, provider, mock_client):
-        """VIB-4875: GeckoTerminal is DEX-native, so the SDK always asks for
+        """VIB-4875: CoinGecko Onchain is DEX-native, so the SDK always asks for
         continuous buckets (include_empty_intervals=True)."""
-        mock_client.integration.GeckoTerminalGetOHLCV.return_value = _make_grpc_response(1)
+        mock_client.integration.CoinGeckoOnchainGetOHLCV.return_value = _make_grpc_response(1)
 
         await provider.get_ohlcv(token="NVDAON", chain="ethereum")
 
-        request = mock_client.integration.GeckoTerminalGetOHLCV.call_args[0][0]
+        request = mock_client.integration.CoinGeckoOnchainGetOHLCV.call_args[0][0]
         assert request.include_empty_intervals is True
 
     @pytest.mark.asyncio
     async def test_empty_response_raises(self, provider, mock_client):
         """Empty candle list raises DataSourceUnavailable."""
-        mock_client.integration.GeckoTerminalGetOHLCV.return_value = (
-            gateway_pb2.GeckoTerminalOHLCVResponse()
+        mock_client.integration.CoinGeckoOnchainGetOHLCV.return_value = (
+            gateway_pb2.CoinGeckoOnchainOHLCVResponse()
         )
 
         with pytest.raises(DataSourceUnavailable, match="No OHLCV data"):
@@ -108,7 +108,7 @@ class TestGatewayGeckoTerminalOHLCVProvider:
     @pytest.mark.asyncio
     async def test_grpc_error_raises_data_source_unavailable(self, provider, mock_client):
         """gRPC errors are wrapped in DataSourceUnavailable."""
-        mock_client.integration.GeckoTerminalGetOHLCV.side_effect = RuntimeError("connection refused")
+        mock_client.integration.CoinGeckoOnchainGetOHLCV.side_effect = RuntimeError("connection refused")
 
         with pytest.raises(DataSourceUnavailable, match="connection refused"):
             await provider.get_ohlcv(token="ALMANAK")
@@ -116,28 +116,28 @@ class TestGatewayGeckoTerminalOHLCVProvider:
     @pytest.mark.asyncio
     async def test_cache_hit(self, provider, mock_client):
         """Second call with same params returns cached result without gRPC call."""
-        mock_client.integration.GeckoTerminalGetOHLCV.return_value = _make_grpc_response(2)
+        mock_client.integration.CoinGeckoOnchainGetOHLCV.return_value = _make_grpc_response(2)
 
         first = await provider.get_ohlcv(token="ALMANAK", timeframe="1h")
         second = await provider.get_ohlcv(token="ALMANAK", timeframe="1h")
 
         assert first == second
-        assert mock_client.integration.GeckoTerminalGetOHLCV.call_count == 1
+        assert mock_client.integration.CoinGeckoOnchainGetOHLCV.call_count == 1
 
     @pytest.mark.asyncio
     async def test_cache_key_includes_quote(self, provider, mock_client):
         """Different quote currencies produce separate cache entries."""
-        mock_client.integration.GeckoTerminalGetOHLCV.return_value = _make_grpc_response(1)
+        mock_client.integration.CoinGeckoOnchainGetOHLCV.return_value = _make_grpc_response(1)
 
         await provider.get_ohlcv(token="ALMANAK", quote="USD")
         await provider.get_ohlcv(token="ALMANAK", quote="WETH")
 
-        assert mock_client.integration.GeckoTerminalGetOHLCV.call_count == 2
+        assert mock_client.integration.CoinGeckoOnchainGetOHLCV.call_count == 2
 
     @pytest.mark.asyncio
     async def test_live_timeframe_uses_shorter_ttl(self, provider, mock_client):
         """1m/5m timeframes use the shorter live TTL."""
-        mock_client.integration.GeckoTerminalGetOHLCV.return_value = _make_grpc_response(1)
+        mock_client.integration.CoinGeckoOnchainGetOHLCV.return_value = _make_grpc_response(1)
 
         # Use a provider with 0-second live TTL to force cache miss on second call
         provider._cache_ttl_live = 0.0
@@ -147,7 +147,7 @@ class TestGatewayGeckoTerminalOHLCVProvider:
         await provider.get_ohlcv(token="ALMANAK", timeframe="1m")
 
         # With 0s live TTL, cache always expires → 2 gRPC calls
-        assert mock_client.integration.GeckoTerminalGetOHLCV.call_count == 2
+        assert mock_client.integration.CoinGeckoOnchainGetOHLCV.call_count == 2
 
     def test_clear_cache(self, provider, mock_client):
         """clear_cache empties the internal cache dict."""
@@ -165,7 +165,7 @@ class TestGatewayGeckoTerminalOHLCVProvider:
     @pytest.mark.asyncio
     async def test_metrics_update_on_success(self, provider, mock_client):
         """Successful request increments counters."""
-        mock_client.integration.GeckoTerminalGetOHLCV.return_value = _make_grpc_response(1)
+        mock_client.integration.CoinGeckoOnchainGetOHLCV.return_value = _make_grpc_response(1)
 
         await provider.get_ohlcv(token="ALMANAK")
 
@@ -177,8 +177,8 @@ class TestGatewayGeckoTerminalOHLCVProvider:
     @pytest.mark.asyncio
     async def test_metrics_update_on_error(self, provider, mock_client):
         """Failed request increments error counter."""
-        mock_client.integration.GeckoTerminalGetOHLCV.return_value = (
-            gateway_pb2.GeckoTerminalOHLCVResponse()
+        mock_client.integration.CoinGeckoOnchainGetOHLCV.return_value = (
+            gateway_pb2.CoinGeckoOnchainOHLCVResponse()
         )
 
         with pytest.raises(DataSourceUnavailable):
@@ -189,25 +189,25 @@ class TestGatewayGeckoTerminalOHLCVProvider:
 
 
 # =============================================================================
-# GeckoTerminalGatewayDataProvider
+# CoinGeckoOnchainGatewayDataProvider
 # =============================================================================
 
 
-class TestGeckoTerminalGatewayDataProvider:
-    """Tests for the DataProvider adapter wrapping GatewayGeckoTerminalOHLCVProvider."""
+class TestCoinGeckoOnchainGatewayDataProvider:
+    """Tests for the DataProvider adapter wrapping GatewayCoinGeckoOnchainOHLCVProvider."""
 
     @pytest.fixture
     def mock_gateway_provider(self):
-        provider = MagicMock(spec=GatewayGeckoTerminalOHLCVProvider)
+        provider = MagicMock(spec=GatewayCoinGeckoOnchainOHLCVProvider)
         provider.get_health_metrics.return_value = {"total_requests": 5}
         return provider
 
     @pytest.fixture
     def adapter(self, mock_gateway_provider):
-        return GeckoTerminalGatewayDataProvider(mock_gateway_provider)
+        return CoinGeckoOnchainGatewayDataProvider(mock_gateway_provider)
 
     def test_name(self, adapter):
-        assert adapter.name == "geckoterminal"
+        assert adapter.name == "coingecko_onchain"
 
     def test_data_class(self, adapter):
         assert adapter.data_class == DataClassification.INFORMATIONAL
@@ -237,7 +237,7 @@ class TestGeckoTerminalGatewayDataProvider:
 
         assert isinstance(envelope, DataEnvelope)
         assert envelope.value == candles
-        assert envelope.meta.source == "geckoterminal"
+        assert envelope.meta.source == "coingecko_onchain"
 
     def test_fetch_missing_token_raises(self, adapter):
         """fetch() without token raises ValueError."""

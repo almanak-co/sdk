@@ -70,7 +70,7 @@ class TestPackStatusDetails:
             message="rate limited",
             retry_delay_seconds=2.5,
             reason="UPSTREAM_RATE_LIMITED",
-            upstream="geckoterminal",
+            upstream="coingecko_onchain",
         )
 
         assert code == grpc.StatusCode.RESOURCE_EXHAUSTED
@@ -80,7 +80,7 @@ class TestPackStatusDetails:
         assert details.code == grpc.StatusCode.RESOURCE_EXHAUSTED
         assert details.retry_delay_seconds == pytest.approx(2.5)
         assert details.reason == "UPSTREAM_RATE_LIMITED"
-        assert details.upstream == "geckoterminal"
+        assert details.upstream == "coingecko_onchain"
 
     def test_pack_with_arbitrary_metadata(self) -> None:
         _, _, trailing = pack_status_details(

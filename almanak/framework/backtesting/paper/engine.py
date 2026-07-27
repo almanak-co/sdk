@@ -3611,7 +3611,7 @@ class PaperTrader:
         """Initialize indicator calculators (RSI, MACD, BB, ATR) with multi-source OHLCV.
 
         Creates an RSICalculator backed by RoutingOHLCVProvider, which chains
-        multiple OHLCV sources (GeckoTerminal -> Binance). Falls back to
+        multiple OHLCV sources (CoinGecko Onchain -> Binance). Falls back to
         Binance-only if the routing infrastructure fails to initialize.
 
         VIB-1955: Previously used BinanceOHLCVProvider alone, which caused
@@ -3652,15 +3652,15 @@ class PaperTrader:
             from almanak.framework.data.ohlcv.ohlcv_router import OHLCVRouter
             from almanak.framework.data.ohlcv.routing_provider import RoutingOHLCVProvider
             from almanak.gateway.data.ohlcv.binance_provider import BinanceOHLCVProvider
-            from almanak.gateway.data.ohlcv.geckoterminal_provider import GeckoTerminalOHLCVProvider
+            from almanak.gateway.data.ohlcv.coingecko_onchain_provider import CoinGeckoOnchainOHLCVProvider
 
             chain = self.config.chain.lower() if isinstance(self.config.chain, str) else str(self.config.chain).lower()
 
             # Create router with providers
             router = OHLCVRouter(default_chain=chain)
 
-            # GeckoTerminal: DEX-native data, no API key needed
-            gecko = GeckoTerminalOHLCVProvider()
+            # CoinGecko Onchain: DEX-native data, no API key needed
+            gecko = CoinGeckoOnchainOHLCVProvider()
             router.register_provider(gecko)
 
             # Binance: CEX data via DataProvider adapter
@@ -3673,7 +3673,7 @@ class PaperTrader:
                 closeable_providers=[gecko],
             )
             logger.info(
-                "[%s] Created multi-source OHLCV provider (GeckoTerminal + Binance) for chain=%s",
+                "[%s] Created multi-source OHLCV provider (CoinGecko Onchain + Binance) for chain=%s",
                 self._backtest_id,
                 chain,
             )

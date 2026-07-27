@@ -199,14 +199,14 @@ class TestRouterRetryConsumesUpstreamRetryAfter:
 
     def test_router_sleeps_for_upstream_advised_delay(self) -> None:
         provider = MagicMock()
-        provider.name = "geckoterminal"
+        provider.name = "coingecko_onchain"
         provider.data_class = DataClassification.INFORMATIONAL
 
         candles = [_candle_now()]
         # First call raises with retry_after=1.7; second call succeeds.
         provider.fetch.side_effect = [
-            DataSourceRateLimited(source="geckoterminal", retry_after=1.7),
-            _envelope_with(candles, source="geckoterminal"),
+            DataSourceRateLimited(source="coingecko_onchain", retry_after=1.7),
+            _envelope_with(candles, source="coingecko_onchain"),
         ]
 
         router = OHLCVRouter()
@@ -216,20 +216,20 @@ class TestRouterRetryConsumesUpstreamRetryAfter:
         with patch.object(ohlcv_router.time, "sleep", side_effect=sleeps.append):
             envelope = router.get_ohlcv("UNITLESS", chain="arbitrum", timeframe="1h", limit=1)
 
-        assert envelope.meta.source == "geckoterminal"
+        assert envelope.meta.source == "coingecko_onchain"
         assert provider.fetch.call_count == 2
         # Exactly one sleep, exactly the advised value (no jitter applied).
         assert sleeps == [pytest.approx(1.7)]
 
     def test_router_caps_upstream_advised_delay(self) -> None:
         provider = MagicMock()
-        provider.name = "geckoterminal"
+        provider.name = "coingecko_onchain"
         provider.data_class = DataClassification.INFORMATIONAL
 
         candles = [_candle_now()]
         provider.fetch.side_effect = [
-            DataSourceRateLimited(source="geckoterminal", retry_after=999.0),
-            _envelope_with(candles, source="geckoterminal"),
+            DataSourceRateLimited(source="coingecko_onchain", retry_after=999.0),
+            _envelope_with(candles, source="coingecko_onchain"),
         ]
 
         router = OHLCVRouter()
@@ -246,13 +246,13 @@ class TestRouterRetryConsumesUpstreamRetryAfter:
         # but NO retry_after — exercises the legacy heuristic + jitter fallback
         # path. Second call succeeds.
         provider = MagicMock()
-        provider.name = "geckoterminal"
+        provider.name = "coingecko_onchain"
         provider.data_class = DataClassification.INFORMATIONAL
 
         candles = [_candle_now()]
         provider.fetch.side_effect = [
-            DataSourceUnavailable(source="geckoterminal", reason="connection reset"),
-            _envelope_with(candles, source="geckoterminal"),
+            DataSourceUnavailable(source="coingecko_onchain", reason="connection reset"),
+            _envelope_with(candles, source="coingecko_onchain"),
         ]
 
         router = OHLCVRouter()

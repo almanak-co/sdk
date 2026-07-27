@@ -5,7 +5,7 @@ Wraps the async ``GatewayOHLCVProvider`` (which only implements the
 as a sync ``DataProvider``.
 
 Uses the same async-to-sync wrapping pattern as
-``GeckoTerminalOHLCVProvider.fetch()``.
+``CoinGeckoOnchainOHLCVProvider.fetch()``.
 
 Example:
     from almanak.framework.data.ohlcv.gateway_data_adapter import GatewayOHLCVDataProvider
@@ -32,7 +32,7 @@ from almanak.framework.data.models import DataClassification, DataEnvelope, Data
 if TYPE_CHECKING:
     from almanak.framework.data.ohlcv.gateway_provider import (
         GatewayCoinGeckoOHLCVProvider,
-        GatewayGeckoTerminalOHLCVProvider,
+        GatewayCoinGeckoOnchainOHLCVProvider,
         GatewayOHLCVProvider,
     )
 
@@ -85,7 +85,7 @@ class GatewayOHLCVDataProvider:
 
         start = time.monotonic()
 
-        # Async-to-sync wrapping (same 3-tier pattern as GeckoTerminalOHLCVProvider)
+        # Async-to-sync wrapping (same 3-tier pattern as CoinGeckoOnchainOHLCVProvider)
         coro = self._provider.get_ohlcv(
             token=token,
             quote=quote,
@@ -119,27 +119,27 @@ class GatewayOHLCVDataProvider:
         return self._provider.get_health_metrics()
 
 
-class GeckoTerminalGatewayDataProvider:
-    """Adapts GatewayGeckoTerminalOHLCVProvider to the DataProvider protocol.
+class CoinGeckoOnchainGatewayDataProvider:
+    """Adapts GatewayCoinGeckoOnchainOHLCVProvider to the DataProvider protocol.
 
     Properties:
-        name: Returns ``"geckoterminal"`` to match the router's provider chain key.
+        name: Returns ``"coingecko_onchain"`` to match the router's provider chain key.
         data_class: INFORMATIONAL -- OHLCV is never execution-grade.
     """
 
-    def __init__(self, gateway_provider: GatewayGeckoTerminalOHLCVProvider) -> None:
+    def __init__(self, gateway_provider: GatewayCoinGeckoOnchainOHLCVProvider) -> None:
         self._provider = gateway_provider
 
     @property
     def name(self) -> str:
-        return "geckoterminal"
+        return "coingecko_onchain"
 
     @property
     def data_class(self) -> DataClassification:
         return DataClassification.INFORMATIONAL
 
     def fetch(self, **kwargs: object) -> DataEnvelope:
-        """Synchronous DataProvider entry point for GeckoTerminal OHLCV."""
+        """Synchronous DataProvider entry point for CoinGecko Onchain OHLCV."""
         token = str(kwargs.get("token", ""))
         if not token:
             raise ValueError("`token` is a required argument and cannot be empty.")
@@ -263,5 +263,5 @@ class CoinGeckoGatewayDataProvider:
 __all__ = [
     "CoinGeckoGatewayDataProvider",
     "GatewayOHLCVDataProvider",
-    "GeckoTerminalGatewayDataProvider",
+    "CoinGeckoOnchainGatewayDataProvider",
 ]

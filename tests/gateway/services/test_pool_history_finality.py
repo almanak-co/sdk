@@ -33,7 +33,7 @@ from almanak.gateway.services.pool_history_service import PoolHistoryServiceServ
 
 HOUR = 3600
 DAY = 86400
-_CUTOFF = 24 * HOUR  # the_graph / geckoterminal finality cutoff (matches settings default)
+_CUTOFF = 24 * HOUR  # the_graph / coingecko_onchain finality cutoff (matches settings default)
 _ARB_POOL = "0xc6962004f452be9203591991d15f6b388e09e8d0"
 
 

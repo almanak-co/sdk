@@ -11,9 +11,7 @@ Public surface:
   constructs one in ``__init__`` and calls ``dispatch()`` inside the public
   cache's ``get_or_fetch`` closure.
 * The three providers (``TheGraphPoolHistoryProvider`` /
-  ``DefiLlamaPoolHistoryProvider`` / ``GeckoTerminalPoolHistoryProvider``).
-  The GeckoTerminal class name is retained as a compatibility key; its
-  upstream egress is CoinGecko Onchain.
+  ``DefiLlamaPoolHistoryProvider`` / ``CoinGeckoOnchainPoolHistoryProvider``).
 * The 3-state taxonomy sentinels + ``_ProviderError`` (parallel copies of the
   analytics-service types — the two services are intentionally decoupled,
   decision #3).
@@ -32,20 +30,20 @@ from ._base import (
     _TokenBucket,
 )
 from ._graphql import GatewayGraphQLClient
+from .coingecko_onchain import CoinGeckoOnchainPoolHistoryProvider
 from .defillama import DefiLlamaPoolHistoryProvider
 from .dispatcher import (
     PoolHistoryDispatcher,
     _DispatchCounters,
     _DispatchOutcome,
 )
-from .geckoterminal import GeckoTerminalPoolHistoryProvider
 from .thegraph import TheGraphPoolHistoryProvider
 
 __all__ = [
     "PoolHistoryDispatcher",
     "TheGraphPoolHistoryProvider",
     "DefiLlamaPoolHistoryProvider",
-    "GeckoTerminalPoolHistoryProvider",
+    "CoinGeckoOnchainPoolHistoryProvider",
     "GatewayGraphQLClient",
     "PoolHistoryProvider",
     "ProviderResult",

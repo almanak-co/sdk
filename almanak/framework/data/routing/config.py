@@ -23,7 +23,7 @@ Example:
         def health(self) -> dict[str, object]:
             return {"status": "healthy"}
 
-    config = DataRoutingConfig.from_strategy_config({"data_overrides": {"ohlcv": {"primary": "geckoterminal"}}})
+    config = DataRoutingConfig.from_strategy_config({"data_overrides": {"ohlcv": {"primary": "coingecko_onchain"}}})
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 class DataProvider(Protocol):
     """Protocol for interchangeable data providers.
 
-    All data providers (GeckoTerminal, DeFi Llama, Binance, on-chain readers)
+    All data providers (CoinGecko Onchain, DeFi Llama, Binance, on-chain readers)
     must implement this interface to participate in the DataRouter's
     provider selection and failover logic.
 
@@ -52,13 +52,13 @@ class DataProvider(Protocol):
         health: Return a health status dict with at least a "status" key.
 
     Properties:
-        name: Unique provider identifier (e.g. "geckoterminal", "defillama").
+        name: Unique provider identifier (e.g. "coingecko_onchain", "defillama").
         data_class: Classification controlling fail-closed vs fallback semantics.
     """
 
     @property
     def name(self) -> str:
-        """Unique provider identifier (e.g. 'geckoterminal', 'alchemy_rpc')."""
+        """Unique provider identifier (e.g. 'coingecko_onchain', 'alchemy_rpc')."""
         ...
 
     @property
@@ -142,7 +142,7 @@ class ProviderConfig:
     behavior, and optional quota limits.
 
     Attributes:
-        primary: Name of the primary provider (e.g. "geckoterminal").
+        primary: Name of the primary provider (e.g. "coingecko_onchain").
         fallback: Ordered list of fallback provider names.
         timeout_ms: Request timeout in milliseconds.
         quota: Optional quota configuration for the primary provider.
@@ -173,12 +173,12 @@ _DEFAULT_ROUTING: dict[str, ProviderConfig] = {
     "pool_price": ProviderConfig(primary="alchemy_rpc", timeout_ms=500),
     "twap": ProviderConfig(primary="alchemy_rpc", timeout_ms=500),
     "lwap": ProviderConfig(primary="alchemy_rpc", timeout_ms=500),
-    "ohlcv": ProviderConfig(primary="binance", fallback=["geckoterminal", "defillama"], timeout_ms=2000),
-    "pool_history": ProviderConfig(primary="thegraph", fallback=["defillama", "geckoterminal"], timeout_ms=5000),
+    "ohlcv": ProviderConfig(primary="binance", fallback=["coingecko_onchain", "defillama"], timeout_ms=2000),
+    "pool_history": ProviderConfig(primary="thegraph", fallback=["defillama", "coingecko_onchain"], timeout_ms=5000),
     "lending_rate": ProviderConfig(primary="thegraph", fallback=["defillama"], timeout_ms=5000),
     "funding_rate": ProviderConfig(primary="protocol_api", timeout_ms=2000),
     "liquidity_depth": ProviderConfig(primary="alchemy_rpc", timeout_ms=500),
-    "pool_analytics": ProviderConfig(primary="defillama", fallback=["geckoterminal", "thegraph"], timeout_ms=5000),
+    "pool_analytics": ProviderConfig(primary="defillama", fallback=["coingecko_onchain", "thegraph"], timeout_ms=5000),
     "yield_opportunities": ProviderConfig(primary="defillama", timeout_ms=5000),
 }
 
@@ -298,9 +298,9 @@ class DataRoutingConfig:
 
         Examples:
             # Full form
-            {"ohlcv": {"primary": "geckoterminal", "fallback": ["defillama"], "timeout_ms": 3000}}
+            {"ohlcv": {"primary": "coingecko_onchain", "fallback": ["defillama"], "timeout_ms": 3000}}
             # Shorthand: just a primary provider name
-            {"ohlcv": "geckoterminal"}
+            {"ohlcv": "coingecko_onchain"}
         """
         routes: dict[str, ProviderConfig] = {}
         for data_type, value in overrides.items():

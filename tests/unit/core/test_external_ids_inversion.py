@@ -7,8 +7,8 @@ Eleven standalone per-vendor chain maps were folded onto
 * CoinGecko ``gateway/data/price/coingecko.py::COINGECKO_PLATFORM_IDS``
 * DexScreener ``gateway/data/price/dexscreener.py::CHAIN_TO_DEXSCREENER_PLATFORM``
   **+** ``gateway/services/dexscreener_lookup.py::CHAIN_SLUG_MAP`` (collapsed)
-* GeckoTerminal ``gateway/data/ohlcv/geckoterminal_provider.py::_CHAIN_TO_NETWORK``
-  **+** ``gateway/data/_history_common.py::_CHAIN_TO_GT_NETWORK`` (collapsed)
+* CoinGecko Onchain ``gateway/data/ohlcv/coingecko_onchain_provider.py::_CHAIN_TO_NETWORK``
+  **+** ``gateway/data/_history_common.py::_CHAIN_TO_CG_ONCHAIN_NETWORK`` (collapsed)
 * DeFiLlama slug ``framework/data/providers/defillama_provider.py::_CHAIN_TO_LLAMA``
 * DeFiLlama display ``gateway/data/_history_common.py::_CHAIN_TO_LLAMA_DISPLAY``
   **+** ``framework/data/yields/aggregator.py::_CHAIN_TO_LLAMA_DISPLAY`` (byte-identical)
@@ -33,7 +33,7 @@ fold and are pinned here by name:
 * DexScreener #2/#3 agree on all 17 canonical chains; #2 additionally carried
   the ``"bnb"`` alias (dropped — ``external_id_for`` resolves it via the
   registry). The reconciled key-set is the 17 canonical chains.
-* GeckoTerminal #4/#5 agree on all 9 shared chains; #4 additionally carried
+* CoinGecko Onchain #4/#5 agree on all 9 shared chains; #4 additionally carried
   ``mantle``. The reconciled key-set is the union (10 chains).
 * DeFiLlama display #7/#8 are byte-identical.
 """
@@ -129,8 +129,8 @@ FROZEN_DEXSCREENER_SLUG: dict[str, str] = {
     "robinhood": "robinhood",
 }
 
-# 4. GeckoTerminal _CHAIN_TO_NETWORK (has mantle).
-FROZEN_GECKOTERMINAL_NETWORK: dict[str, str] = {
+# 4. CoinGecko Onchain _CHAIN_TO_NETWORK (has mantle).
+FROZEN_COINGECKO_ONCHAIN_NETWORK: dict[str, str] = {
     "ethereum": "eth",
     "arbitrum": "arbitrum",
     "base": "base",
@@ -144,8 +144,8 @@ FROZEN_GECKOTERMINAL_NETWORK: dict[str, str] = {
     "robinhood": "robinhood",
 }
 
-# 5. GeckoTerminal _CHAIN_TO_GT_NETWORK (no mantle; same "geckoterminal" vendor).
-FROZEN_GECKOTERMINAL_GT: dict[str, str] = {
+# 5. CoinGecko Onchain _CHAIN_TO_CG_ONCHAIN_NETWORK (no mantle; same "coingecko_onchain" vendor).
+FROZEN_COINGECKO_ONCHAIN_GT: dict[str, str] = {
     "ethereum": "eth",
     "arbitrum": "arbitrum",
     "base": "base",
@@ -268,9 +268,9 @@ def _frozen_for(vendor: str) -> dict[str, str]:
         # #2 ∪ #3, value-identical on all shared canonical chains; #2 adds "bnb".
         merged = {**FROZEN_DEXSCREENER_SLUG, **FROZEN_DEXSCREENER_PLATFORM}
         return merged
-    if vendor == "geckoterminal":
+    if vendor == "coingecko_onchain":
         # #4 ∪ #5, value-identical on all 9 shared chains; #4 adds "mantle".
-        merged = {**FROZEN_GECKOTERMINAL_GT, **FROZEN_GECKOTERMINAL_NETWORK}
+        merged = {**FROZEN_COINGECKO_ONCHAIN_GT, **FROZEN_COINGECKO_ONCHAIN_NETWORK}
         return merged
     if vendor == "defillama":
         return dict(FROZEN_DEFILLAMA)
@@ -290,7 +290,7 @@ def _frozen_for(vendor: str) -> dict[str, str]:
 ALL_VENDORS = (
     "coingecko",
     "dexscreener",
-    "geckoterminal",
+    "coingecko_onchain",
     "defillama",
     "defillama_display",
     "zerion",
@@ -321,7 +321,7 @@ def test_vendor_chain_map_does_not_widen(vendor: str) -> None:
 @pytest.mark.parametrize("vendor", ALL_VENDORS)
 def test_external_id_values_match_frozen(vendor: str) -> None:
     # Catches arbitrum-one vs arbitrum (coingecko), eth vs ethereum
-    # (geckoterminal/moralis), avax vs avalanche (defillama), and the
+    # (coingecko_onchain/moralis), avax vs avalanche (defillama), and the
     # lowercase/Capitalised DeFiLlama split.
     frozen = _frozen_for(vendor)
     for chain, vid in frozen.items():
@@ -389,16 +389,16 @@ def test_dexscreener_collapse_keeps_all_canonical_chains() -> None:
     assert len(expected) == 19
 
 
-def test_geckoterminal_collapse_is_union_with_mantle() -> None:
-    # #4 (_CHAIN_TO_NETWORK) carried mantle; #5 (_CHAIN_TO_GT_NETWORK) did not.
+def test_coingecko_onchain_collapse_is_union_with_mantle() -> None:
+    # #4 (_CHAIN_TO_NETWORK) carried mantle; #5 (_CHAIN_TO_CG_ONCHAIN_NETWORK) did not.
     # The collapse is the union, so BOTH mantle and solana must be present by
     # name (they came from different source maps).
-    gt_map = vendor_chain_map("geckoterminal")
+    gt_map = vendor_chain_map("coingecko_onchain")
     assert "mantle" in gt_map  # only in #4
     assert "solana" in gt_map  # in both #4 and #5
-    assert external_id_for("mantle", "geckoterminal") == "mantle"
-    assert external_id_for("solana", "geckoterminal") == "solana"
-    expected = set(FROZEN_GECKOTERMINAL_NETWORK) | set(FROZEN_GECKOTERMINAL_GT)
+    assert external_id_for("mantle", "coingecko_onchain") == "mantle"
+    assert external_id_for("solana", "coingecko_onchain") == "solana"
+    expected = set(FROZEN_COINGECKO_ONCHAIN_NETWORK) | set(FROZEN_COINGECKO_ONCHAIN_GT)
     assert set(gt_map) == expected
 
 

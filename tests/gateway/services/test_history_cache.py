@@ -560,11 +560,11 @@ def test_raw_cache_partition_count_decrements_on_eviction():
     cache = _raw_cache(max_entries=2)
     cache.put(_raw_key(provider="the_graph"), _snapshot_response(), FINALITY_FINALIZED)
     cache.put(_raw_key(provider="defillama"), _snapshot_response(), FINALITY_FINALIZED)
-    cache.put(_raw_key(provider="geckoterminal", start=1_700_500_000),
+    cache.put(_raw_key(provider="coingecko_onchain", start=1_700_500_000),
               _snapshot_response(), FINALITY_FINALIZED)
     # The_graph (oldest) should have been evicted.
     assert "the_graph" not in cache.entries_by_partition
-    assert cache.entries_by_partition == {"defillama": 1, "geckoterminal": 1}
+    assert cache.entries_by_partition == {"defillama": 1, "coingecko_onchain": 1}
 
 
 def test_public_cache_has_no_partition_tracking():

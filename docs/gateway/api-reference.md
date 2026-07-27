@@ -1132,13 +1132,14 @@ message CoinGeckoOHLCVResponse {
 }
 ```
 
-### GeckoTerminalGetOHLCV
+### CoinGeckoOnchainGetOHLCV
 
-Legacy-named RPC for DEX OHLCV data from CoinGecko Onchain for on-chain
-pool pricing.
+DEX OHLCV data from CoinGecko Onchain for on-chain pool pricing. Pool-level
+candles with volume — distinct from `CoinGeckoGetOHLCV`, which serves
+token-level, price-only CEX-reference candles.
 
 ```protobuf
-rpc GeckoTerminalGetOHLCV(GeckoTerminalOHLCVRequest) returns (GeckoTerminalOHLCVResponse)
+rpc CoinGeckoOnchainGetOHLCV(CoinGeckoOnchainOHLCVRequest) returns (CoinGeckoOnchainOHLCVResponse)
 ```
 
 ### GetWalletPortfolio
@@ -1573,7 +1574,7 @@ message PoolHistoryResponse {
   repeated PoolSnapshot snapshots = 1;     // Ascending by timestamp, one row per aligned bucket
   TruncationReason truncation_reason = 2;  // CAP_EXCEEDED | PROVIDER_PAGE_CAP | PROVIDER_RETENTION
   int64 next_start_ts = 3;                 // Re-chunk hint for paged backfill
-  string source = 4;                       // "the_graph" | "defillama" | "geckoterminal" (legacy key for CoinGecko Onchain)
+  string source = 4;                       // "the_graph" | "defillama" | "coingecko_onchain"
   bool finalized_only = 5;                 // false if any row is provisional within the finality cutoff
   bool success = 6;
   string error = 7;

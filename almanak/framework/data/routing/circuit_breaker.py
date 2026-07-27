@@ -9,7 +9,7 @@ States:
     HALF_OPEN - Cooldown elapsed; one test request is allowed through.
 
 Usage:
-    cb = CircuitBreaker(name="geckoterminal", failure_threshold=5, cooldown_seconds=60)
+    cb = CircuitBreaker(name="coingecko_onchain", failure_threshold=5, cooldown_seconds=60)
 
     if cb.allow_request():
         try:

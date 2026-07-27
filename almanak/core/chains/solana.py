@@ -62,11 +62,11 @@ DESCRIPTOR = register_chain(
         # serve as a CAIP-2 reference). VIB-5175.
         caip2_reference="5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
         # VIB-4851 (B1): per-vendor external ids, transposed from the legacy
-        # standalone vendor maps (CoinGecko / DexScreener / GeckoTerminal /
+        # standalone vendor maps (CoinGecko / DexScreener / CoinGecko Onchain /
         # DeFiLlama / Zerion / Moralis / OKX). Values verbatim incl. case.
         external_ids={
             "dexscreener": "solana",
-            "geckoterminal": "solana",
+            "coingecko_onchain": "solana",
             "defillama_display": "Solana",
             "zerion": "solana",
             "okx": "501",

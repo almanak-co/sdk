@@ -58,7 +58,7 @@ class DataMeta:
     """Provenance metadata attached to every data value.
 
     Attributes:
-        source: Provider name (e.g. 'alchemy_rpc', 'geckoterminal', 'binance').
+        source: Provider name (e.g. 'alchemy_rpc', 'coingecko_onchain', 'binance').
         observed_at: UTC timestamp when the value was observed at the source.
         block_number: On-chain block number (None for off-chain data).
         finality: Block finality level or 'off_chain' for API data.

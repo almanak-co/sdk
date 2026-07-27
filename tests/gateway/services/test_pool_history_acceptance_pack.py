@@ -35,7 +35,7 @@ lines 165-173):
 |---|-----------------------------------|-------------------------------------------------------------------------------|
 | 1 | Happy path per provider           | ``test_pool_history_service.py::test_recorded_fixture_per_provider_chain``    |
 | 2 | Chain matrix                      | ``test_pool_history_service.py::test_chain_matrix_arbitrum_ethereum_base``    |
-| 3 | Provider fallback                 | ``test_pool_history_service.py::test_provider_fallback_full_chain_1d_to_geckoterminal`` |
+| 3 | Provider fallback                 | ``test_pool_history_service.py::test_provider_fallback_full_chain_1d_to_coingecko_onchain`` |
 | 4 | Cache hit + finality re-promotion | ``test_pool_history_finality.py::test_finality_re_promotion_stable_cache_key`` |
 | 5 | Hosted-auth interceptor           | ``test_pool_history_auth.py::test_authenticated_happy_path``                  |
 | 6 | Truncation roundtrip              | ``test_pool_history_truncation.py::test_truncation_reason_cap_exceeded``      |
@@ -81,7 +81,7 @@ from tests.gateway.services.test_pool_history_finality import (
 from tests.gateway.services.test_pool_history_service import (
     test_chain_matrix_arbitrum_ethereum_base as _t2,  # noqa: F401
     test_pool_not_found_never_returns_empty_envelope as _t9,  # noqa: F401
-    test_provider_fallback_full_chain_1d_to_geckoterminal as _t3,  # noqa: F401
+    test_provider_fallback_full_chain_1d_to_coingecko_onchain as _t3,  # noqa: F401
     test_recorded_fixture_per_provider_chain as _t1,  # noqa: F401
 )
 from tests.gateway.services.test_pool_history_truncation import (
@@ -95,7 +95,7 @@ ACCEPTANCE_PACK_FUNCTIONS: tuple[tuple[str, str], ...] = (
     # 9 gateway tests
     ("tests.gateway.services.test_pool_history_service", "test_recorded_fixture_per_provider_chain"),
     ("tests.gateway.services.test_pool_history_service", "test_chain_matrix_arbitrum_ethereum_base"),
-    ("tests.gateway.services.test_pool_history_service", "test_provider_fallback_full_chain_1d_to_geckoterminal"),
+    ("tests.gateway.services.test_pool_history_service", "test_provider_fallback_full_chain_1d_to_coingecko_onchain"),
     ("tests.gateway.services.test_pool_history_finality", "test_finality_re_promotion_stable_cache_key"),
     ("tests.gateway.services.test_pool_history_auth", "test_authenticated_happy_path"),
     ("tests.gateway.services.test_pool_history_truncation", "test_truncation_reason_cap_exceeded"),

@@ -6531,7 +6531,7 @@ class PoolHistoryResponse(_message.Message):
     """
     source: _builtins.str
     """Provider that served the response: "the_graph" | "defillama" |
-    "geckoterminal" (legacy key for CoinGecko Onchain) on success. On
+    "coingecko_onchain" on success. On
     failure: "" or "none" (NEVER a provider name with snapshots=[] — that
     would imply a (failed) provider's data is in the envelope).
     """
@@ -11486,9 +11486,9 @@ class WriteApprovalResponseByStrategyRequest(_message.Message):
 Global___WriteApprovalResponseByStrategyRequest: _TypeAlias = WriteApprovalResponseByStrategyRequest  # noqa: Y015
 
 @_typing.final
-class GeckoTerminalOHLCVRequest(_message.Message):
+class CoinGeckoOnchainOHLCVRequest(_message.Message):
     """=============================================================================
-    Legacy-named CoinGecko Onchain Integration Messages
+    CoinGecko Onchain (DEX pool) Integration Messages
     =============================================================================
     """
 
@@ -11529,10 +11529,10 @@ class GeckoTerminalOHLCVRequest(_message.Message):
     _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "include_empty_intervals", b"include_empty_intervals", "limit", b"limit", "pool_address", b"pool_address", "quote", b"quote", "timeframe", b"timeframe", "token", b"token"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
-Global___GeckoTerminalOHLCVRequest: _TypeAlias = GeckoTerminalOHLCVRequest  # noqa: Y015
+Global___CoinGeckoOnchainOHLCVRequest: _TypeAlias = CoinGeckoOnchainOHLCVRequest  # noqa: Y015
 
 @_typing.final
-class GeckoTerminalOHLCVCandle(_message.Message):
+class CoinGeckoOnchainOHLCVCandle(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
     TIMESTAMP_FIELD_NUMBER: _builtins.int
@@ -11561,24 +11561,24 @@ class GeckoTerminalOHLCVCandle(_message.Message):
     _ClearFieldArgType: _TypeAlias = _typing.Literal["close", b"close", "high", b"high", "low", b"low", "open", b"open", "timestamp", b"timestamp", "volume", b"volume"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
-Global___GeckoTerminalOHLCVCandle: _TypeAlias = GeckoTerminalOHLCVCandle  # noqa: Y015
+Global___CoinGeckoOnchainOHLCVCandle: _TypeAlias = CoinGeckoOnchainOHLCVCandle  # noqa: Y015
 
 @_typing.final
-class GeckoTerminalOHLCVResponse(_message.Message):
+class CoinGeckoOnchainOHLCVResponse(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
     CANDLES_FIELD_NUMBER: _builtins.int
     @_builtins.property
-    def candles(self) -> _containers.RepeatedCompositeFieldContainer[Global___GeckoTerminalOHLCVCandle]: ...
+    def candles(self) -> _containers.RepeatedCompositeFieldContainer[Global___CoinGeckoOnchainOHLCVCandle]: ...
     def __init__(
         self,
         *,
-        candles: _abc.Iterable[Global___GeckoTerminalOHLCVCandle] | None = ...,
+        candles: _abc.Iterable[Global___CoinGeckoOnchainOHLCVCandle] | None = ...,
     ) -> None: ...
     _ClearFieldArgType: _TypeAlias = _typing.Literal["candles", b"candles"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
-Global___GeckoTerminalOHLCVResponse: _TypeAlias = GeckoTerminalOHLCVResponse  # noqa: Y015
+Global___CoinGeckoOnchainOHLCVResponse: _TypeAlias = CoinGeckoOnchainOHLCVResponse  # noqa: Y015
 
 @_typing.final
 class ReconcileRequest(_message.Message):

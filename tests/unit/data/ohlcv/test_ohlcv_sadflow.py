@@ -72,7 +72,7 @@ def _make_candles(n: int = 5) -> list[OHLCVCandle]:
     ]
 
 
-def _make_envelope(candles: list[OHLCVCandle] | None = None, source: str = "geckoterminal") -> DataEnvelope:
+def _make_envelope(candles: list[OHLCVCandle] | None = None, source: str = "coingecko_onchain") -> DataEnvelope:
     if candles is None:
         candles = _make_candles()
     meta = DataMeta(
@@ -116,7 +116,7 @@ class TestErrorEnvelope:
     def test_primary_error_in_reason_when_gecko_and_binance_both_fail(self):
         """When Gecko fails then Binance fails, reason includes both errors."""
         router = OHLCVRouter(default_chain="base")
-        gecko = _failing_provider("geckoterminal", "StatusCode.INTERNAL — GeckoTerminal OHLCV request failed")
+        gecko = _failing_provider("coingecko_onchain", "StatusCode.INTERNAL — CoinGecko Onchain OHLCV request failed")
         binance = _failing_provider("binance", "Unknown token for Binance: 0xaero")
         router.register_provider(gecko)
         router.register_provider(binance)
@@ -126,7 +126,7 @@ class TestErrorEnvelope:
                 router.get_ohlcv("AERO", chain="base")
 
         reason = exc_info.value.reason
-        assert "StatusCode.INTERNAL" in reason or "GeckoTerminal" in reason, (
+        assert "StatusCode.INTERNAL" in reason or "CoinGecko Onchain" in reason, (
             f"Primary Gecko error not found in reason: {reason}"
         )
         assert "Unknown token for Binance" in reason, f"Last Binance error not found in reason: {reason}"
@@ -146,7 +146,7 @@ class TestErrorEnvelope:
     def test_primary_error_leads_reason(self):
         """The primary error text appears before the last error in the reason."""
         router = OHLCVRouter(default_chain="base")
-        gecko = _failing_provider("geckoterminal", "GECKO_FAIL")
+        gecko = _failing_provider("coingecko_onchain", "GECKO_FAIL")
         binance = _failing_provider("binance", "BINANCE_FAIL")
         router.register_provider(gecko)
         router.register_provider(binance)
@@ -175,8 +175,8 @@ class TestClassifyGeckoPlusBinanceCombined:
         """Gecko INTERNAL + Binance unknown token → classification is 'mixed'."""
         combined = (
             "All providers failed for AERO/USD on base"
-            " — primary: Data source 'gateway_geckoterminal' unavailable:"
-            " <RpcError status = StatusCode.INTERNAL details = 'GeckoTerminal OHLCV request failed'>;"
+            " — primary: Data source 'gateway_coingecko_onchain' unavailable:"
+            " <RpcError status = StatusCode.INTERNAL details = 'CoinGecko Onchain OHLCV request failed'>;"
             " last: Data source 'gateway_ohlcv' unavailable: Unknown token for Binance: 0xaero"
         )
         market = _snapshot_with_failure(combined)
@@ -190,7 +190,7 @@ class TestClassifyGeckoPlusBinanceCombined:
 
     def test_grpc_internal_only_is_transient(self):
         """A pure gRPC INTERNAL error with no permanent hints → 'transient'."""
-        market = _snapshot_with_failure("StatusCode.INTERNAL — GeckoTerminal OHLCV request failed")
+        market = _snapshot_with_failure("StatusCode.INTERNAL — CoinGecko Onchain OHLCV request failed")
         assert market.classify_critical_data_failures() == "transient"
 
     def test_grpc_unavailable_only_is_transient(self):
@@ -200,7 +200,7 @@ class TestClassifyGeckoPlusBinanceCombined:
     def test_two_separate_failures_gecko_transient_binance_permanent(self):
         """Two separate recorded failures (one each) → 'mixed'."""
         market = MarketSnapshot(chain="base", wallet_address="0xtest")
-        market._record_critical_data_failure("ohlcv_router", "AERO_primary", "StatusCode.INTERNAL: GeckoTerminal blip")
+        market._record_critical_data_failure("ohlcv_router", "AERO_primary", "StatusCode.INTERNAL: CoinGecko Onchain blip")
         market._record_critical_data_failure("ohlcv_router", "AERO_last", "Unknown token for Binance: 0xaero")
         assert market.classify_critical_data_failures() == "mixed"
 
@@ -240,20 +240,20 @@ class TestRetryLogic:
         router = OHLCVRouter(default_chain="base")
 
         gecko = MagicMock()
-        gecko.name = "geckoterminal"
+        gecko.name = "coingecko_onchain"
         gecko.fetch.side_effect = [
             DataSourceUnavailable(
-                source="geckoterminal",
-                reason="StatusCode.INTERNAL: GeckoTerminal OHLCV request failed",
+                source="coingecko_onchain",
+                reason="StatusCode.INTERNAL: CoinGecko Onchain OHLCV request failed",
             ),
-            _make_envelope(source="geckoterminal"),
+            _make_envelope(source="coingecko_onchain"),
         ]
         router.register_provider(gecko)
 
         with patch("almanak.framework.data.ohlcv.ohlcv_router.time.sleep"):
             result = router.get_ohlcv("AERO", chain="base")
 
-        assert result.meta.source == "geckoterminal"
+        assert result.meta.source == "coingecko_onchain"
         assert gecko.fetch.call_count == 2
 
     def test_retry_exhausted_falls_through_to_binance(self):
@@ -261,11 +261,11 @@ class TestRetryLogic:
         router = OHLCVRouter(default_chain="base")
 
         transient_err = DataSourceUnavailable(
-            source="geckoterminal",
-            reason="StatusCode.INTERNAL: GeckoTerminal OHLCV request failed",
+            source="coingecko_onchain",
+            reason="StatusCode.INTERNAL: CoinGecko Onchain OHLCV request failed",
         )
         gecko = MagicMock()
-        gecko.name = "geckoterminal"
+        gecko.name = "coingecko_onchain"
         gecko.fetch.side_effect = [transient_err, transient_err, transient_err]
 
         binance = _succeeding_provider("binance")
@@ -273,7 +273,7 @@ class TestRetryLogic:
         router.register_provider(binance)
 
         with patch("almanak.framework.data.ohlcv.ohlcv_router.time.sleep"):
-            # AERO is defi_primary → chain is [geckoterminal, defillama, binance]
+            # AERO is defi_primary → chain is [coingecko_onchain, binance]
             result = router.get_ohlcv("AERO", chain="base")
 
         assert result.meta.source == "binance"
@@ -283,7 +283,7 @@ class TestRetryLogic:
         """A non-transient (permanent) error on Gecko is NOT retried."""
         router = OHLCVRouter(default_chain="base")
 
-        gecko = _failing_provider("geckoterminal", "Pool not found for this token")
+        gecko = _failing_provider("coingecko_onchain", "Pool not found for this token")
         router.register_provider(gecko)
 
         with patch("almanak.framework.data.ohlcv.ohlcv_router.time.sleep") as mock_sleep:
@@ -314,12 +314,12 @@ class TestRetryLogic:
         router = OHLCVRouter(default_chain="base")
 
         transient_err = DataSourceUnavailable(
-            source="geckoterminal",
+            source="coingecko_onchain",
             reason="StatusCode.INTERNAL: blip",
         )
         gecko = MagicMock()
-        gecko.name = "geckoterminal"
-        gecko.fetch.side_effect = [transient_err, _make_envelope(source="geckoterminal")]
+        gecko.name = "coingecko_onchain"
+        gecko.fetch.side_effect = [transient_err, _make_envelope(source="coingecko_onchain")]
         router.register_provider(gecko)
 
         with patch("almanak.framework.data.ohlcv.ohlcv_router.time.sleep") as mock_sleep:
@@ -341,7 +341,7 @@ class TestIsTransientExc:
     @pytest.mark.parametrize(
         "reason",
         [
-            "StatusCode.INTERNAL: GeckoTerminal OHLCV request failed",
+            "StatusCode.INTERNAL: CoinGecko Onchain OHLCV request failed",
             "StatusCode.UNAVAILABLE: upstream blip",
             "StatusCode.RESOURCE_EXHAUSTED: rate limited",
             "StatusCode.DEADLINE_EXCEEDED: timed out",

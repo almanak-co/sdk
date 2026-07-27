@@ -79,7 +79,7 @@ class StatusDetails:
             e.g. ``"UPSTREAM_RATE_LIMITED"``. Used by the FailureKind taxonomy.
         domain: ``ErrorInfo.domain`` (e.g. ``"almanak.gateway"``).
         upstream: Upstream identifier (from ``ErrorInfo.metadata['upstream']``),
-            e.g. ``"geckoterminal"`` / ``"binance"``. Useful for per-upstream metrics.
+            e.g. ``"coingecko_onchain"`` / ``"binance"``. Useful for per-upstream metrics.
         metadata: Full ``ErrorInfo.metadata`` dict (all key/value pairs).
     """
 
@@ -128,7 +128,7 @@ def pack_status_details(
             None means "no advice; caller policy applies."
         reason: Stable machine-readable reason (e.g. ``"UPSTREAM_RATE_LIMITED"``).
         domain: ``ErrorInfo.domain``.
-        upstream: Upstream identifier (e.g. ``"geckoterminal"``).
+        upstream: Upstream identifier (e.g. ``"coingecko_onchain"``).
         metadata: Additional ``ErrorInfo.metadata`` entries.
 
     Returns:

@@ -632,7 +632,7 @@ def _build_orchestrator_and_providers(  # noqa: C901
         if requirements.indicators:
             # NOTE: In multi-chain mode, OHLCV routing is bound to the first chain.
             # For CEX-listed tokens this is fine (Binance data is chain-agnostic).
-            # For DeFi-native tokens on secondary chains, GeckoTerminal pool search
+            # For DeFi-native tokens on secondary chains, CoinGecko Onchain pool search
             # may resolve to the wrong network. Per-chain providers would require
             # passing chain context through the indicator callables, which is a larger change.
             ohlcv_stack = create_ohlcv_stack(

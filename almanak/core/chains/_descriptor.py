@@ -53,17 +53,20 @@ _CAIP2_REFERENCE_RE = re.compile(r"^[-_a-zA-Z0-9]{1,32}$")
 # external_ids key not in this set so a typo'd vendor (e.g. ``"gecko"``) fails
 # loudly at registration rather than silently producing an unreachable id.
 #
-# ``dexscreener`` and ``geckoterminal`` each collapse two legacy maps that were
-# verified value-identical on every shared chain (DexScreener:
-# ``CHAIN_TO_DEXSCREENER_PLATFORM`` + ``CHAIN_SLUG_MAP``; GeckoTerminal:
-# ``_CHAIN_TO_NETWORK`` + ``_CHAIN_TO_GT_NETWORK``). ``defillama`` (lowercase
-# slug) and ``defillama_display`` (Capitalised display name) cover the same
-# chains but carry distinct value formats, so they remain separate keys.
+# ``dexscreener`` and ``coingecko_onchain`` each collapse two legacy maps that
+# were verified value-identical on every shared chain (DexScreener:
+# ``CHAIN_TO_DEXSCREENER_PLATFORM`` + ``CHAIN_SLUG_MAP``; CoinGecko Onchain:
+# ``_CHAIN_TO_NETWORK`` + ``_CHAIN_TO_CG_ONCHAIN_NETWORK``). ``defillama``
+# (lowercase slug) and ``defillama_display`` (Capitalised display name) cover
+# the same chains but carry distinct value formats, so they remain separate
+# keys. ``coingecko`` (asset-platform id, e.g. ``"ethereum"``) and
+# ``coingecko_onchain`` (Onchain/DEX network slug, e.g. ``"eth"``) are the same
+# vendor but distinct identifier namespaces, so they are separate keys too.
 KNOWN_VENDORS: frozenset[str] = frozenset(
     {
         "coingecko",
         "dexscreener",
-        "geckoterminal",
+        "coingecko_onchain",
         "defillama",
         "defillama_display",
         "zerion",
@@ -622,7 +625,7 @@ class ChainDescriptor:
             per-chain identifier — e.g. ``{"coingecko": "arbitrum-one",
             "okx": "42161"}``. Mirrors the chain half of the legacy
             vendor-side maps (CoinGecko ``COINGECKO_PLATFORM_IDS``,
-            DexScreener, GeckoTerminal, DeFiLlama, Zerion, Moralis, OKX) so a
+            DexScreener, CoinGecko Onchain, DeFiLlama, Zerion, Moralis, OKX) so a
             vendor identifier derives from the registry instead of a
             standalone dict. **Sparse**: a chain declares only the vendors it
             is actually supported on; ``None`` means "no vendor identifiers

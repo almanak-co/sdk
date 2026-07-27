@@ -29,12 +29,12 @@ from typing import Any
 
 from almanak.framework.data.ohlcv.gateway_data_adapter import (
     CoinGeckoGatewayDataProvider,
+    CoinGeckoOnchainGatewayDataProvider,
     GatewayOHLCVDataProvider,
-    GeckoTerminalGatewayDataProvider,
 )
 from almanak.framework.data.ohlcv.gateway_provider import (
     GatewayCoinGeckoOHLCVProvider,
-    GatewayGeckoTerminalOHLCVProvider,
+    GatewayCoinGeckoOnchainOHLCVProvider,
     GatewayOHLCVProvider,
 )
 from almanak.framework.data.ohlcv.ohlcv_router import (
@@ -75,7 +75,7 @@ def create_ohlcv_stack(
 ) -> OHLCVStack:
     """Build the standard OHLCV stack (router + gateway-backed providers).
 
-    Wires the two gateway-backed providers (``geckoterminal`` and ``binance``)
+    Wires the two gateway-backed providers (``coingecko_onchain`` and ``binance``)
     into a single :class:`OHLCVRouter` and returns an :class:`OHLCVStack` that
     exposes both the sync router (for ``MarketSnapshot.ohlcv()``) and the async
     routing provider (for indicators + dashboard).
@@ -92,7 +92,7 @@ def create_ohlcv_stack(
         :class:`OHLCVStack` with ``router`` and ``provider`` populated.
 
     Note:
-        Three providers are wired: ``geckoterminal`` (DEX-native),
+        Three providers are wired: ``coingecko_onchain`` (DEX-native),
         ``binance`` (CEX primary), and ``coingecko`` (CEX fallback, VIB-4847).
         CoinGecko gives the ``cex_primary`` chain a real fallback so a stale /
         rebranded Binance ticker (rejected by the ALM-2697 staleness guard) no
@@ -112,14 +112,14 @@ def create_ohlcv_stack(
     gateway_provider = GatewayOHLCVProvider(gateway_client=gateway_client)
     binance_adapter = GatewayOHLCVDataProvider(gateway_provider)
 
-    gecko_provider = GatewayGeckoTerminalOHLCVProvider(gateway_client=gateway_client, chain=chain)
-    gecko_adapter = GeckoTerminalGatewayDataProvider(gecko_provider)
+    cg_onchain_provider = GatewayCoinGeckoOnchainOHLCVProvider(gateway_client=gateway_client, chain=chain)
+    cg_onchain_adapter = CoinGeckoOnchainGatewayDataProvider(cg_onchain_provider)
 
     coingecko_provider = GatewayCoinGeckoOHLCVProvider(gateway_client=gateway_client)
     coingecko_adapter = CoinGeckoGatewayDataProvider(coingecko_provider)
 
     router = OHLCVRouter(default_chain=chain)
-    router.register_provider(gecko_adapter)
+    router.register_provider(cg_onchain_adapter)
     router.register_provider(binance_adapter)
     router.register_provider(coingecko_adapter)
 

@@ -12,11 +12,8 @@ address, so the matcher could never return data.
 
 | File | Provider | Use |
 |---|---|---|
-| `geckoterminal_arbitrum_univ3.json` | CoinGecko Onchain | D1.S1, D2.M1, D2.M4 — Antonis pool happy path |
-| `geckoterminal_ethereum_univ3.json` | CoinGecko Onchain | D2.M1 — Ethereum chain-mapping branch |
-
-The file names keep the historical `geckoterminal_` prefix — CoinGecko
-acquired GeckoTerminal and the Onchain API serves the same payload shape.
+| `coingecko_onchain_arbitrum_univ3.json` | CoinGecko Onchain | D1.S1, D2.M1, D2.M4 — Antonis pool happy path |
+| `coingecko_onchain_ethereum_univ3.json` | CoinGecko Onchain | D2.M1 — Ethereum chain-mapping branch |
 
 Schema is intentionally trimmed to the fields the servicer reads
 (`_parse_coingecko_onchain_pool`). Adding fields here is fine; removing

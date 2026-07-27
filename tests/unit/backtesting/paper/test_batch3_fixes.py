@@ -37,8 +37,8 @@ class TestIndicatorFallback:
         trader.config = SimpleNamespace(chain="arbitrum")
 
         with patch(
-            "almanak.gateway.data.ohlcv.geckoterminal_provider.GeckoTerminalOHLCVProvider",
-            side_effect=RuntimeError("GeckoTerminal unavailable"),
+            "almanak.gateway.data.ohlcv.coingecko_onchain_provider.CoinGeckoOnchainOHLCVProvider",
+            side_effect=RuntimeError("CoinGecko Onchain unavailable"),
         ):
             provider = trader._create_ohlcv_provider()
 

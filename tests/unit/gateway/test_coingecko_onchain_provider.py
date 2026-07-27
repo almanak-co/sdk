@@ -1,9 +1,9 @@
-"""Tests for GeckoTerminalOHLCVProvider.
+"""Tests for CoinGeckoOnchainOHLCVProvider.
 
 Tests cover:
 - OHLCVProvider protocol: get_ohlcv, supported_timeframes
 - DataProvider protocol: name, data_class, fetch, health
-- GeckoTerminal API response parsing
+- CoinGecko Onchain API response parsing
 - Rate limiting with token bucket
 - Chain-to-network mapping
 - Timeframe mapping
@@ -22,10 +22,10 @@ import pytest
 
 from almanak.framework.data.interfaces import DataSourceUnavailable, OHLCVCandle
 from almanak.framework.data.models import DataClassification, DataEnvelope
-from almanak.gateway.data.ohlcv.geckoterminal_provider import (
+from almanak.gateway.data.ohlcv.coingecko_onchain_provider import (
     _CHAIN_TO_NETWORK,
     _TIMEFRAME_TO_GT,
-    GeckoTerminalOHLCVProvider,
+    CoinGeckoOnchainOHLCVProvider,
     _TokenBucket,
 )
 
@@ -35,20 +35,20 @@ from almanak.gateway.data.ohlcv.geckoterminal_provider import (
 
 
 @pytest.fixture
-def provider() -> GeckoTerminalOHLCVProvider:
+def provider() -> CoinGeckoOnchainOHLCVProvider:
     """Create a fresh provider for each test."""
-    return GeckoTerminalOHLCVProvider(cache_ttl=60, request_timeout=5.0, api_key="test-key")
+    return CoinGeckoOnchainOHLCVProvider(cache_ttl=60, request_timeout=5.0, api_key="test-key")
 
 
 def _make_ohlcv_response(
     candles: list[list[float | int]] | None = None,
 ) -> dict:
-    """Build a mock GeckoTerminal OHLCV JSON response.
+    """Build a mock CoinGecko Onchain OHLCV JSON response.
 
     Default produces 3 candles in descending order (API default).
     """
     if candles is None:
-        # Descending timestamp order (newest first, as GeckoTerminal returns)
+        # Descending timestamp order (newest first, as CoinGecko Onchain returns)
         candles = [
             [1700003600, 1810.5, 1820.0, 1800.0, 1815.0, 50000.0],
             [1700000000, 1800.0, 1812.0, 1795.0, 1810.0, 45000.0],
@@ -66,7 +66,7 @@ def _make_ohlcv_response(
 
 
 def _make_search_response(pool_address: str = "0xabcdef1234567890") -> dict:
-    """Build a mock GeckoTerminal pool search response."""
+    """Build a mock CoinGecko Onchain pool search response."""
     return {
         "data": [
             {
@@ -89,13 +89,13 @@ def _make_search_response(pool_address: str = "0xabcdef1234567890") -> dict:
 class TestDataProviderProtocol:
     """Test DataProvider protocol compliance."""
 
-    def test_name(self, provider: GeckoTerminalOHLCVProvider) -> None:
-        assert provider.name == "geckoterminal"
+    def test_name(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
+        assert provider.name == "coingecko_onchain"
 
-    def test_data_class(self, provider: GeckoTerminalOHLCVProvider) -> None:
+    def test_data_class(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
         assert provider.data_class == DataClassification.INFORMATIONAL
 
-    def test_health_initial(self, provider: GeckoTerminalOHLCVProvider) -> None:
+    def test_health_initial(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
         h = provider.health()
         assert h["status"] == "healthy"
         assert h["total_requests"] == 0
@@ -104,7 +104,7 @@ class TestDataProviderProtocol:
         assert h["errors"] == 0
         assert h["success_rate"] == 100.0
 
-    def test_health_after_errors(self, provider: GeckoTerminalOHLCVProvider) -> None:
+    def test_health_after_errors(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
         provider._metrics.total_requests = 10
         provider._metrics.errors = 6
         provider._metrics.successful_requests = 4
@@ -120,7 +120,7 @@ class TestDataProviderProtocol:
 class TestOHLCVProviderProtocol:
     """Test OHLCVProvider protocol compliance."""
 
-    def test_supported_timeframes(self, provider: GeckoTerminalOHLCVProvider) -> None:
+    def test_supported_timeframes(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
         tf = provider.supported_timeframes
         assert tf == ["1m", "5m", "15m", "1h", "4h", "1d"]
         # Returns a copy, not the original list
@@ -128,7 +128,7 @@ class TestOHLCVProviderProtocol:
         assert "999m" not in provider.supported_timeframes
 
     @pytest.mark.asyncio
-    async def test_invalid_timeframe_raises(self, provider: GeckoTerminalOHLCVProvider) -> None:
+    async def test_invalid_timeframe_raises(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
         with pytest.raises(ValueError, match="Invalid timeframe"):
             await provider.get_ohlcv("WETH", timeframe="7m")
 
@@ -142,7 +142,7 @@ class TestGetOHLCV:
     """Test get_ohlcv with mocked HTTP responses."""
 
     @pytest.mark.asyncio
-    async def test_fetch_with_pool_address(self, provider: GeckoTerminalOHLCVProvider) -> None:
+    async def test_fetch_with_pool_address(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
         """Fetch OHLCV with explicit pool address."""
         mock_response = AsyncMock()
         mock_response.status = 200
@@ -172,8 +172,8 @@ class TestGetOHLCV:
         assert isinstance(candles[0].volume, Decimal)
 
     @pytest.mark.asyncio
-    async def test_include_empty_intervals_adds_query_param(self, provider: GeckoTerminalOHLCVProvider) -> None:
-        """VIB-4875: the flag is sent to GeckoTerminal as include_empty_intervals=true."""
+    async def test_include_empty_intervals_adds_query_param(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
+        """VIB-4875: the flag is sent to CoinGecko Onchain as include_empty_intervals=true."""
         mock_response = AsyncMock()
         mock_response.status = 200
         mock_response.json = AsyncMock(return_value=_make_ohlcv_response())
@@ -194,7 +194,7 @@ class TestGetOHLCV:
         assert params["include_empty_intervals"] == "true"
 
     @pytest.mark.asyncio
-    async def test_include_empty_intervals_omitted_by_default(self, provider: GeckoTerminalOHLCVProvider) -> None:
+    async def test_include_empty_intervals_omitted_by_default(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
         """Default (False) keeps the request byte-identical to legacy behaviour."""
         mock_response = AsyncMock()
         mock_response.status = 200
@@ -213,7 +213,7 @@ class TestGetOHLCV:
         assert "include_empty_intervals" not in params
 
     @pytest.mark.asyncio
-    async def test_fetch_with_search(self, provider: GeckoTerminalOHLCVProvider) -> None:
+    async def test_fetch_with_search(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
         """Fetch OHLCV by searching for pool first."""
         search_resp = AsyncMock()
         search_resp.status = 200
@@ -245,13 +245,13 @@ class TestGetOHLCV:
         assert mock_session.get.call_count == 2
 
     @pytest.mark.asyncio
-    async def test_unsupported_chain_raises(self, provider: GeckoTerminalOHLCVProvider) -> None:
+    async def test_unsupported_chain_raises(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
         """Unsupported chain raises DataSourceUnavailable."""
         with pytest.raises(DataSourceUnavailable, match="Unsupported chain"):
             await provider.get_ohlcv("WETH", chain="fantom")
 
     @pytest.mark.asyncio
-    async def test_http_error_raises(self, provider: GeckoTerminalOHLCVProvider) -> None:
+    async def test_http_error_raises(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
         """Non-200 HTTP status raises DataSourceUnavailable."""
         mock_response = AsyncMock()
         mock_response.status = 500
@@ -273,7 +273,7 @@ class TestGetOHLCV:
             )
 
     @pytest.mark.asyncio
-    async def test_http_429_raises_rate_limit(self, provider: GeckoTerminalOHLCVProvider) -> None:
+    async def test_http_429_raises_rate_limit(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
         """429 status raises DataSourceUnavailable with rate limit message."""
         mock_response = AsyncMock()
         mock_response.status = 429
@@ -294,7 +294,7 @@ class TestGetOHLCV:
             )
 
     @pytest.mark.asyncio
-    async def test_empty_response_raises(self, provider: GeckoTerminalOHLCVProvider) -> None:
+    async def test_empty_response_raises(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
         """Empty OHLCV list raises DataSourceUnavailable."""
         mock_response = AsyncMock()
         mock_response.status = 200
@@ -318,7 +318,7 @@ class TestGetOHLCV:
     @pytest.mark.asyncio
     async def test_missing_api_key_raises_before_http(self) -> None:
         """CoinGecko Onchain OHLCV requires a gateway-owned CoinGecko key."""
-        provider = GeckoTerminalOHLCVProvider(api_key="", request_timeout=5.0)
+        provider = CoinGeckoOnchainOHLCVProvider(api_key="", request_timeout=5.0)
         mock_session = AsyncMock()
         mock_session.get = MagicMock()
         mock_session.closed = False
@@ -343,7 +343,7 @@ class TestGetOHLCV:
 class TestParseResponse:
     """Test OHLCV response parsing logic."""
 
-    def test_parse_valid_response(self, provider: GeckoTerminalOHLCVProvider) -> None:
+    def test_parse_valid_response(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
         data = _make_ohlcv_response()
         candles = provider._parse_ohlcv_response(data)
         assert len(candles) == 3
@@ -351,7 +351,7 @@ class TestParseResponse:
         assert candles[0].timestamp < candles[1].timestamp
         assert candles[1].timestamp < candles[2].timestamp
 
-    def test_parse_candle_values(self, provider: GeckoTerminalOHLCVProvider) -> None:
+    def test_parse_candle_values(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
         data = _make_ohlcv_response(
             candles=[
                 [1700000000, 1800.5, 1812.0, 1795.3, 1810.7, 45000.0],
@@ -367,11 +367,11 @@ class TestParseResponse:
         assert c.volume == Decimal("45000.0")
         assert c.timestamp == datetime.fromtimestamp(1700000000, tz=UTC)
 
-    def test_parse_empty_response(self, provider: GeckoTerminalOHLCVProvider) -> None:
+    def test_parse_empty_response(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
         candles = provider._parse_ohlcv_response({})
         assert candles == []
 
-    def test_parse_malformed_entries_skipped(self, provider: GeckoTerminalOHLCVProvider) -> None:
+    def test_parse_malformed_entries_skipped(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
         data = _make_ohlcv_response(
             candles=[
                 [1700000000, 1800.0, 1812.0, 1795.0, 1810.0, 45000.0],  # Valid
@@ -382,11 +382,11 @@ class TestParseResponse:
         candles = provider._parse_ohlcv_response(data)
         assert len(candles) == 1
 
-    def test_parse_missing_attributes(self, provider: GeckoTerminalOHLCVProvider) -> None:
+    def test_parse_missing_attributes(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
         candles = provider._parse_ohlcv_response({"data": {}})
         assert candles == []
 
-    def test_parse_none_data(self, provider: GeckoTerminalOHLCVProvider) -> None:
+    def test_parse_none_data(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
         candles = provider._parse_ohlcv_response({"data": None})
         assert candles == []
 
@@ -400,7 +400,7 @@ class TestCaching:
     """Test in-memory cache behavior."""
 
     @pytest.mark.asyncio
-    async def test_cache_hit(self, provider: GeckoTerminalOHLCVProvider) -> None:
+    async def test_cache_hit(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
         """Second call returns cached data without HTTP request."""
         mock_response = AsyncMock()
         mock_response.status = 200
@@ -423,7 +423,7 @@ class TestCaching:
         assert mock_session.get.call_count == 1
         assert provider._metrics.cache_hits == 1
 
-    def test_cache_expiry(self, provider: GeckoTerminalOHLCVProvider) -> None:
+    def test_cache_expiry(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
         """Cache entries expire after TTL."""
         provider._cache_ttl = 1  # 1 second TTL
 
@@ -445,7 +445,7 @@ class TestCaching:
         result = provider._get_cached(key)
         assert result is None
 
-    def test_cache_fresh(self, provider: GeckoTerminalOHLCVProvider) -> None:
+    def test_cache_fresh(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
         """Fresh cache entries are returned."""
         key = "WETH:ethereum:1h:100:auto"
         candles = [
@@ -464,7 +464,7 @@ class TestCaching:
         assert result is not None
         assert len(result) == 1
 
-    def test_clear_cache(self, provider: GeckoTerminalOHLCVProvider) -> None:
+    def test_clear_cache(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
         key = "test:key"
         provider._cache[key] = ([], time.monotonic())
         assert len(provider._cache) == 1
@@ -514,7 +514,7 @@ class TestTokenBucket:
         assert bucket.acquire() is False
 
     @pytest.mark.asyncio
-    async def test_rate_limit_blocks_request(self, provider: GeckoTerminalOHLCVProvider) -> None:
+    async def test_rate_limit_blocks_request(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
         """When rate limiter is exhausted, get_ohlcv raises."""
         # Exhaust the rate limiter
         provider._rate_limiter = _TokenBucket(rate=1, period=60.0)
@@ -583,7 +583,7 @@ class TestPoolSearch:
     """Test pool address resolution via search."""
 
     @pytest.mark.asyncio
-    async def test_search_returns_pool_url(self, provider: GeckoTerminalOHLCVProvider) -> None:
+    async def test_search_returns_pool_url(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
         """Pool search returns correct OHLCV URL."""
         search_resp = AsyncMock()
         search_resp.status = 200
@@ -601,7 +601,7 @@ class TestPoolSearch:
         assert "/ohlcv/hour" in url
 
     @pytest.mark.asyncio
-    async def test_search_no_pools_raises(self, provider: GeckoTerminalOHLCVProvider) -> None:
+    async def test_search_no_pools_raises(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
         """Empty search results raise DataSourceUnavailable."""
         search_resp = AsyncMock()
         search_resp.status = 200
@@ -618,7 +618,7 @@ class TestPoolSearch:
             await provider._resolve_pool_ohlcv_url("UNKNOWNTOKEN", "USDC", "eth", "hour")
 
     @pytest.mark.asyncio
-    async def test_search_http_error_raises(self, provider: GeckoTerminalOHLCVProvider) -> None:
+    async def test_search_http_error_raises(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
         """Search HTTP error raises DataSourceUnavailable."""
         search_resp = AsyncMock()
         search_resp.status = 500
@@ -643,7 +643,7 @@ class TestMetrics:
     """Test health metrics tracking."""
 
     @pytest.mark.asyncio
-    async def test_success_increments_metrics(self, provider: GeckoTerminalOHLCVProvider) -> None:
+    async def test_success_increments_metrics(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
         mock_response = AsyncMock()
         mock_response.status = 200
         mock_response.json = AsyncMock(return_value=_make_ohlcv_response())
@@ -663,7 +663,7 @@ class TestMetrics:
         assert provider._metrics.total_latency_ms > 0
 
     @pytest.mark.asyncio
-    async def test_error_increments_error_count(self, provider: GeckoTerminalOHLCVProvider) -> None:
+    async def test_error_increments_error_count(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
         with pytest.raises(DataSourceUnavailable):
             await provider.get_ohlcv("WETH", timeframe="1h", chain="fantom")
 
@@ -679,12 +679,12 @@ class TestMetrics:
 class TestCoinGeckoAuth:
     """Test CoinGecko Onchain host/header selection."""
 
-    def test_api_key_selects_pro_host_and_header(self, provider: GeckoTerminalOHLCVProvider) -> None:
+    def test_api_key_selects_pro_host_and_header(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
         assert "pro-api.coingecko.com" in provider._api_base
         assert provider._headers["x-cg-pro-api-key"] == "test-key"
 
     def test_missing_api_key_uses_no_auth_header(self) -> None:
-        provider = GeckoTerminalOHLCVProvider(api_key="")
+        provider = CoinGeckoOnchainOHLCVProvider(api_key="")
         assert "x-cg-pro-api-key" not in provider._headers
 
 
@@ -696,7 +696,7 @@ class TestCoinGeckoAuth:
 class TestFetchWrapper:
     """Test the synchronous fetch() DataProvider method."""
 
-    def test_fetch_returns_data_envelope(self, provider: GeckoTerminalOHLCVProvider) -> None:
+    def test_fetch_returns_data_envelope(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
         """fetch() returns a DataEnvelope wrapping candle list."""
         mock_response = AsyncMock()
         mock_response.status = 200
@@ -720,7 +720,7 @@ class TestFetchWrapper:
         assert isinstance(envelope, DataEnvelope)
         assert isinstance(envelope.value, list)
         assert len(envelope.value) == 3
-        assert envelope.meta.source == "geckoterminal"
+        assert envelope.meta.source == "coingecko_onchain"
         assert envelope.meta.finality == "off_chain"
         assert envelope.meta.confidence == 0.9
 
@@ -734,7 +734,7 @@ class TestLimitCapping:
     """Test that limit is capped at 1000."""
 
     @pytest.mark.asyncio
-    async def test_limit_capped_at_1000(self, provider: GeckoTerminalOHLCVProvider) -> None:
+    async def test_limit_capped_at_1000(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
         mock_response = AsyncMock()
         mock_response.status = 200
         mock_response.json = AsyncMock(return_value=_make_ohlcv_response())
@@ -770,7 +770,7 @@ class TestContextManager:
 
     @pytest.mark.asyncio
     async def test_async_context_manager(self) -> None:
-        async with GeckoTerminalOHLCVProvider() as provider:
-            assert isinstance(provider, GeckoTerminalOHLCVProvider)
+        async with CoinGeckoOnchainOHLCVProvider() as provider:
+            assert isinstance(provider, CoinGeckoOnchainOHLCVProvider)
         # Session should be closed after exit
         assert provider._session is None or provider._session.closed

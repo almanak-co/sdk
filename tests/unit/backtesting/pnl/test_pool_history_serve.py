@@ -39,7 +39,7 @@ class _FakeProvider:
         return self.rows.get(day)
 
 
-def _row(tvl: str | None, volume: str | None, tvl_src: str = "defillama", vol_src: str = "geckoterminal"):
+def _row(tvl: str | None, volume: str | None, tvl_src: str = "defillama", vol_src: str = "coingecko_onchain"):
     return DailyPoolHistory(
         tvl=Decimal(tvl) if tvl is not None else None,
         tvl_source=tvl_src if tvl is not None else "",
@@ -125,7 +125,7 @@ class TestServeContract:
 
         assert envelope.meta.observed_at == TICK  # the bound tick, not wall clock
         assert envelope.meta.source.startswith("backtest_pool_history:")
-        assert "defillama" in envelope.meta.source and "geckoterminal" in envelope.meta.source
+        assert "defillama" in envelope.meta.source and "coingecko_onchain" in envelope.meta.source
 
 
 class TestSnapshotWiring:

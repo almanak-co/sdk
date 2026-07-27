@@ -63,14 +63,14 @@ def test_factory_registers_three_providers(fake_gateway_client: MagicMock) -> No
     """VIB-4847: CoinGecko is now wired as the second CEX provider, so the
     factory registers three providers (gecko, binance, coingecko)."""
     stack = create_ohlcv_stack(gateway_client=fake_gateway_client, chain="arbitrum")
-    assert set(stack.router._providers.keys()) == {"geckoterminal", "binance", "coingecko"}
+    assert set(stack.router._providers.keys()) == {"coingecko_onchain", "binance", "coingecko"}
 
 
-def test_provider_chain_geckoterminal_first(fake_gateway_client: MagicMock) -> None:
-    """Order matters: ``_PROVIDER_CHAINS['defi_primary']`` expects gecko before binance."""
+def test_provider_chain_coingecko_onchain_first(fake_gateway_client: MagicMock) -> None:
+    """Order matters: ``_PROVIDER_CHAINS['defi_primary']`` expects CoinGecko Onchain before Binance."""
     stack = create_ohlcv_stack(gateway_client=fake_gateway_client, chain="arbitrum")
     keys = list(stack.router._providers.keys())
-    assert keys.index("geckoterminal") < keys.index("binance")
+    assert keys.index("coingecko_onchain") < keys.index("binance")
 
 
 # =============================================================================

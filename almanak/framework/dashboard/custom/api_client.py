@@ -499,8 +499,8 @@ class DashboardAPIClient:
 
         Routes through ``framework.data.ohlcv.create_ohlcv_stack`` — the same
         factory that wires the live runner's ``MarketSnapshot.ohlcv()`` and the
-        indicator path's ``RoutingOHLCVProvider``. **Never** calls
-        ``gateway_pb2.GeckoTerminalGetOHLCV`` directly: doing so would bypass
+        indicator path's ``RoutingOHLCVProvider``. **Never** calls the gateway's
+        ``CoinGeckoOnchainGetOHLCV`` RPC directly: doing so would bypass
         the provider routing, CEX/DEX classification, disk cache, retry / typed
         errors, and provenance metadata that the router applies. See
         ``docs/internal/OHLCV-Data.md`` §2 for the full rationale.

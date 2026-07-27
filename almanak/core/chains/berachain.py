@@ -34,7 +34,7 @@ DESCRIPTOR = register_chain(
         ),
         simulation=SimulationProfile(tenderly_supported=True),
         # VIB-4851 (B1): per-vendor external ids, transposed from the legacy
-        # standalone vendor maps (CoinGecko / DexScreener / GeckoTerminal /
+        # standalone vendor maps (CoinGecko / DexScreener / CoinGecko Onchain /
         # DeFiLlama / Zerion / Moralis / OKX). Values verbatim incl. case.
         external_ids={
             "coingecko": "berachain",

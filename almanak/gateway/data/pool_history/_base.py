@@ -29,7 +29,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Protocol, runtime_checkable
 
 from almanak.gateway.data._history_common import (
-    _CHAIN_TO_GT_NETWORK,
+    _CHAIN_TO_CG_ONCHAIN_NETWORK,
     _CHAIN_TO_LLAMA_DISPLAY,
     is_solana_family,
 )
@@ -304,7 +304,7 @@ class PoolHistoryProvider(Protocol):
 
     #: Stable provider id used for ``source`` + raw-cache partition +
     #: per-provider health counters. One of: ``the_graph`` / ``defillama`` /
-    #: ``geckoterminal``.
+    #: ``coingecko_onchain``.
     name: str
 
     async def fetch(
@@ -345,7 +345,7 @@ def build_unmeasured_fields(
 
 
 __all__ = [
-    "_CHAIN_TO_GT_NETWORK",
+    "_CHAIN_TO_CG_ONCHAIN_NETWORK",
     "_CHAIN_TO_LLAMA_DISPLAY",
     "is_solana_family",
     "_MonthlyBudgetTracker",

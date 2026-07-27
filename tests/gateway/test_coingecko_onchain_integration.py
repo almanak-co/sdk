@@ -1,4 +1,4 @@
-"""Tests for the GeckoTerminalGetOHLCV gRPC handler in IntegrationServiceServicer."""
+"""Tests for the CoinGeckoOnchainGetOHLCV gRPC handler in IntegrationServiceServicer."""
 
 import asyncio
 from datetime import UTC, datetime
@@ -31,8 +31,8 @@ def _make_ohlcv_candle(ts_offset: int = 0) -> OHLCVCandle:
     )
 
 
-class TestGeckoTerminalGetOHLCV:
-    """Tests for IntegrationServiceServicer.GeckoTerminalGetOHLCV."""
+class TestCoinGeckoOnchainGetOHLCV:
+    """Tests for IntegrationServiceServicer.CoinGeckoOnchainGetOHLCV."""
 
     @pytest.fixture
     def service(self):
@@ -52,9 +52,9 @@ class TestGeckoTerminalGetOHLCV:
     async def test_empty_token_returns_invalid_argument(self, service):
         """Empty token triggers INVALID_ARGUMENT."""
         ctx = _make_context()
-        request = gateway_pb2.GeckoTerminalOHLCVRequest(token="", chain="base")
+        request = gateway_pb2.CoinGeckoOnchainOHLCVRequest(token="", chain="base")
 
-        await service.GeckoTerminalGetOHLCV(request, ctx)
+        await service.CoinGeckoOnchainGetOHLCV(request, ctx)
 
         ctx.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
         ctx.set_details.assert_called_with("token is required and cannot be empty")
@@ -63,9 +63,9 @@ class TestGeckoTerminalGetOHLCV:
     async def test_empty_chain_returns_invalid_argument(self, service):
         """Empty chain triggers INVALID_ARGUMENT."""
         ctx = _make_context()
-        request = gateway_pb2.GeckoTerminalOHLCVRequest(token="ALMANAK", chain="")
+        request = gateway_pb2.CoinGeckoOnchainOHLCVRequest(token="ALMANAK", chain="")
 
-        await service.GeckoTerminalGetOHLCV(request, ctx)
+        await service.CoinGeckoOnchainGetOHLCV(request, ctx)
 
         ctx.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
         ctx.set_details.assert_called_with("chain is required and cannot be empty")
@@ -74,11 +74,11 @@ class TestGeckoTerminalGetOHLCV:
     async def test_invalid_timeframe_returns_invalid_argument(self, service):
         """Unsupported timeframe triggers INVALID_ARGUMENT."""
         ctx = _make_context()
-        request = gateway_pb2.GeckoTerminalOHLCVRequest(
+        request = gateway_pb2.CoinGeckoOnchainOHLCVRequest(
             token="ALMANAK", chain="base", timeframe="2h",
         )
 
-        await service.GeckoTerminalGetOHLCV(request, ctx)
+        await service.CoinGeckoOnchainGetOHLCV(request, ctx)
 
         ctx.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
         assert "Invalid timeframe" in ctx.set_details.call_args[0][0]
@@ -87,11 +87,11 @@ class TestGeckoTerminalGetOHLCV:
     async def test_limit_out_of_range_returns_invalid_argument(self, service):
         """Limit outside 1-1000 triggers INVALID_ARGUMENT."""
         ctx = _make_context()
-        request = gateway_pb2.GeckoTerminalOHLCVRequest(
+        request = gateway_pb2.CoinGeckoOnchainOHLCVRequest(
             token="ALMANAK", chain="base", timeframe="1h", limit=1001,
         )
 
-        await service.GeckoTerminalGetOHLCV(request, ctx)
+        await service.CoinGeckoOnchainGetOHLCV(request, ctx)
 
         ctx.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
         assert "limit must be between" in ctx.set_details.call_args[0][0]
@@ -100,7 +100,7 @@ class TestGeckoTerminalGetOHLCV:
     async def test_success_returns_candles(self, service):
         """Happy path: candles from provider are mapped to response proto."""
         ctx = _make_context()
-        request = gateway_pb2.GeckoTerminalOHLCVRequest(
+        request = gateway_pb2.CoinGeckoOnchainOHLCVRequest(
             token="ALMANAK", chain="base", timeframe="1h", limit=2,
         )
 
@@ -112,10 +112,10 @@ class TestGeckoTerminalGetOHLCV:
         mock_provider.__aexit__ = AsyncMock(return_value=False)
 
         with patch(
-            "almanak.gateway.data.ohlcv.geckoterminal_provider.GeckoTerminalOHLCVProvider",
+            "almanak.gateway.data.ohlcv.coingecko_onchain_provider.CoinGeckoOnchainOHLCVProvider",
             return_value=mock_provider,
         ):
-            response = await service.GeckoTerminalGetOHLCV(request, ctx)
+            response = await service.CoinGeckoOnchainGetOHLCV(request, ctx)
 
         assert len(response.candles) == 2
         assert response.candles[0].close == "1810.0"
@@ -127,7 +127,7 @@ class TestGeckoTerminalGetOHLCV:
     async def test_include_empty_intervals_forwarded_to_provider(self, service):
         """VIB-4875: the proto flag is threaded through to the provider call."""
         ctx = _make_context()
-        request = gateway_pb2.GeckoTerminalOHLCVRequest(
+        request = gateway_pb2.CoinGeckoOnchainOHLCVRequest(
             token="NVDAON", chain="ethereum", timeframe="1h", limit=2,
             include_empty_intervals=True,
         )
@@ -138,10 +138,10 @@ class TestGeckoTerminalGetOHLCV:
         mock_provider.__aexit__ = AsyncMock(return_value=False)
 
         with patch(
-            "almanak.gateway.data.ohlcv.geckoterminal_provider.GeckoTerminalOHLCVProvider",
+            "almanak.gateway.data.ohlcv.coingecko_onchain_provider.CoinGeckoOnchainOHLCVProvider",
             return_value=mock_provider,
         ):
-            await service.GeckoTerminalGetOHLCV(request, ctx)
+            await service.CoinGeckoOnchainGetOHLCV(request, ctx)
 
         assert mock_provider.get_ohlcv.call_args.kwargs["include_empty_intervals"] is True
         ctx.set_code.assert_not_called()
@@ -150,7 +150,7 @@ class TestGeckoTerminalGetOHLCV:
     async def test_provider_error_returns_sanitized_internal(self, service):
         """Provider exceptions yield INTERNAL with sanitized message."""
         ctx = _make_context()
-        request = gateway_pb2.GeckoTerminalOHLCVRequest(
+        request = gateway_pb2.CoinGeckoOnchainOHLCVRequest(
             token="ALMANAK", chain="base", timeframe="1h", limit=10,
         )
 
@@ -160,10 +160,10 @@ class TestGeckoTerminalGetOHLCV:
         mock_provider.__aexit__ = AsyncMock(return_value=False)
 
         with patch(
-            "almanak.gateway.data.ohlcv.geckoterminal_provider.GeckoTerminalOHLCVProvider",
+            "almanak.gateway.data.ohlcv.coingecko_onchain_provider.CoinGeckoOnchainOHLCVProvider",
             return_value=mock_provider,
         ):
-            await service.GeckoTerminalGetOHLCV(request, ctx)
+            await service.CoinGeckoOnchainGetOHLCV(request, ctx)
 
         ctx.set_code.assert_called_with(grpc.StatusCode.INTERNAL)
         # Must NOT leak raw error text — VIB-3800 sanitization replaces the
@@ -176,7 +176,7 @@ class TestGeckoTerminalGetOHLCV:
     async def test_value_error_returns_invalid_argument(self, service):
         """ValueError from provider yields INVALID_ARGUMENT."""
         ctx = _make_context()
-        request = gateway_pb2.GeckoTerminalOHLCVRequest(
+        request = gateway_pb2.CoinGeckoOnchainOHLCVRequest(
             token="ALMANAK", chain="base", timeframe="1h", limit=10,
         )
 
@@ -186,9 +186,9 @@ class TestGeckoTerminalGetOHLCV:
         mock_provider.__aexit__ = AsyncMock(return_value=False)
 
         with patch(
-            "almanak.gateway.data.ohlcv.geckoterminal_provider.GeckoTerminalOHLCVProvider",
+            "almanak.gateway.data.ohlcv.coingecko_onchain_provider.CoinGeckoOnchainOHLCVProvider",
             return_value=mock_provider,
         ):
-            await service.GeckoTerminalGetOHLCV(request, ctx)
+            await service.CoinGeckoOnchainGetOHLCV(request, ctx)
 
         ctx.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)

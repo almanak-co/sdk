@@ -1,6 +1,6 @@
 """Tests for GatewayOHLCVProvider.get_ohlcv (Binance klines via gateway).
 
-Mirrors the mock pattern of test_gateway_geckoterminal_provider.py: a mock
+Mirrors the mock pattern of test_gateway_coingecko_onchain_provider.py: a mock
 GatewayClient with an ``integration`` stub, real gateway_pb2 messages.
 """
 

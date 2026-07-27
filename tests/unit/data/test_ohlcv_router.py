@@ -65,7 +65,7 @@ def _make_candles(count: int = 5, start_hours_ago: int = 48) -> list[OHLCVCandle
 
 def _make_envelope(
     candles: list[OHLCVCandle],
-    source: str = "geckoterminal",
+    source: str = "coingecko_onchain",
     confidence: float = 0.9,
 ) -> DataEnvelope[list[OHLCVCandle]]:
     """Wrap candles in a DataEnvelope."""
@@ -148,11 +148,11 @@ class TestClassifyInstrument:
         inst = Instrument(base="CBBTC", quote="USDT", chain="base")
         assert classify_instrument(inst) == "cex_primary"
 
-    def test_cbbtc_routes_to_binance_before_geckoterminal(self):
-        """CBBTC/USDC on base should try Binance first, not GeckoTerminal."""
+    def test_cbbtc_routes_to_binance_before_coingecko_onchain(self):
+        """CBBTC/USDC on base should try Binance first, not CoinGecko Onchain."""
         router = OHLCVRouter()
         binance = _mock_provider("binance")
-        gecko = _mock_provider("geckoterminal")
+        gecko = _mock_provider("coingecko_onchain")
         router.register_provider(binance)
         router.register_provider(gecko)
 
@@ -172,7 +172,7 @@ class TestProviderChains:
 
     def test_defi_primary_chain(self):
         # VIB-4847: defillama removed from the middle tier (no provider wired).
-        assert _PROVIDER_CHAINS["defi_primary"] == ["geckoterminal", "binance"]
+        assert _PROVIDER_CHAINS["defi_primary"] == ["coingecko_onchain", "binance"]
 
 
 # ---------------------------------------------------------------------------
@@ -316,15 +316,15 @@ class TestOHLCVRouter:
 
     def test_register_provider(self):
         router = OHLCVRouter()
-        provider = _mock_provider("geckoterminal")
+        provider = _mock_provider("coingecko_onchain")
         router.register_provider(provider)
-        assert "geckoterminal" in router._providers
+        assert "coingecko_onchain" in router._providers
 
     def test_routes_cex_primary_to_binance_first(self):
         """CEX-primary tokens should try Binance first."""
         router = OHLCVRouter()
         binance = _mock_provider("binance")
-        gecko = _mock_provider("geckoterminal")
+        gecko = _mock_provider("coingecko_onchain")
         router.register_provider(binance)
         router.register_provider(gecko)
 
@@ -334,22 +334,22 @@ class TestOHLCVRouter:
         gecko.fetch.assert_not_called()
 
     def test_routes_defi_primary_to_gecko_first(self):
-        """DeFi-primary tokens should try GeckoTerminal first."""
+        """DeFi-primary tokens should try CoinGecko Onchain first."""
         router = OHLCVRouter()
         binance = _mock_provider("binance")
-        gecko = _mock_provider("geckoterminal")
+        gecko = _mock_provider("coingecko_onchain")
         router.register_provider(binance)
         router.register_provider(gecko)
 
         envelope = router.get_ohlcv("OBSCUREDEFI/USDC", chain="base")
-        assert envelope.meta.source == "geckoterminal"
+        assert envelope.meta.source == "coingecko_onchain"
         gecko.fetch.assert_called_once()
         binance.fetch.assert_not_called()
 
     def test_fallback_on_primary_failure(self):
         """When primary provider fails, falls back to next in chain."""
         router = OHLCVRouter()
-        gecko = _mock_provider("geckoterminal", fail=True)
+        gecko = _mock_provider("coingecko_onchain", fail=True)
         binance = _mock_provider("binance")
         router.register_provider(gecko)
         router.register_provider(binance)
@@ -361,7 +361,7 @@ class TestOHLCVRouter:
     def test_all_providers_fail_raises(self):
         """When all providers fail, raises DataSourceUnavailable."""
         router = OHLCVRouter()
-        gecko = _mock_provider("geckoterminal", fail=True)
+        gecko = _mock_provider("coingecko_onchain", fail=True)
         defillama = _mock_provider("defillama", fail=True)
         binance = _mock_provider("binance", fail=True)
         router.register_provider(gecko)
@@ -374,14 +374,14 @@ class TestOHLCVRouter:
     def test_force_provider_bypasses_classification(self):
         """force_provider should use the specified provider directly."""
         router = OHLCVRouter()
-        gecko = _mock_provider("geckoterminal")
+        gecko = _mock_provider("coingecko_onchain")
         binance = _mock_provider("binance")
         router.register_provider(gecko)
         router.register_provider(binance)
 
-        # WETH would normally route to Binance, but force GeckoTerminal
-        envelope = router.get_ohlcv("WETH/USDC", chain="arbitrum", force_provider="geckoterminal")
-        assert envelope.meta.source == "geckoterminal"
+        # WETH would normally route to Binance, but force CoinGecko Onchain
+        envelope = router.get_ohlcv("WETH/USDC", chain="arbitrum", force_provider="coingecko_onchain")
+        assert envelope.meta.source == "coingecko_onchain"
 
     def test_cex_dex_basis_warning(self, caplog):
         """CEX source for DeFi-native pair reduces confidence to 0.7."""
@@ -411,7 +411,7 @@ class TestOHLCVRouter:
     def test_empty_result_skips_provider(self):
         """Provider returning empty candles is skipped."""
         router = OHLCVRouter()
-        gecko = _mock_provider("geckoterminal", candles=[])
+        gecko = _mock_provider("coingecko_onchain", candles=[])
         binance = _mock_provider("binance")
         router.register_provider(gecko)
         router.register_provider(binance)
@@ -423,12 +423,12 @@ class TestOHLCVRouter:
     def test_accepts_instrument_object(self):
         """OHLCVRouter accepts an Instrument directly."""
         router = OHLCVRouter()
-        gecko = _mock_provider("geckoterminal")
+        gecko = _mock_provider("coingecko_onchain")
         router.register_provider(gecko)
 
         inst = Instrument(base="MYTOKEN", quote="USDC", chain="base")
         envelope = router.get_ohlcv(inst)
-        assert envelope.meta.source == "geckoterminal"
+        assert envelope.meta.source == "coingecko_onchain"
 
     def test_accepts_plain_string(self):
         """OHLCVRouter accepts a plain token string."""
@@ -442,7 +442,7 @@ class TestOHLCVRouter:
     def test_default_chain_used(self):
         """When chain is not specified, default_chain is used."""
         router = OHLCVRouter(default_chain="base")
-        gecko = _mock_provider("geckoterminal")
+        gecko = _mock_provider("coingecko_onchain")
         router.register_provider(gecko)
 
         router.get_ohlcv("MYTOKEN/USDC")
@@ -481,18 +481,18 @@ class TestOHLCVRouter:
             _make_candle(now - timedelta(hours=25), close=1820.0),
             _make_candle(now - timedelta(minutes=5), close=1830.0),
         ]
-        gecko = _mock_provider("geckoterminal", candles=candles_fresh)
+        gecko = _mock_provider("coingecko_onchain", candles=candles_fresh)
         router.register_provider(gecko)
 
         # First call writes finalized rows to the cache.
         envelope1 = router.get_ohlcv("MYTOKEN/USDC", chain="base", limit=3)
-        assert envelope1.meta.source == "geckoterminal"
+        assert envelope1.meta.source == "coingecko_onchain"
         assert gecko.fetch.call_count == 1
 
         # Second call: cache contains only >24h-old rows, which fail the
         # staleness gate for the default 1h timeframe — evict and refetch.
         envelope2 = router.get_ohlcv("MYTOKEN/USDC", chain="base", limit=3)
-        assert envelope2.meta.source == "geckoterminal"
+        assert envelope2.meta.source == "coingecko_onchain"
         assert envelope2.meta.cache_hit is False
         assert gecko.fetch.call_count == 2
 
@@ -508,7 +508,7 @@ class TestOHLCVRouterCacheBehavior:
             _make_candle(now - timedelta(hours=48)),  # finalized
             _make_candle(now - timedelta(hours=1)),  # provisional
         ]
-        gecko = _mock_provider("geckoterminal", candles=candles)
+        gecko = _mock_provider("coingecko_onchain", candles=candles)
         router.register_provider(gecko)
 
         router.get_ohlcv("MYTOKEN/USDC", chain="base")
@@ -526,7 +526,7 @@ class TestOHLCVRouterCacheBehavior:
             _make_candle(now - timedelta(hours=1)),
             _make_candle(now - timedelta(minutes=30)),
         ]
-        gecko = _mock_provider("geckoterminal", candles=candles)
+        gecko = _mock_provider("coingecko_onchain", candles=candles)
         router.register_provider(gecko)
 
         router.get_ohlcv("MYTOKEN/USDC", chain="base")
@@ -547,7 +547,7 @@ class TestMarketSnapshotOHLCVRouter:
         """ohlcv() uses OHLCVRouter when configured."""
         from almanak.framework.market import MarketSnapshot
         candles = _make_candles(count=3, start_hours_ago=2)
-        gecko = _mock_provider("geckoterminal", candles=candles)
+        gecko = _mock_provider("coingecko_onchain", candles=candles)
 
         router = OHLCVRouter(default_chain="arbitrum")
         router.register_provider(gecko)
@@ -562,14 +562,14 @@ class TestMarketSnapshotOHLCVRouter:
         assert isinstance(df, pd.DataFrame)
         assert len(df) == 3
         assert list(df.columns) == ["timestamp", "open", "high", "low", "close", "volume"]
-        assert df.attrs["source"] == "geckoterminal"
+        assert df.attrs["source"] == "coingecko_onchain"
         assert "confidence" in df.attrs
 
     def test_ohlcv_accepts_instrument(self):
         """ohlcv() accepts an Instrument object."""
         from almanak.framework.market import MarketSnapshot
         candles = _make_candles(count=2)
-        gecko = _mock_provider("geckoterminal", candles=candles)
+        gecko = _mock_provider("coingecko_onchain", candles=candles)
 
         router = OHLCVRouter()
         router.register_provider(gecko)
@@ -619,7 +619,7 @@ class TestMarketSnapshotOHLCVRouter:
 
         router = OHLCVRouter()
         # No providers registered -> all will fail
-        gecko = _mock_provider("geckoterminal", fail=True)
+        gecko = _mock_provider("coingecko_onchain", fail=True)
         defillama = _mock_provider("defillama", fail=True)
         binance = _mock_provider("binance", fail=True)
         router.register_provider(gecko)
@@ -639,7 +639,7 @@ class TestMarketSnapshotOHLCVRouter:
         """All providers returning empty candles raises OHLCVUnavailableError."""
         from almanak.framework.market import MarketSnapshot, OHLCVUnavailableError
 
-        gecko = _mock_provider("geckoterminal", candles=[])
+        gecko = _mock_provider("coingecko_onchain", candles=[])
         defillama = _mock_provider("defillama", candles=[])
         binance = _mock_provider("binance", candles=[])
         router = OHLCVRouter()
@@ -679,7 +679,7 @@ class TestMarketSnapshotOHLCVRouter:
                 volume=None,  # NaN volume
             ),
         ]
-        gecko = _mock_provider("geckoterminal", candles=candles)
+        gecko = _mock_provider("coingecko_onchain", candles=candles)
         router = OHLCVRouter()
         router.register_provider(gecko)
 
@@ -731,9 +731,9 @@ class TestOHLCVRouterEdgeCases:
         """Provider returning envelope with None value is treated as empty."""
         router = OHLCVRouter()
         provider = MagicMock()
-        provider.name = "geckoterminal"
+        provider.name = "coingecko_onchain"
         provider.data_class = DataClassification.INFORMATIONAL
-        provider.fetch.return_value = _make_envelope([], source="geckoterminal")
+        provider.fetch.return_value = _make_envelope([], source="coingecko_onchain")
         router.register_provider(provider)
 
         binance = _mock_provider("binance")
@@ -757,7 +757,7 @@ class TestOHLCVRouterEdgeCases:
     def test_pool_address_passed_through(self):
         """pool_address kwarg is passed to provider.fetch()."""
         router = OHLCVRouter()
-        gecko = _mock_provider("geckoterminal")
+        gecko = _mock_provider("coingecko_onchain")
         router.register_provider(gecko)
 
         router.get_ohlcv("MYTOKEN/USDC", chain="base", pool_address="0xpool123")

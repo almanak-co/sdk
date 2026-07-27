@@ -355,14 +355,14 @@ class GatewayOHLCVProvider:
         logger.debug("OHLCV cache cleared")
 
 
-class GatewayGeckoTerminalOHLCVProvider:
-    """Gateway-backed GeckoTerminal OHLCV provider.
+class GatewayCoinGeckoOnchainOHLCVProvider:
+    """Gateway-backed CoinGecko Onchain OHLCV provider.
 
-    Proxies GeckoTerminal OHLCV requests through the gateway's
-    GeckoTerminalGetOHLCV gRPC endpoint. This allows deployed strategy
+    Proxies CoinGecko Onchain OHLCV requests through the gateway's
+    CoinGeckoOnchainGetOHLCV gRPC endpoint. This allows deployed strategy
     containers (which have no internet) to access DEX OHLCV data.
 
-    Mirrors the GatewayOHLCVProvider pattern but targets GeckoTerminal
+    Mirrors the GatewayOHLCVProvider pattern but targets CoinGecko Onchain
     instead of Binance.
     """
 
@@ -393,7 +393,7 @@ class GatewayGeckoTerminalOHLCVProvider:
         pool_address: str | None = None,
         chain: str | None = None,
     ) -> list[OHLCVCandle]:
-        """Get DEX OHLCV data through the gateway's GeckoTerminal proxy.
+        """Get DEX OHLCV data through the gateway's CoinGecko Onchain proxy.
 
         Args:
             token: Token symbol (e.g., "ALMANAK", "WETH")
@@ -421,21 +421,21 @@ class GatewayGeckoTerminalOHLCVProvider:
         try:
             from almanak.gateway.proto import gateway_pb2
 
-            request = gateway_pb2.GeckoTerminalOHLCVRequest(
+            request = gateway_pb2.CoinGeckoOnchainOHLCVRequest(
                 token=token,
                 chain=target_chain,
                 timeframe=timeframe,
                 limit=min(limit, 1000),
                 pool_address=pool_address or "",
                 quote=quote,
-                # GeckoTerminal is DEX-native: request continuous buckets so
+                # CoinGecko Onchain is DEX-native: request continuous buckets so
                 # interior no-trade intervals don't fragment indicator windows.
                 # The trailing-edge (last-trade -> now) gap is closed by the
                 # OHLCV router's DEX forward-fill, not by this flag.
                 include_empty_intervals=True,
             )
             response = await asyncio.to_thread(
-                self._gateway_client.integration.GeckoTerminalGetOHLCV,
+                self._gateway_client.integration.CoinGeckoOnchainGetOHLCV,
                 request,
                 self._gateway_client.config.timeout,
             )
@@ -443,7 +443,7 @@ class GatewayGeckoTerminalOHLCVProvider:
             if not response.candles:
                 self._metrics.errors += 1
                 raise DataSourceUnavailable(
-                    source="gateway_geckoterminal",
+                    source="gateway_coingecko_onchain",
                     reason=f"No OHLCV data for {token} on {target_chain}",
                 )
 
@@ -472,11 +472,11 @@ class GatewayGeckoTerminalOHLCVProvider:
             from almanak.framework.data.interfaces import data_source_error_from_grpc
 
             self._metrics.errors += 1
-            typed = data_source_error_from_grpc(e, default_source="gateway_geckoterminal")
+            typed = data_source_error_from_grpc(e, default_source="gateway_coingecko_onchain")
             if typed is not None:
                 raise typed from e
             raise DataSourceUnavailable(
-                source="gateway_geckoterminal",
+                source="gateway_coingecko_onchain",
                 reason=str(e),
             ) from e
 
@@ -491,9 +491,9 @@ class GatewayGeckoTerminalOHLCVProvider:
         }
 
     def clear_cache(self) -> None:
-        """Clear the GeckoTerminal OHLCV cache."""
+        """Clear the CoinGecko Onchain OHLCV cache."""
         self._cache.clear()
-        logger.debug("GeckoTerminal OHLCV cache cleared")
+        logger.debug("CoinGecko Onchain OHLCV cache cleared")
 
 
 class GatewayCoinGeckoOHLCVProvider:
@@ -504,7 +504,7 @@ class GatewayCoinGeckoOHLCVProvider:
     when the ALM-2697 staleness guard rejects stale Binance klines, the router
     falls through here instead of returning a permanent ``DATA_ERROR``.
 
-    Mirrors the :class:`GatewayOHLCVProvider` / :class:`GatewayGeckoTerminalOHLCVProvider`
+    Mirrors the :class:`GatewayOHLCVProvider` / :class:`GatewayCoinGeckoOnchainOHLCVProvider`
     pattern. Candles are price-only (``volume=None``) because CoinGecko's OHLC
     endpoint carries no volume.
     """
@@ -634,7 +634,7 @@ class GatewayCoinGeckoOHLCVProvider:
 
 __all__ = [
     "GatewayCoinGeckoOHLCVProvider",
-    "GatewayGeckoTerminalOHLCVProvider",
+    "GatewayCoinGeckoOnchainOHLCVProvider",
     "GatewayOHLCVProvider",
     "OHLCVHealthMetrics",
     "TOKEN_TO_BINANCE_SYMBOL",

@@ -67,13 +67,13 @@ DESCRIPTOR = register_chain(
         },
         simulation=SimulationProfile(tenderly_supported=True, alchemy_network="opt-mainnet"),
         # VIB-4851 (B1): per-vendor external ids, transposed from the legacy
-        # standalone vendor maps (CoinGecko / DexScreener / GeckoTerminal /
+        # standalone vendor maps (CoinGecko / DexScreener / CoinGecko Onchain /
         # DeFiLlama / Zerion / Moralis / OKX). Values verbatim incl. case.
         external_ids={
             "tenderly": "optimism",
             "coingecko": "optimistic-ethereum",
             "dexscreener": "optimism",
-            "geckoterminal": "optimism",
+            "coingecko_onchain": "optimism",
             "defillama": "optimism",
             "defillama_display": "Optimism",
             "zerion": "optimism",

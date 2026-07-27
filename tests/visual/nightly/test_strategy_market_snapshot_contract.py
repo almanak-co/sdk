@@ -51,7 +51,7 @@ from almanak.framework.data.ohlcv.gateway_data_adapter import GatewayOHLCVDataPr
 from almanak.framework.data.ohlcv.gateway_provider import GatewayOHLCVProvider
 from almanak.framework.data.ohlcv.ohlcv_router import OHLCVRouter
 from almanak.framework.data.ohlcv.routing_provider import RoutingOHLCVProvider
-from almanak.gateway.data.ohlcv.geckoterminal_provider import GeckoTerminalOHLCVProvider
+from almanak.gateway.data.ohlcv.coingecko_onchain_provider import CoinGeckoOnchainOHLCVProvider
 from almanak.framework.data.price.gateway_oracle import GatewayPriceOracle
 from almanak.framework.gateway_client import GatewayClient, GatewayClientConfig
 from almanak.framework.market import IndicatorProvider, MarketSnapshot
@@ -193,17 +193,17 @@ def test_strategy_market_snapshot_contract() -> None:
 
         gateway_ohlcv = GatewayOHLCVProvider(gateway_client=client)
         gateway_adapter = GatewayOHLCVDataProvider(gateway_ohlcv)
-        gecko_provider = GeckoTerminalOHLCVProvider()
+        cg_onchain_provider = CoinGeckoOnchainOHLCVProvider()
 
         router = OHLCVRouter(default_chain=chain)
         router.register_provider(gateway_adapter)
-        router.register_provider(gecko_provider)
+        router.register_provider(cg_onchain_provider)
 
         ohlcv_provider = RoutingOHLCVProvider(
             router=router,
             chain=chain,
             pool_address=None,
-            closeable_providers=[gecko_provider],
+            closeable_providers=[cg_onchain_provider],
         )
 
         rsi_calculator = RSICalculator(ohlcv_provider=ohlcv_provider)

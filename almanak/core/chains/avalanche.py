@@ -102,13 +102,13 @@ DESCRIPTOR = register_chain(
         },
         simulation=SimulationProfile(tenderly_supported=True),
         # VIB-4851 (B1): per-vendor external ids, transposed from the legacy
-        # standalone vendor maps (CoinGecko / DexScreener / GeckoTerminal /
+        # standalone vendor maps (CoinGecko / DexScreener / CoinGecko Onchain /
         # DeFiLlama / Zerion / Moralis / OKX). Values verbatim incl. case.
         external_ids={
             "tenderly": "avalanche",
             "coingecko": "avalanche",
             "dexscreener": "avalanche",
-            "geckoterminal": "avax",
+            "coingecko_onchain": "avax",
             "defillama": "avax",
             "defillama_display": "Avalanche",
             "zerion": "avalanche",

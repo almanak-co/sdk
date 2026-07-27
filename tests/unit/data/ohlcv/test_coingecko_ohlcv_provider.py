@@ -318,7 +318,7 @@ class TestProviderChainInvariant:
         """Real factory build: every advertised provider name is registered.
 
         This is the durable guard. Before VIB-4847 the factory registered only
-        ``geckoterminal`` + ``binance`` while the chains named ``coingecko`` and
+        ``coingecko_onchain`` + ``binance`` while the chains named ``coingecko`` and
         ``defillama`` — this assertion would have FAILED then.
         """
         stack = create_ohlcv_stack(gateway_client=MagicMock(), chain="arbitrum")
@@ -339,7 +339,7 @@ class TestProviderChainInvariant:
             assert_provider_chains_registered(router)
         assert "invariant violated" in str(exc.value).lower()
         # The missing names are named so the fix is obvious.
-        assert "coingecko" in str(exc.value) or "geckoterminal" in str(exc.value)
+        assert "coingecko" in str(exc.value) or "coingecko_onchain" in str(exc.value)
 
     def test_defillama_removed_from_chains(self):
         """VIB-4847 decision: DeFi Llama OHLCV is not implemented, so its name
@@ -347,7 +347,7 @@ class TestProviderChainInvariant:
         with a registered provider when VIB-3448 ships."""
         assert "defillama" not in provider_names_in_chains()
         assert _PROVIDER_CHAINS["cex_primary"] == ["binance", "coingecko"]
-        assert _PROVIDER_CHAINS["defi_primary"] == ["geckoterminal", "binance"]
+        assert _PROVIDER_CHAINS["defi_primary"] == ["coingecko_onchain", "binance"]
 
 
 # =============================================================================

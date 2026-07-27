@@ -1,9 +1,9 @@
 """VIB-4347: ``DashboardAPIClient.get_ohlcv`` routes through the shared factory.
 
 The whole point of VIB-4347 is to **avoid** dashboards constructing
-``gateway_pb2.GeckoTerminalGetOHLCV`` directly. The mock-spy test below is
+``gateway_pb2.CoinGeckoOnchainGetOHLCV`` directly. The mock-spy test below is
 the load-bearing assertion: any future code change that re-introduces a
-hardcoded GeckoTerminal call from the dashboard API client will fail this
+hardcoded CoinGecko Onchain call from the dashboard API client will fail this
 test loudly.
 """
 
@@ -34,7 +34,7 @@ def _candle(close: str = "1900") -> OHLCVCandle:
 def _envelope(
     candles: list[OHLCVCandle],
     *,
-    source: str = "geckoterminal",
+    source: str = "coingecko_onchain",
     confidence: float = 1.0,
     cache_hit: bool = False,
 ) -> DataEnvelope[list[OHLCVCandle]]:
@@ -63,11 +63,11 @@ def gateway_client_with_spy() -> tuple[MagicMock, MagicMock]:
 
 
 # =============================================================================
-# D1.4 — get_ohlcv routes through the factory and NOT GeckoTerminalGetOHLCV
+# D1.4 — get_ohlcv routes through the factory and NOT CoinGeckoOnchainGetOHLCV
 # =============================================================================
 
 
-def test_get_ohlcv_does_not_call_geckoterminal_directly(
+def test_get_ohlcv_does_not_call_coingecko_onchain_directly(
     gateway_client_with_spy: tuple[MagicMock, MagicMock],
 ) -> None:
     """The load-bearing test for VIB-4347's whole purpose."""
@@ -84,8 +84,8 @@ def test_get_ohlcv_does_not_call_geckoterminal_directly(
             "WETH", chain="arbitrum", pool_address="0xabc", timeframe="1h", limit=10
         )
 
-    # Direct GeckoTerminalGetOHLCV call is forbidden.
-    integration_spy.GeckoTerminalGetOHLCV.assert_not_called()
+    # Direct CoinGeckoOnchainGetOHLCV call is forbidden.
+    integration_spy.CoinGeckoOnchainGetOHLCV.assert_not_called()
     # We did get the candle back via the factory path.
     assert len(result) == 1
     assert result[0]["close"] == "1900"

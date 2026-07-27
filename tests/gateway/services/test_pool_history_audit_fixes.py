@@ -2,7 +2,7 @@
 
 Each test pins a fix for a specific audit finding so it cannot silently regress:
 
-- **B#1** GeckoTerminal OHLCV backward pagination — a window longer than one
+- **B#1** CoinGecko Onchain OHLCV backward pagination — a window longer than one
   page is fetched across multiple ``before_timestamp`` calls, never silently
   truncated to the most-recent 1000 bars.
 - **B#2** TheGraph 4h down-sampling SUMS the per-hour flows (volume/fees) across
@@ -31,7 +31,7 @@ from almanak.gateway.data.pool_history._base import (
 )
 from almanak.gateway.data.pool_history.defillama import DefiLlamaPoolHistoryProvider
 from almanak.gateway.data.pool_history.dispatcher import PoolHistoryDispatcher
-from almanak.gateway.data.pool_history.geckoterminal import GeckoTerminalPoolHistoryProvider
+from almanak.gateway.data.pool_history.coingecko_onchain import CoinGeckoOnchainPoolHistoryProvider
 from almanak.gateway.data.pool_history.thegraph import (
     TheGraphPoolHistoryProvider,
     _aggregate_4h,
@@ -80,7 +80,7 @@ def test_thegraph_4h_flow_empty_neq_zero():
 
 
 # ===========================================================================
-# B#1 — GeckoTerminal paginates backward (no silent 1000-bar truncation)
+# B#1 — CoinGecko Onchain paginates backward (no silent 1000-bar truncation)
 # ===========================================================================
 
 
@@ -121,7 +121,7 @@ def _ohlcv_payload(rows: list[list[Any]]) -> dict:
     return {"data": {"attributes": {"ohlcv_list": rows}}}
 
 
-def test_geckoterminal_paginates_backward_over_window():
+def test_coingecko_onchain_paginates_backward_over_window():
     """A window longer than one page triggers a second before_timestamp call and
     returns the FULL series — never just the most-recent page (audit blocker #1)."""
     # newest-first pages; patch the limit small so 2 pages are needed.
@@ -129,13 +129,13 @@ def test_geckoterminal_paginates_backward_over_window():
     page2 = [[6 * 3600, 0, 0, 0, 0, "6"], [5 * 3600, 0, 0, 0, 0, "5"]]  # partial -> stop
     session = _FakeSession([_FakeResp(200, _ohlcv_payload(page1)), _FakeResp(200, _ohlcv_payload(page2))])
 
-    provider = GeckoTerminalPoolHistoryProvider(
+    provider = CoinGeckoOnchainPoolHistoryProvider(
         session_getter=AsyncMock(return_value=session),
         rate_limiter=_TokenBucket(rate=100, period=1.0),
         api_key="test-key",
     )
 
-    with patch("almanak.gateway.data.pool_history.geckoterminal._OHLCV_LIMIT", 3):
+    with patch("almanak.gateway.data.pool_history.coingecko_onchain._OHLCV_LIMIT", 3):
         result = asyncio.run(
             provider.fetch(
                 chain="base",
@@ -155,10 +155,10 @@ def test_geckoterminal_paginates_backward_over_window():
     assert session.calls[1].get("before_timestamp") == str(7 * 3600)
 
 
-def test_geckoterminal_404_first_page_is_not_found():
+def test_coingecko_onchain_404_first_page_is_not_found():
     """404 on the first page => pool not found (None), not a partial success."""
     session = _FakeSession([_FakeResp(404, {})])
-    provider = GeckoTerminalPoolHistoryProvider(
+    provider = CoinGeckoOnchainPoolHistoryProvider(
         session_getter=AsyncMock(return_value=session),
         rate_limiter=_TokenBucket(rate=100, period=1.0),
         api_key="test-key",
@@ -176,10 +176,10 @@ def test_geckoterminal_404_first_page_is_not_found():
     assert result is None
 
 
-def test_geckoterminal_missing_api_key_fails_before_egress():
+def test_coingecko_onchain_missing_api_key_fails_before_egress():
     """CoinGecko Onchain pool-history fallback requires a gateway-owned key."""
     session = _FakeSession([_FakeResp(200, _ohlcv_payload([[3600, 0, 0, 0, 0, "1"]]))])
-    provider = GeckoTerminalPoolHistoryProvider(
+    provider = CoinGeckoOnchainPoolHistoryProvider(
         session_getter=AsyncMock(return_value=session),
         rate_limiter=_TokenBucket(rate=100, period=1.0),
         api_key="",
@@ -203,10 +203,10 @@ def test_geckoterminal_missing_api_key_fails_before_egress():
     assert session.calls == []
 
 
-def test_geckoterminal_401_with_key_mentions_key_validation():
+def test_coingecko_onchain_401_with_key_mentions_key_validation():
     """Invalid or expired keys get the same operator-facing 401 guidance."""
     session = _FakeSession([_FakeResp(401, {"error": "bad key"})])
-    provider = GeckoTerminalPoolHistoryProvider(
+    provider = CoinGeckoOnchainPoolHistoryProvider(
         session_getter=AsyncMock(return_value=session),
         rate_limiter=_TokenBucket(rate=100, period=1.0),
         api_key="bad-key",
@@ -289,7 +289,7 @@ def test_dispatch_rejects_invalid_address_before_providers():
     """A malformed EVM address never reaches a provider egress URL."""
     disp = _dispatcher()
     disp._thegraph.fetch = AsyncMock()  # type: ignore[method-assign]
-    disp._geckoterminal.fetch = AsyncMock()  # type: ignore[method-assign]
+    disp._coingecko_onchain.fetch = AsyncMock()  # type: ignore[method-assign]
 
     outcome = asyncio.run(
         disp.dispatch(
@@ -305,7 +305,7 @@ def test_dispatch_rejects_invalid_address_before_providers():
     assert outcome.success is False
     assert "invalid pool_address" in outcome.error
     disp._thegraph.fetch.assert_not_called()
-    disp._geckoterminal.fetch.assert_not_called()
+    disp._coingecko_onchain.fetch.assert_not_called()
     asyncio.run(disp.close())
 
 
@@ -351,10 +351,10 @@ class _RaisingResp(_FakeResp):
         raise self._exc
 
 
-def test_geckoterminal_null_data_does_not_crash():
+def test_coingecko_onchain_null_data_does_not_crash():
     """A ``{"data": null}`` body coerces to no-rows (None), not AttributeError."""
     session = _FakeSession([_FakeResp(200, {"data": None})])
-    provider = GeckoTerminalPoolHistoryProvider(
+    provider = CoinGeckoOnchainPoolHistoryProvider(
         session_getter=AsyncMock(return_value=session),
         rate_limiter=_TokenBucket(rate=100, period=1.0),
         api_key="test-key",
@@ -372,12 +372,12 @@ def test_geckoterminal_null_data_does_not_crash():
     assert result is None
 
 
-def test_geckoterminal_json_decode_error_maps_to_provider_error():
+def test_coingecko_onchain_json_decode_error_maps_to_provider_error():
     """A JSONDecodeError (ValueError) on a 200 maps to _ProviderError, not a crash."""
     import json
 
     session = _FakeSession([_RaisingResp(200, json.JSONDecodeError("boom", "", 0))])
-    provider = GeckoTerminalPoolHistoryProvider(
+    provider = CoinGeckoOnchainPoolHistoryProvider(
         session_getter=AsyncMock(return_value=session),
         rate_limiter=_TokenBucket(rate=100, period=1.0),
         api_key="test-key",

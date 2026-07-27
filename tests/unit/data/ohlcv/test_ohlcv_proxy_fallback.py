@@ -233,19 +233,19 @@ class TestProxyFallback:
 
         # Use a non-CEX provider to avoid the basis risk penalty entirely
         provider = MagicMock()
-        provider.name = "geckoterminal"
+        provider.name = "coingecko_onchain"
 
         def selective_fetch(**kwargs):
             token = kwargs.get("token", "")
             if token == "WMNT":
-                raise DataSourceUnavailable(source="geckoterminal", reason="fail")
-            return _make_envelope(source="geckoterminal")
+                raise DataSourceUnavailable(source="coingecko_onchain", reason="fail")
+            return _make_envelope(source="coingecko_onchain")
 
         provider.fetch.side_effect = selective_fetch
         router.register_provider(provider)
 
         result = router.get_ohlcv("WMNT", chain="mantle")
-        # geckoterminal is not a CEX source, so no basis penalty applied
+        # coingecko_onchain is not a CEX source, so no basis penalty applied
         # Proxy itself adds no penalty
         assert result.meta.confidence == 1.0
         assert result.meta.proxy_source == "WMNT"

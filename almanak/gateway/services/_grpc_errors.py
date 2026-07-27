@@ -44,7 +44,7 @@ def set_error_from_upstream(
     Args:
         context: gRPC servicer context (sync or async).
         exc: The exception raised by the integration / aggregator layer.
-        upstream: Upstream identifier (e.g. ``"geckoterminal"``, ``"binance"``,
+        upstream: Upstream identifier (e.g. ``"coingecko_onchain"``, ``"binance"``,
             ``"price_aggregator"``). Surfaced as ``ErrorInfo.metadata['upstream']``
             for client-side metrics.
     """

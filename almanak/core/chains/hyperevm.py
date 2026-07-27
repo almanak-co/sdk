@@ -81,8 +81,8 @@ DESCRIPTOR = register_chain(
             "usdt0": "0xB8CE59FC3717ada4C02eaDF9682A9e934F625ebb",
         },
         # Per-vendor chain slugs (values verbatim). HyperEVM's price-vendor slug
-        # is "hyperevm" on CoinGecko and DexScreener. Other vendors (GeckoTerminal,
-        # DeFiLlama, …) are left for the first-connector PR — matching the vendor
+        # is "hyperevm" on CoinGecko and DexScreener. Other vendors (CoinGecko
+        # Onchain, DeFiLlama, …) are left for the first-connector PR — matching the vendor
         # coverage the other no-connector chains (blast/linea/plasma) declare today.
         external_ids={
             "coingecko": "hyperevm",

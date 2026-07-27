@@ -8,7 +8,7 @@ circuit breaker). ``MarketSnapshot.is_quiet_pool_hold()`` is the gate: every
 recorded critical failure must be a quiet-pool staleness miss AND the affected
 token must still be priceable.
 
-This is the NVDAON/USD incident: geckoterminal returned stale OHLCV (no weekend
+This is the NVDAON/USD incident: coingecko_onchain returned stale OHLCV (no weekend
 swaps), the Binance fallback can't price a tokenized stock, RSI failed — yet the
 pool was alive and priceable the whole time.
 """
@@ -24,7 +24,7 @@ from almanak.framework.market import MarketSnapshot
 # into _critical_data_failures during the NVDAON incident.
 _NVDAON_STALE_DETAIL = (
     "Data source 'ohlcv_router' unavailable: All providers failed for NVDAON/USD on ethereum "
-    "— primary: geckoterminal returned stale OHLCV for NVDAON/USD on ethereum: youngest candle "
+    "— primary: coingecko_onchain returned stale OHLCV for NVDAON/USD on ethereum: youngest candle "
     "is 87288s behind wall-clock (budget 86400s for timeframe 1h); treating as provider miss; "
     "last: Unknown token for Binance: NVDAON"
 )
@@ -89,7 +89,7 @@ class TestIsQuietPoolHold:
         market._record_critical_data_failure(
             "rsi",
             "('AAPLON', '1h', 14)",
-            "geckoterminal returned stale OHLCV for AAPLON/USD on ethereum: youngest candle is "
+            "coingecko_onchain returned stale OHLCV for AAPLON/USD on ethereum: youngest candle is "
             "90000s behind wall-clock (budget 86400s for timeframe 1h); treating as provider miss",
         )
         assert market.is_quiet_pool_hold() is True
@@ -117,7 +117,7 @@ class TestIsQuietPoolHold:
         market._record_critical_data_failure(
             "rsi",
             "('FOO', '1h', 14)",
-            "geckoterminal returned stale OHLCV for FOO/USD on arbitrum-one: youngest candle is "
+            "coingecko_onchain returned stale OHLCV for FOO/USD on arbitrum-one: youngest candle is "
             "90000s behind wall-clock (budget 86400s for timeframe 1h); treating as provider miss",
         )
         assert market.is_quiet_pool_hold() is True
@@ -128,7 +128,7 @@ def test_quiet_pool_regex_captures_hyphenated_chain() -> None:
     from almanak.framework.market.snapshot import _QUIET_POOL_STALE_RE
 
     m = _QUIET_POOL_STALE_RE.search(
-        "geckoterminal returned stale OHLCV for WBTC/USD on polygon-zkevm: youngest candle ..."
+        "coingecko_onchain returned stale OHLCV for WBTC/USD on polygon-zkevm: youngest candle ..."
     )
     assert m is not None
     assert m.group("base") == "WBTC"

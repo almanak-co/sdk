@@ -1,9 +1,9 @@
 """Tests for the DEX quiet-pool OHLCV forward-fill + relaxed staleness budget (VIB-4875).
 
-Background: on-chain DEX sources (GeckoTerminal) only emit a candle when a swap
+Background: on-chain DEX sources (CoinGecko Onchain) only emit a candle when a swap
 occurs. For a genuinely quiet pool the newest real candle lags wall-clock, which
 the ALM-2697 staleness guard would reject as a dead feed — stranding the strategy
-in ``DATA_ERROR`` even though the pool is alive and GeckoTerminal has data. The
+in ``DATA_ERROR`` even though the pool is alive and CoinGecko Onchain has data. The
 ``ethereum-nvda-activity-hourly`` deployment hit exactly this (NVDAON/USDC 1h).
 
 The fix is two-fold and DEX-scoped:
@@ -181,13 +181,13 @@ class TestForwardFillHelper:
 class TestRouterDexQuietPool:
     """A quiet DEX pool must return a fresh, continuous series — not DATA_ERROR."""
 
-    def test_quiet_geckoterminal_pool_is_forward_filled_and_returned(self, tmp_path):
+    def test_quiet_coingecko_onchain_pool_is_forward_filled_and_returned(self, tmp_path):
         router = OHLCVRouter(disk_cache_dir=tmp_path, default_chain="ethereum")
         now = datetime.now(UTC)
         # Last swap 3h ago, then quiet — the NVDAON/USDC deployment scenario.
         last_trade = _floor_hour(now) - timedelta(hours=3)
         real = _hourly_series_ending(last_trade, count=5)
-        gecko = _provider("geckoterminal", real)
+        gecko = _provider("coingecko_onchain", real)
         router.register_provider(gecko)
 
         # limit=10 comfortably exceeds 5 real + 3 synthetic, so no trimming.
@@ -195,7 +195,7 @@ class TestRouterDexQuietPool:
 
         # The pre-fix bug: this raised DataSourceUnavailable (stale). Post-fix it
         # returns a forward-filled, current series.
-        assert envelope.meta.source == "geckoterminal"
+        assert envelope.meta.source == "coingecko_onchain"
         assert envelope.meta.forward_filled is True
         assert envelope.meta.confidence <= _DEX_FORWARD_FILL_CONFIDENCE
         # Newest candle is now within the strict budget (advanced to wall-clock).
@@ -208,22 +208,22 @@ class TestRouterDexQuietPool:
         router = OHLCVRouter(disk_cache_dir=tmp_path, default_chain="ethereum")
         now = datetime.now(UTC)
         real = _hourly_series_ending(_floor_hour(now) - timedelta(hours=3), count=5)
-        router.register_provider(_provider("geckoterminal", real))
+        router.register_provider(_provider("coingecko_onchain", real))
 
         with caplog.at_level("INFO", logger="almanak.framework.data.ohlcv.ohlcv_router"):
             router.get_ohlcv("NVDAON/USDC", chain="ethereum", timeframe="1h", limit=5)
 
         assert "ohlcv_dex_forward_fill" in caplog.text
-        assert "geckoterminal" in caplog.text
+        assert "coingecko_onchain" in caplog.text
 
-    def test_dead_geckoterminal_pool_still_rejected(self, tmp_path):
+    def test_dead_coingecko_onchain_pool_still_rejected(self, tmp_path):
         """Beyond the dead-pool horizon, a DEX source is NOT forward-filled and
         the staleness guard rejects it (no other provider registered)."""
         router = OHLCVRouter(disk_cache_dir=tmp_path, default_chain="ethereum")
         now = datetime.now(UTC)
         # 30h with no trade > 24h DEX horizon.
         dead = _hourly_series_ending(_floor_hour(now) - timedelta(hours=30), count=5)
-        router.register_provider(_provider("geckoterminal", dead))
+        router.register_provider(_provider("coingecko_onchain", dead))
 
         with pytest.raises(DataSourceUnavailable) as exc_info:
             router.get_ohlcv("NVDAON/USDC", chain="ethereum", timeframe="1h", limit=5)
@@ -233,7 +233,7 @@ class TestRouterDexQuietPool:
         router = OHLCVRouter(disk_cache_dir=tmp_path, default_chain="ethereum")
         now = datetime.now(UTC)
         fresh = _hourly_series_ending(_floor_hour(now), count=10)  # traded this hour
-        router.register_provider(_provider("geckoterminal", fresh))
+        router.register_provider(_provider("coingecko_onchain", fresh))
 
         envelope = router.get_ohlcv("NVDAON/USDC", chain="ethereum", timeframe="1h", limit=10)
 
@@ -250,7 +250,7 @@ class TestForwardFillRespectsLimit:
         # Pool returns exactly `limit` real candles, then is quiet for 3h. Without
         # trimming the response would be 5 real + 3 synthetic = 8 candles.
         real = _hourly_series_ending(_floor_hour(now) - timedelta(hours=3), count=5)
-        router.register_provider(_provider("geckoterminal", real))
+        router.register_provider(_provider("coingecko_onchain", real))
 
         envelope = router.get_ohlcv("NVDAON/USDC", chain="ethereum", timeframe="1h", limit=5)
 
@@ -270,7 +270,7 @@ class TestForwardFillRespectsLimit:
         now = datetime.now(UTC)
         # Quiet for 5h but caller only wants 2 candles.
         real = _hourly_series_ending(_floor_hour(now) - timedelta(hours=5), count=5)
-        router.register_provider(_provider("geckoterminal", real))
+        router.register_provider(_provider("coingecko_onchain", real))
 
         envelope = router.get_ohlcv("NVDAON/USDC", chain="ethereum", timeframe="1h", limit=2)
 
@@ -290,7 +290,7 @@ class TestSyntheticCandlesNotFinalized:
         # the disk cache as immutable source="disk_cache" confidence=1.0 history.
         last_trade = _floor_day(now) - timedelta(days=10)
         real = _daily_series_ending(last_trade, count=5)
-        router.register_provider(_provider("geckoterminal", real))
+        router.register_provider(_provider("coingecko_onchain", real))
 
         envelope = router.get_ohlcv("NVDAON/USDC", chain="ethereum", timeframe="1d", limit=30)
         assert envelope.meta.forward_filled is True

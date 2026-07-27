@@ -51,7 +51,7 @@ class TestDataMeta:
     def test_full_construction(self):
         now = datetime.now(UTC)
         meta = DataMeta(
-            source="geckoterminal",
+            source="coingecko_onchain",
             observed_at=now,
             block_number=100,
             finality="finalized",

@@ -30,7 +30,7 @@ def _register_surfaces() -> None:
     from almanak.framework.data.ohlcv import routing_provider as fw_routing
     from almanak.gateway.data.ohlcv import binance_provider as gw_binance
     from almanak.gateway.data.ohlcv import coingecko_provider as gw_coingecko
-    from almanak.gateway.data.ohlcv import geckoterminal_provider as gw_geckoterminal
+    from almanak.gateway.data.ohlcv import coingecko_onchain_provider as gw_coingecko_onchain
 
     _ADVERTISED_SURFACES.extend(
         [
@@ -39,8 +39,8 @@ def _register_surfaces() -> None:
                 fw_gateway.GatewayOHLCVProvider._SUPPORTED_TIMEFRAMES,
             ),
             (
-                "framework.GatewayGeckoTerminalOHLCVProvider",
-                fw_gateway.GatewayGeckoTerminalOHLCVProvider._SUPPORTED_TIMEFRAMES,
+                "framework.GatewayCoinGeckoOnchainOHLCVProvider",
+                fw_gateway.GatewayCoinGeckoOnchainOHLCVProvider._SUPPORTED_TIMEFRAMES,
             ),
             (
                 "framework.GatewayCoinGeckoOHLCVProvider",
@@ -60,8 +60,8 @@ def _register_surfaces() -> None:
                 gw_coingecko.CoinGeckoOHLCVProvider.SUPPORTED_TIMEFRAMES,
             ),
             (
-                "gateway.GeckoTerminalOHLCVProvider",
-                gw_geckoterminal.GeckoTerminalOHLCVProvider.SUPPORTED_TIMEFRAMES,
+                "gateway.CoinGeckoOnchainOHLCVProvider",
+                gw_coingecko_onchain.CoinGeckoOnchainOHLCVProvider.SUPPORTED_TIMEFRAMES,
             ),
         ]
     )

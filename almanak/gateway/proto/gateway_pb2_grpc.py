@@ -2883,10 +2883,10 @@ class IntegrationServiceStub(object):
                 request_serializer=gateway__pb2.TheGraphQueryRequest.SerializeToString,
                 response_deserializer=gateway__pb2.TheGraphQueryResponse.FromString,
                 _registered_method=True)
-        self.GeckoTerminalGetOHLCV = channel.unary_unary(
-                '/almanak.gateway.proto.IntegrationService/GeckoTerminalGetOHLCV',
-                request_serializer=gateway__pb2.GeckoTerminalOHLCVRequest.SerializeToString,
-                response_deserializer=gateway__pb2.GeckoTerminalOHLCVResponse.FromString,
+        self.CoinGeckoOnchainGetOHLCV = channel.unary_unary(
+                '/almanak.gateway.proto.IntegrationService/CoinGeckoOnchainGetOHLCV',
+                request_serializer=gateway__pb2.CoinGeckoOnchainOHLCVRequest.SerializeToString,
+                response_deserializer=gateway__pb2.CoinGeckoOnchainOHLCVResponse.FromString,
                 _registered_method=True)
         self.GetWalletPortfolio = channel.unary_unary(
                 '/almanak.gateway.proto.IntegrationService/GetWalletPortfolio',
@@ -2972,8 +2972,10 @@ class IntegrationServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def GeckoTerminalGetOHLCV(self, request, context):
-        """Legacy-named CoinGecko Onchain DEX OHLCV endpoint
+    def CoinGeckoOnchainGetOHLCV(self, request, context):
+        """CoinGecko Onchain DEX OHLCV endpoint (pool-level candles, with volume).
+        Distinct from CoinGeckoGetOHLCV above, which is the CEX-reference,
+        token-level, price-only feed.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -3045,10 +3047,10 @@ def add_IntegrationServiceServicer_to_server(servicer, server):
                     request_deserializer=gateway__pb2.TheGraphQueryRequest.FromString,
                     response_serializer=gateway__pb2.TheGraphQueryResponse.SerializeToString,
             ),
-            'GeckoTerminalGetOHLCV': grpc.unary_unary_rpc_method_handler(
-                    servicer.GeckoTerminalGetOHLCV,
-                    request_deserializer=gateway__pb2.GeckoTerminalOHLCVRequest.FromString,
-                    response_serializer=gateway__pb2.GeckoTerminalOHLCVResponse.SerializeToString,
+            'CoinGeckoOnchainGetOHLCV': grpc.unary_unary_rpc_method_handler(
+                    servicer.CoinGeckoOnchainGetOHLCV,
+                    request_deserializer=gateway__pb2.CoinGeckoOnchainOHLCVRequest.FromString,
+                    response_serializer=gateway__pb2.CoinGeckoOnchainOHLCVResponse.SerializeToString,
             ),
             'GetWalletPortfolio': grpc.unary_unary_rpc_method_handler(
                     servicer.GetWalletPortfolio,
@@ -3346,7 +3348,7 @@ class IntegrationService(object):
             _registered_method=True)
 
     @staticmethod
-    def GeckoTerminalGetOHLCV(request,
+    def CoinGeckoOnchainGetOHLCV(request,
             target,
             options=(),
             channel_credentials=None,
@@ -3359,9 +3361,9 @@ class IntegrationService(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/almanak.gateway.proto.IntegrationService/GeckoTerminalGetOHLCV',
-            gateway__pb2.GeckoTerminalOHLCVRequest.SerializeToString,
-            gateway__pb2.GeckoTerminalOHLCVResponse.FromString,
+            '/almanak.gateway.proto.IntegrationService/CoinGeckoOnchainGetOHLCV',
+            gateway__pb2.CoinGeckoOnchainOHLCVRequest.SerializeToString,
+            gateway__pb2.CoinGeckoOnchainOHLCVResponse.FromString,
             options,
             channel_credentials,
             insecure,

@@ -7,7 +7,7 @@ breaker can apply different tolerance thresholds for **data-class** vs
 Why this matters
 ----------------
 The 29 Apr 2026 production incident tripped a strategy's circuit breaker
-after 3 consecutive transient ``GeckoTerminal`` OHLCV failures. The breaker
+after 3 consecutive transient ``coingecko_onchain`` OHLCV failures. The breaker
 treated all consecutive failures alike — so 3 transient *data* outages
 looked identical to 3 *execution-revert* failures. Risk reduction needs
 fresh data; killing the strategy at iteration 3 of a transient data outage

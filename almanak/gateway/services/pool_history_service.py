@@ -356,8 +356,7 @@ _TRUNCATION_REASON_NAMES: tuple[str, ...] = (
 )
 
 # Provider-bound counters. The provider set is OPEN — POOL-5 adds
-# ``the_graph`` / ``defillama`` / ``geckoterminal`` (legacy key for
-# CoinGecko Onchain) when it lands. POOL-2
+# ``the_graph`` / ``defillama`` / ``coingecko_onchain`` when it lands. POOL-2
 # initializes the keyset empty so health() returns a stable shape even
 # pre-POOL-5.
 _PER_PROVIDER_COUNTER_NAMES: tuple[str, ...] = (
@@ -482,12 +481,12 @@ class PoolHistoryServiceServicer(gateway_pb2_grpc.PoolHistoryServiceServicer):
         self._finality_cutoffs: dict[str, int] = {
             "the_graph": settings.pool_history_finality_cutoff_seconds_the_graph,
             "defillama": settings.pool_history_finality_cutoff_seconds_defillama,
-            "geckoterminal": settings.pool_history_finality_cutoff_seconds_geckoterminal,
+            "coingecko_onchain": settings.pool_history_finality_cutoff_seconds_coingecko_onchain,
         }
         self._page_cap_rows: dict[str, int] = {
             "the_graph": settings.pool_history_page_cap_rows_the_graph,
             "defillama": settings.pool_history_page_cap_rows_defillama,
-            "geckoterminal": settings.pool_history_page_cap_rows_geckoterminal,
+            "coingecko_onchain": settings.pool_history_page_cap_rows_coingecko_onchain,
         }
 
         self._dispatcher = PoolHistoryDispatcher(

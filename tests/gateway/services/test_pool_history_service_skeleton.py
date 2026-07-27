@@ -111,7 +111,7 @@ def test_killswitch_on_dispatches_after_pool5():
     servicer = PoolHistoryServiceServicer(settings)
     ctx = _MockContext()
 
-    failure = _DispatchOutcome(success=False, source="", snapshots=[], error="the_graph: not found; geckoterminal: not found")
+    failure = _DispatchOutcome(success=False, source="", snapshots=[], error="the_graph: not found; coingecko_onchain: not found")
     with patch.object(servicer._dispatcher, "dispatch", new=AsyncMock(return_value=failure)):
         response = asyncio.run(servicer.GetPoolHistory(_request(), ctx))  # type: ignore[arg-type]
 

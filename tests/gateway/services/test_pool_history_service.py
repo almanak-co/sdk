@@ -16,7 +16,7 @@ Covers the POOL-5 rows of the umbrella UAT card
 
 Tests patch the upstream provider seams (``GatewayGraphQLClient.query`` for
 TheGraph; ``_query_pools`` / ``_query_chart`` for DefiLlama; ``_query_ohlcv``
-for GeckoTerminal) with recorded JSON fixtures under
+for CoinGecko Onchain) with recorded JSON fixtures under
 ``tests/gateway/services/fixtures/pool_history/`` — no live external API is
 reached. Patching at those seams is the "equivalent in-test HTTP mocking" the
 UAT card permits in lieu of ``aioresponses`` (not a project dependency).
@@ -141,7 +141,7 @@ def _patch_defillama(
     ]
 
 
-def _patch_geckoterminal(servicer: PoolHistoryServiceServicer, ohlcv: list | None | Exception) -> AsyncMock:
+def _patch_coingecko_onchain(servicer: PoolHistoryServiceServicer, ohlcv: list | None | Exception) -> AsyncMock:
     mock = AsyncMock(side_effect=ohlcv) if isinstance(ohlcv, Exception) else AsyncMock(return_value=ohlcv)
     return mock
 
@@ -209,9 +209,9 @@ def test_recorded_fixture_per_provider_chain():
     servicer = _enabled_servicer()
     ctx = _Ctx()
     tg_mock = _thegraph_query_mock("poolHourDatas", fx["poolHourDatas"])
-    gt_mock = _patch_geckoterminal(servicer, [])
+    gt_mock = _patch_coingecko_onchain(servicer, [])
     with _patch_thegraph(servicer, tg_mock), patch.object(
-        servicer._dispatcher._geckoterminal, "_query_ohlcv", new=gt_mock
+        servicer._dispatcher._coingecko_onchain, "_query_ohlcv", new=gt_mock
     ):
         resp = asyncio.run(
             servicer.GetPoolHistory(
@@ -230,7 +230,7 @@ def test_recorded_fixture_per_provider_chain():
     assert resp.source == "the_graph"
     assert len(resp.snapshots) == 168
     assert resp.snapshots[0].tvl == "1210000.0"
-    assert gt_mock.call_count == 0  # TheGraph won; GeckoTerminal never hit.
+    assert gt_mock.call_count == 0  # TheGraph won; CoinGecko Onchain never hit.
 
     # Cell 2: defillama, ethereum, uniswap_v3, 1d, 30d. Force TheGraph down so
     # DefiLlama (1d-eligible) serves.
@@ -239,10 +239,10 @@ def test_recorded_fixture_per_provider_chain():
     servicer = _enabled_servicer()
     ctx = _Ctx()
     tg_down = AsyncMock(side_effect=SubgraphConnectionError("thegraph down"))
-    gt_mock = _patch_geckoterminal(servicer, [])
+    gt_mock = _patch_coingecko_onchain(servicer, [])
     patches = _patch_defillama(servicer, pools=dl["catalog"]["data"], chart=dl["chart"]["data"])
     with _patch_thegraph(servicer, tg_down), patches[0], patches[1], patch.object(
-        servicer._dispatcher._geckoterminal, "_query_ohlcv", new=gt_mock
+        servicer._dispatcher._coingecko_onchain, "_query_ohlcv", new=gt_mock
     ):
         resp = asyncio.run(
             servicer.GetPoolHistory(
@@ -261,21 +261,21 @@ def test_recorded_fixture_per_provider_chain():
     assert resp.source == "defillama"
     assert len(resp.snapshots) == 30
     assert resp.snapshots[0].tvl == "215000000.0"
-    assert gt_mock.call_count == 0  # DefiLlama served; GeckoTerminal never hit.
+    assert gt_mock.call_count == 0  # DefiLlama served; CoinGecko Onchain never hit.
 
-    # Cell 3: geckoterminal, base, aerodrome, 1h, 7d. Aerodrome has no
+    # Cell 3: coingecko_onchain, base, aerodrome, 1h, 7d. Aerodrome has no
     # subgraph URL (the_graph -> _NOT_ATTEMPTED) and DefiLlama is 1h-ineligible
-    # -> GeckoTerminal serves.
-    gt_fx = _fx("geckoterminal_base_aerodrome_7d_1h.json")
+    # -> CoinGecko Onchain serves.
+    gt_fx = _fx("coingecko_onchain_base_aerodrome_7d_1h.json")
     start_1h = gt_fx["meta"]["start_ts"]
     servicer = _enabled_servicer()
     ctx = _Ctx()
     tg_mock = AsyncMock()  # must NOT be called (no aerodrome subgraph)
     dl_pools = AsyncMock()  # must NOT be called (DefiLlama skipped @1h)
-    gt_mock = _patch_geckoterminal(servicer, gt_fx["ohlcv_list"])
+    gt_mock = _patch_coingecko_onchain(servicer, gt_fx["ohlcv_list"])
     with _patch_thegraph(servicer, tg_mock), patch.object(
         servicer._dispatcher._defillama, "_query_pools", new=dl_pools
-    ), patch.object(servicer._dispatcher._geckoterminal, "_query_ohlcv", new=gt_mock):
+    ), patch.object(servicer._dispatcher._coingecko_onchain, "_query_ohlcv", new=gt_mock):
         resp = asyncio.run(
             servicer.GetPoolHistory(
                 _request(
@@ -290,7 +290,7 @@ def test_recorded_fixture_per_provider_chain():
             )
         )
     assert resp.success is True
-    assert resp.source == "geckoterminal"
+    assert resp.source == "coingecko_onchain"
     assert len(resp.snapshots) == 168
     assert resp.snapshots[0].volume_24h == "2000.0"
     assert tg_mock.call_count == 0  # no aerodrome subgraph -> never queried
@@ -349,17 +349,17 @@ def test_chain_matrix_arbitrum_ethereum_base(chain, protocol, pool, fixture, exp
     assert captured_urls and all(u == expected_url for u in captured_urls)
 
 
-def test_chain_matrix_base_aerodrome_falls_through_to_geckoterminal():
+def test_chain_matrix_base_aerodrome_falls_through_to_coingecko_onchain():
     """D2.M1: (base, aerodrome) has no registered subgraph URL, so the
-    TheGraph leg is NOT_ATTEMPTED and GeckoTerminal serves the cell."""
-    gt_fx = _fx("geckoterminal_base_aerodrome_7d_1h.json")
+    TheGraph leg is NOT_ATTEMPTED and CoinGecko Onchain serves the cell."""
+    gt_fx = _fx("coingecko_onchain_base_aerodrome_7d_1h.json")
     start = gt_fx["meta"]["start_ts"]
     servicer = _enabled_servicer()
     ctx = _Ctx()
     tg_mock = AsyncMock()
-    gt_mock = _patch_geckoterminal(servicer, gt_fx["ohlcv_list"])
+    gt_mock = _patch_coingecko_onchain(servicer, gt_fx["ohlcv_list"])
     with _patch_thegraph(servicer, tg_mock), patch.object(
-        servicer._dispatcher._geckoterminal, "_query_ohlcv", new=gt_mock
+        servicer._dispatcher._coingecko_onchain, "_query_ohlcv", new=gt_mock
     ):
         resp = asyncio.run(
             servicer.GetPoolHistory(
@@ -375,7 +375,7 @@ def test_chain_matrix_base_aerodrome_falls_through_to_geckoterminal():
             )
         )
     assert resp.success is True
-    assert resp.source == "geckoterminal"
+    assert resp.source == "coingecko_onchain"
     assert tg_mock.call_count == 0  # no aerodrome subgraph URL registered
 
 
@@ -384,18 +384,18 @@ def test_chain_matrix_base_aerodrome_falls_through_to_geckoterminal():
 # =============================================================================
 
 
-def test_provider_fallback_thegraph_to_geckoterminal_1h():
-    """TheGraph raises @1h -> GeckoTerminal serves; DefiLlama call count 0."""
-    gt_fx = _fx("geckoterminal_arbitrum_univ3_7d_1h.json")
+def test_provider_fallback_thegraph_to_coingecko_onchain_1h():
+    """TheGraph raises @1h -> CoinGecko Onchain serves; DefiLlama call count 0."""
+    gt_fx = _fx("coingecko_onchain_arbitrum_univ3_7d_1h.json")
     start = gt_fx["meta"]["start_ts"]
     servicer = _enabled_servicer()
     ctx = _Ctx()
     tg_down = AsyncMock(side_effect=SubgraphConnectionError("thegraph down"))
     dl_pools = AsyncMock()
-    gt_mock = _patch_geckoterminal(servicer, gt_fx["ohlcv_list"])
+    gt_mock = _patch_coingecko_onchain(servicer, gt_fx["ohlcv_list"])
     with _patch_thegraph(servicer, tg_down), patch.object(
         servicer._dispatcher._defillama, "_query_pools", new=dl_pools
-    ), patch.object(servicer._dispatcher._geckoterminal, "_query_ohlcv", new=gt_mock):
+    ), patch.object(servicer._dispatcher._coingecko_onchain, "_query_ohlcv", new=gt_mock):
         resp = asyncio.run(
             servicer.GetPoolHistory(
                 _request(
@@ -410,7 +410,7 @@ def test_provider_fallback_thegraph_to_geckoterminal_1h():
             )
         )
     assert resp.success is True
-    assert resp.source == "geckoterminal"
+    assert resp.source == "coingecko_onchain"
     assert dl_pools.call_count == 0  # DefiLlama skipped at 1h
     # provider_fallback incremented for the TheGraph failure.
     assert servicer.health()["per_rpc"]["provider_fallback"] >= 1
@@ -418,16 +418,16 @@ def test_provider_fallback_thegraph_to_geckoterminal_1h():
 
 
 def test_provider_fallback_thegraph_to_defillama_1d():
-    """TheGraph raises @1d -> DefiLlama serves; GeckoTerminal call count 0."""
+    """TheGraph raises @1d -> DefiLlama serves; CoinGecko Onchain call count 0."""
     dl = _fx("defillama_arbitrum_univ3_30d_1d.json")
     start = dl["meta"]["start_ts"]
     servicer = _enabled_servicer()
     ctx = _Ctx()
     tg_down = AsyncMock(side_effect=SubgraphConnectionError("thegraph down"))
-    gt_mock = _patch_geckoterminal(servicer, [])
+    gt_mock = _patch_coingecko_onchain(servicer, [])
     patches = _patch_defillama(servicer, pools=dl["catalog"]["data"], chart=dl["chart"]["data"])
     with _patch_thegraph(servicer, tg_down), patches[0], patches[1], patch.object(
-        servicer._dispatcher._geckoterminal, "_query_ohlcv", new=gt_mock
+        servicer._dispatcher._coingecko_onchain, "_query_ohlcv", new=gt_mock
     ):
         resp = asyncio.run(
             servicer.GetPoolHistory(
@@ -444,28 +444,28 @@ def test_provider_fallback_thegraph_to_defillama_1d():
         )
     assert resp.success is True
     assert resp.source == "defillama"
-    assert gt_mock.call_count == 0  # DefiLlama served; GeckoTerminal never hit.
+    assert gt_mock.call_count == 0  # DefiLlama served; CoinGecko Onchain never hit.
 
 
 @pytest.mark.acceptance_pack
-def test_provider_fallback_full_chain_1d_to_geckoterminal():
-    """TheGraph raises + DefiLlama raises @1d -> GeckoTerminal serves.
+def test_provider_fallback_full_chain_1d_to_coingecko_onchain():
+    """TheGraph raises + DefiLlama raises @1d -> CoinGecko Onchain serves.
 
     All three tried in order; provider_fallback increments to 2 (the_graph
     fail + defillama fail)."""
-    gt_fx = _fx("geckoterminal_arbitrum_univ3_90d_1d.json")
+    gt_fx = _fx("coingecko_onchain_arbitrum_univ3_90d_1d.json")
     start = gt_fx["meta"]["start_ts"]
     servicer = _enabled_servicer()
     ctx = _Ctx()
     tg_down = AsyncMock(side_effect=SubgraphConnectionError("thegraph down"))
-    gt_mock = _patch_geckoterminal(servicer, gt_fx["ohlcv_list"])
+    gt_mock = _patch_coingecko_onchain(servicer, gt_fx["ohlcv_list"])
     patches = _patch_defillama(
         servicer,
         pools=aiohttp.ClientError("defillama down"),
         chart=aiohttp.ClientError("defillama down"),
     )
     with _patch_thegraph(servicer, tg_down), patches[0], patches[1], patch.object(
-        servicer._dispatcher._geckoterminal, "_query_ohlcv", new=gt_mock
+        servicer._dispatcher._coingecko_onchain, "_query_ohlcv", new=gt_mock
     ):
         resp = asyncio.run(
             servicer.GetPoolHistory(
@@ -481,7 +481,7 @@ def test_provider_fallback_full_chain_1d_to_geckoterminal():
             )
         )
     assert resp.success is True
-    assert resp.source == "geckoterminal"
+    assert resp.source == "coingecko_onchain"
     health = servicer.health()
     assert health["per_rpc"]["provider_fallback"] == 2  # the_graph + defillama
     assert health["per_provider"]["the_graph"]["errors"] == 1
@@ -491,16 +491,16 @@ def test_provider_fallback_full_chain_1d_to_geckoterminal():
 
 def test_defillama_skipped_for_1h():
     """TheGraph raises @1h: DefiLlama HTTP seam is NEVER hit (daily-only)."""
-    gt_fx = _fx("geckoterminal_arbitrum_univ3_7d_1h.json")
+    gt_fx = _fx("coingecko_onchain_arbitrum_univ3_7d_1h.json")
     start = gt_fx["meta"]["start_ts"]
     servicer = _enabled_servicer()
     ctx = _Ctx()
     tg_down = AsyncMock(side_effect=SubgraphConnectionError("thegraph down"))
     dl_pools = AsyncMock()
-    gt_mock = _patch_geckoterminal(servicer, gt_fx["ohlcv_list"])
+    gt_mock = _patch_coingecko_onchain(servicer, gt_fx["ohlcv_list"])
     with _patch_thegraph(servicer, tg_down), patch.object(
         servicer._dispatcher._defillama, "_query_pools", new=dl_pools
-    ), patch.object(servicer._dispatcher._geckoterminal, "_query_ohlcv", new=gt_mock):
+    ), patch.object(servicer._dispatcher._coingecko_onchain, "_query_ohlcv", new=gt_mock):
         resp = asyncio.run(
             servicer.GetPoolHistory(
                 _request(
@@ -566,19 +566,19 @@ def test_resolution_matrix(resolution, fixture, data_key, n_rows, grid):
 
 def test_defillama_skipped_for_4h():
     """D2.M3 (Codex Round-3 #1): TheGraph raises @4h -> DefiLlama seam NEVER
-    hit; chain falls through to GeckoTerminal. Prevents silently relabeling
+    hit; chain falls through to CoinGecko Onchain. Prevents silently relabeling
     DefiLlama daily data as 4h history."""
-    gt_fx = _fx("geckoterminal_arbitrum_univ3_7d_1h.json")  # hour timeframe, aggregate=4
+    gt_fx = _fx("coingecko_onchain_arbitrum_univ3_7d_1h.json")  # hour timeframe, aggregate=4
     start = gt_fx["meta"]["start_ts"]
     # The OHLCV fixture is hourly; for 4h only rows on the 4h grid survive.
     servicer = _enabled_servicer()
     ctx = _Ctx()
     tg_down = AsyncMock(side_effect=SubgraphConnectionError("thegraph down"))
     dl_pools = AsyncMock()
-    gt_mock = _patch_geckoterminal(servicer, gt_fx["ohlcv_list"])
+    gt_mock = _patch_coingecko_onchain(servicer, gt_fx["ohlcv_list"])
     with _patch_thegraph(servicer, tg_down), patch.object(
         servicer._dispatcher._defillama, "_query_pools", new=dl_pools
-    ), patch.object(servicer._dispatcher._geckoterminal, "_query_ohlcv", new=gt_mock):
+    ), patch.object(servicer._dispatcher._coingecko_onchain, "_query_ohlcv", new=gt_mock):
         resp = asyncio.run(
             servicer.GetPoolHistory(
                 _request(
@@ -593,7 +593,7 @@ def test_defillama_skipped_for_4h():
             )
         )
     assert resp.success is True
-    assert resp.source == "geckoterminal"
+    assert resp.source == "coingecko_onchain"
     assert dl_pools.call_count == 0  # DefiLlama skipped at 4h
     assert all(s.timestamp % 14400 == 0 for s in resp.snapshots)
 
@@ -653,14 +653,14 @@ def test_all_providers_unavailable():
     ctx = _Ctx()
     start = 1_699_920_000  # day-aligned
     tg_down = AsyncMock(side_effect=SubgraphConnectionError("thegraph 503"))
-    gt_down = _patch_geckoterminal(servicer, aiohttp.ClientError("gt 503"))
+    gt_down = _patch_coingecko_onchain(servicer, aiohttp.ClientError("gt 503"))
     patches = _patch_defillama(
         servicer,
         pools=aiohttp.ClientError("llama 503"),
         chart=aiohttp.ClientError("llama 503"),
     )
     with _patch_thegraph(servicer, tg_down), patches[0], patches[1], patch.object(
-        servicer._dispatcher._geckoterminal, "_query_ohlcv", new=gt_down
+        servicer._dispatcher._coingecko_onchain, "_query_ohlcv", new=gt_down
     ):
         resp = asyncio.run(
             servicer.GetPoolHistory(
@@ -680,7 +680,7 @@ def test_all_providers_unavailable():
     # 1d chain attempts all three eligible providers.
     assert "the_graph" in resp.error
     assert "defillama" in resp.error
-    assert "geckoterminal" in resp.error
+    assert "coingecko_onchain" in resp.error
     # Failure-envelope shape.
     assert resp.source == ""
     assert resp.next_start_ts == 0
@@ -699,7 +699,7 @@ def test_keyless_coingecko_onchain_fallback_fails_before_egress():
     gt_ohlcv = AsyncMock()
 
     with _patch_thegraph(servicer, tg_down), patch.object(
-        servicer._dispatcher._geckoterminal, "_query_ohlcv", new=gt_ohlcv
+        servicer._dispatcher._coingecko_onchain, "_query_ohlcv", new=gt_ohlcv
     ):
         resp = asyncio.run(
             servicer.GetPoolHistory(
@@ -737,12 +737,12 @@ def test_failed_then_success_reattempts_providers():
         resolution=gateway_pb2.Resolution.RESOLUTION_1H,
     )
 
-    # First call: TheGraph down, GeckoTerminal down -> failure.
+    # First call: TheGraph down, CoinGecko Onchain down -> failure.
     ctx1 = _Ctx()
     tg_down = AsyncMock(side_effect=SubgraphConnectionError("down"))
-    gt_down = _patch_geckoterminal(servicer, aiohttp.ClientError("down"))
+    gt_down = _patch_coingecko_onchain(servicer, aiohttp.ClientError("down"))
     with _patch_thegraph(servicer, tg_down), patch.object(
-        servicer._dispatcher._geckoterminal, "_query_ohlcv", new=gt_down
+        servicer._dispatcher._coingecko_onchain, "_query_ohlcv", new=gt_down
     ):
         resp1 = asyncio.run(servicer.GetPoolHistory(req, ctx1))
     assert resp1.success is False
@@ -773,12 +773,12 @@ def test_pool_not_found_never_returns_empty_envelope():
     ctx = _Ctx()
     start = 1_699_920_000
     # TheGraph returns {pool: null} -> empty rows (not-found). DefiLlama returns
-    # no matching pool (empty catalog). GeckoTerminal returns 404 (None).
+    # no matching pool (empty catalog). CoinGecko Onchain returns 404 (None).
     tg_empty = AsyncMock(return_value={"poolDayDatas": []})
-    gt_404 = _patch_geckoterminal(servicer, None)  # 404
+    gt_404 = _patch_coingecko_onchain(servicer, None)  # 404
     patches = _patch_defillama(servicer, pools=[], chart=[])
     with _patch_thegraph(servicer, tg_empty), patches[0], patches[1], patch.object(
-        servicer._dispatcher._geckoterminal, "_query_ohlcv", new=gt_404
+        servicer._dispatcher._coingecko_onchain, "_query_ohlcv", new=gt_404
     ):
         resp = asyncio.run(
             servicer.GetPoolHistory(
@@ -817,10 +817,10 @@ def test_defillama_substring_match_does_not_false_positive():
         {"pool": f"arbitrum-{_ARB_POOL}deadbeef", "chain": "Arbitrum", "project": "uniswap-v3", "symbol": "DECOY"},
     ]
     tg_down = AsyncMock(side_effect=SubgraphConnectionError("down"))
-    gt_404 = _patch_geckoterminal(servicer, None)
+    gt_404 = _patch_coingecko_onchain(servicer, None)
     patches = _patch_defillama(servicer, pools=decoy_catalog, chart=[])
     with _patch_thegraph(servicer, tg_down), patches[0], patches[1], patch.object(
-        servicer._dispatcher._geckoterminal, "_query_ohlcv", new=gt_404
+        servicer._dispatcher._coingecko_onchain, "_query_ohlcv", new=gt_404
     ):
         resp = asyncio.run(
             servicer.GetPoolHistory(
@@ -863,10 +863,10 @@ def test_budget_trip_falls_back():
 
     ctx = _Ctx()
     tg_mock = AsyncMock()  # must NOT be called
-    gt_mock = _patch_geckoterminal(servicer, [])
+    gt_mock = _patch_coingecko_onchain(servicer, [])
     patches = _patch_defillama(servicer, pools=dl["catalog"]["data"], chart=dl["chart"]["data"])
     with _patch_thegraph(servicer, tg_mock), patches[0], patches[1], patch.object(
-        servicer._dispatcher._geckoterminal, "_query_ohlcv", new=gt_mock
+        servicer._dispatcher._coingecko_onchain, "_query_ohlcv", new=gt_mock
     ):
         resp = asyncio.run(
             servicer.GetPoolHistory(
@@ -884,7 +884,7 @@ def test_budget_trip_falls_back():
     assert resp.success is True
     assert resp.source == "defillama"
     assert tg_mock.call_count == 0  # TheGraph skipped — breaker tripped.
-    assert gt_mock.call_count == 0  # DefiLlama served before GeckoTerminal.
+    assert gt_mock.call_count == 0  # DefiLlama served before CoinGecko Onchain.
 
 
 def test_thegraph_budget_counter_health_export():

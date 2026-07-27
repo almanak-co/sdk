@@ -46,8 +46,8 @@ class TestUpstreamMapping:
         ctx = _FakeContext()
         set_error_from_upstream(
             ctx,
-            IntegrationRateLimitError("geckoterminal", retry_after=3.0),
-            upstream="geckoterminal",
+            IntegrationRateLimitError("coingecko_onchain", retry_after=3.0),
+            upstream="coingecko_onchain",
         )
         assert ctx.code == grpc.StatusCode.RESOURCE_EXHAUSTED
 
@@ -55,7 +55,7 @@ class TestUpstreamMapping:
         assert details is not None
         assert details.reason == "UPSTREAM_RATE_LIMITED"
         assert details.retry_delay_seconds == pytest.approx(3.0)
-        assert details.upstream == "geckoterminal"
+        assert details.upstream == "coingecko_onchain"
 
     def test_timeout_code(self) -> None:
         ctx = _FakeContext()
@@ -267,13 +267,13 @@ class TestDataSourceErrorFromGrpc:
         ctx = self._ctx_to_rpc_error()
         set_error_from_upstream(
             ctx,
-            IntegrationRateLimitError("geckoterminal", retry_after=2.0),
-            upstream="geckoterminal",
+            IntegrationRateLimitError("coingecko_onchain", retry_after=2.0),
+            upstream="coingecko_onchain",
         )
         rpc_error = _FakeRpcError(ctx.trailing)
         typed = data_source_error_from_grpc(rpc_error)
         assert isinstance(typed, DataSourceRateLimited)
-        assert typed.source == "geckoterminal"
+        assert typed.source == "coingecko_onchain"
         assert typed.retry_after == pytest.approx(2.0)
 
     def test_timeout_round_trip(self) -> None:

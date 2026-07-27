@@ -4,7 +4,7 @@ Provides protocol-specific pool readers that fetch live prices from
 on-chain AMM pool contracts (Uniswap V3, Aerodrome, PancakeSwap V3),
 TWAP and LWAP aggregation across multiple pools, pool analytics (TVL,
 volume, fee APR/APY), and historical pool state data from The Graph,
-DeFi Llama, and GeckoTerminal.
+DeFi Llama, and CoinGecko Onchain.
 """
 
 from __future__ import annotations

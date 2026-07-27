@@ -58,8 +58,8 @@ from ._base import (
     _ProviderError,
 )
 from ._graphql import GatewayGraphQLClient
+from .coingecko_onchain import CoinGeckoOnchainPoolHistoryProvider
 from .defillama import DefiLlamaPoolHistoryProvider, ResolvedPoolIdentity
-from .geckoterminal import GeckoTerminalPoolHistoryProvider
 from .thegraph import TheGraphPoolHistoryProvider
 
 logger = logging.getLogger(__name__)
@@ -74,8 +74,9 @@ logger = logging.getLogger(__name__)
 _THEGRAPH_RATE_PER_S = 2
 #: DefiLlama public tier: 10 req/s per IP.
 _DEFILLAMA_RATE_PER_S = 10
-#: CoinGecko Onchain fallback bucket: keep the legacy 30 req/min throttle.
-_GECKOTERMINAL_RATE_PER_MIN = 30
+#: CoinGecko Onchain fallback bucket: 30 req/min, matching the pool-analytics
+#: servicer's bucket for the same upstream host.
+_COINGECKO_ONCHAIN_RATE_PER_MIN = 30
 
 #: Per-provider finality cutoff defaults (seconds), POOL-6 (VIB-4754). DefiLlama
 #: revises daily data >24h after the fact (PoolX.md §D4), so its default is 72h
@@ -86,7 +87,7 @@ _GECKOTERMINAL_RATE_PER_MIN = 30
 _DEFAULT_FINALITY_CUTOFFS: dict[str, int] = {
     "the_graph": 86400,
     "defillama": 259200,
-    "geckoterminal": 86400,
+    "coingecko_onchain": 86400,
 }
 #: Ultimate fallback for an unknown provider id absent from the merged map.
 _DEFAULT_FINALITY_CUTOFF_SECONDS = 86400
@@ -207,8 +208,8 @@ class PoolHistoryDispatcher:
         # throttle-wait signal is meaningless in that mode).
         thegraph_throttle_ms = round(1.0 * 1000.0 / _THEGRAPH_RATE_PER_S) if _THEGRAPH_RATE_PER_S else 0
         defillama_throttle_ms = round(1.0 * 1000.0 / _DEFILLAMA_RATE_PER_S) if _DEFILLAMA_RATE_PER_S else 0
-        geckoterminal_throttle_ms = (
-            round(60.0 * 1000.0 / _GECKOTERMINAL_RATE_PER_MIN) if _GECKOTERMINAL_RATE_PER_MIN else 0
+        coingecko_onchain_throttle_ms = (
+            round(60.0 * 1000.0 / _COINGECKO_ONCHAIN_RATE_PER_MIN) if _COINGECKO_ONCHAIN_RATE_PER_MIN else 0
         )
 
         def _bump_throttle(provider_name: str, ms: int) -> Callable[[], None]:
@@ -228,10 +229,10 @@ class PoolHistoryDispatcher:
             period=1.0,
             on_refusal=_bump_throttle("defillama", defillama_throttle_ms),
         )
-        self._geckoterminal_bucket = _ObservableTokenBucket(
-            rate=_GECKOTERMINAL_RATE_PER_MIN,
+        self._coingecko_onchain_bucket = _ObservableTokenBucket(
+            rate=_COINGECKO_ONCHAIN_RATE_PER_MIN,
             period=60.0,
-            on_refusal=_bump_throttle("geckoterminal", geckoterminal_throttle_ms),
+            on_refusal=_bump_throttle("coingecko_onchain", coingecko_onchain_throttle_ms),
         )
         self._budget = _MonthlyBudgetTracker(budget_max=thegraph_monthly_budget_max)
 
@@ -264,15 +265,15 @@ class PoolHistoryDispatcher:
             rate_limiter=self._defillama_bucket,
             pool_token_resolver=self._resolve_pool_token_set,
         )
-        self._geckoterminal = GeckoTerminalPoolHistoryProvider(
+        self._coingecko_onchain = CoinGeckoOnchainPoolHistoryProvider(
             session_getter=self._get_http_session,
-            rate_limiter=self._geckoterminal_bucket,
+            rate_limiter=self._coingecko_onchain_bucket,
             api_key=coingecko_api_key,
         )
         self._providers: dict[str, PoolHistoryProvider] = {
             self._thegraph.name: self._thegraph,
             self._defillama.name: self._defillama,
-            self._geckoterminal.name: self._geckoterminal,
+            self._coingecko_onchain.name: self._coingecko_onchain,
         }
 
     # -- HTTP session (shared by REST providers) --------------------------
@@ -316,9 +317,9 @@ class PoolHistoryDispatcher:
         resolver traffic honours the same upstream throttle as OHLCV
         fetches.
         """
-        from almanak.gateway.data._history_common import _CHAIN_TO_GT_NETWORK
+        from almanak.gateway.data._history_common import _CHAIN_TO_CG_ONCHAIN_NETWORK
 
-        network = _CHAIN_TO_GT_NETWORK.get(chain)
+        network = _CHAIN_TO_CG_ONCHAIN_NETWORK.get(chain)
         if network is None or not self._coingecko_api_key:
             return None
 
@@ -359,7 +360,7 @@ class PoolHistoryDispatcher:
     ) -> ResolvedPoolIdentity | None:
         """The uncoalesced fetch behind :meth:`_resolve_pool_token_set`."""
         chain, pool_address = cache_key
-        if not self._geckoterminal_bucket.acquire():
+        if not self._coingecko_onchain_bucket.acquire():
             logger.debug("Pool token resolver: CoinGecko bucket empty for %s/%s", chain, pool_address)
             return None
 
@@ -439,9 +440,9 @@ class PoolHistoryDispatcher:
         raises ``ValueError`` — the validator should have rejected it first.
         """
         if resolution in (gateway_pb2.Resolution.RESOLUTION_1H, gateway_pb2.Resolution.RESOLUTION_4H):
-            return ("the_graph", "geckoterminal")
+            return ("the_graph", "coingecko_onchain")
         if resolution == gateway_pb2.Resolution.RESOLUTION_1D:
-            return ("the_graph", "defillama", "geckoterminal")
+            return ("the_graph", "defillama", "coingecko_onchain")
         raise ValueError(f"unsupported resolution for dispatch: {resolution}")
 
     def is_supported(self, chain: str, protocol: str) -> bool:
