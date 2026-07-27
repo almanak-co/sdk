@@ -814,6 +814,37 @@ class IntegrationServiceServicer(gateway_pb2_grpc.IntegrationServiceServicer):
             context.set_details(f"limit must be between 1 and 1000, got {req_limit}")
             return gateway_pb2.CoinGeckoOnchainOHLCVResponse()
 
+        # pool_address is optional -- empty means "resolve the pool by token
+        # symbol". When supplied it is interpolated straight into an outbound
+        # URL path segment by the provider, so a value carrying "/" or ".."
+        # could reshape the request path and reach other upstream endpoints.
+        req_pool_address = (request.pool_address or "").strip()
+        if req_pool_address:
+            # Chain-family detection only (Solana pools are base58, EVM pools
+            # are 0x-hex); the chain itself is still forwarded unmodified.
+            #
+            # An unrecognized chain skips the shape check rather than defaulting
+            # to the EVM branch, which would reject a base58 pool on, say, a
+            # not-yet-registered Solana-family network. Skipping cannot leak: the
+            # provider resolves its vendor network map -- derived from the same
+            # ChainRegistry that backs validate_chain, so never wider than it --
+            # *before* it builds any URL, so an unrecognized chain dies on the
+            # provider's retryable "Unsupported chain" error without egressing.
+            # That error is what the OHLCV router fails over on; rejecting it
+            # here would convert the failover into a hard INVALID_ARGUMENT.
+            try:
+                family_chain: str | None = validate_chain(request.chain)
+            except ValidationError:
+                family_chain = None
+
+            if family_chain is not None:
+                try:
+                    req_pool_address = validate_address_for_chain(req_pool_address, family_chain, field="pool_address")
+                except ValidationError as e:
+                    context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                    context.set_details(str(e))
+                    return gateway_pb2.CoinGeckoOnchainOHLCVResponse()
+
         try:
             from almanak.gateway.data.ohlcv.coingecko_onchain_provider import CoinGeckoOnchainOHLCVProvider
 
@@ -826,7 +857,7 @@ class IntegrationServiceServicer(gateway_pb2_grpc.IntegrationServiceServicer):
                     timeframe=req_timeframe,
                     limit=req_limit,
                     chain=request.chain.strip(),
-                    pool_address=request.pool_address or None,
+                    pool_address=req_pool_address or None,
                     include_empty_intervals=request.include_empty_intervals,
                 )
 
