@@ -9,19 +9,30 @@ Tests the full Intent -> Compile -> Execute -> Parse -> Verify flow for lending 
 
 Aave V3 Pool on Mantle: 0x458F293454fE0d67EC0655f3672301301DD51422
 
-Mantle Aave V3 reserve configuration (verified on-chain via getReserveConfigurationData):
+Mantle Aave V3 reserve configuration (verified on-chain via getReserveConfigurationData).
 
-    Token   active  frozen  ltv   borrowable  collateral
-    WETH    true    TRUE    0     true        false       <- frozen, supply reverts (#2102)
-    WMNT    true    false   4000  false       true        <- only collateral with LTV>0
-    USDC    true    false   0     true        false       <- borrow-only (LTV 0)
-    USDT0   true    false   0     true        false       <- borrow-only
-    USDe    true    false   0     true        false
-    GHO     true    false   0     true        false
+CURRENT (since block 98303344, ~2026-07-22 — VIB-6111): Aave governance set
+``ltv=0`` on ALL 10 reserves of this market. No asset can be enabled as
+collateral, so NO borrow is possible for any asset here. Only the LTV field
+moved; liquidationThreshold, borrowingEnabled, isActive, isFrozen and the
+supply/borrow caps are byte-identical either side of that block.
+
+    Token   active  frozen  ltv           borrowable  collateral
+    WETH    true    TRUE    0 (was 8050)  true        false       <- frozen, supply reverts (#2102)
+    WMNT    true    false   0 (was 4000)  false       false       <- was the only LTV>0 reserve
+    USDC    true    false   0             true        false       <- borrow-only (LTV 0)
+    USDT0   true    false   0             true        false       <- borrow-only
+    USDe    true    false   0             true        false
+    GHO     true    false   0             true        false
 
 Tests use:
-- Supply/withdraw: USDC (active, non-frozen).
-- Borrow/repay: WMNT collateral (only reserve with non-zero LTV) + USDC borrow asset.
+- Supply/withdraw: USDC (active, non-frozen) — unaffected, these pass
+  ``use_as_collateral=False`` and remain full round trips.
+- Borrow/repay: quarantined under VIB-6111. Rather than a bare ``xfail`` that
+  would mute unrelated regressions too, those tests now assert the specific
+  market state that blocks them (LTV=0 on-chain, failure isolated to the
+  ``setUserUseReserveAsCollateral`` leg, no debt created). They fail loudly if
+  Aave restores a non-zero LTV.
 
 NO MOCKING. All tests execute real on-chain transactions and verify state changes.
 
@@ -140,6 +151,27 @@ def get_atoken_address(web3: Web3, asset: str) -> str:
     reserve_data = pool_contract.functions.getReserveData(Web3.to_checksum_address(asset)).call()
     # aTokenAddress is the 9th field (index 8) in ReserveData.
     return reserve_data[8]
+
+
+def get_reserve_ltv(web3: Web3, asset: str) -> int:
+    """Read an Aave V3 reserve's loan-to-value, in basis points (VIB-6111).
+
+    LTV is packed into bits 0-15 of ``ReserveConfigurationMap.data``, the first
+    field of ``ReserveData``. An LTV of 0 means the asset cannot be enabled as
+    collateral at all — ``setUserUseReserveAsCollateral`` reverts
+    ``UserHasAssetWithZeroLtv()`` (``0x21e5c4ae``) for it.
+
+    This is the discriminating on-chain read behind the borrow/repay
+    quarantine: it distinguishes "the market zeroed LTV" from any other reason
+    a lending test might fail, so unrelated regressions stay real failures.
+    """
+    pool_address = AAVE_V3_POOL_ADDRESSES[CHAIN_NAME]
+    pool_contract = web3.eth.contract(address=Web3.to_checksum_address(pool_address), abi=AAVE_POOL_ABI)
+    reserve_data = pool_contract.functions.getReserveData(Web3.to_checksum_address(asset)).call()
+    configuration = reserve_data[0]
+    # web3 decodes the single-member struct as a tuple/list; unwrap defensively.
+    packed = configuration[0] if isinstance(configuration, (list, tuple)) else configuration
+    return packed & 0xFFFF
 
 
 # =============================================================================
@@ -488,10 +520,12 @@ class TestAaveV3SupplyIntent:
 class TestAaveV3BorrowIntent:
     """Test Aave V3 borrow operations on Mantle.
 
-    Uses WMNT as collateral (LTV=40%, the only Mantle Aave reserve with
-    non-zero LTV) and borrows USDC. WETH is frozen on Mantle Aave V3 (#2102),
-    USDC has LTV=0 so it cannot be used as collateral, leaving WMNT as the
-    sole viable collateral asset.
+    HISTORICAL (pre-2026-07-22): used WMNT as collateral (LTV=40%, then the
+    only Mantle Aave reserve with non-zero LTV) and borrowed USDC.
+
+    CURRENT: every reserve on this market has LTV=0 — see VIB-6111. There is
+    no substitute collateral asset, so borrowing is structurally impossible
+    here rather than mis-parameterised.
     """
 
     @pytest.mark.intent(IntentType.SUPPLY, IntentType.BORROW)
@@ -504,29 +538,44 @@ class TestAaveV3BorrowIntent:
         execution_context: ExecutionContext,
         price_oracle: dict[str, Decimal],
     ):
-        """Test USDC borrow after supplying WMNT as collateral.
+        """VIB-6111: borrowing on Aave V3 Mantle is blocked by market-wide LTV=0.
 
-        Done in two intents because Aave V3's BorrowIntent compiler emits
-        ``approve + supply + borrow`` but does NOT emit
-        ``setUserUseReserveAsCollateral`` — and on Mantle's Aave V3
-        deployment, supplying WMNT does not auto-enable it as collateral
-        (likely because of isolation-mode / debt-ceiling configuration), so
-        the subsequent borrow reverts. The fix is to issue a SupplyIntent
-        first with ``use_as_collateral=True`` (which DOES emit the explicit
-        toggle) and then a borrow-only BorrowIntent with
-        ``collateral_amount=0``.
+        HISTORICAL: this asserted a full WMNT-collateral → USDC-borrow round
+        trip. Aave governance set ``ltv=0`` on all 10 Mantle reserves at block
+        98303344 (~2026-07-22) — WETH 8050→0, WMNT 4000→0, every other reserve
+        config field byte-identical — so no asset can be enabled as collateral
+        and no borrow is possible for any asset on this market.
 
-        WMNT has LTV=40% on Mantle. With CoinGecko WMNT ≈ $0.65 (CI run
-        showed $0.648), 200 WMNT collateral ≈ $130 supports up to ~$52 USDC
-        borrow at 40% LTV. We borrow 20 USDC (~38% utilization of LTV cap,
-        ~15% effective LTV — well under the 30% intent-tests cap).
+        Deliberately NOT a bare ``xfail``: muting the whole body would also
+        swallow a compiler break, an RPC error or a receipt regression, and
+        would report the same green tick for all of them. Instead this asserts
+        the *specific* market state that makes borrowing impossible, so every
+        other failure mode stays a real failure:
 
-        4-Layer Verification:
-        1. Compilation: SupplyIntent + BorrowIntent each → ActionBundle (SUCCESS)
-        2. Execution: both on-chain bundles succeed
-        3. Receipt Parsing: Supply (WMNT) and Borrow (USDC) events parsed
-        4. Balance Deltas: WMNT decreased by collateral, USDC increased by
-           borrow, totalDebtBase increased, healthFactor > 1e18
+        1. Compilation: SupplyIntent AND BorrowIntent both still compile to
+           ActionBundles (SUCCESS) — a compiler regression fails here.
+        2. Execution: the supply bundle fails, and fails specifically at its
+           final ``setUserUseReserveAsCollateral`` leg — ``approve`` and
+           ``supply`` still land on-chain. An earlier-leg failure fails here.
+        3. Market state: WMNT LTV reads 0 on-chain. If Aave restores a
+           non-zero LTV this fails loudly and the original round-trip
+           assertions above should be restored (this is the monitor property
+           ``strict=True`` was standing in for).
+        4. Conservation: the supplied WMNT converts to aWMNT, no debt is
+           created, and USDC does not move.
+
+        EXECUTION SHAPE — the supply leg's fate depends on the signer, so this
+        test does not assert either outcome (VIB-6111):
+
+        * **Safe/Zodiac**: ``ExecutionOrchestrator._sign_via_safe`` bundles a
+          multi-tx ActionBundle into an **atomic MultiSend** and returns a
+          single signed tx — all legs succeed or fail together, so the supply
+          is rolled back and no funds move.
+        * **EOA**: legs are submitted sequentially, so ``approve`` and
+          ``supply`` commit and only the toggle reverts — capital lands as
+          aWMNT with zero collateral value (measured on a fork, see VIB-6111).
+
+        The conservation block below asserts only what holds either way.
         """
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
         wmnt = tokens["WMNT"]
@@ -544,8 +593,20 @@ class TestAaveV3BorrowIntent:
         )
 
         print(f"\n{'=' * 80}")
-        print("Test: Borrow USDC with WMNT collateral on Aave V3 (Mantle)")
+        print("Test: Borrow USDC with WMNT collateral on Aave V3 (Mantle) — VIB-6111 quarantine")
         print(f"{'=' * 80}")
+
+        # Layer 3 (market state): WMNT LTV must be zero. This is the fact that
+        # makes borrowing impossible; asserting it is what keeps this
+        # quarantine narrow. If Aave restores a non-zero LTV, this fails and
+        # the historical round-trip assertions should be restored.
+        wmnt_ltv = get_reserve_ltv(web3, wmnt)
+        assert wmnt_ltv == 0, (
+            f"VIB-6111 quarantine is STALE: WMNT LTV on Aave V3 Mantle is now {wmnt_ltv} bps "
+            f"(expected 0). Aave restored a non-zero LTV — restore the full "
+            f"WMNT-collateral → USDC-borrow round-trip assertions and delete this quarantine."
+        )
+        print(f"WMNT LTV on-chain: {wmnt_ltv} bps (zero — collateral cannot be enabled)")
 
         # Layer 4a: Record balances BEFORE
         wmnt_before = get_token_balance(web3, wmnt, funded_wallet)
@@ -569,11 +630,31 @@ class TestAaveV3BorrowIntent:
         assert supply_result.status.value == "SUCCESS", f"Supply compilation failed: {supply_result.error}"
         assert supply_result.action_bundle is not None
         print(f"\nStep 1 — Supply ActionBundle: {len(supply_result.action_bundle.transactions)} transactions")
-        supply_exec = await orchestrator.execute(supply_result.action_bundle, execution_context)
-        assert supply_exec.success, f"Supply execution failed: {supply_exec.error}"
 
-        # Step 2: BorrowIntent with collateral_amount=0 — borrows USDC
-        # against existing collateral (the WMNT just supplied).
+        # Layer 2: the bundle must fail, and must fail at the collateral
+        # toggle specifically — approve and supply still land on-chain.
+        supply_exec = await orchestrator.execute(supply_result.action_bundle, execution_context)
+        assert not supply_exec.success, (
+            "Supply-with-collateral unexpectedly SUCCEEDED. Every Aave V3 Mantle reserve "
+            "has LTV=0 (VIB-6111), so setUserUseReserveAsCollateral must revert "
+            "UserHasAssetWithZeroLtv(). A success here means the market changed — restore "
+            "the full borrow round-trip assertions."
+        )
+        tx_results = supply_exec.transaction_results
+        assert len(tx_results) >= 1, f"expected at least one transaction result: {supply_exec.error}"
+        # Only the LAST leg may fail, whichever shape the executor produced
+        # (see the execution-shape note in the docstring). With an atomic
+        # MultiSend there is a single result and this slice is empty.
+        assert all(r.success for r in tx_results[:-1]), (
+            "ONLY the final setUserUseReserveAsCollateral leg may revert. An earlier leg "
+            "failed, which means something other than the zero-LTV block broke: "
+            + "; ".join(f"tx[{i}] success={r.success} error={r.error}" for i, r in enumerate(tx_results))
+        )
+        assert not tx_results[-1].success, "the failing leg must be the last one"
+        print(f"Supply bundle failed at the collateral toggle as expected: {supply_exec.error}")
+
+        # Step 2: BorrowIntent must still COMPILE — this keeps the BORROW
+        # compiler path under test even though it can never execute here.
         borrow_intent = BorrowIntent(
             protocol="aave_v3",
             collateral_token="WMNT",
@@ -588,14 +669,40 @@ class TestAaveV3BorrowIntent:
         assert compilation_result.status.value == "SUCCESS", f"Borrow compilation failed: {compilation_result.error}"
         assert compilation_result.action_bundle is not None
 
-        print(f"Step 2 — Borrow ActionBundle: {len(compilation_result.action_bundle.transactions)} transactions")
+        print(f"Step 2 — Borrow ActionBundle compiles: {len(compilation_result.action_bundle.transactions)} txs")
 
-        # Layer 2: Execute borrow
-        execution_result = await orchestrator.execute(compilation_result.action_bundle, execution_context)
-        assert execution_result.success, f"Borrow execution failed: {execution_result.error}"
-        print(f"Borrow successful! {len(execution_result.transaction_results)} transactions")
+        # Layer 4b: conservation. Deliberately execution-shape agnostic — the
+        # WMNT outcome differs by signer (atomic MultiSend rolls the supply
+        # back; per-leg EOA submission commits it), so asserting either one
+        # would pin this test to a lane. What must hold either way: WMNT is
+        # conserved (it either stays put or converts 1:1 into aWMNT), no debt
+        # is created, and USDC never moves because borrow is unreachable.
+        wmnt_after = get_token_balance(web3, wmnt, funded_wallet)
+        usdc_after = get_token_balance(web3, usdc, funded_wallet)
+        account_data_after = get_user_account_data(web3, funded_wallet)
 
-        # Layer 3: Parse receipts across BOTH bundles (supply + borrow).
+        expected_wmnt_spent = int(collateral_amount * Decimal(10**wmnt_decimals))
+        wmnt_spent = wmnt_before - wmnt_after
+        assert wmnt_spent in (0, expected_wmnt_spent), (
+            f"WMNT must either be untouched (bundle rolled back) or spent exactly "
+            f"{expected_wmnt_spent} (supply leg committed); got {wmnt_spent}"
+        )
+        if wmnt_spent:
+            atoken = get_atoken_address(web3, wmnt)
+            assert get_token_balance(web3, atoken, funded_wallet) >= wmnt_spent, (
+                "WMNT left the wallet, so the matching aWMNT must have been received"
+            )
+        assert usdc_after == usdc_before, (
+            f"USDC must NOT move — the borrow is unreachable. before={usdc_before} after={usdc_after}"
+        )
+        assert account_data_after["totalDebtBase"] == account_data_before["totalDebtBase"], (
+            "no debt may be created while no reserve can be enabled as collateral"
+        )
+        print("Conservation verified: WMNT→aWMNT supplied, zero debt, USDC untouched")
+
+        # Layer 3: Parse receipts from the supply legs that DID commit. The
+        # borrow bundle never executes, so there is no Borrow event to parse —
+        # asserting one would be asserting a state that cannot exist.
         supply_parsed = False
         for tx_result in supply_exec.transaction_results:
             if tx_result.receipt:
@@ -606,55 +713,13 @@ class TestAaveV3BorrowIntent:
                     for supply_event in parse_result.supplies:
                         assert supply_event.amount > 0, "Supply amount must be > 0"
                         print(f"  Supply amount: {supply_event.amount}")
-        assert supply_parsed, "Must find at least one Supply event in supply bundle"
-
-        borrow_parsed = False
-        for tx_result in execution_result.transaction_results:
-            if tx_result.receipt:
-                parser = AaveV3ReceiptParser()
-                parse_result = parser.parse_receipt(tx_result.receipt.to_dict())
-                if parse_result.success and parse_result.borrows:
-                    borrow_parsed = True
-                    for borrow_event in parse_result.borrows:
-                        assert borrow_event.amount > 0, "Borrow amount must be > 0"
-                        print(f"  Borrow amount: {borrow_event.amount}")
-                        print(f"  Reserve: {borrow_event.reserve}")
-
-        assert borrow_parsed, "Must find at least one Borrow event in borrow bundle"
-
-        # Layer 4b: Verify balance changes (across both bundles)
-        wmnt_after = get_token_balance(web3, wmnt, funded_wallet)
-        usdc_after = get_token_balance(web3, usdc, funded_wallet)
-        wmnt_spent = wmnt_before - wmnt_after
-        usdc_received = usdc_after - usdc_before
+        assert supply_parsed, "Must find at least one Supply event in the committed supply legs"
 
         print("\n--- Results ---")
-        print(f"WMNT spent (collateral): {format_token_amount(wmnt_spent, wmnt_decimals)}")
-        print(f"USDC received: {format_token_amount(usdc_received, usdc_decimals)}")
-
-        expected_wmnt_spent = int(collateral_amount * Decimal(10**wmnt_decimals))
-        assert wmnt_spent == expected_wmnt_spent, (
-            f"WMNT spent must EXACTLY equal collateral amount. "
-            f"Expected: {expected_wmnt_spent}, Got: {wmnt_spent}"
-        )
-
-        expected_usdc = int(borrow_amount * Decimal(10**usdc_decimals))
-        assert usdc_received == expected_usdc, (
-            f"USDC received must EXACTLY equal borrow amount. Expected: {expected_usdc}, Got: {usdc_received}"
-        )
-
-        account_data_after = get_user_account_data(web3, funded_wallet)
-        print(f"Debt after: {account_data_after['totalDebtBase']}")
-        print(f"Health factor: {account_data_after['healthFactor']}")
-
-        assert account_data_after["totalDebtBase"] > account_data_before["totalDebtBase"], (
-            "Debt must increase after borrow"
-        )
-        assert account_data_after["healthFactor"] > 10**18, (
-            f"Health factor must be > 1.0 (got {account_data_after['healthFactor'] / 10**18:.4f})"
-        )
-
-        print("\nALL CHECKS PASSED")
+        print(f"WMNT spent (supplied): {format_token_amount(wmnt_before - wmnt_after, wmnt_decimals)}")
+        print(f"USDC delta: {format_token_amount(usdc_after - usdc_before, usdc_decimals)} (must be 0)")
+        print(f"Debt after: {account_data_after['totalDebtBase']} (must be unchanged)")
+        print("\nVIB-6111 QUARANTINE ASSERTIONS PASSED — borrow remains blocked by LTV=0")
 
 
 # =============================================================================
@@ -668,7 +733,12 @@ class TestAaveV3BorrowIntent:
 class TestAaveV3RepayIntent:
     """Test Aave V3 repay operations on Mantle.
 
-    Verifies WMNT collateral supply -> USDC borrow -> USDC repay flow.
+    HISTORICAL (pre-2026-07-22): verified a WMNT collateral supply -> USDC
+    borrow -> USDC repay flow.
+
+    CURRENT: blocked by the same market change as TestAaveV3BorrowIntent —
+    every reserve has LTV=0, so no borrow can occur and there is no debt to
+    repay. See VIB-6111.
     """
 
     @pytest.mark.intent(IntentType.SUPPLY, IntentType.BORROW, IntentType.REPAY)
@@ -681,17 +751,31 @@ class TestAaveV3RepayIntent:
         execution_context: ExecutionContext,
         price_oracle: dict[str, Decimal],
     ):
-        """Test USDC repay after WMNT-collateralised borrow on Mantle.
+        """VIB-6111: repay is unreachable on Mantle — the borrow it needs cannot happen.
 
-        4-Layer Verification:
-        1. Compilation: RepayIntent -> ActionBundle (SUCCESS)
-        2. Execution: on-chain transactions succeed
-        3. Receipt Parsing: Repay event parsed
-        4. Balance Deltas: USDC decreased, totalDebtBase decreased,
-           healthFactor improved
+        HISTORICAL: this asserted a WMNT-collateral → USDC-borrow → USDC-repay
+        round trip. Aave governance set ``ltv=0`` on all 10 Mantle reserves at
+        block 98303344 (~2026-07-22), so the collateral toggle reverts, the
+        borrow never happens, and there is no debt to repay.
+
+        Same discipline as ``test_borrow_usdc_with_wmnt_collateral``: rather
+        than muting the whole body with a bare ``xfail`` — which would also
+        swallow compiler, RPC and receipt regressions — this asserts the
+        specific reachable state, so every other failure mode stays real:
+
+        1. Compilation: SupplyIntent, BorrowIntent AND RepayIntent all still
+           compile (SUCCESS) — the REPAY compiler path stays under test.
+        2. Execution: the supply bundle fails, and only its final
+           ``setUserUseReserveAsCollateral`` leg may be the one that reverts.
+           Execution shape is signer-dependent (Safe bundles atomically via
+           MultiSend, EOA submits per-leg), so no leg count is asserted.
+        3. Market state: WMNT LTV reads 0 on-chain — the monitor. A non-zero
+           LTV fails here and means the round trip should be restored.
+        4. Conservation: no debt is created and USDC does not move.
         """
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
         usdc = tokens["USDC"]
+        wmnt = tokens["WMNT"]
         usdc_decimals = get_token_decimals(web3, usdc)
 
         compiler = IntentCompiler(
@@ -701,14 +785,27 @@ class TestAaveV3RepayIntent:
         )
 
         print(f"\n{'=' * 80}")
-        print("Test: Repay USDC after WMNT collateral + USDC borrow on Aave V3 (Mantle)")
+        print("Test: Repay USDC on Aave V3 (Mantle) — VIB-6111 quarantine")
         print(f"{'=' * 80}")
 
-        # Step 1a: SupplyIntent with use_as_collateral=True so that
-        # setUserUseReserveAsCollateral(WMNT, true) actually fires (Mantle's
-        # Aave V3 does NOT auto-enable WMNT as collateral on supply — see
-        # test_borrow_usdc_with_wmnt_collateral for the rationale).
-        print("\nStep 1a: Supplying 200 WMNT as collateral...")
+        # Layer 3 (market state): the fact that makes the whole chain impossible.
+        wmnt_ltv = get_reserve_ltv(web3, wmnt)
+        assert wmnt_ltv == 0, (
+            f"VIB-6111 quarantine is STALE: WMNT LTV on Aave V3 Mantle is now {wmnt_ltv} bps "
+            f"(expected 0). Aave restored a non-zero LTV — restore the full "
+            f"supply → borrow → repay round-trip assertions and delete this quarantine."
+        )
+        print(f"WMNT LTV on-chain: {wmnt_ltv} bps (zero — collateral cannot be enabled)")
+
+        # Layer 4a: Record state BEFORE
+        usdc_before = get_token_balance(web3, usdc, funded_wallet)
+        account_data_before = get_user_account_data(web3, funded_wallet)
+        print(f"USDC before: {format_token_amount(usdc_before, usdc_decimals)}")
+        print(f"Debt before: {account_data_before['totalDebtBase']}")
+
+        # Step 1a: SupplyIntent with use_as_collateral=True — the leg that the
+        # zero-LTV market change breaks.
+        print("\nStep 1a: Supplying 200 WMNT as collateral (expected to fail at the toggle)...")
         supply_intent = SupplyIntent(
             protocol="aave_v3",
             token="WMNT",
@@ -717,13 +814,33 @@ class TestAaveV3RepayIntent:
             chain=CHAIN_NAME,
         )
         supply_result = compiler.compile(supply_intent)
-        assert supply_result.status.value == "SUCCESS"
+        assert supply_result.status.value == "SUCCESS", f"Supply compilation failed: {supply_result.error}"
         assert supply_result.action_bundle is not None
         supply_exec = await orchestrator.execute(supply_result.action_bundle, execution_context)
-        assert supply_exec.success, f"Supply failed: {supply_exec.error}"
+        assert not supply_exec.success, (
+            "Supply-with-collateral unexpectedly SUCCEEDED. Every Aave V3 Mantle reserve has "
+            "LTV=0 (VIB-6111), so setUserUseReserveAsCollateral must revert. A success here "
+            "means the market changed — restore the full repay round-trip assertions."
+        )
+        tx_results = supply_exec.transaction_results
+        assert len(tx_results) >= 1, f"expected at least one transaction result: {supply_exec.error}"
+        # Only the LAST leg may fail. Execution shape is signer-dependent — a
+        # Safe signer bundles the legs into one atomic MultiSend (single
+        # result, slice below is empty), an EOA submits them sequentially —
+        # so this deliberately does not assert a leg count.
+        assert all(r.success for r in tx_results[:-1]), (
+            "ONLY the final setUserUseReserveAsCollateral leg may revert. An earlier leg "
+            "failed, which means something other than the zero-LTV block broke: "
+            + "; ".join(f"tx[{i}] success={r.success} error={r.error}" for i, r in enumerate(tx_results))
+        )
+        assert not tx_results[-1].success, "the failing leg must be the last one"
+        assert tx_results[-1].receipt is not None, "the failing leg must still produce a receipt"
+        assert tx_results[-1].receipt.status == 0, (
+            f"the failing leg must revert on-chain (receipt status 0), got status={tx_results[-1].receipt.status}"
+        )
+        print(f"Supply bundle failed at the collateral toggle as expected: {supply_exec.error}")
 
-        # Step 1b: BorrowIntent against the just-supplied WMNT collateral.
-        print("Step 1b: Borrowing 10 USDC...")
+        # Step 1b: BorrowIntent must still COMPILE (it can never execute here).
         borrow_intent = BorrowIntent(
             protocol="aave_v3",
             collateral_token="WMNT",
@@ -734,24 +851,13 @@ class TestAaveV3RepayIntent:
             chain=CHAIN_NAME,
         )
         borrow_result = compiler.compile(borrow_intent)
-        assert borrow_result.status.value == "SUCCESS"
+        assert borrow_result.status.value == "SUCCESS", f"Borrow compilation failed: {borrow_result.error}"
         assert borrow_result.action_bundle is not None
-        borrow_exec = await orchestrator.execute(borrow_result.action_bundle, execution_context)
-        assert borrow_exec.success, f"Borrow failed: {borrow_exec.error}"
-        print("Supply + Borrow successful!")
+        print(f"Step 1b — Borrow ActionBundle compiles: {len(borrow_result.action_bundle.transactions)} txs")
 
-        # Step 2: Repay 10 USDC
+        # Step 2: RepayIntent must still COMPILE — keeps the REPAY compiler
+        # path under test even though there is no debt to repay.
         repay_amount = Decimal("10")
-        print(f"\nStep 2: Repaying {repay_amount} USDC...")
-
-        # Layer 4a: Record state BEFORE repay
-        usdc_before = get_token_balance(web3, usdc, funded_wallet)
-        account_data_before = get_user_account_data(web3, funded_wallet)
-        print(f"USDC before repay: {format_token_amount(usdc_before, usdc_decimals)}")
-        print(f"Debt before repay: {account_data_before['totalDebtBase']}")
-        print(f"Health factor before: {account_data_before['healthFactor']}")
-
-        # Layer 1: Compile RepayIntent
         repay_intent = RepayIntent(
             protocol="aave_v3",
             token="USDC",
@@ -762,58 +868,38 @@ class TestAaveV3RepayIntent:
         compilation_result = compiler.compile(repay_intent)
         assert compilation_result.status.value == "SUCCESS", f"Repay compilation failed: {compilation_result.error}"
         assert compilation_result.action_bundle is not None
+        print(f"Step 2 — Repay ActionBundle compiles: {len(compilation_result.action_bundle.transactions)} txs")
 
-        print(f"ActionBundle: {len(compilation_result.action_bundle.transactions)} transactions")
-
-        # Layer 2: Execute
-        execution_result = await orchestrator.execute(compilation_result.action_bundle, execution_context)
-        assert execution_result.success, f"Repay execution failed: {execution_result.error}"
-        print(f"Repay successful! {len(execution_result.transaction_results)} transactions")
-
-        # Layer 3: Parse receipts
-        repay_parsed = False
-        for i, tx_result in enumerate(execution_result.transaction_results):
-            print(f"\nTransaction {i + 1}:")
-            print(f"  Hash: {tx_result.tx_hash[:16]}...")
+        # Layer 3: Parse receipts from the supply legs that DID commit. There
+        # is no Repay event to parse — no debt was ever created.
+        supply_parsed = False
+        for tx_result in supply_exec.transaction_results:
             if tx_result.receipt:
                 parser = AaveV3ReceiptParser()
                 parse_result = parser.parse_receipt(tx_result.receipt.to_dict())
-                if parse_result.success and parse_result.repays:
-                    repay_parsed = True
-                    for repay_event in parse_result.repays:
-                        assert repay_event.amount > 0, "Repay amount must be > 0"
-                        print(f"  Repay amount: {repay_event.amount}")
-                        print(f"  Reserve: {repay_event.reserve}")
+                if parse_result.success and parse_result.supplies:
+                    supply_parsed = True
+                    for supply_event in parse_result.supplies:
+                        assert supply_event.amount > 0, "Supply amount must be > 0"
+                        print(f"  Supply amount: {supply_event.amount}")
+        assert supply_parsed, "Must find at least one Supply event in the committed supply legs"
 
-        assert repay_parsed, "Must find at least one Repay event in receipts"
-
-        # Layer 4b: Verify balance changes
+        # Layer 4b: conservation — no borrow, therefore no debt and no USDC movement.
         usdc_after = get_token_balance(web3, usdc, funded_wallet)
-        usdc_spent = usdc_before - usdc_after
+        account_data_after = get_user_account_data(web3, funded_wallet)
 
         print("\n--- Results ---")
-        print(f"USDC spent on repay: {format_token_amount(usdc_spent, usdc_decimals)}")
+        print(f"USDC delta: {format_token_amount(usdc_after - usdc_before, usdc_decimals)} (must be 0)")
+        print(f"Debt after: {account_data_after['totalDebtBase']} (must be unchanged)")
 
-        expected_usdc_spent = int(repay_amount * Decimal(10**usdc_decimals))
-        assert usdc_spent == expected_usdc_spent, (
-            f"USDC spent must EXACTLY equal repay amount. Expected: {expected_usdc_spent}, Got: {usdc_spent}"
+        assert usdc_after == usdc_before, (
+            f"USDC must NOT move — neither borrow nor repay is reachable. before={usdc_before} after={usdc_after}"
+        )
+        assert account_data_after["totalDebtBase"] == account_data_before["totalDebtBase"], (
+            "no debt may be created or repaid while no reserve can be enabled as collateral"
         )
 
-        account_data_after = get_user_account_data(web3, funded_wallet)
-        print(f"Debt after repay: {account_data_after['totalDebtBase']}")
-        print(f"Health factor after: {account_data_after['healthFactor']}")
-
-        assert account_data_after["totalDebtBase"] < account_data_before["totalDebtBase"], (
-            "Debt must decrease after repay"
-        )
-
-        # Health factor should improve (increase) after repay
-        if account_data_before["healthFactor"] < 2**256 - 1:  # Not max uint (no debt)
-            assert account_data_after["healthFactor"] >= account_data_before["healthFactor"], (
-                "Health factor must improve (or stay same) after repay"
-            )
-
-        print("\nALL CHECKS PASSED")
+        print("\nVIB-6111 QUARANTINE ASSERTIONS PASSED — repay remains unreachable")
 
 
 # =============================================================================
