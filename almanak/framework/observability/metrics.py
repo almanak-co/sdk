@@ -212,6 +212,37 @@ def record_ledger_intent_fallback(*, intent_type: str) -> None:
     LEDGER_INTENT_FALLBACK_TOTAL.labels(intent_type=(intent_type or "unknown") or "unknown").inc()
 
 
+LEDGER_LP_LEG_IDENTITY_MISSING_TOTAL = Counter(
+    "ledger_lp_leg_identity_missing_total",
+    "LP money rows whose receipt parser emitted NO per-leg token identity "
+    "(currency0/currency1 / coin_symbols), so the ledger resolved symbols from the "
+    "intent/pool LABEL order instead of the on-chain address. This is the residual "
+    "phantom-order surface after VIB-6053: on an inverted pool a label-order row can "
+    "still transpose / mis-scale. A shrinking rate tracks the parser-stamp rollout to "
+    "completion; a non-zero rate flags a connector that still needs leg-identity "
+    "stamping. Observability only — the row is still written label-order (unchanged).",
+    ["protocol", "chain", "intent_type"],
+    registry=FRAMEWORK_REGISTRY,
+)
+
+
+def record_lp_leg_identity_missing(*, protocol: str, chain: str, intent_type: str) -> None:
+    """Increment ``ledger_lp_leg_identity_missing_total`` for one label-fallback LP row.
+
+    Call at the LP ledger site where a money row's parser emitted no per-leg identity
+    and the resolver fell back to intent/pool label order (VIB-6053). The structured
+    WARNING at the call site is the human-readable half; this is the metric half.
+    Mirrors the :func:`record_ledger_intent_fallback` rollout-tracking contract. Labels
+    are bounded / defaulted to ``"unknown"`` so a missing value never spawns a divergent
+    Prometheus time-series.
+    """
+    LEDGER_LP_LEG_IDENTITY_MISSING_TOTAL.labels(
+        protocol=(str(protocol) or "unknown") or "unknown",
+        chain=(str(chain) or "unknown") or "unknown",
+        intent_type=(str(intent_type) or "unknown") or "unknown",
+    ).inc()
+
+
 def record_v4_lp_parser_drop(*, chain: str, reason: V4LPDropReason | str, outcome: V4LPDropOutcome) -> None:
     """Increment the ``v4_lp_parser_drops_total`` counter.
 
@@ -263,12 +294,14 @@ __all__ = [
     "ACCOUNTING_RAW_WEI_SUSPECTED_TOTAL",
     "FRAMEWORK_REGISTRY",
     "LEDGER_INTENT_FALLBACK_TOTAL",
+    "LEDGER_LP_LEG_IDENTITY_MISSING_TOTAL",
     "ONCHAIN_READ_FALLBACK_TOTAL",
     "OnchainReadFallbackReason",
     "V4_LP_PARSER_DROPS_TOTAL",
     "V4LPDropOutcome",
     "V4LPDropReason",
     "record_ledger_intent_fallback",
+    "record_lp_leg_identity_missing",
     "record_onchain_read_fallback",
     "record_raw_wei_suspected",
     "record_v4_lp_parser_drop",

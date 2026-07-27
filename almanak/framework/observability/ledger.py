@@ -486,6 +486,34 @@ def _lp_amount_to_human(raw: Any, token: str, chain: str) -> str | None:
         return None
 
 
+def _record_lp_leg_identity_missing(intent_type: str, protocol: str, chain: str) -> None:
+    """WARN + metric when an LP money-row's parser emitted NO per-leg identity.
+
+    VIB-6053. The parser stamps ``currency0``/``currency1`` (or ``coin_symbols``)
+    index-aligned with the amounts so the ledger binds symbols by ADDRESS. When a
+    connector emits none of those, the resolver falls back to the intent/pool LABEL
+    order — the residual phantom-order surface (on an inverted pool a label-order row
+    can transpose / mis-scale). This does NOT change the row (it is still written
+    label-order); it makes the residual VISIBLE so the parser-stamp rollout can be
+    driven to completion, mirroring the ``ledger_intent_fallback_total`` contract.
+    """
+    logger.warning(
+        "ledger LP row resolved token symbols from intent-LABEL order — parser emitted "
+        "no per-leg identity (currency0/1 / coin_symbols) for intent_type=%s protocol=%s "
+        "chain=%s. On an inverted pool this risks a transposed/mis-scaled row; stamp leg "
+        "identity at the parser (VIB-6053) to close it.",
+        intent_type,
+        protocol,
+        chain,
+    )
+    try:
+        from almanak.framework.observability.metrics import record_lp_leg_identity_missing
+
+        record_lp_leg_identity_missing(protocol=protocol, chain=chain, intent_type=intent_type)
+    except Exception:  # noqa: BLE001 — observability must never break the accounting write path
+        logger.debug("lp leg identity-missing metric increment failed", exc_info=True)
+
+
 def _extract_from_lp_open(intent: Any, result: Any, chain: str = "") -> _TokensAndAmounts:
     """Phase beta-lp-open -- LP_OPEN has no swap_amounts; pull amounts from
     ``LPOpenData`` in ``result.extracted_data`` and tokens from the intent.
@@ -534,6 +562,15 @@ def _extract_from_lp_open(intent: Any, result: Any, chain: str = "") -> _TokensA
         chain,
         getattr(lp_open_data, "coin_symbols", None),
     )
+    # VIB-6053 residual-surface observability: a real LPOpenData that carries NO
+    # per-leg identity resolved its symbols from intent/pool LABEL order (see helper).
+    if (
+        lp_open_data is not None
+        and getattr(lp_open_data, "currency0", None) is None
+        and getattr(lp_open_data, "currency1", None) is None
+        and not getattr(lp_open_data, "coin_symbols", None)
+    ):
+        _record_lp_leg_identity_missing("LP_OPEN", getattr(intent, "protocol", "") or "", chain)
 
     if lp_open_data is not None:
         # On-chain actuals are raw integers (smallest unit) -> scale to human.
@@ -726,6 +763,10 @@ def _extract_from_lp_close(intent: Any, result: Any, chain: str = "") -> _Tokens
     # chain truth instead of persisting four empty money columns.
     coin_symbols = getattr(lp_close_data, "coin_symbols", None)
     token_in, token_out = _resolve_lp_close_tokens(intent, currency0, currency1, chain, coin_symbols)
+    # VIB-6053 residual-surface observability (see ``_record_lp_leg_identity_missing``):
+    # an LPCloseData with no per-leg identity resolved symbols from intent/pool LABEL order.
+    if currency0 is None and currency1 is None and not coin_symbols:
+        _record_lp_leg_identity_missing("LP_CLOSE", getattr(intent, "protocol", "") or "", chain)
 
     # Scale on-chain raw collected amounts (smallest unit) to human. ``None``
     # (unmeasured) stays ``""`` (Empty != Zero); a measured ``0`` scales to "0".
