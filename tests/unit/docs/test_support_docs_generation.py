@@ -42,6 +42,7 @@ def _connector(
     strategy_intents: tuple[str, ...] | None = ("SWAP",),
     strategy_chains: tuple[str, ...] | None = ("arbitrum",),
     raw_strategy_chains: tuple[str, ...] | None | object = _RAW_UNSET,
+    excluded_chains_by_intent: dict[str, frozenset[str]] | None = None,
 ) -> ConnectorDoc:
     if raw_strategy_chains is _RAW_UNSET:
         raw_strategy_chains = strategy_chains
@@ -55,6 +56,7 @@ def _connector(
         strategy_intents=strategy_intents,
         strategy_chains=strategy_chains,
         raw_strategy_chains=raw_strategy_chains,
+        excluded_chains_by_intent=excluded_chains_by_intent or {},
     )
 
 
@@ -195,3 +197,105 @@ def test_chain_index_links_to_generated_chain_pages() -> None:
     assert "[``arbitrum``](chains/arbitrum.md)" in index
     assert "| [``solana``](chains/solana.md) | N/A | SVM | N/A | 0 |" in index
     assert "| Name | Chain ID | Family | Aliases | Connectors |" in index
+
+
+# ---------------------------------------------------------------------------
+# Per-(intent, chain) exclusions (VIB-6111) — the published-docs surfaces.
+# ---------------------------------------------------------------------------
+
+
+def _aave_like() -> ConnectorDoc:
+    return _connector(
+        "aave_v3",
+        display_name="Aave V3",
+        kind="lending",
+        strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
+        strategy_chains=("arbitrum", "mantle"),
+        excluded_chains_by_intent={"BORROW": frozenset({"mantle"})},
+    )
+
+
+def test_connector_page_narrows_intents_per_chain() -> None:
+    connector = _aave_like()
+    model = _model(
+        chains=(
+            _chain("arbitrum", display_name="Arbitrum", chain_id=42161),
+            _chain("mantle", display_name="Mantle", chain_id=5000),
+        ),
+        connectors=(connector,),
+    )
+    page = generate_connector_matrix.generate_connector_page(connector, model)
+
+    assert (
+        "| [Mantle](../../chains/mantle.md) | EVM | ``REPAY``, ``SUPPLY``, ``WITHDRAW`` |" in page
+    ), "the mantle row must NOT advertise BORROW"
+    assert (
+        "| [Arbitrum](../../chains/arbitrum.md) | EVM | ``BORROW``, ``REPAY``, ``SUPPLY``, "
+        "``WITHDRAW`` |" in page
+    ), "every other chain keeps the full declaration — the exclusion narrows one cell only"
+
+
+def test_chain_page_narrows_intents_for_that_chain() -> None:
+    connector = _aave_like()
+    mantle = _chain("mantle", display_name="Mantle", chain_id=5000)
+    arbitrum = _chain("arbitrum", display_name="Arbitrum", chain_id=42161)
+    model = _model(chains=(arbitrum, mantle), connectors=(connector,))
+
+    mantle_page = generate_chain_table.generate_chain_page(mantle, model)
+    arbitrum_page = generate_chain_table.generate_chain_page(arbitrum, model)
+
+    assert "``REPAY``, ``SUPPLY``, ``WITHDRAW``" in mantle_page
+    assert "``BORROW``" not in mantle_page
+    assert "``BORROW``, ``REPAY``, ``SUPPLY``, ``WITHDRAW``" in arbitrum_page
+
+
+def test_intents_for_chain_is_narrowing_only() -> None:
+    from scripts.docs.support_docs import intents_for_chain
+
+    connector = _aave_like()
+    # A chain the connector never declared gets nothing extra from the helper.
+    assert intents_for_chain(connector, "mantle") == ("SUPPLY", "REPAY", "WITHDRAW")
+    assert intents_for_chain(connector, "arbitrum") == ("SUPPLY", "BORROW", "REPAY", "WITHDRAW")
+    # No exclusions at all -> the full declared tuple, unchanged.
+    assert intents_for_chain(_connector("x"), "arbitrum") == ("SWAP",)
+    # No intents declared -> None passes through for the caller's empty state.
+    assert intents_for_chain(_connector("y", strategy_intents=None), "arbitrum") is None
+
+
+def test_intents_for_chain_canonicalises_alias_input() -> None:
+    """An alias must not render an ASSERTIVE false statement (VIB-6111).
+
+    ``format_intents(())`` renders "None on this chain". Without canonicalizing
+    the input, a caller passing the registered alias ``bnb`` for a connector
+    declaring ``bsc`` gets ``()`` and the generated support table states the
+    connector supports nothing there — worse than the blank cell the empty-state
+    string was introduced to replace, because it asserts rather than omits.
+    """
+    from scripts.docs.support_docs import format_intents, intents_for_chain
+
+    connector = _connector("bsc_venue", strategy_intents=("SWAP", "SUPPLY"), strategy_chains=("bsc",))
+
+    assert intents_for_chain(connector, "bsc") == ("SWAP", "SUPPLY")
+    assert intents_for_chain(connector, "bnb") == ("SWAP", "SUPPLY"), (
+        "the registered alias must fold to the canonical name, exactly as "
+        "ConnectorManifest.intents_for_chain does"
+    )
+    # A genuinely undeclared chain still yields the empty state.
+    assert intents_for_chain(connector, "solana") == ()
+    assert format_intents(intents_for_chain(connector, "solana")) == "None on this chain"
+    # …and the alias must NOT reach that empty state.
+    assert format_intents(intents_for_chain(connector, "bnb")) != "None on this chain"
+
+
+def test_excluded_chain_alias_is_also_canonicalised() -> None:
+    """The exclusion side of the same helper folds aliases too."""
+    from scripts.docs.support_docs import intents_for_chain
+
+    connector = _connector(
+        "bsc_venue_excl",
+        strategy_intents=("SWAP", "SUPPLY"),
+        strategy_chains=("bsc", "arbitrum"),
+        excluded_chains_by_intent={"SWAP": frozenset({"bsc"})},
+    )
+    assert intents_for_chain(connector, "bsc") == ("SUPPLY",)
+    assert intents_for_chain(connector, "bnb") == ("SUPPLY",)

@@ -10,6 +10,7 @@ from almanak.connectors._connector import (
     ImportRef,
     LendingReadDecl,
     MetadataAmountEncoding,
+    StrategyIntentChainExclusion,
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec, SupportedChainsSpec
@@ -144,6 +145,27 @@ CONNECTOR = Connector(
         "mantle",
         "xlayer",
         "linea",
+    ),
+    # BORROW is NOT supported on mantle (VIB-6111). The exclusion narrows the
+    # intents x chains cross-product without touching strategy_chains — mantle
+    # keeps SUPPLY / WITHDRAW / REPAY, which still work there, and stays in
+    # supported_chains.py so the runtime gate and the manifest remain exactly
+    # consistent. Dropping the chain instead would strand pre-existing
+    # borrowers who need REPAY.
+    strategy_intent_chain_exclusions=(
+        StrategyIntentChainExclusion(
+            intent="BORROW",
+            chains=frozenset({"mantle"}),
+            reason=(
+                "Aave governance zeroed ltv on all 10 Aave V3 Mantle reserves at block "
+                "98303344 (2026-07-22); no asset on that market can be enabled as "
+                "collateral, so borrowing is impossible for every asset. "
+                "liquidationThreshold was left intact and nothing is frozen, so SUPPLY, "
+                "WITHDRAW and REPAY still work and stay advertised — REPAY in particular "
+                "must remain available to pre-existing borrowers."
+            ),
+            ticket="VIB-6111",
+        ),
     ),
 )
 

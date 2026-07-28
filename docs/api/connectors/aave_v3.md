@@ -16,7 +16,7 @@
 | [BNB Chain](../../chains/bsc.md) | EVM | ``BORROW``, ``REPAY``, ``SUPPLY``, ``WITHDRAW`` |
 | [Ethereum](../../chains/ethereum.md) | EVM | ``BORROW``, ``REPAY``, ``SUPPLY``, ``WITHDRAW`` |
 | [Linea](../../chains/linea.md) | EVM | ``BORROW``, ``REPAY``, ``SUPPLY``, ``WITHDRAW`` |
-| [Mantle](../../chains/mantle.md) | EVM | ``BORROW``, ``REPAY``, ``SUPPLY``, ``WITHDRAW`` |
+| [Mantle](../../chains/mantle.md) | EVM | ``REPAY``, ``SUPPLY``, ``WITHDRAW`` |
 | [Optimism](../../chains/optimism.md) | EVM | ``BORROW``, ``REPAY``, ``SUPPLY``, ``WITHDRAW`` |
 | [Polygon](../../chains/polygon.md) | EVM | ``BORROW``, ``REPAY``, ``SUPPLY``, ``WITHDRAW`` |
 | [X-Layer](../../chains/xlayer.md) | EVM | ``BORROW``, ``REPAY``, ``SUPPLY``, ``WITHDRAW`` |

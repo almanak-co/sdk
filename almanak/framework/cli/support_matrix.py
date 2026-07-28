@@ -32,6 +32,7 @@ context.
 from __future__ import annotations
 
 import json as json_module
+from collections.abc import Callable
 from typing import Any
 
 import click
@@ -105,10 +106,28 @@ def _normalize_entry_chains(chains: frozenset[str]) -> frozenset[str]:
     return frozenset(_matrix_chain(c) for c in chains)
 
 
+def _constant_chains(chains: tuple[str, ...]) -> Callable[[Any], tuple[str, ...]]:
+    """A narrowing read that returns ``chains`` for every intent.
+
+    Used to derive the PRE-exclusion rows so they can be diffed against the
+    narrowed ones (VIB-6111). A closure factory rather than an inline lambda:
+    an inline `lambda _intent: declared` inside the connector loop trips ruff
+    B023 (late binding), and the `lambda _intent, _c=…: _c` form that avoids
+    B023 defeats mypy's inference against the `Callable` parameter type. Binding
+    the value through a function argument satisfies both.
+    """
+
+    def _read(_intent: Any) -> tuple[str, ...]:
+        return chains
+
+    return _read
+
+
 def _derive_entries_from_intents(
     name: str,
     intents: tuple[Any, ...],
     chains: tuple[str, ...] | None,
+    chains_for_intent: Callable[[Any], tuple[str, ...]],
 ) -> tuple[tuple[str, str, frozenset[str]], ...]:
     """Derive ``(matrix_name, category, chains)`` rows from a manifest's intents.
 
@@ -122,13 +141,27 @@ def _derive_entries_from_intents(
     LP_OPEN + LP_CLOSE) emits multiple rows, one per category. Returns
     an empty tuple for connectors with off-chain venues (``chains is
     None``) since the matrix is on-chain only.
+
+    ``chains_for_intent`` is the manifest's narrowed per-intent chain read
+    (``ConnectorManifest.chains_for_intent`` — VIB-6111). A category's chain
+    set is the UNION of its intents' narrowed chain sets, so a category
+    survives on a chain as long as at least one of its verbs does (Aave V3 on
+    mantle keeps its ``lending`` row because SUPPLY / WITHDRAW / REPAY still
+    work there, even though BORROW is excluded). A category disappears from a
+    chain only when EVERY intent in it is excluded there.
+
+    It is REQUIRED, deliberately (VIB-6111). Making it optional with an
+    un-narrowed default meant a future caller that forgot the argument silently
+    got pre-exclusion semantics — a quiet widening in the one function whose job
+    is truthful narrowing. A missing argument must raise TypeError, not return
+    the wrong answer.
     """
     from almanak.framework.intents.vocabulary import IntentType
 
     if chains is None:
         return ()
 
-    matrix_chains = frozenset(_matrix_chain(c) for c in chains)
+    narrowed: Callable[[Any], tuple[str, ...]] = chains_for_intent
 
     # Intent class → category. Centralising the dispatch here means
     # connectors don't have to repeat it; the matrix is the only place
@@ -155,18 +188,23 @@ def _derive_entries_from_intents(
         IntentType.FLASH_LOAN: ACTION_FLASH_LOAN,
     }
 
-    categories: set[str] = set()
+    # Per-category chain union over that category's intents. An intent whose
+    # narrowed chain set is empty contributes nothing; a category with no
+    # surviving chain at all emits no row (it would be an empty claim).
+    category_chains: dict[str, set[str]] = {}
     for intent in intents:
         cat = intent_category.get(intent)
-        if cat is not None:
-            categories.add(cat)
+        if cat is None:
+            continue
+        category_chains.setdefault(cat, set()).update(_matrix_chain(c) for c in narrowed(intent))
 
-    return tuple((name, cat, matrix_chains) for cat in categories)
+    return tuple((name, cat, frozenset(chain_set)) for cat, chain_set in category_chains.items() if chain_set)
 
 
 def _collect_from_connector_registry(
     entries: dict[tuple[str, str], set[str]],
     authoritative: set[tuple[str, str]],
+    narrowed_out: dict[tuple[str, str], set[str]],
 ) -> None:
     """Phase A — derive rows from the strategy-side ``ConnectorRegistry``.
 
@@ -215,10 +253,51 @@ def _collect_from_connector_registry(
             manifest.name,
             manifest.intents,
             manifest.chains,
+            manifest.chains_for_intent,
         )
-        for matrix_name, category, chain_set in derived:
-            key = (matrix_name, category)
+        # Record EXACTLY WHICH CHAINS the exclusions removed, per row (VIB-6111).
+        #
+        # Phase B unions compiler-table routes into any key it does not consider
+        # authoritative, which would silently undo the narrowing. Freezing the
+        # whole key stops that, but it over-corrects twice over: first at
+        # connector granularity (an exclusion on a LENDING verb froze the SWAP
+        # row), and then still at row granularity — a frozen key also loses
+        # compiler-table chains the exclusion never mentioned. Both directions
+        # under-advertise real support.
+        #
+        # A per-chain denylist is the precise instrument: let Phase B union
+        # whatever it wants, then subtract only the chains the connector
+        # actually disclaimed. Computed by diffing the raw derivation against
+        # the narrowed one, so there is no intent→category duplication and it
+        # stays correct if the category mapping changes.
+        raw = _derive_entries_from_intents(
+            manifest.name,
+            manifest.intents,
+            manifest.chains,
+            _constant_chains(tuple(manifest.chains or ())),
+        )
+        raw_by_key = {(n, c): chains for n, c, chains in raw}
+        derived_by_key = {(n, c): chains for n, c, chains in derived}
+        for key, chain_set in derived_by_key.items():
             entries.setdefault(key, set()).update(chain_set)
+        # Iterate the RAW keys, not the derived ones. A category whose every
+        # chain is narrowed away emits no derived row at all
+        # (``_derive_entries_from_intents`` drops empty categories), so keying
+        # off ``derived`` would record no denylist for it and Phase B could
+        # recreate the whole row from the routing tables. Defaulting the
+        # narrowed set to empty covers both the surviving and the
+        # fully-removed case with one expression.
+        #
+        # NOTE: unreachable under today's validators — a per-entry exclusion
+        # covering every declared chain is rejected, so every intent keeps at
+        # least one chain and a category union can never be empty. Kept as
+        # belt-and-braces because the cost is one dict lookup and the failure
+        # mode if a validator ever relaxes is silent re-advertisement. Do NOT
+        # add a test that fabricates the shape by bypassing validation.
+        for key, raw_chain_set in raw_by_key.items():
+            dropped = set(raw_chain_set) - set(derived_by_key.get(key, frozenset()))
+            if dropped:
+                narrowed_out.setdefault(key, set()).update(dropped)
 
 
 def _collect_from_compiler_tables(
@@ -339,9 +418,18 @@ def _build_matrix() -> dict:
     # connector's view wins. Other keys are open for compiler-table
     # union. See ``_collect_from_compiler_tables`` for the rationale.
     authoritative: set[tuple[str, str]] = set()
+    # (matrix_name, category) -> chains a connector explicitly disclaimed via
+    # ``intent_chain_exclusions``. Subtracted AFTER Phase B so a compiler-table
+    # route can never re-advertise a cell the connector declared unsupported,
+    # while chains the exclusion never mentioned still union normally (VIB-6111).
+    narrowed_out: dict[tuple[str, str], set[str]] = {}
 
-    _collect_from_connector_registry(entries, authoritative)
+    _collect_from_connector_registry(entries, authoritative, narrowed_out)
     _collect_from_compiler_tables(entries, authoritative)
+
+    for key, dropped in narrowed_out.items():
+        if key in entries:
+            entries[key] -= dropped
 
     # Drop empty-chain rows — a connector that declared the capability
     # without any chain coverage shouldn't surface as a no-op row.

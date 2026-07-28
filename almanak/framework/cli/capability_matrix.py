@@ -23,10 +23,19 @@ called, so no gateway-only module is imported):
 capability     derived from
 ============== ==========================================================
 compile        ``strategy_intents`` × ``strategy_chains`` defines the
-               universe; every declared cell compiles.
+               universe; every declared cell compiles. NOT affected by
+               ``strategy_intent_chain_exclusions`` — an exclusion says the
+               verb is not executable on that chain, not that the compiler
+               refuses to build a bundle (VIB-6111; the Mantle intent test
+               asserts BORROW still compiles there). See
+               ``EXCLUSION_GOVERNED_CAPABILITIES``.
 execute        co-declared with ``compile`` in phase 1 (the manifest has no
                separate execute decl); a later phase binds this to demo /
-               intent-test evidence.
+               intent-test evidence. Cells the manifest narrows away via
+               ``strategy_intent_chain_exclusions`` (VIB-6111) render
+               ``unsupported-explicit`` with the connector's declared reason
+               + ticket — this capability and ``demo-coverage`` are the only
+               two the exclusion governs.
 rate           ``lending_read.rate_history_chains`` (strategy-side mirror of
                the gateway ``GatewayLendingRateHistoryCapability``).
 valuation      ``lending_read`` presence (lending). LP / vault / perp have no
@@ -85,6 +94,25 @@ CAPABILITIES: tuple[str, ...] = (
     CAP_SAFETY_FLOOR,
     CAP_DEMO_COVERAGE,
 )
+
+# Capabilities an ``intent_chain_exclusions`` entry actually governs (VIB-6111).
+#
+# An exclusion is a statement about the END-TO-END EXECUTABILITY of a verb on a
+# chain — "you cannot borrow here" — and nothing more. Applying it to every
+# capability prints claims that are demonstrably false about positions this
+# field exists to protect: ``valuation`` derives from the connector's
+# ``lending_read`` decl and ``accounting`` from its ``receipt_parser_connector``,
+# both of which are present and working on Mantle. The connector's stated reason
+# for KEEPING mantle in ``strategy_chains`` is that pre-existing borrowers still
+# hold debt there — so telling an operator that the SDK cannot value or account
+# that debt is exactly backwards, and would read as "your position is invisible
+# to the portfolio fold" during an incident. It is also the same distinction
+# ``teardown/residual_discovery.py`` draws in this change: advertisement
+# narrows; safety does not.
+#
+# ``compile`` is likewise NOT governed: tests/intents/mantle/test_aave_v3_lending.py
+# asserts Mantle BORROW still compiles ("can never execute here").
+EXCLUSION_GOVERNED_CAPABILITIES: frozenset[str] = frozenset({CAP_EXECUTE, CAP_DEMO_COVERAGE})
 
 STATE_SUPPORTED = "supported"
 STATE_UNSUPPORTED = "unsupported-explicit"
@@ -372,6 +400,23 @@ def _connector_protocol_keys(connector: object) -> tuple[str, ...]:
     return (name, *aliases)
 
 
+def _excluded_cell_reasons(connector: object) -> dict[tuple[str, str], str]:
+    """``(intent, normalised chain) -> "<reason> (<ticket>)"`` for excluded cells.
+
+    Reads the descriptor's narrowing-only ``strategy_intent_chain_exclusions``
+    (VIB-6111). An excluded cell is a declared NON-capability: the connector has
+    spoken, so it renders ``unsupported-explicit`` with the declared reason
+    rather than ``supported`` (which would be a lie) or ``unknown`` (which would
+    throw away the explanation).
+    """
+    reasons: dict[tuple[str, str], str] = {}
+    for exclusion in getattr(connector, "strategy_intent_chain_exclusions", None) or ():
+        text = f"{getattr(exclusion, 'reason', '')} ({getattr(exclusion, 'ticket', '')})"
+        for chain in getattr(exclusion, "chains", ()) or ():
+            reasons[(getattr(exclusion, "intent", ""), _matrix_chain(chain))] = text
+    return reasons
+
+
 def _cells_for_connector(connector: object, coverage: _DemoCoverage) -> list[CapabilityCell]:
     """Every applicable capability cell this connector contributes."""
     intents = getattr(connector, "strategy_intents", None)
@@ -388,14 +433,23 @@ def _cells_for_connector(connector: object, coverage: _DemoCoverage) -> list[Cap
         cells.extend(_offchain_cells(name, intents))
         return cells
 
+    excluded = _excluded_cell_reasons(connector)
     norm_chains = [_matrix_chain(c) for c in chains]
     for intent in intents:
         category = _intent_category(intent)
         for chain in norm_chains:
+            exclusion_reason = excluded.get((intent, chain))
             for capability in CAPABILITIES:
                 if not _capability_applies(capability, category):
                     continue
-                state, reason = _capability_state(capability, connector, chain, category, protocol_keys, coverage)
+                if exclusion_reason is not None and capability in EXCLUSION_GOVERNED_CAPABILITIES:
+                    state, reason = STATE_UNSUPPORTED, exclusion_reason
+                else:
+                    # Every other capability is evaluated normally, even for an
+                    # excluded cell — see EXCLUSION_GOVERNED_CAPABILITIES for why
+                    # an allowlist (rather than "everything except compile") is
+                    # the truthful shape here (VIB-6111).
+                    state, reason = _capability_state(capability, connector, chain, category, protocol_keys, coverage)
                 cells.append(
                     CapabilityCell(
                         protocol=name,

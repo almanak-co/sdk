@@ -78,6 +78,16 @@ _DISCOVERY_CHAINS: dict[str, tuple[str, ...]] = {}
 # (loud WARNING), not a real strand (hard fail-closed sentinel).
 _DISCOVERY_INTENTS: dict[str, frozenset[str]] = {}
 
+# DELIBERATELY NOT NARROWED by ``strategy_intent_chain_exclusions`` (VIB-6111).
+# Those exclusions are an ADVERTISEMENT narrowing — they say "do not offer this
+# (intent, chain) cell to new strategies". They say nothing about whether a
+# position opened BEFORE the exclusion existed is still on-chain. Teardown
+# residual discovery is the fail-closed safety sweep; narrowing it here would
+# make teardown skip discovery for exactly the users who most need it (e.g. a
+# pre-existing Aave V3 debt position on Mantle, opened before governance zeroed
+# ltv and disabled new borrows). Both maps stay the coarse UNION of everything
+# the connector ever declares. Advertisement narrows; safety does not.
+
 
 def _register_manifest_teardown_residual_discoveries() -> None:
     """Register connector-owned residual discoveries from manifests (VIB-5116)."""

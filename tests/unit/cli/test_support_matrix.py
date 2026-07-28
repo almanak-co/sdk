@@ -574,3 +574,308 @@ class TestDynamicCapabilityDiscovery:
             )
         finally:
             ConnectorRegistry._entries.pop("vib_4856_mock_suppressed", None)
+
+
+# =============================================================================
+# Per-(intent, chain) exclusions (VIB-6111)
+# =============================================================================
+
+
+class TestIntentChainExclusionDerivation:
+    """A category's chain set is the UNION of its intents' narrowed chain sets.
+
+    The consequence that matters in production: a category survives on a chain
+    as long as ONE of its verbs does (Aave V3 keeps its ``lending`` row on
+    mantle because SUPPLY / WITHDRAW / REPAY still work), and a category
+    disappears from a chain only when EVERY verb in it is excluded there.
+    """
+
+    @staticmethod
+    def _derive(intents, chains, exclusions):
+        from almanak.connectors._strategy_base.registry import ConnectorManifest
+        from almanak.framework.cli.support_matrix import _derive_entries_from_intents
+
+        manifest = ConnectorManifest(
+            name="vib_6111_probe",
+            intents=intents,
+            chains=chains,
+            intent_chain_exclusions=exclusions,
+        )
+        return {
+            (name, category): set(chain_set)
+            for name, category, chain_set in _derive_entries_from_intents(
+                manifest.name, manifest.intents, manifest.chains, manifest.chains_for_intent
+            )
+        }
+
+    def test_partially_excluded_category_keeps_the_chain(self) -> None:
+        from almanak.connectors._strategy_base.registry import IntentChainExclusion
+        from almanak.framework.intents.vocabulary import IntentType
+
+        derived = self._derive(
+            (IntentType.SUPPLY, IntentType.BORROW),
+            ("ethereum", "mantle"),
+            (
+                IntentChainExclusion(
+                    intent=IntentType.BORROW,
+                    chains=frozenset({"mantle"}),
+                    reason="ltv zeroed on every reserve",
+                    ticket="VIB-6111",
+                ),
+            ),
+        )
+
+        assert derived[("vib_6111_probe", "lending")] == {"ethereum", "mantle"}
+
+    def test_fully_excluded_category_drops_the_chain(self) -> None:
+        from almanak.connectors._strategy_base.registry import IntentChainExclusion
+        from almanak.framework.intents.vocabulary import IntentType
+
+        # SWAP is the ONLY verb in the swap category, so excluding it on mantle
+        # removes mantle from the swap row entirely — while the lending row,
+        # driven by a different verb, keeps mantle.
+        derived = self._derive(
+            (IntentType.SWAP, IntentType.SUPPLY),
+            ("ethereum", "mantle"),
+            (
+                IntentChainExclusion(
+                    intent=IntentType.SWAP,
+                    chains=frozenset({"mantle"}),
+                    reason="no router deployed",
+                    ticket="VIB-6111",
+                ),
+            ),
+        )
+
+        assert derived[("vib_6111_probe", "swap")] == {"ethereum"}
+        assert derived[("vib_6111_probe", "lending")] == {"ethereum", "mantle"}
+
+    def test_no_exclusions_is_unchanged_behaviour(self) -> None:
+        from almanak.framework.intents.vocabulary import IntentType
+
+        derived = self._derive((IntentType.SWAP,), ("ethereum", "mantle"), None)
+        assert derived == {("vib_6111_probe", "swap"): {"ethereum", "mantle"}}
+
+    def test_narrowing_callable_is_required_not_a_silent_fallback(self) -> None:
+        """Omitting the narrowing read must RAISE, never widen silently.
+
+        It used to default to the raw ``chains``, so a caller that forgot the
+        argument quietly got pre-VIB-6111 semantics — a silent widening in the
+        one function whose contract is truthful narrowing. Wrong answers must be
+        loud here.
+        """
+        import pytest
+
+        from almanak.framework.cli.support_matrix import _derive_entries_from_intents
+        from almanak.framework.intents.vocabulary import IntentType
+
+        with pytest.raises(TypeError):
+            _derive_entries_from_intents(
+                "vib_6111_probe", (IntentType.SWAP,), ("ethereum", "mantle")
+            )
+
+
+class TestExclusionsSurviveTheFullMatrixBuild:
+    """VIB-6111 regression: Phase B must not re-widen a narrowed row.
+
+    The per-function tests above exercise ``_derive_entries_from_intents`` in
+    ISOLATION, which is exactly why the original defect passed them: the
+    narrowing was correct there and then undone one call later.
+    ``_build_matrix()`` runs Phase A (registry) AND Phase B (compiler routing
+    tables), and Phase B unions router-table chains into any key it does not
+    consider authoritative. A connector that appears in ``PROTOCOL_ROUTERS``
+    therefore got its excluded chain added straight back.
+
+    This test must run the FULL build, and must use a protocol name that really
+    is in the routing tables — otherwise it re-tests Phase A and proves nothing.
+    """
+
+    def test_excluded_chain_is_not_re_added_by_compiler_tables(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from almanak.framework.intents import compiler_constants
+        from almanak.connectors._strategy_base.registry import (
+            ConnectorManifest,
+            ConnectorRegistry,
+            IntentChainExclusion,
+        )
+        from almanak.framework.intents.vocabulary import IntentType
+
+        proto_name = "vib_6111_router_probe"
+        routed_chain = "ethereum"
+        other_chain = "arbitrum"
+
+        # Put the synthetic protocol in the routing table so Phase B genuinely
+        # tries to widen it. A real connector name can't be used here:
+        # ``_build_matrix`` re-imports every connector, which would collide with
+        # the injected manifest.
+        patched_routers = {
+            chain: dict(protos) if isinstance(protos, dict) else list(protos)
+            for chain, protos in compiler_constants.PROTOCOL_ROUTERS.items()
+        }
+        bucket = patched_routers.setdefault(routed_chain, {})
+        if isinstance(bucket, dict):
+            bucket[proto_name] = "0x" + "11" * 20
+        else:
+            bucket.append(proto_name)
+        monkeypatch.setattr(compiler_constants, "PROTOCOL_ROUTERS", patched_routers)
+
+        manifest = ConnectorManifest(
+            name=proto_name,
+            intents=(IntentType.SWAP, IntentType.SUPPLY),
+            chains=(routed_chain, other_chain),
+            intent_chain_exclusions=(
+                IntentChainExclusion(
+                    intent=IntentType.SWAP,
+                    chains=frozenset({routed_chain}),
+                    reason="probe: connector declares SWAP unsupported here",
+                    ticket="VIB-6111",
+                ),
+            ),
+        )
+        ConnectorRegistry.register(manifest)
+        try:
+            data = _build_matrix()
+            swap_rows = [
+                p for p in data["protocols"] if p["name"] == proto_name and p["category"] == "swap"
+            ]
+            assert swap_rows, "the connector should still publish a swap row for its other chain"
+            chains = set(swap_rows[0]["chains"])
+            assert other_chain in chains, "the non-excluded chain must survive"
+            assert routed_chain not in chains, (
+                f"{routed_chain!r} was excluded for SWAP but reappeared in the rendered matrix — "
+                "Phase B (compiler routing tables) re-widened a narrowed row"
+            )
+        finally:
+            ConnectorRegistry._entries.pop(proto_name, None)
+
+    def test_exclusion_does_not_freeze_unrelated_categories(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An exclusion on a LENDING verb must not shrink the SWAP row.
+
+        The first fix froze every derived row of any exclusion-declaring
+        connector, which subtracted compiler-table-only chains from categories
+        the exclusion never mentioned — under-advertising real support, and
+        invisible to the excluded-chain assertion above.
+        """
+        from almanak.framework.intents import compiler_constants
+        from almanak.connectors._strategy_base.registry import (
+            ConnectorManifest,
+            ConnectorRegistry,
+            IntentChainExclusion,
+        )
+        from almanak.framework.intents.vocabulary import IntentType
+
+        proto_name = "vib_6111_category_probe"
+        # Router table covers a chain the manifest does NOT declare; the
+        # historical union is what puts it on the swap row.
+        patched = {
+            chain: dict(protos) if isinstance(protos, dict) else list(protos)
+            for chain, protos in compiler_constants.PROTOCOL_ROUTERS.items()
+        }
+        bucket = patched.setdefault("base", {})
+        if isinstance(bucket, dict):
+            bucket[proto_name] = "0x" + "22" * 20
+        else:
+            bucket.append(proto_name)
+        monkeypatch.setattr(compiler_constants, "PROTOCOL_ROUTERS", patched)
+
+        manifest = ConnectorManifest(
+            name=proto_name,
+            intents=(IntentType.SWAP, IntentType.SUPPLY, IntentType.BORROW),
+            chains=("ethereum", "arbitrum"),
+            intent_chain_exclusions=(
+                IntentChainExclusion(
+                    intent=IntentType.BORROW,
+                    chains=frozenset({"arbitrum"}),
+                    reason="probe: lending-only exclusion",
+                    ticket="VIB-6111",
+                ),
+            ),
+        )
+        ConnectorRegistry.register(manifest)
+        try:
+            data = _build_matrix()
+            swap = [p for p in data["protocols"] if p["name"] == proto_name and p["category"] == "swap"]
+            assert swap, "swap row must exist"
+            assert "base" in set(swap[0]["chains"]), (
+                "a BORROW exclusion must not remove the compiler-table chain 'base' "
+                "from the unrelated swap row"
+            )
+            lending = [
+                p for p in data["protocols"] if p["name"] == proto_name and p["category"] == "lending"
+            ]
+            assert lending, "lending row must exist (SUPPLY still works on both chains)"
+            assert set(lending[0]["chains"]) == {"ethereum", "arbitrum"}, (
+                "SUPPLY survives on both chains, so the lending row keeps both"
+            )
+        finally:
+            ConnectorRegistry._entries.pop(proto_name, None)
+
+
+    def test_unmentioned_compiler_chains_survive_the_narrowing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only the EXCLUDED chains are subtracted — not the whole row.
+
+        Freezing a narrowed key stops Phase B re-adding the excluded chain, but
+        it also drops compiler-table chains the exclusion never mentioned, which
+        under-advertises real support. The denylist is per-chain for that reason.
+        """
+        from almanak.framework.intents import compiler_constants
+        from almanak.connectors._strategy_base.registry import (
+            ConnectorManifest,
+            ConnectorRegistry,
+            IntentChainExclusion,
+        )
+        from almanak.framework.intents.vocabulary import IntentType
+
+        proto_name = "vib_6111_denylist_probe"
+        patched = {
+            chain: dict(protos) if isinstance(protos, dict) else list(protos)
+            for chain, protos in compiler_constants.PROTOCOL_ROUTERS.items()
+        }
+        # Router table lists the protocol on the EXCLUDED chain and on a chain
+        # the manifest never declares at all.
+        for chain in ("ethereum", "polygon"):
+            bucket = patched.setdefault(chain, {})
+            if isinstance(bucket, dict):
+                bucket[proto_name] = "0x" + "33" * 20
+            else:
+                bucket.append(proto_name)
+        monkeypatch.setattr(compiler_constants, "PROTOCOL_ROUTERS", patched)
+
+        manifest = ConnectorManifest(
+            name=proto_name,
+            # TWO intents: excluding the only verb on a declared chain is
+            # rejected by the dual invariant ("the connector claims a chain it
+            # supports nothing on"), so SUPPLY keeps ethereum alive while SWAP
+            # is disclaimed there.
+            intents=(IntentType.SWAP, IntentType.SUPPLY),
+            chains=("ethereum", "arbitrum"),
+            intent_chain_exclusions=(
+                IntentChainExclusion(
+                    intent=IntentType.SWAP,
+                    chains=frozenset({"ethereum"}),
+                    reason="probe: SWAP disclaimed here",
+                    ticket="VIB-6111",
+                ),
+            ),
+        )
+        ConnectorRegistry.register(manifest)
+        try:
+            data = _build_matrix()
+            row = [
+                p for p in data["protocols"] if p["name"] == proto_name and p["category"] == "swap"
+            ]
+            assert row, "swap row must exist"
+            chains = set(row[0]["chains"])
+            assert "ethereum" not in chains, "the EXCLUDED chain must not be re-advertised"
+            assert "arbitrum" in chains, "the declared, non-excluded chain must survive"
+            assert "polygon" in chains, (
+                "a compiler-table chain the exclusion never mentioned must still union in — "
+                "freezing the whole row would silently under-advertise it"
+            )
+        finally:
+            ConnectorRegistry._entries.pop(proto_name, None)

@@ -303,3 +303,56 @@ class TestGlobalApyFallbackWarns:
 
         assert apy == calculator.protocol_supply_apys["aave_v3"]
         assert not [record for record in caplog.records if "aave_v3" in record.getMessage()]
+
+
+class TestPerIntentChainExclusionGate:
+    """VIB-6111 — the chain gate is too coarse for a per-(intent, chain) exclusion.
+
+    Aave V3 keeps ``mantle`` in ``strategy_chains`` because SUPPLY / WITHDRAW /
+    REPAY still work there, so ``_lending_chain_scope_rejection`` passes and a
+    backtest would fill a BORROW that cannot execute live and accrue a
+    fabricated APY on it — the same failure the chain gate exists to prevent,
+    one axis over.
+    """
+
+    def test_chain_gate_alone_does_not_catch_it(self) -> None:
+        """Pins WHY the extra gate is needed; if this ever returns a rejection,
+        the coarse gate started covering the case and this suite should be
+        revisited rather than silently duplicating it."""
+        from almanak.framework.backtesting.pnl.engine import _lending_chain_scope_rejection
+
+        assert _lending_chain_scope_rejection("aave_v3", "mantle") is None
+
+    def test_excluded_intent_on_declared_chain_is_rejected(self) -> None:
+        from almanak.framework.backtesting.pnl.engine import _lending_intent_exclusion_rejection
+
+        reason = _lending_intent_exclusion_rejection("aave_v3", "mantle", "BORROW")
+        assert reason is not None
+        assert "BORROW" in reason and "mantle" in reason
+        assert "VIB-6111" in reason, "the connector's ticket must reach the rejection message"
+        assert "ltv" in reason.lower(), "the connector's reason must reach the rejection message"
+
+    def test_surviving_intents_on_the_same_chain_are_not_rejected(self) -> None:
+        """Over-rejection would strand pre-existing borrowers' REPAY/WITHDRAW."""
+        from almanak.framework.backtesting.pnl.engine import _lending_intent_exclusion_rejection
+
+        for intent in ("SUPPLY", "REPAY", "WITHDRAW"):
+            assert _lending_intent_exclusion_rejection("aave_v3", "mantle", intent) is None, intent
+
+    def test_same_intent_on_other_chains_is_not_rejected(self) -> None:
+        from almanak.framework.backtesting.pnl.engine import _lending_intent_exclusion_rejection
+
+        for chain in ("ethereum", "arbitrum", "base"):
+            assert _lending_intent_exclusion_rejection("aave_v3", chain, "BORROW") is None, chain
+
+    def test_undeclared_protocol_keeps_generic_behaviour(self) -> None:
+        from almanak.framework.backtesting.pnl.engine import _lending_intent_exclusion_rejection
+
+        assert _lending_intent_exclusion_rejection("totally_undeclared_venue", "mantle", "BORROW") is None
+
+    def test_chain_alias_is_canonicalised_before_matching(self) -> None:
+        """A caller passing a non-canonical spelling must not slip past the gate."""
+        from almanak.framework.backtesting.pnl.engine import _lending_intent_exclusion_rejection
+
+        assert _lending_intent_exclusion_rejection("aave_v3", "MANTLE", "BORROW") is not None
+        assert _lending_intent_exclusion_rejection("aave_v3", "mantle", "borrow") is not None

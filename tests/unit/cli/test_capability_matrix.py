@@ -29,6 +29,7 @@ from almanak.framework.cli.capability_matrix import (
     CAP_SAFETY_FLOOR,
     CAP_VALUATION,
     CAPABILITIES,
+    EXCLUSION_GOVERNED_CAPABILITIES,
     STATE_QUARANTINED,
     STATE_SUPPORTED,
     STATE_UNKNOWN,
@@ -70,6 +71,17 @@ class _FakeConnector:
     accounting_treatment: object | None = None
     primitive: object | None = None
     swap_quote_connector: object | None = None
+    strategy_intent_chain_exclusions: tuple[object, ...] | None = None
+
+
+@dataclass
+class _FakeExclusion:
+    """Stand-in for ``StrategyIntentChainExclusion`` (VIB-6111)."""
+
+    intent: str
+    chains: frozenset[str]
+    reason: str = "governance zeroed ltv on every reserve"
+    ticket: str = "VIB-6111"
 
 
 @dataclass
@@ -290,6 +302,76 @@ def test_offchain_venue_marked_unsupported_explicit() -> None:
 
 def test_connector_without_intents_emits_nothing() -> None:
     assert _cells_for_connector(_FakeConnector(strategy_intents=None), _EMPTY_COVERAGE) == []
+
+
+def test_excluded_intent_chain_cell_is_unsupported_with_reason() -> None:
+    """VIB-6111: a declared non-capability renders explicitly, not as ``supported``."""
+    conn = _FakeConnector(
+        name="aave_v3",
+        strategy_intents=("SUPPLY", "BORROW"),
+        strategy_chains=("ethereum", "mantle"),
+        lending_read=_FakeLendingRead(rate_history_chains=("ethereum", "mantle")),
+        strategy_intent_chain_exclusions=(_FakeExclusion(intent="BORROW", chains=frozenset({"mantle"})),),
+    )
+    cells = _cells_for_connector(conn, _EMPTY_COVERAGE)
+
+    borrow_mantle = [c for c in cells if c.intent == "BORROW" and c.chain == "mantle"]
+    assert borrow_mantle, "the excluded cell must still be rendered — as unsupported, not omitted"
+
+    # Only the capabilities the exclusion actually GOVERNS carry the verdict.
+    # An exclusion states that the verb is not executable end-to-end on that
+    # chain — it says nothing about whether the SDK can compile, value, account
+    # for, or quote a rate on a position that already exists there (VIB-6111).
+    governed = [c for c in borrow_mantle if c.capability in EXCLUSION_GOVERNED_CAPABILITIES]
+    assert governed
+    assert all(c.state == STATE_UNSUPPORTED for c in governed)
+    assert all("VIB-6111" in c.reason and "ltv" in c.reason for c in governed)
+
+    # valuation / accounting / rate / compile must NOT inherit the verdict.
+    # Aave keeps `mantle` in strategy_chains precisely because pre-existing
+    # borrowers still hold debt there; printing "valuation: unsupported" tells
+    # an operator their live position is invisible to the portfolio fold, which
+    # is both false and the opposite of the reason the chain was retained.
+    ungoverned = [c for c in borrow_mantle if c.capability not in EXCLUSION_GOVERNED_CAPABILITIES]
+    assert ungoverned, "non-governed capabilities must still be rendered for an excluded cell"
+    for cap in (CAP_COMPILE, CAP_VALUATION, CAP_ACCOUNTING):
+        # NB: do not rebind ``cells`` here — the assertions below read it.
+        cap_cells = [c for c in ungoverned if c.capability == cap]
+        assert cap_cells, f"{cap} must be rendered for an excluded cell"
+        assert all(c.state != STATE_UNSUPPORTED for c in cap_cells), (
+            f"{cap} must reflect its real support, not the exclusion verdict"
+        )
+
+    # Narrowing-only: every other (intent, chain) cell is untouched.
+    borrow_ethereum = [c for c in cells if c.intent == "BORROW" and c.chain == "ethereum"]
+    supply_mantle = [c for c in cells if c.intent == "SUPPLY" and c.chain == "mantle"]
+    assert borrow_ethereum and all(c.state != STATE_UNSUPPORTED for c in borrow_ethereum)
+    assert supply_mantle and all(c.state != STATE_UNSUPPORTED for c in supply_mantle)
+
+
+def test_exclusion_chain_alias_normalises_before_matching() -> None:
+    conn = _FakeConnector(
+        name="x",
+        strategy_intents=("SWAP",),
+        # TWO chains: excluding SWAP on the ONLY declared chain is rejected by
+        # both real validators ("drop the intent instead"), so a one-chain fake
+        # models a manifest that cannot exist and passes only because
+        # _FakeConnector bypasses validation.
+        strategy_chains=("bnb", "ethereum"),
+        strategy_intent_chain_exclusions=(_FakeExclusion(intent="SWAP", chains=frozenset({"bnb"})),),
+    )
+    cells = _cells_for_connector(conn, _EMPTY_COVERAGE)
+    assert cells
+    # The alias must fold to the canonical name — that is what this test is about.
+    assert "bsc" in {c.chain for c in cells}
+    assert "bnb" not in {c.chain for c in cells}
+    # Only exclusion-governed capabilities carry the verdict, and only on the
+    # excluded (canonicalised) chain — the other declared chain is untouched.
+    bsc_governed = [c for c in cells if c.chain == "bsc" and c.capability in EXCLUSION_GOVERNED_CAPABILITIES]
+    assert bsc_governed
+    assert all(c.state == STATE_UNSUPPORTED for c in bsc_governed)
+    eth_governed = [c for c in cells if c.chain == "ethereum" and c.capability in EXCLUSION_GOVERNED_CAPABILITIES]
+    assert eth_governed and all(c.state != STATE_UNSUPPORTED for c in eth_governed)
 
 
 def test_bnb_chain_normalised_to_bsc() -> None:

@@ -22,11 +22,11 @@ from __future__ import annotations
 
 import importlib
 import pkgutil
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from almanak.connectors._connector import CONNECTOR_REGISTRY as CONNECTOR_DESCRIPTOR_REGISTRY
 from almanak.connectors._connector import Connector as ConnectorDescriptor
-from almanak.connectors._connector import StrategyMatrixEntry
+from almanak.connectors._connector import StrategyIntentChainExclusion, StrategyMatrixEntry
 from almanak.core.constants import canonical_chain_name
 from almanak.framework.intents.vocabulary import IntentType
 
@@ -138,6 +138,40 @@ class MatrixEntry:
     chains: frozenset[str]
 
 
+@dataclass(frozen=True)
+class IntentChainExclusion:
+    """One ``(intent, chains)`` pair the connector does NOT support (VIB-6111).
+
+    The registry-side twin of
+    :class:`~almanak.connectors._connector_descriptor.StrategyIntentChainExclusion`,
+    typed with :class:`IntentType` the same way ``ConnectorManifest.intents``
+    is, so consumers never re-parse intent strings.
+
+    Semantics are **narrowing-only**: an exclusion subtracts from the declared
+    ``intents`` x ``chains`` cross-product and can never widen it. That keeps
+    the "the advertised matrix cannot outrun the declaration" invariant true by
+    construction, and means a chain added to ``chains`` later is automatically
+    supported for every intent unless someone deliberately excludes it.
+
+    Fields:
+
+    * ``intent`` — the verb being narrowed. Must appear in ``intents``.
+    * ``chains`` — the chains this verb is NOT supported on. Non-empty, a
+      strict subset of ``chains`` (excluding every chain would mean the verb
+      is not supported at all — drop it from ``intents`` instead). Values are
+      canonicalized through :func:`canonical_chain_name` at construction, same
+      as ``ConnectorManifest.chains``.
+    * ``reason`` — non-empty human-readable why. This surface exists to
+      document truth, so a silent haircut is not allowed.
+    * ``ticket`` — non-empty tracking ticket (e.g. ``"VIB-6111"``).
+    """
+
+    intent: IntentType
+    chains: frozenset[str]
+    reason: str
+    ticket: str
+
+
 def _validate_matrix_entry_fields(entry: MatrixEntry) -> None:
     """Validate a single ``MatrixEntry``'s field contents.
 
@@ -189,6 +223,14 @@ class ConnectorManifest:
       coverage differs from the strategy-side ``chains`` field (e.g. a
       Uniswap V3 fork live on chains where the strategy-side adapter
       doesn't yet declare support).
+    * ``intent_chain_exclusions`` — optional narrowing-only
+      :class:`IntentChainExclusion` tuple: the ``(intent, chain)`` cells
+      the cross-product implies but the connector does NOT support
+      (VIB-6111). Consumers must ask :meth:`chains_for_intent` /
+      :meth:`intents_for_chain` rather than reading ``intents`` x
+      ``chains`` raw — with the deliberate exception of fail-closed
+      safety sweeps (teardown residual discovery), which must keep
+      seeing the widest possible scope.
 
     Validation runs in ``__post_init__`` so a manifest cannot exist in an
     invalid state — every error fires at construction with a message that
@@ -199,15 +241,18 @@ class ConnectorManifest:
     intents: tuple[IntentType, ...]
     chains: tuple[str, ...] | None
     matrix_entries: tuple[MatrixEntry, ...] | None = field(default=None)
+    intent_chain_exclusions: tuple[IntentChainExclusion, ...] | None = field(default=None)
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name.strip():
             raise ValueError(f"ConnectorManifest.name must be a non-empty string, got {self.name!r}")
 
         self._canonicalize_chains()
+        self._canonicalize_exclusion_chains()
         self._validate_intents()
         self._validate_chains()
         self._validate_matrix_entries()
+        self._validate_intent_chain_exclusions()
 
     def _canonicalize_chains(self) -> None:
         """Rewrite ``chains`` to ChainRegistry canonical names (VIB-5293 root).
@@ -230,6 +275,31 @@ class ConnectorManifest:
             "chains",
             tuple(canonical_chain_name(chain) if isinstance(chain, str) else chain for chain in self.chains),
         )
+
+    def _canonicalize_exclusion_chains(self) -> None:
+        """Rewrite every exclusion's ``chains`` to canonical names (VIB-6111).
+
+        Runs BEFORE validation for the same reason ``_canonicalize_chains``
+        does: the subset check below compares against the already-canonicalized
+        ``chains``, so an exclusion declared with a registered alias
+        (``"bnb"``) must fold to ``"bsc"`` first or it would spuriously read as
+        "not in strategy_chains". Non-string junk passes through verbatim for
+        :meth:`_validate_intent_chain_exclusions` to report.
+        """
+        if not isinstance(self.intent_chain_exclusions, tuple):
+            return
+        canonicalized = tuple(
+            replace(
+                exclusion,
+                chains=frozenset(
+                    canonical_chain_name(chain) if isinstance(chain, str) else chain for chain in exclusion.chains
+                ),
+            )
+            if isinstance(exclusion, IntentChainExclusion) and isinstance(exclusion.chains, frozenset)
+            else exclusion
+            for exclusion in self.intent_chain_exclusions
+        )
+        object.__setattr__(self, "intent_chain_exclusions", canonicalized)
 
     def _validate_intents(self) -> None:
         if not isinstance(self.intents, tuple) or not self.intents:
@@ -304,6 +374,191 @@ class ConnectorManifest:
         keys = [(e.matrix_name, e.category) for e in self.matrix_entries]
         if len(set(keys)) != len(keys):
             raise ValueError(f"ConnectorManifest.matrix_entries has duplicate (matrix_name, category) keys: {keys!r}")
+
+    def _validate_intent_chain_exclusions(self) -> None:
+        """Validate ``intent_chain_exclusions`` shape + per-entry contents (VIB-6111)."""
+        if self.intent_chain_exclusions is None:
+            return
+        if not isinstance(self.intent_chain_exclusions, tuple):
+            raise ValueError(
+                f"ConnectorManifest.intent_chain_exclusions must be a tuple of IntentChainExclusion, "
+                f"got {type(self.intent_chain_exclusions).__qualname__}"
+            )
+        bad_entry_types = [e for e in self.intent_chain_exclusions if not isinstance(e, IntentChainExclusion)]
+        if bad_entry_types:
+            raise ValueError(
+                f"ConnectorManifest.intent_chain_exclusions must contain only IntentChainExclusion; "
+                f"got non-IntentChainExclusion values {bad_entry_types!r}"
+            )
+        for exclusion in self.intent_chain_exclusions:
+            self._validate_intent_chain_exclusion_fields(exclusion)
+        intents = [e.intent for e in self.intent_chain_exclusions]
+        if len(set(intents)) != len(intents):
+            raise ValueError(
+                f"ConnectorManifest.intent_chain_exclusions has duplicate intent keys: {intents!r}. "
+                "Declare one exclusion per intent listing every excluded chain."
+            )
+        # The DUAL of the per-entry "excludes every declared chain" rule
+        # (VIB-6111). That rule says: an intent excluded everywhere should be
+        # dropped from ``intents``. This one says: a chain on which EVERY intent
+        # is excluded should be dropped from ``chains``. Without it the
+        # connector still claims the chain while supporting nothing on it —
+        # ``intents_for_chain`` returns ``()`` and the docs generators render the
+        # connector under that chain with a BLANK intent cell, contradicting the
+        # support matrix (which drops the row) with no reason surfaced anywhere.
+        if self.chains:
+            for chain in self.chains:
+                if not any(chain not in self.excluded_chains(intent) for intent in self.intents):
+                    raise ValueError(
+                        f"ConnectorManifest {self.name!r} excludes EVERY declared intent on chain "
+                        f"{chain!r}, so the connector claims a chain it supports nothing on. "
+                        "Remove the chain from strategy_chains instead of excluding every intent on it."
+                    )
+        if self.matrix_entries is not None:
+            # ``matrix_entries`` is a verbatim override: the matrix builder
+            # publishes those rows as-is and skips intent derivation entirely,
+            # so it never consults ``chains_for_intent``. Declaring both would
+            # let the rendered matrix advertise a cell the exclusions removed —
+            # the displayed matrix outrunning the declaration, which is the one
+            # invariant this field exists to protect. Rejected at construction
+            # rather than silently resolved, because either resolution order
+            # ("override wins" / "exclusion wins") would surprise half of
+            # readers (VIB-6111).
+            raise ValueError(
+                f"ConnectorManifest {self.name!r} declares BOTH matrix_entries and "
+                "intent_chain_exclusions. matrix_entries is published verbatim and bypasses "
+                "per-intent narrowing, so the two cannot be combined without the matrix "
+                "outrunning the declaration. Use intent_chain_exclusions alone (rows are then "
+                "derived and narrowed), or encode the narrowing directly in matrix_entries."
+            )
+
+    def _validate_intent_chain_exclusion_fields(self, exclusion: IntentChainExclusion) -> None:
+        """Validate one exclusion against the declared intents/chains."""
+        if not isinstance(exclusion.intent, IntentType):
+            raise ValueError(f"IntentChainExclusion.intent must be an IntentType member, got {exclusion.intent!r}")
+        if exclusion.intent not in self.intents:
+            raise ValueError(
+                f"IntentChainExclusion.intent {exclusion.intent!r} is not declared in "
+                f"ConnectorManifest.intents {self.intents!r} — an exclusion may only narrow the "
+                "declared cross-product, never introduce a new intent."
+            )
+        if not isinstance(exclusion.chains, frozenset) or not exclusion.chains:
+            raise ValueError(
+                f"IntentChainExclusion.chains must be a non-empty frozenset[str], got {exclusion.chains!r}"
+            )
+        bad_chains = [c for c in exclusion.chains if not isinstance(c, str) or not c.strip()]
+        if bad_chains:
+            raise ValueError(f"IntentChainExclusion.chains must contain only non-empty strings, got {bad_chains!r}")
+        if self.chains is None:
+            raise ValueError(
+                "ConnectorManifest.intent_chain_exclusions may not be set when chains is None — "
+                "an off-chain venue has no chains to exclude."
+            )
+        unknown = set(exclusion.chains) - set(self.chains)
+        if unknown:
+            raise ValueError(
+                f"IntentChainExclusion.chains for intent {exclusion.intent!r} contains chains not in "
+                f"ConnectorManifest.chains: {sorted(unknown)!r}. Allowed: {sorted(self.chains)!r}."
+            )
+        if set(exclusion.chains) == set(self.chains):
+            raise ValueError(
+                f"IntentChainExclusion for intent {exclusion.intent!r} excludes every declared chain "
+                f"{sorted(self.chains)!r} — drop the intent from strategy_intents instead."
+            )
+        if not isinstance(exclusion.reason, str) or not exclusion.reason.strip():
+            raise ValueError(f"IntentChainExclusion.reason must be a non-empty string, got {exclusion.reason!r}")
+        if not isinstance(exclusion.ticket, str) or not exclusion.ticket.strip():
+            raise ValueError(f"IntentChainExclusion.ticket must be a non-empty string, got {exclusion.ticket!r}")
+
+    # ------------------------------------------------------------------
+    # Narrowed reads (VIB-6111) — the single way consumers should ask
+    # "is this (intent, chain) cell actually supported?".
+    # ------------------------------------------------------------------
+
+    def excluded_chains(self, intent: IntentType) -> frozenset[str]:
+        """Canonical chain names ``intent`` is explicitly NOT supported on."""
+        for exclusion in self.intent_chain_exclusions or ():
+            if exclusion.intent == intent:
+                return exclusion.chains
+        return frozenset()
+
+    def exclusion_for(self, intent: IntentType, chain: str) -> IntentChainExclusion | None:
+        """The exclusion covering ``(intent, chain)``, or ``None`` when none does.
+
+        Accepts canonical or alias chain names. Returning the exclusion (not a
+        bool) lets renderers surface the ``reason`` / ``ticket`` instead of
+        showing an unexplained blank cell.
+
+        ``None`` means "no exclusion covers this cell" — it does NOT mean
+        "supported". An intent or chain the connector never declared also has no
+        exclusion. Ask :meth:`supports` for the membership question and use this
+        only to render *why* a declared cell was narrowed away.
+        """
+        canonical = canonical_chain_name(chain) if isinstance(chain, str) else chain
+        for exclusion in self.intent_chain_exclusions or ():
+            if exclusion.intent == intent and canonical in exclusion.chains:
+                return exclusion
+        return None
+
+    def chains_for_intent(self, intent: IntentType) -> tuple[str, ...]:
+        """``chains`` minus the chains excluded for ``intent``.
+
+        Returns ``()`` for off-chain venues (``chains is None``), matching the
+        "the matrix is on-chain only" convention downstream consumers already
+        use. Declaration order is preserved.
+
+        An intent the connector does not declare yields ``()`` — the exact dual
+        of :meth:`intents_for_chain` returning ``()`` for an undeclared chain.
+        Without this check the method would answer "supported on every chain"
+        for an intent that is not in the product at all: ``aave_v3`` would report
+        ``chains_for_intent(SWAP)`` as all ten chains. That is a WIDENING, and
+        these methods are documented as the single way to ask "is this
+        ``(intent, chain)`` cell supported?" — so a consumer writing
+        ``chain in m.chains_for_intent(intent)`` would get a false positive for
+        every undeclared verb.
+        """
+        if self.chains is None:
+            return ()
+        if intent not in self.intents:
+            return ()
+        excluded = self.excluded_chains(intent)
+        return tuple(chain for chain in self.chains if chain not in excluded)
+
+    def supports(self, intent: IntentType, chain: str) -> bool:
+        """Whether ``(intent, chain)`` is a declared, non-excluded cell.
+
+        The unambiguous membership question. :meth:`exclusion_for` answers a
+        narrower one — "which exclusion covers this cell" — and its ``None``
+        means "no exclusion covers it", NOT "supported": an undeclared intent
+        or chain has no exclusion either. Callers that only special-case
+        ``exclusion_for(...) is not None`` would read an out-of-product cell as
+        ordinary supported, so they should ask this instead and use
+        ``exclusion_for`` only to render the reason.
+
+        Returns ``False`` for an OFF-CHAIN venue (``chains is None``, e.g.
+        Kraken), matching ``chains_for_intent`` / ``intents_for_chain``'s
+        "the matrix is on-chain only" convention. A caller using this as a
+        general execution gate would therefore exclude every off-chain venue —
+        it answers "is this an on-chain cell this connector supports?", not
+        "can this connector do this at all".
+        """
+        if self.chains is None:
+            return False
+        canonical = canonical_chain_name(chain) if isinstance(chain, str) else chain
+        return canonical in self.chains_for_intent(intent)
+
+    def intents_for_chain(self, chain: str) -> tuple[IntentType, ...]:
+        """The intents supported on ``chain`` — declaration order preserved.
+
+        Accepts canonical or alias chain names. A chain the connector does not
+        declare at all yields ``()``: an exclusion narrows, it never widens.
+        """
+        if self.chains is None:
+            return ()
+        canonical = canonical_chain_name(chain) if isinstance(chain, str) else chain
+        if canonical not in self.chains:
+            return ()
+        return tuple(intent for intent in self.intents if canonical not in self.excluded_chains(intent))
 
 
 class ConnectorRegistry:
@@ -380,6 +635,7 @@ def register_connector(
     intents: tuple[IntentType, ...],
     chains: tuple[str, ...] | None,
     matrix_entries: tuple[MatrixEntry, ...] | None = None,
+    intent_chain_exclusions: tuple[IntentChainExclusion, ...] | None = None,
 ) -> None:
     """Register a validated connector strategy manifest.
 
@@ -394,6 +650,10 @@ def register_connector(
     ``intents`` + ``chains``. See :class:`MatrixEntry` for the field
     semantics.
 
+    ``intent_chain_exclusions`` is the optional narrowing-only list of
+    ``(intent, chains)`` cells the cross-product implies but the connector
+    does not support (VIB-6111). See :class:`IntentChainExclusion`.
+
     Connector authors should declare ``strategy_intents`` and related fields on
     ``CONNECTOR`` in ``connector.py`` rather than calling this helper from a
     package ``__init__.py``.
@@ -404,6 +664,7 @@ def register_connector(
             intents=intents,
             chains=chains,
             matrix_entries=matrix_entries,
+            intent_chain_exclusions=intent_chain_exclusions,
         )
     )
 
@@ -431,6 +692,16 @@ def _matrix_entry_from_descriptor(entry: StrategyMatrixEntry) -> MatrixEntry:
     )
 
 
+def _exclusion_from_descriptor(connector_name: str, entry: StrategyIntentChainExclusion) -> IntentChainExclusion:
+    """Convert descriptor per-(intent, chain) exclusion metadata into the registry type."""
+    return IntentChainExclusion(
+        intent=_intent_from_descriptor(connector_name, entry.intent),
+        chains=entry.chains,
+        reason=entry.reason,
+        ticket=entry.ticket,
+    )
+
+
 def _manifest_from_descriptor(connector: ConnectorDescriptor) -> ConnectorManifest:
     """Build a strategy registry manifest from connector-owned metadata."""
     if connector.strategy_intents is None:
@@ -440,11 +711,19 @@ def _manifest_from_descriptor(connector: ConnectorDescriptor) -> ConnectorManife
         if connector.strategy_matrix_entries is None
         else tuple(_matrix_entry_from_descriptor(entry) for entry in connector.strategy_matrix_entries)
     )
+    exclusions = (
+        None
+        if connector.strategy_intent_chain_exclusions is None
+        else tuple(
+            _exclusion_from_descriptor(connector.name, entry) for entry in connector.strategy_intent_chain_exclusions
+        )
+    )
     return ConnectorManifest(
         name=connector.name,
         intents=tuple(_intent_from_descriptor(connector.name, intent) for intent in connector.strategy_intents),
         chains=connector.strategy_chains,
         matrix_entries=matrix_entries,
+        intent_chain_exclusions=exclusions,
     )
 
 

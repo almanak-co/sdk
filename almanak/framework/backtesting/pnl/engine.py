@@ -545,6 +545,7 @@ _lending_scope_hook_registered = False
 def _clear_lending_scope_caches() -> None:
     _declared_lending_chains.cache_clear()
     _lending_chain_scope_rejection.cache_clear()
+    _lending_intent_exclusion_rejection.cache_clear()
 
 
 def _ensure_lending_scope_invalidation_hook(registry: Any) -> None:
@@ -598,6 +599,62 @@ def _declared_lending_chains(protocol: str) -> frozenset[str] | None:
     chains = tuple(getattr(connector, "strategy_chains", None) or ())
     if intents & lending_intents and chains:
         return frozenset(chains)
+    return None
+
+
+@functools.cache
+def _lending_intent_exclusion_rejection(protocol: str, chain: str, intent_name: str) -> str | None:
+    """Typed refusal for a lending verb the connector DECLARED unsupported here.
+
+    The chain-scope gate below asks "does this connector do lending on this
+    chain at all?", which is too coarse for a per-``(intent, chain)`` exclusion
+    (VIB-6111): Aave V3 keeps ``mantle`` in ``strategy_chains`` because SUPPLY /
+    WITHDRAW / REPAY still work there, so the chain gate passes and a backtest
+    would happily fill a BORROW that cannot execute live and accrue a fabricated
+    APY on it — the same failure mode the chain gate exists to prevent, one axis
+    over.
+
+    ``None`` means no exclusion covers the cell (including "this protocol
+    resolves to no connector" and "the connector declares no exclusions"), so
+    generic / duck-typed protocols keep today's behaviour.
+    """
+    from almanak.connectors._connector import CONNECTOR_REGISTRY
+    from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+
+    _ensure_lending_scope_invalidation_hook(CONNECTOR_REGISTRY)
+
+    key = LendingReadRegistry.normalize_protocol(protocol)
+    if not key:
+        return None
+    connector = CONNECTOR_REGISTRY.get(key)
+    if connector is None:
+        return None
+
+    from almanak.core.chains import ChainRegistry
+
+    def _canon_user(name: str) -> str:
+        # Caller-supplied: tolerant, so an unknown venue does not explode.
+        descriptor = ChainRegistry.try_resolve(name)
+        return descriptor.name if descriptor is not None else name.strip().lower()
+
+    def _canon_declared(name: str) -> str:
+        # Connector-declared metadata is OUR code: a typo'd chain must fail
+        # LOUDLY rather than silently under-reject, matching
+        # ``_lending_chain_scope_rejection._canon_declared``'s stated rule.
+        return ChainRegistry.resolve(name).name
+
+    wanted_chain = _canon_user(chain)
+    wanted_intent = intent_name.strip().upper()
+    for exclusion in getattr(connector, "strategy_intent_chain_exclusions", None) or ():
+        if str(exclusion.intent).strip().upper() != wanted_intent:
+            continue
+        if wanted_chain not in {_canon_declared(c) for c in exclusion.chains}:
+            continue
+        return (
+            f"protocol '{protocol}' declares {wanted_intent} UNSUPPORTED on chain '{chain}' "
+            f"({exclusion.reason} [{exclusion.ticket}]) — the engine refuses to fabricate a "
+            f"lending market the live compiler and the chain both reject"
+        )
     return None
 
 
@@ -4733,7 +4790,12 @@ class PnLBacktester:
         # (observed: fluid/ethereum). Protocols with no lending matrix
         # declaration keep the generic duck-typed behavior.
         if intent_type in (IntentType.SUPPLY, IntentType.BORROW):
-            scope_reason = _lending_chain_scope_rejection(protocol, chain)
+            # Per-(intent, chain) exclusions are checked FIRST and carry the
+            # connector's own reason + ticket, which is a strictly better
+            # message than the coarse chain-scope one (VIB-6111).
+            scope_reason = _lending_intent_exclusion_rejection(
+                protocol, chain, intent_type.value
+            ) or _lending_chain_scope_rejection(protocol, chain)
             if scope_reason is not None:
                 from .sizing import RejectionCode
 

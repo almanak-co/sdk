@@ -53,6 +53,7 @@ __all__ = [
     "MetadataAmountEncoding",
     "PerpsReadDecl",
     "PositionReadDecl",
+    "StrategyIntentChainExclusion",
     "StrategyMatrixEntry",
     "SupportedChainsSpec",
     "VaultRepresentativeSpec",
@@ -114,6 +115,31 @@ class StrategyMatrixEntry:
     matrix_name: str
     category: str
     chains: frozenset[str]
+
+
+@dataclass(frozen=True)
+class StrategyIntentChainExclusion:
+    """One (intent, chains) pair the connector does NOT support, despite the
+    ``strategy_intents`` x ``strategy_chains`` cross-product implying it.
+
+    The mechanism is **narrowing-only**: an exclusion can subtract from the
+    declared cross-product, never add to it, so the existing invariant "the
+    displayed matrix cannot outrun the declaration" survives by construction.
+    Adding a new chain to ``strategy_chains`` later automatically includes it
+    for every intent — there is no per-intent subset list to forget to update.
+
+    Every exclusion carries its own ``reason`` + ``ticket`` because the point
+    of the field is truthfulness documentation, not a silent capability haircut.
+
+    Kept separate from ``_strategy_base.registry.IntentChainExclusion`` so
+    descriptor discovery can stay strategy-safe and avoid importing framework
+    intent vocabulary during connector manifest loading.
+    """
+
+    intent: str
+    chains: frozenset[str]
+    reason: str
+    ticket: str
 
 
 def _validate_decl_aliases(decl_name: str, aliases: tuple[str, ...]) -> None:
@@ -951,6 +977,7 @@ class Connector:
     strategy_intents: tuple[str, ...] | None = None
     strategy_chains: tuple[str, ...] | None = None
     strategy_matrix_entries: tuple[StrategyMatrixEntry, ...] | None = None
+    strategy_intent_chain_exclusions: tuple[StrategyIntentChainExclusion, ...] | None = None
     external_ids: Mapping[str, str] | None = None
 
     def __post_init__(self) -> None:
@@ -1494,6 +1521,10 @@ class Connector:
                 raise ValueError("Connector.strategy_chains may only be set when strategy_intents is set")
             if self.strategy_matrix_entries is not None:
                 raise ValueError("Connector.strategy_matrix_entries may only be set when strategy_intents is set")
+            if self.strategy_intent_chain_exclusions is not None:
+                raise ValueError(
+                    "Connector.strategy_intent_chain_exclusions may only be set when strategy_intents is set"
+                )
             return
 
         if not isinstance(self.strategy_intents, tuple) or not self.strategy_intents:
@@ -1508,6 +1539,7 @@ class Connector:
 
         self._validate_strategy_chains()
         self._validate_strategy_matrix_entries()
+        self._validate_strategy_intent_chain_exclusions()
 
     def _validate_strategy_chains(self) -> None:
         """Validate strategy-side chain identifiers without importing chain registries."""
@@ -1556,6 +1588,144 @@ class Connector:
         bad_chains = [chain for chain in entry.chains if not isinstance(chain, str) or not chain.strip()]
         if bad_chains:
             raise ValueError(f"StrategyMatrixEntry.chains must contain only non-empty strings, got {bad_chains!r}")
+
+    def _validate_strategy_intent_chain_exclusions(self) -> None:
+        """Validate descriptor-owned per-(intent, chain) support exclusions."""
+        if self.strategy_intent_chain_exclusions is None:
+            return
+        if not isinstance(self.strategy_intent_chain_exclusions, tuple):
+            raise ValueError(
+                "Connector.strategy_intent_chain_exclusions must be None or a "
+                f"tuple[StrategyIntentChainExclusion, ...], got {self.strategy_intent_chain_exclusions!r}"
+            )
+        bad_entries = [
+            entry
+            for entry in self.strategy_intent_chain_exclusions
+            if not isinstance(entry, StrategyIntentChainExclusion)
+        ]
+        if bad_entries:
+            raise ValueError(
+                "Connector.strategy_intent_chain_exclusions must contain only "
+                f"StrategyIntentChainExclusion values, got {bad_entries!r}"
+            )
+        if self.strategy_matrix_entries is not None:
+            # Mirrors ConnectorManifest._validate_intent_chain_exclusions
+            # (VIB-6111): strategy_matrix_entries is published verbatim and
+            # bypasses per-intent narrowing, so combining the two would let the
+            # rendered matrix advertise a cell the exclusions removed. Caught
+            # here as well so the connector author sees it at authoring time,
+            # not only when the registry imports.
+            raise ValueError(
+                "Connector.strategy_intent_chain_exclusions may not be combined with "
+                "Connector.strategy_matrix_entries — matrix entries are published verbatim and "
+                "bypass per-intent narrowing, so the rendered matrix would outrun the declaration. "
+                "Declare exclusions alone (matrix rows are then derived and narrowed), or encode "
+                "the narrowing directly in strategy_matrix_entries."
+            )
+        for entry in self.strategy_intent_chain_exclusions:
+            self._validate_strategy_intent_chain_exclusion_fields(entry)
+        self._validate_no_chain_fully_excluded()
+        intents = [entry.intent for entry in self.strategy_intent_chain_exclusions]
+        if len(set(intents)) != len(intents):
+            raise ValueError(
+                f"Connector.strategy_intent_chain_exclusions has duplicate intent keys: {intents!r}. "
+                "Declare one exclusion per intent listing every excluded chain."
+            )
+
+    def _validate_no_chain_fully_excluded(self) -> None:
+        """Descriptor twin of the manifest's dual invariant (VIB-6111).
+
+        The per-entry rule rejects "one intent excluded on every chain" (drop the
+        intent instead). This is its dual: "every intent excluded on one chain"
+        (drop the chain instead), which otherwise leaves the connector claiming a
+        chain it supports nothing on and renders a blank docs cell.
+        ``ConnectorManifest`` enforces it too, so the shape cannot reach the
+        registry either way — mirroring it here gives the connector author the
+        error at authoring time with the descriptor field names, which is what
+        every other rule in this validator does.
+        """
+        declared_chains = self.strategy_chains or ()
+        if not declared_chains:
+            return
+        from almanak.core.constants import canonical_chain_name
+
+        def _canon(chain: str) -> str:
+            return canonical_chain_name(chain) if isinstance(chain, str) else chain
+
+        excluded_by_intent: dict[str, set[str]] = {}
+        for entry in self.strategy_intent_chain_exclusions or ():
+            excluded_by_intent.setdefault(entry.intent, set()).update(_canon(c) for c in entry.chains)
+
+        for chain in declared_chains:
+            canonical = _canon(chain)
+            if all(canonical in excluded_by_intent.get(intent, set()) for intent in (self.strategy_intents or ())):
+                raise ValueError(
+                    f"Connector.strategy_intent_chain_exclusions excludes EVERY declared intent on chain "
+                    f"{chain!r}, so the connector claims a chain it supports nothing on. Remove the chain "
+                    "from strategy_chains instead of excluding every intent on it."
+                )
+
+    def _validate_strategy_intent_chain_exclusion_fields(self, entry: StrategyIntentChainExclusion) -> None:
+        """Validate one exclusion's fields against the declared cross-product."""
+        declared_intents = self.strategy_intents or ()
+        if not isinstance(entry.intent, str) or not entry.intent.strip():
+            raise ValueError(f"StrategyIntentChainExclusion.intent must be a non-empty string, got {entry.intent!r}")
+        if entry.intent not in declared_intents:
+            raise ValueError(
+                f"StrategyIntentChainExclusion.intent {entry.intent!r} is not declared in "
+                f"Connector.strategy_intents {declared_intents!r} — an exclusion may only narrow "
+                "the declared cross-product, never introduce a new intent."
+            )
+        if not isinstance(entry.chains, frozenset) or not entry.chains:
+            raise ValueError(
+                f"StrategyIntentChainExclusion.chains must be a non-empty frozenset[str], got {entry.chains!r}"
+            )
+        bad_chains = [chain for chain in entry.chains if not isinstance(chain, str) or not chain.strip()]
+        if bad_chains:
+            raise ValueError(
+                f"StrategyIntentChainExclusion.chains must contain only non-empty strings, got {bad_chains!r}"
+            )
+        if self.strategy_chains is None:
+            raise ValueError(
+                "Connector.strategy_intent_chain_exclusions may not be set when strategy_chains is None — "
+                "an off-chain venue has no chains to exclude."
+            )
+        # Compare on CANONICAL names (VIB-6111). The registry twin canonicalizes
+        # exclusion chains before its own subset check
+        # (``ConnectorManifest._canonicalize_exclusion_chains``), so a raw-string
+        # comparison here would reject declarations the registry accepts —
+        # e.g. ``strategy_chains=("bsc", ...)`` with an exclusion naming the
+        # registered alias ``"bnb"``. That made the registry's advertised
+        # alias-folding unreachable from the descriptor, which is the only path
+        # production connectors actually use. Imported locally so THIS module's
+        # import stays free of the chain registry, matching
+        # ``_validate_strategy_chains``'s stated intent. It does NOT keep the
+        # chain registry out of connector discovery — ``CONNECTOR = Connector(...)``
+        # executes at connector-module import, so a connector declaring
+        # exclusions pulls it in then. No cycle: ``almanak.core.constants``
+        # never imports ``almanak.connectors``.
+        from almanak.core.constants import canonical_chain_name
+
+        def _canon(chain: str) -> str:
+            return canonical_chain_name(chain) if isinstance(chain, str) else chain
+
+        entry_chains = {_canon(chain) for chain in entry.chains}
+        declared_chains = {_canon(chain) for chain in self.strategy_chains}
+        unknown = entry_chains - declared_chains
+        if unknown:
+            raise ValueError(
+                f"StrategyIntentChainExclusion.chains for intent {entry.intent!r} contains chains not in "
+                f"Connector.strategy_chains: {sorted(unknown)!r}. Allowed: {sorted(declared_chains)!r}."
+            )
+        if entry_chains == declared_chains:
+            raise ValueError(
+                f"StrategyIntentChainExclusion for intent {entry.intent!r} excludes every declared chain "
+                f"{sorted(declared_chains)!r} — drop the intent from strategy_intents instead."
+            )
+        if not isinstance(entry.reason, str) or not entry.reason.strip():
+            raise ValueError(f"StrategyIntentChainExclusion.reason must be a non-empty string, got {entry.reason!r}")
+        if not isinstance(entry.ticket, str) or not entry.ticket.strip():
+            raise ValueError(f"StrategyIntentChainExclusion.ticket must be a non-empty string, got {entry.ticket!r}")
 
     @property
     def protocol(self) -> ProtocolName:

@@ -20,6 +20,14 @@ on the dedicated ``flash_loan_*`` descriptor fields
 ``flash_loan_provider_name`` / ``flash_loan_provider`` / ``flash_loan_builder``,
 never by ``strategy_intents``).
 
+VIB-6111 extends the same truthfulness contract to a *per-chain* claim: BORROW
+is advertised on every declared chain EXCEPT ``mantle``, where Aave governance
+zeroed ``ltv`` on all 10 reserves so no asset can be enabled as collateral. That
+narrowing is expressed as a ``strategy_intent_chain_exclusions`` entry (which
+can only subtract from the cross-product), NOT by dropping ``mantle`` from
+``strategy_chains`` — SUPPLY / WITHDRAW / REPAY still work there, and REPAY in
+particular must stay reachable for pre-existing borrowers. See section (d).
+
 Scope guard: this file asserts *only* about ``aave_v3``. ``balancer_v2`` and
 ``morpho_blue`` still legitimately declare ``FLASH_LOAN`` as strategy support
 and are out of scope.
@@ -158,3 +166,89 @@ def test_aave_provider_resolves_for_flash_loan_compilation() -> None:
         "is registered independently of strategy_intents."
     )
     assert "aave" in FLASH_LOAN_PROVIDER_REGISTRY.names()
+
+
+# ---------------------------------------------------------------------------
+# (d) VIB-6111 — BORROW is NOT supported on mantle.
+#
+# Aave governance set ``ltv = 0`` on all 10 reserves of the Aave V3 Mantle
+# market at block ~98303344 (2026-07-22). ``liquidationThreshold`` was left
+# intact, nothing was frozen, ``isActive`` stayed true. Consequence: no asset on
+# that market can be enabled as collateral, so BORROW is impossible for EVERY
+# asset on the chain — while SUPPLY / WITHDRAW / REPAY keep working.
+#
+# The manifest declares this as a narrowing-only per-(intent, chain) exclusion
+# rather than by dropping ``mantle`` from ``strategy_chains``: dropping the
+# chain would also kill SUPPLY / WITHDRAW / REPAY and would break the exact
+# runtime-gate equality asserted by
+# ``test_runtime_gate_matches_manifest_chains_exactly`` above.
+# ---------------------------------------------------------------------------
+
+
+def test_borrow_is_not_advertised_on_mantle() -> None:
+    manifest = _aave_manifest()
+    borrow_chains = manifest.chains_for_intent(IntentType.BORROW)
+    assert "mantle" not in borrow_chains, (
+        "aave_v3 must NOT advertise BORROW on mantle — governance zeroed ltv on every "
+        "reserve, so no asset can be enabled as collateral (VIB-6111)."
+    )
+    # The exclusion narrows exactly one cell: every other declared chain keeps BORROW.
+    assert set(borrow_chains) == set(manifest.chains) - {"mantle"}
+    assert len(borrow_chains) == 9
+
+
+def test_supply_withdraw_and_repay_still_advertised_on_mantle() -> None:
+    manifest = _aave_manifest()
+    for intent in (IntentType.SUPPLY, IntentType.WITHDRAW):
+        assert "mantle" in manifest.chains_for_intent(intent), (
+            f"{intent.value} still works on Aave V3 Mantle (only ltv was zeroed) and must "
+            "stay advertised (VIB-6111)."
+        )
+    # REPAY explicitly and separately: pre-existing borrowers on Aave V3 Mantle
+    # must be able to repay their debt. Narrowing REPAY away — or dropping the
+    # chain wholesale — would strand exactly the users who most need the verb.
+    assert "mantle" in manifest.chains_for_intent(IntentType.REPAY), (
+        "REPAY must remain available on mantle so pre-existing borrowers can unwind."
+    )
+
+
+def test_mantle_intents_for_chain_is_the_three_working_verbs() -> None:
+    manifest = _aave_manifest()
+    assert set(manifest.intents_for_chain("mantle")) == {
+        IntentType.SUPPLY,
+        IntentType.REPAY,
+        IntentType.WITHDRAW,
+    }
+    # Any other declared chain keeps the full four-verb lending surface.
+    assert set(manifest.intents_for_chain("base")) == _LENDING_INTENTS
+
+
+def test_mantle_stays_a_declared_chain_and_a_gated_chain() -> None:
+    """The exclusion narrows the ADVERTISEMENT, not the chain declaration."""
+    manifest = _aave_manifest()
+    assert "mantle" in manifest.chains
+    assert "mantle" in SUPPORTED_PROTOCOLS["aave_v3"]
+    # And the exact-equality invariant from VIB-5916 still holds.
+    assert SUPPORTED_PROTOCOLS["aave_v3"] == set(manifest.chains)
+
+
+def test_mantle_borrow_exclusion_carries_reason_and_ticket() -> None:
+    manifest = _aave_manifest()
+    exclusion = manifest.exclusion_for(IntentType.BORROW, "mantle")
+    assert exclusion is not None, "the (BORROW, mantle) cell must be an explicit declared exclusion"
+    assert exclusion.ticket == "VIB-6111"
+    assert exclusion.reason.strip(), "an exclusion without a reason is a silent capability haircut"
+    assert "ltv" in exclusion.reason.lower()
+
+
+def test_matrix_lending_row_still_contains_mantle() -> None:
+    """The derived lending row keeps mantle — SUPPLY/WITHDRAW/REPAY still work there.
+
+    The support matrix unions a category's chains over that category's intents,
+    so a category only disappears from a chain when EVERY verb in it is
+    excluded. Aave V3 keeps three of four lending verbs on mantle.
+    """
+    matrix = _build_matrix()
+    lending_rows = [p for p in matrix["protocols"] if p["name"] == "aave_v3" and p["category"] == "lending"]
+    assert len(lending_rows) == 1
+    assert "mantle" in lending_rows[0]["chains"]

@@ -250,3 +250,97 @@ def test_real_corpus_reconciles_clean(module):
     catalog = DemoCatalog.discover()
     result = module.gate_chain_truth(catalog)
     assert result.failures == [], f"unexpected chain-truth failures: {result.failures}"
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# VIB-6111 — connector-declared (intent, chain) exclusions
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def _narrowing_manifest(name: str, chains, intents, *, dead: dict[str, tuple[str, ...]]):
+    """Manifest stand-in that narrows per chain, like ``ConnectorManifest``.
+
+    ``dead`` maps chain -> intents NOT supported there, mirroring what
+    ``intent_chain_exclusions`` produces via ``intents_for_chain``.
+    """
+
+    def intents_for_chain(chain: str):
+        if chain not in chains:
+            return ()
+        return tuple(SimpleNamespace(name=i) for i in intents if i not in dead.get(chain, ()))
+
+    return SimpleNamespace(
+        name=name,
+        chains=tuple(chains),
+        intents=tuple(SimpleNamespace(name=i) for i in intents),
+        intents_for_chain=intents_for_chain,
+    )
+
+
+@pytest.fixture
+def narrowing_index(module):
+    """Aave-shaped: lending on eth + mantle, but BORROW is dead on mantle."""
+    manifests = {
+        "aave_v3": _narrowing_manifest(
+            "aave_v3",
+            ("ethereum", "mantle"),
+            ("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
+            dead={"mantle": ("BORROW",)},
+        ),
+    }
+    return module.ChainTruthIndex(manifests=manifests, descriptor_aliases={})
+
+
+def test_advertised_chain_with_a_dead_intent_warns(module, narrowing_index):
+    """A demo advertising a chain where ONE of its verbs is excluded must warn.
+
+    The pre-VIB-6111 check asked "did ANY intent survive", so a carry demo on
+    Aave/Mantle drew no warning at all: SUPPLY and REPAY still intersected the
+    manifest while the BORROW leg was guaranteed to revert on-chain.
+    """
+    _, warnings = _reconcile(
+        module,
+        narrowing_index,
+        name="carry_demo",
+        chains=["mantle"],
+        protocols=["aave_v3"],
+        intents=["SUPPLY", "BORROW", "REPAY", "HOLD"],
+    )
+    dead_warns = [w for w in warnings if "UNSUPPORTED there" in w]
+    assert len(dead_warns) == 1, f"expected one dead-intent warning, got {warnings!r}"
+    assert "BORROW" in dead_warns[0]
+    assert "SUPPLY" not in dead_warns[0], "surviving verbs must not be reported as dead"
+
+
+def test_advertised_chain_with_all_intents_alive_is_silent(module, narrowing_index):
+    """No false positive on a chain where every demo verb survives."""
+    _, warnings = _reconcile(
+        module,
+        narrowing_index,
+        name="carry_demo",
+        chains=["ethereum"],
+        protocols=["aave_v3"],
+        intents=["SUPPLY", "BORROW", "REPAY", "HOLD"],
+    )
+    assert not [w for w in warnings if "UNSUPPORTED there" in w]
+
+
+def test_under_advertising_does_not_suggest_a_chain_with_a_dead_intent(module, narrowing_index):
+    """The gate must not RECOMMEND adding a chain the demo cannot run on.
+
+    Bad advice from a gate carries the gate's authority: the author adds the
+    chain, every downstream check passes on the surviving verbs, and nothing
+    ever flags the dead leg.
+    """
+    _, warnings = _reconcile(
+        module,
+        narrowing_index,
+        name="carry_demo",
+        chains=["ethereum"],
+        protocols=["aave_v3"],
+        intents=["SUPPLY", "BORROW", "REPAY", "HOLD"],
+    )
+    under = [w for w in warnings if "under-advertising" in w]
+    assert not any("mantle" in w for w in under), (
+        f"mantle must not be suggested — BORROW is dead there: {under!r}"
+    )

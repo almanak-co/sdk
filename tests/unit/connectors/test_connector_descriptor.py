@@ -26,6 +26,7 @@ from almanak.connectors._connector import (
     ImportRef,
     LendingReadDecl,
     PerpsReadDecl,
+    StrategyIntentChainExclusion,
     StrategyMatrixEntry,
 )
 from almanak.connectors._connector_descriptor import (
@@ -840,6 +841,157 @@ def test_connector_rejects_duplicate_strategy_intents() -> None:
             kind=ProtocolKind.SWAP,
             strategy_intents=("SWAP", "SWAP"),
             strategy_chains=("ethereum",),
+        )
+
+
+# ---------------------------------------------------------------------------
+# strategy_intent_chain_exclusions (VIB-6111) — narrowing-only per-(intent,
+# chain) support exclusions. Every rejection branch is asserted here because
+# the whole point of the field is that a connector cannot quietly claim a cell
+# it does not support, NOR quietly disclaim one without a reason + ticket.
+# ---------------------------------------------------------------------------
+
+_EXCLUSION_KWARGS = {
+    "name": "exclusion_host",
+    "kind": ProtocolKind.LENDING,
+    "strategy_intents": ("SUPPLY", "BORROW"),
+    "strategy_chains": ("ethereum", "mantle"),
+}
+
+
+def _exclusion(**overrides: object) -> StrategyIntentChainExclusion:
+    fields: dict[str, object] = {
+        "intent": "BORROW",
+        "chains": frozenset({"mantle"}),
+        "reason": "governance zeroed ltv on every reserve",
+        "ticket": "VIB-6111",
+    }
+    fields.update(overrides)
+    return StrategyIntentChainExclusion(**fields)  # type: ignore[arg-type]
+
+
+def test_connector_accepts_strategy_intent_chain_exclusion() -> None:
+    """A well-formed exclusion narrows the declared cross-product."""
+    connector = Connector(**_EXCLUSION_KWARGS, strategy_intent_chain_exclusions=(_exclusion(),))
+
+    assert connector.strategy_intent_chain_exclusions is not None
+    (exclusion,) = connector.strategy_intent_chain_exclusions
+    assert exclusion.intent == "BORROW"
+    assert exclusion.chains == frozenset({"mantle"})
+    assert exclusion.ticket == "VIB-6111"
+    # strategy_chains is untouched — the exclusion narrows, it does not remove
+    # the chain (SUPPLY still works on mantle).
+    assert connector.strategy_chains == ("ethereum", "mantle")
+
+
+def test_connector_rejects_exclusions_without_strategy_intents() -> None:
+    with pytest.raises(ValueError, match="strategy_intent_chain_exclusions may only be set"):
+        Connector(
+            name="no_intents",
+            kind=ProtocolKind.LENDING,
+            strategy_intent_chain_exclusions=(_exclusion(),),
+        )
+
+
+def test_connector_rejects_exclusions_non_tuple() -> None:
+    with pytest.raises(ValueError, match="strategy_intent_chain_exclusions must be None or a tuple"):
+        Connector(
+            **_EXCLUSION_KWARGS,
+            strategy_intent_chain_exclusions=[_exclusion()],  # type: ignore[arg-type]
+        )
+
+
+def test_connector_rejects_exclusions_wrong_element_type() -> None:
+    with pytest.raises(ValueError, match="must contain only StrategyIntentChainExclusion"):
+        Connector(
+            **_EXCLUSION_KWARGS,
+            strategy_intent_chain_exclusions=("BORROW",),  # type: ignore[arg-type]
+        )
+
+
+def test_connector_rejects_exclusion_intent_not_declared() -> None:
+    """An exclusion may only narrow — never introduce an undeclared intent."""
+    with pytest.raises(ValueError, match=r"is not declared in Connector\.strategy_intents"):
+        Connector(**_EXCLUSION_KWARGS, strategy_intent_chain_exclusions=(_exclusion(intent="REPAY"),))
+
+
+@pytest.mark.parametrize("bad_intent", ["", "   ", None, 7])
+def test_connector_rejects_exclusion_blank_intent(bad_intent: object) -> None:
+    with pytest.raises(ValueError, match="intent must be a non-empty string"):
+        Connector(**_EXCLUSION_KWARGS, strategy_intent_chain_exclusions=(_exclusion(intent=bad_intent),))
+
+
+@pytest.mark.parametrize("bad_chains", [frozenset(), {"mantle"}, ("mantle",)])
+def test_connector_rejects_exclusion_bad_chain_container(bad_chains: object) -> None:
+    with pytest.raises(ValueError, match="chains must be a non-empty frozenset"):
+        Connector(**_EXCLUSION_KWARGS, strategy_intent_chain_exclusions=(_exclusion(chains=bad_chains),))
+
+
+@pytest.mark.parametrize("bad_chain", ["", "  ", None, 7])
+def test_connector_rejects_exclusion_invalid_chain_element(bad_chain: object) -> None:
+    """The declared contract is "non-empty strings" — enforce ALL of it.
+
+    Blank strings alone left ``frozenset({None})`` and numeric elements
+    untested, so a regression that only rejected blanks would have passed.
+    """
+    with pytest.raises(ValueError, match="chains must contain only non-empty strings"):
+        Connector(
+            **_EXCLUSION_KWARGS,
+            strategy_intent_chain_exclusions=(_exclusion(chains=frozenset({bad_chain})),),
+        )
+
+
+def test_connector_rejects_exclusion_chain_not_in_strategy_chains() -> None:
+    with pytest.raises(ValueError, match=r"contains chains not in Connector\.strategy_chains"):
+        Connector(
+            **_EXCLUSION_KWARGS,
+            strategy_intent_chain_exclusions=(_exclusion(chains=frozenset({"linea"})),),
+        )
+
+
+def test_connector_rejects_exclusion_when_strategy_chains_is_none() -> None:
+    """Off-chain venues have no chains to exclude."""
+    with pytest.raises(ValueError, match="may not be set when strategy_chains is None"):
+        Connector(
+            name="offchain_host",
+            kind=ProtocolKind.SWAP,
+            strategy_intents=("SWAP",),
+            strategy_chains=None,
+            strategy_intent_chain_exclusions=(
+                _exclusion(intent="SWAP", chains=frozenset({"ethereum"})),
+            ),
+        )
+
+
+def test_connector_rejects_exclusion_of_every_chain() -> None:
+    """Excluding every chain means the intent isn't supported — drop it instead."""
+    with pytest.raises(ValueError, match="drop the intent from strategy_intents instead"):
+        Connector(
+            **_EXCLUSION_KWARGS,
+            strategy_intent_chain_exclusions=(_exclusion(chains=frozenset({"ethereum", "mantle"})),),
+        )
+
+
+@pytest.mark.parametrize("blank", ["", "   ", None])
+def test_connector_rejects_exclusion_blank_reason(blank: object) -> None:
+    with pytest.raises(ValueError, match="reason must be a non-empty string"):
+        Connector(**_EXCLUSION_KWARGS, strategy_intent_chain_exclusions=(_exclusion(reason=blank),))
+
+
+@pytest.mark.parametrize("blank", ["", "   ", None])
+def test_connector_rejects_exclusion_blank_ticket(blank: object) -> None:
+    with pytest.raises(ValueError, match="ticket must be a non-empty string"):
+        Connector(**_EXCLUSION_KWARGS, strategy_intent_chain_exclusions=(_exclusion(ticket=blank),))
+
+
+def test_connector_rejects_duplicate_exclusion_intent_keys() -> None:
+    with pytest.raises(ValueError, match="has duplicate intent keys"):
+        Connector(
+            **_EXCLUSION_KWARGS,
+            strategy_intent_chain_exclusions=(
+                _exclusion(chains=frozenset({"mantle"})),
+                _exclusion(chains=frozenset({"ethereum"})),
+            ),
         )
 
 
