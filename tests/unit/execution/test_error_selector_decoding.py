@@ -36,6 +36,62 @@ class TestAaveV3ErrorSelectors:
         assert KNOWN_CUSTOM_ERRORS[selector] == expected_name
 
 
+class TestAaveV3ZeroLtvErrorSelectors:
+    """VIB-6111: the zero-LTV / collateral-eligibility family must decode.
+
+    Measured on an Aave V3 Mantle fork where governance set ``ltv = 0`` on all 10
+    reserves: the ``setUserUseReserveAsCollateral`` leg of the SupplyIntent bundle
+    reverts with ``UserHasAssetWithZeroLtv()``. Without these rows the operator
+    only ever sees Zodiac's outer ``ModuleTransactionFailed()``.
+    """
+
+    @pytest.mark.parametrize(
+        "selector, expected_name",
+        [
+            ("0x21e5c4ae", "UserHasAssetWithZeroLtv()"),
+            ("0x5b263df7", "LtvValidationFailed()"),
+            ("0xd0739dae", "UnderlyingCannotBeUsedAsCollateral()"),
+            ("0x911ceb81", "CollateralCannotCoverNewBorrow()"),
+        ],
+    )
+    def test_selector_is_keccak_correct_and_registered(self, selector: str, expected_name: str) -> None:
+        # Verify, don't invent: the selector MUST be keccak4 of the signature.
+        assert "0x" + keccak(text=expected_name)[:4].hex() == selector
+        assert KNOWN_CUSTOM_ERRORS.get(selector) == expected_name
+
+    def test_decode_revert_data_names_user_has_asset_with_zero_ltv(self) -> None:
+        """End-to-end: raw 0x21e5c4ae renders the real cause, not 'Unknown revert'."""
+        submitter = PublicMempoolSubmitter(rpc_url="http://localhost")
+        decoded = submitter._decode_revert_data("0x21e5c4ae")
+        assert decoded == "Custom error: UserHasAssetWithZeroLtv()"
+        assert "UserHasAssetWithZeroLtv" in decoded
+        assert "Unknown revert" not in decoded
+
+    def test_decode_revert_data_accepts_bytes_payload(self) -> None:
+        submitter = PublicMempoolSubmitter(rpc_url="http://localhost")
+        decoded = submitter._decode_revert_data(bytes.fromhex("21e5c4ae"))
+        assert decoded == "Custom error: UserHasAssetWithZeroLtv()"
+
+    def test_stale_selector_is_not_catalogued(self) -> None:
+        # 0x0cafc072 was a keccak-WRONG label for UnderlyingCannotBeUsedAsCollateral
+        # carried in in-repo comments; the correct selector is 0xd0739dae. Nothing
+        # verifies what (if anything) 0x0cafc072 corresponds to, so it must not be
+        # registered.
+        assert "0x0cafc072" not in KNOWN_CUSTOM_ERRORS
+
+    def test_collateral_toggle_function_selector_is_decodable(self) -> None:
+        """The FAILING leg must be nameable in the verbose revert report."""
+        from almanak.framework.execution.revert_diagnostics import (
+            KNOWN_FUNCTION_SELECTORS,
+            decode_calldata_selector,
+        )
+
+        signature = "setUserUseReserveAsCollateral(address,bool)"
+        assert "0x" + keccak(text=signature)[:4].hex() == "0x5a3b74b9"
+        assert KNOWN_FUNCTION_SELECTORS["0x5a3b74b9"] == signature
+        assert decode_calldata_selector("0x5a3b74b9" + "00" * 64) == signature
+
+
 class TestCompoundV3ErrorSelectors:
     """Validate Compound V3 Comet custom error selectors are registered."""
 

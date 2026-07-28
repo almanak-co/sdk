@@ -202,6 +202,17 @@ KNOWN_CUSTOM_ERRORS: dict[str, str] = {
     "0x3a23d825": "InsufficientCollateral()",
     "0xf0788fb2": "NoDebtOfSelectedType()",
     "0xdff88f51": "SameBlockBorrowRepay()",
+    # Aave V3 collateral / LTV errors (VIB-6111). Emitted by the
+    # ``setUserUseReserveAsCollateral`` leg of a SupplyIntent bundle when the
+    # market's risk parameters no longer allow the reserve as collateral — the
+    # zero-LTV market case measured on Aave V3 Mantle, where governance set
+    # ``ltv = 0`` on all 10 reserves. keccak-verified (see
+    # ``tests/unit/teardown/test_revert_hints.py``); operator-clear explanations
+    # live in ``almanak.framework.teardown.revert_hints``.
+    "0x21e5c4ae": "UserHasAssetWithZeroLtv()",
+    "0x5b263df7": "LtvValidationFailed()",
+    "0xd0739dae": "UnderlyingCannotBeUsedAsCollateral()",
+    "0x911ceb81": "CollateralCannotCoverNewBorrow()",
     # Safe / Zodiac Roles modifier errors (VIB-5470). Every intent runs through
     # Safe + Roles ``execTransactionWithRole``, so a lending teardown revert is
     # frequently surfaced with one of these wrapper/authz selectors rather than

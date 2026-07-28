@@ -89,6 +89,10 @@ class BaseCompilerContext:
     rpc_timeout: float
     permission_discovery: bool
     allow_placeholder_prices: bool
+    # True only for a compiler constructed inside the gateway process; lets
+    # risk-parameter pre-flights read via ``services.eth_call`` when there is
+    # no gateway_client to borrow (VIB-6111). See IntentCompilerConfig.
+    gateway_internal_preflight: bool = False
     token_resolver: Any
     gateway_client: Any
     price_oracle: Any

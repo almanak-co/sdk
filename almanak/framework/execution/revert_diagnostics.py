@@ -891,6 +891,11 @@ KNOWN_FUNCTION_SELECTORS: dict[str, str] = {
     "0x69328dec": "withdraw(address,uint256,address)",
     "0xa415bcad": "borrow(address,uint256,uint256,uint16,address)",
     "0x573ade81": "repay(address,uint256,uint256,address)",
+    # VIB-6111: the collateral-toggle leg of the SupplyIntent bundle. It is the
+    # leg that reverts on a zero-LTV market (UserHasAssetWithZeroLtv), so it must
+    # be nameable — otherwise the verbose revert report labels the *failing* call
+    # ``unknown(0x5a3b74b9)``.
+    "0x5a3b74b9": "setUserUseReserveAsCollateral(address,bool)",
     # PancakeSwap V3
     "0x04e45aaf": "exactInputSingle(ExactInputSingleParams)",
     "0xb858183f": "exactInput(ExactInputParams)",

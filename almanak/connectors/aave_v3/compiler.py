@@ -33,6 +33,7 @@ class _LendingCompilerAdapter:
         "price_oracle",
         "_gateway_client",
         "_token_resolver",
+        "_gateway_internal_preflight",
     )
 
     def __init__(self, ctx: BaseCompilerContext) -> None:
@@ -44,6 +45,7 @@ class _LendingCompilerAdapter:
         self.price_oracle = ctx.price_oracle
         self._gateway_client = ctx.gateway_client
         self._token_resolver = ctx.token_resolver
+        self._gateway_internal_preflight = getattr(ctx, "gateway_internal_preflight", False)
 
     # Lending preflight caches read these attribute names off the compiler.
     # We back them with ``ctx.cache`` so the framework owns lifetime.
@@ -63,6 +65,22 @@ class _LendingCompilerAdapter:
     def _lending_borrow_capacity_cache(self) -> dict:
         return self._ctx.cache.setdefault("lending_borrow_capacity", {})
 
+    @property
+    def _lending_reserve_universe_cache(self) -> dict:
+        """Backing for ``_fetch_reserve_universe`` (VIB-6111).
+
+        This one was missing, and enabling the gateway-internal pre-flight is
+        what made it reachable: an absent Aave asset now decodes to the all-zero
+        tuple, ``_absent_reserve_reason`` calls ``_fetch_reserve_universe`` to
+        confirm against ``getAllReservesTokens()``, and that helper does
+        ``compiler._lending_reserve_universe_cache = {}`` when the attribute is
+        not already a dict. On this SLOTTED adapter that assignment raises
+        ``AttributeError`` and blows up compilation instead of returning the
+        actionable "no such reserve" error. Exposing the property makes the
+        ``getattr`` return a dict, so the assignment never happens.
+        """
+        return self._ctx.cache.setdefault("lending_reserve_universe", {})
+
     def _resolve_token(self, token: str) -> Any:
         return self._ctx.services.resolve_token(token)
 
@@ -80,6 +98,18 @@ class _LendingCompilerAdapter:
 
     def _get_chain_rpc_url(self) -> str | None:
         return self._ctx.rpc_url
+
+    def _eth_call(self, to: str, data: str, *, chain: str | None = None) -> str | None:
+        """Read-only ``eth_call`` seam for the lending risk-parameter pre-flights.
+
+        Only consulted when ``_gateway_internal_preflight`` is set — i.e. when
+        this compiler is running inside the gateway process and therefore has
+        no ``gateway_client`` to borrow (VIB-6111). Routing through
+        ``ctx.services`` keeps the boundary intact: ``CompilerQueries.eth_call``
+        is gateway-first and fail-closed, and the direct-Web3 branch it falls
+        back to is correct here because ``almanak/gateway/`` IS the egress layer.
+        """
+        return self._ctx.services.eth_call(to, data, chain=chain)
 
 
 def _failed(intent: Any, error: str) -> CompilationResult:

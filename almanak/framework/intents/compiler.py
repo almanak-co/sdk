@@ -605,6 +605,7 @@ class IntentCompiler:
             "rpc_url": self._get_chain_rpc_url() if resolve_rpc_url else getattr(self, "rpc_url", None),
             "rpc_timeout": getattr(self, "rpc_timeout", 10.0),
             "permission_discovery": getattr(config, "permission_discovery", False),
+            "gateway_internal_preflight": getattr(config, "gateway_internal_preflight", False),
             "allow_placeholder_prices": config.allow_placeholder_prices,
             "token_resolver": getattr(self, "_token_resolver", None),
             "gateway_client": getattr(self, "_gateway_client", None),

@@ -225,7 +225,14 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
 
         # Create compiler with allow_placeholder_prices=True. Real prices are
         # injected per-request in CompileIntent() via price_map field.
-        config = IntentCompilerConfig(allow_placeholder_prices=True)
+        # gateway_internal_preflight: this compiler runs INSIDE the gateway, so
+        # it has no gateway_client to lend to the connector risk-parameter
+        # pre-flights. Without the flag those pre-flights fail open on the one
+        # path the production runner actually uses — the runner compiles through
+        # execution.CompileIntent, not in-process. Measured on Aave V3 Mantle
+        # after governance zeroed ltv: the collateral-eligibility guard never
+        # ran and the emitted bundle reverted on-chain (VIB-6111).
+        config = IntentCompilerConfig(allow_placeholder_prices=True, gateway_internal_preflight=True)
         compiler = IntentCompiler(
             chain=chain,
             wallet_address=wallet_address,

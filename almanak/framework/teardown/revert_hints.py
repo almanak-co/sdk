@@ -31,6 +31,17 @@ entry below was verified that way (see ``tests/unit/teardown/test_revert_hints.p
   unified permission denial. The call's target / function / parameters are not
   authorized by the deployment's Roles manifest (the ``uint8`` Status enum
   encodes which sub-rule failed). A policy denial, not a protocol revert.
+* ``0x21e5c4ae`` — ``UserHasAssetWithZeroLtv()`` — Aave V3 ``Errors`` library.
+  The zero-LTV market revert (VIB-6111): governance set ``ltv = 0`` on the
+  reserve, so ``setUserUseReserveAsCollateral(asset, true)`` reverts. Measured
+  on an Aave V3 Mantle fork, where all 10 reserves carry ``ltv = 0``.
+* ``0x5b263df7`` — ``LtvValidationFailed()`` — Aave V3. The post-action LTV
+  validation for the user's whole position failed.
+* ``0xd0739dae`` — ``UnderlyingCannotBeUsedAsCollateral()`` — Aave V3. The
+  reserve is configured as non-collateral (``usageAsCollateralEnabled ==
+  false``).
+* ``0x911ceb81`` — ``CollateralCannotCoverNewBorrow()`` — Aave V3. The enabled
+  collateral is insufficient for the requested borrow.
 """
 
 from __future__ import annotations
@@ -42,8 +53,8 @@ import re
 # parameterized custom error surfaces as ``<selector><abi-args>`` (one contiguous
 # hex blob), so the selector is the *head* of a longer hex run. Membership is
 # then checked against the closed :data:`_OPERATOR_HINTS` key set, so the only
-# false-positive vector is an address whose first 4 bytes equal one of our three
-# lending selectors exactly — cryptographically negligible, and even then the
+# false-positive vector is an address whose first 4 bytes equal one of our
+# hinted lending selectors exactly — cryptographically negligible, and even then the
 # effect is only an appended (correct-for-that-selector) hint.
 _SELECTOR_RE = re.compile(r"0x[0-9a-fA-F]{8}")
 
@@ -74,16 +85,58 @@ _OPERATOR_HINTS: dict[str, str] = {
         "sub-rule failed). Extend the permission manifest to cover this "
         "lending-unwind call."
     ),
+    "0x21e5c4ae": (
+        "Aave-family lending revert (UserHasAssetWithZeroLtv): this reserve's "
+        "LTV is zero on this market, so the market no longer accepts it as "
+        "collateral and setUserUseReserveAsCollateral(asset, true) reverts. "
+        "Supplying the SAME asset WITHOUT use_as_collateral still works — the "
+        "supply leg itself is fine, only the collateral toggle is rejected. "
+        "This is almost always a governance risk-parameter change (an LTV cut "
+        "to 0 on the market's reserves), NOT a bug in the strategy: re-check "
+        "the reserve's configured LTV before treating it as a code defect."
+    ),
+    "0x5b263df7": (
+        "Aave-family lending revert (LtvValidationFailed): the post-action LTV "
+        "validation over the user's whole position failed — enabling or keeping "
+        "this asset as collateral would leave the account's aggregate LTV "
+        "invalid (typically because one or more supplied reserves now carry "
+        "LTV = 0). Disable collateral on the zero-LTV reserve, or supply "
+        "without use_as_collateral."
+    ),
+    "0xd0739dae": (
+        "Aave-family lending revert (UnderlyingCannotBeUsedAsCollateral): the "
+        "market has usageAsCollateralEnabled = false for this reserve, so it "
+        "can never be toggled on as collateral here. Supply without "
+        "use_as_collateral, or pick a collateral-eligible reserve. A market "
+        "risk-parameter fact, not a strategy bug."
+    ),
+    "0x911ceb81": (
+        "Aave-family lending revert (CollateralCannotCoverNewBorrow): the "
+        "collateral currently enabled for the account cannot support the "
+        "requested borrow. On a market that has cut LTV to 0, previously "
+        "usable collateral contributes zero borrowing power — enable "
+        "additional collateral or reduce the borrow amount."
+    ),
     "0xd27b44a9": (
-        "Safe/Zodiac module wrapper revert (ModuleTransactionFailed): the inner "
-        "transaction executed via the Roles modifier (execTransactionWithRole) "
-        "reverted and the Safe re-wrapped the underlying cause under this "
-        "selector. This is NOT the root cause and NOT an authorization denial — "
-        "the real reason is the inner revert (often an Aave health-factor or "
-        "protocol revert). Replay the call (eth_call at the failing block) to "
-        "recover the inner selector."
+        "Safe/Zodiac module wrapper revert (ModuleTransactionFailed): this is "
+        "Zodiac's OUTER wrapper, not the root cause and not an authorization "
+        "denial. The Roles modifier (execTransactionWithRole) caught the inner "
+        "revert and re-threw this selector, so the inner protocol error is NOT "
+        "present anywhere in this receipt — the receipt cannot tell you why the "
+        "call failed. To surface it, re-run the failing call via eth_call "
+        "against the PARENT block (the block before the one that reverted) with "
+        "the same from/to/data, and decode the selector that comes back. On a "
+        "batched (MultiSend) intent the whole bundle reverts atomically, so "
+        "replay the individual leg you suspect, not just the outer batch. "
+        "Common inner causes on the lending path: an Aave health-factor revert "
+        "(HealthFactorLowerThanLiquidationThreshold) or a zero-LTV collateral "
+        "toggle (UserHasAssetWithZeroLtv)."
     ),
 }
+# NOTE: hint text names inner causes by SIGNATURE, never by hex selector.
+# ``annotate_teardown_error`` appends the hint to the raw error string, so a hex
+# selector embedded in a hint would be re-detected by ``find_revert_selector``
+# on the annotated string and mis-attribute the root cause.
 
 
 def _signature_for(selector: str) -> str | None:

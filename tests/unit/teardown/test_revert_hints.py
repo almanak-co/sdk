@@ -1,11 +1,16 @@
-"""Unit tests for the lending / Safe-Roles teardown revert decoder — VIB-5470.
+"""Unit tests for the lending / Safe-Roles teardown revert decoder — VIB-5470,
+extended by VIB-6111 (zero-LTV market).
 
-Subsumes VIB-5152. Verifies that each of the three operator-facing selectors:
+Subsumes VIB-5152. Verifies that each operator-facing selector:
 
 * ``0x6679996d`` — ``HealthFactorLowerThanLiquidationThreshold()`` (Aave, the
   dust-debt withdraw-all trap)
 * ``0xd27b44a9`` — ``ModuleTransactionFailed()`` (Safe/Zodiac module wrapper)
 * ``0xd0a9bf58`` — ``ConditionViolation(uint8,bytes32)`` (Zodiac Roles v2 denial)
+* ``0x21e5c4ae`` — ``UserHasAssetWithZeroLtv()`` (Aave zero-LTV market)
+* ``0x5b263df7`` — ``LtvValidationFailed()`` (Aave)
+* ``0xd0739dae`` — ``UnderlyingCannotBeUsedAsCollateral()`` (Aave)
+* ``0x911ceb81`` — ``CollateralCannotCoverNewBorrow()`` (Aave)
 
 decodes to a clear operator message, that the embedded-selector scanner and the
 idempotent annotation helper behave, and that the selectors are keccak-correct
@@ -13,6 +18,8 @@ and registered in the shared submitter registry.
 """
 
 from __future__ import annotations
+
+import re
 
 import pytest
 from eth_utils import keccak
@@ -44,6 +51,27 @@ _SELECTOR_CASES = [
         "0xd0a9bf58",
         "ConditionViolation(uint8,bytes32)",
         "Roles v2 permission denial",
+    ),
+    # VIB-6111 — Aave zero-LTV / collateral-eligibility family.
+    (
+        "0x21e5c4ae",
+        "UserHasAssetWithZeroLtv()",
+        "LTV is zero on this market",
+    ),
+    (
+        "0x5b263df7",
+        "LtvValidationFailed()",
+        "aggregate LTV",
+    ),
+    (
+        "0xd0739dae",
+        "UnderlyingCannotBeUsedAsCollateral()",
+        "usageAsCollateralEnabled = false",
+    ),
+    (
+        "0x911ceb81",
+        "CollateralCannotCoverNewBorrow()",
+        "cannot support the requested borrow",
     ),
 ]
 
@@ -171,3 +199,67 @@ class TestHintTableIntegrity:
         # ModuleTransactionFailed is the opaque wrapper; it must be matched only
         # after every more-specific root-cause selector.
         assert list(_OPERATOR_HINTS)[-1] == "0xd27b44a9"
+
+    def test_no_hint_text_embeds_a_hex_selector(self) -> None:
+        # annotate_teardown_error appends the hint to the raw error string, so a
+        # hex selector inside a hint would be re-detected by find_revert_selector
+        # on the annotated string and mis-attribute the root cause.
+        for selector, hint in _OPERATOR_HINTS.items():
+            assert not re.search(r"0x[0-9a-fA-F]{8}", hint), f"hint for {selector} embeds a hex selector"
+
+
+class TestZeroLtvOperatorHint:
+    """VIB-6111: the zero-LTV hint must name the real cause and the workaround.
+
+    On a zero-LTV Aave market the operator only ever sees Zodiac's outer
+    ``ModuleTransactionFailed()``; the actionable content below is the entire
+    point of the fix, so it is asserted phrase-by-phrase rather than by shape.
+    """
+
+    def test_names_zero_ltv_and_the_non_collateral_workaround(self) -> None:
+        message = operator_hint_for_selector("0x21e5c4ae")
+        assert message is not None
+        assert message.startswith("UserHasAssetWithZeroLtv() — ")
+        # (a) plainly states the reserve's LTV is zero / not accepted as collateral
+        assert "LTV is zero on this market" in message
+        assert "no longer accepts it as collateral" in message
+        # (b) supplying WITHOUT use_as_collateral still works
+        assert "WITHOUT use_as_collateral still works" in message
+        # (c) governance risk-parameter change, not a strategy bug
+        assert "governance risk-parameter change" in message
+        assert "NOT a bug in the strategy" in message
+
+    def test_root_cause_beats_the_zodiac_wrapper(self) -> None:
+        # The production surface shows the wrapper; if the inner selector is ever
+        # recovered alongside it, the inner cause must win.
+        both = "Custom error: ModuleTransactionFailed() 0xd27b44a9 inner=0x21e5c4ae"
+        assert find_revert_selector(both) == "0x21e5c4ae"
+
+
+class TestZodiacWrapperMaskingMessage:
+    """VIB-6111: the wrapper hint must say the inner error is absent AND how to get it."""
+
+    def test_explains_masking_and_prescribes_eth_call_replay(self) -> None:
+        message = operator_hint_for_selector("0xd27b44a9")
+        assert message is not None
+        assert "OUTER wrapper" in message
+        assert "NOT present anywhere in this receipt" in message
+        assert "eth_call" in message
+        assert "PARENT block" in message
+        # MultiSend atomicity: replay the leg, not just the outer batch.
+        assert "MultiSend" in message
+
+
+class TestUnverifiedSelectorIsNotCatalogued:
+    """``0x0cafc072`` was a stale, keccak-WRONG label for
+    ``UnderlyingCannotBeUsedAsCollateral()`` (the correct selector is
+    ``0xd0739dae``). It must not be resurrected into any catalogue.
+    """
+
+    def test_stale_selector_absent_everywhere(self) -> None:
+        assert "0x0cafc072" not in _OPERATOR_HINTS
+        assert "0x0cafc072" not in KNOWN_CUSTOM_ERRORS
+
+    def test_correct_selector_is_keccak_of_the_signature(self) -> None:
+        signature = "UnderlyingCannotBeUsedAsCollateral()"
+        assert "0x" + keccak(text=signature)[:4].hex() == "0xd0739dae"

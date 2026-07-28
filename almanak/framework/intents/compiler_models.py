@@ -48,6 +48,27 @@ class IntentCompilerConfig:
             This ensures LP_CLOSE compilation produces full transaction sets
             (approve + removeLiquidity) so the permission generator can extract
             the required target addresses and function selectors.
+        gateway_internal_preflight: Set True ONLY when the compiler is
+            constructed INSIDE the gateway process (see
+            ``almanak/gateway/services/execution_service.py``). Compile-time
+            safety pre-flights that read protocol risk parameters — Aave's
+            frozen-reserve, borrowable and zero-LTV collateral checks — reach
+            for the compiler's ``gateway_client``. A gateway-side compiler has
+            none (it IS the gateway), so those pre-flights silently failed open
+            on the one path the production runner actually uses: the runner
+            compiles via ``execution.CompileIntent``, not in-process
+            (``almanak/framework/runner/_inner_runner_helpers.py``). Measured
+            consequence on Aave V3 Mantle after governance zeroed ``ltv`` — the
+            gateway emitted ``approve + supply + setUserUseReserveAsCollateral``
+            and the toggle leg reverted ``0x21e5c4ae UserHasAssetWithZeroLtv()``
+            on-chain (VIB-6111).
+
+            When True, those pre-flights may issue their reads through the
+            framework ``eth_call`` service instead. This is NOT a strategy-
+            container egress bypass: it is only ever set inside
+            ``almanak/gateway/``, which IS the egress layer, and it stays False
+            for every strategy-side and offline compile so those keep failing
+            open exactly as before.
     """
 
     allow_placeholder_prices: bool = False
@@ -56,6 +77,7 @@ class IntentCompilerConfig:
     fixed_swap_fee_tier: int | None = None
     max_price_impact_pct: Decimal = Decimal("0.10")
     permission_discovery: bool = False
+    gateway_internal_preflight: bool = False
 
     def __post_init__(self) -> None:
         """Validate swap pool selection settings."""

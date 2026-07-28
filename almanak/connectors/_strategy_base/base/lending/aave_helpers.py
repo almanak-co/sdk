@@ -52,7 +52,38 @@ class AssetNotCollateralEligibleError(ValueError):
     Raised at intent compile time when a pre-flight reserve-config query shows
     `usageAsCollateralEnabled == false` or `ltv == 0`. Surfacing this as a
     typed error spares strategy authors from learning the on-chain
-    `0x0cafc072 UnderlyingCannotBeUsedAsCollateral` revert through trial-and-error.
+    `0xd0739dae UnderlyingCannotBeUsedAsCollateral` /
+    `0x21e5c4ae UserHasAssetWithZeroLtv` revert through trial-and-error.
+    (VIB-6111: `0x0cafc072` was a stale, keccak-WRONG selector for
+    `UnderlyingCannotBeUsedAsCollateral()`; `cast sig` gives `0xd0739dae`.)
+    """
+
+
+class ReserveConfigUnverifiableError(ValueError):
+    """A risk-parameter pre-flight was ENABLED but could not complete its read.
+
+    This is deliberately distinct from "no pre-flight was configured" (VIB-6111).
+    The two cases produce the same absence of data and must NOT produce the same
+    decision:
+
+    * **Not configured** — a strategy-side or offline compile with no transport.
+      No read was ever expected, so the guards fail OPEN and the on-chain revert
+      stays the final guard. That keeps offline compiles (including the unit
+      suite) from depending on live market state.
+    * **Configured but failed** — a gateway-internal compiler
+      (``gateway_internal_preflight=True``) whose ``eth_call`` raised, returned a
+      non-string, or returned an undecodable payload. Here the compiler has
+      declared it *can* read, so a failed read means "could not verify", not
+      "verified fine". Failing open here would emit a bundle whose safety was
+      never checked — on Aave V3 Mantle that is precisely the
+      ``approve + supply + setUserUseReserveAsCollateral`` bundle whose toggle leg
+      reverts ``0x21e5c4ae UserHasAssetWithZeroLtv()`` on-chain, burning gas.
+
+    Raising rather than returning ``None`` makes the fail-closed behaviour the
+    DEFAULT: a future consumer that forgets to handle this case gets a loud
+    error instead of silently re-opening the hole this class exists to close.
+    Diagnostic-only consumers (which must never block a compile on a failed
+    read) opt out explicitly by catching it.
     """
 
 
@@ -288,7 +319,25 @@ def _fetch_reserve_config(
     `getReserveConfigurationData(address)` selector and 10-word return layout
     are identical across Aave V3 and any Aave-compatible fork.
 
-    Returns ``None`` when the check could not be performed (no gateway, RPC
+    Transport is the compiler's gateway client, with a narrow
+    ``services.eth_call`` fallback for a GATEWAY-INTERNAL compiler (VIB-6111).
+    A compiler constructed inside the gateway process has no ``gateway_client``
+    to borrow — it IS the gateway — so before that fallback existed this helper
+    returned ``None`` on the one path the production runner actually uses (the
+    runner compiles via ``execution.CompileIntent``, not in-process — see
+    ``almanak/framework/runner/_inner_runner_helpers.py``), silently disabling
+    every Aave risk-parameter pre-flight. Measured on Aave V3 Mantle after
+    governance zeroed ``ltv``: the gateway emitted
+    ``approve + supply + setUserUseReserveAsCollateral`` and the toggle leg
+    reverted ``0x21e5c4ae UserHasAssetWithZeroLtv()`` on-chain.
+
+    The fallback is deliberately NOT taken for strategy-side or offline
+    compilers. ``IntentCompiler`` backfills ``rpc_url`` with a resolvable
+    public/Alchemy endpoint for any known chain, so an unconditional fallback
+    would turn every offline compile — including unit tests — into a live
+    mainnet read whose verdict depends on real market state.
+
+    Returns ``None`` when the check could not be performed (no transport, RPC
     error, malformed response) — callers fail-open in that case so an offline
     / placeholder-mode compile still yields calldata.
     """
@@ -296,13 +345,40 @@ def _fetch_reserve_config(
     if not pool_data_provider:
         return None
 
-    gateway = getattr(compiler, "_gateway_client", None)
-    if gateway is None or not getattr(gateway, "is_connected", False):
-        return None
-
     selector_no_prefix = _AAVE_GET_RESERVE_CONFIG_SELECTOR[2:]
     asset_padded = asset_address.lower().replace("0x", "").zfill(64)
     call_data = "0x" + selector_no_prefix + asset_padded
+
+    gateway = getattr(compiler, "_gateway_client", None)
+    if gateway is None or not getattr(gateway, "is_connected", False):
+        raw_hex = _preflight_eth_call_hex(
+            compiler,
+            to=pool_data_provider,
+            call_data=call_data,
+            pre_flight_label=pre_flight_label,
+        )
+        if raw_hex is None:
+            # Reachable ONLY when the gateway-internal pre-flight is not
+            # configured — every failure of a configured pre-flight raises.
+            _log_preflight_skipped(compiler, pre_flight_label, asset_symbol)
+            return None
+        decoded_config = _decode_reserve_config_payload(
+            raw_hex,
+            asset_symbol=asset_symbol,
+            chain=compiler.chain,
+            pre_flight_label=pre_flight_label,
+        )
+        if decoded_config is None:
+            # The read succeeded but the payload was undecodable (short /
+            # malformed). On a configured pre-flight that is still "could not
+            # verify" — falling through to None here would fail open and re-open
+            # the VIB-6111 hole one layer below the eth_call itself.
+            raise ReserveConfigUnverifiableError(
+                f"{pre_flight_label} pre-flight could not verify reserve risk parameters for "
+                f"{asset_symbol} on {compiler.chain}: the PoolDataProvider returned an "
+                "undecodable payload. Refusing to compile an unverified bundle."
+            )
+        return decoded_config
 
     try:
         from almanak.gateway.proto import gateway_pb2
@@ -369,13 +445,106 @@ def _fetch_reserve_config(
         return None
     if not isinstance(decoded, str):
         return None
+
+    return _decode_reserve_config_payload(
+        decoded,
+        asset_symbol=asset_symbol,
+        chain=compiler.chain,
+        pre_flight_label=pre_flight_label,
+    )
+
+
+def _log_preflight_skipped(compiler: Any, pre_flight_label: str, asset_symbol: str) -> None:
+    """Make a fail-open VISIBLE.
+
+    A skipped risk-parameter pre-flight used to be completely silent, so a
+    compile running with every reserve guard disabled looked identical to one
+    that had checked and passed (VIB-6111).
+    """
+    logger.warning(
+        "%s pre-flight SKIPPED for %s on %s — no gateway client and no "
+        "gateway-internal eth_call seam. Compiling WITHOUT reserve risk-parameter "
+        "verification; the on-chain revert is the only remaining guard.",
+        pre_flight_label,
+        asset_symbol,
+        getattr(compiler, "chain", "?"),
+    )
+
+
+def _preflight_eth_call_hex(
+    compiler: Any,
+    *,
+    to: str,
+    call_data: str,
+    pre_flight_label: str,
+) -> str | None:
+    """Issue a lending pre-flight ``eth_call`` through the framework services seam.
+
+    Returns ``None`` only when the pre-flight is NOT configured — i.e. the
+    compiler is not flagged ``_gateway_internal_preflight``. See
+    :func:`_fetch_reserve_config` for why an unconditional fallback would
+    silently turn offline compiles into live mainnet reads.
+
+    Once the flag IS set, the compiler has declared it can read, so every
+    failure below raises :class:`ReserveConfigUnverifiableError` instead of
+    returning ``None``. Returning ``None`` here would be indistinguishable from
+    "not configured" and would make the safety guards fail open on the one path
+    production actually uses — the defect VIB-6111 exists to close.
+    """
+    # ``is True`` — NOT truthiness. The flag is a real ``bool`` on
+    # ``BaseCompilerContext``, and "configured" must mean somebody explicitly
+    # set it. Duck-typed / MagicMock compilers (used widely in the unit suite
+    # and by the ``_CompilerLikeShim`` strategy path) auto-vivify ANY attribute
+    # as a truthy Mock, so a truthiness test would classify them as
+    # "gateway-internal pre-flight enabled" and then fail closed on a compiler
+    # that has no real eth_call seam at all — turning a deliberate fail-open
+    # into a spurious compile rejection. The codebase already guards this class
+    # of bug elsewhere in this file (see the ``isinstance(cache, dict)`` caches).
+    if getattr(compiler, "_gateway_internal_preflight", False) is not True:
+        return None
+    chain = getattr(compiler, "chain", "?")
+    eth_call = getattr(compiler, "_eth_call", None)
+    if not callable(eth_call):
+        raise ReserveConfigUnverifiableError(
+            f"{pre_flight_label} pre-flight is enabled on {chain} but the compiler exposes no "
+            "usable _eth_call seam, so the reserve risk parameters could not be verified. "
+            "Refusing to compile an unverified bundle."
+        )
+    try:
+        result = eth_call(to, call_data)
+    except Exception as exc:
+        raise ReserveConfigUnverifiableError(
+            f"{pre_flight_label} pre-flight could not verify reserve risk parameters on "
+            f"{chain}: eth_call failed ({exc}). Refusing to compile an unverified bundle."
+        ) from exc
+    if not isinstance(result, str):
+        raise ReserveConfigUnverifiableError(
+            f"{pre_flight_label} pre-flight could not verify reserve risk parameters on "
+            f"{chain}: eth_call returned {type(result).__qualname__}, expected a hex string. "
+            "Refusing to compile an unverified bundle."
+        )
+    return result
+
+
+def _decode_reserve_config_payload(
+    payload: str,
+    *,
+    asset_symbol: str,
+    chain: str,
+    pre_flight_label: str,
+) -> _DecodedReserveConfig | None:
+    """Decode a ``getReserveConfigurationData`` hex payload.
+
+    Shared by both transports so the "broken contract" and short-payload
+    semantics cannot drift between the gateway path and the eth_call path.
+    """
     # Empty `0x` payload from a successful eth_call is a strong "broken
     # contract" signal — a healthy PoolDataProvider always returns a
     # 320-byte ABI-encoded tuple. Treat the same as an explicit revert.
     # Without this branch a shut-down proxy that returns success=True with
     # empty data falls through to the short-response warning and the
     # pre-flight silently fails open. CodeRabbit follow-up.
-    if decoded.lower() == "0x" or decoded == "":
+    if payload.lower() == "0x" or payload == "":
         return _DecodedReserveConfig(
             ltv=0,
             usage_as_collateral_enabled=False,
@@ -383,7 +552,7 @@ def _fetch_reserve_config(
             is_active=False,
             is_frozen=True,
         )
-    raw = decoded.removeprefix("0x") if decoded.startswith("0x") else decoded
+    raw = payload.removeprefix("0x") if payload.startswith("0x") else payload
 
     # getReserveConfigurationData returns 10 uint256/bool words (640 hex chars).
     # A short payload is a strong "broken response" signal — log it with the
@@ -394,7 +563,7 @@ def _fetch_reserve_config(
             pre_flight_label,
             len(raw),
             asset_symbol,
-            compiler.chain,
+            chain,
         )
         return None
 
@@ -583,6 +752,12 @@ def _check_aave_v3_collateral_eligibility(compiler: Any, asset_address: str, ass
     if cache_key in cache:
         return cache[cache_key]
 
+    # ``ReserveConfigUnverifiableError`` PROPAGATES from all three guards
+    # (VIB-6111). The uniform rule is: a guard NEVER converts "could not verify"
+    # into a ``reason`` string, because a reason is indistinguishable from a
+    # measured protocol fact once a caller wraps it in a typed error — and one
+    # of those typed errors classifies COMPILATION_PERMANENT / non-retryable.
+    # Call sites convert it to a NEUTRAL CompilationResult instead.
     config = _fetch_reserve_config(
         compiler,
         asset_address,
@@ -593,6 +768,8 @@ def _check_aave_v3_collateral_eligibility(compiler: Any, asset_address: str, ass
     if config is None:
         # Fail-open: do NOT cache the miss. A transient gateway failure on
         # iteration N must not permanently disable the pre-flight on iter N+1.
+        # Reachable only when no pre-flight was configured at all (offline /
+        # strategy-side compile), where no read was ever expected.
         return None
 
     # VIB-5864: an absent reserve is all-zero, so it would otherwise read as
@@ -650,6 +827,15 @@ def _check_lending_reserve_borrowable(
     if cache_key in cache:
         return cache[cache_key]
 
+    # ``ReserveConfigUnverifiableError`` deliberately PROPAGATES from here
+    # (VIB-6111). Catching it and returning the message as a ``reason`` would
+    # let the caller wrap it in ``LendingBorrowNotEnabledError``, whose prefix
+    # is in ``error_keywords.permanent_keywords`` — so a transient RPC 429 on an
+    # uncredentialed gateway pod would be classified COMPILATION_PERMANENT and
+    # become NON-RETRYABLE, telling the strategy to HOLD until governance
+    # enables borrowing on an asset that is perfectly fine. That is the exact
+    # unmeasured-reported-as-measured conflation this ticket exists to close.
+    # The caller returns a neutral CompilationResult instead.
     config = _fetch_reserve_config(
         compiler,
         asset_address,
@@ -658,7 +844,7 @@ def _check_lending_reserve_borrowable(
         pre_flight_label=f"{protocol} reserve-borrowable",
     )
     if config is None:
-        # Fail-open on transient gateway errors — do not cache the miss.
+        # Fail-open on an UNCONFIGURED pre-flight — do not cache the miss.
         return None
 
     # VIB-5864: an absent reserve reads borrowingEnabled=False off the all-zero
@@ -717,6 +903,12 @@ def _check_lending_reserve_active(
     if cache_key in cache:
         return cache[cache_key]
 
+    # ``ReserveConfigUnverifiableError`` PROPAGATES (VIB-6111) — see
+    # ``_check_lending_reserve_borrowable``. Returning it as a ``reason`` would
+    # let ``assert_lending_reserve_active`` wrap it in
+    # ``PoolReserveFrozenError``, telling a strategy the reserve is frozen when
+    # in fact the read simply failed. Callers that want a compile failure
+    # convert it to a neutral CompilationResult themselves.
     config = _fetch_reserve_config(
         compiler,
         asset_address,
@@ -725,7 +917,7 @@ def _check_lending_reserve_active(
         pre_flight_label=f"{protocol} reserve-active",
     )
     if config is None:
-        # Fail-open: do not cache transient failures.
+        # Fail-open on an UNCONFIGURED pre-flight: do not cache.
         return None
 
     # VIB-5864: this is the guard the user tickets landed on — an absent
@@ -783,10 +975,37 @@ def _gateway_eth_call_raw(compiler: Any, to: str, data: str, label: str) -> str 
     pre-flight rides the same gateway-bounded RPC plumbing. Returns ``None`` on
     any error (no gateway, RPC failure, revert, malformed response) so callers
     can fail-open — the on-chain protocol check remains the final guard.
+
+    **This helper keeps its ``str | None`` contract on purpose (VIB-6111).** Its
+    callers are the reserve-universe read and the borrow-capacity readers, not
+    the reserve risk-parameter guards. Their fail-open behaviour predates this
+    change and is unchanged by it:
+
+    * reserve-universe — a miss only costs the "absent reserve" *refinement* of
+      an error message; the guard still rejects, so failing open here is strictly
+      conservative.
+    * borrow-capacity — a miss skips the capacity refinement; this is a
+      pre-existing fail-open on both the gateway and gateway-internal paths and
+      is deliberately NOT widened or narrowed here. Tightening it is its own
+      change with its own blast radius, tracked separately rather than smuggled
+      into this PR.
+
+    So a raised :class:`ReserveConfigUnverifiableError` is converted back to
+    ``None`` here. That is not a tolerance widening of the guard path — the
+    guards call :func:`_fetch_reserve_config` directly and fail closed.
     """
     gateway = getattr(compiler, "_gateway_client", None)
     if gateway is None or not getattr(gateway, "is_connected", False):
-        return None
+        # Gateway-internal compiler: same fallback as _fetch_reserve_config, but
+        # this helper's callers keep their documented fail-open contract above.
+        try:
+            raw = _preflight_eth_call_hex(compiler, to=to, call_data=data, pre_flight_label=label)
+        except ReserveConfigUnverifiableError as exc:
+            logger.warning("%s eth_call could not be verified on %s: %s", label, compiler.chain, exc)
+            return None
+        if raw is None or raw.lower() == "0x":
+            return None
+        return raw
 
     try:
         from almanak.gateway.proto import gateway_pb2
@@ -1770,6 +1989,75 @@ def _compile_borrow_curvance(
     return result
 
 
+def _annotate_zero_ltv_collateral(
+    compiler: Any,
+    capacity_reason: str,
+    *,
+    collateral_token: Any,
+    protocol: str,
+) -> str:
+    """Append the real cause when a borrow has zero capacity because ltv == 0.
+
+    The bare capacity message ends with "supply more collateral first", which is
+    actively misleading on a market where governance has zeroed ``ltv``: no
+    amount of additional collateral creates borrowing power. This only ever
+    ENRICHES an existing rejection — it never rejects on its own — so it cannot
+    false-reject a wallet that holds other, still-eligible collateral (VIB-6111).
+
+    Falls back to the unmodified reason whenever the reserve read could not be
+    performed; an unmeasured LTV must never be reported as a measured zero. The
+    read is wrapped because this runs on an ALREADY-FAILING path: enriching a
+    rejection must never be able to replace the caller's precise, actionable
+    capacity error with an incidental exception from a diagnostic read.
+    """
+    try:
+        config = _fetch_reserve_config(
+            compiler,
+            collateral_token.address,
+            collateral_token.symbol,
+            protocol=protocol,
+            pre_flight_label="Aave V3 zero-LTV cause",
+        )
+    except Exception as exc:
+        logger.debug("zero-LTV cause annotation skipped: reserve read failed (%s)", exc)
+        return capacity_reason
+    if config is None or getattr(config, "ltv", None) != 0:
+        return capacity_reason
+    if getattr(config, "exists", True) is False:
+        # An ABSENT reserve decodes as the all-zero tuple, so it also reads
+        # ltv == 0. Annotating it would state two things that are false: that
+        # governance zeroed this reserve's LTV, and that "supplying without
+        # use_as_collateral still works" — there is no reserve to supply into.
+        # A measured zero on a reserve that exists is the only case this
+        # annotation may describe (VIB-6111; absent-reserve semantics VIB-5864).
+        logger.debug(
+            "zero-LTV cause annotation skipped: %s has no reserve on %s %s (all-zero read)",
+            collateral_token.symbol,
+            protocol,
+            compiler.chain,
+        )
+        return capacity_reason
+    # Phrased CONDITIONALLY, on purpose. The capacity number this annotates is
+    # account-wide (``getUserAccountData``), while ``collateral_token`` is only
+    # the intent's metadata — when ``collateral_amount == 0`` nothing confirms
+    # that reserve is even supplied or enabled for this wallet. So the measured
+    # fact (this reserve has ltv=0) is stated as measured, and its relevance is
+    # offered rather than asserted: capacity can equally be exhausted by
+    # existing debt, or limited by a different collateral entirely. Declaring a
+    # single root cause from an account-wide read would be the same
+    # claim-exceeds-evidence error this ticket exists to remove.
+    return (
+        f"{capacity_reason} NOTE: the {collateral_token.symbol} reserve on "
+        f"{protocol} {compiler.chain} has ltv=0 (measured), so it grants ZERO borrowing "
+        "power no matter how much of it is supplied. If that reserve is your intended "
+        "collateral, this is a market risk-parameter setting rather than a wallet-balance "
+        "problem, and supplying it without use_as_collateral still works. Borrowing "
+        "against it requires a reserve with a non-zero ltv. Note this does not rule out "
+        "other causes — the capacity figure above is account-wide, so existing debt or a "
+        "different collateral may also be limiting it."
+    )
+
+
 def _compile_borrow_aave_compatible(
     compiler,
     intent: BorrowIntent,
@@ -1807,15 +2095,30 @@ def _compile_borrow_aave_compatible(
     # still report ``borrowingEnabled=true`` and a borrow against it will
     # revert on-chain. Check active/frozen first (cheaper, hits the same
     # ``getReserveConfigurationData`` cache as SUPPLY) so a paused or frozen
-    # reserve fails the compile before the borrowable check runs. Both checks
-    # fail open on RPC errors so placeholder-mode compiles still produce
-    # calldata; the on-chain revert remains the final guard.
-    frozen_reason = _check_lending_reserve_active(
-        compiler,
-        borrow_token.address,
-        borrow_token.symbol,
-        protocol_lower,
-    )
+    # reserve fails the compile before the borrowable check runs.
+    #
+    # Fail-open applies ONLY when no pre-flight is configured (VIB-6111) — an
+    # offline / placeholder-mode compile still produces calldata and the
+    # on-chain revert remains the final guard. A CONFIGURED pre-flight that
+    # cannot read raises ReserveConfigUnverifiableError, which the try/except
+    # below converts to a NEUTRAL compile failure. Do not delete that handler as
+    # redundant: this PR exists because a stale "fails open" description let an
+    # inert guard survive unnoticed.
+    try:
+        frozen_reason = _check_lending_reserve_active(
+            compiler,
+            borrow_token.address,
+            borrow_token.symbol,
+            protocol_lower,
+        )
+    except ReserveConfigUnverifiableError as exc:
+        # Unverifiable != frozen. Neutral failure, so the classifier does not
+        # read it as a governance fact (VIB-6111).
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=str(exc),
+            intent_id=intent.intent_id,
+        )
     if frozen_reason is not None:
         return CompilationResult(
             status=CompilationStatus.FAILED,
@@ -1823,12 +2126,25 @@ def _compile_borrow_aave_compatible(
             intent_id=intent.intent_id,
         )
 
-    borrow_disabled_reason = _check_lending_reserve_borrowable(
-        compiler,
-        borrow_token.address,
-        borrow_token.symbol,
-        protocol_lower,
-    )
+    try:
+        borrow_disabled_reason = _check_lending_reserve_borrowable(
+            compiler,
+            borrow_token.address,
+            borrow_token.symbol,
+            protocol_lower,
+        )
+    except ReserveConfigUnverifiableError as exc:
+        # "Could not verify" is NOT "governance disabled borrowing" (VIB-6111).
+        # Returning a neutral CompilationResult keeps the failure unclassified
+        # (retryable) instead of laundering a transient RPC error into
+        # LendingBorrowNotEnabledError, whose prefix classifies
+        # COMPILATION_PERMANENT / non-retryable and would strand the strategy on
+        # a healthy asset.
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=str(exc),
+            intent_id=intent.intent_id,
+        )
     if borrow_disabled_reason is not None:
         from almanak.framework.intents.intent_errors import LendingBorrowNotEnabledError
 
@@ -1884,7 +2200,12 @@ def _compile_borrow_aave_compatible(
                 asset_address=borrow_token.address,
                 requested_amount=intent.borrow_amount,
                 available_amount=_capacity,
-                reason=capacity_reason,
+                reason=_annotate_zero_ltv_collateral(
+                    compiler,
+                    capacity_reason,
+                    collateral_token=collateral_token,
+                    protocol=protocol_lower,
+                ),
             )
 
     # Build approve TX and supply TX for collateral (if collateral > 0)
@@ -4241,15 +4562,26 @@ def _compile_supply_aave_compatible(
     # so such chain entries are removed from
     # ``LENDING_POOL_ADDRESSES`` and the supply path fails earlier on the
     # zero-address guard above (issues #1842 / #1847 / #1889).
-    # VIB-3749 (extends VIB-3701 collateral pre-flight). Fails open when no
-    # gateway is attached so offline / placeholder-mode compiles still produce
-    # calldata; the on-chain revert remains the final guard.
-    frozen_reason = _check_lending_reserve_active(
-        compiler,
-        asset_address=actual_supply_address,
-        asset_symbol=supply_token.symbol,
-        protocol=protocol_lower,
-    )
+    # VIB-3749 (extends VIB-3701 collateral pre-flight). Fails open when NO
+    # pre-flight is configured — offline / placeholder-mode compiles still
+    # produce calldata and the on-chain revert remains the final guard. A
+    # CONFIGURED pre-flight that cannot read raises
+    # ReserveConfigUnverifiableError and the try/except below turns it into a
+    # NEUTRAL compile failure (VIB-6111).
+    try:
+        frozen_reason = _check_lending_reserve_active(
+            compiler,
+            asset_address=actual_supply_address,
+            asset_symbol=supply_token.symbol,
+            protocol=protocol_lower,
+        )
+    except ReserveConfigUnverifiableError as exc:
+        # Unverifiable != frozen. Neutral failure (VIB-6111).
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=str(exc),
+            intent_id=intent.intent_id,
+        )
     if frozen_reason is not None:
         return CompilationResult(
             status=CompilationStatus.FAILED,
@@ -4311,13 +4643,25 @@ def _compile_supply_aave_compatible(
     if intent.use_as_collateral:
         # Pre-flight: confirm asset can actually be used as collateral on this
         # market. Surfaces a typed error instead of the opaque on-chain
-        # 0x0cafc072 (UnderlyingCannotBeUsedAsCollateral) revert. VIB-3701.
+        # 0xd0739dae (UnderlyingCannotBeUsedAsCollateral) / 0x21e5c4ae
+        # (UserHasAssetWithZeroLtv) revert. VIB-3701; selectors corrected in
+        # VIB-6111 (the previously documented 0x0cafc072 was keccak-wrong).
         if protocol_lower == "aave_v3":
-            ineligible_reason = _check_aave_v3_collateral_eligibility(
-                compiler,
-                asset_address=actual_supply_address,
-                asset_symbol=supply_token.symbol,
-            )
+            try:
+                ineligible_reason = _check_aave_v3_collateral_eligibility(
+                    compiler,
+                    asset_address=actual_supply_address,
+                    asset_symbol=supply_token.symbol,
+                )
+            except ReserveConfigUnverifiableError as exc:
+                # Fail CLOSED, but NEUTRALLY: the compile is refused because the
+                # guard could not verify, not because the asset is conclusively
+                # ineligible (VIB-6111).
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=str(exc),
+                    intent_id=intent.intent_id,
+                )
             if ineligible_reason is not None:
                 return CompilationResult(
                     status=CompilationStatus.FAILED,

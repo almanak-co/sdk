@@ -245,8 +245,19 @@ class TestAaveV3SupplyIntent:
         # Layer 1: Create and compile SupplyIntent
         # use_as_collateral=False is required: USDC has LTV=0 on Mantle Aave
         # V3, so setUserUseReserveAsCollateral(USDC, true) reverts with
-        # UnderlyingCannotBeUsedAsCollateral. The supply itself succeeds; only
-        # the auto-toggle fails.
+        # UserHasAssetWithZeroLtv() (0x21e5c4ae). The supply itself succeeds;
+        # only the auto-toggle fails.
+        #
+        # VIB-6111: this previously named UnderlyingCannotBeUsedAsCollateral,
+        # which is a different error — and the selector documented for it
+        # elsewhere in the tree (0x0cafc072) was keccak-wrong besides. The
+        # correct one is UserHasAssetWithZeroLtv (0x21e5c4ae).
+        #
+        # NOTE: THIS test does not observe that revert — it passes
+        # use_as_collateral=False and therefore never sends
+        # setUserUseReserveAsCollateral(..., true). The revert is EXPECTED
+        # behaviour, measured separately; see
+        # ``docs/internal/reports/vib-6111-mantle-zero-ltv-measurements.md``.
         intent = SupplyIntent(
             protocol="aave_v3",
             token="USDC",
@@ -580,6 +591,15 @@ class TestAaveV3BorrowIntent:
         MultiSend (via ``SafeSigner.sign_bundle_with_web3``) — a different
         shape, and one this test does not exercise. Do not read this test's
         behaviour as evidence about the production lane.
+
+        That lane has since been MEASURED directly, on a fork at head, rather
+        than inferred: the production Safe/Zodiac path reverts the whole
+        MultiSend atomically and moves NO funds, while the EOA lane and this
+        shim both park capital. (The report documents that measurement with
+        WETH/aWETH deltas — cited here for the LANE behaviour, which is
+        token-independent, not for a WMNT-specific figure.) Evidence and
+        receipts:
+        ``docs/internal/reports/vib-6111-mantle-zero-ltv-measurements.md``.
 
         The conservation block below asserts only what holds either way. Note
         this does NOT extend to the Layer 3 receipt assertion further down
