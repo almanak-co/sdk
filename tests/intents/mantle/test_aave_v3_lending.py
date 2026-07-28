@@ -564,18 +564,31 @@ class TestAaveV3BorrowIntent:
         4. Conservation: the supplied WMNT converts to aWMNT, no debt is
            created, and USDC does not move.
 
-        EXECUTION SHAPE — the supply leg's fate depends on the signer, so this
-        test does not assert either outcome (VIB-6111):
+        EXECUTION SHAPE — asserted shape-agnostically on purpose (VIB-6111).
 
-        * **Safe/Zodiac**: ``ExecutionOrchestrator._sign_via_safe`` bundles a
-          multi-tx ActionBundle into an **atomic MultiSend** and returns a
-          single signed tx — all legs succeed or fail together, so the supply
-          is rolled back and no funds move.
-        * **EOA**: legs are submitted sequentially, so ``approve`` and
-          ``supply`` commit and only the toggle reverts — capital lands as
-          aWMNT with zero collateral value (measured on a fork, see VIB-6111).
+        These tests run on the ``ZodiacOrchestrator`` **shim**
+        (``tests/intents/_permission_onchain_harness.py``), which the per-chain
+        conftests substitute for the production ``ExecutionOrchestrator`` —
+        default-on since Phase G, no marker required (``.claude/rules/
+        intent-tests.md``). The shim sends **one ``execTransactionWithRole``
+        per bundle tx, in order**, so there is no MultiSend and no atomicity:
+        ``approve`` and ``supply`` commit, and only the toggle reverts. Capital
+        lands as aWMNT with zero collateral value.
 
-        The conservation block below asserts only what holds either way.
+        Production Safe execution goes through ``ExecutionOrchestrator``, whose
+        ``_sign_safe_batch`` bundles a multi-tx ActionBundle into an atomic
+        MultiSend (via ``SafeSigner.sign_bundle_with_web3``) — a different
+        shape, and one this test does not exercise. Do not read this test's
+        behaviour as evidence about the production lane.
+
+        The conservation block below asserts only what holds either way. Note
+        this does NOT extend to the Layer 3 receipt assertion further down
+        (``assert supply_parsed, "Must find at least one Supply event..."``):
+        that assertion depends on the supply leg having actually committed,
+        which is a property of the non-atomic shim, not of both shapes — an
+        atomic-MultiSend lane would revert the whole bundle and emit no
+        ``Supply`` event. If the harness or lane changes, that assertion (not
+        just the conservation block) needs revisiting.
         """
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
         wmnt = tokens["WMNT"]
@@ -671,12 +684,13 @@ class TestAaveV3BorrowIntent:
 
         print(f"Step 2 — Borrow ActionBundle compiles: {len(compilation_result.action_bundle.transactions)} txs")
 
-        # Layer 4b: conservation. Deliberately execution-shape agnostic — the
-        # WMNT outcome differs by signer (atomic MultiSend rolls the supply
-        # back; per-leg EOA submission commits it), so asserting either one
-        # would pin this test to a lane. What must hold either way: WMNT is
-        # conserved (it either stays put or converts 1:1 into aWMNT), no debt
-        # is created, and USDC never moves because borrow is unreachable.
+        # Layer 4b: conservation. Deliberately execution-shape agnostic — on
+        # the ZodiacOrchestrator shim the supply leg commits (non-atomic), on
+        # an atomic-MultiSend lane it would roll back, so asserting either
+        # outcome would pin this test to a harness. What must hold either way:
+        # WMNT is conserved (it either stays put or converts 1:1 into aWMNT),
+        # no debt is created, and USDC never moves because borrow is
+        # unreachable.
         wmnt_after = get_token_balance(web3, wmnt, funded_wallet)
         usdc_after = get_token_balance(web3, usdc, funded_wallet)
         account_data_after = get_user_account_data(web3, funded_wallet)
@@ -767,8 +781,10 @@ class TestAaveV3RepayIntent:
            compile (SUCCESS) — the REPAY compiler path stays under test.
         2. Execution: the supply bundle fails, and only its final
            ``setUserUseReserveAsCollateral`` leg may be the one that reverts.
-           Execution shape is signer-dependent (Safe bundles atomically via
-           MultiSend, EOA submits per-leg), so no leg count is asserted.
+           These tests run on the ``ZodiacOrchestrator`` shim (one
+           ``execTransactionWithRole`` per bundle tx, non-atomic) rather than
+           the production ``ExecutionOrchestrator``, so no leg count is
+           asserted and the shape is not evidence about production.
         3. Market state: WMNT LTV reads 0 on-chain — the monitor. A non-zero
            LTV fails here and means the round trip should be restored.
         4. Conservation: no debt is created and USDC does not move.
@@ -824,10 +840,10 @@ class TestAaveV3RepayIntent:
         )
         tx_results = supply_exec.transaction_results
         assert len(tx_results) >= 1, f"expected at least one transaction result: {supply_exec.error}"
-        # Only the LAST leg may fail. Execution shape is signer-dependent — a
-        # Safe signer bundles the legs into one atomic MultiSend (single
-        # result, slice below is empty), an EOA submits them sequentially —
-        # so this deliberately does not assert a leg count.
+        # Only the LAST leg may fail. No leg count is asserted: the
+        # ZodiacOrchestrator shim yields one result per bundle tx, while a
+        # production atomic-MultiSend lane would yield a single result (the
+        # slice below is then empty). Both shapes satisfy this.
         assert all(r.success for r in tx_results[:-1]), (
             "ONLY the final setUserUseReserveAsCollateral leg may revert. An earlier leg "
             "failed, which means something other than the zero-LTV block broke: "
