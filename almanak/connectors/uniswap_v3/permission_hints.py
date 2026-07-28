@@ -23,6 +23,7 @@ _ROBINHOOD_USDG = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"
 _ROBINHOOD_WETH = "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"
 
 PERMISSION_HINTS = PermissionHints(
+    supports_standalone_fee_collection=True,
     synthetic_fee_tier={
         "mantle": 500,
         "robinhood": 500,

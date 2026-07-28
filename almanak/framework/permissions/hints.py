@@ -58,10 +58,19 @@ class PermissionHints:
     """Protocol-specific metadata for permission discovery.
 
     Attributes:
-        synthetic_position_id: Format string for LP_CLOSE synthetic position_id.
-            Supports ``{token0}`` and ``{token1}`` placeholders filled with
-            chain token addresses.  Default ``"1"`` = NFT token ID
+        synthetic_position_id: Format string for the synthetic ``position_id``
+            used by BOTH LP_CLOSE and LP_COLLECT_FEES (VIB-6149 — collect
+            carries it inside ``protocol_params`` rather than as a top-level
+            field). Supports ``{token0}`` and ``{token1}`` placeholders filled
+            with chain token addresses. Default ``"1"`` = NFT token ID
             (Uniswap V3 style).
+
+            **Constraint when ``supports_standalone_fee_collection`` is True**:
+            every NFT-position collect compiler coerces this via ``int(...)``,
+            so it must be integer-parseable. A composite form (e.g. aerodrome's
+            ``"{token0}/{token1}/volatile"``, valid for its LP_CLOSE) would fail
+            to compile and silently empty that protocol's collect manifest —
+            discovery degrades to zero targets rather than raising.
         supports_standalone_fee_collection: Whether this protocol supports
             standalone LP_COLLECT_FEES intents.
         selector_labels: Extra selector -> human-readable label mappings.

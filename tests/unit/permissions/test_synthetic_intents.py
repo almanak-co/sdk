@@ -138,16 +138,42 @@ class TestLPIntents:
         assert intents[0].position_id == "1"
 
     def test_lp_collect_fees(self):
-        """LP_COLLECT_FEES should produce a CollectFeesIntent only for traderjoe_v2."""
+        """LP_COLLECT_FEES should produce a CollectFeesIntent for traderjoe_v2.
+
+        Not "only" traderjoe_v2 — VIB-6149 made the V3 family and uniswap_v4
+        build one too. This case is specifically the override-owned shape;
+        the framework-default shape is asserted in
+        ``test_lp_collect_fees_discovery.py``.
+        """
         intents = build_synthetic_intents("traderjoe_v2", "LP_COLLECT_FEES", "avalanche")
         assert len(intents) == 1
         assert isinstance(intents[0], CollectFeesIntent)
         assert "/" in intents[0].pool  # pool format: "token0/token1"
 
     def test_lp_collect_fees_unsupported_protocol(self):
-        """LP_COLLECT_FEES returns empty for protocols that don't support standalone collection."""
-        intents = build_synthetic_intents("uniswap_v3", "LP_COLLECT_FEES", "arbitrum")
+        """LP_COLLECT_FEES returns empty for protocols that don't support standalone collection.
+
+        Uses aerodrome, which genuinely does not declare the verb. This test
+        previously asserted the same thing about **uniswap_v3** — and in doing so
+        ratified VIB-6149: uniswap_v3 declares ``LP_COLLECT_FEES`` in its connector
+        manifest, so "returns empty" was the bug, pinned as if it were the spec.
+        A fee-harvest-only uniswap_v3 strategy got a manifest with zero protocol
+        targets. Same shape as the MultiSend over-grant that
+        ``test_manifest_coverage`` was ratifying (VIB-6057): a test asserting the
+        broken behaviour is why nobody found it.
+        """
+        assert not get_permission_hints("aerodrome").supports_standalone_fee_collection
+        intents = build_synthetic_intents("aerodrome", "LP_COLLECT_FEES", "base")
         assert intents == []
+
+    def test_lp_collect_fees_supported_protocol_is_not_empty(self):
+        """The inverse of the above — a connector that DECLARES the verb must build one."""
+        assert get_permission_hints("uniswap_v3").supports_standalone_fee_collection
+        intents = build_synthetic_intents("uniswap_v3", "LP_COLLECT_FEES", "arbitrum")
+        assert len(intents) == 1
+        assert (intents[0].protocol_params or {}).get("position_id"), (
+            "the collect compiler rejects an intent without protocol_params['position_id']"
+        )
 
     def test_lp_close_aerodrome_position_format(self):
         """Aerodrome LP_CLOSE uses TOKEN0/TOKEN1/volatile format, not NFT ID."""
@@ -228,14 +254,12 @@ class TestSparkLendingRegistration:
     def test_spark_pool_registered_on_ethereum(self):
         """Spark's Ethereum pool must be in LENDING_POOL_ADDRESSES."""
         assert "spark" in LENDING_POOL_ADDRESSES["ethereum"], (
-            "Spark missing from LENDING_POOL_ADDRESSES[ethereum]; "
-            "synthetic intent discovery will short-circuit."
+            "Spark missing from LENDING_POOL_ADDRESSES[ethereum]; synthetic intent discovery will short-circuit."
         )
         # Pin the exact deployment address so a wrong 42-char hex still fails.
         addr = LENDING_POOL_ADDRESSES["ethereum"]["spark"]
         assert addr == "0xC13e21B648A5Ee794902342038FF3aDAB66BE987", (
-            f"Unexpected spark pool address on ethereum: {addr}. "
-            "Expected the canonical Spark LendingPool deployment."
+            f"Unexpected spark pool address on ethereum: {addr}. Expected the canonical Spark LendingPool deployment."
         )
 
     def test_supply_spark_ethereum(self):

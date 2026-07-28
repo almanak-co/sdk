@@ -656,11 +656,25 @@ def _build_lp_collect_fees_intents(protocol: str, chain: str) -> list[AnyIntent]
     if protocol not in managers:
         return []
     token0, token1 = _resolve_lp_pair(hints, chain)
+    # ``position_id`` in ``protocol_params`` (VIB-6149). Every NFT-position
+    # collect compiler — uniswap_v3 and its forks, uniswap_v4 — rejects the
+    # intent without it, so the default shape could NEVER compile and this
+    # builder silently produced a zero-target manifest for any protocol that
+    # opted in. uniswap_v4 hit exactly this and worked around it in its own
+    # ``build_discovery_vectors`` override, whose docstring records the cause:
+    # "V4's collect compiler needs ``position_id`` in ``protocol_params``; the
+    # default ``CollectFeesIntent`` only supplies ``pool``."
+    #
+    # It is NOT a top-level field on ``CollectFeesIntent`` (that raises
+    # "Extra inputs are not permitted"), unlike ``LPCloseIntent.position_id`` —
+    # which is why the sibling ``_build_lp_close_intents`` reads correct while
+    # this one was broken. Same hint, different carrier.
     return [
         CollectFeesIntent(
             pool=f"{token0}/{token1}",
             protocol=protocol,
             chain=chain,
+            protocol_params={"position_id": hints.synthetic_position_id.format(token0=token0, token1=token1)},
         )
     ]
 

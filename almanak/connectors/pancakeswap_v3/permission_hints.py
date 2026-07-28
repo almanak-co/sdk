@@ -11,6 +11,7 @@ right tokens before LP tests grow on bnb for pancakeswap_v3.
 from almanak.framework.permissions.hints import PermissionHints
 
 PERMISSION_HINTS = PermissionHints(
+    supports_standalone_fee_collection=True,
     synthetic_lp_pair={
         "bsc": (
             "0x55d398326f99059fF775485246999027B3197955",  # USDT (BSC)

@@ -20,10 +20,15 @@ V4-compatible intents (VIB-4421):
 - **LP_CLOSE** — V4's LP_CLOSE compiler needs ``currency0``/``currency1`` (or a
   resolvable ``pool``) in ``protocol_params`` to reconstruct the pool key; the
   default only supplies ``position_id``.
-- **LP_COLLECT_FEES** — V4's collect compiler needs ``position_id`` in
-  ``protocol_params``; the default ``CollectFeesIntent`` only supplies ``pool``.
+- **LP_COLLECT_FEES** — no longer overridden. V4's collect compiler needs
+  ``position_id`` in ``protocol_params``, which the shared builder now supplies
+  (VIB-6149). This entry previously documented a defect in that shared builder
+  while working around it locally, which is why the same bug silently affected
+  every other connector for as long as it did.
 
-All four synthetic shapes below were verified to compile offline via the real
+The three synthetic shapes still overridden below (SWAP, LP_OPEN, LP_CLOSE —
+LP_COLLECT_FEES now falls through to the framework default) were verified to
+compile offline via the real
 ``IntentCompiler`` (``allow_placeholder_prices=True``, ``permission_discovery=True``,
 no RPC) and to emit the expected targets: token + Permit2 approvals, the
 UniversalRouter (``execute`` ``0x3593564c``) for SWAP, and the PositionManager
@@ -96,7 +101,6 @@ def build_discovery_vectors(
         return None
 
     from almanak.framework.intents.vocabulary import (
-        CollectFeesIntent,
         LPCloseIntent,
         LPOpenIntent,
         SwapIntent,
@@ -154,18 +158,37 @@ def build_discovery_vectors(
             )
         ]
 
-    if intent_type == "LP_COLLECT_FEES":
-        # V4 standalone fee collection needs ``position_id`` in protocol_params;
-        # the default ``CollectFeesIntent`` only supplies ``pool``.
-        return [
-            CollectFeesIntent(
-                pool=f"{ctx.usdc}/{ctx.weth}/{_SYNTHETIC_FEE_TIER}",
-                protocol=protocol,
-                chain=chain,
-                # str to match the LP_CLOSE synthetic above (the V4 collect
-                # compiler coerces via ``int(...)``; both forms compile).
-                protocol_params={"position_id": "1"},
-            )
-        ]
-
+    # LP_COLLECT_FEES deliberately falls through to the framework default
+    # (VIB-6149). This branch used to build its own CollectFeesIntent purely to
+    # supply ``position_id`` in ``protocol_params`` — a local workaround for a
+    # defect in the SHARED builder, which never supplied it and therefore could
+    # not compile for ANY protocol. That is now fixed at the source in
+    # ``_build_lp_collect_fees_intents``, so the workaround is redundant.
+    #
+    # Verified before deleting rather than assumed: the emitted manifest is
+    # byte-identical (targets, selectors and send_allowed) with and without this
+    # branch on all seven chains V4 declares.
+    #
+    # The override also passed a fee tier in the pool string that the default
+    # omits. That is inert — but NOT because the pool string is unused here, and
+    # stating it that way would be wrong in a load-bearing place. ``pool`` IS
+    # consulted: ``compile_collect_fees`` falls back to
+    # ``_resolve_pool_currencies(...)`` to derive ``currency0``/``currency1``
+    # whenever ``protocol_params`` omits them, which is exactly what the
+    # framework default does. The tier is inert only because that helper reads
+    # ``pool.split("/")[:2]`` and never looks at a third segment.
+    #
+    # So the load-bearing precondition for this deletion is narrower than "pool
+    # is irrelevant": it is that the first two segments still resolve to the
+    # right currencies. Make ``_resolve_pool_currencies`` strict about segment
+    # count, or make collection depend on fee / tick-spacing / hooks, and this
+    # branch has to come back.
+    #
+    # Second precondition, latent today: collect now runs the framework default,
+    # which gates on ``LP_POSITION_MANAGERS``, whereas the SWAP / LP_OPEN /
+    # LP_CLOSE branches above return non-``None`` and so never reach that gate.
+    # Collect is therefore the only V4 LP verb subject to it. The two registries
+    # list the same seven chains today (verified), so this is inert — but adding
+    # a V4 chain to ``addresses.py`` WITHOUT adding it to ``LP_POSITION_MANAGERS``
+    # would silently drop collect on that chain while the other verbs keep working.
     return None
