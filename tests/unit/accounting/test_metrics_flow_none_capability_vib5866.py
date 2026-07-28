@@ -361,6 +361,200 @@ async def test_sqlite_reads_sql_null_as_legacy_measured_zero(store, db_path) -> 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stored", ["NULL", "''", "'   '"])
+async def test_sqlite_reads_legacy_absent_gas_as_measured_zero(store, db_path, stored: str) -> None:
+    """Reader PARITY: SQLite must agree with Postgres and the gateway.
+
+    ``gas_spent_usd`` is ``TEXT DEFAULT '0'`` — nullable — so absence is a
+    schema-permitted state, not corruption. The bare ``Decimal(row[...])`` this
+    guards raised ``TypeError`` on NULL / ``InvalidOperation`` on '', both of
+    which land in the runner's broad ``except Exception``: a WARNING and NO
+    ``portfolio_metrics`` row written at all.
+
+    Spellings are enumerated BY NAME so a future narrowing cannot pass by
+    dropping one.
+    """
+    deployment = f"deployment:gasabs{abs(hash(stored)) % 100000:05d}"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            f"""
+            INSERT INTO portfolio_metrics (
+                deployment_id, initial_value_usd, initial_timestamp,
+                deposits_usd, withdrawals_usd, gas_spent_usd, total_value_usd,
+                updated_at
+            ) VALUES (?, '4', ?, '0', '0', {stored}, '10', ?)
+            """,  # noqa: S608 - `stored` is a test-local literal, not user input
+            (
+                deployment,
+                datetime(2026, 7, 19, tzinfo=UTC).isoformat(),
+                datetime(2026, 7, 19, tzinfo=UTC).isoformat(),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    loaded = await store.get_portfolio_metrics(deployment)
+    assert loaded is not None
+    assert loaded.gas_spent_usd == Decimal("0")
+
+
+@pytest.mark.asyncio
+async def test_sqlite_schema_default_for_total_value_is_the_unmeasured_sentinel(store, db_path) -> None:
+    """A row that never wrote a total must read back UNMEASURED, not zero.
+
+    The column default was ``TEXT DEFAULT '0'``. SQLite's
+    ``ALTER TABLE ADD COLUMN ... DEFAULT`` BACKFILLS every pre-existing row, so
+    that default handed legacy local DBs a *measured zero* NAV they never
+    measured — the exact state VIB-5915 exists to prevent.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO portfolio_metrics (
+                deployment_id, initial_value_usd, initial_timestamp,
+                deposits_usd, withdrawals_usd, gas_spent_usd, updated_at
+            ) VALUES (?, '4', ?, '0', '0', '0.5', ?)
+            """,
+            (
+                "deployment:defaulted00",
+                datetime(2026, 7, 19, tzinfo=UTC).isoformat(),
+                datetime(2026, 7, 19, tzinfo=UTC).isoformat(),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    loaded = await store.get_portfolio_metrics("deployment:defaulted00")
+    assert loaded is not None
+    assert loaded.total_value_usd is None, "schema default fabricated a measured zero"
+    assert loaded.pnl_before_gas is None
+
+
+@pytest.mark.asyncio
+async def test_migration_backfill_does_not_fabricate_measured_zero(tmp_path) -> None:
+    """The MIGRATION path — the only half of the default change production reaches.
+
+    `CREATE TABLE` at ``sqlite.py:541`` is unreachable on a real user database:
+    both SQLite writers name ``total_value_usd`` explicitly, and the table
+    already exists. The reachable path is ``_add_column_if_missing`` at
+    ``sqlite.py:1151`` — SQLite's ``ALTER TABLE ADD COLUMN ... DEFAULT``
+    **backfills every pre-existing row**, so a ``'0'`` default silently hands
+    rows that were never measured a measured-zero NAV.
+
+    An audit mutation proved this half was uncovered: reverting ONLY ``:1151``
+    to ``DEFAULT '0'`` left 2514 tests green, because the sibling test exercises
+    only the inert ``CREATE TABLE`` default. This closes that gap.
+    """
+    from almanak.framework.state.backends.sqlite import SQLiteConfig, SQLiteStore
+
+    db = str(tmp_path / "legacy.db")
+    conn = sqlite3.connect(db)
+    try:
+        # A pre-VIB-2765 table: portfolio_metrics WITHOUT total_value_usd.
+        conn.execute("""
+            CREATE TABLE portfolio_metrics (
+                deployment_id TEXT PRIMARY KEY,
+                initial_value_usd TEXT NOT NULL,
+                initial_timestamp TEXT NOT NULL,
+                deposits_usd TEXT DEFAULT '0',
+                withdrawals_usd TEXT DEFAULT '0',
+                gas_spent_usd TEXT DEFAULT '0',
+                positions_json TEXT DEFAULT '[]',
+                cycle_id TEXT,
+                execution_mode TEXT DEFAULT '',
+                is_complete BOOLEAN DEFAULT 1,
+                updated_at TEXT
+            )
+        """)
+        conn.execute(
+            "INSERT INTO portfolio_metrics (deployment_id, initial_value_usd, initial_timestamp, "
+            "deposits_usd, withdrawals_usd, gas_spent_usd, updated_at) VALUES (?, '4', ?, '0', '0', '0.5', ?)",
+            (
+                "deployment:premigrate0",
+                datetime(2026, 7, 19, tzinfo=UTC).isoformat(),
+                datetime(2026, 7, 19, tzinfo=UTC).isoformat(),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    backend = SQLiteStore(SQLiteConfig(db_path=db))
+    await backend.initialize()  # runs _add_column_if_missing
+    try:
+        loaded = await backend.get_portfolio_metrics("deployment:premigrate0")
+    finally:
+        await backend.close()
+
+    assert loaded is not None, "migration lost the pre-existing row"
+    assert loaded.total_value_usd is None, (
+        "ADD COLUMN backfilled a MEASURED ZERO onto a row that was never measured"
+    )
+
+
+def test_every_portfolio_metrics_writer_supplies_total_value_usd() -> None:
+    """The column default must stay UNREACHABLE for SDK writes.
+
+    Changing the declared default only affects FRESH schemas: on a database
+    upgraded under the old schema the column already exists, so both
+    ``CREATE TABLE IF NOT EXISTS`` and ``_add_column_if_missing`` are no-ops and
+    the old ``DEFAULT '0'`` survives. Rebuilding the table would not recover
+    anything — rows backfilled by the original ``ADD COLUMN ... DEFAULT '0'``
+    are already indistinguishable from genuine measured zeros — so the durable
+    guarantee is not the default at all: it is that **every writer names the
+    column explicitly**, which makes the default unreachable on every path.
+
+    This test pins that. If a future writer omits ``total_value_usd``, an
+    upgraded database silently fabricates a measured-zero NAV again, and this
+    fails instead.
+
+    Writers are asserted BY NAME rather than by count, so adding a writer
+    cannot satisfy this by arithmetic.
+    """
+    import re
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parents[3]
+
+    # DISCOVER writers; do not enumerate them. An earlier revision of this test
+    # hardcoded the two known files and iterated only that set, so a writer added
+    # in any THIRD file was never opened — the test passed while the invariant its
+    # name, docstring and blueprint 27 all claim was violated. Discovery is what
+    # makes the claim true.
+    insert_re = re.compile(r"INSERT(?:\s+OR\s+REPLACE)?\s+INTO\s+portfolio_metrics\s*\(([^)]*)\)", re.I)
+
+    known_writers = {
+        "almanak/framework/state/backends/sqlite.py",
+        "almanak/gateway/services/_save_metrics_helpers.py",
+    }
+    found_writers: set[str] = set()
+
+    for path in sorted((repo / "almanak").rglob("*.py")):
+        src = path.read_text(encoding="utf-8", errors="replace")
+        if "portfolio_metrics" not in src:  # cheap prefilter
+            continue
+        rel = path.relative_to(repo).as_posix()
+        for match in insert_re.finditer(src):
+            found_writers.add(rel)
+            assert "total_value_usd" in match.group(1), (
+                f"{rel}: an INSERT into portfolio_metrics omits total_value_usd — "
+                "it would take the column default, which on an already-migrated "
+                "database is still '0' and reads back as a MEASURED ZERO"
+            )
+
+    # Anti-vacuity, two ways. The discovery must still find the writers we know
+    # about (so it cannot silently go blind), but it is a MINIMUM, not an
+    # equality — a new writer must be caught by the loop above, never excused by
+    # this assertion.
+    missing = known_writers - found_writers
+    assert not missing, f"writer discovery went blind — expected at least {known_writers}, missing {missing}"
+
+
+@pytest.mark.asyncio
 async def test_sqlite_cowrite_seam_persists_unmeasured_flows_as_empty_text(store, db_path) -> None:
     """``save_snapshot_and_metrics`` shares the sentinel with the plain writer."""
     from almanak.framework.portfolio.models import PortfolioSnapshot
@@ -711,12 +905,29 @@ def test_pg_row_reader_maps_absent_or_invalid_total_to_unmeasured(raw: object) -
 
 
 @pytest.mark.parametrize("column", ["initial_value_usd", "gas_spent_usd"])
-@pytest.mark.parametrize("raw", ["", "None", "not-a-decimal", "NaN", "Infinity", "-Infinity"])
+@pytest.mark.parametrize("raw", ["None", "not-a-decimal", "NaN", "Infinity", "-Infinity"])
 def test_pg_row_reader_rejects_invalid_required_monetary_values(column: str, raw: str) -> None:
+    """Genuinely CORRUPT text always raises — with or without a legacy default."""
     from almanak.framework.state.state_manager import _pg_row_to_portfolio_metrics
 
     with pytest.raises(ValueError, match=rf"portfolio_metrics\.{column} must contain a finite decimal measurement"):
         _pg_row_to_portfolio_metrics(_pg_row(**{column: raw}))
+
+
+def test_pg_row_reader_rejects_empty_initial_value_usd() -> None:
+    """``initial_value_usd`` is ``NOT NULL`` and declares NO legacy default, so
+    empty text is corruption rather than legacy absence and must still raise.
+
+    Contrast ``gas_spent_usd`` below, which does declare one — that asymmetry
+    is the whole contract of ``_required_decimal_from_row``.
+    """
+    from almanak.framework.state.state_manager import _pg_row_to_portfolio_metrics
+
+    with pytest.raises(
+        ValueError,
+        match=r"portfolio_metrics\.initial_value_usd must contain a finite decimal measurement",
+    ):
+        _pg_row_to_portfolio_metrics(_pg_row(initial_value_usd=""))
 
 
 def test_pg_row_reader_keeps_legacy_missing_gas_as_measured_zero() -> None:
@@ -727,14 +938,27 @@ def test_pg_row_reader_keeps_legacy_missing_gas_as_measured_zero() -> None:
     assert _pg_row_to_portfolio_metrics(row).gas_spent_usd == Decimal("0")
 
 
-def test_pg_row_reader_rejects_present_null_gas() -> None:
+@pytest.mark.parametrize("raw", [None, "", "   "])
+def test_pg_row_reader_treats_legacy_absent_gas_as_the_declared_default(raw: object) -> None:
+    """VIB-5915 regression guard: a schema-permitted NULL is ABSENCE, not corruption.
+
+    ``gas_spent_usd`` is ``TEXT DEFAULT '0'`` — nullable — and the gateway's
+    reader of the SAME column in the SAME table agrees it may be absent
+    (``state_service.py``: ``gas_spent_usd=row["gas_spent_usd"] or "0"``).
+
+    Narrowing ``legacy_default`` to key-presence only made a present-but-NULL
+    raise ``ValueError``, which is NOT ``AccountingPersistenceError`` and so
+    fell into ``runner_state``'s broad ``except Exception`` — a WARNING and
+    **no ``portfolio_metrics`` row written at all**, silently, on every
+    iteration for that deployment. Strictly more data loss than the behaviour
+    it replaced (``Decimal(row.get(column) or "0")``).
+
+    The three spellings are enumerated BY NAME, not asserted by count, so a
+    future narrowing cannot pass by dropping one.
+    """
     from almanak.framework.state.state_manager import _pg_row_to_portfolio_metrics
 
-    with pytest.raises(
-        ValueError,
-        match=r"portfolio_metrics\.gas_spent_usd must contain a finite decimal measurement",
-    ):
-        _pg_row_to_portfolio_metrics(_pg_row(gas_spent_usd=None))
+    assert _pg_row_to_portfolio_metrics(_pg_row(gas_spent_usd=raw)).gas_spent_usd == Decimal("0")
 
 
 def test_pg_row_reader_keeps_legacy_zero_and_missing_column_measured() -> None:
@@ -863,6 +1087,77 @@ def test_pg_metrics_to_proto_passes_the_sentinel_through() -> None:
     null_row = _pg_row(deposits_usd=None)
     null_row["updated_at"] = datetime(2026, 7, 19, 13, 0, tzinfo=UTC)
     assert StateService._pg_portfolio_metrics_to_proto(null_row).deposits_usd == "0"
+
+
+@pytest.mark.parametrize("raw", [None, "", "   "])
+def test_pg_metrics_to_proto_treats_legacy_absent_gas_as_measured_zero(raw: object) -> None:
+    """READER 3 of 4 — the hosted server-side projection onto the wire.
+
+    All four readers of ``gas_spent_usd`` must share one absence rule. This one
+    used to spell it ``row["gas_spent_usd"] or "0"``, which agrees on ``None``
+    and ``''`` (both falsy) but NOT on whitespace, which is truthy: ``"   "``
+    reached the client verbatim and raised ``InvalidOperation`` downstream while
+    the two direct readers returned a measured zero.
+
+    Without this test, reverting the fix to ``or "0"`` passes the whole suite.
+    """
+    from almanak.gateway.services.state_service import StateServiceServicer as StateService
+
+    row = _pg_row(gas_spent_usd=raw)
+    row["updated_at"] = datetime(2026, 7, 19, 13, 0, tzinfo=UTC)
+    assert StateService._pg_portfolio_metrics_to_proto(row).gas_spent_usd == "0"
+
+
+def test_pg_metrics_to_proto_passes_measured_gas_through_unchanged() -> None:
+    """The absence rule must not touch a MEASURED value — including a real zero."""
+    from almanak.gateway.services.state_service import StateServiceServicer as StateService
+
+    for measured in ("0", "0.00", "0.5", "12.25"):
+        row = _pg_row(gas_spent_usd=measured)
+        row["updated_at"] = datetime(2026, 7, 19, 13, 0, tzinfo=UTC)
+        assert StateService._pg_portfolio_metrics_to_proto(row).gas_spent_usd == measured
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw", [None, "", "   "])
+async def test_hosted_client_reader_treats_legacy_absent_gas_as_measured_zero(monkeypatch, raw: object) -> None:
+    """READER 4 of 4 — the HOSTED PRODUCTION read path.
+
+    Same rule, same spellings. Before the fix this was
+    ``Decimal(response.gas_spent_usd or "0")``, so ``"   "`` became
+    ``Decimal("   ")`` -> ``InvalidOperation``, which is not an
+    ``AccountingPersistenceError`` and therefore landed in ``runner_state``'s
+    broad ``except Exception``: a WARNING and no metrics row at all — the exact
+    silent failure VIB-5915 exists to close.
+    """
+    from almanak.framework.state.gateway_state_manager import GatewayStateManager
+    from almanak.gateway.proto import gateway_pb2
+
+    class _FakeStateStub:
+        def GetPortfolioMetrics(self, request, timeout=None):  # noqa: N802 — gRPC stub name
+            return gateway_pb2.PortfolioMetricsData(
+                found=True,
+                initial_value_usd="100",
+                initial_timestamp=int(datetime(2026, 7, 19, tzinfo=UTC).timestamp()),
+                deposits_usd="0",
+                withdrawals_usd="0",
+                gas_spent_usd="" if raw is None else raw,
+                updated_at=int(datetime(2026, 7, 19, tzinfo=UTC).timestamp()),
+                deployment_id="deployment:abc123def456",
+            )
+
+    manager = GatewayStateManager.__new__(GatewayStateManager)
+    manager._client = SimpleNamespace(state=_FakeStateStub())
+    manager._timeout = 5.0
+
+    async def _no_snapshot(_deployment_id):
+        return None
+
+    monkeypatch.setattr(manager, "get_latest_snapshot", _no_snapshot, raising=False)
+
+    loaded = await manager.get_portfolio_metrics("deployment:abc123def456")
+    assert loaded is not None
+    assert loaded.gas_spent_usd == Decimal("0")
 
 
 @pytest.mark.asyncio

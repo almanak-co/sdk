@@ -538,7 +538,7 @@ CREATE TABLE IF NOT EXISTS portfolio_metrics (
     deposits_usd TEXT DEFAULT '0',
     withdrawals_usd TEXT DEFAULT '0',
     gas_spent_usd TEXT DEFAULT '0',
-    total_value_usd TEXT DEFAULT '0',  -- Current portfolio value (VIB-2765)
+    total_value_usd TEXT DEFAULT '',  -- Current portfolio value (VIB-2765); '' = UNMEASURED (VIB-5915) — a '0' default would fabricate a measured zero
     positions_json TEXT DEFAULT '[]',  -- Snapshot of position state (VIB-2765)
     cycle_id TEXT,  -- Correlation to portfolio_snapshots (VIB-2765)
     execution_mode TEXT DEFAULT '',  -- Phase 4: live, paper, dry_run (VIB-2837)
@@ -1143,7 +1143,12 @@ class SQLiteStore:
         _drop_table_if_exists("timeline_events", "moved to gateway-side store")
 
         # Phase 1a: total_value_usd, positions_json, cycle_id on portfolio_metrics (VIB-2765)
-        _add_column_if_missing("portfolio_metrics", "total_value_usd", "TEXT DEFAULT '0'")
+        # VIB-5915: the sentinel is '', not '0'. SQLite's ``ALTER TABLE ADD
+        # COLUMN ... DEFAULT`` BACKFILLS every pre-existing row, so a '0'
+        # default hands legacy rows a *measured zero* NAV they never measured
+        # — the exact state VIB-5915 exists to prevent. '' reads back as
+        # ``None`` (unmeasured) via ``decode_optional_decimal_text``.
+        _add_column_if_missing("portfolio_metrics", "total_value_usd", "TEXT DEFAULT ''")
         _add_column_if_missing("portfolio_metrics", "positions_json", "TEXT DEFAULT '[]'")
         _add_column_if_missing("portfolio_metrics", "cycle_id", "TEXT")
 
@@ -2853,6 +2858,7 @@ class SQLiteStore:
             PortfolioMetrics,
             decode_optional_decimal_text,
             decode_optional_flow,
+            is_legacy_absent_text,
         )
 
         if not self._initialized:
@@ -2916,7 +2922,15 @@ class SQLiteStore:
                 # Decimal(...) this replaces raised on ''/NULL (VIB-5866).
                 deposits_usd=decode_optional_flow("0" if row["deposits_usd"] is None else row["deposits_usd"]),
                 withdrawals_usd=decode_optional_flow("0" if row["withdrawals_usd"] is None else row["withdrawals_usd"]),
-                gas_spent_usd=Decimal(row["gas_spent_usd"]),
+                # VIB-5915 follow-up: a schema-permitted NULL/'' is legacy
+                # ABSENCE, not corruption — the same rule the Postgres reader
+                # applies via ``_required_decimal_from_row(..., legacy_default)``
+                # and both gateway readers apply via ``is_legacy_absent_text``.
+                # ``gas_spent_usd`` is ``TEXT DEFAULT '0'`` (a DEFAULT does not
+                # imply NOT NULL), and the bare ``Decimal(None)`` this replaces
+                # raised ``TypeError`` into the runner's broad
+                # ``except Exception`` — a WARNING and NO metrics row at all.
+                gas_spent_usd=Decimal("0" if is_legacy_absent_text(row["gas_spent_usd"]) else row["gas_spent_usd"]),
                 positions_json=row["positions_json"] or "[]",
                 cycle_id=row["cycle_id"],
                 deployment_id=row_deployment_id,

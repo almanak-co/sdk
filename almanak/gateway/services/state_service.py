@@ -1246,6 +1246,8 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
 
     @staticmethod
     def _pg_portfolio_metrics_to_proto(row: Any) -> gateway_pb2.PortfolioMetricsData:
+        from almanak.framework.portfolio.models import is_legacy_absent_text
+
         return gateway_pb2.PortfolioMetricsData(
             initial_value_usd=row["initial_value_usd"],
             initial_timestamp=int(row["initial_timestamp"].timestamp()),
@@ -1255,7 +1257,12 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             # (legacy rows predate the sentinel). VIB-5866.
             deposits_usd=row["deposits_usd"] if row["deposits_usd"] is not None else "0",
             withdrawals_usd=row["withdrawals_usd"] if row["withdrawals_usd"] is not None else "0",
-            gas_spent_usd=row["gas_spent_usd"] or "0",
+            # VIB-5915: shares the absence rule with the two direct readers.
+            # The `or "0"` this replaces agreed on NULL and '' (both falsy) but
+            # NOT on whitespace, which is truthy — so `"   "` reached the client
+            # verbatim and raised `InvalidOperation` downstream while the direct
+            # readers returned a measured zero. One home, one rule.
+            gas_spent_usd="0" if is_legacy_absent_text(row["gas_spent_usd"]) else row["gas_spent_usd"],
             updated_at=int(row["updated_at"].timestamp()),
             found=True,
             deployment_id=row["deployment_id"] or "",

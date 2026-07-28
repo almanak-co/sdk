@@ -1893,17 +1893,45 @@ def _required_decimal_from_row(
 ) -> Decimal:
     """Read a required finite monetary value without deferring corruption.
 
-    Some legacy rows omit fields that historically defaulted to zero. Those
-    callers may supply ``legacy_default`` explicitly. Present but empty,
-    malformed, legacy ``"None"``, and non-finite values are never coerced.
-    """
-    from almanak.framework.portfolio.models import decode_optional_decimal_text
+    ``legacy_default`` is the caller's declaration of what a *legacy absence*
+    of this column means. A column can be absent in three indistinguishable
+    ways — the key is missing, the value is SQL ``NULL``, or the value is
+    empty / whitespace text — and none of them is a corrupt measurement, so
+    all three take the declared default. This mirrors
+    :func:`_optional_flow_from_row` directly above, and the two gateway-side
+    readers of the *same column in the same table*
+    (``state_service._pg_portfolio_metrics_to_proto`` and
+    ``gateway_state_manager.get_portfolio_metrics``), which share this exact
+    predicate — see :func:`is_legacy_absent_text` for the full four-reader list.
+    Before VIB-5915 this call site read ``Decimal(row.get(column) or "0")``;
+    narrowing it to key-presence only made a schema-permitted ``NULL`` fatal,
+    and the ``ValueError`` landed in ``runner_state``'s broad
+    ``except Exception`` — a WARNING and *no* ``portfolio_metrics`` row at
+    all, silently, on every iteration.
 
-    if column not in row:
-        if legacy_default is not None:
+    **Empty≠Zero is not in tension here.** The fields that pass
+    ``legacy_default`` are declared *required* by ``PortfolioMetrics``
+    (blueprint 27 §7.6 — ``gas_spent_usd: Decimal``, "always populated"), so
+    they have no ``None`` state to preserve. §10.10 binds the three
+    ``Decimal | None`` columns, which are read by
+    :func:`_optional_flow_from_row` and ``decode_optional_decimal_text``
+    instead. Without a ``legacy_default`` (e.g. ``initial_value_usd``, which
+    is ``NOT NULL``) an absent column still raises.
+
+    A genuinely *corrupt* value — malformed text, the legacy ``"None"``
+    literal, or a non-finite — always raises, default or not.
+    """
+    from almanak.framework.portfolio.models import decode_optional_decimal_text, is_legacy_absent_text
+
+    if legacy_default is not None:
+        raw = row.get(column)
+        if is_legacy_absent_text(raw):
             return legacy_default
-        raise ValueError(f"portfolio_metrics.{column} must contain a finite decimal measurement")
-    raw = row[column]
+    else:
+        if column not in row:
+            raise ValueError(f"portfolio_metrics.{column} must contain a finite decimal measurement")
+        raw = row[column]
+
     value = decode_optional_decimal_text(raw, field_name=f"portfolio_metrics.{column}")
     if value is None:
         raise ValueError(f"portfolio_metrics.{column} must contain a finite decimal measurement")

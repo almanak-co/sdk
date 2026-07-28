@@ -558,7 +558,11 @@ class GatewayStateManager:
         """
         from decimal import Decimal
 
-        from almanak.framework.portfolio.models import PortfolioMetrics, decode_optional_flow
+        from almanak.framework.portfolio.models import (
+            PortfolioMetrics,
+            decode_optional_flow,
+            is_legacy_absent_text,
+        )
 
         try:
             request = gateway_pb2.GetMetricsRequest(deployment_id=deployment_id)
@@ -595,7 +599,12 @@ class GatewayStateManager:
                 # default. (An absent row returns early above on ``found``.)
                 deposits_usd=decode_optional_flow(response.deposits_usd),
                 withdrawals_usd=decode_optional_flow(response.withdrawals_usd),
-                gas_spent_usd=Decimal(response.gas_spent_usd or "0"),
+                # VIB-5915: the HOSTED read path shares the absence rule with
+                # the two direct readers. The `or "0"` this replaces agreed on
+                # NULL and '' (both falsy) but NOT on whitespace, which is
+                # truthy — `Decimal("   ")` raised `InvalidOperation` into the
+                # same silent swallow this fix exists to close.
+                gas_spent_usd=Decimal("0" if is_legacy_absent_text(response.gas_spent_usd) else response.gas_spent_usd),
                 # Phase 4 accounting identity fields (VIB-2835/2837/2839)
                 deployment_id=response.deployment_id or "",
                 cycle_id=response.cycle_id or "",

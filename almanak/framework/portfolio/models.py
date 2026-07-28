@@ -477,6 +477,51 @@ UNMEASURED_DECIMAL_TEXT = ""
 UNMEASURED_FLOW_TEXT = UNMEASURED_DECIMAL_TEXT
 
 
+def is_legacy_absent_text(raw: object) -> bool:
+    """True when a **required** monetary column holds no persisted value at all.
+
+    Absence is not corruption. A missing key, SQL ``NULL``, and empty /
+    whitespace text all mean "nothing was ever written here", so a required
+    column takes its declared legacy default. Malformed text (``"abc"``,
+    the legacy ``"None"`` literal, ``"NaN"``, ``"Infinity"``) is corruption and
+    is deliberately NOT absence — callers still raise on it.
+
+    **One home, four readers** — enumerated, because an earlier revision of this
+    docstring claimed "three readers ... so they cannot drift" while two of them
+    did not consult this helper at all. A false safety claim in a docstring is
+    how the next maintainer is told a hazard is closed when it is not, which is
+    precisely the mechanism that let VIB-5915's own regression ship. The four:
+
+    1. ``state_manager._pg_row_to_portfolio_metrics`` — direct PostgreSQL read
+    2. ``state.backends.sqlite.get_portfolio_metrics`` — local SQLite read
+    3. ``gateway.services.state_service._pg_portfolio_metrics_to_proto`` — the
+       hosted server-side projection onto the wire
+    4. ``state.gateway_state_manager.get_portfolio_metrics`` — the hosted client
+       read, i.e. the production path
+
+    Readers 3 and 4 previously spelled the rule ``x or "0"``. That agrees with
+    this helper on ``None`` and ``''`` (both falsy) but **not** on whitespace,
+    which is truthy: ``"   "`` slipped through to ``Decimal("   ")`` and raised
+    ``InvalidOperation`` while readers 1 and 2 returned a measured zero — a
+    silent divergence on the hosted path.
+
+    .. warning::
+
+       **Never apply this to a column written by**
+       :func:`encode_optional_decimal_text`. That encoder writes ``''`` to mean
+       "I refused to persist a corrupt non-finite value", which is the opposite
+       of legacy absence. Routing such a column through here would turn a
+       rejected ``NaN`` into a fabricated measured zero, silently. The columns
+       this helper serves (``gas_spent_usd``, ``initial_value_usd``) are written
+       with a plain ``str(Decimal)``, never that encoder.
+
+    This does not weaken Empty≠Zero (blueprint 27 §10.10), which binds the
+    ``Decimal | None`` columns that HAVE an unmeasured state to preserve. The
+    columns using this helper are declared always-populated (§7.6).
+    """
+    return raw is None or (isinstance(raw, str) and not raw.strip())
+
+
 def encode_optional_decimal_text(value: Decimal | None, *, field_name: str) -> str:
     """Serialize an optional finite Decimal for a TEXT storage seam.
 
