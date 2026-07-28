@@ -19,12 +19,16 @@ from almanak.framework.accounting.capital_flows import (
     ChainScanResult,
     CounterpartyKind,
     FlowClassification,
+    SAFE_EXEC_TRANSACTION_SELECTOR,
+    SAFE_EXECUTION_SUCCESS_TOPIC,
     ScanStatus,
     TokenInfo,
     TransferDirection,
+    TxEndpoints,
     clear_provenance_caches,
     pad_address_topic,
     scan_chain_transfers,
+    wallet_initiated,
 )
 
 WALLET = "0x1111111111111111111111111111111111111111"
@@ -76,10 +80,15 @@ class FakeEth:
         max_span: int | None = None,
         fail_get_code: bool = False,
         fail_get_tx: bool = False,
+        receipts: dict[str, dict] | None = None,
+        fail_get_receipt: bool = False,
     ) -> None:
         self.logs = logs
         self.code = {k.lower(): v for k, v in (code or {}).items()}
         self.txs = {k.lower(): v for k, v in (txs or {}).items()}
+        self.receipts = {k.lower(): v for k, v in (receipts or {}).items()}
+        self.fail_get_receipt = fail_get_receipt
+        self.receipt_calls: list[str] = []
         self.max_span = max_span
         self.fail_get_code = fail_get_code
         self.fail_get_tx = fail_get_tx
@@ -124,6 +133,14 @@ class FakeEth:
             raise ValueError("not found")
         return self.txs[tx_hash.lower()]
 
+    def get_transaction_receipt(self, tx_hash: str) -> dict:
+        self.receipt_calls.append(tx_hash.lower())
+        if self.fail_get_receipt:
+            raise ConnectionError("provider down")
+        if tx_hash.lower() not in self.receipts:
+            raise ValueError("not found")
+        return self.receipts[tx_hash.lower()]
+
 
 class FakeWeb3:
     def __init__(self, eth: FakeEth) -> None:
@@ -149,6 +166,8 @@ def _scan(
     max_span: int | None = None,
     fail_get_code: bool = False,
     fail_get_tx: bool = False,
+    receipts: dict[str, dict] | None = None,
+    fail_get_receipt: bool = False,
 ) -> ChainScanResult:
     eth = FakeEth(
         logs,
@@ -157,6 +176,8 @@ def _scan(
         max_span=max_span,
         fail_get_code=fail_get_code,
         fail_get_tx=fail_get_tx,
+        receipts=receipts,
+        fail_get_receipt=fail_get_receipt,
     )
     return scan_chain_transfers(
         FakeWeb3(eth),
@@ -242,6 +263,350 @@ def test_transfer_from_pull_is_unclassified_out_never_withdrawal():
     result = _scan(
         [_log(sender=WALLET, recipient=EOA, tx_hash="0xpull")],
         txs={"0xpull": {"from": SPENDER}},
+    )
+    (obs,) = result.observations
+    assert obs.classification is FlowClassification.UNCLASSIFIED_OUT
+
+
+# --------------------------------------------------------------------------
+# VIB-6050 — the wallet is a smart account (Safe / Zodiac), never tx.from
+# --------------------------------------------------------------------------
+
+
+#: ``keccak256("ExecutionFromModuleSuccess(address)")`` — what a module entry
+#: actually emits, as opposed to ``ExecutionSuccess``.
+_MODULE_SUCCESS_TOPIC = "0x6895c13664aa4f67288b25d7a21d7aaa34916e355fb9b6fae0a139a9085becb8"
+
+
+def _module_success_log() -> dict:
+    """The log a genuine ``execTransactionFromModule`` emits."""
+    return {"address": WALLET, "topics": [_MODULE_SUCCESS_TOPIC, "0x" + "22" * 32], "data": "0x"}
+
+
+def _safe_execution_receipt(*, emitter: str = WALLET) -> dict:
+    """A receipt carrying ``ExecutionSuccess`` emitted by ``emitter``."""
+    return {
+        "logs": [
+            {
+                "address": emitter,
+                "topics": [SAFE_EXECUTION_SUCCESS_TOPIC, "0x" + "11" * 32],
+                "data": "0x0",
+            }
+        ]
+    }
+
+
+def test_safe_withdrawal_is_withdrawal_when_the_safe_executed_it():
+    """A Safe owner's ``execTransaction`` withdrawal must book as WITHDRAWAL.
+
+    The hosted platform is Safe-only. ``tx.from`` is the signing owner / agent
+    EOA and the Safe is ``tx.to``, so the pre-VIB-6050 ``sender == wallet``
+    predicate was permanently false and every genuine capital outflow booked as
+    UNCLASSIFIED_OUT, poisoning deposit/withdrawal-adjusted PnL.
+    """
+    result = _scan(
+        [_log(sender=WALLET, recipient=EOA, tx_hash="0xsafe01")],
+        txs={"0xsafe01": {"from": EOA, "to": WALLET, "input": SAFE_EXEC_TRANSACTION_SELECTOR + "00" * 32}},
+        receipts={"0xsafe01": _safe_execution_receipt()},
+    )
+    (obs,) = result.observations
+    assert obs.classification is FlowClassification.WITHDRAWAL
+    assert obs.direction is TransferDirection.OUT
+
+
+def test_module_backdoor_drain_is_not_a_withdrawal_even_though_the_safe_is_tx_to():
+    """THE ATTACK the ``execTransaction`` SELECTOR check exists to stop. Do not simplify.
+
+    Entry into the account is NOT authorisation. An attacker EOA **enabled as a
+    Safe module** — the canonical Safe backdoor, installed with one phished
+    ``execTransaction`` — calls ``execTransactionFromModule`` **directly on the
+    Safe**:
+
+        tx.from  = attacker EOA
+        tx.to    = the Safe            <-- satisfies `tx.to == wallet`
+        selector = 0x468721a7          <-- execTransactionFromModule
+        no owner signature anywhere
+
+    A custom fallback handler, or one that can reach an enabled module, does the
+    same. Under the first draft of this fix (bare ``tx.to == wallet``) that drain
+    classified as a **WITHDRAWAL** — the theft netted out of PnL and the strategy
+    reporting flat instead of a loss. Strictly WORSE than the bug being fixed,
+    which merely under-reported withdrawals.
+
+    **What catches it, and what does NOT.** The load-bearing guard is the outer
+    selector: ``execTransaction`` (``0x6a761202``) is the only Safe entry point
+    that runs ``checkSignatures``, and it lives in the transaction's own signed
+    calldata where no executed contract can reach it. This transaction's
+    selector is ``0x468721a7``, so it never reaches the event check at all.
+
+    The **second** draft of this fix relied on the Safe's own
+    ``ExecutionSuccess`` instead, reasoning that a module path emits
+    ``ExecutionFromModuleSuccess``. **That reasoning is superseded and this test
+    must not be read as endorsing it**: the same module can call
+    ``execTransactionFromModule`` with ``operation = DELEGATECALL``, which runs
+    attacker code *in the Safe's context*, so its ``LOG`` opcodes emit with
+    ``log.address == safe``. A fork run produced a synthetic ``ExecutionSuccess``
+    indistinguishable by emitter from a real one — see
+    ``test_delegatecall_forged_execution_success_is_not_a_withdrawal`` and
+    ``tests/reports/vib6050-safe-withdrawal-realfork-proof.md``. Emitter-pinning
+    does not save an event from delegatecall.
+
+    ``ExecutionSuccess`` is therefore retained only as SECONDARY evidence that
+    the execution succeeded (``execTransaction`` emits ``ExecutionFailure``
+    instead when the inner call reverts). **Never drop the selector check and
+    keep the event check** — that combination is exactly the regression this
+    test exists to fail on, and a reader following the superseded rationale
+    would make it.
+
+    Raised independently by three adversarial reviews of PR #3471: the
+    ``tx.to``-alone break, the DELEGATECALL forge, and the observation that an
+    earlier revision of this very test fed the wrong selector and so did not
+    perform the attack it is named after.
+    """
+    result = _scan(
+        [_log(sender=WALLET, recipient=EOA, tx_hash="0xsafe04")],
+        # A MODULE entry — this is the attack this test is named after. An
+        # earlier revision fed the execTransaction selector here, which made it
+        # silently test "execTransaction without ExecutionSuccess" instead: a
+        # regression that dropped the SELECTOR check but kept the event check
+        # would not have failed it. Caught by adversarial review (Grok), and it
+        # is the same class as everything else this fix has turned up — a test
+        # that reads as coverage and is not.
+        txs={"0xsafe04": {"from": EOA, "to": WALLET, "input": "0x468721a7" + "00" * 32}},
+        receipts={"0xsafe04": {"logs": [_module_success_log()]}},
+    )
+    (obs,) = result.observations
+    assert obs.classification is FlowClassification.UNCLASSIFIED_OUT
+
+
+def test_exec_transaction_without_execution_success_is_not_a_withdrawal():
+    """The SECONDARY check, isolated: owner-signed entry that did not succeed.
+
+    ``execTransaction`` emits ``ExecutionFailure`` instead of ``ExecutionSuccess``
+    when the inner call reverts. Distinct from the module-entry case above —
+    kept separate so each check has a test that fails for its own reason.
+    """
+    result = _scan(
+        [_log(sender=WALLET, recipient=EOA, tx_hash="0xsafe07")],
+        txs={"0xsafe07": {"from": EOA, "to": WALLET, "input": SAFE_EXEC_TRANSACTION_SELECTOR + "00" * 32}},
+        receipts={"0xsafe07": {"logs": []}},
+    )
+    (obs,) = result.observations
+    assert obs.classification is FlowClassification.UNCLASSIFIED_OUT
+
+
+def test_execution_event_emitted_by_someone_else_does_not_corroborate():
+    """The emitter must BE the wallet — otherwise topic0 collision IS authentication.
+
+    This is the VIB-6043 lesson applied to the corroboration: any contract can
+    emit a log whose ``topic0`` collides with ``ExecutionSuccess``. VIB-6043
+    removed a step that *derived* the Safe address from such an event for
+    exactly that reason. Here the wallet is already known from configuration
+    and is used as the FILTER on the emitter, so a colliding event from an
+    unrelated contract matches nothing.
+
+    **The emitter filter is necessary but NOT sufficient, and this test must not
+    be read as claiming otherwise.** Delegatecalled code executes in the Safe's
+    context, so it can emit an ``ExecutionSuccess`` that passes this very filter
+    — measured on a fork, see
+    ``test_delegatecall_forged_execution_success_is_not_a_withdrawal``.
+    Authorisation rests on the ``execTransaction`` selector in the transaction's
+    signed calldata; this filter only stops the cruder, unrelated-contract case.
+    """
+    result = _scan(
+        [_log(sender=WALLET, recipient=EOA, tx_hash="0xsafe05")],
+        txs={"0xsafe05": {"from": EOA, "to": WALLET, "input": SAFE_EXEC_TRANSACTION_SELECTOR + "00" * 32}},
+        receipts={"0xsafe05": _safe_execution_receipt(emitter=CONTRACT)},
+    )
+    (obs,) = result.observations
+    assert obs.classification is FlowClassification.UNCLASSIFIED_OUT
+
+
+def test_unreadable_receipt_leaves_the_smart_account_arm_unknown():
+    """Empty != Zero: a failed receipt read is unknown, never a measured "no"."""
+    assert (
+        wallet_initiated(
+            TxEndpoints(sender=EOA, to=WALLET, selector=SAFE_EXEC_TRANSACTION_SELECTOR),
+            WALLET,
+            wallet_executed_as_safe=None,
+        )
+        is None
+    )
+    result = _scan(
+        [_log(sender=WALLET, recipient=EOA, tx_hash="0xsafe06")],
+        txs={"0xsafe06": {"from": EOA, "to": WALLET, "input": SAFE_EXEC_TRANSACTION_SELECTOR + "00" * 32}},
+        fail_get_receipt=True,
+    )
+    (obs,) = result.observations
+    assert obs.classification is FlowClassification.UNCLASSIFIED_OUT
+
+
+def test_delegatecall_forged_execution_success_is_not_a_withdrawal():
+    """MEASURED BYPASS of the first fix. Do not weaken the selector check.
+
+    The first version of this fix accepted ``tx.to == wallet`` plus an
+    ``ExecutionSuccess`` emitted by the wallet's own address. **That event is
+    forgeable**, and it was verified on a fork, not argued:
+
+    An attacker EOA enabled as a Safe module calls
+    ``execTransactionFromModule(forger, 0, "", DELEGATECALL)``. Delegatecalled
+    code executes in the SAFE's context, so its ``LOG`` opcodes emit with
+    ``log.address == safe``. The fork run produced exactly this receipt shape —
+    a synthetic ``ExecutionSuccess`` indistinguishable, by emitter, from a real
+    one:
+
+        tx.from  = attacker EOA
+        tx.to    = the Safe
+        selector = 0x468721a7   (execTransactionFromModule)
+        logs     = [ExecutionSuccess, emitter == the Safe]   <-- FORGED
+
+    Emitter-pinning does not save an event from delegatecall. What does is the
+    outer selector: ``execTransaction`` (0x6a761202) is the only entry point
+    that runs ``checkSignatures``, and it lives in the transaction's own signed
+    calldata where no executed contract can reach it.
+    """
+    result = _scan(
+        [_log(sender=WALLET, recipient=EOA, tx_hash="0xforge01")],
+        txs={"0xforge01": {"from": EOA, "to": WALLET, "input": "0x468721a7" + "00" * 32}},
+        receipts={"0xforge01": _safe_execution_receipt()},  # emitter IS the Safe
+    )
+    (obs,) = result.observations
+    assert obs.classification is FlowClassification.UNCLASSIFIED_OUT
+
+
+def test_a_module_entry_never_pays_for_a_receipt():
+    """The selector rejects module entries before any receipt fetch."""
+    eth = FakeEth(
+        [_log(sender=WALLET, recipient=EOA, tx_hash="0xforge02")],
+        txs={"0xforge02": {"from": EOA, "to": WALLET, "input": "0x468721a7"}},
+        receipts={"0xforge02": _safe_execution_receipt()},
+    )
+    result = scan_chain_transfers(
+        FakeWeb3(eth),
+        chain="arbitrum",
+        wallet=WALLET,
+        from_block_exclusive=0,
+        head_block=1_000,
+        token_universe=UNIVERSE,
+    )
+    (obs,) = result.observations
+    assert obs.classification is FlowClassification.UNCLASSIFIED_OUT
+    assert eth.receipt_calls == [], "selector must short-circuit before the receipt fetch"
+
+
+def test_the_exec_transaction_selector_is_derived_not_trusted():
+    """Drift guard: re-derive the constant from the canonical signature.
+
+    ``execTransaction``'s parameter list is byte-identical across Safe 1.1.1 /
+    1.3.0 / 1.4.1, so one selector covers every version this SDK deploys
+    against. If the constant is ever edited by hand, this fails.
+    """
+    from web3 import Web3
+
+    signature = "execTransaction(address,uint256,bytes,uint8,uint256,uint256,uint256,address,address,bytes)"
+    assert SAFE_EXEC_TRANSACTION_SELECTOR == "0x" + Web3.keccak(text=signature).hex()[:8]
+
+
+def test_nested_safe_and_4337_entries_fail_conservatively():
+    """Both fail as false NEGATIVES, which is the safe direction.
+
+    Reasoned + selector-verified rather than fork-measured; both reduce to
+    ``endpoints.to != wallet``, which is already covered on-chain.
+
+    * **Nested Safes** — if ``wallet``'s owner is itself a Safe, a withdrawal
+      entered through the owner Safe has ``tx.to == owner_safe``. It does not
+      classify. The same structure is why nesting cannot manufacture a false
+      POSITIVE: reaching the ``tx.to == wallet`` arm still requires entering
+      ``wallet`` through its own signature-validating entry point.
+    * **ERC-4337** — a UserOp routes through the EntryPoint, so ``tx.to`` is the
+      EntryPoint, and ``Safe4337Module.executeUserOp`` (0x7bb37428) is a
+      different selector besides.
+    """
+    owner_safe = "0x5555555555555555555555555555555555555555"
+    entry_point = "0x6666666666666666666666666666666666666666"
+
+    nested = TxEndpoints(sender=EOA, to=owner_safe, selector=SAFE_EXEC_TRANSACTION_SELECTOR)
+    assert wallet_initiated(nested, WALLET, wallet_executed_as_safe=True) is False
+
+    erc4337 = TxEndpoints(sender=EOA, to=entry_point, selector="0x7bb37428")
+    assert wallet_initiated(erc4337, WALLET, wallet_executed_as_safe=True) is False
+
+    # And the 4337 module selector is rejected even if tx.to WERE the wallet.
+    assert wallet_initiated(
+        TxEndpoints(sender=EOA, to=WALLET, selector="0x7bb37428"), WALLET, wallet_executed_as_safe=True
+    ) is False
+
+
+def test_eoa_arm_never_pays_for_a_receipt():
+    """The corroboration is lazy — the EOA lane must not gain an RPC."""
+    eth = FakeEth(
+        [_log(sender=WALLET, recipient=EOA, tx_hash="0xeoa01")],
+        txs={"0xeoa01": {"from": WALLET, "to": USDC}},
+    )
+    result = scan_chain_transfers(
+        FakeWeb3(eth),
+        chain="arbitrum",
+        wallet=WALLET,
+        from_block_exclusive=0,
+        head_block=1_000,
+        token_universe=UNIVERSE,
+    )
+    (obs,) = result.observations
+    assert obs.classification is FlowClassification.WITHDRAWAL
+    assert eth.receipt_calls == []
+
+
+def test_safe_outflow_pulled_by_a_third_party_is_still_unclassified_out():
+    """Widening to ``tx.to`` must not weaken the theft/sweep guard.
+
+    A ``transferFrom`` pull addressed at the token contract (not at the Safe)
+    stays conservative — the Safe was not the entry point of the call.
+    """
+    result = _scan(
+        [_log(sender=WALLET, recipient=EOA, tx_hash="0xsafe02")],
+        txs={"0xsafe02": {"from": SPENDER, "to": USDC}},
+    )
+    (obs,) = result.observations
+    assert obs.classification is FlowClassification.UNCLASSIFIED_OUT
+
+
+def test_zodiac_module_routed_outflow_is_not_a_withdrawal():
+    """A tx routed through the Roles modifier is a strategy tx, not a withdrawal.
+
+    Deliberately excluded from :func:`wallet_initiated`: an unledgered
+    module-routed outflow is a strategy transaction whose ledger row is missing,
+    and booking it as a WITHDRAWAL would net a real loss out of PnL.
+    """
+    roles_modifier = "0x5555555555555555555555555555555555555555"
+    result = _scan(
+        [_log(sender=WALLET, recipient=EOA, tx_hash="0xsafe03")],
+        txs={"0xsafe03": {"from": EOA, "to": roles_modifier}},
+    )
+    (obs,) = result.observations
+    assert obs.classification is FlowClassification.UNCLASSIFIED_OUT
+
+
+def test_wallet_initiated_is_unknown_not_false_when_endpoints_are_unknown():
+    """Empty != Zero at the provenance layer: unknown endpoints are ``None``."""
+    assert wallet_initiated(None, WALLET) is None
+    assert wallet_initiated(TxEndpoints(sender=EOA, to=None), WALLET) is False
+    assert wallet_initiated(TxEndpoints(sender=WALLET, to=USDC), WALLET) is True
+    # The smart-account arm is corroborated, never assumed.
+    signed = TxEndpoints(sender=EOA, to=WALLET, selector=SAFE_EXEC_TRANSACTION_SELECTOR)
+    assert wallet_initiated(signed, WALLET, wallet_executed_as_safe=True) is True
+    assert wallet_initiated(signed, WALLET, wallet_executed_as_safe=False) is False
+    assert wallet_initiated(signed, WALLET, wallet_executed_as_safe=None) is None
+    # A module entry never reaches the event check at all.
+    module_entry = TxEndpoints(sender=EOA, to=WALLET, selector="0x468721a7")
+    assert wallet_initiated(module_entry, WALLET, wallet_executed_as_safe=True) is False
+    # A malformed wallet must never make every endpoint match.
+    assert wallet_initiated(TxEndpoints(sender=EOA, to=None), "") is None
+
+
+def test_contract_creation_tx_has_no_target_and_does_not_match():
+    result = _scan(
+        [_log(sender=WALLET, recipient=EOA, tx_hash="0xcreate")],
+        txs={"0xcreate": {"from": SPENDER, "to": None}},
     )
     (obs,) = result.observations
     assert obs.classification is FlowClassification.UNCLASSIFIED_OUT
