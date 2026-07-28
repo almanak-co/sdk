@@ -26,7 +26,6 @@ from almanak.framework.cli._run_options import (
     strategy_run_options,
 )
 from almanak.framework.cli.ax import ax as framework_ax_group
-from almanak.framework.cli.capability_matrix import capability_matrix_command as framework_capability_matrix_cmd
 from almanak.framework.cli.chain_params import ChainChoice
 from almanak.framework.cli.check import check as framework_check_cmd
 from almanak.framework.cli.demo import demo as framework_demo_cmd
@@ -579,12 +578,11 @@ almanak.add_command(mcp, name="mcp")
 
 @almanak.group()
 def info():
-    """SDK information and capabilities."""
+    """SDK information (support catalogue and related views)."""
     pass
 
 
 info.add_command(framework_support_matrix_cmd, name="matrix")
-info.add_command(framework_capability_matrix_cmd, name="capabilities")
 
 
 @almanak.group()

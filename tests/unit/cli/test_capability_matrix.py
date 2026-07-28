@@ -1,6 +1,6 @@
-"""Unit tests for the manifest-derived capability matrix (`almanak info capabilities`).
+"""Unit tests for the manifest-derived capability matrix library (VIB-5112).
 
-VIB-5112 phase 1 — advisory view. Tests cover:
+Advisory view only — no public CLI. Tests cover:
 
 * per-capability derivation helpers against minimal fake connectors,
 * applicability (rate/valuation/safety-floor only emitted for relevant intents),
@@ -8,13 +8,12 @@ VIB-5112 phase 1 — advisory view. Tests cover:
 * off-chain venues → unsupported-explicit,
 * real-connector derivation (a lending connector with a rate provider vs a vault
   connector without), per the §D3 spec,
-* the CLI command (table, --json, filters),
+* library filters / ``to_dict`` / table render for QA consumers,
 * the keystone advisory guarantee: ``unknown`` never raises / fails.
 """
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 
 import pytest
@@ -43,10 +42,11 @@ from almanak.framework.cli.capability_matrix import (
     _DemoCoverage,
     _intent_category,
     _rate_state,
+    _render_table,
     _safety_floor_state,
     _valuation_state,
     build_capability_matrix,
-    capability_matrix_command,
+    filter_capability_matrix,
 )
 
 
@@ -462,74 +462,68 @@ def test_every_real_cell_has_a_valid_state(real_matrix: CapabilityMatrix) -> Non
 
 
 # =============================================================================
-# CLI
+# Library API (QA consumers — no public CLI)
 # =============================================================================
-@pytest.fixture
-def runner() -> CliRunner:
-    return CliRunner()
-
-
-def test_cli_renders_table(runner: CliRunner) -> None:
-    result = runner.invoke(capability_matrix_command, [])
-    assert result.exit_code == 0, result.output
-    assert "ADVISORY VIEW" in result.output
-    assert "Legend:" in result.output
-
-
-def test_cli_json_is_valid(runner: CliRunner) -> None:
-    result = runner.invoke(capability_matrix_command, ["--json"])
-    assert result.exit_code == 0, result.output
-    payload = json.loads(result.output)
+def test_to_dict_payload_shape(real_matrix: CapabilityMatrix) -> None:
+    payload = real_matrix.to_dict()
     assert payload["capabilities"] == list(CAPABILITIES)
     assert "cells" in payload and payload["cells"]
     assert "summary" in payload
 
 
-def test_cli_state_filter_unknown(runner: CliRunner) -> None:
-    result = runner.invoke(capability_matrix_command, ["--json", "--state", "unknown"])
-    assert result.exit_code == 0, result.output
-    payload = json.loads(result.output)
-    assert all(c["state"] == "unknown" for c in payload["cells"])
+def test_render_table_is_advisory(real_matrix: CapabilityMatrix) -> None:
+    text = _render_table(real_matrix)
+    assert "ADVISORY VIEW" in text
+    assert "Legend:" in text
+    # Keystone: unknown is reported in the summary, never raises.
+    assert "unknown" in text.lower()
 
 
-def test_cli_protocol_filter(runner: CliRunner) -> None:
-    result = runner.invoke(capability_matrix_command, ["--json", "-p", "aave_v3"])
-    assert result.exit_code == 0, result.output
-    payload = json.loads(result.output)
-    assert all("aave_v3" in c["protocol"] for c in payload["cells"])
+def test_filter_state_unknown(real_matrix: CapabilityMatrix) -> None:
+    filtered = filter_capability_matrix(real_matrix, state="unknown")
+    assert filtered.cells
+    assert all(c.state == "unknown" for c in filtered.cells)
 
 
-def test_cli_no_match_prints_message(runner: CliRunner) -> None:
-    result = runner.invoke(capability_matrix_command, ["-p", "does-not-exist-zzz"])
-    assert result.exit_code == 0
-    assert "No capability cells match" in result.output
+def test_filter_protocol(real_matrix: CapabilityMatrix) -> None:
+    filtered = filter_capability_matrix(real_matrix, protocol="aave_v3")
+    assert filtered.cells
+    assert all("aave_v3" in c.protocol for c in filtered.cells)
 
 
-def test_cli_json_empty_result_is_valid_json(runner: CliRunner) -> None:
-    # Regression: --json with no matches must emit valid JSON (empty cells),
-    # not a human-readable error — a consumer piping to a parser must not break.
-    # (CodeRabbit review on PR #3094.)
-    result = runner.invoke(capability_matrix_command, ["--json", "-p", "does-not-exist-zzz"])
-    assert result.exit_code == 0, result.output
-    payload = json.loads(result.output)  # would raise on the old human-text path
+def test_filter_no_match_returns_empty_to_dict() -> None:
+    # Empty filter result must still serialise cleanly for programmatic QA.
+    m = build_capability_matrix()
+    filtered = filter_capability_matrix(m, protocol="does-not-exist-zzz")
+    payload = filtered.to_dict()
     assert payload["cells"] == []
     assert payload["capabilities"] == list(CAPABILITIES)
 
 
-def test_cli_chain_filter_normalises_alias(runner: CliRunner) -> None:
-    # Regression: --chain must normalise the request the same way rows are
-    # normalised, so the bnb alias matches the rendered bsc rows.
-    # (CodeRabbit review on PR #3094.)
-    result = runner.invoke(capability_matrix_command, ["--json", "--chain", "bnb"])
-    assert result.exit_code == 0, result.output
-    payload = json.loads(result.output)
-    assert payload["cells"], "bnb should match normalised bsc rows"
-    assert all(c["chain"] == "bsc" for c in payload["cells"])
+def test_filter_chain_normalises_alias(real_matrix: CapabilityMatrix) -> None:
+    # bnb alias must match normalised bsc rows (same normalisation as matrix rows).
+    filtered = filter_capability_matrix(real_matrix, chain="bnb")
+    assert filtered.cells, "bnb should match normalised bsc rows"
+    assert all(c.chain == "bsc" for c in filtered.cells)
 
 
-def test_cli_advisory_never_errors_on_unknown(runner: CliRunner) -> None:
-    # The keystone guarantee for phase 1: unknown cells are reported, the
-    # command exits 0 — there is no CI-failing behaviour here.
-    result = runner.invoke(capability_matrix_command, [])
-    assert result.exit_code == 0
-    assert "unknown" in result.output.lower()
+def test_build_never_raises_on_unknown(real_matrix: CapabilityMatrix) -> None:
+    # Keystone guarantee for phase 1: unknown cells are reported, never fail.
+    assert any(c.state == STATE_UNKNOWN for c in real_matrix.cells)
+    _ = real_matrix.to_dict()
+    _ = _render_table(real_matrix)
+
+
+def test_info_capabilities_command_is_not_registered() -> None:
+    """Product surface: only `almanak info matrix` — capabilities was demoted."""
+    from almanak.cli.cli import almanak
+
+    runner = CliRunner()
+    help_result = runner.invoke(almanak, ["info", "--help"])
+    assert help_result.exit_code == 0
+    assert "matrix" in help_result.output
+    assert "capabilities" not in help_result.output
+
+    missing = runner.invoke(almanak, ["info", "capabilities"])
+    assert missing.exit_code != 0
+    assert "No such command" in missing.output or "no such command" in missing.output.lower()

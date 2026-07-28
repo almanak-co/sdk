@@ -1,4 +1,4 @@
-"""Manifest-derived **capability matrix** — advisory computed view (VIB-5112).
+"""Manifest-derived **capability matrix** — advisory library view (VIB-5112).
 
 This module is **phase 1** of G1/D3 in the Demo-E2E plan
 (``docs/internal/qa/ToDo-DemoE2E-June27.md`` §D3/§G1): a *read-only view* over
@@ -7,9 +7,15 @@ the capability declarations the connector manifest already carries. It is
 gates the runner. Those are later phases (consumers, then a CI ``unknown``
 gate). See ``docs/internal/qa/capability-matrix-g1-phase1.md`` for the phasing.
 
-Where the existing ``almanak info matrix`` (``support_matrix.py``) answers
-"which (protocol, category, chain) triples are routable?", this view answers the
-*deeper* question the plan's §D symptoms all share: for each declared
+**Not a public CLI.** There is no ``almanak info capabilities`` command — it was
+demoted because it sat next to ``almanak info matrix`` and looked like a second
+support catalogue for Edge/Platform. The product support surface remains
+``almanak info matrix`` only. QA, KitchenLoop, and future runner/CI consumers
+import :func:`build_capability_matrix` (and helpers) from this module directly.
+
+Where ``almanak info matrix`` (``support_matrix.py``) answers "which (protocol,
+category, chain) triples are routable?", this view answers the *deeper*
+question the plan's §D symptoms all share: for each declared
 ``(protocol, chain, intent)`` cell, which **supporting capabilities** —
 rate, valuation, accounting, safety-floor, demo-coverage — are actually
 **declared**, and which are silently **unknown** (the "discovered-at-runtime
@@ -65,11 +71,8 @@ documented TODO; phase 1 keys on ``protocol × chain × intent × capability``.
 
 from __future__ import annotations
 
-import json as json_module
 from collections.abc import Iterable
 from dataclasses import dataclass
-
-import click
 
 from almanak.core.chains import ChainRegistry
 
@@ -601,23 +604,26 @@ def _cap_header(capability: str) -> str:
     }.get(capability, capability)
 
 
-def _filter_cells(
+def filter_capability_matrix(
     matrix: CapabilityMatrix,
     *,
-    protocol: str | None,
-    chain: str | None,
-    intent: str | None,
-    capability: str | None,
-    state: str | None,
+    protocol: str | None = None,
+    chain: str | None = None,
+    intent: str | None = None,
+    capability: str | None = None,
+    state: str | None = None,
 ) -> CapabilityMatrix:
-    """Apply CLI filters (all case-insensitive substring / exact matches)."""
+    """Filter cells for QA / tooling (case-insensitive protocol substring; exact elsewhere).
+
+    Chain aliases are normalised the same way rows are (``bnb`` → ``bsc``).
+    """
     cells = matrix.cells
     if protocol:
         needle = protocol.lower()
         cells = tuple(c for c in cells if needle in c.protocol.lower())
     if chain:
         # Normalise the requested chain the same way rows are normalised
-        # (``_matrix_chain``), so a ``--chain bnb`` request matches the rendered
+        # (``_matrix_chain``), so a ``chain="bnb"`` request matches the rendered
         # ``bsc`` rows. Off-chain rows render as "(off-chain)" and pass through.
         needle = _matrix_chain(chain.lower())
         cells = tuple(c for c in cells if c.chain == needle)
@@ -633,72 +639,5 @@ def _filter_cells(
     return CapabilityMatrix(cells=cells)
 
 
-@click.command("capabilities")
-@click.option("--json", "as_json", is_flag=True, default=False, help="Output as JSON (for programmatic consumption).")
-@click.option("--protocol", "-p", type=str, default=None, help="Filter by protocol name (partial match).")
-@click.option("--chain", type=str, default=None, help="Filter by chain name (exact).")
-@click.option("--intent", "-i", type=str, default=None, help="Filter by intent verb (exact, e.g. SUPPLY).")
-@click.option(
-    "--capability",
-    "-c",
-    type=click.Choice(CAPABILITIES),
-    default=None,
-    help="Filter by capability.",
-)
-@click.option(
-    "--state",
-    "-s",
-    type=click.Choice([STATE_SUPPORTED, STATE_UNSUPPORTED, STATE_QUARANTINED, STATE_UNKNOWN]),
-    default=None,
-    help="Filter by state (e.g. unknown to list the gaps).",
-)
-def capability_matrix_command(
-    as_json: bool,
-    protocol: str | None,
-    chain: str | None,
-    intent: str | None,
-    capability: str | None,
-    state: str | None,
-) -> None:
-    """Show the manifest-derived **capability matrix** (advisory — VIB-5112 phase 1).
-
-    A read-only view over the capability declarations the connector manifest
-    already carries: per declared ``(protocol, chain, intent)`` cell, which of
-    ``compile / execute / rate / valuation / accounting / safety-floor /
-    demo-coverage`` are declared (``supported``) vs silently ``unknown``.
-
-    This is **advisory only** — ``unknown`` is reported, it does not fail
-    anything. The CI ``unknown`` gate is a later phase (see
-    ``docs/internal/qa/capability-matrix-g1-phase1.md``).
-
-    Examples:
-
-    \b
-        almanak info capabilities                  # Full table
-        almanak info capabilities --json           # JSON for CI / tooling
-        almanak info capabilities -s unknown       # Just the coverage gaps
-        almanak info capabilities -p aave_v3       # One protocol
-        almanak info capabilities -c rate          # One capability column
-    """
-    matrix = build_capability_matrix()
-    matrix = _filter_cells(
-        matrix,
-        protocol=protocol,
-        chain=chain,
-        intent=intent,
-        capability=capability,
-        state=state,
-    )
-
-    # --json must always emit valid JSON, even on an empty result set — a
-    # programmatic consumer that pipes to a parser must not receive a
-    # human-readable error on stdout. The empty-match notice is plain-text only.
-    if as_json:
-        click.echo(json_module.dumps(matrix.to_dict(), indent=2))
-        return
-
-    if not matrix.cells:
-        click.echo("No capability cells match the given filters.", err=True)
-        return
-
-    click.echo(_render_table(matrix))
+# Back-compat alias for any in-repo callers that imported the private name.
+_filter_cells = filter_capability_matrix

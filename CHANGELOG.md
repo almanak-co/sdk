@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Removed
+
+- **`almanak info capabilities` CLI.** The VIB-5112 phase-1 capability matrix
+  remains available as a library-only QA API
+  (`almanak.framework.cli.capability_matrix.build_capability_matrix` /
+  `filter_capability_matrix` / `CapabilityMatrix.to_dict`). The product support
+  catalogue is **`almanak info matrix` only** — the sibling command was removed
+  because it was being read as a second support surface by Edge/Platform and
+  agents.
+
 ## [2.24.0] - 2026-07-28
 
 ### Added

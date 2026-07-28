@@ -47,7 +47,7 @@ Commands:
   dashboard         Start the Almanak Operator Dashboard.
   docs              Access bundled SDK documentation for LLM agents.
   gateway           Start the Almanak Gateway gRPC server.
-  info              SDK information and capabilities.
+  info              SDK information (support catalogue and related views).
   mcp               MCP (Model Context Protocol) server commands.
   strat             Commands for managing strategies.
 ```
