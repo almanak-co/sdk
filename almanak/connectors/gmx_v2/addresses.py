@@ -145,8 +145,39 @@ GMX_V2_INDEX_TOKEN_DECIMALS: dict[str, dict[str, int]] = {
 }
 
 
+def index_token_decimals(chain: str | None, market_address: str | None) -> int | None:
+    """Index-token decimals for a GMX V2 market, or ``None`` when unresolved (VIB-6110).
+
+    Keyed ``chain → lowercase market address → decimals`` via ``GMX_V2_INDEX_TOKEN_DECIMALS``.
+    Unlike ``adapter._get_index_token_decimals`` (which defaults to 18 for size scaling),
+    this returns ``None`` on an unknown chain/market so PRICE scaling can fail closed
+    (Empty≠Zero) — a wrongly-scaled ``entry_price``/``exit_price`` is worse than an
+    unmeasured one. Callers must map ``None`` to an unmeasured price, never to the raw
+    GMX-native ratio.
+    """
+    if not chain or not market_address:
+        return None
+    return GMX_V2_INDEX_TOKEN_DECIMALS.get(str(chain).lower(), {}).get(str(market_address).lower())
+
+
 def _assert_gmx_v2_decimal_coverage() -> None:
-    """Fail fast when listed market addresses drift away from decimal metadata."""
+    """Fail fast when listed market addresses drift away from decimal metadata.
+
+    LOAD-BEARING for money, not just tidiness (VIB-6110). Since PERP_SETTLEMENT
+    entry/exit prices are scaled by ``index_token_decimals(chain, market)``, this
+    import-time assert is the ONLY thing guaranteeing that a position this SDK
+    opened can always resolve its price scale: ``compiler._resolve_market`` and
+    ``sdk.get_market_address`` resolve markets exclusively from
+    ``GMX_V2_MARKETS``, and this assert guarantees every such market has
+    decimals. Weaken it and prices silently become unmeasured (Empty≠Zero keeps
+    them from becoming *wrong*, but a settlement stops being measurable).
+
+    It does NOT cover markets we did not open — a third party's market seen in a
+    shared keeper tx may be absent from the table, which is why the price path
+    still fails closed rather than trusting a default. Replacing this table with
+    a chain-backed resolver is VIB-6156; a cross-chain address-uniqueness check
+    (the table currently has one duplicate) is VIB-6155.
+    """
     missing: dict[str, list[str]] = {}
     extra: dict[str, list[str]] = {}
     for chain, markets in GMX_V2_MARKETS.items():
@@ -166,4 +197,10 @@ def _assert_gmx_v2_decimal_coverage() -> None:
 
 _assert_gmx_v2_decimal_coverage()
 
-__all__ = ["GMX_V2", "GMX_V2_INDEX_TOKEN_DECIMALS", "GMX_V2_MARKETS", "GMX_V2_TOKENS"]
+__all__ = [
+    "GMX_V2",
+    "GMX_V2_INDEX_TOKEN_DECIMALS",
+    "GMX_V2_MARKETS",
+    "GMX_V2_TOKENS",
+    "index_token_decimals",
+]

@@ -40,7 +40,7 @@ from typing import Any
 from eth_abi import decode as abi_decode
 
 from almanak.connectors._strategy_base.base import EventRegistry, HexDecoder
-from almanak.connectors.gmx_v2.addresses import GMX_V2_TOKENS
+from almanak.connectors.gmx_v2.addresses import GMX_V2, GMX_V2_TOKENS, index_token_decimals
 from almanak.framework.execution.extract_result import (
     ExtractError,
     ExtractMissing,
@@ -679,11 +679,13 @@ class PerpFillData:
       USD, converted from the fee's collateral-token amount using the SAME
       ``PositionFeesCollected`` event's ``collateralTokenPrice`` (decimals-free:
       ``amount * price / 1e30``).
-    - ``entry_price`` / ``exit_price`` carry GMX ``executionPrice`` divided by
-      ``1e30`` (its native price convention). This is USD-per-token only after
-      multiplying by ``10**(index_token_decimals)`` — the index-token decimals
-      are resolved market-side in WI-2. It is left in the GMX-native ratio here
-      rather than shipping a wrongly-scaled plain-USD number.
+    - ``entry_price`` / ``exit_price`` are USD-per-token: GMX ``executionPrice``
+      scaled by ``10**(index_token_decimals) / 1e30`` (VIB-6110). The index-token
+      decimals are resolved from the parser's ``chain`` + the fill's ``market`` via
+      ``GMX_V2_INDEX_TOKEN_DECIMALS``. Empty≠Zero: ``None`` when the price is absent
+      OR the decimals cannot be resolved (parser constructed without a ``chain``, or
+      an unlisted market) — NEVER the wrongly-scaled raw GMX-native ratio (the
+      ``1.9e-15`` bug this field previously shipped).
     - ``collateral_delta_amount`` is the raw collateral-token smallest-unit
       integer (matches ``extract_collateral_returned`` semantics — no guessed
       decimal scale).
@@ -847,9 +849,16 @@ class GMXv2ReceiptParser:
         """Initialize the parser.
 
         Args:
-            **kwargs: Additional arguments (ignored for compatibility)
+            chain: EVM chain slug (e.g. ``"arbitrum"``). Used ONLY to resolve a
+                market's index-token decimals when scaling ``executionPrice`` to
+                USD-per-token (VIB-6110). When absent, ``entry_price``/``exit_price``
+                are left UNMEASURED (``None``) rather than shipped as the raw
+                GMX-native ratio — the receipt decoder stays chain-agnostic for every
+                other field.
+            **kwargs: Additional arguments (ignored for compatibility).
         """
-        _ = kwargs  # Explicitly unused for forward compatibility
+        chain = kwargs.get("chain")
+        self.chain = str(chain).lower() if chain else None
         self.registry = EventRegistry(EVENT_TOPICS, EVENT_NAME_TO_TYPE)
 
     def parse_receipt(self, receipt: dict[str, Any]) -> ParseResult:  # noqa: C901
@@ -1199,6 +1208,24 @@ class GMXv2ReceiptParser:
         if raw is None or isinstance(raw, bool) or not isinstance(raw, int):
             return None
         return Decimal(raw) / Decimal(10**30)
+
+    def _execution_price_usd(self, raw: Any, market: str | None) -> Decimal | None:
+        """Scale GMX ``executionPrice`` to USD-per-token (VIB-6110).
+
+        GMX stores ``executionPrice`` as a 30-decimal ratio over the index token's
+        smallest unit, so USD-per-token = ``executionPrice * 10**index_token_decimals
+        / 1e30``. The index-token decimals come from the parser's ``chain`` + this
+        fill's ``market``. Empty≠Zero: returns ``None`` when the raw price is absent,
+        the parser has no ``chain``, or the market's decimals are unlisted — NEVER the
+        wrongly-scaled raw ratio (dividing by ``1e30`` alone yields the ``1.9e-15``
+        garbage that corrupted cost-basis downstream).
+        """
+        if raw is None or isinstance(raw, bool) or not isinstance(raw, int):
+            return None
+        decimals = index_token_decimals(self.chain, market)
+        if decimals is None:
+            return None
+        return Decimal(raw) * Decimal(10**decimals) / Decimal(10**30)
 
     @staticmethod
     def _fee_amount_to_usd(amount_raw: Any, price_min_raw: Any, price_max_raw: Any) -> Decimal | None:
@@ -1912,6 +1939,36 @@ class GMXv2ReceiptParser:
             logger.warning(f"Failed to extract swap amounts: {e}")
             return None
 
+    # =========================================================================
+    # Single-fill extractors — LOAD-BEARING INVARIANT (VIB-6110)
+    #
+    # Every extractor below takes the FIRST matching position / fee event in the
+    # receipt (``position_increases[0]``, first PositionFeesCollected, or a sum
+    # across all PositionDecrease events). That is only correct while the receipt
+    # they are handed carries at most ONE of the strategy's orders.
+    #
+    # Today that holds by two INCIDENTAL properties, not by any enforcement:
+    #   1. On GMX V2 the strategy's own tx is ``createOrder`` and emits only
+    #      OrderCreated — the position / fee events land later, in the keeper tx.
+    #      These extractors are reached by ``ResultEnricher`` dynamic dispatch
+    #      (EXTRACTION_SPECS["PERP_CLOSE"]) on the OWN-tx receipt, where they
+    #      therefore find nothing.
+    #   2. The one lane that does feed keeper receipts to the enricher
+    #      (``additional_receipts``, gated on ``_require_terminal_async_settlement``,
+    #      set only by the CLI test lifecycle) uses the Anvil order executor, which
+    #      submits ONE executeOrder tx per order key → one order per receipt.
+    #
+    # The production keeper-receipt path does NOT come through here: it goes
+    # ``perp_settlement.py`` → :meth:`extract_perp_fill`, which IS correlated by
+    # ``order_key`` precisely because a real keeper tx may batch several orders.
+    #
+    # If anyone batches the Anvil executor, enables terminal async settlement in
+    # production, or routes a keeper receipt through ResultEnricher, every
+    # extractor below becomes a live money-path defect at once. Correlate them by
+    # ``order_key`` (same pattern as ``extract_perp_fill``) before doing any of
+    # those. Follow-up: VIB-6152.
+    # =========================================================================
+
     def extract_position_id(self, receipt: dict[str, Any]) -> str | None:
         """Extract position ID (key) from transaction receipt.
 
@@ -2168,15 +2225,109 @@ class GMXv2ReceiptParser:
     # Perp fill economics (VIB-3873 / VIB-3872 WI-1)
     # =========================================================================
 
-    def extract_perp_fill_result(self, receipt: dict[str, Any]) -> ExtractResult[PerpFillData]:
-        """Fail-closed variant of :meth:`extract_perp_fill` — see VIB-3159."""
-        return self._wrap_extract(
-            self.extract_perp_fill,
-            receipt,
-            "no PositionIncrease/PositionDecrease event to build fill economics",
+    def _event_emitter_address(self) -> str | None:
+        """Canonical GMX ``EventEmitter`` for this parser's chain, lowercased.
+
+        ``None`` when the parser has no ``chain`` or the chain is not a GMX V2
+        deployment — callers on the money path must treat that as unmeasured,
+        never as "accept any emitter".
+        """
+        emitter = GMX_V2.get(str(self.chain or "").lower(), {}).get("event_emitter")
+        return str(emitter).lower() if emitter else None
+
+    @staticmethod
+    def _normalized_order_key_filter(order_key: str | None) -> str | None:
+        """Lowercase / ``0x``-prefix a watched order key, or ``None`` if absent."""
+        text = str(order_key or "").strip().lower()
+        if not text:
+            return None
+        return text if text.startswith("0x") else "0x" + text
+
+    @staticmethod
+    def _order_key_matches(decoded: dict[str, Any] | None, wanted: str | None) -> bool:
+        """True when ``decoded`` may be attributed to the watched order (VIB-6110).
+
+        ``wanted is None`` is the uncorrelated call and accepts any decoded
+        event. When a watched order key IS supplied the event must carry that
+        exact key: an event whose ``orderKey`` is absent or empty is NOT a
+        match. Fail-closed is mandatory here — a keeper transaction routinely
+        batches several orders, and attributing another order's market,
+        direction and execution price to the watched settlement is silently
+        wrong money, not a merely malformed row.
+        """
+        if decoded is None:
+            return False
+        if wanted is None:
+            return True
+        candidate = str(decoded.get("order_key") or "").strip().lower()
+        return bool(candidate) and candidate == wanted
+
+    def _select_fill_events(
+        self,
+        events: list[Any],
+        wanted: str | None,
+        emitter: str | None = None,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None]:
+        """Pick the position + fee events for the watched order (VIB-6110).
+
+        Returns ``(increase, decrease, fees)``, each ``None`` when the receipt
+        holds no event of that type attributable to ``wanted``. With
+        ``wanted is None`` this is the legacy first-wins selection. Decoding is
+        attempted per candidate so a malformed event does not mask a later valid
+        one of the same type.
+
+        ``emitter`` authenticates the SOURCE. It is applied to each parsed
+        event's ``contract_address`` rather than by pre-filtering the receipt's
+        logs, and that distinction is load-bearing: a filtered *receipt* keeps
+        the original ``transactionHash``, and ``ResultEnricher``'s
+        ``_install_parse_cache`` keys its ``parse_receipt`` cache on exactly
+        that hash — so a cache warmed with the unfiltered receipt would hand
+        back the unfiltered parse and a forged fill would sail straight through
+        the filter. ``_merge_receipt_logs`` stamps a synthetic hash to dodge the
+        same trap. Filtering post-parse is immune to it, because
+        ``contract_address`` is carried on every cached event.
+        """
+        decoders = {
+            GMXv2EventType.POSITION_INCREASE: self._decode_event_utils_position_increase,
+            GMXv2EventType.POSITION_DECREASE: self._decode_event_utils_position_decrease,
+            GMXv2EventType.POSITION_FEES_COLLECTED: self._decode_event_utils_position_fees,
+        }
+        found: dict[Any, dict[str, Any] | None] = {}
+        for event in events:
+            decoder = decoders.get(event.event_type)
+            if decoder is None or found.get(event.event_type) is not None:
+                continue
+            if emitter is not None and str(getattr(event, "contract_address", "") or "").lower() != emitter:
+                continue  # not the canonical EventEmitter — unattributable is not authentic
+            candidate = decoder(str(event.raw_data or "").removeprefix("0x"))
+            if self._order_key_matches(candidate, wanted):
+                found[event.event_type] = candidate
+        return (
+            found.get(GMXv2EventType.POSITION_INCREASE),
+            found.get(GMXv2EventType.POSITION_DECREASE),
+            found.get(GMXv2EventType.POSITION_FEES_COLLECTED),
         )
 
-    def extract_perp_fill(self, receipt: dict[str, Any]) -> PerpFillData | None:
+    def extract_perp_fill_result(
+        self,
+        receipt: dict[str, Any],
+        order_key: str | None = None,
+    ) -> ExtractResult[PerpFillData]:
+        """Fail-closed variant of :meth:`extract_perp_fill` — see VIB-3159."""
+        missing = "no PositionIncrease/PositionDecrease event to build fill economics"
+        if self._normalized_order_key_filter(order_key) is not None:
+            missing = f"no PositionIncrease/PositionDecrease event for order {order_key} to build fill economics"
+        return self._wrap_extract(
+            lambda parsed_receipt: self.extract_perp_fill(parsed_receipt, order_key=order_key),
+            receipt,
+            missing,
+        )
+
+    def extract_perp_fill(
+        self,
+        receipt: dict[str, Any],
+        order_key: str | None = None,
+    ) -> PerpFillData | None:
         """Build typed fill economics from a GMX keeper receipt (VIB-3872 WI-1).
 
         Merges the receipt's ``PositionIncrease`` **or** ``PositionDecrease``
@@ -2185,26 +2336,68 @@ class GMXv2ReceiptParser:
         (funding / position / borrowing fees in USD). Every field is decoded BY
         NAME from the keyed EventUtils payload and follows Empty != Zero.
 
-        Returns ``None`` when the receipt carries neither a PositionIncrease nor
-        a PositionDecrease event (nothing to settle). A keeper receipt that only
-        yields the position event (no fees event) still returns a PerpFillData
-        with the fee fields left ``None`` (unmeasured).
+        ``order_key`` is the settlement being measured (VIB-6110). A GMX keeper
+        transaction may execute SEVERAL orders — on different markets, in
+        different directions — so the position and fee events must be
+        correlated to the watched order rather than taken first-wins.
+        Uncorrelated, closing order B inside a batch that also opened order A
+        returns A's fill: ``is_open=True`` with A's market and A's entry price,
+        and B's real exit price is lost. Because the impostor price is itself
+        plausible, nothing downstream can detect the substitution.
+
+        Returns ``None`` when the receipt carries no PositionIncrease /
+        PositionDecrease event attributable to ``order_key`` (nothing to
+        settle) — callers map that to UNMEASURED rather than to a fill. A
+        keeper receipt that only yields the position event (no matching fees
+        event) still returns a PerpFillData with the fee fields left ``None``
+        (unmeasured). Passing ``order_key=None`` keeps the legacy first-wins
+        behaviour for callers that have no watched order.
+
+        **Source authentication.** When ``order_key`` is supplied, only logs
+        emitted by the chain's canonical GMX ``EventEmitter`` are considered.
+        Correlating on an ``orderKey`` decoded from an *unauthenticated* log
+        would not be correlation at all: ``_parse_log`` recognises GMX events by
+        topic hash alone and never checks ``log["address"]``, and a GMX order
+        carries an owner-chosen ``callbackContract`` that runs inside the very
+        keeper transaction this method parses. A co-batched adversary can read
+        the order nonce from ``DataStore``, compute our key, and emit a forged
+        ``PositionDecrease`` carrying it with an arbitrary market and price —
+        moving the attack from "be first in the log list" to "write the right
+        32 bytes". Restricting to the EventEmitter is what makes the decoded
+        ``orderKey`` trustworthy. If the emitter cannot be resolved (unknown or
+        absent ``chain``) a correlated call fails closed to ``None``: an
+        unmeasured settlement is recoverable, a forged one is not.
+
+        The emitter check runs against each PARSED event's ``contract_address``
+        (see :meth:`_select_fill_events`), never by pre-filtering the receipt's
+        logs — a filtered receipt keeps its ``transactionHash``, which is the
+        key ``ResultEnricher``'s parse cache uses, so pre-filtering is
+        defeatable by a warmed cache.
         """
+        wanted = self._normalized_order_key_filter(order_key)
+        if wanted is None and order_key is not None:
+            logger.warning(
+                "gmx_v2_perp_fill_order_key_blank: order_key=%r normalized away — falling back to "
+                "UNCORRELATED first-wins selection; a batched keeper tx may yield another order's fill",
+                order_key,
+            )
+        emitter: str | None = None
+        if wanted is not None:
+            emitter = self._event_emitter_address()
+            if emitter is None:
+                logger.warning(
+                    "gmx_v2_perp_fill_emitter_unresolved: refusing to correlate order %s without a "
+                    "known EventEmitter for chain %r — fill economics unmeasured",
+                    order_key,
+                    self.chain,
+                )
+                return None
+
         result = self.parse_receipt(receipt)
         if not result.success:
             return None
 
-        increase_raw: dict[str, Any] | None = None
-        decrease_raw: dict[str, Any] | None = None
-        fees: dict[str, Any] | None = None
-        for event in result.events:
-            raw = str(event.raw_data or "").removeprefix("0x")
-            if event.event_type == GMXv2EventType.POSITION_INCREASE and increase_raw is None:
-                increase_raw = self._decode_event_utils_position_increase(raw)
-            elif event.event_type == GMXv2EventType.POSITION_DECREASE and decrease_raw is None:
-                decrease_raw = self._decode_event_utils_position_decrease(raw)
-            elif event.event_type == GMXv2EventType.POSITION_FEES_COLLECTED and fees is None:
-                fees = self._decode_event_utils_position_fees(raw)
+        increase_raw, decrease_raw, fees = self._select_fill_events(result.events, wanted, emitter)
 
         position = increase_raw if increase_raw is not None else decrease_raw
         if position is None:
@@ -2223,8 +2416,16 @@ class GMXv2ReceiptParser:
             collateral_token=position.get("collateral_token") or None,
             position_key=position.get("position_key") or None,
             order_key=position.get("order_key") or None,
-            entry_price=self._usd_from_1e30(position.get("execution_price_raw")) if is_open else None,
-            exit_price=self._usd_from_1e30(position.get("execution_price_raw")) if not is_open else None,
+            entry_price=(
+                self._execution_price_usd(position.get("execution_price_raw"), position.get("market"))
+                if is_open
+                else None
+            ),
+            exit_price=(
+                self._execution_price_usd(position.get("execution_price_raw"), position.get("market"))
+                if not is_open
+                else None
+            ),
             size_delta_usd=self._usd_from_1e30(position.get("size_delta_usd_raw")),
             size_delta_in_tokens=(
                 Decimal(position["size_delta_in_tokens_raw"])

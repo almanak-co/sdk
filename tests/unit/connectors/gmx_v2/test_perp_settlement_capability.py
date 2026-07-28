@@ -260,6 +260,41 @@ class TestGmxCorrelation:
         assert v.terminal is True
         assert v.fill_data is None
 
+    def test_executed_without_correlated_fill_respects_the_horizon(self, monkeypatch) -> None:
+        """VIB-6110: OrderExecuted whose keeper receipt yields no matching fill must EXPIRE.
+
+        Correlating extraction to the watched order key tightened the condition
+        that reaches this branch — previously any decodable position event
+        satisfied it, now only an orderKey-matching one does. Left unconditionally
+        non-terminal, a GMX payload-key rename or a forged-emitter receipt would
+        re-poll this entry (one eth_getLogs + one eth_getTransactionReceipt per
+        tick) forever and never book the PERP_SETTLEMENT row.
+        """
+        tx = "0xexec-no-fill"
+        # OrderExecuted observed, but the keeper receipt carries no position event
+        # attributable to our order key.
+        empty_receipt = {"transactionHash": tx, "blockNumber": 1, "status": 1, "logs": []}
+
+        eth = _FakeEth(
+            logs_result=[_order_log("OrderExecuted", _OPEN_ORDER_KEY, tx)],
+            receipts_by_tx={tx: empty_receipt},
+        )
+        _patch(monkeypatch, eth=eth)
+        within = _resolve(monkeypatch, _entry(seconds=10))
+        assert within.state is PerpSettlementState.UNMEASURED
+        assert within.terminal is False  # still inside the horizon → retry
+        assert "fill economics unmeasured" in (within.unavailable_reason or "")
+
+        eth = _FakeEth(
+            logs_result=[_order_log("OrderExecuted", _OPEN_ORDER_KEY, tx)],
+            receipts_by_tx={tx: empty_receipt},
+        )
+        _patch(monkeypatch, eth=eth)
+        expired = _resolve(monkeypatch, _entry(seconds=ps.PERP_SETTLEMENT_TIMEOUT_SECONDS + 1))
+        assert expired.state is PerpSettlementState.UNMEASURED
+        assert expired.terminal is True  # horizon passed → book terminal, stop polling
+        assert expired.fill_data is None
+
     def test_frozen_is_terminal(self, monkeypatch) -> None:
         tx = "0xfrozen"
         eth = _FakeEth(

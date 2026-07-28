@@ -135,7 +135,9 @@ def resolve_perp_settlements(
         except Exception as exc:  # noqa: BLE001 — unmeasured setup ⇒ fail-closed verdicts
             setup_error = f"gateway web3 handle unavailable: {exc}"
 
-    parser = GMXv2ReceiptParser()
+    # Pass chain so the parser can scale executionPrice → USD-per-token entry/exit
+    # price via the market's index-token decimals (VIB-6110).
+    parser = GMXv2ReceiptParser(chain=chain)
     # The account pending-order set is identical for every entry in this batch, so
     # read it AT MOST ONCE per invocation — lazily, only if some entry lacks an
     # outcome log. Every no-outcome entry then evaluates the same cached result,
@@ -225,7 +227,14 @@ def _resolve_one(
 
     outcome_log = _first_outcome_log(logs)
     if outcome_log is not None:
-        return _verdict_from_outcome(web3=web3, parser=parser, entry=entry, order_key=order_key, outcome=outcome_log)
+        return _verdict_from_outcome(
+            web3=web3,
+            parser=parser,
+            entry=entry,
+            order_key=order_key,
+            outcome=outcome_log,
+            timeout_seconds=timeout_seconds,
+        )
 
     # 2. No terminal outcome yet — distinguish still-pending vs gone-uncorrelated
     #    vs horizon-expired, all measured against the account's pending-order set
@@ -260,6 +269,7 @@ def _verdict_from_outcome(
     entry: PerpSettlementWatchEntry,
     order_key: str,
     outcome: tuple[str, Any],
+    timeout_seconds: int,
 ) -> PerpSettlementVerdict:
     name, log = outcome
     state = _ORDER_OUTCOME_EVENTS[name]
@@ -283,19 +293,33 @@ def _verdict_from_outcome(
             unavailable_reason=f"{name} observed but keeper receipt {keeper_tx} was unreadable: {exc}",
         )
 
-    fill = parser.extract_perp_fill(cast("dict[str, Any]", receipt))
+    # VIB-6110: correlate to the WATCHED order. A keeper tx may batch several
+    # orders across markets; an uncorrelated extract would return a sibling
+    # order's market, direction and execution price for this settlement.
+    fill = parser.extract_perp_fill(cast("dict[str, Any]", receipt), order_key=order_key)
 
     if state is PerpSettlementState.EXECUTED:
         if fill is None:
             # OrderExecuted without a decodable position event should not happen
             # for a perp increase/decrease; fail-closed rather than assert a fill.
+            #
+            # This branch must respect the watch horizon (VIB-6110). Correlating
+            # the extraction to the watched order key tightened the condition that
+            # reaches here: previously ANY decodable position event satisfied it,
+            # now only an orderKey-matching one does. A GMX payload-key rename, an
+            # ADL/liquidation-shaped decrease, or a forged-emitter receipt would
+            # otherwise pin the entry non-terminal forever — one eth_getLogs plus
+            # one eth_getTransactionReceipt per entry per tick, with the
+            # PERP_SETTLEMENT row never booked. Expire like every other unmeasured
+            # branch in this module so it eventually books a terminal UNMEASURED
+            # carrying the reason string below.
             return PerpSettlementVerdict(
                 order_key=entry.order_key,
                 state=PerpSettlementState.UNMEASURED,
-                terminal=False,
+                terminal=_horizon_expired(entry, timeout_seconds),
                 unavailable_reason=(
                     f"OrderExecuted observed in {keeper_tx} but no PositionIncrease/Decrease "
-                    "was decodable — fill economics unmeasured"
+                    f"for order {order_key} was decodable — fill economics unmeasured"
                 ),
             )
         return PerpSettlementVerdict(

@@ -119,14 +119,18 @@ def test_live_gateway_settlement_returns_executed_with_measured_fill() -> None:
         assert open_v.keeper_tx_hash is not None
         assert open_v.fill_data is not None
         assert open_v.fill_data.is_open is True
-        assert open_v.fill_data.entry_price is not None and open_v.fill_data.entry_price > 0
+        # VIB-6110: entry_price is scaled USD-per-token. This fixture's OPEN market is
+        # BTC/USD (listed, decimals 8) → a real ~$64.5k price, not the sub-1 raw ratio.
+        assert open_v.fill_data.entry_price is not None and open_v.fill_data.entry_price > 1000
         assert open_v.fill_data.size_delta_usd is not None and open_v.fill_data.size_delta_usd > 0
         assert open_v.fill_data.position_fee_usd is not None
 
         assert close_v.state is PerpSettlementState.EXECUTED
         assert close_v.fill_data is not None
         assert close_v.fill_data.is_open is False
-        assert close_v.fill_data.exit_price is not None
+        # This fixture's CLOSE market (0xdab2…) is NOT in GMX_V2_INDEX_TOKEN_DECIMALS, so
+        # VIB-6110 fails closed: exit_price is UNMEASURED (None), never the raw GMX ratio.
+        assert close_v.fill_data.exit_price is None
         # Real close of a losing short → signed negative realized PnL.
         assert close_v.fill_data.realized_pnl_usd is not None
         assert close_v.fill_data.realized_pnl_usd < 0
