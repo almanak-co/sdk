@@ -11,6 +11,11 @@ from almanak.connectors._strategy_base.contract_registry import ContractInfo, Co
 from almanak.framework.services.copy_trading.copy_signal_engine import CopySignalEngine
 from almanak.framework.services.copy_trading.copy_trading_models import CopySignal, LeaderEvent
 
+#: A real 20-byte address — `effective_leader` validates, so a placeholder like
+#: "0xLeader" now correctly resolves to "" (VIB-6049, Empty != Zero: an unusable
+#: address is not attribution).
+LEADER_ADDRESS = "0x1111111111111111111111111111111111111111"
+
 
 @pytest.fixture()
 def registry():
@@ -60,7 +65,7 @@ def leader_event():
         tx_hash="0xabc123",
         log_index=0,
         timestamp=now,
-        from_address="0xLeader",
+        from_address=LEADER_ADDRESS,
         to_address="0xRouter1234",
         receipt={"logs": [{"topics": ["0xswap_topic"], "data": "0x1234"}]},
     )
@@ -91,7 +96,11 @@ class TestCopySignalEngineProcessEvents:
         assert signal.tokens == ["USDC", "WETH"]
         assert signal.amounts == {"USDC": Decimal("1000"), "WETH": Decimal("0.5")}
         assert signal.amounts_usd == {}
-        assert signal.leader_address == "0xLeader"
+        # VIB-6049: leader identity is normalised and now comes from
+        # `effective_leader` rather than the raw tx sender. A value that is not a
+        # 20-byte address resolves to "" (Empty != Zero — an unusable address is
+        # not attribution), so this fixture uses a real one.
+        assert signal.leader_address == LEADER_ADDRESS.lower()
         assert signal.block_number == 100
         assert signal.timestamp == leader_event.timestamp
         assert signal.metadata["effective_price"] == "2000"
@@ -112,7 +121,7 @@ class TestCopySignalEngineProcessEvents:
             tx_hash="0xold",
             log_index=0,
             timestamp=1000,
-            from_address="0xLeader",
+            from_address=LEADER_ADDRESS,
             to_address="0xRouter1234",
             receipt={"logs": []},
         )
@@ -127,7 +136,7 @@ class TestCopySignalEngineProcessEvents:
             tx_hash="0xunknown",
             log_index=0,
             timestamp=int(time.time()),
-            from_address="0xLeader",
+            from_address=LEADER_ADDRESS,
             to_address="0xUnknownContract",
             receipt={"logs": []},
         )
@@ -152,7 +161,7 @@ class TestCopySignalEngineProcessEvents:
                 tx_hash="0xtx1",
                 log_index=0,
                 timestamp=now,
-                from_address="0xLeader",
+                from_address=LEADER_ADDRESS,
                 to_address="0xRouter1234",
                 receipt={"logs": []},
             ),
@@ -162,7 +171,7 @@ class TestCopySignalEngineProcessEvents:
                 tx_hash="0xtx2",
                 log_index=0,
                 timestamp=now,
-                from_address="0xLeader",
+                from_address=LEADER_ADDRESS,
                 to_address="0xRouter1234",
                 receipt={"logs": []},
             ),
@@ -210,7 +219,7 @@ class TestCopySignalEngineGetSkipReason:
             tx_hash="0xold",
             log_index=0,
             timestamp=0,
-            from_address="0xLeader",
+            from_address=LEADER_ADDRESS,
             to_address="0xRouter1234",
             receipt={"logs": []},
         )
@@ -224,7 +233,7 @@ class TestCopySignalEngineGetSkipReason:
             tx_hash="0xunknown",
             log_index=0,
             timestamp=int(time.time()),
-            from_address="0xLeader",
+            from_address=LEADER_ADDRESS,
             to_address="0xNoSuchContract",
             receipt={"logs": []},
         )
@@ -386,7 +395,7 @@ class TestMultiActionExtraction:
             tx_hash="0xabc123",
             log_index=0,
             timestamp=int(time.time()),
-            from_address="0xLeader",
+            from_address=LEADER_ADDRESS,
             to_address=to_address,
             receipt={"logs": [{"topics": ["0xtopic"], "data": "0x1234"}]},
         )
@@ -540,7 +549,7 @@ class TestPerpExtractionDetails:
             tx_hash="0xperp",
             log_index=0,
             timestamp=1_000,
-            from_address="0xLeader",
+            from_address=LEADER_ADDRESS,
             to_address="0xGmxRouter",
             receipt={"logs": [{"topics": ["0xperp_topic"], "data": "0x1234"}]},
         )

@@ -226,7 +226,8 @@ class TestFullPipeline:
         assert signal.protocol == "uniswap_v3"
         assert signal.chain == CHAIN
         assert signal.tokens == ["USDC", "WETH"]
-        assert signal.leader_address == LEADER
+        # VIB-6049: leader identity is normalised lower-case.
+        assert signal.leader_address == LEADER.lower()
 
         size = sizer.compute_size(signal)
         assert size == Decimal("100")  # FIXED_USD mode

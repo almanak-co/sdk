@@ -51,6 +51,7 @@ from almanak.connectors._strategy_base.base.receipt_parser import (
 )
 from almanak.connectors._strategy_base.base.receipt_wallet import (
     TRADING_WALLET_KEY,
+    normalize_wallet_address,
     resolve_trading_wallet,
     safe_wallet_from_receipt,
     stamp_trading_wallet,
@@ -72,6 +73,7 @@ __all__ = [
     "EventRegistry",
     "HexDecoder",
     "ParseResult",
+    "normalize_wallet_address",
     "resolve_swap_token_symbol",
     "resolve_swap_token_symbol_with_fallback",
     "resolve_trading_wallet",

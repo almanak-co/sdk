@@ -11,8 +11,8 @@ import importlib
 import logging
 import time
 import uuid
-from collections.abc import Callable
-from dataclasses import asdict, is_dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import asdict, is_dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -115,6 +115,34 @@ class CopySignalEngine:
             self._emit_skip_event(event, "parser_load_failed")
             return []
 
+        # VIB-6049 link 3 — stamp the effective leader ONCE, before extraction,
+        # so it reaches every extractor call site rather than the two the ticket
+        # named.
+        #
+        # **What this does NOT do**, stated because the obvious reading is too
+        # generous: it does not make *every* parser resolve the leader's money
+        # legs. Only parsers that call ``resolve_trading_wallet`` read the
+        # stamp, and — scoped to what copy-trading can actually reach, which is
+        # the number that matters here — that is **3 of the 11** protocols in
+        # the default contract registry: ``aerodrome``, ``pancakeswap_v3``,
+        # ``sushiswap_v3``. (Six other connectors read the stamp but are not
+        # reachable from copy-trading at all, so quoting "nine" here would
+        # overstate coverage.)
+        #
+        # For the reachable remainder — uniswap_v3/v4, agni_finance,
+        # traderjoe_v2, pendle, aave_v3, morpho_blue, gmx_v2 — the stamp is
+        # inert. Note they do not all then read the sender: most key off
+        # pool/protocol events and never consult ``receipt["from"]`` at all;
+        # ``traderjoe_v2`` and ``morpho_blue`` are the ones that do. Either way
+        # the legs are not leader-resolved.
+        #
+        # Attribution (``CopySignal.leader_address``) is what reaches all of
+        # them, because it comes from here and not from the parser. Migrating
+        # the remainder is a hard dependency of any discovery (link 1) change,
+        # not a follow-up nice-to-have: without it a Safe leader gets the right
+        # identity with signer-resolved or pool-derived amounts.
+        event = self._with_leader_wallet_stamp(event)
+
         decoded = self._extract_signals(parser, info, event, current_time, current_block)
         if decoded:
             self._seen_event_ids[event_id] = current_time
@@ -124,6 +152,51 @@ class CopySignalEngine:
 
         self._emit_skip_event(event, "decode_failed")
         return []
+
+    @staticmethod
+    def _with_leader_wallet_stamp(event: LeaderEvent) -> LeaderEvent:
+        """Return ``event`` with the effective leader stamped on its receipt.
+
+        Uses the VIB-6043 seam (``stamp_trading_wallet``), which the migrated
+        receipt parsers read via ``resolve_trading_wallet``. The stamp is
+        authoritative and outranks ``receipt["from"]``.
+
+        **Why an unmatched event is unchanged in practice**, stated precisely
+        because the obvious explanation is wrong: ``effective_leader`` is falsy
+        only when BOTH ``leader_address`` and ``from_address`` are empty, so for
+        an event carrying no matched leader the stamp is *applied*, not removed.
+        Behaviour is identical to pre-VIB-6049 only because ``WalletMonitor``
+        sources ``from_address`` and the receipt from the same transaction, so
+        the stamped value equals the ``receipt["from"]`` the resolver would have
+        fallen back to. That invariant is asserted by
+        ``test_the_stamp_equals_the_receipt_sender_for_an_unmatched_event`` — if
+        a future discovery fix sets ``from_address`` to something other than the
+        receipt's own sender, this stops being a no-op and that test says so.
+
+        Non-Mapping receipts are passed through untouched. ``stamp_trading_wallet``
+        does ``dict(receipt)`` with no type guard (unlike its sibling
+        ``resolve_trading_wallet``, which checks), and a degraded provider can
+        return a JSON scalar. Raising here would abort the whole batch *after*
+        the poll cursor advanced, silently losing every leader event in it.
+        """
+        from almanak.connectors._strategy_base.base import stamp_trading_wallet
+
+        if not isinstance(event.receipt, Mapping):
+            # ERROR, not WARNING: this event can never be re-polled (the cursor
+            # has already advanced), and downstream it is indistinguishable from
+            # an ordinary undecodable receipt in the skip stream — it falls
+            # through to ``_emit_skip_event(event, "decode_failed")``. A
+            # dedicated skip reason would be better still; that needs a control-
+            # flow change through the caller and is tracked on VIB-6049.
+            logger.error(
+                "Leader event %s carries a non-mapping receipt (%s); skipping the wallet stamp. "
+                "The leader's money legs will resolve against receipt['from'] if present, "
+                "and this event cannot be re-polled.",
+                event.event_id,
+                type(event.receipt).__name__,
+            )
+            return event
+        return replace(event, receipt=stamp_trading_wallet(event.receipt, event.effective_leader))
 
     def _extract_signals(  # noqa: C901
         self,
@@ -731,7 +804,7 @@ class CopySignalEngine:
             amounts=amounts,
             amounts_usd=amounts_usd,
             metadata=metadata,
-            leader_address=event.from_address,
+            leader_address=event.effective_leader,
             block_number=event.block_number,
             timestamp=event.timestamp,
             leader_tx_hash=event.tx_hash,
@@ -844,7 +917,13 @@ class CopySignalEngine:
                     details={
                         "event_id": event.event_id,
                         "reason": reason,
-                        "leader_address": event.from_address,
+                        "leader_address": event.effective_leader,
+                        # Both, deliberately. This is a DIAGNOSTIC stream: when
+                        # nothing normalises, ``effective_leader`` is "" and an
+                        # operator cannot tell which wallet was dropped. The raw
+                        # sender is what makes a skipped event traceable, so it
+                        # is carried alongside rather than instead.
+                        "from_address": event.from_address,
                     },
                 )
             )

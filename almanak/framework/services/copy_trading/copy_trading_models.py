@@ -377,9 +377,48 @@ class PerpPayload:
     position_id: str | None = None
 
 
+def _normalize_evm_address(value: Any) -> str:
+    """Lower-cased 20-byte hex address, or ``""`` when ``value`` is not one.
+
+    **Delegates to** ``normalize_wallet_address`` — the same function
+    ``stamp_trading_wallet`` uses — rather than reimplementing the check, so
+    :attr:`LeaderEvent.effective_leader` and the receipt stamp agree **by
+    construction**. An earlier version of this duplicated the logic and was
+    already drifting: it rejected ``bytes`` / ``HexBytes`` that the stamp
+    accepts. A divergence in that direction yields a signal attributed to the
+    leader whose money legs were resolved against the *signer* — amount-correct
+    and wrongly attributed, the exact failure this field exists to prevent
+    (VIB-6049).
+
+    Imported lazily to match the engine's own deferred import of the same
+    module and keep ``framework`` import-time free of the connector package.
+    """
+    from almanak.connectors._strategy_base.base import normalize_wallet_address
+
+    return normalize_wallet_address(value)
+
+
 @dataclass(frozen=True)
 class LeaderEvent:
-    """An on-chain event from a monitored leader wallet."""
+    """An on-chain event from a monitored leader wallet.
+
+    ``from_address`` is the **transaction sender**. ``leader_address`` is the
+    **configured leader the monitor matched** — the wallet whose money actually
+    moved. They coincide for a leader trading from a plain EOA and diverge for
+    a leader trading through a Safe, a Zodiac Roles modifier, an ERC-4337
+    bundler, or any other relayer: there the sender is the executor and the
+    leader is the account (VIB-6049).
+
+    Consumers that need "whose position is this" must read
+    :attr:`effective_leader`, never ``from_address``.
+
+    **Today no producer sets ``leader_address``** — ``WalletMonitor`` matches
+    leaders on ``tx.from`` and does not populate it — so in every production
+    path ``effective_leader`` degrades to the sender and the two are identical.
+    The field is the seam a discovery fix populates (VIB-6049 link 1); until
+    then, do not read this docstring as saying Safe leaders are attributed
+    correctly.
+    """
 
     chain: str
     block_number: int
@@ -393,10 +432,67 @@ class LeaderEvent:
     tx_index: int | None = None
     tx_type: str | None = None
     gas_price_wei: int | None = None
+    #: The configured leader address this event was matched on. Empty for
+    #: events built before VIB-6049, which fall back to the sender.
+    leader_address: str = ""
 
     @property
     def event_id(self) -> str:
         return f"{self.chain}:{self.tx_hash}:{self.log_index}"
+
+    @property
+    def effective_leader(self) -> str:
+        """Normalised address of the leader whose funds moved in this tx.
+
+        Falls back to the transaction sender, which is the correct answer for
+        plain-EOA leaders and the pre-VIB-6049 behaviour for everything else.
+
+        **Normalised, not merely lower-cased.** The receipt stamp validates the
+        address (``stamp_trading_wallet`` drops anything that is not a 20-byte
+        hex address, leaving parsers to fall back to ``receipt["from"]``), so if
+        attribution used a laxer form the two could silently disagree: the
+        signal would be attributed to the leader while its money legs were
+        resolved against the *signer*. That is an amount-correct,
+        wrongly-attributed signal — precisely the failure this field exists to
+        prevent. Returning the same validated value both places makes them
+        equal by construction. Empty != Zero: ``""`` when nothing resolves.
+
+        **EVM-only, deliberately.** The acceptance test is ``0x`` + 40 hex, so a
+        non-EVM leader (Solana, etc.) normalises to ``""`` even though
+        :attr:`chain` is a free-form string. That is currently unreachable —
+        ``WalletMonitor`` speaks ``eth_*`` exclusively — but it is a
+        chain-specific rule sitting in a chain-generic model, so a future
+        non-EVM copy-trading venue must add a chain-family seam here rather
+        than inherit a silent ``""``. Recorded on VIB-6049 (open).
+
+        **What an empty result would cost, if it ever became reachable.**
+        ``copy_policy_engine`` keys ``state["leader_notional_usd"]`` on this
+        value and calls ``get_leader_cap`` with it, so ``""`` would put *every*
+        unresolvable leader in **one shared notional bucket with no per-leader
+        cap** — two different leaders silently netting against each other. It is
+        unreachable today because ``WalletMonitor`` only emits an event after
+        ``tx["from"]`` matched a configured leader, and a chain-supplied
+        ``from`` is always a valid 20-byte address. A producer that does not
+        share that guarantee (non-EVM, replay, a discovery fix) must therefore
+        skip the event rather than let ``""`` through.
+
+        **Open design question for whoever lands discovery (link 1) — the two
+        review lanes pull in opposite directions, so it is recorded here rather
+        than silently decided.** Today a *set-but-malformed* ``leader_address``
+        falls through to the sender. That is deliberate continuity with
+        pre-VIB-6049 behaviour and it avoids the empty-value hazard above, but
+        it also means "the producer named a leader and the value was garbage"
+        silently becomes "the signer is the leader" — misattribution, which is
+        the class this field exists to prevent. The alternative is to fail
+        closed: if ``leader_address`` is non-empty but does not normalise,
+        return ``""`` and let the caller skip the event.
+        **Neither is safe on its own** — fail-closed only helps if the caller
+        also refuses to emit on ``""``, otherwise it trades misattribution for
+        the shared-notional-bucket hazard. Whoever populates this field must
+        pick one and wire the matching caller behaviour in the same change.
+        Unreachable today because no producer sets ``leader_address``.
+        """
+        return _normalize_evm_address(self.leader_address) or _normalize_evm_address(self.from_address)
 
 
 @dataclass(frozen=True)

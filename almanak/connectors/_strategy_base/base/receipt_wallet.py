@@ -98,11 +98,38 @@ _SAFE_EXECUTION_TOPICS: Final[frozenset[str]] = frozenset(
 _ERC20_TRANSFER_TOPIC: Final[str] = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 
 
-def _normalize_address(value: Any) -> str:
+#: The only characters a normalised address payload may contain. Used instead of
+#: ``int(text, 16)`` because **Python accepts ``_`` as a digit separator**:
+#: ``int("0x" + "a" * 38 + "_b", 16)`` succeeds, so an underscore-bearing 42-char
+#: string would pass a length + ``int()`` check and be treated as a usable address.
+#: It would then be stamped as the authoritative trading wallet, and every parser
+#: would resolve money legs against an address that cannot match anything —
+#: a silent no-signal, which is the failure class this module exists to prevent.
+_HEX_DIGITS: Final[frozenset[str]] = frozenset("0123456789abcdef")
+
+
+def normalize_wallet_address(value: Any) -> str:
     """Lower-cased ``0x``-prefixed 20-byte address, or ``""`` when not one.
 
     Accepts the shapes receipts arrive in: ``str``, ``bytes`` / ``HexBytes``,
     or anything with a ``hex()`` method.
+
+    **Normative, not yet universal.** Anything deciding whether an address may
+    be attributed to, keyed on, or stamped onto a receipt MUST call this rather
+    than reimplementing the check — that is the rule, and the
+    attribution/stamp pair now satisfies it. It is *not* a claim that every
+    address helper in the tree already routes here: `gmx_v2/runner_hooks.py`
+    still carries its own `len == 42` + `int(value, 16)` copy (same hole this
+    function closes, on a different path), and `enso/receipt_parser.py`,
+    `lp_leg_identity.py` and `base/receipt_parser.py` define weaker
+    module-local variants for their own purposes. Migrating those is follow-up
+    work on VIB-6049, not something this docstring should imply is done.
+    Two independent copies would drift — and the specific way they drift is
+    dangerous: if attribution accepted a value the stamp rejected (or vice
+    versa), a signal could be attributed to the leader while its money legs were
+    resolved against the *signer*, producing an amount-correct, wrongly-attributed
+    result. Sharing one function makes them equal by construction rather than by
+    coincidence (VIB-6049).
     """
     if value is None:
         return ""
@@ -128,11 +155,18 @@ def _normalize_address(value: Any) -> str:
         return ""
     if len(text) != 42:
         return ""
-    try:
-        int(text, 16)
-    except ValueError:
+    # NOT ``int(text, 16)`` — see ``_HEX_DIGITS``: that accepts ``_`` separators.
+    if not _HEX_DIGITS.issuperset(text[2:]):
         return ""
     return text
+
+
+#: Alias for this module's own four internal call sites, which referenced the
+#: private name before it became the shared acceptance test. No other module
+#: imports it — the identically-named helpers in ``enso/``, ``gmx_v2/``,
+#: ``lp_leg_identity.py`` and ``receipt_parser.py`` are independent module-local
+#: definitions, not this one.
+_normalize_address = normalize_wallet_address
 
 
 def _normalize_topic(value: Any) -> str:
@@ -258,6 +292,7 @@ def resolve_trading_wallet(receipt: Mapping[str, Any]) -> str:
 
 __all__ = [
     "TRADING_WALLET_KEY",
+    "normalize_wallet_address",
     "resolve_trading_wallet",
     "safe_wallet_from_receipt",
     "stamp_trading_wallet",
