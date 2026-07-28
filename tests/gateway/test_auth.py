@@ -216,6 +216,7 @@ class TestAuthInterceptorAllServices:
             "/almanak.gateway.MarketService/GetBalance",
             "/almanak.gateway.StateService/GetState",
             "/almanak.gateway.StateService/SetState",
+            "/almanak.gateway.StateService/SavePortfolioMetrics",
             "/almanak.gateway.ExecutionService/Execute",
             "/almanak.gateway.ObserveService/Log",
             "/almanak.gateway.RpcService/Call",

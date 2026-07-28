@@ -1885,6 +1885,31 @@ def _optional_flow_from_row(row: Any, column: str) -> Decimal | None:
     return decode_optional_flow(raw)
 
 
+def _required_decimal_from_row(
+    row: Any,
+    column: str,
+    *,
+    legacy_default: Decimal | None = None,
+) -> Decimal:
+    """Read a required finite monetary value without deferring corruption.
+
+    Some legacy rows omit fields that historically defaulted to zero. Those
+    callers may supply ``legacy_default`` explicitly. Present but empty,
+    malformed, legacy ``"None"``, and non-finite values are never coerced.
+    """
+    from almanak.framework.portfolio.models import decode_optional_decimal_text
+
+    if column not in row:
+        if legacy_default is not None:
+            return legacy_default
+        raise ValueError(f"portfolio_metrics.{column} must contain a finite decimal measurement")
+    raw = row[column]
+    value = decode_optional_decimal_text(raw, field_name=f"portfolio_metrics.{column}")
+    if value is None:
+        raise ValueError(f"portfolio_metrics.{column} must contain a finite decimal measurement")
+    return value
+
+
 def _pg_row_to_portfolio_metrics(row: Any) -> "PortfolioMetrics":
     """Convert a ``portfolio_metrics`` row to a ``PortfolioMetrics``.
 
@@ -1897,17 +1922,20 @@ def _pg_row_to_portfolio_metrics(row: Any) -> "PortfolioMetrics":
     """
     from decimal import Decimal
 
-    from almanak.framework.portfolio.models import PortfolioMetrics
+    from almanak.framework.portfolio.models import PortfolioMetrics, decode_optional_decimal_text
 
     initial_timestamp = _require_dt(row["initial_timestamp"], "portfolio_metrics.initial_timestamp")
     is_complete = bool(row["is_complete"]) if row.get("is_complete") is not None else True
     return PortfolioMetrics(
         timestamp=initial_timestamp,
-        total_value_usd=Decimal(row.get("total_value_usd") or "0"),
-        initial_value_usd=Decimal(row["initial_value_usd"]),
+        total_value_usd=decode_optional_decimal_text(
+            row.get("total_value_usd"),
+            field_name="portfolio_metrics.total_value_usd",
+        ),
+        initial_value_usd=_required_decimal_from_row(row, "initial_value_usd"),
         deposits_usd=_optional_flow_from_row(row, "deposits_usd"),
         withdrawals_usd=_optional_flow_from_row(row, "withdrawals_usd"),
-        gas_spent_usd=Decimal(row.get("gas_spent_usd") or "0"),
+        gas_spent_usd=_required_decimal_from_row(row, "gas_spent_usd", legacy_default=Decimal("0")),
         positions_json=row.get("positions_text") or "[]",
         cycle_id=row.get("cycle_id"),
         deployment_id=row.get("deployment_id") or "",

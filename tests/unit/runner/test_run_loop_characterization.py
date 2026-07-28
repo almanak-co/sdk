@@ -956,7 +956,11 @@ class TestAccountingFailedSnapshot:
 
     @pytest.mark.asyncio
     async def test_live_mode_snapshot_failure_escalates_to_accounting_failed(self):
-        runner, strategy, captured = _setup_accounting_failure_runner(live_mode=True)
+        runner, strategy, captured = _setup_accounting_failure_runner(
+            live_mode=True,
+            write_kind=AccountingWriteKind.METRICS,
+        )
+        del runner._is_live_mode
 
         async def mock_iter(s):
             return IterationResult(
@@ -981,6 +985,7 @@ class TestAccountingFailedSnapshot:
         assert len(captured) == 1
         assert captured[0].status == IterationStatus.ACCOUNTING_FAILED
         assert "Accounting persistence failed" in (captured[0].error or "")
+        assert "(metrics)" in (captured[0].error or "")
         # And the alert hook was invoked.
         assert runner._alert_accounting_failure.await_count == 1
         # Regression (#1782): duration_ms on the rebuilt result is measured
@@ -1289,28 +1294,42 @@ class TestAccountingFailedSnapshot:
         )
 
     @pytest.mark.asyncio
-    async def test_non_live_mode_snapshot_failure_is_logged_only(self):
-        runner, strategy, captured = _setup_accounting_failure_runner(live_mode=False)
+    @pytest.mark.parametrize("mode", ["paper", "dry_run"])
+    async def test_non_live_mode_snapshot_failure_is_logged_only(self, mode, caplog):
+        runner, strategy, captured = _setup_accounting_failure_runner(
+            live_mode=False,
+            write_kind=AccountingWriteKind.METRICS,
+        )
+        del runner._is_live_mode
+        runner.config.dry_run = mode == "dry_run"
+        runner.config.paper_mode = mode == "paper"  # type: ignore[attr-defined]
 
         async def mock_iter(s):
             return _make_result(IterationStatus.SUCCESS)
 
         runner.run_iteration = mock_iter
 
-        await asyncio.wait_for(
-            runner.run_loop(
-                strategy,
-                interval_seconds=0,
-                iteration_callback=captured.append,
-                max_iterations=1,
-            ),
-            timeout=5,
-        )
+        with caplog.at_level(logging.ERROR, logger="almanak.framework.runner._run_loop_helpers"):
+            await asyncio.wait_for(
+                runner.run_loop(
+                    strategy,
+                    interval_seconds=0,
+                    iteration_callback=captured.append,
+                    max_iterations=1,
+                ),
+                timeout=5,
+            )
 
         # Non-live mode: result is NOT rebuilt, alert NOT fired.
         assert len(captured) == 1
         assert captured[0].status == IterationStatus.SUCCESS
         assert runner._alert_accounting_failure.await_count == 0
+        assert any(
+            record.levelno == logging.ERROR
+            and "non-live mode" in record.message
+            and "write_kind=metrics" in record.message
+            for record in caplog.records
+        ), f"{mode} metrics failure was not ERROR-visible"
 
 
 # =============================================================================
@@ -1596,4 +1615,3 @@ class TestRecordFailureIncrements:
         runner._circuit_breaker = MagicMock()
         runner._record_failure()
         runner._circuit_breaker.record_failure.assert_not_called()
-

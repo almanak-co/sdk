@@ -576,10 +576,9 @@ class GatewayStateManager:
             # when no snapshot exists the value is genuinely UNMEASURED, so the
             # field stays ``None`` — never ``Decimal("0")``, which would
             # fabricate a measured-zero NAV and poison ``pnl_before_gas`` as
-            # ≈ −initial (a confident-wrong −100% loss). The framework READ path
-            # diverges intentionally from the gateway write path's
-            # ``Decimal("0")``-on-miss: a read must surface "unmeasured", not a
-            # fabricated zero.
+            # ≈ −initial (a confident-wrong −100% loss). This matches the gateway
+            # write path: both preserve a missing snapshot as unmeasured rather
+            # than fabricating a measured zero.
             snapshot = await self.get_latest_snapshot(deployment_id)
             total_value_usd = snapshot.total_value_usd if snapshot is not None else None
 

@@ -105,17 +105,23 @@ def parse_metrics_inputs(
             wording for malformed decimals, negative timestamps, and
             out-of-range timestamps.
     """
-    from almanak.framework.portfolio.models import decode_optional_flow
-
     try:
         initial_value_usd = Decimal(request.initial_value_usd or "0")
         # Empty≠Zero: '' on the wire is the UNMEASURED sentinel for the two
-        # capital flows and is carried through as None (VIB-5866).
-        deposits_usd = decode_optional_flow(request.deposits_usd)
-        withdrawals_usd = decode_optional_flow(request.withdrawals_usd)
+        # capital flows and is carried through as None (VIB-5866).  This is a
+        # strict ingress boundary: legacy-tolerant storage decoding must not
+        # turn malformed caller input into an unmeasured value.
+        deposits_usd = Decimal(request.deposits_usd) if request.deposits_usd else None
+        withdrawals_usd = Decimal(request.withdrawals_usd) if request.withdrawals_usd else None
         gas_spent_usd = Decimal(request.gas_spent_usd or "0")
     except InvalidOperation as exc:
         raise MetricsValidationError("metrics fields must be valid decimal strings") from exc
+
+    if any(
+        value is not None and not value.is_finite()
+        for value in (initial_value_usd, deposits_usd, withdrawals_usd, gas_spent_usd)
+    ):
+        raise MetricsValidationError("metrics fields must be finite decimal strings")
 
     if request.initial_timestamp < 0:
         raise MetricsValidationError("initial_timestamp must be non-negative")
@@ -178,7 +184,7 @@ def build_pg_upsert_args(
     inputs: ParsedMetricsInputs,
     request: gateway_pb2.SaveMetricsRequest,
     now: datetime,
-    total_value_usd: Decimal,
+    total_value_usd: Decimal | None,
     positions_json: str = "[]",
 ) -> tuple[Any, ...]:
     """Build the positional args tuple for the portfolio_metrics UPSERT.
@@ -201,7 +207,7 @@ def build_pg_upsert_args(
     doesn't carry positions; ``PortfolioMetrics.positions_json`` defaults to
     ``"[]"`` and SQLite's writer pulls it via ``getattr``).
     """
-    from almanak.framework.portfolio.models import encode_optional_flow
+    from almanak.framework.portfolio.models import encode_optional_decimal_text, encode_optional_flow
 
     return (
         inputs.deployment_id,
@@ -215,7 +221,7 @@ def build_pg_upsert_args(
         request.execution_mode or "",
         request.is_complete,
         now,
-        str(total_value_usd),
+        encode_optional_decimal_text(total_value_usd, field_name="portfolio total_value_usd"),
         positions_json,
     )
 
@@ -225,13 +231,14 @@ def build_pg_upsert_args(
 # ---------------------------------------------------------------------------
 
 
-async def resolve_total_value_usd(warm_backend: Any, deployment_id: str) -> Decimal:
+async def resolve_total_value_usd(warm_backend: Any, deployment_id: str) -> Decimal | None:
     """Best-effort lookup of the latest snapshot's ``total_value_usd``.
 
     VIB-2765: the proto does NOT carry ``total_value_usd`` (it is derived
     from the most recent snapshot that was saved moments before this RPC).
-    A broken or missing snapshot backend must NOT abort the metrics write —
-    errors are logged and ``Decimal("0")`` is returned.
+    A broken or missing snapshot backend must NOT abort the metrics write.
+    Errors are logged and ``None`` is returned so an unavailable measurement
+    cannot be fabricated into a measured zero.
 
     Args:
         warm_backend: ``StateManager.warm_backend`` — may be ``None`` or may
@@ -240,10 +247,9 @@ async def resolve_total_value_usd(warm_backend: Any, deployment_id: str) -> Deci
         deployment_id: The already resolved deployment id.
 
     Returns:
-        The latest snapshot's ``total_value_usd`` or ``Decimal("0")`` if
-        unavailable.
+        The latest snapshot's ``total_value_usd`` or ``None`` if unavailable.
     """
-    total_value_usd = Decimal("0")
+    total_value_usd: Decimal | None = None
     try:
         if warm_backend and hasattr(warm_backend, "get_latest_snapshot"):
             latest = await warm_backend.get_latest_snapshot(deployment_id)
@@ -261,7 +267,7 @@ async def resolve_total_value_usd(warm_backend: Any, deployment_id: str) -> Deci
 def build_portfolio_metrics(
     inputs: ParsedMetricsInputs,
     request: gateway_pb2.SaveMetricsRequest,
-    total_value_usd: Decimal,
+    total_value_usd: Decimal | None,
 ) -> PortfolioMetrics:
     """Build a ``PortfolioMetrics`` for the warm backend save path.
 

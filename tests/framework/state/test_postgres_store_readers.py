@@ -930,7 +930,7 @@ def test_pg_row_to_portfolio_snapshot_hydrates_populated_wallet_columns():
     assert snap.token_prices == token_prices
 
 
-def test_pg_row_to_portfolio_metrics_defaults_missing_columns():
+def test_pg_row_to_portfolio_metrics_preserves_legacy_null_semantics():
     row = _DictRow(
         {
             "initial_value_usd": "100",
@@ -949,7 +949,8 @@ def test_pg_row_to_portfolio_metrics_defaults_missing_columns():
     )
     metrics = _pg_row_to_portfolio_metrics(row)
     assert metrics.deposits_usd == Decimal("0")
-    assert metrics.total_value_usd == Decimal("0")
+    # Empty≠Zero: an optional total with no measurement remains unmeasured.
+    assert metrics.total_value_usd is None
     assert metrics.positions_json == "[]"
     assert metrics.is_complete is True
 

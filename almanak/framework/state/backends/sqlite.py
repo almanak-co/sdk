@@ -2144,7 +2144,7 @@ class SQLiteStore:
         Returns:
             Row ID of the inserted snapshot.
         """
-        from almanak.framework.portfolio.models import encode_optional_flow
+        from almanak.framework.portfolio.models import encode_optional_decimal_text, encode_optional_flow
 
         if not self._initialized:
             await self.initialize()
@@ -2266,7 +2266,9 @@ class SQLiteStore:
                             encode_optional_flow(metrics.deposits_usd),
                             encode_optional_flow(metrics.withdrawals_usd),
                             str(metrics.gas_spent_usd),
-                            str(metrics.total_value_usd),
+                            encode_optional_decimal_text(
+                                metrics.total_value_usd, field_name="portfolio total_value_usd"
+                            ),
                             getattr(metrics, "positions_json", "[]"),
                             cycle_id,
                             execution_mode,
@@ -2797,7 +2799,7 @@ class SQLiteStore:
         Returns:
             True if successful.
         """
-        from almanak.framework.portfolio.models import encode_optional_flow
+        from almanak.framework.portfolio.models import encode_optional_decimal_text, encode_optional_flow
 
         if not self._initialized:
             await self.initialize()
@@ -2822,7 +2824,7 @@ class SQLiteStore:
                     encode_optional_flow(metrics.deposits_usd),
                     encode_optional_flow(metrics.withdrawals_usd),
                     str(metrics.gas_spent_usd),
-                    str(metrics.total_value_usd),
+                    encode_optional_decimal_text(metrics.total_value_usd, field_name="portfolio total_value_usd"),
                     getattr(metrics, "positions_json", "[]"),
                     getattr(metrics, "cycle_id", None),
                     getattr(metrics, "execution_mode", "") or "",
@@ -2847,7 +2849,11 @@ class SQLiteStore:
         """
         from decimal import Decimal
 
-        from almanak.framework.portfolio.models import PortfolioMetrics, decode_optional_flow
+        from almanak.framework.portfolio.models import (
+            PortfolioMetrics,
+            decode_optional_decimal_text,
+            decode_optional_flow,
+        )
 
         if not self._initialized:
             await self.initialize()
@@ -2896,7 +2902,12 @@ class SQLiteStore:
 
             return PortfolioMetrics(
                 timestamp=updated_at,
-                total_value_usd=Decimal(row["total_value_usd"] or "0"),
+                # Empty≠Zero: empty text, SQL NULL, and poisoned legacy values
+                # are unmeasured. Never turn absence/corruption into a measured
+                # zero (VIB-5915).
+                total_value_usd=decode_optional_decimal_text(
+                    row["total_value_usd"], field_name="portfolio total_value_usd"
+                ),
                 initial_value_usd=Decimal(row["initial_value_usd"]),
                 # Empty≠Zero: '' (the unmeasured sentinel) decodes to None;
                 # SQL NULL predates the sentinel (legacy row) and stays a

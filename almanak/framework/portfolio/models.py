@@ -9,14 +9,18 @@ These models are used by:
 - Dashboard - Displaying portfolio value and PnL charts
 """
 
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from almanak.framework.teardown.models import PositionType
+
+
+logger = logging.getLogger(__name__)
 
 
 class ValueConfidence(StrEnum):
@@ -465,7 +469,55 @@ def enforce_open_position_value_invariant(snapshot: "PortfolioSnapshot") -> "Por
 #: strings, so the empty string is the only value that can carry "unmeasured"
 #: across those seams without a schema or proto change — ``str(None)`` would
 #: persist the literal ``"None"`` and ``"0"`` would fabricate a measured zero.
-UNMEASURED_FLOW_TEXT = ""
+UNMEASURED_DECIMAL_TEXT = ""
+
+# Backwards-compatible public name for callers that describe this sentinel in
+# capital-flow terms. The encoding is shared by every optional Decimal stored
+# in a TEXT column; it is not specific to deposits and withdrawals.
+UNMEASURED_FLOW_TEXT = UNMEASURED_DECIMAL_TEXT
+
+
+def encode_optional_decimal_text(value: Decimal | None, *, field_name: str) -> str:
+    """Serialize an optional finite Decimal for a TEXT storage seam.
+
+    ``None`` is unmeasured and is encoded as the canonical empty-text
+    sentinel. Non-finite Decimals cannot represent a monetary measurement, so
+    they fail closed to the same sentinel and emit a warning rather than
+    poisoning persistence with ``NaN`` or an infinity.
+    """
+    if value is None:
+        return UNMEASURED_DECIMAL_TEXT
+    if not value.is_finite():
+        logger.warning("Non-finite %s value cannot be persisted; storing it as unmeasured", field_name)
+        return UNMEASURED_DECIMAL_TEXT
+    return str(value)
+
+
+def decode_optional_decimal_text(raw: object, *, field_name: str) -> Decimal | None:
+    """Decode optional Decimal TEXT without fabricating a measured zero.
+
+    Empty text and SQL ``NULL`` are the canonical unmeasured representations.
+    The legacy literal ``"None"`` is also accepted for migration compatibility.
+    Invalid and non-finite values fail closed to ``None`` with a warning.
+    """
+    if raw is None or raw == UNMEASURED_DECIMAL_TEXT:
+        return None
+
+    text = str(raw)
+    if text == "None":
+        logger.warning("Legacy literal 'None' found for %s; treating it as unmeasured", field_name)
+        return None
+
+    try:
+        value = Decimal(text)
+    except (InvalidOperation, ValueError):
+        logger.warning("Invalid %s decimal text found in storage; treating it as unmeasured", field_name)
+        return None
+
+    if not value.is_finite():
+        logger.warning("Non-finite %s value found in storage; treating it as unmeasured", field_name)
+        return None
+    return value
 
 
 def encode_optional_flow(value: Decimal | None) -> str:
@@ -474,7 +526,7 @@ def encode_optional_flow(value: Decimal | None) -> str:
     ``None`` (unmeasured) becomes :data:`UNMEASURED_FLOW_TEXT`, never
     ``"None"`` and never ``"0"``.
     """
-    return UNMEASURED_FLOW_TEXT if value is None else str(value)
+    return encode_optional_decimal_text(value, field_name="capital flow")
 
 
 def decode_optional_flow(raw: str | None) -> Decimal | None:
@@ -490,9 +542,7 @@ def decode_optional_flow(raw: str | None) -> Decimal | None:
     calling this codec — both backends agree (SQLite reader, Postgres
     ``_optional_flow_from_row``).
     """
-    if raw is None or raw == UNMEASURED_FLOW_TEXT:
-        return None
-    return Decimal(raw)
+    return decode_optional_decimal_text(raw, field_name="capital flow")
 
 
 @dataclass

@@ -1178,8 +1178,9 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         try:
             # Resolve total_value_usd from the latest snapshot via PostgresStore.
             # Best-effort: the helper swallows any backend exception and returns
-            # Decimal("0"), so a stale or missing snapshot backend never aborts
-            # the metrics write — same contract as the SQLite path.
+            # None, so a stale or missing snapshot backend never aborts the
+            # metrics write and remains explicitly unmeasured — same contract as
+            # the SQLite path.
             await self._ensure_initialized()
             assert self._state_manager is not None
             warm = self._state_manager.warm_backend

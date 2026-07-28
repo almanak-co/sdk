@@ -166,7 +166,10 @@ async def test_malformed_decimal_rejected(service, context, field):
     Pins the exact user-facing wording: ``metrics fields must be valid decimal
     strings`` (downstream observability may grep it).
     """
-    _install_warm_backend(service, None)
+    warm = AsyncMock()
+    warm.get_latest_snapshot = AsyncMock()
+    warm.save_portfolio_metrics = AsyncMock()
+    _install_warm_backend(service, warm)
     kwargs = {field: "not-a-number"}
     request = _make_request(**kwargs)
 
@@ -176,6 +179,35 @@ async def test_malformed_decimal_rejected(service, context, field):
     assert response.error == "metrics fields must be valid decimal strings"
     context.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
     context.set_details.assert_called_once_with("metrics fields must be valid decimal strings")
+    warm.get_latest_snapshot.assert_not_awaited()
+    warm.save_portfolio_metrics.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        (field, value)
+        for field in ("initial_value_usd", "deposits_usd", "withdrawals_usd", "gas_spent_usd")
+        for value in ("NaN", "sNaN", "Infinity", "+Infinity", "-Infinity")
+    ],
+)
+@pytest.mark.asyncio
+async def test_non_finite_decimal_rejected(service, context, field, value):
+    """Every monetary ingress field must be a finite Decimal measurement."""
+    warm = AsyncMock()
+    warm.get_latest_snapshot = AsyncMock()
+    warm.save_portfolio_metrics = AsyncMock()
+    _install_warm_backend(service, warm)
+    request = _make_request(**{field: value})
+
+    response = await service.SavePortfolioMetrics(request, context)
+
+    assert response.success is False
+    assert response.error == "metrics fields must be finite decimal strings"
+    context.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
+    context.set_details.assert_called_once_with("metrics fields must be finite decimal strings")
+    warm.get_latest_snapshot.assert_not_awaited()
+    warm.save_portfolio_metrics.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -350,7 +382,7 @@ async def test_postgres_branch_success(service, context):
 
 
 @pytest.mark.asyncio
-async def test_postgres_branch_exception_returns_internal(service, context):
+async def test_postgres_branch_exception_returns_internal(service, context, caplog):
     """PG exception path: ``INTERNAL`` + ``internal server error`` details.
 
     Pins the error-path wording; downstream observability may grep it.
@@ -358,12 +390,14 @@ async def test_postgres_branch_exception_returns_internal(service, context):
     service._snapshot_pool = MagicMock()
     service._snapshot_fetchrow = AsyncMock(side_effect=RuntimeError("pg down"))
 
-    response = await service.SavePortfolioMetrics(_make_request(), context)
+    with caplog.at_level("ERROR"):
+        response = await service.SavePortfolioMetrics(_make_request(), context)
 
     assert response.success is False
     assert response.error == "internal server error"
     context.set_code.assert_called_once_with(grpc.StatusCode.INTERNAL)
     context.set_details.assert_called_once_with("internal server error")
+    assert "SavePortfolioMetrics failed for" in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -408,8 +442,8 @@ async def test_sqlite_snapshot_lookup_exception_warns_and_continues(service, con
     """Snapshot lookup failure is swallowed with a warning; save still proceeds.
 
     Pins the try/except around ``get_latest_snapshot`` — a broken snapshot
-    backend must NOT abort the metrics write. ``total_value_usd`` falls back
-    to ``Decimal("0")``.
+    backend must NOT abort the metrics write. ``total_value_usd`` remains
+    unmeasured rather than fabricating a measured zero.
     """
     warm = AsyncMock()
     warm.get_latest_snapshot = AsyncMock(side_effect=RuntimeError("snap error"))
@@ -420,12 +454,12 @@ async def test_sqlite_snapshot_lookup_exception_warns_and_continues(service, con
 
     assert response.success is True
     saved: PortfolioMetrics = warm.save_portfolio_metrics.call_args[0][0]
-    assert saved.total_value_usd == Decimal("0")
+    assert saved.total_value_usd is None
 
 
 @pytest.mark.asyncio
-async def test_sqlite_no_latest_snapshot_uses_zero_total_value(service, context):
-    """``get_latest_snapshot`` -> None: ``total_value_usd`` = Decimal("0")."""
+async def test_sqlite_no_latest_snapshot_keeps_total_unmeasured(service, context):
+    """``get_latest_snapshot`` -> None keeps ``total_value_usd`` unmeasured."""
     warm = AsyncMock()
     warm.get_latest_snapshot = AsyncMock(return_value=None)
     warm.save_portfolio_metrics = AsyncMock(return_value=True)
@@ -435,12 +469,12 @@ async def test_sqlite_no_latest_snapshot_uses_zero_total_value(service, context)
 
     assert response.success is True
     saved: PortfolioMetrics = warm.save_portfolio_metrics.call_args[0][0]
-    assert saved.total_value_usd == Decimal("0")
+    assert saved.total_value_usd is None
 
 
 @pytest.mark.asyncio
 async def test_sqlite_warm_backend_without_get_latest_snapshot(service, context):
-    """Warm backend missing ``get_latest_snapshot`` still saves with total=0.
+    """Warm backend missing ``get_latest_snapshot`` saves an unmeasured total.
 
     The ``hasattr`` guard protects early warm-backend impls that only
     implement ``save_portfolio_metrics``.
@@ -453,7 +487,7 @@ async def test_sqlite_warm_backend_without_get_latest_snapshot(service, context)
 
     assert response.success is True
     saved: PortfolioMetrics = warm.save_portfolio_metrics.call_args[0][0]
-    assert saved.total_value_usd == Decimal("0")
+    assert saved.total_value_usd is None
 
 
 @pytest.mark.asyncio
@@ -504,19 +538,22 @@ async def test_sqlite_backend_returns_false(service, context):
 
 
 @pytest.mark.asyncio
-async def test_sqlite_backend_exception_returns_internal(service, context):
+async def test_sqlite_backend_exception_returns_internal(service, context, caplog):
     """Warm backend exception -> INTERNAL + ``internal server error`` details."""
     warm = AsyncMock()
     warm.get_latest_snapshot = AsyncMock(return_value=None)
     warm.save_portfolio_metrics = AsyncMock(side_effect=RuntimeError("boom"))
     _install_warm_backend(service, warm)
 
-    response = await service.SavePortfolioMetrics(_make_request(), context)
+    with caplog.at_level("ERROR"):
+        response = await service.SavePortfolioMetrics(_make_request(), context)
 
     assert response.success is False
     assert response.error == "internal server error"
     context.set_code.assert_called_once_with(grpc.StatusCode.INTERNAL)
     context.set_details.assert_called_once_with("internal server error")
+    assert "SavePortfolioMetrics (SQLite) failed for" in caplog.text
+    assert "boom" in caplog.text
 
 
 # ---------------------------------------------------------------------------
