@@ -92,8 +92,6 @@ def build_token_address_map(
 
     Threaded into ``CoinGeckoDataProvider(token_addresses=...)`` so non-native
     ERC20s resolve their coin id dynamically via the contract-address endpoint.
-    Native gas / wrapped-native symbols are deliberately excluded — the provider
-    resolves them via the chain registry and they need no address (Refinement R1).
 
     Sources, in order:
 
@@ -102,7 +100,18 @@ def build_token_address_map(
        funded tokens.
     2. Every tracked symbol (``--tokens`` / ``config.tokens``) that is NOT native
        and NOT already covered is resolved symbol -> address on ``chain`` through
-       the SDK token registry (:func:`get_token_resolver`).
+       the SDK token registry (:func:`get_token_resolver`). Natives skip the
+       registry lookup — the provider resolves them registry-side without an
+       address (Refinement R1) — but the run chain's own native is still
+       registered at its sentinel below.
+    3. The run chain's native gas asset, at the native sentinel (ALM-3067).
+       This map is not price-lane only: it drives the balance seeder and the
+       snapshot symbol-alias bridges, and a strategy guarding its gas reserve
+       reads ``market.balance("ETH")`` without ever funding or tracking ETH.
+       Excluding the native turned that read into a hold-forever miss reported
+       as a plausible zero-trade result. ``setdefault`` keeps explicit entries'
+       precedence; :func:`native_token_map_entry` guards non-EVM chains and
+       natives without a registry coin id.
 
     A tracked symbol that is neither native nor registry-resolvable is left out
     of the map entirely. It becomes an honest preflight miss (the engine probe
@@ -145,6 +154,14 @@ def build_token_address_map(
             token_resolution_error=TokenResolutionError,
         )
     )
+
+    # Source 3: the run chain's native gas asset (ALM-3067; see docstring).
+    from almanak.framework.backtesting.pnl.data_provider import native_token_map_entry
+
+    native_entry = native_token_map_entry(chain)
+    if native_entry is not None:
+        symbol, key = native_entry
+        address_map.setdefault(symbol, key)
     return address_map
 
 

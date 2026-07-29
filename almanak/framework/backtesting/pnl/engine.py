@@ -2554,7 +2554,7 @@ def _seed_snapshot_balances(
     # Zero-seed BEFORE the cash lane: with symbol aliases registered, the
     # cash lane's symbol writes land on address-native keys, and a later
     # zero-seed of the same key would hide the cash balance.
-    _seed_zero_balances_for_unheld_tokens(snapshot, market_state, portfolio)
+    _seed_zero_balances_for_unheld_tokens(snapshot, market_state, portfolio, token_addresses)
     _seed_cash_balances(snapshot, portfolio, token_addresses)
 
 
@@ -2652,15 +2652,57 @@ def _seed_zero_balances_for_unheld_tokens(
     snapshot: MarketSnapshot,
     market_state: MarketState,
     portfolio: SimulatedPortfolio,
+    token_addresses: Mapping[str, tuple[str, str]] | None = None,
 ) -> None:
     chain = _market_state_chain(market_state)
-    for token in market_state.available_tokens:
+    for token in _zero_seed_candidates(market_state, token_addresses, chain):
         if _should_seed_zero_balance(token, portfolio):
             display_token = _snapshot_token_key(token, chain)
             snapshot.set_balance(
                 display_token,
                 TokenBalance(symbol=display_token, balance=Decimal("0"), balance_usd=Decimal("0")),
             )
+
+
+def _zero_seed_candidates(
+    market_state: MarketState,
+    token_addresses: Mapping[str, tuple[str, str]] | None,
+    chain: str,
+) -> list[TokenRef]:
+    """Tokens whose balance this run can state, held or not.
+
+    Priced tokens (``available_tokens``) plus every same-chain identity the run
+    registered. The registered map is the addition: a simulated wallet's
+    holdings are fully known, so a token the run declared but the portfolio
+    does not hold has a balance of exactly zero -- a MEASURED zero, not an
+    unmeasured empty.
+
+    Without the registered map this set is price-derived, so the native gas
+    asset -- which is priced through its wrapped ERC-20 rather than under a key
+    of its own -- was never seeded, and ``market.balance("ETH")`` raised on
+    every tick instead of answering zero (ALM-3067). Registered-only, never
+    guessed: unregistered symbols and other chains stay honest misses, matching
+    the alias bridge's rule (blueprint 31 §2).
+    """
+    candidates: list[TokenRef] = list(market_state.available_tokens)
+    if not token_addresses:
+        return candidates
+
+    seen = {_snapshot_token_key(token, chain) for token in candidates}
+    run_chain = str(chain).lower()
+    for entry in token_addresses.values():
+        if not is_token_key(entry):
+            continue
+        key_chain, address = normalize_token_key(entry[0], entry[1])
+        if key_chain != run_chain:
+            continue
+        token_key = (key_chain, address)
+        display = _snapshot_token_key(token_key, chain)
+        if display in seen:
+            continue
+        seen.add(display)
+        candidates.append(token_key)
+    return candidates
 
 
 def _should_seed_zero_balance(

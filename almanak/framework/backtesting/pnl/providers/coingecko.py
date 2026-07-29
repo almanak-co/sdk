@@ -52,7 +52,7 @@ from almanak.core.chains._helpers import (
 from almanak.core.chains._registry import ChainRegistry
 from almanak.core.constants import STABLECOINS
 from almanak.framework.backtesting.config import BacktestDataConfig
-from almanak.framework.data.tokens import TokenResolutionError, get_token_resolver
+from almanak.framework.data.tokens import NATIVE_SENTINEL, TokenResolutionError, get_token_resolver
 
 from ..data_provider import (
     OHLCV,
@@ -937,6 +937,30 @@ class CoinGeckoDataProvider:
         return None
 
     @staticmethod
+    def _native_coin_id_for_address(chain: str, address: str) -> str | None:
+        """Registry-derived coin id for a chain's native asset in address form.
+
+        The native fast path used to be symbol-only, so a native gas asset
+        referenced address-natively (at the chain's sentinel) fell through to
+        the contract endpoint — which has no listing for the sentinel, making
+        it an unpriceable tracked token. A ``token_funding`` entry declaring
+        the native then aborted the run at preflight token-availability, even
+        though the same asset priced fine when referenced by symbol
+        (ALM-3067).
+
+        ONLY the sentinel takes this path. Wrapped natives keep resolving
+        through the contract endpoint on purpose: the chain-specific (bridged)
+        coin id it returns is the asset actually traded, and short-circuiting
+        them to the canonical id would change which asset is priced.
+        """
+        if address.lower() != NATIVE_SENTINEL.lower():
+            return None
+        descriptor = ChainRegistry.try_resolve(chain)
+        if descriptor is None:
+            return None
+        return descriptor.native.coingecko_id
+
+    @staticmethod
     def _flat_stablecoin_ohlcv(start: datetime, end: datetime, interval_seconds: int) -> list[OHLCV]:
         """Return deterministic $1 candles for statically-known stablecoins."""
         if interval_seconds <= 0:
@@ -1033,6 +1057,12 @@ class CoinGeckoDataProvider:
         token_key = self._token_key_from_ref(token)
         if token_key is not None:
             chain, address = token_key
+            # Native gas asset in address-native form resolves registry-side
+            # with zero I/O, exactly as its symbol already does (see
+            # ``_native_coin_id_for_address``).
+            native_id = self._native_coin_id_for_address(chain, address)
+            if native_id is not None:
+                return native_id
             return await self._resolve_coin_id_by_address(chain, address)
 
         if not isinstance(token, str) or is_address_like(token):

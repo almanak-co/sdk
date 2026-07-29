@@ -12,6 +12,7 @@ import pytest
 
 from almanak.core.models.quote_asset import QuoteAsset
 from almanak.framework.backtesting.pnl.data_provider import HistoricalDataConfig, MarketState
+from almanak.framework.data.tokens.defaults import NATIVE_SENTINEL
 from almanak.framework.intents.vocabulary import SwapIntent
 from scripts import platform_backtest_runner as runner
 
@@ -241,14 +242,17 @@ def test_platform_numeraire_backtest_prices_address_keyed_data_and_coverage() ->
     result = asyncio.run(backtester.backtest(strategy, config))
 
     assert config.tokens == ["CBBTC", "USDC"]
+    # The run chain's native rides along unconditionally (ALM-3067).
     assert token_addresses == {
         "CBBTC": ("base", BASE_CBBTC),
         "USDC": ("base", BASE_USDC),
+        "ETH": ("base", NATIVE_SENTINEL.lower()),
     }
     assert provider.registered == [
         {
             "CBBTC": ("base", BASE_CBBTC),
             "USDC": ("base", BASE_USDC),
+            "ETH": ("base", NATIVE_SENTINEL.lower()),
         }
     ]
     assert result.error is None
@@ -706,6 +710,9 @@ def test_run_platform_backtest_threads_token_addresses(monkeypatch: pytest.Monke
         {
             "CBBTC": ("base", BASE_CBBTC),
             "USDC": ("base", BASE_USDC),
+            # The run chain's native is always registered (ALM-3067) — the
+            # balance plane exists whether or not the run mentions it.
+            "ETH": ("base", NATIVE_SENTINEL.lower()),
         }
     ]
     assert captured_overrides == [{"allow_volume_fallback": True, "subgraph_rate_limit_per_minute": 42}]

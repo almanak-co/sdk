@@ -161,6 +161,37 @@ def normalize_token_ref(token: TokenRef, default_chain: str | None = None) -> To
     return token.upper()
 
 
+def native_token_map_entry(chain: str) -> tuple[str, TokenKey] | None:
+    """The run chain's native gas asset as a token-map entry, or ``None``.
+
+    ALM-3067: every EVM wallet has a native balance plane (gas), so the
+    backtest token map must carry the chain's native even when the run's
+    funding / tracked tokens never mention it. ``market.balance("ETH")`` on
+    an arbitrum run is a legitimate first read for a strategy guarding its
+    gas reserve; with the native unregistered it is a hold-forever miss the
+    run reports as a plausible zero-trade result. Both map builders (CLI
+    ``build_token_address_map`` and service
+    ``build_backtest_token_address_map``) merge this entry with
+    ``setdefault`` so an explicit user entry keeps precedence.
+
+    ``None`` for non-EVM families (the sentinel is an EVM convention) and
+    for chains whose registry does not pin the native's CoinGecko coin id:
+    a registered token is preflight-probed, so registering an unpriceable
+    native would turn runs that never read it into hard preflight aborts.
+    """
+    from almanak.core.chains import ChainRegistry
+    from almanak.core.enums import ChainFamily
+    from almanak.framework.data.tokens.defaults import NATIVE_SENTINEL
+
+    descriptor = ChainRegistry.try_resolve(chain)
+    if descriptor is None or descriptor.family is not ChainFamily.EVM:
+        return None
+    native = descriptor.native
+    if not native.coingecko_id:
+        return None
+    return native.symbol.upper(), normalize_token_key(descriptor.name, NATIVE_SENTINEL)
+
+
 class HistoricalDataCapability(StrEnum):
     """Declares the historical data capability of a data provider.
 
@@ -311,7 +342,20 @@ class MarketState:
             if chain != str(self.chain).lower():
                 return keys
             add(address)
-            add(token_ref_provider_symbol((chain, address), chain))
+            provider_symbol = token_ref_provider_symbol((chain, address), chain)
+            add(provider_symbol)
+            # The native gas asset in address-native form (the chain's native
+            # sentinel) prices through the wrapped ERC-20 on the same 1:1 plane
+            # the symbol branch below already uses. Without this the *only*
+            # form SDK 3.0 accepts for a native asset cannot be valued at all:
+            # `get_price("ETH")` resolved through wrapped but
+            # `get_price(("arbitrum", 0xeee…))` raised KeyError, which starved
+            # token_funding (`_funding_price`) and, downstream, the balance
+            # lane that this map also feeds (ALM-3067). Added after every
+            # literal candidate so a directly-priced native entry keeps
+            # precedence, matching the symbol branch.
+            for wrapped_key in self._native_wrapped_lookup_keys(provider_symbol.upper()):
+                add(wrapped_key)
             return keys
 
         assert isinstance(token, str)
@@ -664,6 +708,7 @@ __all__ = [
     "HistoricalDataProvider",
     "is_address_like",
     "is_token_key",
+    "native_token_map_entry",
     "normalize_token_key",
     "token_ref_display",
 ]

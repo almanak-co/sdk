@@ -209,17 +209,20 @@ class TestBuildTokenAddressMap:
 
         assert result["USDC"] == ("arbitrum", "0xaf88d065e77c8cC2239327C5EDb3A432268e5831")
 
-    def test_native_symbol_is_skipped(self, monkeypatch) -> None:
+    def test_native_symbols_skip_registry_but_native_registers_at_sentinel(self, monkeypatch) -> None:
         from almanak.framework.cli.backtest import run_helpers
 
         resolver = self._patch_resolver(monkeypatch, {})
 
         # WETH is wrapped-native on arbitrum -> registry-resolved by the provider,
-        # so it should NOT be added to the address map (and resolve() not consulted).
+        # so it is NOT registry-looked-up here (and resolve() not consulted).
+        # The run chain's native itself IS registered, at the sentinel: the map
+        # also drives the balance seeder, and excluding the native made
+        # `market.balance("ETH")` a hold-forever miss (ALM-3067).
         result = run_helpers.build_token_address_map({}, ["WETH", "ETH"], "arbitrum")
 
         assert "WETH" not in result
-        assert "ETH" not in result
+        assert result["ETH"] == ("arbitrum", "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
         resolver.resolve.assert_not_called()
 
     def test_registry_resolves_remaining_tracked_symbol(self, monkeypatch) -> None:

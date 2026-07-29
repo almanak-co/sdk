@@ -13,6 +13,7 @@ import pytest
 
 from almanak.core.models.quote_asset import QuoteAsset
 from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
+from almanak.framework.data.tokens.defaults import NATIVE_SENTINEL
 from almanak.services.backtest.models import BacktestRequest, StrategySpec, TimeframeSpec
 from almanak.services.backtest.services.backtest_runner import (
 
@@ -33,6 +34,10 @@ from almanak.services.backtest.services.job_manager import JobManager
 BASE_CBBTC = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
 BASE_USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
 BASE_WETH = "0x4200000000000000000000000000000000000006"
+# The chain's native gas asset in address-native form. Taken from the token
+# defaults rather than hand-typed so the test cannot drift from the sentinel
+# the resolver actually emits.
+BASE_NATIVE_SENTINEL = NATIVE_SENTINEL.lower()
 UNKNOWN_MIXED_CASE_ADDRESS = "0xAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAa"
 
 
@@ -299,7 +304,18 @@ class TestBacktestTokenRefs:
             "base",
         ) == [UNKNOWN_MIXED_CASE_ADDRESS.lower(), "CBBTC"]
 
-    def test_build_backtest_token_address_map_skips_native_but_keeps_wrapped_native(self):
+    def test_build_backtest_token_address_map_registers_native_alongside_wrapped_native(self):
+        """Natives are registered at the sentinel, distinctly from wrapped (ALM-3067).
+
+        This map is not price-lane only: it also drives the balance seeder and
+        the snapshot / market-state symbol-alias bridges. Skipping natives here
+        (the previous contract) meant ``market.balance("ETH")`` raised on every
+        tick, the strategy held correctly, and the run still reported a
+        plausible non-zero return with zero trades.
+
+        Native and wrapped must stay DISTINCT entries: collapsing ETH onto
+        WETH in an identity map is the aliasing defect of ALM-3058.
+        """
         config = PnLBacktestConfig(
             start_time=datetime(2024, 1, 1, tzinfo=UTC),
             end_time=datetime(2024, 1, 2, tzinfo=UTC),
@@ -313,10 +329,36 @@ class TestBacktestTokenRefs:
             extra_refs=[BASE_CBBTC, BASE_WETH],
         )
 
-        assert "ETH" not in token_addresses
+        assert token_addresses["ETH"] == ("base", BASE_NATIVE_SENTINEL)
         assert token_addresses["WETH"] == ("base", BASE_WETH)
+        assert token_addresses["ETH"] != token_addresses["WETH"]
         assert token_addresses["USDC"] == ("base", BASE_USDC)
         assert token_addresses["CBBTC"] == ("base", BASE_CBBTC)
+
+    def test_build_backtest_token_address_map_registers_native_unprompted(self):
+        """The run chain's native registers even when NOTHING mentions it (ALM-3067).
+
+        The staging reproduction: funding lists WETH + USDC only, yet the
+        strategy's first read is ``market.balance("ETH")`` — its native gas
+        reserve guard. With the native absent from the map, that read was a
+        hold-forever miss and the run reported a plausible zero-trade result.
+        The native must be part of the registered universe unconditionally,
+        not only when the user happens to fund or track it.
+        """
+        config = PnLBacktestConfig(
+            start_time=datetime(2024, 1, 1, tzinfo=UTC),
+            end_time=datetime(2024, 1, 2, tzinfo=UTC),
+            token_funding=_pnl_token_funding(Decimal("10000"), chain="base"),
+            chain="base",
+            tokens=["WETH", "USDC"],  # no native anywhere in the run's inputs
+        )
+
+        token_addresses = build_backtest_token_address_map(config)
+
+        assert token_addresses["ETH"] == ("base", BASE_NATIVE_SENTINEL)
+        # setdefault semantics: the unprompted native never displaces an
+        # explicit user entry (here there is none, so the value is the sentinel).
+        assert token_addresses["WETH"] == ("base", BASE_WETH)
 
     def test_create_backtester_threads_token_addresses_into_provider_cache_keys(self):
         backtester = create_backtester(token_addresses={"CBBTC": ("base", BASE_CBBTC)})
@@ -399,6 +441,9 @@ class TestBacktestTokenRefs:
                 "CBBTC": ("base", BASE_CBBTC),
                 "USDC": ("base", BASE_USDC),
                 "WETH": ("base", BASE_WETH),
+                # The run chain's native is always registered (ALM-3067) —
+                # the balance plane exists whether or not the run mentions it.
+                "ETH": ("base", BASE_NATIVE_SENTINEL),
             }
         ]
         job = job_manager.get_job(job_id)

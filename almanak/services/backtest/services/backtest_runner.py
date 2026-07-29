@@ -24,6 +24,7 @@ from almanak.core.models.quote_asset import QuoteAsset
 from almanak.framework.backtesting.config import BacktestDataConfig
 from almanak.framework.backtesting.models import BacktestResult, _decimal_str
 from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
+from almanak.framework.backtesting.pnl.data_provider import native_token_map_entry
 from almanak.framework.backtesting.pnl.engine import (
     DefaultFeeModel,
     DefaultSlippageModel,
@@ -245,10 +246,6 @@ def normalize_backtest_token_refs(token_refs: Iterable[str], chain: str) -> list
     return normalized
 
 
-def _should_register_provider_address(token: ResolvedToken) -> bool:
-    return not token.is_native
-
-
 def build_backtest_token_address_map(
     config: PnLBacktestConfig,
     *,
@@ -259,10 +256,22 @@ def build_backtest_token_address_map(
     """Build the provider/engine ``SYMBOL -> (chain, address)`` map.
 
     This mirrors the CLI's Phase-0 bridge shape while deriving coverage from
-    both display tokens and address-native strategy config fields. Native
-    assets are intentionally skipped because CoinGecko resolves those through
-    the chain registry fast path; wrapped-native aliases stay registered for
-    engine symbol/address parity.
+    both display tokens and address-native strategy config fields.
+
+    Native assets are registered here like any other resolved token, at the
+    chain's native sentinel address. They used to be skipped on *price-lane*
+    grounds -- CoinGecko resolves a native symbol through the chain registry
+    fast path, so the mapping looked redundant. But this map is not price-lane
+    only: it also drives the balance seeder (``_seed_cash_balances``) and the
+    snapshot/market-state symbol-alias bridges (blueprint 31 §2). Skipping
+    natives therefore starved ``market.balance("ETH")`` -- it raised on every
+    tick, the strategy correctly held, and the run reported a plausible
+    non-zero return with zero trades (ALM-3067).
+
+    Registering natives is inert for the price lane it was protecting:
+    ``CoinGeckoDataProvider._resolve_token_id`` consults its registry-derived
+    native coin-id projection *before* ``_token_addresses``, so a native symbol
+    still resolves with zero I/O and never reaches the contract endpoint.
     """
     refs = list(config.tokens)
     refs.extend(
@@ -279,9 +288,20 @@ def build_backtest_token_address_map(
         if not isinstance(raw, str) or not raw.strip():
             continue
         resolved = _resolve_backtest_token(raw.strip(), config.chain)
-        if resolved is None or not _should_register_provider_address(resolved):
+        if resolved is None:
             continue
         token_addresses[resolved.symbol.upper()] = (config.chain, resolved.address)
+
+    # The run chain's native gas asset is ALWAYS part of the registered
+    # universe (ALM-3067): a strategy guarding its gas reserve reads
+    # `market.balance("ETH")` without ever listing ETH in funding or tracked
+    # tokens, and an unregistered native turns that read into a hold-forever
+    # miss reported as a plausible zero-trade result. setdefault: an explicit
+    # user entry keeps precedence.
+    native_entry = native_token_map_entry(config.chain)
+    if native_entry is not None:
+        symbol, key = native_entry
+        token_addresses.setdefault(symbol, key)
     return token_addresses
 
 
