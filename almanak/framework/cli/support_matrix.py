@@ -27,12 +27,26 @@ causes it to appear in the matrix automatically — no central edit. See
 VIB-4856 (epic VIB-4851) for the rationale, and
 ``blueprints/22-connector-self-containment.md`` for the architectural
 context.
+
+**Schema v2 (``--json``)** adds ``chainsByIntent`` + ``intentsKnown`` per row
+and a provenance envelope, leaving every v1 field byte-identical. The rendering
+``category`` collapses a connector's exact verbs into one label — SUPPLY /
+BORROW / REPAY / WITHDRAW all become ``lending``, and ``yield`` covers STAKE,
+VAULT_DEPOSIT and Pendle's LP/SWAP surface alike — so a consumer reading rows
+alone can ask "is this protocol on this chain?" but never "can it do this
+operation here?". v2 publishes the second answer from the manifest accessor
+that already knows it. Contract and invariants:
+``blueprints/05-connectors.md`` §2a Support matrix JSON contract.
 """
 
 from __future__ import annotations
 
 import json as json_module
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
+from functools import cache
+from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 import click
@@ -79,6 +93,57 @@ SUPPORTED_CATEGORIES: tuple[str, ...] = (
     ACTION_BRIDGE,
 )
 
+# Categories deliberately withheld from the advertised matrix (see the note on
+# SUPPORTED_CATEGORIES for why). Intents mapping to one of these are withheld
+# from ``chainsByIntent`` as well: the withholding is a PRODUCT decision, not a
+# rendering one, so a consumer that keys execution readiness on per-intent
+# coverage must not see them either. Without this, schema v2 would re-advertise
+# through the intent map exactly what the category filter withholds — e.g.
+# ``morpho_blue`` declares FLASH_LOAN and renders only a ``lending`` row.
+#
+# Every category in the intent -> category map must appear in exactly one of
+# SUPPORTED_CATEGORIES or WITHHELD_CATEGORIES; ``test_support_matrix.py``
+# enforces that so adding a category to neither list cannot silently create a
+# third state where a row is hidden but its intents are published.
+WITHHELD_CATEGORIES: tuple[str, ...] = (ACTION_FLASH_LOAN, ACTION_PREDICTION)
+
+# Intents with NO rendering category, listed EXPLICITLY so the omission is a
+# decision rather than an oversight. The partition that matters is over INTENTS,
+# not categories: an intent absent from the category map yields ``None``, which
+# is not in WITHHELD_CATEGORIES, so it was published into ``chainsByIntent``
+# without ever passing the product/withheld decision (observed: hyperliquid
+# published PERP_WITHDRAW). Adding a new IntentType now fails
+# ``test_support_matrix.py`` until someone classifies it.
+#
+# These ARE published: they are genuine strategy-authorable capabilities that
+# the rendering vocabulary simply cannot draw a row for. Withholding them would
+# repeat the collapse schema v2 exists to undo. Verbs that must NOT be
+# advertised belong in WITHHELD_CATEGORIES via the category map instead.
+UNCATEGORISED_INTENTS: frozenset[str] = frozenset(
+    {
+        "CLOSE_CDP",
+        "DELEVERAGE",
+        "ENSURE_BALANCE",
+        "HOLD",
+        "LIQUIDATE",
+        "MINT_STABLE",
+        "OPEN_CDP",
+        "PERP_CANCEL_ORDER",
+        "PERP_WITHDRAW",
+        "REPAY_STABLE",
+        "UNWRAP_NATIVE",
+        "VAULT_MANAGE",
+        "VAULT_REALLOCATE",
+        "WRAP_NATIVE",
+    }
+)
+
+# Schema version for ``almanak info matrix --json``. v1 was the implicit,
+# unversioned ``{chains, protocols}`` shape; v2 adds ``chainsByIntent`` /
+# ``intentsKnown`` per row plus the provenance envelope, and leaves every v1
+# field byte-identical. Bump only on a breaking change to the published shape.
+SCHEMA_VERSION = 2
+
 
 # ---------------------------------------------------------------------------
 # Connector-driven matrix derivation
@@ -123,6 +188,117 @@ def _constant_chains(chains: tuple[str, ...]) -> Callable[[Any], tuple[str, ...]
     return _read
 
 
+@cache
+def _intent_category_map() -> Mapping[Any, str]:
+    """Intent class -> rendering category.
+
+    Centralising the dispatch here means connectors don't have to repeat it;
+    the matrix is the only place that knows about the rendering category
+    vocabulary. Module-level and cached (rather than rebuilt inside
+    :func:`_derive_entries_from_intents`) because schema v2's per-intent
+    coverage needs the SAME map to decide which intents are withheld —
+    two copies would drift, and a drifted copy publishes an intent whose
+    category the renderer suppresses.
+
+    Built lazily: ``IntentType`` pulls in the intent vocabulary, and this
+    module is imported by the CLI's top-level ``info`` group. Returned as a
+    read-only view because the result is cached and shared — a caller mutating
+    it would poison every later build in the process.
+    """
+    from almanak.framework.intents.vocabulary import IntentType
+
+    return MappingProxyType(
+        {
+            IntentType.SWAP: ACTION_SWAP,
+            IntentType.LP_OPEN: ACTION_LP,
+            IntentType.LP_CLOSE: ACTION_LP,
+            IntentType.LP_COLLECT_FEES: ACTION_LP,
+            IntentType.SUPPLY: ACTION_LENDING,
+            IntentType.BORROW: ACTION_LENDING,
+            IntentType.REPAY: ACTION_LENDING,
+            IntentType.WITHDRAW: ACTION_LENDING,
+            IntentType.PERP_OPEN: ACTION_PERPS,
+            IntentType.PERP_CLOSE: ACTION_PERPS,
+            IntentType.STAKE: ACTION_YIELD,
+            IntentType.UNSTAKE: ACTION_YIELD,
+            IntentType.VAULT_DEPOSIT: ACTION_YIELD,
+            IntentType.VAULT_REDEEM: ACTION_YIELD,
+            IntentType.PREDICTION_BUY: ACTION_PREDICTION,
+            IntentType.PREDICTION_SELL: ACTION_PREDICTION,
+            IntentType.PREDICTION_REDEEM: ACTION_PREDICTION,
+            IntentType.BRIDGE: ACTION_BRIDGE,
+            IntentType.FLASH_LOAN: ACTION_FLASH_LOAN,
+        }
+    )
+
+
+def _connector_intent_coverage(manifest: Any) -> dict[str, list[str]]:
+    """Per-intent chain coverage for one connector — the schema v2 payload.
+
+    ``{intent_name: [chain, ...]}`` built from
+    :meth:`ConnectorManifest.chains_for_intent`, which is the accessor the
+    manifest's own docstring tells consumers to ask instead of reading
+    ``intents`` x ``chains`` raw. That is the whole point of the field: the
+    category rows collapse a connector's exact verbs into one rendering label
+    (SUPPLY / BORROW / REPAY / WITHDRAW all become ``lending``), so a consumer
+    reading rows alone can ask "is this protocol on this chain?" but never
+    "can it do this operation here?".
+
+    Deliberately NOT intersected with the row's chains. A connector can emit
+    several rows with different chain sets, and intersecting would make the
+    same intent report different coverage depending on which of its rows you
+    read — a consumer looking at one row would silently get a narrowed answer.
+    The map is a property of the CONNECTOR and is published identically on
+    every row it emits; the row's ``chains`` stays the rendering union.
+
+    Intents whose category is withheld (:data:`WITHHELD_CATEGORIES`) are
+    dropped. An intent with no surviving chain contributes nothing rather than
+    an empty list — an empty claim is not a claim.
+    """
+    category_of = _intent_category_map()
+    coverage: dict[str, list[str]] = {}
+    for intent in manifest.intents:
+        if intent.name in UNCATEGORISED_INTENTS:
+            category: str | None = None
+        elif intent in category_of:
+            category = category_of[intent]
+        else:
+            # An intent in neither the category map nor UNCATEGORISED_INTENTS is
+            # an unclassified new verb. Fail loudly rather than publish it
+            # without a product decision — but with a message an operator or
+            # agent can act on, since this path is also reached by the
+            # LLM-facing check_protocol_support tool. A bare KeyError naming
+            # only the enum member does not say what to do about it.
+            raise RuntimeError(
+                f"IntentType.{intent.name} is not classified for the support "
+                f"matrix. Add it to the intent -> category map in "
+                f"support_matrix.py to render a row for it, or to "
+                f"UNCATEGORISED_INTENTS to publish per-intent coverage with no "
+                f"row. Leaving a verb unclassified would publish it to Edge and "
+                f"the Platform without a product decision."
+            )
+        if category in WITHHELD_CATEGORIES:
+            continue
+        chains = sorted(_matrix_chain(c) for c in manifest.chains_for_intent(intent))
+        if chains:
+            coverage[intent.name] = chains
+    return coverage
+
+
+def _published_matrix_names(manifest: Any) -> set[str]:
+    """The matrix row names this connector publishes under.
+
+    Usually the connector's own name, but a declared ``matrix_entries`` may
+    rename the row (``balancer_v2`` publishes as ``balancer``) or emit several.
+    A manifest with ``matrix_entries=()`` publishes nothing and yields the empty
+    set — the deliberate full-suppression case, which must not acquire a
+    ``chainsByIntent`` entry through the back door.
+    """
+    if manifest.matrix_entries is not None:
+        return {entry.matrix_name for entry in manifest.matrix_entries}
+    return {manifest.name}
+
+
 def _derive_entries_from_intents(
     name: str,
     intents: tuple[Any, ...],
@@ -156,37 +332,12 @@ def _derive_entries_from_intents(
     is truthful narrowing. A missing argument must raise TypeError, not return
     the wrong answer.
     """
-    from almanak.framework.intents.vocabulary import IntentType
-
     if chains is None:
         return ()
 
     narrowed: Callable[[Any], tuple[str, ...]] = chains_for_intent
 
-    # Intent class → category. Centralising the dispatch here means
-    # connectors don't have to repeat it; the matrix is the only place
-    # that knows about the rendering category vocabulary.
-    intent_category: dict[IntentType, str] = {
-        IntentType.SWAP: ACTION_SWAP,
-        IntentType.LP_OPEN: ACTION_LP,
-        IntentType.LP_CLOSE: ACTION_LP,
-        IntentType.LP_COLLECT_FEES: ACTION_LP,
-        IntentType.SUPPLY: ACTION_LENDING,
-        IntentType.BORROW: ACTION_LENDING,
-        IntentType.REPAY: ACTION_LENDING,
-        IntentType.WITHDRAW: ACTION_LENDING,
-        IntentType.PERP_OPEN: ACTION_PERPS,
-        IntentType.PERP_CLOSE: ACTION_PERPS,
-        IntentType.STAKE: ACTION_YIELD,
-        IntentType.UNSTAKE: ACTION_YIELD,
-        IntentType.VAULT_DEPOSIT: ACTION_YIELD,
-        IntentType.VAULT_REDEEM: ACTION_YIELD,
-        IntentType.PREDICTION_BUY: ACTION_PREDICTION,
-        IntentType.PREDICTION_SELL: ACTION_PREDICTION,
-        IntentType.PREDICTION_REDEEM: ACTION_PREDICTION,
-        IntentType.BRIDGE: ACTION_BRIDGE,
-        IntentType.FLASH_LOAN: ACTION_FLASH_LOAN,
-    }
+    intent_category = _intent_category_map()
 
     # Per-category chain union over that category's intents. An intent whose
     # narrowed chain set is empty contributes nothing; a category with no
@@ -205,6 +356,7 @@ def _collect_from_connector_registry(
     entries: dict[tuple[str, str], set[str]],
     authoritative: set[tuple[str, str]],
     narrowed_out: dict[tuple[str, str], set[str]],
+    intent_coverage: dict[str, dict[str, list[str]]],
 ) -> None:
     """Phase A — derive rows from the strategy-side ``ConnectorRegistry``.
 
@@ -236,6 +388,34 @@ def _collect_from_connector_registry(
     _import_all_connectors()
 
     for manifest in ConnectorRegistry.all():
+        # Schema v2 — attach the connector's per-intent chain coverage to every
+        # matrix_name it publishes under. Registered for BOTH branches below,
+        # and BEFORE the ``continue``, so a connector that overrides its
+        # rendering rows still publishes truthful per-intent coverage: Pendle
+        # renders as ``yield`` yet does SWAP / LP_OPEN / LP_CLOSE / WITHDRAW,
+        # which is exactly the collapse this field exists to undo. Registered
+        # even when empty, so ``intentsKnown`` can distinguish "manifest says
+        # nothing is published here" from "no manifest backs this row at all".
+        # An OFF-CHAIN venue (``chains is None``) has a structurally empty
+        # coverage map, so registering it would publish
+        # ``intentsKnown: true, chainsByIntent: {}`` — read by a fail-closed
+        # consumer as "supports nothing".
+        #
+        # Scoped to the COVERAGE registration only. An earlier form used
+        # ``continue`` here, which also skipped the row emission and the
+        # ``authoritative`` marker below: the venue then published no row at all,
+        # which ``executor.py`` reports as "not integrated in the SDK" — a worse
+        # demotion than the one being fixed — and Phase B could union
+        # compiler-table chains into a key the connector had frozen.
+        #
+        # Leaving it unregistered yields ``intentsKnown: false``, which is the
+        # honest answer: a manifest describes this row, but per-intent coverage
+        # is not expressible for an off-chain venue. That IS "unknown".
+        if manifest.chains is not None:
+            coverage = _connector_intent_coverage(manifest)
+            for matrix_name in _published_matrix_names(manifest):
+                intent_coverage.setdefault(matrix_name, {}).update(coverage)
+
         if manifest.matrix_entries is not None:
             for entry in manifest.matrix_entries:
                 key = (entry.matrix_name, entry.category)
@@ -406,7 +586,23 @@ def _build_matrix() -> dict:
 
     Returns a dict with:
         chains: list of chain names (canonical order, matrix form)
-        protocols: list of {name, category, chains: [chain_names]}
+        protocols: list of {name, category, chains, chainsByIntent, intentsKnown}
+
+    ``chains`` and ``chainsByIntent`` answer DIFFERENT questions and are
+    deliberately not constrained to match:
+
+    * ``chains`` — the rendering row. May be WIDER than the manifest (Phase B
+      unions compiler-routable chains a connector never declared) or NARROWER
+      (a declared ``matrix_entries`` row scopes it).
+    * ``chainsByIntent`` — the execution truth, from ``chains_for_intent``.
+      Published per CONNECTOR and repeated identically on every row that
+      connector emits, so reading any single row gives the same answer.
+
+    A chain in ``chains`` that no intent covers therefore means "routable but
+    not strategy-verified" — a consumer gating execution must treat it as
+    UNKNOWN, not as supported. ``intentsKnown=False`` marks rows no manifest
+    describes at all, where an absent intent likewise means unknown rather than
+    unsupported.
 
     Each ``(name, category)`` pair appears at most once; chains union
     across phases so a connector visible to both registries doesn't
@@ -423,8 +619,12 @@ def _build_matrix() -> dict:
     # route can never re-advertise a cell the connector declared unsupported,
     # while chains the exclusion never mentioned still union normally (VIB-6111).
     narrowed_out: dict[tuple[str, str], set[str]] = {}
+    # matrix_name -> {intent_name: [chain, ...]} for every manifest-backed row
+    # (schema v2). Rows with no entry here are compiler-table-only or alias rows
+    # that no connector manifest describes; they publish ``intentsKnown: false``.
+    intent_coverage: dict[str, dict[str, list[str]]] = {}
 
-    _collect_from_connector_registry(entries, authoritative, narrowed_out)
+    _collect_from_connector_registry(entries, authoritative, narrowed_out, intent_coverage)
     _collect_from_compiler_tables(entries, authoritative)
 
     for key, dropped in narrowed_out.items():
@@ -454,11 +654,28 @@ def _build_matrix() -> dict:
         # and removes a fragile implicit contract. (Gemini code review
         # on PR 2469.)
         for name, chain_set in sorted(category_entries, key=lambda pair: pair[0]):
+            coverage = intent_coverage.get(name)
             protocols.append(
                 {
                     "name": name,
                     "category": category,
                     "chains": sorted(chain_set & all_chains),
+                    # Schema v2. See ``_connector_intent_coverage`` for why this
+                    # is NOT intersected with ``chains`` above: the two answer
+                    # different questions. ``chains`` is the rendering row (it
+                    # can be WIDER — Phase B unions compiler-routable chains the
+                    # manifest never claimed — or NARROWER when a declared
+                    # matrix_entries row scopes it). ``chainsByIntent`` is the
+                    # execution truth from ``chains_for_intent``. A chain in
+                    # ``chains`` that no intent covers means "routable, not
+                    # strategy-verified" — treat it as UNKNOWN, not supported.
+                    "chainsByIntent": dict(sorted(coverage.items())) if coverage else {},
+                    # False = no connector manifest describes this row at all
+                    # (compiler-table-only DEXes and alias rows), so an absent
+                    # intent means "unknown", not "unsupported". Distinguishing
+                    # these is what stops a fail-closed consumer demoting real
+                    # venues it simply has no manifest for.
+                    "intentsKnown": name in intent_coverage,
                 }
             )
 
@@ -466,6 +683,273 @@ def _build_matrix() -> dict:
         "chains": _sort_chains(all_chains),
         "protocols": protocols,
     }
+
+
+def _sdk_module_suffix() -> Path | None:
+    """This module's path relative to an SDK checkout root, or ``None``.
+
+    ``almanak/framework/cli/support_matrix.py``, derived from ``__name__`` so it
+    cannot drift if the module moves.
+
+    ``None`` when there is no package path to anchor against — i.e. the module
+    was executed directly. An earlier form RAISED here, which propagated straight
+    out of the CLI: :func:`_is_sdk_checkout` catches only ``OSError`` and
+    :func:`_source_commit` only ``(OSError, UnicodeDecodeError)``, so the raise
+    escaped both. That is the same shape as the two exception-tuple bugs already
+    fixed on this branch, and a direct contradiction of "provenance degrades,
+    never fails".
+    """
+    if "." not in __name__:  # pragma: no cover - only if run as a script
+        return None
+    return Path(*__name__.split(".")).with_suffix(".py")
+
+
+def _is_sdk_checkout(root: Path) -> bool:
+    """Whether ``root`` is the checkout THIS module was loaded from.
+
+    The upward walk finds the first ``.git`` above the module file. In the
+    standard local-SDK layout the SDK is installed into a user's strategy repo
+    (``<user-repo>/.venv/lib/pythonX/site-packages/almanak/...``), so that first
+    ``.git`` is the USER'S repository — and provenance would confidently report
+    a 40-hex SHA describing an entirely unrelated project, with ``sourceDirty``
+    reporting their working tree and ``git status`` running inside their repo.
+
+    False provenance is worse than none: a drift check would compare two
+    unrelated repositories and report match or mismatch with equal
+    meaninglessness. So a candidate is accepted only when it actually contains
+    this module at its package path.
+
+    Known, accepted false negative: a NON-editable (copy) install into a venv
+    that happens to sit inside the SDK checkout loses provenance, because the
+    installed copy's path is not the source path it is compared against. That
+    degrades to ``None``, never to wrong data, and "an installed copy is a build,
+    not a checkout" is arguably the correct answer. Editable installs (PEP 660,
+    legacy egg-link, and ``uv sync``'s workspace editable) all report real source
+    paths and resolve normally.
+    """
+    suffix = _sdk_module_suffix()
+    if suffix is None:
+        return False
+    try:
+        return (root / suffix).resolve() == Path(__file__).resolve()
+    except OSError:
+        return False
+
+
+def _checkout_root(start: Path | None = None) -> Path | None:
+    """The directory CONTAINING ``.git`` — i.e. the working tree root.
+
+    Distinct from :func:`_git_dir`, and the distinction is load-bearing for a
+    linked worktree: there ``.git`` is a FILE and the git dir resolves to
+    ``<main>/.git/worktrees/<name>``, whose parent is inside ``.git`` rather
+    than a checkout. Deriving a working-tree path from the git dir is therefore
+    wrong exactly where this repo does much of its work.
+
+    When ``start`` is omitted (the production path) the result must be THIS
+    SDK's checkout — see :func:`_is_sdk_checkout`. An explicit ``start`` skips
+    that anchor so tests can exercise the walk against fixture trees.
+    """
+    for parent in (start or Path(__file__)).resolve().parents:
+        candidate = parent / ".git"
+        if candidate.is_dir() or candidate.is_file():
+            if start is None and not _is_sdk_checkout(parent):
+                return None
+            return parent
+    return None
+
+
+def _git_dir(start: Path | None = None) -> Path | None:
+    """Locate this checkout's git directory, or ``None`` when there isn't one.
+
+    ``start`` is a FILE path to walk up from; it defaults to this module and
+    exists so the search is testable against a fixture tree rather than only
+    against whatever checkout the tests happen to run in.
+    """
+    for parent in (start or Path(__file__)).resolve().parents:
+        candidate = parent / ".git"
+        if (candidate.is_dir() or candidate.is_file()) and start is None and not _is_sdk_checkout(parent):
+            # Found a repository, but not the one this module lives in — see
+            # _is_sdk_checkout. Refuse rather than describe someone else's repo.
+            return None
+        if candidate.is_dir():
+            return candidate
+        if candidate.is_file():
+            # Linked worktree / submodule: the file points at the real git dir.
+            try:
+                text = candidate.read_text(encoding="utf-8").strip()
+            except (OSError, UnicodeDecodeError):
+                # Callers other than _source_commit (e.g. _worktree_dirty) reach
+                # this without a try, so degrade here rather than propagate.
+                return None
+            if not text.startswith("gitdir:"):
+                return None
+            resolved = Path(text.split(":", 1)[1].strip())
+            if not resolved.is_absolute():
+                resolved = (parent / resolved).resolve()
+            return resolved if resolved.is_dir() else None
+    return None
+
+
+def _ref_search_dirs(git_dir: Path) -> list[Path]:
+    """``git_dir`` plus the shared common dir, when it is a linked worktree.
+
+    A worktree's own git dir holds HEAD but not ``refs/heads`` — those live in
+    the main checkout's git dir, named by the ``commondir`` file. Without this,
+    provenance would silently degrade to ``None`` for every agent worktree,
+    which is where a good deal of this repo's work actually happens.
+    """
+    dirs = [git_dir]
+    commondir = git_dir / "commondir"
+    if commondir.is_file():
+        shared = Path(commondir.read_text(encoding="utf-8").strip())
+        if not shared.is_absolute():
+            shared = (git_dir / shared).resolve()
+        if shared.is_dir():
+            dirs.append(shared)
+    return dirs
+
+
+def _resolve_ref(git_dir: Path, ref: str) -> str | None:
+    """Resolve ``refs/heads/x`` to a SHA via loose refs, then ``packed-refs``.
+
+    The ref is taken from ``.git/HEAD``, and ``pathlib``'s ``/`` lets an
+    ABSOLUTE right operand replace the left entirely — so ``ref: /etc/passwd``
+    would read that path, and ``..`` segments would escape the git dir.
+    ``_valid_sha`` means nothing but 40/64-hex is ever published, so there is no
+    disclosure channel, and writing ``.git/HEAD`` already implies control of the
+    checkout; this is hardening, not a patch for a live hole.
+    """
+    if not ref.startswith("refs/") or ".." in Path(ref).parts or Path(ref).is_absolute():
+        return None
+    for search_dir in _ref_search_dirs(git_dir):
+        loose = search_dir / ref
+        if loose.is_file():
+            try:
+                return loose.read_text(encoding="utf-8").strip() or None
+            except UnicodeDecodeError:
+                return None
+        packed = search_dir / "packed-refs"
+        if not packed.is_file():
+            continue
+        try:
+            packed_lines = packed.read_text(encoding="utf-8").splitlines()
+        except UnicodeDecodeError:
+            return None
+        for line in packed_lines:
+            if line.startswith(("#", "^")):
+                continue
+            sha, _, name = line.partition(" ")
+            if name.strip() == ref:
+                return sha.strip() or None
+    return None
+
+
+def _source_commit(start: Path | None = None) -> str | None:
+    """The commit this matrix was generated from, or ``None`` if unresolvable.
+
+    Provenance for consumers that vendor the artifact — Edge has had a vendored
+    copy drift from the SDK it claimed to describe, and ``sdkVersion`` alone
+    cannot separate two builds of the same rc.
+
+    Read straight from ``.git`` with plain file I/O — no subprocess and no
+    egress on THIS path. (Its sibling :func:`_worktree_dirty` does shell out to
+    a local ``git``; that is a deliberate, documented exception confined to the
+    dirty-check, not a property of provenance reads generally.) Degrades to
+    ``None`` in an installed wheel (no ``.git``), where ``sdkVersion`` is the
+    authoritative identifier anyway. ``None`` always means "not resolvable
+    here" — never a guess, and never a stale value from another checkout.
+    """
+    try:
+        git_dir = _git_dir(start)
+        if git_dir is None:
+            return None
+        head = (git_dir / "HEAD").read_text(encoding="utf-8").strip()
+        if head.startswith("ref:"):
+            return _valid_sha(_resolve_ref(git_dir, head.split(":", 1)[1].strip()))
+        return _valid_sha(head)
+    except (OSError, UnicodeDecodeError):
+        # UnicodeDecodeError is NOT an OSError subclass, so catching OSError
+        # alone let a HEAD / ref / packed-refs file with malformed encoding
+        # crash `almanak info matrix --json` outright — the opposite of the
+        # "provenance degrades, never fails" contract this function documents.
+        return None
+
+
+def _valid_sha(value: str | None) -> str | None:
+    """``value`` if it is a git object id, else ``None``.
+
+    Provenance must be correct or explicitly absent — never a guess. Without
+    this, any non-empty text in ``HEAD``, a loose ref, or ``packed-refs``
+    (a truncated write, an editor's stray newline, ``ref: refs/heads/x`` written
+    to a ref file by mistake) would be published verbatim as ``sourceCommit``.
+    A consumer diffing a vendored copy against the SDK it claims to describe
+    would then be comparing against a value that identifies no build at all,
+    which is worse than reporting nothing.
+
+    Accepts SHA-1 (40 hex) and SHA-256 (64 hex) object ids, so a repository
+    using the newer hash keeps working.
+    """
+    if value is None:
+        return None
+    candidate = value.strip()
+    if len(candidate) in (40, 64) and all(c in "0123456789abcdef" for c in candidate.lower()):
+        return candidate
+    return None
+
+
+def _worktree_dirty() -> bool | None:
+    """Whether the checkout has uncommitted changes; ``None`` if undeterminable.
+
+    ``sourceCommit`` alone over-claims: a matrix generated from a dirty checkout
+    reflects uncommitted connector or registry edits, but still reports HEAD — so
+    a vendored artifact would name a commit that cannot reproduce its contents,
+    which is exactly the drift the provenance envelope exists to expose.
+
+    Published as a separate flag rather than by nulling ``sourceCommit``, because
+    the base commit is still useful information and nulling would erase it — and
+    because almost every dev checkout carries incidental dirt (a lockfile, a
+    scratch doc) that says nothing about whether the matrix itself is
+    reproducible. A consumer diffing a vendored copy reads ``sourceCommit`` for
+    the base and ``sourceDirty`` to know whether exact reproduction is expected.
+
+    Uses ``git status --porcelain`` with no shell and a short timeout. That is a
+    LOCAL read — not egress — and this module is an operator-facing CLI, not a
+    strategy-container hot path. Any failure (no git, not a checkout, timeout,
+    installed wheel) yields ``None``: "not determinable", never a guess.
+    """
+    import subprocess  # noqa: PLC0415 - local, CLI-only, deliberately not top-level
+
+    root = _checkout_root()
+    if root is None:
+        return None
+    try:
+        completed = subprocess.run(  # noqa: S603 - fixed argv, no shell, no user input
+            # --no-optional-locks: `git status` otherwise refreshes the index and
+            # takes index.lock. A read-only annotation must not write to .git,
+            # and under concurrent git activity the contention would degrade this
+            # to None — safe, but silently losing the signal.
+            ["git", "--no-optional-locks", "status", "--porcelain"],  # noqa: S607
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    return bool(completed.stdout.strip())
+
+
+def _sdk_version() -> str | None:
+    """The installed SDK version, or ``None`` if it cannot be determined."""
+    try:
+        from almanak import __version__
+
+        return __version__
+    except Exception:  # pragma: no cover - defensive; __version__ is generated
+        return None
 
 
 def _render_table(data: dict) -> str:
@@ -545,23 +1029,56 @@ def support_matrix(as_json: bool, category: str | None, chain: str | None, proto
     if category:
         data["protocols"] = [p for p in data["protocols"] if p["category"] == category.lower()]
     if chain:
-        chain_lower = chain.lower()
+        # Canonicalize the user's spelling: rows are written canonically by
+        # _matrix_chain, so a registered alias (`bnb` -> `bsc`) previously
+        # reported "no support" for a fully supported chain. Every other chain
+        # surface in the SDK accepts aliases.
+        chain_lower = _matrix_chain(chain.strip().lower())
         data["protocols"] = [p for p in data["protocols"] if chain_lower in p["chains"]]
         # Trim each protocol's chains list to only the filtered chain
         for p in data["protocols"]:
             p["chains"] = [c for c in p["chains"] if c == chain_lower]
+            # Keep the v2 map consistent with the trimmed row. An intent with no
+            # coverage on the filtered chain drops out entirely rather than
+            # rendering as an empty list — an empty claim is not a claim, and a
+            # row can survive this filter on a chain that is routable but that
+            # no intent covers, which must read as {} (unknown), not as support.
+            p["chainsByIntent"] = {
+                intent: [c for c in chains if c == chain_lower]
+                for intent, chains in p["chainsByIntent"].items()
+                if chain_lower in chains
+            }
         data["chains"] = [c for c in data["chains"] if c == chain_lower]
     if protocol:
         protocol_lower = protocol.lower()
         data["protocols"] = [p for p in data["protocols"] if protocol_lower in p["name"].lower()]
 
-    if not data["protocols"]:
+    if not data["protocols"] and not as_json:
+        # Prose belongs on the table path only. Under --json, emitting nothing
+        # gave zero bytes on stdout with exit 0, so `json.loads` / `jq` failed
+        # and could not tell "no matches" from "the command is broken".
         click.echo("No protocols match the given filters.", err=True)
         return
 
     if as_json:
-        # Clean output for programmatic consumption
+        # Clean output for programmatic consumption. The provenance envelope is
+        # added HERE rather than in ``_build_matrix`` so that builder stays
+        # deterministic and pure for its other consumers (the table renderer,
+        # the agent tool, and the tests) — ``generatedAt`` would otherwise make
+        # every one of them non-reproducible.
+        source_commit = _source_commit()
         output = {
+            "schemaVersion": SCHEMA_VERSION,
+            "sdkVersion": _sdk_version(),
+            "sourceCommit": source_commit,
+            # True = the checkout had uncommitted changes, so this artifact is
+            # NOT reproducible from sourceCommit alone. None = undeterminable.
+            # Gated on sourceCommit: the flag QUALIFIES that commit ("is this
+            # artifact reproducible from it?"), so publishing it without one
+            # says nothing. Reachable via a valid .git pointer with an
+            # unreadable HEAD, where _git_dir degrades but git status succeeds.
+            "sourceDirty": _worktree_dirty() if source_commit is not None else None,
+            "generatedAt": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
             "chains": data["chains"],
             "protocols": data["protocols"],
         }

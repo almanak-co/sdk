@@ -11,13 +11,22 @@ Tests validate the support matrix CLI functionality:
 from __future__ import annotations
 
 import json
+from datetime import datetime
+from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
 
 from almanak.framework.cli.support_matrix import (
+    SCHEMA_VERSION,
+    SUPPORTED_CATEGORIES,
+    WITHHELD_CATEGORIES,
     _build_matrix,
+    _git_dir,
+    _intent_category_map,
+    _published_matrix_names,
     _render_table,
+    _source_commit,
     support_matrix,
 )
 
@@ -879,3 +888,830 @@ class TestExclusionsSurviveTheFullMatrixBuild:
             )
         finally:
             ConnectorRegistry._entries.pop(proto_name, None)
+
+
+# =============================================================================
+# Schema v2 — per-intent chain coverage (Edge/Platform execution contract)
+# =============================================================================
+
+
+def _rows_named(data: dict, name: str) -> list[dict]:
+    return [p for p in data["protocols"] if p["name"] == name]
+
+
+def _row(data: dict, name: str, category: str) -> dict:
+    rows = [p for p in _rows_named(data, name) if p["category"] == category]
+    assert rows, f"expected a {name}/{category} row"
+    return rows[0]
+
+
+class TestSchemaV2BackwardCompatibility:
+    """v2 adds fields; it must not move or reshape a single v1 field.
+
+    Edge and the Platform's ``supported_protocol`` generator both consume the
+    v1 shape today, and the docs table renders from the same builder. A v2 that
+    quietly renamed or re-ordered anything would break them on upgrade.
+    """
+
+    def test_v1_fields_still_present_and_typed(self, matrix_data: dict) -> None:
+        for proto in matrix_data["protocols"]:
+            assert isinstance(proto["name"], str)
+            assert isinstance(proto["category"], str)
+            assert isinstance(proto["chains"], list)
+            assert proto["chains"] == sorted(proto["chains"])
+
+    def test_v2_fields_present_on_every_row(self, matrix_data: dict) -> None:
+        for proto in matrix_data["protocols"]:
+            assert isinstance(proto["chainsByIntent"], dict), proto["name"]
+            assert isinstance(proto["intentsKnown"], bool), proto["name"]
+
+    def test_build_matrix_is_deterministic(self) -> None:
+        """No timestamp leaks into the builder — only the CLI JSON envelope.
+
+        ``generatedAt`` in ``_build_matrix`` would make the table renderer, the
+        agent tool and every test non-reproducible.
+        """
+        assert _build_matrix() == _build_matrix()
+
+
+class TestFluidNoLongerOverAdvertisesLending:
+    """The widening this schema was designed around (ALM-3034 / ALM-3044).
+
+    Fluid ships SWAP on four chains but fToken lending on arbitrum + base only
+    (VIB-5030). That narrowing used to live in a hand-written ``matrix_entries``
+    lending row, which scoped the RENDERED row while
+    ``chains_for_intent(SUPPLY)`` — the accessor every consumer is told to ask —
+    still answered all four chains. Publishing per-intent coverage straight from
+    the accessor would have shipped that split as a live over-advertisement, so
+    the truth moved to ``intent_chain_exclusions``.
+
+    If someone reverts fluid to the override, this test fails loudly rather than
+    Edge quietly routing a SUPPLY to a chain with no fToken market.
+    """
+
+    def test_supply_is_arbitrum_and_base_only(self, matrix_data: dict) -> None:
+        by_intent = _row(matrix_data, "fluid", "lending")["chainsByIntent"]
+        assert by_intent["SUPPLY"] == ["arbitrum", "base"]
+        assert by_intent["WITHDRAW"] == ["arbitrum", "base"]
+
+    def test_swap_keeps_all_four_chains(self, matrix_data: dict) -> None:
+        by_intent = _row(matrix_data, "fluid", "swap")["chainsByIntent"]
+        assert by_intent["SWAP"] == ["arbitrum", "base", "ethereum", "polygon"]
+
+    def test_rendered_rows_are_unchanged_by_the_reconciliation(self, matrix_data: dict) -> None:
+        """Moving the narrowing to exclusions must be rendering-neutral."""
+        assert _row(matrix_data, "fluid", "swap")["chains"] == [
+            "arbitrum",
+            "base",
+            "ethereum",
+            "polygon",
+        ]
+        assert _row(matrix_data, "fluid", "lending")["chains"] == ["arbitrum", "base"]
+
+    def test_fluid_declares_no_borrow(self, matrix_data: dict) -> None:
+        """ALM-3034: ``category: lending`` reads as borrow-capable; it isn't."""
+        assert "BORROW" not in _row(matrix_data, "fluid", "lending")["chainsByIntent"]
+
+
+class TestCategoryCollapseIsUndone:
+    """The four things ``yield`` means, and the perps-only case (ALM-3029)."""
+
+    @pytest.mark.parametrize(
+        ("protocol", "expected_intents"),
+        [
+            ("lido", {"STAKE", "UNSTAKE"}),
+            ("morpho_vault", {"VAULT_DEPOSIT", "VAULT_REDEEM"}),
+            ("pendle", {"SWAP", "LP_OPEN", "LP_CLOSE", "WITHDRAW"}),
+        ],
+    )
+    def test_yield_protocols_publish_their_real_verbs(
+        self, matrix_data: dict, protocol: str, expected_intents: set[str]
+    ) -> None:
+        row = _row(matrix_data, protocol, "yield")
+        assert set(row["chainsByIntent"]) == expected_intents
+
+    def test_pendle_renders_as_yield_but_publishes_swap(self, matrix_data: dict) -> None:
+        """VIB-6174: the ``yield`` override is deliberate (VIB-5300 drift guard).
+
+        Both facts are true at once under v2 — the rendering category stays
+        ``yield`` while the intent map carries the SWAP that Edge needs.
+        """
+        row = _row(matrix_data, "pendle", "yield")
+        assert row["category"] == "yield"
+        assert row["chainsByIntent"]["SWAP"] == ["arbitrum", "ethereum"]
+
+    def test_gmx_is_perps_only(self, matrix_data: dict) -> None:
+        row = _row(matrix_data, "gmx_v2", "perps")
+        assert set(row["chainsByIntent"]) == {"PERP_OPEN", "PERP_CLOSE"}
+
+    def test_lending_protocols_separate_supply_from_borrow(self, matrix_data: dict) -> None:
+        row = _row(matrix_data, "morpho_blue", "lending")
+        assert {"SUPPLY", "BORROW", "REPAY", "WITHDRAW"} <= set(row["chainsByIntent"])
+
+
+class TestWithheldCategoriesStayWithheld:
+    """A withheld category must not leak back through the intent map.
+
+    ``flash_loan`` and ``prediction`` are withheld as a PRODUCT decision (an EOA
+    cannot receive a flash loan). Publishing them per-intent would re-advertise
+    through v2 exactly what the category filter suppresses.
+    """
+
+    def test_flash_loan_not_published_for_a_connector_that_declares_it(
+        self, matrix_data: dict
+    ) -> None:
+        row = _row(matrix_data, "morpho_blue", "lending")
+        assert "FLASH_LOAN" not in row["chainsByIntent"]
+
+    def test_no_row_publishes_a_withheld_intent(self, matrix_data: dict) -> None:
+        withheld = {
+            intent.name
+            for intent, category in _intent_category_map().items()
+            if category in WITHHELD_CATEGORIES
+        }
+        assert withheld, "expected at least FLASH_LOAN / PREDICTION_* to be withheld"
+        for proto in matrix_data["protocols"]:
+            assert not (withheld & set(proto["chainsByIntent"])), proto["name"]
+
+    def test_every_category_is_supported_or_withheld_exactly_once(self) -> None:
+        """No third state where a row is hidden but its intents are published."""
+        assert not set(SUPPORTED_CATEGORIES) & set(WITHHELD_CATEGORIES)
+        for category in _intent_category_map().values():
+            assert category in SUPPORTED_CATEGORIES or category in WITHHELD_CATEGORIES, category
+
+
+class TestChainsByIntentNeverOutrunsTheDeclaration:
+    """The invariant that makes v2 safe to gate execution on."""
+
+    def test_coverage_is_a_subset_of_declared_chains(self, matrix_data: dict) -> None:
+        from almanak.connectors._strategy_base.registry import (
+            ConnectorRegistry,
+            _import_all_connectors,
+        )
+
+        _import_all_connectors()
+        manifests = {m.name: m for m in ConnectorRegistry.all()}
+        for proto in matrix_data["protocols"]:
+            manifest = manifests.get(proto["name"])
+            if manifest is None or manifest.chains is None:
+                continue
+            declared = set(manifest.chains)
+            for intent, chains in proto["chainsByIntent"].items():
+                assert set(chains) <= declared, f"{proto['name']}/{intent} outran strategy_chains"
+
+    def test_compiler_table_chains_are_not_claimed_as_intent_coverage(
+        self, matrix_data: dict
+    ) -> None:
+        """A routable-but-unverified chain stays out of the execution answer.
+
+        ``enso`` renders 13 chains (compiler routing tables) but declares 7 —
+        and the extras include ``sepolia``, a TESTNET. It may appear in the
+        rendering row; it must never read as executable coverage.
+        """
+        row = _row(matrix_data, "enso", "aggregator")
+        assert "sepolia" in row["chains"], "precondition: the row still renders it"
+        assert "sepolia" not in row["chainsByIntent"]["SWAP"]
+
+    def test_intent_chain_exclusions_propagate(self, matrix_data: dict) -> None:
+        """VIB-6111: aave_v3 BORROW is excluded on mantle, SUPPLY is not."""
+        by_intent = _row(matrix_data, "aave_v3", "lending")["chainsByIntent"]
+        assert "mantle" in by_intent["SUPPLY"]
+        assert "mantle" not in by_intent["BORROW"]
+
+    def test_a_connectors_rows_all_publish_the_same_map(self, matrix_data: dict) -> None:
+        """Coverage is connector-scoped, so reading any one row is sufficient.
+
+        Intersecting with each row's chains would make the same intent report
+        different coverage depending on which row a consumer happened to read.
+        """
+        by_name: dict[str, list[dict]] = {}
+        for proto in matrix_data["protocols"]:
+            by_name.setdefault(proto["name"], []).append(proto)
+        for name, rows in by_name.items():
+            first = rows[0]["chainsByIntent"]
+            for other in rows[1:]:
+                assert other["chainsByIntent"] == first, name
+
+
+class TestIntentsKnownDistinguishesUnknownFromUnsupported:
+    """Rows no manifest describes must read as unknown, not unsupported.
+
+    A consumer that fails closed on "operation absent" would otherwise demote
+    every compiler-table-only DEX and alias row — real, routable venues — the
+    moment it started keying on per-intent coverage.
+    """
+
+    @pytest.mark.parametrize(
+        "protocol", ["velodrome", "agni_finance", "aerodrome_slipstream"]
+    )
+    def test_manifest_less_rows_are_marked_unknown(
+        self, matrix_data: dict, protocol: str
+    ) -> None:
+        rows = _rows_named(matrix_data, protocol)
+        assert rows, f"{protocol} must still render"
+        for row in rows:
+            assert row["intentsKnown"] is False
+            assert row["chainsByIntent"] == {}
+            assert row["chains"], "the row still advertises chains — it is routable"
+
+    def test_manifest_backed_rows_are_marked_known(self, matrix_data: dict) -> None:
+        for protocol in ("fluid", "pendle", "gmx_v2", "aave_v3"):
+            for row in _rows_named(matrix_data, protocol):
+                assert row["intentsKnown"] is True
+
+    def test_known_rows_carry_coverage(self, matrix_data: dict) -> None:
+        """``intentsKnown`` must not be true-but-empty for a rendered row."""
+        for proto in matrix_data["protocols"]:
+            if proto["intentsKnown"]:
+                assert proto["chainsByIntent"], proto["name"]
+
+    def test_no_two_connectors_claim_the_same_matrix_name(self) -> None:
+        """Coverage is merged by matrix_name — a collision would blend two
+        connectors' intents into one row without anyone noticing."""
+        from almanak.connectors._strategy_base.registry import (
+            ConnectorRegistry,
+            _import_all_connectors,
+        )
+
+        _import_all_connectors()
+        seen: dict[str, str] = {}
+        for manifest in ConnectorRegistry.all():
+            for name in _published_matrix_names(manifest):
+                assert name not in seen, f"{name} claimed by {seen.get(name)} and {manifest.name}"
+                seen[name] = manifest.name
+
+
+class TestSchemaV2JsonEnvelope:
+    """Provenance — a vendored copy has drifted from its SDK before."""
+
+    def test_envelope_fields(self, cli_runner: CliRunner) -> None:
+        result = cli_runner.invoke(support_matrix, ["--json"])
+        assert result.exit_code == 0
+        payload = json.loads(result.output)
+        assert payload["schemaVersion"] == SCHEMA_VERSION == 2
+        assert payload["sdkVersion"]
+        assert "sourceCommit" in payload
+        assert datetime.fromisoformat(payload["generatedAt"]).tzinfo is not None
+
+    def test_chain_filter_keeps_the_map_consistent(self, cli_runner: CliRunner) -> None:
+        result = cli_runner.invoke(support_matrix, ["--json", "--chain", "arbitrum"])
+        assert result.exit_code == 0
+        payload = json.loads(result.output)
+        for proto in payload["protocols"]:
+            assert proto["chains"] == ["arbitrum"]
+            for intent, chains in proto["chainsByIntent"].items():
+                assert chains == ["arbitrum"], f"{proto['name']}/{intent} leaked another chain"
+
+    def test_chain_filter_drops_intents_without_coverage(self, cli_runner: CliRunner) -> None:
+        """A row surviving on a routable-only chain must show no coverage.
+
+        ``uniswap_v3`` renders on ``linea`` via the compiler routing tables but
+        declares no strategy-side support there, so the filtered row keeps its
+        chain and reports an empty map — unknown, not supported.
+        """
+        result = cli_runner.invoke(support_matrix, ["--json", "--chain", "linea"])
+        assert result.exit_code == 0
+        payload = json.loads(result.output)
+        rows = [p for p in payload["protocols"] if p["name"] == "uniswap_v3"]
+        assert rows, "precondition: uniswap_v3 still renders on linea"
+        for row in rows:
+            assert row["chainsByIntent"] == {}
+
+
+class TestSourceCommitProvenance:
+    """Provenance resolution — plain file I/O over ``.git``, no subprocess.
+
+    Covers every branch because the failure mode is silent: a helper that
+    returns ``None`` where a commit exists degrades provenance to "unknown"
+    without any error, and a vendored artifact that has drifted then looks
+    identical to one that hasn't.
+    """
+
+    def _repo(self, tmp_path: Path, head: str) -> Path:
+        git = tmp_path / ".git"
+        git.mkdir()
+        (git / "HEAD").write_text(head, encoding="utf-8")
+        return git
+
+    def test_detached_head_is_the_sha_itself(self, tmp_path: Path) -> None:
+        """The common CI shape — actions/checkout leaves HEAD detached."""
+        self._repo(tmp_path, "a" * 40)
+        assert _source_commit(tmp_path / "mod.py") == "a" * 40
+
+    def test_symbolic_head_resolves_via_loose_ref(self, tmp_path: Path) -> None:
+        git = self._repo(tmp_path, "ref: refs/heads/main\n")
+        loose = git / "refs" / "heads" / "main"
+        loose.parent.mkdir(parents=True)
+        loose.write_text("b" * 40 + "\n", encoding="utf-8")
+        assert _source_commit(tmp_path / "mod.py") == "b" * 40
+
+    def test_symbolic_head_falls_back_to_packed_refs(self, tmp_path: Path) -> None:
+        """A fresh clone packs refs and writes no loose ref."""
+        git = self._repo(tmp_path, "ref: refs/heads/main\n")
+        (git / "packed-refs").write_text(
+            "# pack-refs with: peeled fully-peeled sorted\n"
+            f"{'c' * 40} refs/heads/main\n"
+            f"{'d' * 40} refs/tags/v1\n"
+            f"^{'e' * 40}\n",
+            encoding="utf-8",
+        )
+        assert _source_commit(tmp_path / "mod.py") == "c" * 40
+
+    def test_linked_worktree_resolves_through_commondir(self, tmp_path: Path) -> None:
+        """A worktree holds its own HEAD but shares refs with the main checkout.
+
+        This repo runs a lot of work in agent worktrees; without the commondir
+        hop every one of them would silently report no provenance.
+        """
+        main_git = tmp_path / "main" / ".git"
+        (main_git / "refs" / "heads").mkdir(parents=True)
+        (main_git / "refs" / "heads" / "feat").write_text("f" * 40, encoding="utf-8")
+
+        wt_git = tmp_path / "wt" / ".git-dir"
+        wt_git.mkdir(parents=True)
+        (wt_git / "HEAD").write_text("ref: refs/heads/feat\n", encoding="utf-8")
+        (wt_git / "commondir").write_text(str(main_git), encoding="utf-8")
+
+        checkout = tmp_path / "wt"
+        (checkout / ".git").write_text(f"gitdir: {wt_git}\n", encoding="utf-8")
+        assert _source_commit(checkout / "mod.py") == "f" * 40
+
+    def test_unresolvable_ref_is_none_not_a_guess(self, tmp_path: Path) -> None:
+        self._repo(tmp_path, "ref: refs/heads/missing\n")
+        assert _source_commit(tmp_path / "mod.py") is None
+
+    def test_no_git_dir_is_none(self, tmp_path: Path) -> None:
+        """An installed wheel has no .git; sdkVersion identifies it instead."""
+        assert _git_dir(tmp_path / "mod.py") is None
+        assert _source_commit(tmp_path / "mod.py") is None
+
+    def test_malformed_git_file_is_none(self, tmp_path: Path) -> None:
+        (tmp_path / ".git").write_text("not a gitdir pointer\n", encoding="utf-8")
+        assert _git_dir(tmp_path / "mod.py") is None
+
+    def test_git_file_pointing_nowhere_is_none(self, tmp_path: Path) -> None:
+        (tmp_path / ".git").write_text(f"gitdir: {tmp_path / 'absent'}\n", encoding="utf-8")
+        assert _git_dir(tmp_path / "mod.py") is None
+
+    def test_relative_gitdir_pointer_resolves(self, tmp_path: Path) -> None:
+        real = tmp_path / "real-git"
+        real.mkdir()
+        (real / "HEAD").write_text("9" * 40, encoding="utf-8")
+        (tmp_path / ".git").write_text("gitdir: ./real-git\n", encoding="utf-8")
+        assert _source_commit(tmp_path / "mod.py") == "9" * 40
+
+    def test_unreadable_head_is_none_not_an_exception(self, tmp_path: Path) -> None:
+        """``.git`` present but HEAD missing — degrade, never raise.
+
+        `almanak info matrix --json` must not fail because provenance is
+        unavailable; the matrix is the payload, provenance is the annotation.
+        """
+        (tmp_path / ".git").mkdir()
+        assert _source_commit(tmp_path / "mod.py") is None
+
+    def test_empty_loose_ref_is_none(self, tmp_path: Path) -> None:
+        git = self._repo(tmp_path, "ref: refs/heads/main\n")
+        loose = git / "refs" / "heads" / "main"
+        loose.parent.mkdir(parents=True)
+        loose.write_text("  \n", encoding="utf-8")
+        assert _source_commit(tmp_path / "mod.py") is None
+
+
+class TestProvenanceRejectsMalformedCommits:
+    """False provenance is worse than none.
+
+    Without validation, any non-empty text in `.git/HEAD`, a loose ref, or
+    `packed-refs` is published verbatim as `sourceCommit` — a truncated write,
+    a stray editor newline, or a `ref:` line written into a ref file by mistake
+    would all identify a build that does not exist. A consumer diffing a
+    vendored copy against the SDK it claims to describe would then compare
+    against a value naming no build at all.
+    """
+
+    def _repo(self, tmp_path: Path, head: str) -> Path:
+        git = tmp_path / ".git"
+        git.mkdir()
+        (git / "HEAD").write_text(head, encoding="utf-8")
+        return git
+
+    @pytest.mark.parametrize(
+        "head",
+        [
+            "not-a-sha",
+            "z" * 40,          # right length, not hex
+            "a" * 39,          # one short
+            "a" * 41,          # one long
+            "ref: refs/heads/main extra junk",
+        ],
+    )
+    def test_malformed_detached_head_is_none(self, tmp_path: Path, head: str) -> None:
+        self._repo(tmp_path, head)
+        assert _source_commit(tmp_path / "mod.py") is None
+
+    def test_malformed_loose_ref_is_none(self, tmp_path: Path) -> None:
+        git = self._repo(tmp_path, "ref: refs/heads/main\n")
+        loose = git / "refs" / "heads" / "main"
+        loose.parent.mkdir(parents=True)
+        loose.write_text("deadbeef-not-a-sha\n", encoding="utf-8")
+        assert _source_commit(tmp_path / "mod.py") is None
+
+    def test_malformed_packed_ref_is_none(self, tmp_path: Path) -> None:
+        git = self._repo(tmp_path, "ref: refs/heads/main\n")
+        (git / "packed-refs").write_text("garbage refs/heads/main\n", encoding="utf-8")
+        assert _source_commit(tmp_path / "mod.py") is None
+
+    def test_sha256_object_id_is_accepted(self, tmp_path: Path) -> None:
+        """Validation must not break a repo using the newer hash."""
+        self._repo(tmp_path, "b" * 64)
+        assert _source_commit(tmp_path / "mod.py") == "b" * 64
+
+    def test_cli_publishes_null_for_a_malformed_head(self, tmp_path: Path) -> None:
+        """End-to-end: the artifact must say 'unidentified', not publish junk."""
+        import almanak.framework.cli.support_matrix as sm
+
+        self._repo(tmp_path, "not-a-sha")
+        original = sm._git_dir
+        sm._git_dir = lambda *a, **k: tmp_path / ".git"
+        try:
+            result = CliRunner().invoke(support_matrix, ["--json"])
+            assert result.exit_code == 0
+            payload = json.loads(result.output)
+            assert "sourceCommit" in payload
+            assert payload["sourceCommit"] is None
+            assert payload["protocols"]
+        finally:
+            sm._git_dir = original
+
+
+class TestWorktreeDirtyProvenance:
+    """`sourceCommit` alone over-claims on a dirty checkout.
+
+    A matrix generated with uncommitted connector or registry edits reflects
+    those edits but still reports HEAD, so a vendored artifact would name a
+    commit that cannot reproduce its contents — the exact drift the provenance
+    envelope exists to expose.
+    """
+
+    def _git(self, *args: str, cwd: Path) -> None:
+        import subprocess
+
+        subprocess.run(
+            ["git", *args], cwd=str(cwd), capture_output=True, check=True, timeout=30
+        )
+
+    def _repo(self, tmp_path: Path) -> Path:
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        self._git("init", "-q", cwd=tmp_path)
+        self._git("config", "user.email", "t@example.com", cwd=tmp_path)
+        self._git("config", "user.name", "t", cwd=tmp_path)
+        (tmp_path / "f.txt").write_text("a\n", encoding="utf-8")
+        self._git("add", "f.txt", cwd=tmp_path)
+        self._git("commit", "-q", "-m", "init", cwd=tmp_path)
+        return tmp_path
+
+    def test_clean_checkout_is_not_dirty(self, tmp_path: Path, monkeypatch) -> None:
+        import almanak.framework.cli.support_matrix as sm
+
+        repo = self._repo(tmp_path)
+        monkeypatch.setattr(sm, "_checkout_root", lambda *a, **k: repo)
+        assert sm._worktree_dirty() is False
+
+    def test_linked_worktree_is_measured_not_skipped(self, tmp_path: Path) -> None:
+        """A linked worktree must report real dirtiness, not None.
+
+        `.git` is a FILE there and the git dir resolves to
+        `<main>/.git/worktrees/<name>`, so deriving the working tree from the
+        git dir lands INSIDE `.git` and git status reports nothing usable. This
+        repo runs much of its work in worktrees, so that blind spot would hide
+        dirtiness exactly where it matters most.
+        """
+        import almanak.framework.cli.support_matrix as sm
+
+        main = self._repo(tmp_path / "main")
+        linked = tmp_path / "linked"
+        self._git("worktree", "add", "-q", str(linked), "HEAD", cwd=main)
+        assert (linked / ".git").is_file(), "precondition: linked worktree uses a .git FILE"
+
+        root = sm._checkout_root(linked / "pkg" / "mod.py")
+        assert root == linked, root
+
+        import unittest.mock as _mock
+
+        with _mock.patch.object(sm, "_checkout_root", lambda *a, **k: linked):
+            assert sm._worktree_dirty() is False
+            (linked / "f.txt").write_text("changed\n", encoding="utf-8")
+            assert sm._worktree_dirty() is True
+
+    def test_uncommitted_change_is_dirty(self, tmp_path: Path, monkeypatch) -> None:
+        import almanak.framework.cli.support_matrix as sm
+
+        repo = self._repo(tmp_path)
+        (repo / "f.txt").write_text("changed\n", encoding="utf-8")
+        monkeypatch.setattr(sm, "_checkout_root", lambda *a, **k: repo)
+        assert sm._worktree_dirty() is True
+
+    def test_untracked_file_is_dirty(self, tmp_path: Path, monkeypatch) -> None:
+        """An untracked connector file changes the matrix as surely as an edit."""
+        import almanak.framework.cli.support_matrix as sm
+
+        repo = self._repo(tmp_path)
+        (repo / "new.txt").write_text("x\n", encoding="utf-8")
+        monkeypatch.setattr(sm, "_checkout_root", lambda *a, **k: repo)
+        assert sm._worktree_dirty() is True
+
+    def test_no_git_dir_is_none_not_false(self, tmp_path: Path, monkeypatch) -> None:
+        """Undeterminable must not read as 'clean' — that would be a guess."""
+        import almanak.framework.cli.support_matrix as sm
+
+        monkeypatch.setattr(sm, "_checkout_root", lambda *a, **k: None)
+        assert sm._worktree_dirty() is None
+
+    def test_git_failure_is_none_not_false(self, monkeypatch) -> None:
+        import subprocess
+
+        import almanak.framework.cli.support_matrix as sm
+
+        def boom(*a, **k):
+            raise OSError("git not found")
+
+        monkeypatch.setattr(subprocess, "run", boom)
+        assert sm._worktree_dirty() is None
+
+    def test_cli_publishes_the_flag(self, cli_runner: CliRunner) -> None:
+        result = cli_runner.invoke(support_matrix, ["--json"])
+        assert result.exit_code == 0
+        payload = json.loads(result.output)
+        assert "sourceDirty" in payload
+        assert payload["sourceDirty"] in (True, False, None)
+
+
+class TestProvenanceSurvivesMalformedEncoding:
+    """`UnicodeDecodeError` is not an `OSError` subclass.
+
+    Catching `OSError` alone let a `HEAD`, loose-ref or `packed-refs` file with
+    malformed encoding crash `almanak info matrix --json` outright — the exact
+    opposite of the "provenance degrades, never fails" contract, and a hard
+    failure of the whole catalogue over an unreadable annotation.
+    """
+
+    def _repo(self, tmp_path: Path, head: bytes) -> Path:
+        git = tmp_path / ".git"
+        git.mkdir()
+        (git / "HEAD").write_bytes(head)
+        return git
+
+    def test_undecodable_head_is_none_not_a_crash(self, tmp_path: Path) -> None:
+        self._repo(tmp_path, b"\xff\xfe\x00invalid")
+        assert _source_commit(tmp_path / "mod.py") is None
+
+    def test_undecodable_loose_ref_is_none_not_a_crash(self, tmp_path: Path) -> None:
+        git = self._repo(tmp_path, b"ref: refs/heads/main\n")
+        loose = git / "refs" / "heads" / "main"
+        loose.parent.mkdir(parents=True)
+        loose.write_bytes(b"\xff\xfe\x00")
+        assert _source_commit(tmp_path / "mod.py") is None
+
+    def test_undecodable_packed_refs_is_none_not_a_crash(self, tmp_path: Path) -> None:
+        git = self._repo(tmp_path, b"ref: refs/heads/main\n")
+        (git / "packed-refs").write_bytes(b"\xff\xfe\x00 refs/heads/main\n")
+        assert _source_commit(tmp_path / "mod.py") is None
+
+    def test_undecodable_git_pointer_file_is_none_not_a_crash(self, tmp_path: Path) -> None:
+        """`_git_dir` is reached by `_worktree_dirty` outside any try."""
+        (tmp_path / ".git").write_bytes(b"\xff\xfe\x00")
+        assert _git_dir(tmp_path / "mod.py") is None
+
+    def test_cli_still_emits_a_matrix_when_provenance_is_undecodable(
+        self, tmp_path: Path, cli_runner: CliRunner
+    ) -> None:
+        import almanak.framework.cli.support_matrix as sm
+
+        self._repo(tmp_path, b"\xff\xfe\x00invalid")
+        original = sm._git_dir
+        sm._git_dir = lambda *a, **k: tmp_path / ".git"
+        try:
+            result = cli_runner.invoke(support_matrix, ["--json"])
+            assert result.exit_code == 0, result.output[:400]
+            payload = json.loads(result.output)
+            assert payload["sourceCommit"] is None
+            assert payload["protocols"], "the catalogue must survive bad provenance"
+        finally:
+            sm._git_dir = original
+
+
+class TestProvenanceRefusesAnUnrelatedRepository:
+    """The installed-SDK layout: `almanak` lives inside the USER's repo.
+
+    `<user-repo>/.venv/lib/pythonX/site-packages/almanak/framework/cli/...` — so
+    an unanchored upward walk finds the USER'S `.git` and provenance reports a
+    confidently-wrong 40-hex SHA describing an unrelated project, with
+    `sourceDirty` reporting their working tree and `git status` executing inside
+    their repository.
+
+    That is worse than reporting nothing: a drift check would compare two
+    unrelated repositories and report match or mismatch with equal
+    meaninglessness, while `_valid_sha` would happily pass the value along.
+    """
+
+    def _user_repo_with_vendored_sdk(self, tmp_path: Path) -> Path:
+        import subprocess
+
+        repo = tmp_path / "userrepo"
+        pkg = repo / ".venv" / "lib" / "python3.12" / "site-packages" / "almanak" / "framework" / "cli"
+        pkg.mkdir(parents=True)
+        real = Path(__import__("almanak.framework.cli.support_matrix", fromlist=["x"]).__file__)
+        (pkg / "support_matrix.py").write_text(real.read_text(encoding="utf-8"), encoding="utf-8")
+        for args in (
+            ["init", "-q"],
+            ["config", "user.email", "t@example.com"],
+            ["config", "user.name", "t"],
+        ):
+            subprocess.run(["git", *args], cwd=str(repo), capture_output=True, check=True, timeout=30)
+        (repo / "strategy.py").write_text("x = 1\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=str(repo), capture_output=True, check=True, timeout=30)
+        subprocess.run(
+            ["git", "commit", "-q", "-m", "user work"],
+            cwd=str(repo), capture_output=True, check=True, timeout=30,
+        )
+        return pkg / "support_matrix.py"
+
+    def _load(self, module_file: Path):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "almanak.framework.cli.support_matrix", module_file
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_does_not_report_the_users_repo_as_provenance(self, tmp_path: Path) -> None:
+        mod = self._load(self._user_repo_with_vendored_sdk(tmp_path))
+        assert mod._git_dir() is None
+        assert mod._checkout_root() is None
+        assert mod._source_commit() is None, "must not publish the user's commit"
+        assert mod._worktree_dirty() is None, "must not report the user's working tree"
+
+    def test_real_sdk_checkout_still_resolves(self) -> None:
+        """The anchor must not break the case provenance exists for.
+
+        Skipped when the suite runs against an installed package rather than a
+        checkout (e.g. inside the nightly image), where there is legitimately no
+        provenance to resolve.
+        """
+        import subprocess
+
+        import almanak.framework.cli.support_matrix as sm
+
+        if sm._checkout_root() is None:
+            pytest.skip("not running from an SDK checkout; provenance is N/A")
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, timeout=30
+        ).stdout.strip()
+        assert sm._source_commit() == head
+
+
+class TestEveryIntentIsClassified:
+    """The partition that matters is over INTENTS, not categories.
+
+    An intent absent from the category map yielded `None`, which is not in
+    WITHHELD_CATEGORIES, so it was published into `chainsByIntent` having never
+    passed the product/withheld decision — hyperliquid published
+    `PERP_WITHDRAW` that way. The old guard iterated the map's VALUES, so it
+    structurally could not see an intent that was never added to the map, and
+    adding an IntentType failed no test.
+    """
+
+    def test_every_intent_type_is_classified_exactly_once(self) -> None:
+        from almanak.framework.cli.support_matrix import UNCATEGORISED_INTENTS
+        from almanak.framework.intents.vocabulary import IntentType
+
+        categorised = {i.name for i in _intent_category_map()}
+        overlap = categorised & UNCATEGORISED_INTENTS
+        assert not overlap, f"classified twice: {sorted(overlap)}"
+        stale = UNCATEGORISED_INTENTS - {i.name for i in IntentType}
+        assert not stale, (
+            f"UNCATEGORISED_INTENTS names verbs that no longer exist: {sorted(stale)}. "
+            "A renamed or removed IntentType leaves a dead entry that silently "
+            "widens the set."
+        )
+        missing = {i.name for i in IntentType} - categorised - UNCATEGORISED_INTENTS
+        assert not missing, (
+            f"unclassified IntentType members: {sorted(missing)}. Add each to the "
+            "category map (to render a row) or to UNCATEGORISED_INTENTS (to publish "
+            "coverage with no row). Leaving a verb unclassified publishes it to "
+            "consumers without a product decision."
+        )
+
+    def test_an_unclassified_verb_fails_closed(self, monkeypatch) -> None:
+        """Removing a verb from both sets must RAISE, not silently publish."""
+        import almanak.framework.cli.support_matrix as sm
+
+        monkeypatch.setattr(
+            sm, "UNCATEGORISED_INTENTS", sm.UNCATEGORISED_INTENTS - {"PERP_WITHDRAW"}
+        )
+        with pytest.raises(RuntimeError, match="not classified for the support matrix"):
+            sm._build_matrix()
+
+    def test_uncategorised_verbs_are_still_published(self, matrix_data: dict) -> None:
+        """They are real capabilities; the vocabulary just cannot draw a row."""
+        row = [p for p in matrix_data["protocols"] if p["name"] == "hyperliquid"][0]
+        assert "PERP_WITHDRAW" in row["chainsByIntent"]
+
+
+class TestChainFilterAcceptsAliases:
+    def test_registered_alias_resolves(self, cli_runner: CliRunner) -> None:
+        """`bnb` is a registered alias for `bsc`, which is fully supported.
+
+        Rows are spelled canonically, so comparing a raw lowercased string
+        reported "no support" for a supported chain.
+        """
+        result = cli_runner.invoke(support_matrix, ["--json", "--chain", "bnb"])
+        assert result.exit_code == 0
+        payload = json.loads(result.output)
+        assert payload["chains"] == ["bsc"]
+        assert payload["protocols"], "bsc has supported protocols"
+
+    def test_json_emits_a_valid_envelope_when_nothing_matches(
+        self, cli_runner: CliRunner
+    ) -> None:
+        """Zero bytes on stdout made `jq` fail and could not be distinguished
+        from a broken command."""
+        result = cli_runner.invoke(support_matrix, ["--json", "--chain", "nosuchchain"])
+        assert result.exit_code == 0
+        payload = json.loads(result.output)
+        assert payload["protocols"] == []
+        assert payload["schemaVersion"] == SCHEMA_VERSION
+
+    def test_table_path_still_explains_itself(self, cli_runner: CliRunner) -> None:
+        result = cli_runner.invoke(support_matrix, ["--chain", "nosuchchain"])
+        assert result.exit_code == 0
+        assert "No protocols match" in result.output
+
+
+class TestOffChainVenuesAreNotMarkedKnown:
+    """An off-chain venue must still RENDER, but must not claim coverage.
+
+    The first version of this test iterated real manifests and asserted only
+    inside `if proto["name"] in off_chain`. Kraken — the only `chains is None`
+    manifest — declares no `matrix_entries` and therefore emits no row, so the
+    body never executed and the test asserted NOTHING while reading as coverage.
+    It would not have caught the regression it was written to prevent (a guard
+    that suppressed the row entirely). It now injects the shape under test.
+    """
+
+    def _off_chain_manifest(self):
+        from almanak.connectors._strategy_base.registry import (
+            ConnectorManifest,
+            MatrixEntry,
+        )
+        from almanak.framework.intents.vocabulary import IntentType
+
+        return ConnectorManifest(
+            name="uat_offvenue",
+            intents=(IntentType.SWAP,),
+            chains=None,  # off-chain venue, e.g. a CEX
+            matrix_entries=(
+                MatrixEntry(
+                    matrix_name="uat_offvenue",
+                    category="swap",
+                    chains=frozenset({"ethereum"}),
+                ),
+            ),
+        )
+
+    def test_off_chain_row_is_published_but_not_marked_known(self) -> None:
+        from almanak.connectors._strategy_base.registry import (
+            ConnectorRegistry,
+            _import_all_connectors,
+        )
+
+        _import_all_connectors()
+        ConnectorRegistry._entries["uat_offvenue"] = self._off_chain_manifest()
+        try:
+            rows = [p for p in _build_matrix()["protocols"] if p["name"] == "uat_offvenue"]
+            assert rows, (
+                "the declared row must still render — suppressing it entirely makes "
+                "check_protocol_support report 'not integrated in the SDK', a worse "
+                "demotion than the empty map this guard replaced"
+            )
+            row = rows[0]
+            assert row["intentsKnown"] is False, "off-chain coverage is not expressible"
+            assert row["chainsByIntent"] == {}
+            assert row["chains"] == ["ethereum"], "the declared chains still render"
+        finally:
+            ConnectorRegistry._entries.pop("uat_offvenue", None)
+
+    def test_real_off_chain_manifests_never_claim_coverage(self) -> None:
+        """Whatever rows the real off-chain venues emit, none may claim known."""
+        from almanak.connectors._strategy_base.registry import (
+            ConnectorRegistry,
+            _import_all_connectors,
+        )
+
+        _import_all_connectors()
+        off_chain = {m.name for m in ConnectorRegistry.all() if m.chains is None}
+        assert off_chain, "precondition: at least one off-chain venue (e.g. kraken)"
+        for proto in _build_matrix()["protocols"]:
+            if proto["name"] in off_chain:
+                assert proto["intentsKnown"] is False, proto["name"]

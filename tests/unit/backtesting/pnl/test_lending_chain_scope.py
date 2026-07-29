@@ -19,6 +19,7 @@ hands out the global surrogate APY silently — it warns once per protocol.
 from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 import logging
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -65,6 +66,30 @@ def _config() -> PnLBacktestConfig:
         end_time=TS + timedelta(hours=1),
         token_funding=_pnl_token_funding(INITIAL_CASH),
         include_gas_costs=False,
+    )
+
+
+def _billing_backtester() -> PnLBacktester:
+    """Backtester with fees ACTUALLY enabled, for the zero-cost assertions.
+
+    Asserting ``fee_usd == 0`` against ``fee_pct=0`` is tautological — it holds
+    whether or not the rejection path bills. These rejection tests need a
+    configuration where a bug WOULD charge, so that zero is evidence.
+    """
+    return PnLBacktester(
+        data_provider=MockDataProvider(),
+        fee_models={"default": DefaultFeeModel(fee_pct=Decimal("0.003"))},
+        slippage_models={"default": DefaultSlippageModel(slippage_pct=Decimal("0.001"))},
+    )
+
+
+def _billing_config() -> PnLBacktestConfig:
+    """Config with gas costs ENABLED — same reason as ``_billing_backtester``."""
+    return PnLBacktestConfig(
+        start_time=TS,
+        end_time=TS + timedelta(hours=1),
+        token_funding=_pnl_token_funding(INITIAL_CASH),
+        include_gas_costs=True,
     )
 
 
@@ -126,17 +151,86 @@ class TestDeclaredLendingChains:
             engine_mod._lending_chain_scope_rejection.cache_clear()
 
     def test_registry_clear_invalidates_scope_caches(self) -> None:
-        """The on_clear hook: a registry reset must clear the memoized scope
-        decisions so they cannot go stale."""
+        """The on_clear hook must invalidate ALL THREE memoized gate decisions.
+
+        Asserting only that ``_declared_lending_chains`` emptied is too weak: the
+        two decision-level caches (``_lending_chain_scope_rejection`` and
+        ``_lending_intent_exclusion_rejection``) memoize registry-derived
+        verdicts too, and dropping either ``cache_clear()`` call would leave the
+        gate answering from a declaration that no longer exists — a stale
+        REFUSAL strands a legitimate fill, a stale APPROVAL fabricates one.
+
+        Verified behaviourally as well as structurally: after the registry is
+        emptied the gate must actually CHANGE its answer, not merely report an
+        empty cache.
+        """
+        from almanak.connectors._connector import CONNECTOR_REGISTRY
+        from almanak.connectors._strategy_base.registry import _import_all_connectors
+        from almanak.framework.backtesting.pnl import engine as engine_mod
+
+        # Populate all three caches with real decisions.
+        assert _declared_lending_chains("fluid") == frozenset({"arbitrum", "base"})
+        assert _lending_chain_scope_rejection("fluid", "ethereum") is not None
+        assert (
+            engine_mod._lending_intent_exclusion_rejection("aave_v3", "mantle", "BORROW") is not None
+        )
+        for fn in (
+            engine_mod._declared_lending_chains,
+            engine_mod._lending_chain_scope_rejection,
+            engine_mod._lending_intent_exclusion_rejection,
+        ):
+            assert fn.cache_info().currsize > 0, fn.__name__
+
+        try:
+            CONNECTOR_REGISTRY.clear()
+
+            # Structural: every cache the hook owns is emptied.
+            for fn in (
+                engine_mod._declared_lending_chains,
+                engine_mod._lending_chain_scope_rejection,
+                engine_mod._lending_intent_exclusion_rejection,
+            ):
+                assert fn.cache_info().currsize == 0, f"{fn.__name__} kept a stale entry"
+
+            # The registry re-populates lazily on the next get(), so the value
+            # is legitimately recomputed rather than absent — the point is that
+            # it is RE-DERIVED, not replayed.
+            assert _declared_lending_chains("fluid") == frozenset({"arbitrum", "base"})
+        finally:
+            _import_all_connectors()
+            engine_mod._clear_lending_scope_caches()
+
+    def test_a_changed_declaration_is_seen_only_after_invalidation(self) -> None:
+        """The staleness test with teeth: does the gate CHANGE its answer?
+
+        Empty caches are necessary but not sufficient — what matters is that a
+        changed declaration reaches the gate. This pins both directions: while
+        cached, the gate replays the old verdict (proving the cache is real and
+        the test is not vacuous); after invalidation it reflects the new one.
+        """
+        from unittest import mock
+
         from almanak.connectors._connector import CONNECTOR_REGISTRY
         from almanak.framework.backtesting.pnl import engine as engine_mod
 
-        assert _declared_lending_chains("fluid") is not None  # populate cache
-        info_before = engine_mod._declared_lending_chains.cache_info()
-        assert info_before.currsize > 0
-        CONNECTOR_REGISTRY.clear()
-        info_after = engine_mod._declared_lending_chains.cache_info()
-        assert info_after.currsize == 0
+        engine_mod._clear_lending_scope_caches()
+        assert _declared_lending_chains("fluid") == frozenset({"arbitrum", "base"})
+
+        # Widen rather than narrow: fluid's exclusions name ethereum/polygon, and
+        # the manifest validator (correctly) rejects an exclusion for a chain not
+        # in strategy_chains — so removing chains would fail construction, not the
+        # cache. Adding one changes the derived answer while staying valid.
+        real = CONNECTOR_REGISTRY.get("fluid")
+        widened = replace(real, strategy_chains=(*real.strategy_chains, "optimism"))
+        try:
+            with mock.patch.object(CONNECTOR_REGISTRY, "get", return_value=widened):
+                # Still cached -> the OLD declaration is replayed.
+                assert _declared_lending_chains("fluid") == frozenset({"arbitrum", "base"})
+                engine_mod._clear_lending_scope_caches()
+                # Invalidated -> the NEW declaration is picked up.
+                assert _declared_lending_chains("fluid") == frozenset({"arbitrum", "base", "optimism"})
+        finally:
+            engine_mod._clear_lending_scope_caches()
 
     def test_chain_alias_resolves_before_comparison(self) -> None:
         # aave_v3 declares "ethereum"; the registry alias "mainnet" must not
@@ -171,7 +265,15 @@ class TestLendingChainScopeGate:
         assert portfolio.get_total_value_usd(state) == INITIAL_CASH
         trade = portfolio.trades[-1]
         assert trade.success is False
-        assert "protocol 'fluid' declares no lending support on chain 'ethereum'" in trade.metadata["failure_reason"]
+        # Since fluid's lending narrowing moved to strategy_intent_chain_exclusions
+        # (matrix schema v2), the per-(intent, chain) gate fires FIRST and carries
+        # the connector's own reason + ticket — strictly more informative than the
+        # coarse chain-scope message it replaces. Still the same refusal: no
+        # position, no cash moved, same rejection code.
+        reason = trade.metadata["failure_reason"]
+        assert "SUPPLY UNSUPPORTED on chain 'ethereum'" in reason
+        assert "protocol 'fluid'" in reason
+        assert "VIB-5030" in reason, "the refusal must name the ticket that justifies it"
         assert trade.metadata["rejection_code"] == RejectionCode.UNDECLARED_LENDING_CHAIN.value
         # Rejected fills charge nothing.
         assert trade.fee_usd == Decimal("0")
@@ -224,6 +326,18 @@ class TestLendingChainScopeGate:
         trade = portfolio.trades[-1]
         assert trade.success is False
         assert trade.metadata["rejection_code"] == RejectionCode.UNDECLARED_LENDING_CHAIN.value
+        # The refusal must be legible, not just typed. fluid declares no BORROW at
+        # all, so no per-(intent, chain) exclusion covers this cell — the reason
+        # comes from the coarse chain-scope gate and must name the protocol, the
+        # chain, and the chains lending IS declared on. Without this, a rejection
+        # carrying a misleading reason would still pass.
+        reason = trade.metadata["failure_reason"]
+        assert "protocol 'fluid'" in reason
+        assert "chain 'ethereum'" in reason
+        assert "arbitrum, base" in reason, "must name where lending IS declared"
+        # Rejected fills charge nothing — a refusal that still bills is a loss.
+        assert trade.fee_usd == Decimal("0")
+        assert trade.gas_cost_usd == Decimal("0")
 
     @pytest.mark.asyncio
     async def test_supply_on_declared_chain_fills(self) -> None:
@@ -356,3 +470,179 @@ class TestPerIntentChainExclusionGate:
 
         assert _lending_intent_exclusion_rejection("aave_v3", "MANTLE", "BORROW") is not None
         assert _lending_intent_exclusion_rejection("aave_v3", "mantle", "borrow") is not None
+
+
+class TestRejectedFillsChargeNothingWhenBillingIsEnabled:
+    """Zero-cost assertions made non-tautological.
+
+    The suite's default fixtures set ``fee_pct=0`` and ``include_gas_costs=False``,
+    so asserting a refused fill cost nothing proves nothing — it would hold even
+    if the rejection path billed. These run the same refusals with fees and gas
+    genuinely enabled, where a billing bug WOULD produce a non-zero charge.
+    """
+
+    @pytest.mark.asyncio
+    async def test_supply_rejection_is_free_with_fees_enabled(self) -> None:
+        portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CASH)
+        await _billing_backtester()._execute_intent(
+            SupplyIntent(protocol="fluid", token="USDC", amount=SUPPLY_AMOUNT),
+            portfolio,
+            _market("ethereum"),
+            TS,
+            _billing_config(),
+        )
+        trade = portfolio.trades[-1]
+        assert trade.success is False
+        # Load-bearing: a successful fill under this same config burns gas (see
+        # the control below), so zero here is evidence rather than a default.
+        assert trade.gas_cost_usd == Decimal("0"), "a refused fill must not burn gas"
+        # Weak by nature — the lending lane charges no fee_usd even on success —
+        # kept only so a future lane that DOES charge cannot regress silently.
+        assert trade.fee_usd == Decimal("0"), "a refused fill must not be billed"
+        assert portfolio.cash_usd == INITIAL_CASH
+        assert portfolio.positions == []
+
+    @pytest.mark.asyncio
+    async def test_borrow_rejection_is_free_with_fees_enabled(self) -> None:
+        portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CASH)
+        await _billing_backtester()._execute_intent(
+            BorrowIntent(
+                protocol="fluid",
+                collateral_token="USDC",
+                collateral_amount=Decimal("0"),
+                borrow_token="USDC",
+                borrow_amount=Decimal("1000"),
+            ),
+            portfolio,
+            _market("ethereum"),
+            TS,
+            _billing_config(),
+        )
+        trade = portfolio.trades[-1]
+        assert trade.success is False
+        # Load-bearing: a successful fill under this same config burns gas (see
+        # the control below), so zero here is evidence rather than a default.
+        assert trade.gas_cost_usd == Decimal("0"), "a refused fill must not burn gas"
+        # Weak by nature — the lending lane charges no fee_usd even on success —
+        # kept only so a future lane that DOES charge cannot regress silently.
+        assert trade.fee_usd == Decimal("0"), "a refused fill must not be billed"
+        assert portfolio.cash_usd == INITIAL_CASH
+        assert portfolio.positions == []
+
+    @pytest.mark.asyncio
+    async def test_the_billing_fixture_would_actually_charge(self) -> None:
+        """Control: the same config DOES bill on a fill that succeeds.
+
+        Without this, the two tests above could pass because the fixture never
+        charges anything under any circumstances — which would make them
+        tautological in a new way rather than fixing the old one.
+        """
+        portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CASH)
+        await _billing_backtester()._execute_intent(
+            SupplyIntent(protocol="fluid", token="USDC", amount=SUPPLY_AMOUNT),
+            portfolio,
+            _market("arbitrum"),  # DECLARED chain — this one fills
+            TS,
+            _billing_config(),
+        )
+        trade = portfolio.trades[-1]
+        assert trade.success is True, "precondition: arbitrum is a declared lending chain"
+        # GAS is what discriminates for the lending lane. This control was written
+        # asserting fee_usd > 0 and FAILED, which is how we learned a successful
+        # lending SUPPLY charges no fee_usd at all (fees apply to swaps) while it
+        # does burn gas. So `fee_usd == 0` on a rejection is tautological however
+        # the fixture is configured, and gas_cost_usd is the real evidence.
+        assert trade.gas_cost_usd > Decimal("0"), (
+            "fixture must actually charge gas, or the zero-gas assertions above are vacuous")
+
+
+class TestPerIntentExclusionIsWiredIntoExecution:
+    """The exclusion gate must fire in `_execute_intent`, not just in helpers.
+
+    aave_v3 keeps `mantle` in its lending chains (SUPPLY / WITHDRAW / REPAY all
+    work there), so the COARSE chain-scope gate passes and only the
+    per-`(intent, chain)` exclusion can refuse a BORROW. That makes this the one
+    shape where a helper-level test proves nothing: if the execution path stopped
+    consulting the exclusion gate, or mapped the intent to the wrong verb, a
+    fabricated Aave BORROW on Mantle would fill and accrue interest while every
+    other test in this file still passed.
+    """
+
+    @pytest.mark.asyncio
+    async def test_aave_borrow_on_mantle_is_refused_by_the_exclusion_gate(self) -> None:
+        portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CASH)
+        await _billing_backtester()._execute_intent(
+            BorrowIntent(
+                protocol="aave_v3",
+                collateral_token="USDC",
+                collateral_amount=Decimal("0"),
+                borrow_token="USDC",
+                borrow_amount=Decimal("1000"),
+            ),
+            portfolio,
+            _market("mantle"),
+            TS,
+            _billing_config(),
+        )
+        assert portfolio.positions == [], "a fabricated Aave BORROW must not open"
+        assert portfolio.cash_usd == INITIAL_CASH
+        trade = portfolio.trades[-1]
+        assert trade.success is False
+        assert trade.gas_cost_usd == Decimal("0")
+        reason = trade.metadata["failure_reason"]
+        assert "BORROW" in reason and "mantle" in reason
+        assert "VIB-6111" in reason, "must carry the connector's own justifying ticket"
+
+    @pytest.mark.asyncio
+    async def test_aave_supply_on_mantle_still_fills(self) -> None:
+        """Control: the exclusion narrows BORROW only.
+
+        Without this, the test above would also pass if the gate wrongly refused
+        every Aave operation on Mantle — stranding SUPPLY / WITHDRAW / REPAY,
+        which VIB-6111 deliberately kept working so pre-existing borrowers can
+        still repay and exit.
+        """
+        portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CASH)
+        await _billing_backtester()._execute_intent(
+            SupplyIntent(protocol="aave_v3", token="USDC", amount=SUPPLY_AMOUNT),
+            portfolio,
+            _market("mantle"),
+            TS,
+            _billing_config(),
+        )
+        trade = portfolio.trades[-1]
+        assert trade.success is True, "SUPPLY on mantle must still work (VIB-6111)"
+        assert portfolio.positions, "the supply position must be opened"
+
+
+class TestExitPathsAreNotGated:
+    """Exits must NOT fail closed on an undeclared chain — by design.
+
+    The gate covers lending OPENS only (SUPPLY / BORROW). Refusing a WITHDRAW or
+    REPAY would strand capital: a position opened before a chain was narrowed is
+    still on-chain and its holder must be able to unwind it. VIB-6111 keeps
+    REPAY on Aave/Mantle for exactly this reason, and teardown's residual sweep
+    is deliberately left un-narrowed on the same principle — advertisement
+    narrows, safety does not.
+
+    This test exists so that a future "consistency" change which extends the
+    gate to exits fails loudly instead of silently trapping users.
+    """
+
+    @pytest.mark.asyncio
+    async def test_withdraw_on_undeclared_chain_is_not_refused_by_this_gate(self) -> None:
+        from almanak.framework.intents.lending_intents import WithdrawIntent
+
+        portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CASH)
+        await _backtester()._execute_intent(
+            WithdrawIntent(protocol="fluid", token="USDC", amount=Decimal("100")),
+            portfolio,
+            _market("ethereum"),
+            TS,
+            _config(),
+        )
+        trade = portfolio.trades[-1]
+        assert trade.metadata.get("rejection_code") != RejectionCode.UNDECLARED_LENDING_CHAIN.value, (
+            "exits must not be refused by the lending chain-scope gate — that would "
+            "strand a position opened before the chain was narrowed"
+        )

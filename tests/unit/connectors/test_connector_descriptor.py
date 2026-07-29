@@ -282,18 +282,15 @@ EXPECTED_STRATEGY_MATRIX_ENTRIES = {
             chains=frozenset(("arbitrum", "ethereum")),
         ),
     ),
-    "fluid": (
-        StrategyMatrixEntry(
-            matrix_name="fluid",
-            category="swap",
-            chains=frozenset(("arbitrum", "base", "ethereum", "polygon")),
-        ),
-        StrategyMatrixEntry(
-            matrix_name="fluid",
-            category="lending",
-            chains=frozenset(("arbitrum", "base")),
-        ),
-    ),
+    # Matrix schema v2: fluid no longer declares a manual matrix override, for
+    # the same reason aave_v3 dropped its (VIB-5916 above). Its two rows now
+    # DERIVE from (strategy_intents, strategy_chains) narrowed by
+    # strategy_intent_chain_exclusions — SWAP on 4 chains, SUPPLY/WITHDRAW on
+    # arbitrum+base. The override scoped only the RENDERED row, so
+    # chains_for_intent(SUPPLY) still answered all four chains; publishing
+    # per-intent coverage would have shipped that as a live over-advertisement.
+    # None = no override. The exclusions are pinned in test_fluid_connector.py.
+    "fluid": None,
     "uniswap_v4": (
         StrategyMatrixEntry(
             matrix_name="uniswap_v4",

@@ -6,6 +6,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`almanak info matrix --json` schema v2 — per-intent chain coverage.** Each
+  protocol row now carries `chainsByIntent` (`{INTENT: [chain, …]}`, derived from
+  `ConnectorManifest.chains_for_intent`) and `intentsKnown`, plus a provenance
+  envelope (`schemaVersion`, `sdkVersion`, `sourceCommit`, `sourceDirty`,
+  `generatedAt`). **v2 is purely additive**: every v1 field keeps its exact value
+  and position — the top-level `chains` and `protocols` keys, and each protocol
+  row's `name`, `category` and `chains` — and no v1 key is removed or reordered,
+  so existing consumers and the rendered docs table are unaffected. (The document
+  as a whole is not byte-identical, because v2 adds keys by design.)
+
+  The rendering `category` collapses a connector's exact verbs into one label:
+  `SUPPLY`/`BORROW`/`REPAY`/`WITHDRAW` all become `lending`, and `yield` covers
+  `STAKE` (lido), `VAULT_DEPOSIT` (morpho_vault) and Pendle's `LP_OPEN`/`SWAP`
+  surface alike. Consumers could therefore ask "is this protocol on this chain?"
+  but never "can it do this operation here?" — so `fluid`, which declares no
+  `BORROW`, read as borrow-capable, and `gmx_v2` read as LP-capable. Contract and
+  invariants: `docs/internal/blueprints/05-connectors.md` §2a. Notably `chains`
+  may be **wider** than `chainsByIntent` (compiler-routable chains no strategy
+  verifies) and `intentsKnown: false` marks rows no manifest describes — both
+  mean *unknown*, not *supported* or *unsupported*.
+
+### Fixed
+
+- **Fluid no longer over-advertises lending on ethereum / polygon.** fToken
+  lending shipped on arbitrum + base only (VIB-5030), but that narrowing lived in
+  a hand-written `strategy_matrix_entries` row: it scoped the rendered row while
+  `chains_for_intent(SUPPLY)` — the accessor every consumer is told to ask —
+  still answered all four chains. Harmless while only the table read the matrix;
+  a live over-advertisement the moment per-intent coverage is published. The
+  truth moved to `strategy_intent_chain_exclusions`, and the matrix rows are now
+  derived from it (rendering output unchanged).
+
 ### Removed
 
 - **`almanak info capabilities` CLI.** The VIB-5112 phase-1 capability matrix

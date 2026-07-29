@@ -12,8 +12,8 @@
 |-------|--------|-------------------|
 | [Arbitrum](../../chains/arbitrum.md) | EVM | ``SUPPLY``, ``SWAP``, ``WITHDRAW`` |
 | [Base](../../chains/base.md) | EVM | ``SUPPLY``, ``SWAP``, ``WITHDRAW`` |
-| [Ethereum](../../chains/ethereum.md) | EVM | ``SUPPLY``, ``SWAP``, ``WITHDRAW`` |
-| [Polygon](../../chains/polygon.md) | EVM | ``SUPPLY``, ``SWAP``, ``WITHDRAW`` |
+| [Ethereum](../../chains/ethereum.md) | EVM | ``SWAP`` |
+| [Polygon](../../chains/polygon.md) | EVM | ``SWAP`` |
 
 ## API Reference
 

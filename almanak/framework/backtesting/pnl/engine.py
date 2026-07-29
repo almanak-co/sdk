@@ -597,9 +597,57 @@ def _declared_lending_chains(protocol: str) -> frozenset[str] | None:
     lending_intents = {"SUPPLY", "BORROW", "REPAY", "WITHDRAW"}
     intents = {str(i).upper() for i in (getattr(connector, "strategy_intents", None) or ())}
     chains = tuple(getattr(connector, "strategy_chains", None) or ())
-    if intents & lending_intents and chains:
-        return frozenset(chains)
+    declared_lending = intents & lending_intents
+    if declared_lending and chains:
+        return _narrowed_lending_chains(connector, declared_lending, chains)
     return None
+
+
+def _narrowed_lending_chains(connector: Any, lending_intents: set[str], chains: tuple[str, ...]) -> frozenset[str]:
+    """``chains`` minus the chains every declared lending verb excludes.
+
+    The union, over the connector's declared lending verbs, of that verb's
+    surviving chains — the same answer ``ConnectorManifest.chains_for_intent``
+    gives, computed on the descriptor this module already holds.
+
+    The subtraction is load-bearing. Without it this fallback reports the RAW
+    ``strategy_intents`` x ``strategy_chains`` cross-product, so a connector
+    that narrows lending per chain reports every chain it merely SWAPS on and
+    the chain gate stops rejecting there. Fluid is exactly that shape (fToken
+    lending on arbitrum + base, VIB-5030; the DEX swaps on four chains), and
+    the hole is not covered by ``_lending_intent_exclusion_rejection``: that
+    gate can only fire on a declared exclusion, and there is no exclusion for
+    a verb the connector never declared at all — so a fluid BORROW on ethereum
+    would fill and accrue a fabricated APY.
+
+    Union rather than intersection: this gate answers "does this connector do
+    lending on this chain AT ALL". Per-``(intent, chain)`` narrowing is
+    ``_lending_intent_exclusion_rejection``'s job, and answering it here would
+    reject SUPPLY on a chain where only BORROW is excluded.
+
+    Returns the connector's own chain spellings (not canonicalized), because
+    callers canonicalize on comparison and render these verbatim in the
+    rejection message.
+    """
+    from almanak.core.chains import ChainRegistry
+
+    def _canon_declared(name: str) -> str:
+        # Connector-declared metadata is OUR code: a typo'd chain must fail
+        # LOUDLY rather than silently widen the gate, matching
+        # ``_lending_chain_scope_rejection._canon_declared``'s stated rule.
+        return ChainRegistry.resolve(name).name
+
+    exclusions = getattr(connector, "strategy_intent_chain_exclusions", None) or ()
+    covered: set[str] = set()
+    for intent in lending_intents:
+        excluded = {
+            _canon_declared(chain)
+            for exclusion in exclusions
+            if str(exclusion.intent).strip().upper() == intent
+            for chain in exclusion.chains
+        }
+        covered |= {chain for chain in chains if _canon_declared(chain) not in excluded}
+    return frozenset(covered)
 
 
 @functools.cache
