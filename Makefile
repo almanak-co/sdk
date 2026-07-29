@@ -1,4 +1,4 @@
-.PHONY: all help clean test test-unit test-acceptance-pack test-connectors test-intents test-integration test-all test-ci test-coverage crap crap-fresh crap-diff crap-diff-fresh test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single test-accounting-matrix test-accounting-matrix-quick list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build-platform-runner build publish lint lint-check format format-check security docs docs-cli docs-generated docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene check-xfail-liveness check-config-boundary check-connector-registry check-strategy-taxonomy check-teardown-state-persistence check-connector-chains check-demos check-intent-coverage check-deployment-scoped-tables check-deployment-id-proto-surface check-gateway-isolation check-decimal-policy check-decimal-policy-baseline regen-contract-baselines check-accounting-ratchet check-accounting-merge-gate scan-coupling scan-coupling-report scan-coupling-baseline check-hardcoded-addresses check-hardcoded-addresses-baseline
+.PHONY: all help clean test test-unit test-acceptance-pack test-connectors test-intents test-integration test-all test-ci test-coverage crap crap-fresh crap-diff crap-diff-fresh test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single test-accounting-matrix test-accounting-matrix-quick list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build-platform-runner build publish lint lint-check format format-check security docs docs-cli docs-generated docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene check-xfail-liveness check-config-boundary check-connector-registry check-strategy-taxonomy check-teardown-state-persistence check-connector-chains check-demos check-intent-coverage check-deployment-scoped-tables check-deployment-id-proto-surface check-gateway-isolation check-decimal-policy check-decimal-policy-baseline regen-contract-baselines check-accounting-ratchet check-accounting-merge-gate scan-coupling scan-coupling-report scan-coupling-baseline check-hardcoded-addresses check-hardcoded-addresses-baseline check-permission-coverage
 
 # Load .env file if it exists
 -include .env
@@ -71,6 +71,18 @@ check-config-boundary:
 # universe consumed by PR 2's intent-test coverage gate and future tooling.
 check-connector-registry: ## Validate connector manifests against the registry
 	uv run python scripts/ci/check_connector_registry.py --verbose
+
+# Zodiac permission-coverage preflight (VIB-6018, gating VIB-6057). Fails when a
+# hosted-relevant (connector, intent, chain) triple yields ZERO non-infrastructure
+# grants and is not a declared accepted gap, AND when a declared accepted gap is
+# no longer a gap (a stale entry pre-authorises a regression back to zero grants).
+#
+# NOT wired to per-PR CI on purpose: it compiles a synthetic intent for all ~375
+# declared triples and several connectors are RPC-bound (curve alone is 40-115s
+# per chain). This is the on-demand / nightly entry point; a scheduled workflow
+# is the intended next step and is tracked, not shipped here.
+check-permission-coverage: ## Preflight the Zodiac permission break set (slow, RPC-bound)
+	uv run python scripts/ci/check_permission_manifest_coverage.py
 
 # Strategy-taxonomy guard (MasterQAPlan-June13 §3.2). Keeps the tutorial/test
 # line out of strategies/flagship/: FAIL on a committed config that sets a

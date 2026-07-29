@@ -176,12 +176,18 @@ def _membership_sets() -> tuple[frozenset[str], frozenset[str], frozenset[str], 
 
     Deferred out of module import (it was eager) because the derivation calls
     ``get_permission_hints`` for every connector; at *import* time a connector's
-    ``permission_hints`` module can still be mid-import (circular), and
-    ``get_permission_hints`` then silently falls back to default (empty) hints,
-    dropping that connector from the derived sets. Under xdist worker import
-    ordering that surfaced as ``morpho_blue`` missing from
-    ``_LENDING_PROTOCOLS`` (VIB-4928). Computing on first *use* runs after all
-    connector imports have settled, making the membership deterministic.
+    ``permission_hints`` module can still be mid-import (circular), so the
+    module object exists in ``sys.modules`` without ``PERMISSION_HINTS`` yet
+    bound. Under xdist worker import ordering that surfaced as ``morpho_blue``
+    missing from ``_LENDING_PROTOCOLS`` (VIB-4928). Computing on first *use*
+    runs after all connector imports have settled, making the membership
+    deterministic.
+
+    Since VIB-6018 that state no longer degrades silently — ``get_permission_hints``
+    raises ``PermissionHintsError`` for a module that exists but exports no
+    usable hints, rather than substituting empty ones. Deferring is still what
+    keeps the window closed; the difference is that if it ever reopens, it now
+    fails loudly instead of dropping a connector from the derived sets.
     """
     return _derive_membership_sets()
 

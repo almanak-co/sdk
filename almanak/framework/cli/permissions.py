@@ -166,6 +166,7 @@ def permissions(  # noqa: C901
 
     # Generate manifest for each chain
     from ..permissions.generator import generate_manifest
+    from ..permissions.hints import PermissionHintsError
 
     # Filter out non-EVM chains for zodiac format (Safe/Zodiac is EVM-only)
     # This must happen before the compiler logger mutation so the early exit
@@ -234,14 +235,47 @@ def permissions(  # noqa: C901
                 click.echo(f"  Using RPC for on-chain discovery on {target_chain}", err=True)
 
             click.echo(f"Generating permissions for {strategy_name} on {target_chain}...", err=True)
-            manifest = generate_manifest(
-                strategy_name=strategy_name,
-                chain=target_chain,
-                supported_protocols=chain_protocols,
-                intent_types=intent_types,
-                config=config,
-                rpc_url=chain_rpc_url,
-            )
+            try:
+                manifest = generate_manifest(
+                    strategy_name=strategy_name,
+                    chain=target_chain,
+                    supported_protocols=chain_protocols,
+                    intent_types=intent_types,
+                    config=config,
+                    rpc_url=chain_rpc_url,
+                )
+            except (PermissionHintsError, ImportError) as exc:
+                # A connector with a broken permission_hints module now fails
+                # closed rather than degrading to an empty manifest — correct,
+                # but the blast radius is wider than the broken connector:
+                # ``_derive_membership_sets`` folds ``get_permission_hints``
+                # over EVERY slug, so one bad module stops manifest generation
+                # for all of them. Surface it as a CLI error instead of a raw
+                # traceback, and name the remedy.
+                #
+                # BOTH raise paths are caught. ``PermissionHintsError`` is the
+                # malformed-export case; a broken *nested import* inside an
+                # existing hints module propagates as ImportError /
+                # ModuleNotFoundError, and that is the MORE common shape — it is
+                # the one this branch is named for. Left uncaught it reaches the
+                # user as a bare "No module named 'x'", which reads as a broken
+                # install rather than a broken connector, and invites them to
+                # hand-write a manifest instead.
+                # Phrased as "most likely", not "definitely": ImportError is
+                # broad, and generate_manifest imports more than hints modules.
+                # Naming the likely cause without asserting it keeps the message
+                # useful when it IS a hints module and non-misleading when it
+                # is not.
+                raise click.ClickException(
+                    f"{exc}\n\n"
+                    "Permission manifest generation failed while importing. Most often this is a "
+                    "connector's permission_hints module missing an export or carrying a broken "
+                    "import — and discovery reads EVERY connector's hints, so one bad module blocks "
+                    "generation for all of them; the fault need not be in the connector you asked "
+                    "for. Inspect the error above for the module that actually failed. Do not "
+                    "hand-write a manifest to work around this: an incomplete one reverts "
+                    "unauthorized under Safe."
+                ) from exc
             manifests.append(manifest)
 
             # Print warnings

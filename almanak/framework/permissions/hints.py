@@ -176,6 +176,45 @@ _PROTOCOL_CONNECTOR_MAP: dict[str, str | tuple[str, str]] = {
 }
 
 
+def _is_missing_along_path(module_path: str, missing: str | None) -> bool:
+    """True when ``missing`` is ``module_path`` or a PACKAGE ON ITS PATH.
+
+    This is the discriminator between "connector genuinely has no
+    ``permission_hints`` module" (return the empty default) and "an import
+    INSIDE an existing module is broken" (raise).
+
+    It must compare DOTTED COMPONENTS, not raw string prefixes. A bare
+    ``module_path.startswith(missing)`` matches partial component names and
+    swallows exactly the class this function exists to catch:
+
+    * target ``…uniswap_v3.permission_hints``, nested failure
+      ``almanak.connectors.uniswap`` (a refactor that dropped the version
+      suffix) — ``startswith`` is True, so the broken import is misread as an
+      absent module;
+    * target ``…curve.permission_hints``, nested ``from .permission import X``
+      failing as ``almanak.connectors.curve.permission`` — likewise swallowed.
+
+    Both return empty hints, dropping the connector out of every membership set
+    in ``synthetic_intents.py`` and yielding a manifest with zero core grants —
+    the fail-open this module exists to close, on a money-path connector.
+    Anchoring on ``missing + "."`` makes a partial component a non-match while
+    keeping every genuine parent-package case working.
+    """
+    if not missing:
+        return False
+    return module_path == missing or module_path.startswith(missing + ".")
+
+
+class PermissionHintsError(RuntimeError):
+    """A connector's ``permission_hints`` module exists but is unusable.
+
+    Distinct from "this protocol has no hints", which is a legitimate state and
+    still yields the empty default. This is raised only when the module is
+    present and broken, where silently substituting empty hints would produce a
+    manifest that authorises nothing while looking successful (VIB-6018).
+    """
+
+
 def get_permission_hints(protocol: str) -> PermissionHints:
     """Load PermissionHints for a protocol via convention-based import.
 
@@ -183,7 +222,28 @@ def get_permission_hints(protocol: str) -> PermissionHints:
     If ``_PROTOCOL_CONNECTOR_MAP`` maps ``protocol`` to a
     ``(connector_name, attribute_name)`` tuple, loads
     ``connectors.{connector_name}.permission_hints.{attribute_name}`` instead.
-    Falls back to defaults if the module or attribute does not exist.
+    Returns the empty default only when the module is genuinely ABSENT.
+
+    A **nested** import error inside an existing ``permission_hints`` module —
+    a typo, a broken refactor, a renamed symbol upstream — is re-raised
+    (VIB-6018). Swallowing it silently substituted empty hints, which drops the
+    connector out of every derived membership set in ``synthetic_intents.py``
+    and yields an empty Zodiac manifest: the exact VIB-5990 failure shape, with
+    no signal anywhere. An empty manifest is not a degraded result here, it is a
+    wrong one — every Safe-path call for that connector reverts unauthorized (or,
+    pre-VIB-6057, executes unconstrained inside a MultiSend batch).
+
+    A module that exists but exports no usable ``PERMISSION_HINTS`` raises
+    :class:`PermissionHintsError` for the same reason — see the raise site.
+
+    This mirrors :func:`get_discovery_vectors_override`, which already made this
+    distinction; the two now agree, so a connector cannot lose its declarative
+    hints while keeping its vector override or vice versa.
+
+    Raises:
+        PermissionHintsError: the module exists but does not export a usable
+            ``PermissionHints`` instance.
+        ImportError: a nested import inside an existing module is broken.
     """
     mapping = _PROTOCOL_CONNECTOR_MAP.get(protocol, protocol)
     if isinstance(mapping, tuple):
@@ -191,19 +251,38 @@ def get_permission_hints(protocol: str) -> PermissionHints:
     else:
         connector_name = mapping
         attribute_name = "PERMISSION_HINTS"
+    module_path = f"almanak.connectors.{connector_name}.permission_hints"
     try:
-        mod = importlib.import_module(f"almanak.connectors.{connector_name}.permission_hints")
-        hints = getattr(mod, attribute_name, None)
-        if isinstance(hints, PermissionHints):
-            return hints
-        logger.debug(
-            "%s in %s.permission_hints is not a PermissionHints instance",
-            attribute_name,
-            connector_name,
-        )
-    except (ImportError, ModuleNotFoundError):
-        pass
-    return _DEFAULT
+        mod = importlib.import_module(module_path)
+    except ModuleNotFoundError as exc:
+        # ``exc.name`` is the module that could not be found. It names the target
+        # module (or a package along its path) exactly when that module is the
+        # thing that is missing — i.e. this connector genuinely has no
+        # permission_hints module. Anything else is a broken import INSIDE an
+        # existing module and must surface.
+        if _is_missing_along_path(module_path, exc.name):
+            return _DEFAULT
+        raise
+    hints = getattr(mod, attribute_name, None)
+    if isinstance(hints, PermissionHints):
+        return hints
+    # The module EXISTS but does not export usable hints — a renamed constant, a
+    # bad merge, a plain dict where a PermissionHints was meant. Returning
+    # _DEFAULT here would reintroduce the very failure this function was changed
+    # to close, just through a different door: the connector silently drops out
+    # of every derived membership set and its manifest comes back empty, with a
+    # DEBUG line as the only trace. Fail closed instead — the connector's own
+    # module is the one place this is unambiguously a defect, never a legitimate
+    # "this protocol has no hints" signal (that case is the ModuleNotFoundError
+    # branch above). Measured 2026-07-28: all 44 registered protocols export a
+    # valid PERMISSION_HINTS, so this raises for nobody today.
+    raise PermissionHintsError(
+        f"{module_path} exists but does not export a usable {attribute_name}: "
+        f"expected a PermissionHints instance, found {type(hints).__name__}. "
+        "An empty manifest is not a degraded result — every Safe-path call for "
+        f"{connector_name!r} would revert unauthorized. Fix the export rather "
+        "than letting discovery fall back to empty hints."
+    )
 
 
 @dataclass(frozen=True)
@@ -246,7 +325,7 @@ def get_discovery_vectors_override(
         # error inside an existing override module (typo, broken refactor):
         # those must surface, not silently disable the override and degrade
         # the manifest.
-        if exc.name and module_path.startswith(exc.name):
+        if _is_missing_along_path(module_path, exc.name):
             return None
         raise
     fn = getattr(mod, "build_discovery_vectors", None)
