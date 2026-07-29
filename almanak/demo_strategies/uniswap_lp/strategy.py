@@ -98,6 +98,7 @@ class UniswapLPConfig:
         amount0: Amount of token0 to provide (e.g., "0.001" WETH)
         amount1: Amount of token1 to provide (e.g., "0.1" USDC)
         min_position_usd: Minimum total inventory (USD) required to (re)open a position
+        max_slippage: Min-out floor for LP mint/withdraw as a fraction (0.005 = 0.5%)
         force_action: Force specific action for testing ("open", "close", or "")
         position_id: NFT ID of position to close (when force_action="close")
     """
@@ -113,6 +114,9 @@ class UniswapLPConfig:
     # Minimum total inventory (USD) required to (re)open a position
     min_position_usd: Decimal = Decimal("100")
 
+    # Min-out floor for LP mint/withdraw, as a fraction (0.005 = 0.5%)
+    max_slippage: Decimal = Decimal("0.005")
+
     # Testing/override options
     force_action: str = ""
     position_id: str | None = None
@@ -125,6 +129,7 @@ class UniswapLPConfig:
             "amount0": str(self.amount0),
             "amount1": str(self.amount1),
             "min_position_usd": str(self.min_position_usd),
+            "max_slippage": str(self.max_slippage),
             "force_action": self.force_action,
             "position_id": self.position_id,
         }
@@ -214,6 +219,9 @@ class UniswapLPStrategy(IntentStrategy[UniswapLPConfig]):
     }
     """
 
+    # Default so the attribute exists even when __init__ is bypassed.
+    max_slippage: Decimal = Decimal("0.005")
+
     # =========================================================================
     # INITIALIZATION
     # =========================================================================
@@ -252,6 +260,9 @@ class UniswapLPStrategy(IntentStrategy[UniswapLPConfig]):
         # Token amounts to provide (ensure Decimal for arithmetic)
         self.amount0 = Decimal(str(self.config.amount0))  # Token0 (e.g., WETH)
         self.amount1 = Decimal(str(self.config.amount1))  # Token1 (e.g., USDC)
+
+        # Min-out floor applied to every LP intent
+        self.max_slippage = Decimal(str(self.config.max_slippage))
 
         # Force action for testing ("open" or "close")
         self.force_action = str(self.config.force_action).lower()
@@ -536,6 +547,7 @@ class UniswapLPStrategy(IntentStrategy[UniswapLPConfig]):
             range_lower=range_lower,
             range_upper=range_upper,
             protocol="uniswap_v3",
+            max_slippage=self.max_slippage,
         )
 
     def _rebalance_swap_intent(
@@ -596,6 +608,7 @@ class UniswapLPStrategy(IntentStrategy[UniswapLPConfig]):
             pool=self.pool,
             collect_fees=True,  # Always collect fees when closing
             protocol="uniswap_v3",
+            max_slippage=self.max_slippage,
         )
 
     # =========================================================================
@@ -817,12 +830,18 @@ class UniswapLPStrategy(IntentStrategy[UniswapLPConfig]):
 
         logger.info(f"Generating teardown intent for LP position {position_id} (mode={mode.value})")
 
+        from almanak.framework.teardown import TeardownMode
+
+        # Widen the floor on a HARD unwind: exiting matters more than the price.
+        teardown_slippage = Decimal("0.03") if mode == TeardownMode.HARD else self.max_slippage
+
         intents.append(
             Intent.lp_close(
                 position_id=position_id,
                 pool=self.pool,
                 collect_fees=True,
                 protocol="uniswap_v3",
+                max_slippage=teardown_slippage,
             )
         )
 

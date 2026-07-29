@@ -22,6 +22,7 @@
     "range_width_pct": 0.3,
     "amount0": "0.01",
     "amount1": "30",
+    "max_slippage": "0.005",
     "fee_hint": null,
     "anvil_funding": {
         "ETH": 100,

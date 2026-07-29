@@ -108,6 +108,9 @@ class Curve3poolLPConfig:
     # HOLD rather than open a dust position.
     min_position_usd: Decimal = field(default_factory=lambda: Decimal("100"))
 
+    # Min-out floor for LP deposit/withdraw, as a fraction (0.005 = 0.5%)
+    max_slippage: Decimal = field(default_factory=lambda: Decimal("0.005"))
+
     # Force "open" or "close" for testing / sidecar single-iteration runs.
     force_action: str = ""
 
@@ -118,7 +121,7 @@ class Curve3poolLPConfig:
         (100 / 100.0); convert any non-Decimal via str() so later Decimal
         arithmetic in decide() never hits a float/int TypeError.
         """
-        for attr in ("amount_dai", "amount_usdc", "amount_usdt", "min_position_usd"):
+        for attr in ("amount_dai", "amount_usdc", "amount_usdt", "min_position_usd", "max_slippage"):
             value = getattr(self, attr)
             if value is not None and not isinstance(value, Decimal):
                 setattr(self, attr, Decimal(str(value)))
@@ -133,6 +136,7 @@ class Curve3poolLPConfig:
             "amount_usdc": str(self.amount_usdc),
             "amount_usdt": str(self.amount_usdt),
             "min_position_usd": str(self.min_position_usd),
+            "max_slippage": str(self.max_slippage),
             "force_action": self.force_action,
         }
 
@@ -208,6 +212,9 @@ class Curve3poolLPStrategy(IntentStrategy[Curve3poolLPConfig]):
     }
     """
 
+    # Default so the attribute exists even when __init__ is bypassed.
+    max_slippage: Decimal = Decimal("0.005")
+
     # The three coins of Curve 3pool, in pool-coin-index order. This ordering
     # is load-bearing: ``coin_amounts[i]`` maps to pool coin index ``i``, so it
     # MUST match the registry order (DAI=0, USDC=1, USDT=2) in
@@ -239,6 +246,9 @@ class Curve3poolLPStrategy(IntentStrategy[Curve3poolLPConfig]):
         # Minimum total inventory (USD) required to (re)open a position.
         # __post_init__ has already coerced this to a Decimal on the typed config.
         self.min_position_usd = self.config.min_position_usd
+
+        # Min-out floor applied to every LP intent.
+        self.max_slippage = self.config.max_slippage
 
         # Force action for testing ("open" or "close").
         self.force_action = str(self.config.force_action).lower()
@@ -388,9 +398,10 @@ class Curve3poolLPStrategy(IntentStrategy[Curve3poolLPConfig]):
             pool=self.pool,
             coin_amounts=coin_amounts,
             protocol="curve",
+            max_slippage=self.max_slippage,
         )
 
-    def _create_close_intent(self) -> Intent:
+    def _create_close_intent(self, max_slippage: Decimal | None = None) -> Intent:
         """Create an LP_CLOSE intent to burn the fungible 3Crv LP token.
 
         Curve LP positions are fungible ERC20 LP tokens. We pass the pool's LP
@@ -409,6 +420,7 @@ class Curve3poolLPStrategy(IntentStrategy[Curve3poolLPConfig]):
             pool=self.pool,
             collect_fees=True,
             protocol="curve",
+            max_slippage=max_slippage if max_slippage is not None else self.max_slippage,
         )
 
     def _lp_token_address(self) -> str:
@@ -538,7 +550,12 @@ class Curve3poolLPStrategy(IntentStrategy[Curve3poolLPConfig]):
 
         if self._has_position:
             logger.info("Generating teardown intent for Curve 3pool position (mode=%s)", mode.value)
-            intents.append(self._create_close_intent())
+
+            from almanak.framework.teardown import TeardownMode
+
+            # Widen the floor on a HARD unwind: exiting matters more than the price.
+            teardown_slippage = Decimal("0.03") if mode == TeardownMode.HARD else self.max_slippage
+            intents.append(self._create_close_intent(max_slippage=teardown_slippage))
 
         return intents
 

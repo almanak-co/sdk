@@ -5,6 +5,7 @@
     "amount_usdc": "100",
     "amount_usdt": "100",
     "min_position_usd": "100",
+    "max_slippage": "0.005",
     "force_action": "",
     "token_funding": [
         {

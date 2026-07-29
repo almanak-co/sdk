@@ -67,6 +67,8 @@ class UniswapV4HooksConfig:
     amount0: Decimal = Decimal("0.01")
     amount1: Decimal = Decimal("30")
     min_position_usd: Decimal = Decimal("100")
+    # Min-out floor for LP mint/withdraw, as a fraction (0.005 = 0.5%)
+    max_slippage: Decimal = Decimal("0.005")
     fee_hint: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -77,6 +79,7 @@ class UniswapV4HooksConfig:
             "amount0": str(self.amount0),
             "amount1": str(self.amount1),
             "min_position_usd": str(self.min_position_usd),
+            "max_slippage": str(self.max_slippage),
             "fee_hint": self.fee_hint,
         }
 
@@ -120,6 +123,9 @@ class UniswapV4HooksStrategy(IntentStrategy[UniswapV4HooksConfig]):
     - Warn when empty hookData might revert
     """
 
+    # Default so the attribute exists even when __init__ is bypassed.
+    max_slippage: Decimal = Decimal("0.005")
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
@@ -137,6 +143,7 @@ class UniswapV4HooksStrategy(IntentStrategy[UniswapV4HooksConfig]):
 
         # Minimum total inventory (USD) required to (re)open a position.
         self.min_position_usd = Decimal(str(self.get_config("min_position_usd", "100")))
+        self.max_slippage = Decimal(str(self.get_config("max_slippage", "0.005")))
 
         # -- Hook discovery --
         # Decode hook capabilities from the hook address's last 14 bits
@@ -316,6 +323,7 @@ class UniswapV4HooksStrategy(IntentStrategy[UniswapV4HooksConfig]):
             range_upper=range_upper,
             protocol="uniswap_v4",
             protocol_params=protocol_params,
+            max_slippage=self.max_slippage,
         )
 
     def _rebalance_swap_intent(
@@ -365,6 +373,7 @@ class UniswapV4HooksStrategy(IntentStrategy[UniswapV4HooksConfig]):
             collect_fees=True,
             protocol="uniswap_v4",
             protocol_params={"hook_data": hook_data},
+            max_slippage=self.max_slippage,
         )
 
     # =========================================================================
@@ -515,6 +524,12 @@ class UniswapV4HooksStrategy(IntentStrategy[UniswapV4HooksConfig]):
             f"V4 hooked teardown: closing position {self._current_position_id} (mode={mode.value})"
         )
         hook_data = self._encoder.encode(fee_hint=self.fee_hint)
+
+        from almanak.framework.teardown import TeardownMode
+
+        # Widen the floor on a HARD unwind: exiting matters more than the price.
+        teardown_slippage = Decimal("0.03") if mode == TeardownMode.HARD else self.max_slippage
+
         return [
             Intent.lp_close(
                 position_id=self._current_position_id,
@@ -522,6 +537,7 @@ class UniswapV4HooksStrategy(IntentStrategy[UniswapV4HooksConfig]):
                 collect_fees=True,
                 protocol="uniswap_v4",
                 protocol_params={"hook_data": hook_data},
+                max_slippage=teardown_slippage,
             )
         ]
 

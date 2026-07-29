@@ -23,6 +23,7 @@
     "num_bins": 11,
     "rebalance_buffer_pct": "0.5",
     "rebalance_cooldown_minutes": 30,
+    "max_slippage": "0.005",
     "anvil_funding": {
         "AVAX": 100,
         "WAVAX": 100,

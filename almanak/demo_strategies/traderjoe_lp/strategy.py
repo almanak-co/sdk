@@ -101,6 +101,8 @@ class TraderJoeLPConfig:
     # before recentering) + cooldown (minutes a fresh position must live first).
     rebalance_buffer_pct: Decimal = field(default_factory=lambda: Decimal("0.5"))
     rebalance_cooldown_minutes: int = 30
+    # Min-out floor for LP mint/withdraw, as a fraction (0.005 = 0.5%)
+    max_slippage: Decimal = field(default_factory=lambda: Decimal("0.005"))
     force_action: str = ""
     position_id: str | None = None
 
@@ -120,6 +122,8 @@ class TraderJoeLPConfig:
             self.rebalance_buffer_pct = Decimal(self.rebalance_buffer_pct)
         if isinstance(self.rebalance_cooldown_minutes, str):
             self.rebalance_cooldown_minutes = int(self.rebalance_cooldown_minutes)
+        if isinstance(self.max_slippage, str):
+            self.max_slippage = Decimal(self.max_slippage)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert config to dictionary."""
@@ -134,6 +138,7 @@ class TraderJoeLPConfig:
             "min_position_usd": str(self.min_position_usd),
             "rebalance_buffer_pct": str(self.rebalance_buffer_pct),
             "rebalance_cooldown_minutes": self.rebalance_cooldown_minutes,
+            "max_slippage": str(self.max_slippage),
             "force_action": self.force_action,
             "position_id": self.position_id,
         }
@@ -223,8 +228,9 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
     }
     """
 
-    # Default so the attribute exists even when __init__ is bypassed.
+    # Defaults so the attributes exist even when __init__ is bypassed.
     _last_seen_market_ts: datetime | None = None
+    max_slippage: Decimal = Decimal("0.005")
 
     # =========================================================================
     # INITIALIZATION
@@ -270,6 +276,7 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
 
         # Minimum total inventory (USD) required to (re)open a position.
         self.min_position_usd = Decimal(str(self.get_config("min_position_usd", "100")))
+        self.max_slippage = Decimal(str(self.get_config("max_slippage", "0.005")))
 
         # Rebalance hysteresis — prevents close->reopen->close thrash when price
         # oscillates around the band edge (a recentering LP with no hysteresis
@@ -506,6 +513,7 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
             range_lower=range_lower,
             range_upper=range_upper,
             protocol="traderjoe_v2",
+            max_slippage=self.max_slippage,
         )
 
     def _rebalance_swap_intent(
@@ -565,6 +573,7 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
             collect_fees=True,
             protocol="traderjoe_v2",
             protocol_params={"bin_ids": list(self._position_bin_ids)},
+            max_slippage=self.max_slippage,
         )
 
     # =========================================================================
@@ -880,6 +889,11 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
         if self._position_bin_ids:
             logger.info(f"Generating teardown intent for TraderJoe LP position (mode={mode.value})")
 
+            from almanak.framework.teardown import TeardownMode
+
+            # Widen the floor on a HARD unwind: exiting matters more than the price.
+            teardown_slippage = Decimal("0.03") if mode == TeardownMode.HARD else self.max_slippage
+
             intents.append(
                 Intent.lp_close(
                     position_id=self.pool,
@@ -887,6 +901,7 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
                     collect_fees=True,
                     protocol="traderjoe_v2",
                     protocol_params={"bin_ids": list(self._position_bin_ids)},
+                    max_slippage=teardown_slippage,
                 )
             )
 
