@@ -104,6 +104,24 @@ class PermissionHints:
             RPC URL.  Protocols that only use static contract addresses (e.g.
             Uniswap V3, Aave V3) should leave this False to avoid unnecessary
             RPC calls during offline discovery.
+        offline_discovery: Whether this protocol's compiler can produce complete
+            calldata with NO network reads. When True, the discovery compiler is
+            built with ``offline_discovery=True``, which stops
+            ``_get_chain_rpc_url`` from resolving an *implicit* transport (a
+            managed Anvil fork, then a free public RPC) that the caller never
+            asked for. An explicit ``rpc_url`` is still honoured.
+
+            This is what makes a manifest a pure function of the connector
+            registry rather than of RPC weather: curve LP discovery on arbitrum
+            was issuing 43 live ``eth_call``s and producing 7/3/7 targets and
+            6/2/7 selectors across three consecutive runs, because a 429 on the
+            ``is_ng`` ABI probe silently flipped which selector family got
+            authorised (VIB-6046 D5).
+
+            Opt-IN. ``False`` preserves today's behaviour exactly. Several
+            connectors (gmx_v2, pendle, traderjoe_v2, uniswap_v4 hooks) discover
+            NOTHING without the implicit fallback, so this must not be flipped
+            on globally without first giving each of them an offline path.
         synthetic_discovery_intents: The set of intent-type *strings* (e.g.
             ``"SWAP"``, ``"LP_OPEN"``, ``"SUPPLY"``) this protocol slug
             participates in for synthetic permission discovery. **Opt-OUT
@@ -152,6 +170,7 @@ class PermissionHints:
     synthetic_fee_tier: dict[str, int] = field(default_factory=dict)
     static_permissions: dict[str, list[StaticPermissionEntry]] = field(default_factory=dict)
     needs_rpc_discovery: bool = False
+    offline_discovery: bool = False
     synthetic_discovery_intents: frozenset[str] = frozenset()
     supports_native_in_swap: bool = False
 

@@ -28,7 +28,9 @@ from tests.intents.conftest import CHAIN_CONFIGS, fund_erc20_token, get_token_ba
 
 logger = logging.getLogger(__name__)
 
-pytestmark = pytest.mark.no_zodiac(reason="curve LP not in _LP_PROTOCOLS; manifest empty for curve LP")
+# VIB-6046: curve now participates in LP_OPEN/LP_CLOSE synthetic discovery, so the
+# stale ``no_zodiac`` opt-out ('manifest empty for curve LP') is removed and this
+# module runs through Safe + Roles by default.
 
 CHAIN_NAME = "ethereum"
 POOL = "tricrypto2"

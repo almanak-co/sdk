@@ -212,11 +212,25 @@ class TestCurveMetapoolConfig:
 # =============================================================================
 
 
-@pytest.mark.no_zodiac(reason="curve LP not in _LP_PROTOCOLS; manifest empty for curve LP")
 @pytest.mark.ethereum
 @pytest.mark.lp
+@pytest.mark.no_zodiac(
+    reason="VIB-6046: _acquire_3crv() hand-builds calldata instead of compiling an intent, so the "
+    "late-bound manifest has nothing recorded when its first tx runs and Roles denies it "
+    "(ConditionViolation on DAI). A harness-ordering gap, not a curve LP permission gap — the "
+    "sibling underlying-LP class compiles first and passes under Zodiac."
+)
 class TestCurveMetapoolNativeLPLifecycle:
-    """Tier A: native 2-coin metapool LP_OPEN (FRAX + 3CRV) then LP_CLOSE."""
+    """Tier A: native 2-coin metapool LP_OPEN (FRAX + 3CRV) then LP_CLOSE.
+
+    ``no_zodiac`` above is a *harness* opt-out, not a permission one: the
+    ``_acquire_3crv`` setup step sends raw calldata through the orchestrator
+    without ever calling ``IntentCompiler.compile``, so under default-on Zodiac
+    the recorder has no intents to derive a manifest from and the setup's very
+    first tx is denied before any curve LP call is attempted. Rewriting the
+    setup to compile a real 3pool ``LPOpenIntent`` would let this run under
+    Zodiac; that is a test change, tracked separately from VIB-6046.
+    """
 
     @pytest.mark.intent(IntentType.LP_OPEN, IntentType.LP_CLOSE)
     @pytest.mark.asyncio
@@ -350,7 +364,6 @@ class TestCurveMetapoolNativeLPLifecycle:
 # =============================================================================
 
 
-@pytest.mark.no_zodiac(reason="curve LP not in _LP_PROTOCOLS; manifest empty for curve LP")
 @pytest.mark.ethereum
 @pytest.mark.lp
 class TestCurveMetapoolUnderlyingLP:

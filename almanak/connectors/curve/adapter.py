@@ -589,6 +589,28 @@ class CurveConfig:
     deadline_seconds: int = 300
     rpc_url: str | None = None  # DEPRECATED — use gateway_client
     gateway_client: "GatewayClient | None" = field(default=None, repr=False, compare=False)
+    # --- Permission-discovery only. NEVER set on a funds-moving path. -------
+    # Both flags exist so an ahead-of-time Zodiac manifest can be derived
+    # OFFLINE and DETERMINISTICALLY (VIB-6046 D5). They are set from
+    # ``ctx.permission_discovery`` in ``CurveCompiler``, which is itself only
+    # true for compilers built by ``framework/permissions/discovery.py``.
+    #
+    # ``permission_discovery`` substitutes synthetic, positive slippage bounds
+    # for the on-chain quotes the fail-closed guards require. This is safe ONLY
+    # because discovery never signs or submits: it harvests ``(target,
+    # selector)`` pairs from the calldata and throws the calldata away. The
+    # guards themselves are UNCHANGED — they still refuse a non-positive
+    # bound; the substitution happens at the quote seam, upstream of them.
+    #
+    # ``force_is_ng`` pins the ABI variant instead of taking the pool's
+    # registry value, so discovery can compile the same vector under BOTH the
+    # StableSwap-NG dynamic-array ABI and the legacy fixed-size ABI. The two
+    # emit DIFFERENT 4-byte selectors, and ``_refresh_pool_info_from_chain``
+    # can override the static ``is_ng`` from a live probe at execution time —
+    # so a manifest pinned to one variant reverts *unauthorized* at
+    # ``execTransactionWithRole`` if the strategy emits the other.
+    permission_discovery: bool = False
+    force_is_ng: bool | None = None
 
     def __post_init__(self) -> None:
         """Validate configuration."""
@@ -901,6 +923,8 @@ class CurveAdapter:
         self.wallet_address = config.wallet_address
         self._rpc_url = config.rpc_url
         self._gateway_client = config.gateway_client
+        self._permission_discovery = config.permission_discovery
+        self._force_is_ng = config.force_is_ng
 
         # Load contract addresses
         self.addresses = CURVE_ADDRESSES[self.chain]
@@ -1066,15 +1090,42 @@ class CurveAdapter:
         """
         cached = self._pool_refresh_cache.get(cold_start.address.lower())
         if cached is not None:
-            return replace(
-                cached,
-                coins=list(cached.coins),
-                coin_addresses=list(cached.coin_addresses),
-                coin_decimals=list(cached.coin_decimals) if cached.coin_decimals is not None else None,
+            return self._apply_forced_is_ng(
+                replace(
+                    cached,
+                    coins=list(cached.coins),
+                    coin_addresses=list(cached.coin_addresses),
+                    coin_decimals=list(cached.coin_decimals) if cached.coin_decimals is not None else None,
+                )
             )
         if not refresh:
-            return cold_start
-        return self._refresh_pool_info_from_chain(cold_start)
+            return self._apply_forced_is_ng(cold_start)
+        return self._apply_forced_is_ng(self._refresh_pool_info_from_chain(cold_start))
+
+    def _apply_forced_is_ng(self, pool_info: PoolInfo) -> PoolInfo:
+        """Pin the ABI variant when discovery asked for a specific one.
+
+        No-op unless ``CurveConfig.force_is_ng`` was set, which only permission
+        discovery does. Applied AFTER the refresh/cache resolve so it overrides
+        both the static registry value and any live probe result — the point is
+        to compile a chosen variant, not to observe one.
+
+        **StableSwap family only.** ``is_ng`` distinguishes the StableSwap-NG
+        dynamic-array ABI from the legacy fixed-size one; CryptoSwap/Tricrypto
+        pools implement neither NG form, so forcing it there authorises a
+        selector the pool does not have and the compiler would never emit for
+        it — an over-grant, and precisely the failure class this PR exists to
+        close. Measured before this guard: 3 registered pools
+        (arbitrum/tricrypto, base/weth_cbeth, ethereum/tricrypto2) carried
+        ``0xb72df5de`` and ``0xd40ddb8c`` for nothing.
+
+        Restricting here costs no drift protection: ``_probe_is_ng``
+        fingerprints the NG ABI, so it cannot return ``True`` for a pool that
+        does not implement it.
+        """
+        if self._force_is_ng is None or self._is_cryptoswap(pool_info) or pool_info.is_ng == self._force_is_ng:
+            return pool_info
+        return replace(pool_info, is_ng=self._force_is_ng)
 
     # =========================================================================
     # Refresh-on-read: reconcile the static registry against live chain truth
@@ -1089,6 +1140,46 @@ class CurveAdapter:
         if gateway_client is not None and getattr(gateway_client, "is_connected", False):
             return True
         return bool(self._rpc_url)
+
+    # ------------------------------------------------------------------
+    # Permission-discovery synthetic quotes (VIB-6046 D5)
+    # ------------------------------------------------------------------
+    # Every fail-closed slippage guard in this adapter refuses when it cannot
+    # obtain an on-chain quote, because shipping ``min_lp=0`` / ``min_amount=0``
+    # / an unbounded ``max_burn`` on real funds is an MEV theft vector. That is
+    # correct for execution and WRONG for permission discovery, which compiles
+    # calldata solely to read its ``(target, selector)`` pairs and never signs
+    # or submits it. Before this seam existed, curve LP simply did not compile
+    # offline, so discovery reached for a public RPC and the resulting manifest
+    # became a function of rate-limit weather — three consecutive arbitrum runs
+    # produced 7/3/7 targets from identical inputs.
+    #
+    # The guards are deliberately NOT relaxed. They still refuse any
+    # non-positive bound. These helpers only supply a positive, deterministic
+    # stand-in for the quote the guards consume, and only when
+    # ``permission_discovery`` is set.
+
+    def _synthetic_quote_scale(self, notional: int, *, floor: int = 10**6) -> int:
+        """A positive, deterministic stand-in for an on-chain quote.
+
+        Scaled off the caller's own notional so the value stays in a sane
+        range for the pool's decimals, with a floor so that the downstream
+        ``* (10000 - slippage_bps) // 10000`` integer math can never round it
+        back to zero and re-trip the guard it is meant to satisfy.
+        """
+        return max(int(notional), floor)
+
+    def _discovery_min_amounts(self, pool_info: PoolInfo, lp_amount: int, length: int | None = None) -> list[int]:
+        """Synthetic per-coin proportional withdrawal vector for discovery.
+
+        Splits the burned LP evenly across the coins. The real path derives
+        this from live reserves; the split ratio is irrelevant to discovery,
+        which only reads the selector off the encoded call — but every entry
+        must be POSITIVE or ``remove_liquidity``'s all-zero guard trips.
+        """
+        n = length if length is not None else pool_info.n_coins
+        per_coin = self._synthetic_quote_scale(lp_amount // max(n, 1))
+        return [per_coin] * n
 
     def _resolve_gas(self, *, to: str, data: str, value: int, static_gas: int) -> int:
         """Live ``eth_estimateGas`` × safety buffer, clamped to a conservative static floor.
@@ -2727,6 +2818,9 @@ class CurveAdapter:
         """
         combined_len = 1 + len(pool_info.base_pool_coins or [])
         zero = [0] * combined_len
+        if self._permission_discovery:
+            # Discovery only — positive stand-in, see CurveConfig.permission_discovery.
+            return self._discovery_min_amounts(pool_info, lp_amount, length=combined_len)
         if self._gateway_client is None and not self._rpc_url:
             self._last_estimation_error = "gateway_client or rpc_url not configured"
             return zero
@@ -3311,6 +3405,11 @@ class CurveAdapter:
         instead of shipping an unprotected ``min_lp=0``.
         """
         if pool_info.pool_type in (PoolType.CRYPTOSWAP, PoolType.TRICRYPTO):
+            if self._permission_discovery:
+                # Discovery only: a positive stand-in so the fail-closed guard
+                # below is satisfied without a network read. Never reached on a
+                # funds-moving path (see CurveConfig.permission_discovery).
+                return self._synthetic_quote_scale(sum(amounts))
             if self._gateway_client is None and not self._rpc_url:
                 raise ValueError(
                     f"CryptoSwap/Tricrypto pool {pool_info.name}: cannot compute min_lp without a "
@@ -3428,6 +3527,9 @@ class CurveAdapter:
         no gateway/rpc, or if no selector yields a positive quote, it RAISES rather
         than returning 0 (never ships an unbounded/zero ``max_burn``).
         """
+        if self._permission_discovery:
+            # Discovery only — positive stand-in, see CurveConfig.permission_discovery.
+            return self._synthetic_quote_scale(sum(amounts))
         gateway_client = self._resolve_onchain_gateway_client(pool_info, "imbalanced max_burn")
 
         if pool_info.is_ng:
@@ -3471,6 +3573,12 @@ class CurveAdapter:
         ``int128`` form (3pool-era pools). Raises if any coin cannot be read so the
         caller fails closed rather than skipping the bound check.
         """
+        if self._permission_discovery:
+            # Discovery only — a reserve vector large enough that the caller's
+            # "requested more of a coin than the pool holds" bound is satisfied
+            # by the synthetic withdrawal vector. See
+            # CurveConfig.permission_discovery.
+            return [self._synthetic_quote_scale(0, floor=10**24)] * pool_info.n_coins
         gateway_client = self._resolve_onchain_gateway_client(pool_info, "pool balances")
         balances: list[int] = []
         for i in range(pool_info.n_coins):
@@ -3523,6 +3631,9 @@ class CurveAdapter:
             Returns [0, ..., 0] when on-chain estimation is unavailable.
         """
         zero_amounts = [0] * pool_info.n_coins
+        if self._permission_discovery:
+            # Discovery only — positive stand-in, see CurveConfig.permission_discovery.
+            return self._discovery_min_amounts(pool_info, lp_amount)
         if self._gateway_client is None and not self._rpc_url:
             logger.warning(
                 f"remove_liquidity: no gateway_client or rpc_url configured for {pool_info.name} -- "
@@ -3778,6 +3889,12 @@ class CurveAdapter:
         in the static config does not get a valid quote paired with a wrong-family
         remove tx that would revert on execution.
         """
+        if self._permission_discovery:
+            # Discovery only — positive stand-in, see CurveConfig.permission_discovery.
+            # ``used_cryptoswap`` follows the pool's declared family so the caller
+            # builds the matching ``remove_liquidity_one_coin`` selector, exactly as
+            # a live quote would.
+            return self._synthetic_quote_scale(lp_amount), self._is_cryptoswap(pool_info)
         if self._gateway_client is None and not self._rpc_url:
             raise ValueError(
                 f"Curve pool {pool_info.name}: cannot compute single-sided min-out without a "

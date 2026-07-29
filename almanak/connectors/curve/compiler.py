@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple
 
@@ -26,6 +27,68 @@ logger = logging.getLogger(__name__)
 # tolerance. 50 bps (0.5%) — the historical Curve LP default. Kept as a named
 # constant so the fallback is explicit at both the LP_OPEN and LP_CLOSE sites.
 _DEFAULT_LP_SLIPPAGE_BPS = 50
+
+
+def _discovery_mode(ctx: Any) -> bool:
+    """True when this compile is permission discovery, not execution.
+
+    Read defensively via ``getattr`` — the same convention aerodrome and
+    ``_fluid_core`` use — because ``BaseCompilerContext`` is duck-typed at this
+    seam and test stubs legitimately omit the field. A bare attribute access
+    turns every such stub into a compile FAILURE rather than a default.
+
+    This is the ONLY thing that may enable ``CurveConfig.permission_discovery``,
+    which substitutes synthetic slippage bounds. It is set exclusively by
+    ``framework/permissions/discovery.py``; no execution path constructs a
+    context with it true.
+    """
+    return bool(getattr(ctx, "permission_discovery", False))
+
+
+def _compile_under_both_abi_variants(
+    make_adapter: Callable[[bool], Any],
+    call: Callable[[Any], Any],
+) -> Any:
+    """Run ``call`` under BOTH curve ABI variants and merge the transactions.
+
+    Permission discovery only (VIB-6046 D5). ``PoolInfo.is_ng`` selects between
+    the StableSwap-NG dynamic-array ABI and the legacy fixed-size ABI, which are
+    DIFFERENT 4-byte selectors for ``add_liquidity``, ``remove_liquidity`` and
+    ``remove_liquidity_imbalance``.
+
+    Discovery is offline by construction, so it resolves ``is_ng`` from the
+    static ``CURVE_POOLS`` registry. At execution time, however,
+    ``_refresh_pool_info_from_chain`` probes the pool and OVERRIDES that value
+    when the live ABI fingerprint disagrees ("Curve is_ng drift ... trusting
+    live ABI fingerprint"). A manifest pinned to the static variant therefore
+    fails to authorise the selector the strategy actually emits — and it fails
+    at ``execTransactionWithRole`` with *unauthorized*, during teardown, with
+    capital already committed.
+
+    Authorising both variants is the safe resolution, and it is not a
+    meaningful over-grant: the alternate selector lands on a pool address the
+    manifest already carries, and if it were ever emitted against a pool of the
+    other family the call simply reverts on-chain.
+
+    The FIRST variant's result is authoritative for status and metadata; the
+    second contributes only transactions the first did not already produce
+    (compared by ``(to, data)``, so duplicate approves collapse). If the first
+    variant fails to compile, the second is returned in its place.
+    """
+    primary = call(make_adapter(False))
+    alternate = call(make_adapter(True))
+
+    if not getattr(primary, "success", False):
+        return alternate if getattr(alternate, "success", False) else primary
+    if not getattr(alternate, "success", False):
+        return primary
+
+    seen = {(tx.to.lower(), tx.data) for tx in primary.transactions}
+    for tx in alternate.transactions:
+        if (tx.to.lower(), tx.data) not in seen:
+            seen.add((tx.to.lower(), tx.data))
+            primary.transactions.append(tx)
+    return primary
 
 
 def _resolve_lp_slippage_bps(max_slippage: Decimal | None) -> int:
@@ -1081,14 +1144,21 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
             # Honor the intent's requested LP slippage (audit P0-7); fall back to
             # the built-in 50 bps default when the caller didn't set one.
             slippage_bps = _resolve_lp_slippage_bps(intent.max_slippage)
-            config = CurveConfig(
-                chain=ctx.chain,
-                wallet_address=ctx.wallet_address,
-                default_slippage_bps=slippage_bps,
-                rpc_url=ctx.rpc_url,
-                gateway_client=ctx.gateway_client,
-            )
-            adapter = CurveAdapter(config)
+
+            def _make_adapter(force_is_ng: bool | None) -> Any:
+                return CurveAdapter(
+                    CurveConfig(
+                        chain=ctx.chain,
+                        wallet_address=ctx.wallet_address,
+                        default_slippage_bps=slippage_bps,
+                        rpc_url=ctx.rpc_url,
+                        gateway_client=ctx.gateway_client,
+                        permission_discovery=_discovery_mode(ctx),
+                        force_is_ng=force_is_ng,
+                    )
+                )
+
+            adapter = _make_adapter(None)
 
             logger.info(
                 "Compiling Curve LP_OPEN%s: pool=%s (%s), amounts=%s",
@@ -1098,17 +1168,27 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
                 amounts,
             )
             if is_underlying_deposit:
-                liq_result = adapter.add_liquidity_underlying(
-                    pool_address=pool_address,
-                    underlying_amounts=amounts,
-                    slippage_bps=slippage_bps,
-                )
+
+                def _call(a: Any) -> Any:
+                    return a.add_liquidity_underlying(
+                        pool_address=pool_address,
+                        underlying_amounts=amounts,
+                        slippage_bps=slippage_bps,
+                    )
             else:
-                liq_result = adapter.add_liquidity(
-                    pool_address=pool_address,
-                    amounts=amounts,
-                    slippage_bps=slippage_bps,
-                )
+
+                def _call(a: Any) -> Any:
+                    return a.add_liquidity(
+                        pool_address=pool_address,
+                        amounts=amounts,
+                        slippage_bps=slippage_bps,
+                    )
+
+            if _discovery_mode(ctx):
+                # Authorise BOTH ABI variants — see _compile_under_both_abi_variants.
+                liq_result = _compile_under_both_abi_variants(_make_adapter, _call)
+            else:
+                liq_result = _call(adapter)
 
             if not liq_result.success:
                 return CompilationResult(
@@ -1134,7 +1214,7 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
             )
 
             result.action_bundle = action_bundle
-            result.transactions = transactions  # type: ignore[assignment]
+            result.transactions = transactions
             result.total_gas_estimate = total_gas
 
             logger.info(
@@ -1421,16 +1501,27 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
                 lp_amount,
             )
 
-            config = CurveConfig(
-                chain=ctx.chain,
-                wallet_address=ctx.wallet_address,
-                default_slippage_bps=slippage_bps,
-                rpc_url=ctx.rpc_url,
-                gateway_client=ctx.gateway_client,
-            )
-            adapter = CurveAdapter(config)
+            def _make_adapter(force_is_ng: bool | None) -> Any:
+                return CurveAdapter(
+                    CurveConfig(
+                        chain=ctx.chain,
+                        wallet_address=ctx.wallet_address,
+                        default_slippage_bps=slippage_bps,
+                        rpc_url=ctx.rpc_url,
+                        gateway_client=ctx.gateway_client,
+                        permission_discovery=_discovery_mode(ctx),
+                        force_is_ng=force_is_ng,
+                    )
+                )
 
-            liq_result = self._dispatch_remove_liquidity(adapter, intent, pool.address, lp_amount, slippage_bps)
+            def _call(a: Any) -> Any:
+                return self._dispatch_remove_liquidity(a, intent, pool.address, lp_amount, slippage_bps)
+
+            if _discovery_mode(ctx):
+                # Authorise BOTH ABI variants — see _compile_under_both_abi_variants.
+                liq_result = _compile_under_both_abi_variants(_make_adapter, _call)
+            else:
+                liq_result = _call(_make_adapter(None))
 
             if not liq_result.success:
                 return CompilationResult(
@@ -1470,7 +1561,7 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
             )
 
             result.action_bundle = action_bundle
-            result.transactions = transactions  # type: ignore[assignment]
+            result.transactions = transactions
             result.total_gas_estimate = total_gas
 
             logger.info(

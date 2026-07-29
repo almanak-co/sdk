@@ -40,7 +40,9 @@ from tests.intents.conftest import (
     get_token_balance,
 )
 
-pytestmark = pytest.mark.no_zodiac(reason="curve LP not in _LP_PROTOCOLS; manifest empty for curve LP")
+# VIB-6046: curve now participates in LP_OPEN/LP_CLOSE synthetic discovery, so the
+# stale ``no_zodiac`` opt-out ('manifest empty for curve LP') is removed and this
+# module runs through Safe + Roles by default.
 
 logger = logging.getLogger(__name__)
 

@@ -737,6 +737,42 @@ class IntentCompiler:
         if self.rpc_url:
             return self.rpc_url
 
+        # Permission discovery is an AHEAD-OF-TIME, deterministic operation: the
+        # manifest it produces must be a pure function of the connector registry
+        # and the compiler, never of RPC weather. The fallbacks below resolve a
+        # transport the caller never asked for — a managed Anvil fork, then a
+        # free public RPC — so a discovery run built with ``rpc_url=None`` was
+        # still issuing live ``eth_call``s (measured: 43 per curve LP discovery
+        # on arbitrum, against ``arbitrum-one-rpc.publicnode.com``). Whether
+        # those calls were served or 429'd then decided which selectors landed
+        # on the manifest: three consecutive runs produced 7/3/7 targets and
+        # 6/2/7 selectors from identical inputs (VIB-6046 D5).
+        #
+        # An EXPLICIT ``rpc_url`` is still honoured above — that is the
+        # opted-in path connectors declaring ``needs_rpc_discovery=True``
+        # (e.g. Aerodrome pool resolution) rely on. Only the implicit
+        # fallbacks are suppressed.
+        #
+        # Opt-IN per connector (``PermissionHints.offline_discovery``), NOT the
+        # default: gmx_v2, pendle, traderjoe_v2 and uniswap_v4 hooks currently
+        # discover nothing without the implicit fallback, so flipping the
+        # default would convert their existing nondeterminism into a hard
+        # failure. Same defect class, tracked separately.
+        # ``getattr(self, "_config", ...)``, not ``self._config``: this class is
+        # routinely built with ``IntentCompiler.__new__(IntentCompiler)`` — see
+        # ``tests/unit/intents/test_aerodrome_collect_fees_compiler.py`` — which
+        # skips ``__init__`` and therefore never sets ``_config``. Reaching
+        # through it directly raises ``AttributeError`` from a method whose whole
+        # job is to answer "which RPC, if any". The sibling accessors in
+        # ``_base_compiler_context_kwargs`` already guard this way.
+        if getattr(getattr(self, "_config", None), "offline_discovery", False):
+            logger.debug(
+                "Offline permission discovery for %s: no explicit rpc_url; staying offline "
+                "rather than falling back to Anvil/public RPC (manifest determinism)",
+                self.chain,
+            )
+            return None
+
         # Check if a managed Anvil fork is running for this chain.
         # managed.py sets ANVIL_{CHAIN}_PORT when it starts an Anvil fork.
         # This MUST take priority over mainnet RPC so that protocol adapters

@@ -110,10 +110,12 @@ def discover_permissions(  # noqa: C901
     targets: dict[str, _TargetAccumulator] = {}
     warnings: list[str] = []
 
-    # Cache compilers by (pool_selection_mode, fee_tier, uses_rpc) to avoid re-creating them.
+    # Cache compilers by (pool_selection_mode, fee_tier, uses_rpc, offline) to avoid
+    # re-creating them. ``offline`` is part of the key because two protocols with
+    # different transport policies must not share a compiler instance.
     # RPC is only passed to protocols that declare needs_rpc_discovery=True in their
     # PermissionHints, so other protocols are unaffected by the rpc_url parameter.
-    _compilers: dict[tuple[str, int, bool], IntentCompiler] = {}
+    _compilers: dict[tuple[str, int, bool, bool], IntentCompiler] = {}
 
     def _get_compiler(protocol: str) -> IntentCompiler:
         """Get or create a compiler configured for this protocol.
@@ -140,6 +142,12 @@ def discover_permissions(  # noqa: C901
         # addresses and don't benefit from RPC — avoid unnecessary calls.
         uses_rpc = hints.needs_rpc_discovery and rpc_url is not None
         compiler_rpc = rpc_url if uses_rpc else None
+        # Connectors that declare an offline-capable compiler additionally
+        # suppress the compiler's IMPLICIT transport fallbacks (managed Anvil,
+        # then public RPC), so their manifest cannot vary with RPC weather.
+        # Part of the cache key below: two protocols with different values must
+        # not share a compiler instance.
+        offline = hints.offline_discovery
 
         # ``permission_discovery=True`` on every compiler built here — it is
         # the behavioural flag protocol-specific LP_CLOSE bodies consult to
@@ -147,7 +155,7 @@ def discover_permissions(  # noqa: C901
         # RPC is unavailable, so every selector in the teardown flow is
         # captured even in fully-offline discovery. Orthogonal to whether
         # ``rpc_url`` was passed through to the compiler.
-        key = (mode, fee_tier, uses_rpc)
+        key = (mode, fee_tier, uses_rpc, offline)
         if key not in _compilers:
             _compilers[key] = IntentCompiler(
                 chain=chain,
@@ -157,6 +165,7 @@ def discover_permissions(  # noqa: C901
                     swap_pool_selection_mode=cast(Literal["auto", "fixed"], mode),
                     fixed_swap_fee_tier=fee_tier,
                     permission_discovery=True,
+                    offline_discovery=offline,
                 ),
             )
         return _compilers[key]

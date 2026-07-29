@@ -38,7 +38,15 @@ from tests.intents.conftest import (
     get_token_balance,
 )
 
-pytestmark = pytest.mark.no_zodiac(reason="curve LP not in _LP_PROTOCOLS; manifest empty for curve LP")
+# VIB-6046: the ``no_zodiac`` opt-out that used to sit here ("curve LP not in
+# _LP_PROTOCOLS; manifest empty for curve LP") is gone. Curve now participates in
+# LP_OPEN/LP_CLOSE synthetic discovery, so this module runs through Safe + Roles
+# by default and is the on-chain proof that the generated manifest actually
+# AUTHORISES a curve LP round-trip — not merely that it is non-empty. The
+# ZodiacOrchestrator derives its manifest from the real ``generate_manifest``
+# and dispatches each tx individually through ``execTransactionWithRole``, so a
+# missing (target, selector) surfaces as ``AuthorizationFailed`` rather than
+# being carried by the MultiSend batch bypass (VIB-6057).
 
 logger = logging.getLogger(__name__)
 

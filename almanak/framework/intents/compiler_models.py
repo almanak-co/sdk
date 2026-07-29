@@ -48,6 +48,26 @@ class IntentCompilerConfig:
             This ensures LP_CLOSE compilation produces full transaction sets
             (approve + removeLiquidity) so the permission generator can extract
             the required target addresses and function selectors.
+        offline_discovery: If True, ``_get_chain_rpc_url`` will NOT resolve an
+            implicit transport (a managed Anvil fork, then a free public RPC)
+            when no ``rpc_url`` was explicitly configured. An explicit
+            ``rpc_url`` is still honoured.
+
+            Set from ``PermissionHints.offline_discovery``, which a connector
+            opts into once its compiler can produce complete calldata with no
+            network reads. It exists because a manifest built from implicit
+            live reads is a function of RPC weather, not of the registry:
+            curve LP discovery on arbitrum was issuing 43 ``eth_call``s to a
+            public RPC and producing 7/3/7 targets across three consecutive
+            runs (VIB-6046 D5).
+
+            Opt-IN rather than default-on: several connectors (gmx_v2, pendle,
+            traderjoe_v2, uniswap_v4 hooks) currently depend on that implicit
+            fallback and discover nothing without it. Flipping the default
+            would turn their flakiness into a hard failure. They have the same
+            nondeterminism, tracked separately — see the module note in
+            ``almanak/connectors/curve/permission_hints.py``.
+
         gateway_internal_preflight: Set True ONLY when the compiler is
             constructed INSIDE the gateway process (see
             ``almanak/gateway/services/execution_service.py``). Compile-time
@@ -77,6 +97,7 @@ class IntentCompilerConfig:
     fixed_swap_fee_tier: int | None = None
     max_price_impact_pct: Decimal = Decimal("0.10")
     permission_discovery: bool = False
+    offline_discovery: bool = False
     gateway_internal_preflight: bool = False
 
     def __post_init__(self) -> None:
