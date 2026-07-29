@@ -6,7 +6,8 @@ backoff, connection pooling, and multiple subgraph endpoints.
 
 Key Features:
     - Unified client for all subgraph queries
-    - Configurable API key via THEGRAPH_API_KEY environment variable
+    - Configurable API key via THEGRAPH_API_KEY (falling back to
+      ALMANAK_GATEWAY_THEGRAPH_API_KEY — one secret feeds both planes)
     - Rate limiting integration with TokenBucketRateLimiter
     - Exponential backoff retry logic for transient failures
     - Connection pooling with aiohttp ClientSession
@@ -136,6 +137,26 @@ class SubgraphSchemaError(SubgraphQueryError):
     permanent = True
 
 
+class SubgraphAuthError(SubgraphQueryError):
+    """Raised when the subgraph endpoint rejects the request's credentials.
+
+    Auth failures are PERMANENT within a run (ALM-3070): a request that
+    carries no API key — or one the gateway rejects — answers ``auth error:
+    missing authorization header`` on every attempt, so the retry ladder can
+    only burn wall-clock. A measured 2161-tick backtest spent ~10s
+    (1.5s + 2.3s + 4.8s of backoff) per pool-day lookup on a hopeless direct
+    query before its caller degraded to the gateway pool-history ladder,
+    which answers the same question in under 2 ms.
+
+    Subclasses :class:`SubgraphQueryError` so existing callers (e.g.
+    ``LiquidityDepthProvider``) keep degrading through their documented
+    fallback path without a catch-clause change.
+    """
+
+    #: Read by TokenBucketRateLimiter.retry_with_backoff: never retried.
+    permanent = True
+
+
 # GraphQL error-message markers that indicate a schema mismatch rather than a
 # transient failure (The Graph phrases vary by graph-node version).
 _SCHEMA_ERROR_MARKERS = ("has no field", "cannot query field", "unknown field", "unknown argument")
@@ -144,6 +165,53 @@ _SCHEMA_ERROR_MARKERS = ("has no field", "cannot query field", "unknown field", 
 # ladder (seconds): a deployment with no allocations or indexers that are
 # hours behind stays that way.
 _UNAVAILABLE_ERROR_MARKERS = ("no allocations", "bad indexers", "subgraph not found")
+
+# Credential-rejection markers (ALM-3070). Covers what The Graph's gateway
+# answers a keyless / bad-key request with, plus the "key is not configured"
+# detail the Almanak gateway's TheGraphQuery RPC surfaces when
+# ALMANAK_GATEWAY_THEGRAPH_API_KEY is missing — both arrive through the same
+# GraphQL ``errors`` payload and neither can succeed on retry.
+_AUTH_ERROR_MARKERS = (
+    "auth error",
+    "missing authorization header",
+    "invalid authorization header",
+    "unauthorized",
+    "invalid api key",
+    "api key not found",
+    "payment required",
+    "api_key is not configured",
+    "api key is not configured",
+)
+
+# HTTP statuses that mean "your credentials are the problem": 401
+# Unauthorized, 402 Payment Required (The Graph bills query volume against
+# the key), 403 Forbidden. None of them recover inside a retry ladder.
+_AUTH_HTTP_STATUSES = frozenset({401, 402, 403})
+
+# Warn-once latch for the keyless-skip diagnostic. Module scope, not
+# instance scope, so a run that builds several SubgraphClients (liquidity
+# depth, DEX volume, lending APY each own one) emits ONE warning rather
+# than one per client — and never one per pool-day lookup, which is the
+# storm ALM-3070 measured. Tests reset it via monkeypatch.
+_MISSING_API_KEY_WARNED = False
+
+_MISSING_API_KEY_MESSAGE = (
+    "No TheGraph API key configured (THEGRAPH_API_KEY, or "
+    "ALMANAK_GATEWAY_THEGRAPH_API_KEY as a fallback) — skipping direct subgraph "
+    "queries for this run: they can only answer 'auth error: missing "
+    "authorization header'. Callers degrade to their fallback data sources "
+    "(e.g. the gateway pool-history ladder). Set the key to enable the direct "
+    "subgraph lane."
+)
+
+
+def _warn_missing_api_key_once() -> None:
+    """Emit the missing-key diagnostic at most once per process."""
+    global _MISSING_API_KEY_WARNED
+    if _MISSING_API_KEY_WARNED:
+        return
+    _MISSING_API_KEY_WARNED = True
+    logger.warning(_MISSING_API_KEY_MESSAGE)
 
 
 class SubgraphConnectionError(SubgraphClientError):
@@ -462,7 +530,8 @@ class SubgraphClientConfig:
     """Configuration for SubgraphClient.
 
     Attributes:
-        api_key: The Graph API key (defaults to THEGRAPH_API_KEY env var)
+        api_key: The Graph API key (defaults to THEGRAPH_API_KEY, falling
+                 back to ALMANAK_GATEWAY_THEGRAPH_API_KEY)
         requests_per_minute: Rate limit for requests (default: 100)
         timeout_seconds: HTTP request timeout (default: 30)
         max_retries: Maximum retry attempts for failed requests (default: 3)
@@ -484,6 +553,13 @@ class SubgraphClientConfig:
         the config factory reads the same env var and exposes it as
         ``BacktestConfig.thegraph_api_key`` (``None`` when unset, the
         same shape this dataclass expects).
+
+        ALM-3070: that factory now falls back to
+        ``ALMANAK_GATEWAY_THEGRAPH_API_KEY`` when ``THEGRAPH_API_KEY`` is
+        unset, so one provisioned secret feeds both the gateway's
+        pool-history ladder and this engine-side client. An explicit
+        ``api_key`` argument still wins over both — this branch only runs
+        when the caller passed ``None``.
         """
         if self.api_key is None:
             self.api_key = backtest_config_from_env().thegraph_api_key
@@ -573,8 +649,9 @@ class SubgraphClient:
         """Initialize the SubgraphClient.
 
         Args:
-            config: Client configuration. If None, uses defaults with
-                    THEGRAPH_API_KEY from environment.
+            config: Client configuration. If None, uses defaults with the
+                    API key resolved from THEGRAPH_API_KEY (falling back to
+                    ALMANAK_GATEWAY_THEGRAPH_API_KEY).
             rate_limiter: Optional rate limiter. If None, creates one
                           based on config.requests_per_minute.
             use_gateway: Route queries through the gateway's TheGraphQuery
@@ -686,6 +763,8 @@ class SubgraphClient:
 
         Raises:
             SubgraphRateLimitError: If rate limit is exceeded
+            SubgraphAuthError: If no API key is configured, or the endpoint
+                rejects the credentials (permanent — never retried)
             SubgraphQueryError: If query returns errors
             SubgraphConnectionError: If connection fails
         """
@@ -693,6 +772,17 @@ class SubgraphClient:
             served = await self._gateway_transport.query_payload(subgraph_id, query, variables)
             if served is not None:
                 return self._finish_graphql_payload(served, query)
+
+        # ALM-3070: the direct lane authenticates with a bearer token. Without
+        # one the request is already decided — don't spend a round-trip (or a
+        # retry ladder) proving it. Raising keeps the failure loud for the
+        # caller's own degradation bookkeeping; only the logging is quietened.
+        if not self._config.api_key:
+            _warn_missing_api_key_once()
+            raise SubgraphAuthError(
+                "No TheGraph API key configured; direct subgraph query skipped (permanent, not retried)",
+                query=query,
+            )
 
         session = await self._get_session()
         url = self._build_url(subgraph_id)
@@ -733,6 +823,13 @@ class SubgraphClient:
                         subgraph_id[:20] + "...",
                         error_text[:500],
                     )
+                    if response.status in _AUTH_HTTP_STATUSES:
+                        # Credentials, not weather — retrying sends the same
+                        # rejected token again (ALM-3070).
+                        raise SubgraphAuthError(
+                            f"HTTP {response.status} (auth, permanent, not retried): {error_text}",
+                            query=query,
+                        )
                     raise SubgraphQueryError(
                         f"HTTP {response.status}: {error_text}",
                         query=query,
@@ -756,9 +853,10 @@ class SubgraphClient:
         Single error-classification point: gateway-served payloads carry the
         same ``{"data": ..., "errors": [...]}`` shape as the direct HTTP
         body, so error semantics cannot drift between transports. The schema /
-        unavailability classification (ALM-2939) lives HERE — inside the shared
-        method extracted by #3302 — so both the direct-HTTP and gateway-served
-        paths fail permanent errors fast instead of burning the retry ladder.
+        unavailability classification (ALM-2939) and the auth classification
+        (ALM-3070) live HERE — inside the shared method extracted by #3302 —
+        so both the direct-HTTP and gateway-served paths fail permanent errors
+        fast instead of burning the retry ladder.
         """
         if "errors" in data and data["errors"]:
             error_msgs = [e.get("message", str(e)) for e in data["errors"]]
@@ -768,6 +866,14 @@ class SubgraphClient:
                 joined,
             )
             lowered = joined.lower()
+            if any(marker in lowered for marker in _AUTH_ERROR_MARKERS):
+                # Credential rejection is PERMANENT for the run — the next
+                # attempt sends the same (missing or bad) token (ALM-3070).
+                raise SubgraphAuthError(
+                    f"Subgraph auth failure (permanent, not retried): {joined}",
+                    query=query,
+                    errors=data["errors"],
+                )
             if any(marker in lowered for marker in _SCHEMA_ERROR_MARKERS):
                 # Schema mismatch is PERMANENT for a (query, deployment) pair —
                 # retrying can never succeed; fail fast, callers degrade.
@@ -813,6 +919,9 @@ class SubgraphClient:
 
         Raises:
             SubgraphRateLimitError: If rate limit exceeded after retries
+            SubgraphAuthError: If the client is unauthenticated with no
+                gateway transport to fall back on, or the endpoint rejects
+                the credentials. Never retried (ALM-3070).
             SubgraphQueryError: If query fails after retries
             SubgraphConnectionError: If connection fails after retries
 
@@ -831,6 +940,22 @@ class SubgraphClient:
             )
         """
         self._stats.total_queries += 1
+
+        # ALM-3070: with no *live* gateway transport AND no API key there is
+        # no leg that could serve this query. Short-circuit ahead of
+        # retry_with_backoff so the caller pays neither a rate-limiter token
+        # (which throttles to requests_per_minute once the burst drains) nor
+        # a backoff ladder for a foregone conclusion. The gateway's death is
+        # sticky, so once it retires mid-run every later lookup lands here.
+        gateway_can_serve = self._gateway_transport is not None and not self._gateway_transport.is_dead
+        if not gateway_can_serve and not self._config.api_key:
+            _warn_missing_api_key_once()
+            self._stats.failed_queries += 1
+            raise SubgraphAuthError(
+                "No TheGraph API key configured and no gateway transport available; "
+                "direct subgraph query skipped (permanent, not retried)",
+                query=query,
+            )
 
         async def execute_with_rate_limit() -> dict[str, Any]:
             return await self._execute_query(subgraph_id, query, variables)
@@ -1000,7 +1125,8 @@ def create_subgraph_client(
 
     Args:
         requests_per_minute: Rate limit for requests (default: 100)
-        api_key: The Graph API key (defaults to THEGRAPH_API_KEY env var)
+        api_key: The Graph API key (defaults to THEGRAPH_API_KEY, falling
+                 back to ALMANAK_GATEWAY_THEGRAPH_API_KEY)
 
     Returns:
         Configured SubgraphClient instance
@@ -1023,6 +1149,8 @@ __all__ = [
     "SubgraphClientError",
     "SubgraphRateLimitError",
     "SubgraphQueryError",
+    "SubgraphAuthError",
+    "SubgraphSchemaError",
     "SubgraphConnectionError",
     "QueryStats",
     "create_subgraph_client",

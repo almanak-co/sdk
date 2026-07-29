@@ -42,6 +42,7 @@ from ...exceptions import NoAcceptableDataSourceError
 from ..types import DataConfidence, DataSourceInfo, LiquidityResult
 from .base import HistoricalLiquidityProvider
 from .subgraph_client import (
+    SubgraphAuthError,
     SubgraphClient,
     SubgraphClientConfig,
     SubgraphQueryError,
@@ -49,6 +50,21 @@ from .subgraph_client import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _lane_failure_log_level(exc: Exception) -> int:
+    """Log level for a subgraph-family lookup that failed (ALM-3070).
+
+    A missing or rejected TheGraph API key is a run-level *configuration*
+    fact, not a per-pool-day event: ``SubgraphClient`` already states it
+    once per run, and every subsequent lookup fails identically. Repeating
+    it at WARNING for each of a 2161-tick run's pool-days was the log storm
+    measured in ALM-3070, and it buries the genuine failures.
+
+    Everything else keeps WARNING — a real transport, schema, or query
+    failure must stay loud so a degraded lane is never silent.
+    """
+    return logging.DEBUG if isinstance(exc, SubgraphAuthError) else logging.WARNING
 
 
 # =============================================================================
@@ -613,7 +629,8 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
             )
 
         except (SubgraphRateLimitError, SubgraphQueryError) as e:
-            logger.warning(
+            logger.log(
+                _lane_failure_log_level(e),
                 "V3 subgraph error: protocol=%s, chain=%s, pool=%s...: %s",
                 protocol_id,
                 chain,
@@ -708,7 +725,8 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
             )
 
         except (SubgraphRateLimitError, SubgraphQueryError) as e:
-            logger.warning(
+            logger.log(
+                _lane_failure_log_level(e),
                 "V2 subgraph error: protocol=%s, chain=%s, pool=%s...: %s",
                 protocol_id,
                 chain,
@@ -785,7 +803,8 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
             # query_with_pagination) MUST propagate — a broad `except Exception`
             # here silently broke the fail-loud pagination guarantee for the
             # messari family (curve, sushiswap_v3) (CodeRabbit #3271).
-            logger.warning(
+            logger.log(
+                _lane_failure_log_level(e),
                 "Messari-standard liquidity query failed: protocol=%s, chain=%s, pool=%s..., error=%s",
                 protocol_id,
                 chain,
@@ -880,7 +899,8 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
             )
 
         except (SubgraphRateLimitError, SubgraphQueryError) as e:
-            logger.warning(
+            logger.log(
+                _lane_failure_log_level(e),
                 "LB subgraph error: protocol=%s, chain=%s, pool=%s...: %s",
                 protocol_id,
                 chain,
@@ -989,7 +1009,8 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
             )
 
         except (SubgraphRateLimitError, SubgraphQueryError) as e:
-            logger.warning(
+            logger.log(
+                _lane_failure_log_level(e),
                 "Balancer subgraph error: chain=%s, pool=%s...: %s",
                 chain,
                 pool_address_lower[:10],
@@ -1083,7 +1104,8 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
             )
 
         except (SubgraphRateLimitError, SubgraphQueryError) as e:
-            logger.warning(
+            logger.log(
+                _lane_failure_log_level(e),
                 "Curve subgraph error: chain=%s, pool=%s...: %s",
                 chain,
                 pool_address_lower[:10],

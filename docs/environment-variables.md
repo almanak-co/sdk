@@ -82,7 +82,23 @@ Set these based on which protocols and features your strategy uses.
 | `COINGECKO_API_KEY` | CoinGecko API key for market prices. Also required for CoinGecko Onchain pool/OHLCV data when running a local gateway. | [coingecko.com/en/api](https://www.coingecko.com/en/api) |
 | `ALMANAK_API_KEY` | Almanak platform authentication | [app.almanak.co](https://app.almanak.co/) |
 | `ALMANAK_DASHBOARD_API_KEY` | API key used by the operator dashboard when calling non-gateway REST endpoints (pause/resume go through gateway; `bump-gas` / `cancel-tx` still use REST). Must match a key listed in `ALMANAK_API_KEYS` on the API server. | `dash_abc123...` |
-| `THEGRAPH_API_KEY` | Backtesting with subgraph data (DEX volumes, lending APYs) | [thegraph.com/studio](https://thegraph.com/studio/) |
+| `THEGRAPH_API_KEY` | Backtesting with subgraph data (DEX volumes, lending APYs, liquidity depth) | [thegraph.com/studio](https://thegraph.com/studio/) |
+
+!!! note "One TheGraph key, two consumers"
+    The backtest data plane reads TheGraph from two places: the gateway's
+    pool-history ladder (`ALMANAK_GATEWAY_THEGRAPH_API_KEY`) and the engine-side
+    subgraph client (`THEGRAPH_API_KEY`). The engine-side client now falls back to
+    `ALMANAK_GATEWAY_THEGRAPH_API_KEY` when `THEGRAPH_API_KEY` is unset, so
+    **provisioning either name is enough** — set `THEGRAPH_API_KEY` only when the
+    engine-side lane needs a *different* key from the gateway's (it takes
+    precedence).
+
+    With no key under either name, the engine-side client skips the direct
+    subgraph lane entirely (an unauthenticated request can only answer `auth
+    error: missing authorization header`), logs one warning per run, and callers
+    degrade to the gateway pool-history ladder. Expect lower-confidence liquidity
+    and volume inputs, and — if the gateway is also keyless — pool-days that do
+    not serve at all.
 
 ### Agentic CLI (`almanak ax -n`)
 
@@ -435,5 +451,9 @@ For deployed or sidecar gateway environments, set
 `ALMANAK_GATEWAY_COINGECKO_API_KEY`. CoinGecko Onchain DEX endpoints require a
 valid Pro API key via the gateway; without it, pool analytics, pool history, and
 DEX-native OHLCV fallbacks fail fast with an explicit key error.
+
+Same for TheGraph: set `ALMANAK_GATEWAY_THEGRAPH_API_KEY` on the gateway. The
+engine-side subgraph client falls back to that name, so one secret covers both
+planes — see the note under [Optional API Keys](#optional-api-keys).
 
 All other gateway and framework settings have sensible defaults and do not need to be set. See [`.env.example`](https://github.com/almanak-co/almanak-sdk/blob/main/.env.example) for the full list of advanced options.

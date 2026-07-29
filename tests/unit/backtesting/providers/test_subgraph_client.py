@@ -12,6 +12,7 @@ covering:
 """
 
 import asyncio
+import logging
 from datetime import datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -20,6 +21,7 @@ import aiohttp
 import pytest
 
 from almanak.framework.backtesting.exceptions import NoAcceptableDataSourceError
+from almanak.framework.backtesting.pnl.providers import subgraph_client as subgraph_client_module
 from almanak.framework.backtesting.pnl.providers.rate_limiter import (
     TokenBucketRateLimiter,
 )
@@ -30,6 +32,7 @@ from almanak.framework.backtesting.pnl.providers.subgraph_client import (
     THE_GRAPH_MAX_SKIP,
     THEGRAPH_GATEWAY_URL,
     QueryStats,
+    SubgraphAuthError,
     SubgraphClient,
     SubgraphClientConfig,
     SubgraphClientError,
@@ -39,6 +42,29 @@ from almanak.framework.backtesting.pnl.providers.subgraph_client import (
     create_subgraph_client,
     paginate_subgraph_query,
 )
+
+
+@pytest.fixture(autouse=True)
+def _authenticated_by_default(monkeypatch):
+    """Give every test a configured API key unless it opts out.
+
+    Since ALM-3070 an unauthenticated ``SubgraphClient`` short-circuits the
+    direct-HTTP lane instead of sending a request that can only answer
+    ``auth error: missing authorization header``. Almost every test below
+    mocks that HTTP lane to simulate an *authenticated* exchange, so the key
+    is the honest baseline for them.
+
+    Tests that exercise the keyless path (``TestUnauthenticatedFastFail``,
+    the header/config tests) opt out by calling ``monkeypatch.delenv`` in the
+    test body — that runs after this fixture, so it wins.
+
+    ``ALMANAK_GATEWAY_THEGRAPH_API_KEY`` is scrubbed rather than set: the
+    resolver falls back to it (ALM-3070), so a developer's exported gateway
+    key would otherwise silently re-authenticate the opt-out tests.
+    """
+    monkeypatch.delenv("ALMANAK_GATEWAY_THEGRAPH_API_KEY", raising=False)
+    monkeypatch.setenv("THEGRAPH_API_KEY", "test-api-key")
+
 
 # =============================================================================
 # Test SubgraphClientConfig
@@ -1419,3 +1445,224 @@ class TestSchemaErrorFastFail:
         with pytest.raises(SubgraphQueryError):
             await limiter.retry_with_backoff(boom, max_retries=2, base_delay_seconds=0.01)
         assert boom.await_count == 3  # initial + 2 retries
+
+
+# =============================================================================
+# ALM-3070: unauthenticated requests are hopeless, not transient
+# =============================================================================
+
+
+class TestAuthErrorClassification:
+    """An auth failure is permanent for the run — never retried."""
+
+    @pytest.mark.asyncio
+    async def test_auth_error_is_not_retried(self):
+        limiter = TokenBucketRateLimiter(requests_per_minute=6000)
+        boom = AsyncMock(side_effect=SubgraphAuthError("auth error: missing authorization header"))
+        with pytest.raises(SubgraphAuthError):
+            await limiter.retry_with_backoff(boom, max_retries=4)
+        assert boom.await_count == 1  # no retries on a permanent error
+
+    def test_auth_error_is_a_query_error(self):
+        """Existing callers catch SubgraphQueryError; they must keep degrading."""
+        assert issubclass(SubgraphAuthError, SubgraphQueryError)
+        assert SubgraphAuthError("x").permanent is True
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            # The Graph's decentralized gateway, keyless request.
+            "auth error: missing authorization header",
+            # The Graph, bad/unknown key.
+            "auth error: invalid api key",
+            # Almanak gateway's TheGraphQuery RPC with no key provisioned.
+            "ALMANAK_GATEWAY_THEGRAPH_API_KEY is not configured",
+            # Gateway DEX-volume lane, same cause, different phrasing.
+            "gateway thegraph_api_key is not configured",
+            # Key out of query credits — hopeless inside a retry ladder.
+            "payment required",
+        ],
+    )
+    def test_graphql_auth_payload_classified_permanent(self, message):
+        client = SubgraphClient(config=SubgraphClientConfig(api_key="k"), use_gateway=False)
+        with pytest.raises(SubgraphAuthError) as exc_info:
+            client._finish_graphql_payload({"errors": [{"message": message}]}, "query { pools { id } }")
+        assert exc_info.value.permanent is True
+
+    def test_non_auth_graphql_error_stays_retryable(self):
+        """Fail-loud: a real backend failure must keep its retry ladder."""
+        client = SubgraphClient(config=SubgraphClientConfig(api_key="k"), use_gateway=False)
+        with pytest.raises(SubgraphQueryError) as exc_info:
+            client._finish_graphql_payload({"errors": [{"message": "store error: connection reset"}]}, "query {}")
+        assert not isinstance(exc_info.value, SubgraphAuthError)
+        assert getattr(exc_info.value, "permanent", False) is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", [401, 402, 403])
+    async def test_auth_http_status_is_permanent(self, status):
+        client = SubgraphClient(config=SubgraphClientConfig(api_key="stale-key"), use_gateway=False)
+
+        mock_response = AsyncMock()
+        mock_response.status = status
+        mock_response.text = AsyncMock(return_value="auth error")
+        mock_context = MagicMock()
+        mock_context.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_context.__aexit__ = AsyncMock(return_value=None)
+        mock_session = MagicMock()
+        mock_session.post = MagicMock(return_value=mock_context)
+
+        with patch.object(client, "_get_session", return_value=mock_session):
+            with pytest.raises(SubgraphAuthError):
+                await client.query(subgraph_id="test", query="{ pools { id } }")
+
+        # One attempt, not four: the retry ladder never ran.
+        assert mock_session.post.call_count == 1
+        await client.close()
+
+    @pytest.mark.asyncio
+    async def test_server_error_still_retries(self):
+        """HTTP 500 is weather, not credentials — the ladder must still run."""
+        client = SubgraphClient(
+            config=SubgraphClientConfig(api_key="k", max_retries=2),
+            use_gateway=False,
+        )
+        client._rate_limiter = TokenBucketRateLimiter(requests_per_minute=6000)
+
+        mock_response = AsyncMock()
+        mock_response.status = 500
+        mock_response.text = AsyncMock(return_value="internal error")
+        mock_context = MagicMock()
+        mock_context.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_context.__aexit__ = AsyncMock(return_value=None)
+        mock_session = MagicMock()
+        mock_session.post = MagicMock(return_value=mock_context)
+
+        with patch.object(client, "_get_session", return_value=mock_session):
+            with pytest.raises(SubgraphQueryError):
+                await client.query(subgraph_id="test", query="{ pools { id } }")
+
+        assert mock_session.post.call_count == 3  # initial + 2 retries
+        await client.close()
+
+
+class TestUnauthenticatedFastFail:
+    """A keyless client skips the direct query and warns once per run."""
+
+    @pytest.fixture(autouse=True)
+    def _keyless(self, monkeypatch):
+        monkeypatch.delenv("THEGRAPH_API_KEY", raising=False)
+        monkeypatch.delenv("ALMANAK_GATEWAY_THEGRAPH_API_KEY", raising=False)
+        monkeypatch.setattr(subgraph_client_module, "_MISSING_API_KEY_WARNED", False)
+
+    @pytest.mark.asyncio
+    async def test_keyless_query_never_touches_http(self):
+        client = SubgraphClient(use_gateway=False)
+        assert client.config.api_key is None
+
+        never = AsyncMock(side_effect=AssertionError("direct HTTP must not be attempted without a key"))
+        with patch.object(client, "_get_session", never):
+            with pytest.raises(SubgraphAuthError):
+                await client.query(subgraph_id="test", query="{ pools { id } }")
+        assert never.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_keyless_query_pays_no_rate_limit_token(self):
+        """The short-circuit runs ahead of retry_with_backoff's acquire().
+
+        Paying a token would re-throttle the caller to requests_per_minute
+        once the burst drains — the stall ALM-3070 measured (~8 calls/min).
+        """
+        client = SubgraphClient(use_gateway=False)
+        with pytest.raises(SubgraphAuthError):
+            await client.query(subgraph_id="test", query="{ pools { id } }")
+        assert client.rate_limiter.get_stats().total_requests == 0
+        assert client.get_stats().failed_queries == 1
+
+    @pytest.mark.asyncio
+    async def test_gateway_leg_still_attempted_exactly_once(self):
+        """A configured gateway keeps its turn; only the keyless retry ladder goes."""
+        transport = MagicMock()
+        transport.is_dead = False  # live gateway leg
+        transport.query_payload = AsyncMock(return_value=None)  # gateway could not serve
+        client = SubgraphClient(use_gateway=False)
+        client._gateway_transport = transport
+
+        never = AsyncMock(side_effect=AssertionError("direct HTTP must not be attempted without a key"))
+        with patch.object(client, "_get_session", never):
+            with pytest.raises(SubgraphAuthError):
+                await client.query(subgraph_id="test", query="{ pools { id } }")
+
+        assert transport.query_payload.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_gateway_served_payload_still_returned(self):
+        """The skip must not shadow a gateway that CAN serve the query."""
+        transport = MagicMock()
+        transport.is_dead = False  # live gateway leg
+        transport.query_payload = AsyncMock(return_value={"data": {"pools": [{"id": "0x1"}]}})
+        client = SubgraphClient(use_gateway=False)
+        client._gateway_transport = transport
+
+        result = await client.query(subgraph_id="test", query="{ pools { id } }")
+        assert result == {"pools": [{"id": "0x1"}]}
+
+    @pytest.mark.asyncio
+    async def test_missing_key_warns_once_per_run_not_per_lookup(self, caplog):
+        caplog.set_level(logging.WARNING, logger=subgraph_client_module.__name__)
+
+        # Three clients (liquidity depth, DEX volume, lending APY each own
+        # one) x five pool-day lookups each.
+        for _ in range(3):
+            client = SubgraphClient(use_gateway=False)
+            for _ in range(5):
+                with pytest.raises(SubgraphAuthError):
+                    await client.query(subgraph_id="test", query="{ pools { id } }")
+
+        warnings = [r for r in caplog.records if "No TheGraph API key configured" in r.getMessage()]
+        assert len(warnings) == 1
+
+
+
+    @pytest.mark.asyncio
+    async def test_retired_gateway_stops_costing_rate_limit_tokens(self):
+        """Once the gateway retires itself, later lookups cost nothing.
+
+        Gateway death is sticky, so without this the keyless client would
+        still pay one token per pool-day — re-throttling the run to
+        requests_per_minute instead of stalling it on backoff.
+        """
+        transport = MagicMock()
+        transport.is_dead = False
+        transport.query_payload = AsyncMock(return_value=None)
+        client = SubgraphClient(use_gateway=False)
+        client._gateway_transport = transport
+
+        never = AsyncMock(side_effect=AssertionError("direct HTTP must not be attempted without a key"))
+        with patch.object(client, "_get_session", never):
+            with pytest.raises(SubgraphAuthError):
+                await client.query(subgraph_id="test", query="{ pools { id } }")
+            assert client.rate_limiter.get_stats().total_requests == 1
+
+            transport.is_dead = True  # channel-level failure retired it
+            for _ in range(5):
+                with pytest.raises(SubgraphAuthError):
+                    await client.query(subgraph_id="test", query="{ pools { id } }")
+
+        # Still 1: the five post-retirement lookups never reached the limiter.
+        assert client.rate_limiter.get_stats().total_requests == 1
+        assert transport.query_payload.await_count == 1
+
+class TestLiquidityLaneLogLevel:
+    """The caller's per-lookup log must not re-create the storm."""
+
+    def test_auth_failure_logs_at_debug(self):
+        from almanak.framework.backtesting.pnl.providers.liquidity_depth import _lane_failure_log_level
+
+        assert _lane_failure_log_level(SubgraphAuthError("auth error")) == logging.DEBUG
+
+    def test_real_failures_stay_loud(self):
+        from almanak.framework.backtesting.pnl.providers.liquidity_depth import _lane_failure_log_level
+
+        assert _lane_failure_log_level(SubgraphQueryError("store error")) == logging.WARNING
+        assert _lane_failure_log_level(SubgraphRateLimitError()) == logging.WARNING
+        assert _lane_failure_log_level(SubgraphConnectionError("boom")) == logging.WARNING

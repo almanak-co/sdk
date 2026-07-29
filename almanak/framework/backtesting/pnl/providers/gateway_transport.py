@@ -106,6 +106,16 @@ class GatewayTransportBase:
             return None, None
         return response, None
 
+    @property
+    def is_dead(self) -> bool:
+        """True once a channel-level failure retired this transport for the run.
+
+        Sticky by design: callers can ask whether the gateway leg is still a
+        candidate before paying for it (e.g. a keyless ``SubgraphClient``
+        skipping its rate limiter when neither leg can serve — ALM-3070).
+        """
+        return self._dead
+
     def _mark_dead(self, reason: str) -> None:
         self._dead = True
         self._handles = None

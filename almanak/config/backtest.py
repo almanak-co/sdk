@@ -171,11 +171,18 @@ class BacktestConfig(BaseModel):
     """
 
     thegraph_api_key: str | None = Field(default=None, repr=False)
-    """The Graph decentralized-network API key (``THEGRAPH_API_KEY``).
+    """The Graph decentralized-network API key.
+
+    Resolved from ``THEGRAPH_API_KEY``, falling back to
+    ``ALMANAK_GATEWAY_THEGRAPH_API_KEY`` (ALM-3070) — see
+    :func:`_resolve_thegraph_api_key` for the precedence rule.
 
     Optional — when set, ``SubgraphClientConfig`` adds the key to the
     Authorization header for every subgraph query. When unset, the
-    client targets the anonymous public tier (lower rate limits).
+    engine-side client skips the direct subgraph lane entirely (an
+    unauthenticated request can only answer ``auth error: missing
+    authorization header``) and callers degrade to their fallback data
+    sources, e.g. the gateway pool-history ladder.
     """
 
     alchemy_api_key: str | None = Field(default=None, repr=False)
@@ -347,6 +354,44 @@ def _resolve_ssl_cert_file() -> str | None:
 
 
 # =============================================================================
+# TheGraph key resolution — one secret, two consumers
+# =============================================================================
+
+
+# Env names for the TheGraph key, highest precedence first. The data plane
+# has two consumers that historically read different names (ALM-3070): the
+# gateway's pool-history ladder reads the prefixed
+# ``ALMANAK_GATEWAY_THEGRAPH_API_KEY`` (pydantic-settings' gateway prefix),
+# while this engine-side cluster reads the bare ``THEGRAPH_API_KEY``.
+# Provisioning only one of them left the other plane unauthenticated —
+# measured cost: a 3-month backtest either stalled on hopeless retries or
+# ran with ~70 of 90 pool-days unserved. Reading the ladder here means one
+# provisioned secret satisfies both planes.
+_THEGRAPH_API_KEY_ENV_VARS: tuple[str, ...] = (
+    "THEGRAPH_API_KEY",
+    "ALMANAK_GATEWAY_THEGRAPH_API_KEY",
+)
+
+
+def _resolve_thegraph_api_key() -> str | None:
+    """Resolve the TheGraph API key from the env ladder; ``None`` if unset.
+
+    Precedence: the explicit engine-side ``THEGRAPH_API_KEY`` wins, then the
+    gateway-provisioned ``ALMANAK_GATEWAY_THEGRAPH_API_KEY``. An operator who
+    deliberately sets a *different* key for the engine-side lane keeps it.
+
+    Empty strings are treated as unset at every rung, matching the
+    ``os.environ.get("X") or None`` guard the other secrets in this factory
+    use — an empty-string secret would otherwise produce an
+    ``Authorization: Bearer `` header that fails auth on every request.
+    """
+    for env_var in _THEGRAPH_API_KEY_ENV_VARS:
+        if value := os.environ.get(env_var):
+            return value
+    return None
+
+
+# =============================================================================
 # Public factory — single env-reading entry point for backtest config
 # =============================================================================
 
@@ -366,8 +411,11 @@ def backtest_config_from_env(
     * ``COINGECKO_API_KEY`` → ``coingecko_api_key`` (consumed by
       ``CoinGeckoDataProvider``, the benchmark helpers, and the
       crisis-runner date-range guard).
-    * ``THEGRAPH_API_KEY`` → ``thegraph_api_key`` (consumed by
-      ``SubgraphClientConfig``).
+    * ``THEGRAPH_API_KEY``, else ``ALMANAK_GATEWAY_THEGRAPH_API_KEY`` →
+      ``thegraph_api_key`` (consumed by ``SubgraphClientConfig``). See
+      :func:`_resolve_thegraph_api_key` — the two-rung ladder means one
+      provisioned secret feeds both the gateway and engine-side planes
+      (ALM-3070).
     * ``ARCHIVE_RPC_URL_<CHAIN>`` → ``archive_rpc_urls[chain]``
       (consumed by Chainlink, TWAP, gas, and aggregated providers).
       Empty values are *not* stored — the dict carries only chains
@@ -411,7 +459,7 @@ def backtest_config_from_env(
 
     kwargs: dict[str, Any] = {
         "coingecko_api_key": os.environ.get("COINGECKO_API_KEY") or None,
-        "thegraph_api_key": os.environ.get("THEGRAPH_API_KEY") or None,
+        "thegraph_api_key": _resolve_thegraph_api_key(),
         "alchemy_api_key": os.environ.get("ALCHEMY_API_KEY") or None,
         "gateway_host": os.environ.get("ALMANAK_GATEWAY_HOST") or None,
         "archive_rpc_urls": archive_rpc_urls,

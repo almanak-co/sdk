@@ -40,6 +40,8 @@ from almanak.config.backtest import (
 _BACKTEST_ENV_VARS: tuple[str, ...] = (
     "COINGECKO_API_KEY",
     "THEGRAPH_API_KEY",
+    # ALM-3070: second rung of the TheGraph key ladder.
+    "ALMANAK_GATEWAY_THEGRAPH_API_KEY",
     # ARCHIVE_RPC_URL_<CHAIN> cluster.
     "ARCHIVE_RPC_URL_ETHEREUM",
     "ARCHIVE_RPC_URL_ARBITRUM",
@@ -131,6 +133,33 @@ class TestEnvOverrides:
     def test_thegraph_api_key(self, monkeypatch):
         monkeypatch.setenv("THEGRAPH_API_KEY", "tg-secret")
         assert backtest_config_from_env().thegraph_api_key == "tg-secret"
+
+    def test_thegraph_api_key_falls_back_to_gateway_name(self, monkeypatch):
+        """ALM-3070: one provisioned secret must satisfy both planes.
+
+        The gateway's pool-history ladder reads
+        ``ALMANAK_GATEWAY_THEGRAPH_API_KEY``; before this fallback the
+        engine-side subgraph client saw nothing and ran unauthenticated.
+        """
+        monkeypatch.setenv("ALMANAK_GATEWAY_THEGRAPH_API_KEY", "gw-secret")
+        assert backtest_config_from_env().thegraph_api_key == "gw-secret"
+
+    def test_thegraph_explicit_key_beats_gateway_fallback(self, monkeypatch):
+        """Precedence: an operator pointing the engine lane at a different key keeps it."""
+        monkeypatch.setenv("THEGRAPH_API_KEY", "tg-secret")
+        monkeypatch.setenv("ALMANAK_GATEWAY_THEGRAPH_API_KEY", "gw-secret")
+        assert backtest_config_from_env().thegraph_api_key == "tg-secret"
+
+    def test_thegraph_empty_engine_key_falls_through_to_gateway(self, monkeypatch):
+        """An empty string is unset at every rung — never an empty Bearer token."""
+        monkeypatch.setenv("THEGRAPH_API_KEY", "")
+        monkeypatch.setenv("ALMANAK_GATEWAY_THEGRAPH_API_KEY", "gw-secret")
+        assert backtest_config_from_env().thegraph_api_key == "gw-secret"
+
+    def test_thegraph_both_empty_is_none(self, monkeypatch):
+        monkeypatch.setenv("THEGRAPH_API_KEY", "")
+        monkeypatch.setenv("ALMANAK_GATEWAY_THEGRAPH_API_KEY", "")
+        assert backtest_config_from_env().thegraph_api_key is None
 
     def test_empty_string_treated_as_unset(self, monkeypatch):
         # Mirrors the legacy ``os.environ.get("X", "")`` → ``not key``

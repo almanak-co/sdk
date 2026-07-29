@@ -18,7 +18,9 @@ from almanak.framework.backtesting.pnl.providers.gateway_transport import (
 )
 from almanak.framework.backtesting.pnl.providers.liquidity_depth import LiquidityDepthProvider
 from almanak.framework.backtesting.pnl.providers.subgraph_client import (
+    SubgraphAuthError,
     SubgraphClient,
+    SubgraphClientConfig,
     SubgraphQueryError,
 )
 from almanak.gateway.proto import gateway_pb2
@@ -36,8 +38,15 @@ def _transport_with_stub(stub: MagicMock) -> GatewaySubgraphTransport:
     return transport
 
 
-def _client_with_stub(stub: MagicMock) -> SubgraphClient:
-    client = SubgraphClient(use_gateway=True)
+def _client_with_stub(stub: MagicMock, *, api_key: str | None = "test-api-key") -> SubgraphClient:
+    """Client wired to a stubbed gateway transport.
+
+    Defaults to an authenticated client: since ALM-3070 the direct-HTTP
+    fallback only exists for a client that holds a key, so a keyless default
+    would make the sticky-death tests assert the wrong path. Pass
+    ``api_key=None`` to exercise the keyless behaviour explicitly.
+    """
+    client = SubgraphClient(config=SubgraphClientConfig(api_key=api_key), use_gateway=True)
     client._gateway_transport = _transport_with_stub(stub)
     return client
 
@@ -146,6 +155,30 @@ class TestStickyDeathFallback:
         with pytest.raises(RuntimeError, match="http path reached"):
             await client._execute_query("SUBGRAPH_ID", _QUERY)
         assert stub.TheGraphQuery.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_keyless_client_does_not_fall_back_to_http(self, monkeypatch):
+        """ALM-3070: a dead gateway + no key has no third option.
+
+        The keyless direct-HTTP "fallback" can only answer ``auth error:
+        missing authorization header``, so it is skipped rather than tried.
+        """
+        monkeypatch.delenv("THEGRAPH_API_KEY", raising=False)
+        monkeypatch.delenv("ALMANAK_GATEWAY_THEGRAPH_API_KEY", raising=False)
+
+        stub = MagicMock()
+        stub.TheGraphQuery.side_effect = ConnectionError("sidecar gone")
+        client = _client_with_stub(stub, api_key=None)
+
+        async def _http_sentinel():
+            raise AssertionError("direct HTTP must not be attempted without a key")
+
+        client._get_session = _http_sentinel  # type: ignore[method-assign]
+        with pytest.raises(SubgraphAuthError):
+            await client._execute_query("SUBGRAPH_ID", _QUERY)
+
+        assert client._gateway_transport is not None
+        assert client._gateway_transport._dead is True
 
 
 class TestAutoDetection:
