@@ -1,4 +1,4 @@
-.PHONY: all help clean test test-unit test-acceptance-pack test-connectors test-intents test-integration test-all test-ci test-coverage crap crap-fresh crap-diff crap-diff-fresh test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single test-accounting-matrix test-accounting-matrix-quick list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build-platform-runner build publish lint lint-check format format-check security docs docs-cli docs-generated docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene check-xfail-liveness check-config-boundary check-connector-registry check-strategy-taxonomy check-teardown-state-persistence check-connector-chains check-demos check-intent-coverage check-deployment-scoped-tables check-deployment-id-proto-surface check-gateway-isolation check-decimal-policy check-decimal-policy-baseline regen-contract-baselines check-accounting-ratchet check-accounting-merge-gate scan-coupling scan-coupling-report scan-coupling-baseline check-hardcoded-addresses check-hardcoded-addresses-baseline check-permission-coverage
+.PHONY: all help clean test test-unit test-acceptance-pack test-connectors test-intents test-integration test-all test-ci test-coverage crap crap-fresh crap-diff crap-diff-fresh test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single test-accounting-matrix test-accounting-matrix-quick list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build-platform-runner build publish lint lint-check format format-check security docs docs-cli docs-generated docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene check-xfail-liveness check-config-boundary check-connector-registry check-strategy-taxonomy check-teardown-state-persistence check-connector-chains check-demos check-intent-coverage check-orphan-scripts check-import-provenance check-deployment-scoped-tables check-deployment-id-proto-surface check-gateway-isolation check-decimal-policy check-decimal-policy-baseline regen-contract-baselines check-accounting-ratchet check-accounting-merge-gate scan-coupling scan-coupling-report scan-coupling-baseline check-hardcoded-addresses check-hardcoded-addresses-baseline check-permission-coverage
 
 # Load .env file if it exists
 -include .env
@@ -45,6 +45,26 @@ typecheck-report:
 # Fails when the filter is missing a reachable import or contains a stale entry.
 audit-intent-paths:
 	uv run python scripts/ci/audit_intent_test_paths.py
+
+# Orphan-script gate (VIB-6208 / VIB-6209 / VIB-6210). Fails when an executable in
+# scripts/ci/ is run by no workflow, no Makefile recipe, no container
+# entrypoint under nightly-test-builds/, and no test. Motivating case: the
+# accounting ship-gate accounting_regression_check.sh has never executed, and
+# #3441 shipped a fix to it while it was unreachable. Reading a script as data
+# (a test asserting on its source text) deliberately does NOT count as wiring.
+# Exceptions live in scripts/ci/orphan-script-allowlist.yml and require a
+# reason, a ticket, and an owner or an expiry date.
+check-orphan-scripts:
+	uv run python scripts/ci/check_orphan_scripts.py
+
+# Import-provenance gate (PRD docs/internal/PRD-ImprovsJuly28.md P5, recurrence
+# prevention for the #3441 defect). Fails when a repo script or workflow runs
+# a Python entrypoint that imports `almanak` via bare `python`/`python3`
+# instead of `uv run python`. Bare python resolves `almanak` from ambient
+# site-packages, so the check silently measures a different source tree than
+# the branch under test -- exactly the false-green #3441 fixed by hand.
+check-import-provenance:
+	uv run python scripts/ci/check_import_provenance.py
 
 # Enforce xfail hygiene: every @pytest.mark.xfail under tests/intents/ must
 # carry a ticket ref, a dated reason, and an explicit strict=. See issue #1694.
