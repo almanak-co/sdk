@@ -120,8 +120,48 @@ class GmxV2GatewayConnector(
         return await servicer._fetch_gmx_v2_rate(market, chain)
 
     def coingecko_ids(self) -> dict[str, str]:
-        """CoinGecko slug for the GMX governance token (Arbitrum)."""
-        return {"GMX": "gmx"}
+        """CoinGecko slugs for the GMX token AND every perp index symbol (VIB-6219).
+
+        The index symbols are here, not in a per-chain token table, because GMX's
+        markets are **synthetic**: ``LTC/USD`` trades on Arbitrum with no LTC token
+        deployed there, so no chain table legitimately owns the slug. This connector
+        defines the markets, so it declares how to price them.
+
+        Why this is load-bearing rather than cosmetic: since VIB-6219 the compiler
+        must read the index price to derive ``acceptablePrice`` instead of shipping an
+        accept-anything sentinel, and it **fails closed** when the price is
+        unavailable. A missing slug therefore does not degrade protection — it makes
+        the market **uncompilable**. Auditing all 20 ``(chain, market)`` pairs found
+        four index symbols priceable by neither CoinGecko nor Binance:
+
+            LTC  (arbitrum + avalanche)   XRP, ATOM, NEAR  (arbitrum)
+
+        which is five of twenty markets. ``DOGE`` had no CoinGecko slug either but
+        does resolve via Binance ``DOGEUSDT``; it is declared here anyway so the
+        primary source covers it rather than relying on the fallback.
+
+        Registry contract: ``_build_registry_price_ids`` raises ``RuntimeError`` if
+        two connectors give the same symbol different slugs, so these must agree with
+        any other declaration of the same asset.
+        """
+        return {
+            "GMX": "gmx",
+            # Perp index symbols — see docstring. Ordered as in GMX_V2_MARKETS.
+            "AAVE": "aave",
+            "ARB": "arbitrum",
+            "ATOM": "cosmos",
+            "AVAX": "avalanche-2",
+            "BTC": "bitcoin",
+            "DOGE": "dogecoin",
+            "ETH": "ethereum",
+            "LINK": "chainlink",
+            "LTC": "litecoin",
+            "NEAR": "near",
+            "OP": "optimism",
+            "SOL": "solana",
+            "UNI": "uniswap",
+            "XRP": "ripple",
+        }
 
     def dexscreener_ids(self) -> dict[str, dict[str, str]]:
         """GMX is an EVM-only token resolved via ``TokenResolver``."""

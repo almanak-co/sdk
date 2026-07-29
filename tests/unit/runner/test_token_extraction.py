@@ -175,3 +175,49 @@ class TestParsePoolTokens:
     def test_extract_token_symbols_aerodrome_cl_intent(self):
         intent = {"pool": "WETH/USDC/cl"}
         assert extract_token_symbols(intent) == ["WETH", "USDC"]
+
+
+class TestPerpMarketIndexSymbol:
+    """A perp intent's priced index symbol lives in `market` (VIB-6219).
+
+    `market` is in neither TOKEN_FIELDS nor the `pool` path, so before VIB-6219
+    `extract_token_symbols(PerpCloseIntent(market="BTC/USD", ...))` returned only
+    `["USDC"]`. That was harmless while GMX shipped an accept-anything
+    `acceptablePrice`; once the compiler DERIVES the bound from the index price,
+    an un-warmed index symbol makes every perp open and close fail closed — and
+    on teardown, fail closed forever (the read gap is classified transient, so
+    the runner retries an intent that can never succeed, stranding an open
+    leveraged position).
+    """
+
+    def test_index_symbol_is_extracted_and_fiat_quote_is_not(self):
+        assert extract_token_symbols({"market": "BTC/USD", "collateral_token": "USDC"}) == ["USDC", "BTC"]
+
+    def test_bare_index_alias_is_extracted(self):
+        """GMX accepts "ETH" as well as "ETH/USD"; both must warm the same symbol."""
+        assert extract_token_symbols({"market": "ETH"}) == ["ETH"]
+        assert extract_token_symbols({"market": "ETH/USD"}) == ["ETH"]
+
+    def test_a_fiat_only_market_yields_nothing(self):
+        """No on-chain token, no `USD/USD` feed — warming it would fail loudly."""
+        assert extract_token_symbols({"market": "USD"}) == []
+
+    def test_address_and_junk_markets_are_ignored(self):
+        assert extract_token_symbols({"market": "0x" + "a" * 40}) == []
+        assert extract_token_symbols({"market": ""}) == []
+        assert extract_token_symbols({"market": None}) == []
+        assert extract_token_symbols({"market": 123}) == []
+
+    def test_every_gmx_catalogued_market_yields_its_index_symbol(self):
+        """Catalogue-wide, not a spot-check: one missing symbol = one unopenable market."""
+        from almanak.connectors.gmx_v2.addresses import GMX_V2_MARKETS
+
+        for chain, markets in GMX_V2_MARKETS.items():
+            for market_key in markets:
+                got = extract_token_symbols({"market": market_key})
+                assert got == [market_key.split("/", 1)[0]], f"{chain}/{market_key} -> {got}"
+
+    def test_pool_intents_are_unaffected(self):
+        """Regression guard: adding `market` must not change LP/swap extraction."""
+        assert extract_token_symbols({"pool": "WETH/USDC/500"}) == ["WETH", "USDC"]
+        assert extract_token_symbols({"from_token": "USDC", "to_token": "WETH"}) == ["USDC", "WETH"]

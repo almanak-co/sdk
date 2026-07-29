@@ -139,6 +139,21 @@ def extract_token_symbols(intent: Any, *, _depth: int = 0) -> list[str]:
     if isinstance(pool, str):
         symbols.extend(parse_pool_tokens(pool))
 
+    # Parse the perp market descriptor (e.g. "ETH/USD", "BTC/USD", or the bare
+    # index alias "ETH"). VIB-6219: the GMX V2 compiler now REQUIRES the index
+    # price to derive `acceptablePrice`, and the index symbol lives only in
+    # `market` — it is in none of TOKEN_FIELDS and is not a `pool`. Without this,
+    # a perp open or close whose strategy never happened to call
+    # `market.price(index)` compiles against an oracle missing that symbol and
+    # fails closed on every retry.
+    market = _get("market")
+    if isinstance(market, str):
+        if "/" in market:
+            # parse_pool_tokens drops the fiat quote leg: "BTC/USD" -> ["BTC"].
+            symbols.extend(parse_pool_tokens(market))
+        elif _is_symbol(market) and not is_fiat_quote_symbol(market):
+            symbols.append(market.strip())
+
     # Recurse into callback_intents (FlashLoanIntent)
     callbacks = _get("callback_intents")
     if callbacks and isinstance(callbacks, list):

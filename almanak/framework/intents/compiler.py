@@ -111,6 +111,9 @@ class _ConnectorCompilerServices:
     def require_token_price(self, symbol: str) -> Decimal:
         return self.compiler._require_token_price(symbol)
 
+    def assert_prices_available(self, tokens: list[str | None]) -> None:
+        return self.compiler.assert_prices_available(tokens)
+
     def usd_to_token_amount(self, usd_amount: Decimal, token: "TokenInfo") -> int:
         return self.compiler._usd_to_token_amount(usd_amount, token)
 

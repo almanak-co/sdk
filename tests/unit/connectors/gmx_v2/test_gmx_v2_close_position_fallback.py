@@ -18,7 +18,6 @@ def adapter():
     config = GMXv2Config(
         chain="arbitrum",
         wallet_address="0x" + "ab" * 20,
-        default_slippage_bps=30,
     )
     return GMXv2Adapter(config)
 

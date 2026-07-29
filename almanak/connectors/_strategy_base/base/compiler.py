@@ -37,6 +37,18 @@ class CompilerServices(Protocol):
 
     def require_token_price(self, symbol: str) -> Decimal: ...
 
+    def assert_prices_available(self, tokens: list[str | None]) -> None:
+        """Raise ``ValueError`` unless every token has a REAL, non-placeholder price.
+
+        ``require_token_price`` deliberately returns a fake ``Decimal("1")`` for
+        any symbol when the compiler is in placeholder mode (no price oracle at
+        all), so that indicator-only strategies still compile. That fallback is
+        safe for sizing hints and fatal for a *protective bound*: a connector
+        deriving a price limit from ``$1`` emits calldata that looks protected
+        and is not. Call this before deriving any money bound from a price.
+        """
+        ...
+
     def usd_to_token_amount(self, usd_amount: Decimal, token: TokenInfo) -> int: ...
 
     def calculate_expected_output(self, amount_in: int, from_token: TokenInfo, to_token: TokenInfo) -> int: ...

@@ -95,8 +95,8 @@ def test_compiler_resolves_mixed_case_avalanche_collateral_keys() -> None:
     from decimal import Decimal
     from unittest.mock import MagicMock
 
-    from almanak.connectors.gmx_v2.addresses import GMX_V2_TOKENS
-    from almanak.framework.intents.compiler import IntentCompiler
+    from almanak.connectors.gmx_v2.addresses import GMX_V2_MARKETS, GMX_V2_TOKENS
+    from almanak.framework.intents.compiler import IntentCompiler, IntentCompilerConfig
     from almanak.framework.intents.compiler_models import CompilationStatus
     from almanak.framework.intents.vocabulary import PerpOpenIntent
 
@@ -113,6 +113,17 @@ def test_compiler_resolves_mixed_case_avalanche_collateral_keys() -> None:
     # Resolver-less compile path forces the static decimals fallback we just
     # added, which is exactly the regression surface this test pins.
     compiler._token_resolver = None
+    # VIB-6219: the compile path now derives a real acceptablePrice, so it needs
+    # a price oracle. Without one the compile fails closed BEFORE reaching the
+    # collateral lookup and this test would pass vacuously.
+    compiler._config = IntentCompilerConfig(allow_placeholder_prices=False)
+    compiler._using_placeholders = False
+    compiler._placeholder_warning_logged = False
+    compiler._stablecoin_fallback_logged = set()
+    compiler.price_oracle = {"ETH": Decimal("3000"), "USDC": Decimal("1")}
+    compiler.default_deadline_seconds = 600
+    compiler.default_protocol = "gmx_v2"
+    compiler._allowance_cache = {}
     # Stub _build_approve_tx so the compile can proceed past the approval step.
     compiler._build_approve_tx = lambda token_address, spender, amount: []
     compiler._get_chain_rpc_url = lambda: "http://localhost:8545"
@@ -131,7 +142,7 @@ def test_compiler_resolves_mixed_case_avalanche_collateral_keys() -> None:
     from unittest.mock import patch
 
     mock_sdk = MagicMock()
-    mock_sdk.get_market_address.return_value = "0xmarket"
+    mock_sdk.get_market_address.return_value = GMX_V2_MARKETS["avalanche"]["ETH/USD"]
     mock_sdk.ROUTER_ADDRESS = "0xrouter"
     mock_sdk.build_increase_order_multicall.return_value = MagicMock(
         to="0xrouter", value=0, data=b"0x", gas_estimate=300_000
@@ -140,7 +151,6 @@ def test_compiler_resolves_mixed_case_avalanche_collateral_keys() -> None:
 
     mock_adapter_result = MagicMock(success=True, error=None)
     mock_adapter_result.collateral_amount_usd = Decimal("1000")
-    mock_adapter_result.acceptable_price_30dec = 1_000_000_000_000_000_000_000_000_000_000_000
 
     with (
         patch("almanak.connectors.gmx_v2.compiler.GMXv2Adapter") as mock_adapter_cls,
@@ -148,7 +158,7 @@ def test_compiler_resolves_mixed_case_avalanche_collateral_keys() -> None:
         patch("almanak.connectors.gmx_v2.compiler.GMXV2SDK", return_value=mock_sdk),
         patch(
             "almanak.connectors.gmx_v2.compiler.GMX_V2_MARKETS",
-            {"avalanche": {"ETH/USD": "0xmarket"}},
+            {"avalanche": {"ETH/USD": GMX_V2_MARKETS["avalanche"]["ETH/USD"]}},
         ),
     ):
         mock_adapter_cls.return_value.open_position.return_value = mock_adapter_result
@@ -157,11 +167,29 @@ def test_compiler_resolves_mixed_case_avalanche_collateral_keys() -> None:
     # Specific failure mode the test pins: an "Unknown collateral token: WETH.e"
     # error indicates the case-insensitive lookup regressed. Anything else
     # (success, or a different downstream error) means the lookup itself worked.
-    if result.status == CompilationStatus.FAILED:
-        assert "Unknown collateral token" not in (result.error or ""), (
-            f"WETH.e collateral lookup must succeed via case-insensitive match against "
-            f"GMX_V2_TOKENS['avalanche']['WETH.e']={expected_addr}; got error: {result.error}"
-        )
+    assert result.status == CompilationStatus.SUCCESS, (
+        f"WETH.e collateral lookup must succeed via case-insensitive match against "
+        f"GMX_V2_TOKENS['avalanche']['WETH.e']={expected_addr}; got error: {result.error}"
+    )
+    # Positively pin that the resolved ADDRESS reached the order, rather than
+    # only asserting the absence of one error string — the weaker form passed
+    # vacuously once the compile started failing earlier for a different reason.
+    #
+    # Asserting the metadata symbol is not enough either (CodeRabbit): metadata
+    # echoes back the INPUT `"WETH.e"`, so a regression that resolved the symbol
+    # to the WRONG address would still satisfy it, and `expected_addr` would go
+    # unused outside a failure message. Read the address out of the order params
+    # the SDK was actually handed.
+    assert result.action_bundle.metadata["collateral_token"] == "WETH.e"
+
+    assert mock_sdk.build_increase_order_multicall.call_count == 1, (
+        "the compile must have reached the order builder exactly once"
+    )
+    order_params = mock_sdk.build_increase_order_multicall.call_args.args[0]
+    assert order_params.initial_collateral_token.lower() == expected_addr.lower(), (
+        f"the order must carry the RESOLVED WETH.e address {expected_addr}, "
+        f"got {order_params.initial_collateral_token}"
+    )
 
 
 def test_native_wrapped_decimals_documented_for_avalanche() -> None:

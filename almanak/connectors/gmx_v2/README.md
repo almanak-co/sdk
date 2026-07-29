@@ -68,7 +68,6 @@ close_result = adapter.close_position(
 |-----------|------|---------|-------------|
 | `chain` | str | Required | Target chain ("arbitrum" or "avalanche") |
 | `wallet_address` | str | Required | Wallet address for transactions |
-| `default_slippage_bps` | int | 50 | Default slippage tolerance in basis points (0.5%) |
 | `execution_fee` | int | Auto | Execution fee in native token wei |
 | `referral_code` | bytes | 0x00...00 | Referral code for fee discounts |
 

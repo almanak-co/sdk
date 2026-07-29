@@ -212,14 +212,12 @@ class GMXv2Config:
     Attributes:
         chain: Target blockchain (arbitrum or avalanche)
         wallet_address: Address executing transactions
-        default_slippage_bps: Default slippage tolerance in basis points (default 50 = 0.5%)
         execution_fee: Execution fee in native token wei (auto-set per chain)
         referral_code: Optional referral code for fee discounts
     """
 
     chain: str
     wallet_address: str
-    default_slippage_bps: int = 50
     execution_fee: int | None = None
     referral_code: bytes = b"\x00" * 32
 
@@ -231,15 +229,11 @@ class GMXv2Config:
         if self.execution_fee is None:
             self.execution_fee = DEFAULT_EXECUTION_FEE.get(self.chain, DEFAULT_EXECUTION_FEE["arbitrum"])
 
-        if self.default_slippage_bps < 0 or self.default_slippage_bps > 10000:
-            raise ValueError("Slippage must be between 0 and 10000 basis points")
-
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
         return {
             "chain": self.chain,
             "wallet_address": self.wallet_address,
-            "default_slippage_bps": self.default_slippage_bps,
             "execution_fee": self.execution_fee,
             "referral_code": self.referral_code.hex(),
         }

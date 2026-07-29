@@ -33,6 +33,7 @@ from almanak.framework.teardown.oracle_warmup import (
     TeardownPriceOracleError,
     extract_required_token_chains,
     extract_required_tokens,
+    extract_warmable_token_chains,
     warm_and_validate_oracle,
 )
 from almanak.framework.teardown.teardown_manager import TeardownManager
@@ -1098,3 +1099,103 @@ def test_discover_lp_close_pool_string_still_fails_loud_on_unpriceable_pool_toke
     with pytest.raises(TeardownPriceOracleError) as exc:
         warm_and_validate_oracle(market, [close], "ethereum", raise_on_missing=True)
     assert "WBTC" in str(exc.value)
+
+
+class TestPerpIndexSymbolIsWarmed:
+    """Teardown must warm a perp's index symbol (VIB-6219).
+
+    Teardown builds close intents directly — the strategy's ``decide()`` never
+    runs, so nothing else calls ``market.price(index)``. Once the GMX V2 compiler
+    derives ``acceptablePrice`` from the index price, an un-warmed index symbol
+    makes the close compile fail with ``is_transient=True``; teardown reads
+    ``retryable=compilation_result.is_transient`` and retries forever, stranding
+    an open leveraged position. That is strictly worse than the unbounded-price
+    defect VIB-6219 fixes, which is why the warm path is part of that change.
+    """
+
+    def test_index_symbol_is_warmable_but_NOT_required(self):
+        """Both halves matter, and they pull in opposite directions.
+
+        Warmable, or the GMX close never compiles and teardown retries forever.
+        NOT required, or one unpriceable index aborts the whole plan before any
+        risk-reducing intent runs (blueprint 14's inverted failure semantics).
+        """
+        intents = [{"market": "BTC/USD", "collateral_token": "USDC", "chain": "arbitrum"}]
+        assert extract_warmable_token_chains(intents, "arbitrum")["BTC"] == "arbitrum"
+        assert "BTC" not in extract_required_token_chains(intents, "arbitrum")
+        # The collateral token stays required — the split must not weaken it.
+        assert extract_required_token_chains(intents, "arbitrum")["USDC"] == "arbitrum"
+
+    def test_an_unpriceable_index_does_NOT_abort_the_plan(self):
+        """The cross-primitive case: a GMX perp beside an LP close and a repay.
+
+        `warm_and_validate_oracle` raises TeardownPriceOracleError as a
+        whole-plan pre-flight for any missing REQUIRED token. If the index were
+        required, an unpriceable XRP would block the LP close and the loan repay
+        in the same plan, with zero closing intents executed.
+        """
+        market = MagicMock()
+
+        def _price(token, chain=None):
+            if token.upper() == "XRP":
+                raise ValueError("no price source for XRP")
+            return Decimal("1")
+
+        market.price.side_effect = _price
+        market.get_price_oracle_dict.return_value = {"USDC": Decimal("1"), "WETH": Decimal("3000")}
+        del market.pt_price
+
+        intents = [
+            {"market": "XRP/USD", "collateral_token": "USDC", "chain": "arbitrum"},
+            {"pool": "WETH/USDC/500", "chain": "arbitrum"},
+        ]
+        # Must NOT raise, and must still return a usable oracle for the other legs.
+        oracle = warm_and_validate_oracle(market, intents, "arbitrum", raise_on_missing=True)
+        assert oracle is not None
+        assert oracle["USDC"] == Decimal("1")
+        # It was still ATTEMPTED — best-effort means warmed, not skipped.
+        assert any(c.args and c.args[0].upper() == "XRP" for c in market.price.call_args_list)
+
+    def test_a_missing_REQUIRED_token_still_aborts(self):
+        """Negative control: the split must not have weakened the real guard."""
+        market = MagicMock()
+        market.price.side_effect = ValueError("no price")
+        market.get_price_oracle_dict.return_value = {}
+        del market.pt_price
+        with pytest.raises(TeardownPriceOracleError):
+            warm_and_validate_oracle(
+                market, [{"token": "SOMEUNPRICEABLE", "chain": "arbitrum"}], "arbitrum", raise_on_missing=True
+            )
+
+    def test_the_fiat_quote_leg_is_NOT_warmed(self):
+        """`USD` has no on-chain token and no `USD/USD` feed.
+
+        Warming it would raise TeardownPriceOracleError and abort a healthy
+        teardown — a guard failing on its own correct input. This is why the
+        market descriptor is not routed through `_symbols_from_pool_string`,
+        which takes `parts[:2]` unconditionally.
+        """
+        got = extract_warmable_token_chains(
+            [{"market": "BTC/USD", "collateral_token": "USDC", "chain": "arbitrum"}], "arbitrum"
+        )
+        assert "USD" not in got, got
+
+    def test_bare_index_alias_is_warmed(self):
+        assert "SOL" in extract_warmable_token_chains([{"market": "SOL", "chain": "arbitrum"}], "arbitrum")
+
+    def test_multichain_perp_plan_warms_each_index_on_its_own_chain(self):
+        got = extract_warmable_token_chains(
+            [
+                {"market": "BTC/USD", "chain": "arbitrum"},
+                {"market": "AVAX/USD", "chain": "avalanche"},
+            ],
+            None,
+        )
+        assert got["BTC"] == "arbitrum"
+        assert got["AVAX"] == "avalanche"
+
+    def test_lp_pool_intents_are_unaffected(self):
+        """Regression guard: the LP `pool` path must keep both legs, and required."""
+        got = extract_required_token_chains([{"pool": "WETH/USDC/500", "chain": "arbitrum"}], "arbitrum")
+        assert got["WETH"] == "arbitrum"
+        assert got["USDC"] == "arbitrum"

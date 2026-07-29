@@ -44,7 +44,6 @@ class TestGMXv2Config:
 
         assert config.chain == "arbitrum"
         assert config.wallet_address == "0x1234567890123456789012345678901234567890"
-        assert config.default_slippage_bps == 50
         assert config.execution_fee == DEFAULT_EXECUTION_FEE["arbitrum"]
 
     def test_config_creation_avalanche(self) -> None:
@@ -65,31 +64,34 @@ class TestGMXv2Config:
                 wallet_address="0x1234567890123456789012345678901234567890",
             )
 
-    def test_config_custom_slippage(self) -> None:
-        """Test config with custom slippage."""
+    def test_config_rejects_default_slippage_bps(self) -> None:
+        """``default_slippage_bps`` must stay deleted (VIB-6219).
+
+        The field was validated, serialized and documented for the whole life of
+        this connector, and NOTHING ever read it: the compiler discarded the
+        user's tolerance and encoded an "accept any price" sentinel instead. The
+        real tolerance is ``PerpOpenIntent.max_slippage`` / ``PerpCloseIntent.
+        max_slippage``, which the compiler now turns into a real
+        ``acceptablePrice`` bound.
+
+        Re-adding a config knob here would recreate the trap: a plausible-looking
+        slippage setting that silently changes nothing about the calldata. If a
+        connector-level default is ever genuinely needed, it must be wired to the
+        encoder and covered by a decoded-calldata test.
+        """
+        with pytest.raises(TypeError, match="default_slippage_bps"):
+            GMXv2Config(
+                chain="arbitrum",
+                wallet_address="0x1234567890123456789012345678901234567890",
+                default_slippage_bps=100,  # type: ignore[call-arg]
+            )
+
         config = GMXv2Config(
             chain="arbitrum",
             wallet_address="0x1234567890123456789012345678901234567890",
-            default_slippage_bps=100,  # 1%
         )
-
-        assert config.default_slippage_bps == 100
-
-    def test_config_invalid_slippage(self) -> None:
-        """Test config with invalid slippage."""
-        with pytest.raises(ValueError, match="Slippage must be between"):
-            GMXv2Config(
-                chain="arbitrum",
-                wallet_address="0x1234567890123456789012345678901234567890",
-                default_slippage_bps=-1,
-            )
-
-        with pytest.raises(ValueError, match="Slippage must be between"):
-            GMXv2Config(
-                chain="arbitrum",
-                wallet_address="0x1234567890123456789012345678901234567890",
-                default_slippage_bps=10001,
-            )
+        assert not hasattr(config, "default_slippage_bps")
+        assert "default_slippage_bps" not in config.to_dict()
 
     def test_config_custom_execution_fee(self) -> None:
         """Test config with custom execution fee."""
@@ -113,7 +115,7 @@ class TestGMXv2Config:
 
         assert config_dict["chain"] == "arbitrum"
         assert config_dict["wallet_address"] == "0x1234567890123456789012345678901234567890"
-        assert config_dict["default_slippage_bps"] == 50
+        assert config_dict["execution_fee"] == DEFAULT_EXECUTION_FEE["arbitrum"]
 
 
 # =============================================================================

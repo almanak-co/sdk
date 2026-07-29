@@ -14,6 +14,7 @@ from almanak.connectors._strategy_base.base.compiler import (
 )
 from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus, TransactionData
 from almanak.framework.intents.intent_errors import InvalidCollateralForMarketError
+from almanak.framework.intents.min_out_guard import UnprotectedTradeError
 from almanak.framework.intents.vocabulary import (
     IntentType,
     PerpCancelIntent,
@@ -22,7 +23,9 @@ from almanak.framework.intents.vocabulary import (
 )
 from almanak.framework.models.reproduction_bundle import ActionBundle
 
+from .acceptable_price import bound_is_maximum, derive_acceptable_price_30dec, price_30dec_to_usd
 from .adapter import GMX_V2_MARKETS, GMXv2Adapter, GMXv2Config
+from .addresses import index_token_decimals
 from .market_rules import validate_collateral
 from .sdk import GMX_V2_TOKENS, GMXV2SDK, GMXV2OrderParams, PositionQueryError
 
@@ -110,17 +113,6 @@ class GMXV2Compiler(BasePerpCompiler):
             except InvalidCollateralForMarketError as exc:
                 return CompilationResult(status=CompilationStatus.FAILED, error=str(exc), intent_id=intent.intent_id)
 
-            slippage_bps = int(intent.max_slippage * 10000)
-            adapter = GMXv2Adapter(
-                GMXv2Config(
-                    chain=ctx.chain,
-                    wallet_address=ctx.wallet_address,
-                    default_slippage_bps=slippage_bps,
-                )
-            )
-
-            acceptable_price = Decimal(10**30) if intent.is_long else Decimal("0")
-
             if intent.collateral_amount == "all":
                 return CompilationResult(
                     status=CompilationStatus.FAILED,
@@ -128,21 +120,6 @@ class GMXV2Compiler(BasePerpCompiler):
                         "collateral_amount='all' must be resolved before compilation. "
                         "Use Intent.set_resolved_amount() to resolve chained amounts."
                     ),
-                    intent_id=intent.intent_id,
-                )
-
-            order_result = adapter.open_position(
-                market=intent.market,
-                collateral_token=intent.collateral_token,
-                collateral_amount=intent.collateral_amount,  # type: ignore[arg-type]
-                size_delta_usd=intent.size_usd,
-                is_long=intent.is_long,
-                acceptable_price=acceptable_price,
-            )
-            if not order_result.success:
-                return CompilationResult(
-                    status=CompilationStatus.FAILED,
-                    error=order_result.error or "Failed to create position order",
                     intent_id=intent.intent_id,
                 )
 
@@ -155,6 +132,32 @@ class GMXV2Compiler(BasePerpCompiler):
             if isinstance(market_or_error, CompilationResult):
                 return market_or_error
             market_address = market_or_error
+
+            # VIB-6219: the bound MUST be derived before any calldata is built.
+            # Resolving the market first is what makes that possible — the price
+            # scale and the price symbol both key off the resolved address.
+            price_or_error = self._derive_acceptable_price(ctx, intent, market_address, is_increase=True)
+            if isinstance(price_or_error, CompilationResult):
+                return price_or_error
+            acceptable_price_30dec, acceptable_price_usd = price_or_error
+
+            adapter = GMXv2Adapter(GMXv2Config(chain=ctx.chain, wallet_address=ctx.wallet_address))
+            order_result = adapter.open_position(
+                market=intent.market,
+                collateral_token=intent.collateral_token,
+                collateral_amount=intent.collateral_amount,  # type: ignore[arg-type]
+                size_delta_usd=intent.size_usd,
+                is_long=intent.is_long,
+                # Plain USD, matching the adapter's documented parameter contract.
+                # The GMX-native integer below is what reaches calldata.
+                acceptable_price=acceptable_price_usd,
+            )
+            if not order_result.success:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=order_result.error or "Failed to create position order",
+                    intent_id=intent.intent_id,
+                )
 
             collateral_or_error = self._resolve_collateral(ctx, intent.collateral_token, intent.intent_id)
             if isinstance(collateral_or_error, CompilationResult):
@@ -177,7 +180,7 @@ class GMXV2Compiler(BasePerpCompiler):
                 initial_collateral_delta_amount=collateral_wei,
                 size_delta_usd=size_delta_usd,
                 is_long=intent.is_long,
-                acceptable_price=int(acceptable_price),
+                acceptable_price=acceptable_price_30dec,
                 execution_fee=execution_fee,
             )
             tx_data = sdk.build_increase_order_multicall(order_params)
@@ -218,6 +221,10 @@ class GMXV2Compiler(BasePerpCompiler):
                     "is_long": intent.is_long,
                     "leverage": str(intent.leverage),
                     "max_slippage": str(intent.max_slippage),
+                    # VIB-6219: the protective bound actually encoded into
+                    # createOrder, in GMX's 30-decimal convention plus plain USD.
+                    "acceptable_price_30dec": str(acceptable_price_30dec),
+                    "acceptable_price_usd": str(acceptable_price_usd),
                     "order_key": order_result.order_key,
                     "chain": ctx.chain,
                 },
@@ -249,16 +256,6 @@ class GMXV2Compiler(BasePerpCompiler):
                 validate_collateral(chain=ctx.chain, market=intent.market, collateral_token=intent.collateral_token)
             except InvalidCollateralForMarketError as exc:
                 return CompilationResult(status=CompilationStatus.FAILED, error=str(exc), intent_id=intent.intent_id)
-
-            slippage_bps = int(intent.max_slippage * 10000)
-            adapter = GMXv2Adapter(
-                GMXv2Config(
-                    chain=ctx.chain,
-                    wallet_address=ctx.wallet_address,
-                    default_slippage_bps=slippage_bps,
-                )
-            )
-            acceptable_price = Decimal("0") if intent.is_long else Decimal(10**30)
 
             sdk_or_error = self._build_sdk(ctx, intent.intent_id)
             if isinstance(sdk_or_error, CompilationResult):
@@ -295,12 +292,22 @@ class GMXV2Compiler(BasePerpCompiler):
                 size_delta_usd = queried_size
                 resolved_size_usd = Decimal(size_delta_usd) / Decimal(10**30)
 
+            # VIB-6219: derive the protective bound before any calldata is built.
+            # Teardown reaches this path too — a read gap is classified transient
+            # so an RPC blip cannot become a permanent teardown failure.
+            price_or_error = self._derive_acceptable_price(ctx, intent, market_address, is_increase=False)
+            if isinstance(price_or_error, CompilationResult):
+                return price_or_error
+            acceptable_price_30dec, acceptable_price_usd = price_or_error
+
+            adapter = GMXv2Adapter(GMXv2Config(chain=ctx.chain, wallet_address=ctx.wallet_address))
             order_result = adapter.close_position(
                 market=intent.market,
                 collateral_token=intent.collateral_token,
                 is_long=intent.is_long,
                 size_delta_usd=resolved_size_usd,
-                acceptable_price=acceptable_price,
+                # Plain USD, matching the adapter's documented parameter contract.
+                acceptable_price=acceptable_price_usd,
             )
             if not order_result.success:
                 return CompilationResult(
@@ -317,7 +324,7 @@ class GMXV2Compiler(BasePerpCompiler):
                 initial_collateral_delta_amount=0,
                 size_delta_usd=size_delta_usd,
                 is_long=intent.is_long,
-                acceptable_price=int(acceptable_price),
+                acceptable_price=acceptable_price_30dec,
                 execution_fee=execution_fee,
             )
             tx_data = sdk.build_decrease_order_multicall(order_params)
@@ -345,6 +352,9 @@ class GMXV2Compiler(BasePerpCompiler):
                     "size_usd": str(intent.size_usd) if intent.size_usd else None,
                     "close_full_position": intent.close_full_position,
                     "max_slippage": str(intent.max_slippage),
+                    # VIB-6219: the protective bound actually encoded into createOrder.
+                    "acceptable_price_30dec": str(acceptable_price_30dec),
+                    "acceptable_price_usd": str(acceptable_price_usd),
                     "order_key": order_result.order_key,
                     "chain": ctx.chain,
                 },
@@ -412,6 +422,195 @@ class GMXV2Compiler(BasePerpCompiler):
             result.error = str(exc)
 
         return result
+
+    def _index_symbol_for_market(self, chain: str, market_address: str) -> str | None:
+        """Reverse-resolve a market ADDRESS to its index-token price symbol.
+
+        Keyed off the resolved address rather than ``intent.market`` so that every
+        alias the SDK accepts for the same market (``"ETH"``, ``"WETH"``,
+        ``"ETH/USD"``) yields one symbol, and so the symbol and the decimals used
+        for price scaling are always read for the *same* market.
+        """
+        wanted = market_address.lower()
+        for market_key, address in GMX_V2_MARKETS.get(chain, {}).items():
+            if address.lower() == wanted:
+                return market_key.split("/", 1)[0]
+        return None
+
+    def _derive_acceptable_price(
+        self,
+        ctx: PerpCompilerContext,
+        intent: Any,
+        market_address: str,
+        *,
+        is_increase: bool,
+    ) -> tuple[int, Decimal] | CompilationResult:
+        """Derive the ``acceptablePrice`` bound, or a classified FAILED result.
+
+        Returns ``(price_30dec, price_usd)`` — the first is what gets ABI-encoded
+        into ``createOrder``; the second is the same bound in plain USD for the
+        adapter's documented parameter contract and for order metadata.
+
+        Fails **closed** (VIB-6219): there is no fallback to the historical
+        "accept any price" sentinel. The two failure classes are kept distinct
+        because they route differently:
+
+        * a price/metadata READ gap is ``is_transient=True`` — teardown reads
+          ``retryable=compilation_result.is_transient``
+          (``teardown_manager.py``), so an RPC blip must not become a permanent
+          teardown failure;
+        * a refusal to build an unprotected order is ``is_safety_refusal=True``
+          (VIB-5746) → ``FailureKind.GUARD_REFUSED``, which deliberately does
+          NOT count toward the circuit breaker: zero calldata was built.
+        """
+        leg = "PERP_OPEN" if is_increase else "PERP_CLOSE"
+        context = f"gmx_v2 {leg} {intent.market} on {ctx.chain}"
+
+        decimals = index_token_decimals(ctx.chain, market_address)
+        if decimals is None:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"GMX V2 {leg}: no index-token decimals for market {intent.market} "
+                    f"({market_address}) on {ctx.chain}; cannot scale a price bound. "
+                    "Refusing to submit an order with no acceptable-price protection."
+                ),
+                intent_id=intent.intent_id,
+                is_safety_refusal=True,
+            )
+
+        symbol = self._index_symbol_for_market(ctx.chain, market_address)
+        if symbol is None:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"GMX V2 {leg}: market {intent.market} ({market_address}) is not in the "
+                    f"{ctx.chain} market catalogue, so its index-token price symbol is unknown. "
+                    "Refusing to submit an order with no acceptable-price protection."
+                ),
+                intent_id=intent.intent_id,
+                is_safety_refusal=True,
+            )
+
+        try:
+            # MUST come before require_token_price, not after. In placeholder
+            # mode (no price oracle at all — `_using_placeholders`, which the
+            # runner enters whenever its price pre-fetch yields nothing, and
+            # which the gateway's compile path permits unconditionally)
+            # `require_token_price` returns a FAKE `Decimal("1")` for any symbol
+            # it cannot price. Deriving the bound from that fails OPEN, which is
+            # the whole defect this module exists to delete: a short open on
+            # BTC/USD would encode a minimum near `0.99 * 10**22` against a real
+            # execution price near `10**27` — trivially satisfied, i.e. no
+            # protection at all, while the logs and bundle metadata report a
+            # real-looking bound. `$1` is finite and positive, so no guard
+            # inside `derive_acceptable_price_30dec` can catch it.
+            #
+            # `assert_prices_available` already encodes exactly this rule
+            # (placeholder mode => every token reported missing) and is what the
+            # teardown lane uses for the same reason; reusing it keeps one
+            # definition of "is this a real price" rather than inventing a
+            # second. Transient, not a refusal: the price returns once the
+            # oracle populates.
+            #
+            # EXEMPT: offline permission discovery. The Zodiac Roles manifest is
+            # built by compiling synthetic intents purely to enumerate the
+            # (target, selector) pairs a Safe must authorise — that calldata is
+            # never signed or submitted, and discovery runs with no oracle by
+            # construction. Refusing there yields ZERO permissions, and an empty
+            # manifest means every Safe GMX call reverts at
+            # `execTransactionWithRole` (AGENTS.md §Connector additions names
+            # this exact trap). Caught by
+            # tests/unit/permissions/test_protocol_compatibility.py, which is
+            # why the guard is scoped rather than absolute.
+            if not ctx.permission_discovery:
+                ctx.services.assert_prices_available([symbol])
+            index_price_usd = ctx.services.require_token_price(symbol)
+        except Exception as exc:  # noqa: BLE001 - any read gap is retryable, never a licence to skip the bound
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"GMX V2 {leg}: could not read the {symbol} index price needed to bound "
+                    f"execution ({exc}). Refusing to submit an unprotected order; retrying once "
+                    "the price is available is safe."
+                ),
+                intent_id=intent.intent_id,
+                is_transient=True,
+            )
+
+        # GMX's tolerance granularity is a basis point, and `int()` TRUNCATES:
+        # any 0 < max_slippage < 0.0001 collapses to 0 bps. That is not a safety
+        # problem (0 bps is the tightest possible bound) but it is a silent
+        # degradation of an explicit user request into a bound that pins the
+        # acceptable price to spot exactly — an order that almost certainly
+        # cannot fill, while still burning the keeper execution fee. Refuse
+        # instead, and say which value was too fine to express. An explicit
+        # `max_slippage == 0` is a different, legitimate request (pin to spot on
+        # purpose) and is deliberately NOT caught here.
+        # Inside its own classified try: the oracle legitimately holds price
+        # values as strings (`inner_runner._fetch_prices_for_intent` stores
+        # `str(resp.price)`), so `Decimal(...)` can raise `InvalidOperation`, and
+        # `max_slippage * 10000` can raise `TypeError` on a non-Decimal. Left
+        # unguarded these fell through to the method-level `except Exception`,
+        # which produces a FAILED carrying NEITHER flag — simultaneously
+        # non-retryable in teardown (position stranded) and counted toward the
+        # circuit breaker. A malformed read is a read gap: transient.
+        try:
+            price_decimal = Decimal(index_price_usd)
+            slippage_bps = int(intent.max_slippage * 10000)
+        except (ArithmeticError, TypeError, ValueError) as exc:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"GMX V2 {leg}: the {symbol} index price or slippage tolerance could not be "
+                    f"interpreted as a number ({exc!r}); refusing to derive a bound from it."
+                ),
+                intent_id=intent.intent_id,
+                is_transient=True,
+            )
+
+        if intent.max_slippage > 0 and slippage_bps == 0:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"GMX V2 {leg}: max_slippage={intent.max_slippage} is finer than GMX's "
+                    "one-basis-point granularity and truncates to 0 bps, which pins the "
+                    "acceptable price to spot exactly — the order would burn a keeper "
+                    "execution fee without being fillable. Use max_slippage >= 0.0001 "
+                    "(1 bp), or exactly 0 to pin to spot deliberately."
+                ),
+                intent_id=intent.intent_id,
+                is_safety_refusal=True,
+            )
+
+        try:
+            price_30dec = derive_acceptable_price_30dec(
+                index_price_usd=price_decimal,
+                index_token_decimals=decimals,
+                slippage_bps=slippage_bps,
+                is_long=intent.is_long,
+                is_increase=is_increase,
+                context=context,
+            )
+        except UnprotectedTradeError as exc:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=str(exc),
+                intent_id=intent.intent_id,
+                is_safety_refusal=True,
+            )
+
+        logger.info(
+            "GMX V2 %s %s: index %s=$%s, max_slippage=%s -> acceptablePrice=%d (30-dec, %s bound)",
+            leg,
+            "LONG" if intent.is_long else "SHORT",
+            symbol,
+            index_price_usd,
+            intent.max_slippage,
+            price_30dec,
+            "upper" if bound_is_maximum(is_long=intent.is_long, is_increase=is_increase) else "lower",
+        )
+        return price_30dec, price_30dec_to_usd(price_30dec, decimals)
 
     def _build_sdk(self, ctx: PerpCompilerContext, intent_id: str) -> GMXV2SDK | CompilationResult:
         gateway_client = ctx.gateway_client

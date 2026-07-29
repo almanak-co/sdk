@@ -26,7 +26,15 @@ def _make_mock_compiler(chain: str = "arbitrum") -> IntentCompiler:
     compiler._config = IntentCompilerConfig(allow_placeholder_prices=True)
     compiler._using_placeholders = False
     compiler._placeholder_warning_logged = False
-    compiler.price_oracle = None
+    # VIB-6219: the perp compiler now derives ``acceptablePrice`` from the index
+    # price, so the compile path needs a real oracle. A None oracle here would
+    # make every PERP_OPEN fail closed (which is the correct new behaviour, but
+    # not what these tests are about).
+    compiler.price_oracle = {
+        "ETH": Decimal("3000"),
+        "SOL": Decimal("150"),
+        "USDC": Decimal("1"),
+    }
     compiler.default_deadline_seconds = 600
     compiler.default_protocol = "gmx_v2"
     compiler._token_resolver = None
@@ -122,7 +130,7 @@ class TestPerpOpenApproval:
             patch("almanak.connectors.gmx_v2.compiler.GMXv2Config"),
             patch("almanak.connectors.gmx_v2.compiler.GMXV2SDK", return_value=mock_sdk),
             patch("almanak.connectors.gmx_v2.compiler.GMX_V2_MARKETS", {
-                "arbitrum": {"ETH/USD": "0xmarket"},
+                "arbitrum": {"ETH/USD": "0x70d95587d40A2caf56bd97485aB3Eec10Bee6336"},
             }),
             patch("almanak.connectors.gmx_v2.compiler.GMX_V2_TOKENS", {
                 "arbitrum": {"USDC": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"},
@@ -191,7 +199,7 @@ class TestPerpOpenApproval:
             patch("almanak.connectors.gmx_v2.compiler.GMXv2Config"),
             patch("almanak.connectors.gmx_v2.compiler.GMXV2SDK", return_value=mock_sdk),
             patch("almanak.connectors.gmx_v2.compiler.GMX_V2_MARKETS", {
-                "arbitrum": {"ETH/USD": "0xmarket"},
+                "arbitrum": {"ETH/USD": "0x70d95587d40A2caf56bd97485aB3Eec10Bee6336"},
             }),
             patch("almanak.connectors.gmx_v2.compiler.GMX_V2_TOKENS", {
                 "arbitrum": {"WETH": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"},

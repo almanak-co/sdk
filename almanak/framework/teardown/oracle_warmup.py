@@ -127,6 +127,47 @@ def _symbols_from_pool_string(pool: Any) -> list[str]:
     return [p for p in parts[:2] if _looks_like_symbol(p)]
 
 
+def _symbols_from_market_string(market: Any) -> list[str]:
+    """Extract the priced index symbol from a perp ``market`` descriptor.
+
+    Perp intents name their market as ``INDEX/QUOTE`` (``"ETH/USD"``,
+    ``"BTC/USD"``) or as a bare index alias (``"ETH"``). Only the **index** leg
+    is priceable: the quote leg is a fiat denomination with no on-chain token and
+    no ``USD/USD`` feed, so warming it would fail and raise
+    ``TeardownPriceOracleError`` for a token nothing needs.
+
+    Deliberately NOT folded into :func:`_symbols_from_pool_string`, which takes
+    ``parts[:2]`` unconditionally and is shared with the LP ``pool`` path — using
+    it here would warm ``"USD"`` and turn a correct teardown into a loud
+    pre-flight failure.
+
+    VIB-6219: the GMX V2 compiler now requires the index price to derive
+    ``acceptablePrice``. Teardown builds close intents directly, without running
+    the strategy's ``decide()``, so if this symbol is not warmed here the compile
+    fails with ``is_transient=True`` and teardown retries forever — stranding an
+    open leveraged position, which is strictly worse than the unbounded-price
+    defect VIB-6219 fixes.
+    """
+    # Imported INSIDE the function, matching how `inner_runner` and the gateway
+    # `execution_service` already reach into this module. A module-level
+    # `teardown -> runner` edge is not safe here: it was tried, and it broke
+    # `almanak.framework.teardown.decision_log` attribute resolution (10 tests in
+    # tests/unit/teardown/test_decision_log.py went from green to red). The
+    # canonical fiat-quote set is still reused rather than re-declared — a local
+    # copy would drift, and a drifted copy here would try to warm a fiat "token"
+    # and raise TeardownPriceOracleError on an otherwise healthy teardown.
+    from almanak.framework.runner.token_extraction import is_fiat_quote_symbol
+
+    if not isinstance(market, str) or not market.strip():
+        return []
+    index_leg = market.split("/", 1)[0].strip() if "/" in market else market.strip()
+    if not _looks_like_symbol(index_leg):
+        return []
+    if is_fiat_quote_symbol(index_leg):
+        return []
+    return [index_leg]
+
+
 def _intent_field(intent: Any, name: str) -> Any:
     """Read ``name`` from either an Intent object or a serialized dict."""
     if isinstance(intent, dict):
@@ -188,6 +229,44 @@ def extract_required_token_chains(intents: list[Any], fallback_chain: str | None
         for native in _CHAIN_NATIVE_SYMBOLS.get(plan_chain.lower(), frozenset()):
             _record(native, plan_chain)
 
+    return token_chains
+
+
+def extract_warmable_token_chains(intents: list[Any], fallback_chain: str | None) -> dict[str, str | None]:
+    """Map perp index symbols to their chain — warmed BEST-EFFORT, never required.
+
+    Deliberately separate from :func:`extract_required_token_chains`, and this
+    separation is the whole point (VIB-6219).
+
+    A perp's priced index symbol lives in ``intent.market``, which no other
+    extractor reads. It must be warmed: once the GMX V2 compiler derives
+    ``acceptablePrice`` from the index price, an un-warmed index makes the close
+    compile fail ``is_transient=True``, and teardown — which reads
+    ``retryable=compilation_result.is_transient`` — then retries forever on a
+    condition that cannot self-heal, stranding an open leveraged position.
+
+    But it must NOT be *required*. ``warm_and_validate_oracle`` raises
+    :class:`TeardownPriceOracleError` as a whole-plan pre-flight for any missing
+    required token, so requiring the index would let one unpriceable perp index
+    abort the entire unwind — blocking the Uniswap LP close and the Aave repay in
+    the same plan, with zero closing intents executed. Blueprint 14's inverted
+    failure semantics forbid exactly that: teardown's first job is to remove
+    on-chain risk, and an accounting- or price-shaped problem must never block
+    the next risk-reducing intent.
+
+    Best-effort is therefore the correct polarity: warming populates the cache so
+    the GMX leg compiles when the price is obtainable, and when it is not, the
+    failure stays scoped to that one leg as a transient instead of escalating
+    into a plan-wide refusal.
+    """
+    token_chains: dict[str, str | None] = {}
+    for intent in intents:
+        raw_chain = _intent_field(intent, "chain")
+        intent_chain = raw_chain.strip() if isinstance(raw_chain, str) and raw_chain.strip() else fallback_chain
+        for symbol in _symbols_from_market_string(_intent_field(intent, "market")):
+            key = symbol.strip().upper()
+            if key not in token_chains or (token_chains[key] is None and intent_chain is not None):
+                token_chains[key] = intent_chain
     return token_chains
 
 
@@ -375,7 +454,19 @@ def warm_and_validate_oracle(
 
     token_chains = extract_required_token_chains(intents, chain)
     required = set(token_chains.keys())
-    if not required:
+    # VIB-6219: perp index symbols are warmed but NOT required — see
+    # `extract_warmable_token_chains`. Merged into `token_chains` so the warm
+    # loop prices each on its own chain; deliberately absent from `required` so
+    # an unpriceable index degrades to one transient GMX-leg failure instead of
+    # aborting the whole unwind. A symbol that is ALREADY required (e.g. it is
+    # also a collateral token) keeps its required status — `setdefault` never
+    # downgrades.
+    best_effort: set[str] = set()
+    for symbol, symbol_chain in extract_warmable_token_chains(intents, chain).items():
+        if symbol not in token_chains:
+            token_chains[symbol] = symbol_chain
+            best_effort.add(symbol)
+    if not required and not best_effort:
         # Nothing to warm (e.g. LP_CLOSE-only plan whose tokens resolve
         # on-chain at compile time). Return whatever the oracle already holds.
         fetched = market.get_price_oracle_dict()
@@ -389,7 +480,7 @@ def warm_and_validate_oracle(
     # same call, but which a token may legitimately resolve past via the
     # wrapped<->native alias even when its own key is absent.
     priced_ok: set[str] = set()
-    for token in sorted(required):
+    for token in sorted(required | best_effort):
         if not can_price:
             break
         # PT/YT symbols are not carried by the generic GetPrice oracle — they are
@@ -463,5 +554,6 @@ __all__ = [
     "TeardownPriceOracleError",
     "extract_required_token_chains",
     "extract_required_tokens",
+    "extract_warmable_token_chains",
     "warm_and_validate_oracle",
 ]

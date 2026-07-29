@@ -738,6 +738,16 @@ CHAIN_CONFIGS = {
             "USDT": "0x9702230A8Ea53601f5cD2dc00fDBc13d4dF4A8c7",
             "USDC.e": "0xA7D7079b0FEaD91F3e65f86E8915Cb59c1a4C664",
             "USDT.e": "0xc7198437980c041c805A1EDcbA50c1Ce5db95118",
+            # WETH.e — present ONLY so this chain's session price-oracle fixture
+            # fetches an ETH price (the fixture is built from these keys). GMX V2
+            # runs an ETH/USD market on avalanche, and since VIB-6219 the compiler
+            # must read the index price to bound `acceptablePrice` instead of
+            # shipping an accept-anything sentinel — so without a WETH price the
+            # perp-open test fails closed with "could not read the ETH index price".
+            # Arbitrum's list already carries WETH, which is why its GMX tests pass.
+            # No `balance_slots` entry: nothing funds it, and the funding loop skips
+            # tokens without a slot (with a warning) rather than erroring.
+            "WETH": "0x49D5c2BdFfac6CE2BFdB6640F4F80f226bc10bAB",
         },
         "balance_slots": {
             "USDC": 9,
