@@ -68,6 +68,7 @@ from .intent_errors import (  # noqa: E402, F401
     LpOpenZeroLiquidityError,
     ProtocolRequiredError,
 )
+from .min_out_guard import validate_max_slippage_fraction
 
 # =============================================================================
 # Enums
@@ -332,8 +333,7 @@ class SwapIntent(BaseIntent):
                 raise ValueError("amount must be positive")
             elif not isinstance(self.amount, Decimal) and self.amount != "all":
                 raise ValueError("amount must be a positive Decimal or 'all'")
-        if self.max_slippage < 0 or self.max_slippage > 1:
-            raise ValueError("max_slippage must be between 0 and 1")
+        validate_max_slippage_fraction(self.max_slippage)
         if self.max_price_impact is not None and (self.max_price_impact <= 0 or self.max_price_impact > 1):
             raise ValueError("max_price_impact must be between 0 (exclusive) and 1 (inclusive)")
         # Cross-chain swaps require an aggregator protocol (Enso or LiFi)
@@ -772,8 +772,7 @@ class LPOpenIntent(BaseIntent):
             raise ValueError("At least one amount must be positive")
         if self.coin_amounts is not None:
             self._validate_coin_amounts()
-        if self.max_slippage is not None and (self.max_slippage < 0 or self.max_slippage > 1):
-            raise ValueError("max_slippage must be between 0 and 1")
+        validate_max_slippage_fraction(self.max_slippage)
         if self.range_lower >= self.range_upper:
             raise ValueError("range_lower must be less than range_upper")
         # Fail-closed gate (VIB-5555): a ``TickBand`` addresses raw protocol ticks
@@ -974,8 +973,7 @@ class LPCloseIntent(BaseIntent):
                 )
         elif not isinstance(self.position_id, str) or not self.position_id:
             raise ValueError("position_id must be a non-empty string when amount is None")
-        if self.max_slippage is not None and (self.max_slippage < 0 or self.max_slippage > 1):
-            raise ValueError("max_slippage must be between 0 and 1")
+        validate_max_slippage_fraction(self.max_slippage)
         # coin_index opts into a single-sided close. Reject bool (a bool is an int
         # subclass in Python, but `True`/`False` are never a valid coin index) and
         # negatives. The connector validates the upper bound against the resolved

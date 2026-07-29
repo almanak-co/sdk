@@ -52,8 +52,12 @@ def compute_min_amount_out(expected_amount: int, max_slippage: Decimal) -> int:
         expected_amount: The expected output amount (integer wei / smallest units).
             Must be >= 0.
         max_slippage: Slippage tolerance as a fraction (``Decimal("0.01")`` = 1%).
-            Must be in ``[0, 1]`` inclusive. ``0`` is allowed and yields
-            ``expected_amount`` unchanged.
+            Must be in ``[0, 1)`` — EXCLUSIVE at 1 (VIB-6217). ``0`` is allowed and
+            yields ``expected_amount`` unchanged. ``1`` is rejected because it
+            returns ``0`` for every input, i.e. a minimum that accepts any output
+            including total loss; that is not a 100% tolerance, it is the absence
+            of one, and it silently defeats every connector that derives its
+            minimum correctly through this helper.
 
     Returns:
         ``int(expected_amount * (1 - max_slippage))`` using Decimal arithmetic
@@ -61,12 +65,12 @@ def compute_min_amount_out(expected_amount: int, max_slippage: Decimal) -> int:
 
     Raises:
         ValueError: If ``expected_amount`` is negative, or ``max_slippage`` is
-            outside ``[0, 1]``.
+            outside ``[0, 1)``.
     """
     if expected_amount < 0:
         raise ValueError(f"expected_amount must be >= 0 (got {expected_amount})")
-    if max_slippage < Decimal("0") or max_slippage > Decimal("1"):
-        raise ValueError(f"max_slippage must be in [0, 1] (got {max_slippage})")
+    if max_slippage < Decimal("0") or max_slippage >= Decimal("1"):
+        raise ValueError(f"max_slippage must be in [0, 1) (got {max_slippage})")
     return int(Decimal(str(expected_amount)) * (Decimal("1") - max_slippage))
 
 

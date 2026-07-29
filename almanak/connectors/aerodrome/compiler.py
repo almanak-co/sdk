@@ -22,6 +22,7 @@ from almanak.connectors._strategy_base.base.compiler import BaseConcentratedLiqu
 from almanak.connectors._strategy_base.cl_range import PriceBandToTicksError, price_band_to_ticks
 from almanak.framework.intents import compiler_constants
 from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus
+from almanak.framework.intents.min_out_guard import UnprotectedTradeError
 from almanak.framework.intents.vocabulary import IntentType, lp_range_bounds, lp_range_is_ticks
 from almanak.framework.models.reproduction_bundle import ActionBundle
 
@@ -1377,7 +1378,7 @@ def compile_swap_aerodrome(compiler, intent: SwapIntent) -> CompilationResult:  
 
 
 # crap-allowlist: VIB-4853 — import-path swap only (pool-validation moved into connectors, #2527); function body unchanged, anvil-only coverage. Refactor + coverage backfill tracked in VIB-4139.
-def compile_lp_open_aerodrome_slipstream(compiler, intent: LPOpenIntent) -> CompilationResult:
+def compile_lp_open_aerodrome_slipstream(compiler, intent: LPOpenIntent) -> CompilationResult:  # noqa: C901 - VIB-6217 safety-refusal handler is +1 branch on a function already AT the cap (15); decomposition is VIB-4139, see below
     """Compile LP_OPEN intent for Aerodrome Slipstream CL (concentrated liquidity).
 
     Aerodrome Slipstream uses Uniswap V3-style concentrated liquidity with NFT positions.
@@ -1637,6 +1638,20 @@ def compile_lp_open_aerodrome_slipstream(compiler, intent: LPOpenIntent) -> Comp
             f"tick_spacing={tick_spacing}, {len(transactions)} txs{tx_summary}, {total_gas} gas"
         )
 
+    except UnprotectedTradeError as e:
+        # A SAFETY REFUSAL, not a fault (VIB-6217). Zero transactions were built
+        # and the on-chain position is untouched — the guard did its job. Without
+        # is_safety_refusal the runner maps this to an ordinary fault and it counts
+        # toward the circuit breaker's consecutive-failure trip, so a
+        # correctly-refusing strategy would trip itself off.
+        #
+        # logger.error, NOT logger.exception: a deliberate refusal that emits a
+        # full traceback reads as a crash, and a guard that looks like a crash is
+        # a guard someone switches off.
+        logger.error(f"Refusing to compile Aerodrome Slipstream LP_OPEN without output protection: {e}")
+        result.status = CompilationStatus.FAILED
+        result.is_safety_refusal = True
+        result.error = str(e)
     except Exception as e:
         logger.exception(f"Failed to compile Aerodrome Slipstream LP_OPEN intent: {e}")
         result.status = CompilationStatus.FAILED

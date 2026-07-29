@@ -1209,7 +1209,17 @@ class TestCompileLPOpenSlippage:
         mock_adapter_cls: MagicMock,
         mock_validate: MagicMock,
     ) -> None:
-        """protocol_params.lp_slippage=1.0 yields zero minimums (safe-for-testing)."""
+        """VIB-6217: protocol_params.lp_slippage=1.0 now FAILS compilation.
+
+        This previously asserted SUCCESS with ``amount0_min == amount1_min == "0"``
+        and described it as "safe-for-testing". It was not safe: a zero minimum
+        means the mint accepts any outcome, and this was the one bypass that
+        reached ``compute_min_amount_out`` without passing an intent validator.
+
+        The end-to-end assertion matters more than the unit one on ``cl_math``:
+        it proves the refusal actually surfaces as a FAILED compilation through
+        the real compiler rather than escaping as an unhandled exception.
+        """
 
         mock_adapter_cls.return_value = _make_mock_lp_adapter()
         mock_validate.return_value = _mock_pool_validation_ok()
@@ -1224,9 +1234,77 @@ class TestCompileLPOpenSlippage:
             )
             result = compiler.compile(intent)
 
+        assert result.status == CompilationStatus.FAILED
+        assert "lp_slippage" in (result.error or "")
+
+    @patch(VALIDATE_V3_POOL)
+    @patch(LP_ADAPTER_CLS)
+    def test_out_of_range_lp_slippage_is_classified_as_a_safety_refusal(
+        self,
+        mock_adapter_cls: MagicMock,
+        mock_validate: MagicMock,
+    ) -> None:
+        """A refusal must be classified as a refusal, not as a fault (VIB-6217).
+
+        Asserting only ``status is FAILED`` would pass against the WRONG
+        classification: before the dedicated handler, ``UnprotectedTradeError``
+        fell through to the generic ``except Exception`` and produced FAILED with
+        ``is_safety_refusal=False``. The runner maps that to an ordinary fault, so
+        it counts toward the circuit breaker's consecutive-failure trip — a
+        strategy that correctly refuses to trade would trip itself off. Zero
+        transactions were built and the on-chain position is untouched; the guard
+        did its job and that is a safety success, not a failure of the strategy.
+
+        Uses ``lp_slippage: 5`` rather than ``1.0`` so this exercises the range
+        check rather than a value that merely happens to be the boundary.
+        """
+        mock_adapter_cls.return_value = _make_mock_lp_adapter()
+        mock_validate.return_value = _mock_pool_validation_ok()
+        compiler = _make_compiler(chain="arbitrum")
+
+        with (
+            patch.object(compiler, "_parse_pool_info", return_value=(_USDC, _WETH, 3000, False)),
+            patch.object(compiler, "_build_approve_tx", return_value=[]),
+        ):
+            intent = _make_lp_intent(protocol_params={"lp_slippage": 5})
+            result = compiler.compile(intent)
+
+        assert result.status == CompilationStatus.FAILED
+        assert result.is_safety_refusal is True, (
+            "an out-of-range lp_slippage is a safety refusal, not a fault — "
+            "misclassifying it makes a correct refusal count toward the circuit breaker"
+        )
+        assert "lp_slippage" in (result.error or "")
+
+    @patch(VALIDATE_V3_POOL)
+    @patch(LP_ADAPTER_CLS)
+    def test_protocol_params_lp_slippage_override_still_works_in_range(
+        self,
+        mock_adapter_cls: MagicMock,
+        mock_validate: MagicMock,
+    ) -> None:
+        """The override itself is not removed — only the out-of-range value is.
+
+        Without this, the test above would be satisfied by ``lp_slippage`` being
+        ignored or broken entirely, rather than by the range check firing.
+        """
+
+        mock_adapter_cls.return_value = _make_mock_lp_adapter()
+        mock_validate.return_value = _mock_pool_validation_ok()
+        compiler = _make_compiler(chain="arbitrum")
+
+        with (
+            patch.object(compiler, "_parse_pool_info", return_value=(_USDC, _WETH, 3000, False)),
+            patch.object(compiler, "_build_approve_tx", return_value=[]),
+        ):
+            intent = _make_lp_intent(
+                protocol_params={"lp_slippage": 0.5},
+            )
+            result = compiler.compile(intent)
+
         assert result.status == CompilationStatus.SUCCESS, result.error
-        assert result.action_bundle.metadata["amount0_min"] == "0"
-        assert result.action_bundle.metadata["amount1_min"] == "0"
+        a0_desired = Decimal(result.action_bundle.metadata["amount0_desired"])
+        assert result.action_bundle.metadata["amount0_min"] == str(int(a0_desired * Decimal("0.5")))
 
 
 class TestCompileLPOpenErrorPaths:

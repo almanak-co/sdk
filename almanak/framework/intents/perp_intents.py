@@ -24,6 +24,7 @@ from almanak.framework.models.base import (
 
 from .base import BaseIntent
 from .intent_errors import InvalidProtocolParameterError
+from .min_out_guard import validate_max_slippage_fraction
 from .vocabulary import (
     IntentType,
 )
@@ -124,8 +125,7 @@ class PerpOpenIntent(BaseIntent):
             raise ValueError("collateral_amount must be a positive Decimal or 'all'")
         if self.size_usd <= 0:
             raise ValueError("size_usd must be positive")
-        if self.max_slippage < 0 or self.max_slippage > 1:
-            raise ValueError("max_slippage must be between 0 and 1")
+        validate_max_slippage_fraction(self.max_slippage)
         if self.leverage < 1:
             raise ValueError("leverage must be >= 1")
         # Validate leverage against protocol capabilities
@@ -224,8 +224,7 @@ class PerpCloseIntent(BaseIntent):
         """Validate perp close parameters."""
         if self.size_usd is not None and self.size_usd <= 0:
             raise ValueError("size_usd must be positive if specified")
-        if self.max_slippage < 0 or self.max_slippage > 1:
-            raise ValueError("max_slippage must be between 0 and 1")
+        validate_max_slippage_fraction(self.max_slippage)
         if self.position_id is not None:
             pid = self.position_id
             if not isinstance(pid, str) or not pid.startswith("0x"):

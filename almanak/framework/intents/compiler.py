@@ -287,6 +287,7 @@ from .compiler_queries import (
 from .compiler_queries import (
     tick_to_price as _qtick_to_price,
 )
+from .min_out_guard import validate_max_slippage_fraction
 
 # =============================================================================
 # Native-token symbol table (VIB-3135)
@@ -521,8 +522,18 @@ class IntentCompiler:
             else None
         )
 
-        # LP slippage configuration (0.99 = 99% default, allows concentrated liquidity flexibility)
-        self.default_lp_slippage = min(max(default_lp_slippage, Decimal("0")), Decimal("1"))
+        # LP slippage configuration. VALIDATED, not clamped (VIB-6217): a clamp on a
+        # safety parameter is a fail-open — `min(max(x, 0), 1)` silently turned
+        # `default_lp_slippage=Decimal("5")` into exactly `1`, and a tolerance of 1
+        # sizes every LP minimum at zero. Rejecting at construction also keeps the
+        # bad value away from `compute_min_amount_out`, whose bare `ValueError` would
+        # otherwise bypass the compile-time safety-refusal handlers and be billed to
+        # the circuit breaker as an ordinary fault.
+        #
+        # NOTE: the DEFAULT is still 0.99 (a 1%-of-desired floor), which is its own
+        # defect — see VIB-6225. This only stops a caller making it worse.
+        validate_max_slippage_fraction(default_lp_slippage, field_name="default_lp_slippage")
+        self.default_lp_slippage = default_lp_slippage
 
         # Token resolver - use provided or default singleton (lazy import to avoid circular dependency)
         if token_resolver is None:

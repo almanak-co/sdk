@@ -8,6 +8,7 @@ from typing import Any
 
 from almanak.framework.intents._compiler_helpers import compute_min_amount_out
 from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus
+from almanak.framework.intents.min_out_guard import UnprotectedTradeError
 
 logger = logging.getLogger(__name__)
 
@@ -152,14 +153,33 @@ def compute_lp_slippage_mins(
     amount1_desired: int,
     default_lp_slippage: Decimal,
 ) -> tuple[int, int]:
-    """Compute LP minimum amounts from the effective LP slippage."""
+    """Compute LP minimum amounts from the effective LP slippage.
+
+    ``protocol_params["lp_slippage"]`` FAILS CLOSED (VIB-6217). It used to be
+    clamped with ``min(max(x, 0), 1)``, which turned every out-of-range value into
+    a legal-looking one: a fat-fingered ``5`` became exactly ``1``, and a slippage
+    of 1 makes ``compute_min_amount_out`` return 0 for both tokens — the mint is
+    then encoded with ``amount0Min = amount1Min = 0`` and will accept any amount of
+    LP for the tokens deposited. Maximum harm from a typo, with no signal. A
+    tolerance outside ``[0, 1)`` is now refused rather than silently repaired.
+
+    Note this raises ``UnprotectedTradeError``, so connector compilers calling this
+    should surface it as ``CompilationStatus.FAILED`` with
+    ``is_safety_refusal=True`` rather than letting it escape as a crash.
+    """
     protocol_lp_slippage = (intent.protocol_params or {}).get("lp_slippage")
     intent_max_slippage = getattr(intent, "max_slippage", None)
-    lp_slippage = (
-        min(max(Decimal(str(protocol_lp_slippage)), Decimal("0")), Decimal("1"))
-        if protocol_lp_slippage is not None
-        else (intent_max_slippage if intent_max_slippage is not None else default_lp_slippage)
-    )
+    if protocol_lp_slippage is not None:
+        lp_slippage = Decimal(str(protocol_lp_slippage))
+        if lp_slippage < Decimal("0") or lp_slippage >= Decimal("1"):
+            raise UnprotectedTradeError(
+                "LP mint (protocol_params.lp_slippage)",
+                f"lp_slippage must be in [0, 1) (got {lp_slippage}); a tolerance of "
+                f"1 or more sizes both minimum amounts at zero, which accepts any "
+                f"mint outcome. Set an explicit tolerance such as 0.05.",
+            )
+    else:
+        lp_slippage = intent_max_slippage if intent_max_slippage is not None else default_lp_slippage
     amount0_min = compute_min_amount_out(amount0_desired, lp_slippage)
     amount1_min = compute_min_amount_out(amount1_desired, lp_slippage)
     logger.debug(

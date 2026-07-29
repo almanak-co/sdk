@@ -281,9 +281,10 @@ class TestLpIntentMaxSlippageField:
         )
         assert intent.max_slippage == Decimal("0.02")
 
-    @pytest.mark.parametrize("bad", [Decimal("-0.01"), Decimal("1.5")])
+    # Decimal("1") is the VIB-6217 case: a 100% tolerance sizes min_mint at zero.
+    @pytest.mark.parametrize("bad", [Decimal("-0.01"), Decimal("1"), Decimal("1.5")])
     def test_lp_open_slippage_out_of_range_rejected(self, bad: Decimal) -> None:
-        with pytest.raises(ValueError, match="max_slippage must be between 0 and 1"):
+        with pytest.raises(ValueError, match=r"max_slippage must be in \[0, 1\)"):
             LPOpenIntent(
                 pool="2pool",
                 amount0=Decimal("1"),
@@ -294,9 +295,10 @@ class TestLpIntentMaxSlippageField:
                 max_slippage=bad,
             )
 
-    @pytest.mark.parametrize("bad", [Decimal("-0.01"), Decimal("1.5")])
+    # Decimal("1") is the VIB-6217 case: a 100% tolerance sizes min_amounts at zero.
+    @pytest.mark.parametrize("bad", [Decimal("-0.01"), Decimal("1"), Decimal("1.5")])
     def test_lp_close_slippage_out_of_range_rejected(self, bad: Decimal) -> None:
-        with pytest.raises(ValueError, match="max_slippage must be between 0 and 1"):
+        with pytest.raises(ValueError, match=r"max_slippage must be in \[0, 1\)"):
             LPCloseIntent(
                 position_id="100",
                 pool="2pool",

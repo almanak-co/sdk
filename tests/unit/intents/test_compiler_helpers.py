@@ -44,9 +44,23 @@ class TestComputeMinAmountOut:
     def test_zero_slippage_returns_expected(self) -> None:
         assert compute_min_amount_out(1_000_000, Decimal("0")) == 1_000_000
 
-    def test_full_slippage_yields_zero(self) -> None:
-        # max_slippage=1 is the "zero minimum" boundary used by LP safe-for-testing.
-        assert compute_min_amount_out(1_000_000, Decimal("1")) == 0
+    def test_full_slippage_raises(self) -> None:
+        """VIB-6217: a tolerance of 1 is refused, not honoured as a zero minimum.
+
+        This test previously asserted ``compute_min_amount_out(1_000_000,
+        Decimal("1")) == 0`` and called it "the 'zero minimum' boundary used by LP
+        safe-for-testing". That boundary was the defect: a zero minimum accepts any
+        output, so every connector deriving its minimum CORRECTLY through this
+        helper could still be handed a slippage that zeroes the result. There is no
+        legitimate caller of a 100% tolerance — 0.9999 is available for anyone who
+        genuinely wants an almost-unbounded one.
+        """
+        with pytest.raises(ValueError, match=r"\[0, 1\)"):
+            compute_min_amount_out(1_000_000, Decimal("1"))
+
+    def test_slippage_just_below_one_is_still_allowed(self) -> None:
+        """The bound is exclusive at 1 only; it is not a cap on large tolerances."""
+        assert compute_min_amount_out(1_000_000, Decimal("0.9999")) == 100
 
     def test_truncates_not_rounds(self) -> None:
         # Real compiler uses ``int(Decimal(...) * ...)`` which truncates.
@@ -65,11 +79,11 @@ class TestComputeMinAmountOut:
             compute_min_amount_out(-1, Decimal("0.01"))
 
     def test_slippage_above_one_raises(self) -> None:
-        with pytest.raises(ValueError, match=r"\[0, 1\]"):
+        with pytest.raises(ValueError, match=r"\[0, 1\)"):
             compute_min_amount_out(1_000_000, Decimal("1.5"))
 
     def test_negative_slippage_raises(self) -> None:
-        with pytest.raises(ValueError, match=r"\[0, 1\]"):
+        with pytest.raises(ValueError, match=r"\[0, 1\)"):
             compute_min_amount_out(1_000_000, Decimal("-0.01"))
 
     def test_matches_compiler_line_1554(self) -> None:

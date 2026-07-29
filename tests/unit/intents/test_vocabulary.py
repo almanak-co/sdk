@@ -104,9 +104,13 @@ class TestSwapIntentValidators:
         with pytest.raises(ValidationError, match="invalid number format"):
             SwapIntent(from_token="USDC", to_token="ETH", amount="maximum")
 
-    @pytest.mark.parametrize("bad_slippage", [Decimal("-0.01"), Decimal("1.5")])
+    # Decimal("1") is the VIB-6217 case: 100% tolerance derives a zero minimum
+    # from any expected output, so the bound is exclusive at 1.
+    @pytest.mark.parametrize(
+        "bad_slippage", [Decimal("-0.01"), Decimal("1"), Decimal("1.5")]
+    )
     def test_slippage_out_of_bounds(self, bad_slippage):
-        with pytest.raises(ValidationError, match="max_slippage must be between 0 and 1"):
+        with pytest.raises(ValidationError, match=r"max_slippage must be in \[0, 1\)"):
             SwapIntent(
                 from_token="USDC",
                 to_token="ETH",

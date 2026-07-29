@@ -37,6 +37,7 @@ from almanak.framework.models.base import (
 )
 
 from .base import BaseIntent
+from .min_out_guard import validate_max_slippage_fraction
 
 if TYPE_CHECKING:
     from .bridge import BridgeIntent
@@ -182,8 +183,7 @@ class EnsureBalanceIntent(BaseIntent):
             raise InvalidEnsureBalanceError("min_amount must be positive")
 
         # Validate slippage
-        if self.max_slippage < 0 or self.max_slippage > 1:
-            raise InvalidEnsureBalanceError("max_slippage must be between 0 and 1")
+        validate_max_slippage_fraction(self.max_slippage, error_type=InvalidEnsureBalanceError)
 
         return self
 

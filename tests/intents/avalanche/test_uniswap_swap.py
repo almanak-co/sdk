@@ -107,7 +107,10 @@ class TestUniswapV3SwapIntent:
             # This fork-level golden asserts execution and exact input deltas;
             # unit coverage owns the min-output math. Keep the live fork route
             # tolerant so pool/oracle drift does not mask intent plumbing.
-            max_slippage=Decimal("1"),
+            # VIB-6217: 1 (100%) is no longer a legal tolerance — it derives a
+            # zero minimum, which is the absence of protection, not a loose one.
+            # 0.99 keeps this golden just as drift-tolerant in practice.
+            max_slippage=Decimal("0.99"),
             protocol="uniswap_v3",
             chain=CHAIN_NAME,
         )

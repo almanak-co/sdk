@@ -15,6 +15,7 @@ from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
 
 from almanak.framework.intents.compiler import (
     CompilationStatus,
@@ -550,13 +551,46 @@ class TestPreSwapErrors:
             assert result.status == CompilationStatus.FAILED
             assert "v3-compatible dex" in result.error.lower()
 
-    def test_extreme_slippage_fails_gracefully(self, compiler_arbitrum):
-        """If max_slippage >= 100%, the buffered amount would be zero -- should fail cleanly."""
+    def test_slippage_of_exactly_one_is_refused_before_compilation(self):
+        """VIB-6217 moved this defence EARLIER: 100% slippage is now unconstructable.
+
+        This test previously built a ``SwapIntent`` with ``max_slippage=1.0`` and
+        asserted ``compile()`` returned FAILED. That intent can no longer exist —
+        ``SwapIntent``'s validator now enforces ``[0, 1)`` — so the compile-time
+        check is never reached via this route. The protection did not weaken; it
+        moved from "the compiler refuses to build it" to "the intent refuses to be
+        built", which also covers every other connector at once.
+        """
+        with pytest.raises(ValidationError, match=r"must be in \[0, 1\)"):
+            SwapIntent(
+                from_token="WETH",
+                to_token="PT-wstETH-25JUN2026",
+                amount=Decimal("1"),
+                max_slippage=Decimal("1.0"),
+                protocol="pendle",
+            )
+
+    def test_extreme_but_legal_slippage_still_fails_gracefully(self, compiler_arbitrum):
+        """The compiler's own zero-input guard must NOT become dead code.
+
+        ``pre_swap_min_out = int(estimated * (1 - max_slippage))`` still truncates
+        to zero for a tolerance just under 1, so ``compiler.py``'s
+        ``buffered_mint_sy_amount <= 0`` refusal remains reachable with a slippage
+        the intent validator accepts. Without this case, tightening the intent
+        bound would have silently orphaned that guard.
+
+        It takes a very small amount to get there — at 1 WETH a 0.9999 tolerance
+        still leaves a positive floor (~8.5e9 wei against an ~8.5e17 expected
+        output). That is the honest limit of VIB-6217 on its own: the ``[0, 1)``
+        bound stops the floor being exactly zero, it does NOT stop it being
+        negligible. Making a negligible floor unencodable is VIB-6218's
+        ``require_protective_min``, which no production path calls yet.
+        """
         intent = SwapIntent(
             from_token="WETH",
             to_token="PT-wstETH-25JUN2026",
-            amount=Decimal("1"),
-            max_slippage=Decimal("1.0"),  # 100% slippage
+            amount=Decimal("0.00000000000001"),
+            max_slippage=Decimal("0.9999"),  # legal, but annihilates the floor
             protocol="pendle",
         )
 

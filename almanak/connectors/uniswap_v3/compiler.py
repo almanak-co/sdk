@@ -43,6 +43,7 @@ from almanak.framework.intents.compiler_constants import (
     get_gas_estimate,
 )
 from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus, TokenInfo, TransactionData
+from almanak.framework.intents.min_out_guard import UnprotectedTradeError
 from almanak.framework.intents.vocabulary import CollectFeesIntent, IntentType, LPCloseIntent, LPOpenIntent, SwapIntent
 from almanak.framework.utils.log_formatters import _emojis_enabled, format_percentage, format_token_amount
 
@@ -423,6 +424,20 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
                 tx_summary,
                 total_gas,
             )
+        except UnprotectedTradeError as e:
+            # A SAFETY REFUSAL, not a fault (VIB-6217). Zero transactions were
+            # built and the on-chain position is untouched — the guard did its
+            # job. Without is_safety_refusal the runner maps this to an ordinary
+            # fault and it counts toward the circuit breaker's consecutive-failure
+            # trip, so a correctly-refusing strategy would trip itself off.
+            #
+            # logger.error, NOT logger.exception: a deliberate refusal that emits
+            # a full traceback reads as a crash, and a guard that looks like a
+            # crash is a guard someone switches off.
+            logger.error("Refusing to compile LP_OPEN without output protection: %s", e)
+            result.status = CompilationStatus.FAILED
+            result.is_safety_refusal = True
+            result.error = str(e)
         except Exception as e:
             logger.exception("Failed to compile LP_OPEN intent: %s", e)
             result.status = CompilationStatus.FAILED
