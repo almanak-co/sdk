@@ -134,12 +134,25 @@ def _assert_fixture_lifecycle(
         # round-trip is enforced by its cell pack, not this guard. Unknown
         # profiles never reach here: _profile_for raises above.
         return
+    # VIB-6043 leg 2: a step that LANDED but was accounting-degraded still
+    # happened — the lifecycle question is "did this primitive complete its
+    # round trip?", not "were the books clean?". Without the degraded arm a
+    # degraded LP_CLOSE (the VIB-6051 shape this guard targets) drops out of
+    # ``actual`` and this raises FixtureLifecycleError, so NO cells score at
+    # all — the audit tool would abort on exactly the input it exists to
+    # measure, and G1 would never get the chance to report the real defect.
+    # Predicate imported, not inlined — see ``ledger_guard.landed_sql`` for why
+    # the prefix match uses substr rather than LIKE.
     if deployment_id is None:
-        cur = conn.execute("SELECT DISTINCT intent_type FROM transaction_ledger WHERE success=1")
+        cur = conn.execute(
+            f"SELECT DISTINCT intent_type FROM transaction_ledger WHERE {_landed_sql()}",
+            dict(_LANDED_PARAMS),
+        )
     else:
         cur = conn.execute(
-            "SELECT DISTINCT intent_type FROM transaction_ledger WHERE success=1 AND deployment_id = ?",
-            (deployment_id,),
+            "SELECT DISTINCT intent_type FROM transaction_ledger "
+            f"WHERE {_landed_sql()} AND deployment_id = :deployment_id",
+            {"deployment_id": deployment_id, **_LANDED_PARAMS},
         )
     actual = {row[0] for row in cur.fetchall() if row[0]}
     missing = expected - actual
@@ -817,6 +830,47 @@ def _g1_classify_swap_usd_legs(
     return missing_swap_usd, pt_unmeasured_disposals
 
 
+#: The landed / degraded rules are IMPORTED from ``accounting.ledger_guard`` —
+#: one shared set of predicates, so the scorecard and the write path cannot
+#: drift apart. ``test_ledger_guard`` pins Python and SQL forms together.
+#:
+#: An earlier version of this note claimed the opposite — a local mirror
+#: constant and no import-time dependency on the write path. The imports below
+#: are hard and module-level; the comment described a design that was replaced.
+from almanak.framework.accounting.ledger_guard import LANDED_PARAMS as _LANDED_PARAMS
+from almanak.framework.accounting.ledger_guard import degraded as _degraded_rule
+from almanak.framework.accounting.ledger_guard import landed as _landed_rule
+from almanak.framework.accounting.ledger_guard import landed_sql as _landed_sql
+
+
+def _row_landed(row: dict[str, Any]) -> bool:
+    """Whether a ledger row represents a transaction that actually LANDED.
+
+    ``transaction_ledger.success`` is the *framework verdict*, not chain
+    reality: the slippage circuit-breaker, the reconciliation finalizer and
+    the Empty != Zero guard (VIB-6043 leg 2) all write ``success=False`` on
+    transactions that landed on-chain.
+
+    **Every cell that asks "did this transaction execute?" must use this, not
+    ``row["success"]``.** Cells that ask "were the books clean?" should keep
+    using ``success`` directly. Getting that distinction wrong in either
+    direction produces a scorecard that reports something it has not
+    verified — G1, G10 and G11 have each been bitten by it.
+    """
+    # Delegates to the ONE rule. This previously read ``bool(row.get("success"))``,
+    # which treats the malformed string "0" as LANDED — an Empty != Zero
+    # violation sitting inside the helper meant to enforce the distinction.
+    #
+    # ``tx_hash`` is passed because the degraded arm requires it: the marker's
+    # ``chain_success`` is stamped by construction, so a NO-OP bundle (no
+    # transaction submitted, ``tx_hash=""``) carries it too. ``.get`` is safe
+    # here specifically because every caller's rows come from ``_table_rows``,
+    # which issues ``SELECT *`` — the column is always present. A future caller
+    # that hand-builds row dicts must include it, or its degraded rows silently
+    # stop counting as landed.
+    return _landed_rule(row.get("success"), row.get("error"), row.get("tx_hash"))
+
+
 def _cell_g1_money_trail(
     rows: list[dict[str, Any]],
     acct_events: list[dict[str, Any]],
@@ -858,7 +912,29 @@ def _cell_g1_money_trail(
     # (gas-only money trail). Mixing the two would FAIL G1 for a reverted
     # SWAP that legitimately has no amount_out, masking the actual gap.
     successful = [r for r in rows if r.get("success")]
-    missing_hash = [r for r in successful if not r.get("tx_hash")]
+    # VIB-6043 leg 2 — anti-laundering. The write-time guard downgrades a
+    # would-be-success SWAP row with unmeasured amounts to success=False plus an
+    # ``accounting_degraded:`` marker. That row would otherwise DROP OUT of the
+    # ``successful`` scan below and this cell would flip green while the money is
+    # still unmeasured — turning a fix into a way to hide the defect. Degraded
+    # rows are therefore evaluated over ALL rows.
+    #
+    # UNCONDITIONALLY — do NOT re-add a ``tx_hash`` filter here. The guard fires
+    # on any success row with unmeasured money slots regardless of whether a
+    # hash was captured, so gating this clause on ``tx_hash`` re-opens the exact
+    # laundering hole it exists to close: a row with success=True, no hash and
+    # no amounts (the Safe/bundle under-measured shape) used to FAIL under
+    # ``missing_hash``, and the downgrade to success=False removes it from
+    # ``successful`` — so a hash-gated clause would let it escape BOTH and flip
+    # this cell green where it was previously red.
+    degraded = [r for r in rows if _degraded_rule(r.get("error"))]
+    # Spans successful + degraded so downgrading a row can never remove it from
+    # a clause that used to see it. NOTE this extension is currently INERT:
+    # the ``if degraded:`` clause below returns FAIL first, so the unconditional
+    # degraded check is doing all the work. It is kept as defence-in-depth
+    # against a future reordering of these clauses, not because it changes any
+    # verdict today.
+    missing_hash = [r for r in (*successful, *degraded) if not r.get("tx_hash")]
     missing_token_amounts = [
         r for r in successful if r.get("intent_type") == "SWAP" and not (r.get("amount_in") and r.get("amount_out"))
     ]
@@ -870,6 +946,16 @@ def _cell_g1_money_trail(
     # missing USD (and the matching cell-level error is also surfaced via
     # the report's ``payload_validation_errors`` list).
     missing_swap_usd, pt_unmeasured_disposals = _g1_classify_swap_usd_legs(successful, acct_events, acct_payloads)
+
+    if degraded:
+        sample_tx = degraded[0].get("tx_hash") or "<no tx_hash>"
+        return CellResult(
+            "G1",
+            "Money trail",
+            "FAIL",
+            f"{len(degraded)} ledger rows are accounting-degraded "
+            f"(money moved, amounts unmeasured) — e.g. tx {sample_tx}",
+        )
 
     if missing_hash:
         return CellResult(
@@ -1819,11 +1905,19 @@ def _cell_g10_multi_tx_atomicity(
             continue
         cycles.setdefault(cyc, []).append(r)
 
-    mixed: list[tuple[Any, int, int]] = []  # (cycle_id, success_count, fail_count)
+    # VIB-6043 leg 2: this cell asks "did every dispatched intent in the cycle
+    # reach the same ON-CHAIN outcome?" — so it must key on chain reality, not
+    # the framework verdict. An ``accounting_degraded:`` row LANDED; its
+    # success=False is a books verdict about unmeasured amounts, not a revert.
+    # Counting it as a failure makes a clean-row + degraded-row cycle report
+    # "some succeeded, some reverted" when nothing reverted, and leaves G10
+    # permanently red on any multi-intent cycle containing a degraded row —
+    # masking the genuine partial-unwind signal this cell exists to surface.
+    mixed: list[tuple[Any, int, int]] = []  # (cycle_id, landed_count, reverted_count)
     for cyc, rs in cycles.items():
         if len(rs) < 2:
             continue
-        successes = sum(1 for r in rs if r.get("success"))
+        successes = sum(1 for r in rs if _row_landed(r))
         fails = len(rs) - successes
         if successes > 0 and fails > 0:
             mixed.append((cyc, successes, fails))
@@ -1847,7 +1941,14 @@ def _cell_g10_multi_tx_atomicity(
 
 
 def _cell_g11_failed_intents(ledger: list[dict[str, Any]]) -> CellResult:
-    failed = [r for r in ledger if not r.get("success")]
+    # VIB-6043 leg 2: a landed-but-degraded row did NOT fail. Keying this on
+    # the framework verdict counts it as a failed intent, which flips a run
+    # where nothing reverted from SKIP to PASS — the cell would assert the
+    # failed-intent writer contract was exercised when zero intents failed.
+    # (And where the same under-measured shape also leaves gas_usd empty, it
+    # flips to FAIL with the diagnostic "failed intents have no gas_usd" for a
+    # transaction that never failed.) Same defect shape as G1 and G10.
+    failed = [r for r in ledger if not _row_landed(r)]
     if not failed:
         return CellResult(
             "G11",

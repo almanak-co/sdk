@@ -3603,7 +3603,13 @@ class StrategyRunner:
                     wallet_address=wallet_address,
                 )
                 if not used_atomic:
-                    await self.state_manager.save_ledger_entry(entry)
+                    # VIB-6043 leg 2: route through the commit primitive so the
+                    # write-time Empty != Zero guard sees EVERY ledger row, not
+                    # just the registry-mode ones. Same single delegation to
+                    # ``state_manager.save_ledger_entry`` underneath.
+                    from almanak.framework.accounting.commit import save_ledger_and_registry
+
+                    await save_ledger_and_registry(self.state_manager, ledger=entry)
 
             # Emit position event whenever the chain TX succeeded — the framework
             # ``success`` verdict can be False on slippage-breach / reconciliation-
@@ -3637,8 +3643,13 @@ class StrategyRunner:
                     wallet_address=eff_wallet,
                 )
 
-            # Signal that this iteration executed a trade — forces snapshot
-            if success:
+            # Signal that this iteration executed a trade — forces snapshot.
+            # VIB-6043 leg 2: keyed on CHAIN success, not the framework verdict.
+            # A slippage-breach / reconciliation-incident / accounting-degraded
+            # row carries success=False while the tx really landed; gating on
+            # the verdict silently skipped the portfolio snapshot for exactly
+            # the iterations whose books most need one.
+            if success or chain_success:
                 self._iteration_had_trade = True
             return entry.id
         except AccountingPersistenceError:
@@ -4474,6 +4485,22 @@ class StrategyRunner:
         if not self.state_manager or not hasattr(self.state_manager, "save_ledger_entry"):
             return
         try:
+            # VIB-6043 leg 2: apply the write-time Empty != Zero guard here too,
+            # but keep the WRITE on the plain ``save_ledger_entry`` RPC. This is
+            # the best-effort durability net for a commit that just failed —
+            # routing it back through the same primitive would make a systemic
+            # failure there take out the net as well, which is the one thing
+            # this path exists to prevent.
+            from almanak.framework.accounting.ledger_guard import apply_degradation, classify_ledger_row
+
+            degradation = classify_ledger_row(entry)
+            if degradation is not None:
+                apply_degradation(entry, degradation)
+                logger.error(
+                    "orphan_candidate_ledger_fallback degraded before write (%s): %s",
+                    degradation.reason.value,
+                    degradation.detail,
+                )
             await self.state_manager.save_ledger_entry(entry)
             logger.warning(
                 "orphan_candidate_ledger_fallback_ok: plain ledger row persisted "

@@ -411,18 +411,68 @@ def decode_selector(selector: str | None) -> str:
     return _SELECTOR_LABELS.get(s, s)
 
 
+def leg_role(sub_tx: object) -> str:
+    """The receipt-derived ``role`` on a leg, uppercased, or ``""`` if absent.
+
+    ``role`` (``APPROVAL`` / ``ACTION`` / ``INCIDENTAL``) is stamped by
+    ``observability.ledger._classify_sub_tx_role`` from the receipt's event
+    logs, so it is the only leg field that is a MEASUREMENT rather than an
+    inference. It exists on ``sub_transactions`` entries and not on
+    ``all_tx_results`` entries — hence a reader, not a required field.
+    """
+    if not isinstance(sub_tx, dict):
+        return ""
+    return str(sub_tx.get("role") or "").strip().upper()
+
+
 def is_approval_tx(sub_tx: dict) -> bool:
     """Return True if ``sub_tx`` is an ERC-20 ``approve`` call.
 
-    Selector-first: when ``function_selector`` is populated on the sub-tx
-    record, the answer is exact. When it isn't (today's
+    **Selector, then gas.** Deliberately NOT role-first, and that is the
+    opposite of what this docstring said before — it described a role-first
+    body that had already been removed, which is how the wrong rule nearly got
+    restored.
+
+    Role-first WAS tried here (VIB-6043 review round 7) on the reasoning that
+    ``role`` is a receipt MEASUREMENT while gas is a heuristic, that
+    ``_classify_sub_tx_role`` emits only ``APPROVAL`` / ``ACTION`` so it maps
+    onto this boolean without loss, and that the objection which removed it from
+    ``pick_action_tx`` therefore does not apply here. Every one of those
+    statements is true, and the conclusion is still WRONG, because the two
+    functions are not independent: ``pick_action_tx`` selects the **last
+    non-approval** leg and computes that with ``is_approval_tx``. Changing this
+    predicate silently changes which transaction the operator clicks.
+
+    Measured on the real writer's ``LP_CLOSE = decreaseLiquidity + collect +
+    unwrap`` bundle, with role-first applied HERE only:
+
+        action pick, sub_transactions : 0xcol -> 0xunwrap   (the regression
+                                                             role-first was
+                                                             removed to prevent)
+        action pick, all_tx_results   : 0xcol  (unchanged — no ``role`` field)
+
+    So it re-introduces BOTH defects the removal fixed — the wrong action leg,
+    and the two surfaces naming different transactions — through the back door.
+    Three existing tests catch it; they are the reason this is a docstring and
+    not a regression.
+
+    The cost of staying selector-then-gas is real and is not hidden: the ~30k
+    WETH unwrap falls inside the approval gas band, so on every Uniswap V3
+    LP_CLOSE with an unwrap a genuine action leg is filtered out of the sub-tx
+    table by default, labelled ``approve`` if shown, and exported
+    ``is_approval=1`` — while the ``role`` field in the very dict being
+    classified says ``ACTION``. Fixing that requires decoupling ``pick_action_tx``
+    from this predicate first (VIB-6177); it is not a one-line change here, and
+    anyone who thinks it is should re-read the measurement above.
+
+    Selector fallback: when ``function_selector`` is populated the answer is
+    exact. When neither role nor selector is present (today's
     ``all_tx_results`` shape — see VIB-4046 §"Adding function_selector"
-    discussion), fall back to a tight gas-band heuristic. ERC-20
-    ``approve`` lands at ~46k (slot-create) / ~28k (slot-reset). The
-    50k ceiling is chosen to clear those bands without overlapping
-    real action calls — Aave V3 ``setUserUseReserveAsCollateral``
-    measures ~50–70k, the lowest-cost action leg in the demo suite,
-    and we want it OUT of the approval bucket.
+    discussion), fall back to a tight gas-band heuristic. ERC-20 ``approve``
+    lands at ~46k (slot-create) / ~28k (slot-reset). The 50k ceiling is chosen
+    to clear those bands without overlapping real action calls — Aave V3
+    ``setUserUseReserveAsCollateral`` measures ~50–70k, the lowest-cost action
+    leg in the demo suite, and we want it OUT of the approval bucket.
 
     False-negative risk: a real approve metered above 50k on an unusual
     chain would be tagged as an action and shown in the default view.
@@ -451,6 +501,24 @@ def pick_action_tx(
 
     Order of preference (VIB-4046, refined for failure-investigation):
 
+    NOTE — a ``role``-first rule was added and then REMOVED (VIB-6043 review).
+    It was justified by a divergence that does not exist: the claim was that the
+    headline read ``all_tx_results`` (gas ladder) while the CSV read
+    ``sub_transactions`` (exact selector), so the two named different legs. Run
+    against the REAL writer, ``_function_selector_from_receipt``
+    (``observability/ledger.py``) returns ``""`` unconditionally, so
+    ``sub_transactions`` carries no selector either and BOTH surfaces already
+    fell to the gas ladder and agreed.
+
+    Worse, ``_classify_sub_tx_role`` emits only ``APPROVAL`` / ``ACTION`` —
+    ``INCIDENTAL`` is reserved-for-future and emitted nowhere. So a real
+    ``LP_CLOSE = decreaseLiquidity + collect + unwrap`` bundle is
+    ``['ACTION','ACTION','ACTION']``, and "last ACTION" named the 30k unwrap
+    where the ladder named ``collect``. A regression, defended by a test whose
+    fixture used ``role="INCIDENTAL"`` — a value no writer can produce.
+
+    Do not re-add it without first checking what the writer actually emits.
+
     1. The **last non-approval** sub-tx — regardless of success. When
        an action reverts but a trailing reset-approve succeeds, the
        operator clicking the headline link wants to land on the
@@ -465,7 +533,19 @@ def pick_action_tx(
     non_approval = [tx for tx in all_tx_results if not is_approval_tx(tx)]
     if non_approval:
         return non_approval[-1]
-    successful = [tx for tx in all_tx_results if tx.get("success", True)]
+
+    # Accept BOTH leg schemas. ``all_tx_results`` entries carry ``success``;
+    # ``sub_transactions`` entries carry ``status: "success"/"failure"`` and no
+    # ``success`` key at all — so a bare ``tx.get("success", True)`` silently
+    # treats every reverted sub-transaction as successful. This function is now
+    # fed ``sub_transactions`` by the trade tape (VIB-6043 leg 2 review).
+    def _leg_ok(tx: dict) -> bool:
+        status = tx.get("status")
+        if status is not None:
+            return str(status).lower() == "success"
+        return bool(tx.get("success", True))
+
+    successful = [tx for tx in all_tx_results if _leg_ok(tx)]
     if successful:
         return successful[-1]
     return all_tx_results[-1]

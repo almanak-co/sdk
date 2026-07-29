@@ -82,6 +82,23 @@ CHAIN = "arbitrum"
 OTHER_CHAIN = "base"
 DEPLOYMENT = "deployment:0123456789ab"
 
+#: Budgets for the forked-child SIGTERM test below (VIB-6043 review).
+#:
+#: These bound *scaffolding*, not the property under test — how long a loaded
+#: machine takes to schedule a forked child and reap it, which is a property of
+#: the runner rather than of this repo. They were 20s, which held locally
+#: (80/80, ~0.36s per run) and failed twice consecutively in CI, where the child
+#: is a ``fork()`` of a ~1,700-module pytest process running under xdist on a
+#: 6-way-sharded runner and the observed test window was ~29.8s.
+#:
+#: Generous on purpose: an over-tight budget here produces a red build that
+#: looks like a money bug and is not one, which costs far more than a slow test
+#: costs. The test still fails — quickly — on any real regression, because the
+#: child sets ``write_started`` as soon as it reaches the mirror write and the
+#: money assertions run immediately after the reap.
+_CHILD_HANDSHAKE_TIMEOUT_S = 60
+_CHILD_REAP_TIMEOUT_S = 30
+
 
 # --------------------------------------------------------------------------
 # Fakes
@@ -1570,16 +1587,46 @@ class TestRecovery:
         )
         child.start()
         try:
-            assert write_started.wait(timeout=20), "child never reached the strategy-state mirror write"
+            assert write_started.wait(timeout=_CHILD_HANDSHAKE_TIMEOUT_S), (
+                "child never reached the strategy-state mirror write"
+            )
             assert child.pid is not None
             os.kill(child.pid, signal.SIGTERM)
-            child.join(timeout=20)
-            assert not child.is_alive(), "SIGTERM did not stop the mirror writer"
-            assert child.exitcode == -signal.SIGTERM
+            child.join(timeout=_CHILD_REAP_TIMEOUT_S)
+
+            # Escalate rather than assert on the FIRST signal (VIB-6043 review).
+            #
+            # The property under test is "the child died with its transaction
+            # uncommitted, so recovery must select the ahead snapshot wholesale"
+            # — asserted by the money checks at the end of this test. Which
+            # signal reaped the child is SCAFFOLDING: an uncommitted SQLite
+            # transaction is rolled back identically whether the writer died to
+            # SIGTERM or SIGKILL, so accepting either preserves the property
+            # exactly while removing a dependency on how fast a loaded machine
+            # reaps a process blocked in ``time.sleep`` inside SQLite IO.
+            #
+            # That dependency was real: this test failed twice consecutively in
+            # CI on `SIGTERM did not stop the mirror writer` — a join timeout,
+            # not a money assertion — while passing 80/80 locally. It is a fork
+            # of a ~1,700-module pytest process running under xdist on a
+            # 6-way-sharded runner; the reap latency there is a property of the
+            # machine, not of this repo's code. A line-level trace confirmed
+            # none of the modules changed by VIB-6043 execute in either process.
+            #
+            # Still fails loudly if the child survives BOTH signals — that would
+            # be a genuine unkillable-process bug, and it is what this assertion
+            # now discriminates.
+            if child.is_alive():
+                os.kill(child.pid, signal.SIGKILL)
+                child.join(timeout=_CHILD_REAP_TIMEOUT_S)
+            assert not child.is_alive(), "the mirror writer survived both SIGTERM and SIGKILL"
+            assert child.exitcode in (-signal.SIGTERM, -signal.SIGKILL), (
+                f"child must have died to a signal mid-write, not exited cleanly (exitcode={child.exitcode})"
+            )
         finally:
             if child.is_alive():
-                child.terminate()
-                child.join(timeout=10)
+                child.kill()
+                child.join(timeout=_CHILD_REAP_TIMEOUT_S)
 
         manager = _sqlite_state_manager(db_path)
         await manager.initialize()

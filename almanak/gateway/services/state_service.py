@@ -1422,6 +1422,46 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             context.set_details("timestamp must be positive")
             return gateway_pb2.SaveLedgerEntryResponse(success=False, error="timestamp must be positive")
 
+        # VIB-6043 leg 2 — apply the write-time Empty != Zero guard AT THE GATEWAY
+        # BOUNDARY as well, not only in the strategy-side commit primitive.
+        #
+        # This RPC is an independent write boundary: it persists the caller's
+        # `success` / `amount_in` / `amount_out` verbatim in both the PostgreSQL
+        # and the SQLite branch. The gateway is the trust boundary and must not
+        # assume its caller already ran the guard — a differently-versioned
+        # strategy container, a replay tool, or any other gRPC client could
+        # otherwise still write the exact shape the guard exists to forbid
+        # (success=True + unmeasured amounts). Flagged by CodeRabbit on #3441.
+        #
+        # Same rule, same code path: the fields are projected through the SAME
+        # classify/apply pair the commit primitive uses, so the two cannot drift.
+        # Money columns are never altered — unmeasured stays unmeasured.
+        from almanak.framework.accounting.ledger_guard import degrade_row_fields
+
+        _degraded = degrade_row_fields(
+            intent_type=request.intent_type,
+            success=request.success,
+            amount_in=request.amount_in,
+            amount_out=request.amount_out,
+            error=request.error,
+            extracted_data_json=(request.extracted_data_json or b"").decode("utf-8", errors="replace"),
+            tx_hash=request.tx_hash,
+            chain=request.chain,
+            protocol=request.protocol,
+        )
+        if _degraded is not None:
+            ledger_success, ledger_error, ledger_extracted_json = _degraded
+            logger.error(
+                "SaveLedgerEntry degraded at the gateway boundary for %s (id=%s): %s",
+                deployment_id,
+                entry_id,
+                ledger_error,
+            )
+        else:
+            ledger_success = request.success
+            ledger_error = request.error
+            ledger_extracted_json = None  # unchanged — use the request's bytes
+
         await self._ensure_snapshot_pool()
 
         try:
@@ -1548,9 +1588,9 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                     request.tx_hash,
                     request.chain,
                     request.protocol,
-                    request.success,
-                    request.error,
-                    extracted_data_for_pg,
+                    ledger_success,
+                    ledger_error,
+                    (ledger_extracted_json if ledger_extracted_json is not None else extracted_data_for_pg),
                     price_inputs_json,
                     pre_state_json,
                     post_state_json,
@@ -1614,9 +1654,15 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                     tx_hash=request.tx_hash,
                     chain=request.chain,
                     protocol=request.protocol,
-                    success=request.success,
-                    error=request.error,
-                    extracted_data_json=extracted_json,
+                    # VIB-6043 leg 2: same boundary guard as the PostgreSQL
+                    # branch above — both paths of this RPC must apply it, or
+                    # the local/SQLite deployment keeps the hole the hosted one
+                    # just closed.
+                    success=ledger_success,
+                    error=ledger_error,
+                    extracted_data_json=(
+                        ledger_extracted_json if ledger_extracted_json is not None else extracted_json
+                    ),
                     price_inputs_json=price_inputs_json,
                     pre_state_json=pre_state_json,
                     post_state_json=post_state_json,
@@ -4538,13 +4584,33 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         Field order mirrors :meth:`SaveLedgerEntry`. ``deployment_id`` and
         ``deployment_id`` come from the validated, resolved values rather
         than the raw request to keep both paths in lockstep.
+
+        **The Empty != Zero guard is applied here, before the entry is
+        returned** (VIB-6043 leg 2). This is the sole construction point for
+        the atomic RPC's ledger row, and BOTH persistence branches —
+        ``_save_ledger_and_registry_pg``'s ``INSERT INTO transaction_ledger``
+        and the SQLite ``StateManager.save_ledger_and_registry`` delegate —
+        consume the object this method returns. Guarding at construction
+        rather than at the call site makes the bypass structurally
+        impossible instead of merely absent: a future second caller inherits
+        the guard for free.
+
+        ``SaveLedgerAndRegistry`` is an independent write boundary, exactly
+        like :meth:`SaveLedgerEntry`, and it carries the *registry* (LP) lane
+        — the VIB-6051 shape ``REQUIRED_MONEY_SLOTS["LP_CLOSE"]`` exists for.
+        The gateway is the trust boundary and must not assume its caller ran
+        the framework-side guard: a differently-versioned strategy container,
+        a replay tool or any other gRPC client could otherwise still persist
+        ``success=True`` with unmeasured amounts. Money columns are never
+        altered — unmeasured stays unmeasured, never a fabricated ``0``.
         """
+        from almanak.framework.accounting.ledger_guard import apply_degradation, classify_ledger_row
         from almanak.framework.observability.ledger import LedgerEntry
 
         def _opt_str(b: bytes | None) -> str:
             return b.decode("utf-8") if b else ""
 
-        return LedgerEntry(
+        entry = LedgerEntry(
             id=ledger_id,
             cycle_id=request.cycle_id,
             deployment_id=deployment_id,
@@ -4569,6 +4635,20 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             pre_state_json=_opt_str(request.pre_state_json),
             post_state_json=_opt_str(request.post_state_json),
         )
+
+        # Same rule, same code path as the commit primitive and
+        # :meth:`SaveLedgerEntry`, so the three boundaries cannot drift.
+        # No-op for rows that are already non-success or already marked.
+        degradation = classify_ledger_row(entry)
+        if degradation is not None:
+            apply_degradation(entry, degradation)
+            logger.error(
+                "SaveLedgerAndRegistry degraded at the gateway boundary for %s (id=%s): %s",
+                deployment_id,
+                ledger_id,
+                degradation.detail,
+            )
+        return entry
 
     @staticmethod
     def _build_registry_row_from_request(

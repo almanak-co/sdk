@@ -28,6 +28,55 @@ from almanak.framework.dashboard.utils import (
 )
 
 
+#: A ``TradeTapeRow`` builder. Module-level (it was class-scoped inside
+#: ``TestSubTxParsing``) so the role-preference tests below can build rows
+#: too — a second copy would be one more place for the fixture shape to
+#: drift from ``TradeTapeRow``.
+@pytest.fixture
+def make_row() -> object:
+    from almanak.framework.dashboard.gateway_client import TradeTapeRow
+
+    def _make(extracted_data_json: str = "", tx_hash: str = "0xtail") -> TradeTapeRow:
+        return TradeTapeRow(
+            id="row-1",
+            cycle_id="cyc-1",
+            timestamp=None,
+            intent_type="SWAP",
+            token_in="USDC",
+            amount_in="100",
+            token_out="WETH",
+            amount_out="0.04",
+            effective_price="2500",
+            slippage_bps=10.0,
+            gas_used=300_000,
+            gas_usd="2.0",
+            tx_hash=tx_hash,
+            chain="arbitrum",
+            protocol="uniswap_v3",
+            success=True,
+            error="",
+            amount_in_usd="100",
+            amount_out_usd="100",
+            extracted_data_json=extracted_data_json,
+            price_inputs_json="",
+            pre_state_json="",
+            post_state_json="",
+            accounting_payload_json="",
+            accounting_event_type="",
+            position_key="",
+            confidence="HIGH",
+            unavailable_reason="",
+            schema_version=1,
+            formula_version=1,
+            matching_policy_version=3,
+            position_event_json="",
+            position_id="",
+            position_event_type="",
+        )
+
+    return _make
+
+
 class TestDecodeSelector:
     def test_known_selector_returns_label(self) -> None:
         assert decode_selector(APPROVE_SELECTOR) == "approve"
@@ -266,50 +315,6 @@ class TestSubTxParsing:
     """The dashboard's parse helpers. Imported lazily so streamlit isn't
     required just to run these tests."""
 
-    @pytest.fixture
-    def make_row(self) -> object:
-        from almanak.framework.dashboard.gateway_client import TradeTapeRow
-
-        def _make(extracted_data_json: str = "", tx_hash: str = "0xtail") -> TradeTapeRow:
-            return TradeTapeRow(
-                id="row-1",
-                cycle_id="cyc-1",
-                timestamp=None,
-                intent_type="SWAP",
-                token_in="USDC",
-                amount_in="100",
-                token_out="WETH",
-                amount_out="0.04",
-                effective_price="2500",
-                slippage_bps=10.0,
-                gas_used=300_000,
-                gas_usd="2.0",
-                tx_hash=tx_hash,
-                chain="arbitrum",
-                protocol="uniswap_v3",
-                success=True,
-                error="",
-                amount_in_usd="100",
-                amount_out_usd="100",
-                extracted_data_json=extracted_data_json,
-                price_inputs_json="",
-                pre_state_json="",
-                post_state_json="",
-                accounting_payload_json="",
-                accounting_event_type="",
-                position_key="",
-                confidence="HIGH",
-                unavailable_reason="",
-                schema_version=1,
-                formula_version=1,
-                matching_policy_version=3,
-                position_event_json="",
-                position_id="",
-                position_event_type="",
-            )
-
-        return _make
-
     def test_get_all_tx_results_missing_returns_empty(self, make_row) -> None:  # type: ignore[no-untyped-def]
         from almanak.framework.dashboard.pages.trade_tape import _get_all_tx_results
 
@@ -355,3 +360,279 @@ class TestSubTxParsing:
         legs = _get_all_tx_results(row)
         assert len(legs) == 1
         assert legs[0]["tx_hash"] == "0xa"
+
+
+class TestActionPickIsDerivedFromTheRealWriter:
+    """VIB-6043 review — a `role`-first rule was added and then REMOVED.
+
+    The rule was justified by a divergence that does not exist. The claim was
+    that the tape headline read `all_tx_results` (gas ladder) while the CSV read
+    `sub_transactions` (exact selector), so the two named different legs. Run
+    against the REAL writer:
+
+        roles     -> ['ACTION', 'ACTION', 'ACTION']
+        selectors -> ['', '', '']
+
+    `_function_selector_from_receipt` returns `""` unconditionally, so
+    `sub_transactions` carries no selector either — both surfaces already fell
+    to the gas ladder and already agreed. And `_classify_sub_tx_role` emits only
+    APPROVAL/ACTION; `INCIDENTAL` is reserved-for-future and emitted nowhere.
+
+    So "last ACTION" named the 30k unwrap where the ladder named `collect` — a
+    regression, defended by three tests whose fixtures used `role="INCIDENTAL"`,
+    a value no writer can produce. Vacuity class 1: the tests authorised a
+    behaviour production cannot reach.
+
+    These replacements build the bundle with `_build_sub_transactions` so the
+    fixture is whatever the writer actually emits.
+    """
+
+    # Real event signatures. `_classify_sub_tx_role` returns "ACTION" immediately
+    # for a leg with NO logs, so a `logs=[]` fixture never reaches the branch that
+    # actually classifies anything — it would assert {"ACTION"} even if the log
+    # branch were inverted. (Measured: inverting that branch left the whole suite
+    # green.) Every real receipt carries logs, so the fixture must too.
+    _TRANSFER = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+    _BURN = "0x0c396cd989a39f4459b5fa1aed6a9a8dcdbc45908acfd67e028cd568da98982c"
+    _COLLECT = "0x70935338e69775456a85ddef226c395fb668b63fa0115f5f20610b388e6ca9c0"
+    _WITHDRAWAL = "0x7fcf532c15f0a6db0bd6d0e038bea71d30d808c7d98cb3bf7268a95bf5081b65"
+    _APPROVAL = "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925"
+
+    @classmethod
+    def _leg(cls, h: str, gas: int, topics: list[str]):  # type: ignore[no-untyped-def]
+        from types import SimpleNamespace as NS
+
+        return NS(
+            tx_hash=h, gas_used=gas, success=True, status=1,
+            receipt=NS(status=1, logs=[{"topics": [t]} for t in topics]), error=None,
+        )
+
+    @classmethod
+    def _real_lp_close_bundle(cls):  # type: ignore[no-untyped-def]
+        from almanak.framework.observability.ledger import _build_sub_transactions
+
+        # The repo's own documented shape: decreaseLiquidity + collect + unwrap,
+        # each with the events it really emits. None is approval-only, so all
+        # three classify ACTION through the REAL branch, not the empty-log default.
+        return _build_sub_transactions([
+            cls._leg("0xdec", 120_000, [cls._BURN, cls._TRANSFER]),
+            cls._leg("0xcol", 90_000, [cls._COLLECT, cls._TRANSFER]),
+            cls._leg("0xunwrap", 30_000, [cls._WITHDRAWAL]),
+        ])
+
+    def test_the_writer_emits_no_selectors_and_only_action_roles(self):
+        """Pins the precondition the removed rule got wrong.
+
+        If a future change starts emitting real selectors or INCIDENTAL roles,
+        this fails first and names the reason — rather than a role-based picker
+        silently becoming reachable and changing which tx the operator clicks.
+        """
+        subs = self._real_lp_close_bundle()
+        assert {s.get("role") for s in subs} == {"ACTION"}
+        assert {s.get("function_selector") for s in subs} == {""}
+
+        # The canary is only meaningful if the classifier it watches CAN say
+        # something else on this fixture shape. An approval-only leg must come
+        # back APPROVAL through the same path — otherwise the assertion above
+        # is pinned by the empty-log default rather than by the writer.
+        from almanak.framework.observability.ledger import _build_sub_transactions
+
+        approval_only = _build_sub_transactions([self._leg("0xapp", 46_000, [self._APPROVAL])])
+        assert approval_only[0]["role"] == "APPROVAL", (
+            "the role classifier cannot discriminate on this fixture shape — "
+            "the ACTION assertion above would hold vacuously"
+        )
+
+    def test_the_action_pick_matches_the_pre_delta_answer(self):
+        """The 30k unwrap is not the action leg; `collect` is."""
+        from almanak.framework.dashboard.utils import pick_action_tx
+
+        subs = self._real_lp_close_bundle()
+        assert pick_action_tx(subs, "LP_CLOSE")["tx_hash"] == "0xcol"
+
+    def test_both_leg_arrays_name_the_same_action(self):
+        """The property the removed rule claimed to establish — it already held.
+
+        `all_tx_results` and `sub_transactions` must agree about which leg is
+        the action, and they do, because neither carries a selector and both
+        fall to the same gas ladder.
+        """
+        from almanak.framework.dashboard.utils import pick_action_tx
+
+        subs = self._real_lp_close_bundle()
+        all_tx = [
+            {"tx_hash": s["tx_hash"], "gas_used": s["gas_used"], "success": True}
+            for s in subs
+        ]
+        assert pick_action_tx(subs, "LP_CLOSE")["tx_hash"] == pick_action_tx(all_tx, "LP_CLOSE")["tx_hash"]
+
+class TestSubTxBlockRendersTheMeasuredLegVerdict:
+    """The expander table must not repeat the CSV's key-mismatch bug.
+
+    ``_render_sub_tx_block`` read ``tx.get("success", True)``. That was correct
+    while it was fed ``all_tx_results`` (whose entries carry ``success``) and
+    became wrong the moment it was fed ``_resolve_legs`` — ``sub_transactions``
+    entries carry ``status: "success"/"failure"`` and no ``success`` key at all,
+    so every leg defaulted to True and a REVERTED leg rendered a green tick.
+    Identical defect to the one already fixed in the CSV export, one function
+    over; pointing the headline at the shared resolver is what would have
+    reintroduced it here.
+    """
+
+    @staticmethod
+    def _render(legs: list[dict], monkeypatch) -> str:  # type: ignore[no-untyped-def]
+        from almanak.framework.dashboard.pages import trade_tape as tt
+
+        captured: list[str] = []
+        monkeypatch.setattr(tt.st, "markdown", lambda html, **kw: captured.append(str(html)))
+        row = type("R", (), {"chain": "arbitrum"})()
+        tt._render_sub_tx_block(row, legs, show_approvals=True)  # type: ignore[arg-type]
+        return "\n".join(captured)
+
+    def test_a_reverted_leg_renders_red(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        html = self._render(
+            [{"tx_hash": "0xact", "gas_used": 200_000, "status": "failure", "role": "ACTION"}],
+            monkeypatch,
+        )
+        assert "✗" in html and "✓" not in html, "a reverted sub-tx must not render as landed"
+
+    def test_a_successful_leg_renders_green(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """Anti-vacuity control — the fix must not paint everything red."""
+        html = self._render(
+            [{"tx_hash": "0xact", "gas_used": 200_000, "status": "success", "role": "ACTION"}],
+            monkeypatch,
+        )
+        assert "✓" in html and "✗" not in html
+
+    def test_an_unmeasured_leg_renders_neither(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """Empty != Zero on screen: no measurement is not a failure."""
+        html = self._render([{"tx_hash": "0xact", "gas_used": 200_000}], monkeypatch)
+        assert "✓" not in html and "✗" not in html
+        assert "not measured" in html
+
+
+class TestANoOpIsNotGradedAsALandedTrade:
+    """A row that submitted NOTHING must not render as an executed trade.
+
+    A lending no-op (Compound V3 `withdraw_all` on zero collateral, Euler V2
+    full exit) compiles to `transactions=[]` with `metadata["no_op"]=True`. The
+    orchestrator returns success with no transaction results and the runner
+    writes `success=1, tx_hash=""`. `WITHDRAW` is not in `REQUIRED_MONEY_SLOTS`,
+    so nothing marks the row and `landed()`'s hash-blind clean arm answers True.
+
+    Before this fix the headline rendered a GREEN TICK — an affirmative claim
+    that a trade executed, for a transaction that was never sent — while the CSV
+    lane on the same row refused to grade it. Green-for-nothing-happened is
+    worse than the red tick it replaced, and the two lanes disagreeing is the
+    surface split this delta exists to close.
+    """
+
+    @staticmethod
+    def _noop_row(make_row, intent_type="WITHDRAW"):  # type: ignore[no-untyped-def]
+        row = make_row(tx_hash="")
+        row.intent_type = intent_type
+        row.success = True   # the framework verdict a no-op really produces
+        row.error = ""       # unmarked: not in REQUIRED_MONEY_SLOTS
+        return row
+
+    def test_the_headline_does_not_claim_a_no_op_executed(self, make_row):
+        from almanak.framework.dashboard.pages.trade_tape import _submitted_nothing
+
+        row = self._noop_row(make_row)
+        assert _submitted_nothing(row) is True, (
+            "a blank tx_hash with no measured legs is a MEASURED 'nothing was sent', "
+            "not an unknown — if this reads False the headline falls back to "
+            "row.success and paints a green tick for a trade that never happened"
+        )
+
+    def test_a_real_trade_is_still_graded(self, make_row):
+        """The guard must not silence rows that DID submit — that would be the
+        same misreport inverted, and it is how a hash gate usually goes wrong."""
+        from almanak.framework.dashboard.pages.trade_tape import _submitted_nothing
+
+        assert _submitted_nothing(make_row(tx_hash="0xtail")) is False
+
+    def test_a_leg_bearing_row_with_no_parent_hash_is_still_graded(self, make_row):
+        """A blank PARENT hash does not mean nothing was submitted when the legs
+        carry measured receipts — grade it from the legs, as the CSV lane does."""
+        import json
+
+        from almanak.framework.dashboard.pages.trade_tape import _submitted_nothing
+
+        row = self._noop_row(make_row)
+        row.extracted_data_json = json.dumps(
+            {"sub_transactions": [{"tx_hash": "0xleg", "status": "success", "gas_used": 90_000}]}
+        )
+        assert _submitted_nothing(row) is False
+
+    def test_both_lanes_agree_that_a_no_op_is_ungraded(self, make_row):
+        """The headline and the CSV must not disagree on the same row."""
+        from almanak.framework.dashboard.pages.trade_tape import (
+            _resolve_onchain_display_status,
+            _submitted_nothing,
+        )
+
+        row = self._noop_row(make_row)
+        landed, _ = _resolve_onchain_display_status(row)
+
+        # The CSV lane's answer: not gradeable.
+        assert landed is None
+        # The headline must NOT resolve that None into row.success (True).
+        assert _submitted_nothing(row) is True, (
+            "headline would fall back to row.success=True while the CSV exports "
+            "blank — the two lanes disagreeing about the same row"
+        )
+
+
+class TestTheCsvActionColumnStillHasAnOwner:
+    """`is_action_tx` had ZERO test coverage anywhere in tests/ at HEAD.
+
+    The delta deleted `test_the_headline_and_the_csv_name_the_same_action_tx` —
+    the only test asserting end-to-end that the row flagged `is_action_tx=1` is
+    the transaction the headline links to. The deletion was justified: all five
+    of that class's fixtures used `role="INCIDENTAL"` or a fabricated selector,
+    values no writer can produce (vacuity class 1).
+
+    But the PROPERTY was producible even though the fixtures were not. Deleting
+    the property along with the bad fixture left an operator-facing CSV column
+    with no owner: an auditor filtering on `is_action_tx=1` gets whatever
+    `pick_action_tx` happens to return, and nothing would notice a change.
+
+    Re-pointed at `_real_lp_close_bundle` — built by `_build_sub_transactions`
+    from real receipt logs — and driven through the REAL `_rows_to_csv`, which
+    the replacement test never called.
+    """
+
+    @staticmethod
+    def _csv_rows(make_row):  # type: ignore[no-untyped-def]
+        import csv
+        import io
+        import json
+
+        from almanak.framework.dashboard.pages.trade_tape import _rows_to_csv
+
+        subs = TestActionPickIsDerivedFromTheRealWriter._real_lp_close_bundle()
+        row = make_row(extracted_data_json=json.dumps({"sub_transactions": subs}))
+        row.intent_type = "LP_CLOSE"
+        text, _ = _rows_to_csv([row])
+        return subs, list(csv.DictReader(io.StringIO(text)))
+
+    def test_exactly_one_leg_is_flagged_as_the_action(self, make_row):
+        _, rows = self._csv_rows(make_row)
+        flagged = [r for r in rows if r["is_action_tx"] in ("1", "True", "true")]
+        assert len(flagged) == 1, (
+            f"expected exactly one action leg in the CSV, got {len(flagged)}: "
+            f"{[r['tx_hash'] for r in flagged]}"
+        )
+
+    def test_the_csv_action_leg_is_the_one_the_headline_links_to(self, make_row):
+        """The end-to-end property the deleted test owned."""
+        from almanak.framework.dashboard.utils import pick_action_tx
+
+        subs, rows = self._csv_rows(make_row)
+        headline = pick_action_tx(subs, "LP_CLOSE")["tx_hash"]
+        flagged = [r["tx_hash"] for r in rows if r["is_action_tx"] in ("1", "True", "true")]
+        assert flagged == [headline], (
+            f"CSV flags {flagged} as the action tx but the headline links to "
+            f"{headline!r} — an auditor joining the two gets no match"
+        )

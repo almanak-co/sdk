@@ -40,14 +40,50 @@ cutover protocol.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
+from almanak.framework.accounting.ledger_guard import (
+    LedgerDegradation,
+    apply_degradation,
+    classify_ledger_row,
+)
 from almanak.framework.primitives.types import AccountingCategory, Primitive
 
 if TYPE_CHECKING:
     from almanak.framework.observability.ledger import LedgerEntry
     from almanak.framework.state.state_manager import StateManager
+
+
+logger = logging.getLogger(__name__)
+
+
+def _record_degraded_write(ledger: LedgerEntry, degradation: LedgerDegradation) -> None:
+    """Mirror a degraded row into the deferred-write log for operators.
+
+    The teardown lane already surfaces degraded accounting this way; the
+    iteration lane had no equivalent, so a downgraded row would only ever be
+    visible by querying the ledger. Never raises — an observability write must
+    not be able to break a money-path commit.
+    """
+    try:
+        from almanak.framework.accounting import deferred_log
+
+        deferred_log.append(
+            deferred_log.DeferredWrite.now(
+                kind="ledger_degraded",
+                deployment_id=getattr(ledger, "deployment_id", "") or "",
+                cycle_id=getattr(ledger, "cycle_id", "") or "",
+                intent_type=getattr(ledger, "intent_type", "") or None,
+                tx_hash=getattr(ledger, "tx_hash", "") or None,
+                ledger_entry_id=getattr(ledger, "id", "") or None,
+                error=degradation.marker(),
+                extra={"columns": list(degradation.columns)},
+            )
+        )
+    except Exception:  # noqa: BLE001 — observability must never break the commit
+        logger.debug("deferred-write record for degraded ledger row failed", exc_info=True)
 
 
 # =============================================================================
@@ -227,6 +263,25 @@ async def save_ledger_and_registry(
         AccountingPersistenceError: When the backend write fails.
     """
     _validate_inputs(ledger=ledger, registry=registry, handle=handle, mode=mode)
+
+    # VIB-6043 leg 2 — write-time Empty != Zero guard. A row must never claim a
+    # clean success while its measured money columns are empty (the
+    # PancakeSwap-under-Safe shape: tx hash + gas + amount_in='' amount_out='').
+    # The guard DOWNGRADES and MARKS rather than rejecting: refusing the write
+    # would manufacture the other half of VIB-6043 (money on-chain, zero rows).
+    # It is a no-op for rows that are already non-success or already marked, so
+    # it composes with the slippage / reconciliation / settlement degraded-row
+    # producers instead of double-marking them.
+    degradation = classify_ledger_row(ledger)
+    if degradation is not None:
+        apply_degradation(ledger, degradation)
+        logger.error(
+            "Ledger row degraded before write (%s): %s — booked with success=False and "
+            "UNMEASURED amounts rather than a clean success row (Empty != Zero, VIB-6043).",
+            degradation.reason.value,
+            degradation.detail,
+        )
+        _record_degraded_write(ledger, degradation)
 
     if mode == "accounting_only":
         # Backwards-compatible path. The SQLite backend's existing

@@ -201,20 +201,67 @@ def _snapshot_attr(snapshot: Any, name: str) -> Any:
     return getattr(snapshot, name, None)
 
 
+#: The landed rule is IMPORTED from ``accounting.ledger_guard`` — one shared
+#: predicate, so the reporting path and the write path cannot drift apart.
+#:
+#: An earlier version of this note said the opposite: that a local "mirror"
+#: constant kept this path free of any import-time dependency on the write
+#: path. There is no such constant and the import below is hard and
+#: module-level. The comment described a design that was replaced.
+from almanak.framework.accounting.ledger_guard import landed as _landed_rule
+
+
+def _landed_on_chain(entry: Any) -> bool:
+    """Whether a ledger row represents a transaction that actually LANDED.
+
+    ``transaction_ledger.success`` is the *framework verdict*, not chain
+    reality: the slippage circuit-breaker, the reconciliation finalizer and
+    (since VIB-6043 leg 2) the Empty != Zero guard all write ``success=False``
+    on transactions that landed. A reader asking "did this intent run?" must
+    key on chain reality or it silently stops seeing real trades.
+
+    A legacy truthy non-bool (e.g. the string ``"1"``) can never upgrade a
+    malformed row — but this previously used ``is True``, which ALSO rejected
+    the integer ``1`` that ``sqlite3`` returns for a BOOLEAN column. The shared
+    rule keeps the first property and drops the second.
+
+    ``tx_hash`` is handed to the rule because the degradation marker is not
+    on-chain evidence on its own (see :func:`ledger_guard.landed`): a NO-OP
+    ``LP_CLOSE`` carries the marker with no transaction submitted. A no-op is
+    not an "intervening successful swap" and must not suppress a headline.
+    """
+    return _landed_rule(
+        _snapshot_attr(entry, "success"),
+        _snapshot_attr(entry, "error"),
+        _snapshot_attr(entry, "tx_hash"),
+    )
+
+
 def _has_intervening_successful_swap(
     ledger_entries: list[Any],
     prev_ts: datetime,
     latest_ts: datetime,
 ) -> bool:
-    """Return ``True`` iff some successful SWAP ran between the two timestamps.
+    """Return ``True`` iff some SWAP that LANDED ran between the two timestamps.
 
-    "Successful" is strict identity: ``entry.success is True``.  A truthy
-    non-bool (e.g. legacy string ``"1"``) is rejected so we never silently
-    upgrade a malformed row into a suppression signal.  Empty≠Zero
-    discipline at the read site.
+    "Landed" is the shared ``ledger_guard.landed`` rule — ``success == 1``,
+    which accepts the integer ``1`` SQLite returns as well as a Python
+    ``True``; NOT strict ``is True`` identity — OR an
+    ``accounting_degraded:`` marker (VIB-6043 leg 2). A truthy non-bool (e.g.
+    legacy string ``"1"``) is still rejected so we never silently upgrade a
+    malformed row into a suppression signal. Empty≠Zero discipline at the
+    read site.
+
+    The degraded arm matters: the write-time guard downgrades a swap whose
+    amounts were unmeasured to ``success=False`` even though the tx landed —
+    the PancakeSwap-under-Safe shape. Keying this on the framework verdict
+    would stop Rule 3 firing for exactly that swap, so
+    ``detect_stale_post_teardown_snapshot`` would report "no detection" and
+    the headline PnL it exists to suppress (VIB-4906 / VIB-4907) would be
+    published, comparing stale state against itself.
     """
     for entry in ledger_entries:
-        if _snapshot_attr(entry, "success") is not True:
+        if not _landed_on_chain(entry):
             continue
         intent_type = _snapshot_attr(entry, "intent_type") or ""
         if intent_type.upper() != "SWAP":
@@ -404,17 +451,22 @@ def _to_decimal_or_none(raw: Any) -> Decimal | None:
 
 
 def _ledger_has_successful_intent(ledger_entries: list[Any] | None, intent_type: str) -> bool:
-    """Return ``True`` iff a successful ledger entry of ``intent_type`` exists.
+    """Return ``True`` iff a LANDED ledger entry of ``intent_type`` exists.
 
-    "Successful" is strict identity (``entry.success is True``) so a malformed
-    truthy non-bool row can never silently upgrade the classification
-    (Empty!=Zero at the read site). ``None`` / empty ledger -> ``False``.
+    "Landed" is the shared ``ledger_guard.landed`` rule — ``success == 1``,
+    which deliberately accepts the integer ``1`` SQLite returns as well as a
+    Python ``True`` (see that function's docstring); NOT strict ``is True``
+    identity, which this comment previously claimed — OR an
+    ``accounting_degraded:`` marker, so a malformed truthy non-bool row can
+    never silently upgrade the classification (Empty!=Zero at the read site)
+    while a degraded-but-landed row still counts as "this intent ran"
+    (VIB-6043 leg 2). ``None`` / empty ledger -> ``False``.
     """
     if not ledger_entries:
         return False
     want = str(intent_type).upper()
     for entry in ledger_entries:
-        if _snapshot_attr(entry, "success") is not True:
+        if not _landed_on_chain(entry):
             continue
         # str() both sides: a ledger row's intent_type may be a non-str (int /
         # enum / None) — `(x or "").upper()` still raises AttributeError on a
