@@ -1187,6 +1187,7 @@ def _normalise_multi_protocols(chains: list[str], protocols: dict[str, list[str]
     factory raises before the dataclass would.
     """
     # Imported lazily — protocol validation matrix lives in the legacy module.
+    from almanak.connectors._strategy_base.protocol_aliases import normalize_protocol
     from almanak.framework.execution.config import SUPPORTED_PROTOCOLS
 
     if not protocols:
@@ -1209,14 +1210,23 @@ def _normalise_multi_protocols(chains: list[str], protocols: dict[str, list[str]
         validated: list[str] = []
         for protocol in protocol_list:
             pl = protocol.lower()
-            if pl not in SUPPORTED_PROTOCOLS:
+            # Resolve chain-scoped aliases before the membership test, exactly as
+            # ``MultiChainRuntimeConfig._validate_protocols`` does. This validator is a
+            # SECOND COPY that runs FIRST on the CLI path, so without the same
+            # normalisation the alias fix is inert in production: `{"mantle":
+            # ["uniswap_v3"]}` was rejected here before the alias-aware dataclass
+            # validation ever ran, even though the compiler resolves it to
+            # `agni_finance` and compiles it (VIB-6231). Only the lookup key is
+            # canonicalised; the stored value stays as the caller wrote it.
+            pk = normalize_protocol(cl, pl)
+            if pk not in SUPPORTED_PROTOCOLS:
                 valid = ", ".join(sorted(SUPPORTED_PROTOCOLS.keys()))
                 raise ConfigurationError(
                     field="protocols",
                     reason=f"Unknown protocol '{protocol}'. Valid protocols: {valid}",
                 )
-            if cl not in SUPPORTED_PROTOCOLS[pl]:
-                avail = ", ".join(sorted(SUPPORTED_PROTOCOLS[pl]))
+            if cl not in SUPPORTED_PROTOCOLS[pk]:
+                avail = ", ".join(sorted(SUPPORTED_PROTOCOLS[pk]))
                 raise ConfigurationError(
                     field="protocols",
                     reason=(f"Protocol '{protocol}' is not available on chain '{chain}'. Available on: {avail}"),

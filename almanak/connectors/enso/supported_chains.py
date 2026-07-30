@@ -10,6 +10,12 @@ from __future__ import annotations
 
 # Aggregator. ``mantle`` is excluded: the Enso client CHAIN_MAPPING does not
 # support it.
+#
+# VIB-6231: ``blast`` and ``plasma`` removed. Neither is in the manifest's
+# ``strategy_chains``, so ``almanak info matrix`` never published them, but this
+# declaration made config validation ACCEPT them -- and a swap on either fails
+# at compile with "Unknown token: USDC" because no tokens are registered for
+# those chains. Accept-then-reject, same shape as the ``lido`` L2 rows.
 SUPPORTED_CHAINS_BY_PROTOCOL: dict[str, frozenset[str]] = {
     "enso": frozenset(
         {
@@ -21,8 +27,6 @@ SUPPORTED_CHAINS_BY_PROTOCOL: dict[str, frozenset[str]] = {
             "avalanche",
             "bsc",
             "linea",
-            "plasma",
-            "blast",
             "berachain",
             "sonic",
         }

@@ -23,9 +23,16 @@ from almanak.framework.cli._solana_setup import get_orca_pool_accounts
 
 
 def test_non_orca_protocol_returns_empty() -> None:
-    """``protocol != "orca_whirlpools"`` short-circuits without an HTTP call."""
+    """A non-Orca protocol short-circuits without an HTTP call."""
     assert get_orca_pool_accounts({"protocol": "raydium_clmm", "pool_address": "x"}) == []
+    assert get_orca_pool_accounts({"protocol": "raydium", "pool_address": "x"}) == []
     assert get_orca_pool_accounts({}) == []
+
+
+def test_non_string_protocol_returns_empty() -> None:
+    """A malformed ``protocol`` value must not reach the registry lookup."""
+    for bogus in (None, 42, ["orca"], {"name": "orca"}):
+        assert get_orca_pool_accounts({"protocol": bogus, "pool_address": "x" * 44}) == []
 
 
 def test_missing_pool_address_returns_empty() -> None:
@@ -37,17 +44,13 @@ def test_missing_pool_address_returns_empty() -> None:
 def test_malformed_tick_spacing_returns_empty(capsys) -> None:
     """A non-numeric ``tick_spacing`` must NOT raise — fork startup depends on
     this helper's "return [] on any error" contract."""
-    result = get_orca_pool_accounts(
-        {"protocol": "orca_whirlpools", "pool_address": "x" * 44, "tick_spacing": "bogus"}
-    )
+    result = get_orca_pool_accounts({"protocol": "orca_whirlpools", "pool_address": "x" * 44, "tick_spacing": "bogus"})
     assert result == []
 
 
 def test_malformed_range_pct_returns_empty() -> None:
     """Same guard for ``range_pct`` — never crash fork startup on a config typo."""
-    result = get_orca_pool_accounts(
-        {"protocol": "orca_whirlpools", "pool_address": "x" * 44, "range_pct": "twenty"}
-    )
+    result = get_orca_pool_accounts({"protocol": "orca_whirlpools", "pool_address": "x" * 44, "range_pct": "twenty"})
     assert result == []
 
 
@@ -55,18 +58,14 @@ def test_api_404_returns_empty() -> None:
     """Non-200 Orca API response yields ``[]`` and a warning, never raises."""
     fake_resp = MagicMock(status_code=404)
     with patch("requests.get", return_value=fake_resp):
-        result = get_orca_pool_accounts(
-            {"protocol": "orca_whirlpools", "pool_address": "x" * 44}
-        )
+        result = get_orca_pool_accounts({"protocol": "orca_whirlpools", "pool_address": "x" * 44})
     assert result == []
 
 
 def test_api_exception_returns_empty() -> None:
     """Network-level exception (timeout, DNS, etc.) is caught and returns ``[]``."""
     with patch("requests.get", side_effect=ConnectionError("boom")):
-        result = get_orca_pool_accounts(
-            {"protocol": "orca_whirlpools", "pool_address": "x" * 44}
-        )
+        result = get_orca_pool_accounts({"protocol": "orca_whirlpools", "pool_address": "x" * 44})
     assert result == []
 
 
@@ -91,13 +90,51 @@ def test_valid_response_includes_vaults_and_tick_arrays() -> None:
         },
     )
     with patch("requests.get", return_value=fake_resp):
-        result = get_orca_pool_accounts(
-            {"protocol": "orca_whirlpools", "pool_address": valid_pool, "range_pct": 10}
-        )
+        result = get_orca_pool_accounts({"protocol": "orca_whirlpools", "pool_address": valid_pool, "range_pct": 10})
     assert valid_vault_a in result
     assert valid_vault_b in result
     # PDAs are 44-char base58 strings; we should have multiple beyond the 2 vaults.
     assert len(result) > 2, f"Expected vaults + tick-array PDAs, got {result}"
+
+
+def test_published_protocol_name_is_recognised_as_orca() -> None:
+    """VIB-6231: ``protocol: "orca"`` must pre-clone, exactly like the long form.
+
+    ``almanak info matrix`` publishes the manifest name ``orca``, but this gate
+    compared against the compiler key ``orca_whirlpools``. A config written from
+    the published catalogue therefore skipped the tick-array pre-clone silently,
+    and the LP_OPEN then failed on the fork with missing accounts.
+
+    Asserted as parity against the long form rather than against a fixed
+    account list, so it cannot pass by both spellings short-circuiting.
+    """
+    valid_pool = "HJPjoWUrhoZzkNfRpHuieeFk9WcZWjwy6PBjZ81ngndJ"
+    valid_vault_a = "BVNo8ftg2LkkssnWT4ZWdtoFaevnfD6ExYeramwM27pe"
+    valid_vault_b = "5KeVQQwKXCSEZWfvFdsCGYL5iSJpZxqd9hDsjTqxUjZf"
+
+    def _accounts_for(protocol: str) -> list[str]:
+        fake_resp = MagicMock(
+            status_code=200,
+            json=lambda: {
+                "data": {
+                    "tickCurrentIndex": 0,
+                    "tickSpacing": 64,
+                    "tokenVaultA": valid_vault_a,
+                    "tokenVaultB": valid_vault_b,
+                }
+            },
+        )
+        with patch("requests.get", return_value=fake_resp):
+            return get_orca_pool_accounts({"protocol": protocol, "pool_address": valid_pool, "range_pct": 10})
+
+    long_form = _accounts_for("orca_whirlpools")
+    # Guard the comparison: if the long form ever stops pre-cloning, parity
+    # below would be vacuously satisfied by two empty lists.
+    assert len(long_form) > 2, f"long-form spelling stopped pre-cloning: {long_form}"
+    assert _accounts_for("orca") == long_form
+    # Case / hyphen variants fold to the same compiler key too.
+    assert _accounts_for("ORCA") == long_form
+    assert _accounts_for("orca-whirlpools") == long_form
 
 
 def test_orca_api_base_url_env_override(monkeypatch) -> None:

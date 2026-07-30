@@ -1059,18 +1059,26 @@ class TestChainsByIntentNeverOutrunsTheDeclaration:
             for intent, chains in proto["chainsByIntent"].items():
                 assert set(chains) <= declared, f"{proto['name']}/{intent} outran strategy_chains"
 
-    def test_compiler_table_chains_are_not_claimed_as_intent_coverage(
-        self, matrix_data: dict
-    ) -> None:
+    def test_compiler_table_chains_are_not_claimed_as_intent_coverage(self, matrix_data: dict) -> None:
         """A routable-but-unverified chain stays out of the execution answer.
 
-        ``enso`` renders 13 chains (compiler routing tables) but declares 7 —
-        and the extras include ``sepolia``, a TESTNET. It may appear in the
-        rendering row; it must never read as executable coverage.
+        ``enso`` renders more chains (compiler routing tables + its declared
+        ``matrix_entries``) than its ``strategy_chains`` declares. Those extras may
+        appear in the rendering row; they must never read as executable coverage.
+
+        The example chain is **derived**, not hardcoded: this test originally
+        asserted on ``sepolia``, and when VIB-6231 removed that unresolvable chain
+        the precondition failed even though the property under test still held.
         """
         row = _row(matrix_data, "enso", "aggregator")
-        assert "sepolia" in row["chains"], "precondition: the row still renders it"
-        assert "sepolia" not in row["chainsByIntent"]["SWAP"]
+        rendered = set(row["chains"])
+        covered = set(row["chainsByIntent"]["SWAP"])
+        extras = rendered - covered
+        assert extras, (
+            "precondition: enso must render at least one chain its intents do not cover, or this test proves nothing"
+        )
+        # The real property: nothing rendered-but-undeclared leaks into coverage.
+        assert not (extras & covered)
 
     def test_intent_chain_exclusions_propagate(self, matrix_data: dict) -> None:
         """VIB-6111: aave_v3 BORROW is excluded on mantle, SUPPLY is not."""
@@ -1715,3 +1723,76 @@ class TestOffChainVenuesAreNotMarkedKnown:
         for proto in _build_matrix()["protocols"]:
             if proto["name"] in off_chain:
                 assert proto["intentsKnown"] is False, proto["name"]
+
+
+class TestRowsDoNotAdvertiseACategoryTheyCannotServe:
+    """A Phase-B row must not contradict the connector's own declaration.
+
+    VIB-6231. ``camelot`` declares ``strategy_intents=("SWAP",)`` and its
+    compiler answers ``CamelotCompiler does not support intent type
+    IntentType.LP_OPEN``. But its address in ``LP_POSITION_MANAGERS`` minted an
+    ``lp`` row, so the matrix advertised an LP venue that cannot do LP.
+    ``chainsByIntent`` was already honest (``{"SWAP": [...]}`` on both rows) --
+    only a v1 consumer reading ``category`` was misled.
+    """
+
+    def test_camelot_publishes_no_lp_row(self) -> None:
+        from almanak.framework.cli.support_matrix import _build_matrix
+
+        rows = [(p["name"], p["category"]) for p in _build_matrix()["protocols"]]
+        assert ("camelot", "lp") not in rows
+        # Guard the assertion: camelot must still publish its real swap row, or
+        # this would pass by camelot having vanished entirely.
+        assert ("camelot", "swap") in rows
+
+    def test_no_row_advertises_an_unservable_category(self) -> None:
+        """The general invariant, not just the one row that motivated it."""
+        from almanak.framework.cli.support_matrix import (
+            _build_matrix,
+            _category_is_served_by_coverage,
+        )
+
+        offenders = [
+            (p["name"], p["category"], sorted(p["chainsByIntent"]))
+            for p in _build_matrix()["protocols"]
+            if p["intentsKnown"]
+            and p["chainsByIntent"]
+            and not _category_is_served_by_coverage(p["category"], p["chainsByIntent"])
+        ]
+        # Declared ``matrix_entries`` rows are deliberate rendering overrides
+        # (enso renders SWAP as ``aggregator``), so they are expected here and
+        # are excluded from the suppression rule by design.
+        from almanak.connectors._connector import CONNECTOR_REGISTRY
+
+        declared = {
+            (entry.matrix_name, entry.category)
+            for connector in CONNECTOR_REGISTRY.all()
+            for entry in connector.strategy_matrix_entries or ()
+        }
+        undeclared = [o for o in offenders if (o[0], o[1]) not in declared]
+        assert undeclared == [], f"rows advertising a category their intents cannot serve: {undeclared}"
+
+    def test_declared_rendering_overrides_survive(self) -> None:
+        """Negative control: the suppression must not eat declared rows.
+
+        ``enso`` declares ``category="aggregator"`` while its only intent is
+        SWAP (category ``swap``). An unscoped version of this rule deleted the
+        enso and lifi aggregator rows outright.
+        """
+        from almanak.framework.cli.support_matrix import _build_matrix
+
+        rows = [(p["name"], p["category"]) for p in _build_matrix()["protocols"]]
+        assert ("enso", "aggregator") in rows
+        assert ("lifi", "aggregator") in rows
+
+    def test_routing_only_rows_are_untouched(self) -> None:
+        """Rows no manifest describes keep publishing -- absent != unsupported.
+
+        ``intentsKnown=False`` rows have no coverage to contradict, so the
+        suppression must never reach them.
+        """
+        from almanak.framework.cli.support_matrix import _build_matrix
+
+        unknown = [p for p in _build_matrix()["protocols"] if not p["intentsKnown"]]
+        assert unknown, "expected some routing-table-only rows; the guard would be vacuous without them"
+        assert all(p["chains"] for p in unknown)

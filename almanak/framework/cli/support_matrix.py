@@ -571,6 +571,52 @@ def _sort_chains(all_chains: set[str]) -> list[str]:
     return sorted_chains
 
 
+def _category_is_served_by_coverage(category: str, coverage: Mapping[str, Any]) -> bool:
+    """Whether any intent in ``coverage`` belongs to ``category``.
+
+    Derived by inverting the same intent -> category map the rest of this module
+    uses, so there is no second hand-maintained table to drift.
+    """
+    category_by_intent_name = {intent.name: cat for intent, cat in _intent_category_map().items()}
+    return any(category_by_intent_name.get(intent_name) == category for intent_name in coverage)
+
+
+def _is_suppressed_phase_b_row(
+    key: tuple[str, str],
+    authoritative: set[tuple[str, str]],
+    intent_coverage: dict[str, dict[str, Any]],
+) -> bool:
+    """Whether a Phase-B row advertises a category its own declaration cannot serve.
+
+    VIB-6231. ``camelot`` declares ``SWAP`` only, but its address in
+    ``LP_POSITION_MANAGERS`` minted an ``lp`` row — so the matrix advertised an LP
+    venue whose compiler answers "CamelotCompiler does not support intent type
+    IntentType.LP_OPEN". ``chainsByIntent`` was already honest (``{"SWAP": [...]}``
+    on both rows), so only a v1 consumer reading ``category`` was misled.
+
+    Two deliberate carve-outs, both of which keep the row:
+
+    * **Declared (`authoritative`) rows.** A ``matrix_entries`` row is a rendering
+      override whose category need not match its intents' categories (``enso``
+      renders SWAP as ``aggregator``, ``pendle`` renders LP/SWAP as ``yield``).
+      Suppressing those deletes them outright.
+    * **Connectors with no categorised intent at all.** If every declared intent is
+      in ``UNCATEGORISED_INTENTS`` the connector maps to no category, and "serves
+      nothing" is indistinguishable from "we cannot tell". The surrounding code
+      works hard to keep absent != unsupported, so this fails OPEN. Latent today
+      (no connector is purely uncategorised) and kept that way on purpose.
+    """
+    name, category = key
+    coverage = intent_coverage.get(name)
+    if not coverage or key in authoritative:
+        return False
+    category_by_intent_name = {intent.name: cat for intent, cat in _intent_category_map().items()}
+    categorised = {category_by_intent_name[i] for i in coverage if i in category_by_intent_name}
+    if not categorised:
+        return False  # fail open — see docstring
+    return category not in categorised
+
+
 def _build_matrix() -> dict:
     """Build the chains x protocols support matrix from SDK data structures.
 
@@ -634,6 +680,17 @@ def _build_matrix() -> dict:
     # Drop empty-chain rows — a connector that declared the capability
     # without any chain coverage shouldn't surface as a no-op row.
     entries = {key: chains for key, chains in entries.items() if chains}
+
+    # VIB-6231: drop Phase-B rows whose category the connector's own declaration
+    # cannot serve, BEFORE the chain axis is unioned below. Suppressing later (in
+    # the row loop) left a suppressed row's chains in ``chains``, so the first
+    # suppression of the only row carrying some chain would publish a chain with
+    # no protocol row — the phantom-chain class this same change removes.
+    entries = {
+        key: chains
+        for key, chains in entries.items()
+        if not _is_suppressed_phase_b_row(key, authoritative, intent_coverage)
+    }
 
     all_chains: set[str] = set()
     for chain_set in entries.values():

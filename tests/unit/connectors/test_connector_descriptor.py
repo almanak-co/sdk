@@ -241,16 +241,13 @@ EXPECTED_STRATEGY_MATRIX_ENTRIES = {
                     "ethereum",
                     "optimism",
                     "bsc",
-                    "gnosis",
                     "polygon",
-                    "zksync",
                     "base",
                     "arbitrum",
                     "avalanche",
                     "sonic",
                     "linea",
                     "berachain",
-                    "sepolia",
                 )
             ),
         ),
@@ -261,7 +258,7 @@ EXPECTED_STRATEGY_MATRIX_ENTRIES = {
             matrix_name="lifi",
             category="aggregator",
             chains=frozenset(
-                ("ethereum", "optimism", "bsc", "gnosis", "polygon", "base", "arbitrum", "avalanche", "sonic", "linea")
+                ("ethereum", "optimism", "bsc", "polygon", "base", "arbitrum", "avalanche", "sonic", "linea")
             ),
         ),
     ),

@@ -15,6 +15,10 @@ aggregator that derives
 
 from __future__ import annotations
 
+# VIB-6231: ``blast`` removed -- absent from the manifest's ``strategy_chains``
+# so it was never published, yet config validation accepted it and a blast swap
+# fails at compile with "Unknown token: USDC" (no tokens registered for blast).
+#
 # protocol identifier → chains the connector runs on. ``agni_finance`` is a
 # Uniswap V3 fork backed by this same connector (no own folder), so it is
 # declared alongside the canonical ``uniswap_v3`` key.
@@ -29,7 +33,6 @@ SUPPORTED_CHAINS_BY_PROTOCOL: dict[str, frozenset[str]] = {
             "avalanche",
             "bsc",
             "linea",
-            "blast",
             "monad",
             "xlayer",
             "zerog",  # JAINE DEX (Uniswap V3 fork on 0G Chain)

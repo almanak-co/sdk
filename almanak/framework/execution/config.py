@@ -103,6 +103,7 @@ logger = logging.getLogger(__name__)
 # capability code, so this strategy-container module stays clean of
 # ``almanak/connectors/_base/gateway_capabilities.py`` (enforced by
 # ``tests/static/test_strategy_import_boundary.py``).
+from almanak.connectors._strategy_base.protocol_aliases import normalize_protocol
 from almanak.connectors._strategy_base.supported_chains_registry import supported_protocols_matrix
 
 SUPPORTED_PROTOCOLS: dict[str, set[str]] = supported_protocols_matrix()
@@ -848,9 +849,20 @@ class MultiChainRuntimeConfig:
             validated_protocols: list[str] = []
             for protocol in protocol_list:
                 protocol_lower = protocol.lower()
+                # Resolve chain-scoped aliases before the membership test, so this
+                # gate answers the same question the compiler does. Without it,
+                # `{"mantle": ["uniswap_v3"]}` was rejected as "not available on
+                # chain mantle" even though the compiler resolves it to
+                # `agni_finance` (the Uniswap V3 fork that IS Mantle's
+                # deployment) and compiles it fine -- i.e. the published
+                # catalogue advertised a pair the config loader refused
+                # (VIB-6231). Only the lookup key is canonicalised; the stored
+                # value stays as-is so downstream readers of ``config.protocols``
+                # see the spelling they always have.
+                protocol_key = normalize_protocol(chain_lower, protocol_lower)
 
                 # Check if protocol is known
-                if protocol_lower not in SUPPORTED_PROTOCOLS:
+                if protocol_key not in SUPPORTED_PROTOCOLS:
                     valid_protocols = ", ".join(sorted(SUPPORTED_PROTOCOLS.keys()))
                     raise ConfigurationError(
                         field="protocols",
@@ -858,8 +870,8 @@ class MultiChainRuntimeConfig:
                     )
 
                 # Check if protocol is available on this chain
-                if chain_lower not in SUPPORTED_PROTOCOLS[protocol_lower]:
-                    available_chains = ", ".join(sorted(SUPPORTED_PROTOCOLS[protocol_lower]))
+                if chain_lower not in SUPPORTED_PROTOCOLS[protocol_key]:
+                    available_chains = ", ".join(sorted(SUPPORTED_PROTOCOLS[protocol_key]))
                     raise ConfigurationError(
                         field="protocols",
                         reason=f"Protocol '{protocol}' is not available on chain '{chain}'. "

@@ -281,9 +281,9 @@ class SvmFamily:
         """Solana-specific compilation dispatch.
 
         Returns a :class:`CompilationResult` when SVM owns the intent (every
-        SWAP / LP / lending intent on a Solana chain, plus the explicit
-        ``meteora_dlmm`` / ``orca_whirlpools`` / ``raydium_clmm`` protocol
-        routes on any chain).
+        SWAP / LP / lending intent on a Solana chain, plus any spelling of a
+        Solana-only LP protocol -- published manifest name or compiler key,
+        see ``_svm_dispatch.solana_lp_spellings()`` -- on any chain).
 
         Returns ``None`` only on the *cross-chain SVM-protocol-on-EVM-chain*
         edge case where ``intent.protocol`` declares a Solana-only protocol
@@ -317,13 +317,13 @@ class SvmFamily:
             return _svm_dispatch.dispatch_swap(compiler, intent)
 
         if intent.intent_type is IntentType.LP_OPEN:
-            if not (is_solana_chain or protocol_key in _svm_dispatch._ALLOWED_SOLANA_LP_PROTOCOLS):
+            if not (is_solana_chain or protocol_key in _svm_dispatch.solana_lp_spellings()):
                 return None
             assert isinstance(intent, LPOpenIntent)
             return _svm_dispatch.dispatch_lp_open(compiler, intent, is_solana_chain)
 
         if intent.intent_type is IntentType.LP_CLOSE:
-            if not (is_solana_chain or protocol_key in _svm_dispatch._ALLOWED_SOLANA_LP_PROTOCOLS):
+            if not (is_solana_chain or protocol_key in _svm_dispatch.solana_lp_spellings()):
                 return None
             assert isinstance(intent, LPCloseIntent)
             return _svm_dispatch.dispatch_lp_close(compiler, intent, is_solana_chain)

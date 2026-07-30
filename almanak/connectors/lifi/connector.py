@@ -32,7 +32,7 @@ CONNECTOR = Connector(
             matrix_name="lifi",
             category="aggregator",
             chains=frozenset(
-                ("ethereum", "optimism", "bsc", "gnosis", "polygon", "base", "arbitrum", "avalanche", "sonic", "linea")
+                ("ethereum", "optimism", "bsc", "polygon", "base", "arbitrum", "avalanche", "sonic", "linea")
             ),
         ),
     ),

@@ -34,9 +34,17 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 WORKFLOW_DIR = REPO_ROOT / ".github" / "workflows"
 
 #: (make target, script) pairs that must run in CI, not just be callable.
+#:
+#: VIB-6231 added ``check-chain-truth``. It belongs here for exactly the reason
+#: this module exists: ``check_orphan_scripts.py`` reports
+#: ``check_chain_truth_agreement.py`` as ``wired <- Makefile`` the moment the
+#: Makefile target exists, so without this entry a gate that never runs in CI
+#: looks fully wired. Leaving it out would be the vacuous pass described above,
+#: one gate along.
 REQUIRED_GATES = [
     ("check-orphan-scripts", "scripts/ci/check_orphan_scripts.py"),
     ("check-import-provenance", "scripts/ci/check_import_provenance.py"),
+    ("check-chain-truth", "scripts/ci/check_chain_truth_agreement.py"),
 ]
 
 
@@ -160,15 +168,18 @@ def test_a_real_step_does_satisfy_the_guard(tmp_path, monkeypatch):
     wf_dir = tmp_path / ".github" / "workflows"
     wf_dir.mkdir(parents=True)
     monkeypatch.setattr("tests.unit.scripts.test_ci_gates_are_wired.WORKFLOW_DIR", wf_dir)
+    # Steps are DERIVED from REQUIRED_GATES, not hardcoded: with a literal list
+    # this positive control fails the moment a gate is added to REQUIRED_GATES,
+    # which reads as "the new gate is unwired" when it actually means "this
+    # fixture is stale" (VIB-6231 hit exactly that).
+    steps_yaml = "".join(f"      - run: make {target}\n" for target, _script in REQUIRED_GATES)
     (wf_dir / "lint.yml").write_text(
         "name: Lint\n"
         "on: [push]\n"
         "jobs:\n"
         "  lint:\n"
         "    runs-on: ubuntu-latest\n"
-        "    steps:\n"
-        "      - run: make check-orphan-scripts\n"
-        "      - run: make check-import-provenance\n",
+        "    steps:\n" + steps_yaml,
         encoding="utf-8",
     )
     steps = _run_steps()

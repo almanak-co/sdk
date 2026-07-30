@@ -27,7 +27,19 @@ def get_orca_pool_accounts(strategy_config: dict) -> list[str]:
     Note: Direct HTTP call to Orca API is acceptable here because this runs
     during CLI fork setup, before the gateway is started.
     """
-    if strategy_config.get("protocol") != "orca_whirlpools":
+    # Resolve to the connector's compiler key rather than string-comparing one
+    # spelling: the support matrix publishes ``orca`` while the compiler key is
+    # ``orca_whirlpools``, so an exact-match gate silently skipped the
+    # tick-array pre-clone for every config written from the published
+    # catalogue -- and the LP_OPEN then failed on the fork with missing
+    # accounts (VIB-6231). Imported inside the function to keep this module's
+    # import cost low (see module docstring).
+    from almanak.framework.chain_family._svm_dispatch import resolve_solana_lp_protocol
+
+    protocol = strategy_config.get("protocol")
+    if not isinstance(protocol, str):
+        return []
+    if resolve_solana_lp_protocol(protocol) != "orca_whirlpools":
         return []
     pool_address = strategy_config.get("pool_address")
     if not pool_address:
