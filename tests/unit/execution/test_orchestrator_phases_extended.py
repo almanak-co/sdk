@@ -8,6 +8,7 @@ exception paths, and side-effect ordering.
 
 from __future__ import annotations
 
+import contextlib
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -15,6 +16,7 @@ import pytest
 from almanak.framework.execution._pipeline_state import ExecutionPipelineState
 from almanak.framework.execution.events import ExecutionEventType
 from almanak.framework.execution.interfaces import (
+    DeferredRefreshError,
     ExecutionError,
     GasEstimationError,
     InsufficientFundsError,
@@ -107,6 +109,60 @@ def _make_state(
         context=context,
         result=result,
     )
+
+
+# -----------------------------------------------------------------------------
+# Deferred-refresh refusal seams (VIB-6228)
+#
+# One factory per refusal class, each patching the seam that actually reaches
+# that class's guard. Two of these guards live INSIDE
+# ``_fetch_fresh_transaction``, so their cases must patch the registry rather
+# than the function -- patching the function bypasses the code under test and
+# injects a ``None`` return the production type signature forbids.
+# -----------------------------------------------------------------------------
+
+_FRESH_TX = {"to": "0xf6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6", "value": 0, "data": "0x6672657368", "gas_estimate": 1, "tx_type": "swap"}
+_FETCH = "almanak.framework.execution.deferred_refresh._fetch_fresh_transaction"
+_REGISTRY = "almanak.framework.execution.deferred_refresh.DEFERRED_REFRESH_REGISTRY"
+
+
+def _no_patch():
+    """No injection at all -- the guard fires before anything is fetched."""
+    return contextlib.nullcontext()
+
+
+def _no_provider():
+    """Registry resolves no provider for the bundle's protocol."""
+    registry = MagicMock()
+    registry.lookup.return_value = None
+    return patch(_REGISTRY, registry)
+
+
+def _provider_returns_none():
+    """A registered provider hands back nothing."""
+    provider = MagicMock()
+    provider.refresh_transaction.return_value = None
+    registry = MagicMock()
+    registry.lookup.return_value = provider
+    return patch(_REGISTRY, registry)
+
+
+def _fetch_raises():
+    from almanak.framework.execution.interfaces import DeferredRefreshError as _DRE
+
+    return patch(_FETCH, side_effect=_DRE("the fresh route request failed: boom", protocol="lifi"))
+
+
+def _fetch_ok():
+    return patch(_FETCH, return_value=dict(_FRESH_TX))
+
+
+def _fetch_repoints():
+    return patch(_FETCH, return_value={**_FRESH_TX, "approval_address": "0x" + "22" * 20})
+
+
+def _fetch_bad_spender():
+    return patch(_FETCH, return_value={**_FRESH_TX, "approval_address": "0xabc"})
 
 
 def _install_capture(orchestrator):
@@ -260,6 +316,196 @@ class TestPhaseBuildExtended:
         # unsigned_txs was built from the refreshed bundle (single tx)
         assert state.unsigned_txs is not None
         assert len(state.unsigned_txs) == 1
+
+    @pytest.mark.asyncio
+    async def test_deferred_refresh_refusal_becomes_a_failed_result_not_a_crash(self, orchestrator):
+        """A Step-0 refresh refusal must surface as a failure ExecutionResult (VIB-6228).
+
+        This is the claim the fail-closed design rests on: ``refresh_deferred_bundle``
+        raising cannot escape ``execute`` or kill the runner, because
+        ``DeferredRefreshError`` is an ``ExecutionError`` and
+        ``_handle_execution_exception`` already owns that mapping — so the fix
+        needed no orchestrator branch. Asserted end-to-end through the real
+        ``execute`` entry point rather than against ``_phase_build`` in
+        isolation, since "the exception is caught somewhere upstream" is exactly
+        the kind of assumption that ships inert safety machinery.
+        """
+        bundle = ActionBundle(
+            intent_type="SWAP",
+            transactions=[{"to": "0x00", "data": "0x", "value": 0, "tx_type": "swap_deferred"}],
+            metadata={"deferred_swap": True, "protocol": "lifi", "route_params": {"from_amount": "1"}},
+        )
+        events = _install_capture(orchestrator)
+
+        with patch(
+            "almanak.framework.execution.deferred_refresh._fetch_fresh_transaction",
+            side_effect=DeferredRefreshError("the fresh route request failed: boom", protocol="lifi"),
+        ):
+            result = await orchestrator.execute(bundle)
+
+        assert result.success is False
+        # The refusal reason survives verbatim -- the generic "Unexpected error:"
+        # wrapper would have obscured it, and BOTH downstream classifiers read this
+        # exact string (the iteration lane's `_is_retryable` blocklist and the
+        # teardown lane's `classify_teardown_failure`).
+        #
+        # The `[transient]` tag is load-bearing, not cosmetic: it carries
+        # `recoverable` into the teardown classifier, which is string-only by
+        # design. Without it every refusal fell through to UNKNOWN -> ESCALATE and
+        # walked the slippage ladder to a 5% operator-approval gate. Asserted on the
+        # full string so a reword that drops or detaches the tag fails here.
+        assert result.error == "Deferred lifi bundle refresh refused [transient]: the fresh route request failed: boom"
+        assert result.error_phase == ExecutionPhase.VALIDATION
+        failed = [d for t, d in events if t == ExecutionEventType.EXECUTION_FAILED]
+        assert failed, "Expected EXECUTION_FAILED for a deferred-refresh refusal"
+        assert failed[0]["error_type"] == "DeferredRefreshError"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("label", "mutate_bundle", "patcher", "expected_reason"),
+        [
+            ("route_params absent", lambda b: b.metadata.pop("route_params"), _no_patch, "no route_params"),
+            (
+                "no provider registered",
+                lambda b: b.metadata.update(protocol="unknown_dex"),
+                _no_provider,
+                "no deferred-refresh provider is registered",
+            ),
+            ("fetch raised", None, _fetch_raises, "the fresh route request failed"),
+            ("provider returned None", None, _provider_returns_none, "returned no transaction data"),
+            ("no _deferred tx", lambda b: b.transactions[1].update(tx_type="swap"), _fetch_ok, "'_deferred' tx_type"),
+            (
+                "malformed approval",
+                lambda b: b.transactions[0].update(data="0x095ea7b3dead"),
+                _fetch_repoints,
+                "well-formed approve(address,uint256)",
+            ),
+            ("non-address spender", None, _fetch_bad_spender, "not a 20-byte address"),
+        ],
+    )
+    async def test_every_refusal_class_becomes_a_failed_result(
+        self, orchestrator, label, mutate_bundle, patcher, expected_reason
+    ):
+        """EVERY refusal class must surface through the real entry point (VIB-6228).
+
+        The single-scenario test above only exercises the fetch-failure class, so
+        "a refusal cannot escape the pipeline" was being generalised from one
+        instance. All classes do raise the same ``DeferredRefreshError``, so
+        ``_handle_execution_exception`` treats them identically today — but that
+        is an inference about the implementation, not an assertion about
+        behaviour, and a future local ``except DeferredRefreshError`` on one path
+        would break it silently. Raised by a UAT-GATE Phase 0b spec critique
+        (Codex, SPEC_INSUFFICIENT).
+
+        **Each case injects at the seam that actually reaches its guard.** The
+        first draft patched ``_fetch_fresh_transaction`` for every case, including
+        the two whose guards live *inside* that function ("no provider
+        registered", "provider returned None") — so those two bypassed the code
+        they existed to test and instead fed a ``None`` back into the caller,
+        which cannot occur in production (the function is typed
+        ``-> dict[str, Any]`` and raises rather than returning ``None``). They now
+        patch the registry, one level deeper.
+        """
+        approve = "0x095ea7b3" + "0" * 24 + "11" * 20 + f"{100_000_000:064x}"
+        bundle = ActionBundle(
+            intent_type="SWAP",
+            transactions=[
+                {"to": "0xT", "data": approve, "value": 0, "tx_type": "approve"},
+                {"to": "0xR", "data": "0xstale", "value": 0, "tx_type": "swap_deferred"},
+            ],
+            metadata={"deferred_swap": True, "protocol": "lifi", "route_params": {"from_amount": "1"}},
+        )
+        if mutate_bundle is not None:
+            mutate_bundle(bundle)
+
+        with patcher():
+            result = await orchestrator.execute(bundle)
+
+        assert result.success is False, f"{label}: expected a failed result"
+        assert (result.error or "").startswith("Deferred "), (
+            f"{label}: the refusal reason did not survive — got {result.error!r}. A "
+            f'"Unexpected error:" prefix means it escaped to the generic handler.'
+        )
+        assert result.error_phase == ExecutionPhase.VALIDATION, label
+        # Each case must refuse for ITS OWN reason. Without this, all seven pass if
+        # every one of them trips the same guard -- e.g. a future ordering change
+        # makes "malformed approval" and "non-address spender" hit the route_params
+        # check instead of the approval checks, and the test stays green while the
+        # two cases it exists for go unexercised. (Raised by CodeRabbit.)
+        assert expected_reason in (result.error or ""), (
+            f"{label}: refused for the wrong reason -- expected {expected_reason!r}, got {result.error!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_successful_refresh_still_proceeds_past_step_0(self, orchestrator):
+        """Negative control for the parametrised refusal test above.
+
+        Without it, an orchestrator that failed EVERY deferred bundle at Step 0
+        would satisfy all seven refusal cases.
+        """
+        orchestrator._check_token_balance_before_submit = AsyncMock()
+        bundle = ActionBundle(
+            intent_type="SWAP",
+            transactions=[{"to": "0xR", "data": "0xstale", "value": 0, "tx_type": "swap_deferred"}],
+            metadata={"deferred_swap": True, "protocol": "lifi", "route_params": {"from_amount": "1"}},
+        )
+        fresh = {"to": "0xf6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6", "value": 0, "data": "0x6672657368", "gas_estimate": 21000, "tx_type": "swap"}
+
+        state = ExecutionPipelineState(
+            action_bundle=bundle,
+            context=ExecutionContext(chain="arbitrum", wallet_address=orchestrator.signer.address),
+            result=ExecutionResult(success=False, phase=ExecutionPhase.VALIDATION),
+        )
+        with patch("almanak.framework.execution.deferred_refresh._fetch_fresh_transaction", return_value=fresh):
+            early = await orchestrator._phase_build(state)
+
+        assert early is None, "a successful refresh must not short-circuit the pipeline"
+        assert state.action_bundle.transactions[0]["data"] == fresh["data"]
+        assert state.unsigned_txs is not None and len(state.unsigned_txs) == 1
+
+    @pytest.mark.asyncio
+    async def test_string_encoded_numerics_survive_the_unsigned_tx_build(self, orchestrator):
+        """A refresh response with quoted numerics must build, not TypeError.
+
+        `_validate_fresh_transaction` deliberately accepts string-encoded integers
+        because JSON APIs quote large numbers and refusing them would brick
+        deferred swaps on every chain. But `_build_unsigned_transactions` computes
+        `int(gas_estimate * self.gas_buffer_multiplier)`, and `"250000" * 1.2` is a
+        `TypeError` — so accepting the response without normalising it merely moved
+        the failure one stage downstream, into an opaque "Unexpected error".
+
+        Asserted through the real `_phase_build` rather than by checking a type on
+        the refreshed dict: the property that matters is that the NEXT stage works,
+        and a type assertion is a proxy for that, not proof of it. Found by the
+        Codex auditor on the very diff that introduced the leniency — the fix round
+        creating the next defect.
+        """
+        orchestrator._check_token_balance_before_submit = AsyncMock()
+        bundle = ActionBundle(
+            intent_type="SWAP",
+            transactions=[{"to": "0xR", "data": "0xstale", "value": 0, "tx_type": "swap_deferred"}],
+            metadata={"deferred_swap": True, "protocol": "lifi", "route_params": {"from_amount": "1"}},
+        )
+        fresh = {
+            "to": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "value": "1000000000000000000",  # quoted, as LiFi renders it
+            "data": "0x" + "ab" * 32,
+            "gas_estimate": "250000",  # quoted
+            "tx_type": "swap",
+        }
+        state = ExecutionPipelineState(
+            action_bundle=bundle,
+            context=ExecutionContext(chain="arbitrum", wallet_address=orchestrator.signer.address),
+            result=ExecutionResult(success=False, phase=ExecutionPhase.VALIDATION),
+        )
+        with patch("almanak.framework.execution.deferred_refresh._fetch_fresh_transaction", return_value=fresh):
+            early = await orchestrator._phase_build(state)
+
+        assert early is None, "a well-formed refresh must not short-circuit the pipeline"
+        assert state.unsigned_txs is not None and len(state.unsigned_txs) == 1
+        built = state.unsigned_txs[0]
+        assert built.gas_limit == int(250000 * orchestrator.gas_buffer_multiplier)
+        assert built.value == 10**18
 
 
 # =============================================================================

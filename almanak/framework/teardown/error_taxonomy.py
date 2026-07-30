@@ -40,6 +40,10 @@ class RevertClass(StrEnum):
     LIQUIDITY_UNAVAILABLE = "liquidity_unavailable"
     GAS_UNDERESTIMATE = "gas_underestimate"
     TRANSPORT_TRANSIENT = "transport_transient"
+    # VIB-6228: Step 0 could not obtain fresh aggregator calldata, so no
+    # transaction was built. Distinct from TRANSPORT_TRANSIENT because the
+    # failure is pre-submission and no slippage level is relevant to it.
+    ROUTE_REFRESH_REFUSED = "route_refresh_refused"
     UNKNOWN = "unknown"
 
 
@@ -136,6 +140,51 @@ def classify_teardown_failure(error_message: str | None) -> tuple[RevertClass, D
         return RevertClass.UNKNOWN, Disposition.ESCALATE
 
     e = error_message.lower()
+
+    # 0. Deferred-route refresh refusal (VIB-6228) — must precede EVERY other
+    #    branch, slippage included.
+    #
+    #    A `DeferredRefreshError` means Step 0 could not obtain fresh aggregator
+    #    calldata, so no transaction was built and nothing reached the chain. No
+    #    slippage level can fix that: the ladder re-broadcasts nothing. Escalating
+    #    is therefore always wrong, and it is actively harmful — level 3 is
+    #    `auto_approve=False`, so an unreachable LiFi/Enso endpoint would ask an
+    #    operator to approve 5% slippage, and with no approval callback wired the
+    #    manager returns `paused_awaiting_approval`, which teardown turns into an
+    #    early return that ABANDONS every remaining risk-reducing intent. That
+    #    inverts §Teardown's first rule: remove on-chain risk, always.
+    #
+    #    Measured before this branch existed: 7 of 8 refusal messages landed on
+    #    `UNKNOWN → ESCALATE` at step 7. Only one classified correctly, and only
+    #    because its wrapped upstream text happened to contain a transport keyword
+    #    — a 502 from the same API did not. That accident is why this cannot be
+    #    left to step 2.
+    #
+    #    It must also precede step 1: the refusal embeds the upstream error
+    #    verbatim for diagnosability, so a route API that mentions "slippage" in
+    #    its own message would otherwise escalate on a failed HTTP fetch.
+    #
+    #    The `[transient]` / `[permanent]` tag comes from the exception's
+    #    `recoverable` flag (`execution/interfaces.py`). Matching the tag together
+    #    with the phrase keeps this string-only — this module's documented design
+    #    — while still reading the classification its producer actually made.
+    if "bundle refresh refused" in e:
+        if "[permanent]" in e:
+            # A bundle/config defect: absent route_params, unregistered protocol,
+            # two deferred legs, an unparseable approval. Retrying cannot fix it,
+            # so surface loudly and let teardown proceed to the next intent.
+            return RevertClass.ROUTE_REFRESH_REFUSED, Disposition.NON_RETRYABLE
+        # Default to transient for an untagged or `[transient]` refusal: the
+        # common cause is an aggregator API blip, and retrying at the SAME
+        # slippage level is exactly right. Defaulting this way also means a future
+        # message that loses its tag degrades to "retry", never to "escalate".
+        #
+        # RETRY_SAME_LEVEL is load-bearing here, not merely harmless:
+        # `teardown_manager.execute_at_slippage` calls `compiler.compile(...)` on
+        # EVERY attempt, so each same-level retry is a fresh compile -> fresh route
+        # quote -> fresh Step-0 refresh. A retry can therefore genuinely succeed,
+        # which is the argument for this disposition over NON_RETRYABLE.
+        return RevertClass.ROUTE_REFRESH_REFUSED, Disposition.RETRY_SAME_LEVEL
 
     # 1. Genuine slippage FIRST — a message can carry both "slippage" and a
     #    generic "revert"; the slippage signal wins and escalates.

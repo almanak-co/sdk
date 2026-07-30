@@ -252,6 +252,79 @@ class GasEstimationError(ExecutionError):
         super().__init__(f"Gas estimation failed: {reason}")
 
 
+class DeferredRefreshError(ExecutionError):
+    """Raised when a deferred bundle cannot be safely refreshed (VIB-6228).
+
+    A bundle carrying ``metadata["deferred_swap"] = True`` is a bundle whose
+    calldata the compiler declared **known-stale** — aggregator routes
+    (LiFi / Enso) expire in seconds, which is the whole reason Step 0 of the
+    execution pipeline re-fetches them. So any outcome other than "refreshed
+    successfully" leaves the pipeline holding calldata that must not be
+    submitted, and this exception is how that refusal is signalled.
+
+    ``ExecutionOrchestrator._handle_execution_exception`` already maps
+    :class:`ExecutionError` to the canonical failure ``ExecutionResult``
+    (``result.error = str(exc)``, ``error_phase = result.phase``, session
+    closed, ``EXECUTION_FAILED`` emitted), so raising this cannot escape the
+    pipeline or crash the runner — no orchestrator branch is needed.
+
+    Retryability — TWO consumers, and they do not share a code path
+    ---------------------------------------------------------------
+    The **iteration lane** reaches ``inner_runner._is_retryable``, a substring
+    blocklist over the error *message* that defaults to retryable. The messages
+    built here deliberately avoid every blocklist token, so a transient
+    route-API outage stays retryable — the failure mode that matters, since
+    converting a blip into a permanent failure would strand a strategy
+    mid-rebalance.
+
+    The **teardown lane** never reaches that function at all: it compiles and
+    calls ``orchestrator.execute`` directly and classifies with
+    ``teardown.error_taxonomy.classify_teardown_failure``. That is why
+    ``recoverable`` is encoded into ``str(self)`` as a ``[transient]`` /
+    ``[permanent]`` tag rather than left as an attribute: the teardown
+    classifier is deliberately string-only (see its module docstring — "so it
+    is deterministic and unit-testable"), so a tag is the only channel that
+    reaches it, and without one every refusal fell through to
+    ``UNKNOWN → ESCALATE``. Escalating walks the slippage ladder to a 5%
+    operator-approval gate — asking a human to approve loss because an
+    aggregator API was unreachable, which that module's own comments call out
+    as the thing never to do. Measured before the tag existed: **7 of 8**
+    refusal messages escalated.
+
+    Both properties are asserted, in
+    ``tests/unit/execution/test_deferred_refresh.py`` and
+    ``tests/unit/teardown/test_error_taxonomy_deferred_refresh.py``, rather
+    than trusted.
+
+    Keep the tag adjacent to the ``bundle refresh refused`` phrase: the
+    classifier matches on that pair, and a reworded message that separates them
+    silently restores the escalate behaviour.
+
+    The wrapped upstream ``reason`` is included for diagnosability even though
+    an upstream message that itself contains a blocklist token (e.g. a route
+    API echoing "execution reverted") will read as non-retryable. That is the
+    correct reading of such a route, and refusal has already happened either
+    way.
+
+    Attributes:
+        reason: Why the refresh could not be completed safely.
+        protocol: Deferred protocol the bundle named (may be empty).
+        recoverable: Whether the cause is expected to be transient.
+    """
+
+    def __init__(
+        self,
+        reason: str,
+        protocol: str = "",
+        recoverable: bool = True,
+    ) -> None:
+        self.reason = reason
+        self.protocol = protocol
+        self.recoverable = recoverable
+        tag = "transient" if recoverable else "permanent"
+        super().__init__(f"Deferred {protocol or 'unknown-protocol'} bundle refresh refused [{tag}]: {reason}")
+
+
 # =============================================================================
 # Data Classes
 # =============================================================================
@@ -1051,4 +1124,5 @@ __all__ = [
     "InsufficientFundsError",
     "NonceError",
     "GasEstimationError",
+    "DeferredRefreshError",
 ]

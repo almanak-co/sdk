@@ -2425,7 +2425,11 @@ class ExecutionOrchestrator:
             self._emit_event(
                 ExecutionEventType.EXECUTION_FAILED,
                 context,
-                {"error": str(exc), "error_type": "ExecutionError"},
+                # Unlike the exact-type branches above, this one catches every
+                # remaining ``ExecutionError`` subclass, so report the concrete
+                # class (as the generic path below does) rather than flattening
+                # e.g. ``DeferredRefreshError`` to the base name.
+                {"error": str(exc), "error_type": type(exc).__name__},
             )
             return result
 
