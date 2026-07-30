@@ -46,6 +46,23 @@ STATEFUL_TEMPLATES = [
 ]
 
 
+def _function_source(code: str, func_name: str) -> str | None:
+    """Return the source of ``func_name`` from ``code``, or None if absent.
+
+    Structural guards over generated code MUST be scoped to the function they
+    are guarding. A whole-file substring check silently passes on text that
+    lives somewhere else entirely: asserting ``"seeded" in code`` was satisfied
+    by the module's own ``from almanak.framework.market.testing import seeded``
+    import, so deleting the whole Phase-B seeding block still left the guard
+    green. Anchoring on the parsed function body removes that class of vacuity.
+    """
+    tree = ast.parse(code)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name == func_name:
+            return ast.get_source_segment(code, node)
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Structural checks on the emitted test module
 # ---------------------------------------------------------------------------
@@ -193,14 +210,68 @@ def test_generated_test_file_has_persistence_round_trip(
 def test_generated_test_file_has_on_intent_executed_failure_test(
     template: StrategyTemplate,
 ) -> None:
-    """Stateful templates test that on_intent_executed(success=False) does not mutate state."""
+    """Stateful templates test that a FAILED intent never credits state."""
     code = generate_test_file(
         name="Gen Probe",
         template=template,
         chain=_TEMPLATE_CHAINS[template],
     )
-    assert "test_on_intent_executed_ignores_failures" in code, (
-        f"failure-mode callback test missing in {template.value}"
+    fn_src = _function_source(code, "test_on_intent_executed_failure_does_not_credit_state")
+    assert fn_src is not None, f"failure-mode callback test missing in {template.value}"
+
+    # BOTH phases must survive. Either alone has a proven blind spot:
+    #
+    #  * Phase A (full-state equality from the FRESH state) is what catches a
+    #    handler ADVANCING a state machine on failure. Most templates hold their
+    #    state in a StrEnum, and a StrEnum IS a str -- so Phase B's numeric /
+    #    collection contract cannot see it move. Dropping Phase A was a measured
+    #    REGRESSION: a mutation that credited state on failure passed Phase B
+    #    alone while the older broad assertion caught it.
+    #  * Phase B (seeded mid-flight, no credit) is what stops Phase A being
+    #    vacuous for quantities -- from a fresh strategy everything is already
+    #    zeroed, so a handler that zeroes on failure produces no diff.
+    #
+    # These assert STRUCTURE, not wording, so a reworded docstring does not trip
+    # them -- but deleting a phase does.
+    #
+    # NOTE: every check below is scoped to the FUNCTION BODY, never the whole
+    # file. A whole-file substring check is vacuous here: an earlier revision
+    # asserted ``"seeded" in code``, which the module's own
+    # ``from ...testing import seeded`` import satisfied on its own -- deleting
+    # the entire Phase-B seeding block left that assertion green. Anchor on
+    # code that exists ONLY inside the function under test.
+    assert "fresh_before == fresh_after" in fn_src, (
+        f"{template.value}: failure test lost its Phase-A full-state equality "
+        f"check from the fresh state -- enum/str state advancement on a failed "
+        f"intent is now invisible (measured regression, do not remove)"
+    )
+    # Phase A must be re-entered from the INITIAL state on every iteration.
+    # Without the restore, Phase B's seeding leaks into the next intent type and
+    # Phase A's "from the initial state" message becomes false -- and a handler
+    # doing what Phase B explicitly allows (reverting, zeroing) fails Phase A.
+    assert "_restore(initial_state)" in fn_src, (
+        f"{template.value}: failure test no longer restores the initial state "
+        f"before each Phase A -- from the second intent type on, Phase A runs "
+        f"against Phase B's seeded state and can fail CORRECT handlers"
+    )
+    # Phase B must actually seed. Anchor on the seeding statements themselves,
+    # not on the word "seeded" appearing somewhere in the file.
+    assert fn_src.count("setattr(strategy, f,") >= 2, (
+        f"{template.value}: failure test no longer seeds pre-state -- Phase B is "
+        f"vacuous without it (a fresh strategy is already zeroed, so any revert "
+        f"is a no-op and the assertion cannot fail)"
+    )
+    assert "INCREASED on a failed" in fn_src, (
+        f"{template.value}: failure test no longer asserts the no-phantom-credit "
+        f"contract"
+    )
+    # The failure test must fire every intent type the template branches on.
+    # Hardcoding one type lets the other failure branches go unexercised — a
+    # broken LP_OPEN or PERP_OPEN branch could credit state while the test is
+    # green, because the callback dispatches on intent_type.
+    assert "for intent_type_value in" in fn_src, (
+        f"{template.value}: failure test no longer iterates the template's "
+        f"transition intent types — it can only exercise one failure branch"
     )
 
 

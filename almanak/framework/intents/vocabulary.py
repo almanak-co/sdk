@@ -699,12 +699,37 @@ class LPOpenIntent(BaseIntent):
             Aerodrome, TraderJoe V2, Pendle, …) ignore it entirely and continue to read
             ``amount0``/``amount1``. When ``None`` (the default), behaviour is unchanged.
         max_slippage: Optional maximum acceptable slippage applied to the deposit's
-            min-mint floor (e.g. ``0.005`` = 0.5%), in the same units as
-            :attr:`SwapIntent.max_slippage`. Consumed by the Curve compiler to size the
-            ``add_liquidity`` ``min_mint`` calldata. When ``None`` (the default), the
-            connector falls back to its built-in default (Curve: 50 bps), so existing
-            callers are byte-for-byte unchanged. Connectors that do not consume it ignore
-            it entirely.
+            min-amount floor (e.g. ``0.005`` = 0.5%), in the same units as
+            :attr:`SwapIntent.max_slippage`. Consumed by Curve (sizes the
+            ``add_liquidity`` ``min_mint`` calldata), the Uniswap V3 family and
+            ``aerodrome_slipstream`` (size the ``amount0Min``/``amount1Min`` pair
+            via ``cl_math.compute_lp_slippage_mins``), and Uniswap **V4** (by a
+            DIFFERENT mechanism — it haircuts liquidity / ``amount*_max`` rather
+            than calling ``cl_math.compute_lp_slippage_mins``). When ``None`` (the
+            default), each connector falls back to its OWN built-in default:
+            Curve 50 bps, V3-family / Slipstream the permissive
+            :data:`~almanak.framework.intents.compiler.LP_SLIPPAGE_PERMISSIVE_DEFAULT`,
+            and Uniswap V4 ``0.005`` (0.5%) — V4 does NOT inherit the permissive
+            default, so do not generalise "V3 family" to "all Uniswap LP".
+
+            NOT consumed by plain ``aerodrome`` (the v2 constant-product AMM),
+            which discards it and submits a literal ``amount_a_min=0,
+            amount_b_min=0``. Setting this field on ``aerodrome`` yields NO floor
+            rather than a tighter one — an unfloored mint, not a protected one, so
+            none of the advice below buys you anything there.
+            Omitting it is SUPPORTED and will not revert an honest balanced mint —
+            a swap-grade floor there constrains the token SPLIT rather than a
+            quoted output, so it fails good mints when price drifts toward a range
+            edge. But on the connectors that DO consume it, prefer setting it
+            explicitly: the inherited V3-family default
+            is permissive, its magnitude is contested (VIB-6225), and "split not
+            value" only holds while the price is honest — under a manipulated price
+            the split shift IS a value transfer. On those same consuming
+            connectors, set it explicitly ALWAYS when the
+            deposit embeds an implicit swap (imbalanced/single-sided/zap), where
+            execution price directly determines value received. See the LP SLIPPAGE
+            DOCTRINE in ``framework/intents/compiler.py``. Connectors that do not
+            consume it ignore it entirely.
         intent_id: Unique identifier for this intent
         created_at: Timestamp when the intent was created
     """
@@ -907,9 +932,27 @@ class LPCloseIntent(BaseIntent):
             withdrawal's min-amounts floor (e.g. ``0.005`` = 0.5%), in the same
             units as :attr:`SwapIntent.max_slippage`. Consumed by the Curve
             compiler to size the ``remove_liquidity`` ``min_amounts`` calldata.
-            When ``None`` (the default), the connector falls back to its built-in
-            default (Curve: 50 bps), so existing callers are byte-for-byte
-            unchanged. Connectors that do not consume it ignore it entirely.
+            When ``None`` (the default), Curve falls back to its built-in 50 bps.
+
+            NOTE — this parameter is consumed on CLOSE by Curve only. The
+            Uniswap V3 and Aerodrome close paths submit literal ZERO minimums
+            and ignore this field entirely. (The calldata names differ per
+            connector: ``amount0Min``/``amount1Min`` on the V3-shaped
+            ``decreaseLiquidity`` paths, ``amount_a_min``/``amount_b_min`` on
+            ``aerodrome`` v2 ``removeLiquidity`` — same zero, different field.) So
+            setting it on those protocols does NOT tighten the exit — an exit
+            cannot currently be floored on those connectors AT ALL, even when one
+            is explicitly requested. Do not read that as safe. A zero minimum is
+            unprotected in the same way the permissive open default is: a
+            proportional burn returns the split the live price implies, which is
+            equivalent value only while that price is HONEST. Under a manipulated
+            price the burn hands back the cheap leg and the minimums are the only
+            on-chain defence — here there are none. The stated in-connector
+            rationale is that a full close is lower risk than a mint because the
+            position is already yours and no competing liquidity is being added
+            (``connectors/aerodrome/adapter.py``); that bounds the exposure, it
+            does not remove it. See the LP SLIPPAGE DOCTRINE in
+            ``framework/intents/compiler.py``.
         coin_index: Optional single-sided exit selector (VIB-5437). When set to a
             non-negative pool-coin index, the close withdraws the ENTIRE position
             into that one coin via Curve's ``remove_liquidity_one_coin`` (min-out
@@ -1483,9 +1526,36 @@ class Intent:
                 uses it directly instead of mapping ``amount0``/``amount1`` to indices
                 0/1, so non-leading coins (index 2+) can be targeted. Connectors that
                 do not consume it ignore it entirely.
-            max_slippage: Optional maximum acceptable slippage on the deposit's min-mint
-                floor (e.g. 0.005 = 0.5%). When None (the default), the connector uses its
-                built-in default (Curve: 50 bps). Consumed only by the Curve compiler.
+            max_slippage: Optional maximum acceptable slippage on the deposit's
+                min-amount floor (e.g. 0.005 = 0.5%). Consumed by Curve, the
+                Uniswap V3 family, ``aerodrome_slipstream``, and Uniswap **V4**
+                (V4 by a DIFFERENT mechanism -- it haircuts liquidity /
+                ``amount*_max`` instead of computing an ``amount0Min`` /
+                ``amount1Min`` pair). When None (the
+                default), each connector uses its own built-in default: Curve
+                50 bps, V3-family / Slipstream the permissive LP default, and
+                Uniswap V4 ``0.005`` (0.5%). V4 does NOT inherit the permissive
+                LP default -- do not generalise "V3 family" to "all Uniswap LP".
+
+                NOT consumed by plain ``aerodrome`` (the v2 constant-product AMM):
+                that path discards the value and submits a literal
+                ``amount_a_min=0, amount_b_min=0``
+                (``connectors/aerodrome/adapter.py``), so setting this field on
+                ``aerodrome`` gives you NO floor rather than a tighter one. Do not
+                read a set ``max_slippage`` as protection there, and read the
+                advice below as scoped to the CONSUMING connectors only.
+
+                Omitting it is SUPPORTED and will not revert an honest
+                balanced mint, because a swap-grade floor there constrains the token
+                SPLIT rather than a quoted output. On the connectors that DO
+                consume it, prefer setting it explicitly
+                anyway: the inherited V3-family default is permissive, its magnitude
+                is contested (VIB-6225), and "split not value" holds only while the
+                price is honest -- under a manipulated price the split shift IS a
+                value transfer. On those same connectors, set it ALWAYS when the
+                deposit embeds an implicit
+                swap (imbalanced, single-sided, or zap deposits). See the LP
+                SLIPPAGE DOCTRINE in ``framework/intents/compiler.py``.
 
         Returns:
             LPOpenIntent: The created LP open intent
@@ -1572,9 +1642,15 @@ class Intent:
                 identities) with COMPILATION_FAILED BEFORE resolving the wei;
                 per-connector compiler guards are defense-in-depth only.
             max_slippage: Optional maximum acceptable slippage on the withdrawal's
-                min-amounts floor (e.g. 0.005 = 0.5%). When None (the default), the
-                connector uses its built-in default (Curve: 50 bps). Consumed only by
-                the Curve compiler.
+                min-amounts floor (e.g. 0.005 = 0.5%). When None (the default),
+                Curve uses its built-in 50 bps. Consumed on CLOSE by the Curve
+                compiler only — the Uniswap V3 and Aerodrome close paths submit a
+                literal zero floor and ignore this field, so setting it there does
+                NOT tighten the exit. (Zero under connector-specific calldata
+                names: ``amount0Min``/``amount1Min`` on the V3-shaped
+                ``decreaseLiquidity`` paths, ``amount_a_min``/``amount_b_min`` on
+                ``aerodrome`` v2 ``removeLiquidity``.) See the LP SLIPPAGE DOCTRINE in
+                ``framework/intents/compiler.py``.
             coin_index: Optional single-sided exit selector (Curve only, VIB-5437).
                 A non-negative pool-coin index withdraws the whole position into
                 that one coin via ``remove_liquidity_one_coin``; ``None`` (default)

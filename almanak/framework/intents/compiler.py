@@ -392,6 +392,46 @@ def _raise_if_placeholder_intent(intent_type: IntentType) -> None:
         )
 
 
+# =============================================================================
+# LP SLIPPAGE DOCTRINE — why LP defaults are permissive and swap defaults are not
+# =============================================================================
+# Design rationale lives in docs/internal/blueprints/03-intent-system.md
+# §"LP slippage doctrine". Summarised here because this is where the number is.
+#
+# A BALANCED concentrated-liquidity mint or burn is not a swap in SHAPE: the pool
+# computes liquidity from the live price and consumes whatever split that implies,
+# so ``amount0Min``/``amount1Min`` constrain the SPLIT rather than a quoted output.
+# A floor tight enough to demand a specific split therefore reverts honest mints
+# whenever price drifts toward a range edge, which is why LP intents default to a
+# permissive floor while ``Intent.swap`` does not (it defaults to 0.005).
+#
+# IMPORTANT LIMIT OF THAT ARGUMENT — do not over-read it. "Split, not value" holds
+# only while the price is HONEST. Under a MANIPULATED price the split shift IS a
+# value transfer: an attacker who moves spot before your mint has you supply the
+# expensive leg cheaply, takes the position's other side, and restores the price.
+# The minimums are the only on-chain defence against that, so a permissive floor
+# is a real (bounded) exposure and not a free lunch. **The magnitude of the
+# default below is contested and under active review as VIB-6225 (Urgent)**,
+# which argues 0.99 is a shipped "make it always succeed" placeholder and that a
+# real tolerance of order 0.005–0.02 belongs here. Treat the shape argument above
+# as settled and the NUMBER as open; do not cite this comment as authority for
+# keeping 0.99.
+#
+# The shape argument does NOT extend at all to LP paths that embed an implicit
+# swap: an imbalanced StableSwap ``add_liquidity``, a single-sided deposit, or a
+# zap. There the LP call IS a swap wearing an LP name, the value received depends
+# directly on execution price, and a wide floor is a theft vector (VIB-5441).
+# Those connectors set their own swap-grade floor and refuse a zero minimum —
+# Curve is the reference implementation (``connectors/curve/compiler.py``).
+#
+# On the residual 1%: it is not value protection, it is a tripwire — it makes a
+# mint that would consume ~none of one token revert on-chain, the same failure
+# ``cl_math.lp_range_excludes_spot_warning`` reports off-chain. Note that since
+# VIB-6217 a value of exactly ``1`` is REFUSED at construction rather than
+# accepted, so that tripwire can no longer be removed through this door.
+LP_SLIPPAGE_PERMISSIVE_DEFAULT: Decimal = Decimal("0.99")
+
+
 class IntentCompiler:
     """Compiles Intents into executable ActionBundles.
 
@@ -437,7 +477,7 @@ class IntentCompiler:
         default_deadline_seconds: int = 300,
         rpc_url: str | None = None,
         rpc_timeout: float = 10.0,
-        default_lp_slippage: Decimal = Decimal("0.99"),
+        default_lp_slippage: Decimal = LP_SLIPPAGE_PERMISSIVE_DEFAULT,
         config: IntentCompilerConfig | None = None,
         gateway_client: "GatewayClient | None" = None,
         token_resolver: "TokenResolverType | None" = None,
@@ -455,13 +495,23 @@ class IntentCompiler:
             rpc_url: RPC URL for on-chain queries (needed for LP close).
                 DEPRECATED: Use gateway_client instead for production deployments.
             rpc_timeout: HTTP timeout for direct RPC calls in seconds.
-            default_lp_slippage: Default slippage for LP operations (0.99 = 99%).
-                This controls the minimum acceptable amounts when adding/removing liquidity.
+            default_lp_slippage: Default slippage for BALANCED LP operations
+                (:data:`LP_SLIPPAGE_PERMISSIVE_DEFAULT`, 0.99 = 99%). Controls the
+                minimum acceptable amounts when adding/removing liquidity.
                 LP operations differ from swaps - for concentrated liquidity, the actual
                 deposit ratio depends heavily on where the current price is relative to
                 your tick range. A price near the range edge means most liquidity is in
-                one token. Default 99% allows nearly full flexibility for this behavior.
-                Can be lowered for tighter protection if needed.
+                one token, so a tight floor reverts honest mints while constraining
+                only the SPLIT — under an HONEST price it is not buying you value
+                protection. The permissive default allows for that behaviour. Read
+                the LP SLIPPAGE DOCTRINE comment above this class before relying on
+                it: the split-not-value argument holds only while the price is
+                honest, under a MANIPULATED price the split shift IS a value
+                transfer, and the magnitude of this default is contested under
+                VIB-6225. The argument also does NOT extend to swaps or to
+                swap-embedding LP paths (imbalanced/single-sided/zap deposits —
+                those set their own swap-grade floor). Can and often should be
+                lowered for tighter protection.
             config: Optional configuration. If not provided, defaults to
                 IntentCompilerConfig() which requires price_oracle.
             gateway_client: Optional gateway client for RPC queries. When provided,
@@ -535,6 +585,11 @@ class IntentCompiler:
         #
         # NOTE: the DEFAULT is still 0.99 (a 1%-of-desired floor), which is its own
         # defect — see VIB-6225. This only stops a caller making it worse.
+        #
+        # For WHY the LP default is permissive at all (the split-vs-value mechanism,
+        # and the swap-embedding boundary where that reasoning stops applying), see
+        # the LP SLIPPAGE DOCTRINE comment above this class — which also records that
+        # the magnitude of this default is contested by VIB-6225.
         validate_max_slippage_fraction(default_lp_slippage, field_name="default_lp_slippage")
         self.default_lp_slippage = default_lp_slippage
 

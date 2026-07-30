@@ -608,7 +608,18 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                 )
             elif sell_signal:
                 base_price = market.price(self.base_token)
-                min_sell = self.trade_size_usd / base_price if base_price > 0 else Decimal("0")
+                # An unpriced market cannot SIZE a sell. Treating price <= 0 as
+                # "min_sell = 0" is not a safe fallback: it makes the balance
+                # check below pass on ANY dust, so the strategy emits a SWAP at
+                # the full configured notional off a $0 oracle. Empty != Zero --
+                # refuse rather than substitute a zero for a number you do not
+                # have. (The buy branch is gated by `quote_balance.balance_usd`,
+                # which a degraded oracle already drags to 0.)
+                if not base_price or base_price <= 0:
+                    return Intent.hold(
+                        reason=f"No valid {self.base_token} price ({base_price}); refusing to size a sell"
+                    )
+                min_sell = self.trade_size_usd / base_price
                 if base_balance.balance >= min_sell:
                     # Gas-worthiness gate (same as buy branch).
                     if self.trade_size_usd < self.min_trade_value_usd:
@@ -733,6 +744,30 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
             logger.info(f"Opening LP: {lower_price:.2f} - {upper_price:.2f}")
             amount_base = base_balance.balance * Decimal("0.95")
             amount_quote = quote_balance.balance * Decimal("0.95")
+            # NOTE ON SLIPPAGE -- the swaps above set `max_slippage`; the lp_open
+            # calls below do not. The asymmetry is about SHAPE, not about LP being
+            # safe, so read this before copying it:
+            #
+            #   * A swap's floor bounds a quoted VALUE and the counterparty picks
+            #     the execution price -- so it must be tight (0.005-0.01).
+            #   * A balanced LP mint's floor (amount0Min/amount1Min) bounds the
+            #     token SPLIT, not a quoted output: the pool derives liquidity from
+            #     the live price and consumes whatever split that implies. A floor
+            #     tight enough to demand a specific split reverts honest mints when
+            #     price drifts toward a range edge.
+            #
+            # LIMIT OF THAT ARGUMENT: "split, not value" holds only while the price
+            # is HONEST. Under a MANIPULATED price the split shift IS a value
+            # transfer, and these minimums are the only on-chain defence. The
+            # inherited default is permissive and its magnitude is contested
+            # (VIB-6225), so setting `max_slippage` explicitly here is a legitimate
+            # hardening step -- pick a tolerance wide enough not to fight your own
+            # range (a few percent), not a swap-grade one.
+            #
+            # Set it ALWAYS when the deposit embeds an implicit swap -- imbalanced
+            # StableSwap add_liquidity, single-sided deposits, zaps -- because there
+            # execution price DIRECTLY determines value received. Full rationale:
+            # "LP slippage doctrine" in docs/internal/blueprints/03-intent-system.md.
             if self._uses_tick_ranges():
                 # Slipstream's compiler consumes RAW INTEGER TICKS aligned to
                 # the pool's tick spacing (pool format
@@ -1190,6 +1225,24 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
         return """
             entry_price = market.price(self.base_token)
 
+            # An unpriced market cannot open leverage OR judge an open one.
+            # entry_price is the basis for the take-profit / stop-loss
+            # comparisons below, so acting at 0 would arm both exits against a
+            # meaningless reference (and the PnL ratio divides by it). Refuse
+            # rather than guess -- Empty != Zero. The guard deliberately covers
+            # BOTH states, so the reason names the state it actually blocked:
+            # an operator reading "refusing to open leverage" while a position
+            # is already open would go looking for the wrong problem.
+            if not entry_price or entry_price <= 0:
+                _blocked = (
+                    "refusing to open leverage"
+                    if self._position_state == PerpsState.IDLE
+                    else "refusing to evaluate exits on an open position"
+                )
+                return Intent.hold(
+                    reason=f"No valid {self.base_token} price ({entry_price}); {_blocked}"
+                )
+
             if self._position_state == PerpsState.IDLE:
                 try:
                     collateral_bal = market.balance(self.collateral_token)
@@ -1310,6 +1363,19 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
             logger.info(f"Opening LP via IntentSequence: {lower_price:.2f} - {upper_price:.2f}")
             return Intent.sequence(
                 [
+                    # The swap sets `max_slippage`; the lp_open below does not. The
+                    # asymmetry is about SHAPE: a swap's floor bounds a quoted VALUE
+                    # against a counterparty-chosen price so it must be tight, while
+                    # a balanced LP mint's floor bounds the token SPLIT the pool
+                    # chooses, so a swap-grade value reverts honest mints. It is NOT
+                    # that an LP mint is riskless -- under a MANIPULATED price the
+                    # split shift is a value transfer, and the permissive inherited
+                    # default is contested (VIB-6225). Setting `max_slippage` here
+                    # (a few percent, wide enough not to fight your range) is a
+                    # legitimate hardening step, and is REQUIRED when the deposit
+                    # embeds an implicit swap (imbalanced/single-sided/zap). See
+                    # "LP slippage doctrine" in
+                    # docs/internal/blueprints/03-intent-system.md.
                     Intent.swap(
                         from_token=self.quote_token,
                         to_token=self.base_token,
@@ -1496,8 +1562,10 @@ def _get_template_teardown(
             TeardownPositionSummary,
         )
 
+        snapshot = None
         try:
-            self._reconcile_holding_base(self.create_market_snapshot())
+            snapshot = self.create_market_snapshot()
+            self._reconcile_holding_base(snapshot)
         except Exception as e:
             logger.warning(
                 f"get_open_positions: live-balance reconcile unavailable, "
@@ -1507,14 +1575,63 @@ def _get_template_teardown(
         positions = []
 
         if self._holding_base:
+            # VALUE THE POSITION LIVE -- nothing in the framework back-fills
+            # PositionInfo.value_usd. It is consumed verbatim: summed into the
+            # teardown total and read by the max-acceptable-loss guard, where a
+            # fabricated 0 silently buys the LOOSEST slippage tier at the exact
+            # moment you are unwinding. Empty != Zero: when the read is
+            # unavailable, emit 0 PAIRED WITH BOTH markers --
+            # details["value_usd_unknown"] = True and
+            # details["valuation_status"] = "no_path". Different consumers;
+            # setting only one leaves the other treating this as a measured zero.
+            #
+            # BE PRECISE ABOUT WHAT THE MARKERS BUY YOU: they make the gap
+            # VISIBLE, they do NOT restore the loss cap. "value_usd_unknown" is
+            # read by the teardown CLI preview
+            # (framework/cli/teardown_helpers.py), which prints "Value: unknown"
+            # and drives the warning banner; "valuation_status" is read by the
+            # portfolio valuer. The max-acceptable-loss guard itself
+            # (``calculate_max_acceptable_loss``, framework/teardown/models.py)
+            # still reads ONLY the summed numeric total and consults NEITHER
+            # marker -- an unmeasured row therefore still contributes 0 and still
+            # yields the most permissive tier. Closing that is VIB-5604. This is
+            # exactly why valuing live above matters more than marking.
+            #
+            # DO NOT rely on the read RAISING. ``balance_usd()`` returns a plain
+            # Decimal and does not raise for an unpriceable holding -- an illiquid
+            # token or a degraded oracle yields a bare 0 while the balance is
+            # non-zero, and a try/except alone would emit that as a MEASURED $0.
+            # Inspect the pair semantically instead: a positive token balance
+            # with a non-positive USD value is UNMEASURED. A genuinely zero
+            # holding may stay a measured $0 -- that is a real answer.
+            details = {{"asset": self.base_token, "quote": self.quote_token}}
+            value_usd = Decimal("0")
+            try:
+                if snapshot is None:
+                    raise RuntimeError("no market snapshot available")
+                token_balance = snapshot.balance(self.base_token)
+                value_usd = Decimal(str(token_balance.balance_usd))
+                if Decimal(str(token_balance.balance)) > 0 and value_usd <= 0:
+                    raise RuntimeError(
+                        f"holding {{token_balance.balance}} {{self.base_token}} but USD "
+                        f"value read back as {{value_usd}} -- unpriceable, not worthless"
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"get_open_positions: {{self.base_token}} valuation unavailable: {{e}}"
+                )
+                value_usd = Decimal("0")
+                details["valuation_status"] = "no_path"
+                details["value_usd_unknown"] = True
+
             positions.append(
                 PositionInfo(
                     position_type=PositionType.TOKEN,
                     position_id="{strategy_name}_base_token",
                     chain=self.chain,
                     protocol="{protocol}",
-                    value_usd=Decimal("0"),  # Will be enriched by framework
-                    details={{"asset": self.base_token, "quote": self.quote_token}},
+                    value_usd=value_usd,
+                    details=details,
                 )
             )
 
@@ -1591,18 +1708,60 @@ def _get_template_teardown(
         positions = []
 
         if self._position_id is not None:
+            # VALUE THE POSITION LIVE -- nothing in the framework back-fills
+            # PositionInfo.value_usd. It is consumed verbatim: summed into the
+            # teardown total and read by the max-acceptable-loss guard, where a
+            # fabricated 0 silently buys the LOOSEST slippage tier at the exact
+            # moment you are unwinding.
+            #
+            # market.lp_position_value() reuses the SAME repricing engine as the
+            # portfolio valuer, and returns None (never a fabricated $0) when the
+            # position cannot be measured. Empty != Zero: on an unmeasured read
+            # emit 0 PAIRED WITH BOTH markers. They are read by DIFFERENT
+            # consumers and setting only one leaves the other treating this as a
+            # measured zero:
+            #   * details["value_usd_unknown"] = True -- read by the teardown CLI
+            #     preview (framework/cli/teardown_helpers.py), which prints
+            #     "Value: unknown" and drives the warning banner.
+            #   * details["valuation_status"] = "no_path" -- what the portfolio
+            #     valuer reads (framework/valuation/portfolio_valuer.py).
+            # Both make the gap VISIBLE; NEITHER restores the loss cap. The
+            # max-acceptable-loss guard (``calculate_max_acceptable_loss``,
+            # framework/teardown/models.py) reads only the summed numeric total,
+            # so an unmeasured row still contributes 0 and still yields the most
+            # permissive tier -- closing that is VIB-5604. Value live where you
+            # can; marking is the fallback, not a substitute.
+            # A genuinely empty position returns an all-zero MEASURED result,
+            # which is a different thing and must stay different.
+            details = {{
+                "pool": self.pool,
+                "range_lower": str(self._range_lower) if self._range_lower is not None else None,
+                "range_upper": str(self._range_upper) if self._range_upper is not None else None,
+            }}
+            value_usd = Decimal("0")
+            try:
+                lp_value = self.create_market_snapshot().lp_position_value(
+                    str(self._position_id), self.protocol
+                )
+                if lp_value is None:
+                    raise RuntimeError("position could not be measured")
+                # .total_usd includes uncollected fees; .value_usd excludes them.
+                value_usd = Decimal(str(lp_value.total_usd))
+            except Exception as e:
+                logger.warning(
+                    f"get_open_positions: LP #{{self._position_id}} valuation unavailable: {{e}}"
+                )
+                details["valuation_status"] = "no_path"
+                details["value_usd_unknown"] = True
+
             positions.append(
                 PositionInfo(
                     position_type=PositionType.LP,
                     position_id=str(self._position_id),
                     chain=self.chain,
                     protocol=self.protocol,
-                    value_usd=Decimal("0"),  # Will be enriched by framework
-                    details={{
-                        "pool": self.pool,
-                        "range_lower": str(self._range_lower) if self._range_lower is not None else None,
-                        "range_upper": str(self._range_upper) if self._range_upper is not None else None,
-                    }},
+                    value_usd=value_usd,
+                    details=details,
                 )
             )
 
@@ -1674,24 +1833,79 @@ def _get_template_teardown(
 
         positions = []
 
+        # VALUE BOTH LEGS LIVE -- nothing in the framework back-fills
+        # PositionInfo.value_usd. It is consumed verbatim: summed into the
+        # teardown total and read by the max-acceptable-loss guard, where a
+        # fabricated 0 silently buys the LOOSEST slippage tier at the exact
+        # moment you are unwinding.
+        #
+        # DENOMINATION GUARD -- read this before copying the pattern. On a
+        # degraded price read the framework stamps
+        # ``price_source == PRICE_SOURCE_SAME_ASSET_UNIT``, and
+        # ``collateral_value_usd`` is then TOKEN-denominated, not USD. Trusting
+        # it blindly books tokens as dollars (a ~2000x understatement for WETH
+        # collateral). Refuse the read instead of converting a unit you cannot
+        # name: Empty != Zero, and a wrong unit is worse than a missing number.
+        from almanak.framework.data.position_health import PRICE_SOURCE_SAME_ASSET_UNIT
+
+        health = None
+        try:
+            health = self.create_market_snapshot().position_health(
+                self.lending_protocol, self.lending_market
+            )
+            if getattr(health, "price_source", "") == PRICE_SOURCE_SAME_ASSET_UNIT:
+                raise RuntimeError(
+                    "degraded price read -- values are token-denominated, not USD"
+                )
+        except Exception as e:
+            logger.warning(f"get_open_positions: lending valuation unavailable: {{e}}")
+            health = None
+
         # After looping, borrows exist even in SUPPLIED state (from prior loops)
         has_borrows = (
             self._loop_state in (LendingLoopState.BORROWED, LendingLoopState.MONITORING)
             or self._loop_count > 0
         )
         if has_borrows:
+            borrow_details = {{
+                "borrow_token": self.borrow_token,
+                "loop_count": self._loop_count,
+                "market_id": self.lending_market,
+            }}
+            if health is None:
+                borrow_details["valuation_status"] = "no_path"
+                borrow_details["value_usd_unknown"] = True
+            # SIGN MATTERS -- a BORROW is a LIABILITY, so report it NEGATIVE.
+            #
+            # Two different consumers read this row and only one of them
+            # normalises the sign for you:
+            #   * TeardownPositionSummary sums `p.value_usd` DIRECTLY, with no
+            #     sign handling at all (framework/teardown/models.py). A positive
+            #     debt here is ADDED to collateral, so a $10k supply against $6k
+            #     of debt totals $16k instead of the true $4k net -- and that
+            #     inflated total is what `max_loss_usd` and
+            #     `protected_minimum_usd` are computed from. Reporting gross debt
+            #     positive would swap a fabricated-zero bug for an inflated-total
+            #     one on the same teardown safety calculation.
+            #   * PortfolioValuer accepts EITHER convention: it negates a
+            #     positive debt and passes an already-negative one through
+            #     unchanged (framework/valuation/portfolio_valuer.py). So a
+            #     negative value is correct for the valuer too.
+            # Negative therefore satisfies both; positive silently breaks one.
+            # `value_usd == 0` still means UNMEASURED to the valuer, which is
+            # exactly what the `health is None` branch above wants.
             positions.append(
                 PositionInfo(
                     position_type=PositionType.BORROW,
                     position_id="{strategy_name}_borrow",
                     chain=self.chain,
                     protocol=self.lending_protocol,
-                    value_usd=Decimal("0"),  # Will be enriched by framework
-                    details={{
-                        "borrow_token": self.borrow_token,
-                        "loop_count": self._loop_count,
-                        "market_id": self.lending_market,
-                    }},
+                    value_usd=(
+                        -abs(Decimal(str(health.debt_value_usd)))
+                        if health is not None
+                        else Decimal("0")
+                    ),
+                    details=borrow_details,
                 )
             )
 
@@ -1703,18 +1917,26 @@ def _get_template_teardown(
             or self._loop_count > 0
         )
         if has_supply:
+            supply_details = {{
+                "collateral_token": self.collateral_token,
+                "supply_amount": str(self.supply_amount),
+                "market_id": self.lending_market,
+            }}
+            if health is None:
+                supply_details["valuation_status"] = "no_path"
+                supply_details["value_usd_unknown"] = True
             positions.append(
                 PositionInfo(
                     position_type=PositionType.SUPPLY,
                     position_id="{strategy_name}_supply",
                     chain=self.chain,
                     protocol=self.lending_protocol,
-                    value_usd=Decimal("0"),  # Will be enriched by framework
-                    details={{
-                        "collateral_token": self.collateral_token,
-                        "supply_amount": str(self.supply_amount),
-                        "market_id": self.lending_market,
-                    }},
+                    value_usd=(
+                        Decimal(str(health.collateral_value_usd))
+                        if health is not None
+                        else Decimal("0")
+                    ),
+                    details=supply_details,
                 )
             )
 
@@ -1914,16 +2136,39 @@ def _get_template_teardown(
         positions = []
 
         if self._state == VaultYieldState.DEPOSITED:
+            # TODO(you): value this position before running with real funds.
+            #
+            # Nothing in the framework back-fills PositionInfo.value_usd -- it is
+            # consumed verbatim, summed into the teardown total, and read by the
+            # max-acceptable-loss guard, where a fabricated 0 silently buys the
+            # LOOSEST slippage tier at the moment of unwind. There is no generic
+            # ERC-4626 share-valuation helper on MarketSnapshot, so the scaffold
+            # cannot measure this one for you.
+            #
+            # Until you implement it, this row is declared UNMEASURED via
+            # BOTH markers: details["value_usd_unknown"] = True (read by the
+            # teardown CLI preview, framework/cli/teardown_helpers.py) and
+            # details["valuation_status"] = "no_path" (read by the portfolio
+            # valuer). Different consumers -- setting only one leaves the other
+            # treating this as a measured zero. The markers make the gap VISIBLE
+            # but do NOT restore the loss cap: the max-acceptable-loss guard
+            # (framework/teardown/models.py) reads only the summed numeric total
+            # and consults neither (VIB-5604). Convert your share balance to
+            # assets (``convertToAssets``) and price the underlying; then drop
+            # the "no_path" marker. Do NOT simply delete the marker and leave the
+            # 0 -- that is the fabrication this branch exists to avoid.
             positions.append(
                 PositionInfo(
                     position_type=PositionType.SUPPLY,
                     position_id="{strategy_name}_vault",
                     chain=self.chain,
                     protocol=self.protocol,
-                    value_usd=Decimal("0"),  # Will be enriched by framework
+                    value_usd=Decimal("0"),
                     details={{
                         "vault_address": self.vault_address,
                         "deposit_token": self.deposit_token,
+                        "valuation_status": "no_path",
+                        "value_usd_unknown": True,
                     }},
                 )
             )
@@ -1992,6 +2237,26 @@ def _get_template_teardown(
             "STAKE": PositionType.STAKE,
         }}
 
+        # TODO(you): value these positions before running with real funds.
+        #
+        # Nothing in the framework back-fills PositionInfo.value_usd -- it is
+        # consumed verbatim, summed into the teardown total, and read by the
+        # max-acceptable-loss guard, where a fabricated 0 silently buys the
+        # LOOSEST slippage tier at the moment of unwind. Copied trades span
+        # heterogeneous position types, so there is no single call the scaffold
+        # can make for you: dispatch on ``pos_type`` and use the matching API
+        # (TOKEN -> market.balance_usd, LP -> market.lp_position_value,
+        # SUPPLY/BORROW -> market.position_health, PERP -> your perp read).
+        #
+        # Until then every row is declared UNMEASURED via
+        # BOTH markers: details["value_usd_unknown"] = True (read by the teardown
+        # CLI preview, framework/cli/teardown_helpers.py) and
+        # details["valuation_status"] = "no_path" (read by the portfolio valuer).
+        # Different consumers -- setting only one leaves the other treating this
+        # as a measured zero. The markers make the gap VISIBLE but do NOT restore
+        # the loss cap: the max-acceptable-loss guard (framework/teardown/
+        # models.py) reads only the summed numeric total and consults neither
+        # (VIB-5604). Remove them only once you emit a real value.
         for i, trade in enumerate(self._open_trades):
             pos_type = _type_map.get(trade.get("intent_type"), PositionType.TOKEN)
             positions.append(
@@ -2000,8 +2265,8 @@ def _get_template_teardown(
                     position_id=f"{strategy_name}_copy_{{i}}",
                     chain=self.chain,
                     protocol=trade.get("protocol", "unknown"),
-                    value_usd=Decimal("0"),  # Will be enriched by framework
-                    details=trade,
+                    value_usd=Decimal("0"),
+                    details={{**trade, "valuation_status": "no_path", "value_usd_unknown": True}},
                 )
             )
 
@@ -2195,18 +2460,55 @@ def _get_template_teardown(
         positions = []
 
         if self._position_id is not None:
+            # VALUE THE POSITION LIVE -- nothing in the framework back-fills
+            # PositionInfo.value_usd. It is consumed verbatim: summed into the
+            # teardown total and read by the max-acceptable-loss guard, where a
+            # fabricated 0 silently buys the LOOSEST slippage tier at the exact
+            # moment you are unwinding. lp_position_value() returns None (never a
+            # fabricated $0) when the position cannot be measured; Empty != Zero,
+            # so an unmeasured read is declared via BOTH markers --
+            # valuation_status="no_path" (read by the portfolio valuer) and
+            # value_usd_unknown=True (read by the teardown CLI preview,
+            # framework/cli/teardown_helpers.py). Setting only one leaves the
+            # other consumer treating this as a measured zero. Neither restores
+            # the loss cap: the max-acceptable-loss guard
+            # (framework/teardown/models.py) reads only the summed numeric total
+            # and consults neither marker (VIB-5604). A genuinely empty position
+            # returns an all-zero MEASURED result -- those two must stay
+            # distinguishable.
+            details = {{
+                "pool": self.pool,
+                # `is not None`, NOT truthiness: a range bound of 0 is a legitimate
+                # value (ticks are signed and Decimal("0") is a real price bound),
+                # and `if self._range_lower` would serialise it as None -- reporting
+                # the bound as ABSENT rather than zero. Matches dynamic_lp.
+                "range_lower": str(self._range_lower) if self._range_lower is not None else None,
+                "range_upper": str(self._range_upper) if self._range_upper is not None else None,
+            }}
+            value_usd = Decimal("0")
+            try:
+                lp_value = self.create_market_snapshot().lp_position_value(
+                    str(self._position_id), self.protocol
+                )
+                if lp_value is None:
+                    raise RuntimeError("position could not be measured")
+                # .total_usd includes uncollected fees; .value_usd excludes them.
+                value_usd = Decimal(str(lp_value.total_usd))
+            except Exception as e:
+                logger.warning(
+                    f"get_open_positions: LP #{{self._position_id}} valuation unavailable: {{e}}"
+                )
+                details["valuation_status"] = "no_path"
+                details["value_usd_unknown"] = True
+
             positions.append(
                 PositionInfo(
                     position_type=PositionType.LP,
                     position_id=str(self._position_id),
                     chain=self.chain,
                     protocol=self.protocol,
-                    value_usd=Decimal("0"),  # Will be enriched by framework
-                    details={{
-                        "pool": self.pool,
-                        "range_lower": str(self._range_lower) if self._range_lower else None,
-                        "range_upper": str(self._range_upper) if self._range_upper else None,
-                    }},
+                    value_usd=value_usd,
+                    details=details,
                 )
             )
 
@@ -2280,17 +2582,43 @@ def _get_template_teardown(
 
         if self._stake_state == StakingState.STAKED:
             staked_amt = self._staked_amount or self.stake_amount
+            # TODO(you): value this position before running with real funds.
+            #
+            # Nothing in the framework back-fills PositionInfo.value_usd. It is
+            # consumed verbatim: summed into the teardown total and read by the
+            # max-acceptable-loss guard, where a fabricated 0 silently buys the
+            # LOOSEST slippage tier at the exact moment you are unwinding.
+            #
+            # This row is declared UNMEASURED rather than valued, because the
+            # scaffold cannot do it correctly for you: ``staked_amt`` is what you
+            # DEPOSITED (denominated in ``stake_token``), but most liquid-staking
+            # protocols hand back a RECEIPT token at a non-1:1 and drifting ratio
+            # (ETH -> wstETH is ~1.18 and rises with accrued rewards). Pricing the
+            # deposited amount with the deposited token's price therefore reports
+            # the wrong number in the wrong denomination, and reporting it as
+            # MEASURED is worse than reporting nothing — a wrong number the guard
+            # TRUSTS does more damage than a missing one it can SEE. Empty != Zero.
+            #
+            # To implement: read your receipt-token balance
+            # (``market.balance("<receipt token>")``), price THAT token, and drop
+            # the "no_path" marker. Do not simply delete the marker and price
+            # ``staked_amt`` — that is the denomination bug this branch avoids.
+            details = {{
+                "stake_token": self.stake_token,
+                "staked_amount": str(staked_amt),
+                "valuation_status": "no_path",
+                "value_usd_unknown": True,
+            }}
+            value_usd = Decimal("0")
+
             positions.append(
                 PositionInfo(
                     position_type=PositionType.STAKE,
                     position_id="{strategy_name}_stake",
                     chain=self.chain,
                     protocol=self.staking_protocol,
-                    value_usd=Decimal("0"),  # Will be enriched by framework
-                    details={{
-                        "stake_token": self.stake_token,
-                        "staked_amount": str(staked_amt),
-                    }},
+                    value_usd=value_usd,
+                    details=details,
                 )
             )
 
@@ -3305,8 +3633,8 @@ def _get_template_callbacks(template: StrategyTemplate) -> str:
             '        """Save position state for crash recovery."""\n'
             "        return {\n"
             '            "position_id": self._position_id,\n'
-            '            "range_lower": str(self._range_lower) if self._range_lower else None,\n'
-            '            "range_upper": str(self._range_upper) if self._range_upper else None,\n'
+            '            "range_lower": str(self._range_lower) if self._range_lower is not None else None,\n'
+            '            "range_upper": str(self._range_upper) if self._range_upper is not None else None,\n'
             "        }\n"
             "\n"
             "    def load_persistent_state(self, state):\n"
@@ -3933,6 +4261,17 @@ class _TemplateTestSpec:
         that is reconciled from live balance on resume / before teardown
         (VIB-5155 / ALM-2719). When True the emitted suite includes a
         desync regression test proving a stale/false flag can still exit.
+    * price_independent_intents: intent types this template may legitimately
+        still emit when the oracle reports a zero price, because their size is
+        denominated in TOKEN UNITS rather than USD. The zero-price edge-case
+        test otherwise demands HOLD. Keep this set as SMALL as possible: every
+        entry is a hole in that assertion, so an intent belongs here only when
+        its amount provably never passes through ``market.price(...)``.
+        Staking is the motivating case — ``Intent.stake(amount=stake_amount)``
+        stakes a configured number of tokens, so a $0 oracle does not make its
+        size meaningless the way it does for a USD-notional swap. (The staking
+        template's swap-to-acquire branch, which IS USD-sized, keeps its own
+        explicit ``stake_price <= 0`` refusal and is unaffected by this.)
     """
 
     state_fields: tuple[str, ...] = ()
@@ -3942,6 +4281,7 @@ class _TemplateTestSpec:
     transitions: tuple[_StateTransition, ...] = ()
     persistent_state_sample: dict[str, object] | None = None
     reconciles_side_state: bool = False
+    price_independent_intents: tuple[str, ...] = ()
 
 
 _BLANK_TEST_SPEC = _TemplateTestSpec()
@@ -4218,6 +4558,11 @@ _TEMPLATE_TEST_SPECS: dict[StrategyTemplate, _TemplateTestSpec] = {
             ),
         ),
         persistent_state_sample={"stake_state": "staked", "staked_amount": "1"},
+        # A funded stake at a $0 oracle is CORRECT: the amount is a configured
+        # token quantity, not a USD notional, so nothing is sized off the dead
+        # price. Without this the zero-price test would demand HOLD and be
+        # wrong — see _TemplateTestSpec.price_independent_intents.
+        price_independent_intents=("STAKE",),
     ),
     StrategyTemplate.COPY_TRADER: _TemplateTestSpec(
         state_fields=("_open_trades",),
@@ -4257,6 +4602,7 @@ They cover: init, decide(), error handling, state transitions, persistence
 round-trip, teardown intents, and common edge cases (zero balance, zero price).
 """
 
+import hashlib
 import json
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -4313,6 +4659,7 @@ _TEST_CONFIG = _load_test_config()
 _TOKEN_CONFIG_KEYS = (
     "base_token", "quote_token", "target_token", "stable_token",
     "collateral_token", "borrow_token", "supply_token", "deposit_token",
+    "stake_token",
     "token_x", "token_y", "token0", "token1",
 )
 
@@ -4343,11 +4690,60 @@ def _config_tokens() -> list[str]:
     return list(seen.values()) or ["WETH", "USDC"]
 
 
+# Per-token test prices. A SINGLE scalar for every symbol makes an inverted
+# price basis -- using the quote token's price where the base token's belongs --
+# arithmetically invisible: if USDC and WETH both read $2000 then base/quote and
+# quote/base produce the same number and every assertion still passes. That
+# inversion is the single most damaging unit bug in strategy code, so the harness
+# must be able to see it. Keep these values DISTINCT and non-round.
+_TEST_PRICES: dict[str, Decimal] = {{
+    "USDC": Decimal("1"),
+    "USDT": Decimal("1"),
+    "DAI": Decimal("1"),
+    "USDC.E": Decimal("1"),
+    "USDS": Decimal("1"),
+    "SUSDS": Decimal("1"),
+    "WETH": Decimal("2000"),
+    "ETH": Decimal("2000"),
+    "STETH": Decimal("2000"),
+    "WSTETH": Decimal("2360"),
+    "WBTC": Decimal("60000"),
+    "CBBTC": Decimal("60000"),
+    "AVAX": Decimal("40"),
+    "WAVAX": Decimal("40"),
+    "ARB": Decimal("0.85"),
+    "OP": Decimal("1.70"),
+    "LINK": Decimal("15"),
+}}
+def _test_price_for(token: str) -> Decimal:
+    """Distinct, stable per-token price so unit/basis errors surface in assertions.
+
+    An unknown symbol gets a price DERIVED FROM THE SYMBOL rather than one shared
+    constant. A single fallback would reproduce the bug this fixture exists to
+    expose, one level down: two custom tokens both priced at the same number make
+    a base/quote inversion between THEM invisible again, exactly as USDC and WETH
+    both reading $2000 did. The derivation is a stable hash of the symbol, so it
+    is deterministic across runs (no ordering or seed dependence) while still
+    separating any two distinct symbols.
+
+    The band is 3-953, deliberately overlapping neither the stablecoin 1 nor
+    WETH's 2000, and never zero — a zero here would silently exercise the
+    unpriced-market path in tests that meant to use a healthy market.
+    """
+    upper = token.upper()
+    known = _TEST_PRICES.get(upper)
+    if known is not None:
+        return known
+    # Stable across processes: hashlib, not builtin hash() (which is salted).
+    digest = hashlib.sha256(upper.encode()).hexdigest()
+    return Decimal(3 + int(digest[:8], 16) % 950) + (Decimal(int(digest[8:10], 16) % 100) / Decimal(100))
+
+
 def _make_market(
     *,
-    price: Decimal = Decimal("2000"),
+    price: Decimal | None = None,
     balance: Decimal = Decimal("100"),
-    balance_usd: Decimal = Decimal("100000"),
+    balance_usd: Decimal | None = None,
     rsi: Decimal = Decimal("50"),
     timestamp: datetime = T0,
 ):
@@ -4356,15 +4752,41 @@ def _make_market(
     Unseeded data (funding rates, position health, ...) raises the SDK's
     data-unavailable errors. Drive time-based tests by passing different
     ``timestamp`` values to successive decide() calls.
+
+    ``price`` defaults to None, which seeds each token with its own realistic
+    price from ``_TEST_PRICES`` (see the note there -- a uniform price hides
+    inverted-basis bugs). Pass an explicit ``price`` to force ONE value across
+    every token, which is what the zero-price/degraded-oracle tests want.
+
+    ``balance_usd`` resolution, in order:
+      1. explicit value  -> used verbatim for every token
+      2. explicit price  -> derived as ``balance * price``
+      3. neither         -> a healthy flat default
+
+    Rule 2 matters: forcing ``price=0`` must NOT leave the wallet claiming a
+    six-figure USD balance. A market that cannot price an asset does not know
+    what the holding is worth, and a fixture that asserts otherwise lets a
+    strategy walk straight past its own USD-denominated guards -- the harness
+    would then be certifying behaviour that cannot happen in production.
     """
     period = int(_TEST_CONFIG.get("rsi_period", 14) or 14)
     tokens = _config_tokens()
+
+    def _usd_for(token: str) -> Decimal:
+        if balance_usd is not None:
+            return balance_usd
+        if price is not None:
+            return balance * price
+        return Decimal("100000")
+
     return seeded(
         chain="{chain}",
         wallet_address="0x" + "1" * 40,
-        prices={{token: price for token in tokens}},
+        prices={{
+            token: (price if price is not None else _test_price_for(token)) for token in tokens
+        }},
         balances={{
-            token: TokenBalance(symbol=token, balance=balance, balance_usd=balance_usd)
+            token: TokenBalance(symbol=token, balance=balance, balance_usd=_usd_for(token))
             for token in tokens
         }},
         indicators={{f"{{token}}:rsi:{{period}}": RSIData(value=rsi, period=period) for token in tokens}},
@@ -4472,16 +4894,28 @@ class Test{class_name}Basics:
 '''
 
 
-def _render_edge_case_tests(class_name: str) -> str:
+def _render_edge_case_tests(class_name: str, spec: "_TemplateTestSpec") -> str:
     """Zero-balance and zero-price edge cases.
 
     These catch a common beginner bug: dividing by price without guarding
     against price=0, or sizing trades without checking balance>0.
+
+    ``spec.price_independent_intents`` widens the zero-price assertion for the
+    few templates whose action is denominated in token units rather than USD
+    (staking). It is emitted as an explicit named set so the generated test
+    states its own exemption instead of silently accepting any non-HOLD intent.
     """
+    allowed = ", ".join(f'"{t}"' for t in ("HOLD", *spec.price_independent_intents))
     return f'''
 # ---------------------------------------------------------------------------
 # Edge cases: degenerate market inputs
 # ---------------------------------------------------------------------------
+
+# Intent types this template may still emit when the oracle price is 0.
+# HOLD is always allowed. Anything else listed here is sized in TOKEN UNITS,
+# never in USD, so a dead oracle does not make its size meaningless -- keep
+# this set minimal, since every extra entry is a hole in the assertion below.
+_ZERO_PRICE_ALLOWED_INTENTS = {{{allowed}}}
 
 
 class Test{class_name}EdgeCases:
@@ -4502,12 +4936,28 @@ class Test{class_name}EdgeCases:
     def test_decide_with_zero_price_does_not_raise(
         self, strategy: {class_name}
     ) -> None:
-        """A price=0 (bad oracle) must not trigger a ZeroDivisionError.
+        """A price=0 (bad oracle) must not raise AND must not trade.
 
         Strategies that size by ``amount_usd / price`` are especially vulnerable.
-        If decide() raises anything except a hold, that is a bug to fix.
+        Not raising is only half the contract: a zero oracle price means the
+        market is UNPRICED, and sizing a live trade off an unpriced market is
+        the failure this test exists to catch. Asserting only that the return
+        value is Intent-shaped would pass a strategy that happily submits a SWAP
+        sized off a $0 price -- so the intent type is asserted too, matching
+        ``test_decide_handles_market_errors_gracefully``.
         """
-        market = _make_market(price=Decimal("0"))
+        # Sweep the signal axis, not just the default neutral one. With the
+        # default rsi=50 an indicator-driven template returns "no signal" and
+        # never REACHES its buy/sell sizing at all -- so the assertion below
+        # would pass while an unguarded ``trade_size_usd / price`` sat one
+        # signal away. 20/80 straddle the conventional oversold/overbought
+        # thresholds; templates that ignore RSI are unaffected.
+        for _rsi in (Decimal("50"), Decimal("20"), Decimal("80")):
+            self._assert_zero_price_holds(strategy, _rsi)
+
+    @staticmethod
+    def _assert_zero_price_holds(strategy, rsi_value: Decimal) -> None:
+        market = _make_market(price=Decimal("0"), rsi=rsi_value)
         try:
             result = strategy.decide(market)
         except ZeroDivisionError as exc:
@@ -4521,6 +4971,21 @@ class Test{class_name}EdgeCases:
             or hasattr(result, "intent_type")
             or hasattr(result, "intents")
         )
+
+        # An unpriced market must not produce a live trade.
+        emitted = []
+        if result is not None:
+            emitted = list(getattr(result, "intents", None) or [result])
+        for item in emitted:
+            if not hasattr(item, "intent_type"):
+                continue
+            intent_type = getattr(item.intent_type, "value", str(item.intent_type))
+            assert intent_type in _ZERO_PRICE_ALLOWED_INTENTS, (
+                f"decide() emitted {{intent_type}} on a ZERO price. An unpriced "
+                f"market must produce HOLD -- sizing a trade off a $0 oracle "
+                f"reads as free size. Guard with ``if price > 0``. "
+                f"Reason: {{getattr(item, 'reason', '<no reason>')}}"
+            )
 
 '''
 
@@ -4733,6 +5198,15 @@ def _render_callback_tests(
 ) -> str:
     """State machine transition tests driven by the template's transition spec."""
     state_fields_block = _fmt_state_fields_tuple(spec.state_fields)
+    # The failure-path test must fire the intent types this template actually
+    # branches on. Hardcoding "SWAP" let LP / perp / lending / staking / vault
+    # callbacks ignore the mock entirely — their handlers dispatch on
+    # intent_type, so a broken PERP_OPEN failure branch could credit state while
+    # a SWAP-only test stayed green. Deduped, order-preserved.
+    _seen_types: dict[str, None] = {}
+    for t in spec.transitions:
+        _seen_types.setdefault(t.intent_type, None)
+    failure_intent_types_block = _fmt_state_fields_tuple(tuple(_seen_types) or ("SWAP",))
     param_entries: list[str] = []
     for t in spec.transitions:
         param_entries.append(
@@ -4797,28 +5271,125 @@ class Test{class_name}StateMachine:
                     f"Expected {{field}} == {{expected_value!r}}, got {{actual!r}}"
                 )
 
-    def test_on_intent_executed_ignores_failures(
+    def test_on_intent_executed_failure_does_not_credit_state(
         self, strategy: {class_name}
     ) -> None:
-        """success=False must NOT mutate state -- framework retries on failure.
+        """A FAILED intent must never ADVANCE or CREDIT position state.
 
-        Uses deepcopy so in-place mutations of mutable fields (lists, dicts)
-        are detected, not silently passed.
+        TWO PHASES, because either alone has a blind spot:
+
+        * **Phase A, from the FRESH state: nothing may change at all.** This is
+          full-state equality, and it is what catches a handler ADVANCING a
+          state machine on failure -- e.g. a failed PERP_OPEN that still sets
+          ``_trade_state = HEDGED``, leaving the strategy believing it is hedged
+          with no hedge on-chain. Most templates hold their primary state in a
+          ``StrEnum``, and a ``StrEnum`` IS a ``str``: it is neither numeric nor
+          a collection, so the Phase-B contract below cannot see it move. Phase A
+          is safe from the fresh state precisely because a correct handler has
+          nothing to revert there -- any diff is the handler inventing state.
+
+        * **Phase B, from a SEEDED mid-flight state: no credit.** Phase A alone
+          is vacuous for quantities: a fresh strategy is already zeroed, so a
+          handler that zeroes on failure produces no diff and the assertion
+          passes no matter what it does. Seeding first makes a wrong mutation
+          observable. The contract here is deliberately narrow so it does not
+          punish correct code:
+
+            - numeric fields must NOT increase -- growth on a failed intent is
+              phantom credit, booking size that never executed on-chain
+            - collections must NOT grow -- same failure, for trade/position lists
+
+          Reverting a transitional state to a stable one, or ZEROING a quantity,
+          is legitimate failure handling and stays allowed in Phase B.
+
+        Do not collapse these into one phase. Phase B alone was a REGRESSION
+        against full-state equality: it silently dropped enum coverage, and a
+        mutation that credited state on failure passed it while the older broad
+        assertion caught it.
+
+        What this still canNOT check is whether your handler reverts to the
+        RIGHT state -- that is strategy-specific. Add an explicit assertion for
+        your own transition below.
         """
         tracked_fields = [
             f for f in {state_fields_block} if hasattr(strategy, f)
         ]
-        before = {{f: copy.deepcopy(getattr(strategy, f)) for f in tracked_fields}}
 
-        intent = _make_mock_intent("SWAP")
-        result = _make_mock_result()
-        strategy.on_intent_executed(intent, success=False, result=result)
+        def _snapshot() -> dict:
+            return {{f: copy.deepcopy(getattr(strategy, f)) for f in tracked_fields}}
 
-        after = {{f: copy.deepcopy(getattr(strategy, f)) for f in tracked_fields}}
-        assert before == after, (
-            f"Failed intents must not mutate state. Diff: "
-            f"{{[(f, before[f], after[f]) for f in tracked_fields if before[f] != after[f]]}}"
-        )
+        def _restore(state: dict) -> None:
+            for f, value in state.items():
+                setattr(strategy, f, copy.deepcopy(value))
+
+        # Captured BEFORE any seeding. Phase B deliberately mutates the strategy,
+        # and that mutation must not leak into the NEXT intent type's Phase A --
+        # otherwise "from the fresh state" is a lie from the second iteration on,
+        # and a handler doing exactly what Phase B declares legitimate (reverting
+        # a transitional state, zeroing a quantity) would trip Phase A's
+        # full-state equality and fail correct code.
+        initial_state = _snapshot()
+
+        # Fire EVERY intent type this template branches on, not just one. The
+        # callback dispatches on intent_type, so a single hardcoded type would
+        # leave the other failure branches unexercised -- a broken LP_OPEN or
+        # PERP_OPEN failure path could credit state while this test stayed green.
+        for intent_type_value in {failure_intent_types_block}:
+            # ---- Phase A: from the fresh state, NOTHING may change. ----
+            _restore(initial_state)
+            fresh_before = _snapshot()
+            strategy.on_intent_executed(
+                _make_mock_intent(intent_type_value), success=False, result=_make_mock_result()
+            )
+            fresh_after = _snapshot()
+            assert fresh_before == fresh_after, (
+                f"A failed {{intent_type_value}} intent MUTATED state from the "
+                f"initial state. Nothing was executed on-chain, so there is "
+                f"nothing to record and nothing to revert. Diff: "
+                f"{{[(f, fresh_before[f], fresh_after[f]) for f in tracked_fields if fresh_before[f] != fresh_after[f]]}}"
+            )
+
+            # ---- Phase B: from a seeded mid-flight state, no CREDIT. ----
+            for f in tracked_fields:
+                current = getattr(strategy, f)
+                if isinstance(current, bool):
+                    setattr(strategy, f, True)
+                elif isinstance(current, Decimal):
+                    setattr(strategy, f, Decimal("3"))
+                elif isinstance(current, int):
+                    setattr(strategy, f, 3)
+                elif isinstance(current, list):
+                    setattr(strategy, f, [{{"seeded": True}}])
+                elif current is None:
+                    setattr(strategy, f, Decimal("3"))
+
+            before = _snapshot()
+
+            intent = _make_mock_intent(intent_type_value)
+            result = _make_mock_result()
+            strategy.on_intent_executed(intent, success=False, result=result)
+
+            for f in tracked_fields:
+                old = before[f]
+                new = getattr(strategy, f)
+                numeric = (int, float, Decimal)
+                if (
+                    isinstance(old, numeric)
+                    and isinstance(new, numeric)
+                    and not isinstance(old, bool)
+                    and not isinstance(new, bool)
+                ):
+                    assert Decimal(str(new)) <= Decimal(str(old)), (
+                        f"{{f}} INCREASED on a failed {{intent_type_value}} intent "
+                        f"({{old}} -> {{new}}). A failed intent must never credit "
+                        f"state -- that books size which never executed on-chain."
+                    )
+                elif isinstance(old, list | dict | set) and isinstance(new, list | dict | set):
+                    assert len(new) <= len(old), (
+                        f"{{f}} GREW on a failed {{intent_type_value}} intent "
+                        f"(len {{len(old)}} -> {{len(new)}}). A failed intent must "
+                        f"never append a position or trade record."
+                    )
 
 '''
 
@@ -5052,7 +5623,7 @@ def generate_test_file(
 
     header = _render_test_file_header(name, class_name, chain, template)
     base_tests = _render_base_tests(class_name, chain)
-    edge_tests = _render_edge_case_tests(class_name)
+    edge_tests = _render_edge_case_tests(class_name, spec)
     teardown_tests = _render_teardown_tests(class_name, spec)
 
     callback_tests = ""
