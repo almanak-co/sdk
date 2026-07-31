@@ -41,6 +41,7 @@ from enum import Enum, IntEnum, auto
 from typing import TYPE_CHECKING, Any, Optional, Protocol, runtime_checkable
 
 from almanak.framework.models.run_mode import RunMode
+from almanak.framework.portfolio.models import ValueConfidence, ValueConfidenceParseError
 from almanak.framework.state.ledger_registry_mode import LedgerRegistrySaveMode
 
 if TYPE_CHECKING:
@@ -875,12 +876,15 @@ class PostgresStore:
         to_ts: datetime | None,
         *,
         scan_cap: int = 200_000,
-    ) -> tuple[list[tuple[datetime, str | None, str | None, str | None, str | None]], bool]:
+    ) -> tuple[
+        list[tuple[datetime, str | None, str | None, ValueConfidence | None, str | None]],
+        bool,
+    ]:
         """Projected NAV samples inside a time window (VIB-5059 P2). Postgres twin
         of :meth:`SQLiteStore.get_snapshots_in_window` — identical contract.
 
         Returns ``(rows, truncated)`` with ``rows`` = ``(timestamp,
-        total_value_usd_text, available_cash_usd_text, value_confidence_text,
+        total_value_usd_text, available_cash_usd_text, value_confidence,
         positions_json_text)`` oldest-first. Projects the chart columns plus
         ``available_cash_usd`` (VIB-5942, for the wallet-NAV ``total − debt + cash``
         series) and ``positions_json`` (VIB-5170, for per-row BORROW debt netting),
@@ -925,7 +929,10 @@ class PostgresStore:
                 r["timestamp"],
                 r["total_value_text"],
                 r["available_cash_text"],
-                r["value_confidence"],
+                ValueConfidence.parse_optional(
+                    r["value_confidence"],
+                    field_name="Postgres portfolio_snapshots.value_confidence",
+                ),
                 r["positions_text"],
             )
             for r in reversed(rows)
@@ -937,13 +944,16 @@ class PostgresStore:
         *,
         since: tuple[datetime, int] | None = None,
         scan_cap: int = 200_000,
-    ) -> tuple[list[tuple[datetime, str | None, str | None, int, str | None, str | None]], bool]:
+    ) -> tuple[
+        list[tuple[datetime, str | None, str | None, int, str | None, ValueConfidence | None]],
+        bool,
+    ]:
         """NAV-component series for lifetime drawdown (VIB-5118/5134). Postgres twin
         of :meth:`SQLiteStore.get_nav_series` — identical contract.
 
         Returns ``(rows, truncated)`` with ``rows`` = ``(timestamp,
         total_value_usd_text, available_cash_usd_text, id, positions_json_text,
-        value_confidence_text)`` oldest-first. Projects the two NAV columns plus the
+        value_confidence)`` oldest-first. Projects the two NAV columns plus the
         row ``id`` cursor tiebreaker, ``positions_json`` (VIB-5170 debt-netting
         input), and ``value_confidence`` (VIB-5408 trust gate — the fold SKIPs an
         ``UNAVAILABLE`` row, whose deflated NAV would otherwise corrupt the displayed
@@ -1024,7 +1034,10 @@ class PostgresStore:
                 r["available_cash_text"],
                 r["id"],
                 r["positions_text"],
-                r["value_confidence_text"],
+                ValueConfidence.parse_optional(
+                    r["value_confidence_text"],
+                    field_name="Postgres portfolio_snapshots.value_confidence",
+                ),
             )
             for r in ordered
         ], truncated
@@ -1863,7 +1876,10 @@ def _pg_row_to_portfolio_snapshot(row: Any) -> "PortfolioSnapshot":
             "available_cash_usd": str(row["available_cash_usd"]),
             "deployed_capital_usd": deployed_capital_usd,
             "wallet_total_value_usd": wallet_total_value_usd,
-            "value_confidence": row["value_confidence"],
+            "value_confidence": ValueConfidence.parse_optional(
+                row["value_confidence"],
+                field_name="Postgres portfolio_snapshots.value_confidence",
+            ),
             "positions": positions,
             "wallet_balances": wallet_balances_raw,
             "token_prices": token_prices,
@@ -2862,6 +2878,11 @@ class StateManager:
             latency = (time.perf_counter() - start) * 1000
             self._record_metrics(StateTier.WARM, "get_latest_snapshot", latency, True)
             return result
+        except ValueConfidenceParseError as e:
+            latency = (time.perf_counter() - start) * 1000
+            self._record_metrics(StateTier.WARM, "get_latest_snapshot", latency, False, str(e))
+            logger.error("Invalid persisted value confidence: %s", e)
+            raise
         except Exception as e:
             latency = (time.perf_counter() - start) * 1000
             self._record_metrics(StateTier.WARM, "get_latest_snapshot", latency, False, str(e))
@@ -2887,6 +2908,11 @@ class StateManager:
             latency = (time.perf_counter() - start) * 1000
             self._record_metrics(StateTier.WARM, "get_first_snapshot", latency, True)
             return result
+        except ValueConfidenceParseError as e:
+            latency = (time.perf_counter() - start) * 1000
+            self._record_metrics(StateTier.WARM, "get_first_snapshot", latency, False, str(e))
+            logger.error("Invalid persisted value confidence: %s", e)
+            raise
         except Exception as e:
             latency = (time.perf_counter() - start) * 1000
             self._record_metrics(StateTier.WARM, "get_first_snapshot", latency, False, str(e))
@@ -2926,6 +2952,11 @@ class StateManager:
             latency = (time.perf_counter() - start) * 1000
             self._record_metrics(StateTier.WARM, "get_snapshots_since", latency, True)
             return result
+        except ValueConfidenceParseError as e:
+            latency = (time.perf_counter() - start) * 1000
+            self._record_metrics(StateTier.WARM, "get_snapshots_since", latency, False, str(e))
+            logger.error("Invalid persisted value confidence: %s", e)
+            raise
         except Exception as e:
             latency = (time.perf_counter() - start) * 1000
             self._record_metrics(StateTier.WARM, "get_snapshots_since", latency, False, str(e))
@@ -2967,6 +2998,11 @@ class StateManager:
             latency = (time.perf_counter() - start) * 1000
             self._record_metrics(StateTier.WARM, "get_recent_snapshots", latency, True)
             return result
+        except ValueConfidenceParseError as e:
+            latency = (time.perf_counter() - start) * 1000
+            self._record_metrics(StateTier.WARM, "get_recent_snapshots", latency, False, str(e))
+            logger.error("Invalid persisted value confidence: %s", e)
+            raise
         except Exception as e:
             latency = (time.perf_counter() - start) * 1000
             self._record_metrics(StateTier.WARM, "get_recent_snapshots", latency, False, str(e))
@@ -2980,7 +3016,10 @@ class StateManager:
         to_ts: datetime | None,
         *,
         scan_cap: int = 200_000,
-    ) -> tuple[list[tuple[datetime, str | None, str | None, str | None, str | None]], bool]:
+    ) -> tuple[
+        list[tuple[datetime, str | None, str | None, ValueConfidence | None, str | None]],
+        bool,
+    ]:
         """Projected NAV samples inside a time window, for windowed charts (VIB-5059 P2).
 
         Returns ``(rows, truncated)`` — see the backend method for the row shape
@@ -3023,7 +3062,10 @@ class StateManager:
         *,
         since: tuple[datetime, int] | None = None,
         scan_cap: int = 200_000,
-    ) -> tuple[list[tuple[datetime, str | None, str | None, int, str | None, str | None]], bool]:
+    ) -> tuple[
+        list[tuple[datetime, str | None, str | None, int, str | None, ValueConfidence | None]],
+        bool,
+    ]:
         """NAV-component series for lifetime drawdown / high-watermark (VIB-5118/5134).
 
         Returns ``(rows, truncated)`` — see the backend method for the row shape and
@@ -3056,6 +3098,11 @@ class StateManager:
             latency = (time.perf_counter() - start) * 1000
             self._record_metrics(StateTier.WARM, "get_nav_series", latency, True)
             return result
+        except ValueConfidenceParseError as e:
+            latency = (time.perf_counter() - start) * 1000
+            self._record_metrics(StateTier.WARM, "get_nav_series", latency, False, str(e))
+            logger.error("Invalid persisted value confidence: %s", e)
+            raise
         except Exception as e:
             latency = (time.perf_counter() - start) * 1000
             self._record_metrics(StateTier.WARM, "get_nav_series", latency, False, str(e))
@@ -3093,6 +3140,11 @@ class StateManager:
             latency = (time.perf_counter() - start) * 1000
             self._record_metrics(StateTier.WARM, "get_snapshot_at", latency, True)
             return result
+        except ValueConfidenceParseError as e:
+            latency = (time.perf_counter() - start) * 1000
+            self._record_metrics(StateTier.WARM, "get_snapshot_at", latency, False, str(e))
+            logger.error("Invalid persisted value confidence: %s", e)
+            raise
         except Exception as e:
             latency = (time.perf_counter() - start) * 1000
             self._record_metrics(StateTier.WARM, "get_snapshot_at", latency, False, str(e))
@@ -4083,6 +4135,9 @@ class StateManager:
         assert warm is not None and hasattr(warm, "get_first_snapshot_sync")
         try:
             return warm.get_first_snapshot_sync(deployment_id)
+        except ValueConfidenceParseError:
+            logger.error("Invalid persisted value confidence", exc_info=True)
+            raise
         except Exception:
             logger.debug("get_first_snapshot_sync failed", exc_info=True)
             return None

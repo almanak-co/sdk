@@ -114,6 +114,18 @@ def test_pg_row_value_confidence_round_trips() -> None:
         assert snap.value_confidence == level
 
 
+@pytest.mark.parametrize("stored", [None, ""])
+def test_pg_row_missing_value_confidence_remains_unmeasured(stored) -> None:
+    snap = _pg_row_to_portfolio_snapshot(_row(value_confidence=stored))
+    assert snap.value_confidence is None
+    assert not snap.is_valid
+
+
+def test_pg_row_unknown_value_confidence_is_surfaced() -> None:
+    with pytest.raises(ValueError, match="invalid Postgres portfolio_snapshots.value_confidence"):
+        _pg_row_to_portfolio_snapshot(_row(value_confidence="MYSTERY"))
+
+
 def test_pg_row_positions_envelope_unpacks_metadata() -> None:
     """Identity round-trip is independent of how positions_json is shaped
     (legacy bare list vs VIB-3923 envelope)."""

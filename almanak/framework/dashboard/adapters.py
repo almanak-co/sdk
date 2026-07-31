@@ -12,6 +12,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from almanak.framework.dashboard.models import Strategy, StrategyStatus
+from almanak.framework.portfolio.models import ValueConfidence
 
 if TYPE_CHECKING:
     from almanak.framework.dashboard.data_client import DashboardDataClient
@@ -81,7 +82,10 @@ def strategy_from_pm_dict(entry: dict[str, Any]) -> Strategy:
         attention_reason=entry.get("attention_reason"),
         is_multi_chain=bool(entry.get("is_multi_chain")),
         chains=entry.get("chains") or [],
-        value_confidence=entry.get("value_confidence"),
+        value_confidence=ValueConfidence.parse_optional(
+            entry.get("value_confidence"),
+            field_name="PM strategy.value_confidence",
+        ),
     )
 
 

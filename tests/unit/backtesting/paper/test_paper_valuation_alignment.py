@@ -19,6 +19,7 @@ import pytest
 
 from almanak.framework.backtesting.models import EquityPoint
 from almanak.framework.backtesting.paper.models import PaperTradingSummary
+from almanak.framework.portfolio.models import PortfolioSnapshot, ValueConfidence
 from almanak.framework.valuation.rpc_adapter import (
     DirectRpcAdapter,
     _DirectRpcStub,
@@ -375,20 +376,21 @@ class TestPaperTraderValuerIntegration:
 
         assert result == (Decimal("25000"), Decimal("25000"), Decimal("0"))
 
-    def test_value_portfolio_rich_valuer_returns_unavailable(self):
+    @pytest.mark.parametrize("confidence", [None, ValueConfidence.UNAVAILABLE])
+    def test_rich_snapshot_values_rejects_unmeasured_confidence(
+        self,
+        confidence: ValueConfidence | None,
+    ) -> None:
         trader = self._make_trader()
-        trader._init_portfolio_valuer()
+        snapshot = PortfolioSnapshot(
+            timestamp=datetime.now(UTC),
+            deployment_id="test_strategy",
+            total_value_usd=Decimal("15000"),
+            available_cash_usd=Decimal("10000"),
+            value_confidence=confidence,
+        )
 
-        trader._current_strategy = _FakeStrategy()
-        trader._last_market_snapshot = MagicMock()
-
-        mock_snapshot = MagicMock()
-        mock_snapshot.value_confidence.value = "UNAVAILABLE"
-
-        with patch.object(trader._portfolio_valuer, "value", return_value=mock_snapshot):
-            result = trader._value_portfolio_rich()
-
-        assert result is None
+        assert trader._rich_snapshot_values(snapshot) is None
 
     def test_value_portfolio_rich_valuer_exception_fallback(self):
         trader = self._make_trader()

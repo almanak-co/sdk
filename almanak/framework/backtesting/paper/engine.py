@@ -1013,7 +1013,8 @@ class PaperTrader:
         return strategy, market
 
     def _rich_snapshot_values(self, snapshot: Any) -> tuple[Decimal, Decimal, Decimal] | None:
-        if snapshot.value_confidence.value == "UNAVAILABLE":
+        # PortfolioSnapshot.is_valid is a boolean property, not a method.
+        if not snapshot.is_valid:
             return None
         return snapshot.total_value_usd, snapshot.available_cash_usd, snapshot.position_value_usd
 

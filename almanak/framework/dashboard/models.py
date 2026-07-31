@@ -10,6 +10,7 @@ from enum import StrEnum
 from typing import Any
 
 from almanak.framework.models.run_mode import RunMode
+from almanak.framework.portfolio.models import ValueConfidence
 
 
 class StrategyStatus(StrEnum):
@@ -392,14 +393,18 @@ class Strategy:
     pnl_by_chain: dict[str, Decimal] = field(default_factory=dict)  # Per-chain P&L
     # Configuration path for config editor
     config_path: str | None = None
-    # Value confidence indicator (HIGH, ESTIMATED, STALE, UNAVAILABLE)
-    value_confidence: str | None = None
+    # None means confidence was not measured; never infer HIGH from absence.
+    value_confidence: ValueConfidence | None = None
     # Paper trading support
     execution_mode: RunMode = RunMode.LIVE
     paper_metrics: PaperMetrics | None = None
 
     def __post_init__(self) -> None:
-        """Canonicalize legacy wire/model inputs to the typed run-mode vocabulary."""
+        """Canonicalize legacy boundary inputs to typed dashboard vocabulary."""
+        self.value_confidence = ValueConfidence.parse_optional(
+            self.value_confidence,
+            field_name="Strategy.value_confidence",
+        )
         self.execution_mode = RunMode.parse(self.execution_mode)
 
 

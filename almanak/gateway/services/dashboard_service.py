@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 
 from almanak.core.chains import LEGACY_SERIALIZED_CHAIN
 from almanak.core.lifecycle import LifecycleValueError, parse_lifecycle_command, require_enqueueable_command
+from almanak.framework.portfolio.models import serialize_value_confidence
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.integrations.portfolio_chain import PortfolioProviderChain, build_portfolio_chain
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
@@ -2696,7 +2697,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             net_apr_pct=("" if pnl.net_apr_pct is None else f"{pnl.net_apr_pct:.2f}"),
             max_drawdown_pct=f"{pnl.max_drawdown_pct:.2f}",
             current_drawdown_pct=f"{pnl.current_drawdown_pct:.2f}",
-            value_confidence=pnl.value_confidence,
+            value_confidence=serialize_value_confidence(pnl.value_confidence),
             age_days=pnl.age_days,
             deployed_capital_usd=str(pnl.deployed_capital_usd),
             available_cash_usd=str(pnl.available_cash_usd),

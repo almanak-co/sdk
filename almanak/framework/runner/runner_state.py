@@ -34,6 +34,7 @@ from ..portfolio import (
     PortfolioSnapshot,
     ValueConfidence,
     enforce_open_position_value_invariant,
+    serialize_value_confidence,
 )
 from ..state.exceptions import AccountingPersistenceError, AccountingWriteKind
 from ..state.state_manager import StateConflictError, StateData, StateNotFoundError
@@ -566,12 +567,12 @@ def _value_via_portfolio_valuer(
         logger.debug("PortfolioValuer failed, trying fallback: %s", e)
         return None
 
-    if snapshot and snapshot.value_confidence != ValueConfidence.UNAVAILABLE:
+    if snapshot and snapshot.is_valid:
         logger.debug(
             "Portfolio valued by PortfolioValuer for %s: $%.2f (%s)",
             strategy.deployment_id,
             snapshot.total_value_usd,
-            snapshot.value_confidence.value,
+            snapshot.value_confidence,
         )
     return snapshot
 
@@ -596,7 +597,7 @@ def _value_via_strategy_fallback(
     fallback = strategy.get_portfolio_snapshot()
     if fallback is not None:
         fallback.iteration_number = iteration_number
-    if fallback is not None and fallback.value_confidence != ValueConfidence.UNAVAILABLE:
+    if fallback is not None and fallback.is_valid:
         logger.debug(
             "Portfolio valued by strategy fallback for %s: $%.2f",
             strategy.deployment_id,
@@ -854,7 +855,7 @@ async def _write_valuation_into_strategy_state(
         if state is None:
             return
         state.state["total_value_usd"] = str(snapshot.total_value_usd)
-        state.state["value_confidence"] = snapshot.value_confidence.value
+        state.state["value_confidence"] = serialize_value_confidence(snapshot.value_confidence)
         for key in _RECONCILIATION_STATE_KEYS:
             if snapshot.snapshot_metadata and key in snapshot.snapshot_metadata:
                 state.state[key] = str(snapshot.snapshot_metadata[key])
@@ -939,7 +940,7 @@ async def capture_portfolio_snapshot(
 
     try:
         snapshot = _value_via_portfolio_valuer(runner, strategy, iteration_number)
-        if snapshot is None or snapshot.value_confidence == ValueConfidence.UNAVAILABLE:
+        if snapshot is None or not snapshot.is_valid:
             snapshot = _value_via_strategy_fallback(strategy, iteration_number, snapshot)
 
         # Failure contract: never skip a snapshot -- construct UNAVAILABLE if needed.
@@ -996,7 +997,7 @@ async def capture_portfolio_snapshot(
                 strategy.deployment_id,
                 snapshot.total_value_usd,
                 snapshot_id,
-                snapshot.value_confidence.value,
+                snapshot.value_confidence,
             )
             # Track C (VIB-3891): per-iteration position-state snapshots.
             # Best-effort — internally swallows failures so a Track C write
@@ -1741,7 +1742,7 @@ async def _build_metrics_for_snapshot(  # noqa: C901
         if not hasattr(runner.state_manager, "get_portfolio_metrics"):
             return None
 
-        if snapshot.error or snapshot.value_confidence == ValueConfidence.UNAVAILABLE:
+        if snapshot.error or not snapshot.is_valid:
             logger.info(f"Skipping portfolio metrics for {deployment_id}: snapshot unavailable")
             return None
 

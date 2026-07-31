@@ -33,6 +33,7 @@ from almanak.framework.dashboard.utils import (
     format_usd,
     get_status_icon,
 )
+from almanak.framework.portfolio.models import ValueConfidence
 
 
 def _e(value: Any) -> str:
@@ -119,10 +120,11 @@ def render_chain_info_row(strategy: Strategy) -> None:
 
 
 _CONFIDENCE_ICONS = {
-    "HIGH": "",
-    "ESTIMATED": " ⚠️",
-    "STALE": " ⏰",
-    "UNAVAILABLE": " ❓",
+    ValueConfidence.HIGH: "",
+    ValueConfidence.ESTIMATED: " [estimated]",
+    ValueConfidence.STALE: " [stale]",
+    ValueConfidence.UNAVAILABLE: " [unavailable]",
+    None: " [unmeasured]",
 }
 
 _RISK_COLORS = {
@@ -395,12 +397,13 @@ def render_money_trail(p: PnLSummary, cost: CostStackInfo | None = None) -> None
         )
     with c2:
         confidence_icon = _CONFIDENCE_ICONS.get(p.value_confidence, "")
+        confidence_label = p.value_confidence.value if p.value_confidence is not None else "UNMEASURED"
         st.metric(
             "Wallet NAV now",
             format_usd(p.nav_usd) + confidence_icon,
             help=(
                 f"Net Asset Value = open positions + cash. "
-                f"Confidence: {p.value_confidence}. HIGH = oracle "
+                f"Confidence: {confidence_label}. HIGH = oracle "
                 "quotes available; ESTIMATED = derived from latest "
                 "snapshot."
             ),

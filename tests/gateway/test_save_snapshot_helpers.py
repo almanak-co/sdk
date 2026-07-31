@@ -86,6 +86,21 @@ def _request(
 
 
 class TestValidateSaveSnapshotPayload:
+    @pytest.mark.parametrize("confidence", list(ValueConfidence))
+    def test_every_known_confidence_is_accepted(self, confidence: ValueConfidence):
+        req = _request(value_confidence=confidence.value)
+        assert StateServiceServicer._validate_save_snapshot_payload(req) is None
+
+    def test_empty_confidence_is_accepted_as_unmeasured(self):
+        req = _request(value_confidence="")
+        assert StateServiceServicer._validate_save_snapshot_payload(req) is None
+
+    def test_unknown_confidence_is_rejected(self):
+        req = _request(value_confidence="MYSTERY")
+        error = StateServiceServicer._validate_save_snapshot_payload(req)
+        assert error is not None
+        assert "invalid SaveSnapshotRequest.value_confidence 'MYSTERY'" in error
+
     def test_happy_legacy_list_returns_none(self):
         req = _request(positions_json=b'[{"symbol": "USDC"}]')
         assert StateServiceServicer._validate_save_snapshot_payload(req) is None
@@ -273,13 +288,13 @@ class TestBuildSqliteSnapshot:
         assert snap.token_prices == {}
         assert snap.wallet_balances == []
 
-    def test_default_value_confidence_when_unset(self, ts: datetime):
-        # Empty proto string ⇒ "HIGH" default per the orchestrator contract.
+    def test_value_confidence_remains_unmeasured_when_unset(self, ts: datetime):
+        # Empty proto string is the existing wire sentinel for unmeasured.
         req = _request(value_confidence="", positions_json=b"")
         snap = StateServiceServicer._build_sqlite_snapshot(
             "Strat:abc", ts, req, RunMode.parse_optional(req.execution_mode)
         )
-        assert snap.value_confidence == ValueConfidence.HIGH
+        assert snap.value_confidence is None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -326,9 +341,7 @@ class TestSaveSnapshotPostgres:
         ts = datetime(2026, 5, 7, 12, 0, 0, tzinfo=UTC)
         now = datetime(2026, 5, 7, 12, 0, 1, tzinfo=UTC)
         req = _request(deployment_id="Strat:abc", cycle_id="cycle-7", execution_mode="paper")
-        await pg_service._save_snapshot_postgres(
-            "Strat:abc", ts, now, req, RunMode.parse_optional(req.execution_mode)
-        )
+        await pg_service._save_snapshot_postgres("Strat:abc", ts, now, req, RunMode.parse_optional(req.execution_mode))
         args = pg_service._snapshot_fetchrow.await_args.args
         # VIB-4721/4722: portfolio_snapshots has a single identity column,
         # deployment_id ($1, the validated wire id). cycle_id / execution_mode
@@ -347,26 +360,22 @@ class TestSaveSnapshotPostgres:
         ts = datetime(2026, 5, 7, 12, 0, 0, tzinfo=UTC)
         now = datetime(2026, 5, 7, 12, 0, 1, tzinfo=UTC)
         req = _request()  # cycle_id / execution_mode = ""
-        await pg_service._save_snapshot_postgres(
-            "Strat:abc", ts, now, req, RunMode.parse_optional(req.execution_mode)
-        )
+        await pg_service._save_snapshot_postgres("Strat:abc", ts, now, req, RunMode.parse_optional(req.execution_mode))
         args = pg_service._snapshot_fetchrow.await_args.args
         assert args[1] == "Strat:abc"  # deployment_id always present
         assert tuple(args[-2:]) == ("", "")
 
     @pytest.mark.asyncio
-    async def test_default_value_confidence_passed_when_unset(self, pg_service: StateServiceServicer):
+    async def test_unmeasured_value_confidence_passed_when_unset(self, pg_service: StateServiceServicer):
         pg_service._snapshot_fetchrow = AsyncMock(return_value={"id": 1})
         ts = datetime(2026, 5, 7, 12, 0, 0, tzinfo=UTC)
         now = datetime(2026, 5, 7, 12, 0, 1, tzinfo=UTC)
         req = _request(value_confidence="")
-        await pg_service._save_snapshot_postgres(
-            "Strat:abc", ts, now, req, RunMode.parse_optional(req.execution_mode)
-        )
+        await pg_service._save_snapshot_postgres("Strat:abc", ts, now, req, RunMode.parse_optional(req.execution_mode))
         args = pg_service._snapshot_fetchrow.await_args.args
         # value_confidence is the 6th param after SQL → args[6]
         # (deployment_id, ts, iter, total, available, value_conf)
-        assert args[6] == "HIGH"
+        assert args[6] == ""
 
     @pytest.mark.asyncio
     async def test_empty_positions_json_writes_empty_array_string(self, pg_service: StateServiceServicer):
@@ -374,9 +383,7 @@ class TestSaveSnapshotPostgres:
         ts = datetime(2026, 5, 7, 12, 0, 0, tzinfo=UTC)
         now = datetime(2026, 5, 7, 12, 0, 1, tzinfo=UTC)
         req = _request(positions_json=b"")
-        await pg_service._save_snapshot_postgres(
-            "Strat:abc", ts, now, req, RunMode.parse_optional(req.execution_mode)
-        )
+        await pg_service._save_snapshot_postgres("Strat:abc", ts, now, req, RunMode.parse_optional(req.execution_mode))
         args = pg_service._snapshot_fetchrow.await_args.args
         # positions_json is param 7 (after SQL)
         assert args[7] == "[]"
@@ -405,9 +412,7 @@ class TestSaveSnapshotPostgres:
             "token_prices": token_prices,
         }
         req = _request(positions_json=json.dumps(envelope).encode())
-        await pg_service._save_snapshot_postgres(
-            "Strat:abc", ts, now, req, RunMode.parse_optional(req.execution_mode)
-        )
+        await pg_service._save_snapshot_postgres("Strat:abc", ts, now, req, RunMode.parse_optional(req.execution_mode))
         args = pg_service._snapshot_fetchrow.await_args.args
         # Bind order: ... created_at($9)=args[9], deployed_capital_usd=args[10],
         # wallet_total_value_usd=args[11], wallet_balances_json=args[12],
@@ -428,9 +433,7 @@ class TestSaveSnapshotPostgres:
         ts = datetime(2026, 5, 7, 12, 0, 0, tzinfo=UTC)
         now = datetime(2026, 5, 7, 12, 0, 1, tzinfo=UTC)
         req = _request(positions_json=json.dumps([_position("x")]).encode())
-        await pg_service._save_snapshot_postgres(
-            "Strat:abc", ts, now, req, RunMode.parse_optional(req.execution_mode)
-        )
+        await pg_service._save_snapshot_postgres("Strat:abc", ts, now, req, RunMode.parse_optional(req.execution_mode))
         args = pg_service._snapshot_fetchrow.await_args.args
         assert args[10] == "0"
         assert args[11] == "0"

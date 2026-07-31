@@ -40,9 +40,9 @@ from almanak.framework.dashboard.quant_aggregations import (
     compute_pnl_summary,
     compute_reconciliation,
     evaluate_posture,
-    ledger_quant_stats_from_entries,
 )
 from almanak.framework.observability.ledger import LedgerQuantStats
+from almanak.framework.portfolio.models import serialize_value_confidence
 from almanak.framework.state.backends.sqlite import SQLiteConfig, SQLiteStore
 from almanak.framework.state.state_manager import StateManager
 from almanak.gateway.proto import gateway_pb2
@@ -118,7 +118,15 @@ def _insert_snapshot(
             value_confidence, positions_json, created_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (deployment_id, ts.isoformat(), total_value_usd, available_cash_usd, value_confidence, positions_json, ts.isoformat()),
+        (
+            deployment_id,
+            ts.isoformat(),
+            total_value_usd,
+            available_cash_usd,
+            value_confidence,
+            positions_json,
+            ts.isoformat(),
+        ),
     )
     store._conn.commit()  # type: ignore[union-attr]
 
@@ -371,27 +379,42 @@ def _seed_realistic_mix(store: SQLiteStore) -> None:
     )
     _insert_portfolio_metrics(store, "3000")
 
-    _insert_accounting_event(store, _T0 + timedelta(minutes=1), "SWAP", {
-        "event_type": "SWAP",
-        "slippage_usd": "0.50",
-        "realized_pnl_usd": "1.25",
-        "protocol_fee_usd": "0.10",
-        "schema_version": "1",
-        "formula_version": "1",
-        "matching_policy_version": "1",
-    })
-    _insert_accounting_event(store, _T0 + timedelta(minutes=6), "LP_OPEN", {
-        "event_type": "LP_OPEN",
-        "cost_basis_usd": "2000",
-        "position_key": "pos-1",
-    })
-    _insert_accounting_event(store, _T0 + timedelta(minutes=12), "LP_CLOSE", {
-        "event_type": "LP_CLOSE",
-        "fees_total_usd": "3.21",
-        "realized_pnl_usd": "-0.75",
-        "il_usd": "0.40",
-        "position_key": "pos-1",
-    })
+    _insert_accounting_event(
+        store,
+        _T0 + timedelta(minutes=1),
+        "SWAP",
+        {
+            "event_type": "SWAP",
+            "slippage_usd": "0.50",
+            "realized_pnl_usd": "1.25",
+            "protocol_fee_usd": "0.10",
+            "schema_version": "1",
+            "formula_version": "1",
+            "matching_policy_version": "1",
+        },
+    )
+    _insert_accounting_event(
+        store,
+        _T0 + timedelta(minutes=6),
+        "LP_OPEN",
+        {
+            "event_type": "LP_OPEN",
+            "cost_basis_usd": "2000",
+            "position_key": "pos-1",
+        },
+    )
+    _insert_accounting_event(
+        store,
+        _T0 + timedelta(minutes=12),
+        "LP_CLOSE",
+        {
+            "event_type": "LP_CLOSE",
+            "fees_total_usd": "3.21",
+            "realized_pnl_usd": "-0.75",
+            "il_usd": "0.40",
+            "position_key": "pos-1",
+        },
+    )
 
 
 async def _new_path_stats(store: SQLiteStore) -> LedgerQuantStats:
@@ -448,13 +471,17 @@ async def test_equivalence_every_tile_field_identical(store: SQLiteStore) -> Non
     legacy_stats = _legacy_ledger_reduction(await _legacy_full_fetch(store))
     new_stats = await _new_path_stats(store)
 
-    ref = _compute_all_tiles(portfolio_metrics=metrics, snapshots=snapshots, ledger=legacy_stats, accounting_events=events)
+    ref = _compute_all_tiles(
+        portfolio_metrics=metrics, snapshots=snapshots, ledger=legacy_stats, accounting_events=events
+    )
     new = _compute_all_tiles(portfolio_metrics=metrics, snapshots=snapshots, ledger=new_stats, accounting_events=events)
     _assert_tiles_equal(ref, new)
 
     # The list path (legacy callers / regression suites) must agree too.
     full_rows = await _legacy_full_fetch(store)
-    via_list = _compute_all_tiles(portfolio_metrics=metrics, snapshots=snapshots, ledger=full_rows, accounting_events=events)
+    via_list = _compute_all_tiles(
+        portfolio_metrics=metrics, snapshots=snapshots, ledger=full_rows, accounting_events=events
+    )
     _assert_tiles_equal(ref, via_list)
 
 
@@ -474,7 +501,9 @@ async def test_rpc_end_to_end_serves_reference_values(store: SQLiteStore) -> Non
     metrics = await sm.get_portfolio_metrics(_DEP)
     events = await sm.get_accounting_events_for_dashboard(deployment_id=_DEP)
     legacy_stats = _legacy_ledger_reduction(await _legacy_full_fetch(store))
-    ref = _compute_all_tiles(portfolio_metrics=metrics, snapshots=snapshots, ledger=legacy_stats, accounting_events=events)
+    ref = _compute_all_tiles(
+        portfolio_metrics=metrics, snapshots=snapshots, ledger=legacy_stats, accounting_events=events
+    )
 
     ctx = MagicMock()
     pnl = await svc.GetPnLSummary(gateway_pb2.GetPnLSummaryRequest(deployment_id=_DEP), ctx)
@@ -484,7 +513,7 @@ async def test_rpc_end_to_end_serves_reference_values(store: SQLiteStore) -> Non
     assert pnl.deployed_usd == str(ref["pnl"].deployed_usd)
     assert pnl.nav_usd == str(ref["pnl"].nav_usd)
     assert pnl.lifetime_pnl_usd == str(ref["pnl"].lifetime_pnl_usd)
-    assert pnl.value_confidence == ref["pnl"].value_confidence
+    assert pnl.value_confidence == serialize_value_confidence(ref["pnl"].value_confidence)
     assert pnl.open_position_count == ref["pnl"].open_position_count
 
     assert cost.cost_gas_usd == str(ref["cost"].gas_usd)
@@ -689,9 +718,7 @@ class _FailingSM:
 
 
 @pytest.mark.asyncio
-async def test_degraded_backend_burst_resolves_unmeasured(
-    store: SQLiteStore, caplog: pytest.LogCaptureFixture
-) -> None:
+async def test_degraded_backend_burst_resolves_unmeasured(store: SQLiteStore, caplog: pytest.LogCaptureFixture) -> None:
     _seed_realistic_mix(store)
 
     def _row_counts() -> tuple[int, int]:
@@ -710,7 +737,7 @@ async def test_degraded_backend_burst_resolves_unmeasured(
             svc.GetAuditPosture(gateway_pb2.GetAuditPostureRequest(deployment_id="dep-degraded"), MagicMock()),
         )
 
-    assert pnl.value_confidence == "UNAVAILABLE"
+    assert pnl.value_confidence == ""
     assert cost.inventory_unrealized_usd == ""  # unmeasured sentinel, not "0"
     assert audit.g6_status == "NA"  # never a fabricated PASS
     # The documented degraded-load log lines fired (per-fetch failure logger).
@@ -735,7 +762,7 @@ async def test_zero_row_deployment_empty_state_tiles(store: SQLiteStore) -> None
     audit = await svc.GetAuditPosture(gateway_pb2.GetAuditPostureRequest(deployment_id=_DEP), ctx)
 
     # Pinned legacy empty-state values (not just "anything non-crashing").
-    assert pnl.value_confidence == "UNAVAILABLE"
+    assert pnl.value_confidence == ""
     assert pnl.deployed_usd == "0"
     assert pnl.nav_usd == "0"
     assert pnl.lifetime_pnl_usd == "0"
@@ -772,9 +799,7 @@ class _AnchorFailingSM:
 
 
 @pytest.mark.asyncio
-async def test_anchor_failure_falls_back_to_metrics(
-    store: SQLiteStore, caplog: pytest.LogCaptureFixture
-) -> None:
+async def test_anchor_failure_falls_back_to_metrics(store: SQLiteStore, caplog: pytest.LogCaptureFixture) -> None:
     _seed_realistic_mix(store)  # ledger HAS a $2000 wallet anchor on disk
     sm = _state_manager_over(store)
     svc = _servicer_over(_AnchorFailingSM(sm))

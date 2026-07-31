@@ -40,7 +40,11 @@ from almanak.framework.dashboard.quant_aggregations import (
     compute_pnl_summary,
     lifetime_drawdowns_from_nav_text,
 )
-from almanak.framework.portfolio.models import PortfolioSnapshot, ValueConfidence
+from almanak.framework.portfolio.models import (
+    PortfolioSnapshot,
+    ValueConfidence,
+    ValueConfidenceParseError,
+)
 from almanak.framework.state.backends.sqlite import SQLiteConfig, SQLiteStore
 from almanak.framework.state.state_manager import StateManager
 from almanak.gateway.services.dashboard_service import DashboardServiceServicer
@@ -71,10 +75,12 @@ def _total_for(i: int) -> Decimal:
     return _RECENT
 
 
-def _nav_text_rows() -> list[tuple[datetime, str | None, str | None, int]]:
-    # (timestamp, total_value_usd_text, available_cash_usd_text, id) oldest-first,
-    # cash 0 so wallet-NAV == total. id mirrors insertion order (VIB-5134 cursor).
-    return [(_BASE_TS + timedelta(minutes=i), str(_total_for(i)), "0", i) for i in range(_TOTAL_COUNT)]
+def _nav_text_rows() -> list[tuple[datetime, str | None, str | None, int, None, ValueConfidence]]:
+    # Full persistence projection oldest-first; cash 0 so wallet-NAV == total.
+    return [
+        (_BASE_TS + timedelta(minutes=i), str(_total_for(i)), "0", i, None, ValueConfidence.HIGH)
+        for i in range(_TOTAL_COUNT)
+    ]
 
 
 def _snap(i: int) -> PortfolioSnapshot:
@@ -274,6 +280,18 @@ async def test_facade_get_nav_series_swallows_backend_error() -> None:
     # Graceful: returns ([], False) rather than raising — the loader then leaves
     # lifetime_drawdown None and the summary falls back to the windowed value.
     assert await sm.get_nav_series(_DEP) == ([], False)
+    assert sm._record_metrics.called
+
+
+@pytest.mark.asyncio
+async def test_facade_get_nav_series_surfaces_invalid_confidence() -> None:
+    class _Corrupt:
+        async def get_nav_series(self, deployment_id: str, *, since=None, scan_cap: int = 200_000):
+            raise ValueConfidenceParseError("invalid persisted value_confidence 'MYSTERY'")
+
+    sm = _bare_state_manager(_Corrupt())
+    with pytest.raises(ValueConfidenceParseError, match="MYSTERY"):
+        await sm.get_nav_series(_DEP)
     assert sm._record_metrics.called
 
 

@@ -13,6 +13,9 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import pytest
+
+from almanak.framework.portfolio.models import ValueConfidenceParseError
 from almanak.framework.state.state_manager import StateManager
 
 
@@ -77,6 +80,18 @@ def test_get_first_snapshot_backend_error_returns_none() -> None:
     sm = _make_manager(warm=warm)
     # A read failure degrades to None (UNMEASURED) — never raises at boot.
     assert sm.get_first_snapshot_sync("dep-X") is None
+
+
+def test_get_first_snapshot_invalid_confidence_is_not_suppressed() -> None:
+    error = ValueConfidenceParseError("invalid persisted value_confidence 'MYSTERY'")
+    warm = MagicMock()
+    warm.get_first_snapshot_sync = MagicMock(side_effect=error)
+    sm = _make_manager(warm=warm)
+
+    with pytest.raises(ValueConfidenceParseError, match="MYSTERY") as exc_info:
+        sm.get_first_snapshot_sync("dep-X")
+
+    assert exc_info.value is error
 
 
 def test_get_first_snapshot_happy_path_with_snapshot() -> None:

@@ -36,6 +36,7 @@ import pytest
 
 from almanak.framework.dashboard.gateway_client import _convert_pnl_summary
 from almanak.framework.dashboard.quant_aggregations import PnLSummary, compute_pnl_summary
+from almanak.framework.portfolio.models import ValueConfidence
 from almanak.gateway.proto import gateway_pb2
 from almanak.gateway.services.dashboard_service import DashboardServiceServicer
 
@@ -294,3 +295,19 @@ def test_client_decodes_empty_string_as_unmeasured() -> None:
     assert measured.lifetime_pnl_usd == Decimal("200")
     assert measured.lifetime_pnl_pct == Decimal("25.00")
     assert measured.net_apr_pct == Decimal("0.00")
+
+
+@pytest.mark.parametrize("confidence", list(ValueConfidence))
+def test_client_decodes_every_known_confidence(confidence: ValueConfidence) -> None:
+    result = _convert_pnl_summary(gateway_pb2.PnLSummary(value_confidence=confidence.value))
+    assert result.value_confidence is confidence
+
+
+def test_client_preserves_missing_confidence() -> None:
+    result = _convert_pnl_summary(gateway_pb2.PnLSummary(value_confidence=""))
+    assert result.value_confidence is None
+
+
+def test_client_surfaces_unknown_confidence() -> None:
+    with pytest.raises(ValueError, match="invalid PnLSummary.value_confidence"):
+        _convert_pnl_summary(gateway_pb2.PnLSummary(value_confidence="MYSTERY"))

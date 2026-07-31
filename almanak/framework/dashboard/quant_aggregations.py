@@ -521,7 +521,7 @@ class PnLSummary:
     net_apr_pct: Decimal | None = Decimal("0")
     max_drawdown_pct: Decimal = Decimal("0")
     current_drawdown_pct: Decimal = Decimal("0")
-    value_confidence: str = "UNAVAILABLE"
+    value_confidence: ValueConfidence | None = None
     age_days: int = 0
     # VIB-5866: True when ``deposits_usd`` / ``withdrawals_usd`` could not be
     # measured, so the three metrics above are suppressed. Diagnostic for local
@@ -544,6 +544,13 @@ class PnLSummary:
     primary_risk_color: str = "neutral"
     primary_risk_kind: str = "none"
 
+    def __post_init__(self) -> None:
+        """Canonicalize direct/legacy construction to the typed vocabulary."""
+        self.value_confidence = ValueConfidence.parse_optional(
+            self.value_confidence,
+            field_name="PnLSummary.value_confidence",
+        )
+
 
 @dataclass
 class QuantHeader:
@@ -563,7 +570,7 @@ class QuantHeader:
     net_apr_pct: Decimal | None = Decimal("0")
     max_drawdown_pct: Decimal = Decimal("0")
     current_drawdown_pct: Decimal = Decimal("0")
-    value_confidence: str = "UNAVAILABLE"
+    value_confidence: ValueConfidence | None = None
     age_days: int = 0
     capital_flows_unmeasured: bool = False
     deployed_capital_usd: Decimal = Decimal("0")
@@ -577,6 +584,13 @@ class QuantHeader:
     reconciliation: ReconciliationStatus = field(default_factory=ReconciliationStatus)
     audit_trail: AuditTrailStats = field(default_factory=AuditTrailStats)
     posture: AccountantPosture = field(default_factory=AccountantPosture)
+
+    def __post_init__(self) -> None:
+        """Canonicalize direct/legacy construction to the typed vocabulary."""
+        self.value_confidence = ValueConfidence.parse_optional(
+            self.value_confidence,
+            field_name="QuantHeader.value_confidence",
+        )
 
 
 def _accumulate_term(stack: CostStack, attr: str, meter: list[int], value: Decimal | None) -> None:
@@ -1408,6 +1422,14 @@ def evaluate_posture(  # noqa: C901
 # ---------------------------------------------------------------------------
 
 
+def _snapshot_value_confidence(snapshot: Any, *, field_name: str) -> ValueConfidence | None:
+    """Read and type one snapshot confidence at an aggregation boundary."""
+    raw = (
+        snapshot.get("value_confidence") if isinstance(snapshot, dict) else getattr(snapshot, "value_confidence", None)
+    )
+    return ValueConfidence.parse_optional(raw, field_name=field_name)
+
+
 def _drawdowns(snapshots: list[Any]) -> tuple[Decimal, Decimal]:
     """Return (max_drawdown_pct, current_drawdown_pct).
 
@@ -1428,25 +1450,16 @@ def _drawdowns(snapshots: list[Any]) -> tuple[Decimal, Decimal]:
     drawdown on a flat equity loop — is removed here. Non-leveraged snapshots
     subtract ``Decimal("0")`` (no negative leg) and stay byte-identical.
 
-    VIB-5408: skip any snapshot that is ``UNAVAILABLE`` (== ``not
-    PortfolioSnapshot.is_valid``). An ``UNAVAILABLE`` snapshot's ``total_value_usd``
-    deliberately excludes an unmeasured position, so it is *deflated*; folding it
-    would manufacture a phantom drawdown dip / corrupt the displayed high-watermark
-    on the recent-window fallback path too — the same trust gate as
-    :func:`_wallet_navs_from_nav_text`. The gate is UNAVAILABLE-only: ``ESTIMATED``
-    / ``STALE`` snapshots are valued (priced, just imprecise / late), so they are
-    kept — skipping them would mask a real drawdown. Empty/absent confidence is not
-    ``UNAVAILABLE`` and is NOT skipped — byte-identical to before.
+    VIB-5408 / ALM-3086: skip snapshots whose confidence is absent or
+    ``UNAVAILABLE`` (== ``not PortfolioSnapshot.is_valid``). Their NAV cannot be
+    trusted as a measured sample; folding one would manufacture a drawdown or move
+    the high-watermark. ``ESTIMATED`` / ``STALE`` remain valued because they are
+    priced, merely imprecise or late. Unknown strings fail at this named boundary.
     """
     values: list[Decimal] = []
     for snap in snapshots:
-        confidence = getattr(snap, "value_confidence", None)
-        if confidence is None and isinstance(snap, dict):
-            confidence = snap.get("value_confidence")
-        # ``value_confidence`` may be a ValueConfidence enum (typed snapshot) or a
-        # raw string (dict / DB text). Both compare equal to the StrEnum value, so
-        # gate on == UNAVAILABLE — the deflated-NAV case — and keep everything else.
-        if confidence is not None and str(confidence) == ValueConfidence.UNAVAILABLE.value:
+        confidence = _snapshot_value_confidence(snap, field_name="drawdown snapshot.value_confidence")
+        if confidence is None or confidence == ValueConfidence.UNAVAILABLE:
             continue
         v = getattr(snap, "total_value_usd", None)
         if v is None and isinstance(snap, dict):
@@ -1545,20 +1558,18 @@ def _wallet_navs_from_nav_text(rows: Iterable[tuple[Any, ...]]) -> list[Decimal]
     garbage (unmeasured) drop out; a row with no ``positions_json`` (short tuple)
     nets ``Decimal("0")`` debt — byte-identical to the pre-VIB-5170 behaviour.
 
-    **VIB-5408 confidence gate (display-correctness, not fund-safety).** A row whose
-    ``value_confidence`` (row[5]) is exactly ``UNAVAILABLE`` is SKIPPED: an
-    ``UNAVAILABLE`` snapshot's ``total_value_usd`` deliberately *excludes* an
-    unmeasured position (e.g. a held PT that could not be priced —
+    **VIB-5408 / ALM-3086 confidence gate (display-correctness, not fund-safety).**
+    A row whose ``value_confidence`` (row[5]) is absent or ``UNAVAILABLE`` is
+    SKIPPED: such a snapshot's ``total_value_usd`` may exclude an unmeasured
+    position (e.g. a held PT that could not be priced —
     ``portfolio_valuer.py`` ``_pt_unmeasured_row`` — or VIB-5406's drain-barrier
     degrade), so the NAV is *deflated*. Folding it would manufacture a phantom
     drawdown dip and corrupt the displayed high-watermark / max-drawdown tiles.
     These tiles feed dashboard display + an agent-tools report dict only — no risk
     breaker or auto-teardown consumes them — so this is a display-correctness fix.
 
-    The gate is **UNAVAILABLE-only**, deliberately narrower than the ticket's
-    "non-HIGH" wording, and aligned with ``PortfolioSnapshot.is_valid`` (==
-    ``value_confidence != UNAVAILABLE``, ``portfolio/models.py``) — the codebase's
-    one measured/unmeasured line. ``ESTIMATED`` (CEX / API estimates) and ``STALE``
+    The gate is aligned with ``PortfolioSnapshot.is_valid``: missing confidence and
+    ``UNAVAILABLE`` are unmeasured; ``ESTIMATED`` (CEX / API estimates) and ``STALE``
     (old-but-real) snapshots ARE valued — the position is priced, just imprecisely
     or late — so they are *not* deflated and must NOT be skipped: dropping them
     would remove legitimate NAV samples and could MASK a real drawdown (a strategy
@@ -1570,21 +1581,19 @@ def _wallet_navs_from_nav_text(rows: Iterable[tuple[Any, ...]]) -> list[Decimal]
     leaves the running peak untouched, so the fold behaves as if the last measured
     point persisted — no interpolation (which would invent a value) and no hard gap
     (lifetime drawdown is a default header metric that must degrade gracefully). A
-    row with NO confidence element (short legacy tuple) is treated as measured —
-    byte-identical to the pre-VIB-5408 behaviour. Empty (``""`` / ``None``)
-    confidence is unmeasured-*confidence*, NOT ``UNAVAILABLE``: it cannot prove the
-    row is unmeasured, so it falls THROUGH this gate and is filtered only by the
-    existing ``> 0`` NAV check (the legacy success path is kept intact).
+    row with no confidence element, ``""``, or ``None`` is unmeasured and skipped;
+    an unknown non-empty value is surfaced as an error instead of being trusted.
     """
     navs: list[Decimal] = []
     for row in rows:
-        if len(row) > 5 and row[5] == ValueConfidence.UNAVAILABLE.value:
-            # UNAVAILABLE ⇒ a position dropped out of total_value_usd ⇒ deflated NAV
-            # ⇒ skip the sample so it never moves the running peak / drawdown
-            # (skip-carry-forward). ESTIMATED / STALE are valued (priced, just
-            # imprecise/late) and NOT skipped — skipping them would mask a real
-            # drawdown. Empty/None confidence is not UNAVAILABLE, so it falls through
-            # and the > 0 NAV filter below gates it (legacy behaviour preserved).
+        raw_confidence = row[5] if len(row) > 5 else None
+        confidence = ValueConfidence.parse_optional(
+            raw_confidence,
+            field_name="NAV series value_confidence",
+        )
+        if confidence is None or confidence == ValueConfidence.UNAVAILABLE:
+            # Unmeasured confidence ⇒ skip-carry-forward so this sample never moves
+            # the running peak/drawdown. ESTIMATED / STALE remain valued.
             continue
         debt_mark = Decimal("0")
         if len(row) > 4:
@@ -1714,8 +1723,8 @@ def compute_pnl_summary(
 
     All inputs are already-fetched objects from the StateManager — this
     function does no I/O. Empty inputs collapse gracefully to a summary
-    with ``UNAVAILABLE`` confidence and zero-valued tiles, never an
-    exception.
+    with unmeasured (``None``) confidence and zero-valued tiles, never an
+    exception. Confidence remains ``None`` until a measured snapshot supplies it.
 
     Decomposed from ``build_quant_header`` (VIB-3969) so a PnL consumer
     never pays the cost of computing G6 reconciliation + 21-cell
@@ -1739,12 +1748,12 @@ def compute_pnl_summary(
     if snapshots:
         latest = snapshots[-1]
         pnl.available_cash_usd = _to_decimal(getattr(latest, "available_cash_usd", "0"))
-        # Empty != zero (CLAUDE.md): an absent value_confidence is unmeasured
-        # — falling back to "HIGH" would falsely upgrade an unsourced
-        # snapshot. Preserve the dataclass default ("UNAVAILABLE") instead.
-        confidence = getattr(latest, "value_confidence", None)
-        if confidence:
-            pnl.value_confidence = confidence
+        # Empty != zero: preserve absent confidence as None. Unknown boundary
+        # strings fail rather than being normalized or silently trusted.
+        pnl.value_confidence = _snapshot_value_confidence(
+            latest,
+            field_name="PnL snapshot.value_confidence",
+        )
         pnl.deployed_capital_usd = _to_decimal(getattr(latest, "deployed_capital_usd", "0"))
         _raw_total_value_usd = _to_decimal(getattr(latest, "total_value_usd", "0"))
         # Open position count + leverage debt-netting from positions_json.

@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Self
 
 from almanak.framework.models.run_mode import RunMode, RunModeStamp, serialize_run_mode
 
@@ -23,6 +23,10 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+
+class ValueConfidenceParseError(ValueError):
+    """A confidence value crossed a boundary outside the canonical vocabulary."""
 
 
 class ValueConfidence(StrEnum):
@@ -39,6 +43,48 @@ class ValueConfidence(StrEnum):
     ESTIMATED = "ESTIMATED"
     STALE = "STALE"
     UNAVAILABLE = "UNAVAILABLE"
+
+    @classmethod
+    def parse(
+        cls,
+        value: Self | str,
+        *,
+        field_name: str = "value_confidence",
+    ) -> Self:
+        """Parse one persisted or wire confidence value without normalization.
+
+        Confidence values are stable accounting vocabulary. Accepting different
+        casing or surrounding whitespace would turn an unknown boundary value into
+        a trusted one, so parsing is deliberately exact and fails loudly.
+        """
+        if isinstance(value, cls):
+            return value
+        if not isinstance(value, str):
+            raise ValueConfidenceParseError(
+                f"{field_name} must be a string or ValueConfidence, got {type(value).__name__}"
+            )
+        try:
+            return cls(value)
+        except ValueError as exc:
+            valid = ", ".join(confidence.value for confidence in cls)
+            raise ValueConfidenceParseError(f"invalid {field_name} {value!r}; expected one of: {valid}") from exc
+
+    @classmethod
+    def parse_optional(
+        cls,
+        value: Self | str | None,
+        *,
+        field_name: str = "value_confidence",
+    ) -> Self | None:
+        """Parse a boundary where ``None``/``""`` means unmeasured confidence."""
+        if value is None or value == "":
+            return None
+        return cls.parse(value, field_name=field_name)
+
+
+def serialize_value_confidence(confidence: ValueConfidence | None) -> str:
+    """Return the stable database/protobuf value; ``""`` preserves absence."""
+    return ValueConfidence.parse(confidence).value if confidence is not None else ""
 
 
 @dataclass
@@ -159,7 +205,9 @@ class PortfolioSnapshot:
     available_cash_usd: Decimal
 
     # Value confidence indicator for dashboard display
-    value_confidence: ValueConfidence = ValueConfidence.HIGH
+    # None is unmeasured confidence. It must never be upgraded to HIGH by a
+    # constructor, persistence adapter, or dashboard aggregation.
+    value_confidence: ValueConfidence | None = None
     error: str | None = None  # Error message if value could not be computed
 
     # Positions by type (for dashboard breakdown)
@@ -206,6 +254,7 @@ class PortfolioSnapshot:
             self.deployed_capital_usd = Decimal(str(self.deployed_capital_usd))
         if isinstance(self.wallet_total_value_usd, int | float | str):
             self.wallet_total_value_usd = Decimal(str(self.wallet_total_value_usd))
+        self.value_confidence = ValueConfidence.parse_optional(self.value_confidence)
         self.execution_mode = RunMode.parse_optional(self.execution_mode)
 
     @property
@@ -216,7 +265,7 @@ class PortfolioSnapshot:
     @property
     def is_valid(self) -> bool:
         """Check if snapshot contains valid data."""
-        return self.value_confidence != ValueConfidence.UNAVAILABLE
+        return self.value_confidence is not None and self.value_confidence != ValueConfidence.UNAVAILABLE
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary for JSON storage."""
@@ -227,7 +276,7 @@ class PortfolioSnapshot:
             "available_cash_usd": str(self.available_cash_usd),
             "deployed_capital_usd": str(self.deployed_capital_usd),
             "wallet_total_value_usd": str(self.wallet_total_value_usd),
-            "value_confidence": self.value_confidence.value,
+            "value_confidence": self.value_confidence.value if self.value_confidence is not None else None,
             "error": self.error,
             "positions": [_position_to_dict(p) for p in self.positions],
             "wallet_balances": [
@@ -332,7 +381,10 @@ class PortfolioSnapshot:
             available_cash_usd=Decimal(data["available_cash_usd"]),
             deployed_capital_usd=Decimal(data.get("deployed_capital_usd", "0")),
             wallet_total_value_usd=Decimal(data.get("wallet_total_value_usd", "0")),
-            value_confidence=ValueConfidence(data.get("value_confidence", "HIGH")),
+            value_confidence=ValueConfidence.parse_optional(
+                data.get("value_confidence"),
+                field_name="PortfolioSnapshot.value_confidence",
+            ),
             error=data.get("error"),
             positions=positions,
             wallet_balances=wallet_balances,

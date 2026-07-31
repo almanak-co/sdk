@@ -24,6 +24,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 import grpc
 
 from almanak.framework.models.run_mode import RunMode, RunModeStamp, serialize_run_mode
+from almanak.framework.portfolio.models import ValueConfidence, serialize_value_confidence
 from almanak.framework.state.ledger_registry_mode import (
     LedgerRegistrySaveMode,
     ledger_registry_save_behavior,
@@ -740,11 +741,20 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
     def _validate_save_snapshot_payload(request: gateway_pb2.SaveSnapshotRequest) -> str | None:
         """Return an error string if the request payload is invalid, else None.
 
-        Validates timestamp positivity, positions_json well-formedness, and
-        envelope shape (legacy list OR ``{positions: list, metadata: dict}``).
+        Validates timestamp positivity, confidence vocabulary, positions_json
+        well-formedness, and envelope shape (legacy list OR
+        ``{positions: list, metadata: dict}``). Empty confidence is allowed and
+        remains unmeasured; unknown non-empty values are rejected.
         """
         if request.timestamp <= 0:
             return "timestamp must be positive"
+        try:
+            ValueConfidence.parse_optional(
+                request.value_confidence,
+                field_name="SaveSnapshotRequest.value_confidence",
+            )
+        except (TypeError, ValueError) as exc:
+            return str(exc)
         if not request.positions_json:
             return None
         try:
@@ -909,7 +919,12 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             request.iteration_number,
             request.total_value_usd,
             request.available_cash_usd,
-            request.value_confidence or "HIGH",
+            serialize_value_confidence(
+                ValueConfidence.parse_optional(
+                    request.value_confidence,
+                    field_name="SaveSnapshotRequest.value_confidence",
+                )
+            ),
             positions_json,
             request.chain,
             now,
@@ -935,13 +950,16 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         envelope (Phase 1c)."""
         from decimal import Decimal
 
-        from almanak.framework.portfolio.models import PortfolioSnapshot, ValueConfidence
+        from almanak.framework.portfolio.models import PortfolioSnapshot
 
         snapshot = PortfolioSnapshot(
             timestamp=ts,
             total_value_usd=Decimal(request.total_value_usd or "0"),
             available_cash_usd=Decimal(request.available_cash_usd or "0"),
-            value_confidence=ValueConfidence(request.value_confidence or "HIGH"),
+            value_confidence=ValueConfidence.parse_optional(
+                request.value_confidence,
+                field_name="SaveSnapshotRequest.value_confidence",
+            ),
             chain=request.chain,
             iteration_number=request.iteration_number,
             # VIB-4095 (3.4) — Phase 4 identity reaches the SQLite writer
@@ -1117,7 +1135,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             iteration_number=snapshot.iteration_number,
             total_value_usd=str(snapshot.total_value_usd),
             available_cash_usd=str(snapshot.available_cash_usd),
-            value_confidence=snapshot.value_confidence.value,
+            value_confidence=serialize_value_confidence(snapshot.value_confidence),
             positions_json=positions_bytes,
             chain=snapshot.chain or "",
             found=True,

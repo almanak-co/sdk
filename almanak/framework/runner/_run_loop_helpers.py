@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any, assert_never, cast
 
 from almanak.core.chains._helpers import is_solana_chain
 from almanak.core.lifecycle import LifecycleCommand, LifecycleState
+from almanak.framework.portfolio.models import ValueConfidence, serialize_value_confidence
 
 from ..api.timeline import TimelineEvent, TimelineEventType, add_event
 from ..state.exceptions import AccountingPersistenceError
@@ -1019,14 +1020,11 @@ def _portfolio_snapshot_to_price_oracle(snapshot: Any | None) -> dict | None:
     if not token_prices:
         return None
 
-    # ValueConfidence -> Accountant Test confidence taxonomy
-    confidence_attr = getattr(snapshot, "value_confidence", None)
-    confidence_str = getattr(confidence_attr, "value", None) or getattr(confidence_attr, "name", None) or "ESTIMATED"
-    confidence_str = str(confidence_str).upper()
-    # Map "HIGH" through; collapse anything else to ESTIMATED so the
-    # downstream confidence vocabulary stays bounded.
-    if confidence_str not in {"HIGH", "ESTIMATED", "STALE", "UNAVAILABLE"}:
-        confidence_str = "ESTIMATED"
+    confidence = ValueConfidence.parse_optional(
+        getattr(snapshot, "value_confidence", None),
+        field_name="teardown snapshot.value_confidence",
+    )
+    confidence_text = serialize_value_confidence(confidence)
 
     timestamp = getattr(snapshot, "timestamp", None)
     fetched_at = timestamp.isoformat() if timestamp is not None and hasattr(timestamp, "isoformat") else ""
@@ -1045,7 +1043,7 @@ def _portfolio_snapshot_to_price_oracle(snapshot: Any | None) -> dict | None:
             "price_usd": str(price_usd),
             "oracle_source": "portfolio_valuer",
             "fetched_at": fetched_at,
-            "confidence": confidence_str,
+            "confidence": confidence_text,
         }
     return oracle or None
 

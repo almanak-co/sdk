@@ -25,6 +25,7 @@ import pytest
 
 from almanak.framework.intents.vocabulary import SwapIntent
 from almanak.framework.observability.ledger import LedgerEntry
+from almanak.framework.portfolio import ValueConfidence
 from almanak.framework.runner._run_loop_helpers import capture_snapshot_with_accounting
 from almanak.framework.runner.runner_models import IterationResult, IterationStatus
 from almanak.framework.runner.runner_state import CapitalFlowMeasurementError
@@ -334,7 +335,7 @@ def _snapshot_stub():
     snap.iteration_number = 1
     snap.total_value_usd = Decimal("100")
     snap.available_cash_usd = Decimal("50")
-    snap.value_confidence = MagicMock(value="HIGH")
+    snap.value_confidence = ValueConfidence.HIGH
     snap.chain = "arbitrum"
     snap.token_prices = None
     snap.wallet_balances = None

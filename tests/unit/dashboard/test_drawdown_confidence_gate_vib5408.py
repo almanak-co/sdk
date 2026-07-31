@@ -1,5 +1,4 @@
-"""VIB-5408 regression: the drawdown / high-watermark fold must SKIP UNAVAILABLE
-``value_confidence`` snapshots (and ONLY UNAVAILABLE).
+"""VIB-5408 / ALM-3086 regression: drawdown folds skip unmeasured snapshots.
 
 The lifetime/incremental drawdown fold (``get_nav_series`` →
 ``lifetime_drawdowns_from_nav_text`` → ``_wallet_navs_from_nav_text``) and the
@@ -12,8 +11,8 @@ phantom drawdown dip and corrupts the displayed high-watermark / max-drawdown ti
 (display-correctness: these tiles feed dashboard display + an agent-tools report dict
 only — no risk breaker / auto-teardown consumes them).
 
-Gate scope — **UNAVAILABLE-only**, aligned with ``PortfolioSnapshot.is_valid`` (==
-``value_confidence != UNAVAILABLE``). ``ESTIMATED`` (CEX / API estimates) and ``STALE``
+Gate scope is aligned with ``PortfolioSnapshot.is_valid``: missing confidence and
+``UNAVAILABLE`` are unmeasured. ``ESTIMATED`` (CEX / API estimates) and ``STALE``
 (old-but-real) snapshots ARE valued — the position is priced, just imprecisely / late —
 so they are NOT deflated and must be KEPT. Skipping them would remove legitimate NAV
 samples and could MASK a real drawdown (a strategy legitimately ``ESTIMATED`` for its
@@ -22,9 +21,8 @@ false-negative is worse than an imprecise-but-real point.
 
 Policy: **skip-carry-forward**. Dropping the ``UNAVAILABLE`` sample leaves the running
 peak / latest_nav untouched, so the fold behaves as if the last measured point
-persisted — no interpolation, no hard gap. Empty/None confidence is unmeasured-
-*confidence* (not provably ``UNAVAILABLE``), so it falls through the gate (legacy
-success path preserved).
+persisted — no interpolation, no hard gap. Empty/None confidence stays unmeasured
+and is skipped; it is never upgraded to a trusted sample.
 
 These tests pin the core invariant from the ticket:
 
@@ -35,7 +33,7 @@ across the raw text fold (``lifetime_drawdowns_from_nav_text`` / ``fold_nav_text
 typed AND dict recent-window fold (``_drawdowns``), and the real SQLite
 ``get_nav_series`` reader (which now projects the 6th ``value_confidence`` element); plus
 ESTIMATED/STALE-NOT-skipped, degraded-terminal (carry-forward), all-skipped, first-row-
-skipped, and Empty≠Zero legacy-path edges.
+skipped, and Empty≠Zero edges.
 """
 
 from __future__ import annotations
@@ -69,7 +67,7 @@ _HEALTHY_NAVS = [Decimal("100"), Decimal("90"), Decimal("110"), Decimal("105")]
 _DEFLATED = Decimal("5")
 
 
-def _text_row(i: int, total: Decimal, confidence: str | None) -> tuple:
+def _text_row(i: int, total: Decimal, confidence: ValueConfidence | str | None) -> tuple:
     # (timestamp, total_value_usd_text, available_cash_usd_text, id, positions_json,
     #  value_confidence) — the 6-tuple shape get_nav_series now returns. cash 0 and
     # positions_json None so wallet-NAV == total and no debt netting.
@@ -109,8 +107,8 @@ def test_lifetime_fold_skips_unavailable_row_invariant() -> None:
     assert max_dd == Decimal("10")  # (100 - 90) / 100 * 100
 
 
-@pytest.mark.parametrize("kept_confidence", ["ESTIMATED", "STALE"])
-def test_lifetime_fold_keeps_estimated_and_stale_rows(kept_confidence: str) -> None:
+@pytest.mark.parametrize("kept_confidence", [ValueConfidence.ESTIMATED, ValueConfidence.STALE])
+def test_lifetime_fold_keeps_estimated_and_stale_rows(kept_confidence: ValueConfidence) -> None:
     # ESTIMATED / STALE are valued (priced, just imprecise / late), NOT deflated — they
     # must be KEPT. A genuine dip stamped ESTIMATED/STALE must STILL register as a
     # drawdown (skipping it would MASK a real drawdown — the over-broad-gate failure).
@@ -242,25 +240,38 @@ def test_recent_window_drawdowns_skips_unavailable_dict_snapshot_invariant() -> 
 
 
 # ---------------------------------------------------------------------------
-# 3. Empty≠Zero: empty/None/absent confidence is NOT skipped (legacy success path).
+# 3. Empty≠Zero: empty/None/absent confidence is unmeasured and skipped.
 # ---------------------------------------------------------------------------
 
 
-def test_empty_confidence_is_not_unavailable_legacy_path_preserved() -> None:
-    # Empty-string / None confidence is unmeasured-confidence, not UNAVAILABLE: it must
-    # NOT be skipped — the > 0 NAV filter still gates it. A 5-tuple (no confidence
-    # element at all) is also the legacy path.
+def test_empty_none_and_absent_confidence_are_skipped() -> None:
     rows_empty = [_text_row(i, nav, "") for i, nav in enumerate(_HEALTHY_NAVS)]
     rows_none = [_text_row(i, nav, None) for i, nav in enumerate(_HEALTHY_NAVS)]
     rows_legacy_5tuple = [
         (_BASE_TS + timedelta(minutes=i), str(nav), "0", i, None) for i, nav in enumerate(_HEALTHY_NAVS)
     ]
-    rows_high = [_text_row(i, nav, "HIGH") for i, nav in enumerate(_HEALTHY_NAVS)]
-
-    expected = lifetime_drawdowns_from_nav_text(rows_high)
+    expected = (Decimal("0"), Decimal("0"))
     assert lifetime_drawdowns_from_nav_text(rows_empty) == expected
     assert lifetime_drawdowns_from_nav_text(rows_none) == expected
     assert lifetime_drawdowns_from_nav_text(rows_legacy_5tuple) == expected
+
+
+def test_unknown_confidence_is_surfaced() -> None:
+    rows = [_text_row(0, Decimal("100"), "MYSTERY")]
+    with pytest.raises(ValueError, match="invalid NAV series value_confidence"):
+        lifetime_drawdowns_from_nav_text(rows)
+
+    with pytest.raises(ValueError, match="invalid drawdown snapshot.value_confidence"):
+        _drawdowns(
+            [
+                {
+                    "total_value_usd": "100",
+                    "available_cash_usd": "0",
+                    "value_confidence": "MYSTERY",
+                    "positions_json": "[]",
+                }
+            ]
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -287,8 +298,8 @@ async def test_get_nav_series_projects_value_confidence_sixth_element(store: SQL
     assert len(rows) == 2
     # 6-tuple: (..., positions_json[4], value_confidence[5]).
     assert all(len(r) == 6 for r in rows)
-    assert rows[0][5] == "HIGH"
-    assert rows[1][5] == "UNAVAILABLE"
+    assert rows[0][5] == ValueConfidence.HIGH
+    assert rows[1][5] == ValueConfidence.UNAVAILABLE
 
 
 @pytest.mark.asyncio

@@ -162,8 +162,8 @@ def test_no_snapshots_zero_nav_no_crash():
     )
     assert h.nav_usd == Decimal("0")
     # Lifetime PnL = 0 - 100 = -100 (no live data → cannot compute true PnL).
-    # The dashboard footer surfaces this via value_confidence=UNAVAILABLE.
-    assert h.value_confidence == "UNAVAILABLE"
+    # No snapshot means confidence itself is unmeasured, never inferred.
+    assert h.value_confidence is None
 
 
 def test_snapshot_with_missing_cash_field_treats_as_zero():

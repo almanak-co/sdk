@@ -21,6 +21,7 @@ import grpc
 
 from almanak.framework.gateway_client import GatewayClient
 from almanak.framework.models.run_mode import RunMode
+from almanak.framework.portfolio.models import ValueConfidenceParseError, serialize_value_confidence
 from almanak.framework.state.exceptions import AccountingPersistenceError, AccountingWriteKind
 from almanak.framework.state.ledger_registry_mode import LedgerRegistrySaveMode
 from almanak.framework.state.state_manager import StateData
@@ -316,7 +317,7 @@ class GatewayStateManager:
                 iteration_number=snapshot.iteration_number,
                 total_value_usd=str(snapshot.total_value_usd),
                 available_cash_usd=str(snapshot.available_cash_usd),
-                value_confidence=snapshot.value_confidence.value,
+                value_confidence=serialize_value_confidence(snapshot.value_confidence),
                 positions_json=positions_bytes,
                 chain=snapshot.chain or "",
                 # VIB-4091/4094 — Phase 4 identity. Source of truth: the runner
@@ -343,7 +344,7 @@ class GatewayStateManager:
                 "Portfolio snapshot saved via gateway: strategy=%s, value=$%.2f, confidence=%s",
                 snapshot.deployment_id,
                 snapshot.total_value_usd,
-                snapshot.value_confidence.value,
+                snapshot.value_confidence,
             )
             return response.snapshot_id
         except AccountingPersistenceError:
@@ -366,6 +367,9 @@ class GatewayStateManager:
                 return None
 
             return self._proto_to_snapshot(response)
+        except ValueConfidenceParseError:
+            logger.error("Invalid value confidence in GetLatestSnapshot response", exc_info=True)
+            raise
         except Exception as e:
             logger.debug("Failed to get latest snapshot via gateway: %s", e)
             return None
@@ -383,6 +387,9 @@ class GatewayStateManager:
             response = self._client.state.GetSnapshotsSince(request, timeout=self._timeout)
 
             return [self._proto_to_snapshot(s) for s in response.snapshots if s.found]
+        except ValueConfidenceParseError:
+            logger.error("Invalid value confidence in GetSnapshotsSince response", exc_info=True)
+            raise
         except Exception as e:
             logger.debug("Failed to get snapshots via gateway: %s", e)
             return []
@@ -636,7 +643,7 @@ class GatewayStateManager:
             "timestamp": datetime.fromtimestamp(data.timestamp, tz=UTC).isoformat(),
             "total_value_usd": data.total_value_usd or "0",
             "available_cash_usd": data.available_cash_usd or "0",
-            "value_confidence": data.value_confidence or "HIGH",
+            "value_confidence": data.value_confidence,
             "error": None,
             "positions": positions_list,
             "wallet_balances": wallet_balances_raw,

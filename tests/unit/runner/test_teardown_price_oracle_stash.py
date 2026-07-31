@@ -16,9 +16,11 @@ import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
-
 from unittest.mock import patch
 
+import pytest
+
+from almanak.framework.portfolio.models import ValueConfidence
 from almanak.framework.runner._run_loop_helpers import (
     _ensure_native_gas_in_teardown_oracle,
     _ensure_receipt_legs_in_teardown_oracle,
@@ -29,7 +31,7 @@ from almanak.framework.runner._run_loop_helpers import (
 def _snapshot(
     *,
     token_prices: dict | None = None,
-    confidence: str = "HIGH",
+    confidence: ValueConfidence | str | None = ValueConfidence.HIGH,
     timestamp: datetime | None = None,
 ) -> SimpleNamespace:
     """Build a stand-in PortfolioSnapshot. The real type lives in
@@ -38,7 +40,7 @@ def _snapshot(
     """
     return SimpleNamespace(
         token_prices=token_prices or {},
-        value_confidence=SimpleNamespace(value=confidence, name=confidence),
+        value_confidence=confidence,
         timestamp=timestamp or datetime(2026, 5, 1, 12, 0, 0, tzinfo=UTC),
     )
 
@@ -97,14 +99,23 @@ def test_drops_entries_missing_symbol_or_price():
     }
 
 
-def test_unknown_confidence_collapsed_to_estimated():
+def test_unknown_confidence_is_surfaced():
     snap = _snapshot(
         token_prices={"a:b": {"price_usd": "1.0", "symbol": "X"}},
         confidence="DEGRADED_BIN_STEP_AUTODETECT",
     )
+    with pytest.raises(ValueError, match="invalid teardown snapshot.value_confidence"):
+        _portfolio_snapshot_to_price_oracle(snap)
+
+
+def test_missing_confidence_remains_empty_on_price_inputs():
+    snap = _snapshot(
+        token_prices={"a:b": {"price_usd": "1.0", "symbol": "X"}},
+        confidence=None,
+    )
     out = _portfolio_snapshot_to_price_oracle(snap)
     assert out is not None
-    assert out["X"]["confidence"] == "ESTIMATED"
+    assert out["X"]["confidence"] == ""
 
 
 def test_decimal_price_preserved_as_string():

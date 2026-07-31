@@ -91,13 +91,14 @@ def _make_save_request(
     deployment_id: str = "Strat:abc",
     cycle_id: str = "cycle-001",
     execution_mode: str = "live",
+    value_confidence: str = "HIGH",
 ) -> gateway_pb2.SaveSnapshotRequest:
     return gateway_pb2.SaveSnapshotRequest(
         timestamp=1_725_000_000,
         iteration_number=1,
         total_value_usd="1000.00",
         available_cash_usd="500.00",
-        value_confidence="HIGH",
+        value_confidence=value_confidence,
         positions_json=b"[]",
         chain="arbitrum",
         deployment_id=deployment_id,
@@ -203,6 +204,27 @@ class TestPgSnapshotIdentityWrite:
 
 class TestSqliteSnapshotIdentityWrite:
     @pytest.mark.asyncio
+    async def test_sqlite_save_preserves_missing_confidence(self, sqlite_service, warm_backend, context) -> None:
+        response = await sqlite_service.SavePortfolioSnapshot(
+            _make_save_request(value_confidence=""),
+            context,
+        )
+        assert response.success is True
+        snapshot = warm_backend.save_portfolio_snapshot.call_args.args[0]
+        assert snapshot.value_confidence is None
+        assert not snapshot.is_valid
+
+    @pytest.mark.asyncio
+    async def test_sqlite_save_rejects_unknown_confidence(self, sqlite_service, warm_backend, context) -> None:
+        response = await sqlite_service.SavePortfolioSnapshot(
+            _make_save_request(value_confidence="MYSTERY"),
+            context,
+        )
+        assert response.success is False
+        assert "invalid SaveSnapshotRequest.value_confidence" in response.error
+        warm_backend.save_portfolio_snapshot.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_sqlite_save_rebuilds_snapshot_with_identity(self, sqlite_service, warm_backend, context) -> None:
         """The SQLite path rebuilds a ``PortfolioSnapshot`` from the wire
         request and hands it to the warm backend. The three identity fields
@@ -249,6 +271,29 @@ class TestSqliteSnapshotIdentityWrite:
 
 
 class TestSnapshotIdentityReadMapping:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("confidence", [*ValueConfidence, None])
+    async def test_get_latest_confidence_wire_round_trip(
+        self,
+        confidence: ValueConfidence | None,
+        sqlite_service,
+        warm_backend,
+        context,
+    ) -> None:
+        warm_backend.get_latest_snapshot.return_value = PortfolioSnapshot(
+            timestamp=datetime(2026, 5, 7, 12, 0, tzinfo=UTC),
+            deployment_id="Strat:abc",
+            total_value_usd=Decimal("1234.56"),
+            available_cash_usd=Decimal("500"),
+            value_confidence=confidence,
+        )
+        response = await sqlite_service.GetLatestSnapshot(
+            gateway_pb2.GetLatestSnapshotRequest(deployment_id="Strat:abc"),
+            context,
+        )
+        expected = confidence.value if confidence is not None else ""
+        assert response.value_confidence == expected
+
     @pytest.mark.asyncio
     async def test_get_latest_includes_identity_fields(self, sqlite_service, warm_backend, context) -> None:
         snap = PortfolioSnapshot(

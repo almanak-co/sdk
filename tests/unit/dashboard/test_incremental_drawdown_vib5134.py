@@ -80,7 +80,7 @@ def test_full_recompute_equals_drawdown_stats_and_lifetime_text() -> None:
     # The fold front-ends (numeric / text / the named lifetime entry point) all
     # converge on the SAME recurrence as _drawdown_stats (the windowed path).
     series = _navs(["100", "60", "80", "150", "90", "120"])
-    rows = [(_BASE_TS + timedelta(minutes=i), str(v), "0", i) for i, v in enumerate(series)]
+    rows = [(_BASE_TS + timedelta(minutes=i), str(v), "0", i, None, ValueConfidence.HIGH) for i, v in enumerate(series)]
 
     via_numeric = fold_drawdowns(_EMPTY_DRAWDOWN_STATE, series).as_pcts()
     via_text = fold_nav_text(_EMPTY_DRAWDOWN_STATE, rows).as_pcts()
@@ -104,11 +104,11 @@ def test_empty_and_single_sample_states() -> None:
 def test_fold_nav_text_applies_empty_not_zero_filter() -> None:
     # "", None and garbage are unmeasured (filtered), never a measured $0 that
     # would crater the running peak.
-    rows: list[tuple[Any, str | None, str | None, int]] = [
-        (_BASE_TS, "100", "0", 0),
-        (_BASE_TS + timedelta(minutes=1), "", None, 1),
-        (_BASE_TS + timedelta(minutes=2), "not-a-number", "x", 2),
-        (_BASE_TS + timedelta(minutes=3), "60", "0", 3),
+    rows: list[tuple[Any, str | None, str | None, int, None, ValueConfidence]] = [
+        (_BASE_TS, "100", "0", 0, None, ValueConfidence.HIGH),
+        (_BASE_TS + timedelta(minutes=1), "", None, 1, None, ValueConfidence.HIGH),
+        (_BASE_TS + timedelta(minutes=2), "not-a-number", "x", 2, None, ValueConfidence.HIGH),
+        (_BASE_TS + timedelta(minutes=3), "60", "0", 3, None, ValueConfidence.HIGH),
     ]
     state = fold_nav_text(_EMPTY_DRAWDOWN_STATE, rows)
     # Only 100 and 60 fold in → peak 100, current (100-60)/100 = 40%.

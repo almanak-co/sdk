@@ -14,6 +14,7 @@ from typing import Any
 import grpc
 
 from almanak.framework.gateway_client import GatewayClient, get_gateway_client
+from almanak.framework.portfolio.models import ValueConfidence
 from almanak.gateway.proto import gateway_pb2
 
 logger = logging.getLogger(__name__)
@@ -237,7 +238,7 @@ class PnLSummary:
     net_apr_pct: Decimal | None
     max_drawdown_pct: Decimal
     current_drawdown_pct: Decimal
-    value_confidence: str
+    value_confidence: ValueConfidence | None
     age_days: int
     deployed_capital_usd: Decimal
     available_cash_usd: Decimal
@@ -250,6 +251,13 @@ class PnLSummary:
     # the client renders no perp section (additive/optional; degrades cleanly).
     perp_positions: list[PerpPositionInfo] = field(default_factory=list)
     positions_as_of: str = ""  # ISO ts of the source snapshot ("" if none)
+
+    def __post_init__(self) -> None:
+        """Canonicalize direct/legacy construction to the typed vocabulary."""
+        self.value_confidence = ValueConfidence.parse_optional(
+            self.value_confidence,
+            field_name="dashboard PnLSummary.value_confidence",
+        )
 
 
 @dataclass
@@ -391,7 +399,10 @@ def _convert_pnl_summary(proto: gateway_pb2.PnLSummary) -> PnLSummary:
         net_apr_pct=_safe_optional_decimal(proto.net_apr_pct),
         max_drawdown_pct=_safe_decimal(proto.max_drawdown_pct),
         current_drawdown_pct=_safe_decimal(proto.current_drawdown_pct),
-        value_confidence=proto.value_confidence or "UNAVAILABLE",
+        value_confidence=ValueConfidence.parse_optional(
+            proto.value_confidence,
+            field_name="PnLSummary.value_confidence",
+        ),
         age_days=proto.age_days,
         deployed_capital_usd=_safe_decimal(proto.deployed_capital_usd),
         available_cash_usd=_safe_decimal(proto.available_cash_usd),

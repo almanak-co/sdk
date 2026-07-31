@@ -14,8 +14,6 @@ total" heuristic runs.
 
 from __future__ import annotations
 
-import sys
-import types
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -23,6 +21,8 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+
+from almanak.framework.portfolio.models import ValueConfidence
 
 # ─── Stubs for runner deps that aren't relevant to this baseline test ─────
 
@@ -36,8 +36,12 @@ class _StubSnapshot:
     timestamp: datetime
     total_value_usd: Decimal
     available_cash_usd: Decimal
-    value_confidence: Any  # kept opaque
+    value_confidence: ValueConfidence | None
     error: str = ""
+
+    @property
+    def is_valid(self) -> bool:
+        return self.value_confidence is not None and self.value_confidence != ValueConfidence.UNAVAILABLE
 
 
 class _StubStateManager:
@@ -63,10 +67,7 @@ class _StubRunner:
 
 
 @pytest.fixture
-def value_confidence_high() -> Any:
-    """Pull the live ValueConfidence enum (must compare ``!= UNAVAILABLE``)."""
-    from almanak.framework.runner.runner_state import ValueConfidence
-
+def value_confidence_high() -> ValueConfidence:
     return ValueConfidence.HIGH
 
 
@@ -76,7 +77,7 @@ def stub_runner() -> _StubRunner:
 
 
 @pytest.fixture
-def fresh_snapshot(value_confidence_high: Any) -> _StubSnapshot:
+def fresh_snapshot(value_confidence_high: ValueConfidence) -> _StubSnapshot:
     """A snapshot with cash > 0 and positions = 0 — pre-deployment shape."""
     return _StubSnapshot(
         deployment_id="strat-h1",

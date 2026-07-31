@@ -471,3 +471,17 @@ def test_apptest_strategy_with_missing_optional_fields_does_not_raise() -> None:
     # metric. No pnl_history -> no ``7d PnL`` metric emitted.
     assert "Positions" in metric_labels
     assert "7d PnL" not in metric_labels
+
+
+def test_confidence_suffixes_use_plain_text_labels() -> None:
+    """Confidence states remain distinct without emoji-only indicators."""
+    from almanak.framework.dashboard.pages._detail_header import _CONFIDENCE_ICONS
+    from almanak.framework.portfolio.models import ValueConfidence
+
+    assert _CONFIDENCE_ICONS == {
+        ValueConfidence.HIGH: "",
+        ValueConfidence.ESTIMATED: " [estimated]",
+        ValueConfidence.STALE: " [stale]",
+        ValueConfidence.UNAVAILABLE: " [unavailable]",
+        None: " [unmeasured]",
+    }

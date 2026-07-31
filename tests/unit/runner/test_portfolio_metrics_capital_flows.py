@@ -33,7 +33,7 @@ from almanak.framework.accounting.capital_flows import (
     clear_provenance_caches,
     pad_address_topic,
 )
-from almanak.framework.portfolio import PortfolioMetrics, PortfolioSnapshot
+from almanak.framework.portfolio import PortfolioMetrics, PortfolioSnapshot, ValueConfidence
 from almanak.framework.portfolio.models import TokenBalance
 from almanak.framework.runner.capital_flow_state import (
     DETAIL_NO_GATEWAY,
@@ -415,6 +415,7 @@ def _snapshot(
         deployment_id=DEPLOYMENT,
         total_value_usd=Decimal(total),
         available_cash_usd=Decimal(cash),
+        value_confidence=ValueConfidence.HIGH,
         chain=CHAIN,
         wallet_balances=balances if balances is not None else [TokenBalance("USDC", Decimal("1"), Decimal("1"), USDC)],
         token_prices=prices

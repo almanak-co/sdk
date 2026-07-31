@@ -46,6 +46,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from almanak.framework.models.run_mode import RunMode
+from almanak.framework.portfolio.models import ValueConfidence, serialize_value_confidence
 from almanak.framework.state.ledger_registry_mode import (
     LedgerRegistrySaveMode,
     ledger_registry_save_behavior,
@@ -2093,7 +2094,7 @@ class SQLiteStore:
                             str(snapshot.available_cash_usd),
                             str(snapshot.deployed_capital_usd),
                             str(snapshot.wallet_total_value_usd),
-                            snapshot.value_confidence.value,
+                            serialize_value_confidence(snapshot.value_confidence),
                             json.dumps(snapshot.to_positions_payload()),
                             json.dumps(snapshot.token_prices) if snapshot.token_prices else "{}",
                             json.dumps(
@@ -2233,7 +2234,7 @@ class SQLiteStore:
                             str(snapshot.available_cash_usd),
                             str(snapshot.deployed_capital_usd),
                             str(snapshot.wallet_total_value_usd),
-                            snapshot.value_confidence.value,
+                            serialize_value_confidence(snapshot.value_confidence),
                             json.dumps(snapshot.to_positions_payload()),
                             json.dumps(snapshot.token_prices) if snapshot.token_prices else "{}",
                             json.dumps(
@@ -2461,11 +2462,14 @@ class SQLiteStore:
         to_ts: datetime | None,
         *,
         scan_cap: int = 200_000,
-    ) -> tuple[list[tuple[datetime, str | None, str | None, str | None, str | None]], bool]:
+    ) -> tuple[
+        list[tuple[datetime, str | None, str | None, ValueConfidence | None, str | None]],
+        bool,
+    ]:
         """Projected NAV samples inside a time window, for windowed charts (VIB-5059 P2).
 
         Returns ``(rows, truncated)`` where ``rows`` is ``(timestamp,
-        total_value_usd_text, available_cash_usd_text, value_confidence_text,
+        total_value_usd_text, available_cash_usd_text, value_confidence,
         positions_json_text)`` oldest-first. The chart-relevant columns plus
         ``positions_json`` (VIB-5170, for per-row BORROW debt netting) are
         projected; the other JSON blobs (``token_prices_json`` /
@@ -2493,7 +2497,10 @@ class SQLiteStore:
         if not self._initialized:
             await self.initialize()
 
-        def _sync_get() -> tuple[list[tuple[datetime, str | None, str | None, str | None, str | None]], bool]:
+        def _sync_get() -> tuple[
+            list[tuple[datetime, str | None, str | None, ValueConfidence | None, str | None]],
+            bool,
+        ]:
             clauses = ["deployment_id = ?"]
             params: list[object] = [deployment_id]
             if from_ts is not None:
@@ -2520,7 +2527,7 @@ class SQLiteStore:
                 # them first, so the surplus (oldest) tail is dropped.
                 fetched = fetched[:scan_cap]
 
-            rows: list[tuple[datetime, str | None, str | None, str | None, str | None]] = []
+            rows: list[tuple[datetime, str | None, str | None, ValueConfidence | None, str | None]] = []
             for row in reversed(fetched):  # DESC fetch -> emit oldest-first
                 ts = row["timestamp"]
                 if isinstance(ts, str):
@@ -2530,7 +2537,10 @@ class SQLiteStore:
                         ts,
                         row["total_value_usd"],
                         row["available_cash_usd"],
-                        row["value_confidence"],
+                        ValueConfidence.parse_optional(
+                            row["value_confidence"],
+                            field_name="SQLite portfolio_snapshots.value_confidence",
+                        ),
                         row["positions_json"],
                     )
                 )
@@ -2545,12 +2555,15 @@ class SQLiteStore:
         *,
         since: tuple[datetime, int] | None = None,
         scan_cap: int = 200_000,
-    ) -> tuple[list[tuple[datetime, str | None, str | None, int, str | None, str | None]], bool]:
+    ) -> tuple[
+        list[tuple[datetime, str | None, str | None, int, str | None, ValueConfidence | None]],
+        bool,
+    ]:
         """NAV-component series for lifetime drawdown / high-watermark (VIB-5118/5134).
 
         Returns ``(rows, truncated)`` where ``rows`` is ``(timestamp,
         total_value_usd_text, available_cash_usd_text, id, positions_json_text,
-        value_confidence_text)`` oldest-first (``positions_json`` is the VIB-5170
+        value_confidence)`` oldest-first (``positions_json`` is the VIB-5170
         debt-netting input; ``value_confidence`` is the VIB-5408 trust gate). The
         fold (:func:`_wallet_navs_from_nav_text`) SKIPs any ``UNAVAILABLE`` row (==
         ``not PortfolioSnapshot.is_valid``) — an ``UNAVAILABLE`` NAV is *deflated*
@@ -2593,7 +2606,10 @@ class SQLiteStore:
         if not self._initialized:
             await self.initialize()
 
-        def _sync_get() -> tuple[list[tuple[datetime, str | None, str | None, int, str | None, str | None]], bool]:
+        def _sync_get() -> tuple[
+            list[tuple[datetime, str | None, str | None, int, str | None, ValueConfidence | None]],
+            bool,
+        ]:
             params: list[object] = [deployment_id]
             where = "deployment_id = ?"
             if since is not None:
@@ -2644,7 +2660,7 @@ class SQLiteStore:
             # Incremental (ASC) is already oldest-first; full (DESC) is reversed.
             ordered = fetched if since is not None else list(reversed(fetched))
 
-            rows: list[tuple[datetime, str | None, str | None, int, str | None, str | None]] = []
+            rows: list[tuple[datetime, str | None, str | None, int, str | None, ValueConfidence | None]] = []
             for row in ordered:
                 ts = row["timestamp"]
                 if isinstance(ts, str):
@@ -2666,7 +2682,10 @@ class SQLiteStore:
                         row["available_cash_usd"],
                         row["id"],
                         row["positions_json"],
-                        row["value_confidence"],
+                        ValueConfidence.parse_optional(
+                            row["value_confidence"],
+                            field_name="SQLite portfolio_snapshots.value_confidence",
+                        ),
                     )
                 )
             return rows, truncated
@@ -2784,7 +2803,10 @@ class SQLiteStore:
                 "available_cash_usd": str(row["available_cash_usd"]),
                 "deployed_capital_usd": self._safe_row_str(row, "deployed_capital_usd", "0"),
                 "wallet_total_value_usd": self._safe_row_str(row, "wallet_total_value_usd", "0"),
-                "value_confidence": row["value_confidence"],
+                "value_confidence": ValueConfidence.parse_optional(
+                    row["value_confidence"],
+                    field_name="SQLite portfolio_snapshots.value_confidence",
+                ),
                 "positions": positions,
                 "wallet_balances": self._safe_row_json(row, "wallet_balances_json", []),
                 "token_prices": self._safe_row_json(row, "token_prices_json", {}),

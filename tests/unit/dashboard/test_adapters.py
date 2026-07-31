@@ -17,6 +17,7 @@ from almanak.framework.dashboard.models import (
     TimelineEvent,
     TimelineEventType,
 )
+from almanak.framework.portfolio.models import ValueConfidence
 
 
 class TestStrategyFromPmDict:
@@ -96,7 +97,15 @@ class TestStrategyFromPmDict:
     def test_value_confidence_passed_through(self):
         entry = {"deployment_id": "s1", "value_confidence": "STALE"}
         strategy = strategy_from_pm_dict(entry)
-        assert strategy.value_confidence == "STALE"
+        assert strategy.value_confidence == ValueConfidence.STALE
+
+    def test_missing_value_confidence_remains_unmeasured(self):
+        strategy = strategy_from_pm_dict({"deployment_id": "s1"})
+        assert strategy.value_confidence is None
+
+    def test_unknown_value_confidence_is_surfaced(self):
+        with pytest.raises(ValueError, match="invalid PM strategy.value_confidence"):
+            strategy_from_pm_dict({"deployment_id": "s1", "value_confidence": "MYSTERY"})
 
 
 # ---------------------------------------------------------------------------
