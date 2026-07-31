@@ -11,6 +11,10 @@ from almanak.connectors._connector import (
     SupportedChainsSpec,
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
+from almanak.core.chains.arbitrum import DESCRIPTOR as ARBITRUM
+from almanak.core.chains.avalanche import DESCRIPTOR as AVALANCHE
+from almanak.core.chains.bsc import DESCRIPTOR as BSC
+from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
 
 CONNECTOR = Connector(
     name="traderjoe_v2",
@@ -65,7 +69,7 @@ CONNECTOR = Connector(
         attribute="PRIMITIVE",
     ),
     strategy_intents=("SWAP", "LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"),
-    supported_chains=SupportedChainsSpec(chains=("avalanche", "arbitrum", "bsc", "ethereum")),
+    supported_chains=SupportedChainsSpec(chains=(AVALANCHE, ARBITRUM, BSC, ETHEREUM)),
 )
 
 __all__ = ["CONNECTOR"]

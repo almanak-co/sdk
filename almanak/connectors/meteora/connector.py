@@ -12,6 +12,7 @@ from almanak.connectors._connector import (
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
 from almanak.connectors._strategy_base.solana_program import SolanaProgramSpec
 from almanak.connectors.meteora.constants import DLMM_PROGRAM_ID
+from almanak.core.chains.solana import DESCRIPTOR as SOLANA
 
 CONNECTOR = Connector(
     name="meteora",
@@ -38,7 +39,7 @@ CONNECTOR = Connector(
         module="almanak.connectors.meteora.capabilities",
     ),
     strategy_intents=("LP_OPEN", "LP_CLOSE"),
-    supported_chains=SupportedChainsSpec(chains=("solana",)),
+    supported_chains=SupportedChainsSpec(chains=(SOLANA,)),
     backtest_strategy_type=BacktestStrategyTypeDecl(
         strategy_type="lp",
         aliases=("meteora_dlmm",),

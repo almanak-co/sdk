@@ -15,6 +15,11 @@ from almanak.connectors._connector import (
 )
 from almanak.connectors._strategy_base.position_read_base import CURVE_LP
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
+from almanak.core.chains.arbitrum import DESCRIPTOR as ARBITRUM
+from almanak.core.chains.base import DESCRIPTOR as BASE
+from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
+from almanak.core.chains.optimism import DESCRIPTOR as OPTIMISM
+from almanak.core.chains.polygon import DESCRIPTOR as POLYGON
 
 CONNECTOR = Connector(
     name="curve",
@@ -92,7 +97,7 @@ CONNECTOR = Connector(
     # math is framework-valued, not connector-side.
     position_read=PositionReadDecl(kind=CURVE_LP),
     strategy_intents=("SWAP", "LP_OPEN", "LP_CLOSE"),
-    supported_chains=SupportedChainsSpec(chains=("ethereum", "arbitrum", "optimism", "polygon", "base")),
+    supported_chains=SupportedChainsSpec(chains=(ETHEREUM, ARBITRUM, OPTIMISM, POLYGON, BASE)),
 )
 
 __all__ = ["CONNECTOR"]

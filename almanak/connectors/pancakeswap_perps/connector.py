@@ -9,6 +9,7 @@ from almanak.connectors._connector import (
     SupportedChainsSpec,
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
+from almanak.core.chains.bsc import DESCRIPTOR as BSC
 
 CONNECTOR = Connector(
     name="pancakeswap_perps",
@@ -29,7 +30,7 @@ CONNECTOR = Connector(
         attribute="AsterPerpsCompiler",
     ),
     strategy_intents=("PERP_OPEN", "PERP_CLOSE"),
-    supported_chains=SupportedChainsSpec(chains=("bsc",)),
+    supported_chains=SupportedChainsSpec(chains=(BSC,)),
 )
 
 __all__ = ["CONNECTOR"]

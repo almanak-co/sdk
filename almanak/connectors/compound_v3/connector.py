@@ -15,6 +15,11 @@ from almanak.connectors._connector import (
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
 from almanak.connectors.compound_v3.backtest_risk import BACKTEST_RISK as _BACKTEST_RISK
+from almanak.core.chains.arbitrum import DESCRIPTOR as ARBITRUM
+from almanak.core.chains.base import DESCRIPTOR as BASE
+from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
+from almanak.core.chains.optimism import DESCRIPTOR as OPTIMISM
+from almanak.core.chains.polygon import DESCRIPTOR as POLYGON
 
 CONNECTOR = Connector(
     name="compound_v3",
@@ -85,7 +90,7 @@ CONNECTOR = Connector(
     ),
     backtest_risk=_BACKTEST_RISK,
     strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
-    supported_chains=SupportedChainsSpec(chains=("ethereum", "arbitrum", "base", "optimism", "polygon")),
+    supported_chains=SupportedChainsSpec(chains=(ETHEREUM, ARBITRUM, BASE, OPTIMISM, POLYGON)),
 )
 
 __all__ = ["CONNECTOR"]

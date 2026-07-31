@@ -21,6 +21,10 @@ import pytest
 from click.testing import CliRunner
 
 from almanak.connectors._connector import SupportedChainsSpec
+from almanak.core.chains.base import DESCRIPTOR as BASE
+from almanak.core.chains.bsc import DESCRIPTOR as BSC
+from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
+from almanak.core.chains.mantle import DESCRIPTOR as MANTLE
 from almanak.framework.cli.capability_matrix import (
     CAP_ACCOUNTING,
     CAP_COMPILE,
@@ -254,7 +258,7 @@ def test_lending_connector_emits_rate_valuation_accounting() -> None:
     conn = _FakeConnector(
         name="lender",
         strategy_intents=("SUPPLY",),
-        supported_chains=SupportedChainsSpec(chains=("base",)),
+        supported_chains=SupportedChainsSpec(chains=(BASE,)),
         lending_read=_FakeLendingRead(rate_history_chains=("base",)),
         receipt_parser_connector=object(),
     )
@@ -273,7 +277,7 @@ def test_swap_connector_emits_safety_floor_not_rate() -> None:
     conn = _FakeConnector(
         name="dex",
         strategy_intents=("SWAP",),
-        supported_chains=SupportedChainsSpec(chains=("base",)),
+        supported_chains=SupportedChainsSpec(chains=(BASE,)),
         swap_quote_connector=object(),
     )
     caps = {c.capability for c in _cells_for_connector(conn, _EMPTY_COVERAGE)}
@@ -304,8 +308,8 @@ def test_intent_override_omits_unsupported_cells() -> None:
         name="aave_v3",
         strategy_intents=("SUPPLY", "BORROW"),
         supported_chains=SupportedChainsSpec(
-            chains=("ethereum", "mantle"),
-            intent_overrides={"BORROW": ("ethereum",)},
+            chains=(ETHEREUM, MANTLE),
+            intent_overrides={"BORROW": (ETHEREUM,)},
         ),
         lending_read=_FakeLendingRead(rate_history_chains=("ethereum", "mantle")),
     )
@@ -319,13 +323,13 @@ def test_intent_override_omits_unsupported_cells() -> None:
     assert supply_mantle
 
 
-def test_intent_override_chain_alias_normalises_before_emitting() -> None:
+def test_intent_override_descriptor_emits_canonical_name() -> None:
     conn = _FakeConnector(
         name="x",
         strategy_intents=("SWAP",),
         supported_chains=SupportedChainsSpec(
-            chains=("ethereum",),
-            intent_overrides={"SWAP": ("bnb",)},
+            chains=(ETHEREUM,),
+            intent_overrides={"SWAP": (BSC,)},
         ),
     )
     cells = _cells_for_connector(conn, _EMPTY_COVERAGE)
@@ -333,11 +337,11 @@ def test_intent_override_chain_alias_normalises_before_emitting() -> None:
     assert {c.chain for c in cells} == {"bsc"}
 
 
-def test_bnb_chain_normalised_to_bsc() -> None:
+def test_descriptor_chain_emits_canonical_name() -> None:
     conn = _FakeConnector(
         name="x",
         strategy_intents=("SWAP",),
-        supported_chains=SupportedChainsSpec(chains=("bnb",)),
+        supported_chains=SupportedChainsSpec(chains=(BSC,)),
     )
     chains = {c.chain for c in _cells_for_connector(conn, _EMPTY_COVERAGE)}
     assert "bsc" in chains
@@ -352,12 +356,12 @@ def test_build_matrix_with_injected_connectors_is_sorted_and_deterministic() -> 
         _FakeConnector(
             name="zeta",
             strategy_intents=("SWAP",),
-            supported_chains=SupportedChainsSpec(chains=("base",)),
+            supported_chains=SupportedChainsSpec(chains=(BASE,)),
         ),
         _FakeConnector(
             name="alpha",
             strategy_intents=("SWAP",),
-            supported_chains=SupportedChainsSpec(chains=("base",)),
+            supported_chains=SupportedChainsSpec(chains=(BASE,)),
         ),
     ]
     m1 = build_capability_matrix(connectors=conns, demo_coverage=_EMPTY_COVERAGE)
@@ -372,7 +376,7 @@ def test_counts_by_state_tallies_all_states() -> None:
         _FakeConnector(
             name="x",
             strategy_intents=("VAULT_DEPOSIT",),
-            supported_chains=SupportedChainsSpec(chains=("base",)),
+            supported_chains=SupportedChainsSpec(chains=(BASE,)),
         )
     ]
     m = build_capability_matrix(connectors=conns, demo_coverage=_EMPTY_COVERAGE)

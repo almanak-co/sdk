@@ -12,6 +12,7 @@ from almanak.connectors._connector import (
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
 from almanak.connectors._strategy_base.position_read_base import FUNGIBLE_LP
+from almanak.core.chains.arbitrum import DESCRIPTOR as ARBITRUM
 
 CONNECTOR = Connector(
     # DEX LP surface (Phase 4, VIB-5032): a third thin manifest over the fluid
@@ -58,7 +59,7 @@ CONNECTOR = Connector(
     # v1 scope — arbitrum only (the sole chain whose SmartLending wrappers were
     # round-tripped on-chain). base/ethereum/polygon need per-chain resolver
     # verification before being added.
-    supported_chains=SupportedChainsSpec(chains=("arbitrum",)),
+    supported_chains=SupportedChainsSpec(chains=(ARBITRUM,)),
     backtest_strategy_type=BacktestStrategyTypeDecl(
         strategy_type="lp",
         # Fungible ERC-20-share wrapper positions: no tick range.

@@ -12,6 +12,7 @@ from almanak.connectors._connector import (
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
 from almanak.connectors._strategy_base.solana_program import SolanaProgramSpec
 from almanak.connectors.orca.constants import METADATA_PROGRAM_ID, WHIRLPOOL_PROGRAM_ID
+from almanak.core.chains.solana import DESCRIPTOR as SOLANA
 
 CONNECTOR = Connector(
     name="orca",
@@ -48,7 +49,7 @@ CONNECTOR = Connector(
         module="almanak.connectors.orca.capabilities",
     ),
     strategy_intents=("LP_OPEN", "LP_CLOSE"),
-    supported_chains=SupportedChainsSpec(chains=("solana",)),
+    supported_chains=SupportedChainsSpec(chains=(SOLANA,)),
     backtest_strategy_type=BacktestStrategyTypeDecl(
         strategy_type="lp",
         aliases=("orca_whirlpools",),

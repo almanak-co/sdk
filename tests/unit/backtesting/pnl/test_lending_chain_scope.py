@@ -24,6 +24,11 @@ from decimal import Decimal
 import pytest
 
 from almanak.connectors._connector import SupportedChainsSpec
+from almanak.core.chains.arbitrum import DESCRIPTOR as ARBITRUM
+from almanak.core.chains.base import DESCRIPTOR as BASE
+from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
+from almanak.core.chains.optimism import DESCRIPTOR as OPTIMISM
+from almanak.core.chains.polygon import DESCRIPTOR as POLYGON
 from almanak.framework.backtesting.pnl.data_provider import MarketState
 from almanak.framework.backtesting.pnl.engine import (
     DefaultFeeModel,
@@ -218,8 +223,8 @@ class TestDeclaredLendingChains:
         widened = replace(
             real,
             supported_chains=SupportedChainsSpec(
-                chains=("arbitrum", "base", "optimism"),
-                intent_overrides={"SWAP": ("arbitrum", "base", "ethereum", "polygon")},
+                chains=(ARBITRUM, BASE, OPTIMISM),
+                intent_overrides={"SWAP": (ARBITRUM, BASE, ETHEREUM, POLYGON)},
             ),
         )
         try:

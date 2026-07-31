@@ -8,6 +8,8 @@ from almanak.connectors._connector import (
     ImportRef,
     SupportedChainsSpec,
 )
+from almanak.core.chains.base import DESCRIPTOR as BASE
+from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
 
 CONNECTOR = Connector(
     name="lagoon",
@@ -22,7 +24,7 @@ CONNECTOR = Connector(
         attribute="LagoonReceiptParserConnector",
     ),
     strategy_intents=("VAULT_DEPOSIT", "VAULT_REDEEM"),
-    supported_chains=SupportedChainsSpec(chains=("ethereum", "base")),
+    supported_chains=SupportedChainsSpec(chains=(ETHEREUM, BASE)),
     # Vault lifecycle support is intentionally hidden from the support matrix.
     strategy_matrix_entries=(),
 )

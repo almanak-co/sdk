@@ -134,7 +134,7 @@ def test_descriptor_strategy_support_detector_counts_connector_manifest(tmp_path
             name="foo",
             kind=ProtocolKind.SWAP,
             strategy_intents=("SWAP",),
-            supported_chains=SupportedChainsSpec(chains=("ethereum",)),
+            supported_chains=SupportedChainsSpec(chains=(ETHEREUM,)),
         )
         """,
     )
@@ -150,7 +150,7 @@ def test_descriptor_strategy_support_detector_counts_annotated_manifest(tmp_path
             name="foo",
             kind=ProtocolKind.SWAP,
             strategy_intents=("SWAP",),
-            supported_chains=SupportedChainsSpec(chains=("ethereum",)),
+            supported_chains=SupportedChainsSpec(chains=(ETHEREUM,)),
         )
         """,
     )
@@ -187,7 +187,7 @@ def test_static_scan_accepts_descriptor_owned_strategy_registration(
             name="foo",
             kind=ProtocolKind.SWAP,
             strategy_intents=("SWAP",),
-            supported_chains=SupportedChainsSpec(chains=("ethereum",)),
+            supported_chains=SupportedChainsSpec(chains=(ETHEREUM,)),
         )
         """,
     )
@@ -215,7 +215,7 @@ def test_static_scan_rejects_legacy_registration_even_with_descriptor(
             name="foo",
             kind=ProtocolKind.SWAP,
             strategy_intents=("SWAP",),
-            supported_chains=SupportedChainsSpec(chains=("ethereum",)),
+            supported_chains=SupportedChainsSpec(chains=(ETHEREUM,)),
         )
         """,
     )
@@ -338,7 +338,7 @@ def test_excluded_dir_with_descriptor_registration_fails(
             name="base",
             kind=ProtocolKind.SWAP,
             strategy_intents=("SWAP",),
-            supported_chains=SupportedChainsSpec(chains=("ethereum",)),
+            supported_chains=SupportedChainsSpec(chains=(ETHEREUM,)),
         )
         """,
     )
@@ -372,7 +372,7 @@ def test_excluded_dir_with_both_registration_sources_lists_both(
             name="base",
             kind=ProtocolKind.SWAP,
             strategy_intents=("SWAP",),
-            supported_chains=SupportedChainsSpec(chains=("ethereum",)),
+            supported_chains=SupportedChainsSpec(chains=(ETHEREUM,)),
         )
         """,
     )

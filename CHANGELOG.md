@@ -30,6 +30,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Connector chain declarations are statically typed.** `SupportedChainsSpec`
+  now accepts only the registered `ChainDescriptor` singletons exported from
+  `almanak.core.chains.<canonical_name>` modules. Raw strings and synthetic or
+  unregistered descriptors are rejected, moving misspelled manifest chains to
+  import/type-check time. Connector query APIs continue to return canonical
+  lowercase strings, so config, CLI, JSON, and wire contracts are unchanged.
+
 - **Connector chain support now has one canonical declaration.** Strategy
   connectors declare an inline `SupportedChainsSpec` with optional per-intent
   and owned-alias overrides. The former `Connector.strategy_chains` field,

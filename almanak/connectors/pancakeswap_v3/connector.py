@@ -12,6 +12,10 @@ from almanak.connectors._connector import (
     SupportedChainsSpec,
 )
 from almanak.connectors._strategy_base.address_table import AbiFamily, AddressTableSpec
+from almanak.core.chains.arbitrum import DESCRIPTOR as ARBITRUM
+from almanak.core.chains.base import DESCRIPTOR as BASE
+from almanak.core.chains.bsc import DESCRIPTOR as BSC
+from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
 
 CONNECTOR = Connector(
     name="pancakeswap_v3",
@@ -93,7 +97,7 @@ CONNECTOR = Connector(
         attribute="UniswapV3Compiler",
     ),
     strategy_intents=("SWAP", "LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"),
-    supported_chains=SupportedChainsSpec(chains=("bsc", "ethereum", "arbitrum", "base")),
+    supported_chains=SupportedChainsSpec(chains=(BSC, ETHEREUM, ARBITRUM, BASE)),
 )
 
 __all__ = ["CONNECTOR"]

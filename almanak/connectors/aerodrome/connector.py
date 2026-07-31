@@ -13,6 +13,8 @@ from almanak.connectors._connector import (
     SupportedChainsSpec,
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
+from almanak.core.chains.base import DESCRIPTOR as BASE
+from almanak.core.chains.optimism import DESCRIPTOR as OPTIMISM
 
 CONNECTOR = Connector(
     name="aerodrome",
@@ -109,7 +111,7 @@ CONNECTOR = Connector(
     metadata_amount_encoding=MetadataAmountEncoding(swap="human"),
     strategy_intents=("SWAP", "LP_OPEN", "LP_CLOSE"),
     supported_chains=SupportedChainsSpec(
-        chains=("base", "optimism"),
+        chains=(BASE, OPTIMISM),
         # Slipstream (concentrated liquidity) is deployed on Base only. Optimism
         # is Velodrome V2 — the Solidly-fork Classic pools — and `addresses.py`
         # carries no `cl_*` entries for it: no cl_factory, no cl_nft
@@ -117,7 +119,7 @@ CONNECTOR = Connector(
         # alias inherits the connector union and publishes an optimism row that
         # cannot compile an LP_OPEN. Optimism's concentrated venue is Velodrome
         # Slipstream, which has its own row.
-        protocol_overrides={"aerodrome_slipstream": ("base",)},
+        protocol_overrides={"aerodrome_slipstream": (BASE,)},
     ),
 )
 

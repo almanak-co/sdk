@@ -17,6 +17,10 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
+from almanak.core.chains.arbitrum import DESCRIPTOR as ARBITRUM
+from almanak.core.chains.base import DESCRIPTOR as BASE
+from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
+from almanak.core.chains.polygon import DESCRIPTOR as POLYGON
 from almanak.framework.cli.support_matrix import (
     SCHEMA_VERSION,
     SUPPORTED_CATEGORIES,
@@ -446,7 +450,7 @@ class TestDynamicCapabilityDiscovery:
             name="vib_4856_mock_swap",
             kind=ProtocolKind.SWAP,
             strategy_intents=("SWAP",),
-            supported_chains=SupportedChainsSpec(chains=("ethereum", "arbitrum")),
+            supported_chains=SupportedChainsSpec(chains=(ETHEREUM, ARBITRUM)),
             strategy_matrix_entries=(
                 StrategyMatrixEntry(
                     matrix_name="vib_4856_mock_swap",
@@ -479,7 +483,7 @@ class TestDynamicCapabilityDiscovery:
             name="vib_4856_mock_multi",
             kind=ProtocolKind.LP,
             strategy_intents=("LP_OPEN", "LP_CLOSE"),
-            supported_chains=SupportedChainsSpec(chains=("ethereum", "base")),
+            supported_chains=SupportedChainsSpec(chains=(ETHEREUM, BASE)),
             strategy_matrix_entries=(
                 StrategyMatrixEntry(
                     matrix_name="vib_4856_mock_multi",
@@ -519,7 +523,7 @@ class TestDynamicCapabilityDiscovery:
             name="vib_4856_mock_strategy",
             kind=ProtocolKind.SWAP,
             strategy_intents=("SWAP",),
-            supported_chains=SupportedChainsSpec(chains=("ethereum", "polygon")),
+            supported_chains=SupportedChainsSpec(chains=(ETHEREUM, POLYGON)),
             strategy_matrix_entries=(
                 StrategyMatrixEntry(
                     matrix_name="vib_4856_mock_strategy",
@@ -554,7 +558,7 @@ class TestDynamicCapabilityDiscovery:
             name="vib_4856_mock_suppressed",
             kind=ProtocolKind.LENDING,
             strategy_intents=("SUPPLY", "BORROW"),
-            supported_chains=SupportedChainsSpec(chains=("ethereum",)),
+            supported_chains=SupportedChainsSpec(chains=(ETHEREUM,)),
             strategy_matrix_entries=(),
         )
         monkeypatch.setattr(CONNECTOR_REGISTRY, "with_strategy_support", lambda: (connector,))
@@ -577,8 +581,8 @@ class TestDynamicCapabilityDiscovery:
             kind=ProtocolKind.LP,
             strategy_intents=("SWAP", "LP_OPEN"),
             supported_chains=SupportedChainsSpec(
-                chains=("base",),
-                intent_overrides={"SWAP": ("ethereum",)},
+                chains=(BASE,),
+                intent_overrides={"SWAP": (ETHEREUM,)},
             ),
         )
         monkeypatch.setattr(

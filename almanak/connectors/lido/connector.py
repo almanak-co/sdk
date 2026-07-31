@@ -9,6 +9,7 @@ from almanak.connectors._connector import (
     ImportRef,
     SupportedChainsSpec,
 )
+from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
 
 CONNECTOR = Connector(
     name="lido",
@@ -30,7 +31,7 @@ CONNECTOR = Connector(
         attribute="LidoCompiler",
     ),
     strategy_intents=("STAKE", "UNSTAKE"),
-    supported_chains=SupportedChainsSpec(chains=("ethereum",)),
+    supported_chains=SupportedChainsSpec(chains=(ETHEREUM,)),
 )
 
 __all__ = ["CONNECTOR"]

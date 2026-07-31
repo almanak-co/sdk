@@ -10,6 +10,13 @@ from almanak.connectors._connector import (
     SupportedChainsSpec,
 )
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
+from almanak.core.chains.arbitrum import DESCRIPTOR as ARBITRUM
+from almanak.core.chains.avalanche import DESCRIPTOR as AVALANCHE
+from almanak.core.chains.base import DESCRIPTOR as BASE
+from almanak.core.chains.bsc import DESCRIPTOR as BSC
+from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
+from almanak.core.chains.optimism import DESCRIPTOR as OPTIMISM
+from almanak.core.chains.polygon import DESCRIPTOR as POLYGON
 
 CONNECTOR = Connector(
     name="enso",
@@ -46,9 +53,7 @@ CONNECTOR = Connector(
         module="almanak.connectors.enso.capabilities",
     ),
     strategy_intents=("SWAP",),
-    supported_chains=SupportedChainsSpec(
-        chains=("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bsc")
-    ),
+    supported_chains=SupportedChainsSpec(chains=(ETHEREUM, ARBITRUM, OPTIMISM, POLYGON, BASE, AVALANCHE, BSC)),
     # Aggregators render as aggregator rows instead of generic swap rows.
     strategy_matrix_entries=(
         StrategyMatrixEntry(

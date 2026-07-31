@@ -10,6 +10,7 @@ from almanak.connectors._connector import (
 )
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
 from almanak.connectors._strategy_base.solana_program import SolanaProgramSpec
+from almanak.core.chains.solana import DESCRIPTOR as SOLANA
 
 KAMINO_LENDING_PROGRAM_ID = "KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD"
 
@@ -39,7 +40,7 @@ CONNECTOR = Connector(
         module="almanak.connectors.kamino.capabilities",
     ),
     strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
-    supported_chains=SupportedChainsSpec(chains=("solana",)),
+    supported_chains=SupportedChainsSpec(chains=(SOLANA,)),
 )
 
 __all__ = ["CONNECTOR", "KAMINO_LENDING_PROGRAM_ID"]

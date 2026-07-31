@@ -28,6 +28,15 @@ import pytest
 
 from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import Connector, SupportedChainsSpec
+from almanak.core.chains import ChainDescriptor, ChainRegistry
+
+
+def _chain_refs(chains) -> tuple[ChainDescriptor, ...]:
+    return tuple(ChainRegistry.resolve(chain) for chain in chains)
+
+
+def _override_refs(overrides):
+    return {key: _chain_refs(chains) for key, chains in (overrides or {}).items()}
 
 
 def _load_module():
@@ -54,8 +63,8 @@ def _manifest(name: str, chains, intents, *, aliases=(), protocol_overrides=None
         aliases=aliases,
         strategy_intents=tuple(intents),
         supported_chains=SupportedChainsSpec(
-            chains=tuple(chains),
-            protocol_overrides=protocol_overrides or {},
+            chains=_chain_refs(chains),
+            protocol_overrides=_override_refs(protocol_overrides),
         ),
     )
 
@@ -269,7 +278,7 @@ def _narrowing_manifest(name: str, chains, intents, *, dead: dict[str, tuple[str
     ``dead`` maps chain -> intents not supported there.
     """
     overrides = {
-        intent: tuple(chain for chain in chains if intent not in dead.get(chain, ()))
+        intent: _chain_refs(chain for chain in chains if intent not in dead.get(chain, ()))
         for intent in intents
         if any(intent in dead.get(chain, ()) for chain in chains)
     }
@@ -278,7 +287,7 @@ def _narrowing_manifest(name: str, chains, intents, *, dead: dict[str, tuple[str
         kind=ProtocolKind.LENDING,
         strategy_intents=tuple(intents),
         supported_chains=SupportedChainsSpec(
-            chains=tuple(chains),
+            chains=_chain_refs(chains),
             intent_overrides=overrides,
         ),
     )

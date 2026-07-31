@@ -15,6 +15,30 @@ from almanak.connectors._connector import (
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
 from almanak.connectors.aave_v3.backtest_risk import BACKTEST_RISK as _BACKTEST_RISK
+from almanak.core.chains.arbitrum import DESCRIPTOR as ARBITRUM
+from almanak.core.chains.avalanche import DESCRIPTOR as AVALANCHE
+from almanak.core.chains.base import DESCRIPTOR as BASE
+from almanak.core.chains.bsc import DESCRIPTOR as BSC
+from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
+from almanak.core.chains.linea import DESCRIPTOR as LINEA
+from almanak.core.chains.mantle import DESCRIPTOR as MANTLE
+from almanak.core.chains.optimism import DESCRIPTOR as OPTIMISM
+from almanak.core.chains.polygon import DESCRIPTOR as POLYGON
+from almanak.core.chains.xlayer import DESCRIPTOR as XLAYER
+
+_SUPPORTED_CHAINS = (
+    ETHEREUM,
+    ARBITRUM,
+    OPTIMISM,
+    POLYGON,
+    BASE,
+    AVALANCHE,
+    BSC,
+    MANTLE,
+    XLAYER,
+    LINEA,
+)
+_BORROW_CHAINS = tuple(chain for chain in _SUPPORTED_CHAINS if chain is not MANTLE)
 
 CONNECTOR = Connector(
     name="aave_v3",
@@ -133,18 +157,7 @@ CONNECTOR = Connector(
     # override — so the displayed lending row equals supported_chains exactly
     # and cannot outrun this declaration.
     supported_chains=SupportedChainsSpec(
-        chains=(
-            "ethereum",
-            "arbitrum",
-            "optimism",
-            "polygon",
-            "base",
-            "avalanche",
-            "bsc",
-            "mantle",
-            "xlayer",
-            "linea",
-        ),
+        chains=_SUPPORTED_CHAINS,
         # Mantle omits BORROW because THIS CONNECTOR cannot borrow there — not
         # because the market cannot be borrowed against (ALM-3075).
         #
@@ -166,19 +179,7 @@ CONNECTOR = Connector(
         # non-zero liquidation thresholds looks identical to a wind-down, and
         # that misreading is what ALM-3075 exists to correct. Restore mantle
         # here once BORROW compiles an eMode enrolment.
-        intent_overrides={
-            "BORROW": (
-                "ethereum",
-                "arbitrum",
-                "optimism",
-                "polygon",
-                "base",
-                "avalanche",
-                "bsc",
-                "xlayer",
-                "linea",
-            )
-        },
+        intent_overrides={"BORROW": _BORROW_CHAINS},
     ),
 )
 

@@ -9,6 +9,7 @@ from almanak.connectors._connector import (
     SupportedChainsSpec,
 )
 from almanak.connectors._strategy_base.solana_program import SolanaProgramSpec
+from almanak.core.chains.solana import DESCRIPTOR as SOLANA
 
 JUPITER_V6_PROGRAM_ID = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"
 
@@ -36,7 +37,7 @@ CONNECTOR = Connector(
         attribute="JupiterCompiler",
     ),
     strategy_intents=("SWAP",),
-    supported_chains=SupportedChainsSpec(chains=("solana",)),
+    supported_chains=SupportedChainsSpec(chains=(SOLANA,)),
 )
 
 __all__ = ["CONNECTOR", "JUPITER_V6_PROGRAM_ID"]

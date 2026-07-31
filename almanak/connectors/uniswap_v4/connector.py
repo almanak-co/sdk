@@ -11,6 +11,13 @@ from almanak.connectors._connector import (
     SupportedChainsSpec,
 )
 from almanak.connectors._strategy_base.address_table import AbiFamily, AddressTableSpec
+from almanak.core.chains.arbitrum import DESCRIPTOR as ARBITRUM
+from almanak.core.chains.avalanche import DESCRIPTOR as AVALANCHE
+from almanak.core.chains.base import DESCRIPTOR as BASE
+from almanak.core.chains.bsc import DESCRIPTOR as BSC
+from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
+from almanak.core.chains.optimism import DESCRIPTOR as OPTIMISM
+from almanak.core.chains.polygon import DESCRIPTOR as POLYGON
 
 CONNECTOR = Connector(
     name="uniswap_v4",
@@ -107,9 +114,7 @@ CONNECTOR = Connector(
     # ``UNISWAP_V4`` in addresses.py and the 28 on-chain intent tests (7 chains x
     # 4 intents). ChainRegistry canonical names are used (``bsc``, not the
     # ``bnb`` alias).
-    supported_chains=SupportedChainsSpec(
-        chains=("ethereum", "arbitrum", "base", "optimism", "polygon", "avalanche", "bsc")
-    ),
+    supported_chains=SupportedChainsSpec(chains=(ETHEREUM, ARBITRUM, BASE, OPTIMISM, POLYGON, AVALANCHE, BSC)),
     # Matrix output covers deployed V4 chains for both swap and LP rows.
     strategy_matrix_entries=(
         StrategyMatrixEntry(

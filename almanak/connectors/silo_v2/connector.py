@@ -10,6 +10,7 @@ from almanak.connectors._connector import (
     SupportedChainsSpec,
 )
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
+from almanak.core.chains.avalanche import DESCRIPTOR as AVALANCHE
 
 CONNECTOR = Connector(
     name="silo_v2",
@@ -40,7 +41,7 @@ CONNECTOR = Connector(
         attribute="silo_v2_teardown_post_condition",
     ),
     strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
-    supported_chains=SupportedChainsSpec(chains=("avalanche",)),
+    supported_chains=SupportedChainsSpec(chains=(AVALANCHE,)),
 )
 
 __all__ = ["CONNECTOR"]

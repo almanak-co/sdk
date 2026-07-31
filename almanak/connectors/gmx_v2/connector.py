@@ -15,6 +15,8 @@ from almanak.connectors._connector import (
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
 from almanak.connectors.gmx_v2.backtest_risk import BACKTEST_RISK as _BACKTEST_RISK
+from almanak.core.chains.arbitrum import DESCRIPTOR as ARBITRUM
+from almanak.core.chains.avalanche import DESCRIPTOR as AVALANCHE
 
 CONNECTOR = Connector(
     name="gmx_v2",
@@ -117,7 +119,7 @@ CONNECTOR = Connector(
     # verb — never authored by a strategy — so it lives on GMXV2Compiler.intents (the
     # compilation universe, which routes it) but not here. Do not "fix" this by adding it.
     strategy_intents=("PERP_OPEN", "PERP_CLOSE"),
-    supported_chains=SupportedChainsSpec(chains=("arbitrum", "avalanche")),
+    supported_chains=SupportedChainsSpec(chains=(ARBITRUM, AVALANCHE)),
 )
 
 __all__ = ["CONNECTOR"]

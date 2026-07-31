@@ -8,15 +8,17 @@ same end-to-end support truth.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from types import MappingProxyType
 
-from almanak.core.chains import ChainRegistry
+from almanak.core.chains import ChainDescriptor, ChainRegistry
 
 __all__ = [
     "CapabilitiesSpec",
     "SupportedChainsSpec",
 ]
+
+_EMPTY_CHAIN_OVERRIDES: Mapping[str, tuple[ChainDescriptor, ...]] = MappingProxyType({})
 
 
 def _validate_keys_and_module(spec_name: str, keys: tuple[str, ...], module: str) -> None:
@@ -55,72 +57,95 @@ class CapabilitiesSpec:
         _validate_keys_and_module("CapabilitiesSpec", self.keys, self.module)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class SupportedChainsSpec:
     """End-to-end strategy chain support declared inline by a connector.
+
+    Declarations use the registered :class:`ChainDescriptor` singleton exported
+    by each module under :mod:`almanak.core.chains`. This makes a misspelled
+    chain an import/type-check failure instead of a string that poisons
+    connector discovery at runtime.
 
     ``chains`` applies to every declared strategy intent unless an entry in
     ``intent_overrides`` replaces it. ``protocol_overrides`` gives an owned
     protocol alias a different chain set (for example Agni Finance on Mantle).
-    ``chains=None`` is an explicit off-chain declaration.
+    ``chains=None`` is an explicit off-chain declaration. Construction projects
+    descriptors to canonical string names immediately so the existing metadata,
+    repr, equality, CLI, config, and serialization boundaries remain stable.
     """
 
     chains: tuple[str, ...] | None
-    intent_overrides: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
-    protocol_overrides: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    intent_overrides: Mapping[str, tuple[str, ...]]
+    protocol_overrides: Mapping[str, tuple[str, ...]]
 
-    def __post_init__(self) -> None:
-        """Validate and freeze canonical chain declarations."""
-        canonical_chains = self._canonicalize_chains("chains", self.chains, allow_none=True)
-        canonical_intents = self._canonicalize_overrides("intent_overrides", self.intent_overrides, intent_keys=True)
-        canonical_protocols = self._canonicalize_overrides(
+    def __init__(
+        self,
+        *,
+        chains: tuple[ChainDescriptor, ...] | None,
+        intent_overrides: Mapping[str, tuple[ChainDescriptor, ...]] = _EMPTY_CHAIN_OVERRIDES,
+        protocol_overrides: Mapping[str, tuple[ChainDescriptor, ...]] = _EMPTY_CHAIN_OVERRIDES,
+    ) -> None:
+        """Validate descriptor inputs and freeze their canonical names."""
+        validated_chains = self._validate_chain_refs("chains", chains, allow_none=True)
+        validated_intents = self._validate_overrides("intent_overrides", intent_overrides, intent_keys=True)
+        validated_protocols = self._validate_overrides(
             "protocol_overrides",
-            self.protocol_overrides,
+            protocol_overrides,
             intent_keys=False,
         )
-        if canonical_chains is None and (canonical_intents or canonical_protocols):
+        if validated_chains is None and (validated_intents or validated_protocols):
             raise ValueError("off-chain SupportedChainsSpec cannot declare intent or protocol overrides")
-        object.__setattr__(self, "chains", canonical_chains)
-        object.__setattr__(self, "intent_overrides", MappingProxyType(canonical_intents))
-        object.__setattr__(self, "protocol_overrides", MappingProxyType(canonical_protocols))
+        object.__setattr__(self, "chains", validated_chains)
+        object.__setattr__(self, "intent_overrides", MappingProxyType(validated_intents))
+        object.__setattr__(self, "protocol_overrides", MappingProxyType(validated_protocols))
 
     @staticmethod
-    def _canonicalize_chains(
+    def _validate_chain_refs(
         field_name: str,
-        chains: tuple[str, ...] | None,
+        chains: tuple[ChainDescriptor, ...] | None,
         *,
         allow_none: bool,
     ) -> tuple[str, ...] | None:
         if chains is None:
             if allow_none:
                 return None
-            raise ValueError(f"SupportedChainsSpec.{field_name} must be a non-empty tuple[str, ...]")
+            raise ValueError(f"SupportedChainsSpec.{field_name} must be a non-empty tuple[ChainDescriptor, ...]")
         if not isinstance(chains, tuple) or not chains:
-            raise ValueError(f"SupportedChainsSpec.{field_name} must be a non-empty tuple[str, ...], got {chains!r}")
-        bad = [chain for chain in chains if not isinstance(chain, str) or not chain.strip()]
+            raise ValueError(
+                f"SupportedChainsSpec.{field_name} must be a non-empty tuple[ChainDescriptor, ...], got {chains!r}"
+            )
+        bad = [chain for chain in chains if not isinstance(chain, ChainDescriptor)]
         if bad:
-            raise ValueError(f"SupportedChainsSpec.{field_name} contains invalid chain values: {bad!r}")
-        canonical: list[str] = []
+            raise TypeError(
+                f"SupportedChainsSpec.{field_name} must contain registered ChainDescriptor references, got {bad!r}"
+            )
+        canonical_names: list[str] = []
         for chain in chains:
-            descriptor = ChainRegistry.try_resolve(chain)
-            if descriptor is None:
-                raise ValueError(f"SupportedChainsSpec.{field_name} contains unknown chain {chain!r}")
-            canonical.append(descriptor.name)
-        if len(set(canonical)) != len(canonical):
-            raise ValueError(f"SupportedChainsSpec.{field_name} contains duplicate canonical chains: {canonical!r}")
-        return tuple(canonical)
+            registered = ChainRegistry.try_resolve(chain.name)
+            if registered is not chain:
+                raise ValueError(
+                    f"SupportedChainsSpec.{field_name} contains unregistered "
+                    f"ChainDescriptor {chain.name!r}; import the descriptor singleton "
+                    f"from almanak.core.chains.{chain.name}"
+                )
+            canonical_names.append(chain.name)
+        if len(set(canonical_names)) != len(canonical_names):
+            raise ValueError(
+                f"SupportedChainsSpec.{field_name} contains duplicate canonical chains: {canonical_names!r}"
+            )
+        return tuple(canonical_names)
 
     @classmethod
-    def _canonicalize_overrides(
+    def _validate_overrides(
         cls,
         field_name: str,
-        overrides: Mapping[str, tuple[str, ...]],
+        overrides: Mapping[str, tuple[ChainDescriptor, ...]],
         *,
         intent_keys: bool,
     ) -> dict[str, tuple[str, ...]]:
         if not isinstance(overrides, Mapping):
             raise ValueError(f"SupportedChainsSpec.{field_name} must be a mapping, got {overrides!r}")
-        canonical: dict[str, tuple[str, ...]] = {}
+        validated: dict[str, tuple[str, ...]] = {}
         for raw_key, chains in overrides.items():
             if not isinstance(raw_key, str) or not raw_key.strip():
                 raise ValueError(f"SupportedChainsSpec.{field_name} contains invalid key {raw_key!r}")
@@ -132,12 +157,12 @@ class SupportedChainsSpec:
             # failure, just missing coverage for the cell it was meant to pin.
             stripped = raw_key.strip()
             key = stripped.upper() if intent_keys else stripped.lower().replace("-", "_")
-            if key in canonical:
+            if key in validated:
                 raise ValueError(f"SupportedChainsSpec.{field_name} contains duplicate key {key!r}")
-            resolved = cls._canonicalize_chains(f"{field_name}[{raw_key!r}]", chains, allow_none=False)
-            assert resolved is not None
-            canonical[key] = resolved
-        return canonical
+            names = cls._validate_chain_refs(f"{field_name}[{raw_key!r}]", chains, allow_none=False)
+            assert names is not None
+            validated[key] = names
+        return validated
 
     @property
     def is_offchain(self) -> bool:

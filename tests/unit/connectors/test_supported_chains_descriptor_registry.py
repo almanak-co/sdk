@@ -8,6 +8,9 @@ from pathlib import Path
 import pytest
 
 from almanak.connectors._connector import CONNECTOR_REGISTRY, SupportedChainsSpec
+from almanak.core.chains.base import DESCRIPTOR as BASE
+from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
+from almanak.core.chains.polygon import DESCRIPTOR as POLYGON
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _CHAINS_DIR = _REPO_ROOT / "almanak" / "core" / "chains"
@@ -111,7 +114,7 @@ def test_agni_override_does_not_widen_canonical_uniswap() -> None:
     manager, quoter and router), so "mantle absent from uniswap_v3" would assert a
     coverage claim that is false, not the leak this test exists to catch.
     """
-    spec = SupportedChainsSpec(chains=("ethereum", "base"), protocol_overrides={"forky": ("polygon",)})
+    spec = SupportedChainsSpec(chains=(ETHEREUM, BASE), protocol_overrides={"forky": (POLYGON,)})
     assert spec.chains_for_protocol("forky") == ("polygon",)
     # The override's chain must NOT appear in the canonical read...
     assert spec.chains_for_protocol("canonical_reader") == ("ethereum", "base")
@@ -149,9 +152,9 @@ def test_override_keys_are_stripped_before_normalisation() -> None:
     cell it was meant to pin silently kept the default coverage.
     """
     spec = SupportedChainsSpec(
-        chains=("ethereum", "base"),
-        intent_overrides={" LP_OPEN ": ("base",)},
-        protocol_overrides={"  forky\t": ("polygon",)},
+        chains=(ETHEREUM, BASE),
+        intent_overrides={" LP_OPEN ": (BASE,)},
+        protocol_overrides={"  forky\t": (POLYGON,)},
     )
     assert spec.chains_for_intent("LP_OPEN") == ("base",)
     assert spec.chains_for_protocol("forky") == ("polygon",)
@@ -161,4 +164,4 @@ def test_override_keys_are_stripped_before_normalisation() -> None:
     # Stripping happens BEFORE the duplicate check, so padded and clean
     # spellings of one key collide instead of both being stored.
     with pytest.raises(ValueError, match="duplicate key"):
-        SupportedChainsSpec(chains=("ethereum",), intent_overrides={"SWAP": ("ethereum",), " SWAP": ("ethereum",)})
+        SupportedChainsSpec(chains=(ETHEREUM,), intent_overrides={"SWAP": (ETHEREUM,), " SWAP": (ETHEREUM,)})

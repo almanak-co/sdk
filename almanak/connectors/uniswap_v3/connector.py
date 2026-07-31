@@ -13,21 +13,33 @@ from almanak.connectors._connector import (
 )
 from almanak.connectors._strategy_base.address_table import AbiFamily, AddressTableSpec
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
+from almanak.core.chains.arbitrum import DESCRIPTOR as ARBITRUM
+from almanak.core.chains.avalanche import DESCRIPTOR as AVALANCHE
+from almanak.core.chains.base import DESCRIPTOR as BASE
+from almanak.core.chains.bsc import DESCRIPTOR as BSC
+from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
+from almanak.core.chains.mantle import DESCRIPTOR as MANTLE
+from almanak.core.chains.monad import DESCRIPTOR as MONAD
+from almanak.core.chains.optimism import DESCRIPTOR as OPTIMISM
+from almanak.core.chains.polygon import DESCRIPTOR as POLYGON
+from almanak.core.chains.robinhood import DESCRIPTOR as ROBINHOOD
+from almanak.core.chains.xlayer import DESCRIPTOR as XLAYER
+from almanak.core.chains.zerog import DESCRIPTOR as ZEROG
 
 _V3_ABI_FAMILIES = (AbiFamily.V3_FACTORY, AbiFamily.V3_NPM)
 
 #: Chains with a proven 4-layer LP lifecycle (LP_OPEN / LP_CLOSE /
 #: LP_COLLECT_FEES) as well as SWAP.
 _LP_CHAINS = (
-    "ethereum",
-    "arbitrum",
-    "optimism",
-    "polygon",
-    "base",
-    "avalanche",
-    "bsc",
-    "monad",
-    "robinhood",
+    ETHEREUM,
+    ARBITRUM,
+    OPTIMISM,
+    POLYGON,
+    BASE,
+    AVALANCHE,
+    BSC,
+    MONAD,
+    ROBINHOOD,
 )
 
 #: SWAP-proven, LP-unproven. Each is a distinct deployment with a full address
@@ -42,7 +54,7 @@ _LP_CHAINS = (
 #: `check_intent_coverage --enforce` fails on all three LP verbs for them.
 #: `linea` is in neither tuple: it has no suite for any verb, so it stays
 #: unpublished until one exists.
-_SWAP_ONLY_CHAINS = ("mantle", "xlayer", "zerog")
+_SWAP_ONLY_CHAINS = (MANTLE, XLAYER, ZEROG)
 
 _VOLUME_SUBGRAPH_URLS = {
     "ethereum": "https://gateway.thegraph.com/api/subgraphs/id/5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV",
@@ -212,7 +224,7 @@ CONNECTOR = Connector(
         # its own NonfungiblePositionManager (AGNI_FINANCE["mantle"]) and its
         # LP lifecycle is proven on-chain by tests/intents/mantle/test_agni_lp.py
         # (LP_OPEN / LP_CLOSE). Intersecting here would delete proven coverage.
-        protocol_overrides={"agni_finance": ("mantle",)},
+        protocol_overrides={"agni_finance": (MANTLE,)},
     ),
 )
 

@@ -8,6 +8,7 @@ from almanak.connectors._connector import (
     ImportRef,
     SupportedChainsSpec,
 )
+from almanak.core.chains.zerog import DESCRIPTOR as ZEROG
 
 CONNECTOR = Connector(
     name="gimo",
@@ -21,7 +22,7 @@ CONNECTOR = Connector(
         attribute="GimoCompiler",
     ),
     strategy_intents=("STAKE", "UNSTAKE"),
-    supported_chains=SupportedChainsSpec(chains=("zerog",)),
+    supported_chains=SupportedChainsSpec(chains=(ZEROG,)),
 )
 
 __all__ = ["CONNECTOR"]

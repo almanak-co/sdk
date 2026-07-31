@@ -14,6 +14,7 @@ from almanak.connectors._connector import (
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
 from almanak.connectors.spark.backtest_risk import BACKTEST_RISK as _BACKTEST_RISK
+from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
 
 CONNECTOR = Connector(
     name="spark",
@@ -73,7 +74,7 @@ CONNECTOR = Connector(
     metadata_amount_encoding=MetadataAmountEncoding(lending="wei"),
     backtest_risk=_BACKTEST_RISK,
     strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
-    supported_chains=SupportedChainsSpec(chains=("ethereum",)),
+    supported_chains=SupportedChainsSpec(chains=(ETHEREUM,)),
 )
 
 __all__ = ["CONNECTOR"]

@@ -92,6 +92,7 @@ from almanak.connectors._strategy_base.vault_representatives import VaultReprese
 from almanak.connectors._strategy_base.vault_tool_registry import (
     VaultToolConnector,
 )
+from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
 from almanak.framework.permissions.models import ContractPermission
 
 EXPECTED_CONNECTOR_KINDS = {
@@ -805,7 +806,7 @@ def test_connector_accepts_strategy_support_metadata() -> None:
         name="strategy_supported",
         kind=ProtocolKind.SWAP,
         strategy_intents=("SWAP",),
-        supported_chains=SupportedChainsSpec(chains=("ethereum",)),
+        supported_chains=SupportedChainsSpec(chains=(ETHEREUM,)),
         strategy_matrix_entries=(
             StrategyMatrixEntry(
                 matrix_name="strategy_supported",
@@ -817,7 +818,7 @@ def test_connector_accepts_strategy_support_metadata() -> None:
 
     assert connector.has_strategy_support is True
     assert connector.strategy_intents == ("SWAP",)
-    assert connector.supported_chains == SupportedChainsSpec(chains=("ethereum",))
+    assert connector.supported_chains == SupportedChainsSpec(chains=(ETHEREUM,))
 
 
 def test_connector_rejects_supported_chains_without_strategy_intents() -> None:
@@ -826,7 +827,7 @@ def test_connector_rejects_supported_chains_without_strategy_intents() -> None:
         Connector(
             name="bad_supported_chains",
             kind=ProtocolKind.SWAP,
-            supported_chains=SupportedChainsSpec(chains=("ethereum",)),
+            supported_chains=SupportedChainsSpec(chains=(ETHEREUM,)),
         )
 
 
@@ -837,7 +838,7 @@ def test_connector_rejects_duplicate_strategy_intents() -> None:
             name="bad_strategy_intents",
             kind=ProtocolKind.SWAP,
             strategy_intents=("SWAP", "SWAP"),
-            supported_chains=SupportedChainsSpec(chains=("ethereum",)),
+            supported_chains=SupportedChainsSpec(chains=(ETHEREUM,)),
         )
 
 
@@ -851,7 +852,7 @@ def test_connector_registry_filters_strategy_support() -> None:
             name="with_strategy",
             kind=ProtocolKind.SWAP,
             strategy_intents=("SWAP",),
-            supported_chains=SupportedChainsSpec(chains=("ethereum",)),
+            supported_chains=SupportedChainsSpec(chains=(ETHEREUM,)),
         ),
     )
 

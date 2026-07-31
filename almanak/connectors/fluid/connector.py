@@ -12,6 +12,10 @@ from almanak.connectors._connector import (
     SupportedChainsSpec,
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
+from almanak.core.chains.arbitrum import DESCRIPTOR as ARBITRUM
+from almanak.core.chains.base import DESCRIPTOR as BASE
+from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
+from almanak.core.chains.polygon import DESCRIPTOR as POLYGON
 
 CONNECTOR = Connector(
     name="fluid",
@@ -96,8 +100,8 @@ CONNECTOR = Connector(
     # The per-intent override is the canonical truth for both runtime checks
     # and generated matrix rows.
     supported_chains=SupportedChainsSpec(
-        chains=("arbitrum", "base"),
-        intent_overrides={"SWAP": ("arbitrum", "base", "ethereum", "polygon")},
+        chains=(ARBITRUM, BASE),
+        intent_overrides={"SWAP": (ARBITRUM, BASE, ETHEREUM, POLYGON)},
     ),
     strategy_matrix_entries=(
         StrategyMatrixEntry(

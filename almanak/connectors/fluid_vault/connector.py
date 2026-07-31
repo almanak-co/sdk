@@ -13,6 +13,8 @@ from almanak.connectors._connector import (
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
+from almanak.core.chains.arbitrum import DESCRIPTOR as ARBITRUM
+from almanak.core.chains.base import DESCRIPTOR as BASE
 
 CONNECTOR = Connector(
     # Vault NFT-CDP borrow surface (Phase 3, VIB-5031, ADR r2 Q0): a second
@@ -87,7 +89,7 @@ CONNECTOR = Connector(
     strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
     # Checkpoint-1 scope — the exact lending universe, no cross-product
     # over-claim (compile-time chain guard retained as defense-in-depth).
-    supported_chains=SupportedChainsSpec(chains=("arbitrum", "base")),
+    supported_chains=SupportedChainsSpec(chains=(ARBITRUM, BASE)),
     strategy_matrix_entries=(
         StrategyMatrixEntry(
             matrix_name="fluid_vault",

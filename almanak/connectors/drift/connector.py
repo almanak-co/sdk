@@ -11,6 +11,7 @@ from almanak.connectors._connector import (
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
 from almanak.connectors._strategy_base.solana_program import SolanaProgramSpec
 from almanak.connectors.drift.constants import DRIFT_PROGRAM_ID
+from almanak.core.chains.solana import DESCRIPTOR as SOLANA
 
 CONNECTOR = Connector(
     name="drift",
@@ -39,7 +40,7 @@ CONNECTOR = Connector(
         attribute="PRIMITIVE",
     ),
     strategy_intents=("PERP_OPEN", "PERP_CLOSE"),
-    supported_chains=SupportedChainsSpec(chains=("solana",)),
+    supported_chains=SupportedChainsSpec(chains=(SOLANA,)),
 )
 
 __all__ = ["CONNECTOR"]

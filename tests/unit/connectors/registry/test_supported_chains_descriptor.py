@@ -2,17 +2,24 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from types import MappingProxyType
 
 import pytest
 
 from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import Connector, StrategyMatrixEntry, SupportedChainsSpec
+from almanak.core.chains.arbitrum import DESCRIPTOR as ARBITRUM
+from almanak.core.chains.base import DESCRIPTOR as BASE
+from almanak.core.chains.bsc import DESCRIPTOR as BSC
+from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
+from almanak.core.chains.mantle import DESCRIPTOR as MANTLE
+from almanak.core.chains.polygon import DESCRIPTOR as POLYGON
 
 
 def _connector(
     *,
-    supported_chains: SupportedChainsSpec | None = SupportedChainsSpec(chains=("ethereum",)),
+    supported_chains: SupportedChainsSpec | None = SupportedChainsSpec(chains=(ETHEREUM,)),
     intents: tuple[str, ...] | None = ("SWAP",),
     aliases: tuple[str, ...] = (),
 ) -> Connector:
@@ -25,23 +32,25 @@ def _connector(
     )
 
 
-def test_chain_aliases_canonicalize() -> None:
-    spec = SupportedChainsSpec(chains=("bnb", "ethereum"))
+def test_registered_descriptors_project_canonical_names() -> None:
+    spec = SupportedChainsSpec(chains=(BSC, ETHEREUM))
     assert spec.chains == ("bsc", "ethereum")
+    assert spec.all_chains() == ("bsc", "ethereum")
+    assert spec.supports(chain="bnb")
 
 
 @pytest.mark.parametrize(
-    ("chains", "match"),
+    ("chains", "error", "match"),
     [
-        ((), "non-empty tuple"),
-        (("ethereum", "ethereum"), "duplicate canonical chains"),
-        (("bnb", "bsc"), "duplicate canonical chains"),
-        (("ethereuem",), "unknown chain"),
+        ((), ValueError, "non-empty tuple"),
+        ((ETHEREUM, ETHEREUM), ValueError, "duplicate canonical chains"),
+        (("ethereum",), TypeError, "registered ChainDescriptor"),
+        ((replace(ETHEREUM, name="ethereuem"),), ValueError, "unregistered ChainDescriptor"),
     ],
 )
-def test_invalid_chain_declarations_fail(chains: tuple[str, ...], match: str) -> None:
-    with pytest.raises(ValueError, match=match):
-        SupportedChainsSpec(chains=chains)
+def test_invalid_chain_declarations_fail(chains: object, error: type[Exception], match: str) -> None:
+    with pytest.raises(error, match=match):
+        SupportedChainsSpec(chains=chains)  # type: ignore[arg-type]
 
 
 def test_offchain_declaration_is_explicit() -> None:
@@ -56,7 +65,7 @@ def test_offchain_declaration_rejects_overrides() -> None:
     with pytest.raises(ValueError, match="off-chain"):
         SupportedChainsSpec(
             chains=None,
-            intent_overrides={"SWAP": ("ethereum",)},
+            intent_overrides={"SWAP": (ETHEREUM,)},
         )
 
 
@@ -66,8 +75,8 @@ def test_intent_override_replaces_default() -> None:
         kind=ProtocolKind.SWAP,
         strategy_intents=("SWAP", "SUPPLY"),
         supported_chains=SupportedChainsSpec(
-            chains=("arbitrum", "base"),
-            intent_overrides={"swap": ("arbitrum", "base", "ethereum", "polygon")},
+            chains=(ARBITRUM, BASE),
+            intent_overrides={"swap": (ARBITRUM, BASE, ETHEREUM, POLYGON)},
         ),
     )
     assert connector.supported_chains_for_intent("SWAP") == (
@@ -83,8 +92,8 @@ def test_protocol_override_is_alias_specific() -> None:
     connector = _connector(
         aliases=("fork",),
         supported_chains=SupportedChainsSpec(
-            chains=("ethereum",),
-            protocol_overrides={"fork": ("mantle",)},
+            chains=(ETHEREUM,),
+            protocol_overrides={"fork": (MANTLE,)},
         ),
     )
     assert connector.supported_chains_for_protocol("example") == ("ethereum",)
@@ -95,9 +104,9 @@ def test_protocol_override_is_alias_specific() -> None:
 
 def test_override_mappings_are_frozen() -> None:
     spec = SupportedChainsSpec(
-        chains=("ethereum",),
-        intent_overrides={"SWAP": ("base",)},
-        protocol_overrides={"fork": ("mantle",)},
+        chains=(ETHEREUM,),
+        intent_overrides={"SWAP": (BASE,)},
+        protocol_overrides={"fork": (MANTLE,)},
     )
     assert isinstance(spec.intent_overrides, MappingProxyType)
     assert isinstance(spec.protocol_overrides, MappingProxyType)
@@ -109,8 +118,8 @@ def test_undeclared_intent_override_is_rejected() -> None:
     with pytest.raises(ValueError, match="undeclared strategy intents"):
         _connector(
             supported_chains=SupportedChainsSpec(
-                chains=("ethereum",),
-                intent_overrides={"BORROW": ("base",)},
+                chains=(ETHEREUM,),
+                intent_overrides={"BORROW": (BASE,)},
             )
         )
 
@@ -119,8 +128,8 @@ def test_unowned_protocol_override_is_rejected() -> None:
     with pytest.raises(ValueError, match="connector aliases"):
         _connector(
             supported_chains=SupportedChainsSpec(
-                chains=("ethereum",),
-                protocol_overrides={"not_owned": ("mantle",)},
+                chains=(ETHEREUM,),
+                protocol_overrides={"not_owned": (MANTLE,)},
             )
         )
 
@@ -151,8 +160,8 @@ def test_matrix_entries_group_intents_without_owning_chains() -> None:
         kind=ProtocolKind.SWAP,
         strategy_intents=("SWAP", "SUPPLY"),
         supported_chains=SupportedChainsSpec(
-            chains=("arbitrum",),
-            intent_overrides={"SWAP": ("arbitrum", "ethereum")},
+            chains=(ARBITRUM,),
+            intent_overrides={"SWAP": (ARBITRUM, ETHEREUM)},
         ),
         strategy_matrix_entries=(
             StrategyMatrixEntry(matrix_name="grouped", category="swap", intents=("SWAP",)),
@@ -171,7 +180,7 @@ def test_matrix_entry_rejects_undeclared_or_duplicate_intents() -> None:
             name="unknown_row_intent",
             kind=ProtocolKind.SWAP,
             strategy_intents=("SWAP",),
-            supported_chains=SupportedChainsSpec(chains=("ethereum",)),
+            supported_chains=SupportedChainsSpec(chains=(ETHEREUM,)),
             strategy_matrix_entries=(
                 StrategyMatrixEntry(
                     matrix_name="unknown_row_intent",
@@ -186,7 +195,7 @@ def test_matrix_entry_rejects_undeclared_or_duplicate_intents() -> None:
             name="duplicate_row_intent",
             kind=ProtocolKind.SWAP,
             strategy_intents=("SWAP",),
-            supported_chains=SupportedChainsSpec(chains=("ethereum",)),
+            supported_chains=SupportedChainsSpec(chains=(ETHEREUM,)),
             strategy_matrix_entries=(
                 StrategyMatrixEntry(
                     matrix_name="duplicate_row_intent",

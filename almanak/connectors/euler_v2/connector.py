@@ -10,6 +10,10 @@ from almanak.connectors._connector import (
     SupportedChainsSpec,
 )
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
+from almanak.core.chains.arbitrum import DESCRIPTOR as ARBITRUM
+from almanak.core.chains.avalanche import DESCRIPTOR as AVALANCHE
+from almanak.core.chains.base import DESCRIPTOR as BASE
+from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
 
 CONNECTOR = Connector(
     name="euler_v2",
@@ -40,7 +44,7 @@ CONNECTOR = Connector(
         attribute="euler_v2_teardown_post_condition",
     ),
     strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
-    supported_chains=SupportedChainsSpec(chains=("ethereum", "avalanche", "base", "arbitrum")),
+    supported_chains=SupportedChainsSpec(chains=(ETHEREUM, AVALANCHE, BASE, ARBITRUM)),
 )
 
 __all__ = ["CONNECTOR"]
