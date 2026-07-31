@@ -355,11 +355,14 @@ omit = [
 #                178 781 covered, 30 353 missing). The CRAP-offender sweep added
 #                branch-complete unit coverage for every non-allowlisted
 #                gate-parity offender >= 100. Bumped to 85 → 0.49 pt buffer.
+#   2026-07-31 — CI measured 87.31% on main HEAD 41f2af7 (Main run 30638073675,
+#                test_suite / tests job: 214 564 stmts, 187 331 covered, 27 233
+#                missing). Bumped to 87 → 0.31 pt buffer.
 #
 # fail_under is a no-regress gate, NOT the goal — the 80% target lives in
 # docs/internal/coverage-improvement-plan.md §3. Ratchet policy (each phase increments
 # fail_under to its exit-criteria number, never decrements) is in §8 Phase 0 of the same doc.
-fail_under = 85
+fail_under = 87
 show_missing = true
 skip_empty = true
 
