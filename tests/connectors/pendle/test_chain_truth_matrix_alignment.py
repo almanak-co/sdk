@@ -138,5 +138,5 @@ def test_pendle_matrix_entry_renders_yield_category() -> None:
         "Pendle must declare exactly one explicit yield matrix entry; "
         f"got {[(e.matrix_name, e.category) for e in entries]}"
     )
-    assert yield_rows[0].intents == ("SWAP", "LP_OPEN", "LP_CLOSE", "WITHDRAW")
+    assert yield_rows[0].intent_names == ("SWAP", "LP_OPEN", "LP_CLOSE", "WITHDRAW")
     assert set(CONNECTOR.supported_chains_for_protocol("pendle")) == {"arbitrum", "ethereum"}

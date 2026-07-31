@@ -9,6 +9,7 @@ from almanak.connectors._connector import (
     SupportedChainsSpec,
 )
 from almanak.core.chains.zerog import DESCRIPTOR as ZEROG
+from almanak.core.intent_types import IntentType
 
 CONNECTOR = Connector(
     name="gimo",
@@ -21,7 +22,7 @@ CONNECTOR = Connector(
         module="almanak.connectors.gimo.compiler",
         attribute="GimoCompiler",
     ),
-    strategy_intents=("STAKE", "UNSTAKE"),
+    strategy_intents=(IntentType.STAKE, IntentType.UNSTAKE),
     supported_chains=SupportedChainsSpec(chains=(ZEROG,)),
 )
 

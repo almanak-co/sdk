@@ -13,6 +13,7 @@ from almanak.connectors._connector import (
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
 from almanak.connectors._strategy_base.position_read_base import FUNGIBLE_LP
 from almanak.core.chains.arbitrum import DESCRIPTOR as ARBITRUM
+from almanak.core.intent_types import IntentType
 
 CONNECTOR = Connector(
     # DEX LP surface (Phase 4, VIB-5032): a third thin manifest over the fluid
@@ -55,7 +56,7 @@ CONNECTOR = Connector(
             attribute="read_fungible_lp_position",
         ),
     ),
-    strategy_intents=("LP_OPEN", "LP_CLOSE"),
+    strategy_intents=(IntentType.LP_OPEN, IntentType.LP_CLOSE),
     # v1 scope — arbitrum only (the sole chain whose SmartLending wrappers were
     # round-tripped on-chain). base/ethereum/polygon need per-chain resolver
     # verification before being added.

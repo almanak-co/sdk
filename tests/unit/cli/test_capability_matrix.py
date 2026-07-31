@@ -25,6 +25,7 @@ from almanak.core.chains.base import DESCRIPTOR as BASE
 from almanak.core.chains.bsc import DESCRIPTOR as BSC
 from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
 from almanak.core.chains.mantle import DESCRIPTOR as MANTLE
+from almanak.core.intent_types import IntentType
 from almanak.framework.cli.capability_matrix import (
     CAP_ACCOUNTING,
     CAP_COMPILE,
@@ -309,7 +310,7 @@ def test_intent_override_omits_unsupported_cells() -> None:
         strategy_intents=("SUPPLY", "BORROW"),
         supported_chains=SupportedChainsSpec(
             chains=(ETHEREUM, MANTLE),
-            intent_overrides={"BORROW": (ETHEREUM,)},
+            intent_overrides={IntentType.BORROW: (ETHEREUM,)},
         ),
         lending_read=_FakeLendingRead(rate_history_chains=("ethereum", "mantle")),
     )
@@ -329,7 +330,7 @@ def test_intent_override_descriptor_emits_canonical_name() -> None:
         strategy_intents=("SWAP",),
         supported_chains=SupportedChainsSpec(
             chains=(ETHEREUM,),
-            intent_overrides={"SWAP": (BSC,)},
+            intent_overrides={IntentType.SWAP: (BSC,)},
         ),
     )
     cells = _cells_for_connector(conn, _EMPTY_COVERAGE)

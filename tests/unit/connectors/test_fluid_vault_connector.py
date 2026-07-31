@@ -19,11 +19,11 @@ class TestFluidVaultManifest:
     def test_lending_intents_exactly_four(self):
         # DELEVERAGE compiles as a REPAY (BaseLendingCompiler dispatch) and
         # is deliberately NOT a declared intent row.
-        assert CONNECTOR.strategy_intents == ("SUPPLY", "BORROW", "REPAY", "WITHDRAW")
+        assert CONNECTOR.strategy_intent_names == ("SUPPLY", "BORROW", "REPAY", "WITHDRAW")
 
     def test_chains_exactly_arbitrum_base_no_cross_product(self):
         assert CONNECTOR.supported_chains_for_protocol("fluid_vault") == ("arbitrum", "base")
-        entries = {e.category: e.intents for e in CONNECTOR.strategy_matrix_entries}
+        entries = {e.category: e.intent_names for e in CONNECTOR.strategy_matrix_entries}
         assert entries == {"lending": ("SUPPLY", "BORROW", "REPAY", "WITHDRAW")}
 
     def test_kind_is_lending(self):

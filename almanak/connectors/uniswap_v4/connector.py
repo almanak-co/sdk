@@ -18,6 +18,7 @@ from almanak.core.chains.bsc import DESCRIPTOR as BSC
 from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
 from almanak.core.chains.optimism import DESCRIPTOR as OPTIMISM
 from almanak.core.chains.polygon import DESCRIPTOR as POLYGON
+from almanak.core.intent_types import IntentType
 
 CONNECTOR = Connector(
     name="uniswap_v4",
@@ -96,7 +97,7 @@ CONNECTOR = Connector(
         module="almanak.connectors.uniswap_v4.protocol_family",
         attribute="PROTOCOL_FAMILY",
     ),
-    strategy_intents=("SWAP", "LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"),
+    strategy_intents=(IntentType.SWAP, IntentType.LP_OPEN, IntentType.LP_CLOSE, IntentType.LP_COLLECT_FEES),
     # Backtests as "lp"; V4 positions are tick-ranged concentrated liquidity
     # (hooks change fee routing, not range economics). Historical-data lanes
     # for V4 are a separate, still-open support question.
@@ -120,12 +121,12 @@ CONNECTOR = Connector(
         StrategyMatrixEntry(
             matrix_name="uniswap_v4",
             category="swap",
-            intents=("SWAP",),
+            intents=(IntentType.SWAP,),
         ),
         StrategyMatrixEntry(
             matrix_name="uniswap_v4",
             category="lp",
-            intents=("LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"),
+            intents=(IntentType.LP_OPEN, IntentType.LP_CLOSE, IntentType.LP_COLLECT_FEES),
         ),
     ),
 )

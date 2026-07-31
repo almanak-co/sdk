@@ -10,6 +10,7 @@ from almanak.connectors._connector import (
 )
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
 from almanak.core.chains.monad import DESCRIPTOR as MONAD
+from almanak.core.intent_types import IntentType
 
 CONNECTOR = Connector(
     name="curvance",
@@ -26,7 +27,7 @@ CONNECTOR = Connector(
         keys=("curvance",),
         module="almanak.connectors.curvance.capabilities",
     ),
-    strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
+    strategy_intents=(IntentType.SUPPLY, IntentType.BORROW, IntentType.REPAY, IntentType.WITHDRAW),
     supported_chains=SupportedChainsSpec(chains=(MONAD,)),
 )
 

@@ -20,6 +20,7 @@ from almanak.core.chains.base import DESCRIPTOR as BASE
 from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
 from almanak.core.chains.optimism import DESCRIPTOR as OPTIMISM
 from almanak.core.chains.polygon import DESCRIPTOR as POLYGON
+from almanak.core.intent_types import IntentType
 
 CONNECTOR = Connector(
     name="compound_v3",
@@ -89,7 +90,7 @@ CONNECTOR = Connector(
         poke=ImportRef(module="almanak.connectors.compound_v3.backtest_poke", attribute="poke_compound_v3"),
     ),
     backtest_risk=_BACKTEST_RISK,
-    strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
+    strategy_intents=(IntentType.SUPPLY, IntentType.BORROW, IntentType.REPAY, IntentType.WITHDRAW),
     supported_chains=SupportedChainsSpec(chains=(ETHEREUM, ARBITRUM, BASE, OPTIMISM, POLYGON)),
 )
 

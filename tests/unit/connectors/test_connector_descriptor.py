@@ -93,6 +93,7 @@ from almanak.connectors._strategy_base.vault_tool_registry import (
     VaultToolConnector,
 )
 from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
+from almanak.core.intent_types import IntentType
 from almanak.framework.permissions.models import ContractPermission
 
 EXPECTED_CONNECTOR_KINDS = {
@@ -248,14 +249,14 @@ EXPECTED_STRATEGY_MATRIX_ENTRIES = {
         StrategyMatrixEntry(
             matrix_name="balancer",
             category="flash_loan",
-            intents=("FLASH_LOAN",),
+            intents=(IntentType.FLASH_LOAN,),
         ),
     ),
     "enso": (
         StrategyMatrixEntry(
             matrix_name="enso",
             category="aggregator",
-            intents=("SWAP",),
+            intents=(IntentType.SWAP,),
         ),
     ),
     "lagoon": (),
@@ -263,45 +264,45 @@ EXPECTED_STRATEGY_MATRIX_ENTRIES = {
         StrategyMatrixEntry(
             matrix_name="lifi",
             category="aggregator",
-            intents=("SWAP", "BRIDGE"),
+            intents=(IntentType.SWAP, IntentType.BRIDGE),
         ),
     ),
     "morpho_blue": (
         StrategyMatrixEntry(
             matrix_name="morpho_blue",
             category="lending",
-            intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
+            intents=(IntentType.SUPPLY, IntentType.BORROW, IntentType.REPAY, IntentType.WITHDRAW),
         ),
     ),
     "pendle": (
         StrategyMatrixEntry(
             matrix_name="pendle",
             category="yield",
-            intents=("SWAP", "LP_OPEN", "LP_CLOSE", "WITHDRAW"),
+            intents=(IntentType.SWAP, IntentType.LP_OPEN, IntentType.LP_CLOSE, IntentType.WITHDRAW),
         ),
     ),
     "fluid": (
         StrategyMatrixEntry(
             matrix_name="fluid",
             category="swap",
-            intents=("SWAP",),
+            intents=(IntentType.SWAP,),
         ),
         StrategyMatrixEntry(
             matrix_name="fluid",
             category="lending",
-            intents=("SUPPLY", "WITHDRAW"),
+            intents=(IntentType.SUPPLY, IntentType.WITHDRAW),
         ),
     ),
     "uniswap_v4": (
         StrategyMatrixEntry(
             matrix_name="uniswap_v4",
             category="swap",
-            intents=("SWAP",),
+            intents=(IntentType.SWAP,),
         ),
         StrategyMatrixEntry(
             matrix_name="uniswap_v4",
             category="lp",
-            intents=("LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"),
+            intents=(IntentType.LP_OPEN, IntentType.LP_CLOSE, IntentType.LP_COLLECT_FEES),
         ),
     ),
 }
@@ -805,19 +806,20 @@ def test_connector_accepts_strategy_support_metadata() -> None:
     connector = Connector(
         name="strategy_supported",
         kind=ProtocolKind.SWAP,
-        strategy_intents=("SWAP",),
+        strategy_intents=(IntentType.SWAP,),
         supported_chains=SupportedChainsSpec(chains=(ETHEREUM,)),
         strategy_matrix_entries=(
             StrategyMatrixEntry(
                 matrix_name="strategy_supported",
                 category="swap",
-                intents=("SWAP",),
+                intents=(IntentType.SWAP,),
             ),
         ),
     )
 
     assert connector.has_strategy_support is True
-    assert connector.strategy_intents == ("SWAP",)
+    assert connector.strategy_intents == (IntentType.SWAP,)
+    assert connector.strategy_intent_names == ("SWAP",)
     assert connector.supported_chains == SupportedChainsSpec(chains=(ETHEREUM,))
 
 
@@ -837,10 +839,20 @@ def test_connector_rejects_duplicate_strategy_intents() -> None:
         Connector(
             name="bad_strategy_intents",
             kind=ProtocolKind.SWAP,
-            strategy_intents=("SWAP", "SWAP"),
+            strategy_intents=(IntentType.SWAP, IntentType.SWAP),
             supported_chains=SupportedChainsSpec(chains=(ETHEREUM,)),
         )
 
+
+def test_connector_rejects_raw_string_strategy_intents() -> None:
+    """Manifest declarations must use the canonical enum, not string lookalikes."""
+    with pytest.raises(TypeError, match="only IntentType members"):
+        Connector(
+            name="stringly_strategy_intents",
+            kind=ProtocolKind.SWAP,
+            strategy_intents=("SWAP",),  # type: ignore[arg-type]
+            supported_chains=SupportedChainsSpec(chains=(ETHEREUM,)),
+        )
 
 
 def test_connector_registry_filters_strategy_support() -> None:
@@ -851,7 +863,7 @@ def test_connector_registry_filters_strategy_support() -> None:
         Connector(
             name="with_strategy",
             kind=ProtocolKind.SWAP,
-            strategy_intents=("SWAP",),
+            strategy_intents=(IntentType.SWAP,),
             supported_chains=SupportedChainsSpec(chains=(ETHEREUM,)),
         ),
     )
@@ -869,7 +881,7 @@ def test_migrated_strategy_registration_is_descriptor_owned() -> None:
 
     for name, (intents, chains) in MIGRATED_STRATEGY_REGISTRATION.items():
         connector = connectors[name]
-        assert connector.strategy_intents == intents
+        assert connector.strategy_intent_names == intents
         assert connector.supported_chains is not None
         if chains is None:
             assert connector.supported_chains.is_offchain

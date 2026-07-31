@@ -15,6 +15,7 @@ from almanak.core.chains.bsc import DESCRIPTOR as BSC
 from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
 from almanak.core.chains.optimism import DESCRIPTOR as OPTIMISM
 from almanak.core.chains.polygon import DESCRIPTOR as POLYGON
+from almanak.core.intent_types import IntentType
 
 CONNECTOR = Connector(
     name="stargate",
@@ -32,7 +33,7 @@ CONNECTOR = Connector(
         module="almanak.connectors._strategy_base.bridge_compiler",
         attribute="BridgeCompiler",
     ),
-    strategy_intents=("BRIDGE",),
+    strategy_intents=(IntentType.BRIDGE,),
     supported_chains=SupportedChainsSpec(chains=(ETHEREUM, ARBITRUM, OPTIMISM, POLYGON, BASE, AVALANCHE, BSC)),
 )
 

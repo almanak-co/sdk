@@ -1,7 +1,7 @@
 """Balancer LP intents must fail closed with a capability-scoped error (ALM-2729).
 
 Balancer is integrated for flash loans only — its connector manifest declares
-``strategy_intents=("FLASH_LOAN",)`` and there is no Balancer LP compiler route.
+``strategy_intents=(IntentType.FLASH_LOAN,)`` and there is no Balancer LP compiler route.
 Historically an ``Intent.lp_open(..., protocol="balancer")`` fell through to a
 bare "not supported" message; this asserts the enriched, capability-scoped error
 that names the protocols which DO support the LP verb, so a strategy author who

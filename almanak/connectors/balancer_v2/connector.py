@@ -18,6 +18,7 @@ from almanak.core.chains.base import DESCRIPTOR as BASE
 from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
 from almanak.core.chains.optimism import DESCRIPTOR as OPTIMISM
 from almanak.core.chains.polygon import DESCRIPTOR as POLYGON
+from almanak.core.intent_types import IntentType
 
 CONNECTOR = Connector(
     name="balancer_v2",
@@ -69,14 +70,14 @@ CONNECTOR = Connector(
         attribute="build_balancer_flash_loan",
     ),
     flash_loan_synthetic_discovery=True,
-    strategy_intents=("FLASH_LOAN",),
+    strategy_intents=(IntentType.FLASH_LOAN,),
     supported_chains=SupportedChainsSpec(chains=(ETHEREUM, ARBITRUM, OPTIMISM, POLYGON, BASE, AVALANCHE)),
     # Matrix output keeps the historical "balancer" row name for flash loans.
     strategy_matrix_entries=(
         StrategyMatrixEntry(
             matrix_name="balancer",
             category="flash_loan",
-            intents=("FLASH_LOAN",),
+            intents=(IntentType.FLASH_LOAN,),
         ),
     ),
 )

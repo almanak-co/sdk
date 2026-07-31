@@ -29,6 +29,7 @@ from almanak.core.chains.base import DESCRIPTOR as BASE
 from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
 from almanak.core.chains.optimism import DESCRIPTOR as OPTIMISM
 from almanak.core.chains.polygon import DESCRIPTOR as POLYGON
+from almanak.core.intent_types import IntentType
 from almanak.framework.backtesting.pnl.data_provider import MarketState
 from almanak.framework.backtesting.pnl.engine import (
     DefaultFeeModel,
@@ -224,7 +225,7 @@ class TestDeclaredLendingChains:
             real,
             supported_chains=SupportedChainsSpec(
                 chains=(ARBITRUM, BASE, OPTIMISM),
-                intent_overrides={"SWAP": (ARBITRUM, BASE, ETHEREUM, POLYGON)},
+                intent_overrides={IntentType.SWAP: (ARBITRUM, BASE, ETHEREUM, POLYGON)},
             ),
         )
         try:

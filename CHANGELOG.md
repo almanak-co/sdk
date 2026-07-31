@@ -30,6 +30,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Connector intent declarations are statically typed.** Connector manifests
+  now declare canonical `IntentType` members from
+  `almanak.core.intent_types` in `strategy_intents`,
+  `SupportedChainsSpec.intent_overrides`, and `StrategyMatrixEntry.intents`.
+  Raw strings and unrelated enum members are rejected during manifest
+  construction. The framework vocabulary re-exports the same enum object, and
+  CLI, docs, JSON, config, and wire boundaries continue to publish canonical
+  uppercase string values.
+
 - **Connector chain declarations are statically typed.** `SupportedChainsSpec`
   now accepts only the registered `ChainDescriptor` singletons exported from
   `almanak.core.chains.<canonical_name>` modules. Raw strings and synthetic or

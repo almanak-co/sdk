@@ -133,7 +133,7 @@ def test_descriptor_strategy_support_detector_counts_connector_manifest(tmp_path
         CONNECTOR = Connector(
             name="foo",
             kind=ProtocolKind.SWAP,
-            strategy_intents=("SWAP",),
+            strategy_intents=(IntentType.SWAP,),
             supported_chains=SupportedChainsSpec(chains=(ETHEREUM,)),
         )
         """,
@@ -149,7 +149,7 @@ def test_descriptor_strategy_support_detector_counts_annotated_manifest(tmp_path
         CONNECTOR: Connector = Connector(
             name="foo",
             kind=ProtocolKind.SWAP,
-            strategy_intents=("SWAP",),
+            strategy_intents=(IntentType.SWAP,),
             supported_chains=SupportedChainsSpec(chains=(ETHEREUM,)),
         )
         """,
@@ -186,7 +186,7 @@ def test_static_scan_accepts_descriptor_owned_strategy_registration(
         CONNECTOR = Connector(
             name="foo",
             kind=ProtocolKind.SWAP,
-            strategy_intents=("SWAP",),
+            strategy_intents=(IntentType.SWAP,),
             supported_chains=SupportedChainsSpec(chains=(ETHEREUM,)),
         )
         """,
@@ -214,7 +214,7 @@ def test_static_scan_rejects_legacy_registration_even_with_descriptor(
         CONNECTOR = Connector(
             name="foo",
             kind=ProtocolKind.SWAP,
-            strategy_intents=("SWAP",),
+            strategy_intents=(IntentType.SWAP,),
             supported_chains=SupportedChainsSpec(chains=(ETHEREUM,)),
         )
         """,
@@ -337,7 +337,7 @@ def test_excluded_dir_with_descriptor_registration_fails(
         CONNECTOR = Connector(
             name="base",
             kind=ProtocolKind.SWAP,
-            strategy_intents=("SWAP",),
+            strategy_intents=(IntentType.SWAP,),
             supported_chains=SupportedChainsSpec(chains=(ETHEREUM,)),
         )
         """,
@@ -371,7 +371,7 @@ def test_excluded_dir_with_both_registration_sources_lists_both(
         CONNECTOR = Connector(
             name="base",
             kind=ProtocolKind.SWAP,
-            strategy_intents=("SWAP",),
+            strategy_intents=(IntentType.SWAP,),
             supported_chains=SupportedChainsSpec(chains=(ETHEREUM,)),
         )
         """,

@@ -10,6 +10,7 @@ from almanak.connectors._connector import (
     SupportedChainsSpec,
 )
 from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
+from almanak.core.intent_types import IntentType
 
 CONNECTOR = Connector(
     name="lido",
@@ -30,7 +31,7 @@ CONNECTOR = Connector(
         module="almanak.connectors.lido.compiler",
         attribute="LidoCompiler",
     ),
-    strategy_intents=("STAKE", "UNSTAKE"),
+    strategy_intents=(IntentType.STAKE, IntentType.UNSTAKE),
     supported_chains=SupportedChainsSpec(chains=(ETHEREUM,)),
 )
 

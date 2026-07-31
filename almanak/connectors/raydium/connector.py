@@ -13,6 +13,7 @@ from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpe
 from almanak.connectors._strategy_base.solana_program import SolanaProgramSpec
 from almanak.connectors.raydium.constants import CLMM_PROGRAM_ID
 from almanak.core.chains.solana import DESCRIPTOR as SOLANA
+from almanak.core.intent_types import IntentType
 
 CONNECTOR = Connector(
     name="raydium",
@@ -44,7 +45,7 @@ CONNECTOR = Connector(
         keys=("raydium_clmm",),
         module="almanak.connectors.raydium.capabilities",
     ),
-    strategy_intents=("LP_OPEN", "LP_CLOSE"),
+    strategy_intents=(IntentType.LP_OPEN, IntentType.LP_CLOSE),
     supported_chains=SupportedChainsSpec(chains=(SOLANA,)),
     backtest_strategy_type=BacktestStrategyTypeDecl(
         strategy_type="lp",

@@ -10,6 +10,7 @@ from almanak.connectors._connector import (
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
 from almanak.core.chains.arbitrum import DESCRIPTOR as ARBITRUM
+from almanak.core.intent_types import IntentType
 
 CONNECTOR = Connector(
     name="camelot",
@@ -35,7 +36,7 @@ CONNECTOR = Connector(
         module="almanak.connectors.camelot.compiler",
         attribute="CamelotCompiler",
     ),
-    strategy_intents=("SWAP",),
+    strategy_intents=(IntentType.SWAP,),
     supported_chains=SupportedChainsSpec(chains=(ARBITRUM,)),
 )
 

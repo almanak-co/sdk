@@ -25,6 +25,7 @@ from __future__ import annotations
 import pytest
 
 from almanak.connectors._connector import CONNECTOR_REGISTRY
+from almanak.core.intent_types import IntentType
 from almanak.framework.chain_family import _svm_dispatch
 from almanak.framework.chain_family._svm_dispatch import (
     _SOLANA_DEFAULT_LP_PROTOCOL,
@@ -157,7 +158,7 @@ class TestRoutingIsDerivedFromTheManifests:
         for connector in CONNECTOR_REGISTRY.all():
             if "solana" not in connector.all_supported_chains:
                 continue
-            if not {"LP_OPEN", "LP_CLOSE"}.intersection(connector.strategy_intents or ()):
+            if not {"LP_OPEN", "LP_CLOSE"}.intersection(connector.strategy_intent_names or ()):
                 continue
             (compiler_key,) = tuple(connector.compiler_keys)
             for spelling in (connector.name, compiler_key, *connector.aliases):
@@ -214,7 +215,7 @@ class TestDerivationFailsLoudOnAnAmbiguousManifest:
             name = "twoheaded"
             aliases = ()
             all_supported_chains = ("solana",)
-            strategy_intents = ("LP_OPEN",)
+            strategy_intents = (IntentType.LP_OPEN,)
             compiler_keys = frozenset({"twoheaded_a", "twoheaded_b"})
 
         monkeypatch.setattr(
@@ -234,14 +235,14 @@ class TestDerivationFailsLoudOnAnAmbiguousManifest:
             name = "left"
             aliases = ("shared",)
             all_supported_chains = ("solana",)
-            strategy_intents = ("LP_OPEN",)
+            strategy_intents = (IntentType.LP_OPEN,)
             compiler_keys = frozenset({"left_clmm"})
 
         class _Right:
             name = "right"
             aliases = ("shared",)
             all_supported_chains = ("solana",)
-            strategy_intents = ("LP_OPEN",)
+            strategy_intents = (IntentType.LP_OPEN,)
             compiler_keys = frozenset({"right_clmm"})
 
         monkeypatch.setattr(_svm_dispatch.CONNECTOR_REGISTRY, "all", lambda: (_Left(), _Right()))

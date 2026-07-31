@@ -15,6 +15,7 @@ from almanak.core.chains.arbitrum import DESCRIPTOR as ARBITRUM
 from almanak.core.chains.avalanche import DESCRIPTOR as AVALANCHE
 from almanak.core.chains.bsc import DESCRIPTOR as BSC
 from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
+from almanak.core.intent_types import IntentType
 
 CONNECTOR = Connector(
     name="traderjoe_v2",
@@ -68,7 +69,7 @@ CONNECTOR = Connector(
         module="almanak.connectors.traderjoe_v2.primitive",
         attribute="PRIMITIVE",
     ),
-    strategy_intents=("SWAP", "LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"),
+    strategy_intents=(IntentType.SWAP, IntentType.LP_OPEN, IntentType.LP_CLOSE, IntentType.LP_COLLECT_FEES),
     supported_chains=SupportedChainsSpec(chains=(AVALANCHE, ARBITRUM, BSC, ETHEREUM)),
 )
 

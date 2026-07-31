@@ -11,6 +11,7 @@ from almanak.connectors._connector import (
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
 from almanak.core.chains.bsc import DESCRIPTOR as BSC
+from almanak.core.intent_types import IntentType
 
 CONNECTOR = Connector(
     name="aster_perps",
@@ -40,7 +41,7 @@ CONNECTOR = Connector(
         spec=ImportRef(module="almanak.connectors.aster_perps.perps_read", attribute="PERPS_READ_SPEC"),
         aliases=("pancakeswap_perps",),
     ),
-    strategy_intents=("PERP_OPEN", "PERP_CLOSE"),
+    strategy_intents=(IntentType.PERP_OPEN, IntentType.PERP_CLOSE),
     supported_chains=SupportedChainsSpec(chains=(BSC,)),
 )
 

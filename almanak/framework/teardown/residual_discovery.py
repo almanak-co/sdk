@@ -105,8 +105,8 @@ def _register_manifest_teardown_residual_discoveries() -> None:
         # here skips the residual sweep for that (connector, chain) entirely
         # (VIB-5293 defect class).
         _DISCOVERY_CHAINS[name] = tuple(canonical_chain_name(str(c)).lower() for c in chains) if chains else ()
-        intents = connector_manifest.strategy_intents
-        _DISCOVERY_INTENTS[name] = frozenset(i.upper() for i in intents) if intents else frozenset()
+        intents = connector_manifest.strategy_intent_names
+        _DISCOVERY_INTENTS[name] = frozenset(intents) if intents else frozenset()
 
 
 _register_manifest_teardown_residual_discoveries()

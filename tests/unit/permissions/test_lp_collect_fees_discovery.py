@@ -58,7 +58,7 @@ _NON_NFT_POSITION_COLLECTORS = frozenset({"traderjoe_v2"})
 
 
 def _declaring_connectors() -> list[str]:
-    return sorted(m.name for m in CONNECTOR_REGISTRY.all() if _VERB in (getattr(m, "strategy_intents", None) or ()))
+    return sorted(m.name for m in CONNECTOR_REGISTRY.all() if _VERB in (m.strategy_intent_names or ()))
 
 
 def _safe_reachable_chains(connector: str) -> list[str]:
@@ -126,7 +126,7 @@ class TestDeclarationsAgree:
     def test_strategy_intents_and_hints_agree_on_fee_collection(self, connector: str) -> None:
         manifest = CONNECTOR_REGISTRY.get(connector)
         assert manifest is not None
-        declares = _VERB in (getattr(manifest, "strategy_intents", None) or ())
+        declares = _VERB in (manifest.strategy_intent_names or ())
         supports = get_permission_hints(connector).supports_standalone_fee_collection
         assert declares == supports, (
             f"{connector}: connector manifest declares {_VERB}={declares} but "

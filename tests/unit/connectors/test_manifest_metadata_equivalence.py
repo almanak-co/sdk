@@ -836,7 +836,7 @@ def test_lp_connectors_declare_economic_family() -> None:
     pick "concentrated", "bin", or "fungible" in their backtest decl.
     """
     for connector in CONNECTOR_REGISTRY.all():
-        if "LP_OPEN" not in (connector.strategy_intents or ()):
+        if "LP_OPEN" not in (connector.strategy_intent_names or ()):
             continue
         decl = connector.backtest_strategy_type
         assert decl is not None, (

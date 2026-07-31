@@ -324,7 +324,7 @@ def _connector_strategy_intents(protocol: str, *, chain: str | None = None) -> t
     connector = CONNECTOR_REGISTRY.get(protocol)
     if connector is None:
         return None
-    declared = connector.strategy_intents
+    declared = connector.strategy_intent_names
     if declared is None or chain is None:
         return declared
     return tuple(intent for intent in declared if connector.supports(chain=chain, protocol=protocol, intent=intent))

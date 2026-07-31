@@ -29,6 +29,7 @@ import pytest
 from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import Connector, SupportedChainsSpec
 from almanak.core.chains import ChainDescriptor, ChainRegistry
+from almanak.core.intent_types import IntentType
 
 
 def _chain_refs(chains) -> tuple[ChainDescriptor, ...]:
@@ -61,7 +62,7 @@ def _manifest(name: str, chains, intents, *, aliases=(), protocol_overrides=None
         name=name,
         kind=ProtocolKind.SWAP,
         aliases=aliases,
-        strategy_intents=tuple(intents),
+        strategy_intents=tuple(IntentType(intent) for intent in intents),
         supported_chains=SupportedChainsSpec(
             chains=_chain_refs(chains),
             protocol_overrides=_override_refs(protocol_overrides),
@@ -278,14 +279,14 @@ def _narrowing_manifest(name: str, chains, intents, *, dead: dict[str, tuple[str
     ``dead`` maps chain -> intents not supported there.
     """
     overrides = {
-        intent: _chain_refs(chain for chain in chains if intent not in dead.get(chain, ()))
+        IntentType(intent): _chain_refs(chain for chain in chains if intent not in dead.get(chain, ()))
         for intent in intents
         if any(intent in dead.get(chain, ()) for chain in chains)
     }
     return Connector(
         name=name,
         kind=ProtocolKind.LENDING,
-        strategy_intents=tuple(intents),
+        strategy_intents=tuple(IntentType(intent) for intent in intents),
         supported_chains=SupportedChainsSpec(
             chains=_chain_refs(chains),
             intent_overrides=overrides,

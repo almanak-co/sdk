@@ -22,6 +22,7 @@ from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
 from almanak.core.chains.monad import DESCRIPTOR as MONAD
 from almanak.core.chains.polygon import DESCRIPTOR as POLYGON
 from almanak.core.chains.robinhood import DESCRIPTOR as ROBINHOOD
+from almanak.core.intent_types import IntentType
 
 CONNECTOR = Connector(
     name="morpho_blue",
@@ -132,14 +133,20 @@ CONNECTOR = Connector(
         poke=ImportRef(module="almanak.connectors.morpho_blue.backtest_poke", attribute="poke_morpho_blue"),
     ),
     backtest_risk=_BACKTEST_RISK,
-    strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW", "FLASH_LOAN"),
+    strategy_intents=(
+        IntentType.SUPPLY,
+        IntentType.BORROW,
+        IntentType.REPAY,
+        IntentType.WITHDRAW,
+        IntentType.FLASH_LOAN,
+    ),
     supported_chains=SupportedChainsSpec(chains=(ETHEREUM, BASE, ARBITRUM, POLYGON, MONAD, ROBINHOOD)),
     # Matrix output stays lending-only even though flash-loan intent is registered.
     strategy_matrix_entries=(
         StrategyMatrixEntry(
             matrix_name="morpho_blue",
             category="lending",
-            intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
+            intents=(IntentType.SUPPLY, IntentType.BORROW, IntentType.REPAY, IntentType.WITHDRAW),
         ),
     ),
 )

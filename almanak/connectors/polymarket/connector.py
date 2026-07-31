@@ -10,6 +10,7 @@ from almanak.connectors._connector import (
 )
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
 from almanak.core.chains.polygon import DESCRIPTOR as POLYGON
+from almanak.core.intent_types import IntentType
 
 CONNECTOR = Connector(
     name="polymarket",
@@ -53,7 +54,7 @@ CONNECTOR = Connector(
         module="almanak.connectors.polymarket.gateway_stub",
         attribute="GATEWAY_STUB_SPEC",
     ),
-    strategy_intents=("PREDICTION_BUY", "PREDICTION_SELL", "PREDICTION_REDEEM"),
+    strategy_intents=(IntentType.PREDICTION_BUY, IntentType.PREDICTION_SELL, IntentType.PREDICTION_REDEEM),
     supported_chains=SupportedChainsSpec(chains=(POLYGON,)),
 )
 

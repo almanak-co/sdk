@@ -15,6 +15,7 @@ from almanak.connectors._connector import (
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
 from almanak.core.chains.base import DESCRIPTOR as BASE
 from almanak.core.chains.optimism import DESCRIPTOR as OPTIMISM
+from almanak.core.intent_types import IntentType
 
 CONNECTOR = Connector(
     name="aerodrome",
@@ -109,7 +110,7 @@ CONNECTOR = Connector(
     ),
     # Aerodrome's SWAP compiler ships amount_in as a human-readable Decimal (VIB-3747).
     metadata_amount_encoding=MetadataAmountEncoding(swap="human"),
-    strategy_intents=("SWAP", "LP_OPEN", "LP_CLOSE"),
+    strategy_intents=(IntentType.SWAP, IntentType.LP_OPEN, IntentType.LP_CLOSE),
     supported_chains=SupportedChainsSpec(
         chains=(BASE, OPTIMISM),
         # Slipstream (concentrated liquidity) is deployed on Base only. Optimism

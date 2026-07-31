@@ -11,6 +11,7 @@ from almanak.connectors._connector import (
 )
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
 from almanak.core.chains.avalanche import DESCRIPTOR as AVALANCHE
+from almanak.core.intent_types import IntentType
 
 CONNECTOR = Connector(
     name="benqi",
@@ -44,7 +45,7 @@ CONNECTOR = Connector(
         module="almanak.connectors.benqi.teardown_post_condition",
         attribute="benqi_teardown_post_condition",
     ),
-    strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
+    strategy_intents=(IntentType.SUPPLY, IntentType.BORROW, IntentType.REPAY, IntentType.WITHDRAW),
     supported_chains=SupportedChainsSpec(chains=(AVALANCHE,)),
 )
 

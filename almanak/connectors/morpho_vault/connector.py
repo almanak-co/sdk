@@ -12,6 +12,7 @@ from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpe
 from almanak.connectors._strategy_base.vault_representatives import VaultRepresentativeSpec
 from almanak.core.chains.base import DESCRIPTOR as BASE
 from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
+from almanak.core.intent_types import IntentType
 
 CONNECTOR = Connector(
     name="morpho_vault",
@@ -46,7 +47,7 @@ CONNECTOR = Connector(
             attribute="METAMORPHO_VAULTS",
         ),
     ),
-    strategy_intents=("VAULT_DEPOSIT", "VAULT_REDEEM"),
+    strategy_intents=(IntentType.VAULT_DEPOSIT, IntentType.VAULT_REDEEM),
     supported_chains=SupportedChainsSpec(chains=(ETHEREUM, BASE)),
 )
 

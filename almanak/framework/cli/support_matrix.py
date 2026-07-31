@@ -256,8 +256,7 @@ def _connector_intent_coverage(
     an empty list — an empty claim is not a claim.
     """
     coverage: dict[str, list[str]] = {}
-    for intent in connector.strategy_intents or ():
-        intent_name = intent.upper()
+    for intent_name in connector.strategy_intent_names or ():
         if intent_name in UNCATEGORISED_INTENTS:
             category: str | None = None
         elif intent_name in _INTENT_CATEGORIES:
@@ -324,8 +323,8 @@ def _chains_for_intents(
 def _derive_entries_from_intents(connector: Any) -> tuple[tuple[str, str, frozenset[str]], ...]:
     """Derive matrix rows from a connector's intent-specific chain support."""
     by_category: dict[str, set[str]] = {}
-    for intent in connector.strategy_intents or ():
-        category = _INTENT_CATEGORIES.get(intent.upper())
+    for intent in connector.strategy_intent_names or ():
+        category = _INTENT_CATEGORIES.get(intent)
         if category is None:
             continue
         by_category.setdefault(category, set()).update(connector.supported_chains_for_intent(intent) or ())
@@ -365,7 +364,7 @@ def _collect_from_connector_registry(
                 entries.setdefault(key, set()).update(
                     _chains_for_intents(
                         connector,
-                        entry.intents,
+                        entry.intent_names,
                         protocol=entry.matrix_name,
                     )
                 )
@@ -432,9 +431,7 @@ def _collect_from_compiler_tables(
         connector = CONNECTOR_REGISTRY.get(key[0])
         if connector is not None and connector.has_strategy_support:
             category_intents = tuple(
-                intent
-                for intent in connector.strategy_intents or ()
-                if _INTENT_CATEGORIES.get(intent.upper()) == key[1]
+                intent for intent in connector.strategy_intent_names or () if _INTENT_CATEGORIES.get(intent) == key[1]
             )
             if not category_intents:
                 return

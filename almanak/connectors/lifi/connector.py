@@ -16,6 +16,7 @@ from almanak.core.chains.bsc import DESCRIPTOR as BSC
 from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
 from almanak.core.chains.optimism import DESCRIPTOR as OPTIMISM
 from almanak.core.chains.polygon import DESCRIPTOR as POLYGON
+from almanak.core.intent_types import IntentType
 
 CONNECTOR = Connector(
     name="lifi",
@@ -32,14 +33,14 @@ CONNECTOR = Connector(
         module="almanak.connectors.lifi.deferred_refresh_provider",
         attribute="LiFiDeferredRefreshConnector",
     ),
-    strategy_intents=("SWAP", "BRIDGE"),
+    strategy_intents=(IntentType.SWAP, IntentType.BRIDGE),
     supported_chains=SupportedChainsSpec(chains=(ETHEREUM, ARBITRUM, OPTIMISM, POLYGON, BASE, AVALANCHE, BSC)),
     # Aggregators render as aggregator rows instead of generic swap/bridge rows.
     strategy_matrix_entries=(
         StrategyMatrixEntry(
             matrix_name="lifi",
             category="aggregator",
-            intents=("SWAP", "BRIDGE"),
+            intents=(IntentType.SWAP, IntentType.BRIDGE),
         ),
     ),
 )

@@ -15,12 +15,13 @@ from almanak.core.chains.bsc import DESCRIPTOR as BSC
 from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
 from almanak.core.chains.mantle import DESCRIPTOR as MANTLE
 from almanak.core.chains.polygon import DESCRIPTOR as POLYGON
+from almanak.core.intent_types import IntentType
 
 
 def _connector(
     *,
     supported_chains: SupportedChainsSpec | None = SupportedChainsSpec(chains=(ETHEREUM,)),
-    intents: tuple[str, ...] | None = ("SWAP",),
+    intents: tuple[IntentType, ...] | None = (IntentType.SWAP,),
     aliases: tuple[str, ...] = (),
 ) -> Connector:
     return Connector(
@@ -58,6 +59,7 @@ def test_offchain_declaration_is_explicit() -> None:
     assert connector.supported_chains is not None
     assert connector.supported_chains.is_offchain
     assert connector.all_supported_chains == ()
+    assert connector.supported_chains_for_intent("SWAP") is None
     assert connector.supports(chain="ethereum", intent="SWAP") is False
 
 
@@ -65,7 +67,7 @@ def test_offchain_declaration_rejects_overrides() -> None:
     with pytest.raises(ValueError, match="off-chain"):
         SupportedChainsSpec(
             chains=None,
-            intent_overrides={"SWAP": (ETHEREUM,)},
+            intent_overrides={IntentType.SWAP: (ETHEREUM,)},
         )
 
 
@@ -73,10 +75,10 @@ def test_intent_override_replaces_default() -> None:
     connector = Connector(
         name="fluid_like",
         kind=ProtocolKind.SWAP,
-        strategy_intents=("SWAP", "SUPPLY"),
+        strategy_intents=(IntentType.SWAP, IntentType.SUPPLY),
         supported_chains=SupportedChainsSpec(
             chains=(ARBITRUM, BASE),
-            intent_overrides={"swap": (ARBITRUM, BASE, ETHEREUM, POLYGON)},
+            intent_overrides={IntentType.SWAP: (ARBITRUM, BASE, ETHEREUM, POLYGON)},
         ),
     )
     assert connector.supported_chains_for_intent("SWAP") == (
@@ -86,6 +88,23 @@ def test_intent_override_replaces_default() -> None:
         "polygon",
     )
     assert connector.supported_chains_for_intent("SUPPLY") == ("arbitrum", "base")
+
+
+@pytest.mark.parametrize("intent", [IntentType.BORROW, "BORROW", "TYPO"])
+def test_strategy_intent_queries_reject_invalid_or_undeclared_intents(intent: IntentType | str) -> None:
+    connector = _connector()
+
+    assert connector.supported_chains_for_intent(intent) == ()
+    assert connector.supported_chains_for(intent=intent) == ()
+    assert connector.supports(chain="ethereum", intent=intent) is False
+
+
+def test_intent_override_rejects_raw_string_keys() -> None:
+    with pytest.raises(TypeError, match="keys must be IntentType members"):
+        SupportedChainsSpec(
+            chains=(ETHEREUM,),
+            intent_overrides={"SWAP": (BASE,)},  # type: ignore[dict-item]
+        )
 
 
 def test_protocol_override_is_alias_specific() -> None:
@@ -105,13 +124,13 @@ def test_protocol_override_is_alias_specific() -> None:
 def test_override_mappings_are_frozen() -> None:
     spec = SupportedChainsSpec(
         chains=(ETHEREUM,),
-        intent_overrides={"SWAP": (BASE,)},
+        intent_overrides={IntentType.SWAP: (BASE,)},
         protocol_overrides={"fork": (MANTLE,)},
     )
     assert isinstance(spec.intent_overrides, MappingProxyType)
     assert isinstance(spec.protocol_overrides, MappingProxyType)
     with pytest.raises(TypeError):
-        spec.intent_overrides["SWAP"] = ("ethereum",)  # type: ignore[index]
+        spec.intent_overrides[IntentType.SWAP] = ("ethereum",)  # type: ignore[index]
 
 
 def test_undeclared_intent_override_is_rejected() -> None:
@@ -119,7 +138,7 @@ def test_undeclared_intent_override_is_rejected() -> None:
         _connector(
             supported_chains=SupportedChainsSpec(
                 chains=(ETHEREUM,),
-                intent_overrides={"BORROW": (BASE,)},
+                intent_overrides={IntentType.BORROW: (BASE,)},
             )
         )
 
@@ -149,7 +168,7 @@ def test_removed_strategy_chains_argument_is_rejected_immediately() -> None:
         Connector(  # type: ignore[call-arg]
             name="legacy",
             kind=ProtocolKind.SWAP,
-            strategy_intents=("SWAP",),
+            strategy_intents=(IntentType.SWAP,),
             strategy_chains=("ethereum",),
         )
 
@@ -158,20 +177,31 @@ def test_matrix_entries_group_intents_without_owning_chains() -> None:
     connector = Connector(
         name="grouped",
         kind=ProtocolKind.SWAP,
-        strategy_intents=("SWAP", "SUPPLY"),
+        strategy_intents=(IntentType.SWAP, IntentType.SUPPLY),
         supported_chains=SupportedChainsSpec(
             chains=(ARBITRUM,),
-            intent_overrides={"SWAP": (ARBITRUM, ETHEREUM)},
+            intent_overrides={IntentType.SWAP: (ARBITRUM, ETHEREUM)},
         ),
         strategy_matrix_entries=(
-            StrategyMatrixEntry(matrix_name="grouped", category="swap", intents=("SWAP",)),
-            StrategyMatrixEntry(matrix_name="grouped", category="lending", intents=("SUPPLY",)),
+            StrategyMatrixEntry(matrix_name="grouped", category="swap", intents=(IntentType.SWAP,)),
+            StrategyMatrixEntry(matrix_name="grouped", category="lending", intents=(IntentType.SUPPLY,)),
         ),
     )
     swap, lending = connector.strategy_matrix_entries or ()
-    assert swap.intents == ("SWAP",)
-    assert lending.intents == ("SUPPLY",)
+    assert swap.intents == (IntentType.SWAP,)
+    assert lending.intents == (IntentType.SUPPLY,)
+    assert swap.intent_names == ("SWAP",)
+    assert lending.intent_names == ("SUPPLY",)
     assert not hasattr(swap, "chains")
+
+
+def test_matrix_entry_rejects_raw_string_intents_immediately() -> None:
+    with pytest.raises(TypeError, match="only IntentType members"):
+        StrategyMatrixEntry(
+            matrix_name="stringly",
+            category="swap",
+            intents=("SWAP",),  # type: ignore[arg-type]
+        )
 
 
 def test_matrix_entry_rejects_undeclared_or_duplicate_intents() -> None:
@@ -179,13 +209,13 @@ def test_matrix_entry_rejects_undeclared_or_duplicate_intents() -> None:
         Connector(
             name="unknown_row_intent",
             kind=ProtocolKind.SWAP,
-            strategy_intents=("SWAP",),
+            strategy_intents=(IntentType.SWAP,),
             supported_chains=SupportedChainsSpec(chains=(ETHEREUM,)),
             strategy_matrix_entries=(
                 StrategyMatrixEntry(
                     matrix_name="unknown_row_intent",
                     category="swap",
-                    intents=("BORROW",),
+                    intents=(IntentType.BORROW,),
                 ),
             ),
         )
@@ -194,18 +224,18 @@ def test_matrix_entry_rejects_undeclared_or_duplicate_intents() -> None:
         Connector(
             name="duplicate_row_intent",
             kind=ProtocolKind.SWAP,
-            strategy_intents=("SWAP",),
+            strategy_intents=(IntentType.SWAP,),
             supported_chains=SupportedChainsSpec(chains=(ETHEREUM,)),
             strategy_matrix_entries=(
                 StrategyMatrixEntry(
                     matrix_name="duplicate_row_intent",
                     category="swap",
-                    intents=("SWAP",),
+                    intents=(IntentType.SWAP,),
                 ),
                 StrategyMatrixEntry(
                     matrix_name="duplicate_row_intent_alias",
                     category="aggregator",
-                    intents=("SWAP",),
+                    intents=(IntentType.SWAP,),
                 ),
             ),
         )

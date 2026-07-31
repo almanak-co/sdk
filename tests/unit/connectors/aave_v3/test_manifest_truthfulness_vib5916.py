@@ -92,11 +92,11 @@ def test_plasma_and_sonic_not_advertised() -> None:
 
 def test_flash_loan_not_declared_as_strategy_support() -> None:
     manifest = _aave_manifest()
-    assert "FLASH_LOAN" not in (manifest.strategy_intents or ()), (
+    assert "FLASH_LOAN" not in (manifest.strategy_intent_names or ()), (
         "aave_v3 must NOT advertise FLASH_LOAN as strategy support — the lane compiles but "
         "has no executable receiver/accounting support (VIB-5916)."
     )
-    assert set(manifest.strategy_intents or ()) == _LENDING_INTENTS
+    assert set(manifest.strategy_intent_names or ()) == _LENDING_INTENTS
 
 
 # ---------------------------------------------------------------------------
@@ -188,8 +188,7 @@ def test_supply_withdraw_and_repay_still_advertised_on_mantle() -> None:
     manifest = _aave_manifest()
     for intent in ("SUPPLY", "WITHDRAW"):
         assert "mantle" in (manifest.supported_chains_for_intent(intent) or ()), (
-            f"{intent} still works on Aave V3 Mantle (only ltv was zeroed) and must "
-            "stay advertised (VIB-6111)."
+            f"{intent} still works on Aave V3 Mantle (only ltv was zeroed) and must stay advertised (VIB-6111)."
         )
     # REPAY explicitly and separately: pre-existing borrowers on Aave V3 Mantle
     # must be able to repay their debt. Narrowing REPAY away — or dropping the
@@ -202,15 +201,11 @@ def test_supply_withdraw_and_repay_still_advertised_on_mantle() -> None:
 def test_mantle_intents_for_chain_is_the_three_working_verbs() -> None:
     manifest = _aave_manifest()
     assert {
-        intent
-        for intent in manifest.strategy_intents or ()
-        if manifest.supports(chain="mantle", intent=intent)
+        intent for intent in manifest.strategy_intent_names or () if manifest.supports(chain="mantle", intent=intent)
     } == {"SUPPLY", "REPAY", "WITHDRAW"}
     # Any other declared chain keeps the full four-verb lending surface.
     assert {
-        intent
-        for intent in manifest.strategy_intents or ()
-        if manifest.supports(chain="base", intent=intent)
+        intent for intent in manifest.strategy_intent_names or () if manifest.supports(chain="base", intent=intent)
     } == _LENDING_INTENTS
 
 
@@ -226,7 +221,11 @@ def test_mantle_stays_a_declared_chain_and_a_gated_chain() -> None:
 def test_mantle_borrow_is_encoded_in_the_unified_intent_override() -> None:
     manifest = _aave_manifest()
     assert manifest.supported_chains is not None
-    assert manifest.supported_chains.intent_overrides["BORROW"] == manifest.supported_chains_for_intent("BORROW")
+    from almanak.core.intent_types import IntentType
+
+    assert manifest.supported_chains.intent_overrides[IntentType.BORROW] == manifest.supported_chains_for_intent(
+        "BORROW"
+    )
 
 
 def test_matrix_lending_row_still_contains_mantle() -> None:

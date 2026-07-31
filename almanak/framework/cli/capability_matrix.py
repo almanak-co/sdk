@@ -379,7 +379,13 @@ def _connector_protocol_keys(connector: object) -> tuple[str, ...]:
 
 def _cells_for_connector(connector: object, coverage: _DemoCoverage) -> list[CapabilityCell]:
     """Every applicable capability cell this connector contributes."""
-    intents = getattr(connector, "strategy_intents", None)
+    # Capability cells are serialized for CLI/JSON output, so deliberately
+    # cross the typed manifest boundary through its canonical string view.
+    # The fallback keeps lightweight test doubles and third-party readers
+    # compatible while Connector itself always supplies the property.
+    intents = getattr(connector, "strategy_intent_names", None)
+    if intents is None:
+        intents = getattr(connector, "strategy_intents", None)
     support = getattr(connector, "supported_chains", None)
     name = getattr(connector, "name", None) or ""
     if not intents or support is None:

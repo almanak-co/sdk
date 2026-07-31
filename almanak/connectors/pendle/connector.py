@@ -14,6 +14,7 @@ from almanak.connectors._strategy_base.address_table import AddressTableSpec
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
 from almanak.core.chains.arbitrum import DESCRIPTOR as ARBITRUM
 from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
+from almanak.core.intent_types import IntentType
 
 CONNECTOR = Connector(
     name="pendle",
@@ -78,7 +79,7 @@ CONNECTOR = Connector(
         keys=("pendle",),
         module="almanak.connectors.pendle.capabilities",
     ),
-    strategy_intents=("SWAP", "LP_OPEN", "LP_CLOSE", "WITHDRAW"),
+    strategy_intents=(IntentType.SWAP, IntentType.LP_OPEN, IntentType.LP_CLOSE, IntentType.WITHDRAW),
     supported_chains=SupportedChainsSpec(chains=(ARBITRUM, ETHEREUM)),
     # Backtests as "lp" (what intent-priority detection already resolves for
     # SWAP+LP_OPEN); Pendle AMM LP shares are fungible ERC-20 — no tick range.
@@ -110,7 +111,7 @@ CONNECTOR = Connector(
         StrategyMatrixEntry(
             matrix_name="pendle",
             category="yield",
-            intents=("SWAP", "LP_OPEN", "LP_CLOSE", "WITHDRAW"),
+            intents=(IntentType.SWAP, IntentType.LP_OPEN, IntentType.LP_CLOSE, IntentType.WITHDRAW),
         ),
     ),
 )

@@ -25,6 +25,7 @@ from almanak.core.chains.mantle import DESCRIPTOR as MANTLE
 from almanak.core.chains.optimism import DESCRIPTOR as OPTIMISM
 from almanak.core.chains.polygon import DESCRIPTOR as POLYGON
 from almanak.core.chains.xlayer import DESCRIPTOR as XLAYER
+from almanak.core.intent_types import IntentType
 
 _SUPPORTED_CHAINS = (
     ETHEREUM,
@@ -147,7 +148,7 @@ CONNECTOR = Connector(
     # fields below (with_flash_loan / FLASH_LOAN_PROVIDER_REGISTRY), which are
     # keyed independently of strategy_intents — see
     # tests/unit/connectors/aave_v3/test_manifest_truthfulness_vib5916.py.
-    strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
+    strategy_intents=(IntentType.SUPPLY, IntentType.BORROW, IntentType.REPAY, IntentType.WITHDRAW),
     # linea added (VIB-5916) after Phase-0 live-reserve verification. Plasma
     # is deliberately NOT declared because its token catalogue is incomplete.
     # Sonic is deliberately NOT declared because Aave governance proposed a
@@ -179,7 +180,7 @@ CONNECTOR = Connector(
         # non-zero liquidation thresholds looks identical to a wind-down, and
         # that misreading is what ALM-3075 exists to correct. Restore mantle
         # here once BORROW compiles an eMode enrolment.
-        intent_overrides={"BORROW": _BORROW_CHAINS},
+        intent_overrides={IntentType.BORROW: _BORROW_CHAINS},
     ),
 )
 

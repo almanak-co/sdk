@@ -25,6 +25,7 @@ from almanak.core.chains.polygon import DESCRIPTOR as POLYGON
 from almanak.core.chains.robinhood import DESCRIPTOR as ROBINHOOD
 from almanak.core.chains.xlayer import DESCRIPTOR as XLAYER
 from almanak.core.chains.zerog import DESCRIPTOR as ZEROG
+from almanak.core.intent_types import IntentType
 
 _V3_ABI_FAMILIES = (AbiFamily.V3_FACTORY, AbiFamily.V3_NPM)
 
@@ -201,16 +202,16 @@ CONNECTOR = Connector(
         module="almanak.connectors.uniswap_v3.primitive",
         attribute="PRIMITIVE",
     ),
-    strategy_intents=("SWAP", "LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"),
+    strategy_intents=(IntentType.SWAP, IntentType.LP_OPEN, IntentType.LP_CLOSE, IntentType.LP_COLLECT_FEES),
     supported_chains=SupportedChainsSpec(
         # SWAP spans both tuples; the LP lifecycle is restricted to _LP_CHAINS
         # by the overrides below. Composing rather than re-listing keeps the two
         # sets from drifting apart.
         chains=_LP_CHAINS + _SWAP_ONLY_CHAINS,
         intent_overrides={
-            "LP_OPEN": _LP_CHAINS,
-            "LP_CLOSE": _LP_CHAINS,
-            "LP_COLLECT_FEES": _LP_CHAINS,
+            IntentType.LP_OPEN: _LP_CHAINS,
+            IntentType.LP_CLOSE: _LP_CHAINS,
+            IntentType.LP_COLLECT_FEES: _LP_CHAINS,
         },
         # Agni Finance is a Uniswap V3 fork on Mantle sharing this connector,
         # with its OWN address table (AGNI_FINANCE) distinct from the canonical

@@ -20,6 +20,7 @@ from almanak.core.chains.base import DESCRIPTOR as BASE
 from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
 from almanak.core.chains.optimism import DESCRIPTOR as OPTIMISM
 from almanak.core.chains.polygon import DESCRIPTOR as POLYGON
+from almanak.core.intent_types import IntentType
 
 CONNECTOR = Connector(
     name="curve",
@@ -96,7 +97,7 @@ CONNECTOR = Connector(
     # of the reader's old hardcoded {"curve"} set (VIB-5420). No builder — the
     # math is framework-valued, not connector-side.
     position_read=PositionReadDecl(kind=CURVE_LP),
-    strategy_intents=("SWAP", "LP_OPEN", "LP_CLOSE"),
+    strategy_intents=(IntentType.SWAP, IntentType.LP_OPEN, IntentType.LP_CLOSE),
     supported_chains=SupportedChainsSpec(chains=(ETHEREUM, ARBITRUM, OPTIMISM, POLYGON, BASE)),
 )
 

@@ -15,6 +15,7 @@ from almanak.connectors._connector import (
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
 from almanak.connectors.hyperliquid.backtest_risk import BACKTEST_RISK as _BACKTEST_RISK
 from almanak.core.chains.hyperevm import DESCRIPTOR as HYPEREVM
+from almanak.core.intent_types import IntentType
 
 CONNECTOR = Connector(
     name="hyperliquid",
@@ -23,7 +24,7 @@ CONNECTOR = Connector(
     # HyperEVM (chain 999), plus PERP_WITHDRAW (a CoreWriter spotSend
     # HyperCore->HyperEVM USDC bridge, VIB-5617). See compiler.py for the scope
     # bounded by the CoreWriter action set + the perp intent vocabulary.
-    strategy_intents=("PERP_OPEN", "PERP_CLOSE", "PERP_WITHDRAW"),
+    strategy_intents=(IntentType.PERP_OPEN, IntentType.PERP_CLOSE, IntentType.PERP_WITHDRAW),
     supported_chains=SupportedChainsSpec(chains=(HYPEREVM,)),
     fee_model=FeeModelDecl(
         model=ImportRef(module="almanak.connectors.hyperliquid.fee_model", attribute="HyperliquidFeeModel"),

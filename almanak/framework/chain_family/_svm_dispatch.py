@@ -39,6 +39,7 @@ from almanak.connectors._strategy_base.compiler_registry import get_compiler as 
 from almanak.connectors._strategy_base.protocol_aliases import normalize_protocol
 from almanak.core.chains import ChainRegistry
 from almanak.core.enums import ChainFamily
+from almanak.core.intent_types import IntentType
 from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus
 
 if TYPE_CHECKING:
@@ -52,7 +53,7 @@ if TYPE_CHECKING:
 
 _ALLOWED_SOLANA_SWAP_PROTOCOLS = {"jupiter"}
 _SOLANA_DEFAULT_LP_PROTOCOL = "raydium_clmm"
-_LP_INTENT_NAMES = frozenset({"LP_OPEN", "LP_CLOSE"})
+_LP_INTENT_TYPES = frozenset({IntentType.LP_OPEN, IntentType.LP_CLOSE})
 
 
 def _fold_protocol(protocol: str) -> str:
@@ -94,7 +95,7 @@ def _solana_lp_routing() -> _SolanaLpRouting:
     spellings: dict[str, str] = {}
     published: list[str] = []
     for connector in CONNECTOR_REGISTRY.all():
-        if not _LP_INTENT_NAMES.intersection(connector.strategy_intents or ()):
+        if not _LP_INTENT_TYPES.intersection(connector.strategy_intents or ()):
             continue
         # ``family_of`` answers ``None`` for a name it cannot resolve, so a typo in a
         # declared chain drops that connector from this table and its protocol then

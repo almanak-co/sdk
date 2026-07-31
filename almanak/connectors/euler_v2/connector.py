@@ -14,6 +14,7 @@ from almanak.core.chains.arbitrum import DESCRIPTOR as ARBITRUM
 from almanak.core.chains.avalanche import DESCRIPTOR as AVALANCHE
 from almanak.core.chains.base import DESCRIPTOR as BASE
 from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
+from almanak.core.intent_types import IntentType
 
 CONNECTOR = Connector(
     name="euler_v2",
@@ -43,7 +44,7 @@ CONNECTOR = Connector(
         module="almanak.connectors.euler_v2.teardown_post_condition",
         attribute="euler_v2_teardown_post_condition",
     ),
-    strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
+    strategy_intents=(IntentType.SUPPLY, IntentType.BORROW, IntentType.REPAY, IntentType.WITHDRAW),
     supported_chains=SupportedChainsSpec(chains=(ETHEREUM, AVALANCHE, BASE, ARBITRUM)),
 )
 

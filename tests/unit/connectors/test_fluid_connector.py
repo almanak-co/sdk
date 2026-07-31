@@ -15,10 +15,10 @@ class TestFluidManifest:
         # LP intents stay removed (Phase 1, VIB-5029): direct pool LP is
         # whitelist-gated on-chain (VIB-5028 §V4); LP returns in Phase 4.
         # SUPPLY/WITHDRAW are the Phase-2 fToken lending surface (VIB-5030).
-        assert CONNECTOR.strategy_intents == ("SWAP", "SUPPLY", "WITHDRAW")
+        assert CONNECTOR.strategy_intent_names == ("SWAP", "SUPPLY", "WITHDRAW")
 
     def test_matrix_chains(self):
-        entries = {e.category: e.intents for e in CONNECTOR.strategy_matrix_entries}
+        entries = {e.category: e.intent_names for e in CONNECTOR.strategy_matrix_entries}
         assert entries["swap"] == ("SWAP",)
         assert CONNECTOR.supported_chains_for_intent("SWAP") == (
             "arbitrum",

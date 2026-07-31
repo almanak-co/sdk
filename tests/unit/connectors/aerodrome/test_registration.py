@@ -28,7 +28,7 @@ def test_aerodrome_registers_base_and_optimism() -> None:
 def test_aerodrome_intents_unchanged_by_optimism_flip() -> None:
     connector = CONNECTOR_REGISTRY.get("aerodrome")
     assert connector is not None
-    assert set(connector.strategy_intents or ()) == {
+    assert set(connector.strategy_intent_names or ()) == {
         "SWAP",
         "LP_OPEN",
         "LP_CLOSE",

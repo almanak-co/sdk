@@ -16,6 +16,7 @@ from almanak.core.chains.arbitrum import DESCRIPTOR as ARBITRUM
 from almanak.core.chains.base import DESCRIPTOR as BASE
 from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
 from almanak.core.chains.polygon import DESCRIPTOR as POLYGON
+from almanak.core.intent_types import IntentType
 
 CONNECTOR = Connector(
     name="fluid",
@@ -95,24 +96,24 @@ CONNECTOR = Connector(
     # (VIB-3747 / VIB-4851 C1). Without it the amounts would be classified
     # human and mis-scaled by 10**decimals.
     metadata_amount_encoding=MetadataAmountEncoding(lending="wei"),
-    strategy_intents=("SWAP", "SUPPLY", "WITHDRAW"),
+    strategy_intents=(IntentType.SWAP, IntentType.SUPPLY, IntentType.WITHDRAW),
     # fToken lending is Arbitrum + Base only; SWAP is all four proven chains.
     # The per-intent override is the canonical truth for both runtime checks
     # and generated matrix rows.
     supported_chains=SupportedChainsSpec(
         chains=(ARBITRUM, BASE),
-        intent_overrides={"SWAP": (ARBITRUM, BASE, ETHEREUM, POLYGON)},
+        intent_overrides={IntentType.SWAP: (ARBITRUM, BASE, ETHEREUM, POLYGON)},
     ),
     strategy_matrix_entries=(
         StrategyMatrixEntry(
             matrix_name="fluid",
             category="swap",
-            intents=("SWAP",),
+            intents=(IntentType.SWAP,),
         ),
         StrategyMatrixEntry(
             matrix_name="fluid",
             category="lending",
-            intents=("SUPPLY", "WITHDRAW"),
+            intents=(IntentType.SUPPLY, IntentType.WITHDRAW),
         ),
     ),
 )

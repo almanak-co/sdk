@@ -582,7 +582,7 @@ def _declared_lending_chains(protocol: str) -> frozenset[str] | None:
     if connector is None:
         return None
     lending_intents = frozenset({"SUPPLY", "BORROW", "REPAY", "WITHDRAW"})
-    declared_intents = lending_intents.intersection(connector.strategy_intents or ())
+    declared_intents = lending_intents.intersection(connector.strategy_intent_names or ())
     if declared_intents:
         return frozenset(
             chain for intent in declared_intents for chain in connector.supported_chains_for_intent(intent) or ()
@@ -609,7 +609,7 @@ def _lending_intent_support_rejection(protocol: str, chain: str, intent_name: st
     lending_intents = frozenset({"SUPPLY", "BORROW", "REPAY", "WITHDRAW"})
     if intent not in lending_intents:
         return None
-    declared_intents = {value.upper() for value in connector.strategy_intents or ()}
+    declared_intents = set(connector.strategy_intent_names or ())
     supported = connector.supported_chains_for(protocol=key, intent=intent) or ()
     if intent in declared_intents and connector.supports(chain=chain, protocol=key, intent=intent):
         return None

@@ -15,6 +15,7 @@ from almanak.connectors._strategy_base.address_table import AddressTableSpec
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
 from almanak.connectors.spark.backtest_risk import BACKTEST_RISK as _BACKTEST_RISK
 from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
+from almanak.core.intent_types import IntentType
 
 CONNECTOR = Connector(
     name="spark",
@@ -73,7 +74,7 @@ CONNECTOR = Connector(
     # Aave-fork compiler: lending metadata amounts are wei-encoded (VIB-3747).
     metadata_amount_encoding=MetadataAmountEncoding(lending="wei"),
     backtest_risk=_BACKTEST_RISK,
-    strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
+    strategy_intents=(IntentType.SUPPLY, IntentType.BORROW, IntentType.REPAY, IntentType.WITHDRAW),
     supported_chains=SupportedChainsSpec(chains=(ETHEREUM,)),
 )
 

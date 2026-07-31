@@ -28,6 +28,7 @@ from almanak.connectors._strategy_base.position_read_base import BUILDER_REQUIRE
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec, SupportedChainsSpec
 from almanak.connectors._strategy_base.solana_program import SolanaProgramSpec
 from almanak.connectors._strategy_base.vault_representatives import VaultRepresentativeSpec
+from almanak.core.intent_types import IntentType
 
 # Recognised vendor keys for ``Connector.external_ids`` (VIB-4851 B1, plan 024).
 # Mirrors ``almanak.core.chains._descriptor.KNOWN_VENDORS`` for the protocol
@@ -133,7 +134,30 @@ class StrategyMatrixEntry:
 
     matrix_name: str
     category: str
-    intents: tuple[str, ...]
+    intents: tuple[IntentType, ...]
+
+    def __post_init__(self) -> None:
+        """Validate row identity and require canonical intent enum members."""
+        if not isinstance(self.matrix_name, str) or not self.matrix_name.strip():
+            raise ValueError(f"StrategyMatrixEntry.matrix_name must be a non-empty string, got {self.matrix_name!r}")
+        if not isinstance(self.category, str) or not self.category.strip():
+            raise ValueError(f"StrategyMatrixEntry.category must be a non-empty string, got {self.category!r}")
+        if not isinstance(self.intents, tuple) or not self.intents:
+            raise ValueError(
+                f"StrategyMatrixEntry.intents must be a non-empty tuple[IntentType, ...], got {self.intents!r}"
+            )
+        bad_intents = [intent for intent in self.intents if not isinstance(intent, IntentType)]
+        if bad_intents:
+            raise TypeError(f"StrategyMatrixEntry.intents must contain only IntentType members, got {bad_intents!r}")
+        if len(set(self.intents)) != len(self.intents):
+            raise ValueError(
+                f"StrategyMatrixEntry.intents contains duplicates: {[intent.value for intent in self.intents]!r}"
+            )
+
+    @property
+    def intent_names(self) -> tuple[str, ...]:
+        """Canonical string values for docs, CLI, and serialization boundaries."""
+        return tuple(intent.value for intent in self.intents)
 
 
 def _validate_decl_aliases(decl_name: str, aliases: tuple[str, ...]) -> None:
@@ -968,7 +992,7 @@ class Connector:
     flash_loan_provider: ImportRef | None = None
     flash_loan_builder: ImportRef | None = None
     flash_loan_synthetic_discovery: bool = False
-    strategy_intents: tuple[str, ...] | None = None
+    strategy_intents: tuple[IntentType, ...] | None = None
     strategy_matrix_entries: tuple[StrategyMatrixEntry, ...] | None = None
     external_ids: Mapping[str, str] | None = None
 
@@ -1517,26 +1541,28 @@ class Connector:
 
         if not isinstance(self.strategy_intents, tuple) or not self.strategy_intents:
             raise ValueError(
-                f"Connector.strategy_intents must be None or a non-empty tuple[str, ...], got {self.strategy_intents!r}"
+                "Connector.strategy_intents must be None or a non-empty "
+                f"tuple[IntentType, ...], got {self.strategy_intents!r}"
             )
-        bad_intents = [intent for intent in self.strategy_intents if not isinstance(intent, str) or not intent.strip()]
+        bad_intents = [intent for intent in self.strategy_intents if not isinstance(intent, IntentType)]
         if bad_intents:
-            raise ValueError(f"Connector.strategy_intents must contain only non-empty strings, got {bad_intents!r}")
+            raise TypeError(f"Connector.strategy_intents must contain only IntentType members, got {bad_intents!r}")
         if len(set(self.strategy_intents)) != len(self.strategy_intents):
-            raise ValueError(f"Connector.strategy_intents contains duplicates: {self.strategy_intents!r}")
+            raise ValueError(
+                "Connector.strategy_intents contains duplicates: "
+                f"{[intent.value for intent in self.strategy_intents]!r}"
+            )
 
         if self.supported_chains is None:
             raise ValueError(
                 "Connector.supported_chains is required when strategy_intents is set; "
                 "use SupportedChainsSpec(chains=None) for an off-chain venue"
             )
-        undeclared_overrides = set(self.supported_chains.intent_overrides) - {
-            intent.upper() for intent in self.strategy_intents
-        }
+        undeclared_overrides = set(self.supported_chains.intent_overrides) - set(self.strategy_intents)
         if undeclared_overrides:
             raise ValueError(
                 "Connector.supported_chains.intent_overrides contains undeclared strategy intents: "
-                f"{sorted(undeclared_overrides)!r}"
+                f"{sorted(intent.value for intent in undeclared_overrides)!r}"
             )
         unowned_protocols = set(self.supported_chains.protocol_overrides) - set(self.aliases)
         if unowned_protocols:
@@ -1560,42 +1586,26 @@ class Connector:
             raise ValueError(
                 f"Connector.strategy_matrix_entries must contain only StrategyMatrixEntry values, got {bad_entries!r}"
             )
-        for entry in self.strategy_matrix_entries:
-            self._validate_strategy_matrix_entry_fields(entry)
         keys = [(entry.matrix_name, entry.category) for entry in self.strategy_matrix_entries]
         if len(set(keys)) != len(keys):
             raise ValueError(f"Connector.strategy_matrix_entries has duplicate (matrix_name, category) keys: {keys!r}")
-        declared = {intent.upper() for intent in self.strategy_intents or ()}
-        seen_intents: set[str] = set()
+        declared = set(self.strategy_intents or ())
+        seen_intents: set[IntentType] = set()
         for entry in self.strategy_matrix_entries:
-            entry_intents = {intent.upper() for intent in entry.intents}
+            entry_intents = set(entry.intents)
             unknown = entry_intents - declared
             if unknown:
                 raise ValueError(
-                    f"StrategyMatrixEntry.intents contains undeclared strategy intents: {sorted(unknown)!r}"
+                    "StrategyMatrixEntry.intents contains undeclared strategy intents: "
+                    f"{sorted(intent.value for intent in unknown)!r}"
                 )
             duplicated = entry_intents & seen_intents
             if duplicated:
                 raise ValueError(
-                    f"Connector.strategy_matrix_entries assigns an intent to multiple rows: {sorted(duplicated)!r}"
+                    "Connector.strategy_matrix_entries assigns an intent to multiple rows: "
+                    f"{sorted(intent.value for intent in duplicated)!r}"
                 )
             seen_intents.update(entry_intents)
-
-    @staticmethod
-    def _validate_strategy_matrix_entry_fields(entry: StrategyMatrixEntry) -> None:
-        """Validate one strategy support-matrix row's fields."""
-        if not isinstance(entry.matrix_name, str) or not entry.matrix_name.strip():
-            raise ValueError(f"StrategyMatrixEntry.matrix_name must be a non-empty string, got {entry.matrix_name!r}")
-        if not isinstance(entry.category, str) or not entry.category.strip():
-            raise ValueError(f"StrategyMatrixEntry.category must be a non-empty string, got {entry.category!r}")
-        if not isinstance(entry.intents, tuple) or not entry.intents:
-            raise ValueError(f"StrategyMatrixEntry.intents must be a non-empty tuple[str, ...], got {entry.intents!r}")
-        bad_intents = [intent for intent in entry.intents if not isinstance(intent, str) or not intent.strip()]
-        if bad_intents:
-            raise ValueError(f"StrategyMatrixEntry.intents contains invalid values: {bad_intents!r}")
-        normalized = [intent.upper() for intent in entry.intents]
-        if len(set(normalized)) != len(normalized):
-            raise ValueError(f"StrategyMatrixEntry.intents contains duplicates: {normalized!r}")
 
     @property
     def protocol(self) -> ProtocolName:
@@ -1666,17 +1676,34 @@ class Connector:
         return self.strategy_intents is not None
 
     @property
+    def strategy_intent_names(self) -> tuple[str, ...] | None:
+        """Canonical string values for docs, CLI, and serialization boundaries."""
+        if self.strategy_intents is None:
+            return None
+        return tuple(intent.value for intent in self.strategy_intents)
+
+    def _declared_strategy_intent(self, intent: IntentType | str) -> IntentType | None:
+        """Normalize a runtime intent only when this connector declares it."""
+        intent_type = IntentType.try_parse(intent)
+        if intent_type is None or intent_type not in (self.strategy_intents or ()):
+            return None
+        return intent_type
+
+    @property
     def all_supported_chains(self) -> tuple[str, ...]:
         """Stable union of every chain supported by at least one strategy intent."""
         if self.supported_chains is None:
             return ()
         return self.supported_chains.all_chains()
 
-    def supported_chains_for_intent(self, intent: object) -> tuple[str, ...] | None:
+    def supported_chains_for_intent(self, intent: IntentType | str) -> tuple[str, ...] | None:
         """Return exact support for one declared intent, or ``None`` off-chain."""
         if self.supported_chains is None:
             return None
-        return self.supported_chains.chains_for_intent(intent)
+        intent_type = self._declared_strategy_intent(intent)
+        if intent_type is None:
+            return ()
+        return self.supported_chains.chains_for_intent(intent_type)
 
     def supported_chains_for_protocol(self, protocol: str) -> tuple[str, ...]:
         """Return canonical or alias-specific protocol coverage."""
@@ -1688,15 +1715,16 @@ class Connector:
         self,
         *,
         protocol: str | None = None,
-        intent: object | None = None,
+        intent: IntentType | str | None = None,
     ) -> tuple[str, ...] | None:
         """Return exact support for a protocol alias and/or declared intent."""
         if self.supported_chains is None:
             return None
         if intent is not None:
-            raw = getattr(intent, "name", intent)
-            if str(raw).upper() not in {declared.upper() for declared in self.strategy_intents or ()}:
+            intent_type = self._declared_strategy_intent(intent)
+            if intent_type is None:
                 return ()
+            intent = intent_type
         return self.supported_chains.chains_for(protocol=protocol, intent=intent)
 
     def supports(
@@ -1704,15 +1732,16 @@ class Connector:
         *,
         chain: str,
         protocol: str | None = None,
-        intent: object | None = None,
+        intent: IntentType | str | None = None,
     ) -> bool:
         """Return whether this connector supports an exact query on a chain."""
         if self.supported_chains is None:
             return False
         if intent is not None:
-            raw = getattr(intent, "name", intent)
-            if str(raw).upper() not in {declared.upper() for declared in self.strategy_intents or ()}:
+            intent_type = self._declared_strategy_intent(intent)
+            if intent_type is None:
                 return False
+            intent = intent_type
         return self.supported_chains.supports(chain=chain, protocol=protocol, intent=intent)
 
     @property
@@ -1770,7 +1799,7 @@ class ConnectorRegistry:
                 return connector
         return None
 
-    def supported_chains_for(self, protocol: str, *, intent: object | None = None) -> tuple[str, ...]:
+    def supported_chains_for(self, protocol: str, *, intent: IntentType | str | None = None) -> tuple[str, ...]:
         """Resolve canonical or alias-specific support from connector metadata."""
         key = protocol.lower().replace("-", "_")
         connector = self.get(key)

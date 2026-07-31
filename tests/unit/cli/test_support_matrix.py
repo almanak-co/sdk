@@ -21,6 +21,7 @@ from almanak.core.chains.arbitrum import DESCRIPTOR as ARBITRUM
 from almanak.core.chains.base import DESCRIPTOR as BASE
 from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
 from almanak.core.chains.polygon import DESCRIPTOR as POLYGON
+from almanak.core.intent_types import IntentType
 from almanak.framework.cli.support_matrix import (
     SCHEMA_VERSION,
     SUPPORTED_CATEGORIES,
@@ -449,13 +450,13 @@ class TestDynamicCapabilityDiscovery:
         connector = Connector(
             name="vib_4856_mock_swap",
             kind=ProtocolKind.SWAP,
-            strategy_intents=("SWAP",),
+            strategy_intents=(IntentType.SWAP,),
             supported_chains=SupportedChainsSpec(chains=(ETHEREUM, ARBITRUM)),
             strategy_matrix_entries=(
                 StrategyMatrixEntry(
                     matrix_name="vib_4856_mock_swap",
                     category="swap",
-                    intents=("SWAP",),
+                    intents=(IntentType.SWAP,),
                 ),
             ),
         )
@@ -482,18 +483,18 @@ class TestDynamicCapabilityDiscovery:
         connector = Connector(
             name="vib_4856_mock_multi",
             kind=ProtocolKind.LP,
-            strategy_intents=("LP_OPEN", "LP_CLOSE"),
+            strategy_intents=(IntentType.LP_OPEN, IntentType.LP_CLOSE),
             supported_chains=SupportedChainsSpec(chains=(ETHEREUM, BASE)),
             strategy_matrix_entries=(
                 StrategyMatrixEntry(
                     matrix_name="vib_4856_mock_multi",
                     category="lp",
-                    intents=("LP_OPEN",),
+                    intents=(IntentType.LP_OPEN,),
                 ),
                 StrategyMatrixEntry(
                     matrix_name="vib_4856_mock_multi_alias",
                     category="lp",
-                    intents=("LP_CLOSE",),
+                    intents=(IntentType.LP_CLOSE,),
                 ),
             ),
         )
@@ -522,13 +523,13 @@ class TestDynamicCapabilityDiscovery:
         connector = Connector(
             name="vib_4856_mock_strategy",
             kind=ProtocolKind.SWAP,
-            strategy_intents=("SWAP",),
+            strategy_intents=(IntentType.SWAP,),
             supported_chains=SupportedChainsSpec(chains=(ETHEREUM, POLYGON)),
             strategy_matrix_entries=(
                 StrategyMatrixEntry(
                     matrix_name="vib_4856_mock_strategy",
                     category="aggregator",
-                    intents=("SWAP",),
+                    intents=(IntentType.SWAP,),
                 ),
             ),
         )
@@ -557,7 +558,7 @@ class TestDynamicCapabilityDiscovery:
         connector = Connector(
             name="vib_4856_mock_suppressed",
             kind=ProtocolKind.LENDING,
-            strategy_intents=("SUPPLY", "BORROW"),
+            strategy_intents=(IntentType.SUPPLY, IntentType.BORROW),
             supported_chains=SupportedChainsSpec(chains=(ETHEREUM,)),
             strategy_matrix_entries=(),
         )
@@ -579,10 +580,10 @@ class TestDynamicCapabilityDiscovery:
         connector = Connector(
             name="fallback_exact",
             kind=ProtocolKind.LP,
-            strategy_intents=("SWAP", "LP_OPEN"),
+            strategy_intents=(IntentType.SWAP, IntentType.LP_OPEN),
             supported_chains=SupportedChainsSpec(
                 chains=(BASE,),
-                intent_overrides={"SWAP": (ETHEREUM,)},
+                intent_overrides={IntentType.SWAP: (ETHEREUM,)},
             ),
         )
         monkeypatch.setattr(
@@ -610,7 +611,6 @@ class TestDynamicCapabilityDiscovery:
 
         assert entries[("fallback_exact", "swap")] == {"ethereum"}
         assert entries[("fallback_exact", "lp")] == {"base"}
-
 
 
 # =============================================================================
@@ -740,17 +740,13 @@ class TestWithheldCategoriesStayWithheld:
     through v2 exactly what the category filter suppresses.
     """
 
-    def test_flash_loan_not_published_for_a_connector_that_declares_it(
-        self, matrix_data: dict
-    ) -> None:
+    def test_flash_loan_not_published_for_a_connector_that_declares_it(self, matrix_data: dict) -> None:
         row = _row(matrix_data, "morpho_blue", "lending")
         assert "FLASH_LOAN" not in row["chainsByIntent"]
 
     def test_no_row_publishes_a_withheld_intent(self, matrix_data: dict) -> None:
         withheld = {
-            intent.name
-            for intent, category in _intent_category_map().items()
-            if category in WITHHELD_CATEGORIES
+            intent.name for intent, category in _intent_category_map().items() if category in WITHHELD_CATEGORIES
         }
         assert withheld, "expected at least FLASH_LOAN / PREDICTION_* to be withheld"
         for proto in matrix_data["protocols"]:
@@ -812,9 +808,7 @@ class TestIntentsKnownDistinguishesUnknownFromUnsupported:
     """
 
     @pytest.mark.parametrize("protocol", ["velodrome"])
-    def test_manifest_less_rows_are_marked_unknown(
-        self, matrix_data: dict, protocol: str
-    ) -> None:
+    def test_manifest_less_rows_are_marked_unknown(self, matrix_data: dict, protocol: str) -> None:
         rows = _rows_named(matrix_data, protocol)
         assert rows, f"{protocol} must still render"
         for row in rows:
@@ -1005,9 +999,9 @@ class TestProvenanceRejectsMalformedCommits:
         "head",
         [
             "not-a-sha",
-            "z" * 40,          # right length, not hex
-            "a" * 39,          # one short
-            "a" * 41,          # one long
+            "z" * 40,  # right length, not hex
+            "a" * 39,  # one short
+            "a" * 41,  # one long
             "ref: refs/heads/main extra junk",
         ],
     )
@@ -1062,9 +1056,7 @@ class TestWorktreeDirtyProvenance:
     def _git(self, *args: str, cwd: Path) -> None:
         import subprocess
 
-        subprocess.run(
-            ["git", *args], cwd=str(cwd), capture_output=True, check=True, timeout=30
-        )
+        subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, check=True, timeout=30)
 
     def _repo(self, tmp_path: Path) -> Path:
         tmp_path.mkdir(parents=True, exist_ok=True)
@@ -1238,16 +1230,17 @@ class TestProvenanceRefusesAnUnrelatedRepository:
         subprocess.run(["git", "add", "-A"], cwd=str(repo), capture_output=True, check=True, timeout=30)
         subprocess.run(
             ["git", "commit", "-q", "-m", "user work"],
-            cwd=str(repo), capture_output=True, check=True, timeout=30,
+            cwd=str(repo),
+            capture_output=True,
+            check=True,
+            timeout=30,
         )
         return pkg / "support_matrix.py"
 
     def _load(self, module_file: Path):
         import importlib.util
 
-        spec = importlib.util.spec_from_file_location(
-            "almanak.framework.cli.support_matrix", module_file
-        )
+        spec = importlib.util.spec_from_file_location("almanak.framework.cli.support_matrix", module_file)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         return mod
@@ -1323,9 +1316,7 @@ class TestEveryIntentIsClassified:
         """Removing a verb from both sets must RAISE, not silently publish."""
         import almanak.framework.cli.support_matrix as sm
 
-        monkeypatch.setattr(
-            sm, "UNCATEGORISED_INTENTS", sm.UNCATEGORISED_INTENTS - {"PERP_WITHDRAW"}
-        )
+        monkeypatch.setattr(sm, "UNCATEGORISED_INTENTS", sm.UNCATEGORISED_INTENTS - {"PERP_WITHDRAW"})
         with pytest.raises(RuntimeError, match="not classified for the support matrix"):
             sm._build_matrix()
 
@@ -1348,9 +1339,7 @@ class TestChainFilterAcceptsAliases:
         assert payload["chains"] == ["bsc"]
         assert payload["protocols"], "bsc has supported protocols"
 
-    def test_json_emits_a_valid_envelope_when_nothing_matches(
-        self, cli_runner: CliRunner
-    ) -> None:
+    def test_json_emits_a_valid_envelope_when_nothing_matches(self, cli_runner: CliRunner) -> None:
         """Zero bytes on stdout made `jq` fail and could not be distinguished
         from a broken command."""
         result = cli_runner.invoke(support_matrix, ["--json", "--chain", "nosuchchain"])
@@ -1384,7 +1373,7 @@ class TestOffChainVenuesAreNotPublishedAsOnChainSupport:
 class TestRowsDoNotAdvertiseACategoryTheyCannotServe:
     """A Phase-B row must not contradict the connector's own declaration.
 
-    VIB-6231. ``camelot`` declares ``strategy_intents=("SWAP",)`` and its
+    VIB-6231. ``camelot`` declares ``strategy_intents=(IntentType.SWAP,)`` and its
     compiler answers ``CamelotCompiler does not support intent type
     IntentType.LP_OPEN``. But its address in ``LP_POSITION_MANAGERS`` minted an
     ``lp`` row, so the matrix advertised an LP venue that cannot do LP.

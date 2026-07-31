@@ -17,6 +17,7 @@ from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpe
 from almanak.connectors.gmx_v2.backtest_risk import BACKTEST_RISK as _BACKTEST_RISK
 from almanak.core.chains.arbitrum import DESCRIPTOR as ARBITRUM
 from almanak.core.chains.avalanche import DESCRIPTOR as AVALANCHE
+from almanak.core.intent_types import IntentType
 
 CONNECTOR = Connector(
     name="gmx_v2",
@@ -118,7 +119,7 @@ CONNECTOR = Connector(
     # intent-coverage gate + SKILL surface). A cancel is a framework TEARDOWN-RECOVERY
     # verb — never authored by a strategy — so it lives on GMXV2Compiler.intents (the
     # compilation universe, which routes it) but not here. Do not "fix" this by adding it.
-    strategy_intents=("PERP_OPEN", "PERP_CLOSE"),
+    strategy_intents=(IntentType.PERP_OPEN, IntentType.PERP_CLOSE),
     supported_chains=SupportedChainsSpec(chains=(ARBITRUM, AVALANCHE)),
 )
 

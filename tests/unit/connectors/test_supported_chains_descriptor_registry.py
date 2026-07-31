@@ -11,6 +11,7 @@ from almanak.connectors._connector import CONNECTOR_REGISTRY, SupportedChainsSpe
 from almanak.core.chains.base import DESCRIPTOR as BASE
 from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
 from almanak.core.chains.polygon import DESCRIPTOR as POLYGON
+from almanak.core.intent_types import IntentType
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _CHAINS_DIR = _REPO_ROOT / "almanak" / "core" / "chains"
@@ -141,19 +142,17 @@ def test_every_onchain_protocol_and_alias_resolves(protocol: str) -> None:
     assert chains, protocol
 
 
-def test_override_keys_are_stripped_before_normalisation() -> None:
-    """A padded override key must reach the same slot as its clean spelling.
+def test_protocol_override_keys_are_stripped_before_normalisation() -> None:
+    """A padded protocol override key reaches its clean spelling.
 
     Validation only tested ``raw_key.strip()`` for emptiness while storing the
-    UNSTRIPPED key, so ``" LP_OPEN"`` was accepted and then never matched:
-    lookups build their key from ``getattr(intent, "name", intent)`` and from
-    ``protocol.lower()``, neither of which ever carries whitespace. The
-    override became dead weight with no exception and no failing test — the
-    cell it was meant to pin silently kept the default coverage.
+    unstripped key, so ``" forky"`` was accepted and then never matched by
+    ``protocol.lower()``. Intent override keys are canonical ``IntentType``
+    members and therefore cannot carry whitespace.
     """
     spec = SupportedChainsSpec(
         chains=(ETHEREUM, BASE),
-        intent_overrides={" LP_OPEN ": (BASE,)},
+        intent_overrides={IntentType.LP_OPEN: (BASE,)},
         protocol_overrides={"  forky\t": (POLYGON,)},
     )
     assert spec.chains_for_intent("LP_OPEN") == ("base",)
@@ -164,4 +163,7 @@ def test_override_keys_are_stripped_before_normalisation() -> None:
     # Stripping happens BEFORE the duplicate check, so padded and clean
     # spellings of one key collide instead of both being stored.
     with pytest.raises(ValueError, match="duplicate key"):
-        SupportedChainsSpec(chains=(ETHEREUM,), intent_overrides={"SWAP": (ETHEREUM,), " SWAP": (ETHEREUM,)})
+        SupportedChainsSpec(
+            chains=(ETHEREUM,),
+            protocol_overrides={"forky": (ETHEREUM,), " forky": (ETHEREUM,)},
+        )

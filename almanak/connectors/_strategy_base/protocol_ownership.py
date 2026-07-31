@@ -12,13 +12,15 @@ from dataclasses import dataclass
 from types import MappingProxyType
 
 from almanak.core.chains import ChainDescriptor, ChainRegistry
+from almanak.core.intent_types import IntentType
 
 __all__ = [
     "CapabilitiesSpec",
     "SupportedChainsSpec",
 ]
 
-_EMPTY_CHAIN_OVERRIDES: Mapping[str, tuple[ChainDescriptor, ...]] = MappingProxyType({})
+_EMPTY_INTENT_CHAIN_OVERRIDES: Mapping[IntentType, tuple[ChainDescriptor, ...]] = MappingProxyType({})
+_EMPTY_PROTOCOL_CHAIN_OVERRIDES: Mapping[str, tuple[ChainDescriptor, ...]] = MappingProxyType({})
 
 
 def _validate_keys_and_module(spec_name: str, keys: tuple[str, ...], module: str) -> None:
@@ -75,24 +77,20 @@ class SupportedChainsSpec:
     """
 
     chains: tuple[str, ...] | None
-    intent_overrides: Mapping[str, tuple[str, ...]]
+    intent_overrides: Mapping[IntentType, tuple[str, ...]]
     protocol_overrides: Mapping[str, tuple[str, ...]]
 
     def __init__(
         self,
         *,
         chains: tuple[ChainDescriptor, ...] | None,
-        intent_overrides: Mapping[str, tuple[ChainDescriptor, ...]] = _EMPTY_CHAIN_OVERRIDES,
-        protocol_overrides: Mapping[str, tuple[ChainDescriptor, ...]] = _EMPTY_CHAIN_OVERRIDES,
+        intent_overrides: Mapping[IntentType, tuple[ChainDescriptor, ...]] = _EMPTY_INTENT_CHAIN_OVERRIDES,
+        protocol_overrides: Mapping[str, tuple[ChainDescriptor, ...]] = _EMPTY_PROTOCOL_CHAIN_OVERRIDES,
     ) -> None:
         """Validate descriptor inputs and freeze their canonical names."""
         validated_chains = self._validate_chain_refs("chains", chains, allow_none=True)
-        validated_intents = self._validate_overrides("intent_overrides", intent_overrides, intent_keys=True)
-        validated_protocols = self._validate_overrides(
-            "protocol_overrides",
-            protocol_overrides,
-            intent_keys=False,
-        )
+        validated_intents = self._validate_intent_overrides(intent_overrides)
+        validated_protocols = self._validate_protocol_overrides(protocol_overrides)
         if validated_chains is None and (validated_intents or validated_protocols):
             raise ValueError("off-chain SupportedChainsSpec cannot declare intent or protocol overrides")
         object.__setattr__(self, "chains", validated_chains)
@@ -136,13 +134,28 @@ class SupportedChainsSpec:
         return tuple(canonical_names)
 
     @classmethod
-    def _validate_overrides(
+    def _validate_intent_overrides(
         cls,
-        field_name: str,
+        overrides: Mapping[IntentType, tuple[ChainDescriptor, ...]],
+    ) -> dict[IntentType, tuple[str, ...]]:
+        field_name = "intent_overrides"
+        if not isinstance(overrides, Mapping):
+            raise ValueError(f"SupportedChainsSpec.{field_name} must be a mapping, got {overrides!r}")
+        validated: dict[IntentType, tuple[str, ...]] = {}
+        for raw_key, chains in overrides.items():
+            if not isinstance(raw_key, IntentType):
+                raise TypeError(f"SupportedChainsSpec.{field_name} keys must be IntentType members, got {raw_key!r}")
+            names = cls._validate_chain_refs(f"{field_name}[{raw_key.name}]", chains, allow_none=False)
+            assert names is not None
+            validated[raw_key] = names
+        return validated
+
+    @classmethod
+    def _validate_protocol_overrides(
+        cls,
         overrides: Mapping[str, tuple[ChainDescriptor, ...]],
-        *,
-        intent_keys: bool,
     ) -> dict[str, tuple[str, ...]]:
+        field_name = "protocol_overrides"
         if not isinstance(overrides, Mapping):
             raise ValueError(f"SupportedChainsSpec.{field_name} must be a mapping, got {overrides!r}")
         validated: dict[str, tuple[str, ...]] = {}
@@ -150,13 +163,12 @@ class SupportedChainsSpec:
             if not isinstance(raw_key, str) or not raw_key.strip():
                 raise ValueError(f"SupportedChainsSpec.{field_name} contains invalid key {raw_key!r}")
             # Strip BEFORE normalising. Lookup keys are built from
-            # ``getattr(intent, "name", intent)`` and from ``protocol.lower()``,
-            # neither of which ever carries stray whitespace — so a key like
-            # ``" SWAP"`` would validate, store, and then never match anything.
+            # ``protocol.lower()``, which never carries stray whitespace, so a
+            # key like ``" alias"`` would validate, store, and then never match.
             # The override would silently be dead weight: no exception, no test
             # failure, just missing coverage for the cell it was meant to pin.
             stripped = raw_key.strip()
-            key = stripped.upper() if intent_keys else stripped.lower().replace("-", "_")
+            key = stripped.lower().replace("-", "_")
             if key in validated:
                 raise ValueError(f"SupportedChainsSpec.{field_name} contains duplicate key {key!r}")
             names = cls._validate_chain_refs(f"{field_name}[{raw_key!r}]", chains, allow_none=False)
@@ -169,10 +181,11 @@ class SupportedChainsSpec:
         """Whether this declaration represents an off-chain venue."""
         return self.chains is None
 
-    def chains_for_intent(self, intent: object) -> tuple[str, ...] | None:
+    def chains_for_intent(self, intent: IntentType | str) -> tuple[str, ...] | None:
         """Return the exact chain set for one intent name or enum value."""
-        raw = getattr(intent, "name", intent)
-        key = str(raw).upper()
+        key = IntentType.try_parse(intent)
+        if key is None:
+            return self.chains
         return self.intent_overrides.get(key, self.chains)
 
     def default_chains_union(self) -> tuple[str, ...]:
@@ -202,7 +215,7 @@ class SupportedChainsSpec:
         self,
         *,
         protocol: str | None = None,
-        intent: object | None = None,
+        intent: IntentType | str | None = None,
     ) -> tuple[str, ...] | None:
         """Return exact coverage for an optional protocol alias and intent.
 
@@ -224,7 +237,7 @@ class SupportedChainsSpec:
         *,
         chain: str,
         protocol: str | None = None,
-        intent: object | None = None,
+        intent: IntentType | str | None = None,
     ) -> bool:
         """Return whether this declaration supports an exact support query."""
         descriptor = ChainRegistry.try_resolve(chain)

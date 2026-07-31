@@ -10,6 +10,7 @@ from almanak.connectors._connector import (
 )
 from almanak.core.chains.base import DESCRIPTOR as BASE
 from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
+from almanak.core.intent_types import IntentType
 
 CONNECTOR = Connector(
     name="lagoon",
@@ -23,7 +24,7 @@ CONNECTOR = Connector(
         module="almanak.connectors.lagoon.receipt_parser_provider",
         attribute="LagoonReceiptParserConnector",
     ),
-    strategy_intents=("VAULT_DEPOSIT", "VAULT_REDEEM"),
+    strategy_intents=(IntentType.VAULT_DEPOSIT, IntentType.VAULT_REDEEM),
     supported_chains=SupportedChainsSpec(chains=(ETHEREUM, BASE)),
     # Vault lifecycle support is intentionally hidden from the support matrix.
     strategy_matrix_entries=(),
