@@ -26,11 +26,11 @@ import scripts.ci.check_connector_registry as gate  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def _isolate_registry() -> None:
-    from almanak.connectors._strategy_base.registry import ConnectorRegistry
+    from almanak.connectors._connector import CONNECTOR_REGISTRY
 
-    ConnectorRegistry._clear()
+    CONNECTOR_REGISTRY.clear()
     yield
-    ConnectorRegistry._clear()
+    CONNECTOR_REGISTRY.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -134,7 +134,7 @@ def test_descriptor_strategy_support_detector_counts_connector_manifest(tmp_path
             name="foo",
             kind=ProtocolKind.SWAP,
             strategy_intents=("SWAP",),
-            strategy_chains=("ethereum",),
+            supported_chains=SupportedChainsSpec(chains=("ethereum",)),
         )
         """,
     )
@@ -150,7 +150,7 @@ def test_descriptor_strategy_support_detector_counts_annotated_manifest(tmp_path
             name="foo",
             kind=ProtocolKind.SWAP,
             strategy_intents=("SWAP",),
-            strategy_chains=("ethereum",),
+            supported_chains=SupportedChainsSpec(chains=("ethereum",)),
         )
         """,
     )
@@ -187,7 +187,7 @@ def test_static_scan_accepts_descriptor_owned_strategy_registration(
             name="foo",
             kind=ProtocolKind.SWAP,
             strategy_intents=("SWAP",),
-            strategy_chains=("ethereum",),
+            supported_chains=SupportedChainsSpec(chains=("ethereum",)),
         )
         """,
     )
@@ -215,7 +215,7 @@ def test_static_scan_rejects_legacy_registration_even_with_descriptor(
             name="foo",
             kind=ProtocolKind.SWAP,
             strategy_intents=("SWAP",),
-            strategy_chains=("ethereum",),
+            supported_chains=SupportedChainsSpec(chains=("ethereum",)),
         )
         """,
     )
@@ -338,7 +338,7 @@ def test_excluded_dir_with_descriptor_registration_fails(
             name="base",
             kind=ProtocolKind.SWAP,
             strategy_intents=("SWAP",),
-            strategy_chains=("ethereum",),
+            supported_chains=SupportedChainsSpec(chains=("ethereum",)),
         )
         """,
     )
@@ -372,7 +372,7 @@ def test_excluded_dir_with_both_registration_sources_lists_both(
             name="base",
             kind=ProtocolKind.SWAP,
             strategy_intents=("SWAP",),
-            strategy_chains=("ethereum",),
+            supported_chains=SupportedChainsSpec(chains=("ethereum",)),
         )
         """,
     )
@@ -500,61 +500,26 @@ class TestDeclaredChainsResolve:
     ``_svm_dispatch._solana_lp_routing`` and raised. That was worse than the bug:
     the loop ran for every connector declaring LP intents (12, 9 of them
     EVM-only) and ``SvmFamily.compile_intent`` consults that table on every LP
-    intent on every non-Solana chain, so one typo in Curve's ``strategy_chains``
+    intent on every non-Solana chain, so one typo in Curve's support declaration
     failed every Uniswap V3 LP compile on Arbitrum. A manifest typo is a
     lint-class defect and belongs here.
 
-    **This check is load-bearing for BOTH fields — do not delete it as redundant.**
-    An earlier version of this docstring claimed ``strategy_chains`` was already
-    enforced upstream by ``ConnectorManifest``'s ``KNOWN_VENUES`` validation and
-    that "a typo there cannot even construct". That is wrong, and it was written
-    from observing a CI gate fail rather than from tracing the layers:
-
-    * ``Connector(...)`` — the descriptor — accepts an unknown chain.
-      ``_validate_strategy_chains`` checks tuple-ness, non-empty strings and
-      duplicates only, and says so ("without importing chain registries").
-    * ``KNOWN_VENUES`` lives in ``ConnectorManifest.__post_init__``, reached only
-      via ``_manifest_from_descriptor`` <- ``_register_descriptor_connectors`` <-
-      ``_import_all_connectors``, whose own docstring reads "Used only by the CI
-      gate. Production code does not need this."
-    * ``_svm_dispatch._solana_lp_routing`` reads ``CONNECTOR_REGISTRY.all()`` — the
-      *descriptor* registry — so no manifest is ever built on a strategy-runtime
-      path and ``KNOWN_VENUES`` never fires there.
-
-    So a typo'd ``strategy_chains`` is caught in CI and in ``almanak info matrix``,
-    and silently drops the connector from family-derived dispatch in a running
-    strategy. This gate is the only build-time guard that runs before a strategy
-    does, for ``strategy_chains`` as much as for ``strategy_matrix_entries``.
+    ``SupportedChainsSpec`` already rejects unknown names eagerly. This
+    registry-wide check is defense in depth and proves the gate inspected every
+    discovered declaration rather than succeeding vacuously.
     """
 
     @staticmethod
-    def _manifest(name, chains=(), entries=()):
-        class _Entry:
-            def __init__(self, matrix_name, chains):
-                self.matrix_name = matrix_name
-                self.chains = frozenset(chains)
-
+    def _manifest(name, chains=()):
         class _M:
             pass
 
         m = _M()
         m.name = name
-        m.chains = tuple(chains)
-        m.matrix_entries = tuple(_Entry(mn, ch) for mn, ch in entries)
+        m.all_supported_chains = tuple(chains)
         return m
 
-    def test_unresolvable_matrix_entry_chain_is_reported(self):
-        from scripts.ci.check_connector_registry import _check_declared_chains_resolve
-
-        manifests = [self._manifest("demo", ("ethereum",), (("demo", ("ethereum", "gnosis")),))]
-        violations = _check_declared_chains_resolve(manifests)
-        details = " ".join(v.detail for v in violations)
-        assert violations, "an unresolvable matrix-entry chain must be reported"
-        assert "gnosis" in details
-        # The resolvable chain on the same connector must NOT be reported.
-        assert "'ethereum'" not in details
-
-    def test_unresolvable_strategy_chain_is_reported(self):
+    def test_unresolvable_supported_chain_is_reported(self):
         from scripts.ci.check_connector_registry import _check_declared_chains_resolve
 
         violations = _check_declared_chains_resolve([self._manifest("demo", ("ethereumm",))])
@@ -565,15 +530,14 @@ class TestDeclaredChainsResolve:
         """Positive control, so the checks above cannot pass by always reporting."""
         from scripts.ci.check_connector_registry import _check_declared_chains_resolve
 
-        manifests = [self._manifest("demo", ("ethereum", "arbitrum"), (("demo", ("base",)),))]
+        manifests = [self._manifest("demo", ("ethereum", "arbitrum", "base"))]
         assert _check_declared_chains_resolve(manifests) == []
 
     def test_scanning_nothing_is_itself_a_violation(self):
         """A gate that inspected zero declarations must not report success.
 
-        This guard caught a real mistake during development: the check read the
-        descriptor's ``strategy_chains`` off a ``ConnectorManifest``, which
-        exposes ``chains`` — so it silently scanned nothing.
+        This guard prevents a broken discovery or field rename from turning the
+        invariant into an empty loop that silently reports success.
         """
         from scripts.ci.check_connector_registry import _check_declared_chains_resolve
 

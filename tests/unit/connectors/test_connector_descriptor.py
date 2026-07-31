@@ -26,8 +26,8 @@ from almanak.connectors._connector import (
     ImportRef,
     LendingReadDecl,
     PerpsReadDecl,
-    StrategyIntentChainExclusion,
     StrategyMatrixEntry,
+    SupportedChainsSpec,
 )
 from almanak.connectors._connector_descriptor import (
     CONNECTOR_DESCRIPTOR_REGISTRY,
@@ -74,7 +74,6 @@ from almanak.connectors._strategy_base.protocol_metadata_registry import (
 from almanak.connectors._strategy_base.receipt_parser_registry import (
     ReceiptParserConnector,
 )
-from almanak.connectors._strategy_base.registry import ConnectorRegistry as StrategyConnectorRegistry
 from almanak.connectors._strategy_base.runner_hook_registry import (
     RunnerHookConnector,
 )
@@ -210,7 +209,26 @@ MIGRATED_STRATEGY_REGISTRATION = {
     ),
     "uniswap_v3": (
         ("SWAP", "LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"),
-        ("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bsc", "monad", "robinhood"),
+        # mantle / xlayer / zerog are SWAP-only: each is a distinct deployment
+        # with its own address table (UNISWAP_V3["mantle"] shares no contract
+        # with AGNI_FINANCE["mantle"]) and a 4-layer SWAP suite under
+        # tests/intents/<chain>/. Their LP intents are withheld via
+        # `intent_overrides` for want of an LP suite, so this union — which is
+        # `default_chains_union()`, SWAP included — is wider than the LP set.
+        (
+            "ethereum",
+            "arbitrum",
+            "optimism",
+            "polygon",
+            "base",
+            "avalanche",
+            "bsc",
+            "monad",
+            "robinhood",
+            "mantle",
+            "xlayer",
+            "zerog",
+        ),
     ),
     "uniswap_v4": (
         ("SWAP", "LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"),
@@ -222,34 +240,21 @@ MIGRATED_STRATEGY_REGISTRATION = {
 
 EXPECTED_STRATEGY_MATRIX_ENTRIES = {
     # VIB-5916: aave_v3 no longer declares a manual matrix override. The
-    # lending matrix row now DERIVES from (strategy_intents, strategy_chains),
+    # lending matrix row now derives from unified intent-chain support,
     # which drops the optimistic plasma/sonic claims. None = no override.
     "aave_v3": None,
     "balancer_v2": (
         StrategyMatrixEntry(
             matrix_name="balancer",
             category="flash_loan",
-            chains=frozenset(("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche")),
+            intents=("FLASH_LOAN",),
         ),
     ),
     "enso": (
         StrategyMatrixEntry(
             matrix_name="enso",
             category="aggregator",
-            chains=frozenset(
-                (
-                    "ethereum",
-                    "optimism",
-                    "bsc",
-                    "polygon",
-                    "base",
-                    "arbitrum",
-                    "avalanche",
-                    "sonic",
-                    "linea",
-                    "berachain",
-                )
-            ),
+            intents=("SWAP",),
         ),
     ),
     "lagoon": (),
@@ -257,47 +262,45 @@ EXPECTED_STRATEGY_MATRIX_ENTRIES = {
         StrategyMatrixEntry(
             matrix_name="lifi",
             category="aggregator",
-            chains=frozenset(
-                ("ethereum", "optimism", "bsc", "polygon", "base", "arbitrum", "avalanche", "sonic", "linea")
-            ),
+            intents=("SWAP", "BRIDGE"),
         ),
     ),
     "morpho_blue": (
         StrategyMatrixEntry(
             matrix_name="morpho_blue",
             category="lending",
-            chains=frozenset(("ethereum", "base", "arbitrum", "polygon", "monad", "robinhood")),
+            intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
         ),
     ),
     "pendle": (
         StrategyMatrixEntry(
             matrix_name="pendle",
             category="yield",
-            # VIB-5300 trimmed this to the chains Pendle can actually compile on
-            # ({arbitrum, ethereum}); the prior 7-chain set over-advertised chains
-            # that failed at compile time.
-            chains=frozenset(("arbitrum", "ethereum")),
+            intents=("SWAP", "LP_OPEN", "LP_CLOSE", "WITHDRAW"),
         ),
     ),
-    # Matrix schema v2: fluid no longer declares a manual matrix override, for
-    # the same reason aave_v3 dropped its (VIB-5916 above). Its two rows now
-    # DERIVE from (strategy_intents, strategy_chains) narrowed by
-    # strategy_intent_chain_exclusions — SWAP on 4 chains, SUPPLY/WITHDRAW on
-    # arbitrum+base. The override scoped only the RENDERED row, so
-    # chains_for_intent(SUPPLY) still answered all four chains; publishing
-    # per-intent coverage would have shipped that as a live over-advertisement.
-    # None = no override. The exclusions are pinned in test_fluid_connector.py.
-    "fluid": None,
+    "fluid": (
+        StrategyMatrixEntry(
+            matrix_name="fluid",
+            category="swap",
+            intents=("SWAP",),
+        ),
+        StrategyMatrixEntry(
+            matrix_name="fluid",
+            category="lending",
+            intents=("SUPPLY", "WITHDRAW"),
+        ),
+    ),
     "uniswap_v4": (
         StrategyMatrixEntry(
             matrix_name="uniswap_v4",
             category="swap",
-            chains=frozenset(("ethereum", "base", "arbitrum", "optimism", "polygon", "avalanche", "bsc")),
+            intents=("SWAP",),
         ),
         StrategyMatrixEntry(
             matrix_name="uniswap_v4",
             category="lp",
-            chains=frozenset(("ethereum", "base", "arbitrum", "optimism", "polygon", "avalanche", "bsc")),
+            intents=("LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"),
         ),
     ),
 }
@@ -782,11 +785,11 @@ def _isolate_strategy_connector_registry() -> Iterator[None]:
     """Keep descriptor provider imports from leaking strategy registry state."""
     AddressRegistry.reset_cache()
     CompilerRegistry.reset_cache()
-    StrategyConnectorRegistry._clear()
+    CONNECTOR_REGISTRY.clear()
     yield
     AddressRegistry.reset_cache()
     CompilerRegistry.reset_cache()
-    StrategyConnectorRegistry._clear()
+    CONNECTOR_REGISTRY.clear()
 
 
 def test_descriptor_names_alias_connector_interface() -> None:
@@ -802,28 +805,28 @@ def test_connector_accepts_strategy_support_metadata() -> None:
         name="strategy_supported",
         kind=ProtocolKind.SWAP,
         strategy_intents=("SWAP",),
-        strategy_chains=("ethereum",),
+        supported_chains=SupportedChainsSpec(chains=("ethereum",)),
         strategy_matrix_entries=(
             StrategyMatrixEntry(
                 matrix_name="strategy_supported",
                 category="swap",
-                chains=frozenset({"ethereum"}),
+                intents=("SWAP",),
             ),
         ),
     )
 
     assert connector.has_strategy_support is True
     assert connector.strategy_intents == ("SWAP",)
-    assert connector.strategy_chains == ("ethereum",)
+    assert connector.supported_chains == SupportedChainsSpec(chains=("ethereum",))
 
 
-def test_connector_rejects_strategy_chains_without_strategy_intents() -> None:
-    """Strategy chains are meaningful only when the connector declares intents."""
-    with pytest.raises(ValueError, match="strategy_chains"):
+def test_connector_rejects_supported_chains_without_strategy_intents() -> None:
+    """Supported chains are meaningful only when the connector declares intents."""
+    with pytest.raises(ValueError, match="supported_chains"):
         Connector(
-            name="bad_strategy_chains",
+            name="bad_supported_chains",
             kind=ProtocolKind.SWAP,
-            strategy_chains=("ethereum",),
+            supported_chains=SupportedChainsSpec(chains=("ethereum",)),
         )
 
 
@@ -834,159 +837,9 @@ def test_connector_rejects_duplicate_strategy_intents() -> None:
             name="bad_strategy_intents",
             kind=ProtocolKind.SWAP,
             strategy_intents=("SWAP", "SWAP"),
-            strategy_chains=("ethereum",),
+            supported_chains=SupportedChainsSpec(chains=("ethereum",)),
         )
 
-
-# ---------------------------------------------------------------------------
-# strategy_intent_chain_exclusions (VIB-6111) — narrowing-only per-(intent,
-# chain) support exclusions. Every rejection branch is asserted here because
-# the whole point of the field is that a connector cannot quietly claim a cell
-# it does not support, NOR quietly disclaim one without a reason + ticket.
-# ---------------------------------------------------------------------------
-
-_EXCLUSION_KWARGS = {
-    "name": "exclusion_host",
-    "kind": ProtocolKind.LENDING,
-    "strategy_intents": ("SUPPLY", "BORROW"),
-    "strategy_chains": ("ethereum", "mantle"),
-}
-
-
-def _exclusion(**overrides: object) -> StrategyIntentChainExclusion:
-    fields: dict[str, object] = {
-        "intent": "BORROW",
-        "chains": frozenset({"mantle"}),
-        "reason": "governance zeroed ltv on every reserve",
-        "ticket": "VIB-6111",
-    }
-    fields.update(overrides)
-    return StrategyIntentChainExclusion(**fields)  # type: ignore[arg-type]
-
-
-def test_connector_accepts_strategy_intent_chain_exclusion() -> None:
-    """A well-formed exclusion narrows the declared cross-product."""
-    connector = Connector(**_EXCLUSION_KWARGS, strategy_intent_chain_exclusions=(_exclusion(),))
-
-    assert connector.strategy_intent_chain_exclusions is not None
-    (exclusion,) = connector.strategy_intent_chain_exclusions
-    assert exclusion.intent == "BORROW"
-    assert exclusion.chains == frozenset({"mantle"})
-    assert exclusion.ticket == "VIB-6111"
-    # strategy_chains is untouched — the exclusion narrows, it does not remove
-    # the chain (SUPPLY still works on mantle).
-    assert connector.strategy_chains == ("ethereum", "mantle")
-
-
-def test_connector_rejects_exclusions_without_strategy_intents() -> None:
-    with pytest.raises(ValueError, match="strategy_intent_chain_exclusions may only be set"):
-        Connector(
-            name="no_intents",
-            kind=ProtocolKind.LENDING,
-            strategy_intent_chain_exclusions=(_exclusion(),),
-        )
-
-
-def test_connector_rejects_exclusions_non_tuple() -> None:
-    with pytest.raises(ValueError, match="strategy_intent_chain_exclusions must be None or a tuple"):
-        Connector(
-            **_EXCLUSION_KWARGS,
-            strategy_intent_chain_exclusions=[_exclusion()],  # type: ignore[arg-type]
-        )
-
-
-def test_connector_rejects_exclusions_wrong_element_type() -> None:
-    with pytest.raises(ValueError, match="must contain only StrategyIntentChainExclusion"):
-        Connector(
-            **_EXCLUSION_KWARGS,
-            strategy_intent_chain_exclusions=("BORROW",),  # type: ignore[arg-type]
-        )
-
-
-def test_connector_rejects_exclusion_intent_not_declared() -> None:
-    """An exclusion may only narrow — never introduce an undeclared intent."""
-    with pytest.raises(ValueError, match=r"is not declared in Connector\.strategy_intents"):
-        Connector(**_EXCLUSION_KWARGS, strategy_intent_chain_exclusions=(_exclusion(intent="REPAY"),))
-
-
-@pytest.mark.parametrize("bad_intent", ["", "   ", None, 7])
-def test_connector_rejects_exclusion_blank_intent(bad_intent: object) -> None:
-    with pytest.raises(ValueError, match="intent must be a non-empty string"):
-        Connector(**_EXCLUSION_KWARGS, strategy_intent_chain_exclusions=(_exclusion(intent=bad_intent),))
-
-
-@pytest.mark.parametrize("bad_chains", [frozenset(), {"mantle"}, ("mantle",)])
-def test_connector_rejects_exclusion_bad_chain_container(bad_chains: object) -> None:
-    with pytest.raises(ValueError, match="chains must be a non-empty frozenset"):
-        Connector(**_EXCLUSION_KWARGS, strategy_intent_chain_exclusions=(_exclusion(chains=bad_chains),))
-
-
-@pytest.mark.parametrize("bad_chain", ["", "  ", None, 7])
-def test_connector_rejects_exclusion_invalid_chain_element(bad_chain: object) -> None:
-    """The declared contract is "non-empty strings" — enforce ALL of it.
-
-    Blank strings alone left ``frozenset({None})`` and numeric elements
-    untested, so a regression that only rejected blanks would have passed.
-    """
-    with pytest.raises(ValueError, match="chains must contain only non-empty strings"):
-        Connector(
-            **_EXCLUSION_KWARGS,
-            strategy_intent_chain_exclusions=(_exclusion(chains=frozenset({bad_chain})),),
-        )
-
-
-def test_connector_rejects_exclusion_chain_not_in_strategy_chains() -> None:
-    with pytest.raises(ValueError, match=r"contains chains not in Connector\.strategy_chains"):
-        Connector(
-            **_EXCLUSION_KWARGS,
-            strategy_intent_chain_exclusions=(_exclusion(chains=frozenset({"linea"})),),
-        )
-
-
-def test_connector_rejects_exclusion_when_strategy_chains_is_none() -> None:
-    """Off-chain venues have no chains to exclude."""
-    with pytest.raises(ValueError, match="may not be set when strategy_chains is None"):
-        Connector(
-            name="offchain_host",
-            kind=ProtocolKind.SWAP,
-            strategy_intents=("SWAP",),
-            strategy_chains=None,
-            strategy_intent_chain_exclusions=(
-                _exclusion(intent="SWAP", chains=frozenset({"ethereum"})),
-            ),
-        )
-
-
-def test_connector_rejects_exclusion_of_every_chain() -> None:
-    """Excluding every chain means the intent isn't supported — drop it instead."""
-    with pytest.raises(ValueError, match="drop the intent from strategy_intents instead"):
-        Connector(
-            **_EXCLUSION_KWARGS,
-            strategy_intent_chain_exclusions=(_exclusion(chains=frozenset({"ethereum", "mantle"})),),
-        )
-
-
-@pytest.mark.parametrize("blank", ["", "   ", None])
-def test_connector_rejects_exclusion_blank_reason(blank: object) -> None:
-    with pytest.raises(ValueError, match="reason must be a non-empty string"):
-        Connector(**_EXCLUSION_KWARGS, strategy_intent_chain_exclusions=(_exclusion(reason=blank),))
-
-
-@pytest.mark.parametrize("blank", ["", "   ", None])
-def test_connector_rejects_exclusion_blank_ticket(blank: object) -> None:
-    with pytest.raises(ValueError, match="ticket must be a non-empty string"):
-        Connector(**_EXCLUSION_KWARGS, strategy_intent_chain_exclusions=(_exclusion(ticket=blank),))
-
-
-def test_connector_rejects_duplicate_exclusion_intent_keys() -> None:
-    with pytest.raises(ValueError, match="has duplicate intent keys"):
-        Connector(
-            **_EXCLUSION_KWARGS,
-            strategy_intent_chain_exclusions=(
-                _exclusion(chains=frozenset({"mantle"})),
-                _exclusion(chains=frozenset({"ethereum"})),
-            ),
-        )
 
 
 def test_connector_registry_filters_strategy_support() -> None:
@@ -998,7 +851,7 @@ def test_connector_registry_filters_strategy_support() -> None:
             name="with_strategy",
             kind=ProtocolKind.SWAP,
             strategy_intents=("SWAP",),
-            strategy_chains=("ethereum",),
+            supported_chains=SupportedChainsSpec(chains=("ethereum",)),
         ),
     )
 
@@ -1016,7 +869,11 @@ def test_migrated_strategy_registration_is_descriptor_owned() -> None:
     for name, (intents, chains) in MIGRATED_STRATEGY_REGISTRATION.items():
         connector = connectors[name]
         assert connector.strategy_intents == intents
-        assert connector.strategy_chains == chains
+        assert connector.supported_chains is not None
+        if chains is None:
+            assert connector.supported_chains.is_offchain
+        else:
+            assert connector.supported_chains_for_protocol(name) == chains
         if name in EXPECTED_STRATEGY_MATRIX_ENTRIES:
             assert connector.strategy_matrix_entries == EXPECTED_STRATEGY_MATRIX_ENTRIES[name]
 

@@ -6,6 +6,7 @@ from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
     Connector,
     ImportRef,
+    SupportedChainsSpec,
 )
 
 CONNECTOR = Connector(
@@ -21,7 +22,7 @@ CONNECTOR = Connector(
         attribute="LagoonReceiptParserConnector",
     ),
     strategy_intents=("VAULT_DEPOSIT", "VAULT_REDEEM"),
-    strategy_chains=("ethereum", "base"),
+    supported_chains=SupportedChainsSpec(chains=("ethereum", "base")),
     # Vault lifecycle support is intentionally hidden from the support matrix.
     strategy_matrix_entries=(),
 )

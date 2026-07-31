@@ -644,9 +644,9 @@ class GatewayPriceIdCapability(Protocol):
 # (``tests/static/test_strategy_import_boundary.py``) forbids the matrix CLI
 # (under ``almanak/framework/cli/``) from reading anything in this module, so
 # the gateway-side capability was unreachable from the only consumer that
-# needed it. Matrix data now lives strategy-side on
-# :class:`almanak.connectors._strategy_base.registry.MatrixEntry` and
-# ``ConnectorManifest.matrix_entries``; see
+# needed it. Matrix classification now lives on descriptor-owned
+# ``StrategyMatrixEntry`` values while chains derive from the connector's
+# unified ``supported_chains`` declaration; see
 # ``almanak/framework/cli/support_matrix.py`` for the consumer.
 
 

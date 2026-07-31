@@ -90,7 +90,7 @@ def build_discovery_vectors(
     # ``chain`` here is the SDK canonical chain name: the whole discovery
     # pipeline (``_get_token_pair``, ``UNISWAP_V4``, the V4 compiler) is keyed
     # on canonical names, so BSC arrives as ``"bsc"`` — never ``"bnb"`` (a
-    # ChainRegistry alias; ``strategy_chains`` declarations canonicalize at
+    # ChainRegistry alias; ``supported_chains`` declarations canonicalize at
     # the registry boundary too). Returning ``None`` for a non-SDK
     # string is the framework-consistent behaviour (every connector's token
     # resolution is bsc-keyed too); we do NOT alias bnb→bsc here because

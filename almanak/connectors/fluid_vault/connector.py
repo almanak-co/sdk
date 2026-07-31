@@ -9,6 +9,7 @@ from almanak.connectors._connector import (
     LendingReadDecl,
     MetadataAmountEncoding,
     StrategyMatrixEntry,
+    SupportedChainsSpec,
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
@@ -86,12 +87,12 @@ CONNECTOR = Connector(
     strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
     # Checkpoint-1 scope — the exact lending universe, no cross-product
     # over-claim (compile-time chain guard retained as defense-in-depth).
-    strategy_chains=("arbitrum", "base"),
+    supported_chains=SupportedChainsSpec(chains=("arbitrum", "base")),
     strategy_matrix_entries=(
         StrategyMatrixEntry(
             matrix_name="fluid_vault",
             category="lending",
-            chains=frozenset(("arbitrum", "base")),
+            intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
         ),
     ),
 )

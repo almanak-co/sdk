@@ -7,8 +7,9 @@ from almanak.connectors._connector import (
     Connector,
     ImportRef,
     StrategyMatrixEntry,
+    SupportedChainsSpec,
 )
-from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec, SupportedChainsSpec
+from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
 
 CONNECTOR = Connector(
     name="enso",
@@ -44,31 +45,16 @@ CONNECTOR = Connector(
         keys=("enso",),
         module="almanak.connectors.enso.capabilities",
     ),
-    supported_chains=SupportedChainsSpec(
-        keys=("enso",),
-        module="almanak.connectors.enso.supported_chains",
-    ),
     strategy_intents=("SWAP",),
-    strategy_chains=("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bsc"),
+    supported_chains=SupportedChainsSpec(
+        chains=("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bsc")
+    ),
     # Aggregators render as aggregator rows instead of generic swap rows.
     strategy_matrix_entries=(
         StrategyMatrixEntry(
             matrix_name="enso",
             category="aggregator",
-            chains=frozenset(
-                (
-                    "ethereum",
-                    "optimism",
-                    "bsc",
-                    "polygon",
-                    "base",
-                    "arbitrum",
-                    "avalanche",
-                    "sonic",
-                    "linea",
-                    "berachain",
-                )
-            ),
+            intents=("SWAP",),
         ),
     ),
 )

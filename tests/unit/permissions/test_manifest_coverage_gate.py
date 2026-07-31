@@ -18,6 +18,7 @@ sweep, which is slow and network-bound.
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -187,21 +188,41 @@ class TestTripleEnumeration:
         A connector missing from the descriptor registry drops out of the sweep
         ENTIRELY, and an absent triple reads as "no gap here" rather than as an
         error — the same absence-as-success shape this gate has been bitten by
-        repeatedly. ``_declared_triples`` therefore hydrates the registry
-        explicitly rather than relying on this module's import chain to have
-        pulled every connector in as a side effect.
+        repeatedly. ``_declared_triples`` must therefore hydrate the registry
+        itself rather than relying on its importer's chain to have pulled every
+        connector in as a side effect.
 
-        Measured 2026-07-29: hydration is currently a no-op (375 triples across
-        41 connectors either way), so this pins the invariant, not a live fix.
+        Calling ``_declared_triples()`` twice in THIS process cannot show that:
+        by the time this module is imported, the fixtures and imports above
+        have already loaded much of ``almanak``, so both calls read the same
+        warm registry and the comparison is between a value and itself. The
+        enumeration is re-run in a **cold subprocess** that imports the gate
+        module and nothing else — the only place where an import-order
+        dependency can actually surface.
         """
-        from almanak.connectors._strategy_base.registry import _import_all_connectors
+        in_process = {t.key() for t in _declared_triples()}
+        assert in_process
 
-        before = {t.key() for t in _declared_triples()}
-        _import_all_connectors()
-        after = {t.key() for t in _declared_triples()}
-        assert before == after, (
-            "the declared universe grew after explicit registry hydration — the sweep was "
-            f"silently under-enumerating by {len(after - before)} triples: {sorted(after - before)[:10]}"
+        probe = (
+            "import json,sys;"
+            f"sys.path.insert(0, {str(_REPO_ROOT)!r});"
+            "from scripts.ci.check_permission_manifest_coverage import _declared_triples;"
+            "print(json.dumps(sorted(t.key() for t in _declared_triples())))"
+        )
+        completed = subprocess.run(  # noqa: S603
+            [sys.executable, "-c", probe],
+            capture_output=True,
+            text=True,
+            cwd=_REPO_ROOT,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stderr[-2000:]
+        cold = set(json.loads(completed.stdout.strip().splitlines()[-1]))
+
+        assert cold == in_process, (
+            "the declared universe differs between a cold import and this warm process — the sweep "
+            f"under-enumerates by {len(in_process - cold)} triple(s) when nothing else has imported "
+            f"the connectors: {sorted(in_process - cold)[:10]}"
         )
 
     def test_triples_are_deterministically_ordered(self) -> None:

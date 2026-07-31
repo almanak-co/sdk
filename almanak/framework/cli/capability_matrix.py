@@ -7,11 +7,10 @@ the capability declarations the connector manifest already carries. It is
 gates the runner. Those are later phases (consumers, then a CI ``unknown``
 gate). See ``docs/internal/qa/capability-matrix-g1-phase1.md`` for the phasing.
 
-**Not a public CLI.** There is no ``almanak info capabilities`` command — it was
-demoted because it sat next to ``almanak info matrix`` and looked like a second
-support catalogue for Edge/Platform. The product support surface remains
-``almanak info matrix`` only. QA, KitchenLoop, and future runner/CI consumers
-import :func:`build_capability_matrix` (and helpers) from this module directly.
+The read-only ``almanak info capabilities`` command exposes this deeper
+advisory view to QA and operators. It is not an independent support catalogue:
+its cell universe is derived from the same exact connector
+``SupportedChainsSpec`` declarations as ``almanak info matrix``.
 
 Where ``almanak info matrix`` (``support_matrix.py``) answers "which (protocol,
 category, chain) triples are routable?", this view answers the *deeper*
@@ -28,20 +27,11 @@ called, so no gateway-only module is imported):
 ============== ==========================================================
 capability     derived from
 ============== ==========================================================
-compile        ``strategy_intents`` × ``strategy_chains`` defines the
-               universe; every declared cell compiles. NOT affected by
-               ``strategy_intent_chain_exclusions`` — an exclusion says the
-               verb is not executable on that chain, not that the compiler
-               refuses to build a bundle (VIB-6111; the Mantle intent test
-               asserts BORROW still compiles there). See
-               ``EXCLUSION_GOVERNED_CAPABILITIES``.
+compile        Exact ``strategy_intents`` × ``supported_chains`` coverage
+               defines the universe; every declared cell compiles.
 execute        co-declared with ``compile`` in phase 1 (the manifest has no
                separate execute decl); a later phase binds this to demo /
-               intent-test evidence. Cells the manifest narrows away via
-               ``strategy_intent_chain_exclusions`` (VIB-6111) render
-               ``unsupported-explicit`` with the connector's declared reason
-               + ticket — this capability and ``demo-coverage`` are the only
-               two the exclusion governs.
+               intent-test evidence.
 rate           ``lending_read.rate_history_chains`` (strategy-side mirror of
                the gateway ``GatewayLendingRateHistoryCapability``).
 valuation      ``lending_read`` presence (lending). LP / vault / perp have no
@@ -71,8 +61,11 @@ documented TODO; phase 1 keys on ``protocol × chain × intent × capability``.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable
 from dataclasses import dataclass
+
+import click
 
 from almanak.core.chains import ChainRegistry
 
@@ -97,25 +90,6 @@ CAPABILITIES: tuple[str, ...] = (
     CAP_SAFETY_FLOOR,
     CAP_DEMO_COVERAGE,
 )
-
-# Capabilities an ``intent_chain_exclusions`` entry actually governs (VIB-6111).
-#
-# An exclusion is a statement about the END-TO-END EXECUTABILITY of a verb on a
-# chain — "you cannot borrow here" — and nothing more. Applying it to every
-# capability prints claims that are demonstrably false about positions this
-# field exists to protect: ``valuation`` derives from the connector's
-# ``lending_read`` decl and ``accounting`` from its ``receipt_parser_connector``,
-# both of which are present and working on Mantle. The connector's stated reason
-# for KEEPING mantle in ``strategy_chains`` is that pre-existing borrowers still
-# hold debt there — so telling an operator that the SDK cannot value or account
-# that debt is exactly backwards, and would read as "your position is invisible
-# to the portfolio fold" during an incident. It is also the same distinction
-# ``teardown/residual_discovery.py`` draws in this change: advertisement
-# narrows; safety does not.
-#
-# ``compile`` is likewise NOT governed: tests/intents/mantle/test_aave_v3_lending.py
-# asserts Mantle BORROW still compiles ("can never execute here").
-EXCLUSION_GOVERNED_CAPABILITIES: frozenset[str] = frozenset({CAP_EXECUTE, CAP_DEMO_COVERAGE})
 
 STATE_SUPPORTED = "supported"
 STATE_UNSUPPORTED = "unsupported-explicit"
@@ -380,7 +354,7 @@ def _capability_state(
 ) -> tuple[str, str]:
     """Dispatch one capability to its derivation. Returns ``(state, reason)``."""
     if capability == CAP_COMPILE:
-        return STATE_SUPPORTED, "declared in strategy_intents × strategy_chains"
+        return STATE_SUPPORTED, "declared in strategy_intents × supported_chains"
     if capability == CAP_EXECUTE:
         return STATE_SUPPORTED, "co-declared with compile (phase-1: no separate execute evidence)"
     if capability == CAP_RATE:
@@ -403,56 +377,30 @@ def _connector_protocol_keys(connector: object) -> tuple[str, ...]:
     return (name, *aliases)
 
 
-def _excluded_cell_reasons(connector: object) -> dict[tuple[str, str], str]:
-    """``(intent, normalised chain) -> "<reason> (<ticket>)"`` for excluded cells.
-
-    Reads the descriptor's narrowing-only ``strategy_intent_chain_exclusions``
-    (VIB-6111). An excluded cell is a declared NON-capability: the connector has
-    spoken, so it renders ``unsupported-explicit`` with the declared reason
-    rather than ``supported`` (which would be a lie) or ``unknown`` (which would
-    throw away the explanation).
-    """
-    reasons: dict[tuple[str, str], str] = {}
-    for exclusion in getattr(connector, "strategy_intent_chain_exclusions", None) or ():
-        text = f"{getattr(exclusion, 'reason', '')} ({getattr(exclusion, 'ticket', '')})"
-        for chain in getattr(exclusion, "chains", ()) or ():
-            reasons[(getattr(exclusion, "intent", ""), _matrix_chain(chain))] = text
-    return reasons
-
-
 def _cells_for_connector(connector: object, coverage: _DemoCoverage) -> list[CapabilityCell]:
     """Every applicable capability cell this connector contributes."""
     intents = getattr(connector, "strategy_intents", None)
-    chains = getattr(connector, "strategy_chains", None)
+    support = getattr(connector, "supported_chains", None)
     name = getattr(connector, "name", None) or ""
-    if not intents:
+    if not intents or support is None:
         return []
     protocol_keys = _connector_protocol_keys(connector)
 
     cells: list[CapabilityCell] = []
-    if chains is None:
+    if support.is_offchain:
         # Off-chain venue (e.g. Kraken): on-chain capabilities are explicitly
         # not applicable. Surface one row per intent so the venue is visible.
         cells.extend(_offchain_cells(name, intents))
         return cells
 
-    excluded = _excluded_cell_reasons(connector)
-    norm_chains = [_matrix_chain(c) for c in chains]
     for intent in intents:
         category = _intent_category(intent)
+        norm_chains = [_matrix_chain(c) for c in support.chains_for_intent(intent) or ()]
         for chain in norm_chains:
-            exclusion_reason = excluded.get((intent, chain))
             for capability in CAPABILITIES:
                 if not _capability_applies(capability, category):
                     continue
-                if exclusion_reason is not None and capability in EXCLUSION_GOVERNED_CAPABILITIES:
-                    state, reason = STATE_UNSUPPORTED, exclusion_reason
-                else:
-                    # Every other capability is evaluated normally, even for an
-                    # excluded cell — see EXCLUSION_GOVERNED_CAPABILITIES for why
-                    # an allowlist (rather than "everything except compile") is
-                    # the truthful shape here (VIB-6111).
-                    state, reason = _capability_state(capability, connector, chain, category, protocol_keys, coverage)
+                state, reason = _capability_state(capability, connector, chain, category, protocol_keys, coverage)
                 cells.append(
                     CapabilityCell(
                         protocol=name,
@@ -467,7 +415,7 @@ def _cells_for_connector(connector: object, coverage: _DemoCoverage) -> list[Cap
 
 
 def _offchain_cells(name: str, intents: Iterable[str]) -> list[CapabilityCell]:
-    """Capability rows for an off-chain venue (``strategy_chains is None``)."""
+    """Capability rows for an explicit off-chain support declaration."""
     cells: list[CapabilityCell] = []
     for intent in intents:
         for capability in CAPABILITIES:
@@ -478,7 +426,7 @@ def _offchain_cells(name: str, intents: Iterable[str]) -> list[CapabilityCell]:
                     intent=intent,
                     capability=capability,
                     state=STATE_UNSUPPORTED,
-                    reason="off-chain venue (strategy_chains=None)",
+                    reason="off-chain venue (supported_chains.chains=None)",
                 )
             )
     return cells
@@ -641,3 +589,33 @@ def filter_capability_matrix(
 
 # Back-compat alias for any in-repo callers that imported the private name.
 _filter_cells = filter_capability_matrix
+
+
+@click.command("capabilities")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Output as JSON.")
+@click.option("--protocol", "-p", type=str, default=None, help="Filter by protocol name (partial match).")
+@click.option("--chain", type=str, default=None, help="Filter by chain name.")
+@click.option("--intent", type=str, default=None, help="Filter by intent name.")
+@click.option("--capability", type=str, default=None, help="Filter by capability name.")
+@click.option("--state", type=str, default=None, help="Filter by advisory state.")
+def capability_matrix(
+    as_json: bool,
+    protocol: str | None,
+    chain: str | None,
+    intent: str | None,
+    capability: str | None,
+    state: str | None,
+) -> None:
+    """Show the advisory connector capability matrix."""
+    matrix = filter_capability_matrix(
+        build_capability_matrix(),
+        protocol=protocol,
+        chain=chain,
+        intent=intent,
+        capability=capability,
+        state=state,
+    )
+    if as_json:
+        click.echo(json.dumps(matrix.to_dict(), indent=2))
+        return
+    click.echo(_render_table(matrix))

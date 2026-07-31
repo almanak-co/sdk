@@ -57,11 +57,11 @@ class TestTheTreeIsClean:
         disagreements, _unmapped, _ = find_disagreements()
         assert not [d for d in disagreements if d.protocol == "lido"]
 
-    def test_pancakeswap_v3_linea_is_loadable(self) -> None:
-        """The catalogue published it; config validation must accept it too."""
+    def test_pancakeswap_v3_linea_is_not_advertised(self) -> None:
+        """Linea is intentionally absent from the proven unified declaration."""
         from almanak.framework.execution.config import SUPPORTED_PROTOCOLS
 
-        assert "linea" in SUPPORTED_PROTOCOLS["pancakeswap_v3"]
+        assert "linea" not in SUPPORTED_PROTOCOLS["pancakeswap_v3"]
 
 
 class TestConfigValidationResolvesProtocolAliases:
@@ -139,38 +139,32 @@ class TestGateFailsOnAReintroducedDisagreement:
 class TestGateFailsOnAnUnregisteredChain:
     """Negative control for check 3."""
 
-    def test_phantom_chain_in_a_matrix_entry_is_reported(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_phantom_chain_in_unified_support_is_reported(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import scripts.ci.check_chain_truth_agreement as gate
-
-        class _Entry:
-            matrix_name = "demo"
-            chains = frozenset({"ethereum", "definitely_not_a_chain"})
 
         class _Connector:
             name = "demo"
-            strategy_chains = ("ethereum",)
-            strategy_matrix_entries = (_Entry(),)
+            all_supported_chains = ("ethereum", "definitely_not_a_chain")
 
         from almanak.connectors import _connector as connector_mod
 
         monkeypatch.setattr(connector_mod.CONNECTOR_REGISTRY, "all", lambda: (_Connector(),))
         rows = gate.find_unregistered_chain_declarations()
-        assert ("demo", "strategy_matrix_entries[demo]", "definitely_not_a_chain") in rows
+        assert ("demo", "supported_chains", "definitely_not_a_chain") in rows
         # The registered chain on the same connector must NOT be reported.
         assert not [r for r in rows if r[2] == "ethereum"]
 
-    def test_phantom_chain_in_strategy_chains_is_reported(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_registered_unified_support_reports_nothing(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import scripts.ci.check_chain_truth_agreement as gate
 
         class _Connector:
             name = "demo"
-            strategy_chains = ("nonexistent_chain",)
-            strategy_matrix_entries = ()
+            all_supported_chains = ("ethereum",)
 
         from almanak.connectors import _connector as connector_mod
 
         monkeypatch.setattr(connector_mod.CONNECTOR_REGISTRY, "all", lambda: (_Connector(),))
-        assert ("demo", "strategy_chains", "nonexistent_chain") in gate.find_unregistered_chain_declarations()
+        assert gate.find_unregistered_chain_declarations() == []
 
 
 class TestWaiverFileIsStrict:

@@ -7,8 +7,8 @@ from almanak.connectors._connector import (
     BacktestStrategyTypeDecl,
     Connector,
     ImportRef,
+    SupportedChainsSpec,
 )
-from almanak.connectors._strategy_base.protocol_ownership import SupportedChainsSpec
 
 CONNECTOR = Connector(
     name="ethena",
@@ -28,12 +28,8 @@ CONNECTOR = Connector(
         module="almanak.connectors.ethena.compiler",
         attribute="EthenaCompiler",
     ),
-    supported_chains=SupportedChainsSpec(
-        keys=("ethena",),
-        module="almanak.connectors.ethena.supported_chains",
-    ),
     strategy_intents=("STAKE", "UNSTAKE"),
-    strategy_chains=("ethereum",),
+    supported_chains=SupportedChainsSpec(chains=("ethereum",)),
 )
 
 __all__ = ["CONNECTOR"]

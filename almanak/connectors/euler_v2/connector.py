@@ -7,8 +7,9 @@ from almanak.connectors._connector import (
     Connector,
     ImportRef,
     LendingReadDecl,
+    SupportedChainsSpec,
 )
-from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec, SupportedChainsSpec
+from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
 
 CONNECTOR = Connector(
     name="euler_v2",
@@ -25,10 +26,6 @@ CONNECTOR = Connector(
         keys=("euler_v2",),
         module="almanak.connectors.euler_v2.capabilities",
     ),
-    supported_chains=SupportedChainsSpec(
-        keys=("euler_v2",),
-        module="almanak.connectors.euler_v2.supported_chains",
-    ),
     # Bespoke vault/EVC reader (VIB-4966): market-scoped, synthetic market ids; see lending_read.py.
     lending_read=LendingReadDecl(
         account_state=ImportRef(module="almanak.connectors.euler_v2.lending_read", attribute="ACCOUNT_STATE_READ_SPEC"),
@@ -43,7 +40,7 @@ CONNECTOR = Connector(
         attribute="euler_v2_teardown_post_condition",
     ),
     strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
-    strategy_chains=("ethereum", "avalanche", "base", "arbitrum"),
+    supported_chains=SupportedChainsSpec(chains=("ethereum", "avalanche", "base", "arbitrum")),
 )
 
 __all__ = ["CONNECTOR"]

@@ -6,6 +6,7 @@ from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
     Connector,
     ImportRef,
+    SupportedChainsSpec,
 )
 
 CONNECTOR = Connector(
@@ -30,7 +31,7 @@ CONNECTOR = Connector(
     ),
     compiler_default_keys=("BRIDGE",),
     strategy_intents=("BRIDGE",),
-    strategy_chains=("ethereum", "arbitrum", "base", "optimism", "polygon", "linea"),
+    supported_chains=SupportedChainsSpec(chains=("ethereum", "arbitrum", "base", "optimism", "polygon", "linea")),
 )
 
 __all__ = ["CONNECTOR"]

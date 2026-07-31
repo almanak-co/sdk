@@ -104,7 +104,7 @@ def _solana_lp_routing() -> _SolanaLpRouting:
         # here; it was wrong twice over. This loop runs for every connector declaring
         # LP intents -- 12 of them, 9 EVM-only -- and ``SvmFamily.compile_intent``
         # calls ``solana_lp_spellings()`` on every LP_OPEN/LP_CLOSE on a non-Solana
-        # chain, so a one-character typo in (say) Curve's ``strategy_chains`` failed
+        # chain, so a one-character typo in (say) Curve's ``supported_chains`` failed
         # every Uniswap V3 LP compile on Arbitrum. Narrowing to Solana connectors
         # first cannot help either: a typo'd ``"solanaa"`` is exactly the case the
         # narrowing would exclude, so strictness there is unreachable by
@@ -113,11 +113,9 @@ def _solana_lp_routing() -> _SolanaLpRouting:
         # The invariant is therefore asserted where it can fail loudly and harm
         # nothing: ``scripts/ci/check_connector_registry.py`` (CI-wired today) plus
         # ``check_chain_truth_agreement.py``'s unregistered-chain check. Note those
-        # gates are the ONLY enforcement for this field --
-        # ``ConnectorManifest``'s ``KNOWN_VENUES`` check never runs on this path,
-        # because it is reached only via ``_import_all_connectors`` (CI-only) and
-        # this function reads the descriptor registry.
-        if not any(ChainRegistry.family_of(chain) is ChainFamily.SOLANA for chain in connector.strategy_chains or ()):
+        # gates are defense in depth; ``SupportedChainsSpec`` also canonicalises
+        # and rejects unknown chains during descriptor construction.
+        if not any(ChainRegistry.family_of(chain) is ChainFamily.SOLANA for chain in connector.all_supported_chains):
             continue
         compiler_keys = sorted(connector.compiler_keys or ())
         if not compiler_keys:

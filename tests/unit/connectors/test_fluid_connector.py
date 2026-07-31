@@ -18,44 +18,17 @@ class TestFluidManifest:
         assert CONNECTOR.strategy_intents == ("SWAP", "SUPPLY", "WITHDRAW")
 
     def test_matrix_chains(self):
-        """Advertised chain scope per category — now DERIVED, not hand-written.
-
-        Matrix schema v2: the hand-written ``strategy_matrix_entries`` override
-        scoped only the RENDERED row, while ``chains_for_intent(SUPPLY)`` — the
-        accessor consumers are told to ask — still answered all four chains.
-        Publishing per-intent coverage would have shipped that split as a live
-        over-advertisement, so the narrowing moved to
-        ``strategy_intent_chain_exclusions`` and the rows derive from it.
-
-        Asserted on the rendered matrix rather than the declaration, so this
-        keeps pinning the same observable fact the override used to pin.
-        """
-        from almanak.framework.cli.support_matrix import _build_matrix
-
-        assert CONNECTOR.strategy_matrix_entries is None
-        rows = {
-            p["category"]: p["chains"] for p in _build_matrix()["protocols"] if p["name"] == "fluid"
-        }
-        assert rows["swap"] == ["arbitrum", "base", "ethereum", "polygon"]
+        entries = {e.category: e.intents for e in CONNECTOR.strategy_matrix_entries}
+        assert entries["swap"] == ("SWAP",)
+        assert CONNECTOR.supported_chains_for_intent("SWAP") == (
+            "arbitrum",
+            "base",
+            "ethereum",
+            "polygon",
+        )
         # Lending scoped to the Phase-0-validated chains (VIB-5030).
-        assert rows["lending"] == ["arbitrum", "base"]
-
-    def test_lending_exclusions_pin_the_narrowing(self):
-        """The exclusions are now the single source of the lending narrowing."""
-        excluded = {
-            (x.intent, tuple(sorted(x.chains))) for x in CONNECTOR.strategy_intent_chain_exclusions
-        }
-        assert excluded == {
-            ("SUPPLY", ("ethereum", "polygon")),
-            ("WITHDRAW", ("ethereum", "polygon")),
-        }
-        # SUPPLY and WITHDRAW must be excluded TOGETHER: advertising a withdraw
-        # on a chain that cannot open a position implies a redeemable position
-        # that cannot exist.
-        assert {x.intent for x in CONNECTOR.strategy_intent_chain_exclusions} == {
-            "SUPPLY",
-            "WITHDRAW",
-        }
+        assert entries["lending"] == ("SUPPLY", "WITHDRAW")
+        assert CONNECTOR.supported_chains_for_intent("SUPPLY") == ("arbitrum", "base")
 
     def test_fluid_lending_alias(self):
         # The platform spec emits protocol="fluid_lending" — must resolve to
@@ -71,32 +44,19 @@ class TestFluidManifest:
 
     def test_lending_chain_sets_in_sync(self):
         # pr-auditor 2026-06-11: the lending chain universe lives in FOUR
-        # places — the compiler gate, the manifest's advertised lending scope,
+        # places — the compiler gate, the descriptor's advertised lending scope,
         # the valuation market table, and the permission-hints synthetic gate.
         # They are hand-maintained copies today (single-source derivation is a
         # follow-up); this pin prevents silent drift, where e.g. a chain
         # compiles supplies that valuation cannot mark or discovery never
         # authorises.
         #
-        # The manifest copy used to be the hand-written ``matrix_entries``
-        # lending row; under matrix schema v2 it is ``chains_for_intent(SUPPLY)``
-        # — the accessor consumers actually read, and the one that was silently
-        # DISAGREEING with the other three before the exclusions landed. Reading
-        # the row would now pass while the published contract over-advertised.
-        from almanak.connectors._strategy_base.registry import (
-            ConnectorRegistry,
-            _import_all_connectors,
-        )
+        # The descriptor copy is the exact per-intent support query.
         from almanak.connectors.fluid.compiler import FluidCompiler
         from almanak.connectors.fluid.lending_read import FLUID_FTOKEN_MARKETS
         from almanak.connectors.fluid.permission_hints import _LENDING_CHAINS
-        from almanak.framework.intents.vocabulary import IntentType
 
-        # Connectors register lazily on first attribute access.
-        _import_all_connectors()
-        manifest = ConnectorRegistry.get("fluid")
-        assert manifest is not None, "fluid must be registered"
-        manifest_lending_chains = frozenset(manifest.chains_for_intent(IntentType.SUPPLY))
+        manifest_lending_chains = frozenset(CONNECTOR.supported_chains_for_intent("SUPPLY") or ())
         assert FluidCompiler.LENDING_CHAINS == manifest_lending_chains
         assert FluidCompiler.LENDING_CHAINS == frozenset(FLUID_FTOKEN_MARKETS.keys())
         assert FluidCompiler.LENDING_CHAINS == _LENDING_CHAINS

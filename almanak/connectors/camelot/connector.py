@@ -6,6 +6,7 @@ from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
     Connector,
     ImportRef,
+    SupportedChainsSpec,
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
 
@@ -34,7 +35,7 @@ CONNECTOR = Connector(
         attribute="CamelotCompiler",
     ),
     strategy_intents=("SWAP",),
-    strategy_chains=("arbitrum",),
+    supported_chains=SupportedChainsSpec(chains=("arbitrum",)),
 )
 
 __all__ = ["CONNECTOR"]

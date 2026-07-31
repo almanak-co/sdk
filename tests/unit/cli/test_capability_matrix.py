@@ -14,11 +14,13 @@ Advisory view only — no public CLI. Tests cover:
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 
 import pytest
 from click.testing import CliRunner
 
+from almanak.connectors._connector import SupportedChainsSpec
 from almanak.framework.cli.capability_matrix import (
     CAP_ACCOUNTING,
     CAP_COMPILE,
@@ -28,7 +30,6 @@ from almanak.framework.cli.capability_matrix import (
     CAP_SAFETY_FLOOR,
     CAP_VALUATION,
     CAPABILITIES,
-    EXCLUSION_GOVERNED_CAPABILITIES,
     STATE_QUARANTINED,
     STATE_SUPPORTED,
     STATE_UNKNOWN,
@@ -65,23 +66,12 @@ class _FakeConnector:
     name: str = "fake"
     aliases: tuple[str, ...] = ()
     strategy_intents: tuple[str, ...] | None = None
-    strategy_chains: tuple[str, ...] | None = None
+    supported_chains: SupportedChainsSpec | None = None
     lending_read: object | None = None
     receipt_parser_connector: object | None = None
     accounting_treatment: object | None = None
     primitive: object | None = None
     swap_quote_connector: object | None = None
-    strategy_intent_chain_exclusions: tuple[object, ...] | None = None
-
-
-@dataclass
-class _FakeExclusion:
-    """Stand-in for ``StrategyIntentChainExclusion`` (VIB-6111)."""
-
-    intent: str
-    chains: frozenset[str]
-    reason: str = "governance zeroed ltv on every reserve"
-    ticket: str = "VIB-6111"
 
 
 @dataclass
@@ -264,7 +254,7 @@ def test_lending_connector_emits_rate_valuation_accounting() -> None:
     conn = _FakeConnector(
         name="lender",
         strategy_intents=("SUPPLY",),
-        strategy_chains=("base",),
+        supported_chains=SupportedChainsSpec(chains=("base",)),
         lending_read=_FakeLendingRead(rate_history_chains=("base",)),
         receipt_parser_connector=object(),
     )
@@ -283,7 +273,7 @@ def test_swap_connector_emits_safety_floor_not_rate() -> None:
     conn = _FakeConnector(
         name="dex",
         strategy_intents=("SWAP",),
-        strategy_chains=("base",),
+        supported_chains=SupportedChainsSpec(chains=("base",)),
         swap_quote_connector=object(),
     )
     caps = {c.capability for c in _cells_for_connector(conn, _EMPTY_COVERAGE)}
@@ -293,7 +283,11 @@ def test_swap_connector_emits_safety_floor_not_rate() -> None:
 
 
 def test_offchain_venue_marked_unsupported_explicit() -> None:
-    conn = _FakeConnector(name="kraken", strategy_intents=("SWAP",), strategy_chains=None)
+    conn = _FakeConnector(
+        name="kraken",
+        strategy_intents=("SWAP",),
+        supported_chains=SupportedChainsSpec(chains=None),
+    )
     cells = _cells_for_connector(conn, _EMPTY_COVERAGE)
     assert cells
     assert all(c.state == STATE_UNSUPPORTED for c in cells)
@@ -304,78 +298,47 @@ def test_connector_without_intents_emits_nothing() -> None:
     assert _cells_for_connector(_FakeConnector(strategy_intents=None), _EMPTY_COVERAGE) == []
 
 
-def test_excluded_intent_chain_cell_is_unsupported_with_reason() -> None:
-    """VIB-6111: a declared non-capability renders explicitly, not as ``supported``."""
+def test_intent_override_omits_unsupported_cells() -> None:
+    """An intent override is the exact support universe, not a post-hoc exclusion."""
     conn = _FakeConnector(
         name="aave_v3",
         strategy_intents=("SUPPLY", "BORROW"),
-        strategy_chains=("ethereum", "mantle"),
+        supported_chains=SupportedChainsSpec(
+            chains=("ethereum", "mantle"),
+            intent_overrides={"BORROW": ("ethereum",)},
+        ),
         lending_read=_FakeLendingRead(rate_history_chains=("ethereum", "mantle")),
-        strategy_intent_chain_exclusions=(_FakeExclusion(intent="BORROW", chains=frozenset({"mantle"})),),
     )
     cells = _cells_for_connector(conn, _EMPTY_COVERAGE)
 
     borrow_mantle = [c for c in cells if c.intent == "BORROW" and c.chain == "mantle"]
-    assert borrow_mantle, "the excluded cell must still be rendered — as unsupported, not omitted"
-
-    # Only the capabilities the exclusion actually GOVERNS carry the verdict.
-    # An exclusion states that the verb is not executable end-to-end on that
-    # chain — it says nothing about whether the SDK can compile, value, account
-    # for, or quote a rate on a position that already exists there (VIB-6111).
-    governed = [c for c in borrow_mantle if c.capability in EXCLUSION_GOVERNED_CAPABILITIES]
-    assert governed
-    assert all(c.state == STATE_UNSUPPORTED for c in governed)
-    assert all("VIB-6111" in c.reason and "ltv" in c.reason for c in governed)
-
-    # valuation / accounting / rate / compile must NOT inherit the verdict.
-    # Aave keeps `mantle` in strategy_chains precisely because pre-existing
-    # borrowers still hold debt there; printing "valuation: unsupported" tells
-    # an operator their live position is invisible to the portfolio fold, which
-    # is both false and the opposite of the reason the chain was retained.
-    ungoverned = [c for c in borrow_mantle if c.capability not in EXCLUSION_GOVERNED_CAPABILITIES]
-    assert ungoverned, "non-governed capabilities must still be rendered for an excluded cell"
-    for cap in (CAP_COMPILE, CAP_VALUATION, CAP_ACCOUNTING):
-        # NB: do not rebind ``cells`` here — the assertions below read it.
-        cap_cells = [c for c in ungoverned if c.capability == cap]
-        assert cap_cells, f"{cap} must be rendered for an excluded cell"
-        assert all(c.state != STATE_UNSUPPORTED for c in cap_cells), (
-            f"{cap} must reflect its real support, not the exclusion verdict"
-        )
-
-    # Narrowing-only: every other (intent, chain) cell is untouched.
+    assert not borrow_mantle
     borrow_ethereum = [c for c in cells if c.intent == "BORROW" and c.chain == "ethereum"]
     supply_mantle = [c for c in cells if c.intent == "SUPPLY" and c.chain == "mantle"]
-    assert borrow_ethereum and all(c.state != STATE_UNSUPPORTED for c in borrow_ethereum)
-    assert supply_mantle and all(c.state != STATE_UNSUPPORTED for c in supply_mantle)
+    assert borrow_ethereum
+    assert supply_mantle
 
 
-def test_exclusion_chain_alias_normalises_before_matching() -> None:
+def test_intent_override_chain_alias_normalises_before_emitting() -> None:
     conn = _FakeConnector(
         name="x",
         strategy_intents=("SWAP",),
-        # TWO chains: excluding SWAP on the ONLY declared chain is rejected by
-        # both real validators ("drop the intent instead"), so a one-chain fake
-        # models a manifest that cannot exist and passes only because
-        # _FakeConnector bypasses validation.
-        strategy_chains=("bnb", "ethereum"),
-        strategy_intent_chain_exclusions=(_FakeExclusion(intent="SWAP", chains=frozenset({"bnb"})),),
+        supported_chains=SupportedChainsSpec(
+            chains=("ethereum",),
+            intent_overrides={"SWAP": ("bnb",)},
+        ),
     )
     cells = _cells_for_connector(conn, _EMPTY_COVERAGE)
     assert cells
-    # The alias must fold to the canonical name — that is what this test is about.
-    assert "bsc" in {c.chain for c in cells}
-    assert "bnb" not in {c.chain for c in cells}
-    # Only exclusion-governed capabilities carry the verdict, and only on the
-    # excluded (canonicalised) chain — the other declared chain is untouched.
-    bsc_governed = [c for c in cells if c.chain == "bsc" and c.capability in EXCLUSION_GOVERNED_CAPABILITIES]
-    assert bsc_governed
-    assert all(c.state == STATE_UNSUPPORTED for c in bsc_governed)
-    eth_governed = [c for c in cells if c.chain == "ethereum" and c.capability in EXCLUSION_GOVERNED_CAPABILITIES]
-    assert eth_governed and all(c.state != STATE_UNSUPPORTED for c in eth_governed)
+    assert {c.chain for c in cells} == {"bsc"}
 
 
 def test_bnb_chain_normalised_to_bsc() -> None:
-    conn = _FakeConnector(name="x", strategy_intents=("SWAP",), strategy_chains=("bnb",))
+    conn = _FakeConnector(
+        name="x",
+        strategy_intents=("SWAP",),
+        supported_chains=SupportedChainsSpec(chains=("bnb",)),
+    )
     chains = {c.chain for c in _cells_for_connector(conn, _EMPTY_COVERAGE)}
     assert "bsc" in chains
     assert "bnb" not in chains
@@ -386,8 +349,16 @@ def test_bnb_chain_normalised_to_bsc() -> None:
 # =============================================================================
 def test_build_matrix_with_injected_connectors_is_sorted_and_deterministic() -> None:
     conns = [
-        _FakeConnector(name="zeta", strategy_intents=("SWAP",), strategy_chains=("base",)),
-        _FakeConnector(name="alpha", strategy_intents=("SWAP",), strategy_chains=("base",)),
+        _FakeConnector(
+            name="zeta",
+            strategy_intents=("SWAP",),
+            supported_chains=SupportedChainsSpec(chains=("base",)),
+        ),
+        _FakeConnector(
+            name="alpha",
+            strategy_intents=("SWAP",),
+            supported_chains=SupportedChainsSpec(chains=("base",)),
+        ),
     ]
     m1 = build_capability_matrix(connectors=conns, demo_coverage=_EMPTY_COVERAGE)
     m2 = build_capability_matrix(connectors=list(conns), demo_coverage=_EMPTY_COVERAGE)
@@ -397,7 +368,13 @@ def test_build_matrix_with_injected_connectors_is_sorted_and_deterministic() -> 
 
 
 def test_counts_by_state_tallies_all_states() -> None:
-    conns = [_FakeConnector(name="x", strategy_intents=("VAULT_DEPOSIT",), strategy_chains=("base",))]
+    conns = [
+        _FakeConnector(
+            name="x",
+            strategy_intents=("VAULT_DEPOSIT",),
+            supported_chains=SupportedChainsSpec(chains=("base",)),
+        )
+    ]
     m = build_capability_matrix(connectors=conns, demo_coverage=_EMPTY_COVERAGE)
     counts = m.counts_by_state()
     # compile+execute supported; rate/valuation/demo unknown; accounting unknown.
@@ -462,7 +439,7 @@ def test_every_real_cell_has_a_valid_state(real_matrix: CapabilityMatrix) -> Non
 
 
 # =============================================================================
-# Library API (QA consumers — no public CLI)
+# Library and read-only CLI API
 # =============================================================================
 def test_to_dict_payload_shape(real_matrix: CapabilityMatrix) -> None:
     payload = real_matrix.to_dict()
@@ -514,16 +491,18 @@ def test_build_never_raises_on_unknown(real_matrix: CapabilityMatrix) -> None:
     _ = _render_table(real_matrix)
 
 
-def test_info_capabilities_command_is_not_registered() -> None:
-    """Product surface: only `almanak info matrix` — capabilities was demoted."""
+def test_info_capabilities_command_emits_json() -> None:
+    """The CLI exposes the advisory view derived from unified support."""
     from almanak.cli.cli import almanak
 
     runner = CliRunner()
     help_result = runner.invoke(almanak, ["info", "--help"])
     assert help_result.exit_code == 0
     assert "matrix" in help_result.output
-    assert "capabilities" not in help_result.output
+    assert "capabilities" in help_result.output
 
-    missing = runner.invoke(almanak, ["info", "capabilities"])
-    assert missing.exit_code != 0
-    assert "No such command" in missing.output or "no such command" in missing.output.lower()
+    result = runner.invoke(almanak, ["info", "capabilities", "--json", "--protocol", "aave_v3"])
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["cells"]
+    assert all(cell["protocol"] == "aave_v3" for cell in payload["cells"])

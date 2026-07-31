@@ -8,6 +8,7 @@ from almanak.connectors._connector import (
     Connector,
     ImportRef,
     PositionReadDecl,
+    SupportedChainsSpec,
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
 from almanak.connectors._strategy_base.position_read_base import FUNGIBLE_LP
@@ -57,7 +58,7 @@ CONNECTOR = Connector(
     # v1 scope — arbitrum only (the sole chain whose SmartLending wrappers were
     # round-tripped on-chain). base/ethereum/polygon need per-chain resolver
     # verification before being added.
-    strategy_chains=("arbitrum",),
+    supported_chains=SupportedChainsSpec(chains=("arbitrum",)),
     backtest_strategy_type=BacktestStrategyTypeDecl(
         strategy_type="lp",
         # Fungible ERC-20-share wrapper positions: no tick range.

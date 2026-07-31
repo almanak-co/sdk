@@ -35,7 +35,6 @@ from almanak.framework.backtesting.pnl.engine import PnLBacktester
 from almanak.framework.backtesting.pnl.error_handling import PreflightValidationError
 from almanak.framework.backtesting.pnl.support_matrix import (
     LANE_FEE_MODEL,
-    _strategy_config_dict,
     LANE_INTENTS,
     LANE_LENDING_APY,
     LANE_LP_VOLUME,
@@ -43,6 +42,7 @@ from almanak.framework.backtesting.pnl.support_matrix import (
     LANE_PRICE,
     BacktestSupportReport,
     LaneSupport,
+    _strategy_config_dict,
     boot_compliance_violations,
     evaluate_backtest_support,
 )
@@ -543,6 +543,29 @@ class TestPerpFundingLane:
 
 
 class TestIntentsLane:
+    def test_canonical_protocol_is_rejected_outside_exact_support(self) -> None:
+        # `linea`, not `mantle`: uniswap_v3 declares mantle for SWAP (distinct
+        # deployment, own address table, own intent suite). linea is declared for
+        # no uniswap_v3 verb at all, so it is the real outside-support case.
+        report = evaluate_backtest_support(
+            _config(chain="linea"),
+            strategy_config={"protocol": "uniswap_v3"},
+        )
+
+        lane = _lane(report, LANE_INTENTS, "uniswap_v3")
+        assert lane.status == "degraded"
+        assert "no strategy intents on 'linea'" in lane.detail
+        assert lane.detail in report.hard_failures
+
+    def test_owned_alias_uses_its_protocol_override(self) -> None:
+        report = evaluate_backtest_support(
+            _config(chain="mantle"),
+            strategy_config={"protocol": "agni_finance"},
+        )
+
+        assert _lane(report, LANE_INTENTS, "agni_finance").status == "supported"
+        assert not [failure for failure in report.hard_failures if "agni_finance" in failure]
+
     def test_partial_envelope_gap_warns_but_stays_supported(self) -> None:
         # morpho_blue declares FLASH_LOAN beside four simulated lending
         # intents — a partial gap. (uniswap_v3 previously served this role via
@@ -720,7 +743,7 @@ class TestEngineIntegration:
         """Default mode: degraded lanes warn and continue; no boot violations."""
         backtester = self._backtester(MockDataProvider(), strategy_type="lending")
         config = _config(token_funding=pnl_token_funding(1000))
-        strategy = _HoldStrategy(config={"protocol": "benqi"})
+        strategy = _HoldStrategy(config={"protocol": "morpho_blue"})
 
         result = asyncio.run(backtester.backtest(strategy, config))
 
@@ -737,14 +760,19 @@ class TestEngineIntegration:
 
     def test_institutional_mode_records_boot_violations(self) -> None:
         backtester = self._backtester(MockDataProvider(), strategy_type="lending")
-        config = _config(token_funding=pnl_token_funding(1000), institutional_mode=True)
-        strategy = _HoldStrategy(config={"protocol": "benqi"})
+        config = _config(
+            token_funding=pnl_token_funding(1000),
+            institutional_mode=True,
+        )
+        strategy = _HoldStrategy(config={"protocol": "morpho_blue"})
         config.fail_on_preflight_error = False  # the degraded lane is warning-severity anyway
 
         result = asyncio.run(backtester.backtest(strategy, config))
 
         assert result.success
-        assert any(v.startswith("Support matrix: lane 'lending_apy[benqi]'") for v in result.compliance_violations)
+        assert any(
+            v.startswith("Support matrix: lane 'lending_apy[morpho_blue]'") for v in result.compliance_violations
+        )
         assert result.institutional_compliance is False
 
     def test_all_clear_support_adds_no_check_row(self) -> None:

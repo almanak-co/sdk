@@ -5,7 +5,7 @@ The companion guard ``test_chain_truth_matrix_alignment.py`` asserts the
 goes one step further and exercises the compile-time *resolution helpers* on
 each advertised chain to prove the breadth claim end-to-end at the data layer:
 
-1. Every advertised ``strategy_chains`` chain resolves a PT market address and
+1. Every advertised ``supported_chains`` chain resolves a PT market address and
    PT/YT token-info for a buy-PT SWAP (the helpers the compiler dereferences).
 2. The Ethereum long-dated ``PT-stETH-30DEC2027`` market — the VIB-5324 demo
    roll target — resolves through those same helpers (the durable, Anvil-
@@ -70,7 +70,7 @@ def _buy_pt_intent(pt_token: str) -> SwapIntent:
     return SwapIntent(from_token="WSTETH", to_token=pt_token, amount_usd=Decimal("100"))
 
 
-@pytest.mark.parametrize("chain", sorted(CONNECTOR.strategy_chains or ()))
+@pytest.mark.parametrize("chain", sorted(CONNECTOR.supported_chains_for_protocol("pendle")))
 def test_every_advertised_chain_resolves_a_pt_market(chain: str) -> None:
     """Each advertised chain must resolve a PT market + PT info for a buy-PT swap."""
     probe = _ADVERTISED_PROBE_PT.get(chain)
@@ -128,4 +128,4 @@ def test_plasma_is_compile_true_but_unadvertised() -> None:
     assert bool(PT_TOKEN_INFO.get("plasma")) and bool(MARKET_BY_PT_TOKEN.get("plasma"))
     assert bool(YT_TOKEN_INFO.get("plasma")) and bool(MARKET_BY_YT_TOKEN.get("plasma"))
     # ...yet it is deliberately absent from the advertised manifest.
-    assert "plasma" not in (CONNECTOR.strategy_chains or ())
+    assert "plasma" not in CONNECTOR.supported_chains_for_protocol("pendle")

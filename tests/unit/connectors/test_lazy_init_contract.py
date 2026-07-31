@@ -20,13 +20,9 @@ Contract:
 4. ``_register_once()`` is idempotent: a second invocation with
    ``_registered`` already True is a no-op (no side effects, no exception).
 
-The first-call registration behaviour itself is exercised end-to-end by
-``almanak.connectors._strategy_base.registry._import_all_connectors`` and
-its associated CI gate (``scripts/ci/check_connector_registry.py``); we
-deliberately do NOT re-test registration here because every connector
-under test has already been registered at import time by the test runner
-(pytest's collection touches the modules), so a fresh call to
-``_register_once`` is a no-op by design.
+Connector descriptor discovery is exercised end-to-end by
+``scripts/ci/check_connector_registry.py``. This test deliberately focuses
+only on lazy public exports.
 
 Why this test exists: CodeRabbit auto-review on PR #2447 requested
 per-connector unit tests for the lazy-init pattern across ~14 connectors.
@@ -79,8 +75,7 @@ def test_discovery_finds_the_expected_lazy_connectors() -> None:
     the post-merge count may grow as new connectors are added.
     """
     assert len(LAZY_CONNECTORS) >= 30, (
-        f"Only {len(LAZY_CONNECTORS)} lazy connectors discovered "
-        f"(expected >= 30): {LAZY_CONNECTORS}"
+        f"Only {len(LAZY_CONNECTORS)} lazy connectors discovered (expected >= 30): {LAZY_CONNECTORS}"
     )
 
 

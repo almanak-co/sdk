@@ -315,16 +315,19 @@ def _declared_protocols(strategy: Any, strategy_config: dict[str, Any]) -> list[
     return protocols
 
 
-def _connector_strategy_intents(protocol: str) -> tuple[str, ...] | None:
-    """Return the connector manifest's ``strategy_intents``, or None."""
+def _connector_strategy_intents(protocol: str, *, chain: str | None = None) -> tuple[str, ...] | None:
+    """Return declared intents, optionally filtered to exact chain support."""
     # Deferred import: connector discovery must never run at module import
     # time (same rule as the sibling _strategy_base registries).
     from almanak.connectors._connector import CONNECTOR_REGISTRY
 
-    manifest = CONNECTOR_REGISTRY.get(protocol)
-    if manifest is None:
+    connector = CONNECTOR_REGISTRY.get(protocol)
+    if connector is None:
         return None
-    return manifest.strategy_intents
+    declared = connector.strategy_intents
+    if declared is None or chain is None:
+        return declared
+    return tuple(intent for intent in declared if connector.supports(chain=chain, protocol=protocol, intent=intent))
 
 
 def _protocol_strategy_types(protocol: str) -> set[str]:
@@ -639,7 +642,7 @@ def _check_perp_funding_lane(
         )
 
 
-def _check_intents_lane(protocols: list[str], report: BacktestSupportReport) -> None:
+def _check_intents_lane(chain: str, protocols: list[str], report: BacktestSupportReport) -> None:
     """Intents lane: connector-declared intents vs the simulated envelope.
 
     Declared-but-unsimulated intent types are surfaced as warnings because
@@ -652,12 +655,28 @@ def _check_intents_lane(protocols: list[str], report: BacktestSupportReport) -> 
 
     simulated = {intent_type.value for intent_type in GENERIC_SIMULATED_INTENT_TYPES}
     for protocol in protocols:
-        declared = _connector_strategy_intents(protocol)
-        if declared is None:
+        all_declared = _connector_strategy_intents(protocol)
+        if all_declared is None:
             report.warnings.append(
                 f"protocol '{protocol}' has no connector strategy manifest — "
                 "intent support is unknown; runtime checks still apply"
             )
+            continue
+        declared = _connector_strategy_intents(protocol, chain=chain)
+        assert declared is not None
+        if not declared:
+            detail = (
+                f"connector '{protocol}' declares no strategy intents on '{chain}' in its unified support specification"
+            )
+            report.lanes.append(
+                LaneSupport(
+                    lane=LANE_INTENTS,
+                    status="degraded",
+                    detail=detail,
+                    protocol=protocol,
+                )
+            )
+            report.hard_failures.append(detail)
             continue
         unsimulated = [intent for intent in declared if intent.upper() not in simulated]
         if not unsimulated:
@@ -787,7 +806,7 @@ def evaluate_backtest_support(
     _check_perp_funding_lane(
         chain, _lane_protocols("perp", report.strategy_type, report.protocols), data_config, report
     )
-    _check_intents_lane(report.protocols, report)
+    _check_intents_lane(chain, report.protocols, report)
 
     return report
 

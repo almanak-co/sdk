@@ -8,9 +8,9 @@ from almanak.connectors._connector import (
     Connector,
     DexVolumeDecl,
     ImportRef,
+    SupportedChainsSpec,
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
-from almanak.connectors._strategy_base.protocol_ownership import SupportedChainsSpec
 
 CONNECTOR = Connector(
     name="traderjoe_v2",
@@ -60,16 +60,12 @@ CONNECTOR = Connector(
         module="almanak.connectors.traderjoe_v2.teardown_post_condition",
         attribute="traderjoe_v2_post_condition",
     ),
-    supported_chains=SupportedChainsSpec(
-        keys=("traderjoe_v2",),
-        module="almanak.connectors.traderjoe_v2.supported_chains",
-    ),
     primitive=ImportRef(
         module="almanak.connectors.traderjoe_v2.primitive",
         attribute="PRIMITIVE",
     ),
     strategy_intents=("SWAP", "LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"),
-    strategy_chains=("avalanche", "arbitrum", "bsc", "ethereum"),
+    supported_chains=SupportedChainsSpec(chains=("avalanche", "arbitrum", "bsc", "ethereum")),
 )
 
 __all__ = ["CONNECTOR"]

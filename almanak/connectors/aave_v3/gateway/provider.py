@@ -92,10 +92,9 @@ class AaveV3GatewayConnector(
         """Chains for which Aave v3 addresses are registered."""
         return frozenset(AAVE_V3.keys())
 
-    # The CLI support matrix consumes connector-level matrix data through
-    # ``ConnectorManifest.matrix_entries`` on the strategy side
-    # (see ``almanak/connectors/aave_v3/__init__.py``); declaring a
-    # parallel gateway capability would duplicate the source of truth.
+    # The CLI support matrix consumes the connector descriptor's inline
+    # ``SupportedChainsSpec`` and matrix classification; declaring a parallel
+    # gateway capability would duplicate the source of truth.
 
     def market_lookup(self):
         """Return the awaitable Aave market-lookup singleton factory.

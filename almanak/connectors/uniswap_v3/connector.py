@@ -9,11 +9,40 @@ from almanak.connectors._connector import (
     DexVolumeDecl,
     FeeModelDecl,
     ImportRef,
+    SupportedChainsSpec,
 )
 from almanak.connectors._strategy_base.address_table import AbiFamily, AddressTableSpec
-from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec, SupportedChainsSpec
+from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
 
 _V3_ABI_FAMILIES = (AbiFamily.V3_FACTORY, AbiFamily.V3_NPM)
+
+#: Chains with a proven 4-layer LP lifecycle (LP_OPEN / LP_CLOSE /
+#: LP_COLLECT_FEES) as well as SWAP.
+_LP_CHAINS = (
+    "ethereum",
+    "arbitrum",
+    "optimism",
+    "polygon",
+    "base",
+    "avalanche",
+    "bsc",
+    "monad",
+    "robinhood",
+)
+
+#: SWAP-proven, LP-unproven. Each is a distinct deployment with a full address
+#: table (factory / position_manager / quoter_v2 / swap_router / swap_router_02),
+#: a receipt-parser NPM entry, and a maintained 4-layer SWAP suite:
+#:   mantle -> tests/intents/mantle/test_uniswap_swap.py
+#:   xlayer -> tests/intents/xlayer/test_uniswap_v3_swap.py
+#:   zerog  -> tests/intents/zerog/test_jaine_swap.py  (JAINE DEX)
+#: None has an LP suite, so their LP intents are withheld below. Dropping the
+#: chains outright would strip proven SWAP coverage; publishing their LP intents
+#: would re-create the "published but unproven" claim VIB-6231 exists to kill —
+#: `check_intent_coverage --enforce` fails on all three LP verbs for them.
+#: `linea` is in neither tuple: it has no suite for any verb, so it stays
+#: unpublished until one exists.
+_SWAP_ONLY_CHAINS = ("mantle", "xlayer", "zerog")
 
 _VOLUME_SUBGRAPH_URLS = {
     "ethereum": "https://gateway.thegraph.com/api/subgraphs/id/5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV",
@@ -156,25 +185,34 @@ CONNECTOR = Connector(
         keys=("uniswap_v3",),
         module="almanak.connectors.uniswap_v3.capabilities",
     ),
-    supported_chains=SupportedChainsSpec(
-        keys=("uniswap_v3", "agni_finance"),
-        module="almanak.connectors.uniswap_v3.supported_chains",
-    ),
     primitive=ImportRef(
         module="almanak.connectors.uniswap_v3.primitive",
         attribute="PRIMITIVE",
     ),
     strategy_intents=("SWAP", "LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"),
-    strategy_chains=(
-        "ethereum",
-        "arbitrum",
-        "optimism",
-        "polygon",
-        "base",
-        "avalanche",
-        "bsc",
-        "monad",
-        "robinhood",
+    supported_chains=SupportedChainsSpec(
+        # SWAP spans both tuples; the LP lifecycle is restricted to _LP_CHAINS
+        # by the overrides below. Composing rather than re-listing keeps the two
+        # sets from drifting apart.
+        chains=_LP_CHAINS + _SWAP_ONLY_CHAINS,
+        intent_overrides={
+            "LP_OPEN": _LP_CHAINS,
+            "LP_CLOSE": _LP_CHAINS,
+            "LP_COLLECT_FEES": _LP_CHAINS,
+        },
+        # Agni Finance is a Uniswap V3 fork on Mantle sharing this connector,
+        # with its OWN address table (AGNI_FINANCE) distinct from the canonical
+        # UNISWAP_V3["mantle"] deployment. The override pins the alias to
+        # mantle alone rather than letting it inherit the union above.
+        #
+        # A protocol override REPLACES the chain set for that alias, so it is
+        # deliberately not intersected with the LP overrides: mantle sits in
+        # _SWAP_ONLY_CHAINS because the CANONICAL uniswap_v3 mantle deployment
+        # has no proven LP suite, which says nothing about Agni's. Agni ships
+        # its own NonfungiblePositionManager (AGNI_FINANCE["mantle"]) and its
+        # LP lifecycle is proven on-chain by tests/intents/mantle/test_agni_lp.py
+        # (LP_OPEN / LP_CLOSE). Intersecting here would delete proven coverage.
+        protocol_overrides={"agni_finance": ("mantle",)},
     ),
 )
 

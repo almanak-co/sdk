@@ -545,7 +545,7 @@ _lending_scope_hook_registered = False
 def _clear_lending_scope_caches() -> None:
     _declared_lending_chains.cache_clear()
     _lending_chain_scope_rejection.cache_clear()
-    _lending_intent_exclusion_rejection.cache_clear()
+    _lending_intent_support_rejection.cache_clear()
 
 
 def _ensure_lending_scope_invalidation_hook(registry: Any) -> None:
@@ -562,11 +562,11 @@ def _declared_lending_chains(protocol: str) -> frozenset[str] | None:
     """Chains the protocol's connector declares lending support on, or None.
 
     ``None`` means "no declaration to gate on": the protocol resolves to no
-    connector manifest, or the manifest carries no lending
-    ``StrategyMatrixEntry`` — duck-typed/generic protocols (tests, synthetic
-    venues) keep today's behavior. A frozenset (union across the manifest's
-    lending rows) means the connector DECLARED its lending chain scope and
-    the engine may fail closed on chains outside it.
+    connector descriptor, or the descriptor declares no lending intents —
+    duck-typed/generic protocols (tests, synthetic venues) keep today's
+    behavior. A frozenset (union across exact lending-intent coverage) means
+    the connector declared its lending chain scope and the engine may fail
+    closed on chains outside it.
     """
     from almanak.connectors._connector import CONNECTOR_REGISTRY
     from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
@@ -581,91 +581,18 @@ def _declared_lending_chains(protocol: str) -> frozenset[str] | None:
     connector = CONNECTOR_REGISTRY.get(key)
     if connector is None:
         return None
-    lending_chains: set[str] = set()
-    declared = False
-    for entry in connector.strategy_matrix_entries or ():
-        if entry.category == "lending":
-            declared = True
-            lending_chains.update(entry.chains)
-    if declared:
-        return frozenset(lending_chains)
-    # No lending matrix rows: most lending connectors (aave_v3, spark,
-    # compound_v3) declare via strategy_intents x strategy_chains — the same
-    # product the support matrix derives lending rows from. A connector
-    # declaring lending intents with a chain list has declared its scope;
-    # skipping it here would leave exactly the majors ungated.
-    lending_intents = {"SUPPLY", "BORROW", "REPAY", "WITHDRAW"}
-    intents = {str(i).upper() for i in (getattr(connector, "strategy_intents", None) or ())}
-    chains = tuple(getattr(connector, "strategy_chains", None) or ())
-    declared_lending = intents & lending_intents
-    if declared_lending and chains:
-        return _narrowed_lending_chains(connector, declared_lending, chains)
+    lending_intents = frozenset({"SUPPLY", "BORROW", "REPAY", "WITHDRAW"})
+    declared_intents = lending_intents.intersection(connector.strategy_intents or ())
+    if declared_intents:
+        return frozenset(
+            chain for intent in declared_intents for chain in connector.supported_chains_for_intent(intent) or ()
+        )
     return None
 
 
-def _narrowed_lending_chains(connector: Any, lending_intents: set[str], chains: tuple[str, ...]) -> frozenset[str]:
-    """``chains`` minus the chains every declared lending verb excludes.
-
-    The union, over the connector's declared lending verbs, of that verb's
-    surviving chains — the same answer ``ConnectorManifest.chains_for_intent``
-    gives, computed on the descriptor this module already holds.
-
-    The subtraction is load-bearing. Without it this fallback reports the RAW
-    ``strategy_intents`` x ``strategy_chains`` cross-product, so a connector
-    that narrows lending per chain reports every chain it merely SWAPS on and
-    the chain gate stops rejecting there. Fluid is exactly that shape (fToken
-    lending on arbitrum + base, VIB-5030; the DEX swaps on four chains), and
-    the hole is not covered by ``_lending_intent_exclusion_rejection``: that
-    gate can only fire on a declared exclusion, and there is no exclusion for
-    a verb the connector never declared at all — so a fluid BORROW on ethereum
-    would fill and accrue a fabricated APY.
-
-    Union rather than intersection: this gate answers "does this connector do
-    lending on this chain AT ALL". Per-``(intent, chain)`` narrowing is
-    ``_lending_intent_exclusion_rejection``'s job, and answering it here would
-    reject SUPPLY on a chain where only BORROW is excluded.
-
-    Returns the connector's own chain spellings (not canonicalized), because
-    callers canonicalize on comparison and render these verbatim in the
-    rejection message.
-    """
-    from almanak.core.chains import ChainRegistry
-
-    def _canon_declared(name: str) -> str:
-        # Connector-declared metadata is OUR code: a typo'd chain must fail
-        # LOUDLY rather than silently widen the gate, matching
-        # ``_lending_chain_scope_rejection._canon_declared``'s stated rule.
-        return ChainRegistry.resolve(name).name
-
-    exclusions = getattr(connector, "strategy_intent_chain_exclusions", None) or ()
-    covered: set[str] = set()
-    for intent in lending_intents:
-        excluded = {
-            _canon_declared(chain)
-            for exclusion in exclusions
-            if str(exclusion.intent).strip().upper() == intent
-            for chain in exclusion.chains
-        }
-        covered |= {chain for chain in chains if _canon_declared(chain) not in excluded}
-    return frozenset(covered)
-
-
 @functools.cache
-def _lending_intent_exclusion_rejection(protocol: str, chain: str, intent_name: str) -> str | None:
-    """Typed refusal for a lending verb the connector DECLARED unsupported here.
-
-    The chain-scope gate below asks "does this connector do lending on this
-    chain at all?", which is too coarse for a per-``(intent, chain)`` exclusion
-    (VIB-6111): Aave V3 keeps ``mantle`` in ``strategy_chains`` because SUPPLY /
-    WITHDRAW / REPAY still work there, so the chain gate passes and a backtest
-    would happily fill a BORROW that cannot execute live and accrue a fabricated
-    APY on it — the same failure mode the chain gate exists to prevent, one axis
-    over.
-
-    ``None`` means no exclusion covers the cell (including "this protocol
-    resolves to no connector" and "the connector declares no exclusions"), so
-    generic / duck-typed protocols keep today's behaviour.
-    """
+def _lending_intent_support_rejection(protocol: str, chain: str, intent_name: str) -> str | None:
+    """Refuse a lending cell outside the descriptor's exact unified support."""
     from almanak.connectors._connector import CONNECTOR_REGISTRY
     from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
 
@@ -675,47 +602,38 @@ def _lending_intent_exclusion_rejection(protocol: str, chain: str, intent_name: 
     if not key:
         return None
     connector = CONNECTOR_REGISTRY.get(key)
-    if connector is None:
+    if connector is None or not connector.has_strategy_support:
         return None
 
-    from almanak.core.chains import ChainRegistry
-
-    def _canon_user(name: str) -> str:
-        # Caller-supplied: tolerant, so an unknown venue does not explode.
-        descriptor = ChainRegistry.try_resolve(name)
-        return descriptor.name if descriptor is not None else name.strip().lower()
-
-    def _canon_declared(name: str) -> str:
-        # Connector-declared metadata is OUR code: a typo'd chain must fail
-        # LOUDLY rather than silently under-reject, matching
-        # ``_lending_chain_scope_rejection._canon_declared``'s stated rule.
-        return ChainRegistry.resolve(name).name
-
-    wanted_chain = _canon_user(chain)
-    wanted_intent = intent_name.strip().upper()
-    for exclusion in getattr(connector, "strategy_intent_chain_exclusions", None) or ():
-        if str(exclusion.intent).strip().upper() != wanted_intent:
-            continue
-        if wanted_chain not in {_canon_declared(c) for c in exclusion.chains}:
-            continue
-        return (
-            f"protocol '{protocol}' declares {wanted_intent} UNSUPPORTED on chain '{chain}' "
-            f"({exclusion.reason} [{exclusion.ticket}]) — the engine refuses to fabricate a "
-            f"lending market the live compiler and the chain both reject"
-        )
-    return None
+    intent = intent_name.strip().upper()
+    lending_intents = frozenset({"SUPPLY", "BORROW", "REPAY", "WITHDRAW"})
+    if intent not in lending_intents:
+        return None
+    declared_intents = {value.upper() for value in connector.strategy_intents or ()}
+    supported = connector.supported_chains_for(protocol=key, intent=intent) or ()
+    if intent in declared_intents and connector.supports(chain=chain, protocol=key, intent=intent):
+        return None
+    supported_label = ", ".join(sorted(supported))
+    if intent not in declared_intents:
+        detail = f"does not declare the {intent} intent"
+    else:
+        detail = f"declares {intent} only on [{supported_label}]"
+    return (
+        f"protocol '{protocol}' {detail}; chain '{chain}' is unsupported — the engine "
+        "refuses to fabricate a lending market the live compiler rejects"
+    )
 
 
 @functools.cache
 def _lending_chain_scope_rejection(protocol: str, chain: str) -> str | None:
     """Typed refusal for a lending open outside the connector's declared chains.
 
-    Returns the rejection reason when ``protocol`` declares a lending
-    StrategyMatrixEntry whose chain scope excludes ``chain`` (the live
+    Returns the rejection reason when ``protocol`` declares lending intents
+    whose exact support excludes ``chain`` (the live
     compiler fails closed on exactly this combination — the backtest must
     not fill it and accrue a fabricated APY). ``None`` means no gate:
-    either the chain is declared, or the protocol declares no lending
-    matrix at all (generic protocols keep today's behavior).
+    either the chain is declared, or the protocol declares no lending intents
+    (generic protocols keep today's behavior).
     """
     declared = _declared_lending_chains(protocol)
     if declared is None:
@@ -4880,12 +4798,7 @@ class PnLBacktester:
         # (observed: fluid/ethereum). Protocols with no lending matrix
         # declaration keep the generic duck-typed behavior.
         if intent_type in (IntentType.SUPPLY, IntentType.BORROW):
-            # Per-(intent, chain) exclusions are checked FIRST and carry the
-            # connector's own reason + ticket, which is a strictly better
-            # message than the coarse chain-scope one (VIB-6111).
-            scope_reason = _lending_intent_exclusion_rejection(
-                protocol, chain, intent_type.value
-            ) or _lending_chain_scope_rejection(protocol, chain)
+            scope_reason = _lending_intent_support_rejection(protocol, chain, intent_type.value)
             if scope_reason is not None:
                 from .sizing import RejectionCode
 

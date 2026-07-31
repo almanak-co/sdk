@@ -8,6 +8,7 @@ from almanak.connectors._connector import (
     Connector,
     ImportRef,
     StrategyMatrixEntry,
+    SupportedChainsSpec,
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
@@ -76,7 +77,7 @@ CONNECTOR = Connector(
         module="almanak.connectors.pendle.capabilities",
     ),
     strategy_intents=("SWAP", "LP_OPEN", "LP_CLOSE", "WITHDRAW"),
-    strategy_chains=("arbitrum", "ethereum"),
+    supported_chains=SupportedChainsSpec(chains=("arbitrum", "ethereum")),
     # Backtests as "lp" (what intent-priority detection already resolves for
     # SWAP+LP_OPEN); Pendle AMM LP shares are fungible ERC-20 — no tick range.
     backtest_strategy_type=BacktestStrategyTypeDecl(
@@ -107,7 +108,7 @@ CONNECTOR = Connector(
         StrategyMatrixEntry(
             matrix_name="pendle",
             category="yield",
-            chains=frozenset(("arbitrum", "ethereum")),
+            intents=("SWAP", "LP_OPEN", "LP_CLOSE", "WITHDRAW"),
         ),
     ),
 )

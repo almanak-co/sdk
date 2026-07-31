@@ -9,9 +9,10 @@ from almanak.connectors._connector import (
     ImportRef,
     LendingReadDecl,
     MetadataAmountEncoding,
+    SupportedChainsSpec,
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
-from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec, SupportedChainsSpec
+from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
 from almanak.connectors.spark.backtest_risk import BACKTEST_RISK as _BACKTEST_RISK
 
 CONNECTOR = Connector(
@@ -52,10 +53,6 @@ CONNECTOR = Connector(
         keys=("spark",),
         module="almanak.connectors.spark.capabilities",
     ),
-    supported_chains=SupportedChainsSpec(
-        keys=("spark",),
-        module="almanak.connectors.spark.supported_chains",
-    ),
     # Aave-fork reads: own opt-in attributes backed by the shared Aave-fork specs.
     # backtest_default_supply_apy / borrow_apy moved from interest.py (plan 022);
     # values verbatim from the pre-rewire hardcoded dict (0.05 / 0.055).
@@ -76,7 +73,7 @@ CONNECTOR = Connector(
     metadata_amount_encoding=MetadataAmountEncoding(lending="wei"),
     backtest_risk=_BACKTEST_RISK,
     strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
-    strategy_chains=("ethereum",),
+    supported_chains=SupportedChainsSpec(chains=("ethereum",)),
 )
 
 __all__ = ["CONNECTOR"]

@@ -8,6 +8,7 @@ from almanak.connectors._connector import (
     Connector,
     ImportRef,
     StrategyMatrixEntry,
+    SupportedChainsSpec,
 )
 from almanak.connectors._strategy_base.address_table import AbiFamily, AddressTableSpec
 
@@ -104,20 +105,22 @@ CONNECTOR = Connector(
     # VIB-4421: extended from ("ethereum", "arbitrum", "base") to the full
     # deployed set so the registry's (connector, intent, chain) universe matches
     # ``UNISWAP_V4`` in addresses.py and the 28 on-chain intent tests (7 chains x
-    # 4 intents). ``strategy_chains`` and ``strategy_matrix_entries`` both use
-    # ChainRegistry canonical names (``bsc``, not the ``bnb`` alias).
-    strategy_chains=("ethereum", "arbitrum", "base", "optimism", "polygon", "avalanche", "bsc"),
+    # 4 intents). ChainRegistry canonical names are used (``bsc``, not the
+    # ``bnb`` alias).
+    supported_chains=SupportedChainsSpec(
+        chains=("ethereum", "arbitrum", "base", "optimism", "polygon", "avalanche", "bsc")
+    ),
     # Matrix output covers deployed V4 chains for both swap and LP rows.
     strategy_matrix_entries=(
         StrategyMatrixEntry(
             matrix_name="uniswap_v4",
             category="swap",
-            chains=frozenset(("ethereum", "base", "arbitrum", "optimism", "polygon", "avalanche", "bsc")),
+            intents=("SWAP",),
         ),
         StrategyMatrixEntry(
             matrix_name="uniswap_v4",
             category="lp",
-            chains=frozenset(("ethereum", "base", "arbitrum", "optimism", "polygon", "avalanche", "bsc")),
+            intents=("LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"),
         ),
     ),
 )

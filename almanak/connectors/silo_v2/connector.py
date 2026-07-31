@@ -7,8 +7,9 @@ from almanak.connectors._connector import (
     Connector,
     ImportRef,
     LendingReadDecl,
+    SupportedChainsSpec,
 )
-from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec, SupportedChainsSpec
+from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
 
 CONNECTOR = Connector(
     name="silo_v2",
@@ -25,10 +26,6 @@ CONNECTOR = Connector(
         keys=("silo_v2",),
         module="almanak.connectors.silo_v2.capabilities",
     ),
-    supported_chains=SupportedChainsSpec(
-        keys=("silo_v2",),
-        module="almanak.connectors.silo_v2.supported_chains",
-    ),
     # Bespoke per-silo ERC-4626 reader (VIB-4965): market-scoped, synthetic market ids; see lending_read.py.
     lending_read=LendingReadDecl(
         account_state=ImportRef(module="almanak.connectors.silo_v2.lending_read", attribute="ACCOUNT_STATE_READ_SPEC"),
@@ -43,7 +40,7 @@ CONNECTOR = Connector(
         attribute="silo_v2_teardown_post_condition",
     ),
     strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
-    strategy_chains=("avalanche",),
+    supported_chains=SupportedChainsSpec(chains=("avalanche",)),
 )
 
 __all__ = ["CONNECTOR"]

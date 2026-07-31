@@ -30,7 +30,6 @@ from almanak.framework.cli.support_matrix import (
     support_matrix,
 )
 
-
 # =============================================================================
 # Test Fixtures
 # =============================================================================
@@ -265,9 +264,7 @@ class TestCompoundV3MatrixEntry:
         compound_protos = [p for p in matrix_data["protocols"] if p["name"] == "compound_v3"]
         assert len(compound_protos) == 1, "compound_v3 should appear in matrix"
         actual_chains = set(compound_protos[0]["chains"])
-        assert actual_chains == expected_chains, (
-            f"Matrix has {actual_chains} but adapter has {expected_chains}"
-        )
+        assert actual_chains == expected_chains, f"Matrix has {actual_chains} but adapter has {expected_chains}"
 
 
 # =============================================================================
@@ -298,9 +295,7 @@ class TestPreviouslyMissingConnectors:
             ("fluid", "swap", {"arbitrum", "base", "ethereum", "polygon"}),
         ],
     )
-    def test_connector_present(
-        self, matrix_data: dict, name: str, category: str, expected_chains: set[str]
-    ) -> None:
+    def test_connector_present(self, matrix_data: dict, name: str, category: str, expected_chains: set[str]) -> None:
         entries = [p for p in matrix_data["protocols"] if p["name"] == name and p["category"] == category]
         assert len(entries) == 1, f"{name} ({category}) should appear exactly once"
         assert set(entries[0]["chains"]) == expected_chains
@@ -316,9 +311,7 @@ class TestPreviouslyMissingConnectors:
             ("joelend", "lending"),  # VIB-3960 — protocol wound down
         ],
     )
-    def test_deregistered_connector_absent(
-        self, matrix_data: dict, name: str, category: str
-    ) -> None:
+    def test_deregistered_connector_absent(self, matrix_data: dict, name: str, category: str) -> None:
         entries = [p for p in matrix_data["protocols"] if p["name"] == name and p["category"] == category]
         assert entries == [], f"{name} ({category}) is deregistered; must not appear in matrix"
 
@@ -424,470 +417,196 @@ class TestDynamicCapabilityDiscovery:
     ``MatrixEntry`` rows automatically appears in the matrix without any
     edit to ``support_matrix.py``.
 
-    The test registers a synthetic ``ConnectorManifest`` into the live
-    ``ConnectorRegistry`` (using a unique connector name that no real
-    connector uses), rebuilds the matrix, and asserts the synthetic
-    rows surface in the rendered output. Teardown unregisters the
-    connector so the test is isolated from siblings in the same suite.
+    Tests inject a synthetic connector descriptor into the descriptor query,
+    rebuild the matrix, and assert its rows surface without central edits.
 
-    Matrix metadata is published via :class:`MatrixEntry` (strategy-side)
-    rather than ``SupportedActionsCapability`` (gateway-side): the matrix
+    Matrix metadata is published via descriptor-owned
+    :class:`StrategyMatrixEntry` rather than a gateway-side capability: the matrix
     CLI is a strategy-container module and the strategy-side import
     boundary (``tests/static/test_strategy_import_boundary.py``) forbids
     reading anything under ``almanak.connectors._base.gateway_*``. See
     the ``support_matrix`` module docstring for the architectural call.
     """
 
-    def test_matrix_entries_picks_up_new_connector(self) -> None:
-        """A ``ConnectorManifest`` with a single ``matrix_entries`` row
-        produces exactly one matrix row, verbatim from the declaration.
+    def test_matrix_entries_picks_up_new_connector(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A descriptor with one classification row produces one matrix row.
+
+        Its chains derive from the row's listed intent.
         Mirrors the simple-case dispatch every connector goes through.
         """
-        from almanak.connectors._strategy_base.registry import (
-            ConnectorManifest,
-            ConnectorRegistry,
-            MatrixEntry,
+        from almanak.connectors._base.types import ProtocolKind
+        from almanak.connectors._connector import (
+            CONNECTOR_REGISTRY,
+            Connector,
+            StrategyMatrixEntry,
+            SupportedChainsSpec,
         )
-        from almanak.framework.intents.vocabulary import IntentType
 
-        manifest = ConnectorManifest(
+        connector = Connector(
             name="vib_4856_mock_swap",
-            intents=(IntentType.SWAP,),
-            chains=("ethereum",),
-            matrix_entries=(
-                MatrixEntry(
+            kind=ProtocolKind.SWAP,
+            strategy_intents=("SWAP",),
+            supported_chains=SupportedChainsSpec(chains=("ethereum", "arbitrum")),
+            strategy_matrix_entries=(
+                StrategyMatrixEntry(
                     matrix_name="vib_4856_mock_swap",
                     category="swap",
-                    chains=frozenset({"ethereum", "arbitrum"}),
+                    intents=("SWAP",),
                 ),
             ),
         )
-        ConnectorRegistry.register(manifest)
-        try:
-            data = _build_matrix()
-            mock_rows = [p for p in data["protocols"] if p["name"] == "vib_4856_mock_swap"]
-            assert len(mock_rows) == 1, f"mock connector should produce one matrix row, got {mock_rows!r}"
-            assert mock_rows[0]["category"] == "swap"
-            assert set(mock_rows[0]["chains"]) == {"ethereum", "arbitrum"}
-        finally:
-            ConnectorRegistry._entries.pop("vib_4856_mock_swap", None)
+        monkeypatch.setattr(CONNECTOR_REGISTRY, "with_strategy_support", lambda: (connector,))
+        data = _build_matrix()
+        mock_rows = [p for p in data["protocols"] if p["name"] == "vib_4856_mock_swap"]
+        assert len(mock_rows) == 1, f"mock connector should produce one matrix row, got {mock_rows!r}"
+        assert mock_rows[0]["category"] == "swap"
+        assert set(mock_rows[0]["chains"]) == {"ethereum", "arbitrum"}
 
-    def test_matrix_entries_multi_row_connector(self) -> None:
-        """One ``ConnectorManifest`` can publish multiple ``MatrixEntry``
+    def test_matrix_entries_multi_row_connector(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """One connector can publish multiple classification rows
         rows under different ``matrix_name``\\ s — the mechanism Aerodrome's
         slipstream alias uses in production.
         """
-        from almanak.connectors._strategy_base.registry import (
-            ConnectorManifest,
-            ConnectorRegistry,
-            MatrixEntry,
+        from almanak.connectors._base.types import ProtocolKind
+        from almanak.connectors._connector import (
+            CONNECTOR_REGISTRY,
+            Connector,
+            StrategyMatrixEntry,
+            SupportedChainsSpec,
         )
-        from almanak.framework.intents.vocabulary import IntentType
 
-        manifest = ConnectorManifest(
+        connector = Connector(
             name="vib_4856_mock_multi",
-            intents=(IntentType.LP_OPEN,),
-            chains=("ethereum",),
-            matrix_entries=(
-                MatrixEntry(
+            kind=ProtocolKind.LP,
+            strategy_intents=("LP_OPEN", "LP_CLOSE"),
+            supported_chains=SupportedChainsSpec(chains=("ethereum", "base")),
+            strategy_matrix_entries=(
+                StrategyMatrixEntry(
                     matrix_name="vib_4856_mock_multi",
                     category="lp",
-                    chains=frozenset({"ethereum"}),
+                    intents=("LP_OPEN",),
                 ),
-                MatrixEntry(
+                StrategyMatrixEntry(
                     matrix_name="vib_4856_mock_multi_alias",
                     category="lp",
-                    chains=frozenset({"ethereum", "base"}),
+                    intents=("LP_CLOSE",),
                 ),
             ),
         )
-        ConnectorRegistry.register(manifest)
-        try:
-            data = _build_matrix()
-            names = {p["name"] for p in data["protocols"]}
-            assert "vib_4856_mock_multi" in names
-            assert "vib_4856_mock_multi_alias" in names
+        monkeypatch.setattr(CONNECTOR_REGISTRY, "with_strategy_support", lambda: (connector,))
+        data = _build_matrix()
+        names = {p["name"] for p in data["protocols"]}
+        assert "vib_4856_mock_multi" in names
+        assert "vib_4856_mock_multi_alias" in names
+        alias_rows = [p for p in data["protocols"] if p["name"] == "vib_4856_mock_multi_alias"]
+        assert set(alias_rows[0]["chains"]) == {"base", "ethereum"}
 
-            alias_rows = [p for p in data["protocols"] if p["name"] == "vib_4856_mock_multi_alias"]
-            assert set(alias_rows[0]["chains"]) == {"base", "ethereum"}
-        finally:
-            ConnectorRegistry._entries.pop("vib_4856_mock_multi", None)
+    def test_descriptor_matrix_entries_picks_up_new_connector(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A descriptor classification row groups exact intent-chain support.
 
-    def test_manifest_matrix_entries_picks_up_new_connector(self) -> None:
-        """Strategy-side path: a ``ConnectorManifest`` with explicit
-        ``matrix_entries`` produces matrix rows verbatim — used by
+        This is used by
         connectors without a gateway-side provider (e.g. LiFi).
         """
-        from almanak.connectors._strategy_base.registry import (
-            ConnectorManifest,
-            ConnectorRegistry,
-            MatrixEntry,
+        from almanak.connectors._base.types import ProtocolKind
+        from almanak.connectors._connector import (
+            CONNECTOR_REGISTRY,
+            Connector,
+            StrategyMatrixEntry,
+            SupportedChainsSpec,
         )
-        from almanak.framework.intents.vocabulary import IntentType
 
-        manifest = ConnectorManifest(
+        connector = Connector(
             name="vib_4856_mock_strategy",
-            intents=(IntentType.SWAP,),
-            chains=("ethereum",),
-            matrix_entries=(
-                MatrixEntry(
+            kind=ProtocolKind.SWAP,
+            strategy_intents=("SWAP",),
+            supported_chains=SupportedChainsSpec(chains=("ethereum", "polygon")),
+            strategy_matrix_entries=(
+                StrategyMatrixEntry(
                     matrix_name="vib_4856_mock_strategy",
                     category="aggregator",
-                    chains=frozenset({"ethereum", "polygon"}),
+                    intents=("SWAP",),
                 ),
             ),
         )
-        ConnectorRegistry.register(manifest)
-        try:
-            data = _build_matrix()
-            rows = [
-                p
-                for p in data["protocols"]
-                if p["name"] == "vib_4856_mock_strategy"
-            ]
-            assert len(rows) == 1
-            assert rows[0]["category"] == "aggregator"
-            assert set(rows[0]["chains"]) == {"ethereum", "polygon"}
-        finally:
-            ConnectorRegistry._entries.pop("vib_4856_mock_strategy", None)
+        monkeypatch.setattr(CONNECTOR_REGISTRY, "with_strategy_support", lambda: (connector,))
+        data = _build_matrix()
+        rows = [p for p in data["protocols"] if p["name"] == "vib_4856_mock_strategy"]
+        assert len(rows) == 1
+        assert rows[0]["category"] == "aggregator"
+        assert set(rows[0]["chains"]) == {"ethereum", "polygon"}
 
-    def test_manifest_empty_matrix_entries_suppresses_derivation(self) -> None:
-        """A connector that declares ``matrix_entries=()`` (e.g. when the
+    def test_descriptor_empty_matrix_entries_suppresses_derivation(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A connector that declares ``strategy_matrix_entries=()``
         gateway side is authoritative) does NOT produce a derived row.
-        Guards against the regression where the strategy-side intent
-        derivation double-counts a connector that the gateway already
-        published.
+        Guards intentional matrix suppression.
         """
-        from almanak.connectors._strategy_base.registry import (
-            ConnectorManifest,
-            ConnectorRegistry,
+        from almanak.connectors._base.types import ProtocolKind
+        from almanak.connectors._connector import (
+            CONNECTOR_REGISTRY,
+            Connector,
+            SupportedChainsSpec,
         )
-        from almanak.framework.intents.vocabulary import IntentType
 
-        manifest = ConnectorManifest(
+        connector = Connector(
             name="vib_4856_mock_suppressed",
-            intents=(IntentType.SUPPLY, IntentType.BORROW),
-            chains=("ethereum",),
-            matrix_entries=(),
+            kind=ProtocolKind.LENDING,
+            strategy_intents=("SUPPLY", "BORROW"),
+            supported_chains=SupportedChainsSpec(chains=("ethereum",)),
+            strategy_matrix_entries=(),
         )
-        ConnectorRegistry.register(manifest)
-        try:
-            data = _build_matrix()
-            rows = [
-                p
-                for p in data["protocols"]
-                if p["name"] == "vib_4856_mock_suppressed"
-            ]
-            assert rows == [], (
-                "matrix_entries=() must suppress strategy-side derivation"
-            )
-        finally:
-            ConnectorRegistry._entries.pop("vib_4856_mock_suppressed", None)
+        monkeypatch.setattr(CONNECTOR_REGISTRY, "with_strategy_support", lambda: (connector,))
+        data = _build_matrix()
+        rows = [p for p in data["protocols"] if p["name"] == "vib_4856_mock_suppressed"]
+        assert rows == [], "strategy_matrix_entries=() must suppress derivation"
 
-
-# =============================================================================
-# Per-(intent, chain) exclusions (VIB-6111)
-# =============================================================================
-
-
-class TestIntentChainExclusionDerivation:
-    """A category's chain set is the UNION of its intents' narrowed chain sets.
-
-    The consequence that matters in production: a category survives on a chain
-    as long as ONE of its verbs does (Aave V3 keeps its ``lending`` row on
-    mantle because SUPPLY / WITHDRAW / REPAY still work), and a category
-    disappears from a chain only when EVERY verb in it is excluded there.
-    """
-
-    @staticmethod
-    def _derive(intents, chains, exclusions):
-        from almanak.connectors._strategy_base.registry import ConnectorManifest
-        from almanak.framework.cli.support_matrix import _derive_entries_from_intents
-
-        manifest = ConnectorManifest(
-            name="vib_6111_probe",
-            intents=intents,
-            chains=chains,
-            intent_chain_exclusions=exclusions,
-        )
-        return {
-            (name, category): set(chain_set)
-            for name, category, chain_set in _derive_entries_from_intents(
-                manifest.name, manifest.intents, manifest.chains, manifest.chains_for_intent
-            )
-        }
-
-    def test_partially_excluded_category_keeps_the_chain(self) -> None:
-        from almanak.connectors._strategy_base.registry import IntentChainExclusion
-        from almanak.framework.intents.vocabulary import IntentType
-
-        derived = self._derive(
-            (IntentType.SUPPLY, IntentType.BORROW),
-            ("ethereum", "mantle"),
-            (
-                IntentChainExclusion(
-                    intent=IntentType.BORROW,
-                    chains=frozenset({"mantle"}),
-                    reason="ltv zeroed on every reserve",
-                    ticket="VIB-6111",
-                ),
-            ),
-        )
-
-        assert derived[("vib_6111_probe", "lending")] == {"ethereum", "mantle"}
-
-    def test_fully_excluded_category_drops_the_chain(self) -> None:
-        from almanak.connectors._strategy_base.registry import IntentChainExclusion
-        from almanak.framework.intents.vocabulary import IntentType
-
-        # SWAP is the ONLY verb in the swap category, so excluding it on mantle
-        # removes mantle from the swap row entirely — while the lending row,
-        # driven by a different verb, keeps mantle.
-        derived = self._derive(
-            (IntentType.SWAP, IntentType.SUPPLY),
-            ("ethereum", "mantle"),
-            (
-                IntentChainExclusion(
-                    intent=IntentType.SWAP,
-                    chains=frozenset({"mantle"}),
-                    reason="no router deployed",
-                    ticket="VIB-6111",
-                ),
-            ),
-        )
-
-        assert derived[("vib_6111_probe", "swap")] == {"ethereum"}
-        assert derived[("vib_6111_probe", "lending")] == {"ethereum", "mantle"}
-
-    def test_no_exclusions_is_unchanged_behaviour(self) -> None:
-        from almanak.framework.intents.vocabulary import IntentType
-
-        derived = self._derive((IntentType.SWAP,), ("ethereum", "mantle"), None)
-        assert derived == {("vib_6111_probe", "swap"): {"ethereum", "mantle"}}
-
-    def test_narrowing_callable_is_required_not_a_silent_fallback(self) -> None:
-        """Omitting the narrowing read must RAISE, never widen silently.
-
-        It used to default to the raw ``chains``, so a caller that forgot the
-        argument quietly got pre-VIB-6111 semantics — a silent widening in the
-        one function whose contract is truthful narrowing. Wrong answers must be
-        loud here.
-        """
-        import pytest
-
-        from almanak.framework.cli.support_matrix import _derive_entries_from_intents
-        from almanak.framework.intents.vocabulary import IntentType
-
-        with pytest.raises(TypeError):
-            _derive_entries_from_intents(
-                "vib_6111_probe", (IntentType.SWAP,), ("ethereum", "mantle")
-            )
-
-
-class TestExclusionsSurviveTheFullMatrixBuild:
-    """VIB-6111 regression: Phase B must not re-widen a narrowed row.
-
-    The per-function tests above exercise ``_derive_entries_from_intents`` in
-    ISOLATION, which is exactly why the original defect passed them: the
-    narrowing was correct there and then undone one call later.
-    ``_build_matrix()`` runs Phase A (registry) AND Phase B (compiler routing
-    tables), and Phase B unions router-table chains into any key it does not
-    consider authoritative. A connector that appears in ``PROTOCOL_ROUTERS``
-    therefore got its excluded chain added straight back.
-
-    This test must run the FULL build, and must use a protocol name that really
-    is in the routing tables — otherwise it re-tests Phase A and proves nothing.
-    """
-
-    def test_excluded_chain_is_not_re_added_by_compiler_tables(
-        self, monkeypatch: pytest.MonkeyPatch
+    def test_compiler_fallback_cannot_cross_widen_intent_overrides(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """A resolvable connector remains bounded by exact intent support."""
+        from almanak.connectors._base.types import ProtocolKind
+        from almanak.connectors._connector import CONNECTOR_REGISTRY, Connector, SupportedChainsSpec
+        from almanak.framework.cli.support_matrix import _collect_from_compiler_tables
         from almanak.framework.intents import compiler_constants
-        from almanak.connectors._strategy_base.registry import (
-            ConnectorManifest,
-            ConnectorRegistry,
-            IntentChainExclusion,
-        )
-        from almanak.framework.intents.vocabulary import IntentType
 
-        proto_name = "vib_6111_router_probe"
-        routed_chain = "ethereum"
-        other_chain = "arbitrum"
-
-        # Put the synthetic protocol in the routing table so Phase B genuinely
-        # tries to widen it. A real connector name can't be used here:
-        # ``_build_matrix`` re-imports every connector, which would collide with
-        # the injected manifest.
-        patched_routers = {
-            chain: dict(protos) if isinstance(protos, dict) else list(protos)
-            for chain, protos in compiler_constants.PROTOCOL_ROUTERS.items()
-        }
-        bucket = patched_routers.setdefault(routed_chain, {})
-        if isinstance(bucket, dict):
-            bucket[proto_name] = "0x" + "11" * 20
-        else:
-            bucket.append(proto_name)
-        monkeypatch.setattr(compiler_constants, "PROTOCOL_ROUTERS", patched_routers)
-
-        manifest = ConnectorManifest(
-            name=proto_name,
-            intents=(IntentType.SWAP, IntentType.SUPPLY),
-            chains=(routed_chain, other_chain),
-            intent_chain_exclusions=(
-                IntentChainExclusion(
-                    intent=IntentType.SWAP,
-                    chains=frozenset({routed_chain}),
-                    reason="probe: connector declares SWAP unsupported here",
-                    ticket="VIB-6111",
-                ),
+        connector = Connector(
+            name="fallback_exact",
+            kind=ProtocolKind.LP,
+            strategy_intents=("SWAP", "LP_OPEN"),
+            supported_chains=SupportedChainsSpec(
+                chains=("base",),
+                intent_overrides={"SWAP": ("ethereum",)},
             ),
         )
-        ConnectorRegistry.register(manifest)
-        try:
-            data = _build_matrix()
-            swap_rows = [
-                p for p in data["protocols"] if p["name"] == proto_name and p["category"] == "swap"
-            ]
-            assert swap_rows, "the connector should still publish a swap row for its other chain"
-            chains = set(swap_rows[0]["chains"])
-            assert other_chain in chains, "the non-excluded chain must survive"
-            assert routed_chain not in chains, (
-                f"{routed_chain!r} was excluded for SWAP but reappeared in the rendered matrix — "
-                "Phase B (compiler routing tables) re-widened a narrowed row"
-            )
-        finally:
-            ConnectorRegistry._entries.pop(proto_name, None)
-
-    def test_exclusion_does_not_freeze_unrelated_categories(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """An exclusion on a LENDING verb must not shrink the SWAP row.
-
-        The first fix froze every derived row of any exclusion-declaring
-        connector, which subtracted compiler-table-only chains from categories
-        the exclusion never mentioned — under-advertising real support, and
-        invisible to the excluded-chain assertion above.
-        """
-        from almanak.framework.intents import compiler_constants
-        from almanak.connectors._strategy_base.registry import (
-            ConnectorManifest,
-            ConnectorRegistry,
-            IntentChainExclusion,
+        monkeypatch.setattr(
+            CONNECTOR_REGISTRY,
+            "get",
+            lambda name: connector if name == "fallback_exact" else None,
         )
-        from almanak.framework.intents.vocabulary import IntentType
-
-        proto_name = "vib_6111_category_probe"
-        # Router table covers a chain the manifest does NOT declare; the
-        # historical union is what puts it on the swap row.
-        patched = {
-            chain: dict(protos) if isinstance(protos, dict) else list(protos)
-            for chain, protos in compiler_constants.PROTOCOL_ROUTERS.items()
-        }
-        bucket = patched.setdefault("base", {})
-        if isinstance(bucket, dict):
-            bucket[proto_name] = "0x" + "22" * 20
-        else:
-            bucket.append(proto_name)
-        monkeypatch.setattr(compiler_constants, "PROTOCOL_ROUTERS", patched)
-
-        manifest = ConnectorManifest(
-            name=proto_name,
-            intents=(IntentType.SWAP, IntentType.SUPPLY, IntentType.BORROW),
-            chains=("ethereum", "arbitrum"),
-            intent_chain_exclusions=(
-                IntentChainExclusion(
-                    intent=IntentType.BORROW,
-                    chains=frozenset({"arbitrum"}),
-                    reason="probe: lending-only exclusion",
-                    ticket="VIB-6111",
-                ),
-            ),
+        monkeypatch.setattr(
+            compiler_constants,
+            "PROTOCOL_ROUTERS",
+            {"base": {"fallback_exact"}, "ethereum": {"fallback_exact"}},
         )
-        ConnectorRegistry.register(manifest)
-        try:
-            data = _build_matrix()
-            swap = [p for p in data["protocols"] if p["name"] == proto_name and p["category"] == "swap"]
-            assert swap, "swap row must exist"
-            assert "base" in set(swap[0]["chains"]), (
-                "a BORROW exclusion must not remove the compiler-table chain 'base' "
-                "from the unrelated swap row"
-            )
-            lending = [
-                p for p in data["protocols"] if p["name"] == proto_name and p["category"] == "lending"
-            ]
-            assert lending, "lending row must exist (SUPPLY still works on both chains)"
-            assert set(lending[0]["chains"]) == {"ethereum", "arbitrum"}, (
-                "SUPPLY survives on both chains, so the lending row keeps both"
-            )
-        finally:
-            ConnectorRegistry._entries.pop(proto_name, None)
-
-
-    def test_unmentioned_compiler_chains_survive_the_narrowing(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Only the EXCLUDED chains are subtracted — not the whole row.
-
-        Freezing a narrowed key stops Phase B re-adding the excluded chain, but
-        it also drops compiler-table chains the exclusion never mentioned, which
-        under-advertises real support. The denylist is per-chain for that reason.
-        """
-        from almanak.framework.intents import compiler_constants
-        from almanak.connectors._strategy_base.registry import (
-            ConnectorManifest,
-            ConnectorRegistry,
-            IntentChainExclusion,
+        monkeypatch.setattr(
+            compiler_constants,
+            "LP_POSITION_MANAGERS",
+            {
+                "base": {"fallback_exact": "0x1"},
+                "ethereum": {"fallback_exact": "0x2"},
+            },
         )
-        from almanak.framework.intents.vocabulary import IntentType
+        monkeypatch.setattr(compiler_constants, "BALANCER_VAULT_ADDRESSES", {})
 
-        proto_name = "vib_6111_denylist_probe"
-        patched = {
-            chain: dict(protos) if isinstance(protos, dict) else list(protos)
-            for chain, protos in compiler_constants.PROTOCOL_ROUTERS.items()
-        }
-        # Router table lists the protocol on the EXCLUDED chain and on a chain
-        # the manifest never declares at all.
-        for chain in ("ethereum", "polygon"):
-            bucket = patched.setdefault(chain, {})
-            if isinstance(bucket, dict):
-                bucket[proto_name] = "0x" + "33" * 20
-            else:
-                bucket.append(proto_name)
-        monkeypatch.setattr(compiler_constants, "PROTOCOL_ROUTERS", patched)
+        entries: dict[tuple[str, str], set[str]] = {}
+        _collect_from_compiler_tables(entries, authoritative=set())
 
-        manifest = ConnectorManifest(
-            name=proto_name,
-            # TWO intents: excluding the only verb on a declared chain is
-            # rejected by the dual invariant ("the connector claims a chain it
-            # supports nothing on"), so SUPPLY keeps ethereum alive while SWAP
-            # is disclaimed there.
-            intents=(IntentType.SWAP, IntentType.SUPPLY),
-            chains=("ethereum", "arbitrum"),
-            intent_chain_exclusions=(
-                IntentChainExclusion(
-                    intent=IntentType.SWAP,
-                    chains=frozenset({"ethereum"}),
-                    reason="probe: SWAP disclaimed here",
-                    ticket="VIB-6111",
-                ),
-            ),
-        )
-        ConnectorRegistry.register(manifest)
-        try:
-            data = _build_matrix()
-            row = [
-                p for p in data["protocols"] if p["name"] == proto_name and p["category"] == "swap"
-            ]
-            assert row, "swap row must exist"
-            chains = set(row[0]["chains"])
-            assert "ethereum" not in chains, "the EXCLUDED chain must not be re-advertised"
-            assert "arbitrum" in chains, "the declared, non-excluded chain must survive"
-            assert "polygon" in chains, (
-                "a compiler-table chain the exclusion never mentioned must still union in — "
-                "freezing the whole row would silently under-advertise it"
-            )
-        finally:
-            ConnectorRegistry._entries.pop(proto_name, None)
+        assert entries[("fallback_exact", "swap")] == {"ethereum"}
+        assert entries[("fallback_exact", "lp")] == {"base"}
+
 
 
 # =============================================================================
@@ -943,7 +662,7 @@ class TestFluidNoLongerOverAdvertisesLending:
     ``chains_for_intent(SUPPLY)`` — the accessor every consumer is told to ask —
     still answered all four chains. Publishing per-intent coverage straight from
     the accessor would have shipped that split as a live over-advertisement, so
-    the truth moved to ``intent_chain_exclusions``.
+    the truth moved to ``SupportedChainsSpec.intent_overrides``.
 
     If someone reverts fluid to the override, this test fails loudly rather than
     Edge quietly routing a SUPPLY to a chain with no fToken market.
@@ -1044,44 +763,23 @@ class TestChainsByIntentNeverOutrunsTheDeclaration:
     """The invariant that makes v2 safe to gate execution on."""
 
     def test_coverage_is_a_subset_of_declared_chains(self, matrix_data: dict) -> None:
-        from almanak.connectors._strategy_base.registry import (
-            ConnectorRegistry,
-            _import_all_connectors,
-        )
+        from almanak.connectors._connector import CONNECTOR_REGISTRY
 
-        _import_all_connectors()
-        manifests = {m.name: m for m in ConnectorRegistry.all()}
         for proto in matrix_data["protocols"]:
-            manifest = manifests.get(proto["name"])
-            if manifest is None or manifest.chains is None:
+            connector = CONNECTOR_REGISTRY.get(proto["name"])
+            if connector is None or connector.supported_chains is None:
                 continue
-            declared = set(manifest.chains)
+            declared = set(connector.supported_chains_for_protocol(proto["name"]))
             for intent, chains in proto["chainsByIntent"].items():
-                assert set(chains) <= declared, f"{proto['name']}/{intent} outran strategy_chains"
+                assert set(chains) <= declared, f"{proto['name']}/{intent} outran supported_chains"
 
-    def test_compiler_table_chains_are_not_claimed_as_intent_coverage(self, matrix_data: dict) -> None:
-        """A routable-but-unverified chain stays out of the execution answer.
-
-        ``enso`` renders more chains (compiler routing tables + its declared
-        ``matrix_entries``) than its ``strategy_chains`` declares. Those extras may
-        appear in the rendering row; they must never read as executable coverage.
-
-        The example chain is **derived**, not hardcoded: this test originally
-        asserted on ``sepolia``, and when VIB-6231 removed that unresolvable chain
-        the precondition failed even though the property under test still held.
-        """
+    def test_descriptor_row_cannot_be_widened_by_compiler_tables(self, matrix_data: dict) -> None:
+        """A connector-backed row is bounded by its unified declaration."""
         row = _row(matrix_data, "enso", "aggregator")
-        rendered = set(row["chains"])
-        covered = set(row["chainsByIntent"]["SWAP"])
-        extras = rendered - covered
-        assert extras, (
-            "precondition: enso must render at least one chain its intents do not cover, or this test proves nothing"
-        )
-        # The real property: nothing rendered-but-undeclared leaks into coverage.
-        assert not (extras & covered)
+        assert set(row["chains"]) == set(row["chainsByIntent"]["SWAP"])
 
-    def test_intent_chain_exclusions_propagate(self, matrix_data: dict) -> None:
-        """VIB-6111: aave_v3 BORROW is excluded on mantle, SUPPLY is not."""
+    def test_intent_override_propagates(self, matrix_data: dict) -> None:
+        """VIB-6111: Aave BORROW omits Mantle while SUPPLY keeps it."""
         by_intent = _row(matrix_data, "aave_v3", "lending")["chainsByIntent"]
         assert "mantle" in by_intent["SUPPLY"]
         assert "mantle" not in by_intent["BORROW"]
@@ -1109,9 +807,7 @@ class TestIntentsKnownDistinguishesUnknownFromUnsupported:
     moment it started keying on per-intent coverage.
     """
 
-    @pytest.mark.parametrize(
-        "protocol", ["velodrome", "agni_finance", "aerodrome_slipstream"]
-    )
+    @pytest.mark.parametrize("protocol", ["velodrome"])
     def test_manifest_less_rows_are_marked_unknown(
         self, matrix_data: dict, protocol: str
     ) -> None:
@@ -1123,9 +819,13 @@ class TestIntentsKnownDistinguishesUnknownFromUnsupported:
             assert row["chains"], "the row still advertises chains — it is routable"
 
     def test_manifest_backed_rows_are_marked_known(self, matrix_data: dict) -> None:
-        for protocol in ("fluid", "pendle", "gmx_v2", "aave_v3"):
+        for protocol in ("fluid", "pendle", "gmx_v2", "aave_v3", "agni_finance", "aerodrome_slipstream"):
             for row in _rows_named(matrix_data, protocol):
                 assert row["intentsKnown"] is True
+
+    def test_agni_alias_coverage_is_mantle_only(self, matrix_data: dict) -> None:
+        row = _row(matrix_data, "agni_finance", "swap")
+        assert row["chainsByIntent"]["SWAP"] == ["mantle"]
 
     def test_known_rows_carry_coverage(self, matrix_data: dict) -> None:
         """``intentsKnown`` must not be true-but-empty for a rendered row."""
@@ -1136,14 +836,10 @@ class TestIntentsKnownDistinguishesUnknownFromUnsupported:
     def test_no_two_connectors_claim_the_same_matrix_name(self) -> None:
         """Coverage is merged by matrix_name — a collision would blend two
         connectors' intents into one row without anyone noticing."""
-        from almanak.connectors._strategy_base.registry import (
-            ConnectorRegistry,
-            _import_all_connectors,
-        )
+        from almanak.connectors._connector import CONNECTOR_REGISTRY
 
-        _import_all_connectors()
         seen: dict[str, str] = {}
-        for manifest in ConnectorRegistry.all():
+        for manifest in CONNECTOR_REGISTRY.with_strategy_support():
             for name in _published_matrix_names(manifest):
                 assert name not in seen, f"{name} claimed by {seen.get(name)} and {manifest.name}"
                 seen[name] = manifest.name
@@ -1171,19 +867,18 @@ class TestSchemaV2JsonEnvelope:
                 assert chains == ["arbitrum"], f"{proto['name']}/{intent} leaked another chain"
 
     def test_chain_filter_drops_intents_without_coverage(self, cli_runner: CliRunner) -> None:
-        """A row surviving on a routable-only chain must show no coverage.
+        """A chain filter retains only intents with exact descriptor coverage.
 
-        ``uniswap_v3`` renders on ``linea`` via the compiler routing tables but
-        declares no strategy-side support there, so the filtered row keeps its
-        chain and reports an empty map — unknown, not supported.
+        Fluid swaps on Ethereum but its lending intents do not. Compiler tables
+        cannot reintroduce the lending row or widen those intent cells.
         """
-        result = cli_runner.invoke(support_matrix, ["--json", "--chain", "linea"])
+        result = cli_runner.invoke(support_matrix, ["--json", "--chain", "ethereum"])
         assert result.exit_code == 0
         payload = json.loads(result.output)
-        rows = [p for p in payload["protocols"] if p["name"] == "uniswap_v3"]
-        assert rows, "precondition: uniswap_v3 still renders on linea"
-        for row in rows:
-            assert row["chainsByIntent"] == {}
+        rows = [p for p in payload["protocols"] if p["name"] == "fluid"]
+        assert len(rows) == 1
+        assert rows[0]["category"] == "swap"
+        assert rows[0]["chainsByIntent"] == {"SWAP": ["ethereum"]}
 
 
 class TestSourceCommitProvenance:
@@ -1571,10 +1266,19 @@ class TestProvenanceRefusesAnUnrelatedRepository:
 
         import almanak.framework.cli.support_matrix as sm
 
-        if sm._checkout_root() is None:
+        checkout_root = sm._checkout_root()
+        if checkout_root is None:
             pytest.skip("not running from an SDK checkout; provenance is N/A")
+        # Anchor on the resolved checkout, not the process cwd: sibling tests in
+        # this directory ``monkeypatch.chdir`` into tmp_path, and under
+        # random ordering this ran ``git rev-parse`` inside one of those temp
+        # git repos and compared its HEAD against the SDK's.
         head = subprocess.run(
-            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, timeout=30
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(checkout_root),
+            capture_output=True,
+            text=True,
+            timeout=30,
         ).stdout.strip()
         assert sm._source_commit() == head
 
@@ -1657,72 +1361,20 @@ class TestChainFilterAcceptsAliases:
         assert "No protocols match" in result.output
 
 
-class TestOffChainVenuesAreNotMarkedKnown:
-    """An off-chain venue must still RENDER, but must not claim coverage.
+class TestOffChainVenuesAreNotPublishedAsOnChainSupport:
+    """An explicit off-chain declaration contributes no on-chain matrix row."""
 
-    The first version of this test iterated real manifests and asserted only
-    inside `if proto["name"] in off_chain`. Kraken — the only `chains is None`
-    manifest — declares no `matrix_entries` and therefore emits no row, so the
-    body never executed and the test asserted NOTHING while reading as coverage.
-    It would not have caught the regression it was written to prevent (a guard
-    that suppressed the row entirely). It now injects the shape under test.
-    """
+    def test_real_off_chain_connectors_emit_no_rows(self) -> None:
+        from almanak.connectors._connector import CONNECTOR_REGISTRY
 
-    def _off_chain_manifest(self):
-        from almanak.connectors._strategy_base.registry import (
-            ConnectorManifest,
-            MatrixEntry,
-        )
-        from almanak.framework.intents.vocabulary import IntentType
-
-        return ConnectorManifest(
-            name="uat_offvenue",
-            intents=(IntentType.SWAP,),
-            chains=None,  # off-chain venue, e.g. a CEX
-            matrix_entries=(
-                MatrixEntry(
-                    matrix_name="uat_offvenue",
-                    category="swap",
-                    chains=frozenset({"ethereum"}),
-                ),
-            ),
-        )
-
-    def test_off_chain_row_is_published_but_not_marked_known(self) -> None:
-        from almanak.connectors._strategy_base.registry import (
-            ConnectorRegistry,
-            _import_all_connectors,
-        )
-
-        _import_all_connectors()
-        ConnectorRegistry._entries["uat_offvenue"] = self._off_chain_manifest()
-        try:
-            rows = [p for p in _build_matrix()["protocols"] if p["name"] == "uat_offvenue"]
-            assert rows, (
-                "the declared row must still render — suppressing it entirely makes "
-                "check_protocol_support report 'not integrated in the SDK', a worse "
-                "demotion than the empty map this guard replaced"
-            )
-            row = rows[0]
-            assert row["intentsKnown"] is False, "off-chain coverage is not expressible"
-            assert row["chainsByIntent"] == {}
-            assert row["chains"] == ["ethereum"], "the declared chains still render"
-        finally:
-            ConnectorRegistry._entries.pop("uat_offvenue", None)
-
-    def test_real_off_chain_manifests_never_claim_coverage(self) -> None:
-        """Whatever rows the real off-chain venues emit, none may claim known."""
-        from almanak.connectors._strategy_base.registry import (
-            ConnectorRegistry,
-            _import_all_connectors,
-        )
-
-        _import_all_connectors()
-        off_chain = {m.name for m in ConnectorRegistry.all() if m.chains is None}
+        off_chain = {
+            connector.name
+            for connector in CONNECTOR_REGISTRY.with_strategy_support()
+            if connector.supported_chains is not None and connector.supported_chains.is_offchain
+        }
         assert off_chain, "precondition: at least one off-chain venue (e.g. kraken)"
-        for proto in _build_matrix()["protocols"]:
-            if proto["name"] in off_chain:
-                assert proto["intentsKnown"] is False, proto["name"]
+        published = {row["name"] for row in _build_matrix()["protocols"]}
+        assert not (off_chain & published)
 
 
 class TestRowsDoNotAdvertiseACategoryTheyCannotServe:

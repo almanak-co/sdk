@@ -8,7 +8,8 @@ from almanak.connectors._connector import (
     ImportRef,
     LendingReadDecl,
     MetadataAmountEncoding,
-    StrategyIntentChainExclusion,
+    StrategyMatrixEntry,
+    SupportedChainsSpec,
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
 
@@ -20,7 +21,7 @@ CONNECTOR = Connector(
     # whitelist-gated on-chain (Phase-0 finding, VIB-5028 §V4) and ships
     # later via SmartLending / smart vaults (VIB-5032); vault borrow is
     # VIB-5031. ``kind`` stays SWAP (primary surface); the intent/chain
-    # exclusions below scope lending to its validated chains.
+    # override below scopes lending to its validated chains.
     kind=ProtocolKind.SWAP,
     # The platform spec emits ``protocol: "fluid_lending"`` for fToken
     # supply strategies — same connector, alias resolved at compile ingress.
@@ -91,41 +92,23 @@ CONNECTOR = Connector(
     # human and mis-scaled by 10**decimals.
     metadata_amount_encoding=MetadataAmountEncoding(lending="wei"),
     strategy_intents=("SWAP", "SUPPLY", "WITHDRAW"),
-    strategy_chains=("arbitrum", "base", "ethereum", "polygon"),
-    # Lending is arbitrum + base only; SWAP is all four chains. This narrowing
-    # used to live in ``strategy_matrix_entries`` (a hand-written ``lending``
-    # row pinned to arbitrum/base), which scoped the RENDERED row but left
-    # ``chains_for_intent(SUPPLY)`` answering all four chains — the accessor
-    # every consumer is told to ask. Publishing per-intent chain coverage
-    # (matrix schema v2) turned that split into a live over-advertisement, so
-    # the truth moved to the typed per-cell mechanism and the matrix rows are
-    # now DERIVED from it: SWAP -> swap on 4 chains, SUPPLY/WITHDRAW ->
-    # lending on arbitrum+base, exactly the two rows the override produced.
-    # Fluid appears in no compiler routing table, so dropping the override
-    # cannot let Phase B widen these rows.
-    strategy_intent_chain_exclusions=(
-        StrategyIntentChainExclusion(
-            intent="SUPPLY",
-            chains=frozenset({"ethereum", "polygon"}),
-            reason=(
-                "fToken lending (VIB-5030) shipped on arbitrum + base only. "
-                "FLUID_FTOKEN_MARKETS carries no ethereum or polygon market, so a "
-                "SUPPLY cannot compile there. Those two chains carry the Fluid DEX "
-                "SWAP surface only (VIB-5029), which stays advertised."
-            ),
-            ticket="VIB-5030",
+    # fToken lending is Arbitrum + Base only; SWAP is all four proven chains.
+    # The per-intent override is the canonical truth for both runtime checks
+    # and generated matrix rows.
+    supported_chains=SupportedChainsSpec(
+        chains=("arbitrum", "base"),
+        intent_overrides={"SWAP": ("arbitrum", "base", "ethereum", "polygon")},
+    ),
+    strategy_matrix_entries=(
+        StrategyMatrixEntry(
+            matrix_name="fluid",
+            category="swap",
+            intents=("SWAP",),
         ),
-        StrategyIntentChainExclusion(
-            intent="WITHDRAW",
-            chains=frozenset({"ethereum", "polygon"}),
-            reason=(
-                "Dual of the SUPPLY exclusion — WITHDRAW redeems an fToken position "
-                "that cannot exist on ethereum or polygon (no market in "
-                "FLUID_FTOKEN_MARKETS). Excluded together so the lending lifecycle "
-                "is advertised as a whole or not at all: advertising WITHDRAW alone "
-                "would imply a redeemable position on a chain that cannot open one."
-            ),
-            ticket="VIB-5030",
+        StrategyMatrixEntry(
+            matrix_name="fluid",
+            category="lending",
+            intents=("SUPPLY", "WITHDRAW"),
         ),
     ),
 )

@@ -6,6 +6,7 @@ from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
     Connector,
     ImportRef,
+    SupportedChainsSpec,
 )
 from almanak.connectors._strategy_base.solana_program import SolanaProgramSpec
 
@@ -35,7 +36,7 @@ CONNECTOR = Connector(
         attribute="JupiterCompiler",
     ),
     strategy_intents=("SWAP",),
-    strategy_chains=("solana",),
+    supported_chains=SupportedChainsSpec(chains=("solana",)),
 )
 
 __all__ = ["CONNECTOR", "JUPITER_V6_PROGRAM_ID"]

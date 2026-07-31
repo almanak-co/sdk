@@ -37,7 +37,7 @@ not an Across-specific gap.
 The target addresses and the selector are taken from the connector's own
 ``adapter.py`` constants (``ACROSS_SPOKE_POOL_ADDRESSES``, ``ACROSS_CHAIN_IDS``,
 ``DEPOSIT_V3_SELECTOR``) and the chain universe from the connector manifest's
-``strategy_chains`` — nothing is hand-typed, so the manifest cannot drift from
+``supported_chains`` — nothing is hand-typed, so the manifest cannot drift from
 the encoder that actually builds the calldata.
 
 VIB-5929 tracks the general hole (13 connectors shipping empty
@@ -64,18 +64,18 @@ def _build_static_permissions() -> dict[str, list[StaticPermissionEntry]]:
     VIB-5921 fixes (empty manifest → every bridge reverts).
     """
     result: dict[str, list[StaticPermissionEntry]] = {}
-    for chain in CONNECTOR.strategy_chains or ():
+    for chain in CONNECTOR.supported_chains_for_intent("BRIDGE") or ():
         chain_id = ACROSS_CHAIN_IDS.get(chain)
         if chain_id is None:
             raise ValueError(
-                f"across declares strategy_chains entry {chain!r} with no ACROSS_CHAIN_IDS mapping — "
+                f"across declares supported_chains entry {chain!r} with no ACROSS_CHAIN_IDS mapping — "
                 "the Safe manifest would silently omit that chain and every bridge would revert "
                 "at execTransactionWithRole."
             )
         spoke_pool = ACROSS_SPOKE_POOL_ADDRESSES.get(chain_id)
         if spoke_pool is None:
             raise ValueError(
-                f"across declares strategy_chains entry {chain!r} (chain id {chain_id}) with no "
+                f"across declares supported_chains entry {chain!r} (chain id {chain_id}) with no "
                 "ACROSS_SPOKE_POOL_ADDRESSES entry — the Safe manifest would silently omit that chain."
             )
         result[chain] = [

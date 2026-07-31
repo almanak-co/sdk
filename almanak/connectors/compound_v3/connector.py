@@ -9,6 +9,7 @@ from almanak.connectors._connector import (
     FeeModelDecl,
     ImportRef,
     LendingReadDecl,
+    SupportedChainsSpec,
     YieldPokeDecl,
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
@@ -84,7 +85,7 @@ CONNECTOR = Connector(
     ),
     backtest_risk=_BACKTEST_RISK,
     strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
-    strategy_chains=("ethereum", "arbitrum", "base", "optimism", "polygon"),
+    supported_chains=SupportedChainsSpec(chains=("ethereum", "arbitrum", "base", "optimism", "polygon")),
 )
 
 __all__ = ["CONNECTOR"]

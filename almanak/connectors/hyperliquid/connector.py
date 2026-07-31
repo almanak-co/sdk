@@ -10,8 +10,9 @@ from almanak.connectors._connector import (
     FundingHistoryDecl,
     ImportRef,
     PerpsReadDecl,
+    SupportedChainsSpec,
 )
-from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec, SupportedChainsSpec
+from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
 from almanak.connectors.hyperliquid.backtest_risk import BACKTEST_RISK as _BACKTEST_RISK
 
 CONNECTOR = Connector(
@@ -22,7 +23,7 @@ CONNECTOR = Connector(
     # HyperCore->HyperEVM USDC bridge, VIB-5617). See compiler.py for the scope
     # bounded by the CoreWriter action set + the perp intent vocabulary.
     strategy_intents=("PERP_OPEN", "PERP_CLOSE", "PERP_WITHDRAW"),
-    strategy_chains=("hyperevm",),
+    supported_chains=SupportedChainsSpec(chains=("hyperevm",)),
     fee_model=FeeModelDecl(
         model=ImportRef(module="almanak.connectors.hyperliquid.fee_model", attribute="HyperliquidFeeModel"),
         description="Hyperliquid perpetuals protocol fee model with maker/taker fees and volume tiers",
@@ -56,10 +57,6 @@ CONNECTOR = Connector(
     capabilities=CapabilitiesSpec(
         keys=("hyperliquid",),
         module="almanak.connectors.hyperliquid.capabilities",
-    ),
-    supported_chains=SupportedChainsSpec(
-        keys=("hyperliquid",),
-        module="almanak.connectors.hyperliquid.supported_chains",
     ),
     primitive=ImportRef(
         module="almanak.connectors.hyperliquid.primitive",

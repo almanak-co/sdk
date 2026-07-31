@@ -6,8 +6,8 @@ from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
     Connector,
     ImportRef,
+    SupportedChainsSpec,
 )
-from almanak.connectors._strategy_base.protocol_ownership import SupportedChainsSpec
 
 CONNECTOR = Connector(
     name="gimo",
@@ -20,12 +20,8 @@ CONNECTOR = Connector(
         module="almanak.connectors.gimo.compiler",
         attribute="GimoCompiler",
     ),
-    supported_chains=SupportedChainsSpec(
-        keys=("gimo",),
-        module="almanak.connectors.gimo.supported_chains",
-    ),
     strategy_intents=("STAKE", "UNSTAKE"),
-    strategy_chains=("zerog",),
+    supported_chains=SupportedChainsSpec(chains=("zerog",)),
 )
 
 __all__ = ["CONNECTOR"]

@@ -7,11 +7,9 @@ from scripts.docs.support_docs import (
     ChainDoc,
     ConnectorDoc,
     SupportDocsModel,
-    _normalize_strategy_chains,
+    _normalize_supported_chains,
     connector_page_slug,
 )
-
-_RAW_UNSET = object()
 
 
 def _chain(
@@ -40,12 +38,11 @@ def _connector(
     kind: str = "swap",
     aliases: tuple[str, ...] = (),
     strategy_intents: tuple[str, ...] | None = ("SWAP",),
-    strategy_chains: tuple[str, ...] | None = ("arbitrum",),
-    raw_strategy_chains: tuple[str, ...] | None | object = _RAW_UNSET,
-    excluded_chains_by_intent: dict[str, frozenset[str]] | None = None,
+    supported_chains: tuple[str, ...] | None = ("arbitrum",),
+    intent_chains: dict[str, tuple[str, ...]] | None = None,
 ) -> ConnectorDoc:
-    if raw_strategy_chains is _RAW_UNSET:
-        raw_strategy_chains = strategy_chains
+    if intent_chains is None:
+        intent_chains = {intent: supported_chains or () for intent in strategy_intents or ()}
     return ConnectorDoc(
         name=name,
         display_name=display_name or name.replace("_", " ").title(),
@@ -54,9 +51,8 @@ def _connector(
         kind=kind,
         aliases=aliases,
         strategy_intents=strategy_intents,
-        strategy_chains=strategy_chains,
-        raw_strategy_chains=raw_strategy_chains,
-        excluded_chains_by_intent=excluded_chains_by_intent or {},
+        supported_chains=supported_chains,
+        intent_chains=intent_chains,
     )
 
 
@@ -72,7 +68,7 @@ def _model(
     return SupportDocsModel(chains=chains, connectors=connectors)
 
 
-def test_strategy_chain_aliases_normalize_to_canonical_names(monkeypatch) -> None:
+def test_supported_chain_aliases_normalize_to_canonical_names(monkeypatch) -> None:
     from almanak.core.chains import ChainRegistry
 
     def try_resolve(chain_name: str) -> SimpleNamespace | None:
@@ -84,7 +80,7 @@ def test_strategy_chain_aliases_normalize_to_canonical_names(monkeypatch) -> Non
 
     monkeypatch.setattr(ChainRegistry, "try_resolve", staticmethod(try_resolve))
 
-    normalized = _normalize_strategy_chains(
+    normalized = _normalize_supported_chains(
         ("ethereum", "bnb", "bsc", "unknown"),
         {"ethereum": 0, "bsc": 1},
     )
@@ -98,7 +94,7 @@ def test_balancer_v2_uses_legacy_connector_slug() -> None:
 
 
 def test_off_chain_connector_renders_as_na() -> None:
-    connector = _connector("kraken", strategy_chains=None)
+    connector = _connector("kraken", supported_chains=None)
     model = _model(connectors=(connector,))
     index = generate_connector_matrix.generate(model)
     page = generate_connector_matrix.generate_connector_page(connector, model)
@@ -107,14 +103,14 @@ def test_off_chain_connector_renders_as_na() -> None:
     assert "| N/A (off-chain) | N/A | ``SWAP`` |" in page
 
 
-def test_empty_strategy_chains_render_registered_empty_state() -> None:
-    connector = _connector("empty_chains", strategy_chains=())
+def test_empty_supported_chains_render_no_strategy_support() -> None:
+    connector = _connector("empty_chains", supported_chains=())
     model = _model(connectors=(connector,))
     index = generate_connector_matrix.generate(model)
     page = generate_connector_matrix.generate_connector_page(connector, model)
 
-    assert "No strategy chains registered" in index
-    assert "| No strategy chains registered | N/A | ``SWAP`` |" in page
+    assert "No strategy support declared" in index
+    assert "| No strategy support declared | N/A | ``SWAP`` |" in page
 
 
 def test_no_strategy_connector_renders_registered_empty_state() -> None:
@@ -122,12 +118,12 @@ def test_no_strategy_connector_renders_registered_empty_state() -> None:
         "beefy",
         kind="vault",
         strategy_intents=None,
-        strategy_chains=None,
+        supported_chains=None,
     )
     model = _model(connectors=(connector,))
     page = generate_connector_matrix.generate_connector_page(connector, model)
 
-    assert "No strategy chains registered" in page
+    assert "No strategy support declared" in page
     assert "No strategy intents registered" in page
 
 
@@ -155,7 +151,7 @@ def test_generated_connector_page_has_support_table_and_api_reference() -> None:
         display_name="Uniswap V3",
         kind="lp",
         strategy_intents=("SWAP", "LP_OPEN"),
-        strategy_chains=("bsc",),
+        supported_chains=("bsc",),
     )
     model = _model(connectors=(connector,))
     index = generate_connector_matrix.generate(model)
@@ -169,11 +165,40 @@ def test_generated_connector_page_has_support_table_and_api_reference() -> None:
     assert "::: almanak.connectors.uniswap_v3" in page
 
 
+def test_generated_connector_page_uses_exact_intent_chain_coverage() -> None:
+    connector = _connector(
+        "fluid",
+        strategy_intents=("SWAP", "SUPPLY"),
+        supported_chains=("arbitrum", "base", "ethereum", "polygon"),
+        intent_chains={
+            "SWAP": ("arbitrum", "base", "ethereum", "polygon"),
+            "SUPPLY": ("arbitrum", "base"),
+        },
+    )
+    chains = (
+        _chain("arbitrum"),
+        _chain("base"),
+        _chain("ethereum"),
+        _chain("polygon"),
+    )
+    page = generate_connector_matrix.generate_connector_page(
+        connector,
+        _model(chains=chains, connectors=(connector,)),
+    )
+
+    ethereum_row = next(line for line in page.splitlines() if "chains/ethereum.md" in line)
+    assert "``SWAP``" in ethereum_row
+    assert "``SUPPLY``" not in ethereum_row
+    arbitrum_row = next(line for line in page.splitlines() if "chains/arbitrum.md" in line)
+    assert "``SWAP``" in arbitrum_row
+    assert "``SUPPLY``" in arbitrum_row
+
+
 def test_generated_chain_page_lists_only_supported_connectors() -> None:
     connectors = (
-        _connector("uniswap_v3", display_name="Uniswap V3", strategy_chains=("arbitrum",)),
-        _connector("kraken", strategy_chains=None),
-        _connector("jupiter", strategy_chains=("solana",)),
+        _connector("uniswap_v3", display_name="Uniswap V3", supported_chains=("arbitrum",)),
+        _connector("kraken", supported_chains=None),
+        _connector("jupiter", supported_chains=("solana",)),
     )
     chain = _chain("arbitrum", display_name="Arbitrum", chain_id=42161)
     model = _model(chains=(chain, _chain("solana", family="SVM", chain_id=0)), connectors=connectors)
@@ -200,7 +225,7 @@ def test_chain_index_links_to_generated_chain_pages() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Per-(intent, chain) exclusions (VIB-6111) — the published-docs surfaces.
+# Exact per-intent support (VIB-6111) — the published-docs surfaces.
 # ---------------------------------------------------------------------------
 
 
@@ -210,8 +235,13 @@ def _aave_like() -> ConnectorDoc:
         display_name="Aave V3",
         kind="lending",
         strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
-        strategy_chains=("arbitrum", "mantle"),
-        excluded_chains_by_intent={"BORROW": frozenset({"mantle"})},
+        supported_chains=("arbitrum", "mantle"),
+        intent_chains={
+            "SUPPLY": ("arbitrum", "mantle"),
+            "BORROW": ("arbitrum",),
+            "REPAY": ("arbitrum", "mantle"),
+            "WITHDRAW": ("arbitrum", "mantle"),
+        },
     )
 
 
@@ -232,7 +262,7 @@ def test_connector_page_narrows_intents_per_chain() -> None:
     assert (
         "| [Arbitrum](../../chains/arbitrum.md) | EVM | ``BORROW``, ``REPAY``, ``SUPPLY``, "
         "``WITHDRAW`` |" in page
-    ), "every other chain keeps the full declaration — the exclusion narrows one cell only"
+    ), "every other chain keeps the full declaration"
 
 
 def test_chain_page_narrows_intents_for_that_chain() -> None:
@@ -256,7 +286,7 @@ def test_intents_for_chain_is_narrowing_only() -> None:
     # A chain the connector never declared gets nothing extra from the helper.
     assert intents_for_chain(connector, "mantle") == ("SUPPLY", "REPAY", "WITHDRAW")
     assert intents_for_chain(connector, "arbitrum") == ("SUPPLY", "BORROW", "REPAY", "WITHDRAW")
-    # No exclusions at all -> the full declared tuple, unchanged.
+    # No overrides at all -> the full declared tuple, unchanged.
     assert intents_for_chain(_connector("x"), "arbitrum") == ("SWAP",)
     # No intents declared -> None passes through for the caller's empty state.
     assert intents_for_chain(_connector("y", strategy_intents=None), "arbitrum") is None
@@ -273,12 +303,12 @@ def test_intents_for_chain_canonicalises_alias_input() -> None:
     """
     from scripts.docs.support_docs import format_intents, intents_for_chain
 
-    connector = _connector("bsc_venue", strategy_intents=("SWAP", "SUPPLY"), strategy_chains=("bsc",))
+    connector = _connector("bsc_venue", strategy_intents=("SWAP", "SUPPLY"), supported_chains=("bsc",))
 
     assert intents_for_chain(connector, "bsc") == ("SWAP", "SUPPLY")
     assert intents_for_chain(connector, "bnb") == ("SWAP", "SUPPLY"), (
         "the registered alias must fold to the canonical name, exactly as "
-        "ConnectorManifest.intents_for_chain does"
+        "the descriptor support query does"
     )
     # A genuinely undeclared chain still yields the empty state.
     assert intents_for_chain(connector, "solana") == ()
@@ -287,15 +317,18 @@ def test_intents_for_chain_canonicalises_alias_input() -> None:
     assert format_intents(intents_for_chain(connector, "bnb")) != "None on this chain"
 
 
-def test_excluded_chain_alias_is_also_canonicalised() -> None:
-    """The exclusion side of the same helper folds aliases too."""
+def test_intent_override_chain_alias_is_also_canonicalised() -> None:
+    """Intent-specific coverage folds aliases too."""
     from scripts.docs.support_docs import intents_for_chain
 
     connector = _connector(
         "bsc_venue_excl",
         strategy_intents=("SWAP", "SUPPLY"),
-        strategy_chains=("bsc", "arbitrum"),
-        excluded_chains_by_intent={"SWAP": frozenset({"bsc"})},
+        supported_chains=("bsc", "arbitrum"),
+        intent_chains={
+            "SWAP": ("arbitrum",),
+            "SUPPLY": ("bsc", "arbitrum"),
+        },
     )
     assert intents_for_chain(connector, "bsc") == ("SUPPLY",)
     assert intents_for_chain(connector, "bnb") == ("SUPPLY",)

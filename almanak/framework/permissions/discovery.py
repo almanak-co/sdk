@@ -12,6 +12,9 @@ from __future__ import annotations
 import logging
 from typing import Literal, cast
 
+from almanak.connectors._connector import CONNECTOR_REGISTRY
+from almanak.connectors._strategy_base.protocol_aliases import normalize_protocol
+
 from ..intents.compiler import (
     AAVE_BORROW_SELECTOR,
     AAVE_FLASH_LOAN_SELECTOR,
@@ -78,6 +81,65 @@ def _build_selector_labels(protocols: list[str]) -> dict[str, str]:
         hints = get_permission_hints(protocol)
         labels.update(hints.selector_labels)
     return labels
+
+
+def _supported_intent_types_for(
+    *,
+    chain: str,
+    protocol: str,
+    intent_types: list[str],
+    warnings: list[str],
+) -> list[str] | None:
+    """Narrow ``intent_types`` to what this connector actually supports here.
+
+    Returns the admissible intent types, or ``None`` when the protocol should be
+    skipped for this chain entirely. Appends a human-readable note to
+    ``warnings`` for every cell it drops, so a thinner manifest is always
+    traceable to a declaration rather than looking like a discovery failure.
+
+    A protocol with no descriptor, or one without strategy support, is passed
+    through unnarrowed: the descriptor is the authority on strategy-authored
+    coverage, and when there is no descriptor there is nothing to check
+    against. Narrowing those to the empty set would silently empty their
+    manifests, which reverts at ``execTransactionWithRole`` rather than failing
+    loudly.
+
+    The registry lookup runs on the CANONICAL key. Chain-scoped brands are not
+    connector discovery keys — ``agni`` on mantle and ``velodrome`` on optimism
+    resolve to ``agni_finance`` / ``aerodrome`` only through
+    ``normalize_protocol``. Looking up the raw name returns ``None`` for those,
+    which takes the fail-open branch above and skips the whole chain/intent
+    gate silently, so a brand-spelled protocol was never narrowed at all.
+    """
+    normalized_protocol = normalize_protocol(chain, protocol)
+    connector = CONNECTOR_REGISTRY.get(normalized_protocol) or CONNECTOR_REGISTRY.get(protocol)
+    if connector is None or not connector.has_strategy_support:
+        return intent_types
+
+    if not connector.supports(chain=chain, protocol=normalized_protocol):
+        warnings.append(f"Skipped unsupported permission discovery chain for {protocol} on {chain}")
+        return None
+
+    # Permission generation may request framework-only recovery verbs that
+    # strategies cannot author (currently GMX PERP_CANCEL_ORDER), or
+    # connector-declared standalone fee collection. Those verbs are
+    # intentionally absent from ``strategy_intents``. Keep exact descriptor
+    # checks for strategy-authored intents and admit only those two
+    # recovery/discovery extensions; their builders remain gated by
+    # PermissionHints.
+    hints = get_permission_hints(protocol)
+    supported = [
+        intent_type
+        for intent_type in intent_types
+        if connector.supports(chain=chain, protocol=normalized_protocol, intent=intent_type)
+        or intent_type == "PERP_CANCEL_ORDER"
+        or (intent_type == "LP_COLLECT_FEES" and hints.supports_standalone_fee_collection)
+    ]
+
+    omitted = sorted(set(intent_types) - set(supported))
+    if omitted:
+        warnings.append(f"Skipped unsupported permission discovery cells for {protocol} on {chain}: {omitted}")
+    return supported or None
 
 
 def discover_permissions(  # noqa: C901
@@ -171,6 +233,15 @@ def discover_permissions(  # noqa: C901
         return _compilers[key]
 
     for protocol in protocols:
+        supported_intent_types = _supported_intent_types_for(
+            chain=chain,
+            protocol=protocol,
+            intent_types=intent_types,
+            warnings=warnings,
+        )
+        if supported_intent_types is None:
+            continue
+
         # Inject static permissions from hints (for protocols that can't compile offline)
         hints = get_permission_hints(protocol)
         chain_static = hints.static_permissions.get(chain, [])
@@ -181,7 +252,7 @@ def discover_permissions(  # noqa: C901
             # must intersect the requested ``intent_types``. This is the
             # least-privilege filter that prevents e.g. TJv2's LBPair
             # approveForAll from leaking into SWAP-only manifests.
-            if entry.intent_types is not None and not entry.intent_types.intersection(intent_types):
+            if entry.intent_types is not None and not entry.intent_types.intersection(supported_intent_types):
                 continue
             target = entry.target.lower()
             if target not in targets:
@@ -197,7 +268,7 @@ def discover_permissions(  # noqa: C901
 
         compiler = _get_compiler(protocol)
 
-        for intent_type in intent_types:
+        for intent_type in supported_intent_types:
             synthetic_intents = build_synthetic_intents(protocol, intent_type, chain)
             if not synthetic_intents:
                 continue

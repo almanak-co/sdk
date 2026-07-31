@@ -36,6 +36,25 @@ from almanak.connectors._strategy_base.vault_representatives import VaultReprese
 # silently producing an unreachable id.
 KNOWN_PROTOCOL_VENDORS: frozenset[str] = frozenset({"defillama"})
 
+MATRIX_CHAIN_DISPLAY_ORDER: tuple[str, ...] = (
+    "ethereum",
+    "arbitrum",
+    "optimism",
+    "base",
+    "polygon",
+    "avalanche",
+    "bsc",
+    "mantle",
+    "linea",
+    "blast",
+    "sonic",
+    "plasma",
+    "berachain",
+    "monad",
+    "solana",
+    "hyperevm",
+)
+
 __all__ = [
     "CONNECTOR_REGISTRY",
     "CONNECTOR_DESCRIPTOR_REGISTRY",
@@ -48,12 +67,12 @@ __all__ = [
     "ConnectorDiscoveryError",
     "ImportRef",
     "KNOWN_PROTOCOL_VENDORS",
+    "MATRIX_CHAIN_DISPLAY_ORDER",
     "LendingReadDecl",
     "LiquidationDefault",
     "MetadataAmountEncoding",
     "PerpsReadDecl",
     "PositionReadDecl",
-    "StrategyIntentChainExclusion",
     "StrategyMatrixEntry",
     "SupportedChainsSpec",
     "VaultRepresentativeSpec",
@@ -107,39 +126,14 @@ class ImportRef:
 class StrategyMatrixEntry:
     """Strategy support-matrix row declared from a connector manifest.
 
-    Kept separate from ``_strategy_base.registry.MatrixEntry`` so descriptor
-    discovery can stay strategy-safe and avoid importing framework intent
-    vocabulary during connector manifest loading.
+    Chain coverage is deliberately absent: rows name and group declared
+    strategy intents, while their chains always come from
+    :class:`SupportedChainsSpec`.
     """
 
     matrix_name: str
     category: str
-    chains: frozenset[str]
-
-
-@dataclass(frozen=True)
-class StrategyIntentChainExclusion:
-    """One (intent, chains) pair the connector does NOT support, despite the
-    ``strategy_intents`` x ``strategy_chains`` cross-product implying it.
-
-    The mechanism is **narrowing-only**: an exclusion can subtract from the
-    declared cross-product, never add to it, so the existing invariant "the
-    displayed matrix cannot outrun the declaration" survives by construction.
-    Adding a new chain to ``strategy_chains`` later automatically includes it
-    for every intent — there is no per-intent subset list to forget to update.
-
-    Every exclusion carries its own ``reason`` + ``ticket`` because the point
-    of the field is truthfulness documentation, not a silent capability haircut.
-
-    Kept separate from ``_strategy_base.registry.IntentChainExclusion`` so
-    descriptor discovery can stay strategy-safe and avoid importing framework
-    intent vocabulary during connector manifest loading.
-    """
-
-    intent: str
-    chains: frozenset[str]
-    reason: str
-    ticket: str
+    intents: tuple[str, ...]
 
 
 def _validate_decl_aliases(decl_name: str, aliases: tuple[str, ...]) -> None:
@@ -975,9 +969,7 @@ class Connector:
     flash_loan_builder: ImportRef | None = None
     flash_loan_synthetic_discovery: bool = False
     strategy_intents: tuple[str, ...] | None = None
-    strategy_chains: tuple[str, ...] | None = None
     strategy_matrix_entries: tuple[StrategyMatrixEntry, ...] | None = None
-    strategy_intent_chain_exclusions: tuple[StrategyIntentChainExclusion, ...] | None = None
     external_ids: Mapping[str, str] | None = None
 
     def __post_init__(self) -> None:
@@ -1517,14 +1509,10 @@ class Connector:
     def _validate_strategy_support(self) -> None:
         """Validate optional strategy-side registration metadata."""
         if self.strategy_intents is None:
-            if self.strategy_chains is not None:
-                raise ValueError("Connector.strategy_chains may only be set when strategy_intents is set")
+            if self.supported_chains is not None:
+                raise ValueError("Connector.supported_chains may only be set when strategy_intents is set")
             if self.strategy_matrix_entries is not None:
                 raise ValueError("Connector.strategy_matrix_entries may only be set when strategy_intents is set")
-            if self.strategy_intent_chain_exclusions is not None:
-                raise ValueError(
-                    "Connector.strategy_intent_chain_exclusions may only be set when strategy_intents is set"
-                )
             return
 
         if not isinstance(self.strategy_intents, tuple) or not self.strategy_intents:
@@ -1537,24 +1525,26 @@ class Connector:
         if len(set(self.strategy_intents)) != len(self.strategy_intents):
             raise ValueError(f"Connector.strategy_intents contains duplicates: {self.strategy_intents!r}")
 
-        self._validate_strategy_chains()
-        self._validate_strategy_matrix_entries()
-        self._validate_strategy_intent_chain_exclusions()
-
-    def _validate_strategy_chains(self) -> None:
-        """Validate strategy-side chain identifiers without importing chain registries."""
-        if self.strategy_chains is None:
-            return
-        if not isinstance(self.strategy_chains, tuple) or not self.strategy_chains:
+        if self.supported_chains is None:
             raise ValueError(
-                "Connector.strategy_chains must be None or a non-empty tuple[str, ...], "
-                f"got {self.strategy_chains!r}. Use strategy_chains=None for off-chain venues."
+                "Connector.supported_chains is required when strategy_intents is set; "
+                "use SupportedChainsSpec(chains=None) for an off-chain venue"
             )
-        bad_chains = [chain for chain in self.strategy_chains if not isinstance(chain, str) or not chain.strip()]
-        if bad_chains:
-            raise ValueError(f"Connector.strategy_chains must contain only non-empty strings, got {bad_chains!r}")
-        if len(set(self.strategy_chains)) != len(self.strategy_chains):
-            raise ValueError(f"Connector.strategy_chains contains duplicates: {self.strategy_chains!r}")
+        undeclared_overrides = set(self.supported_chains.intent_overrides) - {
+            intent.upper() for intent in self.strategy_intents
+        }
+        if undeclared_overrides:
+            raise ValueError(
+                "Connector.supported_chains.intent_overrides contains undeclared strategy intents: "
+                f"{sorted(undeclared_overrides)!r}"
+            )
+        unowned_protocols = set(self.supported_chains.protocol_overrides) - set(self.aliases)
+        if unowned_protocols:
+            raise ValueError(
+                "Connector.supported_chains.protocol_overrides must reference connector aliases; "
+                f"unowned keys: {sorted(unowned_protocols)!r}"
+            )
+        self._validate_strategy_matrix_entries()
 
     def _validate_strategy_matrix_entries(self) -> None:
         """Validate descriptor-owned support-matrix rows."""
@@ -1575,6 +1565,21 @@ class Connector:
         keys = [(entry.matrix_name, entry.category) for entry in self.strategy_matrix_entries]
         if len(set(keys)) != len(keys):
             raise ValueError(f"Connector.strategy_matrix_entries has duplicate (matrix_name, category) keys: {keys!r}")
+        declared = {intent.upper() for intent in self.strategy_intents or ()}
+        seen_intents: set[str] = set()
+        for entry in self.strategy_matrix_entries:
+            entry_intents = {intent.upper() for intent in entry.intents}
+            unknown = entry_intents - declared
+            if unknown:
+                raise ValueError(
+                    f"StrategyMatrixEntry.intents contains undeclared strategy intents: {sorted(unknown)!r}"
+                )
+            duplicated = entry_intents & seen_intents
+            if duplicated:
+                raise ValueError(
+                    f"Connector.strategy_matrix_entries assigns an intent to multiple rows: {sorted(duplicated)!r}"
+                )
+            seen_intents.update(entry_intents)
 
     @staticmethod
     def _validate_strategy_matrix_entry_fields(entry: StrategyMatrixEntry) -> None:
@@ -1583,149 +1588,14 @@ class Connector:
             raise ValueError(f"StrategyMatrixEntry.matrix_name must be a non-empty string, got {entry.matrix_name!r}")
         if not isinstance(entry.category, str) or not entry.category.strip():
             raise ValueError(f"StrategyMatrixEntry.category must be a non-empty string, got {entry.category!r}")
-        if not isinstance(entry.chains, frozenset) or not entry.chains:
-            raise ValueError(f"StrategyMatrixEntry.chains must be a non-empty frozenset[str], got {entry.chains!r}")
-        bad_chains = [chain for chain in entry.chains if not isinstance(chain, str) or not chain.strip()]
-        if bad_chains:
-            raise ValueError(f"StrategyMatrixEntry.chains must contain only non-empty strings, got {bad_chains!r}")
-
-    def _validate_strategy_intent_chain_exclusions(self) -> None:
-        """Validate descriptor-owned per-(intent, chain) support exclusions."""
-        if self.strategy_intent_chain_exclusions is None:
-            return
-        if not isinstance(self.strategy_intent_chain_exclusions, tuple):
-            raise ValueError(
-                "Connector.strategy_intent_chain_exclusions must be None or a "
-                f"tuple[StrategyIntentChainExclusion, ...], got {self.strategy_intent_chain_exclusions!r}"
-            )
-        bad_entries = [
-            entry
-            for entry in self.strategy_intent_chain_exclusions
-            if not isinstance(entry, StrategyIntentChainExclusion)
-        ]
-        if bad_entries:
-            raise ValueError(
-                "Connector.strategy_intent_chain_exclusions must contain only "
-                f"StrategyIntentChainExclusion values, got {bad_entries!r}"
-            )
-        if self.strategy_matrix_entries is not None:
-            # Mirrors ConnectorManifest._validate_intent_chain_exclusions
-            # (VIB-6111): strategy_matrix_entries is published verbatim and
-            # bypasses per-intent narrowing, so combining the two would let the
-            # rendered matrix advertise a cell the exclusions removed. Caught
-            # here as well so the connector author sees it at authoring time,
-            # not only when the registry imports.
-            raise ValueError(
-                "Connector.strategy_intent_chain_exclusions may not be combined with "
-                "Connector.strategy_matrix_entries — matrix entries are published verbatim and "
-                "bypass per-intent narrowing, so the rendered matrix would outrun the declaration. "
-                "Declare exclusions alone (matrix rows are then derived and narrowed), or encode "
-                "the narrowing directly in strategy_matrix_entries."
-            )
-        for entry in self.strategy_intent_chain_exclusions:
-            self._validate_strategy_intent_chain_exclusion_fields(entry)
-        self._validate_no_chain_fully_excluded()
-        intents = [entry.intent for entry in self.strategy_intent_chain_exclusions]
-        if len(set(intents)) != len(intents):
-            raise ValueError(
-                f"Connector.strategy_intent_chain_exclusions has duplicate intent keys: {intents!r}. "
-                "Declare one exclusion per intent listing every excluded chain."
-            )
-
-    def _validate_no_chain_fully_excluded(self) -> None:
-        """Descriptor twin of the manifest's dual invariant (VIB-6111).
-
-        The per-entry rule rejects "one intent excluded on every chain" (drop the
-        intent instead). This is its dual: "every intent excluded on one chain"
-        (drop the chain instead), which otherwise leaves the connector claiming a
-        chain it supports nothing on and renders a blank docs cell.
-        ``ConnectorManifest`` enforces it too, so the shape cannot reach the
-        registry either way — mirroring it here gives the connector author the
-        error at authoring time with the descriptor field names, which is what
-        every other rule in this validator does.
-        """
-        declared_chains = self.strategy_chains or ()
-        if not declared_chains:
-            return
-        from almanak.core.constants import canonical_chain_name
-
-        def _canon(chain: str) -> str:
-            return canonical_chain_name(chain) if isinstance(chain, str) else chain
-
-        excluded_by_intent: dict[str, set[str]] = {}
-        for entry in self.strategy_intent_chain_exclusions or ():
-            excluded_by_intent.setdefault(entry.intent, set()).update(_canon(c) for c in entry.chains)
-
-        for chain in declared_chains:
-            canonical = _canon(chain)
-            if all(canonical in excluded_by_intent.get(intent, set()) for intent in (self.strategy_intents or ())):
-                raise ValueError(
-                    f"Connector.strategy_intent_chain_exclusions excludes EVERY declared intent on chain "
-                    f"{chain!r}, so the connector claims a chain it supports nothing on. Remove the chain "
-                    "from strategy_chains instead of excluding every intent on it."
-                )
-
-    def _validate_strategy_intent_chain_exclusion_fields(self, entry: StrategyIntentChainExclusion) -> None:
-        """Validate one exclusion's fields against the declared cross-product."""
-        declared_intents = self.strategy_intents or ()
-        if not isinstance(entry.intent, str) or not entry.intent.strip():
-            raise ValueError(f"StrategyIntentChainExclusion.intent must be a non-empty string, got {entry.intent!r}")
-        if entry.intent not in declared_intents:
-            raise ValueError(
-                f"StrategyIntentChainExclusion.intent {entry.intent!r} is not declared in "
-                f"Connector.strategy_intents {declared_intents!r} — an exclusion may only narrow "
-                "the declared cross-product, never introduce a new intent."
-            )
-        if not isinstance(entry.chains, frozenset) or not entry.chains:
-            raise ValueError(
-                f"StrategyIntentChainExclusion.chains must be a non-empty frozenset[str], got {entry.chains!r}"
-            )
-        bad_chains = [chain for chain in entry.chains if not isinstance(chain, str) or not chain.strip()]
-        if bad_chains:
-            raise ValueError(
-                f"StrategyIntentChainExclusion.chains must contain only non-empty strings, got {bad_chains!r}"
-            )
-        if self.strategy_chains is None:
-            raise ValueError(
-                "Connector.strategy_intent_chain_exclusions may not be set when strategy_chains is None — "
-                "an off-chain venue has no chains to exclude."
-            )
-        # Compare on CANONICAL names (VIB-6111). The registry twin canonicalizes
-        # exclusion chains before its own subset check
-        # (``ConnectorManifest._canonicalize_exclusion_chains``), so a raw-string
-        # comparison here would reject declarations the registry accepts —
-        # e.g. ``strategy_chains=("bsc", ...)`` with an exclusion naming the
-        # registered alias ``"bnb"``. That made the registry's advertised
-        # alias-folding unreachable from the descriptor, which is the only path
-        # production connectors actually use. Imported locally so THIS module's
-        # import stays free of the chain registry, matching
-        # ``_validate_strategy_chains``'s stated intent. It does NOT keep the
-        # chain registry out of connector discovery — ``CONNECTOR = Connector(...)``
-        # executes at connector-module import, so a connector declaring
-        # exclusions pulls it in then. No cycle: ``almanak.core.constants``
-        # never imports ``almanak.connectors``.
-        from almanak.core.constants import canonical_chain_name
-
-        def _canon(chain: str) -> str:
-            return canonical_chain_name(chain) if isinstance(chain, str) else chain
-
-        entry_chains = {_canon(chain) for chain in entry.chains}
-        declared_chains = {_canon(chain) for chain in self.strategy_chains}
-        unknown = entry_chains - declared_chains
-        if unknown:
-            raise ValueError(
-                f"StrategyIntentChainExclusion.chains for intent {entry.intent!r} contains chains not in "
-                f"Connector.strategy_chains: {sorted(unknown)!r}. Allowed: {sorted(declared_chains)!r}."
-            )
-        if entry_chains == declared_chains:
-            raise ValueError(
-                f"StrategyIntentChainExclusion for intent {entry.intent!r} excludes every declared chain "
-                f"{sorted(declared_chains)!r} — drop the intent from strategy_intents instead."
-            )
-        if not isinstance(entry.reason, str) or not entry.reason.strip():
-            raise ValueError(f"StrategyIntentChainExclusion.reason must be a non-empty string, got {entry.reason!r}")
-        if not isinstance(entry.ticket, str) or not entry.ticket.strip():
-            raise ValueError(f"StrategyIntentChainExclusion.ticket must be a non-empty string, got {entry.ticket!r}")
+        if not isinstance(entry.intents, tuple) or not entry.intents:
+            raise ValueError(f"StrategyMatrixEntry.intents must be a non-empty tuple[str, ...], got {entry.intents!r}")
+        bad_intents = [intent for intent in entry.intents if not isinstance(intent, str) or not intent.strip()]
+        if bad_intents:
+            raise ValueError(f"StrategyMatrixEntry.intents contains invalid values: {bad_intents!r}")
+        normalized = [intent.upper() for intent in entry.intents]
+        if len(set(normalized)) != len(normalized):
+            raise ValueError(f"StrategyMatrixEntry.intents contains duplicates: {normalized!r}")
 
     @property
     def protocol(self) -> ProtocolName:
@@ -1796,6 +1666,56 @@ class Connector:
         return self.strategy_intents is not None
 
     @property
+    def all_supported_chains(self) -> tuple[str, ...]:
+        """Stable union of every chain supported by at least one strategy intent."""
+        if self.supported_chains is None:
+            return ()
+        return self.supported_chains.all_chains()
+
+    def supported_chains_for_intent(self, intent: object) -> tuple[str, ...] | None:
+        """Return exact support for one declared intent, or ``None`` off-chain."""
+        if self.supported_chains is None:
+            return None
+        return self.supported_chains.chains_for_intent(intent)
+
+    def supported_chains_for_protocol(self, protocol: str) -> tuple[str, ...]:
+        """Return canonical or alias-specific protocol coverage."""
+        if self.supported_chains is None:
+            return ()
+        return self.supported_chains.chains_for_protocol(protocol)
+
+    def supported_chains_for(
+        self,
+        *,
+        protocol: str | None = None,
+        intent: object | None = None,
+    ) -> tuple[str, ...] | None:
+        """Return exact support for a protocol alias and/or declared intent."""
+        if self.supported_chains is None:
+            return None
+        if intent is not None:
+            raw = getattr(intent, "name", intent)
+            if str(raw).upper() not in {declared.upper() for declared in self.strategy_intents or ()}:
+                return ()
+        return self.supported_chains.chains_for(protocol=protocol, intent=intent)
+
+    def supports(
+        self,
+        *,
+        chain: str,
+        protocol: str | None = None,
+        intent: object | None = None,
+    ) -> bool:
+        """Return whether this connector supports an exact query on a chain."""
+        if self.supported_chains is None:
+            return False
+        if intent is not None:
+            raw = getattr(intent, "name", intent)
+            if str(raw).upper() not in {declared.upper() for declared in self.strategy_intents or ()}:
+                return False
+        return self.supported_chains.supports(chain=chain, protocol=protocol, intent=intent)
+
+    @property
     def discovery_keys(self) -> frozenset[str]:
         """All keys that should resolve to this connector."""
         keys = set(self.protocol_keys)
@@ -1844,10 +1764,29 @@ class ConnectorRegistry:
 
     def get(self, name: str) -> Connector | None:
         """Return the connector for ``name`` or any published connector key."""
+        key = name.lower().replace("-", "_")
         for connector in self.all():
-            if name in connector.discovery_keys:
+            if key in connector.discovery_keys:
                 return connector
         return None
+
+    def supported_chains_for(self, protocol: str, *, intent: object | None = None) -> tuple[str, ...]:
+        """Resolve canonical or alias-specific support from connector metadata."""
+        key = protocol.lower().replace("-", "_")
+        connector = self.get(key)
+        if connector is None or not connector.has_strategy_support or connector.supported_chains is None:
+            return ()
+        return connector.supported_chains_for(protocol=key, intent=intent) or ()
+
+    def supported_protocols_matrix(self) -> dict[str, set[str]]:
+        """Build the on-chain protocol compatibility matrix from descriptors."""
+        matrix: dict[str, set[str]] = {}
+        for connector in self.with_strategy_support():
+            if connector.supported_chains is None or connector.supported_chains.is_offchain:
+                continue
+            for protocol in sorted(connector.protocol_keys):
+                matrix[protocol] = set(connector.supported_chains_for_protocol(protocol))
+        return matrix
 
     def with_receipt_parser(self) -> tuple[Connector, ...]:
         """Return connectors that publish a receipt-parser connector."""
@@ -2055,7 +1994,6 @@ class ConnectorRegistry:
         seen_compiler_keys: dict[str, str] = {}
         seen_compiler_default_keys: dict[str, str] = {}
         seen_capability_keys: dict[str, str] = {}
-        seen_supported_chain_keys: dict[str, str] = {}
         seen_lending_read_keys: dict[str, str] = {}
         seen_perps_read_keys: dict[str, str] = {}
         seen_funding_history_keys: dict[str, str] = {}
@@ -2126,12 +2064,6 @@ class ConnectorRegistry:
                 capability="Capabilities",
                 keys=() if connector.capabilities is None else connector.capabilities.keys,
                 seen_keys=seen_capability_keys,
-            )
-            self._validate_unique_ownership_keys(
-                connector_name=connector.name,
-                capability="Supported-chains",
-                keys=() if connector.supported_chains is None else connector.supported_chains.keys,
-                seen_keys=seen_supported_chain_keys,
             )
             self._validate_unique_ownership_keys(
                 connector_name=connector.name,

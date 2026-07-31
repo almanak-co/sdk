@@ -60,10 +60,13 @@ _KNOWN_GAPS: set[tuple[str, str, str]] = {
     ("uniswap_v3", "LP_OPEN", "linea"),
     ("pancakeswap_v3", "LP_OPEN", "linea"),
     ("aave_v3", "SUPPLY", "linea"),
-    ("aave_v3", "SUPPLY", "sonic"),
     ("aave_v3", "SUPPLY", "mantle"),
-    # Aave V3 on plasma: lending pool address added but permission hints not yet implemented
+    # Aave V3 on Plasma: deployment tables exist, but the chain is not yet
+    # declared as proven strategy support in the connector descriptor.
     ("aave_v3", "SUPPLY", "plasma"),
+    # Aave V3 on Sonic: retain historical deployment compatibility for
+    # position exits during the proposed whole-market wind-down (ARFC 25401).
+    ("aave_v3", "SUPPLY", "sonic"),
     # X-Layer chain: addresses added in VIB-2252 but permission hints not yet implemented
     ("uniswap_v3", "SWAP", "xlayer"),
     ("uniswap_v3", "LP_OPEN", "xlayer"),
@@ -169,13 +172,17 @@ def _collect_vault_params() -> list[tuple[str, str]]:
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _id(param: tuple[str, str]) -> str:
     return f"{param[0]}-{param[1]}"
 
 
 def _assert_permissions_or_known_gap(
-    protocol: str, intent_type: str, chain: str,
-    permissions: list, warnings: list,
+    protocol: str,
+    intent_type: str,
+    chain: str,
+    permissions: list,
+    warnings: list,
 ):
     """Assert permissions are produced, unless this is a known gap.
 
@@ -201,6 +208,7 @@ def _assert_permissions_or_known_gap(
 # SWAP
 # ---------------------------------------------------------------------------
 
+
 class TestSwapCompatibility:
     """Every protocol in _SWAP_PROTOCOLS with a known router compiles a SWAP."""
 
@@ -219,15 +227,20 @@ class TestSwapCompatibility:
 # LP_OPEN
 # ---------------------------------------------------------------------------
 
+
 class TestLPOpenCompatibility:
     """Every protocol in _LP_PROTOCOLS with a known position manager compiles LP_OPEN."""
 
-    @pytest.mark.parametrize("protocol,chain", _collect_lp_open_params(), ids=[_id(p) for p in _collect_lp_open_params()])
+    @pytest.mark.parametrize(
+        "protocol,chain", _collect_lp_open_params(), ids=[_id(p) for p in _collect_lp_open_params()]
+    )
     def test_lp_open_synthetic_intent(self, protocol: str, chain: str):
         intents = build_synthetic_intents(protocol, "LP_OPEN", chain)
         assert len(intents) >= 1, f"No synthetic LP_OPEN intent for {protocol} on {chain}"
 
-    @pytest.mark.parametrize("protocol,chain", _collect_lp_open_params(), ids=[_id(p) for p in _collect_lp_open_params()])
+    @pytest.mark.parametrize(
+        "protocol,chain", _collect_lp_open_params(), ids=[_id(p) for p in _collect_lp_open_params()]
+    )
     def test_lp_open_discovers_permissions(self, protocol: str, chain: str):
         permissions, warnings = discover_permissions(chain, [protocol], ["LP_OPEN"])
         _assert_permissions_or_known_gap(protocol, "LP_OPEN", chain, permissions, warnings)
@@ -237,6 +250,7 @@ class TestLPOpenCompatibility:
 # LP_CLOSE
 # ---------------------------------------------------------------------------
 
+
 class TestLPCloseCompatibility:
     """Every protocol in _LP_PROTOCOLS with a known position manager compiles LP_CLOSE.
 
@@ -245,12 +259,16 @@ class TestLPCloseCompatibility:
     for known-gap combos.
     """
 
-    @pytest.mark.parametrize("protocol,chain", _collect_lp_close_params(), ids=[_id(p) for p in _collect_lp_close_params()])
+    @pytest.mark.parametrize(
+        "protocol,chain", _collect_lp_close_params(), ids=[_id(p) for p in _collect_lp_close_params()]
+    )
     def test_lp_close_synthetic_intent(self, protocol: str, chain: str):
         intents = build_synthetic_intents(protocol, "LP_CLOSE", chain)
         assert len(intents) >= 1, f"No synthetic LP_CLOSE intent for {protocol} on {chain}"
 
-    @pytest.mark.parametrize("protocol,chain", _collect_lp_close_params(), ids=[_id(p) for p in _collect_lp_close_params()])
+    @pytest.mark.parametrize(
+        "protocol,chain", _collect_lp_close_params(), ids=[_id(p) for p in _collect_lp_close_params()]
+    )
     def test_lp_close_no_crash(self, protocol: str, chain: str):
         """LP_CLOSE may not produce permissions (needs RPC), but must not crash."""
         _permissions, warnings = discover_permissions(chain, [protocol], ["LP_CLOSE"])
@@ -262,18 +280,23 @@ class TestLPCloseCompatibility:
 # LENDING (SUPPLY, WITHDRAW, BORROW, REPAY)
 # ---------------------------------------------------------------------------
 
+
 class TestLendingCompatibility:
     """Every protocol in _LENDING_PROTOCOLS compiles all lending intent types."""
 
     _lending_intent_types = ("SUPPLY", "WITHDRAW", "BORROW", "REPAY")
 
-    @pytest.mark.parametrize("protocol,chain", _collect_lending_params(), ids=[_id(p) for p in _collect_lending_params()])
+    @pytest.mark.parametrize(
+        "protocol,chain", _collect_lending_params(), ids=[_id(p) for p in _collect_lending_params()]
+    )
     def test_lending_synthetic_intents(self, protocol: str, chain: str):
         for intent_type in self._lending_intent_types:
             intents = build_synthetic_intents(protocol, intent_type, chain)
             assert len(intents) >= 1, f"No synthetic {intent_type} intent for {protocol} on {chain}"
 
-    @pytest.mark.parametrize("protocol,chain", _collect_lending_params(), ids=[_id(p) for p in _collect_lending_params()])
+    @pytest.mark.parametrize(
+        "protocol,chain", _collect_lending_params(), ids=[_id(p) for p in _collect_lending_params()]
+    )
     def test_lending_discovers_permissions(self, protocol: str, chain: str):
         permissions, warnings = discover_permissions(chain, [protocol], self._lending_intent_types)
         _assert_permissions_or_known_gap(protocol, "SUPPLY", chain, permissions, warnings)
@@ -282,6 +305,7 @@ class TestLendingCompatibility:
 # ---------------------------------------------------------------------------
 # PERP (PERP_OPEN, PERP_CLOSE)
 # ---------------------------------------------------------------------------
+
 
 class TestPerpCompatibility:
     """Every protocol in _PERP_PROTOCOLS compiles perp intents."""
@@ -302,15 +326,20 @@ class TestPerpCompatibility:
 # FLASH_LOAN
 # ---------------------------------------------------------------------------
 
+
 class TestFlashLoanCompatibility:
     """Every provider in _FLASH_LOAN_PROVIDERS compiles flash loan intents."""
 
-    @pytest.mark.parametrize("protocol,chain", _collect_flash_loan_params(), ids=[_id(p) for p in _collect_flash_loan_params()])
+    @pytest.mark.parametrize(
+        "protocol,chain", _collect_flash_loan_params(), ids=[_id(p) for p in _collect_flash_loan_params()]
+    )
     def test_flash_loan_synthetic_intent(self, protocol: str, chain: str):
         intents = build_synthetic_intents(protocol, "FLASH_LOAN", chain)
         assert len(intents) >= 1, f"No synthetic FLASH_LOAN intent for {protocol} on {chain}"
 
-    @pytest.mark.parametrize("protocol,chain", _collect_flash_loan_params(), ids=[_id(p) for p in _collect_flash_loan_params()])
+    @pytest.mark.parametrize(
+        "protocol,chain", _collect_flash_loan_params(), ids=[_id(p) for p in _collect_flash_loan_params()]
+    )
     def test_flash_loan_discovers_permissions(self, protocol: str, chain: str):
         # Patch _is_wallet_contract to return True (contract wallet) so the EOA guard
         # does not block compilation. These tests exercise permission discovery, not wallet checks.
@@ -322,6 +351,7 @@ class TestFlashLoanCompatibility:
 # ---------------------------------------------------------------------------
 # VAULT (VAULT_DEPOSIT, VAULT_REDEEM)
 # ---------------------------------------------------------------------------
+
 
 class TestVaultCompatibility:
     """MetaMorpho vault intents compile on supported chains."""
@@ -351,6 +381,7 @@ class TestVaultCompatibility:
 # Cross-cutting: negative cases
 # ---------------------------------------------------------------------------
 
+
 class TestNegativeCases:
     """Protocols that don't support certain intent types return empty."""
 
@@ -374,6 +405,7 @@ class TestNegativeCases:
 # ---------------------------------------------------------------------------
 # Coverage summary
 # ---------------------------------------------------------------------------
+
 
 def test_coverage_summary():
     """Verify sufficient coverage of the protocol/chain space."""

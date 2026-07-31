@@ -16,8 +16,6 @@ Companion doctrine: ``InterestCalculator.get_*_apy_for_protocol`` no longer
 hands out the global surrogate APY silently — it warns once per protocol.
 """
 
-from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
-
 import logging
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -25,6 +23,7 @@ from decimal import Decimal
 
 import pytest
 
+from almanak.connectors._connector import SupportedChainsSpec
 from almanak.framework.backtesting.pnl.data_provider import MarketState
 from almanak.framework.backtesting.pnl.engine import (
     DefaultFeeModel,
@@ -37,6 +36,7 @@ from almanak.framework.backtesting.pnl.engine import (
 from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
 from almanak.framework.backtesting.pnl.sizing import RejectionCode
 from almanak.framework.intents.lending_intents import BorrowIntent, SupplyIntent
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 from tests.unit.backtesting.pnl._mocks import MockDataProvider
 
 TS = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
@@ -121,8 +121,8 @@ class TestDeclaredLendingChains:
 
     def test_intents_times_chains_declaration_gates_the_majors(self) -> None:
         """Connectors without lending matrix rows (aave_v3, spark,
-        compound_v3) declare via strategy_intents x strategy_chains — the
-        gate must derive scope from that product, or exactly the most-used
+        compound_v3) declare exact lending intent coverage through
+        supported_chains — the gate must derive scope from it, or the most-used
         lending protocols stay ungated."""
         spark = _declared_lending_chains("spark")
         assert spark is not None and "ethereum" in spark
@@ -142,10 +142,8 @@ class TestDeclaredLendingChains:
 
         engine_mod._lending_chain_scope_rejection.cache_clear()
         try:
-            with mock.patch.object(
-                engine_mod, "_declared_lending_chains", return_value=frozenset({"not_a_chain"})
-            ):
-                with pytest.raises(Exception):
+            with mock.patch.object(engine_mod, "_declared_lending_chains", return_value=frozenset({"not_a_chain"})):
+                with pytest.raises(ValueError, match="not_a_chain"):
                     engine_mod._lending_chain_scope_rejection("typo_proto", "ethereum")
         finally:
             engine_mod._lending_chain_scope_rejection.cache_clear()
@@ -155,7 +153,7 @@ class TestDeclaredLendingChains:
 
         Asserting only that ``_declared_lending_chains`` emptied is too weak: the
         two decision-level caches (``_lending_chain_scope_rejection`` and
-        ``_lending_intent_exclusion_rejection``) memoize registry-derived
+        ``_lending_intent_support_rejection``) memoize registry-derived
         verdicts too, and dropping either ``cache_clear()`` call would leave the
         gate answering from a declaration that no longer exists — a stale
         REFUSAL strands a legitimate fill, a stale APPROVAL fabricates one.
@@ -165,19 +163,16 @@ class TestDeclaredLendingChains:
         empty cache.
         """
         from almanak.connectors._connector import CONNECTOR_REGISTRY
-        from almanak.connectors._strategy_base.registry import _import_all_connectors
         from almanak.framework.backtesting.pnl import engine as engine_mod
 
         # Populate all three caches with real decisions.
         assert _declared_lending_chains("fluid") == frozenset({"arbitrum", "base"})
         assert _lending_chain_scope_rejection("fluid", "ethereum") is not None
-        assert (
-            engine_mod._lending_intent_exclusion_rejection("aave_v3", "mantle", "BORROW") is not None
-        )
+        assert engine_mod._lending_intent_support_rejection("aave_v3", "mantle", "BORROW") is not None
         for fn in (
             engine_mod._declared_lending_chains,
             engine_mod._lending_chain_scope_rejection,
-            engine_mod._lending_intent_exclusion_rejection,
+            engine_mod._lending_intent_support_rejection,
         ):
             assert fn.cache_info().currsize > 0, fn.__name__
 
@@ -188,7 +183,7 @@ class TestDeclaredLendingChains:
             for fn in (
                 engine_mod._declared_lending_chains,
                 engine_mod._lending_chain_scope_rejection,
-                engine_mod._lending_intent_exclusion_rejection,
+                engine_mod._lending_intent_support_rejection,
             ):
                 assert fn.cache_info().currsize == 0, f"{fn.__name__} kept a stale entry"
 
@@ -197,7 +192,7 @@ class TestDeclaredLendingChains:
             # it is RE-DERIVED, not replayed.
             assert _declared_lending_chains("fluid") == frozenset({"arbitrum", "base"})
         finally:
-            _import_all_connectors()
+            CONNECTOR_REGISTRY.clear()
             engine_mod._clear_lending_scope_caches()
 
     def test_a_changed_declaration_is_seen_only_after_invalidation(self) -> None:
@@ -216,12 +211,17 @@ class TestDeclaredLendingChains:
         engine_mod._clear_lending_scope_caches()
         assert _declared_lending_chains("fluid") == frozenset({"arbitrum", "base"})
 
-        # Widen rather than narrow: fluid's exclusions name ethereum/polygon, and
-        # the manifest validator (correctly) rejects an exclusion for a chain not
-        # in strategy_chains — so removing chains would fail construction, not the
-        # cache. Adding one changes the derived answer while staying valid.
+        # Widen the default lending coverage while preserving Fluid's broader
+        # SWAP override. This changes the derived answer while staying valid.
         real = CONNECTOR_REGISTRY.get("fluid")
-        widened = replace(real, strategy_chains=(*real.strategy_chains, "optimism"))
+        assert real is not None
+        widened = replace(
+            real,
+            supported_chains=SupportedChainsSpec(
+                chains=("arbitrum", "base", "optimism"),
+                intent_overrides={"SWAP": ("arbitrum", "base", "ethereum", "polygon")},
+            ),
+        )
         try:
             with mock.patch.object(CONNECTOR_REGISTRY, "get", return_value=widened):
                 # Still cached -> the OLD declaration is replayed.
@@ -265,15 +265,12 @@ class TestLendingChainScopeGate:
         assert portfolio.get_total_value_usd(state) == INITIAL_CASH
         trade = portfolio.trades[-1]
         assert trade.success is False
-        # Since fluid's lending narrowing moved to strategy_intent_chain_exclusions
-        # (matrix schema v2), the per-(intent, chain) gate fires FIRST and carries
-        # the connector's own reason + ticket — strictly more informative than the
-        # coarse chain-scope message it replaces. Still the same refusal: no
-        # position, no cash moved, same rejection code.
+        # Exact intent support fires before the coarse union-of-lending gate.
+        # Still the same refusal: no position, no cash moved, same rejection code.
         reason = trade.metadata["failure_reason"]
-        assert "SUPPLY UNSUPPORTED on chain 'ethereum'" in reason
+        assert "declares SUPPLY only on [arbitrum, base]" in reason
         assert "protocol 'fluid'" in reason
-        assert "VIB-5030" in reason, "the refusal must name the ticket that justifies it"
+        assert "chain 'ethereum' is unsupported" in reason
         assert trade.metadata["rejection_code"] == RejectionCode.UNDECLARED_LENDING_CHAIN.value
         # Rejected fills charge nothing.
         assert trade.fee_usd == Decimal("0")
@@ -326,15 +323,12 @@ class TestLendingChainScopeGate:
         trade = portfolio.trades[-1]
         assert trade.success is False
         assert trade.metadata["rejection_code"] == RejectionCode.UNDECLARED_LENDING_CHAIN.value
-        # The refusal must be legible, not just typed. fluid declares no BORROW at
-        # all, so no per-(intent, chain) exclusion covers this cell — the reason
-        # comes from the coarse chain-scope gate and must name the protocol, the
-        # chain, and the chains lending IS declared on. Without this, a rejection
-        # carrying a misleading reason would still pass.
+        # The refusal must be legible, not just typed. Fluid declares no BORROW
+        # intent at all, so exact intent support rejects it on every chain.
         reason = trade.metadata["failure_reason"]
         assert "protocol 'fluid'" in reason
         assert "chain 'ethereum'" in reason
-        assert "arbitrum, base" in reason, "must name where lending IS declared"
+        assert "does not declare the BORROW intent" in reason
         # Rejected fills charge nothing — a refusal that still bills is a loss.
         assert trade.fee_usd == Decimal("0")
         assert trade.gas_cost_usd == Decimal("0")
@@ -386,9 +380,7 @@ class TestLendingChainScopeGate:
 
 
 class TestGlobalApyFallbackWarns:
-    def test_undeclared_protocol_warns_once_and_returns_surrogate(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    def test_undeclared_protocol_warns_once_and_returns_surrogate(self, caplog: pytest.LogCaptureFixture) -> None:
         from almanak.framework.backtesting.pnl.calculators.interest import (
             _GLOBAL_APY_FALLBACK_WARNED,
             InterestCalculator,
@@ -402,9 +394,7 @@ class TestGlobalApyFallbackWarns:
 
         assert apy == calculator.default_supply_apy
         assert again == apy
-        fallback_warnings = [
-            record for record in caplog.records if "totally_undeclared_venue" in record.getMessage()
-        ]
+        fallback_warnings = [record for record in caplog.records if "totally_undeclared_venue" in record.getMessage()]
         assert len(fallback_warnings) == 1
         assert "fabricated" in fallback_warnings[0].getMessage()
 
@@ -419,10 +409,10 @@ class TestGlobalApyFallbackWarns:
         assert not [record for record in caplog.records if "aave_v3" in record.getMessage()]
 
 
-class TestPerIntentChainExclusionGate:
-    """VIB-6111 — the chain gate is too coarse for a per-(intent, chain) exclusion.
+class TestPerIntentChainSupportGate:
+    """A union-of-intents chain gate is too coarse for an intent override.
 
-    Aave V3 keeps ``mantle`` in ``strategy_chains`` because SUPPLY / WITHDRAW /
+    Aave V3 keeps ``mantle`` in its default support because SUPPLY / WITHDRAW /
     REPAY still work there, so ``_lending_chain_scope_rejection`` passes and a
     backtest would fill a BORROW that cannot execute live and accrue a
     fabricated APY on it — the same failure the chain gate exists to prevent,
@@ -437,39 +427,48 @@ class TestPerIntentChainExclusionGate:
 
         assert _lending_chain_scope_rejection("aave_v3", "mantle") is None
 
-    def test_excluded_intent_on_declared_chain_is_rejected(self) -> None:
-        from almanak.framework.backtesting.pnl.engine import _lending_intent_exclusion_rejection
+    def test_unsupported_intent_on_default_chain_is_rejected(self) -> None:
+        from almanak.framework.backtesting.pnl.engine import _lending_intent_support_rejection
 
-        reason = _lending_intent_exclusion_rejection("aave_v3", "mantle", "BORROW")
+        reason = _lending_intent_support_rejection("aave_v3", "mantle", "BORROW")
         assert reason is not None
         assert "BORROW" in reason and "mantle" in reason
-        assert "VIB-6111" in reason, "the connector's ticket must reach the rejection message"
-        assert "ltv" in reason.lower(), "the connector's reason must reach the rejection message"
+        assert "unsupported" in reason
 
     def test_surviving_intents_on_the_same_chain_are_not_rejected(self) -> None:
         """Over-rejection would strand pre-existing borrowers' REPAY/WITHDRAW."""
-        from almanak.framework.backtesting.pnl.engine import _lending_intent_exclusion_rejection
+        from almanak.framework.backtesting.pnl.engine import _lending_intent_support_rejection
 
         for intent in ("SUPPLY", "REPAY", "WITHDRAW"):
-            assert _lending_intent_exclusion_rejection("aave_v3", "mantle", intent) is None, intent
+            assert _lending_intent_support_rejection("aave_v3", "mantle", intent) is None, intent
 
     def test_same_intent_on_other_chains_is_not_rejected(self) -> None:
-        from almanak.framework.backtesting.pnl.engine import _lending_intent_exclusion_rejection
+        from almanak.framework.backtesting.pnl.engine import _lending_intent_support_rejection
 
         for chain in ("ethereum", "arbitrum", "base"):
-            assert _lending_intent_exclusion_rejection("aave_v3", chain, "BORROW") is None, chain
+            assert _lending_intent_support_rejection("aave_v3", chain, "BORROW") is None, chain
 
     def test_undeclared_protocol_keeps_generic_behaviour(self) -> None:
-        from almanak.framework.backtesting.pnl.engine import _lending_intent_exclusion_rejection
+        from almanak.framework.backtesting.pnl.engine import _lending_intent_support_rejection
 
-        assert _lending_intent_exclusion_rejection("totally_undeclared_venue", "mantle", "BORROW") is None
+        assert _lending_intent_support_rejection("totally_undeclared_venue", "mantle", "BORROW") is None
 
     def test_chain_alias_is_canonicalised_before_matching(self) -> None:
-        """A caller passing a non-canonical spelling must not slip past the gate."""
-        from almanak.framework.backtesting.pnl.engine import _lending_intent_exclusion_rejection
+        """A caller passing a non-canonical spelling must not slip past the gate.
 
-        assert _lending_intent_exclusion_rejection("aave_v3", "MANTLE", "BORROW") is not None
-        assert _lending_intent_exclusion_rejection("aave_v3", "mantle", "borrow") is not None
+        The two rejections alone cannot fail for the reason they name: a gate
+        that never canonicalised would read ``"MANTLE"`` as an unknown chain
+        and reject it too, so ``is not None`` holds either way. The positive
+        control is what distinguishes the two — ``"MAINNET"`` is an alias of
+        ``ethereum`` (``ChainRegistry`` aliases ``eth``/``mainnet``), where
+        BORROW *is* supported, so it passes only if resolution really happens.
+        """
+        from almanak.framework.backtesting.pnl.engine import _lending_intent_support_rejection
+
+        assert _lending_intent_support_rejection("aave_v3", "MANTLE", "BORROW") is not None
+        assert _lending_intent_support_rejection("aave_v3", "mantle", "borrow") is not None
+        assert _lending_intent_support_rejection("aave_v3", "MAINNET", "BORROW") is None
+        assert _lending_intent_support_rejection("aave_v3", "eth", "borrow") is None
 
 
 class TestRejectedFillsChargeNothingWhenBillingIsEnabled:
@@ -553,7 +552,8 @@ class TestRejectedFillsChargeNothingWhenBillingIsEnabled:
         # does burn gas. So `fee_usd == 0` on a rejection is tautological however
         # the fixture is configured, and gas_cost_usd is the real evidence.
         assert trade.gas_cost_usd > Decimal("0"), (
-            "fixture must actually charge gas, or the zero-gas assertions above are vacuous")
+            "fixture must actually charge gas, or the zero-gas assertions above are vacuous"
+        )
 
 
 class TestPerIntentExclusionIsWiredIntoExecution:
@@ -569,7 +569,7 @@ class TestPerIntentExclusionIsWiredIntoExecution:
     """
 
     @pytest.mark.asyncio
-    async def test_aave_borrow_on_mantle_is_refused_by_the_exclusion_gate(self) -> None:
+    async def test_aave_borrow_on_mantle_is_refused_by_exact_support(self) -> None:
         portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CASH)
         await _billing_backtester()._execute_intent(
             BorrowIntent(
@@ -591,7 +591,7 @@ class TestPerIntentExclusionIsWiredIntoExecution:
         assert trade.gas_cost_usd == Decimal("0")
         reason = trade.metadata["failure_reason"]
         assert "BORROW" in reason and "mantle" in reason
-        assert "VIB-6111" in reason, "must carry the connector's own justifying ticket"
+        assert "unsupported" in reason
 
     @pytest.mark.asyncio
     async def test_aave_supply_on_mantle_still_fills(self) -> None:

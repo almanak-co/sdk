@@ -23,7 +23,7 @@ post-condition) exactly like any other position.
 exactly one strategy, so the deployment's wallet is the deployment's own — a
 wallet-scoped read can never surface a sibling deployment's capital. Discoveries
 are scoped to the intersection of the deployment's chains and the connector's
-declared ``strategy_chains`` so a Base-only strategy never issues an Arbitrum
+declared ``supported_chains`` so a Base-only strategy never issues an Arbitrum
 GMX read.
 
 **Empty ≠ Zero, fail-closed (the exact VIB-5116 bug).** A discovery that returns
@@ -78,15 +78,10 @@ _DISCOVERY_CHAINS: dict[str, tuple[str, ...]] = {}
 # (loud WARNING), not a real strand (hard fail-closed sentinel).
 _DISCOVERY_INTENTS: dict[str, frozenset[str]] = {}
 
-# DELIBERATELY NOT NARROWED by ``strategy_intent_chain_exclusions`` (VIB-6111).
-# Those exclusions are an ADVERTISEMENT narrowing — they say "do not offer this
-# (intent, chain) cell to new strategies". They say nothing about whether a
-# position opened BEFORE the exclusion existed is still on-chain. Teardown
-# residual discovery is the fail-closed safety sweep; narrowing it here would
-# make teardown skip discovery for exactly the users who most need it (e.g. a
-# pre-existing Aave V3 debt position on Mantle, opened before governance zeroed
-# ltv and disabled new borrows). Both maps stay the coarse UNION of everything
-# the connector ever declares. Advertisement narrows; safety does not.
+# Teardown uses the UNION of every intent's supported chains. It must discover
+# residuals on any chain where the connector can create or unwind a position;
+# an exact per-intent check would be too narrow for this fail-closed safety
+# sweep.
 
 
 def _register_manifest_teardown_residual_discoveries() -> None:
@@ -103,7 +98,7 @@ def _register_manifest_teardown_residual_discoveries() -> None:
             )
         name = connector_manifest.name.lower()
         _register_teardown_residual_discovery(connector_manifest.name, hook)
-        chains = connector_manifest.strategy_chains
+        chains = connector_manifest.all_supported_chains
         # Canonicalize declared chains (alias → ChainRegistry canonical name,
         # e.g. "bnb" → "bsc") so the deployment-chain intersection below can
         # never silently miss on an alias/canonical vocabulary split — a miss

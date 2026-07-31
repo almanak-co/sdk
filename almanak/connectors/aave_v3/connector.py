@@ -10,10 +10,10 @@ from almanak.connectors._connector import (
     ImportRef,
     LendingReadDecl,
     MetadataAmountEncoding,
-    StrategyIntentChainExclusion,
+    SupportedChainsSpec,
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
-from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec, SupportedChainsSpec
+from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
 from almanak.connectors.aave_v3.backtest_risk import BACKTEST_RISK as _BACKTEST_RISK
 
 CONNECTOR = Connector(
@@ -88,10 +88,6 @@ CONNECTOR = Connector(
         keys=("aave_v3",),
         module="almanak.connectors.aave_v3.capabilities",
     ),
-    supported_chains=SupportedChainsSpec(
-        keys=("aave_v3",),
-        module="almanak.connectors.aave_v3.supported_chains",
-    ),
     primitive=ImportRef(
         module="almanak.connectors.aave_v3.primitive",
         attribute="PRIMITIVE",
@@ -128,44 +124,61 @@ CONNECTOR = Connector(
     # keyed independently of strategy_intents — see
     # tests/unit/connectors/aave_v3/test_manifest_truthfulness_vib5916.py.
     strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
-    # linea added (VIB-5916) after Phase-0 live-reserve verification. plasma
-    # and sonic are deliberately NOT declared: plasma's token catalogue is
-    # incomplete and sonic is untested — they stay out until their own proof
-    # runs. The support matrix now DERIVES from (intents, chains) — no manual
-    # matrix override — so the displayed lending row equals strategy_chains
-    # exactly and cannot outrun this declaration.
-    strategy_chains=(
-        "ethereum",
-        "arbitrum",
-        "optimism",
-        "polygon",
-        "base",
-        "avalanche",
-        "bsc",
-        "mantle",
-        "xlayer",
-        "linea",
-    ),
-    # BORROW is NOT supported on mantle (VIB-6111). The exclusion narrows the
-    # intents x chains cross-product without touching strategy_chains — mantle
-    # keeps SUPPLY / WITHDRAW / REPAY, which still work there, and stays in
-    # supported_chains.py so the runtime gate and the manifest remain exactly
-    # consistent. Dropping the chain instead would strand pre-existing
-    # borrowers who need REPAY.
-    strategy_intent_chain_exclusions=(
-        StrategyIntentChainExclusion(
-            intent="BORROW",
-            chains=frozenset({"mantle"}),
-            reason=(
-                "Aave governance zeroed ltv on all 10 Aave V3 Mantle reserves at block "
-                "98303344 (2026-07-22); no asset on that market can be enabled as "
-                "collateral, so borrowing is impossible for every asset. "
-                "liquidationThreshold was left intact and nothing is frozen, so SUPPLY, "
-                "WITHDRAW and REPAY still work and stay advertised — REPAY in particular "
-                "must remain available to pre-existing borrowers."
-            ),
-            ticket="VIB-6111",
+    # linea added (VIB-5916) after Phase-0 live-reserve verification. Plasma
+    # is deliberately NOT declared because its token catalogue is incomplete.
+    # Sonic is deliberately NOT declared because Aave governance proposed a
+    # whole-market wind-down on 2026-07-29 (ARFC 25401); its retained address
+    # entries support historical-position exits, not new strategy activity.
+    # The support matrix now DERIVES from (intents, chains) — no manual matrix
+    # override — so the displayed lending row equals supported_chains exactly
+    # and cannot outrun this declaration.
+    supported_chains=SupportedChainsSpec(
+        chains=(
+            "ethereum",
+            "arbitrum",
+            "optimism",
+            "polygon",
+            "base",
+            "avalanche",
+            "bsc",
+            "mantle",
+            "xlayer",
+            "linea",
         ),
+        # Mantle omits BORROW because THIS CONNECTOR cannot borrow there — not
+        # because the market cannot be borrowed against (ALM-3075).
+        #
+        # Aave V3 Mantle runs v3.2 "liquid eModes": governance zeroed base LTV
+        # on all 10 reserves (VIB-6111) and moved the collateral power into six
+        # eMode categories, measured live at block 98645311 with LTV 40-93%
+        # ('WMNT__Stablecoins' 40%, 'sUSDe Stablecoins' 90%, 'wrsETH
+        # Correlated' 93%, ...). The market is active — ~$78M outstanding
+        # borrows at ~33% utilisation — so borrowing there is entirely
+        # possible, via eMode.
+        #
+        # We cannot reach it: `adapter.set_user_emode()` exists but no compiler
+        # or intent path calls it, so the user is never enrolled in a category
+        # and a compiled borrow sees base LTV 0 -> zero borrowing power ->
+        # revert. `EMODE_CATEGORIES` in adapter.py is also a hardcoded mainnet
+        # map that cannot describe Mantle's categories.
+        #
+        # Do NOT read this as "Mantle is offboarded". Zeroed base LTV alongside
+        # non-zero liquidation thresholds looks identical to a wind-down, and
+        # that misreading is what ALM-3075 exists to correct. Restore mantle
+        # here once BORROW compiles an eMode enrolment.
+        intent_overrides={
+            "BORROW": (
+                "ethereum",
+                "arbitrum",
+                "optimism",
+                "polygon",
+                "base",
+                "avalanche",
+                "bsc",
+                "xlayer",
+                "linea",
+            )
+        },
     ),
 )
 

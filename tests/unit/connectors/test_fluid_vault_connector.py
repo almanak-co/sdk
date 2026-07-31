@@ -22,9 +22,9 @@ class TestFluidVaultManifest:
         assert CONNECTOR.strategy_intents == ("SUPPLY", "BORROW", "REPAY", "WITHDRAW")
 
     def test_chains_exactly_arbitrum_base_no_cross_product(self):
-        assert CONNECTOR.strategy_chains == ("arbitrum", "base")
-        entries = {e.category: e.chains for e in CONNECTOR.strategy_matrix_entries}
-        assert entries == {"lending": frozenset(("arbitrum", "base"))}
+        assert CONNECTOR.supported_chains_for_protocol("fluid_vault") == ("arbitrum", "base")
+        entries = {e.category: e.intents for e in CONNECTOR.strategy_matrix_entries}
+        assert entries == {"lending": ("SUPPLY", "BORROW", "REPAY", "WITHDRAW")}
 
     def test_kind_is_lending(self):
         assert CONNECTOR.kind is ProtocolKind.LENDING
@@ -49,7 +49,7 @@ class TestFluidVaultManifest:
         from almanak.connectors.fluid.addresses import FLUID_VAULT, FLUID_VAULT_MARKETS
         from almanak.connectors.fluid.vault_compiler import FluidVaultCompiler
 
-        manifest_chains = frozenset(CONNECTOR.strategy_chains)
+        manifest_chains = frozenset(CONNECTOR.supported_chains_for_protocol("fluid_vault"))
         assert FluidVaultCompiler.VAULT_CHAINS == manifest_chains
         assert frozenset(FLUID_VAULT_MARKETS.keys()) == manifest_chains
         assert frozenset(FLUID_VAULT.keys()) == manifest_chains
@@ -251,7 +251,9 @@ class TestFluidVaultZodiacMatrix:
                         if selector == "0x095ea7b3":
                             target = tx.to.lower()
                             assert target != factory, f"{chain}/{intent_type}: approve targets the VaultFactory"
-                            assert target in token_addresses, f"{chain}/{intent_type}: approve targets non-token {target}"
+                            assert target in token_addresses, (
+                                f"{chain}/{intent_type}: approve targets non-token {target}"
+                            )
 
     def test_discovery_borrow_amount_is_concrete_decimal(self):
         from almanak.framework.permissions.hints import DiscoveryContext, get_discovery_vectors_override

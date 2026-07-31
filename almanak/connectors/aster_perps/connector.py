@@ -7,6 +7,7 @@ from almanak.connectors._connector import (
     Connector,
     ImportRef,
     PerpsReadDecl,
+    SupportedChainsSpec,
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
 
@@ -39,7 +40,7 @@ CONNECTOR = Connector(
         aliases=("pancakeswap_perps",),
     ),
     strategy_intents=("PERP_OPEN", "PERP_CLOSE"),
-    strategy_chains=("bsc",),
+    supported_chains=SupportedChainsSpec(chains=("bsc",)),
 )
 
 __all__ = ["CONNECTOR"]

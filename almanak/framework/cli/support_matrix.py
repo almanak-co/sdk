@@ -1,26 +1,22 @@
 """CLI command to display the chains x protocols support matrix.
 
-Dynamically derived from the SDK's actual data structures — the matrix
-is composed from two strategy-side sources:
+Dynamically derived from the SDK's actual data structures — the matrix is
+composed from two sources:
 
-1. **Strategy-side** :class:`~almanak.connectors._strategy_base.registry.ConnectorRegistry`
-   — every ``register_connector`` call contributes a manifest. The
-   manifest's optional ``matrix_entries`` field is consumed verbatim
-   when declared; otherwise entries are derived from ``intents`` +
-   ``chains`` via :func:`_derive_entries_from_intents`.
+1. **Connector descriptors** — every connector's inline
+   ``strategy_intents`` and ``supported_chains`` declaration contributes
+   exact intent-chain coverage. Optional ``strategy_matrix_entries`` preserve
+   row classification and suppression without owning a second chain list.
 2. **Compiler routing tables** — last-resort fallback for protocols
    that have no connector folder (``uniswap_v2`` / ``pancakeswap_v2`` /
    ``quickswap`` / ``sushiswap`` / ``velodrome`` / ``1inch``). Read as
    data (dict iteration), so no protocol-name string literals leak into
    this file.
 
-The gateway-side ``SupportedActionsCapability`` was an early design
-candidate (Source 3 in the VIB-4856 spec) but the strategy-side import
-boundary forbids reading gateway-only modules from a strategy-container
-CLI module. ``ConnectorManifest.matrix_entries`` is the equivalent
-declarative override on the strategy side — every connector that needs
-matrix coverage beyond the intent → category default declares it there
-in its ``__init__.py``.
+The gateway-side ``SupportedActionsCapability`` was an early design candidate,
+but the strategy-side import boundary forbids reading gateway-only modules
+from a strategy-container CLI module. Descriptor-owned matrix entries are the
+strategy-safe classification override.
 
 Adding a new connector folder under ``almanak/connectors/<protocol>/``
 causes it to appear in the matrix automatically — no central edit. See
@@ -42,7 +38,7 @@ that already knows it. Contract and invariants:
 from __future__ import annotations
 
 import json as json_module
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from functools import cache
 from pathlib import Path
@@ -153,12 +149,11 @@ SCHEMA_VERSION = 2
 def _matrix_chain(chain: str) -> str:
     """Normalise a manifest chain name to the matrix's canonical form.
 
-    The strategy registry canonicalizes ``ConnectorManifest.chains``
-    at construction (``"bnb"`` → ``"bsc"``), so manifest-derived rows arrive
+    ``SupportedChainsSpec`` canonicalizes chain declarations at construction
+    (``"bnb"`` → ``"bsc"``), so descriptor-derived rows arrive
     already canonical and this is a no-op for them. It stays as the tolerant
-    rendering backstop for declarative ``matrix_entries`` (which are not
-    registry-canonicalized) and for any alias that slips in via routing
-    tables, so downstream Edge / CI consumers always match on the canonical
+    rendering backstop for compiler routing tables, so downstream Edge / CI
+    consumers always match on the canonical
     string. Normalising via :class:`~almanak.core.chains.ChainRegistry`
     ensures new aliases flow automatically. Unknown chains pass through.
     """
@@ -166,26 +161,27 @@ def _matrix_chain(chain: str) -> str:
     return descriptor.name if descriptor is not None else chain
 
 
-def _normalize_entry_chains(chains: frozenset[str]) -> frozenset[str]:
-    """Apply ``_matrix_chain`` to every chain in a ``MatrixEntry``."""
-    return frozenset(_matrix_chain(c) for c in chains)
-
-
-def _constant_chains(chains: tuple[str, ...]) -> Callable[[Any], tuple[str, ...]]:
-    """A narrowing read that returns ``chains`` for every intent.
-
-    Used to derive the PRE-exclusion rows so they can be diffed against the
-    narrowed ones (VIB-6111). A closure factory rather than an inline lambda:
-    an inline `lambda _intent: declared` inside the connector loop trips ruff
-    B023 (late binding), and the `lambda _intent, _c=…: _c` form that avoids
-    B023 defeats mypy's inference against the `Callable` parameter type. Binding
-    the value through a function argument satisfies both.
-    """
-
-    def _read(_intent: Any) -> tuple[str, ...]:
-        return chains
-
-    return _read
+_INTENT_CATEGORIES: dict[str, str] = {
+    "SWAP": ACTION_SWAP,
+    "LP_OPEN": ACTION_LP,
+    "LP_CLOSE": ACTION_LP,
+    "LP_COLLECT_FEES": ACTION_LP,
+    "SUPPLY": ACTION_LENDING,
+    "BORROW": ACTION_LENDING,
+    "REPAY": ACTION_LENDING,
+    "WITHDRAW": ACTION_LENDING,
+    "PERP_OPEN": ACTION_PERPS,
+    "PERP_CLOSE": ACTION_PERPS,
+    "STAKE": ACTION_YIELD,
+    "UNSTAKE": ACTION_YIELD,
+    "VAULT_DEPOSIT": ACTION_YIELD,
+    "VAULT_REDEEM": ACTION_YIELD,
+    "PREDICTION_BUY": ACTION_PREDICTION,
+    "PREDICTION_SELL": ACTION_PREDICTION,
+    "PREDICTION_REDEEM": ACTION_PREDICTION,
+    "BRIDGE": ACTION_BRIDGE,
+    "FLASH_LOAN": ACTION_FLASH_LOAN,
+}
 
 
 @cache
@@ -232,13 +228,17 @@ def _intent_category_map() -> Mapping[Any, str]:
     )
 
 
-def _connector_intent_coverage(manifest: Any) -> dict[str, list[str]]:
+def _connector_intent_coverage(
+    connector: Any,
+    *,
+    protocol: str | None = None,
+) -> dict[str, list[str]]:
     """Per-intent chain coverage for one connector — the schema v2 payload.
 
     ``{intent_name: [chain, ...]}`` built from
-    :meth:`ConnectorManifest.chains_for_intent`, which is the accessor the
-    manifest's own docstring tells consumers to ask instead of reading
-    ``intents`` x ``chains`` raw. That is the whole point of the field: the
+    :meth:`Connector.supported_chains_for`, which reads the same inline
+    :class:`SupportedChainsSpec` as every other consumer. That is the whole
+    point of the field: the
     category rows collapse a connector's exact verbs into one rendering label
     (SUPPLY / BORROW / REPAY / WITHDRAW all become ``lending``), so a consumer
     reading rows alone can ask "is this protocol on this chain?" but never
@@ -255,13 +255,13 @@ def _connector_intent_coverage(manifest: Any) -> dict[str, list[str]]:
     dropped. An intent with no surviving chain contributes nothing rather than
     an empty list — an empty claim is not a claim.
     """
-    category_of = _intent_category_map()
     coverage: dict[str, list[str]] = {}
-    for intent in manifest.intents:
-        if intent.name in UNCATEGORISED_INTENTS:
+    for intent in connector.strategy_intents or ():
+        intent_name = intent.upper()
+        if intent_name in UNCATEGORISED_INTENTS:
             category: str | None = None
-        elif intent in category_of:
-            category = category_of[intent]
+        elif intent_name in _INTENT_CATEGORIES:
+            category = _INTENT_CATEGORIES[intent_name]
         else:
             # An intent in neither the category map nor UNCATEGORISED_INTENTS is
             # an unclassified new verb. Fail loudly rather than publish it
@@ -270,7 +270,7 @@ def _connector_intent_coverage(manifest: Any) -> dict[str, list[str]]:
             # LLM-facing check_protocol_support tool. A bare KeyError naming
             # only the enum member does not say what to do about it.
             raise RuntimeError(
-                f"IntentType.{intent.name} is not classified for the support "
+                f"IntentType.{intent_name} is not classified for the support "
                 f"matrix. Add it to the intent -> category map in "
                 f"support_matrix.py to render a row for it, or to "
                 f"UNCATEGORISED_INTENTS to publish per-intent coverage with no "
@@ -279,95 +279,69 @@ def _connector_intent_coverage(manifest: Any) -> dict[str, list[str]]:
             )
         if category in WITHHELD_CATEGORIES:
             continue
-        chains = sorted(_matrix_chain(c) for c in manifest.chains_for_intent(intent))
+        chains = sorted(
+            _matrix_chain(c)
+            for c in (
+                connector.supported_chains_for(
+                    protocol=protocol,
+                    intent=intent_name,
+                )
+                or ()
+            )
+        )
         if chains:
-            coverage[intent.name] = chains
+            coverage[intent_name] = chains
     return coverage
 
 
-def _published_matrix_names(manifest: Any) -> set[str]:
-    """The matrix row names this connector publishes under.
+def _published_matrix_names(connector: Any) -> set[str]:
+    """Every row or protocol name this connector can publish under.
 
-    Usually the connector's own name, but a declared ``matrix_entries`` may
-    rename the row (``balancer_v2`` publishes as ``balancer``) or emit several.
-    A manifest with ``matrix_entries=()`` publishes nothing and yields the empty
-    set — the deliberate full-suppression case, which must not acquire a
-    ``chainsByIntent`` entry through the back door.
+    Protocol aliases are included so compiler-fallback rows such as
+    ``agni_finance`` still receive exact per-intent coverage from their owning
+    descriptor. Declared matrix names are included for renamed rows such as
+    ``balancer``.
     """
-    if manifest.matrix_entries is not None:
-        return {entry.matrix_name for entry in manifest.matrix_entries}
-    return {manifest.name}
+    names = set(connector.protocol_keys)
+    if connector.strategy_matrix_entries is not None:
+        names.update(entry.matrix_name for entry in connector.strategy_matrix_entries)
+    return names
 
 
-def _derive_entries_from_intents(
-    name: str,
-    intents: tuple[Any, ...],
-    chains: tuple[str, ...] | None,
-    chains_for_intent: Callable[[Any], tuple[str, ...]],
-) -> tuple[tuple[str, str, frozenset[str]], ...]:
-    """Derive ``(matrix_name, category, chains)`` rows from a manifest's intents.
-
-    Used as the fallback when a :class:`~almanak.connectors._strategy_base.registry.ConnectorManifest`
-    has no explicit ``matrix_entries`` field. The intent → category map
-    lives here (not on each connector) so the strategy registry stays
-    schema-clean — connectors that need anything beyond this default
-    declare it explicitly via ``matrix_entries``.
-
-    A connector with multiple intent classes (e.g. Curve has SWAP +
-    LP_OPEN + LP_CLOSE) emits multiple rows, one per category. Returns
-    an empty tuple for connectors with off-chain venues (``chains is
-    None``) since the matrix is on-chain only.
-
-    ``chains_for_intent`` is the manifest's narrowed per-intent chain read
-    (``ConnectorManifest.chains_for_intent`` — VIB-6111). A category's chain
-    set is the UNION of its intents' narrowed chain sets, so a category
-    survives on a chain as long as at least one of its verbs does (Aave V3 on
-    mantle keeps its ``lending`` row because SUPPLY / WITHDRAW / REPAY still
-    work there, even though BORROW is excluded). A category disappears from a
-    chain only when EVERY intent in it is excluded there.
-
-    It is REQUIRED, deliberately (VIB-6111). Making it optional with an
-    un-narrowed default meant a future caller that forgot the argument silently
-    got pre-exclusion semantics — a quiet widening in the one function whose job
-    is truthful narrowing. A missing argument must raise TypeError, not return
-    the wrong answer.
-    """
-    if chains is None:
-        return ()
-
-    narrowed: Callable[[Any], tuple[str, ...]] = chains_for_intent
-
-    intent_category = _intent_category_map()
-
-    # Per-category chain union over that category's intents. An intent whose
-    # narrowed chain set is empty contributes nothing; a category with no
-    # surviving chain at all emits no row (it would be an empty claim).
-    category_chains: dict[str, set[str]] = {}
+def _chains_for_intents(
+    connector: Any,
+    intents: tuple[str, ...],
+    *,
+    protocol: str | None = None,
+) -> frozenset[str]:
+    """Return the union of exact inline support for the requested intents."""
+    chains: set[str] = set()
     for intent in intents:
-        cat = intent_category.get(intent)
-        if cat is None:
-            continue
-        category_chains.setdefault(cat, set()).update(_matrix_chain(c) for c in narrowed(intent))
+        chains.update(connector.supported_chains_for(protocol=protocol, intent=intent) or ())
+    return frozenset(_matrix_chain(chain) for chain in chains)
 
-    return tuple((name, cat, frozenset(chain_set)) for cat, chain_set in category_chains.items() if chain_set)
+
+def _derive_entries_from_intents(connector: Any) -> tuple[tuple[str, str, frozenset[str]], ...]:
+    """Derive matrix rows from a connector's intent-specific chain support."""
+    by_category: dict[str, set[str]] = {}
+    for intent in connector.strategy_intents or ():
+        category = _INTENT_CATEGORIES.get(intent.upper())
+        if category is None:
+            continue
+        by_category.setdefault(category, set()).update(connector.supported_chains_for_intent(intent) or ())
+    return tuple(
+        (connector.name, category, frozenset(_matrix_chain(chain) for chain in chains))
+        for category, chains in by_category.items()
+        if chains
+    )
 
 
 def _collect_from_connector_registry(
     entries: dict[tuple[str, str], set[str]],
     authoritative: set[tuple[str, str]],
-    narrowed_out: dict[tuple[str, str], set[str]],
     intent_coverage: dict[str, dict[str, list[str]]],
 ) -> None:
-    """Phase A — derive rows from the strategy-side ``ConnectorRegistry``.
-
-    Every connector that calls ``register_connector(...)`` contributes
-    rows here. When the manifest declares ``matrix_entries``, those are
-    consumed verbatim and the resulting keys are marked
-    ``authoritative`` (no compiler-table widening); otherwise rows are
-    derived from ``(intents, chains)`` via
-    :func:`_derive_entries_from_intents` and the keys stay non-
-    authoritative (Phase B can still union compiler-table chains in,
-    since derivation only knows what the manifest declared).
+    """Phase A — derive rows from connector descriptor support metadata.
 
     A manifest with ``matrix_entries=()`` (zero declared entries) is
     treated as authoritative-empty: the connector explicitly publishes
@@ -376,50 +350,25 @@ def _collect_from_connector_registry(
     intent they implement but don't want rendered (e.g. Aave's
     flash-loan capability today).
     """
-    from almanak.connectors._strategy_base.registry import (
-        ConnectorRegistry,
-        _import_all_connectors,
-    )
+    from almanak.connectors._connector import CONNECTOR_REGISTRY
 
-    # Strategy-side connectors register lazily on first attribute access;
-    # the matrix builder forces a full sweep so every connector folder
-    # is represented regardless of whether the rest of the CLI session
-    # has touched it. (CI gates the same way.)
-    _import_all_connectors()
+    for connector in CONNECTOR_REGISTRY.with_strategy_support():
+        if connector.supported_chains is not None and not connector.supported_chains.is_offchain:
+            for matrix_name in _published_matrix_names(connector):
+                intent_coverage.setdefault(matrix_name, {}).update(
+                    _connector_intent_coverage(connector, protocol=matrix_name)
+                )
 
-    for manifest in ConnectorRegistry.all():
-        # Schema v2 — attach the connector's per-intent chain coverage to every
-        # matrix_name it publishes under. Registered for BOTH branches below,
-        # and BEFORE the ``continue``, so a connector that overrides its
-        # rendering rows still publishes truthful per-intent coverage: Pendle
-        # renders as ``yield`` yet does SWAP / LP_OPEN / LP_CLOSE / WITHDRAW,
-        # which is exactly the collapse this field exists to undo. Registered
-        # even when empty, so ``intentsKnown`` can distinguish "manifest says
-        # nothing is published here" from "no manifest backs this row at all".
-        # An OFF-CHAIN venue (``chains is None``) has a structurally empty
-        # coverage map, so registering it would publish
-        # ``intentsKnown: true, chainsByIntent: {}`` — read by a fail-closed
-        # consumer as "supports nothing".
-        #
-        # Scoped to the COVERAGE registration only. An earlier form used
-        # ``continue`` here, which also skipped the row emission and the
-        # ``authoritative`` marker below: the venue then published no row at all,
-        # which ``executor.py`` reports as "not integrated in the SDK" — a worse
-        # demotion than the one being fixed — and Phase B could union
-        # compiler-table chains into a key the connector had frozen.
-        #
-        # Leaving it unregistered yields ``intentsKnown: false``, which is the
-        # honest answer: a manifest describes this row, but per-intent coverage
-        # is not expressible for an off-chain venue. That IS "unknown".
-        if manifest.chains is not None:
-            coverage = _connector_intent_coverage(manifest)
-            for matrix_name in _published_matrix_names(manifest):
-                intent_coverage.setdefault(matrix_name, {}).update(coverage)
-
-        if manifest.matrix_entries is not None:
-            for entry in manifest.matrix_entries:
+        if connector.strategy_matrix_entries is not None:
+            for entry in connector.strategy_matrix_entries:
                 key = (entry.matrix_name, entry.category)
-                entries.setdefault(key, set()).update(_normalize_entry_chains(entry.chains))
+                entries.setdefault(key, set()).update(
+                    _chains_for_intents(
+                        connector,
+                        entry.intents,
+                        protocol=entry.matrix_name,
+                    )
+                )
                 authoritative.add(key)
             # Mark the connector's own name as authoritative — even with
             # zero declared entries the connector has spoken, so Phase B
@@ -427,57 +376,13 @@ def _collect_from_connector_registry(
             # marker key uses ``("", manifest.name)`` so it doesn't
             # collide with real (matrix_name, category) entries; Phase B
             # consults the marker directly.
-            authoritative.add(("", manifest.name))
+            authoritative.add(("", connector.name))
             continue
-        derived = _derive_entries_from_intents(
-            manifest.name,
-            manifest.intents,
-            manifest.chains,
-            manifest.chains_for_intent,
-        )
-        # Record EXACTLY WHICH CHAINS the exclusions removed, per row (VIB-6111).
-        #
-        # Phase B unions compiler-table routes into any key it does not consider
-        # authoritative, which would silently undo the narrowing. Freezing the
-        # whole key stops that, but it over-corrects twice over: first at
-        # connector granularity (an exclusion on a LENDING verb froze the SWAP
-        # row), and then still at row granularity — a frozen key also loses
-        # compiler-table chains the exclusion never mentioned. Both directions
-        # under-advertise real support.
-        #
-        # A per-chain denylist is the precise instrument: let Phase B union
-        # whatever it wants, then subtract only the chains the connector
-        # actually disclaimed. Computed by diffing the raw derivation against
-        # the narrowed one, so there is no intent→category duplication and it
-        # stays correct if the category mapping changes.
-        raw = _derive_entries_from_intents(
-            manifest.name,
-            manifest.intents,
-            manifest.chains,
-            _constant_chains(tuple(manifest.chains or ())),
-        )
-        raw_by_key = {(n, c): chains for n, c, chains in raw}
-        derived_by_key = {(n, c): chains for n, c, chains in derived}
-        for key, chain_set in derived_by_key.items():
+        derived = _derive_entries_from_intents(connector)
+        for matrix_name, category, chain_set in derived:
+            key = (matrix_name, category)
             entries.setdefault(key, set()).update(chain_set)
-        # Iterate the RAW keys, not the derived ones. A category whose every
-        # chain is narrowed away emits no derived row at all
-        # (``_derive_entries_from_intents`` drops empty categories), so keying
-        # off ``derived`` would record no denylist for it and Phase B could
-        # recreate the whole row from the routing tables. Defaulting the
-        # narrowed set to empty covers both the surviving and the
-        # fully-removed case with one expression.
-        #
-        # NOTE: unreachable under today's validators — a per-entry exclusion
-        # covering every declared chain is rejected, so every intent keeps at
-        # least one chain and a category union can never be empty. Kept as
-        # belt-and-braces because the cost is one dict lookup and the failure
-        # mode if a validator ever relaxes is silent re-advertisement. Do NOT
-        # add a test that fabricates the shape by bypassing validation.
-        for key, raw_chain_set in raw_by_key.items():
-            dropped = set(raw_chain_set) - set(derived_by_key.get(key, frozenset()))
-            if dropped:
-                narrowed_out.setdefault(key, set()).update(dropped)
+            authoritative.add(key)
 
 
 def _collect_from_compiler_tables(
@@ -492,16 +397,9 @@ def _collect_from_compiler_tables(
     ``almanak/connectors/``. They cannot publish through the registry,
     so the matrix iterates the routing tables as a fallback.
 
-    For ``(matrix_name, category)`` pairs in ``authoritative`` (declared
-    by a strategy-side ``matrix_entries`` field), Phase B must NOT widen
-    the chain set — the connector's own declaration wins. For non-
-    authoritative pairs (those derived from a strategy manifest's
-    ``intents`` + ``chains`` only, or absent entirely), Phase B unions
-    the compiler-table chains in: the manifest typically declares the
-    chains a strategy can use end-to-end, and the routing tables add
-    chains that a swap router covers but a strategy lifecycle doesn't
-    yet — keeping the union gives the matrix its historical "wherever
-    the protocol is routable" view.
+    Connector-owned rows are authoritative and never widened by routing
+    tables. Alias rows are intersected with the owning connector's support.
+    Only protocols with no connector descriptor use raw routing-table chains.
 
     Reads from compiler tables as **data** (dict iteration). The
     protocol names come from the table keys, not from literal strings,
@@ -528,6 +426,30 @@ def _collect_from_compiler_tables(
         if key in authoritative:
             return
         if ("", key[0]) in authoritative:
+            return
+        from almanak.connectors._connector import CONNECTOR_REGISTRY
+
+        connector = CONNECTOR_REGISTRY.get(key[0])
+        if connector is not None and connector.has_strategy_support:
+            category_intents = tuple(
+                intent
+                for intent in connector.strategy_intents or ()
+                if _INTENT_CATEGORIES.get(intent.upper()) == key[1]
+            )
+            if not category_intents:
+                return
+            # The compiler table decides that an alias/category row exists,
+            # but its chains are never an independent support declaration.
+            # Once the protocol resolves to a connector, publish the exact
+            # unified union for that alias and row's intents.
+            entries.setdefault(key, set()).update(
+                _chains_for_intents(
+                    connector,
+                    category_intents,
+                    protocol=key[0],
+                )
+            )
+            authoritative.add(key)
             return
         entries.setdefault(key, set()).add(chain)
 
@@ -556,14 +478,14 @@ def _sort_chains(all_chains: set[str]) -> list[str]:
     """Sort chains in canonical CLI display order, appending unknowns alphabetically.
 
     The canonical order is owned by
-    :data:`~almanak.connectors._strategy_base.registry.MATRIX_CHAIN_DISPLAY_ORDER`
+    :data:`~almanak.connectors._connector.MATRIX_CHAIN_DISPLAY_ORDER`
     — the chain-name string literals live under ``almanak/connectors/``
     (the coupling scanner's canonical-home exclusion) so this module
     stays free of per-chain literals. Unknown chains (newly registered
     after the display order was last updated) fall through to
     alphabetical sorting at the tail — forward-compatible default.
     """
-    from almanak.connectors._strategy_base.registry import MATRIX_CHAIN_DISPLAY_ORDER
+    from almanak.connectors._connector import MATRIX_CHAIN_DISPLAY_ORDER
 
     sorted_chains = [c for c in MATRIX_CHAIN_DISPLAY_ORDER if c in all_chains]
     # Add any chains not in our predefined order
@@ -622,9 +544,10 @@ def _build_matrix() -> dict:
 
     Composition order:
 
-    1. Strategy-side ``ConnectorRegistry`` manifests (uses
-       ``matrix_entries`` when declared, derived from intents +
-       chains otherwise). Manifests with ``matrix_entries=()``
+    1. Connector descriptors (uses ``strategy_matrix_entries`` when declared,
+       with chains derived from each row's intents; otherwise derives rows
+       from exact intent-chain coverage). Descriptors with
+       ``strategy_matrix_entries=()``
        intentionally publish nothing.
     2. Compiler routing tables (fallback for protocols without a
        connector folder; only fills ``(matrix_name, category)`` keys no
@@ -634,21 +557,17 @@ def _build_matrix() -> dict:
         chains: list of chain names (canonical order, matrix form)
         protocols: list of {name, category, chains, chainsByIntent, intentsKnown}
 
-    ``chains`` and ``chainsByIntent`` answer DIFFERENT questions and are
-    deliberately not constrained to match:
+    ``chains`` and ``chainsByIntent`` answer related but differently scoped
+    questions:
 
-    * ``chains`` — the rendering row. May be WIDER than the manifest (Phase B
-      unions compiler-routable chains a connector never declared) or NARROWER
-      (a declared ``matrix_entries`` row scopes it).
-    * ``chainsByIntent`` — the execution truth, from ``chains_for_intent``.
+    * ``chains`` — the rendering row, derived as the union of the row's intents.
+    * ``chainsByIntent`` — exact execution truth, from ``supported_chains_for``.
       Published per CONNECTOR and repeated identically on every row that
       connector emits, so reading any single row gives the same answer.
 
-    A chain in ``chains`` that no intent covers therefore means "routable but
-    not strategy-verified" — a consumer gating execution must treat it as
-    UNKNOWN, not as supported. ``intentsKnown=False`` marks rows no manifest
-    describes at all, where an absent intent likewise means unknown rather than
-    unsupported.
+    Compiler-only rows without a connector descriptor retain
+    ``intentsKnown=False``. Compiler fallback never widens or narrows a protocol
+    that resolves to a connector beyond its unified specification.
 
     Each ``(name, category)`` pair appears at most once; chains union
     across phases so a connector visible to both registries doesn't
@@ -660,22 +579,13 @@ def _build_matrix() -> dict:
     # connector's view wins. Other keys are open for compiler-table
     # union. See ``_collect_from_compiler_tables`` for the rationale.
     authoritative: set[tuple[str, str]] = set()
-    # (matrix_name, category) -> chains a connector explicitly disclaimed via
-    # ``intent_chain_exclusions``. Subtracted AFTER Phase B so a compiler-table
-    # route can never re-advertise a cell the connector declared unsupported,
-    # while chains the exclusion never mentioned still union normally (VIB-6111).
-    narrowed_out: dict[tuple[str, str], set[str]] = {}
     # matrix_name -> {intent_name: [chain, ...]} for every manifest-backed row
     # (schema v2). Rows with no entry here are compiler-table-only or alias rows
     # that no connector manifest describes; they publish ``intentsKnown: false``.
     intent_coverage: dict[str, dict[str, list[str]]] = {}
 
-    _collect_from_connector_registry(entries, authoritative, narrowed_out, intent_coverage)
+    _collect_from_connector_registry(entries, authoritative, intent_coverage)
     _collect_from_compiler_tables(entries, authoritative)
-
-    for key, dropped in narrowed_out.items():
-        if key in entries:
-            entries[key] -= dropped
 
     # Drop empty-chain rows — a connector that declared the capability
     # without any chain coverage shouldn't surface as a no-op row.
@@ -719,19 +629,13 @@ def _build_matrix() -> dict:
                     "chains": sorted(chain_set & all_chains),
                     # Schema v2. See ``_connector_intent_coverage`` for why this
                     # is NOT intersected with ``chains`` above: the two answer
-                    # different questions. ``chains`` is the rendering row (it
-                    # can be WIDER — Phase B unions compiler-routable chains the
-                    # manifest never claimed — or NARROWER when a declared
-                    # matrix_entries row scopes it). ``chainsByIntent`` is the
-                    # execution truth from ``chains_for_intent``. A chain in
-                    # ``chains`` that no intent covers means "routable, not
-                    # strategy-verified" — treat it as UNKNOWN, not supported.
+                    # different scopes. ``chains`` is the union of this row's
+                    # listed intents; ``chainsByIntent`` is the connector-wide
+                    # exact map from the same unified declaration.
                     "chainsByIntent": dict(sorted(coverage.items())) if coverage else {},
                     # False = no connector manifest describes this row at all
-                    # (compiler-table-only DEXes and alias rows), so an absent
-                    # intent means "unknown", not "unsupported". Distinguishing
-                    # these is what stops a fail-closed consumer demoting real
-                    # venues it simply has no manifest for.
+                    # (connector-less compiler-table DEXes), so an absent intent
+                    # means "unknown", not "unsupported".
                     "intentsKnown": name in intent_coverage,
                 }
             )

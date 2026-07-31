@@ -25,7 +25,7 @@ def _polymarket_chain() -> str:
     """Polymarket's home chain, read from its connector manifest.
 
     The connector owns the "Polymarket lives on Polygon" fact
-    (``strategy_chains``); deriving it here keeps this monitor
+    (``supported_chains``); deriving it here keeps this monitor
     chain-agnostic (VIB-4851 CS-3). The ``"polymarket"`` literal below is a
     documented SELF-IDENTITY key (Phase D precedent): this monitor's
     default venue IS Polymarket — naming the venue and deriving its chain
@@ -36,13 +36,17 @@ def _polymarket_chain() -> str:
     from almanak.core.constants import canonical_chain_name
 
     manifest = CONNECTOR_REGISTRY.get("polymarket")
-    if manifest is None or not manifest.strategy_chains:
+    if manifest is None or not manifest.all_supported_chains:
         # Manifest discovery is static — this is a registry regression, and
         # failing loud beats silently monitoring the wrong chain.
-        raise RuntimeError("polymarket connector manifest is missing or declares no strategy_chains")
+        raise RuntimeError("polymarket connector manifest is missing or declares no supported_chains")
+    if len(manifest.all_supported_chains) != 1:
+        raise RuntimeError(
+            f"polymarket connector must declare exactly one supported chain, got {manifest.all_supported_chains}"
+        )
     # Canonicalize the declared chain (alias → ChainRegistry canonical name)
     # so the monitor always keys on the runtime vocabulary.
-    return canonical_chain_name(manifest.strategy_chains[0])
+    return canonical_chain_name(manifest.all_supported_chains[0])
 
 
 class PredictionEvent(StrEnum):

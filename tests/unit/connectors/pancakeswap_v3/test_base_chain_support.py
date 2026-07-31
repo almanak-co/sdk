@@ -4,10 +4,9 @@ VIB-740 / VIB-exp19 root cause: PancakeSwap V3 was declared supported on
 ``base`` in seven places in its own connector (``connector.py`` twice,
 ``addresses.py``, ``fee_model.py``, ``pool_reader.py``, the ``__init__.py``
 docstring, and a Base subgraph id) — everywhere EXCEPT the one place that is
-actually enforced at runtime: ``supported_chains.py``'s
-``SUPPORTED_CHAINS_BY_PROTOCOL``. Every other declaration made "base" look
-supported (including in ``almanak info matrix``, which reads
-``strategy_chains``), while the runtime gate silently rejected it. This was a
+actually enforced at runtime: the connector's ``supported_chains`` declaration.
+Every other declaration made "base" look supported while the runtime gate
+silently rejected it. This was a
 regression: PancakeSwap V3 LP-on-Base last worked at Kitchen Loop iteration
 70, so the gate was added later without "base".
 
@@ -19,7 +18,7 @@ identical to ``PANCAKESWAP_V3["base"]["factory"]`` below.
 This file pins "base" is present everywhere pancakeswap_v3 declares chain
 coverage, so a partial fix (only patching one of the seven places) fails
 loudly here instead of silently regressing again. The general drift class
-(any connector's ``strategy_chains`` outrunning its own runtime gate) is
+(any consumer outrunning unified connector support) is
 covered for ALL connectors by
 ``tests/unit/connectors/registry/test_supported_chains_manifest_gate.py``;
 this file exists in addition because pancakeswap_v3/base is the specific,
@@ -29,7 +28,6 @@ previously-broken case worth pinning by name.
 from __future__ import annotations
 
 from almanak.connectors._connector import CONNECTOR_REGISTRY
-from almanak.connectors._strategy_base.supported_chains_registry import supported_chains_for
 from almanak.connectors.pancakeswap_v3.addresses import PANCAKESWAP_V3
 from almanak.connectors.pancakeswap_v3.connector import CONNECTOR
 from almanak.connectors.pancakeswap_v3.fee_model import BACKTEST_EXPORT_METADATA
@@ -41,26 +39,24 @@ _BASE_FACTORY = "0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865"
 
 
 def test_base_is_in_the_runtime_enforced_gate() -> None:
-    """The actual bug: ``supported_chains.py`` must list "base".
+    """The actual bug: the descriptor must list "base".
 
     This is what ``almanak.framework.execution.config.SUPPORTED_PROTOCOLS``
-    (built from :func:`supported_chains_for`) enforces at strategy-build
+    (built from descriptor queries) enforces at strategy-build
     time — the ONE place all the others don't matter if this is wrong.
     """
-    assert "base" in supported_chains_for("pancakeswap_v3")
+    assert "base" in CONNECTOR_REGISTRY.supported_chains_for("pancakeswap_v3")
 
 
-def test_base_is_in_connector_manifest_strategy_chains() -> None:
+def test_base_is_in_connector_supported_chains() -> None:
     """``almanak info matrix`` (and the strategy layer) advertise "base"."""
-    assert CONNECTOR.strategy_chains is not None
-    assert "base" in CONNECTOR.strategy_chains
+    assert "base" in CONNECTOR.supported_chains_for_protocol("pancakeswap_v3")
 
 
 def test_base_is_in_the_registered_manifest() -> None:
     """The connector actually registers with the strategy-side registry, base included."""
     manifest = next(m for m in CONNECTOR_REGISTRY.all() if m.name == "pancakeswap_v3")
-    assert manifest.strategy_chains is not None
-    assert "base" in manifest.strategy_chains
+    assert "base" in manifest.supported_chains_for_protocol("pancakeswap_v3")
 
 
 def test_base_has_real_addresses_matching_the_on_chain_factory() -> None:

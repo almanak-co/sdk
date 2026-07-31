@@ -6,6 +6,7 @@ from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
     Connector,
     ImportRef,
+    SupportedChainsSpec,
 )
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
 from almanak.connectors._strategy_base.solana_program import SolanaProgramSpec
@@ -38,7 +39,7 @@ CONNECTOR = Connector(
         attribute="PRIMITIVE",
     ),
     strategy_intents=("PERP_OPEN", "PERP_CLOSE"),
-    strategy_chains=("solana",),
+    supported_chains=SupportedChainsSpec(chains=("solana",)),
 )
 
 __all__ = ["CONNECTOR"]

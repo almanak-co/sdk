@@ -10,6 +10,7 @@ from almanak.connectors._connector import (
     ImportRef,
     LendingReadDecl,
     StrategyMatrixEntry,
+    SupportedChainsSpec,
     YieldPokeDecl,
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
@@ -126,13 +127,13 @@ CONNECTOR = Connector(
     ),
     backtest_risk=_BACKTEST_RISK,
     strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW", "FLASH_LOAN"),
-    strategy_chains=("ethereum", "base", "arbitrum", "polygon", "monad", "robinhood"),
+    supported_chains=SupportedChainsSpec(chains=("ethereum", "base", "arbitrum", "polygon", "monad", "robinhood")),
     # Matrix output stays lending-only even though flash-loan intent is registered.
     strategy_matrix_entries=(
         StrategyMatrixEntry(
             matrix_name="morpho_blue",
             category="lending",
-            chains=frozenset(("ethereum", "base", "arbitrum", "polygon", "monad", "robinhood")),
+            intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
         ),
     ),
 )

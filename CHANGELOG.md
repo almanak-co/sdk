@@ -10,7 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **`almanak info matrix --json` schema v2 — per-intent chain coverage.** Each
   protocol row now carries `chainsByIntent` (`{INTENT: [chain, …]}`, derived from
-  `ConnectorManifest.chains_for_intent`) and `intentsKnown`, plus a provenance
+  `Connector.supported_chains_for`) and `intentsKnown`, plus a provenance
   envelope (`schemaVersion`, `sdkVersion`, `sourceCommit`, `sourceDirty`,
   `generatedAt`). **v2 is purely additive**: every v1 field keeps its exact value
   and position — the top-level `chains` and `protocols` keys, and each protocol
@@ -24,12 +24,43 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   surface alike. Consumers could therefore ask "is this protocol on this chain?"
   but never "can it do this operation here?" — so `fluid`, which declares no
   `BORROW`, read as borrow-capable, and `gmx_v2` read as LP-capable. Contract and
-  invariants: `docs/internal/blueprints/05-connectors.md` §2a. Notably `chains`
-  may be **wider** than `chainsByIntent` (compiler-routable chains no strategy
-  verifies) and `intentsKnown: false` marks rows no manifest describes — both
-  mean *unknown*, not *supported* or *unsupported*.
+  invariants: `docs/internal/blueprints/05-connectors.md` §2a. Notably,
+  `intentsKnown: false` marks compiler-only rows no connector descriptor
+  describes, where absence means *unknown*, not unsupported.
+
+### Changed
+
+- **Connector chain support now has one canonical declaration.** Strategy
+  connectors declare an inline `SupportedChainsSpec` with optional per-intent
+  and owned-alias overrides. The former `Connector.strategy_chains` field,
+  lazy per-connector `supported_chains.py` modules, and parallel strategy
+  registry have been removed. CLI matrices, generated docs, runtime protocol
+  validation, demos, permissions, and backtesting now derive from the same
+  descriptor metadata.
+
+- **`uniswap_v3` declares SWAP more widely than the LP lifecycle.** `mantle`,
+  `xlayer` and `zerog` are each a distinct deployment with a full address table
+  and a maintained 4-layer SWAP suite (`tests/intents/{mantle,xlayer,zerog}/`),
+  so they stay published for SWAP. None has an LP suite, so `LP_OPEN` /
+  `LP_CLOSE` / `LP_COLLECT_FEES` are withheld there via
+  `SupportedChainsSpec.intent_overrides` — `almanak info matrix` now renders a
+  12-chain swap row and a 9-chain lp row for the same connector. Publishing LP
+  on all twelve is what `check_intent_coverage --enforce` fails on; the pairs
+  re-enter when an LP suite lands. (`UNISWAP_V3["mantle"]` shares no contract
+  with `AGNI_FINANCE["mantle"]` — different factory, position manager, quoter
+  and router — so Agni's `protocol_overrides` entry pins the alias, it does not
+  mean Uniswap V3 is absent from Mantle.)
 
 ### Fixed
+
+- **`aerodrome_slipstream` is no longer published on optimism.** Slipstream —
+  the concentrated-liquidity product — is deployed on Base only; Optimism runs
+  Velodrome V2 Classic pools, and `aerodrome/addresses.py` carries no `cl_*`
+  entries for it (no `cl_factory`, no `cl_nft` NonfungiblePositionManager, no
+  `cl_quoter`). Without a `protocol_overrides` entry the alias inherited the
+  connector's `("base", "optimism")` union and advertised an LP row that cannot
+  compile an `LP_OPEN`. Optimism's concentrated venue is Velodrome Slipstream,
+  which has its own row.
 
 - **Fluid no longer over-advertises lending on ethereum / polygon.** fToken
   lending shipped on arbitrum + base only (VIB-5030), but that narrowing lived in
@@ -37,10 +68,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `chains_for_intent(SUPPLY)` — the accessor every consumer is told to ask —
   still answered all four chains. Harmless while only the table read the matrix;
   a live over-advertisement the moment per-intent coverage is published. The
-  truth moved to `strategy_intent_chain_exclusions`, and the matrix rows are now
-  derived from it (rendering output unchanged).
+  truth moved to `SupportedChainsSpec.intent_overrides`, and the matrix rows are
+  now derived from it (rendering output unchanged).
 
 ### Removed
+
+- **BREAKING (config-level): pairs that were published but never proven no
+  longer pass the runtime chain gate.** Collapsing three disagreeing chain
+  declarations into one canonical `SupportedChainsSpec` drops the pairs only the
+  widest source ever claimed: `uniswap_v3` + `linea`, `pancakeswap_v3` +
+  `linea`, `enso` + `sonic` / `berachain` / `linea`, and `lifi` + `sonic` /
+  `linea`. None had an intent suite. A config pairing one of them now fails at
+  boot with a `ConfigurationError` instead of failing on-chain later. `sonic` and
+  `berachain` consequently leave the `almanak info matrix` chain columns
+  entirely — no connector claims either. Address data is retained, so
+  re-enabling is a manifest entry plus a proof run (the VIB-5916 pattern).
+
+- **Three incubating strategies whose only pair is now unsupported.**
+  `uniswap_v3_swap_linea`, `edge_discovery_berachain` (enso + berachain) and
+  `aave_enso_leverage_sonic` (aave_v3 + sonic, enso + sonic) cannot boot, so
+  they are removed rather than left as configs that fail at the chain gate.
+  `enso_swap` loses its `config-sonic.json` and the `sonic` entry in
+  `supported_chains`; its seven other chain configs are unaffected. aave_v3 has
+  not claimed `sonic` since #3338 — its pool and token addresses stay in
+  `addresses.py` so existing Sonic positions can still be exited.
 
 - **`almanak info capabilities` CLI.** The VIB-5112 phase-1 capability matrix
   remains available as a library-only QA API
@@ -234,7 +285,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   could previously override the network to `anvil` on a production gateway; the
   override path is now forbidden, and the pending-order waiver it interacted
   with is proof-carrying. (#3421)
-
 ## [2.23.0] - 2026-07-24
 
 ### Added

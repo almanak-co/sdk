@@ -74,8 +74,8 @@ DESCRIPTOR = register_chain(
             #     lp_collect / lp_burn / vault_deposit: currently UNREACHABLE
             #     dead config — no LP or vault connector declares support for
             #     this chain today (see each connector's own
-            #     supported_chains.py — which connectors run on which chain is
-            #     CONNECTOR knowledge, never named here), so no code path can
+            #     inline supported_chains declaration — which connectors run
+            #     on which chain is CONNECTOR knowledge, never named here), so no code path can
             #     exercise them.
             #   - lending_supply / lending_borrow: REACHABLE (a lending
             #     connector IS registered for this chain) but NOT independently

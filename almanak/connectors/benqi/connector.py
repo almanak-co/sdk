@@ -7,8 +7,9 @@ from almanak.connectors._connector import (
     Connector,
     ImportRef,
     LendingReadDecl,
+    SupportedChainsSpec,
 )
-from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec, SupportedChainsSpec
+from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
 
 CONNECTOR = Connector(
     name="benqi",
@@ -30,10 +31,6 @@ CONNECTOR = Connector(
         keys=("benqi",),
         module="almanak.connectors.benqi.capabilities",
     ),
-    supported_chains=SupportedChainsSpec(
-        keys=("benqi",),
-        module="almanak.connectors.benqi.supported_chains",
-    ),
     # Compound-V2 qiToken reader (VIB-4967): market-scoped, synthetic market ids; see lending_read.py.
     lending_read=LendingReadDecl(
         account_state=ImportRef(module="almanak.connectors.benqi.lending_read", attribute="ACCOUNT_STATE_READ_SPEC"),
@@ -47,7 +44,7 @@ CONNECTOR = Connector(
         attribute="benqi_teardown_post_condition",
     ),
     strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
-    strategy_chains=("avalanche",),
+    supported_chains=SupportedChainsSpec(chains=("avalanche",)),
 )
 
 __all__ = ["CONNECTOR"]

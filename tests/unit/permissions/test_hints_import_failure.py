@@ -210,14 +210,10 @@ class TestMalformedHintsFailClosed:
         The real assertion is that each protocol resolves to hints that are not
         the empty sentinel.
         """
-        from almanak.connectors._strategy_base.registry import (
-            ConnectorRegistry,
-            _import_all_connectors,
-        )
+        from almanak.connectors._connector import CONNECTOR_REGISTRY
         from almanak.framework.permissions.hints import _DEFAULT, _PROTOCOL_CONNECTOR_MAP
 
-        _import_all_connectors()
-        protocols = sorted({m.name for m in ConnectorRegistry.all()} | set(_PROTOCOL_CONNECTOR_MAP))
+        protocols = sorted({m.name for m in CONNECTOR_REGISTRY.with_strategy_support()} | set(_PROTOCOL_CONNECTOR_MAP))
         assert protocols, "connector registry is empty — the sweep would be vacuous"
         for protocol in protocols:
             hints = get_permission_hints(protocol)
@@ -249,10 +245,7 @@ class TestMalformedHintsFailClosed:
         The point of the list is that any connector NOT on it — the other 25,
         including every V3-family LP connector — cannot silently become empty.
         """
-        from almanak.connectors._strategy_base.registry import (
-            ConnectorRegistry,
-            _import_all_connectors,
-        )
+        from almanak.connectors._connector import CONNECTOR_REGISTRY
         from almanak.framework.permissions.hints import _PROTOCOL_CONNECTOR_MAP
 
         # Measured 2026-07-28. Every entry is a connector that ships a literal
@@ -280,8 +273,7 @@ class TestMalformedHintsFailClosed:
             "stargate",
         }
 
-        _import_all_connectors()
-        protocols = sorted({m.name for m in ConnectorRegistry.all()} | set(_PROTOCOL_CONNECTOR_MAP))
+        protocols = sorted({m.name for m in CONNECTOR_REGISTRY.with_strategy_support()} | set(_PROTOCOL_CONNECTOR_MAP))
         empty_now = {p for p in protocols if get_permission_hints(p) == PermissionHints()}
 
         newly_empty = sorted(empty_now - deliberately_empty)

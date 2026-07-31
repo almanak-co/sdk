@@ -10,7 +10,7 @@
 
 | Chain | Family | Supported Intents |
 |-------|--------|-------------------|
-| No strategy chains registered | N/A | No strategy intents registered |
+| No strategy support declared | N/A | No strategy intents registered |
 
 ## API Reference
 

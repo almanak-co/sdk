@@ -45,7 +45,7 @@ _DEPOSIT_V3_SEL = (
 )
 _APPROVE_SEL = "0x" + function_signature_to_4byte_selector("approve(address,uint256)").hex()
 
-_DECLARED_CHAINS = tuple(CONNECTOR.strategy_chains or ())
+_DECLARED_CHAINS = CONNECTOR.supported_chains_for_intent("BRIDGE") or ()
 
 
 def _spoke_pool(chain: str) -> str:
@@ -70,7 +70,7 @@ def _across_permissions(
 class TestAcrossManifest:
     def test_connector_declares_chains(self) -> None:
         """Guard the parametrisation below against an empty universe."""
-        assert _DECLARED_CHAINS, "across declares no strategy_chains"
+        assert _DECLARED_CHAINS, "across declares no supported_chains"
 
     def test_selector_constant_matches_real_signature(self) -> None:
         """``DEPOSIT_V3_SELECTOR`` must equal keccak(depositV3(...))[:4].
@@ -112,7 +112,7 @@ class TestAcrossManifest:
         assert _across_permissions("base", intent_types=["SWAP"]) == []
 
     def test_undeclared_chain_has_no_spoke_pool(self) -> None:
-        """zkSync has a SpokePool constant but is NOT in ``strategy_chains`` —
+        """zkSync has a SpokePool constant but is NOT in ``supported_chains`` —
         the manifest universe is the declared chain set, so it must stay out."""
         manifest = generate_manifest(
             strategy_name="across-undeclared-chain",

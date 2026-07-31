@@ -15,10 +15,13 @@
 | [Base](../../chains/base.md) | EVM | ``LP_CLOSE``, ``LP_COLLECT_FEES``, ``LP_OPEN``, ``SWAP`` |
 | [BNB Chain](../../chains/bsc.md) | EVM | ``LP_CLOSE``, ``LP_COLLECT_FEES``, ``LP_OPEN``, ``SWAP`` |
 | [Ethereum](../../chains/ethereum.md) | EVM | ``LP_CLOSE``, ``LP_COLLECT_FEES``, ``LP_OPEN``, ``SWAP`` |
+| [Mantle](../../chains/mantle.md) | EVM | ``SWAP`` |
 | [Monad](../../chains/monad.md) | EVM | ``LP_CLOSE``, ``LP_COLLECT_FEES``, ``LP_OPEN``, ``SWAP`` |
 | [Optimism](../../chains/optimism.md) | EVM | ``LP_CLOSE``, ``LP_COLLECT_FEES``, ``LP_OPEN``, ``SWAP`` |
 | [Polygon](../../chains/polygon.md) | EVM | ``LP_CLOSE``, ``LP_COLLECT_FEES``, ``LP_OPEN``, ``SWAP`` |
 | [Robinhood](../../chains/robinhood.md) | EVM | ``LP_CLOSE``, ``LP_COLLECT_FEES``, ``LP_OPEN``, ``SWAP`` |
+| [X-Layer](../../chains/xlayer.md) | EVM | ``SWAP`` |
+| [0G](../../chains/zerog.md) | EVM | ``SWAP`` |
 
 ## API Reference
 

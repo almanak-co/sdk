@@ -155,7 +155,7 @@ class TestRoutingIsDerivedFromTheManifests:
     def test_derived_set_matches_the_declaring_connectors(self) -> None:
         expected: dict[str, str] = {}
         for connector in CONNECTOR_REGISTRY.all():
-            if "solana" not in (connector.strategy_chains or ()):
+            if "solana" not in connector.all_supported_chains:
                 continue
             if not {"LP_OPEN", "LP_CLOSE"}.intersection(connector.strategy_intents or ()):
                 continue
@@ -213,7 +213,7 @@ class TestDerivationFailsLoudOnAnAmbiguousManifest:
         class _AmbiguousConnector:
             name = "twoheaded"
             aliases = ()
-            strategy_chains = ("solana",)
+            all_supported_chains = ("solana",)
             strategy_intents = ("LP_OPEN",)
             compiler_keys = frozenset({"twoheaded_a", "twoheaded_b"})
 
@@ -233,14 +233,14 @@ class TestDerivationFailsLoudOnAnAmbiguousManifest:
         class _Left:
             name = "left"
             aliases = ("shared",)
-            strategy_chains = ("solana",)
+            all_supported_chains = ("solana",)
             strategy_intents = ("LP_OPEN",)
             compiler_keys = frozenset({"left_clmm"})
 
         class _Right:
             name = "right"
             aliases = ("shared",)
-            strategy_chains = ("solana",)
+            all_supported_chains = ("solana",)
             strategy_intents = ("LP_OPEN",)
             compiler_keys = frozenset({"right_clmm"})
 

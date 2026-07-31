@@ -36,9 +36,7 @@ FROZEN_CHAIN_RATE_LIMITS: dict[str, int] = {
     "solana": 300,
 }
 
-FROZEN_ARCHIVE_RPC_REQUIRED_CHAINS = frozenset(
-    {"polygon", "ethereum", "avalanche", "zerog", "xlayer"}
-)
+FROZEN_ARCHIVE_RPC_REQUIRED_CHAINS = frozenset({"polygon", "ethereum", "avalanche", "zerog", "xlayer"})
 
 # DELIBERATE widening (VIB-5869 / ALM-2695), pinned here rather than hidden.
 # The frozen literal above was not a considered design — it was the residue of
@@ -174,14 +172,14 @@ class TestRegistryDerivedEnumerations:
             with pytest.raises(RuntimeError, match="polymarket connector manifest"):
                 _polymarket_chain()
 
-    def test_polymarket_chain_empty_strategy_chains_fails_loud(self) -> None:
+    def test_polymarket_chain_empty_supported_chains_fails_loud(self) -> None:
         from types import SimpleNamespace
         from unittest.mock import patch
 
         from almanak.connectors._connector import CONNECTOR_REGISTRY
         from almanak.framework.services.prediction_monitor import _polymarket_chain
 
-        manifest = SimpleNamespace(strategy_chains=())
+        manifest = SimpleNamespace(all_supported_chains=())
         with patch.object(CONNECTOR_REGISTRY, "get", return_value=manifest):
-            with pytest.raises(RuntimeError, match="declares no strategy_chains"):
+            with pytest.raises(RuntimeError, match="declares no supported_chains"):
                 _polymarket_chain()

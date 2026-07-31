@@ -6,6 +6,7 @@ from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
     Connector,
     ImportRef,
+    SupportedChainsSpec,
 )
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
 from almanak.connectors._strategy_base.vault_representatives import VaultRepresentativeSpec
@@ -44,7 +45,7 @@ CONNECTOR = Connector(
         ),
     ),
     strategy_intents=("VAULT_DEPOSIT", "VAULT_REDEEM"),
-    strategy_chains=("ethereum", "base"),
+    supported_chains=SupportedChainsSpec(chains=("ethereum", "base")),
 )
 
 __all__ = ["CONNECTOR"]

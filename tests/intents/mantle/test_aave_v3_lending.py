@@ -53,6 +53,7 @@ from almanak.framework.execution.orchestrator import ExecutionContext, Execution
 from almanak.framework.intents import BorrowIntent, RepayIntent, SupplyIntent, WithdrawIntent
 from almanak.framework.intents.compiler import IntentCompiler
 from almanak.framework.intents.vocabulary import IntentType
+from tests.intents._permission_onchain_harness import AuthorizationFailed
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     format_token_amount,
@@ -534,9 +535,18 @@ class TestAaveV3BorrowIntent:
     HISTORICAL (pre-2026-07-22): used WMNT as collateral (LTV=40%, then the
     only Mantle Aave reserve with non-zero LTV) and borrowed USDC.
 
-    CURRENT: every reserve on this market has LTV=0 — see VIB-6111. There is
-    no substitute collateral asset, so borrowing is structurally impossible
-    here rather than mis-parameterised.
+    CURRENT: every reserve has base LTV=0 (VIB-6111) — but that does NOT make
+    borrowing impossible here, and an earlier version of this docstring said it
+    did. Aave V3 Mantle runs v3.2 "liquid eModes": the collateral power moved
+    into six eMode categories, measured live at block 98645311 with LTV 40-93%
+    ('WMNT__Stablecoins' 40%, 'sUSDe Stablecoins' 90%, 'wrsETH Correlated'
+    93%, ...). The market carries ~$78M of borrows at ~33% utilisation.
+
+    What is actually blocked is OUR path: no compiler calls
+    ``adapter.set_user_emode()``, so we never enrol in a category and a
+    compiled borrow sees base LTV 0. Tracked in ALM-3075, which also owns
+    replacing the base-LTV monitor below — it watches a parameter Aave has
+    already moved away from, so it can no longer fire.
     """
 
     @pytest.mark.intent(IntentType.SUPPLY, IntentType.BORROW)
@@ -549,18 +559,25 @@ class TestAaveV3BorrowIntent:
         execution_context: ExecutionContext,
         price_oracle: dict[str, Decimal],
     ):
-        """VIB-6111: borrowing on Aave V3 Mantle is blocked by market-wide LTV=0.
+        """VIB-6111: borrowing via BASE LTV is blocked on Aave V3 Mantle.
 
         HISTORICAL: this asserted a full WMNT-collateral → USDC-borrow round
         trip. Aave governance set ``ltv=0`` on all 10 Mantle reserves at block
         98303344 (~2026-07-22) — WETH 8050→0, WMNT 4000→0, every other reserve
-        config field byte-identical — so no asset can be enabled as collateral
-        and no borrow is possible for any asset on this market.
+        config field byte-identical.
+
+        SCOPE CORRECTION (ALM-3075): that is a fact about *base* LTV only. It
+        was previously written up here as "no borrow is possible for any asset
+        on this market", which is wrong — Aave moved the collateral power into
+        six v3.2 eMode categories (LTV 40-93%), and the market is actively
+        borrowed against. What this test actually pins is the base-LTV path,
+        which is the only path our connector can compile today because nothing
+        calls ``adapter.set_user_emode()``.
 
         Deliberately NOT a bare ``xfail``: muting the whole body would also
         swallow a compiler break, an RPC error or a receipt regression, and
         would report the same green tick for all of them. Instead this asserts
-        the *specific* market state that makes borrowing impossible, so every
+        the *specific* market state that blocks the base-LTV path, so every
         other failure mode stays a real failure:
 
         1. Compilation: SupplyIntent AND BorrowIntent both still compile to
@@ -568,10 +585,14 @@ class TestAaveV3BorrowIntent:
         2. Execution: the supply bundle fails, and fails specifically at its
            final ``setUserUseReserveAsCollateral`` leg — ``approve`` and
            ``supply`` still land on-chain. An earlier-leg failure fails here.
-        3. Market state: WMNT LTV reads 0 on-chain. If Aave restores a
-           non-zero LTV this fails loudly and the original round-trip
-           assertions above should be restored (this is the monitor property
-           ``strict=True`` was standing in for).
+        3. Market state: WMNT *base* LTV reads 0 on-chain.
+           NOTE (ALM-3075): this was written as a live monitor — "if Aave
+           restores a non-zero LTV this fails loudly" — but it can no longer
+           fire. Aave did not park the parameter, they relocated it: base LTV
+           stays 0 and borrowing power now lives in eMode categories. Watching
+           base LTV therefore watches a value that will not change, so this
+           layer asserts a true fact while providing no regression cover.
+           ALM-3075 owns replacing it with a check on eMode category config.
         4. Conservation: the supplied WMNT converts to aWMNT, no debt is
            created, and USDC does not move.
 
@@ -962,8 +983,28 @@ class TestAaveV3FailureModes:
 
         3-Layer Verification (failure mode):
         1. Compilation: may succeed (compilation doesn't check collateral)
-        2. Execution: should fail or revert
+        2. Execution: must be REFUSED, by either path below
         3. Balance Conservation: USDC balance unchanged
+
+        Two refusal paths are accepted, because which one fires depends on the
+        permission manifest rather than on anything this test controls:
+
+        a) ``AuthorizationFailed`` — aave_v3 does not declare BORROW on mantle
+           (ALM-3075: the connector cannot enrol an eMode, so the base-LTV-0
+           path is all it could compile), so the derived Zodiac manifest holds
+           no ``borrow`` permission and Roles blocks
+           ``execTransactionWithRole`` before the Pool is reached. Current path.
+        b) ``ExecutionResult(success=False)`` — the Pool itself reverts for
+           want of collateral. The path while BORROW was declared here, and the
+           path again once ALM-3075 lands eMode enrolment and mantle returns to
+           the BORROW list.
+
+        Accepting both keeps this honest across that transition without an
+        edit, while still FAILING if the borrow ever SUCCEEDS — the property
+        that actually matters. It deliberately does not assert *which* path
+        fired: pinning path (a) would turn the ALM-3075 fix into a red test,
+        and pinning it as "the market cannot be borrowed against" is the exact
+        misreading ALM-3075 was filed to correct.
         """
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
         usdc = tokens["USDC"]
@@ -998,9 +1039,16 @@ class TestAaveV3FailureModes:
         assert compilation_result.status.value == "SUCCESS"
         assert compilation_result.action_bundle is not None
 
-        execution_result = await orchestrator.execute(compilation_result.action_bundle, execution_context)
-        assert not execution_result.success, "Execution should fail without sufficient collateral"
-        print(f"Execution failed as expected: {execution_result.error}")
+        try:
+            execution_result = await orchestrator.execute(compilation_result.action_bundle, execution_context)
+        except AuthorizationFailed as exc:
+            # Path (a): Roles refused it — the borrow never reached the Pool,
+            # so no debt was created and no USDC was received.
+            print(f"Borrow refused at the authorisation layer as expected: {exc}")
+        else:
+            # Path (b): authz passed, so the Pool is what rejected it.
+            assert not execution_result.success, "Execution should fail without sufficient collateral"
+            print(f"Execution failed as expected: {execution_result.error}")
 
         # Balance conservation: USDC must not change
         usdc_after = get_token_balance(web3, usdc, funded_wallet)

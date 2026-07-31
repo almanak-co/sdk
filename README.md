@@ -293,7 +293,7 @@ For the authoritative per-protocol chain matrix, see the [connector reference](h
 
 ## Supported Protocols
 
-46 connectors are registered today (`ConnectorRegistry.all()`). See the [connector reference](https://sdk.docs.almanak.co/api/connectors/) for the full matrix of chains × intent types per connector.
+46 connectors are registered today in the connector descriptor registry. See the [connector reference](https://sdk.docs.almanak.co/api/connectors/) for the full matrix of chains × intent types per connector.
 
 - **DEXs / AMMs**: Uniswap V3, Uniswap V4, SushiSwap V3, PancakeSwap V3, TraderJoe V2, Aerodrome, Camelot, Curve, Fluid, Pendle, Orca, Meteora, Raydium CLMM
 - **Swap aggregators**: Jupiter, Enso, LiFi
@@ -442,4 +442,3 @@ For detailed documentation, visit [sdk.docs.almanak.co](https://sdk.docs.almanak
 - [Discord](https://discord.gg/yuCMvQv3rN)
 - [Telegram](https://t.me/+G1O9NFuz-AAzYmQy)
 - [Twitter](https://x.com/almanak)
-

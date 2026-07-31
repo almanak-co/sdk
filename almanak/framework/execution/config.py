@@ -41,6 +41,7 @@ Example:
 
 import logging
 import re
+from collections.abc import ItemsView, Iterator, KeysView, ValuesView
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Optional
@@ -89,24 +90,153 @@ logger = logging.getLogger(__name__)
 #
 # VIB-4857 (W5): this ``protocol -> {chains}`` matrix is no longer hand-
 # maintained here. "Which chains does protocol X run on" is *connector*
-# knowledge: each connector declares its own chain coverage in its folder
-# (``almanak/connectors/<proto>/supported_chains.py``), and the strategy-side
-# ``SupportedChainsRegistry`` aggregates those declarations. This module
-# derives the legacy dict-of-sets view from that registry so consumers
+# knowledge: each connector declares inline chain coverage on its
+# ``CONNECTOR`` descriptor. This module derives the legacy dict-of-sets view
+# directly from the descriptor registry so consumers
 # (``almanak.config.runtime`` validation, ``MultiChainRuntimeConfig.
 # _validate_protocols``) keep their exact shape, while adding a connector is
 # one folder and adding a chain to a connector is one line — the matrix
 # cannot drift.
 #
-# Import boundary: ``SupportedChainsRegistry`` is strategy-side
-# (``almanak/connectors/_strategy_base``). It pulls in NO gateway-side
+# Import boundary: descriptor discovery is strategy-safe and pulls in no gateway-side
 # capability code, so this strategy-container module stays clean of
 # ``almanak/connectors/_base/gateway_capabilities.py`` (enforced by
 # ``tests/static/test_strategy_import_boundary.py``).
+from almanak.connectors._connector import CONNECTOR_REGISTRY
 from almanak.connectors._strategy_base.protocol_aliases import normalize_protocol
-from almanak.connectors._strategy_base.supported_chains_registry import supported_protocols_matrix
 
-SUPPORTED_PROTOCOLS: dict[str, set[str]] = supported_protocols_matrix()
+
+class _DerivedProtocolMatrix(dict[str, set[str]]):
+    """The derived ``protocol -> {chains}`` view, kept live across registry resets.
+
+    A snapshot taken once at import goes stale the moment
+    ``CONNECTOR_REGISTRY.clear()`` runs: the registry rediscovers, this view
+    keeps answering from the pre-reset universe, and config validation then
+    accepts or rejects protocols the registry no longer agrees with.
+
+    Refresh is **lazy**, driven by a stale flag that ``on_clear`` sets and the
+    next read consumes. Rebuilding inside the ``on_clear`` callback would make
+    ``clear()`` re-import every connector manifest, which silently defuses the
+    tests that clear the registry precisely in order to observe a *cold*
+    discovery (``test_manifest_discovery_does_not_import_connector_package``).
+
+    It stays a ``dict`` subclass with plain mutable ``set`` values on purpose:
+    ``MultiChainRuntimeConfig._validate_protocols`` and
+    ``almanak.config.runtime`` do ``chain in view[p]`` and ``sorted(view[p])``,
+    and ``tests/unit/config/test_supported_protocols_matrix.py`` pins that
+    shape. Mutating the view cannot corrupt the registry — every
+    ``supported_protocols_matrix()`` call returns fresh sets.
+    """
+
+    def __init__(self) -> None:
+        """Materialise the current matrix and arm the reset hook."""
+        super().__init__(CONNECTOR_REGISTRY.supported_protocols_matrix())
+        self._stale = False
+        CONNECTOR_REGISTRY.on_clear(self._mark_stale)
+
+    def _mark_stale(self) -> None:
+        """Record that the registry was reset; the next read rebuilds."""
+        self._stale = True
+
+    def _sync(self) -> None:
+        """Rebuild in place when the registry has been reset since the last read.
+
+        In place — not a rebind — because ``almanak.framework.execution``
+        re-exports this object by value (``from .config import
+        SUPPORTED_PROTOCOLS``). Rebinding the module global would leave that
+        binding, and every ``from ... import SUPPORTED_PROTOCOLS`` consumer,
+        pointing at the stale object.
+        """
+        if not self._stale:
+            return
+        # Clear the flag first: ``supported_protocols_matrix()`` re-enters
+        # discovery, and a nested read must not recurse into another rebuild.
+        self._stale = False
+        fresh = CONNECTOR_REGISTRY.supported_protocols_matrix()
+        super().clear()
+        super().update(fresh)
+
+    def __contains__(self, key: object) -> bool:
+        """Membership test against the current matrix."""
+        self._sync()
+        return super().__contains__(key)
+
+    def __getitem__(self, key: str) -> set[str]:
+        """Chain set for ``key`` from the current matrix."""
+        self._sync()
+        return super().__getitem__(key)
+
+    def __iter__(self) -> Iterator[str]:
+        """Iterate protocol keys in the current matrix."""
+        self._sync()
+        return super().__iter__()
+
+    def __len__(self) -> int:
+        """Number of protocols in the current matrix."""
+        self._sync()
+        return super().__len__()
+
+    def __eq__(self, other: object) -> bool:
+        """Compare the current matrix against ``other``."""
+        self._sync()
+        return super().__eq__(other)
+
+    def __ne__(self, other: object) -> bool:
+        """Negation of :meth:`__eq__` — ``dict.__ne__`` would skip the resync."""
+        return not self.__eq__(other)
+
+    def __repr__(self) -> str:
+        """Render the current matrix."""
+        self._sync()
+        return super().__repr__()
+
+    def get(self, key: str, default: Any = None) -> Any:
+        """Chain set for ``key``, or ``default`` when absent."""
+        self._sync()
+        return super().get(key, default)
+
+    # The three view accessors below widen their return type from the exact
+    # supertype (``dict_keys`` / ``dict_values`` / ``dict_items``) to the
+    # abstract ``collections.abc`` view. That is deliberate and not fixable in
+    # place: those three names exist only in typeshed's ``builtins.pyi`` — they
+    # are not importable at runtime, nor from ``_typeshed``, so the precise
+    # annotation cannot be written. Dropping the annotation instead would type
+    # the body as ``Any`` and stop mypy checking it at all, which is strictly
+    # worse than a documented widening.
+    #
+    # Safe because the widening only hides the ``dict_view``-specific surface
+    # (``.mapping``, and the set operators on keys/items). No in-tree consumer
+    # touches any of it: every call site sorts or iterates (see
+    # ``config.py:_validate_protocols``, ``almanak/config/runtime.py``,
+    # ``scripts/ci/check_chain_truth_agreement.py``).
+    #
+    # Each override exists to force ``_sync()`` before the view is handed out.
+    # They cannot simply be deleted: ``dict.keys()`` returns a live view whose
+    # iteration goes through the C-level dict iterator, NOT this class's
+    # ``__iter__``, so an unsynced view would silently read the stale matrix.
+
+    def keys(self) -> KeysView[str]:  # type: ignore[override]
+        """Protocol keys in the current matrix."""
+        self._sync()
+        return super().keys()
+
+    def values(self) -> ValuesView[set[str]]:  # type: ignore[override]
+        """Chain sets in the current matrix."""
+        self._sync()
+        return super().values()
+
+    def items(self) -> ItemsView[str, set[str]]:  # type: ignore[override]
+        """``(protocol, chains)`` pairs in the current matrix."""
+        self._sync()
+        return super().items()
+
+    def copy(self) -> dict[str, set[str]]:
+        """Return a plain-``dict`` snapshot of the current matrix."""
+        self._sync()
+        return dict(self)
+
+
+SUPPORTED_PROTOCOLS: dict[str, set[str]] = _DerivedProtocolMatrix()
 
 
 # =============================================================================

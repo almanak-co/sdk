@@ -1,10 +1,9 @@
 """Equivalence contract for manifest-owned metadata registries (VIB-4851).
 
-The capabilities / supported-chains / primitive registries used to hold
+The capabilities and primitive registries used to hold
 hardcoded central loader tables (``_BUILTIN_LOADERS``) mapping protocol
 identifiers to connector metadata modules. Those rows now live on each
 connector's ``CONNECTOR`` manifest (``capabilities=CapabilitiesSpec(...)``,
-``supported_chains=SupportedChainsSpec(...)``,
 ``primitive=ImportRef(..., "PRIMITIVE")``) and the registries derive their
 ownership maps from manifest discovery.
 
@@ -27,7 +26,6 @@ from almanak.connectors._strategy_base.lending_read_registry import LendingReadR
 from almanak.connectors._strategy_base.perps_read_registry import PerpsReadRegistry
 from almanak.connectors._strategy_base.prediction_execute_registry import PredictionExecuteRegistry
 from almanak.connectors._strategy_base.prediction_read_registry import PredictionReadRegistry
-from almanak.connectors._strategy_base.supported_chains_registry import SupportedChainsRegistry
 
 # almanak/connectors/_strategy_base/capabilities_registry.py
 # ``CapabilitiesRegistry._BUILTIN_LOADERS`` as of 2026-06-10, frozen verbatim.
@@ -63,27 +61,6 @@ FROZEN_CAPABILITIES_LOADERS = {
     "curve": "almanak.connectors.curve.capabilities",
 }
 
-# almanak/connectors/_strategy_base/supported_chains_registry.py
-# ``SupportedChainsRegistry._BUILTIN_LOADERS`` as of 2026-06-10, frozen verbatim.
-FROZEN_SUPPORTED_CHAINS_LOADERS = {
-    "aave_v3": "almanak.connectors.aave_v3.supported_chains",
-    "spark": "almanak.connectors.spark.supported_chains",
-    "benqi": "almanak.connectors.benqi.supported_chains",
-    "euler_v2": "almanak.connectors.euler_v2.supported_chains",
-    "silo_v2": "almanak.connectors.silo_v2.supported_chains",
-    "uniswap_v3": "almanak.connectors.uniswap_v3.supported_chains",
-    "agni_finance": "almanak.connectors.uniswap_v3.supported_chains",
-    "sushiswap_v3": "almanak.connectors.sushiswap_v3.supported_chains",
-    "pancakeswap_v3": "almanak.connectors.pancakeswap_v3.supported_chains",
-    "traderjoe_v2": "almanak.connectors.traderjoe_v2.supported_chains",
-    "enso": "almanak.connectors.enso.supported_chains",
-    "gmx_v2": "almanak.connectors.gmx_v2.supported_chains",
-    "hyperliquid": "almanak.connectors.hyperliquid.supported_chains",
-    "lido": "almanak.connectors.lido.supported_chains",
-    "ethena": "almanak.connectors.ethena.supported_chains",
-    "gimo": "almanak.connectors.gimo.supported_chains",
-}
-
 # almanak/connectors/_strategy_base/primitive_registry.py
 # ``PrimitiveRegistry._BUILTIN_LOADERS`` as of 2026-06-10, frozen verbatim.
 FROZEN_PRIMITIVE_LOADERS = {
@@ -104,11 +81,6 @@ FROZEN_PRIMITIVE_LOADERS = {
 def test_capabilities_ownership_equals_frozen_legacy_table() -> None:
     """Manifest-derived capabilities ownership == the legacy hardcoded table."""
     assert CapabilitiesRegistry._loaders() == FROZEN_CAPABILITIES_LOADERS
-
-
-def test_supported_chains_ownership_equals_frozen_legacy_table() -> None:
-    """Manifest-derived chain-coverage ownership == the legacy hardcoded table."""
-    assert SupportedChainsRegistry._loaders() == FROZEN_SUPPORTED_CHAINS_LOADERS
 
 
 def test_primitive_ownership_equals_frozen_legacy_table() -> None:

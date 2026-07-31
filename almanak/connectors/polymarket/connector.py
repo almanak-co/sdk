@@ -6,6 +6,7 @@ from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
     Connector,
     ImportRef,
+    SupportedChainsSpec,
 )
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
 
@@ -52,7 +53,7 @@ CONNECTOR = Connector(
         attribute="GATEWAY_STUB_SPEC",
     ),
     strategy_intents=("PREDICTION_BUY", "PREDICTION_SELL", "PREDICTION_REDEEM"),
-    strategy_chains=("polygon",),
+    supported_chains=SupportedChainsSpec(chains=("polygon",)),
 )
 
 __all__ = ["CONNECTOR"]

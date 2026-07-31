@@ -1703,7 +1703,7 @@ class MyStrategy(IntentStrategy):
 
 ### Additional Connectors
 
-The connector registry (`ConnectorRegistry.all()`) is the post-VIB-4298 source of truth. Connectors below have full SDK + adapter + receipt-parser implementations and are routable via the `protocol="<name>"` string in intents, but do not have a top-level `Protocol` enum entry. Use the canonical name listed in **Config Name**:
+The connector descriptor registry is the post-VIB-4298 source of truth. Connectors below have full SDK + adapter + receipt-parser implementations and are routable via the `protocol="<name>"` string in intents, but do not have a top-level `Protocol` enum entry. Use the canonical name listed in **Config Name**:
 
 | Connector | Type | Config Name | Chains |
 |-----------|------|-------------|--------|

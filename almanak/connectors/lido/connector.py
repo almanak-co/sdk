@@ -7,8 +7,8 @@ from almanak.connectors._connector import (
     BacktestStrategyTypeDecl,
     Connector,
     ImportRef,
+    SupportedChainsSpec,
 )
-from almanak.connectors._strategy_base.protocol_ownership import SupportedChainsSpec
 
 CONNECTOR = Connector(
     name="lido",
@@ -29,12 +29,8 @@ CONNECTOR = Connector(
         module="almanak.connectors.lido.compiler",
         attribute="LidoCompiler",
     ),
-    supported_chains=SupportedChainsSpec(
-        keys=("lido",),
-        module="almanak.connectors.lido.supported_chains",
-    ),
     strategy_intents=("STAKE", "UNSTAKE"),
-    strategy_chains=("ethereum",),
+    supported_chains=SupportedChainsSpec(chains=("ethereum",)),
 )
 
 __all__ = ["CONNECTOR"]

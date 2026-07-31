@@ -1,8 +1,8 @@
 """Pendle chain-truth drift guard (VIB-5300).
 
-Pendle's connector manifest advertises strategy support — both
-``strategy_chains`` and the explicit ``strategy_matrix_entries`` row that
-renders Pendle as ``category="yield"`` in ``almanak info matrix``. Advertised
+Pendle's connector descriptor advertises strategy support through
+``supported_chains``; its explicit ``strategy_matrix_entries`` row only
+classifies the intents as ``category="yield"``. Advertised
 chains are part of the public contract: a strategy launched on an advertised
 chain must actually compile. Before VIB-5300 the matrix over-advertised seven
 chains (arbitrum, ethereum, plasma, sonic, base, mantle, bsc) while the
@@ -62,11 +62,8 @@ def _pendle_compiles_on(chain: str) -> bool:
 
 
 def _advertised_chains() -> frozenset[str]:
-    """All chains the live Pendle manifest advertises (strategy + matrix)."""
-    chains: set[str] = set(CONNECTOR.strategy_chains or ())
-    for entry in CONNECTOR.strategy_matrix_entries or ():
-        chains.update(entry.chains)
-    return frozenset(chains)
+    """All chains the live Pendle descriptor advertises."""
+    return frozenset(CONNECTOR.supported_chains_for_protocol("pendle"))
 
 
 def test_pendle_advertised_chains_are_all_compilable() -> None:
@@ -84,7 +81,7 @@ def test_pendle_advertised_chains_are_all_compilable() -> None:
         "Pendle manifest advertises chains the compiler cannot build on: "
         f"{non_compilable}. Advertised chains must clear both "
         "_check_pendle_chain_supported and per-chain PT/YT market data. Either "
-        "trim the advertised set (strategy_chains / strategy_matrix_entries) or "
+        "trim the advertised supported_chains set or "
         "extend compiler coverage (chain allowlist + PT_TOKEN_INFO / "
         "MARKET_BY_PT_TOKEN data) — do not advertise what cannot compile."
     )
@@ -141,6 +138,5 @@ def test_pendle_matrix_entry_renders_yield_category() -> None:
         "Pendle must declare exactly one explicit yield matrix entry; "
         f"got {[(e.matrix_name, e.category) for e in entries]}"
     )
-    assert yield_rows[0].chains == frozenset({"arbitrum", "ethereum"}), (
-        f"Pendle yield matrix entry chains drifted: {sorted(yield_rows[0].chains)}"
-    )
+    assert yield_rows[0].intents == ("SWAP", "LP_OPEN", "LP_CLOSE", "WITHDRAW")
+    assert set(CONNECTOR.supported_chains_for_protocol("pendle")) == {"arbitrum", "ethereum"}

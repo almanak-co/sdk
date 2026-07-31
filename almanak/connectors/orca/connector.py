@@ -7,6 +7,7 @@ from almanak.connectors._connector import (
     BacktestStrategyTypeDecl,
     Connector,
     ImportRef,
+    SupportedChainsSpec,
 )
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
 from almanak.connectors._strategy_base.solana_program import SolanaProgramSpec
@@ -47,7 +48,7 @@ CONNECTOR = Connector(
         module="almanak.connectors.orca.capabilities",
     ),
     strategy_intents=("LP_OPEN", "LP_CLOSE"),
-    strategy_chains=("solana",),
+    supported_chains=SupportedChainsSpec(chains=("solana",)),
     backtest_strategy_type=BacktestStrategyTypeDecl(
         strategy_type="lp",
         aliases=("orca_whirlpools",),

@@ -6,6 +6,7 @@ from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
     Connector,
     ImportRef,
+    SupportedChainsSpec,
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
 
@@ -28,7 +29,7 @@ CONNECTOR = Connector(
         attribute="AsterPerpsCompiler",
     ),
     strategy_intents=("PERP_OPEN", "PERP_CLOSE"),
-    strategy_chains=("bsc",),
+    supported_chains=SupportedChainsSpec(chains=("bsc",)),
 )
 
 __all__ = ["CONNECTOR"]

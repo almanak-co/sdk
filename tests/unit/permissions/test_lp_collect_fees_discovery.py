@@ -62,14 +62,22 @@ def _declaring_connectors() -> list[str]:
 
 
 def _safe_reachable_chains(connector: str) -> list[str]:
-    """Every declared chain on which a Safe — and therefore a Zodiac manifest — exists.
+    """Every chain declaring ``_VERB`` on which a Safe — and therefore a Zodiac manifest — exists.
 
     Chains without a MultiSend deployment have no Safe execution path, so a
     missing permission there cannot revert ``execTransactionWithRole``.
+
+    Scoped to ``_VERB`` rather than the protocol union: a connector may declare
+    SWAP more widely than the LP lifecycle (``uniswap_v3`` swaps on mantle /
+    xlayer / zerog but has no proven LP there, via ``intent_overrides``). Reading
+    the union would hold a chain to an exact LP_COLLECT_FEES grant that the
+    connector never claims for that verb — asserting a permission for an
+    operation the compiler will refuse to build.
     """
     manifest = CONNECTOR_REGISTRY.get(connector)
     assert manifest is not None
-    return sorted(c for c in (getattr(manifest, "strategy_chains", None) or ()) if c.lower() in MULTISEND_ADDRESSES)
+    declared = manifest.supported_chains_for(protocol=manifest.name, intent=_VERB) or ()
+    return sorted(c for c in declared if c.lower() in MULTISEND_ADDRESSES)
 
 
 def _first_chain(connector: str) -> str:

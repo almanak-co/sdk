@@ -177,12 +177,10 @@ def test_preflight_fails_open_on_unknown_protocol(nc):
 
 
 def test_preflight_fails_open_on_unknown_chain_alias(nc):
-    """A chain the registry doesn't model (sonic/berachain) must fail open —
-    absence from a manifest's chains list is not proof of non-deployment when
-    the chain isn't a KNOWN_VENUE at all."""
+    """A chain the descriptor registry cannot resolve must fail open."""
     meta = nc.StrategyMetadata(
-        name="uniswap_swap_sonic",
-        chain="sonic",
+        name="uniswap_swap_unknown_chain",
+        chain="unknown_chain",
         protocols=("uniswap_v3",),
         intents=("SWAP",),
     )
@@ -283,3 +281,55 @@ def test_resolve_module_constant_helper(nc):
         "uniswap_v3",
         "aerodrome_slipstream",
     ]
+
+
+def test_preflight_fails_open_on_an_undeclared_intent(nc):
+    """A verb no connector declares proves nothing — it must not force a skip.
+
+    ``Connector.supports`` answers False both for "declared, but not on this
+    chain" and for "not in strategy_intents at all" (framework-only recovery
+    verbs, renamed intents, metadata drift). Seeding the verdict from
+    ``meta.intents`` conflated the two: a strategy whose every verb was merely
+    undeclared read as "rejected by every protocol" and the nightly silently
+    skipped a strategy that runs fine.
+    """
+    _require_manifest(nc, "uniswap_v3")
+    meta = nc.StrategyMetadata(
+        name="uniswap_unknown_verb_arbitrum",
+        chain="arbitrum",
+        protocols=("uniswap_v3",),
+        intents=("TOTALLY_UNDECLARED_VERB",),
+    )
+    assert nc.preflight_unsupported(meta) is None
+
+
+def test_preflight_ignores_undeclared_verbs_beside_a_supported_one(nc):
+    """A supported verb still wins when an undeclared one rides along."""
+    _require_manifest(nc, "uniswap_v3")
+    meta = nc.StrategyMetadata(
+        name="uniswap_mixed_verbs_arbitrum",
+        chain="arbitrum",
+        protocols=("uniswap_v3",),
+        intents=("SWAP", "TOTALLY_UNDECLARED_VERB"),
+    )
+    assert nc.preflight_unsupported(meta) is None
+
+
+def test_preflight_still_skips_a_declared_verb_off_its_chain(nc):
+    """The fail-open widening must not blunt the real skip.
+
+    uniswap_v3 declares LP_OPEN, but mantle is SWAP-only for it — a DECLARED
+    verb ruled out on the exact chain still has to be reported, and the reason
+    must name only the declared verbs that were actually evidence.
+    """
+    _require_manifest(nc, "uniswap_v3")
+    meta = nc.StrategyMetadata(
+        name="uniswap_lp_mantle",
+        chain="mantle",
+        protocols=("uniswap_v3",),
+        intents=("LP_OPEN", "TOTALLY_UNDECLARED_VERB"),
+    )
+    reason = nc.preflight_unsupported(meta)
+    assert reason is not None
+    assert "LP_OPEN" in reason
+    assert "TOTALLY_UNDECLARED_VERB" not in reason

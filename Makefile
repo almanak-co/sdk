@@ -88,10 +88,11 @@ check-xfail-liveness:
 check-config-boundary:
 	uv run python scripts/ci/check_config_boundary.py --check --verbose
 
-# Enforce that every connector dir under almanak/connectors/ registers itself
-# in ConnectorRegistry (VIB-4298 PR 1; lazy registration shape from VIB-4835).
-# The registry is the source of truth for the (connector, intent, chain)
-# universe consumed by PR 2's intent-test coverage gate and future tooling.
+# Enforce that every connector dir under almanak/connectors/ publishes a
+# descriptor-owned strategy support declaration (VIB-4298 PR 1; descriptor
+# discovery shape from VIB-4835). The descriptor registry is the source of
+# truth for the (connector, intent, chain) universe consumed by PR 2's
+# intent-test coverage gate and future tooling.
 check-connector-registry: ## Validate connector manifests against the registry
 	uv run python scripts/ci/check_connector_registry.py --verbose
 
@@ -126,11 +127,10 @@ check-teardown-state-persistence:
 # Intent-coverage gate (VIB-4298 PR 2 / VIB-4303). Two-in-one:
 #   1. Marker hygiene — every test_* under tests/intents/ must carry
 #      @pytest.mark.intent(IntentType.X, ...). Always enforced.
-#   2. Coverage gap — every (connector, intent, chain) in ConnectorRegistry
-#      must have an intent test OR a structural entry in
-#      scripts/ci/intent-coverage-excused.yml. Runs --warn-only by default;
-#      a follow-up PR flips to --enforce after the writable backlog clears
-#      (~150 triples as of 2026-05-12).
+#   2. Coverage gap — every exact (connector, intent, chain) declared by the
+#      connector descriptors must have an intent test OR a structural entry in
+#      scripts/ci/intent-coverage-excused.yml. Enforced by default (VIB-4298
+#      closed); pass --warn-only only to inspect gaps without failing.
 check-intent-coverage:
 	uv run python scripts/ci/check_intent_coverage.py --verbose
 
@@ -163,7 +163,8 @@ check-chain-truth:
 # Demo catalog gates (blueprint 21). Runs scripts/ci/check_demos.py — the six
 # original gates plus Gate 7 "Chain truth" (VIB-5327 / VIB-5349), which asserts
 # every demo's @almanak_strategy(supported_chains=[...]) literal is a subset of
-# its covering connector manifest's strategy_chains (the SSOT, blueprint 05).
+# its covering connector descriptor's inline supported_chains spec (the SSOT,
+# blueprint 05).
 # Over-advertising a chain no connector supports is a hard FAIL; the documented
 # waiver path is scripts/ci/demo-chain-exceptions.yml.
 check-demos:

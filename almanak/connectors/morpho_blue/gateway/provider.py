@@ -326,7 +326,7 @@ class MorphoBlueGatewayConnector(
         return frozenset(MORPHO_BLUE.keys())
 
     # The CLI support matrix consumes Morpho Blue's matrix surface via
-    # ``ConnectorManifest.matrix_entries`` on the strategy side
+    # descriptor-owned strategy support metadata
     # (see ``almanak/connectors/morpho_blue/__init__.py``).
 
     # ---------------------------------------------------------------------

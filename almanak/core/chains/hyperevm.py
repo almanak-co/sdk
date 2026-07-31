@@ -10,7 +10,8 @@ the perps venue key is deliberately NOT registered as an alias here.
 
 HYPE's CoinGecko coin id and the official RPC host both contain the perps
 connector's protocol key (shared project identity). The self-containment guard
-(``tests/unit/connectors/test_supported_chains_registry.py``, VIB-5575) treats
+(``tests/unit/connectors/test_supported_chains_descriptor_registry.py``,
+VIB-5575) treats
 those vendor-data contexts as legitimate, but the connector key must still never
 appear here as prose or a support declaration.
 

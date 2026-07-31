@@ -1,6 +1,6 @@
 """Tests for ``scripts/ci/check_demos.py`` Gate 7 — chain truth (VIB-5327).
 
-Gate 7 asserts ``demo.supported_chains ⊆ covering connector.strategy_chains``.
+Gate 7 asserts demos stay within exact connector ``supported_chains`` coverage.
 Loaded via ``importlib`` (mirrors ``test_check_connector_chains.py``) so the
 script's internals can be driven directly without re-shelling.
 
@@ -23,9 +23,11 @@ import importlib.util
 import sys
 from datetime import date, timedelta
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
+
+from almanak.connectors._base.types import ProtocolKind
+from almanak.connectors._connector import Connector, SupportedChainsSpec
 
 
 def _load_module():
@@ -44,12 +46,17 @@ def module():
     return _load_module()
 
 
-def _manifest(name: str, chains, intents):
-    """A duck-typed stand-in for ConnectorManifest (chains + named intents)."""
-    return SimpleNamespace(
+def _manifest(name: str, chains, intents, *, aliases=(), protocol_overrides=None):
+    """Build a connector descriptor for synthetic chain-truth checks."""
+    return Connector(
         name=name,
-        chains=tuple(chains),
-        intents=tuple(SimpleNamespace(name=i) for i in intents),
+        kind=ProtocolKind.SWAP,
+        aliases=aliases,
+        strategy_intents=tuple(intents),
+        supported_chains=SupportedChainsSpec(
+            chains=tuple(chains),
+            protocol_overrides=protocol_overrides or {},
+        ),
     )
 
 
@@ -58,7 +65,11 @@ def index(module):
     """Synthetic index: uniswap_v3 on eth/arb/base/polygon, curve on eth only."""
     manifests = {
         "uniswap_v3": _manifest(
-            "uniswap_v3", ("ethereum", "arbitrum", "base", "polygon"), ("SWAP", "LP_OPEN", "LP_CLOSE")
+            "uniswap_v3",
+            ("ethereum", "arbitrum", "base", "polygon"),
+            ("SWAP", "LP_OPEN", "LP_CLOSE"),
+            aliases=("agni_finance",),
+            protocol_overrides={"agni_finance": ("mantle",)},
         ),
         "curve": _manifest("curve", ("ethereum",), ("SWAP", "LP_OPEN", "LP_CLOSE")),
         "aerodrome": _manifest("aerodrome", ("base", "optimism"), ("SWAP", "LP_OPEN", "LP_CLOSE")),
@@ -142,13 +153,8 @@ def test_documented_exception_downgrades_failure(module, index):
     assert any("WAIVED" in w and "VIB-9999" in w for w in warnings)
 
 
-def test_fork_or_offregistry_protocol_is_skipped_not_failed(module, index):
-    """A protocol the manifest SSOT does not model → SKIP with a WARN, no FAIL.
-
-    ``agni`` on mantle normalises to ``agni_finance`` (a uniswap_v3 fork). The
-    canonical has no manifest, so the gate must NOT fall through to the
-    descriptor alias of the raw brand and falsely assert against uniswap_v3.
-    """
+def test_owned_fork_override_is_supported(module, index):
+    """Agni resolves through Uniswap V3's owned Mantle override."""
     failures, warnings = _reconcile(
         module,
         index,
@@ -158,7 +164,7 @@ def test_fork_or_offregistry_protocol_is_skipped_not_failed(module, index):
         intents=["SWAP", "HOLD"],
     )
     assert failures == []
-    assert any("fork / off-registry" in w for w in warnings)
+    assert warnings == []
 
 
 def test_multi_protocol_chain_covered_by_any(module, index):
@@ -181,9 +187,9 @@ def test_normalize_remaps_brand_to_manifest(module, index):
     assert m is not None and m.name == "aerodrome"
 
 
-def test_resolve_skips_fork_without_manifest(module, index):
-    """``agni`` → ``agni_finance`` (no manifest) → None, not uniswap_v3."""
-    assert index.resolve("agni", "mantle") is None
+def test_resolve_owned_fork_alias(module, index):
+    """``agni`` → ``agni_finance`` resolves to its owning descriptor."""
+    assert index.resolve("agni", "mantle").name == "uniswap_v3"
 
 
 def test_load_chain_exceptions_empty(module, tmp_path):
@@ -253,27 +259,28 @@ def test_real_corpus_reconciles_clean(module):
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# VIB-6111 — connector-declared (intent, chain) exclusions
+# Exact connector-declared intent coverage
 # ─────────────────────────────────────────────────────────────────────────
 
 
 def _narrowing_manifest(name: str, chains, intents, *, dead: dict[str, tuple[str, ...]]):
-    """Manifest stand-in that narrows per chain, like ``ConnectorManifest``.
+    """Build a descriptor narrowed per chain through intent overrides.
 
-    ``dead`` maps chain -> intents NOT supported there, mirroring what
-    ``intent_chain_exclusions`` produces via ``intents_for_chain``.
+    ``dead`` maps chain -> intents not supported there.
     """
-
-    def intents_for_chain(chain: str):
-        if chain not in chains:
-            return ()
-        return tuple(SimpleNamespace(name=i) for i in intents if i not in dead.get(chain, ()))
-
-    return SimpleNamespace(
+    overrides = {
+        intent: tuple(chain for chain in chains if intent not in dead.get(chain, ()))
+        for intent in intents
+        if any(intent in dead.get(chain, ()) for chain in chains)
+    }
+    return Connector(
         name=name,
-        chains=tuple(chains),
-        intents=tuple(SimpleNamespace(name=i) for i in intents),
-        intents_for_chain=intents_for_chain,
+        kind=ProtocolKind.LENDING,
+        strategy_intents=tuple(intents),
+        supported_chains=SupportedChainsSpec(
+            chains=tuple(chains),
+            intent_overrides=overrides,
+        ),
     )
 
 
@@ -341,6 +348,4 @@ def test_under_advertising_does_not_suggest_a_chain_with_a_dead_intent(module, n
         intents=["SUPPLY", "BORROW", "REPAY", "HOLD"],
     )
     under = [w for w in warnings if "under-advertising" in w]
-    assert not any("mantle" in w for w in under), (
-        f"mantle must not be suggested — BORROW is dead there: {under!r}"
-    )
+    assert not any("mantle" in w for w in under), f"mantle must not be suggested — BORROW is dead there: {under!r}"
