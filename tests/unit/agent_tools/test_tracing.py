@@ -5,22 +5,26 @@ import tempfile
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import cast
 from unittest.mock import MagicMock
 
 import pytest
 
+from almanak.framework.agent_tools.errors import AgentErrorCode
 from almanak.framework.agent_tools.executor import ToolExecutor
 from almanak.framework.agent_tools.policy import AgentPolicy
+from almanak.framework.agent_tools.schemas import ToolResponseStatus
 from almanak.framework.agent_tools.tracing import (
     CallbackTraceSink,
     DecisionTracer,
     FileTraceSink,
     InMemoryTraceSink,
+    ToolExecutionTrace,
     TraceEntry,
     TraceSink,
+    _trace_status_is_error,
     sanitize_args,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -57,6 +61,34 @@ def permissive_policy():
 # ---------------------------------------------------------------------------
 # TraceEntry tests
 # ---------------------------------------------------------------------------
+
+
+class TestToolExecutionTrace:
+    @pytest.mark.parametrize("status", list(ToolResponseStatus))
+    @pytest.mark.parametrize("legacy_string", [False, True])
+    def test_status_classification_accepts_typed_and_legacy_values(self, status, legacy_string):
+        raw_status = status.value if legacy_string else status
+        trace = cast(ToolExecutionTrace, {"status": raw_status})
+
+        assert _trace_status_is_error(trace) is status.is_error
+
+    @pytest.mark.parametrize(
+        ("trace", "expected"),
+        [
+            ({"status": ToolResponseStatus.SUCCESS, "data_keys": ["price_usd"]}, False),
+            ({"status": ToolResponseStatus.ERROR, "error_code": AgentErrorCode.EXECUTION_FAILED}, True),
+            (
+                {
+                    "status": ToolResponseStatus.BLOCKED,
+                    "data_keys": [],
+                    "error_code": AgentErrorCode.RISK_BLOCKED,
+                },
+                True,
+            ),
+        ],
+    )
+    def test_optional_fields_do_not_change_status_classification(self, trace, expected):
+        assert _trace_status_is_error(trace) is expected
 
 
 class TestTraceEntry:
@@ -303,6 +335,33 @@ class TestGetSummary:
         )
         summary = tracer.get_summary()
         assert summary["correlation_groups"] == 2
+
+    def test_summary_classifies_every_typed_status(self):
+        sink = InMemoryTraceSink()
+        tracer = DecisionTracer(sink=sink)
+
+        for status in ToolResponseStatus:
+            trace = ToolExecutionTrace(status=status)
+            if status is ToolResponseStatus.ERROR:
+                trace["error_code"] = AgentErrorCode.EXECUTION_FAILED
+            elif status is ToolResponseStatus.BLOCKED:
+                trace["error_code"] = AgentErrorCode.RISK_BLOCKED
+            else:
+                trace["data_keys"] = [status.value]
+            tracer.trace_tool_call(
+                tool_name=f"tool_{status.value}",
+                args={},
+                policy_result={"allowed": True},
+                execution_result=trace,
+                error=None,
+                duration_ms=1.0,
+            )
+
+        summary = tracer.get_summary()
+        assert len(sink.entries) == len(ToolResponseStatus)
+        assert summary["total_calls"] == len(ToolResponseStatus)
+        assert summary["successful"] == 3
+        assert summary["failed"] == 3
 
 
 # ---------------------------------------------------------------------------

@@ -9,7 +9,9 @@ from almanak.framework.agent_tools import (
     PolicyEngine,
     ToolCatalog,
     ToolDefinition,
+    ToolErrorPayload,
     ToolResponse,
+    ToolResponseStatus,
     get_default_catalog,
 )
 ```
@@ -19,7 +21,7 @@ from almanak.framework.agent_tools import (
 The executor is the bridge between the LLM and the gateway. It validates inputs, enforces policy, dispatches to the gateway, and wraps results in `ToolResponse` envelopes.
 
 ```python
-from almanak.framework.agent_tools import ToolExecutor, AgentPolicy, get_default_catalog
+from almanak.framework.agent_tools import AgentPolicy, ToolExecutor, ToolResponseStatus, get_default_catalog
 from almanak.framework.gateway_client import GatewayClient, GatewayClientConfig
 
 gateway = GatewayClient(GatewayClientConfig.from_env())
@@ -36,7 +38,7 @@ executor = ToolExecutor(
 
 # Execute a tool call
 result = await executor.execute("get_price", {"token": "ETH", "chain": "arbitrum"})
-# result.status == "success"
+# result.status == ToolResponseStatus.SUCCESS
 # result.data == {"token": "ETH", "price_usd": 1850.0, ...}
 ```
 
@@ -180,11 +182,15 @@ Standard envelope returned by every tool call.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `status` | `str` | `"success"`, `"simulated"`, `"blocked"`, or `"error"` |
+| `status` | `ToolResponseStatus` | `success`, `simulated`, `partial`, `blocked`, `rejected`, or `error` (lowercase on the JSON wire) |
 | `data` | `dict \| None` | Tool-specific result payload |
-| `error` | `dict \| None` | Structured error if `status == "error"` |
+| `error` | `ToolErrorPayload \| None` | Canonical `AgentErrorCode`, message, recoverability, and `ErrorCategory` for `error`/`blocked` results |
 | `decision_hints` | `dict \| None` | Machine-readable hints for agent reasoning |
 | `explanation` | `str \| None` | Human-readable context about the result |
+
+`error` and `blocked` statuses require an error payload. Other statuses reject
+one. Unknown status values, error codes, fields, and impossible combinations are
+rejected at adapter boundaries instead of being forwarded to an agent.
 
 ## Built-in Tools
 

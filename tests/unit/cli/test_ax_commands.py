@@ -7,7 +7,8 @@ from unittest.mock import MagicMock, patch
 from click.testing import CliRunner
 
 from almanak.cli.cli import almanak
-from almanak.framework.agent_tools.schemas import ToolResponse
+from almanak.framework.agent_tools.errors import AgentErrorCode, ToolErrorPayload, get_error_category
+from almanak.framework.agent_tools.schemas import ToolResponse, ToolResponseStatus
 
 
 def _mock_executor_and_client():
@@ -18,13 +19,28 @@ def _mock_executor_and_client():
     return mock_executor, mock_client
 
 
+def _error_response(
+    message: str,
+    *,
+    code: AgentErrorCode = AgentErrorCode.EXECUTION_FAILED,
+    recoverable: bool = False,
+) -> ToolResponse:
+    return ToolResponse(
+        status=ToolResponseStatus.ERROR,
+        error=ToolErrorPayload(
+            error_code=code,
+            message=message,
+            recoverable=recoverable,
+            error_category=get_error_category(code),
+        ),
+    )
+
+
 class TestAxPrice:
     @patch("almanak.framework.cli.ax._get_executor")
     def test_price_success(self, mock_get_exec):
         mock_executor, mock_client = _mock_executor_and_client()
         mock_get_exec.return_value = (mock_executor, mock_client)
-
-        import asyncio
 
         response = ToolResponse(
             status="success",
@@ -112,10 +128,7 @@ class TestAxBalance:
         mock_executor, mock_client = _mock_executor_and_client()
         mock_get_exec.return_value = (mock_executor, mock_client)
 
-        response = ToolResponse(
-            status="error",
-            error={"message": "Token not found"},
-        )
+        response = _error_response("Token not found", code=AgentErrorCode.VALIDATION_ERROR)
 
         async def mock_execute(tool_name, args):
             return response
@@ -1189,10 +1202,7 @@ class TestAxReadCommands:
         mock_get_exec.return_value = (mock_executor, mock_client)
 
         async def mock_execute(tool_name, args):
-            return ToolResponse(
-                status="error",
-                error={"error_code": "empty_pool", "message": "Pool not found", "recoverable": False},
-            )
+            return _error_response("Pool not found", code=AgentErrorCode.EMPTY_POOL)
 
         mock_executor.execute = mock_execute
 
@@ -1679,7 +1689,7 @@ class TestAxBridge:
         mock_executor, mock_client = _mock_executor_and_client()
         mock_get_exec.return_value = (mock_executor, mock_client)
 
-        response = ToolResponse(status="error", error={"message": "no route"})
+        response = _error_response("no route")
 
         async def mock_execute(tool_name, args):
             return response
@@ -1743,7 +1753,7 @@ class TestAxBridge:
         mock_executor, mock_client = _mock_executor_and_client()
         mock_get_exec.return_value = (mock_executor, mock_client)
 
-        response = ToolResponse(status="error", error={"message": "insufficient balance"})
+        response = _error_response("insufficient balance")
 
         async def mock_execute(tool_name, args):
             return response

@@ -67,7 +67,7 @@ class AlmanakMCPServer:
             "content": [
                 {
                     "type": "text",
-                    "text": json.dumps(response.model_dump(exclude_none=True), indent=2),
+                    "text": json.dumps(response.model_dump(mode="json", exclude_none=True), indent=2),
                 }
             ],
         }

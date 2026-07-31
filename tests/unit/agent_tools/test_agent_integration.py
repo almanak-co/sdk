@@ -22,6 +22,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from almanak.framework.agent_tools.catalog import RiskTier, ToolCategory, ToolDefinition, get_default_catalog
+from almanak.framework.agent_tools.errors import AgentErrorCode
 from almanak.framework.agent_tools.executor import ToolExecutor
 from almanak.framework.agent_tools.policy import AgentPolicy, PolicyEngine
 from almanak.framework.agent_tools.schemas import (
@@ -29,7 +30,6 @@ from almanak.framework.agent_tools.schemas import (
     SwapTokensResponse,
     ToolResponse,
 )
-
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -209,9 +209,7 @@ class TestFullAgentLoopSimulation:
 
         # Step 3: Agent checks RSI indicator
         _setup_indicator_response(mock_gw, value="35.0", signal="oversold")
-        result = await executor.execute(
-            "get_indicator", {"token": "ETH", "indicator": "rsi", "period": 14}
-        )
+        result = await executor.execute("get_indicator", {"token": "ETH", "indicator": "rsi", "period": 14})
         assert result.status == "success"
         assert result.data["signal"] == "oversold"
 
@@ -284,14 +282,15 @@ class TestFullAgentLoopSimulation:
     async def test_batch_get_balances_in_full_loop(self, mock_gw):
         """Agent uses batch_get_balances to get portfolio overview."""
         executor = _make_executor(mock_gw)
-        _setup_batch_balance_response(mock_gw, [
-            ("1.5", "4800.00"),
-            ("5000.00", "5000.00"),
-        ])
-
-        result = await executor.execute(
-            "batch_get_balances", {"chain": "arbitrum", "tokens": ["ETH", "USDC"]}
+        _setup_batch_balance_response(
+            mock_gw,
+            [
+                ("1.5", "4800.00"),
+                ("5000.00", "5000.00"),
+            ],
         )
+
+        result = await executor.execute("batch_get_balances", {"chain": "arbitrum", "tokens": ["ETH", "USDC"]})
         assert result.status == "success"
         assert len(result.data["balances"]) == 2
         assert Decimal(result.data["total_usd"]) == Decimal("9800.00")
@@ -351,8 +350,8 @@ class TestPolicyEnforcementChain:
             {"token_in": "USDC", "token_out": "ETH", "amount": "2000", "chain": "arbitrum"},
         )
         assert result.status == "error"
-        assert result.error["error_code"] == "risk_blocked"
-        assert "daily limit" in result.error["message"].lower()
+        assert result.error.error_code == AgentErrorCode.RISK_BLOCKED
+        assert "daily limit" in result.error.message.lower()
 
     @pytest.mark.asyncio
     async def test_single_trade_limit_enforced(self, mock_gw):
@@ -369,8 +368,8 @@ class TestPolicyEnforcementChain:
             {"token_in": "USDC", "token_out": "ETH", "amount": "1500", "chain": "arbitrum"},
         )
         assert result.status == "error"
-        assert result.error["error_code"] == "risk_blocked"
-        assert "single-trade limit" in result.error["message"].lower()
+        assert result.error.error_code == AgentErrorCode.RISK_BLOCKED
+        assert "single-trade limit" in result.error.message.lower()
 
     @pytest.mark.asyncio
     async def test_blocked_token_returns_informative_error(self, mock_gw):
@@ -385,8 +384,8 @@ class TestPolicyEnforcementChain:
             {"token_in": "WBTC", "token_out": "USDC", "amount": "1", "chain": "arbitrum"},
         )
         assert result.status == "error"
-        assert result.error["error_code"] == "risk_blocked"
-        assert "WBTC" in result.error["message"]
+        assert result.error.error_code == AgentErrorCode.RISK_BLOCKED
+        assert "WBTC" in result.error.message
 
     @pytest.mark.asyncio
     async def test_blocked_chain_returns_informative_error(self, mock_gw):
@@ -396,12 +395,10 @@ class TestPolicyEnforcementChain:
             allowed_chains=["arbitrum"],
         )
 
-        result = await executor.execute(
-            "get_price", {"token": "ETH", "chain": "ethereum"}
-        )
+        result = await executor.execute("get_price", {"token": "ETH", "chain": "ethereum"})
         assert result.status == "error"
-        assert result.error["error_code"] == "risk_blocked"
-        assert "ethereum" in result.error["message"].lower()
+        assert result.error.error_code == AgentErrorCode.RISK_BLOCKED
+        assert "ethereum" in result.error.message.lower()
 
     @pytest.mark.asyncio
     async def test_blocked_protocol_returns_informative_error(self, mock_gw):
@@ -423,8 +420,8 @@ class TestPolicyEnforcementChain:
             },
         )
         assert result.status == "error"
-        assert result.error["error_code"] == "risk_blocked"
-        assert "sushiswap_v3" in result.error["message"].lower()
+        assert result.error.error_code == AgentErrorCode.RISK_BLOCKED
+        assert "sushiswap_v3" in result.error.message.lower()
 
     @pytest.mark.asyncio
     async def test_circuit_breaker_trips_after_consecutive_failures(self, mock_gw):
@@ -447,8 +444,8 @@ class TestPolicyEnforcementChain:
             {"token_in": "USDC", "token_out": "ETH", "amount": "100", "chain": "arbitrum"},
         )
         assert result.status == "error"
-        assert result.error["error_code"] == "risk_blocked"
-        assert "circuit breaker" in result.error["message"].lower()
+        assert result.error.error_code == AgentErrorCode.RISK_BLOCKED
+        assert "circuit breaker" in result.error.message.lower()
 
     @pytest.mark.asyncio
     async def test_trade_rate_limit_enforced(self, mock_gw):
@@ -477,8 +474,8 @@ class TestPolicyEnforcementChain:
             {"token_in": "USDC", "token_out": "ETH", "amount": "100", "chain": "arbitrum"},
         )
         assert result.status == "error"
-        assert result.error["error_code"] == "risk_blocked"
-        assert "rate limit" in result.error["message"].lower()
+        assert result.error.error_code == AgentErrorCode.RISK_BLOCKED
+        assert "rate limit" in result.error.message.lower()
 
 
 # ===========================================================================
@@ -550,7 +547,7 @@ class TestMultiToolWorkflow:
         # Second attempt fails -- bundle consumed
         result = await executor.execute("execute_compiled_bundle", {"bundle_id": bundle_id})
         assert result.status == "error"
-        assert "not found" in result.error["message"].lower()
+        assert "not found" in result.error.message.lower()
 
     @pytest.mark.asyncio
     async def test_compile_execute_cross_chain_blocked(self, mock_gw):
@@ -570,7 +567,7 @@ class TestMultiToolWorkflow:
             {"bundle_id": bundle_id, "chain": "base"},
         )
         assert result.status == "error"
-        assert "compiled for chain" in result.error["message"].lower()
+        assert "compiled for chain" in result.error.message.lower()
 
     @pytest.mark.asyncio
     async def test_simulate_then_execute_workflow(self, mock_gw):
@@ -642,12 +639,13 @@ class TestErrorRecoveryPattern:
             {"token_in": "WBTC", "token_out": "USDC", "amount": "1", "chain": "arbitrum"},
         )
         assert result.status == "error"
-        assert result.error["error_code"] == "risk_blocked"
+        assert result.error.error_code == AgentErrorCode.RISK_BLOCKED
         # Error should mention the blocked token and suggest allowed alternatives
-        assert "WBTC" in result.error["message"]
-        assert result.error["recoverable"] is False
+        assert "WBTC" in result.error.message
+        assert result.error.recoverable is False
         # The suggestion should list allowed tokens
-        assert "suggestion" in result.error
+        assert result.error.suggestion is not None
+        assert "USDC" in result.error.suggestion
 
         # Agent adapts: use an allowed token instead
         _setup_compile_response(mock_gw)
@@ -676,9 +674,9 @@ class TestErrorRecoveryPattern:
             {"token_in": "USDC", "token_out": "ETH", "amount": "8000", "chain": "arbitrum"},
         )
         assert result.status == "error"
-        assert "single-trade limit" in result.error["message"].lower()
-        assert "suggestion" in result.error
-        assert "5000" in result.error["suggestion"]
+        assert "single-trade limit" in result.error.message.lower()
+        assert result.error.suggestion is not None
+        assert "5000" in result.error.suggestion
 
         # Agent reduces amount
         _setup_compile_response(mock_gw)
@@ -725,8 +723,8 @@ class TestErrorRecoveryPattern:
 
         result = await executor.execute("nonexistent_tool", {})
         assert result.status == "error"
-        assert result.error["error_code"] == "validation_error"
-        assert result.error["recoverable"] is True
+        assert result.error.error_code == AgentErrorCode.VALIDATION_ERROR
+        assert result.error.recoverable is True
 
     @pytest.mark.asyncio
     async def test_invalid_args_error_is_recoverable(self, mock_gw):
@@ -736,8 +734,8 @@ class TestErrorRecoveryPattern:
         # Missing required 'token' field
         result = await executor.execute("get_price", {})
         assert result.status == "error"
-        assert result.error["error_code"] == "validation_error"
-        assert result.error["recoverable"] is True
+        assert result.error.error_code == AgentErrorCode.VALIDATION_ERROR
+        assert result.error.recoverable is True
 
 
 # ===========================================================================
@@ -825,8 +823,8 @@ class TestSequentialToolCallSafety:
         # 6th call hits the limit (6 recorded >= 6)
         result = await executor.execute("get_price", {"token": "ETH", "chain": "arbitrum"})
         assert result.status == "error"
-        assert result.error["error_code"] == "risk_blocked"
-        assert "rate limit" in result.error["message"].lower()
+        assert result.error.error_code == AgentErrorCode.RISK_BLOCKED
+        assert "rate limit" in result.error.message.lower()
 
     @pytest.mark.asyncio
     async def test_balance_and_price_calls_interleaved(self, mock_gw):
@@ -873,10 +871,13 @@ class TestStateConsistency:
         """get_risk_metrics returns correct portfolio value from balances."""
         executor = _make_executor(mock_gw)
 
-        _setup_batch_balance_response(mock_gw, [
-            ("1.5", "4800.00"),
-            ("5000.00", "5000.00"),
-        ])
+        _setup_batch_balance_response(
+            mock_gw,
+            [
+                ("1.5", "4800.00"),
+                ("5000.00", "5000.00"),
+            ],
+        )
 
         result = await executor.execute("get_risk_metrics", {"chain": "arbitrum"})
         assert result.status == "success"
@@ -893,9 +894,7 @@ class TestStateConsistency:
         # Save state
         test_state = {"last_action": "swap", "position_id": "12345", "eth_balance": "1.5"}
         _setup_state_save_response(mock_gw, new_version=1, checksum="abc123")
-        save_result = await executor.execute(
-            "save_agent_state", {"state": test_state}
-        )
+        save_result = await executor.execute("save_agent_state", {"state": test_state})
         assert save_result.status == "success"
         assert save_result.data["version"] == 1
 
@@ -947,10 +946,13 @@ class TestStateConsistency:
         assert result.status == "success"
 
         # Now check risk metrics -- should reflect portfolio after trade
-        _setup_batch_balance_response(mock_gw, [
-            ("0.3125", "1000.00"),  # ~1000 USDC worth of ETH
-            ("4000.00", "4000.00"),  # Remaining USDC
-        ])
+        _setup_batch_balance_response(
+            mock_gw,
+            [
+                ("0.3125", "1000.00"),  # ~1000 USDC worth of ETH
+                ("4000.00", "4000.00"),  # Remaining USDC
+            ],
+        )
         risk_result = await executor.execute("get_risk_metrics", {"chain": "arbitrum"})
         assert risk_result.status == "success"
         portfolio_value = Decimal(risk_result.data["portfolio_value_usd"])
@@ -1060,7 +1062,12 @@ class TestCatalogAndEnvelopeConsistency:
         # Error envelope
         error_resp = ToolResponse(
             status="error",
-            error={"error_code": "risk_blocked", "message": "blocked", "recoverable": False},
+            error={
+                "error_code": "risk_blocked",
+                "message": "blocked",
+                "recoverable": False,
+                "error_category": "policy_violation",
+            },
         )
         assert error_resp.status == "error"
         assert error_resp.data is None
@@ -1182,12 +1189,15 @@ class TestPolicyEngineIntegration:
             response_schema=SwapTokensResponse,
         )
         # Violates: token not allowed AND over spend limit AND wrong chain
-        decision = engine.check(swap_tool, {
-            "token_in": "WBTC",
-            "token_out": "DOGE",
-            "amount": "200",
-            "chain": "polygon",
-        })
+        decision = engine.check(
+            swap_tool,
+            {
+                "token_in": "WBTC",
+                "token_out": "DOGE",
+                "amount": "200",
+                "chain": "polygon",
+            },
+        )
         assert decision.allowed is False
         # Should have at least 2 violations (chain + tokens)
         assert len(decision.violations) >= 2

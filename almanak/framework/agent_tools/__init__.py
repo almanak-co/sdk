@@ -41,6 +41,7 @@ from almanak.framework.agent_tools.errors import (  # noqa: F401
     RiskBlockedError,
     SimulationFailedError,
     ToolError,
+    ToolErrorPayload,
     ToolTimeoutError,
     ToolValidationError,
     UpstreamUnavailableError,
@@ -60,13 +61,14 @@ from almanak.framework.agent_tools.policy import (  # noqa: F401
     PolicyEngine,
     PolicyStateStore,
 )
-from almanak.framework.agent_tools.schemas import ToolResponse  # noqa: F401
+from almanak.framework.agent_tools.schemas import ToolResponse, ToolResponseStatus  # noqa: F401
 from almanak.framework.agent_tools.testing import MockCall, MockGatewayClient, MockGatewayConfig  # noqa: F401
 from almanak.framework.agent_tools.tracing import (  # noqa: F401
     CallbackTraceSink,
     DecisionTracer,
     FileTraceSink,
     InMemoryTraceSink,
+    ToolExecutionTrace,
     TraceEntry,
     TraceSink,
     sanitize_args,

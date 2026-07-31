@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -13,19 +13,16 @@ from almanak.framework.agent_tools.adapters.mcp_server import (
     INVALID_REQUEST,
     MAX_CONTENT_LENGTH,
     MCP_PROTOCOL_VERSION,
-    MCPReadError,
     METHOD_NOT_FOUND,
-    PARSE_ERROR,
     SERVER_NAME,
     SERVER_VERSION,
     AlmanakMCPStdioServer,
+    MCPReadError,
     _error_response,
     _success_response,
     parse_message_from_bytes,
 )
-from almanak.framework.agent_tools.catalog import get_default_catalog
 from almanak.framework.agent_tools.schemas import ToolResponse
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -43,7 +40,7 @@ def _make_request(method: str, params: dict | None = None, msg_id: int = 1) -> d
 def _frame_message(message: dict) -> bytes:
     """Encode a message with content-length framing."""
     body = json.dumps(message).encode("utf-8")
-    header = f"Content-Length: {len(body)}\r\n\r\n".encode("utf-8")
+    header = f"Content-Length: {len(body)}\r\n\r\n".encode()
     return header + body
 
 
@@ -260,9 +257,7 @@ class TestToolsList:
     @pytest.mark.asyncio
     async def test_tools_list_with_adapter(self):
         mock_adapter = MagicMock()
-        mock_adapter.tools_list.return_value = [
-            {"name": "test_tool", "description": "Test", "inputSchema": {}}
-        ]
+        mock_adapter.tools_list.return_value = [{"name": "test_tool", "description": "Test", "inputSchema": {}}]
         server = _make_server(adapter=mock_adapter)
         request = _make_request("tools/list")
         response = await server.handle_message(request)
@@ -303,9 +298,11 @@ class TestToolsCall:
         )
 
         mock_adapter = MagicMock()
-        mock_adapter.tools_call = AsyncMock(return_value={
-            "content": [{"type": "text", "text": json.dumps({"status": "success", "data": {"price_usd": 3000.0}})}]
-        })
+        mock_adapter.tools_call = AsyncMock(
+            return_value={
+                "content": [{"type": "text", "text": json.dumps({"status": "success", "data": {"price_usd": 3000.0}})}]
+            }
+        )
 
         server = _make_server(executor=mock_executor, adapter=mock_adapter)
         request = _make_request("tools/call", {"name": "get_price", "arguments": {"token": "ETH"}})
@@ -339,15 +336,26 @@ class TestToolsCall:
     async def test_tools_call_policy_violation(self):
         """tools/call with a blocked result sets isError."""
         mock_adapter = MagicMock()
-        mock_adapter.tools_call = AsyncMock(return_value={
-            "content": [{
-                "type": "text",
-                "text": json.dumps({
-                    "status": "blocked",
-                    "error": {"error_code": "risk_blocked", "message": "Trade exceeds limit"},
-                }),
-            }]
-        })
+        mock_adapter.tools_call = AsyncMock(
+            return_value={
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(
+                            {
+                                "status": "blocked",
+                                "error": {
+                                    "error_code": "risk_blocked",
+                                    "message": "Trade exceeds limit",
+                                    "recoverable": False,
+                                    "error_category": "policy_violation",
+                                },
+                            }
+                        ),
+                    }
+                ]
+            }
+        )
 
         mock_executor = AsyncMock()
         server = _make_server(executor=mock_executor, adapter=mock_adapter)
@@ -361,15 +369,26 @@ class TestToolsCall:
     async def test_tools_call_executor_error_status(self):
         """tools/call with error status from executor sets isError."""
         mock_adapter = MagicMock()
-        mock_adapter.tools_call = AsyncMock(return_value={
-            "content": [{
-                "type": "text",
-                "text": json.dumps({
-                    "status": "error",
-                    "error": {"error_code": "execution_failed", "message": "Reverted"},
-                }),
-            }]
-        })
+        mock_adapter.tools_call = AsyncMock(
+            return_value={
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(
+                            {
+                                "status": "error",
+                                "error": {
+                                    "error_code": "execution_failed",
+                                    "message": "Reverted",
+                                    "recoverable": False,
+                                    "error_category": "non_retryable",
+                                },
+                            }
+                        ),
+                    }
+                ]
+            }
+        )
 
         mock_executor = AsyncMock()
         server = _make_server(executor=mock_executor, adapter=mock_adapter)
@@ -378,6 +397,77 @@ class TestToolsCall:
 
         result = response["result"]
         assert result["isError"] is True
+
+    @pytest.mark.asyncio
+    async def test_tools_call_rejected_status_sets_is_error(self):
+        """Rejected approval requests are failed tool calls without execution errors."""
+        mock_adapter = MagicMock()
+        mock_adapter.tools_call = AsyncMock(
+            return_value={"content": [{"type": "text", "text": json.dumps({"status": "rejected"})}]}
+        )
+
+        server = _make_server(executor=AsyncMock(), adapter=mock_adapter)
+        response = await server.handle_message(_make_request("tools/call", {"name": "swap_tokens"}))
+
+        assert response["result"]["isError"] is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"status": "sucess"},
+            {"status": "error"},
+            {
+                "status": "error",
+                "error": {
+                    "error_code": "typo_error_code",
+                    "message": "bad code",
+                    "recoverable": False,
+                    "error_category": "non_retryable",
+                },
+            },
+            {"status": "success", "unexpected": True},
+        ],
+    )
+    async def test_tools_call_malformed_adapter_response_fails_closed(self, payload):
+        """Malformed plugin responses become one deterministic internal error."""
+        mock_adapter = MagicMock()
+        mock_adapter.tools_call = AsyncMock(return_value={"content": [{"type": "text", "text": json.dumps(payload)}]})
+
+        server = _make_server(executor=AsyncMock(), adapter=mock_adapter)
+        response = await server.handle_message(_make_request("tools/call", {"name": "get_price"}))
+
+        result = response["result"]
+        assert result["isError"] is True
+        parsed = json.loads(result["content"][0]["text"])
+        assert parsed["status"] == "error"
+        assert parsed["error"]["error_code"] == "internal_error"
+        assert parsed["error"]["message"] == "Adapter returned an invalid ToolResponse envelope."
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "adapter_result",
+        [
+            None,
+            [],
+            {},
+            {"content": []},
+            {"content": [{"type": "image", "data": "..."}]},
+            {"content": [{"type": "text", "text": "{}"}, {"type": "text", "text": "{}"}]},
+        ],
+    )
+    async def test_tools_call_invalid_content_shape_fails_closed(self, adapter_result):
+        """The in-process adapter has one canonical response content shape."""
+        mock_adapter = MagicMock()
+        mock_adapter.tools_call = AsyncMock(return_value=adapter_result)
+
+        server = _make_server(executor=AsyncMock(), adapter=mock_adapter)
+        response = await server.handle_message(_make_request("tools/call", {"name": "get_price"}))
+
+        result = response["result"]
+        assert result["isError"] is True
+        parsed = json.loads(result["content"][0]["text"])
+        assert parsed["error"]["error_code"] == "internal_error"
 
 
 # ---------------------------------------------------------------------------
@@ -537,9 +627,7 @@ class TestResources:
     @pytest.mark.asyncio
     async def test_resources_list_with_adapter(self):
         mock_adapter = MagicMock()
-        mock_adapter.resources_list.return_value = [
-            {"uri": "almanak://chains", "name": "Supported Chains"}
-        ]
+        mock_adapter.resources_list.return_value = [{"uri": "almanak://chains", "name": "Supported Chains"}]
         server = _make_server(adapter=mock_adapter)
         request = _make_request("resources/list")
         response = await server.handle_message(request)
@@ -559,9 +647,7 @@ class TestResources:
     @pytest.mark.asyncio
     async def test_resources_read_with_adapter(self):
         mock_adapter = MagicMock()
-        mock_adapter.resources_read.return_value = {
-            "contents": [{"uri": "almanak://chains", "text": "{}"}]
-        }
+        mock_adapter.resources_read.return_value = {"contents": [{"uri": "almanak://chains", "text": "{}"}]}
         server = _make_server(adapter=mock_adapter)
         request = _make_request("resources/read", {"uri": "almanak://chains"})
         response = await server.handle_message(request)

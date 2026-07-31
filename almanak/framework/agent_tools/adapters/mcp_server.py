@@ -27,8 +27,12 @@ import logging
 import sys
 from typing import TYPE_CHECKING, Any
 
+from pydantic import ValidationError
+
 from almanak.framework.agent_tools.adapters.mcp_adapter import AlmanakMCPServer
 from almanak.framework.agent_tools.catalog import get_default_catalog
+from almanak.framework.agent_tools.errors import AgentErrorCode, ToolErrorPayload, get_error_category
+from almanak.framework.agent_tools.schemas import ToolResponse, ToolResponseStatus
 
 if TYPE_CHECKING:
     from almanak.framework.agent_tools.executor import ToolExecutor
@@ -46,6 +50,26 @@ INVALID_REQUEST = -32600
 METHOD_NOT_FOUND = -32601
 INTERNAL_ERROR = -32603
 MAX_CONTENT_LENGTH = 10 * 1024 * 1024  # 10 MiB safety cap
+
+
+def _response_text(response: ToolResponse) -> str:
+    """Serialize one response envelope using its stable JSON wire values."""
+    return json.dumps(response.model_dump(mode="json", exclude_none=True))
+
+
+def _invalid_adapter_response() -> ToolResponse:
+    """Return the deterministic fail-closed result for malformed adapters."""
+    code = AgentErrorCode.INTERNAL_ERROR
+    return ToolResponse(
+        status=ToolResponseStatus.ERROR,
+        error=ToolErrorPayload(
+            error_code=code,
+            message="Adapter returned an invalid ToolResponse envelope.",
+            recoverable=False,
+            error_category=get_error_category(code),
+        ),
+        explanation="The adapter response did not match the agent-tools protocol.",
+    )
 
 
 class MCPReadError(Exception):
@@ -242,20 +266,21 @@ class AlmanakMCPStdioServer:
             raise ValueError("'name' in tools/call params must be a non-empty string")
 
         if self._adapter is None:
+            code = AgentErrorCode.NO_EXECUTOR
+            response = ToolResponse(
+                status=ToolResponseStatus.ERROR,
+                error=ToolErrorPayload(
+                    error_code=code,
+                    message="No executor configured. Start with gateway connection for tool execution.",
+                    recoverable=False,
+                    error_category=get_error_category(code),
+                ),
+            )
             return {
                 "content": [
                     {
                         "type": "text",
-                        "text": json.dumps(
-                            {
-                                "status": "error",
-                                "error": {
-                                    "error_code": "no_executor",
-                                    "message": "No executor configured. Start with gateway connection for tool execution.",
-                                    "recoverable": False,
-                                },
-                            }
-                        ),
+                        "text": _response_text(response),
                     }
                 ],
                 "isError": True,
@@ -263,21 +288,33 @@ class AlmanakMCPStdioServer:
 
         result = await self._adapter.tools_call(tool_name, arguments)
 
-        # Check if the result indicates an error
-        is_error = False
-        if result.get("content"):
-            for content_item in result["content"]:
-                if content_item.get("type") == "text":
-                    try:
-                        parsed = json.loads(content_item["text"])
-                        if parsed.get("status") in ("error", "blocked"):
-                            is_error = True
-                    except (json.JSONDecodeError, KeyError):
-                        pass
+        # Parse the adapter boundary exactly once. Unknown statuses, error
+        # codes, fields, or impossible status/error combinations fail closed
+        # to a deterministic internal-error envelope.
+        try:
+            if not isinstance(result, dict):
+                raise TypeError("adapter result must be an object")
+            content = result.get("content")
+            if not isinstance(content, list) or len(content) != 1:
+                raise TypeError("content must contain exactly one ToolResponse text item")
+            content_item = content[0]
+            if not isinstance(content_item, dict) or content_item.get("type") != "text":
+                raise TypeError("content item must be text")
+            response_text = content_item.get("text")
+            if not isinstance(response_text, str):
+                raise TypeError("content text must be a string")
+            response = ToolResponse.model_validate_json(response_text)
+        except (ValidationError, TypeError) as exc:
+            logger.warning("Invalid ToolResponse returned by MCP adapter: %s", exc)
+            invalid = _invalid_adapter_response()
+            return {
+                "content": [{"type": "text", "text": _response_text(invalid)}],
+                "isError": True,
+            }
 
         return {
-            "content": result.get("content", []),
-            "isError": is_error,
+            "content": content,
+            "isError": response.is_error,
         }
 
     async def _handle_resources_list(self, _message: dict) -> dict:

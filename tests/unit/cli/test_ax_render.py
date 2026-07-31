@@ -7,7 +7,8 @@ from unittest.mock import patch
 
 import pytest
 
-from almanak.framework.agent_tools.schemas import ToolResponse
+from almanak.framework.agent_tools.errors import AgentErrorCode, ToolErrorPayload, get_error_category
+from almanak.framework.agent_tools.schemas import ToolResponse, ToolResponseStatus
 from almanak.framework.cli.ax_render import (
     check_safety_gate,
     is_interactive,
@@ -75,8 +76,13 @@ class TestRenderResult:
 
     def test_human_output_error(self, capsys):
         response = ToolResponse(
-            status="error",
-            error={"message": "Insufficient balance", "recoverable": True},
+            status=ToolResponseStatus.ERROR,
+            error=ToolErrorPayload(
+                error_code=AgentErrorCode.EXECUTION_FAILED,
+                message="Insufficient balance",
+                recoverable=True,
+                error_category=get_error_category(AgentErrorCode.EXECUTION_FAILED),
+            ),
         )
         render_result(response, json_output=False)
         output = capsys.readouterr().out

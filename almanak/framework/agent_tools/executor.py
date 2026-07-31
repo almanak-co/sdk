@@ -42,12 +42,13 @@ from almanak.framework.agent_tools.errors import (
     RiskBlockedError,
     SimulationFailedError,
     ToolError,
+    ToolErrorPayload,
     ToolValidationError,
     get_error_category,
 )
 from almanak.framework.agent_tools.policy import AgentPolicy, PolicyEngine
-from almanak.framework.agent_tools.schemas import ToolResponse
-from almanak.framework.agent_tools.tracing import DecisionTracer, sanitize_args
+from almanak.framework.agent_tools.schemas import ToolResponse, ToolResponseStatus
+from almanak.framework.agent_tools.tracing import DecisionTracer, ToolExecutionTrace, sanitize_args
 
 if TYPE_CHECKING:
     from almanak.connectors._strategy_base.vault_tool_registry import VaultToolCapability
@@ -278,19 +279,48 @@ def _sanitize_analytics_field(value: object) -> str:
     return text
 
 
-def _error_dict(code: AgentErrorCode, message: str, *, recoverable: bool = False) -> dict:
-    """Build a standardized error dict for ToolResponse envelopes.
+def _error_payload(code: AgentErrorCode, message: str, *, recoverable: bool = False) -> ToolErrorPayload:
+    """Build a standardized error payload for ToolResponse envelopes.
 
     Includes ``error_code``, ``message``, ``recoverable``, and ``error_category``
     so LLM agents can reliably pattern-match on error types and decide
     retry vs abort vs escalate.
     """
-    return {
-        "error_code": code.value,
-        "message": message,
-        "recoverable": recoverable,
-        "error_category": get_error_category(code).value,
-    }
+    return ToolErrorPayload(
+        error_code=code,
+        message=message,
+        recoverable=recoverable,
+        error_category=get_error_category(code),
+    )
+
+
+def _action_result_response(
+    *,
+    success: bool,
+    dry_run: bool,
+    data: dict[str, Any],
+    operation: str,
+    failure_detail: str | None = None,
+    include_status_in_data: bool = False,
+) -> ToolResponse:
+    """Build the canonical response for an action execution or simulation."""
+    if success:
+        status = ToolResponseStatus.SIMULATED if dry_run else ToolResponseStatus.SUCCESS
+        error = None
+    else:
+        status = ToolResponseStatus.ERROR
+        code = AgentErrorCode.SIMULATION_FAILED if dry_run else AgentErrorCode.EXECUTION_FAILED
+        failure_kind = "simulation" if dry_run else "execution"
+        error = _error_payload(
+            code,
+            failure_detail or f"{operation} {failure_kind} failed",
+            recoverable=dry_run,
+        )
+
+    response_data = dict(data)
+    if include_status_in_data:
+        response_data["status"] = status
+    return ToolResponse(status=status, data=response_data, error=error)
 
 
 def _resolve_pool_state_capability(chain: str, raw_protocol: str) -> tuple[Any, str, Any]:
@@ -668,7 +698,7 @@ class ToolExecutor:
         )
 
         return ToolResponse(
-            status="rejected",
+            status=ToolResponseStatus.REJECTED,
             data={
                 "request_id": request.request_id,
                 "approval_status": decision.status.value,
@@ -703,7 +733,7 @@ class ToolExecutor:
         """
         start = time.monotonic()
         policy_result_dict: dict | None = None
-        execution_result_dict: dict | None = None
+        execution_result_dict: ToolExecutionTrace | None = None
         error_str: str | None = None
         result: ToolResponse | None = None
 
@@ -729,8 +759,8 @@ class ToolExecutor:
                 if self._alert_manager:
                     self._fire_alert(f"Policy denied {tool_name}: {e.message}", severity="warning")
             result = ToolResponse(
-                status="error",
-                error=e.to_dict(),
+                status=ToolResponseStatus.ERROR,
+                error=e.to_payload(),
                 explanation=e.message,
             )
             execution_result_dict = {"status": result.status, "error_code": e.code}
@@ -739,11 +769,11 @@ class ToolExecutor:
             logger.exception("Unexpected error in tool %s", tool_name)
             error_str = f"internal_error: {e}"
             result = ToolResponse(
-                status="error",
-                error=_error_dict(AgentErrorCode.INTERNAL_ERROR, str(e), recoverable=False),
+                status=ToolResponseStatus.ERROR,
+                error=_error_payload(AgentErrorCode.INTERNAL_ERROR, str(e), recoverable=False),
                 explanation=f"Unexpected error: {e}",
             )
-            execution_result_dict = {"status": result.status, "error_code": "internal_error"}
+            execution_result_dict = {"status": result.status, "error_code": AgentErrorCode.INTERNAL_ERROR}
             return result
         finally:
             try:
@@ -884,7 +914,7 @@ class ToolExecutor:
                     )
                 )
                 return ToolResponse(
-                    status="success",
+                    status=ToolResponseStatus.SUCCESS,
                     data={
                         "token": args["token"],
                         "price_usd": float(resp.price),
@@ -894,8 +924,8 @@ class ToolExecutor:
                 )
             except Exception as e:
                 return ToolResponse(
-                    status="error",
-                    error=_error_dict(
+                    status=ToolResponseStatus.ERROR,
+                    error=_error_payload(
                         AgentErrorCode.GATEWAY_ERROR,
                         f"Price unavailable for {args['token']}: {e}",
                         recoverable=True,
@@ -912,7 +942,7 @@ class ToolExecutor:
                 )
             )
             return ToolResponse(
-                status="success",
+                status=ToolResponseStatus.SUCCESS,
                 data={
                     "token": args["token"],
                     "balance": resp.balance,
@@ -926,8 +956,8 @@ class ToolExecutor:
 
             if not tokens:
                 return ToolResponse(
-                    status="error",
-                    error=_error_dict(
+                    status=ToolResponseStatus.ERROR,
+                    error=_error_payload(
                         AgentErrorCode.VALIDATION_ERROR,
                         "tokens list is required; pass explicit token symbols to query.",
                         recoverable=True,
@@ -948,7 +978,7 @@ class ToolExecutor:
             )
 
             return ToolResponse(
-                status="success",
+                status=ToolResponseStatus.SUCCESS,
                 data={"balances": balances, "total_usd": str(total_usd)},
             )
 
@@ -962,7 +992,7 @@ class ToolExecutor:
                 )
             )
             return ToolResponse(
-                status="success",
+                status=ToolResponseStatus.SUCCESS,
                 data={
                     "indicator": args["indicator"],
                     "value": float(resp.value),
@@ -995,7 +1025,7 @@ class ToolExecutor:
             resolver = get_token_resolver()
             token = resolver.resolve(args["token"], args.get("chain", self._default_chain))
             return ToolResponse(
-                status="success",
+                status=ToolResponseStatus.SUCCESS,
                 data={
                     "symbol": token.symbol,
                     "address": token.address,
@@ -1076,7 +1106,7 @@ class ToolExecutor:
                 actions = []
 
             return ToolResponse(
-                status="success",
+                status=ToolResponseStatus.SUCCESS,
                 data={
                     "bundle_id": bundle_id,
                     "actions": actions,
@@ -1094,8 +1124,8 @@ class ToolExecutor:
                     cached_entry = self._bundle_cache.get(sim_bundle_id)
                 except BundleExpiredError as exc:
                     return ToolResponse(
-                        status="error",
-                        error=_error_dict(
+                        status=ToolResponseStatus.ERROR,
+                        error=_error_payload(
                             AgentErrorCode.VALIDATION_ERROR,
                             str(exc),
                             recoverable=True,
@@ -1130,8 +1160,8 @@ class ToolExecutor:
                 )
                 if not compile_resp.success:
                     return ToolResponse(
-                        status="error",
-                        error=_error_dict(AgentErrorCode.SIMULATION_FAILED, compile_resp.error, recoverable=True),
+                        status=ToolResponseStatus.ERROR,
+                        error=_error_payload(AgentErrorCode.SIMULATION_FAILED, compile_resp.error, recoverable=True),
                     )
                 bundle_bytes = compile_resp.action_bundle
 
@@ -1148,8 +1178,9 @@ class ToolExecutor:
                 )
             )
 
-            return ToolResponse(
-                status="simulated" if exec_resp.success else "error",
+            return _action_result_response(
+                success=exec_resp.success,
+                dry_run=True,
                 data={
                     "success": exec_resp.success,
                     "estimated_output": {},
@@ -1157,6 +1188,8 @@ class ToolExecutor:
                     "gas_estimate_usd": "",
                     "revert_reason": exec_resp.error if not exec_resp.success else None,
                 },
+                operation="Intent",
+                failure_detail=exec_resp.error,
             )
 
         if tool_name == "validate_risk":
@@ -1165,7 +1198,7 @@ class ToolExecutor:
         if tool_name == "compute_rebalance_candidate":
             result = await self._execute_compute_rebalance_candidate(args)
             # Set rebalance gate based on viability
-            if result.status == "success" and result.data and result.data.get("viable"):
+            if result.status == ToolResponseStatus.SUCCESS and result.data and result.data.get("viable"):
                 self._policy_engine.set_rebalance_approved(True)
             return result
 
@@ -1278,17 +1311,19 @@ class ToolExecutor:
                 tool_name=tool_name,
             )
 
-        if dry_run:
-            status = "simulated" if enriched.success else "error"
-        else:
-            status = "success" if enriched.success else "error"
         data = self._build_action_response_from_enriched(tool_name, enriched, args)
 
         # Reset rebalance gate after LP open/close execution
         if tool_name in ("open_lp_position", "close_lp_position"):
             self._policy_engine.set_rebalance_approved(False)
 
-        return ToolResponse(status=status, data=data)
+        return _action_result_response(
+            success=enriched.success,
+            dry_run=dry_run,
+            data=data,
+            operation=tool_name,
+            failure_detail=enriched.error,
+        )
 
     async def _execute_compiled_bundle(self, args: dict) -> ToolResponse:  # noqa: C901
         """Execute a previously compiled ActionBundle from the bundle cache."""
@@ -1440,16 +1475,17 @@ class ToolExecutor:
             )
 
         tx_hashes = list(exec_resp.tx_hashes) if exec_resp.tx_hashes else []
-        status = "simulated" if dry_run else ("success" if exec_resp.success else "error")
-
-        return ToolResponse(
-            status=status,
+        return _action_result_response(
+            success=exec_resp.success,
+            dry_run=dry_run,
             data={
                 "tx_hashes": tx_hashes,
                 "success": exec_resp.success,
                 "gas_used_usd": "",
                 "receipts": [],
             },
+            operation="Compiled bundle",
+            failure_detail=exec_resp.error,
         )
 
     def _build_lp_close_params(self, args: dict, tool_name: str) -> dict:
@@ -1921,7 +1957,7 @@ class ToolExecutor:
                         existing_vault,
                     )
                     return ToolResponse(
-                        status="success",
+                        status=ToolResponseStatus.SUCCESS,
                         data={
                             "status": "success",
                             "vault_address": existing_vault,
@@ -1935,8 +1971,8 @@ class ToolExecutor:
                     # not "vault doesn't exist". Fail closed to prevent duplicates.
                     logger.warning("deploy_vault: cannot verify saved vault %s on-chain: %s", existing_vault[:10], e)
                     return ToolResponse(
-                        status="error",
-                        error=_error_dict(
+                        status=ToolResponseStatus.ERROR,
+                        error=_error_payload(
                             AgentErrorCode.VAULT_VERIFICATION_FAILED,
                             f"deploy_vault aborted: saved vault {existing_vault} exists in state "
                             f"but on-chain verification failed: {e}",
@@ -1951,8 +1987,8 @@ class ToolExecutor:
             else:
                 logger.warning("deploy_vault: failed to load state for idempotency check: %s", e)
                 return ToolResponse(
-                    status="error",
-                    error=_error_dict(
+                    status=ToolResponseStatus.ERROR,
+                    error=_error_payload(
                         AgentErrorCode.STATE_LOAD_FAILED,
                         f"deploy_vault aborted: unable to verify existing vault due to state load failure: {e}",
                         recoverable=True,
@@ -2017,15 +2053,17 @@ class ToolExecutor:
             except Exception as e:
                 logger.warning("Failed to parse deploy receipt: %s", e)
 
-        status = "simulated" if dry_run else "success"
-        return ToolResponse(
-            status=status,
+        return _action_result_response(
+            success=exec_resp.success,
+            dry_run=dry_run,
             data={
-                "status": status,
                 "vault_address": vault_address,
                 "tx_hash": tx_hash,
                 "message": f"Vault deployed at {vault_address}" if vault_address else "Vault deployment submitted",
             },
+            operation="Vault deployment",
+            failure_detail=exec_resp.error,
+            include_status_in_data=True,
         )
 
     # ── POOL / POSITION READ TOOLS ─────────────────────────────────────
@@ -2176,8 +2214,8 @@ class ToolExecutor:
         factory_address = cap.factory_address(chain)
         if not factory_address:
             return ToolResponse(
-                status="error",
-                error=_error_dict(AgentErrorCode.UNSUPPORTED_CHAIN, f"No {protocol} factory on {chain}"),
+                status=ToolResponseStatus.ERROR,
+                error=_error_payload(AgentErrorCode.UNSUPPORTED_CHAIN, f"No {protocol} factory on {chain}"),
             )
         # getPool selector: uint24 (fee_tier) for v3-family, int24 (tick_spacing) for Slipstream.
         get_pool_selector = cap.get_pool_selector()
@@ -2188,8 +2226,8 @@ class ToolExecutor:
             )
             if rpc_error is not None:
                 return ToolResponse(
-                    status="error",
-                    error=_error_dict(
+                    status=ToolResponseStatus.ERROR,
+                    error=_error_payload(
                         AgentErrorCode.RPC_FAILED,
                         f"factory.getPool() failed: {rpc_error}",
                         recoverable=True,
@@ -2197,8 +2235,8 @@ class ToolExecutor:
                 )
             if pool_address is None:
                 return ToolResponse(
-                    status="error",
-                    error=_error_dict(
+                    status=ToolResponseStatus.ERROR,
+                    error=_error_payload(
                         AgentErrorCode.EMPTY_POOL,
                         f"Pool not found: {protocol} {token_a_sym}/{token_b_sym} fee={fee_tier} on {chain}. "
                         f"The factory returned a zero address — the pool may not exist.",
@@ -2227,8 +2265,8 @@ class ToolExecutor:
                     else ""
                 )
                 return ToolResponse(
-                    status="error",
-                    error=_error_dict(
+                    status=ToolResponseStatus.ERROR,
+                    error=_error_payload(
                         AgentErrorCode.RPC_FAILED,
                         f"factory.getPool() failed for {protocol} {token_a_sym}/{token_b_sym} on {chain}: "
                         f"{rpc_errors[0]}{split_note}",
@@ -2236,8 +2274,8 @@ class ToolExecutor:
                     ),
                 )
             return ToolResponse(
-                status="error",
-                error=_error_dict(
+                status=ToolResponseStatus.ERROR,
+                error=_error_payload(
                     AgentErrorCode.EMPTY_POOL,
                     f"Pool not found: {protocol} {token_a_sym}/{token_b_sym} on {chain} at any candidate "
                     f"fee tier {list(candidate_keys)}. The factory returned a zero address for every "
@@ -2270,8 +2308,8 @@ class ToolExecutor:
         cap, protocol, reader_spec = _resolve_pool_state_capability(chain, args.get("protocol", DEFAULT_LP_PROTOCOL))
         if cap is None:
             return ToolResponse(
-                status="error",
-                error=_error_dict(
+                status=ToolResponseStatus.ERROR,
+                error=_error_payload(
                     AgentErrorCode.VALIDATION_ERROR,
                     f"Unsupported protocol '{protocol}' for pool lookup. Supported: {_pool_state_supported_keys()}",
                     recoverable=True,
@@ -2322,8 +2360,8 @@ class ToolExecutor:
         )
         if not slot0_resp.success:
             return ToolResponse(
-                status="error",
-                error=_error_dict(
+                status=ToolResponseStatus.ERROR,
+                error=_error_payload(
                     AgentErrorCode.RPC_FAILED,
                     f"slot0() failed: {slot0_resp.error}",
                     recoverable=True,
@@ -2333,8 +2371,8 @@ class ToolExecutor:
         slot0_hex = json.loads(slot0_resp.result).removeprefix("0x")
         if len(slot0_hex) < 128:
             return ToolResponse(
-                status="error",
-                error=_error_dict(
+                status=ToolResponseStatus.ERROR,
+                error=_error_payload(
                     AgentErrorCode.EMPTY_POOL,
                     "Pool may not exist or is uninitialized",
                 ),
@@ -2370,7 +2408,7 @@ class ToolExecutor:
         analytics = self._fetch_pool_analytics(chain=chain, pool_address=pool_address, protocol=protocol)
 
         return ToolResponse(
-            status="success",
+            status=ToolResponseStatus.SUCCESS,
             data={
                 "pool_address": pool_address,
                 "current_price": str(adjusted_price),
@@ -2484,8 +2522,8 @@ class ToolExecutor:
                 c.protocol for c in STRATEGY_AGENT_READ_REGISTRY.capabilities() if "lp_position" in c.agent_read_keys()
             )
             return ToolResponse(
-                status="error",
-                error=_error_dict(
+                status=ToolResponseStatus.ERROR,
+                error=_error_payload(
                     AgentErrorCode.VALIDATION_ERROR,
                     f"Unsupported protocol '{lp_protocol}' for LP position lookup. Supported: {supported}",
                     recoverable=True,
@@ -2495,8 +2533,8 @@ class ToolExecutor:
         nft_manager = cap.position_manager_address(chain)
         if not nft_manager:
             return ToolResponse(
-                status="error",
-                error=_error_dict(
+                status=ToolResponseStatus.ERROR,
+                error=_error_payload(
                     AgentErrorCode.UNSUPPORTED_CHAIN, f"No position manager on {chain} for {lp_protocol}"
                 ),
             )
@@ -2515,15 +2553,15 @@ class ToolExecutor:
         )
         if not resp.success:
             return ToolResponse(
-                status="error",
-                error=_error_dict(AgentErrorCode.RPC_FAILED, f"positions() failed: {resp.error}", recoverable=True),
+                status=ToolResponseStatus.ERROR,
+                error=_error_payload(AgentErrorCode.RPC_FAILED, f"positions() failed: {resp.error}", recoverable=True),
             )
 
         raw = json.loads(resp.result).removeprefix("0x")
         if len(raw) < 768:  # 12 words * 64 hex chars
             return ToolResponse(
-                status="error",
-                error=_error_dict(AgentErrorCode.INVALID_POSITION, f"Position {position_id} not found or burned"),
+                status=ToolResponseStatus.ERROR,
+                error=_error_payload(AgentErrorCode.INVALID_POSITION, f"Position {position_id} not found or burned"),
             )
 
         words = [raw[i * 64 : (i + 1) * 64] for i in range(12)]
@@ -2630,7 +2668,7 @@ class ToolExecutor:
         except Exception as exc:
             logger.warning("fee USD enrichment block failed, failing open: %s", exc)
 
-        return ToolResponse(status="success", data=data)
+        return ToolResponse(status=ToolResponseStatus.SUCCESS, data=data)
 
     # ─────────────────────────────────────────────────────────────────────
     # Read-only list helpers (VIB-2995)
@@ -2746,8 +2784,8 @@ class ToolExecutor:
         supported_protocols = sorted({p for p, _ in _npms_for_chain(chain)} | {"uniswap_v3"})
         if protocol_arg and protocol_arg not in supported_protocols and protocol_arg != "uniswap_v3":
             return ToolResponse(
-                status="error",
-                error=_error_dict(
+                status=ToolResponseStatus.ERROR,
+                error=_error_payload(
                     AgentErrorCode.VALIDATION_ERROR,
                     f"list_lp_positions: unsupported protocol '{protocol_arg}' on chain={chain}. "
                     f"Supported on this chain: {supported_protocols}",
@@ -2757,8 +2795,8 @@ class ToolExecutor:
         wallet = self._resolve_wallet(args, tool_name="list_lp_positions")
         if not wallet:
             return ToolResponse(
-                status="error",
-                error=_error_dict(
+                status=ToolResponseStatus.ERROR,
+                error=_error_payload(
                     AgentErrorCode.VALIDATION_ERROR,
                     "wallet_address is required (none passed and no default wallet configured)",
                 ),
@@ -2766,8 +2804,8 @@ class ToolExecutor:
 
         if not _npms_for_chain(chain):
             return ToolResponse(
-                status="error",
-                error=_error_dict(
+                status=ToolResponseStatus.ERROR,
+                error=_error_payload(
                     AgentErrorCode.UNSUPPORTED_CHAIN,
                     f"No V3-fork NonfungiblePositionManager registered for chain={chain}",
                 ),
@@ -2786,8 +2824,8 @@ class ToolExecutor:
             )
         except DiscoveryIncomplete as exc:
             return ToolResponse(
-                status="error",
-                error=_error_dict(
+                status=ToolResponseStatus.ERROR,
+                error=_error_payload(
                     AgentErrorCode.RPC_FAILED,
                     f"LP discovery failed: {exc}",
                     recoverable=True,
@@ -2829,7 +2867,7 @@ class ToolExecutor:
         ]
 
         return ToolResponse(
-            status="success",
+            status=ToolResponseStatus.SUCCESS,
             data={
                 "chain": chain,
                 "protocol": protocol_arg or "all",
@@ -2866,8 +2904,8 @@ class ToolExecutor:
                 if "lending_account" in c.agent_read_keys()
             )
             return ToolResponse(
-                status="error",
-                error=_error_dict(
+                status=ToolResponseStatus.ERROR,
+                error=_error_payload(
                     AgentErrorCode.VALIDATION_ERROR,
                     f"list_lending_positions: unsupported protocol '{protocol}'. Supported: {supported}",
                 ),
@@ -2876,8 +2914,8 @@ class ToolExecutor:
         wallet = self._resolve_wallet(args, tool_name="list_lending_positions")
         if not wallet:
             return ToolResponse(
-                status="error",
-                error=_error_dict(
+                status=ToolResponseStatus.ERROR,
+                error=_error_payload(
                     AgentErrorCode.VALIDATION_ERROR,
                     "wallet_address is required (none passed and no default wallet configured)",
                 ),
@@ -2886,8 +2924,8 @@ class ToolExecutor:
         pool_addr = cap.lending_pool_address(chain)
         if not pool_addr:
             return ToolResponse(
-                status="error",
-                error=_error_dict(AgentErrorCode.UNSUPPORTED_CHAIN, f"Aave V3 not configured on {chain}"),
+                status=ToolResponseStatus.ERROR,
+                error=_error_payload(AgentErrorCode.UNSUPPORTED_CHAIN, f"Aave V3 not configured on {chain}"),
             )
 
         wallet_padded = wallet.removeprefix("0x").lower().zfill(64)
@@ -2896,13 +2934,15 @@ class ToolExecutor:
         )
         if not ok:
             return ToolResponse(
-                status="error",
-                error=_error_dict(AgentErrorCode.RPC_FAILED, f"getUserAccountData() failed: {raw}", recoverable=True),
+                status=ToolResponseStatus.ERROR,
+                error=_error_payload(
+                    AgentErrorCode.RPC_FAILED, f"getUserAccountData() failed: {raw}", recoverable=True
+                ),
             )
         if len(raw) < 384:  # 6 words * 64 hex
             return ToolResponse(
-                status="error",
-                error=_error_dict(
+                status=ToolResponseStatus.ERROR,
+                error=_error_payload(
                     AgentErrorCode.RPC_FAILED,
                     f"getUserAccountData() returned short payload: {len(raw)} hex chars",
                     recoverable=True,
@@ -2936,7 +2976,7 @@ class ToolExecutor:
             hf_str = str(Decimal(health_factor_raw) / Decimal(10**18))
 
         return ToolResponse(
-            status="success",
+            status=ToolResponseStatus.SUCCESS,
             data={
                 "chain": chain,
                 "protocol": protocol,
@@ -3002,8 +3042,8 @@ class ToolExecutor:
                 if "lending_reserves" in c.agent_read_keys()
             )
             return ToolResponse(
-                status="error",
-                error=_error_dict(
+                status=ToolResponseStatus.ERROR,
+                error=_error_payload(
                     AgentErrorCode.VALIDATION_ERROR,
                     f"list_lending_reserves: unsupported protocol '{protocol}'. Supported: {supported}",
                 ),
@@ -3012,8 +3052,8 @@ class ToolExecutor:
         plan = cap.lending_reserve_discovery_plan(chain)
         if plan is None:
             return ToolResponse(
-                status="error",
-                error=_error_dict(
+                status=ToolResponseStatus.ERROR,
+                error=_error_payload(
                     AgentErrorCode.UNSUPPORTED_CHAIN,
                     f"{protocol} reserve discovery not configured on chain={chain}",
                 ),
@@ -3029,8 +3069,8 @@ class ToolExecutor:
             ok, raw = self._rpc_call(chain, enum_call.to, enum_call.data, enum_call.id, network)
             if not ok:
                 return ToolResponse(
-                    status="error",
-                    error=_error_dict(
+                    status=ToolResponseStatus.ERROR,
+                    error=_error_payload(
                         AgentErrorCode.RPC_FAILED, f"reserve enumeration failed: {raw}", recoverable=True
                     ),
                 )
@@ -3038,8 +3078,8 @@ class ToolExecutor:
                 entries = plan.decode_enumeration(raw)
             except ValueError as exc:
                 return ToolResponse(
-                    status="error",
-                    error=_error_dict(
+                    status=ToolResponseStatus.ERROR,
+                    error=_error_payload(
                         AgentErrorCode.RPC_FAILED, f"could not decode reserve enumeration: {exc}", recoverable=True
                     ),
                 )
@@ -3108,7 +3148,7 @@ class ToolExecutor:
         self._annotate_reserve_rows(plan, reserves, protocol)
 
         return ToolResponse(
-            status="success",
+            status=ToolResponseStatus.SUCCESS,
             data={
                 "schema_version": 1,
                 "chain": chain,
@@ -3149,8 +3189,8 @@ class ToolExecutor:
         """
         if (collateral or loan) and not any("/" in e.symbol for e in entries):
             return entries, ToolResponse(
-                status="error",
-                error=_error_dict(
+                status=ToolResponseStatus.ERROR,
+                error=_error_payload(
                     AgentErrorCode.VALIDATION_ERROR,
                     f"list_lending_reserves: --collateral/--loan filter markets by leg, but {protocol} "
                     f"reserves on {chain} are not pair-keyed. Use --asset instead.",
@@ -3171,8 +3211,8 @@ class ToolExecutor:
                 if part
             )
             return entries, ToolResponse(
-                status="error",
-                error=_error_dict(
+                status=ToolResponseStatus.ERROR,
+                error=_error_payload(
                     AgentErrorCode.VALIDATION_ERROR,
                     f"Asset filter ({requested}) is not a listed reserve on {protocol} {chain}. "
                     f"Listed reserves: {known}",
@@ -3481,8 +3521,8 @@ class ToolExecutor:
         wallet = self._resolve_wallet(args, tool_name="get_portfolio")
         if not wallet:
             return ToolResponse(
-                status="error",
-                error=_error_dict(
+                status=ToolResponseStatus.ERROR,
+                error=_error_payload(
                     AgentErrorCode.VALIDATION_ERROR,
                     "wallet_address is required (none passed and no default wallet configured)",
                 ),
@@ -3601,13 +3641,15 @@ class ToolExecutor:
             lp_resp = await self._execute_list_lp_positions(
                 {"chain": chain, "wallet_address": wallet, "network": network}
             )
-            if lp_resp.status == "success" and lp_resp.data:
+            if lp_resp.status == ToolResponseStatus.SUCCESS and lp_resp.data:
                 summary["lp_positions"] = lp_resp.data.get("positions", [])
             else:
+                error_code = lp_resp.error.error_code.value if lp_resp.error else "unknown"
+                error_message = lp_resp.error.message if lp_resp.error else "list_lp_positions returned no data"
                 _warn(
                     "lp_positions",
-                    (lp_resp.error or {}).get("error_code", "unknown"),
-                    (lp_resp.error or {}).get("message", "list_lp_positions returned no data"),
+                    error_code,
+                    error_message,
                 )
 
         # Lending (Aave V3 only for v1). Gate on the lending connector's own
@@ -3619,7 +3661,7 @@ class ToolExecutor:
             lend_resp = await self._execute_list_lending_positions(
                 {"chain": chain, "wallet_address": wallet, "network": network}
             )
-            if lend_resp.status == "success" and lend_resp.data:
+            if lend_resp.status == ToolResponseStatus.SUCCESS and lend_resp.data:
                 total_debt = lend_resp.data.get("total_debt_usd", "0")
                 total_collat = lend_resp.data.get("total_collateral_usd", "0")
                 try:
@@ -3637,14 +3679,18 @@ class ToolExecutor:
                     # schema. (Gemini PR #1536 high-priority review.)
                     _warn("lending", "decode_error", f"could not parse totals as Decimal: {exc}")
             else:
+                error_code = lend_resp.error.error_code.value if lend_resp.error else "unknown"
+                error_message = (
+                    lend_resp.error.message if lend_resp.error else "list_lending_positions returned no data"
+                )
                 _warn(
                     "lending",
-                    (lend_resp.error or {}).get("error_code", "unknown"),
-                    (lend_resp.error or {}).get("message", "list_lending_positions returned no data"),
+                    error_code,
+                    error_message,
                 )
 
         summary["warnings"] = warnings
-        status = "partial" if warnings else "success"
+        status = ToolResponseStatus.PARTIAL if warnings else ToolResponseStatus.SUCCESS
         return ToolResponse(status=status, data=summary)
 
     async def _execute_compute_rebalance_candidate(self, args: dict) -> ToolResponse:
@@ -3707,7 +3753,7 @@ class ToolExecutor:
         )
 
         return ToolResponse(
-            status="success",
+            status=ToolResponseStatus.SUCCESS,
             data={
                 "viable": viable,
                 "reason": reason,
@@ -3771,11 +3817,11 @@ class ToolExecutor:
 
         # Gateway must return one response per request in the same order
         if len(resp.responses) != len(all_tokens):
+            message = f"BatchGetBalances returned {len(resp.responses)} responses for {len(all_tokens)} requests"
             return ToolResponse(
-                status="error",
-                data={
-                    "error": f"BatchGetBalances returned {len(resp.responses)} responses for {len(all_tokens)} requests"
-                },
+                status=ToolResponseStatus.ERROR,
+                data={"error": message},
+                error=_error_payload(AgentErrorCode.GATEWAY_ERROR, message, recoverable=True),
             )
 
         tokens = []
@@ -3799,7 +3845,7 @@ class ToolExecutor:
             total_usd += bal_usd
 
         return ToolResponse(
-            status="success",
+            status=ToolResponseStatus.SUCCESS,
             data={
                 "wallet_address": wallet,
                 "chain": chain,
@@ -3836,7 +3882,7 @@ class ToolExecutor:
 
         if not matched_rows:
             return ToolResponse(
-                status="success",
+                status=ToolResponseStatus.SUCCESS,
                 data={
                     "supported": False,
                     "protocol": args["protocol"],
@@ -3867,7 +3913,7 @@ class ToolExecutor:
 
         if query_chain and query_chain not in [c.lower() for c in supported_chains]:
             return ToolResponse(
-                status="success",
+                status=ToolResponseStatus.SUCCESS,
                 data={
                     "supported": False,
                     "protocol": display_name,
@@ -3880,7 +3926,7 @@ class ToolExecutor:
             )
 
         return ToolResponse(
-            status="success",
+            status=ToolResponseStatus.SUCCESS,
             data={
                 "supported": True,
                 "protocol": display_name,
@@ -4015,7 +4061,7 @@ class ToolExecutor:
         is_valid = len(violations) == 0
 
         return ToolResponse(
-            status="success",
+            status=ToolResponseStatus.SUCCESS,
             data={
                 "valid": is_valid,
                 "violations": violations,
@@ -4206,8 +4252,8 @@ class ToolExecutor:
         if ops is None:
             valid = ", ".join(sorted(self._INTENT_GAS_OPS))
             return ToolResponse(
-                status="error",
-                error=_error_dict(
+                status=ToolResponseStatus.ERROR,
+                error=_error_payload(
                     AgentErrorCode.INVALID_INTENT_TYPE,
                     f"Unknown intent_type '{intent_type}'. Valid types: {valid}",
                     recoverable=True,
@@ -4216,7 +4262,7 @@ class ToolExecutor:
         total_gas = sum(get_gas_estimate(chain, op) for op in ops)
 
         return ToolResponse(
-            status="success",
+            status=ToolResponseStatus.SUCCESS,
             data={
                 "gas_units": total_gas,
                 "gas_price_gwei": "",
@@ -4272,8 +4318,8 @@ class ToolExecutor:
         except Exception as e:  # noqa: BLE001 - gateway may raise any gRPC error
             logger.warning("Failed to fetch balances for risk metrics: %s", e)
             return ToolResponse(
-                status="error",
-                error=_error_dict(
+                status=ToolResponseStatus.ERROR,
+                error=_error_payload(
                     AgentErrorCode.GATEWAY_ERROR,
                     f"Failed to fetch balances for risk metrics: {e}",
                     recoverable=True,
@@ -4282,8 +4328,8 @@ class ToolExecutor:
 
         if not any_success:
             return ToolResponse(
-                status="error",
-                error=_error_dict(
+                status=ToolResponseStatus.ERROR,
+                error=_error_payload(
                     AgentErrorCode.ALL_QUERIES_FAILED,
                     "All balance queries returned errors; portfolio value is unknown.",
                     recoverable=True,
@@ -4314,7 +4360,7 @@ class ToolExecutor:
             explanation = f"Full risk metrics computed from {n} portfolio snapshots."
 
         return ToolResponse(
-            status="success",
+            status=ToolResponseStatus.SUCCESS,
             data={
                 "portfolio_value_usd": str(total_value_usd),
                 "var_95": metrics["var_95_pct"],
@@ -4341,8 +4387,8 @@ class ToolExecutor:
             share_price = sdk.get_share_price(vault_address)
         except Exception as e:
             return ToolResponse(
-                status="error",
-                error=_error_dict(
+                status=ToolResponseStatus.ERROR,
+                error=_error_payload(
                     AgentErrorCode.VAULT_READ_FAILED,
                     f"Failed to read vault state: {e}",
                     recoverable=True,
@@ -4350,7 +4396,7 @@ class ToolExecutor:
             )
 
         return ToolResponse(
-            status="success",
+            status=ToolResponseStatus.SUCCESS,
             data={
                 "status": "active",
                 "total_assets": str(total_assets),
@@ -4377,8 +4423,8 @@ class ToolExecutor:
         (VIB-5694); until then the runner settles automatically each interval.
         """
         return ToolResponse(
-            status="error",
-            error=_error_dict(
+            status=ToolResponseStatus.ERROR,
+            error=_error_payload(
                 AgentErrorCode.VAULT_SETTLEMENT_UNSUPPORTED,
                 (
                     f"'{tool_name}' is not available from the agent-tool surface. "
@@ -4418,8 +4464,8 @@ class ToolExecutor:
         if not missing:
             return None
         return ToolResponse(
-            status="error",
-            error=_error_dict(
+            status=ToolResponseStatus.ERROR,
+            error=_error_payload(
                 AgentErrorCode.TEARDOWN_MISSING_SUB_TOOLS,
                 f"teardown_vault requires these sub-tools to be in allowed_tools: "
                 f"{sorted(missing)}. Add them to the policy's allowed_tools set.",
@@ -4492,7 +4538,7 @@ class ToolExecutor:
                         "dry_run": ctx.dry_run,
                     },
                 )
-                if close_result.status == "success":
+                if close_result.status == ToolResponseStatus.SUCCESS:
                     ctx.positions_closed += 1
                     if close_result.data and close_result.data.get("tx_hash"):
                         ctx.tx_hashes.append(close_result.data["tx_hash"])
@@ -4524,8 +4570,8 @@ class ToolExecutor:
                     severity="critical",
                 )
                 return ToolResponse(
-                    status="error",
-                    error=_error_dict(
+                    status=ToolResponseStatus.ERROR,
+                    error=_error_payload(
                         AgentErrorCode.TEARDOWN_LP_CLOSE_FAILED,
                         f"LP position close failed: {lp_close_error}. Will retry on next teardown attempt.",
                         recoverable=True,
@@ -4564,7 +4610,7 @@ class ToolExecutor:
         if lp_position_id:
             try:
                 lp_info = await self._execute_get_lp_position({"position_id": str(lp_position_id), "chain": ctx.chain})
-                if lp_info.status == "success" and lp_info.data:
+                if lp_info.status == ToolResponseStatus.SUCCESS and lp_info.data:
                     for key in ("token_a", "token_b"):
                         addr = lp_info.data.get(key, "")
                         if addr and addr.lower() != underlying_token.lower():
@@ -4591,7 +4637,7 @@ class ToolExecutor:
                 },
             )
             if not (
-                balance_result.status == "success"
+                balance_result.status == ToolResponseStatus.SUCCESS
                 and balance_result.data
                 and float(balance_result.data.get("balance", "0")) > 0
             ):
@@ -4607,7 +4653,7 @@ class ToolExecutor:
                     "dry_run": ctx.dry_run,
                 },
             )
-            if swap_result.status == "success":
+            if swap_result.status == ToolResponseStatus.SUCCESS:
                 ctx.swaps_executed += 1
                 if swap_result.data and swap_result.data.get("tx_hash"):
                     ctx.tx_hashes.append(swap_result.data["tx_hash"])
@@ -4675,7 +4721,7 @@ class ToolExecutor:
             logger.warning("Failed to read final NAV during teardown: %s", e)
             return 0
 
-    def _teardown_finalize_status(self, ctx: _TeardownContext) -> str:
+    def _teardown_finalize_status(self, ctx: _TeardownContext) -> ToolResponseStatus:
         """Persist terminal state and return the teardown status.
 
         teardown_vault owns risk removal (LP close + swap). Reaching here means
@@ -4690,7 +4736,7 @@ class ToolExecutor:
         from almanak.gateway.proto import gateway_pb2
 
         if ctx.dry_run:
-            return "simulated"
+            return ToolResponseStatus.SIMULATED
 
         # Success: promote to torn_down and clear the _teardown sub-state.
         ctx.agent_state["phase"] = "torn_down"
@@ -4706,7 +4752,7 @@ class ToolExecutor:
             )
         except Exception:
             logger.warning("Failed to save teardown state")
-        return "success"
+        return ToolResponseStatus.SUCCESS
 
     async def _execute_teardown_vault(self, args: dict) -> ToolResponse:
         """Deterministic vault teardown with crash-recovery state machine.
@@ -4741,7 +4787,7 @@ class ToolExecutor:
         # Fast-path: already torn down.
         if ctx.agent_state.get("phase") == "torn_down" or ctx.teardown_phase == "torn_down":
             return ToolResponse(
-                status="success",
+                status=ToolResponseStatus.SUCCESS,
                 data={"status": "success", "message": "Vault already torn down"},
             )
 
@@ -4821,14 +4867,16 @@ class ToolExecutor:
             )
 
         tx_hash = exec_resp.tx_hashes[0] if exec_resp.tx_hashes else None
-        status = "simulated" if dry_run else "success"
-        return ToolResponse(
-            status=status,
+        return _action_result_response(
+            success=exec_resp.success,
+            dry_run=dry_run,
             data={
-                "status": status,
                 "tx_hash": tx_hash,
                 "message": f"Safe approved vault {vault_address[:10]}... for underlying token",
             },
+            operation="Vault underlying approval",
+            failure_detail=exec_resp.error,
+            include_status_in_data=True,
         )
 
     # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
@@ -4910,16 +4958,18 @@ class ToolExecutor:
             )
 
         tx_hash = exec_resp.tx_hashes[-1] if exec_resp.tx_hashes else None
-        status = "simulated" if dry_run else "success"
-        return ToolResponse(
-            status=status,
+        return _action_result_response(
+            success=exec_resp.success,
+            dry_run=dry_run,
             data={
-                "status": status,
                 "tx_hash": tx_hash,
                 "approve_tx_hash": approve_resp.tx_hashes[-1] if approve_resp.tx_hashes else None,
                 "amount_deposited": str(amount),
                 "message": f"Deposited {amount} into vault {vault_address[:10]}...",
             },
+            operation="Vault deposit",
+            failure_detail=exec_resp.error,
+            include_status_in_data=True,
         )
 
     # ── STATE TOOLS ─────────────────────────────────────────────────────
@@ -4945,8 +4995,17 @@ class ToolExecutor:
             if resp.success:
                 self._state_versions[deployment_id] = resp.new_version
             return ToolResponse(
-                status="success" if resp.success else "error",
+                status=ToolResponseStatus.SUCCESS if resp.success else ToolResponseStatus.ERROR,
                 data={"version": resp.new_version, "checksum": resp.checksum},
+                error=(
+                    None
+                    if resp.success
+                    else _error_payload(
+                        AgentErrorCode.RECORD_FAILED,
+                        str(getattr(resp, "error", "Failed to save agent state")),
+                        recoverable=True,
+                    )
+                ),
             )
 
         if tool_name == "load_agent_state":
@@ -4956,21 +5015,21 @@ class ToolExecutor:
                 # Track version for subsequent saves
                 self._state_versions[deployment_id] = resp.version
                 return ToolResponse(
-                    status="success",
+                    status=ToolResponseStatus.SUCCESS,
                     data={"state": state, "version": resp.version},
                 )
             except Exception as e:
                 if "NOT_FOUND" in str(e):
                     return ToolResponse(
-                        status="success",
+                        status=ToolResponseStatus.SUCCESS,
                         data={"state": {}, "version": 0},
                         explanation="No previous state found.",
                     )
                 # Real error -- propagate so the agent knows state loading failed
                 logger.error("Failed to load agent state: %s", e)
                 return ToolResponse(
-                    status="error",
-                    error=_error_dict(
+                    status=ToolResponseStatus.ERROR,
+                    error=_error_payload(
                         AgentErrorCode.STATE_LOAD_FAILED,
                         f"Failed to load state: {e}",
                         recoverable=True,
@@ -5000,8 +5059,8 @@ class ToolExecutor:
             except Exception as e:
                 logger.warning("Failed to record agent decision: %s", e)
                 return ToolResponse(
-                    status="error",
-                    error=_error_dict(
+                    status=ToolResponseStatus.ERROR,
+                    error=_error_payload(
                         AgentErrorCode.RECORD_FAILED,
                         f"Failed to record decision: {e}",
                         recoverable=True,
@@ -5010,7 +5069,7 @@ class ToolExecutor:
                 )
 
             return ToolResponse(
-                status="success",
+                status=ToolResponseStatus.SUCCESS,
                 data={"recorded": True, "decision_id": decision_id},
             )
 

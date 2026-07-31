@@ -3,6 +3,7 @@
 import pytest
 from pydantic import ValidationError
 
+from almanak.framework.agent_tools.errors import AgentErrorCode, ErrorCategory
 from almanak.framework.agent_tools.schemas import (
     BatchGetBalancesRequest,
     CloseLPPositionRequest,
@@ -14,6 +15,7 @@ from almanak.framework.agent_tools.schemas import (
     SaveAgentStateRequest,
     SwapTokensRequest,
     ToolResponse,
+    ToolResponseStatus,
 )
 
 
@@ -25,9 +27,20 @@ class TestToolResponse:
         assert r.error is None
 
     def test_error_envelope(self):
-        r = ToolResponse(status="error", error={"code": "fail", "message": "bad"})
+        r = ToolResponse(
+            status="error",
+            error={
+                "error_code": "execution_failed",
+                "message": "bad",
+                "recoverable": False,
+                "error_category": "non_retryable",
+            },
+        )
         assert r.status == "error"
         assert r.data is None
+        assert r.error is not None
+        assert r.error.error_code is AgentErrorCode.EXECUTION_FAILED
+        assert r.error.error_category is ErrorCategory.NON_RETRYABLE
 
     def test_with_hints(self):
         r = ToolResponse(
@@ -38,6 +51,58 @@ class TestToolResponse:
         )
         assert r.decision_hints == {"volatility": "high"}
         assert r.explanation == "Market is volatile."
+
+    @pytest.mark.parametrize("status", list(ToolResponseStatus))
+    def test_status_json_round_trip_preserves_wire_value(self, status):
+        error = None
+        if status.requires_error_payload:
+            error = {
+                "error_code": "risk_blocked" if status is ToolResponseStatus.BLOCKED else "execution_failed",
+                "message": "failed",
+                "recoverable": False,
+                "error_category": "policy_violation" if status is ToolResponseStatus.BLOCKED else "non_retryable",
+            }
+        response = ToolResponse(status=status, data={"ok": True}, error=error)
+
+        wire = response.model_dump_json(exclude_none=True)
+        decoded = ToolResponse.model_validate_json(wire)
+
+        assert decoded == response
+        assert decoded.model_dump(mode="json", exclude_none=True)["status"] == status.value
+
+    def test_unknown_status_is_rejected(self):
+        with pytest.raises(ValidationError, match="status"):
+            ToolResponse.model_validate({"status": "unknown"})
+
+    def test_unknown_error_code_is_rejected(self):
+        with pytest.raises(ValidationError, match="error_code"):
+            ToolResponse.model_validate(
+                {
+                    "status": "error",
+                    "error": {
+                        "error_code": "typo_code",
+                        "message": "bad",
+                        "recoverable": False,
+                        "error_category": "non_retryable",
+                    },
+                }
+            )
+
+    def test_error_status_requires_payload(self):
+        with pytest.raises(ValidationError, match="requires a structured error payload"):
+            ToolResponse(status="error")
+
+    def test_success_status_rejects_error_payload(self):
+        with pytest.raises(ValidationError, match="cannot include an error payload"):
+            ToolResponse(
+                status="success",
+                error={
+                    "error_code": "internal_error",
+                    "message": "impossible",
+                    "recoverable": False,
+                    "error_category": "non_retryable",
+                },
+            )
 
 
 class TestReadToolSchemas:
@@ -118,9 +183,7 @@ class TestActionToolSchemas:
     def test_borrow_with_collateral(self):
         from almanak.framework.agent_tools.schemas import BorrowLendingRequest
 
-        req = BorrowLendingRequest(
-            token="USDC", amount="5000", collateral_token="WETH", collateral_amount="2.0"
-        )
+        req = BorrowLendingRequest(token="USDC", amount="5000", collateral_token="WETH", collateral_amount="2.0")
         assert req.collateral_token == "WETH"
         assert req.collateral_amount == "2.0"
 
@@ -180,58 +243,82 @@ class TestSchemaValidation:
     # -- OpenLPPositionRequest --
     def test_lp_open_positive_amounts(self):
         req = OpenLPPositionRequest(
-            token_a="WETH", token_b="USDC",
-            amount_a="1.0", amount_b="3200",
-            price_lower="2800", price_upper="3600",
+            token_a="WETH",
+            token_b="USDC",
+            amount_a="1.0",
+            amount_b="3200",
+            price_lower="2800",
+            price_upper="3600",
         )
         assert req.amount_a == "1.0"
 
     def test_lp_open_zero_amount_rejected(self):
         with pytest.raises(ValidationError, match="positive"):
             OpenLPPositionRequest(
-                token_a="WETH", token_b="USDC",
-                amount_a="0", amount_b="3200",
-                price_lower="2800", price_upper="3600",
+                token_a="WETH",
+                token_b="USDC",
+                amount_a="0",
+                amount_b="3200",
+                price_lower="2800",
+                price_upper="3600",
             )
 
     def test_lp_open_price_lower_gte_upper_rejected(self):
         with pytest.raises(ValidationError, match="price_lower"):
             OpenLPPositionRequest(
-                token_a="WETH", token_b="USDC",
-                amount_a="1.0", amount_b="3200",
-                price_lower="3600", price_upper="2800",
+                token_a="WETH",
+                token_b="USDC",
+                amount_a="1.0",
+                amount_b="3200",
+                price_lower="3600",
+                price_upper="2800",
             )
 
     def test_lp_open_price_equal_rejected(self):
         with pytest.raises(ValidationError, match="price_lower"):
             OpenLPPositionRequest(
-                token_a="WETH", token_b="USDC",
-                amount_a="1.0", amount_b="3200",
-                price_lower="3000", price_upper="3000",
+                token_a="WETH",
+                token_b="USDC",
+                amount_a="1.0",
+                amount_b="3200",
+                price_lower="3000",
+                price_upper="3000",
             )
 
     def test_lp_open_fee_tier_bounds(self):
         req = OpenLPPositionRequest(
-            token_a="WETH", token_b="USDC",
-            amount_a="1.0", amount_b="3200",
-            fee_tier=100, price_lower="2800", price_upper="3600",
+            token_a="WETH",
+            token_b="USDC",
+            amount_a="1.0",
+            amount_b="3200",
+            fee_tier=100,
+            price_lower="2800",
+            price_upper="3600",
         )
         assert req.fee_tier == 100
 
     def test_lp_open_fee_tier_too_low_rejected(self):
         with pytest.raises(ValidationError):
             OpenLPPositionRequest(
-                token_a="WETH", token_b="USDC",
-                amount_a="1.0", amount_b="3200",
-                fee_tier=50, price_lower="2800", price_upper="3600",
+                token_a="WETH",
+                token_b="USDC",
+                amount_a="1.0",
+                amount_b="3200",
+                fee_tier=50,
+                price_lower="2800",
+                price_upper="3600",
             )
 
     def test_lp_open_fee_tier_too_high_rejected(self):
         with pytest.raises(ValidationError):
             OpenLPPositionRequest(
-                token_a="WETH", token_b="USDC",
-                amount_a="1.0", amount_b="3200",
-                fee_tier=100001, price_lower="2800", price_upper="3600",
+                token_a="WETH",
+                token_b="USDC",
+                amount_a="1.0",
+                amount_b="3200",
+                fee_tier=100001,
+                price_lower="2800",
+                price_upper="3600",
             )
 
     # -- SupplyLendingRequest --

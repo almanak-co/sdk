@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from almanak.framework.agent_tools.errors import AgentErrorCode
 from almanak.framework.agent_tools.executor import ToolExecutor
 from almanak.framework.agent_tools.policy import AgentPolicy
 from almanak.framework.agent_tools.schemas import ToolResponse
@@ -66,6 +67,44 @@ def _mock_exec_response(success=True, tx_hashes=None, error=""):
     resp.error = error
     resp.receipts = b"[]"
     return resp
+
+
+class TestApproveVaultUnderlying:
+    @pytest.mark.asyncio
+    async def test_dry_run_failure_returns_typed_simulation_error(self, executor, mock_gateway):
+        bundle = MagicMock()
+        bundle.to_dict.return_value = {"actions": []}
+        deployer = MagicMock()
+        deployer.build_post_deploy_bundle.return_value = bundle
+        capability = MagicMock()
+        capability.build_deployer.return_value = deployer
+
+        exec_resp = MagicMock()
+        exec_resp.success = False
+        exec_resp.tx_hashes = []
+        exec_resp.error = "approval simulation reverted"
+        mock_gateway.execution.Execute.return_value = exec_resp
+
+        with (
+            patch.object(executor, "_vault_capability", return_value=capability),
+            patch.object(executor, "_resolve_simulation_flag", return_value=True),
+        ):
+            result = await executor.execute(
+                "approve_vault_underlying",
+                {
+                    "chain": "base",
+                    "vault_address": "0x" + "a" * 40,
+                    "underlying_token": "0x" + "c" * 40,
+                    "safe_address": "0x" + "b" * 40,
+                    "dry_run": True,
+                },
+            )
+
+        assert result.status == "error"
+        assert result.error is not None
+        assert result.error.error_code is AgentErrorCode.SIMULATION_FAILED
+        assert result.error.recoverable is True
+        assert result.error.message == "approval simulation reverted"
 
 
 # ── E4: Deploy idempotency ─────────────────────────────────────────

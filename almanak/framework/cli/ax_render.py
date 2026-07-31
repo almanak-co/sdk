@@ -12,10 +12,11 @@ from __future__ import annotations
 import json
 import re
 import sys
+from typing import assert_never
 
 import click
 
-from almanak.framework.agent_tools.schemas import ToolResponse
+from almanak.framework.agent_tools.schemas import ToolResponse, ToolResponseStatus
 
 # Strip ANSI escape sequences and control characters from untrusted strings
 # to prevent terminal manipulation via malicious LLM or gateway responses.
@@ -140,28 +141,24 @@ def render_interpretation(
 
 def _render_json(response: ToolResponse) -> None:
     """Output ToolResponse as pretty-printed JSON."""
-    output: dict[str, object] = {"status": response.status}
-    if response.data:
-        output["data"] = response.data
-    if response.error:
-        output["error"] = response.error
-    if response.explanation:
-        output["explanation"] = response.explanation
-    click.echo(json.dumps(output, indent=2, default=str))
+    click.echo(json.dumps(response.model_dump(mode="json", exclude_none=True), indent=2))
 
 
 def _render_human(response: ToolResponse, *, title: str = "Result") -> None:
     """Output ToolResponse as a human-readable table."""
     # Status line
-    status = response.status
-    if status == "success":
-        status_str = click.style("SUCCESS", fg="green", bold=True)
-    elif status == "simulated":
-        status_str = click.style("SIMULATED", fg="yellow", bold=True)
-    elif status == "error":
-        status_str = click.style("ERROR", fg="red", bold=True)
-    else:
-        status_str = click.style(status.upper(), bold=True)
+    status = ToolResponseStatus(response.status)
+    match status:
+        case ToolResponseStatus.SUCCESS:
+            status_str = click.style("SUCCESS", fg="green", bold=True)
+        case ToolResponseStatus.SIMULATED:
+            status_str = click.style("SIMULATED", fg="yellow", bold=True)
+        case ToolResponseStatus.PARTIAL:
+            status_str = click.style("PARTIAL", fg="yellow", bold=True)
+        case ToolResponseStatus.BLOCKED | ToolResponseStatus.REJECTED | ToolResponseStatus.ERROR:
+            status_str = click.style(status.value.upper(), fg="red", bold=True)
+        case _ as unreachable:
+            assert_never(unreachable)
 
     click.echo(f"\n{title}: {status_str}")
     click.echo("-" * 40)
@@ -173,14 +170,10 @@ def _render_human(response: ToolResponse, *, title: str = "Result") -> None:
             click.echo(f"  {_sanitize(str(key)):<{max_key_len + 2}} {_sanitize(str(value))}")
 
     # Error details
-    if response.error:
+    if status.requires_error_payload and response.error:
         click.echo()
-        if isinstance(response.error, dict):
-            msg = response.error.get("message", str(response.error))
-            recoverable = response.error.get("recoverable")
-        else:
-            msg = str(response.error)
-            recoverable = False
+        msg = response.error.message
+        recoverable = response.error.recoverable
         click.echo(click.style(f"  Error: {_sanitize(msg)}", fg="red"))
         if recoverable:
             click.echo(click.style("  (recoverable)", fg="yellow"))

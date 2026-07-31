@@ -6,9 +6,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.agent_tools.executor import ToolExecutor, _decode_int24
+from almanak.framework.agent_tools.errors import AgentErrorCode
+from almanak.framework.agent_tools.executor import ToolExecutor, _action_result_response, _decode_int24
 from almanak.framework.agent_tools.policy import AgentPolicy
-from almanak.framework.agent_tools.schemas import ToolResponse
+from almanak.framework.agent_tools.schemas import ToolResponse, ToolResponseStatus
 
 
 @pytest.fixture
@@ -38,6 +39,45 @@ def executor(mock_gateway):
         wallet_address="0x1234567890abcdef1234567890abcdef12345678",
         deployment_id="test-strategy",
     )
+
+
+class TestActionResultResponse:
+    @pytest.mark.parametrize(
+        ("success", "dry_run", "expected_status", "expected_code", "recoverable"),
+        [
+            (True, False, ToolResponseStatus.SUCCESS, None, None),
+            (True, True, ToolResponseStatus.SIMULATED, None, None),
+            (False, False, ToolResponseStatus.ERROR, AgentErrorCode.EXECUTION_FAILED, False),
+            (False, True, ToolResponseStatus.ERROR, AgentErrorCode.SIMULATION_FAILED, True),
+        ],
+    )
+    def test_maps_action_outcomes_to_canonical_envelope(
+        self,
+        success,
+        dry_run,
+        expected_status,
+        expected_code,
+        recoverable,
+    ):
+        data = {"tx_hash": "0xabc"}
+
+        response = _action_result_response(
+            success=success,
+            dry_run=dry_run,
+            data=data,
+            operation="Test action",
+            include_status_in_data=True,
+        )
+
+        assert response.status is expected_status
+        assert response.data == {"status": expected_status, "tx_hash": "0xabc"}
+        assert data == {"tx_hash": "0xabc"}
+        if expected_code is None:
+            assert response.error is None
+        else:
+            assert response.error is not None
+            assert response.error.error_code is expected_code
+            assert response.error.recoverable is recoverable
 
 
 class TestToolExecutorBasics:
@@ -380,6 +420,35 @@ class TestActionToolDispatch:
         assert result.status == "success"
         assert result.data["success"] is True
         assert result.data["tx_hashes"] == ["0xdef456"]
+
+    @pytest.mark.asyncio
+    async def test_execute_compiled_bundle_dry_run_failure_returns_simulation_error(self, executor, mock_gateway):
+        compile_resp = MagicMock()
+        compile_resp.success = True
+        compile_resp.action_bundle = b'{"actions": []}'
+        compile_resp.error = ""
+        mock_gateway.execution.CompileIntent.return_value = compile_resp
+        compile_result = await executor.execute(
+            "compile_intent",
+            {"intent_type": "swap", "params": {"from_token": "USDC", "to_token": "ETH", "amount": "1"}},
+        )
+
+        exec_resp = MagicMock()
+        exec_resp.success = False
+        exec_resp.tx_hashes = []
+        exec_resp.error = "simulation reverted"
+        mock_gateway.execution.Execute.return_value = exec_resp
+
+        result = await executor.execute(
+            "execute_compiled_bundle",
+            {"bundle_id": compile_result.data["bundle_id"], "chain": "arbitrum", "dry_run": True},
+        )
+
+        assert result.status is ToolResponseStatus.ERROR
+        assert result.error is not None
+        assert result.error.error_code is AgentErrorCode.SIMULATION_FAILED
+        assert result.error.recoverable is True
+        assert result.error.message == "simulation reverted"
 
     @pytest.mark.asyncio
     async def test_execute_compiled_bundle_missing_bundle(self, executor):
@@ -1443,6 +1512,7 @@ class TestAlertingIntegration:
             {"token_in": "USDC", "token_out": "ETH", "amount": "100", "chain": "arbitrum"},
         )
         assert result.status == "error"
+        assert result.error.error_code is AgentErrorCode.EXECUTION_FAILED
         # Second failure should trip circuit breaker (threshold=2)
         assert executor._policy_engine.consecutive_failures >= 2
         assert executor._policy_engine.is_circuit_breaker_tripped

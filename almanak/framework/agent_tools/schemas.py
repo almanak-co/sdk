@@ -12,10 +12,13 @@ from __future__ import annotations
 
 import re
 from decimal import Decimal, InvalidOperation
+from enum import StrEnum
+from typing import assert_never
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from almanak.core.chains import DEFAULT_CHAIN, DEFAULT_VAULT_CHAIN
+from almanak.framework.agent_tools.errors import ToolErrorPayload
 
 
 def _validate_positive_decimal(v: str, field_name: str) -> str:
@@ -91,14 +94,66 @@ def _check_market_id(protocol: str, market_id: str | None, op: str) -> None:
 # =============================================================================
 
 
+class ToolResponseStatus(StrEnum):
+    """Closed status vocabulary for the LLM-facing response protocol."""
+
+    SUCCESS = "success"
+    SIMULATED = "simulated"
+    PARTIAL = "partial"
+    BLOCKED = "blocked"
+    REJECTED = "rejected"
+    ERROR = "error"
+
+    @property
+    def is_error(self) -> bool:
+        """Whether adapters should expose this result as a failed tool call."""
+        match self:
+            case ToolResponseStatus.SUCCESS | ToolResponseStatus.SIMULATED | ToolResponseStatus.PARTIAL:
+                return False
+            case ToolResponseStatus.BLOCKED | ToolResponseStatus.REJECTED | ToolResponseStatus.ERROR:
+                return True
+        assert_never(self)
+
+    @property
+    def requires_error_payload(self) -> bool:
+        """Whether this status must carry a structured error payload."""
+        match self:
+            case ToolResponseStatus.ERROR | ToolResponseStatus.BLOCKED:
+                return True
+            case (
+                ToolResponseStatus.SUCCESS
+                | ToolResponseStatus.SIMULATED
+                | ToolResponseStatus.PARTIAL
+                | ToolResponseStatus.REJECTED
+            ):
+                return False
+        assert_never(self)
+
+
 class ToolResponse(BaseModel):
     """Standard wrapper returned by every tool."""
 
-    status: str = Field(description="'success', 'simulated', 'blocked', or 'error'")
+    model_config = ConfigDict(extra="forbid")
+
+    status: ToolResponseStatus = Field(description="Closed result status; serialized as its lowercase wire value")
     data: dict | None = Field(default=None, description="Tool-specific result payload")
-    error: dict | None = Field(default=None, description="Structured error if status == 'error'")
+    error: ToolErrorPayload | None = Field(default=None, description="Structured error for error/blocked results")
     decision_hints: dict | None = Field(default=None, description="Machine-readable hints for agent reasoning")
     explanation: str | None = Field(default=None, description="Human-readable context about the result")
+
+    @model_validator(mode="after")
+    def validate_status_error_invariant(self) -> ToolResponse:
+        """Reject impossible status/error combinations at the boundary."""
+        if self.status.requires_error_payload and self.error is None:
+            raise ValueError(f"status={self.status.value!r} requires a structured error payload")
+        if not self.status.requires_error_payload and self.error is not None:
+            raise ValueError(f"status={self.status.value!r} cannot include an error payload")
+        return self
+
+    @property
+    def is_error(self) -> bool:
+        """Whether this result represents a failed or denied tool call."""
+        return self.status.is_error
 
 
 # =============================================================================

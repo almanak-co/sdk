@@ -13,6 +13,9 @@ The ``ErrorCategory`` enum tells agents *how* to handle each error
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Literal, overload
+
+from pydantic import BaseModel, ConfigDict
 
 # ---------------------------------------------------------------------------
 # Error code enum -- single source of truth for all error_code values
@@ -41,6 +44,7 @@ class AgentErrorCode(StrEnum):
     SIMULATION_FAILED = "simulation_failed"
 
     # -- Infrastructure errors ----------------------------------------------
+    NO_EXECUTOR = "no_executor"
     GATEWAY_ERROR = "gateway_error"
     RPC_FAILED = "rpc_failed"
     TIMEOUT = "timeout"
@@ -127,10 +131,64 @@ ERROR_CATEGORIES: dict[AgentErrorCode, ErrorCategory] = {
     AgentErrorCode.UNSUPPORTED_CHAIN: ErrorCategory.CONFIGURATION,
     AgentErrorCode.TEARDOWN_MISSING_SUB_TOOLS: ErrorCategory.CONFIGURATION,
     AgentErrorCode.PREFLIGHT_FAILED: ErrorCategory.CONFIGURATION,
+    AgentErrorCode.NO_EXECUTOR: ErrorCategory.CONFIGURATION,
     # Settlement is not something the agent can retry or reconfigure into
     # existence -- it is owned by the runner. Route the operator to it.
     AgentErrorCode.VAULT_SETTLEMENT_UNSUPPORTED: ErrorCategory.REQUIRES_HUMAN,
 }
+
+
+class ToolErrorPayload(BaseModel):
+    """Closed, wire-compatible error payload for :class:`ToolResponse`.
+
+    The model is intentionally immutable and rejects unknown fields so every
+    executor and adapter observes the same error contract. Mapping-style
+    access is retained for SDK compatibility with existing callers that use
+    ``response.error["error_code"]`` or ``response.error.get("message")``.
+    New code should prefer the typed attributes.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    error_code: AgentErrorCode
+    message: str
+    recoverable: bool
+    error_category: ErrorCategory
+    suggestion: str | None = None
+    tool_name: str | None = None
+
+    @overload
+    def __getitem__(self, key: Literal["error_code"]) -> AgentErrorCode: ...
+
+    @overload
+    def __getitem__(self, key: Literal["error_category"]) -> ErrorCategory: ...
+
+    @overload
+    def __getitem__(self, key: Literal["message"]) -> str: ...
+
+    @overload
+    def __getitem__(self, key: Literal["suggestion", "tool_name"]) -> str | None: ...
+
+    @overload
+    def __getitem__(self, key: Literal["recoverable"]) -> bool: ...
+
+    @overload
+    def __getitem__(self, key: str) -> object: ...
+
+    def __getitem__(self, key: str) -> object:
+        payload = self.model_dump(exclude_none=True)
+        try:
+            return payload[key]
+        except KeyError as exc:
+            raise KeyError(key) from exc
+
+    def get(self, key: str, default: object = None) -> object:
+        """Return a field using the legacy mapping-style API."""
+        return self.model_dump(exclude_none=True).get(key, default)
+
+    def __contains__(self, key: object) -> bool:
+        """Preserve membership checks from the historical dictionary payload."""
+        return isinstance(key, str) and key in self.model_dump(exclude_none=True)
 
 
 def get_error_category(code: AgentErrorCode | str) -> ErrorCategory:
@@ -169,13 +227,15 @@ class ToolError(Exception):
 
     def __init__(
         self,
-        code: str,
+        code: AgentErrorCode,
         message: str,
         *,
         recoverable: bool = False,
         suggestion: str | None = None,
         tool_name: str | None = None,
     ) -> None:
+        if not isinstance(code, AgentErrorCode):
+            raise TypeError("ToolError code must be an AgentErrorCode")
         self.code = code
         self.message = message
         self.recoverable = recoverable
@@ -183,19 +243,20 @@ class ToolError(Exception):
         self.tool_name = tool_name
         super().__init__(f"[{code}] {message}")
 
-    def to_dict(self) -> dict:
-        """Serialize to a dict suitable for tool response envelopes."""
-        d: dict = {
-            "error_code": self.code,
-            "message": self.message,
-            "recoverable": self.recoverable,
-            "error_category": get_error_category(self.code).value,
-        }
-        if self.suggestion:
-            d["suggestion"] = self.suggestion
-        if self.tool_name:
-            d["tool_name"] = self.tool_name
-        return d
+    def to_payload(self) -> ToolErrorPayload:
+        """Build the typed payload used by tool response envelopes."""
+        return ToolErrorPayload(
+            error_code=self.code,
+            message=self.message,
+            recoverable=self.recoverable,
+            error_category=get_error_category(self.code),
+            suggestion=self.suggestion,
+            tool_name=self.tool_name,
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        """Serialize to the historical JSON-compatible dictionary shape."""
+        return self.to_payload().model_dump(mode="json", exclude_none=True)
 
 
 # ---------------------------------------------------------------------------

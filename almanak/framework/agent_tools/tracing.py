@@ -21,7 +21,10 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, NotRequired, TypedDict
+
+from almanak.framework.agent_tools.errors import AgentErrorCode
+from almanak.framework.agent_tools.schemas import ToolResponseStatus
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +44,19 @@ SENSITIVE_FIELDS = frozenset(
 )
 
 _REDACTED = "***REDACTED***"
+
+
+class ToolExecutionTrace(TypedDict):
+    """Typed subset of a tool response retained in observability traces."""
+
+    status: ToolResponseStatus
+    data_keys: NotRequired[list[str]]
+    error_code: NotRequired[AgentErrorCode]
+
+
+def _trace_status_is_error(result: ToolExecutionTrace) -> bool:
+    """Classify a typed trace status, accepting legacy string fixtures."""
+    return ToolResponseStatus(result["status"]).is_error
 
 
 # ---------------------------------------------------------------------------
@@ -63,7 +79,7 @@ class TraceEntry:
     tool_name: str
     args: dict
     policy_result: dict | None
-    execution_result: dict | None
+    execution_result: ToolExecutionTrace | None
     error: str | None
     duration_ms: float
     state_delta: dict | None = None
@@ -224,7 +240,7 @@ class DecisionTracer:
         tool_name: str,
         args: dict,
         policy_result: dict | None,
-        execution_result: dict | None,
+        execution_result: ToolExecutionTrace | None,
         error: str | None,
         duration_ms: float,
         state_delta: dict | None = None,
@@ -286,12 +302,12 @@ class DecisionTracer:
         successful = sum(
             1
             for e in self._entries
-            if e.error is None and e.execution_result is not None and e.execution_result.get("status") != "error"
+            if e.error is None and e.execution_result is not None and not _trace_status_is_error(e.execution_result)
         )
         failed = sum(
             1
             for e in self._entries
-            if e.error is not None or (e.execution_result is not None and e.execution_result.get("status") == "error")
+            if e.error is not None or (e.execution_result is not None and _trace_status_is_error(e.execution_result))
         )
         policy_denied = sum(
             1 for e in self._entries if e.policy_result is not None and not e.policy_result.get("allowed", True)

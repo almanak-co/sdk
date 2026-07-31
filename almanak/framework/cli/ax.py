@@ -18,10 +18,16 @@ import click
 
 from almanak.config.cli_options import gateway_client_options
 from almanak.core.chains import DEFAULT_CHAIN, ChainRegistry
+from almanak.framework.agent_tools.schemas import ToolResponse, ToolResponseStatus
 from almanak.framework.data.models import _NATIVE_TO_WRAPPED
 
 if TYPE_CHECKING:
     from almanak.gateway.managed import ManagedGateway
+
+
+def _response_is_error(response: ToolResponse) -> bool:
+    """Classify a CLI result through the closed response-status vocabulary."""
+    return ToolResponseStatus(response.status).is_error
 
 
 def _action_options(fn):
@@ -287,7 +293,7 @@ def _handle_natural_language(ctx: click.Context, text: str):
             action.arguments["dry_run"] = True
             response = _run_tool(ctx, action.tool_name, action.arguments)
             render_simulation(response, json_output=json_output)
-            if response.status == "error":
+            if _response_is_error(response):
                 sys.exit(1)
             return
 
@@ -304,7 +310,7 @@ def _handle_natural_language(ctx: click.Context, text: str):
 
         response = _run_tool(ctx, action.tool_name, action.arguments)
         render_result(response, json_output=json_output, title=action.tool_name)
-        if response.status == "error":
+        if _response_is_error(response):
             sys.exit(1)
     except click.ClickException:
         raise
@@ -622,7 +628,7 @@ def price(ctx, token):
             },
         )
         render_result(response, json_output=json_output, title=f"Price: {token.upper()}")
-        if response.status == "error":
+        if _response_is_error(response):
             sys.exit(1)
     except click.ClickException:
         raise
@@ -1178,7 +1184,7 @@ def balance(ctx, token):
             },
         )
         render_result(response, json_output=json_output, title=f"Balance: {token.upper()}")
-        if response.status == "error":
+        if _response_is_error(response):
             sys.exit(1)
     except click.ClickException:
         raise
@@ -1259,12 +1265,12 @@ def swap(ctx, from_token, to_token, amount, slippage, protocol, sub_yes, sub_dry
             args["dry_run"] = True
             response = _run_tool(ctx, "swap_tokens", args)
             render_simulation(response, json_output=json_output)
-            if is_native_output and not json_output and response.status != "error":
+            if is_native_output and not json_output and not _response_is_error(response):
                 click.echo(
                     f"\nNote: DEX swaps produce {wrapped_name}, not native {to_token.upper()}. "
                     f"To get native {to_token.upper()}, run: almanak ax {_ax_flags} unwrap {wrapped_name} <amount>"
                 )
-            if response.status == "error":
+            if _response_is_error(response):
                 sys.exit(1)
             return
 
@@ -1281,12 +1287,12 @@ def swap(ctx, from_token, to_token, amount, slippage, protocol, sub_yes, sub_dry
         # Execute
         response = _run_tool(ctx, "swap_tokens", args)
         render_result(response, json_output=json_output, title="Swap")
-        if is_native_output and not json_output and response.status != "error":
+        if is_native_output and not json_output and not _response_is_error(response):
             click.echo(
                 f"\nTip: Output is {wrapped_name} (ERC-20). To unwrap to native {to_token.upper()}: "
                 f"almanak ax {_ax_flags} unwrap {wrapped_name} <amount>"
             )
-        if response.status == "error":
+        if _response_is_error(response):
             sys.exit(1)
     except click.ClickException:
         raise
@@ -1371,7 +1377,7 @@ def lp_close(ctx, position_id, protocol, pool, no_collect_fees, sub_yes, sub_dry
             args["dry_run"] = True
             response = _run_tool(ctx, "close_lp_position", args)
             render_simulation(response, json_output=json_output)
-            if response.status == "error":
+            if _response_is_error(response):
                 sys.exit(1)
             return
 
@@ -1382,7 +1388,7 @@ def lp_close(ctx, position_id, protocol, pool, no_collect_fees, sub_yes, sub_dry
 
         response = _run_tool(ctx, "close_lp_position", args)
         render_result(response, json_output=json_output, title=f"LP Close: #{position_id}")
-        if response.status == "error":
+        if _response_is_error(response):
             sys.exit(1)
     except click.ClickException:
         raise
@@ -1441,7 +1447,7 @@ def lp_info(ctx, position_id, protocol, lp_network):
             },
         )
         render_result(response, json_output=json_output, title=f"LP Position: #{position_id}")
-        if response.status == "error":
+        if _response_is_error(response):
             sys.exit(1)
     except click.ClickException:
         raise
@@ -1507,7 +1513,7 @@ def lp_list(ctx, protocol, wallet_override, include_empty, lp_network):
             },
         )
         render_result(response, json_output=json_output, title=f"LP Positions ({ctx.obj['chain']})")
-        if response.status == "error":
+        if _response_is_error(response):
             sys.exit(1)
     except click.ClickException:
         raise
@@ -1559,7 +1565,7 @@ def lending_list(ctx, protocol, wallet_override, lend_network):
             },
         )
         render_result(response, json_output=json_output, title=f"Lending ({protocol}, {ctx.obj['chain']})")
-        if response.status == "error":
+        if _response_is_error(response):
             sys.exit(1)
     except click.ClickException:
         raise
@@ -1637,11 +1643,11 @@ def lending_reserves(ctx, protocol, asset, collateral, loan):
         # The generic renderer prints the reserves list as one flat repr, which
         # is unreadable for an operator scanning 20+ reserves. Render a real
         # column table for the human path; keep --json untouched for automation.
-        if json_output or response.status == "error":
+        if json_output or _response_is_error(response):
             render_result(response, json_output=json_output, title=f"Lending reserves ({protocol}, {ctx.obj['chain']})")
         else:
             _render_reserves_table(response, protocol=protocol, chain=ctx.obj["chain"])
-        if response.status == "error":
+        if _response_is_error(response):
             sys.exit(1)
     except click.ClickException:
         raise
@@ -1809,7 +1815,7 @@ def portfolio(ctx, tokens, wallet_override, pf_network):
             },
         )
         render_result(response, json_output=json_output, title=f"Portfolio ({ctx.obj['chain']})")
-        if response.status == "error":
+        if _response_is_error(response):
             sys.exit(1)
     except click.ClickException:
         raise
@@ -1884,7 +1890,7 @@ def _run_lending_tool(
             args = {**args, "dry_run": True}
             response = _run_tool(ctx, tool_name, args)
             render_simulation(response, json_output=json_output)
-            if response.status == "error":
+            if _response_is_error(response):
                 sys.exit(1)
             return
 
@@ -1895,7 +1901,7 @@ def _run_lending_tool(
 
         response = _run_tool(ctx, tool_name, args)
         render_result(response, json_output=json_output, title=title)
-        if response.status == "error":
+        if _response_is_error(response):
             sys.exit(1)
     except click.ClickException:
         raise
@@ -2255,7 +2261,11 @@ def pool(ctx, token_a, token_b, fee_tier, protocol):
         # (or explicit-address reads with no measured tier) there is no tier
         # to render — omit the suffix rather than fabricate one.
         resolved_fee_tier = fee_tier
-        if resolved_fee_tier is None and response.status == "success" and isinstance(response.data, dict):
+        if (
+            resolved_fee_tier is None
+            and response.status == ToolResponseStatus.SUCCESS
+            and isinstance(response.data, dict)
+        ):
             resolved_fee_tier = response.data.get("fee_tier")
         title = f"Pool: {token_a.upper()}/{token_b.upper()}"
         if resolved_fee_tier is not None:
@@ -2265,7 +2275,7 @@ def pool(ctx, token_a, token_b, fee_tier, protocol):
             json_output=json_output,
             title=title,
         )
-        if response.status == "error":
+        if _response_is_error(response):
             sys.exit(1)
     except click.ClickException:
         raise
@@ -2343,7 +2353,7 @@ def bridge(ctx, token, amount, from_chain, to_chain, slippage, preferred_bridge,
             args["dry_run"] = True
             response = _run_tool(ctx, "bridge_tokens", args)
             render_simulation(response, json_output=json_output)
-            if response.status == "error":
+            if _response_is_error(response):
                 sys.exit(1)
             return
 
@@ -2356,7 +2366,7 @@ def bridge(ctx, token, amount, from_chain, to_chain, slippage, preferred_bridge,
         # Execute
         response = _run_tool(ctx, "bridge_tokens", args)
         render_result(response, json_output=json_output, title="Bridge")
-        if response.status == "error":
+        if _response_is_error(response):
             sys.exit(1)
     except click.ClickException:
         raise
@@ -2408,7 +2418,7 @@ def unwrap(ctx, token, amount, sub_yes, sub_dry_run, sub_json_output):
             args["dry_run"] = True
             response = _run_tool(ctx, "unwrap_native", args)
             render_simulation(response, json_output=json_output)
-            if response.status == "error":
+            if _response_is_error(response):
                 sys.exit(1)
             return
 
@@ -2419,7 +2429,7 @@ def unwrap(ctx, token, amount, sub_yes, sub_dry_run, sub_json_output):
 
         response = _run_tool(ctx, "unwrap_native", args)
         render_result(response, json_output=json_output, title="Unwrap")
-        if response.status == "error":
+        if _response_is_error(response):
             sys.exit(1)
     except click.ClickException:
         raise
@@ -2796,7 +2806,7 @@ def run_tool(ctx, tool_name, args_json, sub_yes, sub_dry_run, sub_json_output):
             args["dry_run"] = True
             response = _run_tool(ctx, tool_name, args)
             render_simulation(response, json_output=json_output)
-            if response.status == "error":
+            if _response_is_error(response):
                 sys.exit(1)
             return
 
@@ -2812,7 +2822,7 @@ def run_tool(ctx, tool_name, args_json, sub_yes, sub_dry_run, sub_json_output):
 
         response = _run_tool(ctx, tool_name, args)
         render_result(response, json_output=json_output, title=tool_name)
-        if response.status == "error":
+        if _response_is_error(response):
             sys.exit(1)
     except click.ClickException:
         raise

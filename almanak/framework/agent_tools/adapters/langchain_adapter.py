@@ -58,11 +58,11 @@ def get_langchain_tools(catalog: ToolCatalog, executor: ToolExecutor) -> list:
                         result = pool.submit(asyncio.run, executor.execute(name, kwargs)).result()
                 else:
                     result = asyncio.run(executor.execute(name, kwargs))
-                return json.dumps(result.model_dump(exclude_none=True), indent=2)
+                return json.dumps(result.model_dump(mode="json", exclude_none=True), indent=2)
 
             async def _arun(**kwargs) -> str:
                 result = await executor.execute(name, kwargs)
-                return json.dumps(result.model_dump(exclude_none=True), indent=2)
+                return json.dumps(result.model_dump(mode="json", exclude_none=True), indent=2)
 
             return _run, _arun
 

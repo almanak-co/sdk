@@ -1,5 +1,7 @@
 """Tests for agent tool error taxonomy."""
 
+import pytest
+
 from almanak.framework.agent_tools.errors import (
     ERROR_CATEGORIES,
     AgentErrorCode,
@@ -18,25 +20,31 @@ from almanak.framework.agent_tools.errors import (
 
 class TestToolError:
     def test_base_error_fields(self):
-        e = ToolError("test_code", "test message", recoverable=True, suggestion="try again")
-        assert e.code == "test_code"
+        e = ToolError(AgentErrorCode.INTERNAL_ERROR, "test message", recoverable=True, suggestion="try again")
+        assert e.code is AgentErrorCode.INTERNAL_ERROR
         assert e.message == "test message"
         assert e.recoverable is True
         assert e.suggestion == "try again"
         assert e.tool_name is None
-        assert "[test_code]" in str(e)
+        assert "[internal_error]" in str(e)
 
     def test_to_dict(self):
-        e = ToolError("code", "msg", recoverable=False, suggestion="fix it", tool_name="get_price")
+        e = ToolError(
+            AgentErrorCode.VALIDATION_ERROR,
+            "msg",
+            recoverable=False,
+            suggestion="fix it",
+            tool_name="get_price",
+        )
         d = e.to_dict()
-        assert d["error_code"] == "code"
+        assert d["error_code"] == "validation_error"
         assert d["message"] == "msg"
         assert d["recoverable"] is False
         assert d["suggestion"] == "fix it"
         assert d["tool_name"] == "get_price"
 
     def test_to_dict_minimal(self):
-        e = ToolError("code", "msg")
+        e = ToolError(AgentErrorCode.INTERNAL_ERROR, "msg")
         d = e.to_dict()
         assert "suggestion" not in d
         assert "tool_name" not in d
@@ -47,11 +55,10 @@ class TestToolError:
         d = e.to_dict()
         assert d["error_category"] == "retryable"
 
-    def test_to_dict_unknown_code_defaults_to_non_retryable(self):
-        """Unknown error codes get non_retryable category as safe default."""
-        e = ToolError("some_unknown_code", "mystery error")
-        d = e.to_dict()
-        assert d["error_category"] == "non_retryable"
+    def test_unknown_code_rejected_at_internal_boundary(self):
+        """Internal producers cannot introduce ad-hoc error codes."""
+        with pytest.raises(TypeError, match="AgentErrorCode"):
+            ToolError("some_unknown_code", "mystery error")  # type: ignore[arg-type]
 
 
 class TestSpecificErrors:
@@ -251,6 +258,7 @@ class TestErrorCategories:
             AgentErrorCode.UNSUPPORTED_CHAIN,
             AgentErrorCode.TEARDOWN_MISSING_SUB_TOOLS,
             AgentErrorCode.PREFLIGHT_FAILED,
+            AgentErrorCode.NO_EXECUTOR,
         ]
         for code in config_codes:
             assert get_error_category(code) == ErrorCategory.CONFIGURATION, (
