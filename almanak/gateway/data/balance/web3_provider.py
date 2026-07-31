@@ -61,6 +61,10 @@ from almanak.framework.data.tokens.exceptions import (
     TokenNotFoundError as FrameworkTokenNotFoundError,
 )
 from almanak.gateway.utils.indexer_lag import is_indexer_lag_error
+from almanak.gateway.utils.rpc_auth_error import (
+    entitlement_error_message,
+    is_rpc_entitlement_error,
+)
 
 if TYPE_CHECKING:
     from almanak.framework.data.tokens.resolver import TokenResolver
@@ -431,7 +435,19 @@ class Web3BalanceProvider:
         # Use certifi SSL context to avoid macOS system-cert issues (e.g. xlayer public RPC)
         from almanak.gateway.utils.ssl_context import build_ssl_context
 
-        self._w3 = AsyncWeb3(AsyncHTTPProvider(rpc_url, request_kwargs={"ssl": build_ssl_context()}))
+        # This class owns retry classification and budgeting. Web3 otherwise
+        # performs five opaque transport retries before surfacing an aiohttp
+        # error, which makes a deterministic 403 hit the network five times
+        # before our entitlement guard can fail fast. Disable that hidden layer
+        # so 401/403 is one request and transient failures use exactly the
+        # explicit ``max_retries`` budget below.
+        self._w3 = AsyncWeb3(
+            AsyncHTTPProvider(
+                rpc_url,
+                request_kwargs={"ssl": build_ssl_context()},
+                exception_retry_configuration=None,
+            )
+        )
 
         # Token resolver (unified token resolution)
         if token_resolver is not None:
@@ -612,6 +628,17 @@ class Web3BalanceProvider:
                 str(e),
                 extra={"token": token_key, "error": str(e)},
             )
+
+            # VIB-5736: an auth/entitlement error (401/403) is a configuration
+            # problem, not an availability blip — do NOT mask it behind a
+            # stale-cache read. Serving a stale balance here would let the
+            # strategy keep acting on out-of-date balances while the RPC is
+            # misconfigured; surface the actionable error immediately instead.
+            if is_rpc_entitlement_error(e):
+                raise DataSourceUnavailable(
+                    source="web3_balance_provider",
+                    reason=str(e),
+                ) from e
 
             # Try to return stale data if available
             stale = self._get_stale_cached(token_key)
@@ -1069,6 +1096,19 @@ class Web3BalanceProvider:
                     self._max_retries,
                 )
 
+            # VIB-5736: a 401/403 auth/entitlement error is deterministic — the
+            # keyed provider rejects every retry identically (classic case: the
+            # chain is not enabled on the Alchemy app). Fail fast with an
+            # actionable message instead of burning the retry budget every
+            # iteration and hiding the cause behind an opaque "after N attempts".
+            if is_rpc_entitlement_error(last_error):
+                raise RPCError(
+                    entitlement_error_message(self._chain, "eth_getBalance"),
+                    rpc_url=self._mask_rpc_url(self._rpc_url),
+                    method="eth_getBalance",
+                    original_error=last_error,
+                ) from last_error
+
             # VIB-3350 (audit I1): on a PINNED read, indexer lag is owned by the
             # dedicated OUTER lag-retry budget (_read_pinned_balance_with_lag_retry).
             # Do not also burn this inner transient-retry budget on it — break now
@@ -1158,6 +1198,17 @@ class Web3BalanceProvider:
                     attempt + 1,
                     self._max_retries,
                 )
+
+            # VIB-5736: fail fast on a deterministic 401/403 auth/entitlement
+            # error (keyed provider reachable but not authorized for this chain)
+            # rather than retrying it every iteration behind an opaque message.
+            if is_rpc_entitlement_error(last_error):
+                raise RPCError(
+                    entitlement_error_message(self._chain, "balanceOf"),
+                    rpc_url=self._mask_rpc_url(self._rpc_url),
+                    method="balanceOf",
+                    original_error=last_error,
+                ) from last_error
 
             # VIB-3350 (audit I1): a PINNED read delegates indexer-lag retries to
             # the dedicated OUTER budget (_read_pinned_balance_with_lag_retry); do
