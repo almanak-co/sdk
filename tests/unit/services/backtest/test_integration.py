@@ -9,12 +9,16 @@ serialized JSON response.
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from almanak.core.intent_types import IntentType
 from almanak.framework.backtesting.models import (
     BacktestEngine,
     BacktestMetrics,
@@ -25,6 +29,13 @@ from almanak.framework.backtesting.models import (
 from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 WETH_ATTRIBUTION_KEY = "arbitrum:0x123400000000000000000000000000000000abcd"
+GOLDEN_RESPONSE = Path(__file__).parent / "fixtures" / "backtest_response_golden.json"
+
+
+class _FixedDateTime(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return cls(2025, 1, 9, 12, 34, 56, 789000, tzinfo=tz)
 
 
 def _make_backtest_result(
@@ -72,7 +83,7 @@ def _make_backtest_result(
     trades = [
         TradeRecord(
             timestamp=datetime(2025, 1, 2, tzinfo=UTC),
-            intent_type="SWAP",
+            intent_type=IntentType.SWAP,
             executed_price=Decimal("2500.00"),
             amount_usd=Decimal("1000"),
             fee_usd=Decimal("3.00"),
@@ -163,6 +174,20 @@ def _mock_backtester(result: BacktestResult):
     return mock_bt
 
 
+def _make_precision_backtest_result() -> BacktestResult:
+    result = _make_backtest_result()
+    result.metrics.total_pnl_usd = Decimal("250.000000000000000000000000000000")
+    result.metrics.net_pnl_usd = Decimal("234.560000000000000000000000000001")
+    result.metrics.max_drawdown_pct = Decimal("0.043000000000000000000000000009")
+    result.metrics.fees_by_pool = {"WETH/USDC": Decimal("0E+17")}
+    result.metrics.pnl_by_protocol = {"uniswap_v3": Decimal("234.560000000000000000000000000001")}
+    result.equity_curve[0].value_usd = Decimal("10000.00000000000000000000")
+    result.equity_curve[1].numeraire_price_usd = Decimal("2046.9120000")
+    result.trades[0].amount_usd = Decimal("1000.123456789012345678900")
+    result.trades[0].pnl_usd = None
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Submit -> poll -> complete lifecycle
 # ---------------------------------------------------------------------------
@@ -224,6 +249,55 @@ async def test_full_lifecycle_swap(client):
 
         # Verify duration
         assert data["result"]["duration_seconds"] == 2.5
+
+
+@pytest.mark.asyncio
+async def test_full_response_matches_precision_and_absence_golden(client):
+    """The typed service keeps the established response bytes and semantics."""
+    result = _make_precision_backtest_result()
+
+    with (
+        patch(
+            "almanak.services.backtest.services.backtest_runner.create_backtester",
+            return_value=_mock_backtester(result),
+        ),
+        patch(
+            "almanak.services.backtest.services.job_manager.uuid.uuid4",
+            return_value=SimpleNamespace(hex="0123456789abcdef0123456789abcdef"),
+        ),
+        patch("almanak.services.backtest.services.job_manager.datetime", _FixedDateTime),
+    ):
+        submit_resp = await client.post("/api/v1/backtest", json=VALID_SWAP_REQUEST)
+        assert submit_resp.status_code == 202
+        for _ in range(100):
+            poll_resp = await client.get("/api/v1/backtest/bt_0123456789ab")
+            if poll_resp.json()["status"] in {"complete", "failed"}:
+                break
+            await asyncio.sleep(0.05)
+        else:
+            pytest.fail("Backtest did not reach a terminal status before timeout")
+
+        assert poll_resp.json()["status"] == "complete"
+
+    expected = json.loads(GOLDEN_RESPONSE.read_text())
+    assert poll_resp.json() == expected
+    # Pin FastAPI/Starlette encoder bytes, including compact separators and
+    # insertion-order keys, so encoder changes are diagnosed as wire changes.
+    assert poll_resp.content == json.dumps(expected, ensure_ascii=False, separators=(",", ":")).encode()
+
+    from almanak.services.backtest.routers import backtest as backtest_router
+
+    stored_job = backtest_router._job_manager.get_job("bt_0123456789ab")
+    assert stored_job is not None and stored_job.result is not None
+    assert isinstance(stored_job.result.metrics.net_pnl_usd, Decimal)
+    assert stored_job.result.metrics.net_pnl_usd == Decimal("234.560000000000000000000000000001")
+    assert stored_job.result.metrics.benchmark_return is None
+    assert expected["result"]["metrics"]["net_pnl_usd"] == "234.560000000000000000000000000001"
+    assert expected["result"]["metrics"]["benchmark_return"] is None
+    assert "numeraire_price_usd" not in expected["result"]["equity_curve"][0]
+    assert expected["result"]["equity_curve"][1]["numeraire_price_usd"] == "2046.912"
+    assert expected["result"]["equity_curve"][1]["value_numeraire"] == "5"
+    assert expected["result"]["trades"][0]["pnl_usd"] is None
 
 
 @pytest.mark.asyncio

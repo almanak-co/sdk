@@ -5,9 +5,40 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PlainSerializer,
+    model_validator,
+)
+from pydantic.functional_validators import BeforeValidator
+
+from almanak.framework.backtesting.models import decimal_str
+from almanak.framework.models.base import validate_decimal_safe
+
+
+def _decimal_verbatim(value: Decimal) -> str:
+    """Preserve the Decimal's existing scale at the JSON boundary."""
+    return str(value)
+
+
+# Both aliases remain ``Decimal`` in Python mode.  Their serializers run only
+# for JSON output, keeping stringification at the HTTP boundary while retaining
+# the service's established wire formats: normalized metrics and scale-preserving
+# trade/equity values.
+JsonDecimal = Annotated[
+    Decimal,
+    BeforeValidator(validate_decimal_safe),
+    PlainSerializer(_decimal_verbatim, return_type=str, when_used="json"),
+]
+JsonNormalizedDecimal = Annotated[
+    Decimal,
+    BeforeValidator(validate_decimal_safe),
+    PlainSerializer(decimal_str, return_type=str, when_used="json"),
+]
 
 # ---------------------------------------------------------------------------
 # Shared models
@@ -22,6 +53,29 @@ class ProgressInfo(BaseModel):
     eta_seconds: int | None = None
 
 
+class BacktestAction(StrEnum):
+    """Closed StrategySpec action vocabulary owned by the HTTP service.
+
+    These values deliberately preserve the existing lowercase API contract.
+    They are service-level templates rather than a second intent vocabulary;
+    the runner maps each action to canonical ``IntentType`` members.
+    """
+
+    SWAP = "swap"
+    PROVIDE_LIQUIDITY = "provide_liquidity"
+    LEND = "lend"
+    SUPPLY = "supply"
+    BORROW = "borrow"
+
+    @classmethod
+    def _missing_(cls, value: object) -> BacktestAction | None:
+        """Keep the historical case-insensitive input behavior."""
+        if not isinstance(value, str):
+            return None
+        normalized = value.strip().lower()
+        return next((action for action in cls if action.value == normalized), None)
+
+
 class StrategySpec(BaseModel):
     """Opaque strategy specification from any caller.
 
@@ -31,7 +85,7 @@ class StrategySpec(BaseModel):
 
     protocol: str = Field(..., description="e.g. 'uniswap_v3', 'aave_v3'")
     chain: str = Field(..., description="e.g. 'arbitrum', 'ethereum'")
-    action: str = Field(..., description="e.g. 'swap', 'provide_liquidity'")
+    action: BacktestAction = Field(..., description="Backtest action template")
     parameters: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -90,92 +144,121 @@ class BacktestRequest(BaseModel):
 class BacktestMetricsResponse(BaseModel):
     """Full backtest metrics aligned with the SDK BacktestMetrics dataclass.
 
-    All Decimal values are serialized as strings for JSON safety.
-    Field names match BacktestMetrics.to_dict() for consistency.
-    Extra fields from to_dict() that aren't modeled here are silently ignored.
+    Financial values remain ``Decimal`` through service construction and are
+    normalized to the existing JSON string representation only during JSON
+    serialization. Field names match ``BacktestMetrics.to_dict()`` for
+    compatibility. Extra engine metrics that are not part of this API response
+    remain ignored.
     """
 
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="ignore", from_attributes=True, allow_inf_nan=True)
 
     # --- Core PnL ---
-    total_pnl_usd: str = "0"
-    net_pnl_usd: str = "0"
-    realized_pnl: str = "0"
-    unrealized_pnl: str = "0"
+    total_pnl_usd: JsonNormalizedDecimal = Decimal("0")
+    net_pnl_usd: JsonNormalizedDecimal = Decimal("0")
+    realized_pnl: JsonNormalizedDecimal = Decimal("0")
+    unrealized_pnl: JsonNormalizedDecimal = Decimal("0")
 
     # --- Returns ---
-    total_return_pct: str = "0"
-    annualized_return_pct: str = "0"
-    benchmark_return: str | None = None
+    total_return_pct: JsonNormalizedDecimal = Decimal("0")
+    annualized_return_pct: JsonNormalizedDecimal = Decimal("0")
+    benchmark_return: JsonNormalizedDecimal | None = None
 
     # --- Risk metrics ---
-    sharpe_ratio: str = "0"
-    sortino_ratio: str = "0"
-    calmar_ratio: str = "0"
-    volatility: str = "0"
-    max_drawdown_pct: str = "0"
-    information_ratio: str | None = None
-    beta: str | None = None
-    alpha: str | None = None
+    sharpe_ratio: JsonNormalizedDecimal = Decimal("0")
+    sortino_ratio: JsonNormalizedDecimal = Decimal("0")
+    calmar_ratio: JsonNormalizedDecimal = Decimal("0")
+    volatility: JsonNormalizedDecimal = Decimal("0")
+    max_drawdown_pct: JsonNormalizedDecimal = Decimal("0")
+    information_ratio: JsonNormalizedDecimal | None = None
+    beta: JsonNormalizedDecimal | None = None
+    alpha: JsonNormalizedDecimal | None = None
 
     # --- Trade statistics ---
     total_trades: int = 0
     winning_trades: int = 0
     losing_trades: int = 0
-    win_rate: str = "0"
-    profit_factor: str = "0"
-    avg_trade_pnl_usd: str = "0"
-    largest_win_usd: str = "0"
-    largest_loss_usd: str = "0"
-    avg_win_usd: str = "0"
-    avg_loss_usd: str = "0"
+    win_rate: JsonNormalizedDecimal = Decimal("0")
+    profit_factor: JsonNormalizedDecimal = Decimal("0")
+    avg_trade_pnl_usd: JsonNormalizedDecimal = Decimal("0")
+    largest_win_usd: JsonNormalizedDecimal = Decimal("0")
+    largest_loss_usd: JsonNormalizedDecimal = Decimal("0")
+    avg_win_usd: JsonNormalizedDecimal = Decimal("0")
+    avg_loss_usd: JsonNormalizedDecimal = Decimal("0")
 
     # --- Execution costs ---
-    total_fees_usd: str = "0"
-    total_slippage_usd: str = "0"
-    total_gas_usd: str = "0"
-    total_execution_cost_usd: str = "0"
-    avg_gas_price_gwei: str = "0"
-    max_gas_price_gwei: str = "0"
-    total_mev_cost_usd: str = "0"
+    total_fees_usd: JsonNormalizedDecimal = Decimal("0")
+    total_slippage_usd: JsonNormalizedDecimal = Decimal("0")
+    total_gas_usd: JsonNormalizedDecimal = Decimal("0")
+    total_execution_cost_usd: JsonNormalizedDecimal = Decimal("0")
+    avg_gas_price_gwei: JsonNormalizedDecimal = Decimal("0")
+    max_gas_price_gwei: JsonNormalizedDecimal = Decimal("0")
+    total_mev_cost_usd: JsonNormalizedDecimal = Decimal("0")
 
     # --- LP metrics ---
-    total_fees_earned_usd: str = "0"
-    fees_by_pool: dict[str, str] = Field(default_factory=dict)
+    total_fees_earned_usd: JsonNormalizedDecimal = Decimal("0")
+    fees_by_pool: dict[str, JsonNormalizedDecimal] = Field(default_factory=dict)
 
     # --- Perp metrics ---
-    total_funding_paid: str = "0"
-    total_funding_received: str = "0"
+    total_funding_paid: JsonNormalizedDecimal = Decimal("0")
+    total_funding_received: JsonNormalizedDecimal = Decimal("0")
     liquidations_count: int = 0
-    liquidation_losses_usd: str = "0"
-    max_margin_utilization: str = "0"
+    liquidation_losses_usd: JsonNormalizedDecimal = Decimal("0")
+    max_margin_utilization: JsonNormalizedDecimal = Decimal("0")
 
     # --- Lending metrics ---
-    total_interest_earned: str = "0"
-    total_interest_paid: str = "0"
-    min_health_factor: str = "999"
+    total_interest_earned: JsonNormalizedDecimal = Decimal("0")
+    total_interest_paid: JsonNormalizedDecimal = Decimal("0")
+    min_health_factor: JsonNormalizedDecimal = Decimal("999")
     health_factor_warnings: int = 0
 
     # --- Portfolio risk ---
-    total_leverage: str = "0"
-    max_net_delta: dict[str, str] = Field(default_factory=dict)
+    total_leverage: JsonNormalizedDecimal = Decimal("0")
+    max_net_delta: dict[str, JsonNormalizedDecimal] = Field(default_factory=dict)
     max_net_delta_display_labels: dict[str, str] = Field(default_factory=dict)
-    correlation_risk: str | None = None
-    liquidation_cascade_risk: str = "0"
+    correlation_risk: JsonNormalizedDecimal | None = None
+    liquidation_cascade_risk: JsonNormalizedDecimal = Decimal("0")
 
     # --- Breakdowns ---
-    pnl_by_protocol: dict[str, str] = Field(default_factory=dict)
-    pnl_by_intent_type: dict[str, str] = Field(default_factory=dict)
-    pnl_by_asset: dict[str, str] = Field(default_factory=dict)
+    pnl_by_protocol: dict[str, JsonNormalizedDecimal] = Field(default_factory=dict)
+    pnl_by_intent_type: dict[str, JsonNormalizedDecimal] = Field(default_factory=dict)
+    pnl_by_asset: dict[str, JsonNormalizedDecimal] = Field(default_factory=dict)
     pnl_by_asset_display_labels: dict[str, str] = Field(default_factory=dict)
 
 
+class BacktestEquityPointResponse(BaseModel):
+    """One USD HTTP equity point with Decimal values retained in Python mode."""
+
+    timestamp: str
+    value_usd: JsonDecimal
+
+
+class BacktestNumeraireEquityPointResponse(BacktestEquityPointResponse):
+    """Equity point whose measured numeraire projection is present."""
+
+    numeraire_price_usd: JsonNormalizedDecimal
+    value_numeraire: JsonNormalizedDecimal
+
+
+class BacktestTradeResponse(BaseModel):
+    """One HTTP trade row with the established scale-preserving wire format."""
+
+    timestamp: str
+    intent_type: str
+    amount_usd: JsonDecimal
+    fee_usd: JsonDecimal
+    slippage_usd: JsonDecimal
+    pnl_usd: JsonDecimal | None
+    status: Literal["filled", "rejected"]
+    rejection_reason: str | None
+
+
 class BacktestResultResponse(BaseModel):
-    """Serialized backtest result for HTTP responses."""
+    """Typed backtest result serialized only by the HTTP response boundary."""
 
     metrics: BacktestMetricsResponse
-    equity_curve: list[dict[str, Any]] = Field(default_factory=list)
-    trades: list[dict[str, Any]] = Field(default_factory=list)
+    equity_curve: list[BacktestNumeraireEquityPointResponse | BacktestEquityPointResponse] = Field(default_factory=list)
+    trades: list[BacktestTradeResponse] = Field(default_factory=list)
     duration_seconds: float = 0.0
 
 
@@ -253,9 +336,9 @@ class PaperTradeSessionStatus(StrEnum):
 class PaperTradeLiveMetrics(BaseModel):
     """Live metrics from a running paper trading session."""
 
-    pnl_usd: str = "0"
+    pnl_usd: JsonDecimal = Decimal("0")
     total_trades: int = 0
-    gas_cost_usd: str = "0"
+    gas_cost_usd: JsonDecimal = Decimal("0")
 
 
 class PaperTradeSessionResponse(BaseModel):

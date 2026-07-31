@@ -392,7 +392,7 @@ class TestRunLevelReport:
 
     @pytest.mark.asyncio
     async def test_serialized_result_carries_report(self):
-        from almanak.services.backtest.services.backtest_runner import serialize_result
+        from almanak.services.backtest.serialization import serialize_result
 
         backtester = _backtester(num_ticks=4)
         result = await backtester.backtest(_TwapReadingStrategy(), _config(4))

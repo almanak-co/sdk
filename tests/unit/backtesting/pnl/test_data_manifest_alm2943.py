@@ -379,7 +379,7 @@ class TestMissingPriceStamps:
 class TestSerializeResult:
     @pytest.mark.asyncio
     async def test_serialize_result_carries_manifest(self):
-        from almanak.services.backtest.services.backtest_runner import serialize_result
+        from almanak.services.backtest.serialization import serialize_result
 
         backtester = _backtester(num_ticks=4)
         result = await backtester.backtest(_CandleReadingStrategy(), _config(4))
@@ -389,7 +389,7 @@ class TestSerializeResult:
 
     def test_absent_manifest_stays_absent(self):
         from almanak.framework.backtesting.models import BacktestEngine, BacktestMetrics, BacktestResult
-        from almanak.services.backtest.services.backtest_runner import serialize_result
+        from almanak.services.backtest.serialization import serialize_result
 
         result = BacktestResult(
             engine=BacktestEngine.PNL,

@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from almanak.services.backtest.models import PaperTradeLiveMetrics, PaperTradeSessionStatus
 from almanak.services.backtest.services.paper_trade_manager import PaperTradeManager
-
 
 VALID_PAPER_TRADE_REQUEST = {
     "strategy_spec": {
@@ -275,9 +275,9 @@ class TestPaperTradeManager:
         mgr.update_metrics(sid, metrics)
 
         session = mgr.get_session(sid)
-        assert session.metrics.pnl_usd == "150.50"
+        assert session.metrics.pnl_usd == Decimal("150.50")
         assert session.metrics.total_trades == 5
-        assert session.metrics.gas_cost_usd == "2.30"
+        assert session.metrics.gas_cost_usd == Decimal("2.30")
 
     def test_get_nonexistent_session_returns_none(self, tmp_path):
         mgr = PaperTradeManager(max_sessions=4, state_base_dir=str(tmp_path))

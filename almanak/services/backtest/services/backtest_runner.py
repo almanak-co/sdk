@@ -17,13 +17,13 @@ import logging
 from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, assert_never
 
 from almanak.core.chains import ChainRegistry
 from almanak.core.intent_types import IntentType
 from almanak.core.models.quote_asset import QuoteAsset
 from almanak.framework.backtesting.config import BacktestDataConfig
-from almanak.framework.backtesting.models import BacktestResult, _decimal_str
+from almanak.framework.backtesting.models import BacktestResult
 from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 from almanak.framework.backtesting.pnl.data_provider import native_token_map_entry
 from almanak.framework.backtesting.pnl.engine import (
@@ -44,11 +44,18 @@ from almanak.framework.intents.vocabulary import (
 )
 from almanak.framework.market import MarketSnapshot
 from almanak.services.backtest.models import (
+    BacktestAction,
+    BacktestEquityPointResponse,
+    BacktestMetricsResponse,
+    BacktestNumeraireEquityPointResponse,
     BacktestRequest,
+    BacktestResultResponse,
+    BacktestTradeResponse,
     QuickBacktestRequest,
     StrategySpec,
     TimeframeSpec,
 )
+from almanak.services.backtest.serialization import intent_type_wire_value
 from almanak.services.backtest.services.job_manager import JobManager
 
 logger = logging.getLogger(__name__)
@@ -84,23 +91,6 @@ _TOKEN_ADDRESS_KEYS = frozenset(
         "borrow_token_address",
     }
 )
-
-# ---------------------------------------------------------------------------
-# Supported actions and their required/optional parameters
-# ---------------------------------------------------------------------------
-SUPPORTED_ACTIONS = {
-    "swap": {"required": [], "optional": ["from_token", "to_token", "amount_usd", "max_slippage"]},
-    "provide_liquidity": {
-        "required": ["pool"],
-        "optional": ["amount0", "amount1", "range_lower", "range_upper"],
-    },
-    "lend": {"required": [], "optional": ["token", "amount"]},
-    "supply": {"required": [], "optional": ["token", "amount"]},
-    "borrow": {
-        "required": [],
-        "optional": ["collateral_token", "collateral_amount", "borrow_token", "borrow_amount"],
-    },
-}
 
 
 def _string_token_values(value: Any) -> list[str]:
@@ -325,15 +315,15 @@ class SpecBacktestStrategy:
     """
 
     # Maps action → (tags, intent_types) for adapter detection
-    _ACTION_METADATA: dict[str, tuple[list[str], list[IntentType]]] = {
-        "swap": (["swap", "trading"], [IntentType.SWAP]),
-        "provide_liquidity": (
+    _ACTION_METADATA: dict[BacktestAction, tuple[list[str], list[IntentType]]] = {
+        BacktestAction.SWAP: (["swap", "trading"], [IntentType.SWAP]),
+        BacktestAction.PROVIDE_LIQUIDITY: (
             ["lp", "liquidity", "concentrated-liquidity"],
             [IntentType.LP_OPEN, IntentType.LP_CLOSE],
         ),
-        "lend": (["lending", "supply"], [IntentType.SUPPLY, IntentType.WITHDRAW]),
-        "supply": (["lending", "supply"], [IntentType.SUPPLY, IntentType.WITHDRAW]),
-        "borrow": (["lending", "borrow"], [IntentType.BORROW, IntentType.REPAY]),
+        BacktestAction.LEND: (["lending", "supply"], [IntentType.SUPPLY, IntentType.WITHDRAW]),
+        BacktestAction.SUPPLY: (["lending", "supply"], [IntentType.SUPPLY, IntentType.WITHDRAW]),
+        BacktestAction.BORROW: (["lending", "borrow"], [IntentType.BORROW, IntentType.REPAY]),
     }
 
     def __init__(self, spec: StrategySpec) -> None:
@@ -346,10 +336,7 @@ class SpecBacktestStrategy:
         """Build StrategyMetadata from the spec for adapter auto-detection."""
         from almanak.framework.strategies.intent_strategy import StrategyMetadata
 
-        action = spec.action.lower()
-        if action not in self._ACTION_METADATA:
-            raise ValueError(f"Unknown action '{action}'. Supported actions: {', '.join(self._ACTION_METADATA)}")
-        tags, intent_types = self._ACTION_METADATA[action]
+        tags, intent_types = self._ACTION_METADATA[spec.action]
 
         return StrategyMetadata(
             name=self._deployment_id,
@@ -381,25 +368,23 @@ class SpecBacktestStrategy:
         """
         self._tick_count += 1
         params = self._spec.parameters
-        action = self._spec.action.lower()
+        action = self._spec.action
 
         # Only execute on the first tick — afterwards we hold and let
         # the backtester simulate PnL via fee/slippage models.
         if self._tick_count > 1:
-            return HoldIntent(reason=f"Holding {action} position")
+            return HoldIntent(reason=f"Holding {action.value} position")
 
-        if action == "swap":
-            return self._build_swap_intent(params)
-        if action == "provide_liquidity":
-            return self._build_lp_intent(params)
-        if action in ("lend", "supply"):
-            return self._build_supply_intent(params)
-        if action == "borrow":
-            return self._build_borrow_intent(params)
-
-        # Unknown action — hold and let fee model simulate
-        logger.warning("Unknown action '%s', falling back to HoldIntent", action)
-        return HoldIntent(reason=f"Unsupported action: {action}")
+        match action:
+            case BacktestAction.SWAP:
+                return self._build_swap_intent(params)
+            case BacktestAction.PROVIDE_LIQUIDITY:
+                return self._build_lp_intent(params)
+            case BacktestAction.LEND | BacktestAction.SUPPLY:
+                return self._build_supply_intent(params)
+            case BacktestAction.BORROW:
+                return self._build_borrow_intent(params)
+        assert_never(action)
 
     # ------------------------------------------------------------------
     # Intent builders
@@ -470,6 +455,16 @@ class SpecBacktestStrategy:
             borrow_amount=borrow_amount,
             chain=self._spec.chain,
         )
+
+
+_missing_actions = frozenset(BacktestAction) - SpecBacktestStrategy._ACTION_METADATA.keys()
+_extra_actions = SpecBacktestStrategy._ACTION_METADATA.keys() - frozenset(BacktestAction)
+if _missing_actions or _extra_actions:  # pragma: no cover - fails immediately when the enum drifts
+    raise RuntimeError(
+        "SpecBacktestStrategy._ACTION_METADATA must classify every BacktestAction; "
+        f"missing={sorted(action.value for action in _missing_actions)!r}, "
+        f"extra={sorted(action.value for action in _extra_actions)!r}"
+    )
 
 
 def create_backtester(
@@ -560,7 +555,7 @@ def _extract_tokens(spec: StrategySpec) -> list[str]:
     This helper normalises them into a de-duplicated list.
     """
     params = spec.parameters
-    action = spec.action.lower()
+    action = spec.action
 
     # Explicit tokens list always wins
     if "tokens" in params:
@@ -569,22 +564,23 @@ def _extract_tokens(spec: StrategySpec) -> list[str]:
 
     token_set: list[str] = []
 
-    if action == "swap":
-        token_set = [params.get("from_token", "USDC"), params.get("to_token", "WETH")]
-    elif action == "provide_liquidity":
-        token_set = [
-            params.get("token0", params.get("from_token", "WETH")),
-            params.get("token1", params.get("to_token", "USDC")),
-        ]
-    elif action in ("lend", "supply"):
-        token_set = [params.get("token", params.get("from_token", "USDC"))]
-    elif action == "borrow":
-        token_set = [
-            params.get("collateral_token", "WETH"),
-            params.get("borrow_token", "USDC"),
-        ]
-    else:
-        token_set = ["WETH", "USDC"]
+    match action:
+        case BacktestAction.SWAP:
+            token_set = [params.get("from_token", "USDC"), params.get("to_token", "WETH")]
+        case BacktestAction.PROVIDE_LIQUIDITY:
+            token_set = [
+                params.get("token0", params.get("from_token", "WETH")),
+                params.get("token1", params.get("to_token", "USDC")),
+            ]
+        case BacktestAction.LEND | BacktestAction.SUPPLY:
+            token_set = [params.get("token", params.get("from_token", "USDC"))]
+        case BacktestAction.BORROW:
+            token_set = [
+                params.get("collateral_token", "WETH"),
+                params.get("borrow_token", "USDC"),
+            ]
+        case _:
+            assert_never(action)
 
     # De-duplicate while preserving order
     seen: set[str] = set()
@@ -769,8 +765,10 @@ def build_backtest_config(
     )
 
 
-def _serialize_equity_point(pt: Any) -> dict[str, Any]:
-    """Serialize one equity point, keeping the numeraire projection intact.
+def _build_equity_point_response(
+    pt: Any,
+) -> BacktestNumeraireEquityPointResponse | BacktestEquityPointResponse:
+    """Build one typed equity response, keeping the numeraire projection intact.
 
     For a token-quoted strategy (VIB-5127) every point carries the numeraire
     token's USD price; ``value_numeraire`` (= ``value_usd / numeraire_price_usd``)
@@ -779,71 +777,47 @@ def _serialize_equity_point(pt: Any) -> dict[str, Any]:
     unchanged.
 
     Timestamps deliberately keep the service payload's ``str(datetime)``
-    format (matching the trades array and the pre-existing equity points);
-    the new Decimal fields are normalized via ``_decimal_str`` so exponent
-    artifacts (``0E+17``) never leak into JSON (VIB-5083).
+    format (matching the trades array and the pre-existing equity points).
+    Decimal normalization is deferred to the response model's JSON serializer.
     """
-    payload: dict[str, Any] = {"timestamp": str(pt.timestamp), "value_usd": str(pt.value_usd)}
     if pt.numeraire_price_usd is not None and pt.numeraire_price_usd > 0:
-        payload["numeraire_price_usd"] = _decimal_str(pt.numeraire_price_usd)
-        payload["value_numeraire"] = _decimal_str(pt.value_usd / pt.numeraire_price_usd)
-    return payload
+        return BacktestNumeraireEquityPointResponse(
+            timestamp=str(pt.timestamp),
+            value_usd=pt.value_usd,
+            numeraire_price_usd=pt.numeraire_price_usd,
+            value_numeraire=pt.value_usd / pt.numeraire_price_usd,
+        )
+    return BacktestEquityPointResponse(
+        timestamp=str(pt.timestamp),
+        value_usd=pt.value_usd,
+    )
 
 
-def serialize_result(result: BacktestResult) -> dict[str, Any]:
-    """Serialize BacktestResult to a JSON-compatible dict.
+def build_result_response(result: BacktestResult) -> BacktestResultResponse:
+    """Construct the typed HTTP result without crossing the JSON boundary.
 
-    Uses BacktestMetrics.to_dict() to expose the full metric set. All Decimal
-    values are stringified for JSON safety. The field names match the SDK's
-    internal BacktestMetrics dataclass exactly. Numeraire fields (top-level
-    descriptors, per-point prices) and the per-tick ``price_series`` are
-    passed through emit-when-set, mirroring ``BacktestResult.to_dict``.
+    Every money, amount, ratio, and price value stays ``Decimal`` in this
+    object. FastAPI/Pydantic applies the explicit serializers only when the
+    response is encoded as JSON.
     """
-    payload: dict[str, Any] = {
-        "metrics": result.metrics.to_dict(),
-        # decide()-time data-failure report (ALM-2951); [] when clean.
-        "decision_input_failures": result.decision_input_failures or [],
-        "equity_curve": [_serialize_equity_point(pt) for pt in (result.equity_curve or [])],
-        "trades": [
-            {
-                "timestamp": str(t.timestamp),
-                "intent_type": str(t.intent_type),
-                "amount_usd": str(t.amount_usd),
-                "fee_usd": str(t.fee_usd),
-                "slippage_usd": str(t.slippage_usd),
-                # None for an opening / inventory-building trade (no realized
-                # PnL yet, VIB-5083): serialize JSON null, not the str "None".
-                "pnl_usd": str(t.pnl_usd) if t.pnl_usd is not None else None,
-                # The trades array records rejected intents alongside fills
-                # (result_summary.total_trades counts fills only); without a
-                # status the UI blotter renders rejections as $0 trades (ALM-2936).
-                "status": "filled" if t.success else "rejected",
-                "rejection_reason": t.error if not t.success and t.error else None,
-            }
-            for t in (result.trades or [])
+    return BacktestResultResponse(
+        metrics=BacktestMetricsResponse.model_validate(result.metrics),
+        equity_curve=[_build_equity_point_response(point) for point in (result.equity_curve or [])],
+        trades=[
+            BacktestTradeResponse(
+                timestamp=str(trade.timestamp),
+                intent_type=intent_type_wire_value(trade.intent_type),
+                amount_usd=trade.amount_usd,
+                fee_usd=trade.fee_usd,
+                slippage_usd=trade.slippage_usd,
+                pnl_usd=trade.pnl_usd,
+                status="filled" if trade.success else "rejected",
+                rejection_reason=trade.error if not trade.success and trade.error else None,
+            )
+            for trade in (result.trades or [])
         ],
-        "duration_seconds": result.run_duration_seconds or 0.0,
-    }
-    if result.numeraire is not None:
-        payload["numeraire"] = result.numeraire
-    if result.initial_capital_numeraire is not None:
-        payload["initial_capital_numeraire"] = str(result.initial_capital_numeraire)
-    if result.final_capital_numeraire is not None:
-        payload["final_capital_numeraire"] = str(result.final_capital_numeraire)
-    if result.price_series:
-        payload["price_series"] = [
-            {
-                # str(datetime), not isoformat: consistent with every other
-                # timestamp in this service payload (equity curve, trades).
-                "timestamp": str(pt.timestamp),
-                "prices": {key: _decimal_str(price) for key, price in pt.prices.items()},
-            }
-            for pt in result.price_series
-        ]
-        payload["price_series_display_labels"] = dict(result.price_series_display_labels)
-    if result.data_manifest is not None:
-        payload["data_manifest"] = result.data_manifest
-    return payload
+        duration_seconds=result.run_duration_seconds or 0.0,
+    )
 
 
 def resolve_strategy(
@@ -929,8 +903,7 @@ async def run_backtest_job(
         finally:
             await backtester.close()
 
-        serialized = serialize_result(result)
-        job_manager.complete_job(job_id, serialized)
+        job_manager.complete_job(job_id, build_result_response(result))
 
     except Exception:
         logger.exception("Backtest job %s failed", job_id)

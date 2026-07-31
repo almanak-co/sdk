@@ -48,7 +48,7 @@ if TYPE_CHECKING:
     from almanak.framework.backtesting.pnl.support_matrix import BacktestSupportReport
 
 
-def _decimal_str(value: Decimal) -> str:
+def decimal_str(value: Decimal) -> str:
     """Serialize a Decimal in fixed-point, human-readable form (VIB-5083).
 
     A bare ``str(Decimal("0E+17"))`` renders as ``"0E+17"`` -- a profit_factor
@@ -78,6 +78,11 @@ def _decimal_str(value: Decimal) -> str:
     if "." in text:
         text = text.rstrip("0").rstrip(".")
     return text
+
+
+# Compatibility alias for the existing internal call sites. New cross-package
+# consumers should import the public name so framework refactors remain visible.
+_decimal_str = decimal_str
 
 
 def _decimal_str_or_none(value: Decimal | None) -> str | None:
@@ -3090,4 +3095,5 @@ __all__ = [
     "ParameterSource",
     "ParameterSourceRecord",
     "ParameterSourceTracker",
+    "decimal_str",
 ]

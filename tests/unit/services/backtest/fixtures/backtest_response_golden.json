@@ -1,0 +1,103 @@
+{
+  "job_id": "bt_0123456789ab",
+  "status": "complete",
+  "progress": {
+    "percent": 100.0,
+    "current_step": "Done",
+    "eta_seconds": 0
+  },
+  "result": {
+    "metrics": {
+      "total_pnl_usd": "250",
+      "net_pnl_usd": "234.560000000000000000000000000001",
+      "realized_pnl": "234.56",
+      "unrealized_pnl": "0",
+      "total_return_pct": "0.0235",
+      "annualized_return_pct": "0.42",
+      "benchmark_return": null,
+      "sharpe_ratio": "1.82",
+      "sortino_ratio": "2.3",
+      "calmar_ratio": "5.5",
+      "volatility": "0.18",
+      "max_drawdown_pct": "0.043000000000000000000000000009",
+      "information_ratio": null,
+      "beta": null,
+      "alpha": null,
+      "total_trades": 12,
+      "winning_trades": 7,
+      "losing_trades": 5,
+      "win_rate": "0.583",
+      "profit_factor": "2.1",
+      "avg_trade_pnl_usd": "19.55",
+      "largest_win_usd": "80",
+      "largest_loss_usd": "-25",
+      "avg_win_usd": "35",
+      "avg_loss_usd": "-10",
+      "total_fees_usd": "15.44",
+      "total_slippage_usd": "3.2",
+      "total_gas_usd": "1.8",
+      "total_execution_cost_usd": "20.44",
+      "avg_gas_price_gwei": "0",
+      "max_gas_price_gwei": "0",
+      "total_mev_cost_usd": "0",
+      "total_fees_earned_usd": "0",
+      "fees_by_pool": {
+        "WETH/USDC": "0"
+      },
+      "total_funding_paid": "0",
+      "total_funding_received": "0",
+      "liquidations_count": 0,
+      "liquidation_losses_usd": "0",
+      "max_margin_utilization": "0",
+      "total_interest_earned": "0",
+      "total_interest_paid": "0",
+      "min_health_factor": "999",
+      "health_factor_warnings": 0,
+      "total_leverage": "0",
+      "max_net_delta": {},
+      "max_net_delta_display_labels": {},
+      "correlation_risk": null,
+      "liquidation_cascade_risk": "0",
+      "pnl_by_protocol": {
+        "uniswap_v3": "234.560000000000000000000000000001"
+      },
+      "pnl_by_intent_type": {
+        "SWAP": "234.56"
+      },
+      "pnl_by_asset": {
+        "arbitrum:0x123400000000000000000000000000000000abcd": "234.56"
+      },
+      "pnl_by_asset_display_labels": {
+        "arbitrum:0x123400000000000000000000000000000000abcd": "WETH"
+      }
+    },
+    "equity_curve": [
+      {
+        "timestamp": "2025-01-01 00:00:00+00:00",
+        "value_usd": "10000.00000000000000000000"
+      },
+      {
+        "timestamp": "2025-01-08 00:00:00+00:00",
+        "value_usd": "10234.56",
+        "numeraire_price_usd": "2046.912",
+        "value_numeraire": "5"
+      }
+    ],
+    "trades": [
+      {
+        "timestamp": "2025-01-02 00:00:00+00:00",
+        "intent_type": "SWAP",
+        "amount_usd": "1000.123456789012345678900",
+        "fee_usd": "3.00",
+        "slippage_usd": "0.50",
+        "pnl_usd": null,
+        "status": "filled",
+        "rejection_reason": null
+      }
+    ],
+    "duration_seconds": 2.5
+  },
+  "error": null,
+  "created_at": "2025-01-09T12:34:56.789000Z",
+  "completed_at": "2025-01-09T12:34:56.789000Z"
+}

@@ -6,7 +6,6 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-
 VALID_BACKTEST_REQUEST = {
     "strategy_spec": {
         "protocol": "uniswap_v3",
@@ -46,6 +45,24 @@ async def test_submit_backtest_invalid_spec(client):
     """POST /backtest with missing fields returns 422."""
     resp = await client.post("/api/v1/backtest", json={"strategy_spec": {}})
     assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_submit_backtest_rejects_unknown_action_at_parse_time(client):
+    """Unknown actions never reach background dispatch."""
+    request = {
+        **VALID_BACKTEST_REQUEST,
+        "strategy_spec": {
+            **VALID_BACKTEST_REQUEST["strategy_spec"],
+            "action": "stake",
+        },
+    }
+    with patch("almanak.services.backtest.routers.backtest.run_backtest_job") as runner:
+        resp = await client.post("/api/v1/backtest", json=request)
+
+    assert resp.status_code == 422
+    assert resp.json()["detail"][0]["loc"][-1] == "action"
+    runner.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -196,3 +213,21 @@ async def test_backtest_endpoints_in_openapi(client):
     assert "/api/v1/backtest/{job_id}" in paths
     assert "/api/v1/backtest/quick" in paths
     assert "/api/v1/strategies" in paths
+
+
+@pytest.mark.asyncio
+async def test_openapi_exposes_closed_actions_and_string_decimal_wire_types(client):
+    """The schema advertises the closed action set and unchanged JSON strings."""
+    schema = (await client.get("/openapi.json")).json()["components"]["schemas"]
+
+    assert schema["BacktestAction"]["enum"] == [
+        "swap",
+        "provide_liquidity",
+        "lend",
+        "supply",
+        "borrow",
+    ]
+    assert schema["StrategySpec"]["properties"]["action"]["$ref"].endswith("/BacktestAction")
+    assert schema["BacktestMetricsResponse"]["properties"]["net_pnl_usd"]["type"] == "string"
+    assert schema["BacktestTradeResponse"]["properties"]["amount_usd"]["type"] == "string"
+    assert schema["BacktestEquityPointResponse"]["properties"]["value_usd"]["type"] == "string"

@@ -12,7 +12,6 @@ from almanak.services.backtest.models import (
     BacktestJobResponse,
     BacktestMetricsResponse,
     BacktestRequest,
-    BacktestResultResponse,
     JobStatus,
     QuickBacktestRequest,
     QuickBacktestResponse,
@@ -91,21 +90,11 @@ async def get_backtest_status(job_id: str) -> BacktestJobResponse:
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
 
-    result_response = None
-    if job.status == JobStatus.COMPLETE and job.result:
-        metrics_data = job.result.get("metrics", {})
-        result_response = BacktestResultResponse(
-            metrics=BacktestMetricsResponse.model_validate(metrics_data),
-            equity_curve=job.result.get("equity_curve", []),
-            trades=job.result.get("trades", []),
-            duration_seconds=job.result.get("duration_seconds", 0.0),
-        )
-
     return BacktestJobResponse(
         job_id=job.job_id,
         status=job.status,
         progress=job.progress,
-        result=result_response,
+        result=job.result if job.status == JobStatus.COMPLETE else None,
         error=job.error,
         created_at=job.created_at,
         completed_at=job.completed_at,
@@ -138,7 +127,7 @@ async def quick_backtest(request: QuickBacktestRequest) -> QuickBacktestResponse
 
         return QuickBacktestResponse(
             eligible=metrics.sharpe_ratio > 0 and metrics.max_drawdown_pct < Decimal("0.5"),
-            metrics=BacktestMetricsResponse.model_validate(metrics.to_dict()),
+            metrics=BacktestMetricsResponse.model_validate(metrics),
             duration_seconds=round(duration, 2),
         )
 

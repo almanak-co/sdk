@@ -1,7 +1,6 @@
 """Integration-style tests for the backtest lifecycle: submit -> poll -> complete/fail."""
 
 from __future__ import annotations
-from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 import asyncio
 from datetime import UTC, datetime
@@ -10,26 +9,34 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from pydantic import ValidationError
 
 from almanak.core.models.quote_asset import QuoteAsset
 from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 from almanak.framework.data.tokens.defaults import NATIVE_SENTINEL
-from almanak.services.backtest.models import BacktestRequest, StrategySpec, TimeframeSpec
+from almanak.services.backtest.models import (
+    BacktestAction,
+    BacktestMetricsResponse,
+    BacktestRequest,
+    BacktestResultResponse,
+    StrategySpec,
+    TimeframeSpec,
+)
+from almanak.services.backtest.serialization import intent_type_wire_value, serialize_result
 from almanak.services.backtest.services.backtest_runner import (
-
-
     SpecBacktestStrategy,
     _extract_tokens,
     build_backtest_config,
     build_backtest_token_address_map,
     build_quick_timeframe,
+    build_result_response,
     collect_backtest_token_refs,
     create_backtester,
     normalize_backtest_token_refs,
     run_backtest_job,
-    serialize_result,
 )
 from almanak.services.backtest.services.job_manager import JobManager
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 BASE_CBBTC = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
 BASE_USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
@@ -39,6 +46,10 @@ BASE_WETH = "0x4200000000000000000000000000000000000006"
 # the resolver actually emits.
 BASE_NATIVE_SENTINEL = NATIVE_SENTINEL.lower()
 UNKNOWN_MIXED_CASE_ADDRESS = "0xAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAa"
+
+
+def _empty_result_response() -> BacktestResultResponse:
+    return BacktestResultResponse(metrics=BacktestMetricsResponse())
 
 
 # ---------------------------------------------------------------------------
@@ -137,12 +148,31 @@ class TestSpecBacktestStrategy:
         intent2 = strategy.decide(None)
         assert isinstance(intent2, HoldIntent)  # Second tick: Hold
 
-    def test_unknown_action_raises_value_error(self):
-        from almanak.services.backtest.models import StrategySpec
+    def test_supply_alias_returns_supply_intent(self):
+        from almanak.framework.intents.vocabulary import SupplyIntent
 
-        spec = StrategySpec(protocol="some_protocol", chain="ethereum", action="unknown_action")
-        with pytest.raises(ValueError, match="Unknown action 'unknown_action'"):
-            SpecBacktestStrategy(spec)
+        spec = StrategySpec(protocol="aave_v3", chain="ethereum", action="supply")
+        assert isinstance(SpecBacktestStrategy(spec).decide(None), SupplyIntent)
+
+    def test_action_metadata_is_exhaustive_and_uses_canonical_intent_types(self):
+        from almanak.core.intent_types import IntentType
+
+        assert set(SpecBacktestStrategy._ACTION_METADATA) == set(BacktestAction)
+        assert all(
+            isinstance(intent_type, IntentType)
+            for _, intent_types in SpecBacktestStrategy._ACTION_METADATA.values()
+            for intent_type in intent_types
+        )
+
+    def test_unknown_action_is_rejected_while_parsing_spec(self):
+        with pytest.raises(ValidationError) as exc_info:
+            StrategySpec(protocol="some_protocol", chain="ethereum", action="unknown_action")
+
+        assert exc_info.value.errors()[0]["loc"] == ("action",)
+
+    def test_action_parsing_preserves_case_insensitive_compatibility(self):
+        spec = StrategySpec(protocol="uniswap_v3", chain="arbitrum", action=" SWAP ")
+        assert spec.action is BacktestAction.SWAP
 
 
 class TestExtractTokens:
@@ -152,7 +182,9 @@ class TestExtractTokens:
         from almanak.services.backtest.models import StrategySpec
 
         spec = StrategySpec(
-            protocol="uniswap_v3", chain="arbitrum", action="swap",
+            protocol="uniswap_v3",
+            chain="arbitrum",
+            action="swap",
             parameters={"from_token": "DAI", "to_token": "WETH"},
         )
         assert _extract_tokens(spec) == ["DAI", "WETH"]
@@ -161,7 +193,9 @@ class TestExtractTokens:
         from almanak.services.backtest.models import StrategySpec
 
         spec = StrategySpec(
-            protocol="uniswap_v3", chain="arbitrum", action="provide_liquidity",
+            protocol="uniswap_v3",
+            chain="arbitrum",
+            action="provide_liquidity",
             parameters={"token0": "WBTC", "token1": "USDC"},
         )
         assert _extract_tokens(spec) == ["WBTC", "USDC"]
@@ -170,7 +204,9 @@ class TestExtractTokens:
         from almanak.services.backtest.models import StrategySpec
 
         spec = StrategySpec(
-            protocol="aave_v3", chain="ethereum", action="lend",
+            protocol="aave_v3",
+            chain="ethereum",
+            action="lend",
             parameters={"token": "DAI"},
         )
         assert _extract_tokens(spec) == ["DAI"]
@@ -179,7 +215,9 @@ class TestExtractTokens:
         from almanak.services.backtest.models import StrategySpec
 
         spec = StrategySpec(
-            protocol="aave_v3", chain="ethereum", action="borrow",
+            protocol="aave_v3",
+            chain="ethereum",
+            action="borrow",
             parameters={"collateral_token": "WETH", "borrow_token": "USDC"},
         )
         assert _extract_tokens(spec) == ["WETH", "USDC"]
@@ -188,7 +226,9 @@ class TestExtractTokens:
         from almanak.services.backtest.models import StrategySpec
 
         spec = StrategySpec(
-            protocol="uniswap_v3", chain="arbitrum", action="swap",
+            protocol="uniswap_v3",
+            chain="arbitrum",
+            action="swap",
             parameters={"tokens": ["LINK", "DAI"], "from_token": "USDC"},
         )
         assert _extract_tokens(spec) == ["LINK", "DAI"]
@@ -430,8 +470,8 @@ class TestBacktestTokenRefs:
                 side_effect=fake_create_backtester,
             ),
             patch(
-                "almanak.services.backtest.services.backtest_runner.serialize_result",
-                return_value={"metrics": {}, "trades": []},
+                "almanak.services.backtest.services.backtest_runner.build_result_response",
+                return_value=_empty_result_response(),
             ),
         ):
             await run_backtest_job(job_id, request, job_manager)
@@ -483,10 +523,11 @@ class TestJobManager:
         jm.mark_running(job_id)
         assert jm.get_job(job_id).status.value == "running"
 
-        jm.complete_job(job_id, {"metrics": {}})
+        result = _empty_result_response()
+        jm.complete_job(job_id, result)
         job = jm.get_job(job_id)
         assert job.status.value == "complete"
-        assert job.result == {"metrics": {}}
+        assert job.result is result
         assert job.completed_at is not None
 
     def test_lifecycle_pending_running_failed(self):
@@ -514,7 +555,7 @@ class TestJobManager:
 
         # Complete first job — should free a slot
         jm.mark_running(j1)
-        jm.complete_job(j1, {})
+        jm.complete_job(j1, _empty_result_response())
 
         # Should succeed now
         j3 = jm.create_job()
@@ -527,7 +568,7 @@ class TestJobManager:
         assert jm.active_count == 1
         jm.mark_running(j1)
         assert jm.active_count == 1
-        jm.complete_job(j1, {})
+        jm.complete_job(j1, _empty_result_response())
         assert jm.active_count == 0
 
     def test_progress_update(self):
@@ -548,7 +589,7 @@ class TestJobManager:
         for _ in range(3):
             jid = jm.create_job()
             jm.mark_running(jid)
-            jm.complete_job(jid, {})
+            jm.complete_job(jid, _empty_result_response())
             ids.append(jid)
 
         # All 3 exist
@@ -568,7 +609,7 @@ class TestJobManager:
         job_id = jm.create_job()
         jm.mark_running(job_id)
         jm.update_progress(job_id, 50.0, "Halfway")
-        jm.complete_job(job_id, {"metrics": {}})
+        jm.complete_job(job_id, _empty_result_response())
         job = jm.get_job(job_id)
         assert job.progress.percent == 100.0
         assert job.progress.current_step == "Done"
@@ -606,23 +647,23 @@ async def test_submit_poll_complete_lifecycle(client):
     jm.update_progress(job_id, 50.0, "Running simulation...")
     jm.complete_job(
         job_id,
-        {
-            "metrics": {
-                "net_pnl_usd": "150.00",
-                "total_return_pct": "1.5",
-                "sharpe_ratio": "1.2",
-                "max_drawdown_pct": "0.05",
-                "win_rate": "0.6",
-                "total_trades": 10,
-                "total_fees_usd": "5.00",
-                "sortino_ratio": "1.5",
-                "calmar_ratio": "30.0",
-                "profit_factor": "2.5",
-            },
-            "equity_curve": [],
-            "trades": [],
-            "duration_seconds": 2.5,
-        },
+        BacktestResultResponse(
+            metrics=BacktestMetricsResponse(
+                net_pnl_usd=Decimal("150.00"),
+                total_return_pct=Decimal("1.5"),
+                sharpe_ratio=Decimal("1.2"),
+                max_drawdown_pct=Decimal("0.05"),
+                win_rate=Decimal("0.6"),
+                total_trades=10,
+                total_fees_usd=Decimal("5.00"),
+                sortino_ratio=Decimal("1.5"),
+                calmar_ratio=Decimal("30.0"),
+                profit_factor=Decimal("2.5"),
+            ),
+            equity_curve=[],
+            trades=[],
+            duration_seconds=2.5,
+        ),
     )
 
     # Poll — should be complete with results
@@ -631,7 +672,7 @@ async def test_submit_poll_complete_lifecycle(client):
     data = poll_resp.json()
     assert data["status"] == "complete"
     assert data["result"] is not None
-    assert data["result"]["metrics"]["net_pnl_usd"] == "150.00"
+    assert data["result"]["metrics"]["net_pnl_usd"] == "150"
     assert data["result"]["metrics"]["total_trades"] == 10
     assert data["result"]["duration_seconds"] == 2.5
     assert data["completed_at"] is not None
@@ -668,8 +709,8 @@ async def test_submit_poll_failed_lifecycle(client):
     assert data["result"] is None
 
 
-class TestSerializeResult:
-    """serialize_result trade serialization, including unrealized PnL (VIB-5083)."""
+class TestBuildResultResponse:
+    """Typed result construction and JSON-boundary serialization."""
 
     def _result(self, trades):
         from datetime import UTC, datetime
@@ -693,8 +734,8 @@ class TestSerializeResult:
             ],
         )
 
-    def test_realized_and_unrealized_pnl_serialize(self):
-        """A closing trade serializes its realized PnL; an opening trade serializes null."""
+    def test_realized_and_unrealized_pnl_remain_decimal_until_json(self):
+        """A closing trade stays Decimal internally; an opening trade stays absent."""
         from datetime import UTC, datetime
 
         from almanak.framework.backtesting.models import IntentType, TradeRecord
@@ -722,8 +763,13 @@ class TestSerializeResult:
             amount_usd=Decimal("6250"),
         )
 
-        out = serialize_result(self._result([opening, closing]))
-        serialized = out["trades"]
+        response = build_result_response(self._result([opening, closing]))
+        assert response.trades[0].intent_type == "SWAP"
+        assert serialize_result(self._result([opening]))["trades"][0]["intent_type"] == "SWAP"
+        assert response.trades[0].pnl_usd is None
+        assert response.trades[1].pnl_usd == Decimal("1250")
+
+        serialized = response.model_dump(mode="json")["trades"]
         assert serialized[0]["pnl_usd"] is None  # opening trade -> JSON null, not "None"
         assert serialized[1]["pnl_usd"] == "1250"  # closing trade -> realized gain
 
@@ -757,7 +803,7 @@ class TestSerializeResult:
             error="insufficient cash for fill: required 1, cash-like 0",
         )
 
-        serialized = serialize_result(self._result([filled, rejected]))["trades"]
+        serialized = build_result_response(self._result([filled, rejected])).model_dump(mode="json")["trades"]
         assert serialized[0]["status"] == "filled"
         assert serialized[0]["rejection_reason"] is None
         assert serialized[1]["status"] == "rejected"
@@ -765,45 +811,43 @@ class TestSerializeResult:
 
     def test_usd_result_emits_no_numeraire_or_price_keys(self):
         """A fiat_usd result payload stays free of numeraire / price-series keys."""
-        out = serialize_result(self._result([]))
-        assert "numeraire" not in out
-        assert "initial_capital_numeraire" not in out
-        assert "final_capital_numeraire" not in out
-        assert "price_series" not in out
-        assert "price_series_display_labels" not in out
+        out = build_result_response(self._result([])).model_dump(mode="json")
         assert all("numeraire_price_usd" not in pt and "value_numeraire" not in pt for pt in out["equity_curve"])
 
-    def test_numeraire_and_price_series_pass_through(self):
-        """The service serializer must not strip the numeraire projection (VIB-5127).
-
-        Regression: the old serializer emitted only ``{timestamp, value_usd}``
-        per equity point, dropping ``numeraire_price_usd`` and the top-level
-        numeraire descriptors that the SDK result carried.
-        """
+    def test_numeraire_equity_values_remain_decimal_until_json(self):
+        """Measured numeraire equity values keep full precision internally."""
         from datetime import UTC, datetime
 
-        from almanak.framework.backtesting.models import EquityPoint, PricePoint
+        from almanak.framework.backtesting.models import EquityPoint
 
         result = self._result([])
-        result.numeraire = "WETH"
-        result.initial_capital_numeraire = Decimal("5")
-        result.final_capital_numeraire = Decimal("5.5")
         ts = datetime(2025, 11, 1, tzinfo=UTC)
         result.equity_curve = [
             EquityPoint(timestamp=ts, value_usd=Decimal("10000"), numeraire_price_usd=Decimal("2000")),
         ]
-        result.price_series = [
-            PricePoint(timestamp=ts, prices={"arbitrum:0xweth": Decimal("2000"), "USDC": Decimal("1")}),
-        ]
-        result.price_series_display_labels = {"arbitrum:0xweth": "WETH", "USDC": "USDC"}
 
-        out = serialize_result(result)
-        assert out["numeraire"] == "WETH"
-        assert out["initial_capital_numeraire"] == "5"
-        assert out["final_capital_numeraire"] == "5.5"
-        point = out["equity_curve"][0]
+        response = build_result_response(result)
+        assert response.equity_curve[0].numeraire_price_usd == Decimal("2000")
+        assert response.equity_curve[0].value_numeraire == Decimal("5")
+
+        point = response.model_dump(mode="json")["equity_curve"][0]
         assert point["numeraire_price_usd"] == "2000"
         assert point["value_numeraire"] == "5"  # 10000 / 2000
-        price_point = out["price_series"][0]
-        assert price_point["prices"] == {"arbitrum:0xweth": "2000", "USDC": "1"}
-        assert out["price_series_display_labels"]["arbitrum:0xweth"] == "WETH"
+
+    def test_service_decimal_fields_reject_float_construction(self):
+        with pytest.raises(ValidationError, match="Float values are not allowed"):
+            BacktestMetricsResponse(net_pnl_usd=0.1)
+
+    def test_intent_type_wire_value_rejects_invalid_runtime_objects(self):
+        from almanak.core.intent_types import IntentType
+        from almanak.framework.backtesting.intent_types import UnrecognizedIntentType
+
+        assert intent_type_wire_value(IntentType.SWAP) == "SWAP"
+        assert intent_type_wire_value(UnrecognizedIntentType("FUTURE_INTENT")) == "FUTURE_INTENT"
+        assert intent_type_wire_value("LEGACY_INTENT") == "LEGACY_INTENT"
+        with pytest.raises(TypeError, match="got NoneType"):
+            intent_type_wire_value(None)  # type: ignore[arg-type]
+        with pytest.raises(TypeError, match="got dict"):
+            intent_type_wire_value({"value": "SWAP"})  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match="non-empty string"):
+            intent_type_wire_value("  ")

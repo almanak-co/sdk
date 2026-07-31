@@ -6,9 +6,8 @@ import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
 
-from almanak.services.backtest.models import JobStatus, ProgressInfo
+from almanak.services.backtest.models import BacktestResultResponse, JobStatus, ProgressInfo
 
 
 @dataclass
@@ -18,7 +17,7 @@ class JobState:
     job_id: str
     status: JobStatus
     progress: ProgressInfo = field(default_factory=ProgressInfo)  # type: ignore[arg-type]
-    result: dict[str, Any] | None = None
+    result: BacktestResultResponse | None = None
     error: str | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     completed_at: datetime | None = None
@@ -80,7 +79,7 @@ class JobManager:
                     eta_seconds=eta_seconds,
                 )
 
-    def complete_job(self, job_id: str, result: dict[str, Any]) -> None:
+    def complete_job(self, job_id: str, result: BacktestResultResponse) -> None:
         """Mark job as complete with results."""
         with self._lock:
             if job := self._jobs.get(job_id):
