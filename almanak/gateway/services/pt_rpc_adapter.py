@@ -50,6 +50,7 @@ from typing import Any
 
 import aiohttp
 
+from almanak.core.rpc_network import Network
 from almanak.gateway.utils import get_rpc_url
 from almanak.gateway.utils.ssl_context import build_ssl_context
 
@@ -101,9 +102,9 @@ class _NativeEthCall:
     per-call session is correct and cheap.
     """
 
-    def __init__(self, chain: str, network: str, request_timeout: float) -> None:
+    def __init__(self, chain: str, network: Network, request_timeout: float) -> None:
         self._chain = chain.lower()
-        self._network = network
+        self._network = Network.parse(network)
         self._request_timeout = request_timeout
         self._rpc_request_id = 0
         # Resolve once; a missing URL is a hard failure for this transport (the
@@ -205,7 +206,7 @@ class _GatewayNativeRpc:
 def build_gateway_eth_call(
     *,
     chain: str,
-    network: str,
+    network: Network,
     request_timeout: float = GATEWAY_PT_RPC_TIMEOUT_SECONDS,
 ) -> Callable[[str, str], Awaitable[str]]:
     """Return an async ``eth_call(to, data) -> hex`` on the gateway's audited egress.
@@ -232,7 +233,13 @@ class GatewayPtRpcClient:
     reader runs with ``web3 = None`` — NO raw ``HTTPProvider`` on the perimeter.
     """
 
-    def __init__(self, *, chain: str, network: str, request_timeout: float = GATEWAY_PT_RPC_TIMEOUT_SECONDS) -> None:
+    def __init__(
+        self,
+        *,
+        chain: str,
+        network: Network,
+        request_timeout: float = GATEWAY_PT_RPC_TIMEOUT_SECONDS,
+    ) -> None:
         self._source = _NativeEthCall(chain=chain, network=network, request_timeout=request_timeout)
         self.rpc = _GatewayNativeRpc(self._source)
 

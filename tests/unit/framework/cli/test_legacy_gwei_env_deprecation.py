@@ -27,6 +27,7 @@ import pytest
 
 from almanak.config import runtime as _runtime_module
 from almanak.config.runtime import _gas_cap_for_chain
+from almanak.core.rpc_network import Network
 
 
 @pytest.fixture(autouse=True)
@@ -74,7 +75,12 @@ class TestMainnetGwei_EnvIgnored:
                 return default
             return int(raw)
 
-        cap = _gas_cap_for_chain(chain=chain, network="mainnet", prefix="ALMANAK_", get_optional_int=get_optional_int)
+        cap = _gas_cap_for_chain(
+            chain=chain,
+            network=Network.MAINNET,
+            prefix="ALMANAK_",
+            get_optional_int=get_optional_int,
+        )
         assert cap == expected_cap, (
             f"Chain {chain!r} resolved to {cap}, expected {expected_cap}. "
             f"The global env (999999) must NOT clobber chain defaults post-VIB-4879."
@@ -92,7 +98,7 @@ class TestMainnetGwei_EnvIgnored:
 
         cap = _gas_cap_for_chain(
             chain="polygon",
-            network="mainnet",
+            network=Network.MAINNET,
             prefix="ALMANAK_",
             get_optional_int=get_optional_int,
         )
@@ -108,7 +114,7 @@ class TestDeprecationWarning:
         with patch("almanak.config.runtime.logger", mock_logger):
             _gas_cap_for_chain(
                 chain="polygon",
-                network="mainnet",
+                network=Network.MAINNET,
                 prefix="ALMANAK_",
                 get_optional_int=lambda name, default: int(os.environ.get(name, default)),
             )
@@ -124,7 +130,7 @@ class TestDeprecationWarning:
         with patch("almanak.config.runtime.logger", mock_logger):
             _gas_cap_for_chain(
                 chain="polygon",
-                network="mainnet",
+                network=Network.MAINNET,
                 prefix="ALMANAK_",
                 get_optional_int=lambda name, default: int(os.environ.get(name, default)),
             )
@@ -140,7 +146,7 @@ class TestDeprecationWarning:
             for _ in range(3):
                 _gas_cap_for_chain(
                     chain="polygon",
-                    network="mainnet",
+                    network=Network.MAINNET,
                     prefix="ALMANAK_",
                     get_optional_int=lambda name, default: int(os.environ.get(name, default)),
                 )
@@ -164,7 +170,7 @@ class TestDeprecationWarning:
             for chain in ("polygon", "arbitrum", "base"):
                 _gas_cap_for_chain(
                     chain=chain,
-                    network="mainnet",
+                    network=Network.MAINNET,
                     prefix="ALMANAK_",
                     get_optional_int=lambda name, default: int(os.environ.get(name, default)),
                 )
@@ -188,7 +194,7 @@ class TestAnvilPathUnchanged:
         monkeypatch.setenv("MAX_GAS_PRICE_GWEI", "50")  # below ANVIL_GAS_PRICE_CAP_GWEI
         cap = _gas_cap_for_chain(
             chain="polygon",
-            network="anvil",
+            network=Network.ANVIL,
             prefix="ALMANAK_",
             get_optional_int=lambda name, default: int(os.environ.get(name, default)),
         )
@@ -202,7 +208,7 @@ class TestAnvilPathUnchanged:
         with patch("almanak.config.runtime.logger", mock_logger):
             _gas_cap_for_chain(
                 chain="polygon",
-                network="anvil",
+                network=Network.ANVIL,
                 prefix="ALMANAK_",
                 get_optional_int=lambda name, default: int(os.environ.get(name, default)),
             )

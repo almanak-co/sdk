@@ -66,6 +66,7 @@ from almanak.config.runtime import (
     multi_chain_rpc_urls_from_env,
 )
 from almanak.core.chains import ChainRegistry
+from almanak.core.rpc_network import Network
 
 
 # Imported here so callers can reference without touching chain_executor directly.
@@ -855,7 +856,7 @@ class MultiChainRuntimeConfig:
     primary_chain: str = field(default="", init=False)
 
     # Optional fields with defaults
-    network: str = "mainnet"  # Network environment: "mainnet", "sepolia", or "anvil"
+    network: Network = Network.MAINNET
     max_gas_price_gwei: int = 100
     max_gas_cost_native: float = 0.0  # Max gas cost per tx in native token (0 = no limit)
     max_gas_cost_usd: float = 0.0  # Max gas cost per tx in USD (0 = no limit)
@@ -881,6 +882,11 @@ class MultiChainRuntimeConfig:
 
     def __post_init__(self) -> None:
         """Validate configuration and derive fields after initialization."""
+        try:
+            self.network = Network.parse(self.network)
+        except ValueError as exc:
+            raise ConfigurationError(field="network", reason=str(exc)) from None
+
         # Validate chains list
         self._validate_chains()
 
@@ -1078,7 +1084,7 @@ class MultiChainRuntimeConfig:
                 reason="Invalid private key format",
             ) from None
 
-    def _load_rpc_urls(self, network: str = "mainnet") -> None:
+    def _load_rpc_urls(self, network: Network = Network.MAINNET) -> None:
         """Load RPC URLs for each configured chain.
 
         This method supports two modes:
@@ -1086,7 +1092,7 @@ class MultiChainRuntimeConfig:
         2. **Mainnet mode**: Explicit per-chain URLs > dynamic URL building
 
         Args:
-            network: Network environment ("mainnet", "sepolia", "anvil"). Default: "mainnet"
+            network: Canonical RPC-managed network environment.
         """
         self.rpc_urls = multi_chain_rpc_urls_from_env(
             chains=self.chains,

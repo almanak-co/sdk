@@ -31,7 +31,9 @@ from __future__ import annotations
 
 import math
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_serializer, field_validator
+
+from almanak.core.rpc_network import Network
 
 
 class PolymarketGatewaySettings(BaseModel):
@@ -42,12 +44,12 @@ class PolymarketGatewaySettings(BaseModel):
     name fields and validators.
     """
 
-    # Polymarket runtime network — "mainnet" or "anvil". Surfaced on the
+    # Polymarket RPC runtime network. Surfaced on the
     # ``settings.polymarket_network`` attribute by both the prefixed
     # ``ALMANAK_GATEWAY_POLYMARKET_NETWORK`` env var and the bare-name
     # ``ALMANAK_POLYMARKET_NETWORK`` fallback applied at the service
     # boundary in ``almanak/config/env.py``.
-    polymarket_network: str = "mainnet"
+    polymarket_network: Network = Network.MAINNET
 
     # Market shape cache TTL (seconds). Used by the LRU cache in
     # ``PolymarketServiceServicer`` to age out stale market metadata.
@@ -64,6 +66,17 @@ class PolymarketGatewaySettings(BaseModel):
     polymarket_api_key: str | None = None
     polymarket_secret: str | None = None
     polymarket_passphrase: str | None = None
+
+    @field_validator("polymarket_network", mode="before")
+    @classmethod
+    def _parse_polymarket_network(cls, value: object) -> Network:
+        """Canonicalize the Polymarket RPC network at settings ingress."""
+        return Network.parse(value)
+
+    @field_serializer("polymarket_network")
+    def _serialize_polymarket_network(self, value: Network) -> str:
+        """Preserve the lowercase wire representation for composed settings."""
+        return value.value
 
     @field_validator("polymarket_market_cache_ttl_seconds")
     @classmethod

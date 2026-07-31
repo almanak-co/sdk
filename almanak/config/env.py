@@ -303,8 +303,9 @@ def _apply_polymarket_runtime_fallbacks(gateway: GatewayConfig) -> None:
 
     ``polymarket_market_cache_ttl_seconds`` uses the legacy
     clamp/fallback helper which enforces ``[0, 24h]`` and rejects NaN /
-    ``inf``. ``polymarket_network`` is a string with no validator so the
-    bare ``model_fields_set`` guard is sufficient.
+    ``inf``. ``polymarket_network`` is parsed into the canonical RPC network
+    enum before assignment because this legacy fallback runs after Pydantic
+    model construction.
     """
     if "polymarket_market_cache_ttl_seconds" not in gateway.model_fields_set:
         gateway.polymarket_market_cache_ttl_seconds = _parse_polymarket_market_cache_ttl_seconds(
@@ -313,7 +314,9 @@ def _apply_polymarket_runtime_fallbacks(gateway: GatewayConfig) -> None:
     if "polymarket_network" not in gateway.model_fields_set:
         polymarket_network = os.environ.get("ALMANAK_POLYMARKET_NETWORK")
         if polymarket_network is not None:
-            gateway.polymarket_network = polymarket_network
+            from almanak.core.rpc_network import Network
+
+            gateway.polymarket_network = Network.parse(polymarket_network)
 
 
 def _apply_anvil_watchdog_fallback(gateway: GatewayConfig) -> None:

@@ -878,9 +878,10 @@ class IntentCompiler:
             return None
 
         try:
+            from almanak.core.rpc_network import Network
             from almanak.gateway.utils import get_rpc_url
 
-            rpc_url = get_rpc_url(self.chain, network="anvil")
+            rpc_url = get_rpc_url(self.chain, network=Network.ANVIL)
         except (ImportError, ValueError) as e:
             logger.warning(f"Failed to get RPC URL for {self.chain} (no API key, Anvil also unavailable): {e}")
             return None

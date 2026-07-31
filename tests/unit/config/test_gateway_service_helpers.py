@@ -18,6 +18,7 @@ from almanak.connectors.polymarket.gateway.service import (
     POLYMARKET_MARKET_CACHE_TTL_DEFAULT_SECONDS,
     POLYMARKET_MARKET_CACHE_TTL_MAX_SECONDS,
 )
+from almanak.core.rpc_network import Network
 
 _ENV_VARS: tuple[str, ...] = (
     "THEGRAPH_API_KEY",
@@ -72,6 +73,26 @@ def test_gateway_config_reads_gateway_service_boot_fields(monkeypatch: pytest.Mo
     assert cfg.polymarket_network == "anvil"
     assert cfg.polymarket_market_cache_ttl_seconds == 120.0
     assert cfg.anvil_watchdog_interval == 7.5
+
+
+def test_gateway_config_normalizes_bare_polymarket_network_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The legacy bare env fallback must enter the typed settings contract."""
+    monkeypatch.setenv("ALMANAK_POLYMARKET_NETWORK", " AnViL ")
+
+    cfg = gateway_config_from_env()
+
+    assert cfg.polymarket_network is Network.ANVIL
+
+
+def test_gateway_config_rejects_invalid_bare_polymarket_network_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An invalid bare fallback must fail instead of surviving model construction."""
+    monkeypatch.setenv("ALMANAK_POLYMARKET_NETWORK", "devnet")
+
+    with pytest.raises(
+        ValueError,
+        match=r"Unknown network 'devnet'\. Valid values: mainnet, testnet, sepolia, anvil",
+    ):
+        gateway_config_from_env()
 
 
 def test_gateway_config_invalid_thresholds_fall_back_to_defaults(monkeypatch: pytest.MonkeyPatch) -> None:

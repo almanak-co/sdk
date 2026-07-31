@@ -60,10 +60,11 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal
 
 from eth_account import Account
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
 
 from almanak.config.env import _load_dotenv_once
 from almanak.core.chains._helpers import is_solana_chain
+from almanak.core.rpc_network import Network
 
 if TYPE_CHECKING:
     from almanak.framework.execution.signer.safe import SafeSigner
@@ -107,6 +108,14 @@ class MissingEnvironmentVariableError(ConfigurationError):
     def __init__(self, var_name: str) -> None:
         self.var_name = var_name
         super().__init__(field=var_name, reason="Required environment variable not set")
+
+
+def _parse_network(value: object) -> Network:
+    """Parse an RPC-managed network and preserve the config error contract."""
+    try:
+        return Network.parse(value)
+    except ValueError as exc:
+        raise ConfigurationError(field="network", reason=str(exc)) from None
 
 
 # =============================================================================
@@ -214,9 +223,9 @@ class RuntimeConfig(BaseModel):
     # Multi-chain only — protocol mapping per chain.
     protocols: dict[str, list[str]] = Field(default_factory=dict)
 
-    # Network environment ("mainnet" | "sepolia" | "anvil"). Captured for
-    # both lanes so downstream code has a single accessor.
-    network: str = "mainnet"
+    # Closed RPC runtime network. Captured for both lanes so downstream code
+    # has a single typed accessor.
+    network: Network = Network.MAINNET
 
     # Wallet — derived from ``private_key`` (or remote signer). Empty when
     # gateway-wallets mode resolves the address later via RegisterChains.
@@ -253,6 +262,17 @@ class RuntimeConfig(BaseModel):
     # boundary, not slip through silently as an attribute that nothing reads
     # (PR #2152 review).
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
+
+    @field_validator("network", mode="before")
+    @classmethod
+    def _validate_network(cls, value: object) -> Network:
+        """Canonicalize the persisted/runtime wire value at model ingress."""
+        return Network.parse(value)
+
+    @field_serializer("network")
+    def _serialize_network(self, value: Network) -> str:
+        """Preserve the lowercase network value in persisted config shapes."""
+        return value.value
 
     @model_validator(mode="after")
     def _check_single_vs_multi_consistency(self) -> RuntimeConfig:
@@ -576,7 +596,7 @@ def _mask_url(url: str | None) -> str | None:
 
 
 def _gas_cap_for_chain(
-    *, chain: str | None, network: str, prefix: str, get_optional_int: Callable[[str, int], int]
+    *, chain: str | None, network: Network, prefix: str, get_optional_int: Callable[[str, int], int]
 ) -> int:
     """Return the resolved ``max_gas_price_gwei`` for this chain + network.
 
@@ -609,7 +629,7 @@ def _gas_cap_for_chain(
         DEFAULT_GAS_PRICE_CAP_GWEI,
     )
 
-    if network.lower() == "anvil":
+    if network is Network.ANVIL:
         default_gas_cap = ANVIL_GAS_PRICE_CAP_GWEI
         user_gas_cap = get_optional_int("MAX_GAS_PRICE_GWEI", default_gas_cap)
         if user_gas_cap < ANVIL_GAS_PRICE_CAP_GWEI:
@@ -685,7 +705,7 @@ def _warn_if_global_gwei_env_set_on_mainnet(*, prefix: str, chain: str | None) -
 def _resolve_single_chain_rpc_url(
     *,
     chain: str,
-    network: str,
+    network: Network,
     prefix: str,
     get_optional: Callable[..., str | None],
 ) -> str:
@@ -700,8 +720,8 @@ def _resolve_single_chain_rpc_url(
     # of env reads (per the boundary lint allowlist).
     from almanak.gateway.utils.rpc_provider import get_rpc_url
 
-    if network.lower() == "anvil":
-        anvil_url = get_rpc_url(chain, network="anvil")
+    if network is Network.ANVIL:
+        anvil_url = get_rpc_url(chain, network=Network.ANVIL)
         logger.debug(f"Using Anvil RPC URL for {chain}: {anvil_url}")
         return anvil_url
 
@@ -733,7 +753,7 @@ def _resolve_single_chain_rpc_url(
 def _resolve_multi_chain_rpc_urls(
     *,
     chains: list[str],
-    network: str,
+    network: Network,
     private_key: str,
     prefix: str,
 ) -> dict[str, str]:
@@ -753,14 +773,14 @@ def _resolve_multi_chain_rpc_urls(
 
     from almanak.gateway.utils.rpc_provider import get_rpc_url
 
-    is_anvil = network.lower() == "anvil"
+    is_anvil = network is Network.ANVIL
     rpc_urls: dict[str, str] = {}
 
     for chain in chains:
         env_var = f"{prefix}{chain.upper()}_RPC_URL"
 
         if is_anvil:
-            rpc_urls[chain] = get_rpc_url(chain, network="anvil")
+            rpc_urls[chain] = get_rpc_url(chain, network=Network.ANVIL)
             logger.debug(f"Using Anvil RPC URL for {chain}: {rpc_urls[chain]}")
             continue
 
@@ -816,7 +836,7 @@ def runtime_config_from_env(  # noqa: C901
     chain: str | None = None,
     chains: list[str] | None = None,
     protocols: dict[str, list[str]] | None = None,
-    network: Literal["mainnet", "sepolia", "anvil"] | str = "mainnet",
+    network: Network | str = Network.MAINNET,
     dotenv_path: str | None = None,
     prefix: str = "ALMANAK_",
     private_key: str | None = None,
@@ -840,7 +860,7 @@ def runtime_config_from_env(  # noqa: C901
         chain: Single-chain name. Mutually exclusive with ``chains``.
         chains: Multi-chain list. Requires ``protocols``.
         protocols: Per-chain protocol mapping (multi-chain only).
-        network: ``"mainnet"`` | ``"sepolia"`` | ``"anvil"``. Default ``"mainnet"``.
+        network: RPC-managed network enum or its lowercase wire value.
         dotenv_path: Optional ``.env`` path; routed through
             :func:`almanak.config.env._load_dotenv_once`.
         prefix: Env-var prefix. Default ``"ALMANAK_"``.
@@ -876,6 +896,10 @@ def runtime_config_from_env(  # noqa: C901
             reason="`protocols` is only valid alongside `chains` (multi-chain lane)",
         )
 
+    # Canonicalize the closed vocabulary before any RPC/config work. This is
+    # the owner boundary for kwargs originating in CLI/config code.
+    resolved_network = _parse_network(network)
+
     # Single dotenv ingest at the service boundary. ``_load_dotenv_once`` is
     # process-wide; subsequent calls are no-ops regardless of arg shape.
     _load_dotenv_once(dotenv_path)
@@ -894,7 +918,7 @@ def runtime_config_from_env(  # noqa: C901
         return _build_multi_chain(
             chains=chains,
             protocols=protocols or {},  # validated above; never None at this point
-            network=network,
+            network=resolved_network,
             private_key=private_key,
             execution_mode=execution_mode,
             gateway_wallets_configured=gateway_wallets_configured,
@@ -908,7 +932,7 @@ def runtime_config_from_env(  # noqa: C901
 
     return _build_single_chain(
         chain=chain,
-        network=network,
+        network=resolved_network,
         private_key=private_key,
         execution_mode=execution_mode,
         gateway_wallets_configured=gateway_wallets_configured,
@@ -924,7 +948,7 @@ def runtime_config_from_env(  # noqa: C901
 def _build_single_chain(  # noqa: PLR0913 (intentional: explicit getter injection)
     *,
     chain: str | None,
-    network: str,
+    network: Network,
     private_key: str | None,
     execution_mode: SigningMode,
     gateway_wallets_configured: bool,
@@ -1035,7 +1059,7 @@ def _build_multi_chain(  # noqa: PLR0913
     *,
     chains: list[str],
     protocols: dict[str, list[str]],
-    network: str,
+    network: Network,
     private_key: str | None,
     execution_mode: SigningMode,
     gateway_wallets_configured: bool,
@@ -1282,7 +1306,7 @@ def gateway_wallets_configured(*, prefix: str = "ALMANAK_") -> bool:
 def multi_chain_rpc_urls_from_env(
     *,
     chains: list[str],
-    network: str,
+    network: Network | str,
     private_key: str | None,
     prefix: str = "ALMANAK_",
     dotenv_path: str | None = None,
@@ -1291,7 +1315,7 @@ def multi_chain_rpc_urls_from_env(
     _load_dotenv_once(dotenv_path)
     return _resolve_multi_chain_rpc_urls(
         chains=chains,
-        network=network,
+        network=_parse_network(network),
         private_key=private_key or "",
         prefix=prefix,
     )

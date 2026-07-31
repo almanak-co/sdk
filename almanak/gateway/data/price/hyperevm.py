@@ -47,6 +47,8 @@ from typing import TYPE_CHECKING
 
 import aiohttp
 
+from almanak.core.rpc_network import Network
+
 if TYPE_CHECKING:
     from almanak.framework.data.tokens.models import ResolvedToken
 
@@ -115,11 +117,11 @@ class HypercoreOraclePriceSource(BasePriceSource):
 
     def __init__(
         self,
-        network: str = "mainnet",
+        network: Network = Network.MAINNET,
         cache_ttl: float = 10.0,
         request_timeout: float = 5.0,
     ) -> None:
-        self._network = network
+        self._network = Network.parse(network)
         self._cache_ttl = cache_ttl
         self._request_timeout = request_timeout
 

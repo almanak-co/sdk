@@ -22,6 +22,7 @@ from pathlib import Path
 import click
 import pytest
 
+from almanak.core.rpc_network import Network
 from almanak.framework.cli._network_resolution import ResolvedNetwork, resolve_network
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -54,7 +55,14 @@ class TestPrecedence:
         assert resolved == ResolvedNetwork(network="mainnet", source="flag")
 
     def test_flag_is_normalized(self) -> None:
-        assert resolve_network(flag_network="ANVIL", strategy_config=None).network == "anvil"
+        resolved = resolve_network(flag_network=" AnViL ", strategy_config=None)
+
+        assert resolved.network is Network.ANVIL
+
+    def test_runtime_supported_testnet_is_rejected_by_cli(self) -> None:
+        """The SDK CLI deliberately exposes only mainnet and local Anvil."""
+        with pytest.raises(click.ClickException, match=r"Unsupported CLI network.*testnet.*anvil.*mainnet"):
+            resolve_network(flag_network=Network.TESTNET.value, strategy_config=None)
 
     def test_config_wins_over_default(self) -> None:
         resolved = resolve_network(flag_network=None, strategy_config={"network": "anvil"})

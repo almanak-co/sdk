@@ -125,6 +125,24 @@ class TestRpcServiceCall:
         mock_context.set_code.assert_called()
 
     @pytest.mark.asyncio
+    async def test_rejects_invalid_network_at_protobuf_boundary(self, rpc_service, mock_context):
+        """Unary RPC requests must reject unknown network wire values."""
+        request = gateway_pb2.RpcRequest(
+            chain="arbitrum",
+            method="eth_blockNumber",
+            params="[]",
+            id="1",
+            network="devnet",
+        )
+
+        with patch.object(rpc_service, "_get_rpc_url") as get_rpc_url_mock:
+            response = await rpc_service.Call(request, mock_context)
+
+        assert response.success is False
+        assert "Unknown network 'devnet'" in json.loads(response.error)["message"]
+        get_rpc_url_mock.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_accepts_allowed_chains(self, rpc_service, mock_context):
         """Allowed chains list is correct."""
         # Verify expected chains are in allowlist
@@ -631,6 +649,30 @@ class TestRpcServiceBatchCall:
         mock_context.set_code.assert_called()
 
     @pytest.mark.asyncio
+    async def test_batch_rejects_invalid_network_at_protobuf_boundary(self, rpc_service, mock_context):
+        """Batch RPC requests must reject unknown network wire values."""
+        request = gateway_pb2.RpcBatchRequest(
+            chain="arbitrum",
+            requests=[
+                gateway_pb2.RpcRequest(
+                    method="eth_blockNumber",
+                    params="[]",
+                    id="1",
+                    network="devnet",
+                ),
+            ],
+        )
+
+        with patch.object(rpc_service, "_get_rpc_url") as get_rpc_url_mock:
+            response = await rpc_service.BatchCall(request, mock_context)
+
+        assert len(response.responses) == 0
+        mock_context.set_details.assert_called_once_with(
+            "Unknown network 'devnet'. Valid values: mainnet, testnet, sepolia, anvil"
+        )
+        get_rpc_url_mock.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_batch_executes_multiple_calls(self, rpc_service, mock_context):
         """BatchCall executes multiple RPC calls."""
         request = gateway_pb2.RpcBatchRequest(
@@ -974,6 +1016,14 @@ class TestAnvilRateLimitExemption:
     def test_unresolved_network_keeps_the_mainnet_budget(self, rpc_service):
         """Omitting the network must throttle, never unthrottle (fail-safe default)."""
         limiter = rpc_service._get_rate_limiter("arbitrum")
+
+        assert not isinstance(limiter, _UnthrottledRateLimiter)
+        assert limiter.requests_per_minute == CHAIN_RATE_LIMITS["arbitrum"]
+
+    @pytest.mark.parametrize("network", ["", "devnet"])
+    def test_malformed_direct_network_keeps_the_mainnet_budget(self, rpc_service, network):
+        """Malformed direct-call values must fail safe to the throttled bucket."""
+        limiter = rpc_service._get_rate_limiter("arbitrum", network)
 
         assert not isinstance(limiter, _UnthrottledRateLimiter)
         assert limiter.requests_per_minute == CHAIN_RATE_LIMITS["arbitrum"]

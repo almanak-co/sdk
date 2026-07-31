@@ -6,8 +6,10 @@ import math
 from pathlib import Path
 from typing import Annotated, Any
 
-from pydantic import BaseModel, ValidationInfo, field_validator
+from pydantic import BaseModel, ValidationInfo, field_serializer, field_validator
 from pydantic_settings import BaseSettings, NoDecode
+
+from almanak.core.rpc_network import Network
 
 logger = logging.getLogger(__name__)
 
@@ -106,8 +108,8 @@ class GatewaySettings(_GatewaySettingsBase):  # type: ignore[valid-type,misc]
     # at the service boundary (binds ``ALMANAK_GATEWAY_TIMEOUT``).
     timeout: float = 30.0
 
-    # Network settings - "mainnet" for production, "anvil" for local testing
-    network: str = "mainnet"
+    # Closed RPC runtime network. Wire values remain lowercase strings.
+    network: Network = Network.MAINNET
 
     # Pre-initialize chains (comma-separated). Empty = accept any chain on-demand.
     # ``NoDecode`` disables pydantic-settings' default JSON decoding for the env
@@ -424,6 +426,17 @@ class GatewaySettings(_GatewaySettingsBase):  # type: ignore[valid-type,misc]
         if not math.isfinite(value):
             raise ValueError(f"{info.field_name} must be a finite number (got {value!r})")
         return value
+
+    @field_validator("network", mode="before")
+    @classmethod
+    def _parse_network(cls, value: object) -> Network:
+        """Parse the env/config wire value once at the gateway boundary."""
+        return Network.parse(value)
+
+    @field_serializer("network")
+    def _serialize_network(self, value: Network) -> str:
+        """Keep the existing lowercase string representation on config wires."""
+        return value.value
 
     # ``polymarket_market_cache_ttl_seconds`` validator is contributed by the
     # Polymarket connector's manifest-declared settings fragment.

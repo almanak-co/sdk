@@ -345,6 +345,10 @@ class ManagedGateway:
         """
         import shutil
 
+        # RPC routing uses the lowercase runtime enum. This is deliberately
+        # distinct from the public ISDK-facing ``almanak.core.enums.Network``;
+        # both are active contracts and neither supersedes the other.
+        from almanak.core.rpc_network import Network
         from almanak.framework.anvil.fork_manager import RollingForkManager
         from almanak.gateway.utils.rpc_provider import get_rpc_url
 
@@ -378,7 +382,7 @@ class ManagedGateway:
 
                 # Managed Anvil: start a new fork
                 port = find_free_port()
-                fork_url = get_rpc_url(chain, network="mainnet")
+                fork_url = get_rpc_url(chain, network=Network.MAINNET)
                 # Use pinned fork block if available (set by CI or nightly entrypoint)
                 # to maximise Foundry RPC cache hits across strategy runs.
                 fork_block = anvil_fork_block_for_chain(chain)

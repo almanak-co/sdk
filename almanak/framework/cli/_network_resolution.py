@@ -48,11 +48,13 @@ from typing import Any
 
 import click
 
+from almanak.core.rpc_network import Network
+
 logger = logging.getLogger(__name__)
 
 #: Networks a strategy config may legally declare — mirrors the
 #: ``click.Choice`` on the ``--network`` flag (``_run_options.py``).
-VALID_CONFIG_NETWORKS: frozenset[str] = frozenset({"mainnet", "anvil"})
+VALID_CONFIG_NETWORKS: frozenset[Network] = frozenset({Network.MAINNET, Network.ANVIL})
 
 #: Where the resolved network came from. Call sites echo this so an operator
 #: can see *why* they are on a given network.
@@ -63,7 +65,7 @@ NetworkSource = str  # one of: "flag" | "anvil-ports" | "config" | "default"
 class ResolvedNetwork:
     """The resolved network plus the precedence tier that produced it."""
 
-    network: str
+    network: Network
     source: NetworkSource
 
     @property
@@ -98,7 +100,7 @@ def _config_network_raw(strategy_config: Mapping[str, Any] | None) -> Any:
         return None
 
 
-def _normalized_config_network(raw: Any) -> str | None:
+def _normalized_config_network(raw: Any) -> Network | None:
     """Validate + normalize a config ``network`` value.
 
     Returns ``None`` when the key is absent or blank (treated as unset).
@@ -124,7 +126,7 @@ def _normalized_config_network(raw: Any) -> str | None:
             f"{_chain_confusion_hint(normalized)}"
             "Fix the config, or pass --network explicitly to override it."
         )
-    return normalized
+    return Network.parse(normalized)
 
 
 def _chain_confusion_hint(normalized: str) -> str:
@@ -201,10 +203,17 @@ def resolve_network(
     from almanak.framework.deployment import is_local
 
     if flag_network:
-        return ResolvedNetwork(network=flag_network.strip().casefold(), source="flag")
+        try:
+            parsed_flag = Network.parse(flag_network)
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from None
+        if parsed_flag not in VALID_CONFIG_NETWORKS:
+            valid = ", ".join(sorted(VALID_CONFIG_NETWORKS))
+            raise click.ClickException(f"Unsupported CLI network {flag_network!r}. Valid values: {valid}.")
+        return ResolvedNetwork(network=parsed_flag, source="flag")
 
     if anvil_ports_present and not no_gateway:
-        return ResolvedNetwork(network="anvil", source="anvil-ports")
+        return ResolvedNetwork(network=Network.ANVIL, source="anvil-ports")
 
     if not is_local():
         # Hosted never consults the config key, so never invoke the loader
@@ -212,7 +221,7 @@ def resolve_network(
         # config file it previously never read. Only an already-loaded config
         # is inspected, purely to surface the ignored-key notice.
         _warn_hosted_config_network_ignored(_config_network_raw(strategy_config))
-        return ResolvedNetwork(network="mainnet", source="default")
+        return ResolvedNetwork(network=Network.MAINNET, source="default")
 
     if strategy_config is None and config_loader is not None:
         strategy_config = config_loader()
@@ -221,4 +230,4 @@ def resolve_network(
     if config_network:
         return ResolvedNetwork(network=config_network, source="config")
 
-    return ResolvedNetwork(network="mainnet", source="default")
+    return ResolvedNetwork(network=Network.MAINNET, source="default")

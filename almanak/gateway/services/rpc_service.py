@@ -24,6 +24,7 @@ import grpc
 from eth_utils import keccak
 
 from almanak.core.chains._helpers import rpc_rate_limit_map
+from almanak.core.rpc_network import Network
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.metrics import record_rpc_latency, record_rpc_request
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
@@ -50,7 +51,7 @@ CHAIN_RATE_LIMITS: Mapping[str, int] = rpc_rate_limit_map()
 # Effective-network values used to partition the rate-limiter cache. Anvil
 # traffic is unthrottled (no upstream quota to protect); everything else shares
 # the chain's real provider budget. See RpcService._get_rate_limiter.
-_ANVIL_NETWORK = "anvil"
+_ANVIL_NETWORK = Network.ANVIL
 _MAINNET_LIMITER_KEY = ""
 
 
@@ -337,8 +338,8 @@ class _RpcBatchPlan:
     chain: str
     requests: list[gateway_pb2.RpcRequest]
     num_requests: int
-    network_override: str | None
-    effective_network: str
+    network_override: Network | None
+    effective_network: Network
 
 
 @dataclass(frozen=True)
@@ -401,7 +402,7 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
             self._session = None
             logger.info("RpcService HTTP session closed")
 
-    def _get_rate_limiter(self, chain: str, network: str | None = None) -> ChainRateLimiter:
+    def _get_rate_limiter(self, chain: str, network: Network | None = None) -> ChainRateLimiter:
         """Get the rate limiter for a chain on a given *effective* network.
 
         The per-chain RPM budget exists to protect a **paid upstream provider
@@ -426,9 +427,17 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
                 override if one was supplied, else the gateway's launch
                 network. ``None`` is treated as non-Anvil, so any call site
                 that does not resolve a network keeps the mainnet budget
-                (fail-safe: an omission throttles, it never unthrottles).
+                (fail-safe: an omission or malformed direct-call value
+                throttles, it never unthrottles).
         """
-        is_anvil = str(network or "").strip().lower() == _ANVIL_NETWORK
+        # Defensive normalization preserves compatibility for test/support
+        # callers that invoke this private helper directly. Production request
+        # paths have already parsed at the protobuf boundary.
+        try:
+            canonical_network = Network.parse(network) if network is not None else None
+        except ValueError:
+            canonical_network = None
+        is_anvil = canonical_network is Network.ANVIL
         key = (chain, _ANVIL_NETWORK if is_anvil else _MAINNET_LIMITER_KEY)
         limiter = self._rate_limiters.get(key)
         if limiter is None:
@@ -493,7 +502,7 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
             f"or start the gateway with --chains {chain}."
         )
 
-    def _network_elevation_error(self, network_override: str | None) -> str | None:
+    def _network_elevation_error(self, network_override: Network | None) -> str | None:
         """Reject a caller override that would grant Anvil-only semantics.
 
         Anvil privileges — the ``ANVIL_ONLY_RPC_METHODS`` fork-mutation
@@ -506,9 +515,9 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
         URL. The reverse direction — an anvil-launched gateway serving a
         per-request ``"mainnet"`` read (VIB-1713) — stays allowed.
         """
-        if network_override is None or network_override.strip().lower() != "anvil":
+        if network_override is not Network.ANVIL:
             return None
-        if str(self.settings.network or "").strip().lower() == "anvil":
+        if self.settings.network is Network.ANVIL:
             return None
         return (
             "Per-request network override 'anvil' is not permitted on a gateway "
@@ -517,7 +526,7 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
             "the caller"
         )
 
-    def _get_rpc_url(self, chain: str, network_override: str | None = None) -> str | None:
+    def _get_rpc_url(self, chain: str, network_override: Network | None = None) -> str | None:
         """Get RPC URL for a chain.
 
         This function looks up the RPC URL with the API key from settings.
@@ -825,7 +834,17 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
         # policy. Normalize before storing (mirrors the batch path) so the
         # elevation guard, the method allowlist's exact network == "anvil"
         # comparison, and URL resolution all see one canonical value.
-        network_override = (request.network or "").strip().lower() or None
+        try:
+            network_override = Network.parse(request.network) if request.network.strip() else None
+        except ValueError as exc:
+            self._metrics.failed_requests += 1
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(exc))
+            return gateway_pb2.RpcResponse(
+                success=False,
+                error=json.dumps({"code": -32600, "message": str(exc)}),
+                id=request.id,
+            )
         elevation_error = self._network_elevation_error(network_override)
         if elevation_error is not None:
             self._metrics.failed_requests += 1
@@ -967,8 +986,19 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
         requests: list[gateway_pb2.RpcRequest],
         context: grpc.aio.ServicerContext,
         num_requests: int,
-    ) -> tuple[str | None, gateway_pb2.RpcBatchResponse | None]:
-        batch_networks = {rpc_request.network.strip().lower() for rpc_request in requests if rpc_request.network}
+    ) -> tuple[Network | None, gateway_pb2.RpcBatchResponse | None]:
+        try:
+            batch_networks = {
+                Network.parse(rpc_request.network) for rpc_request in requests if rpc_request.network.strip()
+            }
+        except ValueError as exc:
+            response = self._failed_batch_response(
+                context,
+                num_requests,
+                grpc.StatusCode.INVALID_ARGUMENT,
+                str(exc),
+            )
+            return None, response
         if len(batch_networks) > 1:
             response = self._failed_batch_response(
                 context,

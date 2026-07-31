@@ -60,6 +60,7 @@ from almanak.config.gateway_runtime import (
 )
 from almanak.core.chains import ChainRegistry
 from almanak.core.chains.solana import SOLANA_CLUSTERS
+from almanak.core.rpc_network import Network, network_profile
 
 logger = logging.getLogger(__name__)
 
@@ -98,15 +99,6 @@ class NodeProvider(StrEnum):
     ANVIL = "anvil"
     CUSTOM = "custom"  # For explicitly provided URLs
     PUBLIC = "public"  # Free public RPCs (no API key, last resort)
-
-
-class Network(StrEnum):
-    """Network environment for chains."""
-
-    MAINNET = "mainnet"
-    TESTNET = "testnet"  # Generic testnet
-    SEPOLIA = "sepolia"  # Ethereum testnet
-    ANVIL = "anvil"  # Local fork
 
 
 # =============================================================================
@@ -221,7 +213,7 @@ def _has_custom_url(chain: str) -> bool:
 
 def get_rpc_url(
     chain: str,
-    network: str = "mainnet",
+    network: Network = Network.MAINNET,
     provider: NodeProvider | None = None,
     custom_url: str | None = None,
 ) -> str:
@@ -267,14 +259,11 @@ def get_rpc_url(
         chain_lower = resolve_chain_name(chain_lower)
     except (ValueError, ImportError):
         pass
-    network_lower = network.lower()
-
-    # Normalize testnet to sepolia (Ethereum's primary testnet)
-    if network_lower == "testnet":
-        network_lower = "sepolia"
+    network = Network.parse(network)
+    profile = network_profile(network)
 
     # Handle Anvil (local development)
-    if network_lower == "anvil":
+    if profile.is_local:
         return _get_anvil_url(chain_lower)
 
     # Handle custom provider
@@ -290,7 +279,7 @@ def get_rpc_url(
 
     # Build URL based on provider
     if provider == NodeProvider.ALCHEMY:
-        return _get_alchemy_url(chain_lower, network_lower)
+        return _get_alchemy_url(chain_lower, profile.rpc_target)
     elif provider == NodeProvider.TENDERLY:
         return _get_tenderly_url(chain_lower)
     elif provider == NodeProvider.CUSTOM:
@@ -358,7 +347,7 @@ def _auto_select_provider(chain: str) -> NodeProvider:
     )
 
 
-def fork_upstream_is_public_rpc(chain: str, network: str = "mainnet") -> bool:
+def fork_upstream_is_public_rpc(chain: str, network: Network = Network.MAINNET) -> bool:
     """Whether a managed-Anvil fork of ``chain`` would use the free public RPC.
 
     Single source of truth for the VIB-5869 archive gate: rather than
@@ -381,7 +370,8 @@ def fork_upstream_is_public_rpc(chain: str, network: str = "mainnet") -> bool:
         chain_lower = resolve_chain_name(chain_lower)
     except (ValueError, ImportError):
         pass
-    if network.lower() in ("anvil",):
+    network = Network.parse(network)
+    if network_profile(network).is_local:
         # Local Anvil is not a fork upstream; nothing to gate.
         return False
     try:
@@ -420,7 +410,7 @@ def _get_anvil_url(chain: str | None = None) -> str:
     return f"http://127.0.0.1:{port_str}"
 
 
-def _get_alchemy_url(chain: str, network: str = "mainnet") -> str:
+def _get_alchemy_url(chain: str, network: Network = Network.MAINNET) -> str:
     """Build Alchemy RPC URL for the specified chain and network.
 
     URL format: https://{chain_key}-{network}.g.alchemy.com/v2/{api_key}
@@ -448,9 +438,9 @@ def _get_alchemy_url(chain: str, network: str = "mainnet") -> str:
     chain_key = ALCHEMY_CHAIN_KEYS[chain]
 
     # Build URL based on network
-    if network == "mainnet":
+    if network is Network.MAINNET:
         return f"https://{chain_key}-mainnet.g.alchemy.com/v2/{api_key}"
-    elif network == "sepolia":
+    elif network is Network.SEPOLIA:
         return f"https://{chain_key}-sepolia.g.alchemy.com/v2/{api_key}"
     else:
         raise ValueError(f"Unsupported network '{network}' for Alchemy. Use 'mainnet' or 'sepolia'.")
@@ -581,10 +571,9 @@ def has_api_key_configured() -> bool:
     return False
 
 
-@lru_cache(maxsize=32)
 def get_rpc_url_cached(
     chain: str,
-    network: str = "mainnet",
+    network: Network = Network.MAINNET,
     custom_url: str | None = None,
 ) -> str:
     """Cached version of get_rpc_url for performance.
@@ -603,13 +592,18 @@ def get_rpc_url_cached(
     Returns:
         Cached RPC URL
     """
+    return _get_rpc_url_cached(chain, Network.parse(network), custom_url)
+
+
+@lru_cache(maxsize=32)
+def _get_rpc_url_cached(chain: str, network: Network, custom_url: str | None) -> str:
+    """Cache RPC URLs only after the boundary value is canonicalized."""
     if custom_url:
         return get_rpc_url(chain, network, provider=NodeProvider.CUSTOM, custom_url=custom_url)
     return get_rpc_url(chain, network)
 
 
-@lru_cache(maxsize=8)
-def get_cached_web3(chain: str, network: str = "mainnet"):  # noqa: ANN201
+def get_cached_web3(chain: str, network: Network = Network.MAINNET):  # noqa: ANN201
     """Return a cached sync ``web3.Web3`` instance for the given chain/network.
 
     Uses the same URL resolution as ``get_rpc_url``. The returned instance is
@@ -629,6 +623,12 @@ def get_cached_web3(chain: str, network: str = "mainnet"):  # noqa: ANN201
     Returns:
         Cached ``web3.Web3`` instance bound to a process-shared HTTPProvider.
     """
+    return _get_cached_web3(chain, Network.parse(network))
+
+
+@lru_cache(maxsize=8)
+def _get_cached_web3(chain: str, network: Network):  # noqa: ANN201
+    """Build and cache a Web3 client using an already-canonical cache key."""
     # Local import keeps web3 cost off module load (matches the other call sites
     # in this gateway that lazy-import web3).
     from web3 import Web3
@@ -657,6 +657,14 @@ def get_cached_web3(chain: str, network: str = "mainnet"):  # noqa: ANN201
                 logger.warning("POA middleware unavailable for chain %s; latest-block reads may fail", chain)
 
     return w3
+
+
+# Preserve the cache-management hooks exposed by the previously decorated
+# public functions while keeping raw boundary strings out of cache keys.
+get_rpc_url_cached.cache_clear = _get_rpc_url_cached.cache_clear  # type: ignore[attr-defined]
+get_rpc_url_cached.cache_info = _get_rpc_url_cached.cache_info  # type: ignore[attr-defined]
+get_cached_web3.cache_clear = _get_cached_web3.cache_clear  # type: ignore[attr-defined]
+get_cached_web3.cache_info = _get_cached_web3.cache_info  # type: ignore[attr-defined]
 
 
 # =============================================================================

@@ -60,6 +60,7 @@ from almanak.connectors.polymarket.signer import (
     make_local_signer,
     make_remote_signer,
 )
+from almanak.core.rpc_network import Network
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.utils.rpc_provider import get_cached_web3, get_rpc_url, is_local_rpc
 from almanak.gateway.utils.ssl_context import build_ssl_context
@@ -813,7 +814,7 @@ class PolymarketServiceServicer(polymarket_pb2_grpc.PolymarketServiceServicer):
         Anvil port mapping for local-fork testing.
         """
         if self._polygon_web3 is None:
-            network = getattr(self.settings, "polymarket_network", "mainnet")
+            network = Network.parse(getattr(self.settings, "polymarket_network", Network.MAINNET))
             self._polygon_web3 = get_cached_web3("polygon", network=network)
         return self._polygon_web3
 
@@ -830,7 +831,7 @@ class PolymarketServiceServicer(polymarket_pb2_grpc.PolymarketServiceServicer):
         the chain-id assertion: a forked Anvil keeps the same Polygon
         contract addresses but can return any chain ID depending on flags.
         """
-        if str(getattr(self.settings, "polymarket_network", "mainnet") or "").lower() == "anvil":
+        if Network.parse(getattr(self.settings, "polymarket_network", Network.MAINNET)) is Network.ANVIL:
             return True
         try:
             return is_local_rpc(get_rpc_url("polygon"))
