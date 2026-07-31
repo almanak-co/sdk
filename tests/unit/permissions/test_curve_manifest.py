@@ -42,6 +42,7 @@ import pytest
 from almanak.connectors.curve import permission_hints as curve_hints
 from almanak.connectors.curve.adapter import CURVE_POOLS
 from almanak.connectors.curve.receipt_parser import CURVE_NATIVE_ETH_PLACEHOLDER
+from almanak.core.intent_types import IntentType
 from almanak.framework.intents.compiler import ERC20_APPROVE_SELECTOR
 from almanak.framework.permissions.discovery import discover_permissions
 from almanak.framework.permissions.generator import generate_manifest
@@ -142,8 +143,8 @@ class TestCurveLpDeclaration:
 
     def test_curve_declares_swap_and_lp_synthetic_discovery(self) -> None:
         declared = get_permission_hints("curve").synthetic_discovery_intents
-        assert {"SWAP", "LP_OPEN", "LP_CLOSE"} <= declared, (
-            f"curve declares {sorted(declared)}; LP_OPEN/LP_CLOSE are required or the "
+        assert {IntentType.SWAP, IntentType.LP_OPEN, IntentType.LP_CLOSE} <= declared, (
+            f"curve declares {sorted(value.value for value in declared)}; LP_OPEN/LP_CLOSE are required or the "
             "Zodiac manifest for curve LP is empty on every chain (VIB-6046)."
         )
 
@@ -161,7 +162,7 @@ class TestCurveLpDeclaration:
         assert not offenders, f"hardcoded address/selector literals in curve permission_hints: {offenders}"
 
     def test_unowned_intent_types_fall_through_to_the_framework(self) -> None:
-        for intent_type in ("SUPPLY", "PERP_OPEN", "LP_COLLECT_FEES"):
+        for intent_type in (IntentType.SUPPLY, IntentType.PERP_OPEN, IntentType.LP_COLLECT_FEES):
             assert curve_hints.build_discovery_vectors("curve", intent_type, "arbitrum", _CTX) is None
 
 
@@ -170,7 +171,7 @@ class TestCurveLpDiscoveryVectors:
 
     @pytest.mark.parametrize("chain", _CURVE_CHAINS)
     def test_lp_open_vectors_cover_every_registered_pool(self, chain: str) -> None:
-        vectors = curve_hints.build_discovery_vectors("curve", "LP_OPEN", chain, _CTX)
+        vectors = curve_hints.build_discovery_vectors("curve", IntentType.LP_OPEN, chain, _CTX)
         assert vectors, f"no LP_OPEN discovery vectors for curve on {chain}"
         pools = CURVE_POOLS[chain]
         covered = {v.pool for v in vectors}
@@ -185,7 +186,7 @@ class TestCurveLpDiscoveryVectors:
         so coins at index 2+ of a 3- or 4-coin pool would never get an
         ``approve`` on the manifest. Discovery must use the full
         ``coin_amounts`` allocation vector."""
-        vectors = curve_hints.build_discovery_vectors("curve", "LP_OPEN", chain, _CTX)
+        vectors = curve_hints.build_discovery_vectors("curve", IntentType.LP_OPEN, chain, _CTX)
         for vector in vectors:
             pool_data = CURVE_POOLS[chain][vector.pool]
             native_len = int(pool_data["n_coins"])
@@ -205,7 +206,7 @@ class TestCurveLpDiscoveryVectors:
         ``remove_liquidity_imbalance`` is StableSwap-only; the compiler rejects
         it elsewhere, so emitting it there would only add a guaranteed
         compilation-failure warning to every manifest."""
-        vectors = curve_hints.build_discovery_vectors("curve", "LP_CLOSE", chain, _CTX)
+        vectors = curve_hints.build_discovery_vectors("curve", IntentType.LP_CLOSE, chain, _CTX)
         assert vectors, f"no LP_CLOSE discovery vectors for curve on {chain}"
         for pool_name, pool_data in CURVE_POOLS[chain].items():
             shapes = [v for v in vectors if v.pool == pool_name]

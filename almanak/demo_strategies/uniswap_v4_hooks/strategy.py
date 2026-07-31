@@ -39,7 +39,7 @@ from almanak.connectors.uniswap_v4.hooks import (
     discover_pool,
     warn_empty_hook_data,
 )
-from almanak.framework.intents import AnyIntent, Intent
+from almanak.framework.intents import AnyIntent, Intent, IntentType
 from almanak.framework.market import MarketSnapshot
 from almanak.framework.strategies import IntentStrategy, almanak_strategy
 from almanak.framework.utils.log_formatters import format_token_amount_human, format_usd
@@ -105,7 +105,13 @@ class UniswapV4HooksConfig:
     tags=["demo", "lp", "hooks", "uniswap-v4", "base", "v4"],
     supported_chains=["base", "ethereum", "arbitrum"],
     supported_protocols=["uniswap_v4"],
-    intent_types=["LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES", "SWAP", "HOLD"],
+    intent_types=[
+        IntentType.LP_OPEN,
+        IntentType.LP_CLOSE,
+        IntentType.LP_COLLECT_FEES,
+        IntentType.SWAP,
+        IntentType.HOLD,
+    ],
     default_chain="base",
     quote_asset="USD",
 )

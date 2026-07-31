@@ -67,7 +67,7 @@ from decimal import Decimal
 from typing import Any
 
 # Intent is what your strategy returns - describes what action to take
-from almanak.framework.intents import AnyIntent, Intent
+from almanak.framework.intents import AnyIntent, Intent, IntentType
 
 # Core strategy framework imports
 from almanak.framework.market import MarketSnapshot
@@ -104,7 +104,7 @@ logger = logging.getLogger(__name__)
     # SUPPLY: Supply the asset (default WETH) to earn yield
     # WITHDRAW: Reclaim the supplied asset at teardown (withdraw_all -> live balance)
     # HOLD: No action
-    intent_types=["SUPPLY", "WITHDRAW", "HOLD"],
+    intent_types=[IntentType.SUPPLY, IntentType.WITHDRAW, IntentType.HOLD],
     default_chain="ethereum",
     quote_asset="USD",
 )

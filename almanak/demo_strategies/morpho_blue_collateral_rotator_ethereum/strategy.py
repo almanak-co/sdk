@@ -41,7 +41,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
-from almanak.framework.intents import AnyIntent, Intent
+from almanak.framework.intents import AnyIntent, Intent, IntentType
 from almanak.framework.market import MarketSnapshot
 from almanak.framework.strategies import IntentStrategy, almanak_strategy
 
@@ -69,7 +69,7 @@ MARKET_WSTETH_WETH = "0xc54d7acf14de29e0e5527cabd7a576506870346a78a11a6762e2cca6
     supported_chains=["ethereum"],
     default_chain="ethereum",
     supported_protocols=["morpho_blue"],
-    intent_types=["SUPPLY", "WITHDRAW", "HOLD"],
+    intent_types=[IntentType.SUPPLY, IntentType.WITHDRAW, IntentType.HOLD],
     quote_asset="USD",
 )
 class MorphoBlueCollateralRotatorStrategy(IntentStrategy):

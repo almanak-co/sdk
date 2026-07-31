@@ -7,7 +7,6 @@ before reaching the gateway.
 
 from __future__ import annotations
 
-import enum
 import json
 import logging
 import math
@@ -22,6 +21,7 @@ from pathlib import Path
 
 from almanak.core.chains import DEFAULT_CHAIN
 from almanak.core.constants import canonical_chain_name
+from almanak.core.intent_types import IntentType
 from almanak.framework.agent_tools.catalog import RiskTier, ToolDefinition
 from almanak.framework.agent_tools.errors import RiskBlockedError
 
@@ -130,7 +130,7 @@ class AgentPolicy:
     allowed_chains: set[str] | None = field(default_factory=lambda: {DEFAULT_CHAIN})
     allowed_protocols: set[str] | None = None  # None = all protocols
     allowed_tokens: set[str] | None = None  # None = all tokens
-    allowed_intent_types: set[str] | None = None  # None = all intent types
+    allowed_intent_types: set[IntentType] | None = None  # None = all intent types
     allowed_execution_wallets: set[str] | None = None  # None = any wallet allowed
 
     # ── Approval gates ──────────────────────────────────────────────────
@@ -149,6 +149,19 @@ class AgentPolicy:
     min_rebalance_benefit_usd: Decimal = Decimal("10")
     cooldown_seconds: int = 300
     require_rebalance_check: bool = True
+
+    def __post_init__(self) -> None:
+        """Normalize the config boundary into the canonical intent vocabulary."""
+        if self.allowed_intent_types is None:
+            return
+        parsed: set[IntentType] = set()
+        for value in self.allowed_intent_types:
+            intent_type = IntentType.try_parse(value)
+            if intent_type is None:
+                valid = ", ".join(member.value for member in IntentType)
+                raise ValueError(f"Unknown allowed intent type {value!r}; expected one of: {valid}")
+            parsed.add(intent_type)
+        self.allowed_intent_types = parsed
 
 
 @dataclass
@@ -812,12 +825,12 @@ class PolicyEngine:
         intent_type = args.get("intent_type")
         if not intent_type:
             return
-        # Accept either a string or an Enum member (e.g. IntentType.LIQUIDATE).
+        # Accept either a string or an IntentType member (e.g. IntentType.LIQUIDATE).
         # Pydantic ``model_dump()`` typically returns a string for the
         # ``intent_type: str`` schema field, but defense-in-depth: if a
         # caller (test fixture, future internal helper) passes the enum
         # directly, do not silently skip the gate.
-        if isinstance(intent_type, enum.Enum):
+        if isinstance(intent_type, IntentType):
             intent_type = intent_type.value
         if not isinstance(intent_type, str):
             return
@@ -852,11 +865,12 @@ class PolicyEngine:
             )
             return
 
-        if self.policy.allowed_intent_types is not None and intent_type.lower() not in {
-            t.lower() for t in self.policy.allowed_intent_types
-        }:
+        parsed_intent_type = IntentType.try_parse(intent_type)
+        if self.policy.allowed_intent_types is not None and parsed_intent_type not in self.policy.allowed_intent_types:
             violations.append(f"Intent type '{intent_type}' is not allowed.")
-            suggestions.append(f"Allowed intent types: {sorted(self.policy.allowed_intent_types)}")
+            suggestions.append(
+                f"Allowed intent types: {sorted(member.value for member in self.policy.allowed_intent_types)}"
+            )
 
     def _check_spend_limits(self, args: dict, violations: list[str], suggestions: list[str]) -> None:
         # Auto daily reset: check if 24h has elapsed since last reset

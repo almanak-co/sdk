@@ -30,11 +30,14 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+from almanak.core.intent_types import IntentType
 from almanak.framework.permissions.hints import DiscoveryContext, PermissionHints
 
 PERMISSION_HINTS = PermissionHints(
     # DELEVERAGE compiles to a REPAY shape — no separate vector.
-    synthetic_discovery_intents=frozenset({"SUPPLY", "BORROW", "REPAY", "WITHDRAW"}),
+    synthetic_discovery_intents=frozenset(
+        {IntentType.SUPPLY, IntentType.BORROW, IntentType.REPAY, IntentType.WITHDRAW}
+    ),
     # The vault SDK transport needs an RPC/gateway handle even though
     # discovery-mode compiles skip every on-chain read (Aerodrome
     # precedent: offline discovery degrades to a warning).
@@ -61,7 +64,7 @@ def _vault_entries(chain: str) -> list[tuple[str, dict]]:
 
 def build_discovery_vectors(
     protocol: str,
-    intent_type: str,
+    intent_type: IntentType,
     chain: str,
     ctx: DiscoveryContext,
 ):
@@ -72,10 +75,10 @@ def build_discovery_vectors(
     is not in — never emits a doomed synthetic there.
     """
     entries = _vault_entries(chain)
-    if intent_type in {"SUPPLY", "BORROW", "REPAY", "WITHDRAW"} and not entries:
+    if intent_type in {IntentType.SUPPLY, IntentType.BORROW, IntentType.REPAY, IntentType.WITHDRAW} and not entries:
         return []
 
-    if intent_type == "SUPPLY":
+    if intent_type is IntentType.SUPPLY:
         from almanak.framework.intents.vocabulary import SupplyIntent
 
         return [
@@ -89,7 +92,7 @@ def build_discovery_vectors(
             for vault, entry in entries
         ]
 
-    if intent_type == "BORROW":
+    if intent_type is IntentType.BORROW:
         from almanak.framework.intents.vocabulary import BorrowIntent
 
         # Synthetic bundled-collateral borrow for permission discovery only:
@@ -108,7 +111,7 @@ def build_discovery_vectors(
             for vault, entry in entries
         ]
 
-    if intent_type == "REPAY":
+    if intent_type is IntentType.REPAY:
         from almanak.framework.intents.vocabulary import RepayIntent
 
         return [
@@ -122,7 +125,7 @@ def build_discovery_vectors(
             for vault, entry in entries
         ]
 
-    if intent_type == "WITHDRAW":
+    if intent_type is IntentType.WITHDRAW:
         from almanak.framework.intents.vocabulary import WithdrawIntent
 
         return [

@@ -44,6 +44,7 @@ VIB-5929 tracks the general hole (13 connectors shipping empty
 ``PermissionHints`` + a CI gate that would catch a zero-permission manifest).
 """
 
+from almanak.core.intent_types import IntentType
 from almanak.framework.permissions.hints import PermissionHints, StaticPermissionEntry
 
 from .adapter import ACROSS_CHAIN_IDS, ACROSS_SPOKE_POOL_ADDRESSES, DEPOSIT_V3_SELECTOR
@@ -87,7 +88,7 @@ def _build_static_permissions() -> dict[str, list[StaticPermissionEntry]]:
                 # (adapter.build_deposit_tx: value = amount_wei) — Zodiac Roles
                 # rejects a value-bearing call without this.
                 send_allowed=True,
-                intent_types=frozenset({"BRIDGE"}),
+                intent_types=frozenset({IntentType.BRIDGE}),
             )
         ]
     return result

@@ -5,6 +5,9 @@ teardown complements (e.g., SUPPLY -> WITHDRAW, BORROW -> REPAY) so
 strategies don't need to declare them explicitly.
 """
 
+import pytest
+
+from almanak.core.intent_types import IntentType
 from almanak.framework.strategies import IntentStrategy, almanak_strategy
 
 
@@ -13,7 +16,7 @@ def test_supply_auto_expands_withdraw():
 
     @almanak_strategy(
         name="test_supply_expand",
-        intent_types=["SUPPLY", "HOLD"],
+        intent_types=[IntentType.SUPPLY, IntentType.HOLD],
     )
     class TestStrategy(IntentStrategy):
         def decide(self, market):
@@ -25,9 +28,9 @@ def test_supply_auto_expands_withdraw():
         def generate_teardown_intents(self, mode, market=None):
             return []
 
-    assert "SUPPLY" in TestStrategy.STRATEGY_METADATA.intent_types
-    assert "WITHDRAW" in TestStrategy.STRATEGY_METADATA.intent_types
-    assert "HOLD" in TestStrategy.STRATEGY_METADATA.intent_types
+    assert IntentType.SUPPLY in TestStrategy.STRATEGY_METADATA.intent_types
+    assert IntentType.WITHDRAW in TestStrategy.STRATEGY_METADATA.intent_types
+    assert IntentType.HOLD in TestStrategy.STRATEGY_METADATA.intent_types
 
 
 def test_borrow_auto_expands_repay():
@@ -35,7 +38,7 @@ def test_borrow_auto_expands_repay():
 
     @almanak_strategy(
         name="test_borrow_expand",
-        intent_types=["SUPPLY", "BORROW"],
+        intent_types=[IntentType.SUPPLY, IntentType.BORROW],
     )
     class TestStrategy(IntentStrategy):
         def decide(self, market):
@@ -48,8 +51,8 @@ def test_borrow_auto_expands_repay():
             return []
 
     types = TestStrategy.STRATEGY_METADATA.intent_types
-    assert "REPAY" in types, "BORROW should auto-expand to include REPAY"
-    assert "WITHDRAW" in types, "SUPPLY should auto-expand to include WITHDRAW"
+    assert IntentType.REPAY in types, "BORROW should auto-expand to include REPAY"
+    assert IntentType.WITHDRAW in types, "SUPPLY should auto-expand to include WITHDRAW"
 
 
 def test_lp_open_auto_expands_lp_close():
@@ -57,7 +60,7 @@ def test_lp_open_auto_expands_lp_close():
 
     @almanak_strategy(
         name="test_lp_expand",
-        intent_types=["SWAP", "LP_OPEN"],
+        intent_types=[IntentType.SWAP, IntentType.LP_OPEN],
     )
     class TestStrategy(IntentStrategy):
         def decide(self, market):
@@ -69,7 +72,7 @@ def test_lp_open_auto_expands_lp_close():
         def generate_teardown_intents(self, mode, market=None):
             return []
 
-    assert "LP_CLOSE" in TestStrategy.STRATEGY_METADATA.intent_types
+    assert IntentType.LP_CLOSE in TestStrategy.STRATEGY_METADATA.intent_types
 
 
 def test_perp_open_auto_expands_perp_close_and_cancel():
@@ -83,7 +86,7 @@ def test_perp_open_auto_expands_perp_close_and_cancel():
 
     @almanak_strategy(
         name="test_perp_expand",
-        intent_types=["PERP_OPEN"],
+        intent_types=[IntentType.PERP_OPEN],
     )
     class TestStrategy(IntentStrategy):
         def decide(self, market):
@@ -95,8 +98,8 @@ def test_perp_open_auto_expands_perp_close_and_cancel():
         def generate_teardown_intents(self, mode, market=None):
             return []
 
-    assert "PERP_CLOSE" in TestStrategy.STRATEGY_METADATA.intent_types
-    assert "PERP_CANCEL_ORDER" in TestStrategy.STRATEGY_METADATA.intent_types
+    assert IntentType.PERP_CLOSE in TestStrategy.STRATEGY_METADATA.intent_types
+    assert IntentType.PERP_CANCEL_ORDER in TestStrategy.STRATEGY_METADATA.intent_types
 
 
 def test_vault_deposit_auto_expands_vault_redeem():
@@ -104,7 +107,7 @@ def test_vault_deposit_auto_expands_vault_redeem():
 
     @almanak_strategy(
         name="test_vault_expand",
-        intent_types=["VAULT_DEPOSIT"],
+        intent_types=[IntentType.VAULT_DEPOSIT],
     )
     class TestStrategy(IntentStrategy):
         def decide(self, market):
@@ -116,7 +119,7 @@ def test_vault_deposit_auto_expands_vault_redeem():
         def generate_teardown_intents(self, mode, market=None):
             return []
 
-    assert "VAULT_REDEEM" in TestStrategy.STRATEGY_METADATA.intent_types
+    assert IntentType.VAULT_REDEEM in TestStrategy.STRATEGY_METADATA.intent_types
 
 
 def test_no_expansion_when_complements_already_declared():
@@ -124,7 +127,7 @@ def test_no_expansion_when_complements_already_declared():
 
     @almanak_strategy(
         name="test_no_dup_expand",
-        intent_types=["SUPPLY", "WITHDRAW", "BORROW", "REPAY"],
+        intent_types=[IntentType.SUPPLY, IntentType.WITHDRAW, IntentType.BORROW, IntentType.REPAY],
     )
     class TestStrategy(IntentStrategy):
         def decide(self, market):
@@ -137,8 +140,8 @@ def test_no_expansion_when_complements_already_declared():
             return []
 
     types = TestStrategy.STRATEGY_METADATA.intent_types
-    assert types.count("WITHDRAW") == 1, "Should not duplicate WITHDRAW"
-    assert types.count("REPAY") == 1, "Should not duplicate REPAY"
+    assert types.count(IntentType.WITHDRAW) == 1, "Should not duplicate WITHDRAW"
+    assert types.count(IntentType.REPAY) == 1, "Should not duplicate REPAY"
 
 
 def test_repeated_open_intents_add_complement_once():
@@ -146,7 +149,7 @@ def test_repeated_open_intents_add_complement_once():
 
     @almanak_strategy(
         name="test_dedup_expand",
-        intent_types=["SUPPLY", "SUPPLY", "BORROW"],
+        intent_types=[IntentType.SUPPLY, IntentType.SUPPLY, IntentType.BORROW],
     )
     class TestStrategy(IntentStrategy):
         def decide(self, market):
@@ -159,8 +162,8 @@ def test_repeated_open_intents_add_complement_once():
             return []
 
     types = TestStrategy.STRATEGY_METADATA.intent_types
-    assert types.count("WITHDRAW") == 1, "Duplicate SUPPLY should produce single WITHDRAW"
-    assert types.count("REPAY") == 1, "BORROW should produce single REPAY"
+    assert types.count(IntentType.WITHDRAW) == 1, "Duplicate SUPPLY should produce single WITHDRAW"
+    assert types.count(IntentType.REPAY) == 1, "BORROW should produce single REPAY"
 
 
 def test_close_only_does_not_expand_to_open():
@@ -168,7 +171,7 @@ def test_close_only_does_not_expand_to_open():
 
     @almanak_strategy(
         name="test_close_only",
-        intent_types=["WITHDRAW"],
+        intent_types=[IntentType.WITHDRAW],
     )
     class TestStrategy(IntentStrategy):
         def decide(self, market):
@@ -181,8 +184,8 @@ def test_close_only_does_not_expand_to_open():
             return []
 
     types = TestStrategy.STRATEGY_METADATA.intent_types
-    assert "SUPPLY" not in types, "Close-only should NOT expand to open"
-    assert "WITHDRAW" in types
+    assert IntentType.SUPPLY not in types, "Close-only should NOT expand to open"
+    assert IntentType.WITHDRAW in types
 
 
 def test_swap_only_no_expansion():
@@ -190,7 +193,7 @@ def test_swap_only_no_expansion():
 
     @almanak_strategy(
         name="test_swap_only",
-        intent_types=["SWAP", "HOLD"],
+        intent_types=[IntentType.SWAP, IntentType.HOLD],
     )
     class TestStrategy(IntentStrategy):
         def decide(self, market):
@@ -203,7 +206,7 @@ def test_swap_only_no_expansion():
             return []
 
     types = TestStrategy.STRATEGY_METADATA.intent_types
-    assert types == ["SWAP", "HOLD"], "SWAP+HOLD should not trigger expansion"
+    assert types == [IntentType.SWAP, IntentType.HOLD], "SWAP+HOLD should not trigger expansion"
 
 
 def test_empty_intent_types_no_expansion():
@@ -224,3 +227,27 @@ def test_empty_intent_types_no_expansion():
             return []
 
     assert TestStrategy.STRATEGY_METADATA.intent_types == []
+
+
+def test_enum_declaration_keeps_legacy_serialized_values():
+    """Typed declarations still expose and serialize the historical strings."""
+
+    @almanak_strategy(name="test_typed_metadata", intent_types=[IntentType.SWAP, IntentType.HOLD])
+    class TestStrategy(IntentStrategy):
+        def decide(self, market):
+            pass
+
+    metadata = TestStrategy.STRATEGY_METADATA
+    assert metadata.intent_types == [IntentType.SWAP, IntentType.HOLD]
+    assert metadata.to_dict()["intent_types"] == ["SWAP", "HOLD"]
+
+
+def test_legacy_string_declaration_is_parsed_and_typo_rejected():
+    """The public compatibility boundary parses strings immediately."""
+
+    with pytest.raises(ValueError, match=r"invalid intent type 'SWAAP'.*SWAP"):
+
+        @almanak_strategy(name="test_typo", intent_types=["SWAAP"])  # type: ignore[list-item]
+        class TestStrategy(IntentStrategy):
+            def decide(self, market):
+                pass

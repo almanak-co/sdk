@@ -13,6 +13,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from almanak.core.intent_types import IntentType
+
 if TYPE_CHECKING:
     from almanak.framework.intents.vocabulary import AnyIntent
 
@@ -36,8 +38,8 @@ class StaticPermissionEntry:
         intent_types: Optional intent-type allow-list. ``None`` (default)
             means the entry applies to **every** manifest produced for the
             owning protocol (backward-compatible behaviour). When set to a
-            ``frozenset`` of intent-type strings (e.g.
-            ``frozenset({"LP_CLOSE"})``), discovery only injects the entry
+            ``frozenset`` of canonical intent types (e.g.
+            ``frozenset({IntentType.LP_CLOSE})``), discovery only injects the entry
             into manifests whose requested intent-type set intersects this
             allow-list. Use this to keep least-privilege manifests for
             protocols whose static permissions are only required by certain
@@ -50,7 +52,11 @@ class StaticPermissionEntry:
     label: str
     selectors: dict[str, str] = field(default_factory=dict)  # selector -> label
     send_allowed: bool = False
-    intent_types: frozenset[str] | None = None  # None = all intent types; otherwise filter
+    intent_types: frozenset[IntentType] | None = None  # None = all intent types; otherwise filter
+
+    def __post_init__(self) -> None:
+        if self.intent_types is not None and any(not isinstance(value, IntentType) for value in self.intent_types):
+            raise TypeError("StaticPermissionEntry.intent_types must contain canonical IntentType members")
 
 
 @dataclass(frozen=True)
@@ -122,8 +128,8 @@ class PermissionHints:
             connectors (gmx_v2, pendle, traderjoe_v2, uniswap_v4 hooks) discover
             NOTHING without the implicit fallback, so this must not be flipped
             on globally without first giving each of them an offline path.
-        synthetic_discovery_intents: The set of intent-type *strings* (e.g.
-            ``"SWAP"``, ``"LP_OPEN"``, ``"SUPPLY"``) this protocol slug
+        synthetic_discovery_intents: The set of canonical intent types (e.g.
+            ``IntentType.SWAP``, ``IntentType.LP_OPEN``, ``IntentType.SUPPLY``) this protocol slug
             participates in for synthetic permission discovery. **Opt-OUT
             default** (empty) — a protocol with no declaration emits no
             synthetic intents and therefore appears in none of the derived
@@ -158,7 +164,7 @@ class PermissionHints:
             (Uniswap V3 / PancakeSwap V3 / Sushiswap V3) set this True; Solidly
             forks and others leave it False (the historical
             ``_NATIVE_IN_SWAP_PROTOCOLS`` membership). Only meaningful when
-            ``"SWAP"`` is in ``synthetic_discovery_intents``.
+            ``IntentType.SWAP`` is in ``synthetic_discovery_intents``.
     """
 
     synthetic_position_id: str = "1"
@@ -171,8 +177,12 @@ class PermissionHints:
     static_permissions: dict[str, list[StaticPermissionEntry]] = field(default_factory=dict)
     needs_rpc_discovery: bool = False
     offline_discovery: bool = False
-    synthetic_discovery_intents: frozenset[str] = frozenset()
+    synthetic_discovery_intents: frozenset[IntentType] = frozenset()
     supports_native_in_swap: bool = False
+
+    def __post_init__(self) -> None:
+        if any(not isinstance(value, IntentType) for value in self.synthetic_discovery_intents):
+            raise TypeError("PermissionHints.synthetic_discovery_intents must contain canonical IntentType members")
 
 
 _DEFAULT = PermissionHints()
@@ -320,7 +330,7 @@ class DiscoveryContext:
 
 def get_discovery_vectors_override(
     protocol: str,
-) -> Callable[[str, str, str, DiscoveryContext], list[AnyIntent] | None] | None:
+) -> Callable[[str, IntentType, str, DiscoveryContext], list[AnyIntent] | None] | None:
     """Resolve a connector's optional ``build_discovery_vectors`` function.
 
     Mirrors :func:`get_permission_hints`' convention-based import + connector

@@ -1,5 +1,6 @@
 """Uniswap V3 permission hints for permission discovery."""
 
+from almanak.core.intent_types import IntentType
 from almanak.framework.permissions.hints import PermissionHints
 
 # Agni Finance on Mantle is a Uniswap V3 fork that doesn't have a pool
@@ -41,6 +42,6 @@ PERMISSION_HINTS = PermissionHints(
     # Synthetic-discovery participation (VIB-4928): SWAP + LP. V3-style
     # SwapRouter02 auto-wraps native via msg.value, so emit the native-in
     # SWAP synthetic too (flips send_allowed on the router target for Zodiac).
-    synthetic_discovery_intents=frozenset({"SWAP", "LP_OPEN", "LP_CLOSE"}),
+    synthetic_discovery_intents=frozenset({IntentType.SWAP, IntentType.LP_OPEN, IntentType.LP_CLOSE}),
     supports_native_in_swap=True,
 )

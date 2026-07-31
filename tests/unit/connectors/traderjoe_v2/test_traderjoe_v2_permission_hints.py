@@ -8,6 +8,7 @@ from almanak.connectors.traderjoe_v2.permission_hints import (
     PERMISSION_HINTS,
     _build_static_permissions,
 )
+from almanak.core.intent_types import IntentType
 from almanak.framework.permissions.hints import PermissionHints, StaticPermissionEntry
 
 # Selectors mirrored from permission_hints._build_static_permissions for
@@ -90,9 +91,7 @@ class TestBuildStaticPermissions:
         result = _build_static_permissions()
         for entries in result.values():
             for entry in entries:
-                assert entry.target == entry.target.lower(), (
-                    f"target {entry.target} not lowercased"
-                )
+                assert entry.target == entry.target.lower(), f"target {entry.target} not lowercased"
 
     def test_approve_for_all_scoped_to_lp_close(self) -> None:
         result = _build_static_permissions()
@@ -100,14 +99,14 @@ class TestBuildStaticPermissions:
         approve_entries = [e for e in avax if _APPROVE_FOR_ALL in e.selectors]
         for entry in approve_entries:
             # Scoped strictly to LP_CLOSE — keeps SWAP/LP_OPEN manifests at least-privilege
-            assert entry.intent_types == frozenset({"LP_CLOSE"})
+            assert entry.intent_types == frozenset({IntentType.LP_CLOSE})
 
     def test_collect_fees_scoped_to_lp_collect_fees(self) -> None:
         result = _build_static_permissions()
         avax = result["avalanche"]
         collect_entries = [e for e in avax if _COLLECT_FEES in e.selectors]
         for entry in collect_entries:
-            assert entry.intent_types == frozenset({"LP_COLLECT_FEES"})
+            assert entry.intent_types == frozenset({IntentType.LP_COLLECT_FEES})
 
     def test_pair_label_includes_token_pair_and_bin_step(self) -> None:
         """Labels must be self-describing: tokenX/tokenY/binStep format."""

@@ -24,10 +24,11 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+from almanak.core.intent_types import IntentType
 from almanak.framework.permissions.hints import DiscoveryContext, PermissionHints
 
 PERMISSION_HINTS = PermissionHints(
-    synthetic_discovery_intents=frozenset({"SWAP", "SUPPLY", "WITHDRAW"}),
+    synthetic_discovery_intents=frozenset({IntentType.SWAP, IntentType.SUPPLY, IntentType.WITHDRAW}),
     needs_rpc_discovery=True,
     synthetic_swap_pair={
         "arbitrum": ("USDC", "USDT"),
@@ -67,7 +68,7 @@ _SWAP_VECTORS_BY_CHAIN: dict[str, list[tuple[str, str, Decimal]]] = {
 
 def build_discovery_vectors(
     protocol: str,
-    intent_type: str,
+    intent_type: IntentType,
     chain: str,
     ctx: DiscoveryContext,
 ):
@@ -79,7 +80,7 @@ def build_discovery_vectors(
     framework default — which would gate on lending-pool tables Fluid is
     not in — never emits a doomed synthetic there.
     """
-    if intent_type == "SWAP":
+    if intent_type is IntentType.SWAP:
         vectors = _SWAP_VECTORS_BY_CHAIN.get(chain)
         if not vectors:
             return None
@@ -97,7 +98,7 @@ def build_discovery_vectors(
             for from_token, to_token, amount in vectors
         ]
 
-    if intent_type == "SUPPLY":
+    if intent_type is IntentType.SUPPLY:
         if chain not in _LENDING_CHAINS:
             return []
 
@@ -112,7 +113,7 @@ def build_discovery_vectors(
             )
         ]
 
-    if intent_type == "WITHDRAW":
+    if intent_type is IntentType.WITHDRAW:
         if chain not in _LENDING_CHAINS:
             return []
 

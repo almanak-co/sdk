@@ -7,10 +7,13 @@ Extend ``PERMISSION_HINTS`` (e.g. with ``synthetic_market_id``,
 found. See ``.claude/skills/sdk-integrator/SKILL.md`` Phase 6 for patterns.
 """
 
+from almanak.core.intent_types import IntentType
 from almanak.framework.permissions.hints import PermissionHints
 
 # Synthetic-discovery participation (VIB-4928): the four core lending
 # primitives (Spark is an Aave V3 fork).
 PERMISSION_HINTS = PermissionHints(
-    synthetic_discovery_intents=frozenset({"SUPPLY", "WITHDRAW", "BORROW", "REPAY"}),
+    synthetic_discovery_intents=frozenset(
+        {IntentType.SUPPLY, IntentType.WITHDRAW, IntentType.BORROW, IntentType.REPAY}
+    ),
 )

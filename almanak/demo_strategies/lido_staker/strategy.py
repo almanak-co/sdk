@@ -57,7 +57,7 @@ from decimal import Decimal
 from typing import Any
 
 # Intent is what your strategy returns - describes what action to take
-from almanak.framework.intents import Intent
+from almanak.framework.intents import Intent, IntentType
 
 # Core strategy framework imports
 from almanak.framework.market import MarketSnapshot
@@ -106,7 +106,7 @@ _DUST_THRESHOLD = Decimal("0.0001")
     # STAKE: Stake ETH to receive stETH/wstETH
     # SWAP: Teardown path to exit stETH/wstETH -> ETH
     # HOLD: No action
-    intent_types=["STAKE", "SWAP", "HOLD"],
+    intent_types=[IntentType.STAKE, IntentType.SWAP, IntentType.HOLD],
 )
 class LidoStakerStrategy(IntentStrategy):
     """

@@ -7,6 +7,7 @@ teardown, and state persistence without requiring a gateway or Anvil.
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
+from almanak.core.intent_types import IntentType
 from strategies.incubating.aave_enso_carry_polygon.strategy import (
     BORROWED,
     BORROWING,
@@ -126,11 +127,11 @@ class TestStrategyMetadata:
 
     def test_intent_types(self):
         types = AaveEnsoCarryPolygonStrategy.STRATEGY_METADATA.intent_types
-        assert "BORROW" in types
-        assert "SWAP" in types
-        assert "REPAY" in types
-        assert "WITHDRAW" in types
-        assert "HOLD" in types
+        assert IntentType.BORROW in types
+        assert IntentType.SWAP in types
+        assert IntentType.REPAY in types
+        assert IntentType.WITHDRAW in types
+        assert IntentType.HOLD in types
 
     def test_supports_teardown(self):
         strategy = _make_strategy()

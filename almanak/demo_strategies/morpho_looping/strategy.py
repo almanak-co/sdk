@@ -114,7 +114,14 @@ logger = logging.getLogger(__name__)
     # Protocols used
     supported_protocols=["morpho_blue", "uniswap_v3"],
     # Intent types this strategy may emit
-    intent_types=["SUPPLY", "BORROW", "SWAP", "REPAY", "WITHDRAW", "HOLD"],
+    intent_types=[
+        IntentType.SUPPLY,
+        IntentType.BORROW,
+        IntentType.SWAP,
+        IntentType.REPAY,
+        IntentType.WITHDRAW,
+        IntentType.HOLD,
+    ],
     default_chain="ethereum",
 )
 class MorphoLoopingStrategy(IntentStrategy):

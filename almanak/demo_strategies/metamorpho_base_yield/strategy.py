@@ -42,7 +42,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
-from almanak.framework.intents import Intent
+from almanak.framework.intents import Intent, IntentType
 from almanak.framework.market import MarketSnapshot
 from almanak.framework.strategies import IntentStrategy, almanak_strategy
 
@@ -76,7 +76,7 @@ _USD_PEGGED_DEPOSIT_TOKENS = frozenset(_USD_PEGGED_DEPOSIT_TOKEN_DECIMALS)
     supported_chains=["base"],
     default_chain="base",
     supported_protocols=["metamorpho"],
-    intent_types=["VAULT_DEPOSIT", "VAULT_REDEEM", "HOLD"],
+    intent_types=[IntentType.VAULT_DEPOSIT, IntentType.VAULT_REDEEM, IntentType.HOLD],
     quote_asset="USD",
 )
 class MetaMorphoBaseYield(IntentStrategy):

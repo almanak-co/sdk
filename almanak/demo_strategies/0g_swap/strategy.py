@@ -25,7 +25,7 @@ import logging
 from decimal import Decimal
 from typing import Any
 
-from almanak.framework.intents import Intent
+from almanak.framework.intents import Intent, IntentType
 from almanak.framework.market import MarketSnapshot
 from almanak.framework.strategies import IntentStrategy, almanak_strategy
 
@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
     tags=["demo", "0g", "zerog", "wrap"],
     supported_chains=["zerog"],
     supported_protocols=[],
-    intent_types=["WRAP_NATIVE", "HOLD"],
+    intent_types=[IntentType.WRAP_NATIVE, IntentType.HOLD],
     default_chain="zerog",
     quote_asset="USD",
 )

@@ -151,7 +151,7 @@ class DemoSpec:
 
     @property
     def intent_types(self) -> list[str]:
-        return list(self.metadata.intent_types)
+        return [member.value for member in self.metadata.intent_types]
 
     @property
     def quote_asset(self) -> dict[str, Any]:

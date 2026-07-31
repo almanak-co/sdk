@@ -67,7 +67,7 @@ from typing import Any
 from almanak.framework.api.timeline import TimelineEvent, TimelineEventType, add_event
 
 # Intent is what your strategy returns - describes what action to take
-from almanak.framework.intents import AnyIntent, Intent
+from almanak.framework.intents import AnyIntent, Intent, IntentType
 
 # Core strategy framework imports
 from almanak.framework.market import MarketSnapshot
@@ -182,7 +182,7 @@ class UniswapLPConfig:
     # LP_OPEN: Create new liquidity position
     # LP_CLOSE: Close existing position and collect fees
     # HOLD: No action needed
-    intent_types=["LP_OPEN", "LP_CLOSE", "SWAP", "HOLD"],
+    intent_types=[IntentType.LP_OPEN, IntentType.LP_CLOSE, IntentType.SWAP, IntentType.HOLD],
     default_chain="arbitrum",
     quote_asset="USD",
 )

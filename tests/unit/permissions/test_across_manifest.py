@@ -30,6 +30,7 @@ from almanak.connectors.across.adapter import (
     DEPOSIT_V3_SELECTOR,
 )
 from almanak.connectors.across.connector import CONNECTOR
+from almanak.core.intent_types import IntentType
 from almanak.framework.permissions.generator import generate_manifest
 from almanak.framework.permissions.models import ContractPermission
 
@@ -81,6 +82,19 @@ class TestAcrossManifest:
         manifest would authorise the same wrong selector, hiding it.
         """
         assert "0x" + DEPOSIT_V3_SELECTOR.hex() == _DEPOSIT_V3_SEL
+
+    def test_static_builder_scopes_every_declared_chain_to_bridge(self) -> None:
+        """Every raw static entry is typed as least-privilege BRIDGE access."""
+        from almanak.connectors.across.permission_hints import _build_static_permissions
+
+        static_permissions = _build_static_permissions()
+        assert set(static_permissions) == set(_DECLARED_CHAINS)
+        for chain in _DECLARED_CHAINS:
+            entries = static_permissions[chain]
+            assert entries, f"{chain}: static permission builder returned no entries"
+            assert [entry.target.lower() for entry in entries] == [_spoke_pool(chain)]
+            assert {selector.lower() for entry in entries for selector in entry.selectors} == {_DEPOSIT_V3_SEL}
+            assert all(entry.intent_types == frozenset({IntentType.BRIDGE}) for entry in entries)
 
     @pytest.mark.parametrize("chain", _DECLARED_CHAINS)
     def test_bridge_manifest_authorises_spoke_pool_deposit_v3(self, chain: str) -> None:

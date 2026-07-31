@@ -139,7 +139,7 @@ class TestManifestCoverage:
 
         metadata = cls.STRATEGY_METADATA
         protocols = list(metadata.supported_protocols)
-        intent_types = list(metadata.intent_types)
+        intent_types = [member.value for member in metadata.intent_types]
 
         # Determine chains
         if metadata.supported_chains:
@@ -297,7 +297,7 @@ class TestManifestCoverage:
 
         metadata = cls.STRATEGY_METADATA
         protocols = list(metadata.supported_protocols)
-        intent_types = list(metadata.intent_types)
+        intent_types = [member.value for member in metadata.intent_types]
 
         if metadata.supported_chains:
             chains = list(metadata.supported_chains)
@@ -348,7 +348,7 @@ class TestManifestCoverage:
 
         metadata = cls.STRATEGY_METADATA
         protocols = list(metadata.supported_protocols)
-        intent_types = list(metadata.intent_types)
+        intent_types = [member.value for member in metadata.intent_types]
 
         if metadata.supported_chains:
             chains = list(metadata.supported_chains)

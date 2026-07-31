@@ -30,6 +30,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
+from almanak.core.intent_types import IntentType
 from almanak.framework.permissions.hints import DiscoveryContext, PermissionHints
 
 if TYPE_CHECKING:
@@ -38,13 +39,13 @@ if TYPE_CHECKING:
 PERMISSION_HINTS = PermissionHints(
     # Synthetic-discovery participation (VIB-4928): perp open + close. The BSC
     # native-collateral synthetic is emitted by ``build_discovery_vectors``.
-    synthetic_discovery_intents=frozenset({"PERP_OPEN", "PERP_CLOSE"}),
+    synthetic_discovery_intents=frozenset({IntentType.PERP_OPEN, IntentType.PERP_CLOSE}),
 )
 
 
 def build_discovery_vectors(
     protocol: str,
-    intent_type: str,
+    intent_type: IntentType,
     chain: str,
     ctx: DiscoveryContext,
 ) -> list[AnyIntent] | None:
@@ -65,7 +66,7 @@ def build_discovery_vectors(
     if chain != "bsc":
         return None
 
-    if intent_type == "PERP_OPEN":
+    if intent_type is IntentType.PERP_OPEN:
         return [
             # ERC-20 (USDC) collateral path -> ``openMarketTrade`` (0x703085c7)
             PerpOpenIntent(
@@ -91,7 +92,7 @@ def build_discovery_vectors(
             ),
         ]
 
-    if intent_type == "PERP_CLOSE":
+    if intent_type is IntentType.PERP_CLOSE:
         # Placeholder bytes32 tradeHash satisfies the compiler's shape check
         # for ``closeTrade(bytes32)`` (selector ``0x5177fd3b``). The compiler
         # validates shape, not on-chain existence.

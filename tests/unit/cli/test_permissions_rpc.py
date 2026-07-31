@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from unittest.mock import MagicMock, patch
 
+from almanak.core.intent_types import IntentType
 from almanak.framework.cli.permissions import _resolve_rpc_url
 
 
@@ -64,7 +65,7 @@ def test_resolved_rpc_url_forwarded_to_generate_manifest(tmp_path: object) -> No
     metadata = MagicMock(
         name="test_strat",
         supported_protocols=["aerodrome"],
-        intent_types=["SWAP"],
+        intent_types=[IntentType.SWAP],
         supported_chains=["base"],
         default_chain="base",
     )

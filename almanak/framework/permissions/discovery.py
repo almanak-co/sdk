@@ -10,10 +10,12 @@ picked up here.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from typing import Literal, cast
 
 from almanak.connectors._connector import CONNECTOR_REGISTRY
 from almanak.connectors._strategy_base.protocol_aliases import normalize_protocol
+from almanak.core.intent_types import IntentType
 
 from ..intents.compiler import (
     AAVE_BORROW_SELECTOR,
@@ -38,6 +40,7 @@ from ..intents.compiler import (
     IntentCompiler,
     IntentCompilerConfig,
 )
+from ..intents.compiler_models import CompilationResult, TransactionData
 from .hints import get_permission_hints
 from .models import ContractPermission, FunctionPermission
 from .synthetic_intents import build_synthetic_intents
@@ -87,9 +90,9 @@ def _supported_intent_types_for(
     *,
     chain: str,
     protocol: str,
-    intent_types: list[str],
+    intent_types: list[IntentType],
     warnings: list[str],
-) -> list[str] | None:
+) -> list[IntentType] | None:
     """Narrow ``intent_types`` to what this connector actually supports here.
 
     Returns the admissible intent types, or ``None`` when the protocol should be
@@ -132,205 +135,14 @@ def _supported_intent_types_for(
         intent_type
         for intent_type in intent_types
         if connector.supports(chain=chain, protocol=normalized_protocol, intent=intent_type)
-        or intent_type == "PERP_CANCEL_ORDER"
-        or (intent_type == "LP_COLLECT_FEES" and hints.supports_standalone_fee_collection)
+        or intent_type is IntentType.PERP_CANCEL_ORDER
+        or (intent_type is IntentType.LP_COLLECT_FEES and hints.supports_standalone_fee_collection)
     ]
 
-    omitted = sorted(set(intent_types) - set(supported))
+    omitted = sorted(intent_type.value for intent_type in set(intent_types) - set(supported))
     if omitted:
         warnings.append(f"Skipped unsupported permission discovery cells for {protocol} on {chain}: {omitted}")
     return supported or None
-
-
-def discover_permissions(  # noqa: C901
-    chain: str,
-    protocols: list[str],
-    intent_types: list[str],
-    rpc_url: str | None = None,
-) -> tuple[list[ContractPermission], list[str]]:
-    """Discover required permissions by compiling synthetic intents.
-
-    For each (protocol, intent_type) combination, creates a synthetic
-    intent and runs the real IntentCompiler to find out which contracts
-    and function selectors are needed.
-
-    Args:
-        chain: Target chain name
-        protocols: List of protocol names
-        intent_types: List of intent type strings
-        rpc_url: Optional RPC URL for on-chain queries during discovery.
-            Required for protocols like Aerodrome where LP_CLOSE needs to
-            resolve pool addresses via factory contract calls.
-
-    Returns:
-        Tuple of (permissions_list, warnings_list)
-    """
-    # Build selector label map once, merging base labels with protocol hints
-    selector_labels = _build_selector_labels(protocols)
-
-    # Accumulator: target_address -> {selectors, label, send_allowed}
-    targets: dict[str, _TargetAccumulator] = {}
-    warnings: list[str] = []
-
-    # Cache compilers by (pool_selection_mode, fee_tier, uses_rpc, offline) to avoid
-    # re-creating them. ``offline`` is part of the key because two protocols with
-    # different transport policies must not share a compiler instance.
-    # RPC is only passed to protocols that declare needs_rpc_discovery=True in their
-    # PermissionHints, so other protocols are unaffected by the rpc_url parameter.
-    _compilers: dict[tuple[str, int, bool, bool], IntentCompiler] = {}
-
-    def _get_compiler(protocol: str) -> IntentCompiler:
-        """Get or create a compiler configured for this protocol.
-
-        Protocols with entries in SWAP_FEE_TIERS use "fixed" mode with
-        the correct default tier. Protocols without fee tiers (TraderJoe V2,
-        Aerodrome, etc.) use "heuristic" mode which handles missing tiers
-        gracefully. Per-chain fee tier overrides from PermissionHints take
-        precedence (e.g., Agni Finance on mantle uses tier 500).
-        """
-        hints = get_permission_hints(protocol)
-        chain_fee_override = hints.synthetic_fee_tier.get(chain)
-
-        fee_tiers = SWAP_FEE_TIERS.get(protocol)
-        if fee_tiers:
-            mode = "fixed"
-            fee_tier = chain_fee_override or DEFAULT_SWAP_FEE_TIER.get(protocol, fee_tiers[0])
-        else:
-            mode = "auto"
-            fee_tier = chain_fee_override or 3000
-
-        # Only pass RPC to protocols that need on-chain lookups for discovery
-        # (e.g. Aerodrome pool address resolution). Other protocols use static
-        # addresses and don't benefit from RPC — avoid unnecessary calls.
-        uses_rpc = hints.needs_rpc_discovery and rpc_url is not None
-        compiler_rpc = rpc_url if uses_rpc else None
-        # Connectors that declare an offline-capable compiler additionally
-        # suppress the compiler's IMPLICIT transport fallbacks (managed Anvil,
-        # then public RPC), so their manifest cannot vary with RPC weather.
-        # Part of the cache key below: two protocols with different values must
-        # not share a compiler instance.
-        offline = hints.offline_discovery
-
-        # ``permission_discovery=True`` on every compiler built here — it is
-        # the behavioural flag protocol-specific LP_CLOSE bodies consult to
-        # substitute synthetic on-chain state (liquidity, LP balance) when
-        # RPC is unavailable, so every selector in the teardown flow is
-        # captured even in fully-offline discovery. Orthogonal to whether
-        # ``rpc_url`` was passed through to the compiler.
-        key = (mode, fee_tier, uses_rpc, offline)
-        if key not in _compilers:
-            _compilers[key] = IntentCompiler(
-                chain=chain,
-                rpc_url=compiler_rpc,
-                config=IntentCompilerConfig(
-                    allow_placeholder_prices=True,
-                    swap_pool_selection_mode=cast(Literal["auto", "fixed"], mode),
-                    fixed_swap_fee_tier=fee_tier,
-                    permission_discovery=True,
-                    offline_discovery=offline,
-                ),
-            )
-        return _compilers[key]
-
-    for protocol in protocols:
-        supported_intent_types = _supported_intent_types_for(
-            chain=chain,
-            protocol=protocol,
-            intent_types=intent_types,
-            warnings=warnings,
-        )
-        if supported_intent_types is None:
-            continue
-
-        # Inject static permissions from hints (for protocols that can't compile offline)
-        hints = get_permission_hints(protocol)
-        chain_static = hints.static_permissions.get(chain, [])
-        for entry in chain_static:
-            # Skip entries scoped to intent types not present in this request.
-            # ``entry.intent_types is None`` keeps the legacy "applies to all
-            # intent types" behaviour; a non-None value is an allow-list and
-            # must intersect the requested ``intent_types``. This is the
-            # least-privilege filter that prevents e.g. TJv2's LBPair
-            # approveForAll from leaking into SWAP-only manifests.
-            if entry.intent_types is not None and not entry.intent_types.intersection(supported_intent_types):
-                continue
-            target = entry.target.lower()
-            if target not in targets:
-                targets[target] = _TargetAccumulator(label=entry.label)
-            acc = targets[target]
-            for sel in entry.selectors:
-                acc.selectors.add(sel)
-            if entry.send_allowed:
-                acc.send_allowed = True
-            # Add selector labels from static entries
-            for sel, label in entry.selectors.items():
-                selector_labels[sel] = label
-
-        compiler = _get_compiler(protocol)
-
-        for intent_type in supported_intent_types:
-            synthetic_intents = build_synthetic_intents(protocol, intent_type, chain)
-            if not synthetic_intents:
-                continue
-
-            for intent in synthetic_intents:
-                try:
-                    result = compiler.compile(intent)
-                except Exception as exc:
-                    warnings.append(f"Compilation error for {protocol}/{intent_type} on {chain}: {exc}")
-                    continue
-
-                if result.status.value != "SUCCESS":
-                    # Some protocol/chain combos legitimately don't compile
-                    # (e.g., protocol not deployed on this chain).
-                    # Only warn if there's an unexpected error.
-                    if result.error and "not supported" not in result.error.lower():
-                        msg = f"Compilation failed for {protocol}/{intent_type} on {chain}: {result.error}"
-                        # Hint when the failure is due to missing RPC (e.g. pool address lookup)
-                        if rpc_url is None and (
-                            "pool not found" in result.error.lower() or "rpc" in result.error.lower()
-                        ):
-                            msg += (
-                                " — This protocol requires on-chain lookups for full permission"
-                                " discovery. Set ALCHEMY_API_KEY in your .env or pass --rpc-url."
-                            )
-                        warnings.append(msg)
-                    continue
-
-                # Extract permissions from compiled transactions
-                for tx in result.transactions:
-                    target = tx.to.lower()
-                    selector = tx.data[:10] if tx.data and len(tx.data) >= 10 else None
-                    sends_eth = tx.value > 0
-
-                    if target not in targets:
-                        targets[target] = _TargetAccumulator(
-                            label=_derive_label(tx.tx_type, protocol, target),
-                        )
-
-                    acc = targets[target]
-                    if selector:
-                        acc.selectors.add(selector)
-                    if sends_eth:
-                        acc.send_allowed = True
-
-    # Convert accumulators to ContractPermission objects
-    permissions = []
-    for address, acc in sorted(targets.items()):
-        permissions.append(
-            ContractPermission(
-                target=address,
-                label=acc.label,
-                operation=0,  # CALL -- infrastructure overrides to DELEGATECALL later
-                send_allowed=acc.send_allowed,
-                function_selectors=sorted(
-                    [FunctionPermission(selector=s, label=selector_labels.get(s, s)) for s in acc.selectors],
-                    key=lambda fp: fp.selector,
-                ),
-            )
-        )
-
-    return permissions, warnings
 
 
 class _TargetAccumulator:
@@ -342,6 +154,232 @@ class _TargetAccumulator:
         self.label = label
         self.selectors: set[str] = set()
         self.send_allowed = False
+
+
+def _parse_requested_intent_types(
+    values: Sequence[IntentType | str],
+) -> tuple[list[IntentType], list[str]]:
+    """Parse the public string boundary into canonical intent types."""
+    requested: list[IntentType] = []
+    warnings: list[str] = []
+    for value in values:
+        intent_type = IntentType.try_parse(value)
+        if intent_type is None:
+            warnings.append(f"Skipped unknown permission discovery intent type: {value!r}")
+            continue
+        requested.append(intent_type)
+    return requested, warnings
+
+
+class _CompilerCache:
+    """Build and cache protocol-configured permission-discovery compilers."""
+
+    def __init__(self, *, chain: str, rpc_url: str | None) -> None:
+        self._chain = chain
+        self._rpc_url = rpc_url
+        self._compilers: dict[tuple[str, int, bool, bool], IntentCompiler] = {}
+
+    def get(self, protocol: str) -> IntentCompiler:
+        """Return a compiler configured for one protocol's discovery hints."""
+        hints = get_permission_hints(protocol)
+        chain_fee_override = hints.synthetic_fee_tier.get(self._chain)
+        fee_tiers = SWAP_FEE_TIERS.get(protocol)
+        if fee_tiers:
+            mode = "fixed"
+            fee_tier = chain_fee_override or DEFAULT_SWAP_FEE_TIER.get(protocol, fee_tiers[0])
+        else:
+            mode = "auto"
+            fee_tier = chain_fee_override or 3000
+
+        uses_rpc = hints.needs_rpc_discovery and self._rpc_url is not None
+        compiler_rpc = self._rpc_url if uses_rpc else None
+        key = (mode, fee_tier, uses_rpc, hints.offline_discovery)
+        if key not in self._compilers:
+            self._compilers[key] = IntentCompiler(
+                chain=self._chain,
+                rpc_url=compiler_rpc,
+                config=IntentCompilerConfig(
+                    allow_placeholder_prices=True,
+                    swap_pool_selection_mode=cast(Literal["auto", "fixed"], mode),
+                    fixed_swap_fee_tier=fee_tier,
+                    permission_discovery=True,
+                    offline_discovery=hints.offline_discovery,
+                ),
+            )
+        return self._compilers[key]
+
+
+def _add_static_permissions(
+    *,
+    chain: str,
+    protocol: str,
+    intent_types: list[IntentType],
+    targets: dict[str, _TargetAccumulator],
+    selector_labels: dict[str, str],
+) -> None:
+    """Add statically declared permissions applicable to this request."""
+    hints = get_permission_hints(protocol)
+    for entry in hints.static_permissions.get(chain, []):
+        if entry.intent_types is not None and not entry.intent_types.intersection(intent_types):
+            continue
+        target = entry.target.lower()
+        if target not in targets:
+            targets[target] = _TargetAccumulator(label=entry.label)
+        accumulator = targets[target]
+        accumulator.selectors.update(entry.selectors)
+        accumulator.send_allowed |= entry.send_allowed
+        selector_labels.update(entry.selectors)
+
+
+def _compilation_failure_warning(
+    *,
+    result: CompilationResult,
+    chain: str,
+    protocol: str,
+    intent_type: IntentType,
+    rpc_url: str | None,
+) -> str | None:
+    """Return a useful warning for an unexpected compilation failure."""
+    if not result.error or "not supported" in result.error.lower():
+        return None
+    message = f"Compilation failed for {protocol}/{intent_type.value} on {chain}: {result.error}"
+    if rpc_url is None and ("pool not found" in result.error.lower() or "rpc" in result.error.lower()):
+        message += (
+            " — This protocol requires on-chain lookups for full permission"
+            " discovery. Set ALCHEMY_API_KEY in your .env or pass --rpc-url."
+        )
+    return message
+
+
+def _add_compiled_transaction(
+    *,
+    transaction: TransactionData,
+    protocol: str,
+    targets: dict[str, _TargetAccumulator],
+) -> None:
+    """Accumulate one compiler transaction into the permission target map."""
+    target = transaction.to.lower()
+    selector = transaction.data[:10] if transaction.data and len(transaction.data) >= 10 else None
+    if target not in targets:
+        targets[target] = _TargetAccumulator(label=_derive_label(transaction.tx_type, protocol, target))
+    accumulator = targets[target]
+    if selector:
+        accumulator.selectors.add(selector)
+    accumulator.send_allowed |= transaction.value > 0
+
+
+def _compile_synthetic_permissions(
+    *,
+    chain: str,
+    protocol: str,
+    intent_types: list[IntentType],
+    rpc_url: str | None,
+    compiler: IntentCompiler,
+    targets: dict[str, _TargetAccumulator],
+    warnings: list[str],
+) -> None:
+    """Compile synthetic intents and accumulate their transaction permissions."""
+    for intent_type in intent_types:
+        for intent in build_synthetic_intents(protocol, intent_type, chain):
+            try:
+                result = compiler.compile(intent)
+            except Exception as exc:
+                warnings.append(f"Compilation error for {protocol}/{intent_type.value} on {chain}: {exc}")
+                continue
+            if result.status.value != "SUCCESS":
+                warning = _compilation_failure_warning(
+                    result=result,
+                    chain=chain,
+                    protocol=protocol,
+                    intent_type=intent_type,
+                    rpc_url=rpc_url,
+                )
+                if warning:
+                    warnings.append(warning)
+                continue
+            for transaction in result.transactions:
+                _add_compiled_transaction(transaction=transaction, protocol=protocol, targets=targets)
+
+
+def _build_contract_permissions(
+    targets: dict[str, _TargetAccumulator],
+    selector_labels: dict[str, str],
+) -> list[ContractPermission]:
+    """Convert discovery accumulators into stable, sorted permissions."""
+    return [
+        ContractPermission(
+            target=address,
+            label=accumulator.label,
+            operation=0,
+            send_allowed=accumulator.send_allowed,
+            function_selectors=sorted(
+                [
+                    FunctionPermission(selector=selector, label=selector_labels.get(selector, selector))
+                    for selector in accumulator.selectors
+                ],
+                key=lambda permission: permission.selector,
+            ),
+        )
+        for address, accumulator in sorted(targets.items())
+    ]
+
+
+def discover_permissions(
+    chain: str,
+    protocols: list[str],
+    intent_types: Sequence[IntentType | str],
+    rpc_url: str | None = None,
+) -> tuple[list[ContractPermission], list[str]]:
+    """Discover required permissions by compiling synthetic intents.
+
+    For each (protocol, intent_type) combination, creates a synthetic
+    intent and runs the real IntentCompiler to find out which contracts
+    and function selectors are needed.
+
+    Args:
+        chain: Target chain name
+        protocols: List of protocol names
+        intent_types: Canonical intent types or their serialized string values
+        rpc_url: Optional RPC URL for on-chain queries during discovery.
+            Required for protocols like Aerodrome where LP_CLOSE needs to
+            resolve pool addresses via factory contract calls.
+
+    Returns:
+        Tuple of (permissions_list, warnings_list)
+    """
+    requested_intent_types, warnings = _parse_requested_intent_types(intent_types)
+    selector_labels = _build_selector_labels(protocols)
+    targets: dict[str, _TargetAccumulator] = {}
+    compilers = _CompilerCache(chain=chain, rpc_url=rpc_url)
+
+    for protocol in protocols:
+        supported_intent_types = _supported_intent_types_for(
+            chain=chain,
+            protocol=protocol,
+            intent_types=requested_intent_types,
+            warnings=warnings,
+        )
+        if supported_intent_types is None:
+            continue
+
+        _add_static_permissions(
+            chain=chain,
+            protocol=protocol,
+            intent_types=supported_intent_types,
+            targets=targets,
+            selector_labels=selector_labels,
+        )
+        _compile_synthetic_permissions(
+            chain=chain,
+            protocol=protocol,
+            intent_types=supported_intent_types,
+            rpc_url=rpc_url,
+            compiler=compilers.get(protocol),
+            targets=targets,
+            warnings=warnings,
+        )
+
+    return _build_contract_permissions(targets, selector_labels), warnings
 
 
 def _derive_label(tx_type: str, protocol: str, target: str = "") -> str:

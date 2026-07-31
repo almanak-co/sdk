@@ -1,5 +1,6 @@
 """GMX V2 permission hints for permission discovery."""
 
+from almanak.core.intent_types import IntentType
 from almanak.framework.permissions.hints import PermissionHints
 
 PERMISSION_HINTS = PermissionHints(
@@ -24,5 +25,5 @@ PERMISSION_HINTS = PermissionHints(
     # PERP_CANCEL_ORDER and the teardown cancel recovers collateral. gmx_v2 is the
     # ONLY perp connector that supports cancel; the builder gates on this
     # declaration so no other perp connector inherits a cancel it cannot compile.
-    synthetic_discovery_intents=frozenset({"PERP_OPEN", "PERP_CLOSE", "PERP_CANCEL_ORDER"}),
+    synthetic_discovery_intents=frozenset({IntentType.PERP_OPEN, IntentType.PERP_CLOSE, IntentType.PERP_CANCEL_ORDER}),
 )

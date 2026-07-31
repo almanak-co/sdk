@@ -60,7 +60,7 @@ from datetime import UTC, datetime
 from decimal import ROUND_DOWN, Decimal
 from typing import TYPE_CHECKING, Any
 
-from almanak.framework.intents import AnyIntent, Intent
+from almanak.framework.intents import AnyIntent, Intent, IntentType
 from almanak.framework.market import HealthUnavailableError, MarketSnapshot
 from almanak.framework.strategies import IntentStrategy, almanak_strategy
 from almanak.framework.utils.log_formatters import format_token_amount_human, format_usd
@@ -104,7 +104,14 @@ TRANSITIONAL_STATES = {SUPPLYING, BORROWING, SWAPPING, SWAPPING_BACK, REPAYING, 
     tags=["demo", "carry-trade", "aave-v3", "pancakeswap-v3", "lending", "swap", "bsc", "multi-protocol"],
     supported_chains=["bsc"],
     supported_protocols=["aave_v3", "pancakeswap_v3"],
-    intent_types=["SUPPLY", "BORROW", "SWAP", "REPAY", "WITHDRAW", "HOLD"],
+    intent_types=[
+        IntentType.SUPPLY,
+        IntentType.BORROW,
+        IntentType.SWAP,
+        IntentType.REPAY,
+        IntentType.WITHDRAW,
+        IntentType.HOLD,
+    ],
     default_chain="bsc",
     quote_asset="USD",
 )

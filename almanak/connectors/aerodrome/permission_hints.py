@@ -32,6 +32,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
+from almanak.core.intent_types import IntentType
 from almanak.framework.intents.compiler_constants import (
     NFT_POSITION_COLLECT_SELECTOR,
     NFT_POSITION_DECREASE_SELECTOR,
@@ -97,7 +98,7 @@ PERMISSION_HINTS = PermissionHints(
     # ``aerodrome`` does SWAP + LP. As a Solidly router it has no native-in
     # msg.value auto-wrap path, so ``supports_native_in_swap`` stays False
     # (historically absent from ``_NATIVE_IN_SWAP_PROTOCOLS``).
-    synthetic_discovery_intents=frozenset({"SWAP", "LP_OPEN", "LP_CLOSE"}),
+    synthetic_discovery_intents=frozenset({IntentType.SWAP, IntentType.LP_OPEN, IntentType.LP_CLOSE}),
 )
 
 
@@ -157,7 +158,7 @@ def _build_slipstream_static_permissions() -> dict[str, list[StaticPermissionEnt
                 target=target,
                 label=label,
                 selectors={_SLIPSTREAM_MINT_SELECTOR: _SLIPSTREAM_MINT_SIG},
-                intent_types=frozenset({"LP_OPEN"}),
+                intent_types=frozenset({IntentType.LP_OPEN}),
             ),
             StaticPermissionEntry(
                 target=target,
@@ -166,13 +167,13 @@ def _build_slipstream_static_permissions() -> dict[str, list[StaticPermissionEnt
                     _SLIPSTREAM_DECREASE_SELECTOR: _SLIPSTREAM_DECREASE_SIG,
                     _SLIPSTREAM_COLLECT_SELECTOR: _SLIPSTREAM_COLLECT_SIG,
                 },
-                intent_types=frozenset({"LP_CLOSE"}),
+                intent_types=frozenset({IntentType.LP_CLOSE}),
             ),
             StaticPermissionEntry(
                 target=target,
                 label=label,
                 selectors={_SLIPSTREAM_COLLECT_SELECTOR: _SLIPSTREAM_COLLECT_SIG},
-                intent_types=frozenset({"LP_COLLECT_FEES"}),
+                intent_types=frozenset({IntentType.LP_COLLECT_FEES}),
             ),
         ]
     return result
@@ -233,13 +234,13 @@ PERMISSION_HINTS_SLIPSTREAM = PermissionHints(
     # framework's ``PROTOCOL_ROUTERS`` (the TraderJoe V2 precedent).
     # LP_COLLECT_FEES stays gated by
     # ``supports_standalone_fee_collection=True`` above.
-    synthetic_discovery_intents=frozenset({"SWAP", "LP_OPEN", "LP_CLOSE"}),
+    synthetic_discovery_intents=frozenset({IntentType.SWAP, IntentType.LP_OPEN, IntentType.LP_CLOSE}),
 )
 
 
 def build_discovery_vectors(
     protocol: str,
-    intent_type: str,
+    intent_type: IntentType,
     chain: str,
     ctx: DiscoveryContext,
 ) -> list[AnyIntent] | None:
@@ -258,7 +259,7 @@ def build_discovery_vectors(
     ``aerodrome`` SWAP/LP and Slipstream LP keep their framework-default
     dispatch unchanged.
     """
-    if protocol != "aerodrome_slipstream" or intent_type != "SWAP":
+    if protocol != "aerodrome_slipstream" or intent_type is not IntentType.SWAP:
         return None
     # Only chains where Slipstream CL is deployed (Base today). Velodrome on
     # Optimism is Classic-only, so the framework default (which finds no router

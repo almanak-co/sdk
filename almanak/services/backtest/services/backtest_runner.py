@@ -20,6 +20,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from almanak.core.chains import ChainRegistry
+from almanak.core.intent_types import IntentType
 from almanak.core.models.quote_asset import QuoteAsset
 from almanak.framework.backtesting.config import BacktestDataConfig
 from almanak.framework.backtesting.models import BacktestResult, _decimal_str
@@ -324,12 +325,15 @@ class SpecBacktestStrategy:
     """
 
     # Maps action → (tags, intent_types) for adapter detection
-    _ACTION_METADATA: dict[str, tuple[list[str], list[str]]] = {
-        "swap": (["swap", "trading"], ["SWAP"]),
-        "provide_liquidity": (["lp", "liquidity", "concentrated-liquidity"], ["LP_OPEN", "LP_CLOSE"]),
-        "lend": (["lending", "supply"], ["SUPPLY", "WITHDRAW"]),
-        "supply": (["lending", "supply"], ["SUPPLY", "WITHDRAW"]),
-        "borrow": (["lending", "borrow"], ["BORROW", "REPAY"]),
+    _ACTION_METADATA: dict[str, tuple[list[str], list[IntentType]]] = {
+        "swap": (["swap", "trading"], [IntentType.SWAP]),
+        "provide_liquidity": (
+            ["lp", "liquidity", "concentrated-liquidity"],
+            [IntentType.LP_OPEN, IntentType.LP_CLOSE],
+        ),
+        "lend": (["lending", "supply"], [IntentType.SUPPLY, IntentType.WITHDRAW]),
+        "supply": (["lending", "supply"], [IntentType.SUPPLY, IntentType.WITHDRAW]),
+        "borrow": (["lending", "borrow"], [IntentType.BORROW, IntentType.REPAY]),
     }
 
     def __init__(self, spec: StrategySpec) -> None:

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import pytest
 
+from almanak.core.intent_types import IntentType
 from almanak.framework.teardown.revert_transience import (
     Transience,
     classify_revert_transience,
@@ -55,6 +56,12 @@ class TestSeededMetaMorphoRule:
             protocol="MetaMorpho",
         )
         assert result is Transience.TRANSIENT
+
+    def test_enum_and_wire_value_classify_identically(self) -> None:
+        kwargs = {"error_text": "Panic(17)", "protocol": "metamorpho"}
+        typed = classify_revert_transience(intent_type=IntentType.VAULT_REDEEM, **kwargs)
+        serialized = classify_revert_transience(intent_type="VAULT_REDEEM", **kwargs)
+        assert typed is serialized is Transience.TRANSIENT
 
 
 class TestContextScopingSafetyConstraint:

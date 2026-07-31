@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
-from almanak.framework.intents import Intent
+from almanak.framework.intents import Intent, IntentType
 from almanak.framework.market import MarketSnapshot
 from almanak.framework.strategies import IntentStrategy, almanak_strategy
 from almanak.framework.utils.log_formatters import format_usd
@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
     tags=["perpetuals", "gmx", "lifecycle", "test"],
     supported_chains=["arbitrum", "avalanche"],
     supported_protocols=["gmx_v2"],
-    intent_types=["PERP_OPEN", "PERP_CLOSE", "HOLD"],
+    intent_types=[IntentType.PERP_OPEN, IntentType.PERP_CLOSE, IntentType.HOLD],
     quote_asset="USD",
 )
 class GMXPerpLifecycleStrategy(IntentStrategy):

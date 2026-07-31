@@ -20,6 +20,7 @@ from almanak.connectors.fluid_dex_lp.permission_hints import (
     _WITHDRAW_SELECTOR,
     PERMISSION_HINTS,
 )
+from almanak.core.intent_types import IntentType
 from almanak.framework.permissions.discovery import discover_permissions
 from almanak.framework.permissions.synthetic_intents import _lp_protocols, get_protocol_intent_matrix
 
@@ -35,15 +36,14 @@ def _non_native_wrappers() -> dict[str, dict]:
         addr: e
         for addr, e in _arbitrum_wrappers().items()
         if not (
-            bool(e.get("native_token1"))
-            or str(e.get("token0", "")).lower() == FLUID_DEX_LP_NATIVE_SENTINEL.lower()
+            bool(e.get("native_token1")) or str(e.get("token0", "")).lower() == FLUID_DEX_LP_NATIVE_SENTINEL.lower()
         )
     }
 
 
 class TestSyntheticMembership:
     def test_declares_lp_open_and_close(self):
-        assert PERMISSION_HINTS.synthetic_discovery_intents == frozenset({"LP_OPEN", "LP_CLOSE"})
+        assert PERMISSION_HINTS.synthetic_discovery_intents == frozenset({IntentType.LP_OPEN, IntentType.LP_CLOSE})
 
     def test_member_of_lp_protocols(self):
         assert "fluid_dex_lp" in _lp_protocols()
@@ -80,17 +80,17 @@ class TestStaticPermissionSurface:
     def test_deposit_scoped_to_lp_open(self):
         for entry in PERMISSION_HINTS.static_permissions[_CHAIN]:
             if _DEPOSIT_SELECTOR in entry.selectors:
-                assert entry.intent_types == frozenset({"LP_OPEN"})
+                assert entry.intent_types == frozenset({IntentType.LP_OPEN})
 
     def test_withdraw_scoped_to_lp_close(self):
         for entry in PERMISSION_HINTS.static_permissions[_CHAIN]:
             if _WITHDRAW_SELECTOR in entry.selectors:
-                assert entry.intent_types == frozenset({"LP_CLOSE"})
+                assert entry.intent_types == frozenset({IntentType.LP_CLOSE})
 
     def test_approve_scoped_to_lp_open(self):
         for entry in PERMISSION_HINTS.static_permissions[_CHAIN]:
             if _ERC20_APPROVE_SELECTOR in entry.selectors:
-                assert entry.intent_types == frozenset({"LP_OPEN"})
+                assert entry.intent_types == frozenset({IntentType.LP_OPEN})
 
     def test_every_non_native_wrapper_has_deposit_and_withdraw(self):
         deposit_targets = {

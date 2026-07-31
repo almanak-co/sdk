@@ -59,7 +59,7 @@ from decimal import ROUND_DOWN, Decimal
 from typing import TYPE_CHECKING, Any
 
 from almanak.framework.data import MarketSnapshotError, PriceUnavailableError
-from almanak.framework.intents import AnyIntent, Intent
+from almanak.framework.intents import AnyIntent, Intent, IntentType
 from almanak.framework.market import MarketSnapshot
 from almanak.framework.strategies import IntentStrategy, almanak_strategy
 from almanak.framework.utils.log_formatters import format_token_amount_human, format_usd
@@ -104,7 +104,16 @@ class _LeverageUnwindError(RuntimeError):
     supported_chains=["avalanche"],
     default_chain="avalanche",
     supported_protocols=["benqi"],
-    intent_types=["SUPPLY", "BORROW", "SWAP", "UNWRAP_NATIVE", "WRAP_NATIVE", "REPAY", "WITHDRAW", "HOLD"],
+    intent_types=[
+        IntentType.SUPPLY,
+        IntentType.BORROW,
+        IntentType.SWAP,
+        IntentType.UNWRAP_NATIVE,
+        IntentType.WRAP_NATIVE,
+        IntentType.REPAY,
+        IntentType.WITHDRAW,
+        IntentType.HOLD,
+    ],
     quote_asset="USD",
 )
 class BenqiLoopingStrategy(IntentStrategy):

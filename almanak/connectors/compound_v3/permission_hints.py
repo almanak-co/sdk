@@ -26,6 +26,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
+from almanak.core.intent_types import IntentType
 from almanak.framework.permissions.hints import DiscoveryContext, PermissionHints
 
 if TYPE_CHECKING:
@@ -36,7 +37,9 @@ if TYPE_CHECKING:
 # primitives. Compound III discovery vectors are produced by
 # ``build_discovery_vectors`` below.
 PERMISSION_HINTS = PermissionHints(
-    synthetic_discovery_intents=frozenset({"SUPPLY", "WITHDRAW", "BORROW", "REPAY"}),
+    synthetic_discovery_intents=frozenset(
+        {IntentType.SUPPLY, IntentType.WITHDRAW, IntentType.BORROW, IntentType.REPAY}
+    ),
 )
 
 
@@ -68,7 +71,7 @@ def _synthetic_tokens(chain: str, fallback_usdc: str, hint_market_id: str | None
 
 def build_discovery_vectors(
     protocol: str,
-    intent_type: str,
+    intent_type: IntentType,
     chain: str,
     ctx: DiscoveryContext,
 ) -> list[AnyIntent] | None:
@@ -98,7 +101,7 @@ def build_discovery_vectors(
 
     hint_market_id = PERMISSION_HINTS.synthetic_market_id
 
-    if intent_type == "SUPPLY":
+    if intent_type is IntentType.SUPPLY:
         # Compound V3 routes SUPPLY on token-vs-Comet-base match: token==base calls
         # ``Comet.supply()``, anything else calls ``Comet.supplyCollateral()``. The
         # manifest needs BOTH selectors. Without a sweep, the single synthetic
@@ -132,7 +135,7 @@ def build_discovery_vectors(
             )
         return out
 
-    if intent_type == "WITHDRAW":
+    if intent_type is IntentType.WITHDRAW:
         # Compound V3: use the Comet's base token, not the chain default USDC. On
         # polygon these differ (Comet base = USDC.e, chain default = native USDC),
         # so the chain-default would compile against a non-base asset and emit
@@ -148,7 +151,7 @@ def build_discovery_vectors(
             )
         ]
 
-    if intent_type == "BORROW":
+    if intent_type is IntentType.BORROW:
         # Compound V3: borrow_token must match the Comet base (USDC.e on polygon,
         # not native USDC). Collateral fallback to weth covers ethereum/arbitrum/
         # base/optimism/polygon — all polygon Comet collaterals include WETH.
@@ -168,7 +171,7 @@ def build_discovery_vectors(
             )
         ]
 
-    if intent_type == "REPAY":
+    if intent_type is IntentType.REPAY:
         # Compound V3: repay token must match the Comet base. Same rationale as
         # WITHDRAW above — polygon's base is USDC.e, not native USDC.
         base_token, _collateral, market = _synthetic_tokens(chain, ctx.usdc, hint_market_id)

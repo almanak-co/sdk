@@ -42,7 +42,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from almanak.framework.data import BalanceUnavailableError, MarketSnapshotError, PriceUnavailableError
-from almanak.framework.intents import AnyIntent, Intent
+from almanak.framework.intents import AnyIntent, Intent, IntentType
 from almanak.framework.market import MarketSnapshot
 from almanak.framework.strategies import IntentStrategy, almanak_strategy
 
@@ -73,7 +73,7 @@ SHORT = "short"
     supported_chains=["arbitrum"],
     default_chain="arbitrum",
     supported_protocols=["gmx_v2"],
-    intent_types=["PERP_OPEN", "PERP_CLOSE", "HOLD"],
+    intent_types=[IntentType.PERP_OPEN, IntentType.PERP_CLOSE, IntentType.HOLD],
     quote_asset="USD",
 )
 class GmxV2DirectionalPerp(IntentStrategy):

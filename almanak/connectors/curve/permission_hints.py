@@ -83,6 +83,7 @@ import logging
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
+from almanak.core.intent_types import IntentType
 from almanak.framework.permissions.hints import DiscoveryContext, PermissionHints
 
 if TYPE_CHECKING:
@@ -91,7 +92,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 PERMISSION_HINTS = PermissionHints(
-    synthetic_discovery_intents=frozenset({"SWAP", "LP_OPEN", "LP_CLOSE"}),
+    synthetic_discovery_intents=frozenset({IntentType.SWAP, IntentType.LP_OPEN, IntentType.LP_CLOSE}),
     # Curve's compiler produces complete LP calldata with zero network reads
     # (see the module docstring): the discovery compiler substitutes synthetic
     # slippage bounds for the on-chain quotes, and compiles each vector under
@@ -114,7 +115,7 @@ _SYNTHETIC_IMBALANCED_AMOUNT = Decimal("0.001")
 
 def build_discovery_vectors(
     protocol: str,
-    intent_type: str,
+    intent_type: IntentType,
     chain: str,
     ctx: DiscoveryContext,
 ) -> list[AnyIntent] | None:
@@ -129,11 +130,11 @@ def build_discovery_vectors(
     Returns ``None`` for any other intent type so the framework default takes
     over.
     """
-    if intent_type == "SWAP":
+    if intent_type is IntentType.SWAP:
         return _build_swap_vectors(chain)
-    if intent_type == "LP_OPEN":
+    if intent_type is IntentType.LP_OPEN:
         return _build_lp_open_vectors(chain)
-    if intent_type == "LP_CLOSE":
+    if intent_type is IntentType.LP_CLOSE:
         return _build_lp_close_vectors(chain)
     return None
 

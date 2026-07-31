@@ -35,8 +35,11 @@ Example:
 
 import functools
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+
+from almanak.core.intent_types import IntentType
 
 from .base import AdapterRegistry, StrategyBacktestAdapter, get_adapter, get_adapter_with_config
 
@@ -402,7 +405,7 @@ def _detect_from_protocols(protocols: list[str]) -> StrategyTypeHint:
     )
 
 
-def _detect_from_intents(intent_types: list[str]) -> StrategyTypeHint:
+def _detect_from_intents(intent_types: Sequence[IntentType | str]) -> StrategyTypeHint:
     """Detect strategy type from intent types.
 
     Args:
@@ -415,7 +418,9 @@ def _detect_from_intents(intent_types: list[str]) -> StrategyTypeHint:
         return StrategyTypeHint(strategy_type=None)
 
     # Normalize intent types to uppercase
-    normalized_intents = [i.upper() for i in intent_types]
+    normalized_intents = [
+        parsed.value if (parsed := IntentType.try_parse(value)) else str(value).upper() for value in intent_types
+    ]
 
     intent_type_counts: dict[str, int] = {}
     for i in normalized_intents:

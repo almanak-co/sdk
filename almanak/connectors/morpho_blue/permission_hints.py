@@ -34,6 +34,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
+from almanak.core.intent_types import IntentType
 from almanak.framework.permissions.hints import DiscoveryContext, PermissionHints
 
 if TYPE_CHECKING:
@@ -67,7 +68,9 @@ PERMISSION_HINTS = PermissionHints(
     # primitives. Resolved only for the canonical ``morpho_blue`` slug — the
     # bare ``morpho`` compiler-loader alias has no permission_hints module and
     # so never enters the derived lending set.
-    synthetic_discovery_intents=frozenset({"SUPPLY", "WITHDRAW", "BORROW", "REPAY"}),
+    synthetic_discovery_intents=frozenset(
+        {IntentType.SUPPLY, IntentType.WITHDRAW, IntentType.BORROW, IntentType.REPAY}
+    ),
 )
 
 
@@ -125,7 +128,7 @@ def _collateral_token(chain: str, fallback: str) -> str:
 
 def build_discovery_vectors(
     protocol: str,
-    intent_type: str,
+    intent_type: IntentType,
     chain: str,
     ctx: DiscoveryContext,
 ) -> list[AnyIntent] | None:
@@ -160,7 +163,7 @@ def build_discovery_vectors(
 
     market_id = _synthetic_market_id(chain, _SYNTHETIC_MARKET_ID)
 
-    if intent_type == "SUPPLY":
+    if intent_type is IntentType.SUPPLY:
         loan_token = _loan_token(chain, ctx.usdc)
         collateral_token = _collateral_token(chain, ctx.usdc)
         return [
@@ -182,7 +185,7 @@ def build_discovery_vectors(
             ),
         ]
 
-    if intent_type == "WITHDRAW":
+    if intent_type is IntentType.WITHDRAW:
         loan_token = _loan_token(chain, ctx.usdc)
         collateral_token = _collateral_token(chain, ctx.usdc)
         return [
@@ -204,7 +207,7 @@ def build_discovery_vectors(
             ),
         ]
 
-    if intent_type == "BORROW":
+    if intent_type is IntentType.BORROW:
         loan_token = _loan_token(chain, ctx.usdc)
         collateral_token = _collateral_token(chain, ctx.weth)
         # Synthetic bundled-collateral borrow for permission discovery only:
@@ -222,7 +225,7 @@ def build_discovery_vectors(
             )
         ]
 
-    if intent_type == "REPAY":
+    if intent_type is IntentType.REPAY:
         loan_token = _loan_token(chain, ctx.usdc)
         return [
             RepayIntent(

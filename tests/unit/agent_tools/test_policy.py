@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
+from almanak.core.intent_types import IntentType
 from almanak.framework.agent_tools.catalog import RiskTier, ToolCategory, ToolDefinition, get_default_catalog
 from almanak.framework.agent_tools.errors import RiskBlockedError
 from almanak.framework.agent_tools.policy import AgentPolicy, PolicyDecision, PolicyEngine, PolicyStateStore
@@ -33,6 +34,27 @@ class TestAgentPolicyDefaults:
         assert p.require_simulation_before_execution is True
         assert p.max_trades_per_hour == 10
         assert p.cooldown_seconds == 300
+
+    def test_intent_allowlist_normalizes_legacy_strings_and_rejects_typos(self):
+        policy = AgentPolicy(allowed_intent_types={"swap"})  # type: ignore[arg-type]
+        assert policy.allowed_intent_types == {IntentType.SWAP}
+
+        with pytest.raises(ValueError, match=r"Unknown allowed intent type 'SWAAP'.*SWAP"):
+            AgentPolicy(allowed_intent_types={"SWAAP"})  # type: ignore[arg-type]
+
+    def test_intent_allowlist_checks_enum_and_wire_values_equivalently(self):
+        engine = PolicyEngine(AgentPolicy(allowed_intent_types={IntentType.SWAP}))
+        for value in (IntentType.SWAP, "SWAP"):
+            violations: list[str] = []
+            suggestions: list[str] = []
+            engine._check_intent_type_allowed({"intent_type": value}, violations, suggestions)
+            assert violations == []
+
+        violations = []
+        suggestions = []
+        engine._check_intent_type_allowed({"intent_type": IntentType.SUPPLY}, violations, suggestions)
+        assert violations == ["Intent type 'SUPPLY' is not allowed."]
+        assert suggestions == ["Allowed intent types: ['SWAP']"]
 
 
 class TestPolicyDecision:

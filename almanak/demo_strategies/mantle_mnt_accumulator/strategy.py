@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from almanak.framework.teardown.models import TeardownMode, TeardownPositionSummary
 
 from almanak.framework.data import BalanceUnavailableError, MarketSnapshotError, PriceUnavailableError
-from almanak.framework.intents import AnyIntent, Intent
+from almanak.framework.intents import AnyIntent, Intent, IntentType
 from almanak.framework.market import MarketSnapshot
 from almanak.framework.strategies import IntentStrategy, almanak_strategy
 
@@ -62,7 +62,7 @@ def _cfg(config, key: str, default: Any = None) -> Any:
     tags=["mantle", "accumulation", "rsi", "dip-buying", "agni"],
     supported_chains=["mantle"],
     supported_protocols=["agni"],
-    intent_types=["SWAP", "HOLD"],
+    intent_types=[IntentType.SWAP, IntentType.HOLD],
 )
 class MantleMntAccumulator(IntentStrategy):
     """Accumulates WMNT on Mantle via multi-signal RSI entries and Agni Finance.

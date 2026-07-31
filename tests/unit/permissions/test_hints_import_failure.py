@@ -25,6 +25,7 @@ import types
 
 import pytest
 
+from almanak.core.intent_types import IntentType
 from almanak.framework.permissions import hints as hints_mod
 from almanak.framework.permissions.hints import (
     PermissionHints,
@@ -158,7 +159,7 @@ class TestAliasedProtocols:
 
     def test_aliased_protocol_resolves_its_own_attribute(self) -> None:
         """Sanity anchor: the alias path works at all, so the test above is meaningful."""
-        assert "SWAP" in get_permission_hints("aerodrome_slipstream").synthetic_discovery_intents
+        assert IntentType.SWAP in get_permission_hints("aerodrome_slipstream").synthetic_discovery_intents
 
 
 class TestMalformedHintsFailClosed:

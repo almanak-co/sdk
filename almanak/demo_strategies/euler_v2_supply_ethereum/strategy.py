@@ -26,7 +26,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
-from almanak.framework.intents import AnyIntent, Intent
+from almanak.framework.intents import AnyIntent, Intent, IntentType
 from almanak.framework.market import MarketSnapshot
 from almanak.framework.strategies import IntentStrategy, almanak_strategy
 from almanak.framework.utils.log_formatters import format_token_amount_human
@@ -57,7 +57,7 @@ TRANSITIONAL_STATES = {SUPPLYING, WITHDRAWING}
     tags=["kitchenloop", "lending", "euler_v2", "ethereum", "lifecycle"],
     supported_chains=["ethereum"],
     supported_protocols=["euler_v2"],
-    intent_types=["SUPPLY", "WITHDRAW", "HOLD"],
+    intent_types=[IntentType.SUPPLY, IntentType.WITHDRAW, IntentType.HOLD],
     default_chain="ethereum",
     quote_asset="USD",
 )

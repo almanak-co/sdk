@@ -209,23 +209,16 @@ def test_derived_sets_are_frozensets() -> None:
         assert isinstance(derived, frozenset)
 
 
-def test_unknown_declared_intent_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A typo'd intent string (outside ``_VALID_SYNTHETIC_INTENTS``) must raise
-    loudly rather than be silently ignored — silently dropping a connector from a
-    membership set is the exact failure class VIB-4928 PR-1's CI break came from.
-    """
-    import almanak.framework.permissions.synthetic_intents as si
-    from almanak.framework.permissions.hints import PermissionHints
+def test_unknown_declared_intent_raises() -> None:
+    """A typo is rejected deterministically at the declaration boundary."""
+    from almanak.framework.permissions.hints import PermissionHints, StaticPermissionEntry
 
-    bad_hints = PermissionHints(synthetic_discovery_intents=frozenset({"L_OPEN"}))
-    monkeypatch.setattr(si, "_all_connector_slugs", lambda: frozenset({"faketest"}))
-    monkeypatch.setattr(si, "get_permission_hints", lambda _slug: bad_hints)
+    with pytest.raises(TypeError, match="canonical IntentType"):
+        PermissionHints(synthetic_discovery_intents=frozenset({"L_OPEN"}))  # type: ignore[arg-type]
 
-    # Exercise the REAL public path (``__getattr__`` -> cached ``_membership_sets``),
-    # not the inner helper, so a regression in the lazy/cache layer is also caught.
-    si._membership_sets.cache_clear()
-    try:
-        with pytest.raises(ValueError, match="L_OPEN"):
-            _ = si._SWAP_PROTOCOLS
-    finally:
-        si._membership_sets.cache_clear()
+    with pytest.raises(TypeError, match="canonical IntentType"):
+        StaticPermissionEntry(
+            target="0x" + "1" * 40,
+            label="typo",
+            intent_types=frozenset({"L_OPEN"}),  # type: ignore[arg-type]
+        )

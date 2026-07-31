@@ -75,7 +75,7 @@ from typing import TYPE_CHECKING, Any
 
 from almanak.connectors.hyperliquid.fill_reconciliation import FillStatus
 from almanak.framework.data import BalanceUnavailableError, MarketSnapshotError, PriceUnavailableError
-from almanak.framework.intents import AnyIntent, Intent
+from almanak.framework.intents import AnyIntent, Intent, IntentType
 from almanak.framework.market import MarketSnapshot
 from almanak.framework.strategies import IntentStrategy, almanak_strategy
 
@@ -111,7 +111,7 @@ _HYPERCORE_MIN_ORDER_USD = Decimal("10")
     supported_chains=["hyperevm"],
     default_chain="hyperevm",
     supported_protocols=["hyperliquid"],
-    intent_types=["PERP_OPEN", "PERP_CLOSE", "HOLD"],
+    intent_types=[IntentType.PERP_OPEN, IntentType.PERP_CLOSE, IntentType.HOLD],
     quote_asset="USD",
 )
 class HyperliquidTrailingPerp(IntentStrategy):

@@ -71,6 +71,7 @@ from almanak.connectors._fluid_core.addresses import (
     FLUID_SMARTLENDING_MARKETS,
     is_native_leg,
 )
+from almanak.core.intent_types import IntentType
 from almanak.framework.permissions.hints import PermissionHints, StaticPermissionEntry
 
 # ERC-20 ``approve(address,uint256)`` — emitted on each funded token leg
@@ -119,7 +120,7 @@ def _build_static_permissions() -> dict[str, list[StaticPermissionEntry]]:
                     # LP_OPEN compiles to [approve(s)..., deposit]. ``deposit`` is
                     # only emitted on the open path — scope it so LP_CLOSE-only
                     # manifests stay least-privilege.
-                    intent_types=frozenset({"LP_OPEN"}),
+                    intent_types=frozenset({IntentType.LP_OPEN}),
                 )
             )
             entries.append(
@@ -128,7 +129,7 @@ def _build_static_permissions() -> dict[str, list[StaticPermissionEntry]]:
                     label=f"Fluid SmartLending {symbol} (withdraw)",
                     selectors={_WITHDRAW_SELECTOR: _WITHDRAW_SIG},
                     # ``withdraw`` is the LP_CLOSE drain — scope to LP_CLOSE.
-                    intent_types=frozenset({"LP_CLOSE"}),
+                    intent_types=frozenset({IntentType.LP_CLOSE}),
                 )
             )
             # Both ERC-20 legs may be funded on an LP_OPEN (the deposit pulls via
@@ -152,7 +153,7 @@ def _build_static_permissions() -> dict[str, list[StaticPermissionEntry]]:
                     label=f"ERC-20: {token_symbol} (Fluid DEX LP approve)",
                     selectors={_ERC20_APPROVE_SELECTOR: _ERC20_APPROVE_SIG},
                     # ``approve`` is only needed by the LP_OPEN funds-pull.
-                    intent_types=frozenset({"LP_OPEN"}),
+                    intent_types=frozenset({IntentType.LP_OPEN}),
                 )
             )
 
@@ -169,7 +170,7 @@ PERMISSION_HINTS = PermissionHints(
     # come from ``static_permissions`` below (compilation-based discovery is
     # RPC-bound for this connector — see module docstring), NOT from a
     # ``build_discovery_vectors`` override.
-    synthetic_discovery_intents=frozenset({"LP_OPEN", "LP_CLOSE"}),
+    synthetic_discovery_intents=frozenset({IntentType.LP_OPEN, IntentType.LP_CLOSE}),
     static_permissions=_build_static_permissions(),
     selector_labels={
         _DEPOSIT_SELECTOR: _DEPOSIT_SIG,

@@ -47,6 +47,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 
+from almanak.core.intent_types import IntentType
+
 __all__ = [
     "Transience",
     "classify_revert_transience",
@@ -124,7 +126,7 @@ class _TransientRule:
     is not consumed by the matcher.
     """
 
-    intent_types: frozenset[str]
+    intent_types: frozenset[IntentType]
     protocols: frozenset[str]
     signature: Callable[[str], bool]
     why: str
@@ -150,7 +152,7 @@ _TRANSIENT_RULES: tuple[_TransientRule, ...] = (
         # connector-name literal). Connector-owned vetted transient signatures —
         # so other vault connectors contribute their own without a framework
         # literal — are the proper generalization, tracked as VIB-5581.
-        intent_types=frozenset({"vault_redeem"}),
+        intent_types=frozenset({IntentType.VAULT_REDEEM}),
         protocols=frozenset({"metamorpho"}),
         signature=_is_arithmetic_panic,
         why=(
@@ -177,7 +179,7 @@ def _norm(value: str | None) -> str | None:
 def classify_revert_transience(
     error_text: str | None,
     *,
-    intent_type: str | None = None,
+    intent_type: IntentType | str | None = None,
     protocol: str | None = None,
 ) -> Transience:
     """Classify a teardown revert as TRANSIENT / PERMANENT / UNKNOWN.
@@ -198,7 +200,7 @@ def classify_revert_transience(
     if not isinstance(error_text, str) or not error_text:
         return Transience.UNKNOWN
 
-    it = _norm(intent_type)
+    it = IntentType.try_parse(intent_type)
     proto = _norm(protocol)
     if it is None or proto is None:
         return Transience.UNKNOWN

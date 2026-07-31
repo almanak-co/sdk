@@ -62,7 +62,7 @@ from typing import TYPE_CHECKING, Any
 from almanak.framework.api.timeline import TimelineEvent, TimelineEventType, add_event
 
 # Intent is what your strategy returns - describes what action to take
-from almanak.framework.intents import AnyIntent, Intent
+from almanak.framework.intents import AnyIntent, Intent, IntentType
 
 # Core strategy framework imports
 from almanak.framework.market import MarketSnapshot
@@ -180,7 +180,7 @@ class Curve3poolLPConfig:
     # Protocols this strategy interacts with
     supported_protocols=["curve"],
     # Types of intents this strategy may return
-    intent_types=["LP_OPEN", "LP_CLOSE", "HOLD"],
+    intent_types=[IntentType.LP_OPEN, IntentType.LP_CLOSE, IntentType.HOLD],
     default_chain="ethereum",
     quote_asset="USD",
 )

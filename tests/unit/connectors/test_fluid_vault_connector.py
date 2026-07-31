@@ -13,6 +13,7 @@ from decimal import Decimal
 
 from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors.fluid_vault.connector import CONNECTOR
+from almanak.core.intent_types import IntentType
 
 
 class TestFluidVaultManifest:
@@ -135,7 +136,6 @@ class TestFluidVaultRegistries:
 
 class TestFluidVaultZodiacMatrix:
     def test_synthetic_matrix_covers_exactly_four_lending_intents(self):
-        from almanak.framework.intents.vocabulary import IntentType
         from almanak.framework.permissions.synthetic_intents import get_protocol_intent_matrix
 
         matrix = get_protocol_intent_matrix()
@@ -151,7 +151,9 @@ class TestFluidVaultZodiacMatrix:
         )
 
         hints = get_permission_hints("fluid_vault")
-        assert hints.synthetic_discovery_intents == frozenset({"SUPPLY", "BORROW", "REPAY", "WITHDRAW"})
+        assert hints.synthetic_discovery_intents == frozenset(
+            {IntentType.SUPPLY, IntentType.BORROW, IntentType.REPAY, IntentType.WITHDRAW}
+        )
         assert "0x032d2276" in hints.selector_labels  # the vault operate() selector
         # No ERC-721-ONLY selectors (setApprovalForAll / transferFrom /
         # safeTransferFrom) anywhere in the declared surface. NOTE:
@@ -166,7 +168,7 @@ class TestFluidVaultZodiacMatrix:
         vectors_fn = get_discovery_vectors_override("fluid_vault")
         assert vectors_fn is not None
         ctx = DiscoveryContext(usdc="0x" + "1" * 40, weth="0x" + "2" * 40)
-        for intent_type in ("SUPPLY", "BORROW", "REPAY", "WITHDRAW"):
+        for intent_type in (IntentType.SUPPLY, IntentType.BORROW, IntentType.REPAY, IntentType.WITHDRAW):
             for chain, vault in (
                 ("arbitrum", "0xeabbfca72f8a8bf14c4ac59e69ecb2eb69f0811c"),
                 ("base", "0x01f0d07fde184614216e76782c6b7df663f5375e"),
@@ -175,7 +177,7 @@ class TestFluidVaultZodiacMatrix:
                 assert vectors, f"no {intent_type} discovery vector on {chain}"
                 assert [v.market_id for v in vectors] == [vault]
         # Unsupported chains emit NO doomed synthetics.
-        assert vectors_fn("fluid_vault", "SUPPLY", "ethereum", ctx) == []
+        assert vectors_fn("fluid_vault", IntentType.SUPPLY, "ethereum", ctx) == []
 
     def test_no_erc721_vectors_and_approves_target_erc20_tokens_only(self):
         """Compile every discovery vector and pin the REAL no-ERC-721 invariant.
@@ -241,7 +243,7 @@ class TestFluidVaultZodiacMatrix:
                 cache={},
                 services=services,
             )
-            for intent_type in ("SUPPLY", "BORROW", "REPAY", "WITHDRAW"):
+            for intent_type in (IntentType.SUPPLY, IntentType.BORROW, IntentType.REPAY, IntentType.WITHDRAW):
                 for intent in vectors_fn("fluid_vault", intent_type, chain, discovery_ctx):
                     result = FluidVaultCompiler().compile(ctx, intent)
                     assert result.status.value == "SUCCESS", f"{chain}/{intent_type}: {result.error}"
@@ -260,7 +262,7 @@ class TestFluidVaultZodiacMatrix:
 
         vectors_fn = get_discovery_vectors_override("fluid_vault")
         ctx = DiscoveryContext(usdc="0x" + "1" * 40, weth="0x" + "2" * 40)
-        (borrow,) = vectors_fn("fluid_vault", "BORROW", "arbitrum", ctx)
+        (borrow,) = vectors_fn("fluid_vault", IntentType.BORROW, "arbitrum", ctx)
         assert isinstance(borrow.collateral_amount, Decimal)
         assert isinstance(borrow.borrow_amount, Decimal)
         assert borrow.borrow_amount > 0

@@ -40,6 +40,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
+from almanak.core.intent_types import IntentType
 from almanak.framework.intents.compiler import LP_POSITION_MANAGERS
 from almanak.framework.permissions.hints import (
     DiscoveryContext,
@@ -151,7 +152,7 @@ def _build_static_permissions() -> dict[str, list[StaticPermissionEntry]]:
                     # at all. Scoping to LP_CLOSE keeps SWAP-only / LP_OPEN-only
                     # manifests at least-privilege (Codex P1 / Gemini medium on
                     # PR #1923).
-                    intent_types=frozenset({"LP_CLOSE"}),
+                    intent_types=frozenset({IntentType.LP_CLOSE}),
                 )
             )
             entries.append(
@@ -167,7 +168,7 @@ def _build_static_permissions() -> dict[str, list[StaticPermissionEntry]]:
                     # keeps this selector out of SWAP / LP_OPEN / LP_CLOSE
                     # manifests where it isn't needed — same least-privilege
                     # principle as the LP_CLOSE-scoped ``approveForAll`` above.
-                    intent_types=frozenset({"LP_COLLECT_FEES"}),
+                    intent_types=frozenset({IntentType.LP_COLLECT_FEES}),
                 )
             )
 
@@ -226,13 +227,13 @@ PERMISSION_HINTS = PermissionHints(
     # The SWAP synthetic is produced by ``build_discovery_vectors`` below (the
     # LBRouter address lives in LP_POSITION_MANAGERS, not PROTOCOL_ROUTERS).
     # LP_COLLECT_FEES stays gated by ``supports_standalone_fee_collection``.
-    synthetic_discovery_intents=frozenset({"SWAP", "LP_OPEN", "LP_CLOSE"}),
+    synthetic_discovery_intents=frozenset({IntentType.SWAP, IntentType.LP_OPEN, IntentType.LP_CLOSE}),
 )
 
 
 def build_discovery_vectors(
     protocol: str,
-    intent_type: str,
+    intent_type: IntentType,
     chain: str,
     ctx: DiscoveryContext,
 ) -> list[AnyIntent] | None:
@@ -265,7 +266,7 @@ def build_discovery_vectors(
         SwapIntent,
     )
 
-    if intent_type == "SWAP":
+    if intent_type is IntentType.SWAP:
         from_token, to_token = _SWAP_PAIR_BY_CHAIN.get(chain, (ctx.usdc, ctx.weth))
         return [
             SwapIntent(
@@ -285,7 +286,7 @@ def build_discovery_vectors(
     if "traderjoe_v2" not in managers:
         return None
 
-    if intent_type == "LP_OPEN":
+    if intent_type is IntentType.LP_OPEN:
         token0, token1 = ctx.usdc, ctx.weth
         return [
             LPOpenIntent(
@@ -299,7 +300,7 @@ def build_discovery_vectors(
             )
         ]
 
-    if intent_type == "LP_CLOSE":
+    if intent_type is IntentType.LP_CLOSE:
         # TraderJoe LP_CLOSE uses ``synthetic_position_id`` default ``"1"``
         # — no protocol-specific template needed. Mirrors the framework
         # default. ``ctx`` is unused for this branch because LPCloseIntent
@@ -312,7 +313,7 @@ def build_discovery_vectors(
             )
         ]
 
-    if intent_type == "LP_COLLECT_FEES":
+    if intent_type is IntentType.LP_COLLECT_FEES:
         token0, token1 = ctx.usdc, ctx.weth
         return [
             CollectFeesIntent(

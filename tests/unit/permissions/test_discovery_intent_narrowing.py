@@ -15,9 +15,10 @@ thinner manifest was a *decision* rather than a discovery failure.
 
 from __future__ import annotations
 
+from almanak.core.intent_types import IntentType
 from almanak.framework.permissions.discovery import _supported_intent_types_for
 
-_LENDING = ["SUPPLY", "BORROW", "REPAY", "WITHDRAW"]
+_LENDING = [IntentType.SUPPLY, IntentType.BORROW, IntentType.REPAY, IntentType.WITHDRAW]
 
 
 class TestPassThrough:
@@ -77,7 +78,7 @@ class TestIntentNarrowing:
             intent_types=_LENDING,
             warnings=warnings,
         )
-        assert result == ["SUPPLY", "REPAY", "WITHDRAW"]
+        assert result == [IntentType.SUPPLY, IntentType.REPAY, IntentType.WITHDRAW]
         assert warnings == ["Skipped unsupported permission discovery cells for aave_v3 on mantle: ['BORROW']"]
 
     def test_requesting_only_a_withheld_verb_returns_none(self) -> None:
@@ -85,7 +86,7 @@ class TestIntentNarrowing:
         result = _supported_intent_types_for(
             chain="mantle",
             protocol="aave_v3",
-            intent_types=["BORROW"],
+            intent_types=[IntentType.BORROW],
             warnings=warnings,
         )
         # None, not [] — the caller skips the protocol rather than proceeding
@@ -105,10 +106,10 @@ class TestRecoveryVerbExtensions:
         result = _supported_intent_types_for(
             chain="arbitrum",
             protocol="gmx_v2",
-            intent_types=["PERP_CANCEL_ORDER"],
+            intent_types=[IntentType.PERP_CANCEL_ORDER],
             warnings=warnings,
         )
-        assert result == ["PERP_CANCEL_ORDER"]
+        assert result == [IntentType.PERP_CANCEL_ORDER]
         assert warnings == []
 
     def test_standalone_fee_collection_survives_when_the_connector_declares_it(self) -> None:
@@ -117,10 +118,10 @@ class TestRecoveryVerbExtensions:
         result = _supported_intent_types_for(
             chain="base",
             protocol="aerodrome_slipstream",
-            intent_types=["LP_COLLECT_FEES"],
+            intent_types=[IntentType.LP_COLLECT_FEES],
             warnings=warnings,
         )
-        assert result == ["LP_COLLECT_FEES"]
+        assert result == [IntentType.LP_COLLECT_FEES]
         assert warnings == []
 
 
@@ -140,12 +141,12 @@ class TestChainScopedBrandsResolveBeforeLookup:
         result = _supported_intent_types_for(
             chain="mantle",
             protocol="agni",
-            intent_types=["SWAP", "LP_OPEN", *_LENDING],
+            intent_types=[IntentType.SWAP, IntentType.LP_OPEN, *_LENDING],
             warnings=warnings,
         )
         # Agni is a Uniswap V3 fork: the DEX verbs survive, the lending verbs
         # it never declares are dropped — the pass-through would have kept them.
-        assert result == ["SWAP", "LP_OPEN"]
+        assert result == [IntentType.SWAP, IntentType.LP_OPEN]
         assert warnings == [
             "Skipped unsupported permission discovery cells for agni on mantle: "
             "['BORROW', 'REPAY', 'SUPPLY', 'WITHDRAW']"
@@ -159,10 +160,10 @@ class TestChainScopedBrandsResolveBeforeLookup:
         result = _supported_intent_types_for(
             chain="optimism",
             protocol="velodrome",
-            intent_types=["SWAP", "LP_OPEN", "LP_CLOSE"],
+            intent_types=[IntentType.SWAP, IntentType.LP_OPEN, IntentType.LP_CLOSE],
             warnings=warnings,
         )
-        assert result == ["SWAP", "LP_OPEN", "LP_CLOSE"]
+        assert result == [IntentType.SWAP, IntentType.LP_OPEN, IntentType.LP_CLOSE]
         assert warnings == []
 
     def test_brand_outside_its_chain_scope_still_fails_open(self) -> None:
@@ -174,8 +175,8 @@ class TestChainScopedBrandsResolveBeforeLookup:
         result = _supported_intent_types_for(
             chain="arbitrum",
             protocol="agni",
-            intent_types=["SWAP"],
+            intent_types=[IntentType.SWAP],
             warnings=warnings,
         )
-        assert result == ["SWAP"]
+        assert result == [IntentType.SWAP]
         assert warnings == []

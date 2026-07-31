@@ -47,6 +47,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
+from almanak.core.intent_types import IntentType
 from almanak.framework.permissions.hints import DiscoveryContext, PermissionHints
 
 from .addresses import UNISWAP_V4
@@ -68,14 +69,14 @@ PERMISSION_HINTS = PermissionHints(
     # SWAP + LP via the override below. LP_COLLECT_FEES is NOT listed here — it
     # stays gated by ``supports_standalone_fee_collection`` (the V4 compiler's
     # ``_compile_collect_fees_uniswap_v4`` supports standalone collection).
-    synthetic_discovery_intents=frozenset({"SWAP", "LP_OPEN", "LP_CLOSE"}),
+    synthetic_discovery_intents=frozenset({IntentType.SWAP, IntentType.LP_OPEN, IntentType.LP_CLOSE}),
     supports_standalone_fee_collection=True,
 )
 
 
 def build_discovery_vectors(
     protocol: str,
-    intent_type: str,
+    intent_type: IntentType,
     chain: str,
     ctx: DiscoveryContext,
 ) -> list[AnyIntent] | None:
@@ -106,7 +107,7 @@ def build_discovery_vectors(
         SwapIntent,
     )
 
-    if intent_type == "SWAP":
+    if intent_type is IntentType.SWAP:
         return [
             SwapIntent(
                 from_token=ctx.usdc,
@@ -117,7 +118,7 @@ def build_discovery_vectors(
             )
         ]
 
-    if intent_type == "LP_OPEN":
+    if intent_type is IntentType.LP_OPEN:
         return [
             LPOpenIntent(
                 pool=f"{ctx.usdc}/{ctx.weth}/{_SYNTHETIC_FEE_TIER}",
@@ -141,7 +142,7 @@ def build_discovery_vectors(
             )
         ]
 
-    if intent_type == "LP_CLOSE":
+    if intent_type is IntentType.LP_CLOSE:
         # V4 LP_CLOSE reconstructs the pool key from ``protocol_params`` — the
         # default builder only supplies ``position_id`` (insufficient for V4).
         return [

@@ -73,12 +73,12 @@ logger = logging.getLogger(__name__)
 
 # Intent-type string groupings used to bucket each slug's declared participation
 # into the legacy membership sets. SWAP is its own bucket; LP / lending / perp
-# each fold their constituent intent-type strings. ``LP_COLLECT_FEES`` is
+# each fold their constituent canonical intent types. ``LP_COLLECT_FEES`` is
 # deliberately absent — it stays gated by ``supports_standalone_fee_collection``
 # (see ``get_protocol_intent_matrix`` / ``_build_lp_collect_fees_intents``).
-_LP_INTENT_TYPES = frozenset({"LP_OPEN", "LP_CLOSE"})
-_LENDING_INTENT_TYPES = frozenset({"SUPPLY", "WITHDRAW", "BORROW", "REPAY"})
-_PERP_INTENT_TYPES = frozenset({"PERP_OPEN", "PERP_CLOSE"})
+_LP_INTENT_TYPES = frozenset({IntentType.LP_OPEN, IntentType.LP_CLOSE})
+_LENDING_INTENT_TYPES = frozenset({IntentType.SUPPLY, IntentType.WITHDRAW, IntentType.BORROW, IntentType.REPAY})
+_PERP_INTENT_TYPES = frozenset({IntentType.PERP_OPEN, IntentType.PERP_CLOSE})
 # PERP_CANCEL_ORDER (VIB-5569) is a SEPARATE bucket from ``_PERP_INTENT_TYPES``
 # on purpose. A cancel is a framework teardown-recovery verb supported ONLY by
 # gmx_v2 (a direct ``ExchangeRouter.cancelOrder(bytes32)`` call, selector
@@ -90,14 +90,18 @@ _PERP_INTENT_TYPES = frozenset({"PERP_OPEN", "PERP_CLOSE"})
 # (``_build_perp_cancel_intents``), and only gmx_v2 does. It still contributes to
 # the ``perp`` slug-membership fold so a hypothetical cancel-only connector would
 # still register as a perp participant.
-_PERP_CANCEL_INTENT_TYPES = frozenset({"PERP_CANCEL_ORDER"})
-# Every intent-type string a connector may legally declare in
+_PERP_CANCEL_INTENT_TYPES = frozenset({IntentType.PERP_CANCEL_ORDER})
+# Every intent type a connector may legally declare in
 # ``synthetic_discovery_intents`` — derived from the per-category sets above so it
 # cannot drift. A value outside this set is a typo (e.g. ``"L_OPEN"``) that would
 # otherwise be silently ignored, dropping the connector from a membership set;
 # ``_derive_membership_sets`` raises on it instead (VIB-4928).
-_VALID_SYNTHETIC_INTENTS: frozenset[str] = (
-    frozenset({"SWAP"}) | _LP_INTENT_TYPES | _LENDING_INTENT_TYPES | _PERP_INTENT_TYPES | _PERP_CANCEL_INTENT_TYPES
+_VALID_SYNTHETIC_INTENTS: frozenset[IntentType] = (
+    frozenset({IntentType.SWAP})
+    | _LP_INTENT_TYPES
+    | _LENDING_INTENT_TYPES
+    | _PERP_INTENT_TYPES
+    | _PERP_CANCEL_INTENT_TYPES
 )
 
 
@@ -140,10 +144,10 @@ def _derive_membership_sets() -> tuple[frozenset[str], frozenset[str], frozenset
         if unknown:
             raise ValueError(
                 f"Connector {slug!r} declared unknown synthetic_discovery_intents "
-                f"{sorted(unknown)}; valid intent types are "
-                f"{sorted(_VALID_SYNTHETIC_INTENTS)}"
+                f"{sorted(value.value for value in unknown)}; valid intent types are "
+                f"{sorted(value.value for value in _VALID_SYNTHETIC_INTENTS)}"
             )
-        if "SWAP" in declared:
+        if IntentType.SWAP in declared:
             swap.add(slug)
             if hints.supports_native_in_swap:
                 native_in_swap.add(slug)
@@ -270,9 +274,7 @@ def get_protocol_intent_matrix() -> dict[str, frozenset[IntentType]]:
         # intents the compiler rejects.
         declared = get_permission_hints(proto).synthetic_discovery_intents
         matrix[proto].update(
-            it
-            for it in (IntentType.SUPPLY, IntentType.WITHDRAW, IntentType.BORROW, IntentType.REPAY)
-            if it.value in declared
+            it for it in (IntentType.SUPPLY, IntentType.WITHDRAW, IntentType.BORROW, IntentType.REPAY) if it in declared
         )
     for proto in _perp_protocols():
         matrix[proto].update({IntentType.PERP_OPEN, IntentType.PERP_CLOSE})
@@ -413,7 +415,7 @@ def _resolve_lp_pair(hints: PermissionHints, chain: str) -> tuple[str, str]:
 
 def build_synthetic_intents(
     protocol: str,
-    intent_type: str,
+    intent_type: IntentType | str,
     chain: str,
 ) -> list[AnyIntent]:
     """Build synthetic intents for a (protocol, intent_type) combination.
@@ -429,9 +431,8 @@ def build_synthetic_intents(
     Returns:
         List of synthetic intents. Empty if the combination is not supported.
     """
-    try:
-        it = IntentType(intent_type)
-    except ValueError:
+    it = IntentType.try_parse(intent_type)
+    if it is None:
         logger.debug("Unknown intent type: %s", intent_type)
         return []
 
@@ -483,7 +484,7 @@ def _build_swap_intents(protocol: str, chain: str, usdc: str, weth: str) -> list
     override = get_discovery_vectors_override(protocol)
     if override is not None:
         ctx = DiscoveryContext(usdc=usdc, weth=weth)
-        result = override(protocol, "SWAP", chain, ctx)
+        result = override(protocol, IntentType.SWAP, chain, ctx)
         if result is not None:
             return result
     # Check that this protocol has a router on this chain.
@@ -574,7 +575,7 @@ def _build_lp_open_intents(protocol: str, chain: str) -> list[AnyIntent]:
     override = get_discovery_vectors_override(protocol)
     if override is not None:
         ctx = DiscoveryContext(usdc=usdc, weth=weth)
-        result = override(protocol, "LP_OPEN", chain, ctx)
+        result = override(protocol, IntentType.LP_OPEN, chain, ctx)
         if result is not None:
             return result
     managers = LP_POSITION_MANAGERS.get(chain, {})
@@ -625,7 +626,7 @@ def _build_lp_close_intents(protocol: str, chain: str) -> list[AnyIntent]:
     override = get_discovery_vectors_override(protocol)
     if override is not None:
         ctx = DiscoveryContext(usdc=usdc, weth=weth)
-        result = override(protocol, "LP_CLOSE", chain, ctx)
+        result = override(protocol, IntentType.LP_CLOSE, chain, ctx)
         if result is not None:
             return result
     managers = LP_POSITION_MANAGERS.get(chain, {})
@@ -655,7 +656,7 @@ def _build_lp_collect_fees_intents(protocol: str, chain: str) -> list[AnyIntent]
     if override is not None:
         usdc, weth = _get_token_pair(chain)
         ctx = DiscoveryContext(usdc=usdc, weth=weth)
-        result = override(protocol, "LP_COLLECT_FEES", chain, ctx)
+        result = override(protocol, IntentType.LP_COLLECT_FEES, chain, ctx)
         if result is not None:
             return result
     managers = LP_POSITION_MANAGERS.get(chain, {})
@@ -695,7 +696,7 @@ def _build_supply_intents(protocol: str, chain: str, usdc: str, weth: str) -> li
     override = get_discovery_vectors_override(protocol)
     if override is not None:
         ctx = DiscoveryContext(usdc=usdc, weth=weth)
-        result = override(protocol, "SUPPLY", chain, ctx)
+        result = override(protocol, IntentType.SUPPLY, chain, ctx)
         if result is not None:
             return result
     # Check lending pool exists for this chain
@@ -721,7 +722,7 @@ def _build_withdraw_intents(protocol: str, chain: str, usdc: str, weth: str) -> 
     override = get_discovery_vectors_override(protocol)
     if override is not None:
         ctx = DiscoveryContext(usdc=usdc, weth=weth)
-        result = override(protocol, "WITHDRAW", chain, ctx)
+        result = override(protocol, IntentType.WITHDRAW, chain, ctx)
         if result is not None:
             return result
     pools = LENDING_POOL_ADDRESSES.get(chain, {})
@@ -746,7 +747,7 @@ def _build_borrow_intents(protocol: str, chain: str, usdc: str, weth: str) -> li
     override = get_discovery_vectors_override(protocol)
     if override is not None:
         ctx = DiscoveryContext(usdc=usdc, weth=weth)
-        result = override(protocol, "BORROW", chain, ctx)
+        result = override(protocol, IntentType.BORROW, chain, ctx)
         if result is not None:
             return result
     pools = LENDING_POOL_ADDRESSES.get(chain, {})
@@ -778,7 +779,7 @@ def _build_repay_intents(protocol: str, chain: str, usdc: str, weth: str) -> lis
     override = get_discovery_vectors_override(protocol)
     if override is not None:
         ctx = DiscoveryContext(usdc=usdc, weth=weth)
-        result = override(protocol, "REPAY", chain, ctx)
+        result = override(protocol, IntentType.REPAY, chain, ctx)
         if result is not None:
             return result
     pools = LENDING_POOL_ADDRESSES.get(chain, {})
@@ -808,7 +809,7 @@ def _build_perp_open_intents(protocol: str, chain: str, usdc: str) -> list[AnyIn
     if override is not None:
         _, weth = _get_token_pair(chain)
         ctx = DiscoveryContext(usdc=usdc, weth=weth)
-        result = override(protocol, "PERP_OPEN", chain, ctx)
+        result = override(protocol, IntentType.PERP_OPEN, chain, ctx)
         if result is not None:
             return result
     return [
@@ -836,7 +837,7 @@ def _build_perp_close_intents(protocol: str, chain: str, usdc: str) -> list[AnyI
     if override is not None:
         _, weth = _get_token_pair(chain)
         ctx = DiscoveryContext(usdc=usdc, weth=weth)
-        result = override(protocol, "PERP_CLOSE", chain, ctx)
+        result = override(protocol, IntentType.PERP_CLOSE, chain, ctx)
         if result is not None:
             return result
     return [
@@ -873,7 +874,7 @@ def _build_perp_cancel_intents(protocol: str, chain: str) -> list[AnyIntent]:
     so the hosted Safe Zodiac manifest authorises that selector (0x7489ec23),
     which the ``multicall`` open/close grant does not cover.
     """
-    if "PERP_CANCEL_ORDER" not in get_permission_hints(protocol).synthetic_discovery_intents:
+    if IntentType.PERP_CANCEL_ORDER not in get_permission_hints(protocol).synthetic_discovery_intents:
         return []
     return [
         PerpCancelIntent(

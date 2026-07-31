@@ -54,7 +54,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 # Intent is what your strategy returns - a high-level action description
-from almanak.framework.intents import AnyIntent, Intent
+from almanak.framework.intents import AnyIntent, Intent, IntentType
 
 # Core strategy framework imports
 from almanak.framework.market import MarketSnapshot
@@ -120,7 +120,7 @@ DEFAULT_PROTOCOL = "uniswap_v3"
     # What types of intents this strategy may return
     # SWAP: Exchange one token for another
     # HOLD: No action (wait for better conditions)
-    intent_types=["SWAP", "HOLD"],
+    intent_types=[IntentType.SWAP, IntentType.HOLD],
     default_chain="ethereum",
     quote_asset="USD",
 )

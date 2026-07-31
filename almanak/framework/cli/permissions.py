@@ -137,7 +137,7 @@ def permissions(  # noqa: C901
 
     strategy_name = metadata.name or strategy_class.__name__
     protocols = list(metadata.supported_protocols) if metadata.supported_protocols else []
-    intent_types = list(metadata.intent_types) if metadata.intent_types else []
+    intent_types = [member.value for member in metadata.intent_types]
 
     if not protocols:
         click.echo("Warning: No supported_protocols in strategy metadata.", err=True)

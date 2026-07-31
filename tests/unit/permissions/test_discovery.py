@@ -1,7 +1,7 @@
 """Tests for compilation-based permission discovery."""
 
-import pytest
 
+from almanak.core.intent_types import IntentType
 from almanak.framework.intents.compiler import (
     AAVE_BORROW_SELECTOR,
     AAVE_SUPPLY_SELECTOR,
@@ -57,8 +57,7 @@ class TestDiscoverSwapPermissions:
         )
         # Find permissions with approve selector
         approve_perms = [
-            p for p in permissions
-            if any(s.selector == ERC20_APPROVE_SELECTOR for s in p.function_selectors)
+            p for p in permissions if any(s.selector == ERC20_APPROVE_SELECTOR for s in p.function_selectors)
         ]
         assert len(approve_perms) >= 1, "Should have approve permission for input token"
 
@@ -73,6 +72,19 @@ class TestDiscoverSwapPermissions:
         # Should produce no permissions (aerodrome has no router on arbitrum)
         assert permissions == []
 
+    def test_enum_and_wire_value_produce_identical_permissions(self):
+        typed = discover_permissions(
+            chain="arbitrum",
+            protocols=["uniswap_v3"],
+            intent_types=[IntentType.SWAP],
+        )
+        serialized = discover_permissions(
+            chain="arbitrum",
+            protocols=["uniswap_v3"],
+            intent_types=["SWAP"],
+        )
+        assert typed == serialized
+
 
 class TestDiscoverLPPermissions:
     """Test permission discovery for LP intents."""
@@ -86,8 +98,7 @@ class TestDiscoverLPPermissions:
         )
         # Find permission with mint selector
         mint_perms = [
-            p for p in permissions
-            if any(s.selector == NFT_POSITION_MINT_SELECTOR for s in p.function_selectors)
+            p for p in permissions if any(s.selector == NFT_POSITION_MINT_SELECTOR for s in p.function_selectors)
         ]
         assert len(mint_perms) >= 1, "Should have mint permission for LP_OPEN"
 
@@ -177,4 +188,4 @@ class TestWarnings:
             intent_types=["NONEXISTENT_TYPE"],
         )
         assert isinstance(permissions, list)
-        assert isinstance(warnings, list)
+        assert warnings == ["Skipped unknown permission discovery intent type: 'NONEXISTENT_TYPE'"]

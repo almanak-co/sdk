@@ -12,9 +12,31 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
+from almanak.core.intent_types import IntentType
 from almanak.core.models.quote_asset import QuoteAsset
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_intent_type_declarations(values: list[object], *, strategy_name: str) -> list[IntentType]:
+    """Parse the decorator's legacy string boundary into canonical members.
+
+    ``@almanak_strategy`` is a public SDK surface, so existing strategies that
+    pass canonical strings remain loadable.  The annotation on the decorator
+    requires ``IntentType`` for new typed code, while this runtime parser makes
+    old declarations fail deterministically on typos instead of carrying an
+    arbitrary string into permission generation and backtesting.
+    """
+    parsed: list[IntentType] = []
+    for value in values:
+        intent_type = IntentType.try_parse(value)
+        if intent_type is None:
+            valid = ", ".join(member.value for member in IntentType)
+            raise ValueError(
+                f"Strategy {strategy_name!r} declares invalid intent type {value!r}; expected one of: {valid}"
+            )
+        parsed.append(intent_type)
+    return parsed
 
 
 @dataclass(frozen=True)
@@ -72,7 +94,7 @@ class StrategyMetadata:
         tags: List of tags for categorization
         supported_chains: List of supported chains
         supported_protocols: List of supported protocols
-        intent_types: List of intent types this strategy may use
+        intent_types: Canonical intent types this strategy may use
         default_chain: Default chain for single-chain execution (falls back to supported_chains[0])
         data_requirements: Which optional data services the strategy requires.
         quote_asset: The asset this strategy's performance is measured in (USD by
@@ -87,10 +109,14 @@ class StrategyMetadata:
     tags: list[str] = field(default_factory=list)
     supported_chains: list[str] = field(default_factory=list)
     supported_protocols: list[str] = field(default_factory=list)
-    intent_types: list[str] = field(default_factory=list)
+    intent_types: list[IntentType] = field(default_factory=list)
     default_chain: str = ""
     data_requirements: StrategyDataRequirements = field(default_factory=StrategyDataRequirements)
     quote_asset: QuoteAsset = field(default_factory=QuoteAsset.usd)
+
+    def __post_init__(self) -> None:
+        """Normalize legacy runtime strings into canonical members immediately."""
+        self.intent_types = _parse_intent_type_declarations(list(self.intent_types), strategy_name=self.name)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
@@ -102,7 +128,7 @@ class StrategyMetadata:
             "tags": self.tags,
             "supported_chains": self.supported_chains,
             "supported_protocols": self.supported_protocols,
-            "intent_types": self.intent_types,
+            "intent_types": [member.value for member in self.intent_types],
             "default_chain": self.default_chain,
             "data_requirements": {
                 "price": self.data_requirements.price,
@@ -127,7 +153,7 @@ def almanak_strategy(
     tags: list[str] | None = None,
     supported_chains: list[str] | None = None,
     supported_protocols: list[str] | None = None,
-    intent_types: list[str] | None = None,
+    intent_types: list[IntentType] | None = None,
     default_chain: str = "",
     data_requirements: StrategyDataRequirements | dict[str, bool] | None = None,
     quote_asset: QuoteAsset | str | dict[str, Any] | None = None,
@@ -170,7 +196,7 @@ def almanak_strategy(
             author="Almanak",
             tags=["trading", "rsi", "mean-reversion"],
             supported_chains=["arbitrum", "ethereum"],
-            intent_types=["SWAP"],
+            intent_types=[IntentType.SWAP],
             default_chain="arbitrum",
             data_requirements=StrategyDataRequirements(indicators=True),
         )
@@ -197,14 +223,17 @@ def almanak_strategy(
         # pending order — VIB-5569), so the generated Safe manifest authorises the
         # cancel selector for gmx_v2. Kept in lockstep with the generator's
         # _TEARDOWN_COMPLEMENTS.
-        expanded_intent_types = list(intent_types) if intent_types else []
+        expanded_intent_types = _parse_intent_type_declarations(
+            list(intent_types or []),
+            strategy_name=name,
+        )
         if expanded_intent_types:
-            _COMPLEMENT_PAIRS: dict[str, tuple[str, ...]] = {
-                "SUPPLY": ("WITHDRAW",),
-                "BORROW": ("REPAY",),
-                "LP_OPEN": ("LP_CLOSE",),
-                "VAULT_DEPOSIT": ("VAULT_REDEEM",),
-                "PERP_OPEN": ("PERP_CLOSE", "PERP_CANCEL_ORDER"),
+            _COMPLEMENT_PAIRS: dict[IntentType, tuple[IntentType, ...]] = {
+                IntentType.SUPPLY: (IntentType.WITHDRAW,),
+                IntentType.BORROW: (IntentType.REPAY,),
+                IntentType.LP_OPEN: (IntentType.LP_CLOSE,),
+                IntentType.VAULT_DEPOSIT: (IntentType.VAULT_REDEEM,),
+                IntentType.PERP_OPEN: (IntentType.PERP_CLOSE, IntentType.PERP_CANCEL_ORDER),
             }
             declared = set(expanded_intent_types)
             missing = sorted(
@@ -213,14 +242,15 @@ def almanak_strategy(
                     for it in expanded_intent_types
                     for complement in _COMPLEMENT_PAIRS.get(it, ())
                     if complement not in declared
-                }
+                },
+                key=lambda member: member.value,
             )
             if missing:
                 expanded_intent_types.extend(missing)
                 logger.debug(
                     "Strategy '%s': auto-expanded intent_types with teardown complements %s",
                     name,
-                    missing,
+                    [member.value for member in missing],
                 )
 
         # Resolve data_requirements: normalize dict, apply legacy compat when omitted.

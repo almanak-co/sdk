@@ -31,6 +31,7 @@ Without this entry a Safe-wallet hyperliquid strategy gets NO permission for
 (Zodiac Roles: unauthorized).
 """
 
+from almanak.core.intent_types import IntentType
 from almanak.framework.permissions.hints import PermissionHints, StaticPermissionEntry
 
 from .addresses import CORE_WRITER_ADDRESS
@@ -55,7 +56,7 @@ PERMISSION_HINTS = PermissionHints(
                 # target/selector — a spotSend is just another action wrapped in
                 # sendRawAction(bytes) — so no new Zodiac target; scope the intent here
                 # so the Safe manifest authorises the withdraw path.
-                intent_types=frozenset({"PERP_OPEN", "PERP_CLOSE", "PERP_WITHDRAW"}),
+                intent_types=frozenset({IntentType.PERP_OPEN, IntentType.PERP_CLOSE, IntentType.PERP_WITHDRAW}),
             )
         ]
     },

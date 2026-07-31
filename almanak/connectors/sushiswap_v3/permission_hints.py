@@ -8,6 +8,7 @@ USDT + WBNB, and any real LP test on the canonical pair fails Zodiac
 authorisation. Surfaced by #1902.
 """
 
+from almanak.core.intent_types import IntentType
 from almanak.framework.permissions.hints import PermissionHints
 
 PERMISSION_HINTS = PermissionHints(
@@ -20,6 +21,6 @@ PERMISSION_HINTS = PermissionHints(
     },
     # Synthetic-discovery participation (VIB-4928): SWAP + LP. V3-style
     # SwapRouter02 auto-wraps native via msg.value → emit native-in SWAP too.
-    synthetic_discovery_intents=frozenset({"SWAP", "LP_OPEN", "LP_CLOSE"}),
+    synthetic_discovery_intents=frozenset({IntentType.SWAP, IntentType.LP_OPEN, IntentType.LP_CLOSE}),
     supports_native_in_swap=True,
 )
