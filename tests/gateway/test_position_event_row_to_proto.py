@@ -8,6 +8,9 @@ fields (tick_lower/tick_upper/in_range/is_long) where 0/False must still
 be set on the wire and only Python None maps to absent.
 """
 
+import pytest
+
+from almanak.framework.observability.position_events import PositionEventTypeDecodeError
 from almanak.gateway.services.state_service import _position_event_row_to_proto
 
 
@@ -18,8 +21,8 @@ def _full_row(**overrides):
         "cycle_id": "cycle-1",
         "execution_mode": "live",
         "position_id": "pos-1",
-        "position_type": "lp",
-        "event_type": "open",
+        "position_type": "LP",
+        "event_type": "OPEN",
         "timestamp": "2026-01-01T00:00:00+00:00",
         "protocol": "uniswap_v3",
         "chain": "arbitrum",
@@ -58,8 +61,8 @@ class TestFullRow:
         assert msg.cycle_id == "cycle-1"
         assert msg.execution_mode == "live"
         assert msg.position_id == "pos-1"
-        assert msg.position_type == "lp"
-        assert msg.event_type == "open"
+        assert msg.position_type == "LP"
+        assert msg.event_type == "OPEN"
         assert msg.timestamp == 1767225600
         assert msg.protocol == "uniswap_v3"
         assert msg.chain == "arbitrum"
@@ -84,17 +87,13 @@ class TestFullRow:
 
 
 class TestSparseRow:
-    def test_defaults(self):
-        msg = _position_event_row_to_proto({"id": "x"})
-        assert msg.id == "x"
-        assert msg.deployment_id == ""
-        assert msg.token0 == ""
-        assert msg.value_usd == ""
-        assert msg.attribution_json == "{}"
-        assert msg.attribution_version == 0
-        assert msg.timestamp == 0
-        for field in ("tick_lower", "tick_upper", "in_range", "is_long"):
-            assert not msg.HasField(field)
+    def test_missing_vocabulary_fails_closed(self):
+        with pytest.raises(PositionEventTypeDecodeError, match="unknown position_type"):
+            _position_event_row_to_proto({"id": "x"})
+
+    def test_unknown_legacy_vocabulary_fails_closed(self):
+        with pytest.raises(PositionEventTypeDecodeError, match="unknown event_type"):
+            _position_event_row_to_proto(_full_row(event_type="OPNE"))
 
 
 class TestEmptyNeZero:

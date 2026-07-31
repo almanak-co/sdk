@@ -12,6 +12,13 @@ from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from almanak.framework.observability.position_events import (
+    PositionEventType,
+    PositionType,
+    parse_position_event_type,
+    parse_position_type,
+)
+
 from .loader import AccountingData
 
 logger = logging.getLogger(__name__)
@@ -129,7 +136,7 @@ class LPSection:
 
 def build_lp_report(data: AccountingData) -> LPSection:
     """Build per-position LP economics summary from position_events."""
-    lp_events = [ev for ev in data.position_events if (ev.get("position_type") or "").upper() == "LP"]
+    lp_events = [ev for ev in data.position_events if parse_position_type(ev.get("position_type")) == PositionType.LP]
     if not lp_events:
         return LPSection()
 
@@ -153,14 +160,14 @@ def build_lp_report(data: AccountingData) -> LPSection:
         )
 
         for ev in events:
-            event_type = (ev.get("event_type") or "").upper()
+            event_type = parse_position_event_type(ev.get("event_type"))
             gas = _dec0(ev.get("gas_usd"))
             summary.total_gas_usd += gas
 
-            if event_type == "OPEN" and summary.entry_value_usd is None:
+            if event_type == PositionEventType.OPEN and summary.entry_value_usd is None:
                 summary.entry_value_usd = _dec(ev.get("value_usd"))
 
-            if event_type == "CLOSE":
+            if event_type == PositionEventType.CLOSE:
                 summary.is_closed = True
                 summary.exit_value_usd = _dec(ev.get("value_usd"))
                 attribution = _parse_attribution(ev.get("attribution_json"))
@@ -170,14 +177,14 @@ def build_lp_report(data: AccountingData) -> LPSection:
                     il = attribution.get("impermanent_loss_usd")
                     summary.il_usd = _dec(il) if il is not None else None
 
-            if event_type in ("COLLECT_FEES", "CLOSE"):
+            if event_type in (PositionEventType.COLLECT_FEES, PositionEventType.CLOSE):
                 # VIB-5036: fees_token0/1 are raw-by-contract — scale to human
                 # before summing so the report shows human token amounts.
                 summary.fees_token0 += _scale_fee(ev.get("fees_token0"), summary.token0, summary.chain)
                 summary.fees_token1 += _scale_fee(ev.get("fees_token1"), summary.token1, summary.chain)
                 summary.protocol_fees_usd += _dec0(ev.get("protocol_fees_usd"))
 
-            if event_type == "SNAPSHOT":
+            if event_type == PositionEventType.SNAPSHOT:
                 in_range = ev.get("in_range")
                 if isinstance(in_range, bool):
                     summary.in_range = in_range

@@ -879,14 +879,19 @@ class GatewayStateManager:
             True if the event was persisted successfully.
         """
         try:
+            from almanak.framework.observability.position_events import (
+                serialize_position_event_type,
+                serialize_position_type,
+            )
+
             request = gateway_pb2.SavePositionEventRequest(
                 id=event.id,
                 deployment_id=event.deployment_id,
                 cycle_id=getattr(event, "cycle_id", "") or "",
                 execution_mode=getattr(event, "execution_mode", "") or "",
                 position_id=event.position_id,
-                position_type=event.position_type,
-                event_type=event.event_type,
+                position_type=serialize_position_type(event.position_type),
+                event_type=serialize_position_event_type(event.event_type),
                 timestamp=int(event.timestamp.timestamp()),
                 protocol=event.protocol,
                 chain=event.chain,
@@ -1273,9 +1278,12 @@ class GatewayStateManager:
         filter (fresh deployment → no legacy data → backfill is a
         no-op).
         """
+        from almanak.framework.observability.position_events import parse_position_type
+
+        typed_position_types = frozenset(parse_position_type(value) for value in position_types)
         request = gateway_pb2.GetPositionEventsFilteredRequest(
             deployment_id=deployment_id,
-            position_types=sorted(position_types),
+            position_types=sorted(value.value for value in typed_position_types),
         )
         try:
             response = self._client.state.GetPositionEventsFiltered(request, timeout=self._timeout)
@@ -1944,15 +1952,22 @@ def _proto_position_event_to_dict(event: "gateway_pb2.PositionEventData") -> dic
     from datetime import UTC
     from datetime import datetime as _dt
 
+    from almanak.framework.observability.position_events import (
+        parse_position_event_type,
+        parse_position_type,
+    )
+
     timestamp_iso = _dt.fromtimestamp(event.timestamp or 0, tz=UTC).isoformat()
+    position_type = parse_position_type(event.position_type)
+    event_type = parse_position_event_type(event.event_type)
     return {
         "id": event.id,
         "deployment_id": event.deployment_id,
         "cycle_id": event.cycle_id,
         "execution_mode": event.execution_mode,
         "position_id": event.position_id,
-        "position_type": event.position_type,
-        "event_type": event.event_type,
+        "position_type": position_type.value,
+        "event_type": event_type.value,
         "timestamp": timestamp_iso,
         "protocol": event.protocol,
         "chain": event.chain,

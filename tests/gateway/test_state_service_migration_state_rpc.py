@@ -753,6 +753,19 @@ class TestMarkBackfillComplete:
 
 class TestGetPositionEventsFiltered:
     @pytest.mark.asyncio
+    async def test_unknown_position_type_is_rejected(self, state_service, mock_context):
+        req = gateway_pb2.GetPositionEventsFilteredRequest(
+            deployment_id=_DEPLOYMENT_ID,
+            position_types=["LIQUIDITY_POOL"],
+        )
+
+        resp = await state_service.GetPositionEventsFiltered(req, mock_context)
+
+        assert resp.error == "unknown position_type: 'LIQUIDITY_POOL'"
+        mock_context.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
+        mock_context.set_details.assert_called_once_with(resp.error)
+
+    @pytest.mark.asyncio
     async def test_empty_returns_empty(self, state_service, mock_context):
         _make_warm(state_service)  # default returns []
         req = gateway_pb2.GetPositionEventsFilteredRequest(

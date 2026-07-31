@@ -10,8 +10,11 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+import pytest
+
 from almanak.framework.accounting.reporting.loader import AccountingData
 from almanak.framework.accounting.reporting.lp_report import _scale_fee, build_lp_report
+from almanak.framework.observability.position_events import PositionEventTypeDecodeError
 
 
 def _data(position_events: list[dict]) -> AccountingData:
@@ -88,6 +91,12 @@ def test_build_lp_report_sums_human_fees() -> None:
     assert summary.fees_token0 == Decimal("75817134186") / Decimal(10**18)
     assert summary.fees_token1 == Decimal("0.000148")
     assert summary.fees_token0 < Decimal("1")
+
+
+def test_build_lp_report_rejects_unknown_persisted_event_type() -> None:
+    events = [{"position_id": "1", "position_type": "LP", "event_type": "OPNE"}]
+    with pytest.raises(PositionEventTypeDecodeError, match="unknown event_type"):
+        build_lp_report(_data(events))
 
 
 def test_build_lp_report_aggregates_fees_across_events() -> None:

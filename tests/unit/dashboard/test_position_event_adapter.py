@@ -5,15 +5,19 @@ from __future__ import annotations
 from datetime import datetime
 from types import SimpleNamespace
 
+import pytest
+
 from almanak.framework.dashboard.custom.position_event_adapter import (
     position_event_to_dict,
     position_events_to_position_data_dicts,
 )
 from almanak.framework.dashboard.plots import plot_positions_over_time
+from almanak.framework.observability.position_events import PositionEventTypeDecodeError
 
 
 def _proto_event(
     position_id: str = "pid-1",
+    position_type: str = "LP",
     event_type: str = "OPEN",
     timestamp: int = 1746230400,  # 2026-05-03 00:00:00 UTC
     tick_lower: int = 200,
@@ -25,7 +29,7 @@ def _proto_event(
         cycle_id="cyc-1",
         execution_mode="live",
         position_id=position_id,
-        position_type="LP",
+        position_type=position_type,
         event_type=event_type,
         timestamp=timestamp,
         protocol="uniswap_v3",
@@ -81,6 +85,20 @@ def test_position_event_to_dict_zero_timestamp_is_empty() -> None:
     assert d["timestamp"] == ""
 
 
+def test_position_event_to_dict_rejects_unknown_wire_vocabulary() -> None:
+    with pytest.raises(PositionEventTypeDecodeError, match="unknown event_type"):
+        position_event_to_dict(_proto_event(event_type="OPNE"))
+
+
+def test_position_event_to_dict_round_trips_unset_proto_vocabulary() -> None:
+    event = _proto_event(position_type="", event_type="")
+
+    decoded = position_event_to_dict(event)
+
+    assert decoded["position_type"] == ""
+    assert decoded["event_type"] == ""
+
+
 # =============================================================================
 # position_events_to_position_data_dicts — rollup OPEN+CLOSE per position
 # =============================================================================
@@ -129,6 +147,15 @@ def test_rollup_accepts_dicts_or_protos() -> None:
     via_proto = position_events_to_position_data_dicts([raw])
     via_dict = position_events_to_position_data_dicts([as_dict])
     assert via_proto == via_dict
+
+
+def test_rollup_accepts_unset_proto_vocabulary() -> None:
+    positions = position_events_to_position_data_dicts([_proto_event(position_type="", event_type="")])
+
+    assert len(positions) == 1
+    assert positions[0]["position_id"] == "pid-1"
+    assert positions[0]["position_type"] == ""
+    assert positions[0]["is_active"] is True
 
 
 # =============================================================================

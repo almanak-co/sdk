@@ -726,7 +726,7 @@ class DashboardAPIClient:
             Returns ``[]`` on any failure — does not raise.
         """
         try:
-            from almanak.framework.observability.position_events import PositionType
+            from almanak.framework.observability.position_events import PositionType, parse_position_type
             from almanak.gateway.proto import gateway_pb2
 
             from .position_event_adapter import position_event_to_dict
@@ -738,7 +738,7 @@ class DashboardAPIClient:
             if position_types is None:
                 effective_types: list[str] = [pt.value for pt in PositionType]
             else:
-                effective_types = list(position_types)
+                effective_types = [parse_position_type(value).value for value in position_types]
             response = self._client._client.state.GetPositionEventsFiltered(
                 gateway_pb2.GetPositionEventsFilteredRequest(
                     deployment_id=self._deployment_id,

@@ -58,6 +58,7 @@ before γ silently regresses the invariant called out above.
 import json
 import logging
 import uuid
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -121,6 +122,68 @@ class PositionType(StrEnum):
     PENDLE_PT = "PENDLE_PT"
 
 
+class PositionEventTypeDecodeError(ValueError):
+    """A persisted/wire position-event vocabulary value is not recognized.
+
+    Historical rows are never coerced to a valid lifecycle or position kind.
+    Callers at storage, protobuf, and JSON boundaries must surface this error
+    and fail closed rather than silently changing the meaning of the row.
+    """
+
+    def __init__(self, field_name: str, value: object) -> None:
+        super().__init__(f"unknown {field_name}: {value!r}")
+        self.field_name = field_name
+        self.value = value
+
+
+def parse_position_event_type(value: object) -> PositionEventType:
+    """Parse an external lifecycle value without fallback or normalization."""
+    if isinstance(value, PositionEventType):
+        return value
+    if not isinstance(value, str):
+        raise PositionEventTypeDecodeError("event_type", value)
+    try:
+        return PositionEventType(value)
+    except ValueError as exc:
+        raise PositionEventTypeDecodeError("event_type", value) from exc
+
+
+def parse_position_type(value: object) -> PositionType:
+    """Parse an external position-kind value without fallback or normalization."""
+    if isinstance(value, PositionType):
+        return value
+    if not isinstance(value, str):
+        raise PositionEventTypeDecodeError("position_type", value)
+    try:
+        return PositionType(value)
+    except ValueError as exc:
+        raise PositionEventTypeDecodeError("position_type", value) from exc
+
+
+def serialize_position_event_type(value: PositionEventType | None) -> str:
+    """Serialize an internal lifecycle value at a persistence/wire boundary."""
+    if value is None:
+        return ""
+    if not isinstance(value, PositionEventType):
+        raise PositionEventTypeDecodeError("event_type", value)
+    return value.value
+
+
+def serialize_position_type(value: PositionType | None) -> str:
+    """Serialize an internal position kind at a persistence/wire boundary."""
+    if value is None:
+        return ""
+    if not isinstance(value, PositionType):
+        raise PositionEventTypeDecodeError("position_type", value)
+    return value.value
+
+
+def _persisted_text(row: Mapping[str, Any], key: str, default: str = "") -> str:
+    """Decode a persisted text column while preserving its historical default."""
+    value = row.get(key)
+    return default if value is None else str(value)
+
+
 # Intent types that map to position events.
 # VIB-4085 — lending intents (SUPPLY/BORROW/REPAY/WITHDRAW) now produce
 # events as well; the static dispatch below maps them to OPEN / CLOSE
@@ -177,8 +240,8 @@ class PositionEvent:
         id: Unique event identifier (UUID).
         deployment_id: Strategy deployment that owns this position.
         position_id: Immutable position identifier (e.g. NFT tokenId).
-        position_type: LP or PERP.
-        event_type: OPEN, CLOSE, COLLECT_FEES, or SNAPSHOT.
+        position_type: Typed position kind from :class:`PositionType`.
+        event_type: Typed lifecycle state from :class:`PositionEventType`.
         timestamp: When the event occurred.
         protocol: Protocol used (e.g. uniswap_v3, gmx_v2).
         chain: Chain where the position lives.
@@ -220,8 +283,8 @@ class PositionEvent:
     cycle_id: str = ""  # Phase 4: correlation to iteration (VIB-2835)
     execution_mode: str = ""  # Phase 4: "live", "paper", "dry_run" (VIB-2837)
     position_id: str = ""
-    position_type: str = ""
-    event_type: str = ""
+    position_type: PositionType | None = None
+    event_type: PositionEventType | None = None
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
     protocol: str = ""
     chain: str = ""
@@ -273,10 +336,84 @@ class PositionEvent:
     # CLOSE-time IL can fail closed on >2-coin pools. ``None`` for 2-coin venues.
     coin_symbols: list[str] | None = None
 
+    def __post_init__(self) -> None:
+        """Keep the mutable event model typed after construction.
+
+        Raw strings remain accepted as a source-compatibility bridge for older
+        callers, but they are immediately routed through the same strict parser
+        used by storage/wire adapters. Unknown values raise; the object never
+        retains an unchecked string. Empty legacy defaults become explicit
+        ``None`` and preserve the historical empty wire/storage value.
+        """
+        if isinstance(self.position_type, str):
+            self.position_type = parse_position_type(self.position_type) if self.position_type else None
+        elif self.position_type is not None and not isinstance(self.position_type, PositionType):
+            raise PositionEventTypeDecodeError("position_type", self.position_type)
+
+        if isinstance(self.event_type, str):
+            self.event_type = parse_position_event_type(self.event_type) if self.event_type else None
+        elif self.event_type is not None and not isinstance(self.event_type, PositionEventType):
+            raise PositionEventTypeDecodeError("event_type", self.event_type)
+
     def to_dict(self) -> dict[str, Any]:
+        """Serialize to the historical JSON/dict shape."""
         d = asdict(self)
+        d["position_type"] = self.position_type.value if self.position_type is not None else ""
+        d["event_type"] = self.event_type.value if self.event_type is not None else ""
         d["timestamp"] = self.timestamp.isoformat()
         return d
+
+    @classmethod
+    def from_persisted_row(cls, row: Mapping[str, Any]) -> "PositionEvent":
+        """Decode one SQLite/PostgreSQL row into the typed internal model.
+
+        Unknown or absent legacy vocabulary is explicit corruption at this
+        boundary and raises :class:`PositionEventTypeDecodeError`. No fallback
+        event or position kind is fabricated.
+        """
+        timestamp_raw = row.get("timestamp")
+        if isinstance(timestamp_raw, datetime):
+            timestamp = timestamp_raw
+        else:
+            try:
+                timestamp = datetime.fromisoformat(str(timestamp_raw))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"invalid position-event timestamp: {timestamp_raw!r}") from exc
+
+        return cls(
+            id=_persisted_text(row, "id"),
+            deployment_id=_persisted_text(row, "deployment_id"),
+            cycle_id=_persisted_text(row, "cycle_id"),
+            execution_mode=_persisted_text(row, "execution_mode"),
+            position_id=_persisted_text(row, "position_id"),
+            position_type=parse_position_type(row.get("position_type")),
+            event_type=parse_position_event_type(row.get("event_type")),
+            timestamp=timestamp,
+            protocol=_persisted_text(row, "protocol"),
+            chain=_persisted_text(row, "chain"),
+            token0=_persisted_text(row, "token0"),
+            token1=_persisted_text(row, "token1"),
+            amount0=_persisted_text(row, "amount0"),
+            amount1=_persisted_text(row, "amount1"),
+            value_usd=_persisted_text(row, "value_usd"),
+            tick_lower=row.get("tick_lower"),
+            tick_upper=row.get("tick_upper"),
+            liquidity=_persisted_text(row, "liquidity"),
+            in_range=None if row.get("in_range") is None else bool(row.get("in_range")),
+            fees_token0=_persisted_text(row, "fees_token0"),
+            fees_token1=_persisted_text(row, "fees_token1"),
+            leverage=_persisted_text(row, "leverage"),
+            entry_price=_persisted_text(row, "entry_price"),
+            mark_price=_persisted_text(row, "mark_price"),
+            unrealized_pnl=_persisted_text(row, "unrealized_pnl"),
+            is_long=None if row.get("is_long") is None else bool(row.get("is_long")),
+            tx_hash=_persisted_text(row, "tx_hash"),
+            gas_usd=_persisted_text(row, "gas_usd"),
+            ledger_entry_id=_persisted_text(row, "ledger_entry_id"),
+            protocol_fees_usd="" if row.get("protocol_fees_usd") is None else str(row.get("protocol_fees_usd")),
+            attribution_json=_persisted_text(row, "attribution_json") or "{}",
+            attribution_version=int(row.get("attribution_version") or 0),
+        )
 
 
 @dataclass(frozen=True)
@@ -599,8 +736,8 @@ def _seed_event(ctx: IntentEventContext) -> PositionEvent | None:
     return PositionEvent(
         deployment_id=ctx.deployment_id,
         position_id=position_id,
-        position_type=position_type.value,
-        event_type=event_type.value,
+        position_type=position_type,
+        event_type=event_type,
         protocol=protocol,
         chain=ctx.chain,
         tx_hash=tx_hash,
@@ -1077,7 +1214,7 @@ def _stamp_lp_close_fee_taxonomy(event: PositionEvent, lp_close: Any) -> None:
     meaningful and would leak CLOSE semantics into downstream
     attribution.
     """
-    if event.event_type != "CLOSE":
+    if event.event_type != PositionEventType.CLOSE:
         return
     method = getattr(lp_close, "fee_separation_method", None)
     confidence = getattr(lp_close, "fee_confidence", None)
@@ -1158,7 +1295,7 @@ def _apply_perp(event: PositionEvent, ctx: IntentEventContext) -> None:
     # run_attribution_on_close / attribute_perp can read it without a DB
     # schema change. Only write when a value (including measured zero) is
     # present — None means "unknown" and must not be silently promoted to 0.
-    if raw_funding is not None and event.event_type == "CLOSE":
+    if raw_funding is not None and event.event_type == PositionEventType.CLOSE:
         try:
             existing = json.loads(event.attribution_json or "{}")
             if not isinstance(existing, dict):
@@ -1214,7 +1351,7 @@ def _apply_collect_fees(event: PositionEvent, ctx: IntentEventContext) -> None:
     COLLECT_FEES events for a position and divides total fees_usd by the
     hold duration and principal.
     """
-    if event.event_type != "COLLECT_FEES":
+    if event.event_type != PositionEventType.COLLECT_FEES:
         return
 
     lp_close = ctx.extracted.get("lp_close_data")
@@ -1412,14 +1549,14 @@ def _refine_lending_event_type(
 ) -> None:
     """OPEN→INCREASE / CLOSE→DECREASE refinement keyed on cache + leg_value."""
     if intent_type in ("SUPPLY", "BORROW"):
-        cache_key = (event.position_id, str(event.position_type))
+        cache_key = (event.position_id, serialize_position_type(event.position_type))
         if cache_key in cache:
-            event.event_type = PositionEventType.INCREASE.value
+            event.event_type = PositionEventType.INCREASE
         return
     if intent_type not in ("REPAY", "WITHDRAW", "DELEVERAGE"):
         return
     if leg_value is None:
-        event.event_type = PositionEventType.DECREASE.value
+        event.event_type = PositionEventType.DECREASE
         logger.debug(
             "lending lifecycle: post-state missing for %s on %s; "
             "defaulting to DECREASE (would have been CLOSE if leg_value <= dust)",
@@ -1436,7 +1573,7 @@ def _refine_lending_event_type(
         if not value_d.is_finite():
             raise InvalidOperation(f"non-finite leg_value: {leg_value!r}")
     except (InvalidOperation, ValueError, TypeError) as exc:
-        event.event_type = PositionEventType.DECREASE.value
+        event.event_type = PositionEventType.DECREASE
         logger.debug(
             "lending lifecycle: unparseable leg_value=%r for %s on %s (%s); "
             "defaulting to DECREASE (would have been CLOSE if value <= dust)",
@@ -1447,7 +1584,7 @@ def _refine_lending_event_type(
         )
         return
     dust = Decimal(LENDING_CLOSE_DUST_USD)
-    event.event_type = PositionEventType.CLOSE.value if value_d <= dust else PositionEventType.DECREASE.value
+    event.event_type = PositionEventType.CLOSE if value_d <= dust else PositionEventType.DECREASE
 
 
 def lending_realized_net_pnl_usd(
@@ -1537,7 +1674,7 @@ def _build_lending_attribution(
     attribution = {
         "version": 1,
         "schema": "lending_v1",
-        "position_type": str(event.position_type),
+        "position_type": serialize_position_type(event.position_type),
         "collateral_value_after_usd": _stringify_or_none(post.get("collateral_value_usd")),
         "debt_value_after_usd": _stringify_or_none(post.get("debt_value_usd")),
         "health_factor_after": _stringify_or_none(post.get("health_factor")),
@@ -1678,7 +1815,7 @@ def _compute_lending_action_delta(
     *,
     pre_state: dict | None,
     leg_value: Any,
-    position_type: str,
+    position_type: PositionType,
 ) -> str | None:
     """Return ``abs(pre - post)`` as a decimal string, or None to keep the
     post-state stamp.
@@ -1840,7 +1977,7 @@ def build_position_event_from_intent(
     # in-memory cache keyed by ``(position_id, position_type)`` populated
     # on every save_position_event success) so we can hydrate without
     # a state-manager round-trip.
-    if event.event_type == "CLOSE" and event.position_type == "LP":
+    if event.event_type == PositionEventType.CLOSE and event.position_type == PositionType.LP:
         _apply_lp_close_columns(event, ctx, recent_open_events, price_oracle)
 
     # θ — final guard: drop events that never acquired a position_id.
@@ -2252,7 +2389,7 @@ def _apply_lp_open_value_usd_ncoin(event: PositionEvent, ctx: "IntentEventContex
     unmeasured). Concentrated-liquidity venues (``coin_symbols`` is ``None``)
     return ``False`` so the canonical 2-coin path runs unchanged.
     """
-    if event.event_type != "OPEN" or event.position_type != "LP" or event.value_usd:
+    if event.event_type != PositionEventType.OPEN or event.position_type != PositionType.LP or event.value_usd:
         return False
     lp_open = ctx.extracted.get("lp_open_data") if isinstance(ctx.extracted, dict) else None
     coin_symbols = getattr(lp_open, "coin_symbols", None)
@@ -2317,7 +2454,7 @@ def _apply_lp_close_value_usd(event: PositionEvent, price_oracle: dict, chain: s
     Fails closed exactly as before: ``value_usd`` stays "" on any missing
     input (Empty ≠ Zero per CLAUDE.md §Accounting).
     """
-    if event.event_type != "CLOSE" or event.position_type != "LP":
+    if event.event_type != PositionEventType.CLOSE or event.position_type != PositionType.LP:
         return
     if event.value_usd:
         return
@@ -2428,7 +2565,7 @@ def _apply_lp_open_value_usd(event: PositionEvent, price_oracle: dict, chain: st
     Only fires for LP_OPEN where amount0/1 are populated and prices
     cover both legs. Other event types are unaffected.
     """
-    if event.event_type != "OPEN" or event.position_type != "LP":
+    if event.event_type != PositionEventType.OPEN or event.position_type != PositionType.LP:
         return
     if event.value_usd:
         return  # already set by something upstream — don't overwrite

@@ -1406,6 +1406,14 @@ class PostgresStore:
         if not self._initialized:
             await self.initialize()
 
+        from almanak.framework.observability.position_events import (
+            serialize_position_event_type,
+            serialize_position_type,
+        )
+
+        position_type = serialize_position_type(event.position_type)
+        event_type = serialize_position_event_type(event.event_type)
+
         pfu = getattr(event, "protocol_fees_usd", None)
         protocol_fees_usd = "" if pfu is None else str(pfu)
 
@@ -1438,8 +1446,8 @@ class PostgresStore:
                 getattr(event, "cycle_id", "") or "",
                 getattr(event, "execution_mode", "") or "",
                 event.position_id,
-                event.position_type,
-                event.event_type,
+                position_type,
+                event_type,
                 event.timestamp,
                 event.protocol,
                 event.chain,

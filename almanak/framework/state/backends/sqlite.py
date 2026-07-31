@@ -2958,6 +2958,14 @@ class SQLiteStore:
         if not self._initialized:
             await self.initialize()
 
+        from almanak.framework.observability.position_events import (
+            serialize_position_event_type,
+            serialize_position_type,
+        )
+
+        position_type = serialize_position_type(event.position_type)
+        event_type = serialize_position_event_type(event.event_type)
+
         def _sync_save() -> bool:
             with self._db_lock:
                 self._conn.execute(  # type: ignore[union-attr]
@@ -2981,8 +2989,8 @@ class SQLiteStore:
                         getattr(event, "cycle_id", "") or "",
                         getattr(event, "execution_mode", "") or "",
                         event.position_id,
-                        event.position_type,
-                        event.event_type,
+                        position_type,
+                        event_type,
                         event.timestamp.isoformat(),
                         event.protocol,
                         event.chain,

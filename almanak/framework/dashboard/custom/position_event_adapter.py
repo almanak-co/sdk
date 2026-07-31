@@ -17,7 +17,28 @@ from datetime import UTC, datetime
 from math import exp, log
 from typing import Any
 
+from almanak.framework.observability.position_events import (
+    PositionEventType,
+    PositionType,
+    parse_position_event_type,
+    parse_position_type,
+)
+
 from ._token_decimals import resolve_token_decimals
+
+
+def _parse_optional_wire_position_type(value: object) -> PositionType | None:
+    """Decode an optional proto field while rejecting non-empty unknown values."""
+    if value is None or value == "":
+        return None
+    return parse_position_type(value)
+
+
+def _parse_optional_wire_event_type(value: object) -> PositionEventType | None:
+    """Decode an optional proto field while rejecting non-empty unknown values."""
+    if value is None or value == "":
+        return None
+    return parse_position_event_type(value)
 
 
 def position_event_to_dict(event: Any) -> dict[str, Any]:
@@ -33,14 +54,18 @@ def position_event_to_dict(event: Any) -> dict[str, Any]:
         contains every key in the canonical PositionData shape; missing
         attributes resolve to a safe default.
     """
+    # Proto strings are a wire boundary. Parse once, reject unknown legacy
+    # vocabulary, and only serialize back into the established renderer dict.
+    position_type = _parse_optional_wire_position_type(getattr(event, "position_type", None))
+    event_type = _parse_optional_wire_event_type(getattr(event, "event_type", None))
     return {
         "id": getattr(event, "id", "") or "",
         "deployment_id": getattr(event, "deployment_id", "") or "",
         "cycle_id": getattr(event, "cycle_id", "") or "",
         "execution_mode": getattr(event, "execution_mode", "") or "",
         "position_id": getattr(event, "position_id", "") or "",
-        "position_type": getattr(event, "position_type", "") or "",
-        "event_type": getattr(event, "event_type", "") or "",
+        "position_type": position_type.value if position_type is not None else "",
+        "event_type": event_type.value if event_type is not None else "",
         # ``timestamp`` is a Unix epoch second on the wire; convert to
         # ISO 8601 for renderer consumption (Streamlit tables / Plotly
         # axes prefer ISO strings, not epochs).
@@ -125,14 +150,25 @@ def position_events_to_position_data_dicts(
         # Sort within a position by timestamp ASC. Strings sort lexically
         # but ISO 8601 timestamps are ordered-correct, so this is safe.
         group_sorted = sorted(group, key=lambda r: r.get("timestamp") or "")
-        open_row = next((r for r in group_sorted if r.get("event_type") == "OPEN"), None)
-        close_row = next((r for r in group_sorted if r.get("event_type") == "CLOSE"), None)
+        open_row = next(
+            (r for r in group_sorted if _parse_optional_wire_event_type(r.get("event_type")) == PositionEventType.OPEN),
+            None,
+        )
+        close_row = next(
+            (
+                r
+                for r in group_sorted
+                if _parse_optional_wire_event_type(r.get("event_type")) == PositionEventType.CLOSE
+            ),
+            None,
+        )
         # If no OPEN was emitted (truncated history), fall back to the first row.
         anchor = open_row or (group_sorted[0] if group_sorted else None)
         if anchor is None:
             continue
 
         anchor_chain = anchor.get("chain") or None
+        anchor_position_type = _parse_optional_wire_position_type(anchor.get("position_type"))
         positions.append(
             {
                 "position_id": pid,
@@ -143,7 +179,7 @@ def position_events_to_position_data_dicts(
                 "bound_price_lower": _tick_to_price(anchor.get("tick_lower"), token0, token1, anchor_chain),
                 "bound_price_upper": _tick_to_price(anchor.get("tick_upper"), token0, token1, anchor_chain),
                 "is_active": close_row is None,
-                "position_type": anchor.get("position_type", "") or "",
+                "position_type": anchor_position_type.value if anchor_position_type is not None else "",
                 "protocol": anchor.get("protocol", "") or "",
                 "chain": anchor.get("chain", "") or "",
             }

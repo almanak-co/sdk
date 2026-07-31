@@ -15,12 +15,14 @@ doesn't carry the event.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
+from almanak.framework.observability import position_events
 from almanak.framework.teardown.models import PositionInfo, PositionType
 from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
 
@@ -194,25 +196,25 @@ def test_runner_cache_updates_on_open_and_close():
     runner = StrategyRunner.__new__(StrategyRunner)
     runner._recent_open_events = {}
 
-    open_event = SimpleNamespace(
-        event_type="OPEN",
-        position_id=5464283,
-        position_type="LP",
+    open_event = position_events.PositionEvent(
+        event_type=position_events.PositionEventType.OPEN,
+        position_id="5464283",
+        position_type=position_events.PositionType.LP,
         value_usd="5.84",
         ledger_entry_id="ledger-1",
-        timestamp="2026-05-02T15:48:03Z",
+        timestamp=datetime(2026, 5, 2, 15, 48, 3, tzinfo=UTC),
     )
     runner._update_recent_open_events_cache(open_event)
     assert ("5464283", "LP") in runner._recent_open_events
     assert runner._recent_open_events[("5464283", "LP")]["value_usd"] == "5.84"
 
-    close_event = SimpleNamespace(
-        event_type="CLOSE",
-        position_id=5464283,
-        position_type="LP",
+    close_event = position_events.PositionEvent(
+        event_type=position_events.PositionEventType.CLOSE,
+        position_id="5464283",
+        position_type=position_events.PositionType.LP,
         value_usd="0",
         ledger_entry_id="ledger-2",
-        timestamp="2026-05-02T16:00:00Z",
+        timestamp=datetime(2026, 5, 2, 16, tzinfo=UTC),
     )
     runner._update_recent_open_events_cache(close_event)
     assert ("5464283", "LP") not in runner._recent_open_events
@@ -232,13 +234,13 @@ def test_runner_cache_stamps_tokens_on_open():
     runner = StrategyRunner.__new__(StrategyRunner)
     runner._recent_open_events = {}
 
-    open_event = SimpleNamespace(
-        event_type="OPEN",
+    open_event = position_events.PositionEvent(
+        event_type=position_events.PositionEventType.OPEN,
         position_id="5471740",
-        position_type="LP",
+        position_type=position_events.PositionType.LP,
         value_usd="1873.66",
         ledger_entry_id="ledger-1",
-        timestamp="2026-05-04T00:00:00Z",
+        timestamp=datetime(2026, 5, 4, tzinfo=UTC),
         tick_lower=-204000,
         tick_upper=-203000,
         liquidity="123456789",

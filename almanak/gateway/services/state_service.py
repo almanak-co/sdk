@@ -284,14 +284,21 @@ def _position_event_row_to_proto(row: dict[str, Any]) -> gateway_pb2.PositionEve
     has a non-None value, so the wire stays consistent with the SavePositionEvent
     convention where None == absent.
     """
+    from almanak.framework.observability.position_events import (
+        parse_position_event_type,
+        parse_position_type,
+    )
+
+    position_type = parse_position_type(row.get("position_type"))
+    event_type = parse_position_event_type(row.get("event_type"))
     msg = gateway_pb2.PositionEventData(
         id=_row_text(row, "id"),
         deployment_id=_row_text(row, "deployment_id"),
         cycle_id=_row_text(row, "cycle_id"),
         execution_mode=_row_text(row, "execution_mode"),
         position_id=_row_text(row, "position_id"),
-        position_type=_row_text(row, "position_type"),
-        event_type=_row_text(row, "event_type"),
+        position_type=position_type.value,
+        event_type=event_type.value,
         timestamp=_row_timestamp_epoch(row),
         protocol=_row_text(row, "protocol"),
         chain=_row_text(row, "chain"),
@@ -1959,21 +1966,19 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             context.set_details("timestamp must be positive")
             return gateway_pb2.SavePositionEventResponse(success=False, error="timestamp must be positive")
 
-        # Validate position_type and event_type against known enum values to
-        # reject typos at the gateway boundary rather than persisting corrupt records.
-        from almanak.framework.observability.position_events import PositionEventType, PositionType
+        # Parse both closed vocabularies at the gRPC boundary. Unknown values
+        # fail closed and never enter the internal PositionEvent model.
+        from almanak.framework.observability.position_events import (
+            PositionEventTypeDecodeError,
+            parse_position_event_type,
+            parse_position_type,
+        )
 
-        valid_position_types = frozenset(e.value for e in PositionType)
-        valid_event_types = frozenset(e.value for e in PositionEventType)
-
-        if request.position_type not in valid_position_types:
-            err = f"unknown position_type: {request.position_type!r}"
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details(err)
-            return gateway_pb2.SavePositionEventResponse(success=False, error=err)
-
-        if request.event_type not in valid_event_types:
-            err = f"unknown event_type: {request.event_type!r}"
+        try:
+            position_type = parse_position_type(request.position_type)
+            event_type = parse_position_event_type(request.event_type)
+        except PositionEventTypeDecodeError as exc:
+            err = str(exc)
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(err)
             return gateway_pb2.SavePositionEventResponse(success=False, error=err)
@@ -2004,8 +2009,8 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                 cycle_id=request.cycle_id,
                 execution_mode=request.execution_mode,
                 position_id=request.position_id,
-                position_type=request.position_type,
-                event_type=request.event_type,
+                position_type=position_type,
+                event_type=event_type,
                 timestamp=ts,
                 protocol=request.protocol,
                 chain=request.chain,
@@ -2319,7 +2324,9 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         backend to provide the same method (same gap as SavePositionEvent).
         Read-side fail-quiet: on backend error returns an empty list rather
         than raising, so a transient gRPC blip degrades attribution (loud
-        warning in pnl_attributor) instead of halting the runner.
+        warning in pnl_attributor) instead of halting the runner. Persisted
+        vocabulary corruption is different: it fails explicitly as DATA_LOSS
+        so it cannot masquerade as an empty lifecycle history.
         """
         # Validate the wire deployment_id for the input contract; the warm
         # backend keys on deployment_id (blueprint 29 §4 — no translation),
@@ -2348,6 +2355,8 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         # ``deployment_id`` (the canonical runner-stable id), so only
         # ``deployment_id`` is passed through. Per blueprint 29 §4 there is
         # no gateway-side identity translation.
+        from almanak.framework.observability.position_events import PositionEventTypeDecodeError
+
         try:
             await self._ensure_initialized()
             assert self._state_manager is not None
@@ -2359,6 +2368,17 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             rows = await warm.get_position_history(deployment_id, position_id)
             events = [_position_event_row_to_proto(r) for r in rows]
             return gateway_pb2.GetPositionHistoryResponse(events=events)
+        except PositionEventTypeDecodeError as e:
+            error = f"invalid persisted position event: {e}"
+            logger.error(
+                "GetPositionHistory found corrupt vocabulary for deployment=%s position=%s: %s",
+                deployment_id,
+                position_id,
+                e,
+            )
+            context.set_code(grpc.StatusCode.DATA_LOSS)
+            context.set_details(error)
+            return gateway_pb2.GetPositionHistoryResponse(events=[])
         except Exception as e:
             logger.warning(
                 "GetPositionHistory failed for deployment=%s position=%s: %s",
@@ -4220,7 +4240,19 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             context.set_details(err)
             return gateway_pb2.GetPositionEventsFilteredResponse(error=err)
 
-        types = frozenset(t.strip() for t in request.position_types if t.strip())
+        from almanak.framework.observability.position_events import (
+            PositionEventTypeDecodeError,
+            parse_position_type,
+        )
+
+        try:
+            types = frozenset(parse_position_type(t.strip()).value for t in request.position_types if t.strip())
+        except PositionEventTypeDecodeError as exc:
+            return self._position_events_filtered_error(
+                context,
+                grpc.StatusCode.INVALID_ARGUMENT,
+                str(exc),
+            )
         await self._ensure_snapshot_pool()
         if self._snapshot_pool is not None:
             # PostgreSQL mode (T19 / VIB-4205). Empty position_types →

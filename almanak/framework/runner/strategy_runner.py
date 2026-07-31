@@ -3106,13 +3106,19 @@ class StrategyRunner:
         zero deployed capital.
         """
         try:
+            from ..observability.position_events import (
+                PositionEventType,
+                serialize_position_event_type,
+                serialize_position_type,
+            )
+
             position_id = str(getattr(pos_event, "position_id", "") or "")
-            position_type = str(getattr(pos_event, "position_type", "") or "")
-            event_type = str(getattr(pos_event, "event_type", "") or "")
+            position_type = serialize_position_type(getattr(pos_event, "position_type", None))
+            event_type = serialize_position_event_type(getattr(pos_event, "event_type", None))
             if not (position_id and position_type and event_type):
                 return
             key = (position_id, position_type)
-            if event_type == "OPEN":
+            if pos_event.event_type == PositionEventType.OPEN:
                 # VIB-3919 — also stamp the immutable LP bracket so the
                 # CLOSE-event writer can backfill ``tick_lower /
                 # tick_upper / liquidity`` from this cache. The bracket
@@ -3152,7 +3158,7 @@ class StrategyRunner:
                     "amount0": "" if raw_amount0 in (None, "") else str(raw_amount0),
                     "amount1": "" if raw_amount1 in (None, "") else str(raw_amount1),
                 }
-            elif event_type == "CLOSE":
+            elif pos_event.event_type == PositionEventType.CLOSE:
                 self._recent_open_events.pop(key, None)
         except Exception:  # noqa: BLE001 — never raise from a cache update
             logger.debug("recent-open cache update failed", exc_info=True)
@@ -6146,7 +6152,9 @@ class StrategyRunner:
         """
         if not pos_event.position_id:
             return
-        if pos_event.event_type == "OPEN":
+        from ..observability.position_events import PositionEventType
+
+        if pos_event.event_type == PositionEventType.OPEN:
             try:
                 from ..observability.pnl_attributor import stamp_entry_state_on_open
 
@@ -6161,7 +6169,7 @@ class StrategyRunner:
                     pos_event.position_id,
                     exc_info=True,
                 )
-        elif pos_event.event_type == "CLOSE":
+        elif pos_event.event_type == PositionEventType.CLOSE:
             try:
                 from ..observability.pnl_attributor import run_attribution_on_close
 

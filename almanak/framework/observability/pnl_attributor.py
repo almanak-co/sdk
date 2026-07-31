@@ -1580,31 +1580,11 @@ async def recompute_attribution(
                 else:
                     from .position_events import PositionEvent
 
-                    # Fallback: reconstruct the event
-                    evt_obj = PositionEvent(
-                        id=close_dict["id"],
-                        deployment_id=close_dict.get("deployment_id", ""),
-                        position_id=position_id,
-                        position_type=close_dict.get("position_type", ""),
-                        event_type="CLOSE",
-                        protocol=close_dict.get("protocol", ""),
-                        chain=close_dict.get("chain", ""),
-                        attribution_json=attribution,
-                        attribution_version=version,
-                        amount0=close_dict.get("amount0", ""),
-                        amount1=close_dict.get("amount1", ""),
-                        value_usd=close_dict.get("value_usd", ""),
-                        fees_token0=close_dict.get("fees_token0", ""),
-                        fees_token1=close_dict.get("fees_token1", ""),
-                        tx_hash=close_dict.get("tx_hash", ""),
-                        gas_usd=close_dict.get("gas_usd", ""),
-                        ledger_entry_id=close_dict.get("ledger_entry_id", ""),
-                        unrealized_pnl=close_dict.get("unrealized_pnl", ""),
-                        entry_price=close_dict.get("entry_price", ""),
-                        mark_price=close_dict.get("mark_price", ""),
-                        leverage=close_dict.get("leverage", ""),
-                        protocol_fees_usd=close_dict.get("protocol_fees_usd", ""),
-                    )
+                    # Fallback: decode the persisted row through the strict
+                    # typed boundary, then update only attribution fields.
+                    evt_obj = PositionEvent.from_persisted_row(close_dict)
+                    evt_obj.attribution_json = attribution
+                    evt_obj.attribution_version = version
                     await store.save_position_event(evt_obj)
                 count += 1
 

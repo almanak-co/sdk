@@ -201,6 +201,23 @@ async def test_rows_converted_to_position_event_data() -> None:
 
 
 @pytest.mark.asyncio
+async def test_corrupt_persisted_vocabulary_returns_data_loss() -> None:
+    servicer = _make_servicer(rows=[{"position_type": "LP", "event_type": "OPNE"}])
+    ctx = _make_context()
+    req = gateway_pb2.GetPositionHistoryRequest(
+        deployment_id=_DEPLOYMENT_ID, position_id=_POSITION_ID
+    )
+
+    resp = await servicer.GetPositionHistory(req, ctx)
+
+    assert resp.events == []
+    ctx.set_code.assert_called_once_with(grpc.StatusCode.DATA_LOSS)
+    ctx.set_details.assert_called_once_with(
+        "invalid persisted position event: unknown event_type: 'OPNE'"
+    )
+
+
+@pytest.mark.asyncio
 async def test_backend_exception_is_fail_quiet() -> None:
     servicer = _make_servicer(raise_exc=RuntimeError("db gone"))
     ctx = _make_context()

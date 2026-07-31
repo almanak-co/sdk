@@ -427,6 +427,11 @@ class TestSavePositionEventValidation:
         assert resp.success is True
         ctx.set_code.assert_not_called()
         warm.save_position_event.assert_called_once()
+        saved = warm.save_position_event.call_args.args[0]
+        from almanak.framework.observability.position_events import PositionEventType, PositionType
+
+        assert saved.position_type is PositionType.LP
+        assert saved.event_type is PositionEventType.OPEN
 
     @pytest.mark.asyncio
     async def test_backend_returns_false(self, service, ctx):
