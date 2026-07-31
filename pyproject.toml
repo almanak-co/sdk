@@ -180,7 +180,14 @@ crap = "scripts.ci.crap_diff_plugin"
 
 [tool.ruff]
 line-length = 120
-include = ["almanak/**/*.py"]
+# scripts/ holds operator + CI tooling that moves real money on mainnet
+# (scripts/quant-test/{fund,sweep}_pool_wallet.py sign transactions). It was outside
+# ruff's include for its whole life, so `ruff check scripts/` reported "All checks
+# passed!" having found zero files — a false green.
+# Scoped to scripts/quant-test/ for now: the rest of scripts/ carries 116 pre-existing
+# findings and widening the glob would break `make lint` for changes unrelated to it.
+# Widening (and cleaning) the rest is tracked separately.
+include = ["almanak/**/*.py", "scripts/quant-test/**/*.py"]
 exclude = [
     ".claude/",  # Skills templates with placeholder syntax
     "almanak/gateway/proto/",  # Auto-generated protobuf files
@@ -243,6 +250,13 @@ ignore = [
 max-complexity = 15
 
 [tool.ruff.lint.per-file-ignores]
+# Pre-existing style debt in the quant-test report renderer, inherited when it moved out
+# of docs/internal/ into scripts/ (where ruff can finally see it). 42 of these are E701/E702
+# compact one-liners. NOT silenced because they are acceptable — silenced because reformatting
+# a 596-line HTML renderer inside a file-move PR would bury the move in noise and risk the
+# report output. Clean these up (and drop this entry) in a dedicated pass; every OTHER rule
+# still applies to this file, and every other file in scripts/quant-test/ is fully linted.
+"scripts/quant-test/render_report.py" = ["E701", "E702", "UP038", "C901", "C401", "B007"]
 "__init__.py" = ["F401"]  # Re-exports are intentional in __init__.py
 
 [tool.ruff.lint.isort]

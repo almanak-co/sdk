@@ -15,12 +15,15 @@ help: ## Show this help
 
 # Run linting with auto-fix (local development)
 lint: ## Ruff check + format with auto-fix (local dev)
-	uv run ruff check almanak --fix
-	uv run ruff format almanak
+	uv run ruff check almanak scripts/quant-test --fix
+	uv run ruff format almanak scripts/quant-test
 
 # Run linting without auto-fix - fails on errors (CI)
 lint-check: ## Ruff check + format, no fixes (CI)
-	uv run ruff check almanak
+	uv run ruff check almanak scripts/quant-test
+	# format-check stays scoped to almanak/: the quant-test tree carries inherited
+	# formatting debt (all 8 files would be rewritten). `ruff check` is the half that
+	# catches defects and it now gates these mainnet-signing scripts in CI.
 	uv run ruff format almanak --check
 
 # Format code
