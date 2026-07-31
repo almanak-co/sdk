@@ -7,7 +7,7 @@ All scenarios are pure Streamlit (no gateway, no I/O) which keeps these tests
 hermetic; ``render_position_lifecycle`` is naturally no-op in the test
 environment because no local SQLite state DB is present.
 
-Scenarios covered (four tests, matching the plan's ``~4 tests`` directive):
+Scenarios covered:
 
 1. Multi-chain strategy with a bridge transfer -> the bridge section renders
    (``Bridge Transfers`` heading and the token/chain markers appear).
@@ -18,12 +18,13 @@ Scenarios covered (four tests, matching the plan's ``~4 tests`` directive):
    block, and the following sections still render.
 4. Strategy with all optional fields at defaults -> does not crash; no bridge
    section; no fatal exception surfaces via ``at.exception``.
+5. Every bridge lifecycle status renders in its explicit active, terminal, or
+   unknown bucket; unknown input never receives successful-completion styling.
 """
 
 from __future__ import annotations
 
 from streamlit.testing.v1 import AppTest
-
 
 # ---------------------------------------------------------------------------
 # Driver functions executed inside AppTest.from_function
@@ -37,6 +38,7 @@ def _drive_multi_chain_bridge() -> None:
     from datetime import UTC, datetime
     from decimal import Decimal
 
+    from almanak.core.bridge import BridgeTransferStatus
     from almanak.framework.dashboard.models import (
         BridgeTransfer,
         Strategy,
@@ -64,10 +66,50 @@ def _drive_multi_chain_bridge() -> None:
                 from_chain="arbitrum",
                 to_chain="base",
                 initiated_at=datetime(2025, 4, 20, 10, 0, tzinfo=UTC),
-                status="IN_FLIGHT",
+                status=BridgeTransferStatus.IN_FLIGHT,
                 fee_usd=Decimal("1.50"),
                 bridge_protocol="Across",
             )
+        ],
+    )
+    render_bridge_and_lifecycle(strategy)
+
+
+def _drive_all_bridge_lifecycle_statuses() -> None:
+    from datetime import UTC, datetime
+    from decimal import Decimal
+
+    from almanak.core.bridge import BridgeTransferStatus
+    from almanak.framework.dashboard.models import BridgeTransfer, Strategy, StrategyStatus
+    from almanak.framework.dashboard.pages._detail_content import render_bridge_and_lifecycle
+
+    def _transfer(transfer_id: str, token: str, status: BridgeTransferStatus) -> BridgeTransfer:
+        return BridgeTransfer(
+            transfer_id=transfer_id,
+            token=token,
+            amount=Decimal("1"),
+            from_chain="arbitrum",
+            to_chain="base",
+            initiated_at=datetime(2025, 4, 20, 10, 0, tzinfo=UTC),
+            status=status,
+        )
+
+    unknown = _transfer("xfer-unknown", "UNKNOWN_TOKEN", BridgeTransferStatus.UNKNOWN)
+    strategy = Strategy(
+        id="s-bridge-statuses",
+        name="Bridge Statuses",
+        status=StrategyStatus.RUNNING,
+        pnl_24h_usd=Decimal("0"),
+        total_value_usd=Decimal("4"),
+        chain="arbitrum",
+        protocol="Across",
+        is_multi_chain=True,
+        chains=["arbitrum", "base"],
+        bridge_transfers=[
+            _transfer("xfer-flight", "USDC", BridgeTransferStatus.IN_FLIGHT),
+            _transfer("xfer-complete", "DAI", BridgeTransferStatus.COMPLETED),
+            _transfer("xfer-failed", "WETH", BridgeTransferStatus.FAILED),
+            unknown,
         ],
     )
     render_bridge_and_lifecycle(strategy)
@@ -162,6 +204,22 @@ def test_apptest_multi_chain_strategy_renders_bridge_section() -> None:
     # In-flight sub-section header and the transfer's amount/token appear.
     assert "In Progress" in text
     assert "USDC" in text
+
+
+def test_apptest_bridge_statuses_render_in_exhaustive_safe_buckets() -> None:
+    """Known terminal states and unknown inputs never collapse into success."""
+    at = AppTest.from_function(_drive_all_bridge_lifecycle_statuses).run(timeout=30)
+
+    assert not at.exception, f"Unexpected exception: {at.exception}"
+    text = _all_markdown_text(at)
+    expander_labels = [expander.label for expander in at.expander]
+    assert "In Progress" in text
+    assert "Completed Transfers (2)" in expander_labels
+    assert "Transfers with Unknown Status (1)" in expander_labels
+    assert "\u2705 1 DAI" in text
+    assert "\u274c 1 WETH" in text
+    assert "\u26a0\ufe0f 1 UNKNOWN_TOKEN" in text
+    assert "Status: UNKNOWN" in text
 
 
 def test_apptest_single_chain_strategy_skips_bridge_section() -> None:

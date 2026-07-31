@@ -39,6 +39,7 @@ Usage::
 from typing import TYPE_CHECKING
 
 from almanak._lazy import LazySpec, build_lazy_module_dispatch
+from almanak.core.bridge import BridgeTransferStatus
 from almanak.framework.dashboard.adapters import (
     render_strategy_detail,
     render_strategy_timeline,
@@ -62,7 +63,7 @@ from almanak.framework.dashboard.gateway_client import (
     StrategySummary,
     TimelineEvent,
 )
-from almanak.framework.dashboard.models import Strategy
+from almanak.framework.dashboard.models import BridgeTransfer, Strategy
 
 if TYPE_CHECKING:
     from almanak.framework.dashboard.sections import (
@@ -107,6 +108,8 @@ __getattr__, __dir__ = build_lazy_module_dispatch(_LAZY_IMPORTS, package=__name_
 __all__ = [
     # Focused gateway data slices (VIB-3969)
     "AuditPosture",
+    "BridgeTransfer",
+    "BridgeTransferStatus",
     "CostStackInfo",
     # Primary client (protobuf-free)
     "DashboardDataClient",

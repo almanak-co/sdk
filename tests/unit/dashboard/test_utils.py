@@ -2,7 +2,10 @@
 
 from decimal import Decimal
 
-from almanak.framework.dashboard.utils import format_pnl_display, format_usd, pnl_color
+import pytest
+
+from almanak.core.bridge import BridgeTransferStatus
+from almanak.framework.dashboard.utils import format_bridge_progress, format_pnl_display, format_usd, pnl_color
 
 # ---------------------------------------------------------------------------
 # pnl_color
@@ -102,3 +105,28 @@ class TestFormatUsd:
 
     def test_precise_small_large_value_unaffected(self) -> None:
         assert format_usd(Decimal("1234.5"), precise_small=True) == "$1,234.50"
+
+
+class TestFormatBridgeProgress:
+    @pytest.mark.parametrize(
+        ("status", "color", "width"),
+        [
+            (BridgeTransferStatus.IN_FLIGHT, "#2196f3", "width: 50%"),
+            (BridgeTransferStatus.COMPLETED, "#00c853", "width: 100%"),
+            (BridgeTransferStatus.FAILED, "#f44336", "width: 50%"),
+            (BridgeTransferStatus.UNKNOWN, "#ffb300", "width: 0%"),
+        ],
+    )
+    def test_status_styling_is_exhaustive(
+        self,
+        status: BridgeTransferStatus,
+        color: str,
+        width: str,
+    ) -> None:
+        html = format_bridge_progress("arbitrum", "base", status, 50)
+        assert color in html
+        assert width in html
+
+    def test_rejects_untyped_status(self) -> None:
+        with pytest.raises(TypeError, match="requires BridgeTransferStatus"):
+            format_bridge_progress("arbitrum", "base", "COMPLETED", 50)  # type: ignore[arg-type]

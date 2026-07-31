@@ -8,6 +8,9 @@ import json
 import logging
 import re
 from decimal import Decimal
+from typing import assert_never
+
+from almanak.core.bridge import BridgeTransferStatus
 
 logger = logging.getLogger(__name__)
 
@@ -653,21 +656,35 @@ def format_chain_badge(chain: str, color: str) -> str:
     return f'<span style="background-color: {safe_color}22; color: {safe_color}; padding: 0.15rem 0.5rem; border-radius: 12px; font-size: 0.75rem; font-weight: bold; text-transform: uppercase; margin-right: 0.25rem;">{safe_chain}</span>'
 
 
-def format_bridge_progress(from_chain: str, to_chain: str, status: str, progress_pct: int = 0) -> str:
+def format_bridge_progress(
+    from_chain: str,
+    to_chain: str,
+    status: BridgeTransferStatus,
+    progress_pct: int = 0,
+) -> str:
     """Generate HTML for bridge transfer progress visualization."""
     from almanak.framework.dashboard.theme import get_chain_color
+
+    if not isinstance(status, BridgeTransferStatus):
+        raise TypeError(f"bridge progress requires BridgeTransferStatus, got {type(status).__name__}")
 
     from_color = get_chain_color(from_chain)
     to_color = get_chain_color(to_chain)
 
     # Status-specific styling
-    if status == "COMPLETED":
-        progress_color = "#00c853"
-        progress_pct = 100
-    elif status == "FAILED":
-        progress_color = "#f44336"
-    else:
-        progress_color = "#2196f3"
+    match status:
+        case BridgeTransferStatus.COMPLETED:
+            progress_color = "#00c853"
+            progress_pct = 100
+        case BridgeTransferStatus.FAILED:
+            progress_color = "#f44336"
+        case BridgeTransferStatus.IN_FLIGHT:
+            progress_color = "#2196f3"
+        case BridgeTransferStatus.UNKNOWN:
+            progress_color = "#ffb300"
+            progress_pct = 0
+        case _ as unreachable:
+            assert_never(unreachable)
 
     return (
         f'<div style="display: flex; align-items: center; gap: 0.5rem; margin: 0.5rem 0;">'

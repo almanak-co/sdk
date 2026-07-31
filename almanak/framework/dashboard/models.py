@@ -9,6 +9,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 
+from almanak.core.bridge import BridgeTransferStatus, parse_bridge_transfer_status
 from almanak.framework.models.run_mode import RunMode
 from almanak.framework.portfolio.models import ValueConfidence
 
@@ -158,7 +159,13 @@ class ChainPosition:
 
 @dataclass
 class BridgeTransfer:
-    """Represents a bridge transfer between chains."""
+    """Represents a bridge transfer between chains.
+
+    This dataclass is the owning boundary for dashboard/API payloads.  Runtime
+    callers may arrive with historical strings even though typed SDK code must
+    pass :class:`BridgeTransferStatus`; ``__post_init__`` converts those strings
+    and maps unknown forward-compatible values to the explicit safe state.
+    """
 
     transfer_id: str
     token: str
@@ -167,11 +174,15 @@ class BridgeTransfer:
     to_chain: str
     initiated_at: datetime
     completed_at: datetime | None = None
-    status: str = "IN_FLIGHT"  # IN_FLIGHT, COMPLETED, FAILED
+    status: BridgeTransferStatus = BridgeTransferStatus.IN_FLIGHT
     fee_usd: Decimal = Decimal("0")
     source_tx_hash: str | None = None
     destination_tx_hash: str | None = None
     bridge_protocol: str | None = None  # e.g., "Across", "Stargate"
+
+    def __post_init__(self) -> None:
+        """Normalize untrusted wire values to the canonical lifecycle type."""
+        self.status = parse_bridge_transfer_status(self.status)
 
 
 @dataclass

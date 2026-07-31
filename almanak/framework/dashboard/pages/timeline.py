@@ -8,6 +8,7 @@ from datetime import timedelta
 
 import streamlit as st
 
+from almanak.core.bridge import BridgeTransferStatus
 from almanak.framework.dashboard.models import Strategy, TimelineEventType
 from almanak.framework.dashboard.theme import get_chain_color, get_timeline_event_color
 from almanak.framework.dashboard.utils import (
@@ -258,13 +259,16 @@ def page(strategies: list[Strategy]) -> None:  # noqa: C901
             from_chain = event.details.get("from_chain", event.chain or "")
             to_chain = event.destination_chain or event.details.get("to_chain", "")
             if from_chain and to_chain:
-                status = (
-                    "IN_FLIGHT"
-                    if event.event_type == TimelineEventType.BRIDGE_INITIATED
-                    else event.event_type.value.replace("BRIDGE_", "")
-                )
+                status = {
+                    TimelineEventType.BRIDGE_INITIATED: BridgeTransferStatus.IN_FLIGHT,
+                    TimelineEventType.BRIDGE_COMPLETED: BridgeTransferStatus.COMPLETED,
+                    TimelineEventType.BRIDGE_FAILED: BridgeTransferStatus.FAILED,
+                }[event.event_type]
                 bridge_progress_html = format_bridge_progress(
-                    from_chain, to_chain, status, 50 if status == "IN_FLIGHT" else 100
+                    from_chain,
+                    to_chain,
+                    status,
+                    50 if status.behavior.is_in_flight else 100,
                 )
 
         # Event card with timeline visual

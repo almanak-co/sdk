@@ -1388,9 +1388,11 @@ def render_bridge_transfers(strategy: Strategy) -> None:
 
     st.markdown("### Bridge Transfers")
 
-    # Separate active and completed transfers
-    active_transfers = [t for t in strategy.bridge_transfers if t.status == "IN_FLIGHT"]
-    completed_transfers = [t for t in strategy.bridge_transfers if t.status != "IN_FLIGHT"]
+    # Keep unresolved forward-compatible values out of the terminal bucket: an
+    # unknown status must never inherit completed-transfer presentation.
+    active_transfers = [t for t in strategy.bridge_transfers if t.status.behavior.is_in_flight]
+    completed_transfers = [t for t in strategy.bridge_transfers if t.status.behavior.is_terminal]
+    unknown_transfers = [t for t in strategy.bridge_transfers if t.status.behavior.is_unknown]
 
     if active_transfers:
         st.markdown("#### In Progress")
@@ -1420,7 +1422,7 @@ def render_bridge_transfers(strategy: Strategy) -> None:
     if completed_transfers:
         with st.expander(f"Completed Transfers ({len(completed_transfers)})"):
             for transfer in completed_transfers[:5]:  # Show last 5
-                status_icon = "\u2705" if transfer.status == "COMPLETED" else "\u274c"
+                status_icon = "\u2705" if transfer.status.behavior.is_success else "\u274c"
                 st.markdown(
                     f"""
                     <div style="
@@ -1429,6 +1431,24 @@ def render_bridge_transfers(strategy: Strategy) -> None:
                     ">
                         {status_icon} {transfer.amount} {transfer.token} |
                         {transfer.from_chain.upper()} → {transfer.to_chain.upper()} |
+                        Fee: {format_usd(transfer.fee_usd)}
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+    if unknown_transfers:
+        with st.expander(f"Transfers with Unknown Status ({len(unknown_transfers)})"):
+            for transfer in unknown_transfers[:5]:
+                st.markdown(
+                    f"""
+                    <div style="
+                        padding: 0.5rem;
+                        border-bottom: 1px solid #333;
+                    ">
+                        \u26a0\ufe0f {transfer.amount} {transfer.token} |
+                        {transfer.from_chain.upper()} \u2192 {transfer.to_chain.upper()} |
+                        Status: {transfer.status.value} |
                         Fee: {format_usd(transfer.fee_usd)}
                     </div>
                     """,
