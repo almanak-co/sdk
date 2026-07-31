@@ -3246,7 +3246,7 @@ message StrategyStateResponse {
 
 message ExecuteActionRequest {
   string deployment_id = 1;
-  string action = 2;          // "PAUSE", "RESUME", "BUMP_GAS", "CANCEL_TX", "EMERGENCY_UNWIND"
+  string action = 2;          // Lifecycle action: "STOP". Retired "PAUSE"/"RESUME" are rejected.
   string reason = 3;          // Required for audit
   map<string, string> params = 4;  // Action-specific parameters
 }
@@ -4174,7 +4174,7 @@ message TokenMetadataResponse {
 // =============================================================================
 
 service LifecycleService {
-  // Write agent state (INITIALIZING, RUNNING, PAUSED, ERROR, STOPPING, TERMINATED).
+  // Write a current state (INITIALIZING, RUNNING, STOPPING, TEARING_DOWN, TERMINATED, ERROR).
   rpc WriteState(WriteAgentStateRequest) returns (WriteAgentStateResponse);
 
   // Read current agent state.
@@ -4189,7 +4189,7 @@ service LifecycleService {
   // Acknowledge (mark processed) a command.
   rpc AckCommand(AckAgentCommandRequest) returns (AckAgentCommandResponse);
 
-  // Write a command to an agent (PAUSE, RESUME, STOP).
+  // Write a current command to an agent (STOP only).
   rpc WriteCommand(WriteAgentCommandRequest) returns (WriteAgentCommandResponse);
 }
 
@@ -4197,7 +4197,7 @@ service LifecycleService {
 
 message WriteAgentStateRequest {
   string deployment_id = 1;
-  string state = 2;             // INITIALIZING, RUNNING, PAUSED, ERROR, STOPPING, TERMINATED
+  string state = 2;             // Current values above; reads may also return PAUSED or platform V2_* hand-off states.
   string error_message = 3;     // Optional: error details when state=ERROR
   optional string running_almanak_version = 4; // Optional: strategy-loaded almanak package version
 }
@@ -4238,7 +4238,7 @@ message ReadAgentCommandResponse {
   bool found = 1;
   int64 command_id = 2;
   string deployment_id = 3;
-  string command = 4;           // PAUSE, RESUME, STOP
+  string command = 4;           // STOP; historical rows may return retired PAUSE/RESUME.
   string issued_at = 5;         // ISO 8601
   string issued_by = 6;
 }
@@ -4254,7 +4254,7 @@ message AckAgentCommandResponse {
 
 message WriteAgentCommandRequest {
   string deployment_id = 1;
-  string command = 2;           // PAUSE, RESUME, STOP
+  string command = 2;           // STOP only; retired PAUSE/RESUME are rejected.
   string issued_by = 3;
 }
 

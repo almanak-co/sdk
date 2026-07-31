@@ -42,6 +42,8 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 import grpc
 
+from almanak.core.lifecycle import LifecycleCommand, LifecycleState
+
 if TYPE_CHECKING:
     from ..services.emergency_manager import EmergencyManager
     from ..services.operator_card_generator import OperatorCardGenerator
@@ -850,7 +852,7 @@ class StrategyRunner:
         # Shutdown control
         self._shutdown_requested = False
         self._signal_received = False
-        self._terminal_lifecycle_state: str | None = None
+        self._terminal_lifecycle_state: LifecycleState | None = None
         self._terminal_lifecycle_error_message: str | None = None
         self._current_loop_task: asyncio.Task[None] | None = None
 
@@ -1239,7 +1241,12 @@ class StrategyRunner:
 
         return collect_position_snapshot(self, strategy)
 
-    def _lifecycle_write_state(self, deployment_id: str, state: str, error_message: str | None = None) -> None:
+    def _lifecycle_write_state(
+        self,
+        deployment_id: str,
+        state: LifecycleState,
+        error_message: str | None = None,
+    ) -> None:
         from .runner_gateway import lifecycle_write_state
 
         lifecycle_write_state(self, deployment_id, state, error_message)
@@ -1249,7 +1256,7 @@ class StrategyRunner:
 
         lifecycle_heartbeat(self, deployment_id)
 
-    def _lifecycle_poll_command(self, deployment_id: str) -> str | None:
+    def _lifecycle_poll_command(self, deployment_id: str) -> LifecycleCommand | None:
         from .runner_gateway import lifecycle_poll_command
 
         return lifecycle_poll_command(self, deployment_id)
@@ -1309,7 +1316,7 @@ class StrategyRunner:
                 # Only STOP (or a shutdown the handler raised) ends the wait.
                 # Retired PAUSE/RESUME and unknown commands are handled-and-ignored;
                 # breaking on them would prematurely skip the remaining wait.
-                if command == "STOP" or self._shutdown_requested:
+                if command is LifecycleCommand.STOP or self._shutdown_requested:
                     return
             # Lane 2: direct teardown request. should_teardown() is synchronous
             # gateway/SQLite I/O too — same off-loop treatment.
@@ -6846,7 +6853,7 @@ class StrategyRunner:
         if not self._is_managed_deployment():
             logger.warning("Teardown failed in local mode — runner stays alive for debugging: %s", error_message)
             return
-        self._terminal_lifecycle_state = "ERROR"
+        self._terminal_lifecycle_state = LifecycleState.ERROR
         self._terminal_lifecycle_error_message = error_message
         self.request_shutdown()
 

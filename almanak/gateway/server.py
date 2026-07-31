@@ -17,6 +17,7 @@ from grpc_health.v1 import health_pb2, health_pb2_grpc
 from grpc_health.v1.health import aio as health_aio
 from grpc_reflection.v1alpha import reflection
 
+from almanak.core.lifecycle import LifecycleState
 from almanak.core.redaction import install_redaction
 from almanak.framework.utils.deployment_banner import emit_gateway_banner
 from almanak.gateway._server_start_helpers import (
@@ -64,11 +65,9 @@ logger = logging.getLogger(__name__)
 _AIOHTTP_SHUTDOWN_GRACE_SECONDS = 0.25
 
 # States the SDK / gateway own — written by the strategy runner or by the
-# gateway itself once a pod is past the deploy phase. Mirror of
-# ``LifecycleServiceServicer._VALID_STATES``; kept local so Phase 14 can
-# skip its INITIALIZING write whenever the row is already in one of these
-# (prevents a sidecar-only restart from regressing a healthy RUNNING agent).
-_SDK_OWNED_STATES = frozenset({"INITIALIZING", "RUNNING", "STOPPING", "TEARING_DOWN", "TERMINATED", "ERROR"})
+# gateway itself once a pod is past the deploy phase. Derived from the
+# canonical vocabulary so the boot guard cannot drift from service validation.
+_SDK_OWNED_STATES = frozenset(state for state in LifecycleState if state.is_writable)
 
 
 class _RegisterChainsServicer(gateway_pb2_grpc.HealthServicer):
@@ -413,7 +412,7 @@ class GatewayServer:
                     current.state,
                 )
                 return
-            await asyncio.to_thread(lifecycle_store.write_state, aid, "INITIALIZING")
+            await asyncio.to_thread(lifecycle_store.write_state, aid, LifecycleState.INITIALIZING)
             logger.info("Announced INITIALIZING state for agent %s", aid)
         except Exception:
             logger.exception("Failed to announce INITIALIZING state for agent %s", aid)

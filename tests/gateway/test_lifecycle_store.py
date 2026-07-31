@@ -16,11 +16,14 @@ VIB-4722 removed the hosted-env rewrite (``_resolve_deployment_id``) from
 identity and the lifecycle store keys on it verbatim, with no translation.
 """
 
+import sqlite3
 import threading
+from datetime import UTC, datetime
 from unittest.mock import patch
 
 import pytest
 
+from almanak.core.lifecycle import LifecycleCommand, LifecycleState, LifecycleStateSource, LifecycleValueError
 from almanak.gateway.lifecycle import (
     create_lifecycle_store,
     get_lifecycle_store,
@@ -50,30 +53,30 @@ class TestSQLiteLifecycleStoreState:
     """Tests for state CRUD operations."""
 
     def test_write_and_read_state(self, store):
-        store.write_state("agent-1", "RUNNING")
+        store.write_state("agent-1", LifecycleState.RUNNING)
         state = store.read_state("agent-1")
         assert state is not None
         assert state.deployment_id == "agent-1"
-        assert state.state == "RUNNING"
+        assert state.state is LifecycleState.RUNNING
         assert state.error_message is None
 
     def test_write_state_with_error(self, store):
-        store.write_state("agent-1", "ERROR", error_message="Something broke")
+        store.write_state("agent-1", LifecycleState.ERROR, error_message="Something broke")
         state = store.read_state("agent-1")
-        assert state.state == "ERROR"
+        assert state.state is LifecycleState.ERROR
         assert state.error_message == "Something broke"
 
     def test_write_state_upsert(self, store):
-        store.write_state("agent-1", "INITIALIZING")
-        store.write_state("agent-1", "RUNNING")
+        store.write_state("agent-1", LifecycleState.INITIALIZING)
+        store.write_state("agent-1", LifecycleState.RUNNING)
         state = store.read_state("agent-1")
-        assert state.state == "RUNNING"
+        assert state.state is LifecycleState.RUNNING
 
     def test_read_state_not_found(self, store):
         assert store.read_state("nonexistent") is None
 
     def test_heartbeat_increments_count(self, store):
-        store.write_state("agent-1", "RUNNING")
+        store.write_state("agent-1", LifecycleState.RUNNING)
         state_before = store.read_state("agent-1")
         store.heartbeat("agent-1")
         state_after = store.read_state("agent-1")
@@ -82,7 +85,7 @@ class TestSQLiteLifecycleStoreState:
     def test_heartbeat_updates_timestamp(self, store):
         import time
 
-        store.write_state("agent-1", "RUNNING")
+        store.write_state("agent-1", LifecycleState.RUNNING)
         state_before = store.read_state("agent-1")
         time.sleep(0.01)  # Ensure measurable time passes
         store.heartbeat("agent-1")
@@ -91,54 +94,95 @@ class TestSQLiteLifecycleStoreState:
 
     def test_state_transitions(self, store):
         """Test full lifecycle state machine."""
-        transitions = ["INITIALIZING", "RUNNING", "STOPPING", "TEARING_DOWN", "TERMINATED"]
+        transitions = [
+            LifecycleState.INITIALIZING,
+            LifecycleState.RUNNING,
+            LifecycleState.STOPPING,
+            LifecycleState.TEARING_DOWN,
+            LifecycleState.TERMINATED,
+        ]
         for state_name in transitions:
             store.write_state("agent-1", state_name)
             state = store.read_state("agent-1")
-            assert state.state == state_name
+            assert state.state is state_name
 
     def test_write_state_records_reported_running_version(self, store):
-        store.write_state("agent-1", "RUNNING", running_almanak_version="2.15.1rc16")
+        store.write_state("agent-1", LifecycleState.RUNNING, running_almanak_version="2.15.1rc16")
         state = store.read_state("agent-1")
         assert state.running_almanak_version == "2.15.1rc16"
 
     def test_write_state_without_running_version_preserves_existing_value(self, store):
-        store.write_state("agent-1", "RUNNING", running_almanak_version="2.15.1rc16")
-        store.write_state("agent-1", "STOPPING")
+        store.write_state("agent-1", LifecycleState.RUNNING, running_almanak_version="2.15.1rc16")
+        store.write_state("agent-1", LifecycleState.STOPPING)
         state = store.read_state("agent-1")
         assert state.running_almanak_version == "2.15.1rc16"
 
     def test_heartbeat_does_not_touch_running_version(self, store):
-        store.write_state("agent-1", "RUNNING", running_almanak_version="2.15.1rc16")
+        store.write_state("agent-1", LifecycleState.RUNNING, running_almanak_version="2.15.1rc16")
         store.heartbeat("agent-1")
         state = store.read_state("agent-1")
         assert state.running_almanak_version == "2.15.1rc16"
 
     def test_consecutive_state_write_without_running_version_keeps_first_value(self, store):
-        store.write_state("agent-1", "RUNNING", running_almanak_version="2.15.1rc16")
-        store.write_state("agent-1", "RUNNING")
+        store.write_state("agent-1", LifecycleState.RUNNING, running_almanak_version="2.15.1rc16")
+        store.write_state("agent-1", LifecycleState.RUNNING)
         state = store.read_state("agent-1")
         assert state.running_almanak_version == "2.15.1rc16"
 
+    def test_writer_rejects_untyped_and_historical_states(self, store):
+        with pytest.raises(LifecycleValueError, match="untyped lifecycle state"):
+            store.write_state("agent-1", "RUNNING")
+        with pytest.raises(LifecycleValueError, match="retired lifecycle state"):
+            store.write_state("agent-1", LifecycleState.PAUSED)
+        with pytest.raises(LifecycleValueError, match="platform-owned lifecycle state"):
+            store.write_state("agent-1", LifecycleState.V2_DEPLOYING)
+
+    @pytest.mark.parametrize(
+        "stored_state",
+        [LifecycleState.PAUSED, LifecycleState.V2_PREPARING, LifecycleState.V2_DEPLOYING],
+    )
+    def test_read_only_state_row_is_read_typed(self, store, stored_state):
+        now = datetime.now(UTC).isoformat()
+        with sqlite3.connect(store._db_path) as conn:
+            conn.execute(
+                """INSERT INTO agent_state
+                   (deployment_id, state, state_changed_at, source)
+                   VALUES (?, ?, ?, ?)""",
+                ("agent-1", stored_state.value, now, "platform"),
+            )
+
+        state = store.read_state("agent-1")
+
+        assert state is not None
+        assert state.state is stored_state
+        assert state.source is LifecycleStateSource.PLATFORM
+
+    def test_unknown_historical_state_fails_at_read_boundary(self, store):
+        now = datetime.now(UTC).isoformat()
+        with sqlite3.connect(store._db_path) as conn:
+            conn.execute(
+                """INSERT INTO agent_state
+                   (deployment_id, state, state_changed_at, source)
+                   VALUES (?, ?, ?, ?)""",
+                ("agent-1", "RUNNIGN", now, "gateway"),
+            )
+
+        with pytest.raises(LifecycleValueError, match="unknown lifecycle state"):
+            store.read_state("agent-1")
+
 
 class TestSQLiteLifecycleStoreCommands:
-    """Tests for command CRUD operations.
-
-    Note: the store is intentionally vocabulary-agnostic — only the
-    LifecycleService servicer validates command strings against
-    ``_VALID_COMMANDS``. These tests exercise raw round-trip behaviour
-    and use STOP exclusively (VIB-4281 retired PAUSE / RESUME).
-    """
+    """Tests for typed command CRUD and historical-row compatibility."""
 
     def test_write_and_read_command(self, store):
-        store.write_command("agent-1", "STOP", "operator@example.com")
+        store.write_command("agent-1", LifecycleCommand.STOP, "operator@example.com")
         cmd = store.read_pending_command("agent-1")
         assert cmd is not None
-        assert cmd.command == "STOP"
+        assert cmd.command is LifecycleCommand.STOP
         assert cmd.issued_by == "operator@example.com"
 
     def test_ack_command(self, store):
-        store.write_command("agent-1", "STOP", "admin")
+        store.write_command("agent-1", LifecycleCommand.STOP, "admin")
         cmd = store.read_pending_command("agent-1")
         assert cmd is not None
         store.ack_command(cmd.id)
@@ -149,16 +193,16 @@ class TestSQLiteLifecycleStoreCommands:
         assert store.read_pending_command("agent-1") is None
 
     def test_multiple_commands_returns_latest(self, store):
-        store.write_command("agent-1", "STOP", "admin")
-        store.write_command("agent-1", "STOP", "admin-2")
+        store.write_command("agent-1", LifecycleCommand.STOP, "admin")
+        store.write_command("agent-1", LifecycleCommand.STOP, "admin-2")
         cmd = store.read_pending_command("agent-1")
-        assert cmd.command == "STOP"
+        assert cmd.command is LifecycleCommand.STOP
         assert cmd.issued_by == "admin-2"  # Most recent (highest id)
 
     def test_ack_leaves_other_commands(self, store):
         """Acking one command doesn't affect others."""
-        store.write_command("agent-1", "STOP", "admin")
-        store.write_command("agent-2", "STOP", "admin")
+        store.write_command("agent-1", LifecycleCommand.STOP, "admin")
+        store.write_command("agent-2", LifecycleCommand.STOP, "admin")
 
         cmd1 = store.read_pending_command("agent-1")
         store.ack_command(cmd1.id)
@@ -166,18 +210,56 @@ class TestSQLiteLifecycleStoreCommands:
         # agent-2's command should still be pending
         cmd2 = store.read_pending_command("agent-2")
         assert cmd2 is not None
-        assert cmd2.command == "STOP"
+        assert cmd2.command is LifecycleCommand.STOP
 
     def test_command_fields(self, store):
         """Verify all fields are correctly stored and retrieved."""
-        store.write_command("agent-1", "STOP", "dashboard-user@test.com")
+        store.write_command("agent-1", LifecycleCommand.STOP, "dashboard-user@test.com")
         cmd = store.read_pending_command("agent-1")
         assert cmd.deployment_id == "agent-1"
-        assert cmd.command == "STOP"
+        assert cmd.command is LifecycleCommand.STOP
         assert cmd.issued_by == "dashboard-user@test.com"
         assert cmd.issued_at is not None
         assert cmd.processed_at is None
         assert cmd.id > 0
+
+    @pytest.mark.parametrize("command", [LifecycleCommand.PAUSE, LifecycleCommand.RESUME])
+    def test_writer_rejects_historical_commands(self, store, command: LifecycleCommand):
+        with pytest.raises(LifecycleValueError, match="retired lifecycle command"):
+            store.write_command("agent-1", command, "legacy-operator")
+
+    def test_writer_rejects_untyped_command(self, store):
+        with pytest.raises(LifecycleValueError, match="untyped lifecycle command"):
+            store.write_command("agent-1", "STOP", "operator")
+
+    @pytest.mark.parametrize("raw_command", ["PAUSE", "RESUME"])
+    def test_historical_command_row_is_read_typed(self, store, raw_command: str):
+        now = datetime.now(UTC).isoformat()
+        with sqlite3.connect(store._db_path) as conn:
+            conn.execute(
+                """INSERT INTO agent_command
+                   (deployment_id, command, issued_at, issued_by)
+                   VALUES (?, ?, ?, ?)""",
+                ("agent-1", raw_command, now, "legacy-operator"),
+            )
+
+        command = store.read_pending_command("agent-1")
+
+        assert command is not None
+        assert command.command is LifecycleCommand(raw_command)
+
+    def test_unknown_command_fails_at_read_boundary(self, store):
+        now = datetime.now(UTC).isoformat()
+        with sqlite3.connect(store._db_path) as conn:
+            conn.execute(
+                """INSERT INTO agent_command
+                   (deployment_id, command, issued_at, issued_by)
+                   VALUES (?, ?, ?, ?)""",
+                ("agent-1", "LIQUIDATE", now, "legacy-operator"),
+            )
+
+        with pytest.raises(LifecycleValueError, match="unknown lifecycle command"):
+            store.read_pending_command("agent-1")
 
 
 class TestSQLiteLifecycleStorePersistence:
@@ -188,40 +270,40 @@ class TestSQLiteLifecycleStorePersistence:
         db_path = tmp_path / "persist.db"
         store1 = SQLiteLifecycleStore(db_path=db_path)
         store1.initialize()
-        store1.write_state("agent-1", "RUNNING")
-        store1.write_command("agent-1", "STOP", "admin")
+        store1.write_state("agent-1", LifecycleState.RUNNING)
+        store1.write_command("agent-1", LifecycleCommand.STOP, "admin")
         store1.close()
 
         store2 = SQLiteLifecycleStore(db_path=db_path)
         store2.initialize()
         state = store2.read_state("agent-1")
         assert state is not None
-        assert state.state == "RUNNING"
+        assert state.state is LifecycleState.RUNNING
 
         cmd = store2.read_pending_command("agent-1")
         assert cmd is not None
-        assert cmd.command == "STOP"
+        assert cmd.command is LifecycleCommand.STOP
         store2.close()
 
     def test_idempotent_initialize(self, store):
         """Calling initialize twice should not error."""
         store.initialize()
-        store.write_state("agent-1", "RUNNING")
-        assert store.read_state("agent-1").state == "RUNNING"
+        store.write_state("agent-1", LifecycleState.RUNNING)
+        assert store.read_state("agent-1").state is LifecycleState.RUNNING
 
     def test_commands_persist_across_restart(self, tmp_path):
         """Commands survive store restart."""
         db_path = tmp_path / "restart.db"
         store1 = SQLiteLifecycleStore(db_path=db_path)
         store1.initialize()
-        store1.write_command("agent-1", "STOP", "operator")
+        store1.write_command("agent-1", LifecycleCommand.STOP, "operator")
         store1.close()
 
         store2 = SQLiteLifecycleStore(db_path=db_path)
         store2.initialize()
         cmd = store2.read_pending_command("agent-1")
         assert cmd is not None
-        assert cmd.command == "STOP"
+        assert cmd.command is LifecycleCommand.STOP
         store2.close()
 
 
@@ -230,7 +312,7 @@ class TestSQLiteLifecycleStoreThreadSafety:
 
     def test_concurrent_heartbeats(self, store):
         """Multiple threads sending heartbeats concurrently."""
-        store.write_state("agent-1", "RUNNING")
+        store.write_state("agent-1", LifecycleState.RUNNING)
 
         errors = []
 
@@ -263,7 +345,13 @@ class TestSQLiteLifecycleStoreThreadSafety:
                 errors.append(e)
 
         threads = [
-            threading.Thread(target=state_writer, args=(f"agent-{i}", ["RUNNING", "STOPPING", "RUNNING"]))
+            threading.Thread(
+                target=state_writer,
+                args=(
+                    f"agent-{i}",
+                    [LifecycleState.RUNNING, LifecycleState.STOPPING, LifecycleState.RUNNING],
+                ),
+            )
             for i in range(5)
         ]
         for t in threads:
@@ -276,7 +364,7 @@ class TestSQLiteLifecycleStoreThreadSafety:
         for i in range(5):
             state = store.read_state(f"agent-{i}")
             assert state is not None
-            assert state.state == "RUNNING"
+            assert state.state is LifecycleState.RUNNING
 
 
 class TestLifecycleFactory:

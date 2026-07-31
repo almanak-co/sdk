@@ -60,9 +60,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from almanak.core.lifecycle import LifecycleCommand, LifecycleState
 from almanak.framework.execution.circuit_breaker import (
     CircuitBreaker,
 )
+from almanak.framework.runner._run_loop_helpers import handle_lifecycle_command
 from almanak.framework.runner.strategy_runner import (
     CriticalCallbackError,
     IterationResult,
@@ -611,7 +613,7 @@ class TestCircuitBreakerAndConsecutiveErrors:
         error_writes = [
             c
             for c in runner._lifecycle_write_state.call_args_list
-            if len(c.args) >= 2 and c.args[1] == "ERROR"
+            if len(c.args) >= 2 and c.args[1] is LifecycleState.ERROR
         ]
         assert len(error_writes) >= 1
 
@@ -640,7 +642,7 @@ class TestCircuitBreakerAndConsecutiveErrors:
         running_writes = [
             c
             for c in runner._lifecycle_write_state.call_args_list
-            if len(c.args) >= 2 and c.args[1] == "RUNNING"
+            if len(c.args) >= 2 and c.args[1] is LifecycleState.RUNNING
         ]
         # At minimum: the startup RUNNING write + the recovery RUNNING write.
         assert len(running_writes) >= 2
@@ -859,11 +861,47 @@ class TestLifecycleCommands:
     """Pin routing for the STOP lifecycle command."""
 
     @pytest.mark.asyncio
+    async def test_raw_stop_command_is_rejected_without_dispatch(self, caplog):
+        """An unparsed raw STOP value must never reach teardown dispatch."""
+        runner = _make_runner()
+        strategy = _make_strategy()
+        runner._lifecycle_handle_stop = MagicMock()
+
+        with caplog.at_level(logging.ERROR, logger="almanak.framework.runner._run_loop_helpers"):
+            await handle_lifecycle_command(
+                runner,
+                strategy,
+                strategy.deployment_id,
+                "STOP",  # type: ignore[arg-type]
+            )
+
+        runner._lifecycle_handle_stop.assert_not_called()
+        assert "Ignoring untyped lifecycle command 'STOP'" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_resume_command_is_ignored_without_dispatch(self, caplog):
+        """A historical RESUME row is observable but cannot trigger teardown."""
+        runner = _make_runner()
+        strategy = _make_strategy()
+        runner._lifecycle_handle_stop = MagicMock()
+
+        with caplog.at_level(logging.WARNING, logger="almanak.framework.runner._run_loop_helpers"):
+            await handle_lifecycle_command(
+                runner,
+                strategy,
+                strategy.deployment_id,
+                LifecycleCommand.RESUME,
+            )
+
+        runner._lifecycle_handle_stop.assert_not_called()
+        assert "retired lifecycle command RESUME" in caplog.text
+
+    @pytest.mark.asyncio
     async def test_stop_command_calls_handle_stop(self):
         runner = _make_runner()
         strategy = _make_strategy()
-        # First iteration: poll returns "STOP"
-        runner._lifecycle_poll_command = MagicMock(side_effect=["STOP", None, None])
+        # First iteration: poll returns STOP.
+        runner._lifecycle_poll_command = MagicMock(side_effect=[LifecycleCommand.STOP, None, None])
 
         def handle_stop(sid, strat):
             runner.request_shutdown()
@@ -887,7 +925,7 @@ class TestLifecycleCommands:
         """
         runner = _make_runner()
         strategy = _make_strategy()
-        runner._lifecycle_poll_command = MagicMock(side_effect=["PAUSE", None, None])
+        runner._lifecycle_poll_command = MagicMock(side_effect=[LifecycleCommand.PAUSE, None, None])
         runner._lifecycle_handle_stop = MagicMock()
         runner.run_iteration = AsyncMock(return_value=_make_result())
 
@@ -905,7 +943,7 @@ class TestLifecycleCommands:
         paused_writes = [
             c
             for c in runner._lifecycle_write_state.call_args_list
-            if len(c.args) >= 2 and c.args[1] == "PAUSED"
+            if len(c.args) >= 2 and c.args[1] is LifecycleState.PAUSED
         ]
         assert paused_writes == []
         # Operator visibility for the dropped command.
@@ -1418,9 +1456,9 @@ class TestLoopTeardown:
             timeout=5,
         )
 
-        # Final write uses "TERMINATED" (default when no terminal state set).
+        # Final write uses TERMINATED (default when no terminal state set).
         last_call = runner._lifecycle_write_state.call_args_list[-1]
-        assert last_call.args[1] == "TERMINATED"
+        assert last_call.args[1] is LifecycleState.TERMINATED
 
     @pytest.mark.asyncio
     async def test_loop_exit_preserves_terminal_error_state(self):
@@ -1429,7 +1467,7 @@ class TestLoopTeardown:
         strategy = _make_strategy()
 
         async def mock_iter(s):
-            runner._terminal_lifecycle_state = "ERROR"
+            runner._terminal_lifecycle_state = LifecycleState.ERROR
             runner._terminal_lifecycle_error_message = "breaker tripped"
             runner.request_shutdown()
             return _make_result()
@@ -1442,7 +1480,7 @@ class TestLoopTeardown:
         )
 
         last_call = runner._lifecycle_write_state.call_args_list[-1]
-        assert last_call.args[1] == "ERROR"
+        assert last_call.args[1] is LifecycleState.ERROR
         # error_message kwarg preserved
         assert last_call.kwargs.get("error_message") == "breaker tripped"
 
@@ -1558,7 +1596,7 @@ class TestConsecutiveErrorsSingleIncrement:
 
         def spy(*args, **kwargs):
             state = args[1] if len(args) >= 2 else None
-            if state == "ERROR":
+            if state is LifecycleState.ERROR:
                 iteration_at_error_write.append(completed_iterations["n"])
             return original_write(*args, **kwargs)
 

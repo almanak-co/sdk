@@ -31,6 +31,7 @@ from unittest.mock import MagicMock
 import grpc
 import pytest
 
+from almanak.core.lifecycle import LifecycleCommand, LifecycleState
 from almanak.gateway.lifecycle import AgentCommand, AgentState, LifecycleStore
 from almanak.gateway.proto import gateway_pb2
 from almanak.gateway.services.lifecycle_service import LifecycleServiceServicer
@@ -77,7 +78,8 @@ class TestWriteState:
         request = gateway_pb2.WriteAgentStateRequest(deployment_id=deployment_id, state="RUNNING")
         response = await service.WriteState(request, context)
         assert_grpc_error(
-            context, response,
+            context,
+            response,
             expected_status=grpc.StatusCode.INVALID_ARGUMENT,
             error_substring="deployment_id",
         )
@@ -88,7 +90,8 @@ class TestWriteState:
         request = gateway_pb2.WriteAgentStateRequest(deployment_id="agt-1", state="NOT_A_STATE")
         response = await service.WriteState(request, context)
         assert_grpc_error(
-            context, response,
+            context,
+            response,
             expected_status=grpc.StatusCode.INVALID_ARGUMENT,
             error_substring="invalid state",
         )
@@ -102,7 +105,7 @@ class TestWriteState:
         assert_set_code_not_called(context)
         store.write_state.assert_called_once_with(
             deployment_id="agt-1",
-            state="RUNNING",
+            state=LifecycleState.RUNNING,
             error_message=None,
             running_almanak_version=None,
         )
@@ -110,13 +113,15 @@ class TestWriteState:
     @pytest.mark.asyncio
     async def test_error_message_passed_through_to_store(self, service, store, context):
         request = gateway_pb2.WriteAgentStateRequest(
-            deployment_id="agt-1", state="ERROR", error_message="rpc timeout",
+            deployment_id="agt-1",
+            state="ERROR",
+            error_message="rpc timeout",
         )
         response = await service.WriteState(request, context)
         assert response.success is True
         store.write_state.assert_called_once_with(
             deployment_id="agt-1",
-            state="ERROR",
+            state=LifecycleState.ERROR,
             error_message="rpc timeout",
             running_almanak_version=None,
         )
@@ -160,7 +165,7 @@ class TestReadState:
     async def test_happy_path_returns_full_state(self, service, store, context):
         store.read_state.return_value = AgentState(
             deployment_id="agt-1",
-            state="RUNNING",
+            state=LifecycleState.RUNNING,
             state_changed_at=datetime(2026, 5, 4, 12, 0, tzinfo=UTC),
             last_heartbeat_at=datetime(2026, 5, 4, 12, 1, tzinfo=UTC),
             error_message=None,
@@ -181,7 +186,7 @@ class TestReadState:
     async def test_state_with_no_heartbeat_renders_empty_string(self, service, store, context):
         store.read_state.return_value = AgentState(
             deployment_id="agt-1",
-            state="INITIALIZING",
+            state=LifecycleState.INITIALIZING,
             state_changed_at=datetime(2026, 5, 4, 12, 0, tzinfo=UTC),
             last_heartbeat_at=None,
             error_message="bootstrap failed",
@@ -193,6 +198,22 @@ class TestReadState:
         assert response.last_heartbeat_at == ""
         assert response.error_message == "bootstrap failed"
         assert_set_code_not_called(context)
+
+    @pytest.mark.asyncio
+    async def test_historical_paused_state_remains_readable(self, service, store, context):
+        store.read_state.return_value = AgentState(
+            deployment_id="agt-1",
+            state=LifecycleState.PAUSED,
+            state_changed_at=datetime(2026, 5, 4, 12, 0, tzinfo=UTC),
+        )
+
+        response = await service.ReadState(
+            gateway_pb2.ReadAgentStateRequest(deployment_id="agt-1"),
+            context,
+        )
+
+        assert response.found is True
+        assert response.state == "PAUSED"
 
     @pytest.mark.asyncio
     async def test_backend_exception_returns_internal(self, service, store, context):
@@ -215,7 +236,8 @@ class TestHeartbeat:
         request = gateway_pb2.HeartbeatRequest(deployment_id="")
         response = await service.Heartbeat(request, context)
         assert_grpc_error(
-            context, response,
+            context,
+            response,
             expected_status=grpc.StatusCode.INVALID_ARGUMENT,
             error_substring="deployment_id",
         )
@@ -270,7 +292,7 @@ class TestReadCommand:
         store.read_pending_command.return_value = AgentCommand(
             id=42,
             deployment_id="agt-1",
-            command="STOP",
+            command=LifecycleCommand.STOP,
             issued_at=datetime(2026, 5, 4, 12, 0, tzinfo=UTC),
             issued_by="operator@team",
         )
@@ -284,6 +306,25 @@ class TestReadCommand:
         assert response.issued_by == "operator@team"
         store.read_pending_command.assert_called_once_with("agt-1")
         assert_set_code_not_called(context)
+
+    @pytest.mark.parametrize("command", [LifecycleCommand.PAUSE, LifecycleCommand.RESUME])
+    @pytest.mark.asyncio
+    async def test_historical_command_remains_readable(self, service, store, context, command):
+        store.read_pending_command.return_value = AgentCommand(
+            id=43,
+            deployment_id="agt-1",
+            command=command,
+            issued_at=datetime(2026, 5, 4, 12, 0, tzinfo=UTC),
+            issued_by="legacy-operator",
+        )
+
+        response = await service.ReadCommand(
+            gateway_pb2.ReadAgentCommandRequest(deployment_id="agt-1"),
+            context,
+        )
+
+        assert response.found is True
+        assert response.command == command.value
 
     @pytest.mark.asyncio
     async def test_backend_exception_returns_internal(self, service, store, context):
@@ -307,7 +348,8 @@ class TestAckCommand:
         request = gateway_pb2.AckAgentCommandRequest(command_id=0)
         response = await service.AckCommand(request, context)
         assert_grpc_error(
-            context, response,
+            context,
+            response,
             expected_status=grpc.StatusCode.INVALID_ARGUMENT,
             error_substring="command_id",
         )
@@ -343,11 +385,14 @@ class TestWriteCommand:
     @pytest.mark.asyncio
     async def test_empty_deployment_id_returns_invalid_argument(self, service, store, context):
         request = gateway_pb2.WriteAgentCommandRequest(
-            deployment_id="", command="STOP", issued_by="op",
+            deployment_id="",
+            command="STOP",
+            issued_by="op",
         )
         response = await service.WriteCommand(request, context)
         assert_grpc_error(
-            context, response,
+            context,
+            response,
             expected_status=grpc.StatusCode.INVALID_ARGUMENT,
             error_substring="deployment_id",
         )
@@ -356,26 +401,33 @@ class TestWriteCommand:
     @pytest.mark.asyncio
     async def test_invalid_command_returns_invalid_argument(self, service, store, context):
         request = gateway_pb2.WriteAgentCommandRequest(
-            deployment_id="agt-1", command="LAUNCH_NUKES", issued_by="op",
+            deployment_id="agt-1",
+            command="LAUNCH_NUKES",
+            issued_by="op",
         )
         response = await service.WriteCommand(request, context)
         assert_grpc_error(
-            context, response,
+            context,
+            response,
             expected_status=grpc.StatusCode.INVALID_ARGUMENT,
             error_substring="invalid command",
         )
         store.write_command.assert_not_called()
 
-    @pytest.mark.parametrize("command", ["STOP"])
+    @pytest.mark.parametrize("command", [LifecycleCommand.STOP])
     @pytest.mark.asyncio
     async def test_each_valid_command_accepted(self, service, store, context, command):
         request = gateway_pb2.WriteAgentCommandRequest(
-            deployment_id="agt-1", command=command, issued_by="op@team",
+            deployment_id="agt-1",
+            command=command.value,
+            issued_by="op@team",
         )
         response = await service.WriteCommand(request, context)
         assert response.success is True
         store.write_command.assert_called_once_with(
-            deployment_id="agt-1", command=command, issued_by="op@team",
+            deployment_id="agt-1",
+            command=command,
+            issued_by="op@team",
         )
         assert_set_code_not_called(context)
 
@@ -384,11 +436,14 @@ class TestWriteCommand:
     async def test_retired_commands_rejected(self, service, store, context, command):
         """VIB-4281: PAUSE / RESUME no longer accepted."""
         request = gateway_pb2.WriteAgentCommandRequest(
-            deployment_id="agt-1", command=command, issued_by="op@team",
+            deployment_id="agt-1",
+            command=command,
+            issued_by="op@team",
         )
         response = await service.WriteCommand(request, context)
         assert_grpc_error(
-            context, response,
+            context,
+            response,
             expected_status=grpc.StatusCode.INVALID_ARGUMENT,
             error_substring="invalid command",
         )
@@ -398,7 +453,9 @@ class TestWriteCommand:
     async def test_backend_exception_returns_internal_error(self, service, store, context):
         store.write_command.side_effect = RuntimeError("db down")
         request = gateway_pb2.WriteAgentCommandRequest(
-            deployment_id="agt-1", command="STOP", issued_by="op",
+            deployment_id="agt-1",
+            command="STOP",
+            issued_by="op",
         )
         response = await service.WriteCommand(request, context)
         assert response.success is False

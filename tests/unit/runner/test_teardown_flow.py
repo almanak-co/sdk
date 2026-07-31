@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, AsyncMock, patch, call
 
 import pytest
 
+from almanak.core.lifecycle import LifecycleState
 from almanak.framework.runner.strategy_runner import (
     IterationResult,
     IterationStatus,
@@ -1410,7 +1411,12 @@ class TestExecuteTeardownViaManagerCharacterization:
 
         assert result.status == IterationStatus.TEARDOWN
         runner.request_shutdown.assert_called_once()
-        runner._lifecycle_write_state.assert_any_call("test_strat", "TERMINATED")
+        terminated_writes = [
+            recorded_call
+            for recorded_call in runner._lifecycle_write_state.call_args_list
+            if recorded_call.args[0] == "test_strat" and recorded_call.args[1] is LifecycleState.TERMINATED
+        ]
+        assert terminated_writes
         state_mgr.mark_completed.assert_called_once()
         runner._request_teardown_failure_shutdown.assert_not_called()
 

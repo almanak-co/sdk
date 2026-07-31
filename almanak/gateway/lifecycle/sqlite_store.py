@@ -16,6 +16,17 @@ import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
+from almanak.core.lifecycle import (
+    LifecycleCommand,
+    LifecycleState,
+    LifecycleStateSource,
+    parse_lifecycle_command,
+    parse_lifecycle_source,
+    parse_lifecycle_state,
+    require_enqueueable_command,
+    require_writable_state,
+)
+
 from .store import AgentCommand, AgentState
 
 logger = logging.getLogger(__name__)
@@ -108,10 +119,11 @@ class SQLiteLifecycleStore:
     def write_state(
         self,
         deployment_id: str,
-        state: str,
+        state: LifecycleState,
         error_message: str | None = None,
         running_almanak_version: str | None = None,
     ) -> None:
+        state = require_writable_state(state)
         if not self._initialized:
             self.initialize()
         now = datetime.now(UTC).isoformat()
@@ -122,19 +134,27 @@ class SQLiteLifecycleStore:
                     INSERT INTO agent_state
                         (deployment_id, state, state_changed_at, last_heartbeat_at,
                          error_message, source, running_almanak_version)
-                    VALUES (?, ?, ?, ?, ?, 'gateway', ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT (deployment_id) DO UPDATE SET
                         state = excluded.state,
                         state_changed_at = excluded.state_changed_at,
                         last_heartbeat_at = excluded.last_heartbeat_at,
                         error_message = excluded.error_message,
-                        source = 'gateway',
+                        source = excluded.source,
                         running_almanak_version = COALESCE(
                             excluded.running_almanak_version,
                             agent_state.running_almanak_version
                         )
                     """,
-                    (deployment_id, state, now, now, error_message, running_almanak_version),
+                    (
+                        deployment_id,
+                        state.value,
+                        now,
+                        now,
+                        error_message,
+                        LifecycleStateSource.GATEWAY.value,
+                        running_almanak_version,
+                    ),
                 )
                 conn.commit()
 
@@ -153,14 +173,16 @@ class SQLiteLifecycleStore:
                     return None
                 return AgentState(
                     deployment_id=row["deployment_id"],
-                    state=row["state"],
+                    state=parse_lifecycle_state(row["state"]),
                     state_changed_at=datetime.fromisoformat(row["state_changed_at"]),
                     last_heartbeat_at=datetime.fromisoformat(row["last_heartbeat_at"])
                     if row["last_heartbeat_at"]
                     else None,
                     error_message=row["error_message"],
                     iteration_count=row["iteration_count"] or 0,
-                    source=row["source"] if "source" in row.keys() else "gateway",
+                    source=parse_lifecycle_source(
+                        row["source"] if "source" in row.keys() else LifecycleStateSource.GATEWAY.value
+                    ),
                     running_almanak_version=(
                         row["running_almanak_version"] if "running_almanak_version" in row.keys() else None
                     ),
@@ -205,7 +227,7 @@ class SQLiteLifecycleStore:
                 return AgentCommand(
                     id=row["id"],
                     deployment_id=row["deployment_id"],
-                    command=row["command"],
+                    command=parse_lifecycle_command(row["command"]),
                     issued_at=datetime.fromisoformat(row["issued_at"]),
                     issued_by=row["issued_by"],
                     processed_at=None,
@@ -223,7 +245,8 @@ class SQLiteLifecycleStore:
                 )
                 conn.commit()
 
-    def write_command(self, deployment_id: str, command: str, issued_by: str) -> None:
+    def write_command(self, deployment_id: str, command: LifecycleCommand, issued_by: str) -> None:
+        command = require_enqueueable_command(command)
         if not self._initialized:
             self.initialize()
         now = datetime.now(UTC).isoformat()
@@ -234,6 +257,6 @@ class SQLiteLifecycleStore:
                     INSERT INTO agent_command (deployment_id, command, issued_at, issued_by)
                     VALUES (?, ?, ?, ?)
                     """,
-                    (deployment_id, command, now, issued_by),
+                    (deployment_id, command.value, now, issued_by),
                 )
                 conn.commit()

@@ -9,27 +9,17 @@ import logging
 
 import grpc
 
+from almanak.core.lifecycle import (
+    LifecycleValueError,
+    parse_lifecycle_command,
+    parse_lifecycle_state,
+    require_enqueueable_command,
+    require_writable_state,
+)
 from almanak.gateway.lifecycle import LifecycleStore, get_lifecycle_store
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
 
 logger = logging.getLogger(__name__)
-
-# VIB-4049: TEARING_DOWN sits between STOPPING and TERMINATED in the hosted
-# teardown bridge — written by the runner inside ``execute_teardown_via_manager``
-# once unwind starts, replaced by TERMINATED when the unwind succeeds or by
-# ERROR on failure. Platform maps it to ``live_agent_status.TEARDOWN_IN_PROGRESS``
-# so the UI can distinguish "stopping cleanly" from "actively unwinding
-# positions" (the reconciler timeout for TEARDOWN_IN_PROGRESS is the 45-minute
-# teardown SLA, not the 5-minute STOPPING SLA).
-#
-# VIB-4281: PAUSED/PAUSE/RESUME retired from the lifecycle vocabulary. The
-# three-action UX model is Stop (terminate the pod, leave positions on-chain) /
-# Teardown (unwind positions then exit) / Emergency Stop (kubectl delete,
-# bypasses the state guard). Historical `agent_state` rows may still hold
-# `PAUSED` for read-back; the gateway just no longer accepts it as a write
-# target or as an incoming command.
-_VALID_STATES = {"INITIALIZING", "RUNNING", "STOPPING", "TEARING_DOWN", "TERMINATED", "ERROR"}
-_VALID_COMMANDS = {"STOP"}
 
 
 class LifecycleServiceServicer(gateway_pb2_grpc.LifecycleServiceServicer):
@@ -47,7 +37,9 @@ class LifecycleServiceServicer(gateway_pb2_grpc.LifecycleServiceServicer):
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details("deployment_id must be non-empty")
             return gateway_pb2.WriteAgentStateResponse(success=False, error="deployment_id must be non-empty")
-        if request.state not in _VALID_STATES:
+        try:
+            state = require_writable_state(parse_lifecycle_state(request.state))
+        except LifecycleValueError:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(f"invalid state: {request.state}")
             return gateway_pb2.WriteAgentStateResponse(success=False, error=f"invalid state: {request.state}")
@@ -60,7 +52,7 @@ class LifecycleServiceServicer(gateway_pb2_grpc.LifecycleServiceServicer):
             await asyncio.to_thread(
                 self._store.write_state,
                 deployment_id=request.deployment_id,
-                state=request.state,
+                state=state,
                 error_message=request.error_message or None,
                 running_almanak_version=running_almanak_version,
             )
@@ -81,7 +73,7 @@ class LifecycleServiceServicer(gateway_pb2_grpc.LifecycleServiceServicer):
             return gateway_pb2.ReadAgentStateResponse(
                 found=True,
                 deployment_id=state.deployment_id,
-                state=state.state,
+                state=state.state.value,
                 state_changed_at=state.state_changed_at.isoformat(),
                 last_heartbeat_at=state.last_heartbeat_at.isoformat() if state.last_heartbeat_at else "",
                 error_message=state.error_message or "",
@@ -119,7 +111,7 @@ class LifecycleServiceServicer(gateway_pb2_grpc.LifecycleServiceServicer):
                 found=True,
                 command_id=cmd.id,
                 deployment_id=cmd.deployment_id,
-                command=cmd.command,
+                command=cmd.command.value,
                 issued_at=cmd.issued_at.isoformat(),
                 issued_by=cmd.issued_by,
             )
@@ -147,7 +139,9 @@ class LifecycleServiceServicer(gateway_pb2_grpc.LifecycleServiceServicer):
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details("deployment_id must be non-empty")
             return gateway_pb2.WriteAgentCommandResponse(success=False, error="deployment_id must be non-empty")
-        if request.command not in _VALID_COMMANDS:
+        try:
+            command = require_enqueueable_command(parse_lifecycle_command(request.command))
+        except LifecycleValueError:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(f"invalid command: {request.command}")
             return gateway_pb2.WriteAgentCommandResponse(success=False, error=f"invalid command: {request.command}")
@@ -155,7 +149,7 @@ class LifecycleServiceServicer(gateway_pb2_grpc.LifecycleServiceServicer):
             await asyncio.to_thread(
                 self._store.write_command,
                 deployment_id=request.deployment_id,
-                command=request.command,
+                command=command,
                 issued_by=request.issued_by,
             )
             return gateway_pb2.WriteAgentCommandResponse(success=True)

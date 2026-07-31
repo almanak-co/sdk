@@ -31,6 +31,8 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path as _Path
 from typing import TYPE_CHECKING, Any
 
+from almanak.core.lifecycle import LifecycleState
+
 from ..teardown.decision_log import TeardownDecisionPhase, log_teardown_decision
 
 if TYPE_CHECKING:
@@ -985,7 +987,7 @@ def map_teardown_result(
                     deployment_id,
                 )
         runner.request_shutdown()
-        runner._lifecycle_write_state(deployment_id, "TERMINATED")
+        runner._lifecycle_write_state(deployment_id, LifecycleState.TERMINATED)
         if request:
             # VIB-5085: ``positions_closed`` reports verified positions closed,
             # not intents landed. ``mark_completed`` lifts ``result["positions_closed"]``

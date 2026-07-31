@@ -8171,7 +8171,7 @@ class ExecuteActionRequest(_message.Message):
     PARAMS_FIELD_NUMBER: _builtins.int
     deployment_id: _builtins.str
     action: _builtins.str
-    """"PAUSE", "RESUME", "BUMP_GAS", "CANCEL_TX", "EMERGENCY_UNWIND" """
+    """Lifecycle action: "STOP". Retired "PAUSE"/"RESUME" are rejected."""
     reason: _builtins.str
     """Required for audit"""
     @_builtins.property
@@ -10593,7 +10593,7 @@ class WriteAgentStateRequest(_message.Message):
     RUNNING_ALMANAK_VERSION_FIELD_NUMBER: _builtins.int
     deployment_id: _builtins.str
     state: _builtins.str
-    """INITIALIZING, RUNNING, PAUSED, ERROR, STOPPING, TERMINATED"""
+    """Current values above; reads may also return PAUSED or platform V2_* hand-off states."""
     error_message: _builtins.str
     """Optional: error details when state=ERROR"""
     running_almanak_version: _builtins.str
@@ -10752,7 +10752,7 @@ class ReadAgentCommandResponse(_message.Message):
     command_id: _builtins.int
     deployment_id: _builtins.str
     command: _builtins.str
-    """PAUSE, RESUME, STOP"""
+    """STOP; historical rows may return retired PAUSE/RESUME."""
     issued_at: _builtins.str
     """ISO 8601"""
     issued_by: _builtins.str
@@ -10815,7 +10815,7 @@ class WriteAgentCommandRequest(_message.Message):
     ISSUED_BY_FIELD_NUMBER: _builtins.int
     deployment_id: _builtins.str
     command: _builtins.str
-    """PAUSE, RESUME, STOP"""
+    """STOP only; retired PAUSE/RESUME are rejected."""
     issued_by: _builtins.str
     def __init__(
         self,

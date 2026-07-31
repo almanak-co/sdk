@@ -6216,7 +6216,7 @@ class LifecycleServiceServicer(object):
     """
 
     def WriteState(self, request, context):
-        """Write agent state (INITIALIZING, RUNNING, PAUSED, ERROR, STOPPING, TERMINATED).
+        """Write a current state (INITIALIZING, RUNNING, STOPPING, TEARING_DOWN, TERMINATED, ERROR).
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -6251,7 +6251,7 @@ class LifecycleServiceServicer(object):
         raise NotImplementedError('Method not implemented!')
 
     def WriteCommand(self, request, context):
-        """Write a command to an agent (PAUSE, RESUME, STOP).
+        """Write a current command to an agent (STOP only).
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')

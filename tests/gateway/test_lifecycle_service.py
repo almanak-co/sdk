@@ -16,6 +16,7 @@ from unittest.mock import MagicMock
 import grpc
 import pytest
 
+from almanak.core.lifecycle import LifecycleCommand, LifecycleState
 from almanak.gateway.lifecycle.sqlite_store import SQLiteLifecycleStore
 from almanak.gateway.proto import gateway_pb2
 from almanak.gateway.services.lifecycle_service import LifecycleServiceServicer
@@ -55,7 +56,7 @@ class TestLifecycleServiceWriteState:
 
         # Verify state was written
         state = store.read_state("agent-1")
-        assert state.state == "RUNNING"
+        assert state.state is LifecycleState.RUNNING
 
     @pytest.mark.asyncio
     async def test_write_state_with_error_message(self, service, store, mock_context):
@@ -68,7 +69,7 @@ class TestLifecycleServiceWriteState:
         assert response.success is True
 
         state = store.read_state("agent-1")
-        assert state.state == "ERROR"
+        assert state.state is LifecycleState.ERROR
         assert state.error_message == "Connection timeout"
 
     @pytest.mark.asyncio
@@ -103,7 +104,7 @@ class TestLifecycleServiceWriteState:
 class TestLifecycleServiceReadState:
     @pytest.mark.asyncio
     async def test_read_state_found(self, service, store, mock_context):
-        store.write_state("agent-1", "RUNNING")
+        store.write_state("agent-1", LifecycleState.RUNNING)
 
         request = gateway_pb2.ReadAgentStateRequest(deployment_id="agent-1")
         response = await service.ReadState(request, mock_context)
@@ -122,7 +123,7 @@ class TestLifecycleServiceReadState:
 class TestLifecycleServiceHeartbeat:
     @pytest.mark.asyncio
     async def test_heartbeat_success(self, service, store, mock_context):
-        store.write_state("agent-1", "RUNNING")
+        store.write_state("agent-1", LifecycleState.RUNNING)
 
         request = gateway_pb2.HeartbeatRequest(deployment_id="agent-1")
         response = await service.Heartbeat(request, mock_context)
@@ -131,7 +132,6 @@ class TestLifecycleServiceHeartbeat:
         # Verify iteration count incremented
         state = store.read_state("agent-1")
         assert state.iteration_count == 1
-
 
     @pytest.mark.asyncio
     async def test_heartbeat_error_handling(self, mock_context):
@@ -149,7 +149,7 @@ class TestLifecycleServiceHeartbeat:
 class TestLifecycleServiceReadCommand:
     @pytest.mark.asyncio
     async def test_read_command_found(self, service, store, mock_context):
-        store.write_command("agent-1", "STOP", "operator@test.com")
+        store.write_command("agent-1", LifecycleCommand.STOP, "operator@test.com")
 
         request = gateway_pb2.ReadAgentCommandRequest(deployment_id="agent-1")
         response = await service.ReadCommand(request, mock_context)
@@ -168,7 +168,7 @@ class TestLifecycleServiceReadCommand:
 class TestLifecycleServiceAckCommand:
     @pytest.mark.asyncio
     async def test_ack_command_success(self, service, store, mock_context):
-        store.write_command("agent-1", "STOP", "admin")
+        store.write_command("agent-1", LifecycleCommand.STOP, "admin")
         cmd = store.read_pending_command("agent-1")
 
         request = gateway_pb2.AckAgentCommandRequest(command_id=cmd.id)
@@ -193,12 +193,12 @@ class TestLifecycleServiceWriteCommand:
         # Verify command was written
         cmd = store.read_pending_command("agent-1")
         assert cmd is not None
-        assert cmd.command == "STOP"
+        assert cmd.command is LifecycleCommand.STOP
         assert cmd.issued_by == "dashboard-user"
 
     @pytest.mark.asyncio
     async def test_write_command_rejects_pause(self, service, mock_context):
-        """VIB-4281: PAUSE is no longer in _VALID_COMMANDS."""
+        """VIB-4281: PAUSE is historical and cannot be newly enqueued."""
         request = gateway_pb2.WriteAgentCommandRequest(
             deployment_id="agent-1",
             command="PAUSE",
@@ -210,7 +210,7 @@ class TestLifecycleServiceWriteCommand:
 
     @pytest.mark.asyncio
     async def test_write_command_rejects_resume(self, service, mock_context):
-        """VIB-4281: RESUME is no longer in _VALID_COMMANDS."""
+        """VIB-4281: RESUME is historical and cannot be newly enqueued."""
         request = gateway_pb2.WriteAgentCommandRequest(
             deployment_id="agent-1",
             command="RESUME",
@@ -255,14 +255,16 @@ class TestLifecycleServiceInputValidation:
         VIB-4281 removed ``PAUSED`` from the writable vocabulary; historical rows
         may still hold the value but the gateway no longer accepts new writes.
         """
-        for state in ("INITIALIZING", "RUNNING", "STOPPING", "TEARING_DOWN", "TERMINATED", "ERROR"):
-            request = gateway_pb2.WriteAgentStateRequest(deployment_id="agent-v", state=state)
+        for state in LifecycleState:
+            if not state.is_writable:
+                continue
+            request = gateway_pb2.WriteAgentStateRequest(deployment_id="agent-v", state=state.value)
             response = await service.WriteState(request, mock_context)
-            assert response.success is True, f"State {state} should be accepted"
+            assert response.success is True, f"State {state.value} should be accepted"
 
     @pytest.mark.asyncio
     async def test_write_state_rejects_paused(self, service, mock_context):
-        """VIB-4281: PAUSED is no longer in _VALID_STATES."""
+        """VIB-4281: PAUSED is historical and cannot be newly written."""
         request = gateway_pb2.WriteAgentStateRequest(deployment_id="agent-1", state="PAUSED")
         response = await service.WriteState(request, mock_context)
         assert response.success is False

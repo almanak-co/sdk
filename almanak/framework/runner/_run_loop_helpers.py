@@ -28,9 +28,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, assert_never, cast
 
 from almanak.core.chains._helpers import is_solana_chain
+from almanak.core.lifecycle import LifecycleCommand, LifecycleState
 
 from ..api.timeline import TimelineEvent, TimelineEventType, add_event
 from ..state.exceptions import AccountingPersistenceError
@@ -649,7 +650,7 @@ async def initialize_run_loop(  # noqa: C901
     runner._register_with_gateway(strategy)
 
     # Write RUNNING state to LifecycleStore
-    runner._lifecycle_write_state(deployment_id, "RUNNING")
+    runner._lifecycle_write_state(deployment_id, LifecycleState.RUNNING)
 
     # Emit strategy started event
     start_event = TimelineEvent(
@@ -1923,7 +1924,9 @@ async def handle_iteration_failure(
         if not breaker_tolerating_data:
             await runner._alert_consecutive_errors(strategy, result)
             runner._lifecycle_write_state(
-                deployment_id, "ERROR", error_message=str(result.error) if result.error else None
+                deployment_id,
+                LifecycleState.ERROR,
+                error_message=str(result.error) if result.error else None,
             )
 
 
@@ -1948,7 +1951,7 @@ def handle_iteration_success(
     # state (e.g., teardown writes TERMINATED and requests shutdown) --
     # otherwise we would clobber that terminal state with RUNNING.
     if was_in_error_streak and not runner._shutdown_requested and runner._terminal_lifecycle_state is None:
-        runner._lifecycle_write_state(deployment_id, "RUNNING")
+        runner._lifecycle_write_state(deployment_id, LifecycleState.RUNNING)
         logger.info(
             "Strategy %s recovered after error streak (max_consecutive_errors=%d) - lifecycle state reset to RUNNING",
             deployment_id,
@@ -1973,7 +1976,7 @@ async def handle_lifecycle_command(
     runner: StrategyRunner,
     strategy: StrategyProtocol,
     deployment_id: str,
-    command: str | None,
+    command: LifecycleCommand | None,
 ) -> None:
     """Route a polled lifecycle command.
 
@@ -1990,18 +1993,29 @@ async def handle_lifecycle_command(
     teardown and unwind positions, breaking the old "PAUSE = don't touch
     positions" semantic.
     """
-    if command == "STOP":
-        logger.info("Received STOP command for %s", deployment_id)
-        runner._lifecycle_handle_stop(deployment_id, strategy)
+    if command is None:
         return
-
-    if command in ("PAUSE", "RESUME"):
-        logger.warning(
-            "Received retired lifecycle command %s for %s; ignoring (VIB-4281). "
-            "If this came from an operator action, the platform should have rejected it at the API edge.",
+    if not isinstance(command, LifecycleCommand):
+        logger.error(
+            "Ignoring untyped lifecycle command %r for %s; boundary parsing is required",
             command,
             deployment_id,
         )
+        return
+
+    match command:
+        case LifecycleCommand.STOP:
+            logger.info("Received STOP command for %s", deployment_id)
+            runner._lifecycle_handle_stop(deployment_id, strategy)
+        case LifecycleCommand.PAUSE | LifecycleCommand.RESUME:
+            logger.warning(
+                "Received retired lifecycle command %s for %s; ignoring (VIB-4281). "
+                "If this came from an operator action, the platform should have rejected it at the API edge.",
+                command.value,
+                deployment_id,
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 # =============================================================================
@@ -2025,7 +2039,7 @@ async def finalize_run_loop(
     # Write final state to LifecycleStore (preserve ERROR if set by circuit breaker)
     runner._lifecycle_write_state(
         deployment_id,
-        runner._terminal_lifecycle_state or "TERMINATED",
+        runner._terminal_lifecycle_state or LifecycleState.TERMINATED,
         error_message=runner._terminal_lifecycle_error_message,
     )
 

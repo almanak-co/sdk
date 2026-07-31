@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from almanak.framework.state.state_manager import StateManager
 
 from almanak.core.chains import LEGACY_SERIALIZED_CHAIN
+from almanak.core.lifecycle import LifecycleValueError, parse_lifecycle_command, require_enqueueable_command
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.integrations.portfolio_chain import PortfolioProviderChain, build_portfolio_chain
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
@@ -650,7 +651,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
     - GetTimeline: Get strategy timeline events
     - GetStrategyConfig: Get strategy configuration
     - GetStrategyState: Get current strategy state
-    - ExecuteAction: Execute operator actions (pause, resume, etc.)
+    - ExecuteAction: Enqueue the current lifecycle STOP command
     """
 
     def __init__(self, settings: GatewaySettings):
@@ -1905,7 +1906,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         request: gateway_pb2.ExecuteActionRequest,
         context: grpc.aio.ServicerContext,
     ) -> gateway_pb2.ExecuteActionResponse:
-        """Execute operator action (pause, resume, emergency).
+        """Execute a supported operator lifecycle action.
 
         Args:
             request: Action request with deployment_id, action, reason
@@ -1940,9 +1941,9 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         # Instead of mutating state flags directly, we write a command to the
         # LifecycleStore. The strategy runner's poll loop picks it up and
         # transitions state atomically.
-        _ACTION_TO_COMMAND = {"PAUSE": "PAUSE", "RESUME": "RESUME", "STOP": "STOP"}
-        command = _ACTION_TO_COMMAND.get(action)
-        if command is None:
+        try:
+            command = require_enqueueable_command(parse_lifecycle_command(action))
+        except LifecycleValueError:
             context.set_code(grpc.StatusCode.UNIMPLEMENTED)
             context.set_details(f"Action not implemented: {action}")
             return gateway_pb2.ExecuteActionResponse(
@@ -1960,13 +1961,13 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                 command=command,
                 issued_by=f"dashboard:{reason}",
             )
-            logger.info(f"Issued {command} command to {deployment_id} via lifecycle store: {reason}")
+            logger.info(f"Issued {command.value} command to {deployment_id} via lifecycle store: {reason}")
             return gateway_pb2.ExecuteActionResponse(
                 success=True,
                 action_id=action_id,
             )
         except Exception as e:
-            logger.error(f"Failed to issue {command} command to {deployment_id}: {e}")
+            logger.error(f"Failed to issue {command.value} command to {deployment_id}: {e}")
             return gateway_pb2.ExecuteActionResponse(
                 success=False,
                 error=str(e),

@@ -18,6 +18,7 @@ from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
 from almanak.core.chains._helpers import bridged_stablecoin_map
+from almanak.core.lifecycle import LifecycleState
 
 from ..intents.compiler import IntentCompiler, IntentCompilerConfig
 from ..intents.vocabulary import Intent
@@ -952,7 +953,7 @@ def _apply_lending_unwind_guard(
     return guarded.intents
 
 
-# crap-allowlist: VIB-4049 — pre-existing cc=21 teardown coordinator; PR touches a single line (``_lifecycle_write_state("TEARING_DOWN")``), zero new branches.
+# crap-allowlist: VIB-4049 — pre-existing cc=21 teardown coordinator; lifecycle typing adds zero new branches.
 # Function is the canonical sequencer (market snapshot → intents → routing → manager/inline/fallback);
 # decomposing it requires the four-step SDK crap-refactor protocol (blueprint 14 + Plan agent +
 # test baseline) and is out of scope for a regression fix. The C901 exemption is already
@@ -1156,7 +1157,7 @@ async def execute_teardown(  # noqa: C901
         # Match the adjacent all-balances-zero + TeardownManager-success paths —
         # the lifecycle supervisor must see TERMINATED so it doesn't treat a
         # teardown-with-no-positions as still running.
-        runner._lifecycle_write_state(deployment_id, "TERMINATED")
+        runner._lifecycle_write_state(deployment_id, LifecycleState.TERMINATED)
         runner._record_success()
         return IterationResult(
             status=IterationStatus.TEARDOWN,
@@ -1172,7 +1173,7 @@ async def execute_teardown(  # noqa: C901
     # 5min) from "actively unwinding positions" (SLA 45min). The terminal
     # TERMINATED / ERROR writes downstream are unchanged — they take over once
     # the unwind completes (or fails).
-    runner._lifecycle_write_state(deployment_id, "TEARING_DOWN")
+    runner._lifecycle_write_state(deployment_id, LifecycleState.TEARING_DOWN)
     # VIB-5085: record the open-position count (not the intent count) as the
     # teardown's positions_total. ``None`` when unreadable — the mark_started
     # denominator then degrades to the intent count (cosmetic; the completion
@@ -1224,7 +1225,7 @@ async def execute_teardown(  # noqa: C901
         if request:
             _safe_mark(manager, "mark_completed", deployment_id, result={"reason": "all_balances_zero"})
         runner.request_shutdown()
-        runner._lifecycle_write_state(deployment_id, "TERMINATED")
+        runner._lifecycle_write_state(deployment_id, LifecycleState.TERMINATED)
         runner._record_success()
         return IterationResult(
             status=IterationStatus.TEARDOWN,
@@ -2189,7 +2190,7 @@ async def _execute_teardown_inline_body(  # noqa: C901
             last_result.status = IterationStatus.TEARDOWN
             logger.info(f"🛑 {deployment_id} teardown complete - shutting down strategy runner")
             runner.request_shutdown()
-            runner._lifecycle_write_state(deployment_id, "TERMINATED")
+            runner._lifecycle_write_state(deployment_id, LifecycleState.TERMINATED)
             runner._record_success()
             if request:
                 # VIB-5085: report positions closed (= pre-execution count on a
@@ -2237,7 +2238,7 @@ async def _execute_teardown_inline_body(  # noqa: C901
 
     logger.info(f"🛑 {deployment_id} teardown: all positions already closed, shutting down")
     runner.request_shutdown()
-    runner._lifecycle_write_state(deployment_id, "TERMINATED")
+    runner._lifecycle_write_state(deployment_id, LifecycleState.TERMINATED)
     runner._record_success()
     if request:
         _safe_mark(state_manager, "mark_completed", deployment_id, result={"reason": "all_positions_already_closed"})

@@ -1,7 +1,7 @@
 """Tests for teardown failure → shutdown with ERROR terminal state.
 
 Validates that when teardown fails in a managed deployment, the runner:
-1. Sets _terminal_lifecycle_state = "ERROR" (not the default "TERMINATED")
+1. Sets _terminal_lifecycle_state to typed ERROR (not the default TERMINATED)
 2. Sets _terminal_lifecycle_error_message with a meaningful description
 3. Requests shutdown so the run loop exits
 
@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from almanak.core.lifecycle import LifecycleState
 from almanak.framework.runner.strategy_runner import (
     IterationResult,
     IterationStatus,
@@ -94,7 +95,7 @@ class TestRequestTeardownFailureShutdownDeployed:
         runner = _make_runner()
         runner._request_teardown_failure_shutdown("something went wrong")
 
-        assert runner._terminal_lifecycle_state == "ERROR"
+        assert runner._terminal_lifecycle_state is LifecycleState.ERROR
         assert runner._terminal_lifecycle_error_message == "something went wrong"
         assert runner._shutdown_requested is True
 
@@ -102,7 +103,7 @@ class TestRequestTeardownFailureShutdownDeployed:
         runner = _make_runner()
         runner._request_teardown_failure_shutdown("bad teardown")
 
-        assert runner._terminal_lifecycle_state != "TERMINATED"
+        assert runner._terminal_lifecycle_state is not LifecycleState.TERMINATED
 
 
 # ---------------------------------------------------------------------------
@@ -166,7 +167,7 @@ class TestTeardownIntentGenerationFailure:
         )
 
         assert result.status == IterationStatus.STRATEGY_ERROR
-        assert runner._terminal_lifecycle_state == "ERROR"
+        assert runner._terminal_lifecycle_state is LifecycleState.ERROR
         assert "intent gen boom" in runner._terminal_lifecycle_error_message
         assert runner._shutdown_requested is True
 
@@ -260,7 +261,7 @@ class TestManagerExecutionException:
 
         runner._request_teardown_failure_shutdown(error_msg)
 
-        assert runner._terminal_lifecycle_state == "ERROR"
+        assert runner._terminal_lifecycle_state is LifecycleState.ERROR
         assert runner._terminal_lifecycle_error_message == error_msg
         assert runner._shutdown_requested is True
 
@@ -306,7 +307,7 @@ class TestManagerTeardownIncomplete:
             )
 
         assert result.status == IterationStatus.STRATEGY_ERROR
-        assert runner._terminal_lifecycle_state == "ERROR"
+        assert runner._terminal_lifecycle_state is LifecycleState.ERROR
         assert runner._shutdown_requested is True
 
 
@@ -381,5 +382,5 @@ class TestInlineTeardownFailure:
             )
 
         assert result.status == IterationStatus.STRATEGY_ERROR
-        assert runner._terminal_lifecycle_state == "ERROR"
+        assert runner._terminal_lifecycle_state is LifecycleState.ERROR
         assert runner._shutdown_requested is True

@@ -25,6 +25,8 @@ import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from almanak.core.lifecycle import LifecycleState
+
 from ..models.actions import AvailableAction, SuggestedAction
 from ..models.operator_card import EventType, OperatorCard, PositionSummary, Severity
 from ..models.stuck_reason import StuckReason
@@ -402,13 +404,13 @@ class RunnerAlerter:
                         strategy.deployment_id,
                     )
                 else:
-                    self._runner._terminal_lifecycle_state = "ERROR"
+                    self._runner._terminal_lifecycle_state = LifecycleState.ERROR
                     self._runner._terminal_lifecycle_error_message = (
                         f"Circuit breaker tripped: {last_result.error or 'unknown'}"
                     )
                     self._runner._lifecycle_write_state(
                         strategy.deployment_id,
-                        "ERROR",
+                        LifecycleState.ERROR,
                         error_message=self._runner._terminal_lifecycle_error_message,
                     )
                     logger.critical("Circuit breaker tripped in managed deployment — exiting process")

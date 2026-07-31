@@ -39,6 +39,7 @@ from almanak.config.cli_runtime import (  # noqa: F401 — preserve pre-split mo
     almanak_chain_from_env,
     anvil_port_for_chain,
 )
+from almanak.core.lifecycle import LifecycleState
 
 if TYPE_CHECKING:
     pass
@@ -313,8 +314,8 @@ def _report_boot_failure(gateway_client: Any | None, deployment_id: str | None, 
     this write is what keeps the hosted platform's status honest (the
     status-sync maps lifecycle ``ERROR`` + reason instead of showing a pod
     that never got past ``__init__`` as anything runnable). ``ERROR`` is an
-    accepted state in the gateway's ``_VALID_STATES`` whitelist
-    (``almanak/gateway/services/lifecycle_service.py``).
+    writable state in the canonical lifecycle contract
+    (``almanak/core/lifecycle.py``).
     """
     if gateway_client is None or not deployment_id:
         return
@@ -324,7 +325,7 @@ def _report_boot_failure(gateway_client: Any | None, deployment_id: str | None, 
         gateway_client.lifecycle.WriteState(
             gateway_pb2.WriteAgentStateRequest(
                 deployment_id=deployment_id,
-                state="ERROR",
+                state=LifecycleState.ERROR.value,
                 error_message=error_message,
             )
         )

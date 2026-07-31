@@ -10,6 +10,14 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from almanak.core.lifecycle import (
+    LifecycleCommand,
+    LifecycleState,
+    LifecycleValueError,
+    parse_lifecycle_command,
+    require_writable_state,
+)
+
 if TYPE_CHECKING:
     from .runner_models import StrategyProtocol
 
@@ -315,7 +323,12 @@ except Exception:
 _RUNNING_VERSION_REPORTED_DEPLOYMENT_IDS: set[str] = set()
 
 
-def lifecycle_write_state(runner: Any, deployment_id: str, state: str, error_message: str | None = None) -> None:
+def lifecycle_write_state(
+    runner: Any,
+    deployment_id: str,
+    state: LifecycleState,
+    error_message: str | None = None,
+) -> None:
     """Write deployment lifecycle state via gateway.
 
     Non-fatal: catches all exceptions.
@@ -326,15 +339,16 @@ def lifecycle_write_state(runner: Any, deployment_id: str, state: str, error_mes
     try:
         from almanak.gateway.proto import gateway_pb2
 
+        state = require_writable_state(state)
         request = gateway_pb2.WriteAgentStateRequest(
             deployment_id=deployment_id,
-            state=state,
+            state=state.value,
             error_message=error_message or "",
         )
         reported_version = _REPORTED_ALMANAK_VERSION
         reported_running_version = False
         if (
-            state == "RUNNING"
+            state is LifecycleState.RUNNING
             and reported_version is not None
             and deployment_id not in _RUNNING_VERSION_REPORTED_DEPLOYMENT_IDS
         ):
@@ -364,13 +378,12 @@ def lifecycle_heartbeat(runner: Any, deployment_id: str) -> None:
         logger.debug(f"Failed to send lifecycle heartbeat (non-fatal): {e}")
 
 
-def lifecycle_poll_command(runner: Any, deployment_id: str) -> str | None:
+def lifecycle_poll_command(runner: Any, deployment_id: str) -> LifecycleCommand | None:
     """Poll for pending command from LifecycleStore.
 
-    Returns command string (STOP) or None.
-    The command is acknowledged only after it is returned so that callers
-    can apply side-effects before the ack.  If the process crashes between
-    read and ack the command will be re-delivered on the next poll.
+    Known historical commands are returned so the exhaustive runner handler can
+    log and ignore them. Unknown wire values are logged, acknowledged to prevent
+    a poison row from blocking the queue, and never reach control flow.
     Non-fatal: catches all exceptions.
     """
     client = runner._get_gateway_client()
@@ -382,9 +395,18 @@ def lifecycle_poll_command(runner: Any, deployment_id: str) -> str | None:
         request = gateway_pb2.ReadAgentCommandRequest(deployment_id=deployment_id)
         response = client.lifecycle.ReadCommand(request)
         if response.found:
-            command = response.command
-            logger.info("Received lifecycle command: %s (from %s)", command, response.issued_by)
-            # Acknowledge after reading so the command is re-delivered if we crash
+            try:
+                parsed_command = parse_lifecycle_command(response.command)
+            except LifecycleValueError:
+                command = None
+                logger.error(
+                    "Ignoring unknown lifecycle command %r for %s; acknowledging without dispatch",
+                    response.command,
+                    deployment_id,
+                )
+            else:
+                command = parsed_command
+                logger.info("Received lifecycle command: %s (from %s)", parsed_command.value, response.issued_by)
             try:
                 ack_request = gateway_pb2.AckAgentCommandRequest(command_id=response.command_id)
                 client.lifecycle.AckCommand(ack_request)
@@ -414,7 +436,7 @@ def lifecycle_handle_stop(runner: Any, deployment_id: str, strategy: Any) -> Non
         resolve_preferred_asset_policy,
     )
 
-    runner._lifecycle_write_state(deployment_id, "STOPPING")
+    runner._lifecycle_write_state(deployment_id, LifecycleState.STOPPING)
 
     try:
         manager = get_teardown_state_manager_for_runtime(gateway_client=runner._get_gateway_client())

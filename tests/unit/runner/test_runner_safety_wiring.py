@@ -12,6 +12,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from almanak.core.lifecycle import LifecycleState
 from almanak.framework.data.interfaces import BalanceResult, PriceResult
 from almanak.framework.execution.circuit_breaker import (
     CircuitBreaker,
@@ -490,7 +491,7 @@ class TestStuckDetectorWiring:
         config = RunnerConfig(max_consecutive_errors=2)
         runner = _make_runner(config=config)
 
-        states_written: list[str] = []
+        states_written: list[LifecycleState] = []
         original_write = runner._lifecycle_write_state
 
         def spy(deployment_id, state, error_message=None):
@@ -535,9 +536,10 @@ class TestStuckDetectorWiring:
         await runner.run_loop(strategy, interval_seconds=0, max_iterations=3)
 
         # Expected sequence of writes: startup RUNNING, ERROR (after 2nd fail), RUNNING (recovery)
-        assert "ERROR" in states_written, f"ERROR not written; saw {states_written}"
-        error_idx = states_written.index("ERROR")
-        running_after_error = [s for s in states_written[error_idx + 1 :] if s == "RUNNING"]
+        error_indices = [index for index, state in enumerate(states_written) if state is LifecycleState.ERROR]
+        assert error_indices, f"ERROR not written; saw {states_written}"
+        error_idx = error_indices[0]
+        running_after_error = [s for s in states_written[error_idx + 1 :] if s is LifecycleState.RUNNING]
         assert running_after_error, f"Expected a RUNNING write after ERROR (lifecycle recovery), got {states_written}"
         # Counter is zeroed on the recovering success
         assert runner._consecutive_errors == 0
@@ -548,7 +550,7 @@ class TestStuckDetectorWiring:
         config = RunnerConfig(max_consecutive_errors=5)  # high threshold
         runner = _make_runner(config=config)
 
-        states_written: list[str] = []
+        states_written: list[LifecycleState] = []
         original_write = runner._lifecycle_write_state
 
         def spy(deployment_id, state, error_message=None):
@@ -592,9 +594,11 @@ class TestStuckDetectorWiring:
 
         # Only the startup RUNNING write should be present — no recovery write and no ERROR write
         # (we stayed below max_consecutive_errors).
-        running_writes = [s for s in states_written if s == "RUNNING"]
+        running_writes = [s for s in states_written if s is LifecycleState.RUNNING]
         assert len(running_writes) == 1, f"Unexpected extra RUNNING writes: {states_written}"
-        assert "ERROR" not in states_written, f"Should not write ERROR below threshold: {states_written}"
+        assert all(state is not LifecycleState.ERROR for state in states_written), (
+            f"Should not write ERROR below threshold: {states_written}"
+        )
 
     @pytest.mark.asyncio
     async def test_lifecycle_recovery_skipped_when_terminal_state_active(self, monkeypatch):
@@ -610,7 +614,7 @@ class TestStuckDetectorWiring:
         # Pre-populate the error streak state
         runner._consecutive_errors = config.max_consecutive_errors
 
-        states_written: list[str] = []
+        states_written: list[LifecycleState] = []
         original_write = runner._lifecycle_write_state
 
         def spy(deployment_id, state, error_message=None):
@@ -644,7 +648,7 @@ class TestStuckDetectorWiring:
             def decide(self, market):
                 self.decide_call_count += 1
                 # Simulate a teardown-style transition: terminal write + shutdown request
-                self._runner._lifecycle_write_state(self._deployment_id, "TERMINATED")
+                self._runner._lifecycle_write_state(self._deployment_id, LifecycleState.TERMINATED)
                 self._runner.request_shutdown()
                 return HoldIntent(reason="terminal")
 
@@ -655,9 +659,10 @@ class TestStuckDetectorWiring:
         await runner.run_loop(strategy, max_iterations=1)
 
         # TERMINATED must appear and must NOT be followed by a recovery RUNNING write.
-        assert "TERMINATED" in states_written, f"Expected TERMINATED: {states_written}"
-        terminated_idx = states_written.index("TERMINATED")
-        later_running = [s for s in states_written[terminated_idx + 1 :] if s == "RUNNING"]
+        terminated_indices = [index for index, state in enumerate(states_written) if state is LifecycleState.TERMINATED]
+        assert terminated_indices, f"Expected TERMINATED: {states_written}"
+        terminated_idx = terminated_indices[0]
+        later_running = [s for s in states_written[terminated_idx + 1 :] if s is LifecycleState.RUNNING]
         assert not later_running, f"Recovery RUNNING write clobbered terminal state: {states_written}"
 
     @pytest.mark.asyncio

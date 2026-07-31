@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from almanak.core.lifecycle import LifecycleCommand
 from almanak.framework.runner.strategy_runner import _WAIT_POLL_SLICE_SECONDS, StrategyRunner
 
 
@@ -86,8 +87,8 @@ class TestInterruptibleWait:
         sleep_calls: list[float] = []
         to_thread_fns: list = []
 
-        # First poll returns None (no command yet), second returns "STOP".
-        runner._lifecycle_poll_command = MagicMock(side_effect=[None, "STOP"])
+        # First poll returns None (no command yet), second returns STOP.
+        runner._lifecycle_poll_command = MagicMock(side_effect=[None, LifecycleCommand.STOP])
 
         handle_lc_calls: list[tuple] = []
 
@@ -109,7 +110,8 @@ class TestInterruptibleWait:
         assert all(s == _WAIT_POLL_SLICE_SECONDS for s in sleep_calls)
         # The STOP command must have been routed to handle_lifecycle_command.
         assert len(handle_lc_calls) == 1
-        assert handle_lc_calls[0] == (deployment_id, "STOP")
+        assert handle_lc_calls[0][0] == deployment_id
+        assert handle_lc_calls[0][1] is LifecycleCommand.STOP
         # _lifecycle_poll_command called twice (once per sleep slice).
         assert runner._lifecycle_poll_command.call_count == 2
         # The synchronous gRPC poll must be dispatched off-loop via asyncio.to_thread.
@@ -117,9 +119,9 @@ class TestInterruptibleWait:
 
     @pytest.mark.asyncio
     async def test_non_stop_command_does_not_break_wait(self):
-        """A retired PAUSE / unknown command is handled but does NOT end the wait early.
+        """A retired PAUSE command is handled but does NOT end the wait early.
 
-        handle_lifecycle_command processes-and-ignores PAUSE/RESUME/unknown; the wait
+        handle_lifecycle_command processes-and-ignores PAUSE/RESUME; the wait
         must keep sleeping the remaining slices rather than waking the runner up.
         """
         runner = _make_runner()
@@ -128,7 +130,7 @@ class TestInterruptibleWait:
 
         sleep_calls: list[float] = []
         # PAUSE on the first slice, then None for the rest. interval=45 → 3 slices.
-        runner._lifecycle_poll_command = MagicMock(side_effect=["PAUSE", None, None])
+        runner._lifecycle_poll_command = MagicMock(side_effect=[LifecycleCommand.PAUSE, None, None])
 
         handle_lc_calls: list[tuple] = []
 
@@ -145,7 +147,9 @@ class TestInterruptibleWait:
             await runner._interruptible_wait(deployment_id, 45, strategy)
 
         # PAUSE was routed to the handler...
-        assert (deployment_id, "PAUSE") in handle_lc_calls
+        assert len(handle_lc_calls) == 1
+        assert handle_lc_calls[0][0] == deployment_id
+        assert handle_lc_calls[0][1] is LifecycleCommand.PAUSE
         # ...but the wait did NOT return early: all 3 slices were slept.
         assert len(sleep_calls) == 3
         assert runner._lifecycle_poll_command.call_count == 3

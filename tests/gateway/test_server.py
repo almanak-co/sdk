@@ -8,6 +8,7 @@ import pytest
 import pytest_asyncio
 from grpc_health.v1 import health_pb2, health_pb2_grpc
 
+from almanak.core.lifecycle import LifecycleState
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.server import _AIOHTTP_SHUTDOWN_GRACE_SECONDS, GatewayServer
 
@@ -219,17 +220,11 @@ async def test_serving_deferred_until_after_warmup():
     assert "SERVING" in call_order, f"SERVING was never set: {call_order}"
     serving_idx = call_order.index("SERVING")
     not_serving_idx = call_order.index("NOT_SERVING")
-    assert not_serving_idx < serving_idx, (
-        f"NOT_SERVING must precede SERVING: {call_order}"
-    )
+    assert not_serving_idx < serving_idx, f"NOT_SERVING must precede SERVING: {call_order}"
     assert "warmup_end" in call_order, f"Warmup was not executed: {call_order}"
     assert "prewarm_end" in call_order, f"Prewarm was not executed: {call_order}"
-    assert call_order.index("warmup_end") < serving_idx, (
-        f"SERVING set before warmup completed: {call_order}"
-    )
-    assert call_order.index("prewarm_end") < serving_idx, (
-        f"SERVING set before prewarm completed: {call_order}"
-    )
+    assert call_order.index("warmup_end") < serving_idx, f"SERVING set before warmup completed: {call_order}"
+    assert call_order.index("prewarm_end") < serving_idx, f"SERVING set before prewarm completed: {call_order}"
 
     await server.stop()
 
@@ -245,7 +240,7 @@ async def test_serving_deferred_until_after_warmup():
 # ---------------------------------------------------------------------------
 
 
-def _make_state_row(state: str):
+def _make_state_row(state):
     """Build a minimal stand-in for an ``AgentState`` row returned by read_state."""
     row = MagicMock()
     row.state = state
@@ -264,26 +259,30 @@ async def test_announce_initializing_writes_when_hosted_and_writer(monkeypatch):
 
     await server._announce_initializing(store)
 
-    store.write_state.assert_called_once_with("agent-abc", "INITIALIZING")
+    store.write_state.assert_called_once_with("agent-abc", LifecycleState.INITIALIZING)
 
 
 @pytest.mark.asyncio
-async def test_announce_initializing_writes_when_row_is_platform_state(monkeypatch):
+@pytest.mark.parametrize(
+    "platform_state",
+    [LifecycleState.V2_PREPARING, LifecycleState.V2_DEPLOYING],
+)
+async def test_announce_initializing_writes_when_row_is_platform_state(monkeypatch, platform_state):
     """V2_DEPLOYING / V2_PREPARING are platform-owned — gateway advances them."""
     monkeypatch.setenv("ALMANAK_IS_HOSTED", "true")
     monkeypatch.setenv("ALMANAK_DEPLOYMENT_ID", "agent-abc")
     settings = GatewaySettings(metrics_enabled=False, audit_enabled=False, lifecycle_writer=True)
     server = GatewayServer(settings)
     store = MagicMock()
-    store.read_state.return_value = _make_state_row("V2_DEPLOYING")
+    store.read_state.return_value = _make_state_row(platform_state)
 
     await server._announce_initializing(store)
 
-    store.write_state.assert_called_once_with("agent-abc", "INITIALIZING")
+    store.write_state.assert_called_once_with("agent-abc", LifecycleState.INITIALIZING)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("existing_state", ["RUNNING", "STOPPING", "TEARING_DOWN", "TERMINATED", "ERROR", "INITIALIZING"])
+@pytest.mark.parametrize("existing_state", [state for state in LifecycleState if state.is_writable])
 async def test_announce_initializing_skips_when_sdk_owned_state(monkeypatch, existing_state):
     """Gateway sidecar restart while strategy is healthy must NOT regress the row.
 
@@ -347,7 +346,7 @@ async def test_announce_initializing_swallows_write_errors(monkeypatch):
 
     await server._announce_initializing(store)  # must not raise
 
-    store.write_state.assert_called_once_with("agent-abc", "INITIALIZING")
+    store.write_state.assert_called_once_with("agent-abc", LifecycleState.INITIALIZING)
 
 
 @pytest.mark.asyncio

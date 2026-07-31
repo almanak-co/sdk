@@ -13,18 +13,20 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
+from almanak.core.lifecycle import LifecycleCommand, LifecycleState, LifecycleStateSource
+
 
 @dataclass
 class AgentState:
     """Current state of an agent."""
 
     deployment_id: str
-    state: str  # INITIALIZING, RUNNING, PAUSED, ERROR, STOPPING, TERMINATED
+    state: LifecycleState
     state_changed_at: datetime
     last_heartbeat_at: datetime | None = None
     error_message: str | None = None
     iteration_count: int = 0
-    source: str = "gateway"  # 'gateway' or 'platform' — tracks who last wrote the state
+    source: LifecycleStateSource = LifecycleStateSource.GATEWAY
     # almanak SDK version loaded inside the strategy process. Written only when
     # the strategy reports it on lifecycle state writes; ``None`` means either
     # not reported yet or the row predates the column.
@@ -37,7 +39,7 @@ class AgentCommand:
 
     id: int
     deployment_id: str
-    command: str  # PAUSE, RESUME, STOP
+    command: LifecycleCommand
     issued_at: datetime
     issued_by: str
     processed_at: datetime | None = None
@@ -59,7 +61,7 @@ class LifecycleStore(Protocol):
     def write_state(
         self,
         deployment_id: str,
-        state: str,
+        state: LifecycleState,
         error_message: str | None = None,
         running_almanak_version: str | None = None,
     ) -> None: ...
@@ -71,4 +73,4 @@ class LifecycleStore(Protocol):
     # Commands
     def read_pending_command(self, deployment_id: str) -> AgentCommand | None: ...
     def ack_command(self, command_id: int) -> None: ...
-    def write_command(self, deployment_id: str, command: str, issued_by: str) -> None: ...
+    def write_command(self, deployment_id: str, command: LifecycleCommand, issued_by: str) -> None: ...

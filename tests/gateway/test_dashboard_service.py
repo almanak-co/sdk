@@ -6,7 +6,7 @@ Tests cover:
 - GetTimeline RPC
 - GetStrategyConfig RPC
 - GetStrategyState RPC
-- ExecuteAction RPC (pause/resume)
+- ExecuteAction RPC (typed STOP command; retired actions rejected)
 - GetQuantHeader RPC (Senior-Quant header aggregation)
 - GetTradeTape RPC (joined ledger × accounting × position events)
 - Validation error handling
@@ -23,6 +23,7 @@ from uuid import uuid4
 import grpc
 import pytest
 
+from almanak.core.lifecycle import LifecycleCommand
 from almanak.framework.portfolio.models import PortfolioSnapshot, TokenBalance, ValueConfidence
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2
@@ -800,7 +801,7 @@ class TestExecuteAction:
 
         request = gateway_pb2.ExecuteActionRequest(
             deployment_id="test_strategy",
-            action="PAUSE",
+            action="STOP",
             reason="",  # Empty reason
         )
         response = await dashboard_service.ExecuteAction(request, mock_context)
@@ -809,8 +810,8 @@ class TestExecuteAction:
         assert "Reason is required" in response.error
 
     @pytest.mark.asyncio
-    async def test_execute_pause_success(self, dashboard_service, mock_context):
-        """Test pausing a strategy successfully."""
+    async def test_execute_stop_success(self, dashboard_service, mock_context):
+        """STOP is mapped to the canonical lifecycle command."""
         dashboard_service._initialized = True
 
         mock_store = MagicMock()
@@ -818,7 +819,7 @@ class TestExecuteAction:
         with patch("almanak.gateway.lifecycle.get_lifecycle_store", return_value=mock_store):
             request = gateway_pb2.ExecuteActionRequest(
                 deployment_id="test_strategy",
-                action="PAUSE",
+                action="stop",
                 reason="Maintenance",
             )
             response = await dashboard_service.ExecuteAction(request, mock_context)
@@ -828,13 +829,19 @@ class TestExecuteAction:
 
         mock_store.write_command.assert_called_once_with(
             deployment_id="test_strategy",
-            command="PAUSE",
+            command=LifecycleCommand.STOP,
             issued_by="dashboard:Maintenance",
         )
 
+    @pytest.mark.parametrize("retired_action", ["PAUSE", "RESUME"])
     @pytest.mark.asyncio
-    async def test_execute_resume_success(self, dashboard_service, mock_context):
-        """Test resuming a strategy successfully."""
+    async def test_execute_retired_action_is_rejected(
+        self,
+        dashboard_service,
+        mock_context,
+        retired_action: str,
+    ):
+        """Historical commands cannot be newly enqueued by the dashboard."""
         dashboard_service._initialized = True
 
         mock_store = MagicMock()
@@ -842,18 +849,15 @@ class TestExecuteAction:
         with patch("almanak.gateway.lifecycle.get_lifecycle_store", return_value=mock_store):
             request = gateway_pb2.ExecuteActionRequest(
                 deployment_id="test_strategy",
-                action="RESUME",
-                reason="Ready to continue",
+                action=retired_action,
+                reason="Legacy operator action",
             )
             response = await dashboard_service.ExecuteAction(request, mock_context)
 
-        assert response.success is True
-
-        mock_store.write_command.assert_called_once_with(
-            deployment_id="test_strategy",
-            command="RESUME",
-            issued_by="dashboard:Ready to continue",
-        )
+        assert response.success is False
+        assert response.error == f"Action not implemented: {retired_action}"
+        mock_context.set_code.assert_called_with(grpc.StatusCode.UNIMPLEMENTED)
+        mock_store.write_command.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_execute_unknown_action(self, dashboard_service, mock_context):
