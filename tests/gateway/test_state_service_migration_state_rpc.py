@@ -44,6 +44,7 @@ import pytest_asyncio
 
 from almanak.framework.accounting.commit import RegistryRow
 from almanak.framework.migration.backfill import MigrationStateRow
+from almanak.framework.models.run_mode import RunMode
 from almanak.framework.observability.ledger import LedgerEntry
 from almanak.framework.state.backends.sqlite import SQLiteConfig, SQLiteStore
 from almanak.framework.state.gateway_state_manager import GatewayStateManager
@@ -1180,7 +1181,61 @@ def _pg_service_with_conn(
     return service
 
 
+def _ledger_registry_request(*, execution_mode: str) -> gateway_pb2.SaveLedgerAndRegistryRequest:
+    return gateway_pb2.SaveLedgerAndRegistryRequest(
+        id="22222222-2222-2222-2222-222222222222",
+        cycle_id="cyc-mode",
+        deployment_id=_DEPLOYMENT_ID,
+        execution_mode=execution_mode,
+        timestamp=int(datetime(2026, 5, 11, tzinfo=UTC).timestamp()),
+        intent_type="LP_OPEN",
+        token_in="USDC",
+        amount_in="1",
+        chain="arbitrum",
+        protocol="uniswap_v3",
+        success=True,
+        registry_chain="arbitrum",
+        registry_primitive="lp",
+        registry_accounting_category="lp",
+        registry_physical_identity_hash="0xpih-mode",
+        registry_semantic_grouping_key="arbitrum:pool-mode",
+        registry_grouping_policy_version="univ3_lp@v1",
+        registry_status="open",
+        registry_payload_json=b"{}",
+        registry_matching_policy_version=1,
+    )
+
+
 class TestSaveLedgerAndRegistry:
+    @pytest.mark.asyncio
+    async def test_invalid_execution_mode_rejected_before_atomic_write(self, state_service, mock_context):
+        sm = MagicMock()
+        sm.save_ledger_and_registry = AsyncMock()
+        state_service._state_manager = sm
+
+        response = await state_service.SaveLedgerAndRegistry(
+            _ledger_registry_request(execution_mode="livve"), mock_context
+        )
+
+        assert response.success is False
+        assert response.error_class == "ValueError"
+        mock_context.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
+        sm.save_ledger_and_registry.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_execution_mode_is_canonical_before_atomic_write(self, state_service, mock_context):
+        sm = MagicMock()
+        sm.save_ledger_and_registry = AsyncMock()
+        state_service._state_manager = sm
+
+        response = await state_service.SaveLedgerAndRegistry(
+            _ledger_registry_request(execution_mode=" PAPER "), mock_context
+        )
+
+        assert response.success is True
+        ledger = sm.save_ledger_and_registry.await_args.kwargs["ledger"]
+        assert ledger.execution_mode is RunMode.PAPER
+
     @pytest.mark.asyncio
     async def test_happy_path_via_real_sqlite(self, gsm_client):
         """Round-trip a registry-mode write through the proto + adapter."""

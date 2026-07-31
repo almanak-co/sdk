@@ -40,6 +40,7 @@ from almanak.framework.dashboard.utils import (
     get_timeline_event_icon,
     maybe_auto_select_strategy,
 )
+from almanak.framework.models.run_mode import RunMode
 
 logger = logging.getLogger(__name__)
 
@@ -1590,7 +1591,7 @@ def page(strategies: list[Strategy]) -> None:  # noqa: C901
     st.divider()
 
     # Paper trading sessions get a dedicated detail view
-    if strategy.execution_mode == "paper":
+    if strategy.execution_mode is RunMode.PAPER:
         render_paper_session_detail(strategy)
         return
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import tempfile
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
@@ -31,7 +32,7 @@ from almanak.framework.state.state_manager import (
     WarmBackendType,
 )
 from almanak.gateway.proto import gateway_pb2
-from almanak.gateway.services.position_service import PositionServiceServicer
+from almanak.gateway.services.position_service import PositionServiceServicer, _PrimitiveErrorCollector
 
 
 class _NoopGrpcContext:
@@ -103,6 +104,48 @@ def mock_rpc_servicer_empty_wallet():
 
     rpc.Call = AsyncMock(side_effect=fake_call)
     return rpc
+
+
+@pytest.mark.asyncio
+async def test_apply_phantom_missing_writes_registry_without_ledger(mock_state_servicer, temp_state_manager) -> None:
+    """The direct reconciliation writer must preserve its skip-ledger invariant."""
+    _manager, db_path = temp_state_manager
+    servicer = PositionServiceServicer(settings=None)  # type: ignore[arg-type]
+    servicer.state_servicer = mock_state_servicer
+    errors = _PrimitiveErrorCollector()
+
+    rebuilt = await servicer._apply_phantom_missing(
+        deployment_id="TestStrat:abc",
+        chain="arbitrum",
+        source_block_number=12_345_678,
+        reconciliation_id="reconcile-direct",
+        phantoms=[
+            {
+                "primitive": Primitive.LP,
+                "accounting_category": AccountingCategory.LP,
+                "physical_identity_hash": "phantom-direct",
+                "semantic_grouping_key": "arbitrum:phantom-direct",
+                "payload": {"protocol": "uniswap_v3", "token_id": 42},
+                "opened_at_block": 12_345_000,
+                "opened_tx": "0xphantom",
+            }
+        ],
+        errors=errors,
+    )
+
+    with sqlite3.connect(db_path) as conn:
+        ledger_count = conn.execute("SELECT COUNT(*) FROM transaction_ledger").fetchone()[0]
+        registry_row = conn.execute(
+            "SELECT physical_identity_hash, status, payload FROM position_registry WHERE physical_identity_hash = ?",
+            ("phantom-direct",),
+        ).fetchone()
+
+    assert ledger_count == 0
+    assert registry_row is not None
+    assert registry_row[0:2] == ("phantom-direct", "open")
+    assert json.loads(registry_row[2])["source"] == "reconciliation_discovery"
+    assert [row["physical_identity_hash"] for row in rebuilt] == ["phantom-direct"]
+    assert errors.list() == []
 
 
 @pytest.mark.asyncio

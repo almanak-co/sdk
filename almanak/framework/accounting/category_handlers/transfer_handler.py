@@ -46,6 +46,7 @@ from almanak.framework.accounting.models import (
     TransferEventType,
     TransferSettlementStatus,
 )
+from almanak.framework.models.run_mode import RunMode
 from almanak.framework.observability.ledger import deserialize_extracted_data
 
 logger = logging.getLogger(__name__)
@@ -179,7 +180,7 @@ def handle_transfer(
         id=make_accounting_event_id(deployment_id, cycle_id, "TRANSFER", _id_seed, _id_suffix),
         deployment_id=deployment_id,
         cycle_id=cycle_id,
-        execution_mode=execution_mode,
+        execution_mode=RunMode.parse_optional(execution_mode),
         timestamp=timestamp,
         chain=chain,
         protocol=protocol,

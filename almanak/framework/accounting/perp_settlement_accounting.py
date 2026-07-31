@@ -39,6 +39,7 @@ from typing import Any
 from almanak.framework.accounting.ids import make_accounting_event_id
 from almanak.framework.accounting.measured import encode_money_payload
 from almanak.framework.accounting.models import AccountingConfidence, AccountingIdentity, PerpEventType
+from almanak.framework.models.run_mode import RunMode
 
 
 class PerpSettlementAccountingEvent:
@@ -204,7 +205,7 @@ def build_perp_settlement_event(
         ),
         deployment_id=deployment_id,
         cycle_id=cycle_id,
-        execution_mode=execution_mode,
+        execution_mode=RunMode.parse_optional(execution_mode),
         timestamp=timestamp or datetime.now(UTC),
         chain=chain,
         protocol=protocol,

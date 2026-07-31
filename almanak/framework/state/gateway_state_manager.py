@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 import grpc
 
 from almanak.framework.gateway_client import GatewayClient
+from almanak.framework.models.run_mode import RunMode
 from almanak.framework.state.exceptions import AccountingPersistenceError, AccountingWriteKind
 from almanak.framework.state.state_manager import StateData
 from almanak.gateway.proto import gateway_pb2
@@ -608,7 +609,7 @@ class GatewayStateManager:
                 # Phase 4 accounting identity fields (VIB-2835/2837/2839)
                 deployment_id=response.deployment_id or "",
                 cycle_id=response.cycle_id or "",
-                execution_mode=response.execution_mode or "",
+                execution_mode=RunMode.parse_optional(response.execution_mode),
                 is_complete=response.is_complete,
             )
         except Exception as e:

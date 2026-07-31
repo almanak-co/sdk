@@ -20,6 +20,7 @@ from almanak.core.models.params import (
     UpdateTotalAssetsParams,
 )
 from almanak.framework.data.tokens import get_token_resolver
+from almanak.framework.models.run_mode import RunMode
 from almanak.framework.vault.capability import default_vault_protocol
 from almanak.framework.vault.config import (
     ReleaseResult,
@@ -171,7 +172,7 @@ class VaultLifecycleManager:
         persistence_callback: Callable[[dict], None] | None = None,
         receipt_parser_protocol: str | None = None,
         receipt_parser: VaultReceiptParserHandle | None = None,
-        execution_mode: str = "live",
+        execution_mode: RunMode = RunMode.LIVE,
     ) -> None:
         self._config = vault_config
         self._vault_sdk = vault_sdk
@@ -183,7 +184,7 @@ class VaultLifecycleManager:
         # mis-priced propose; paper / dry_run log ERROR and continue (mirroring the
         # accounting layer's mode-aware writes). Defaults to the strictest mode so an
         # unset / unknown value fails safe.
-        self._execution_mode = (execution_mode or "live").strip().lower()
+        self._execution_mode = RunMode.parse(execution_mode)
         self._initial_vault_state = initial_vault_state
         self._vault_state: VaultState | None = None
         self._persistence_callback = persistence_callback
@@ -535,7 +536,7 @@ class VaultLifecycleManager:
         layer's mode-aware writes (blueprint 27). Any unrecognised label fails
         safe as live.
         """
-        return self._execution_mode not in ("paper", "dry_run")
+        return self._execution_mode is RunMode.LIVE
 
     def _share_backed_base(self) -> int | None:
         """Read the share-backed base = on-chain totalAssets + pending deposits.

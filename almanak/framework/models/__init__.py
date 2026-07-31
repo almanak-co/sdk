@@ -26,6 +26,7 @@ from .reproduction_bundle import (
     register_failure_hook,
     unregister_failure_hook,
 )
+from .run_mode import RunMode, RunModeStamp, serialize_run_mode
 from .strategy_version import (
     DeploymentResult,
     PerformanceMetrics,
@@ -77,6 +78,10 @@ __all__ = [
     "get_failure_hooks",
     "clear_failure_hooks",
     "on_failure",
+    # Runtime mode
+    "RunMode",
+    "RunModeStamp",
+    "serialize_run_mode",
     # Strategy versioning
     "StrategyVersion",
     "PerformanceMetrics",

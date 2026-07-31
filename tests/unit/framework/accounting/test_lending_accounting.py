@@ -22,7 +22,6 @@ from almanak.framework.accounting.basis import FIFOBasisStore
 from almanak.framework.accounting.category_handlers.lending_handler import handle_lending
 from almanak.framework.accounting.models import LendingEventType
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1013,3 +1012,24 @@ class TestHandleLendingPreStateLaneSymmetry:
         assert event is not None
         assert event.health_factor_before is None
         assert event.collateral_value_before_usd is None
+
+
+def test_invalid_execution_mode_fails_before_lending_fifo_mutation() -> None:
+    led_id = str(uuid.uuid4())
+    outbox = _make_outbox_row(led_id, intent_type="BORROW")
+    ledger = _make_ledger_row(
+        led_id,
+        intent_type="BORROW",
+        extracted_data_json=json.dumps({"borrow_amount": 100_000_000}),
+        price_inputs_json=_usdc_price_json(),
+    )
+    ledger["execution_mode"] = "livve"
+    basis = MagicMock(spec=FIFOBasisStore)
+
+    with pytest.raises(ValueError, match="invalid run mode"):
+        handle_lending(outbox, ledger, basis)
+
+    basis.record_borrow.assert_not_called()
+    basis.record_swap_acquisition.assert_not_called()
+    basis.match_repay.assert_not_called()
+    basis.match_swap_disposal.assert_not_called()

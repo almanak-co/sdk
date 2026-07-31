@@ -148,7 +148,6 @@ def _make_ledger_row(led_id: str, *, price_inputs_json: str) -> dict:
         "extracted_data_json": "",
         "price_inputs_json": price_inputs_json,
         "deployment_id": "d",
-        "deployment_id": "s",
         "cycle_id": "c",
         "execution_mode": "live",
         "tx_hash": "0xtx",

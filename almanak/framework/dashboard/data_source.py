@@ -39,6 +39,7 @@ from almanak.framework.dashboard.models import (
 from almanak.framework.dashboard.models import (
     TimelineEvent as DashboardTimelineEvent,
 )
+from almanak.framework.models.run_mode import RunMode
 
 logger = logging.getLogger(__name__)
 
@@ -184,7 +185,7 @@ def _convert_gateway_summary_to_model(summary: StrategySummary) -> Strategy:
     Returns:
         Strategy model for dashboard display
     """
-    execution_mode = summary.execution_mode or "live"
+    execution_mode = RunMode.parse(summary.execution_mode or RunMode.LIVE)
     paper_metrics = _build_paper_metrics(summary)
 
     return Strategy(

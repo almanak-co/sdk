@@ -16,6 +16,8 @@ from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
+from almanak.framework.models.run_mode import RunMode, RunModeStamp, serialize_run_mode
+
 if TYPE_CHECKING:
     from almanak.framework.teardown.models import PositionType
 
@@ -192,7 +194,7 @@ class PortfolioSnapshot:
     snapshot_metadata: dict[str, Any] = field(default_factory=dict)
 
     cycle_id: str = ""
-    execution_mode: str = ""  # "live" | "paper" | "dry_run" | "backtest"
+    execution_mode: RunModeStamp = ""
 
     def __post_init__(self) -> None:
         """Normalize numeric fields to Decimal."""
@@ -204,6 +206,7 @@ class PortfolioSnapshot:
             self.deployed_capital_usd = Decimal(str(self.deployed_capital_usd))
         if isinstance(self.wallet_total_value_usd, int | float | str):
             self.wallet_total_value_usd = Decimal(str(self.wallet_total_value_usd))
+        self.execution_mode = RunMode.parse_optional(self.execution_mode)
 
     @property
     def position_value_usd(self) -> Decimal:
@@ -241,7 +244,7 @@ class PortfolioSnapshot:
             "chain": self.chain,
             "iteration_number": self.iteration_number,
             "cycle_id": self.cycle_id,
-            "execution_mode": self.execution_mode,
+            "execution_mode": serialize_run_mode(self.execution_mode),
         }
         if self.snapshot_metadata:
             data["snapshot_metadata"] = self.snapshot_metadata
@@ -338,7 +341,7 @@ class PortfolioSnapshot:
             iteration_number=data.get("iteration_number", 0),
             snapshot_metadata=data.get("snapshot_metadata", {}),
             cycle_id=data.get("cycle_id", ""),
-            execution_mode=data.get("execution_mode", ""),
+            execution_mode=RunMode.parse_optional(data.get("execution_mode")),
         )
 
     @staticmethod
@@ -628,7 +631,7 @@ class PortfolioMetrics:
     positions_json: str = "[]"  # JSON-encoded position details
     cycle_id: str | None = None  # Current execution cycle
 
-    execution_mode: str = ""  # "live", "paper", "dry_run", "backtest"
+    execution_mode: RunModeStamp = ""
     is_complete: bool = True  # Whether all expected records for this cycle were committed
 
     def __post_init__(self) -> None:
@@ -643,6 +646,7 @@ class PortfolioMetrics:
             value = getattr(self, attr)
             if isinstance(value, int | float | str):
                 setattr(self, attr, Decimal(str(value)))
+        self.execution_mode = RunMode.parse_optional(self.execution_mode)
 
     @property
     def pnl_before_gas(self) -> Decimal | None:
@@ -699,7 +703,7 @@ class PortfolioMetrics:
             "gas_spent_usd": str(self.gas_spent_usd),
             "positions_json": self.positions_json,
             "cycle_id": self.cycle_id,
-            "execution_mode": self.execution_mode,
+            "execution_mode": serialize_run_mode(self.execution_mode),
             "is_complete": self.is_complete,
         }
 
@@ -722,6 +726,6 @@ class PortfolioMetrics:
             gas_spent_usd=Decimal(data.get("gas_spent_usd", "0")),
             positions_json=data.get("positions_json", "[]"),
             cycle_id=data.get("cycle_id"),
-            execution_mode=data.get("execution_mode", ""),
+            execution_mode=RunMode.parse_optional(data.get("execution_mode")),
             is_complete=data.get("is_complete", True),
         )

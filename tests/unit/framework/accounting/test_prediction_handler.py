@@ -66,7 +66,6 @@ def _make_outbox_row(
         "id": str(uuid.uuid4()),
         "ledger_entry_id": str(uuid.uuid4()),
         "deployment_id": _DEPLOYMENT_ID,
-        "deployment_id": _DEPLOYMENT_ID,
         "cycle_id": _CYCLE_ID,
         "intent_type": intent_type,
         "wallet_address": wallet_address,
@@ -102,7 +101,6 @@ def _make_ledger_row(
     lid = ledger_entry_id or str(uuid.uuid4())
     return {
         "id": lid,
-        "deployment_id": _DEPLOYMENT_ID,
         "deployment_id": _DEPLOYMENT_ID,
         "cycle_id": _CYCLE_ID,
         "execution_mode": "live",
@@ -597,7 +595,6 @@ def _outbox_with_no_key(intent_type: str) -> dict[str, Any]:
         "id": str(uuid.uuid4()),
         "ledger_entry_id": str(uuid.uuid4()),
         "deployment_id": _DEPLOYMENT_ID,
-        "deployment_id": _DEPLOYMENT_ID,
         "cycle_id": _CYCLE_ID,
         "intent_type": intent_type,
         "wallet_address": "",  # missing wallet
@@ -822,3 +819,15 @@ class TestBuildPositionKeyProtocolFallback:
             outcome="YES",
         )
         assert key == ""  # no malformed "prediction::..." prefix
+
+
+def test_invalid_buy_mode_is_retry_safe_and_does_not_update_basis() -> None:
+    outbox, ledger = _buy_event(shares="10", cost_basis="5.00")
+    ledger["execution_mode"] = "livve"
+    basis = FIFOBasisStore()
+
+    for _ in range(2):
+        with pytest.raises(ValueError, match="invalid run mode"):
+            handle_prediction(outbox, ledger, basis)
+
+        assert basis.get_prediction_position(_DEPLOYMENT_ID, _position_key()) is None

@@ -72,6 +72,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from almanak.config.env import _load_dotenv_once
+from almanak.config.runtime import SigningMode
 from almanak.core.chains._helpers import evm_chain_names
 
 logger = logging.getLogger(__name__)
@@ -294,12 +295,12 @@ class CliRuntimeConfig(BaseModel):
     unset.
     """
 
-    execution_mode: str | None = None
+    execution_mode: SigningMode | None = None
     """Framework-side execution mode (``ALMANAK_EXECUTION_MODE``).
 
-    Lowercased on read. ``"safe_zodiac"`` selects the Zodiac path in
-    the Safe-mode preflight; any other value is treated as the
-    "direct" path.
+    Parsed case-insensitively as one of ``eoa``, ``safe_direct``, or
+    ``safe_zodiac``. Any other value raises
+    :class:`~almanak.config.runtime.ConfigurationError`.
     """
 
     # -------------------------------------------------------------------------
@@ -419,7 +420,8 @@ def cli_runtime_config_from_env(
     * ``ALMANAK_GATEWAY_SAFE_ADDRESS`` → ``gateway_safe_address``.
     * ``ALMANAK_SAFE_ADDRESS`` → ``safe_address``.
     * ``ALMANAK_EOA_ADDRESS`` → ``eoa_address``.
-    * ``ALMANAK_EXECUTION_MODE`` → ``execution_mode`` (lowercased).
+    * ``ALMANAK_EXECUTION_MODE`` → ``execution_mode`` (strict
+      case-insensitive :class:`SigningMode` parsing).
     * ``SOLANA_RPC_URL`` → ``solana_rpc_url``
       (default :data:`DEFAULT_SOLANA_RPC_URL`).
     * ``SOLANA_VALIDATOR_PORT`` → ``solana_validator_port``
@@ -505,7 +507,7 @@ def cli_runtime_config_from_env(
         "gateway_safe_address": os.environ.get("ALMANAK_GATEWAY_SAFE_ADDRESS") or None,
         "safe_address": os.environ.get("ALMANAK_SAFE_ADDRESS") or None,
         "eoa_address": os.environ.get("ALMANAK_EOA_ADDRESS") or None,
-        "execution_mode": (execution_mode_raw.lower() if execution_mode_raw else None) or None,
+        "execution_mode": SigningMode.from_string(execution_mode_raw) if execution_mode_raw else None,
         "solana_rpc_url": os.environ.get("SOLANA_RPC_URL") or DEFAULT_SOLANA_RPC_URL,
         "solana_validator_port": _parse_optional_int(
             "SOLANA_VALIDATOR_PORT",

@@ -40,6 +40,8 @@ from decimal import Decimal
 from enum import Enum, IntEnum, auto
 from typing import TYPE_CHECKING, Any, Optional, Protocol, runtime_checkable
 
+from almanak.framework.models.run_mode import RunMode
+
 if TYPE_CHECKING:
     from almanak.framework.accounting.commit import HandleMapping, RegistryRow
     from almanak.framework.execution.clob_handler import ClobFill, ClobOrderState, ClobOrderStatus
@@ -1975,7 +1977,7 @@ def _pg_row_to_portfolio_metrics(row: Any) -> "PortfolioMetrics":
         positions_json=row.get("positions_text") or "[]",
         cycle_id=row.get("cycle_id"),
         deployment_id=row.get("deployment_id") or "",
-        execution_mode=row.get("execution_mode") or "",
+        execution_mode=RunMode.parse_optional(row.get("execution_mode")),
         is_complete=is_complete,
     )
 
@@ -1989,7 +1991,7 @@ def _pg_row_to_ledger_entry(row: Any) -> "LedgerEntry":
         id=row["id"] or "",
         cycle_id=row.get("cycle_id") or "",
         deployment_id=row.get("deployment_id") or "",
-        execution_mode=row.get("execution_mode") or "",
+        execution_mode=RunMode.parse_optional(row.get("execution_mode")),
         timestamp=timestamp,
         intent_type=row.get("intent_type") or "",
         token_in=row.get("token_in") or "",

@@ -40,6 +40,7 @@ from almanak.framework.accounting.models import (
     PendleAccountingEvent,
     PendleEventType,
 )
+from almanak.framework.models.run_mode import RunMode
 from almanak.framework.primitives.types import AccountingCategory
 
 if TYPE_CHECKING:
@@ -237,7 +238,7 @@ def handle_pendle_lp(
         id=make_accounting_event_id(deployment_id, cycle_id, event_type.value, _id_seed, position_key),
         deployment_id=deployment_id,
         cycle_id=cycle_id,
-        execution_mode=execution_mode,
+        execution_mode=RunMode.parse_optional(execution_mode),
         timestamp=timestamp,
         chain=chain,
         protocol=protocol,
@@ -350,7 +351,7 @@ def _pt_identity(ctx: _PTContext, event_type: str) -> AccountingIdentity:
         id=make_accounting_event_id(ctx.deployment_id, ctx.cycle_id, event_type, _id_seed, ctx.position_key),
         deployment_id=ctx.deployment_id,
         cycle_id=ctx.cycle_id,
-        execution_mode=ctx.execution_mode,
+        execution_mode=RunMode.parse_optional(ctx.execution_mode),
         timestamp=ctx.now,
         chain=ctx.chain,
         protocol=ctx.protocol,

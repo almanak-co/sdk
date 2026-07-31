@@ -26,6 +26,7 @@ from typing import Any
 from almanak.framework.accounting.ids import make_accounting_event_id
 from almanak.framework.accounting.models import AccountingConfidence, AccountingIdentity, SettlementEventType
 from almanak.framework.accounting.settlement_accounting import SettlementAccountingEvent
+from almanak.framework.models.run_mode import RunMode
 
 logger = logging.getLogger(__name__)
 
@@ -146,7 +147,7 @@ def handle_settlement(
         id=make_accounting_event_id(deployment_id, cycle_id, intent_type_str, _id_seed, position_key),
         deployment_id=deployment_id,
         cycle_id=cycle_id,
-        execution_mode=execution_mode,
+        execution_mode=RunMode.parse_optional(execution_mode),
         timestamp=timestamp,
         chain=chain,
         protocol=protocol,

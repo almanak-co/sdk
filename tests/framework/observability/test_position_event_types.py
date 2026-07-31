@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from almanak.framework.models.run_mode import RunMode
 from almanak.framework.observability.position_events import (
     PositionEvent,
     PositionEventType,
@@ -37,6 +38,7 @@ def test_persisted_row_round_trips_to_typed_model() -> None:
     persisted = PositionEvent(
         id="event-1",
         position_id="position-1",
+        execution_mode=RunMode.PAPER,
         position_type=PositionType.LENDING_DEBT,
         event_type=PositionEventType.DECREASE,
         timestamp=datetime(2026, 7, 1, tzinfo=UTC),
@@ -44,6 +46,7 @@ def test_persisted_row_round_trips_to_typed_model() -> None:
 
     decoded = PositionEvent.from_persisted_row(persisted)
 
+    assert decoded.execution_mode is RunMode.PAPER
     assert decoded.position_type is PositionType.LENDING_DEBT
     assert decoded.event_type is PositionEventType.DECREASE
     assert decoded.to_dict()["position_type"] == persisted["position_type"]

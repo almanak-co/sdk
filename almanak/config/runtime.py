@@ -134,12 +134,12 @@ CHAIN_IDS: Mapping[str, int] = _build_chain_ids()
 
 
 # =============================================================================
-# Execution mode (canonical home)
+# Signing mode (canonical home)
 # =============================================================================
 
 
-class ExecutionMode(StrEnum):
-    """Execution mode for transaction signing.
+class SigningMode(StrEnum):
+    """Transaction-signing topology.
 
     See ``framework/execution/config.py`` for the full docstring (the symbol
     is re-exported there for back-compat). Three modes:
@@ -154,8 +154,8 @@ class ExecutionMode(StrEnum):
     SAFE_ZODIAC = "safe_zodiac"
 
     @classmethod
-    def from_string(cls, value: str) -> ExecutionMode:
-        """Parse execution mode from string (case-insensitive)."""
+    def from_string(cls, value: str) -> SigningMode:
+        """Parse signing mode from string (case-insensitive)."""
         try:
             return cls(value.lower())
         except ValueError as e:
@@ -164,6 +164,12 @@ class ExecutionMode(StrEnum):
                 field="execution_mode",
                 reason=f"Invalid execution mode '{value}'. Valid modes: {valid_modes}",
             ) from e
+
+
+# Backwards compatibility for callers importing the historical ambiguous
+# name. New code must use ``SigningMode``; runtime/accounting behavior uses
+# ``almanak.framework.models.RunMode`` instead.
+ExecutionMode = SigningMode
 
 
 # =============================================================================
@@ -360,7 +366,7 @@ def _resolve_private_key_from_env(
     *,
     private_key: str | None,
     chain: str | None,
-    execution_mode: ExecutionMode,
+    execution_mode: SigningMode,
     gateway_wallets_configured: bool,
     get_required: Callable[[str], str],
     get_optional: Callable[..., str | None],
@@ -382,7 +388,7 @@ def _resolve_private_key_from_env(
     if is_solana_chain(chain):
         # Solana uses base58 Ed25519 instead of hex secp256k1 — separate env var.
         return os.environ.get("SOLANA_PRIVATE_KEY") or get_required("PRIVATE_KEY")
-    if execution_mode == ExecutionMode.SAFE_ZODIAC:
+    if execution_mode == SigningMode.SAFE_ZODIAC:
         # Zodiac: private key held by the remote signer service, not needed locally.
         return get_optional("PRIVATE_KEY", "") or ""
     if gateway_wallets_configured:
@@ -392,7 +398,7 @@ def _resolve_private_key_from_env(
 
 
 def _create_safe_signer_from_env(
-    execution_mode: ExecutionMode,
+    execution_mode: SigningMode,
     private_key: str,
     prefix: str = "ALMANAK_",
 ) -> SafeSigner:
@@ -423,7 +429,7 @@ def _create_safe_signer_from_env(
 
     safe_address = get_required("SAFE_ADDRESS")
 
-    if execution_mode == ExecutionMode.SAFE_ZODIAC:
+    if execution_mode == SigningMode.SAFE_ZODIAC:
         # Zodiac mode: prefer explicit EOA_ADDRESS (platform deployments use
         # remote signer with no local key). Fall back to deriving from private
         # key only when EOA_ADDRESS is not set.
@@ -446,7 +452,7 @@ def _create_safe_signer_from_env(
         account = Account.from_key(private_key)
         eoa_address = account.address
 
-    if execution_mode == ExecutionMode.SAFE_DIRECT:
+    if execution_mode == SigningMode.SAFE_DIRECT:
         wallet_config = SafeWalletConfig(
             safe_address=safe_address,
             eoa_address=eoa_address,
@@ -459,7 +465,7 @@ def _create_safe_signer_from_env(
         logger.info(f"Creating Safe signer (direct): safe={safe_address[:10]}..., eoa={eoa_address[:10]}...")
         return create_safe_signer(signer_config)
 
-    if execution_mode == ExecutionMode.SAFE_ZODIAC:
+    if execution_mode == SigningMode.SAFE_ZODIAC:
         zodiac_address = get_required("ZODIAC_ADDRESS")
         # Service URL/JWT are optional — zodiac mode also works with just a private_key.
         signer_service_url = get_optional("SIGNER_SERVICE_URL")
@@ -881,7 +887,7 @@ def runtime_config_from_env(  # noqa: C901
 
     # Common: execution mode + gateway-wallets check + safe signer.
     mode_str = get_optional("EXECUTION_MODE", "eoa") or "eoa"
-    execution_mode = ExecutionMode.from_string(mode_str)
+    execution_mode = SigningMode.from_string(mode_str)
     gateway_wallets_configured = bool(os.environ.get(f"{prefix}GATEWAY_WALLETS"))
 
     if chains is not None:
@@ -920,7 +926,7 @@ def _build_single_chain(  # noqa: PLR0913 (intentional: explicit getter injectio
     chain: str | None,
     network: str,
     private_key: str | None,
-    execution_mode: ExecutionMode,
+    execution_mode: SigningMode,
     gateway_wallets_configured: bool,
     prefix: str,
     get_required: Callable[[str], str],
@@ -971,7 +977,7 @@ def _build_single_chain(  # noqa: PLR0913 (intentional: explicit getter injectio
     )
 
     safe_signer: SafeSigner | None = None
-    if execution_mode in (ExecutionMode.SAFE_DIRECT, ExecutionMode.SAFE_ZODIAC) and not gateway_wallets_configured:
+    if execution_mode in (SigningMode.SAFE_DIRECT, SigningMode.SAFE_ZODIAC) and not gateway_wallets_configured:
         safe_signer = _create_safe_signer_from_env(
             execution_mode=execution_mode,
             private_key=resolved_private_key,
@@ -1031,7 +1037,7 @@ def _build_multi_chain(  # noqa: PLR0913
     protocols: dict[str, list[str]],
     network: str,
     private_key: str | None,
-    execution_mode: ExecutionMode,
+    execution_mode: SigningMode,
     gateway_wallets_configured: bool,
     prefix: str,
     get_required: Callable[[str], str],
@@ -1054,7 +1060,7 @@ def _build_multi_chain(  # noqa: PLR0913
     )
 
     safe_signer: SafeSigner | None = None
-    if execution_mode in (ExecutionMode.SAFE_DIRECT, ExecutionMode.SAFE_ZODIAC) and not gateway_wallets_configured:
+    if execution_mode in (SigningMode.SAFE_DIRECT, SigningMode.SAFE_ZODIAC) and not gateway_wallets_configured:
         safe_signer = _create_safe_signer_from_env(
             execution_mode=execution_mode,
             private_key=resolved_private_key,
@@ -1296,6 +1302,7 @@ __all__ = [
     "ConfigurationError",
     "DataFreshnessPolicy",
     "ExecutionMode",
+    "SigningMode",
     "MissingEnvironmentVariableError",
     "RuntimeConfig",
     "gateway_wallets_configured",

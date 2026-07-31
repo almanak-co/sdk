@@ -32,6 +32,7 @@ from almanak.framework.accounting.models import (
     LendingAccountingEvent,
     LendingEventType,
 )
+from almanak.framework.models.run_mode import RunMode
 
 if TYPE_CHECKING:
     from almanak.framework.accounting.basis import FIFOBasisStore
@@ -104,7 +105,10 @@ def handle_lending(  # noqa: C901
 
     deployment_id = ledger_row.get("deployment_id") or outbox_row.get("deployment_id") or ""
     cycle_id = ledger_row.get("cycle_id") or outbox_row.get("cycle_id") or ""
-    execution_mode = ledger_row.get("execution_mode") or ""
+    # Validate persisted identity before any FIFO mutation.  A malformed
+    # legacy row must fail without consuming or recording basis lots; the
+    # outbox processor will mark that row failed and can safely retry it.
+    execution_mode = RunMode.parse_optional(ledger_row.get("execution_mode"))
     chain = ledger_row.get("chain") or ""
     protocol = ledger_row.get("protocol") or ""
     tx_hash = ledger_row.get("tx_hash") or ""

@@ -33,6 +33,7 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
+from almanak.framework.models.run_mode import RunModeStamp, serialize_run_mode
 from almanak.gateway.proto import gateway_pb2
 
 if TYPE_CHECKING:
@@ -183,6 +184,7 @@ PG_UPSERT_QUERY = """
 def build_pg_upsert_args(
     inputs: ParsedMetricsInputs,
     request: gateway_pb2.SaveMetricsRequest,
+    execution_mode: RunModeStamp,
     now: datetime,
     total_value_usd: Decimal | None,
     positions_json: str = "[]",
@@ -218,7 +220,7 @@ def build_pg_upsert_args(
         encode_optional_flow(inputs.withdrawals_usd),
         str(inputs.gas_spent_usd),
         request.cycle_id or "",
-        request.execution_mode or "",
+        serialize_run_mode(execution_mode),
         request.is_complete,
         now,
         encode_optional_decimal_text(total_value_usd, field_name="portfolio total_value_usd"),
@@ -267,6 +269,7 @@ async def resolve_total_value_usd(warm_backend: Any, deployment_id: str) -> Deci
 def build_portfolio_metrics(
     inputs: ParsedMetricsInputs,
     request: gateway_pb2.SaveMetricsRequest,
+    execution_mode: RunModeStamp,
     total_value_usd: Decimal | None,
 ) -> PortfolioMetrics:
     """Build a ``PortfolioMetrics`` for the warm backend save path.
@@ -291,6 +294,6 @@ def build_portfolio_metrics(
         gas_spent_usd=inputs.gas_spent_usd,
         deployment_id=request.deployment_id or inputs.deployment_id,
         cycle_id=request.cycle_id or None,
-        execution_mode=request.execution_mode or "",
+        execution_mode=execution_mode,
         is_complete=request.is_complete,
     )

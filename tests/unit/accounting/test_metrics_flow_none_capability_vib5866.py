@@ -1036,7 +1036,7 @@ def test_pg_upsert_args_write_empty_string_for_unmeasured_flows() -> None:
         gas_spent_usd=Decimal("0.5"),
         timestamp=datetime(2026, 7, 19, 12, 0, tzinfo=UTC),
     )
-    args = build_pg_upsert_args(inputs, gateway_pb2.SaveMetricsRequest(), now, Decimal("10"))
+    args = build_pg_upsert_args(inputs, gateway_pb2.SaveMetricsRequest(), "", now, Decimal("10"))
     # $4 / $5 in PG_UPSERT_QUERY — the literal "None" must never be written.
     assert args[3] == ""
     assert args[4] == ""
@@ -1058,7 +1058,7 @@ def test_pg_upsert_args_write_empty_string_for_unmeasured_total() -> None:
         gas_spent_usd=Decimal("0.5"),
         timestamp=datetime(2026, 7, 19, 12, 0, tzinfo=UTC),
     )
-    args = build_pg_upsert_args(inputs, gateway_pb2.SaveMetricsRequest(), now, None)
+    args = build_pg_upsert_args(inputs, gateway_pb2.SaveMetricsRequest(), "", now, None)
     assert args[10] == ""
 
 

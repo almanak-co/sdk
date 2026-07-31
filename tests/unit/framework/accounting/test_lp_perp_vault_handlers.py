@@ -27,7 +27,7 @@ from almanak.framework.accounting.models import LPEventType, PerpEventType, Vaul
 from almanak.framework.accounting.perp_accounting import PerpAccountingEvent
 from almanak.framework.accounting.processor import AccountingProcessor
 from almanak.framework.accounting.vault_accounting import VaultAccountingEvent
-
+from almanak.framework.models.run_mode import RunMode, RunModeStamp
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Common builder helpers (mirror the style from test_accounting_processor.py)
@@ -47,7 +47,6 @@ def _make_outbox_row(
         "id": str(uuid.uuid4()),
         "ledger_entry_id": ledger_entry_id,
         "deployment_id": "dep-1",
-        "deployment_id": "strat-1",
         "cycle_id": "cycle-1",
         "intent_type": intent_type,
         "wallet_address": wallet_address,
@@ -76,7 +75,6 @@ def _make_ledger_row(
 ) -> dict[str, Any]:
     return {
         "id": ledger_entry_id,
-        "deployment_id": "strat-1",
         "deployment_id": "dep-1",
         "cycle_id": "cycle-1",
         "execution_mode": "live",
@@ -115,6 +113,102 @@ def _make_mock_store(
     store.get_ledger_entry_by_id = MagicMock(return_value=ledger_row)
     store.save_accounting_event = AsyncMock(return_value=True)
     return store
+
+
+def _event_for_mode(
+    primitive: str, mode: RunMode | str | None
+) -> LPAccountingEvent | PerpAccountingEvent | VaultAccountingEvent | None:
+    led_id = str(uuid.uuid4())
+    if primitive == "lp":
+        outbox = _make_outbox_row(
+            led_id,
+            intent_type="LP_OPEN",
+            position_key="lp:aerodrome:base:0xwallet:0x1111111111111111111111111111111111111111",
+            market_id="0x1111111111111111111111111111111111111111",
+        )
+        ledger = _make_ledger_row(led_id, intent_type="LP_OPEN")
+        handler = handle_lp
+    elif primitive == "perp":
+        outbox = _make_outbox_row(
+            led_id,
+            intent_type="PERP_OPEN",
+            position_key="perp:gmx_v2:arbitrum:0xwallet:eth/usd",
+            market_id="eth/usd",
+        )
+        ledger = _make_ledger_row(led_id, intent_type="PERP_OPEN", protocol="gmx_v2", chain="arbitrum")
+        handler = handle_perp
+    else:
+        outbox = _make_outbox_row(
+            led_id,
+            intent_type="VAULT_DEPOSIT",
+            position_key="vault:metamorpho:arbitrum:0xwallet:0xvault",
+            market_id="0xvault",
+        )
+        ledger = _make_ledger_row(led_id, intent_type="VAULT_DEPOSIT", protocol="metamorpho", chain="arbitrum")
+        handler = handle_vault
+    ledger["execution_mode"] = mode
+    return handler(outbox, ledger)
+
+
+@pytest.mark.parametrize("primitive", ["lp", "perp", "vault"])
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [
+        (RunMode.DRY_RUN, RunMode.DRY_RUN),
+        ("paper", RunMode.PAPER),
+        ("live", RunMode.LIVE),
+        ("", ""),
+        (None, ""),
+    ],
+)
+def test_category_builders_parse_valid_and_legacy_modes(
+    primitive: str, mode: RunMode | str | None, expected: RunModeStamp
+) -> None:
+    event = _event_for_mode(primitive, mode)
+
+    assert event is not None
+    if isinstance(expected, RunMode):
+        assert event.identity.execution_mode is expected
+    else:
+        assert event.identity.execution_mode == expected
+
+
+@pytest.mark.parametrize("primitive", ["lp", "perp", "vault"])
+def test_category_builders_reject_invalid_persisted_mode(primitive: str) -> None:
+    with pytest.raises(ValueError, match="invalid run mode"):
+        _event_for_mode(primitive, "livve")
+
+
+@pytest.mark.asyncio
+async def test_drain_pending_isolates_invalid_mode_to_affected_row() -> None:
+    bad_id = str(uuid.uuid4())
+    good_id = str(uuid.uuid4())
+    pool = "0x1111111111111111111111111111111111111111"
+    bad_outbox = _make_outbox_row(
+        bad_id, intent_type="LP_OPEN", position_key=f"lp:aerodrome:base:0xwallet:{pool}", market_id=pool
+    )
+    good_outbox = _make_outbox_row(
+        good_id, intent_type="LP_OPEN", position_key=f"lp:aerodrome:base:0xwallet:{pool}", market_id=pool
+    )
+    bad_ledger = _make_ledger_row(bad_id, intent_type="LP_OPEN")
+    bad_ledger["execution_mode"] = "livve"
+    good_ledger = _make_ledger_row(good_id, intent_type="LP_OPEN")
+    outboxes = {bad_id: bad_outbox, good_id: good_outbox}
+    ledgers = {bad_id: bad_ledger, good_id: good_ledger}
+
+    store = MagicMock()
+    store.get_outbox_pending.return_value = [bad_outbox, good_outbox]
+    store.get_outbox_by_ledger_id.side_effect = outboxes.__getitem__
+    store.get_ledger_entry_by_id.side_effect = ledgers.__getitem__
+    store.has_accounting_events_for_ledger.return_value = False
+    store.save_accounting_event = AsyncMock(return_value=True)
+    processor = AccountingProcessor(store, FIFOBasisStore(), deployment_id="dep-1")
+
+    assert await processor.drain_pending() == 1
+    store.save_accounting_event.assert_awaited_once()
+    updates = store.update_outbox_entry.call_args_list
+    assert any(call.args[0] == bad_outbox["id"] and call.args[1] == "failed" for call in updates)
+    assert any(call.args[0] == good_outbox["id"] and call.args[1] == "processed" for call in updates)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

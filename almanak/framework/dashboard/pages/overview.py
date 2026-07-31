@@ -26,6 +26,7 @@ from almanak.framework.dashboard.utils import (
     get_status_icon,
     pnl_color,
 )
+from almanak.framework.models.run_mode import RunMode
 
 
 @st.fragment
@@ -223,7 +224,7 @@ def render_strategy_card(strategy: Strategy, col_idx: int, manage_mode: bool = F
     """Render a single strategy card."""
     status_icon = get_status_icon(strategy.status)
     status_color = get_status_color(strategy.status)
-    is_paper = strategy.execution_mode == "paper"
+    is_paper = strategy.execution_mode is RunMode.PAPER
     pnl_value = strategy.pnl_24h_usd
     if is_paper and strategy.paper_metrics:
         pnl_value = strategy.paper_metrics.simulated_pnl_usd

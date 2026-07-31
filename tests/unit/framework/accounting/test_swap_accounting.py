@@ -18,10 +18,11 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
+import pytest
+
 from almanak.framework.accounting.basis import FIFOBasisStore
 from almanak.framework.accounting.category_handlers.swap_handler import handle_swap
 from almanak.framework.accounting.models import AccountingConfidence, SwapAccountingEvent, SwapEventType
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -311,6 +312,27 @@ class TestHandleSwapBasic:
         assert event is not None
         assert event.cost_basis_recorded is False
         assert event.realized_pnl_usd is None
+
+
+def test_invalid_execution_mode_fails_before_swap_fifo_mutation() -> None:
+    ledger = _make_ledger_row(
+        price_inputs_json=_price_json({"USDC": "1", "WETH": "2000"}),
+    )
+    ledger["execution_mode"] = "livve"
+    basis = FIFOBasisStore()
+
+    with pytest.raises(ValueError, match="invalid run mode"):
+        handle_swap(_make_outbox_row(), ledger, basis)
+
+    position_key = f"swap:{_CHAIN}:{_WALLET.lower()}"
+    cost, unmatched = basis.match_swap_disposal(
+        deployment_id=_DEPLOYMENT_ID,
+        position_key=position_key,
+        token="WETH",
+        amount=Decimal("0.05"),
+    )
+    assert cost is None
+    assert unmatched == Decimal("0.05")
 
 
 class TestHandleSwapRealizedPnL:

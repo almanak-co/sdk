@@ -37,7 +37,6 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
-from enum import StrEnum
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -87,6 +86,7 @@ from ..intents.state_machine import (
     TransactionReceipt,
 )
 from ..intents.vocabulary import AnyIntent, HoldIntent, Intent, IntentSequence, IntentType
+from ..models.run_mode import RunMode
 from ..state.exceptions import AccountingPersistenceError
 from ..state.registry_errors import RegistryAutoCollisionError
 from ..state.state_manager import StateManager
@@ -174,23 +174,8 @@ def _lp_open_field(lp_open: Any, name: str) -> Any:
 # =============================================================================
 
 
-class ExecutionMode(StrEnum):
-    """Tri-state execution mode for accounting stamping.
-
-    Single source of truth for the runner-mode label written onto ledger
-    entries, portfolio snapshots, and portfolio metrics. Using an enum
-    (instead of bare strings) catches typos and makes downstream
-    comparisons typo-safe — a misspelled ``"liev"`` would silently store
-    a bad row otherwise.
-    """
-
-    DRY_RUN = "dry_run"
-    PAPER = "paper"
-    LIVE = "live"
-
-
-def derive_execution_mode_from_config(config: Any) -> ExecutionMode:
-    """Return the canonical execution-mode label for a runner config.
+def derive_run_mode_from_config(config: Any) -> RunMode:
+    """Return the canonical run-mode label for a runner config.
 
     The accounting layer needs a single, authoritative mapping from runner
     state to the tri-state label stamped on ledger entries, portfolio
@@ -203,17 +188,24 @@ def derive_execution_mode_from_config(config: Any) -> ExecutionMode:
         config: A ``RunnerConfig`` (or subclass) object.
 
     Returns:
-        ``ExecutionMode.DRY_RUN`` when ``config.dry_run`` is set,
-        ``ExecutionMode.PAPER`` when ``config.paper_mode`` is truthy,
-        otherwise ``ExecutionMode.LIVE``. The returned value is a
+        ``RunMode.DRY_RUN`` when ``config.dry_run`` is set,
+        ``RunMode.PAPER`` when ``config.paper_mode`` is truthy,
+        otherwise ``RunMode.LIVE``. The returned value is a
         ``StrEnum`` so it serialises as the bare label (``"dry_run"`` etc.)
         for ledger / snapshot persistence.
     """
     if getattr(config, "dry_run", False):
-        return ExecutionMode.DRY_RUN
+        return RunMode.DRY_RUN
     if getattr(config, "paper_mode", False):
-        return ExecutionMode.PAPER
-    return ExecutionMode.LIVE
+        return RunMode.PAPER
+    return RunMode.LIVE
+
+
+# Historical runner imports used the ambiguous ``ExecutionMode`` name. Keep
+# the symbol and derivation function as compatibility aliases while all new
+# internal code uses the domain-specific names.
+ExecutionMode = RunMode
+derive_execution_mode_from_config = derive_run_mode_from_config
 
 
 def _last_receipt_block(execution_result: Any | None) -> int | None:
@@ -3083,9 +3075,9 @@ class StrategyRunner:
         need to know about paper trading). Backtest runners bypass the
         StrategyRunner entirely.
         """
-        return derive_execution_mode_from_config(self.config) is ExecutionMode.LIVE
+        return derive_run_mode_from_config(self.config) is RunMode.LIVE
 
-    def _derive_execution_mode(self) -> ExecutionMode:
+    def _derive_execution_mode(self) -> RunMode:
         """Tri-state mode label for accounting rows (dry_run / live / paper).
 
         Centralised so ledger entries, portfolio snapshots, and portfolio
@@ -3094,7 +3086,7 @@ class StrategyRunner:
         that stringify it (e.g. ``entry.execution_mode = mode``) get the
         bare label back for persistence.
         """
-        return derive_execution_mode_from_config(self.config)
+        return derive_run_mode_from_config(self.config)
 
     def _update_recent_open_events_cache(self, pos_event: Any) -> None:
         """VIB-3894 — keep ``_recent_open_events`` in sync with disk writes.
@@ -3559,7 +3551,7 @@ class StrategyRunner:
 
             # Phase 4: stamp deployment_id and execution_mode onto the entry (VIB-2835/2837).
             # VIB-3157: tri-state (dry_run / live / paper) via the shared
-            # ``derive_execution_mode_from_config`` helper so ledger,
+            # ``derive_run_mode_from_config`` helper so ledger,
             # snapshot, and metrics stamping stay in lockstep.
             deployment_id = strategy.deployment_id
             execution_mode = self._derive_execution_mode()
@@ -5986,7 +5978,7 @@ class StrategyRunner:
         entry: Any,
         chain: str,
         deployment_id: str,
-        execution_mode: str,
+        execution_mode: RunMode,
         cycle_id: str,
         price_oracle: dict | None,
         post_state: dict | None,
@@ -6078,7 +6070,7 @@ class StrategyRunner:
                 return
 
             pos_event.cycle_id = cycle_id
-            pos_event.execution_mode = execution_mode
+            pos_event.execution_mode = RunMode.parse(execution_mode)
             saved = await self.state_manager.save_position_event(pos_event)
 
             if not saved:

@@ -25,11 +25,12 @@ from almanak.framework.accounting.writer import (
     _project_lending_aliases,
     augment_accounting_payload,
 )
+from almanak.framework.models.run_mode import RunMode
 from almanak.framework.state.exceptions import AccountingPersistenceError
 
 
 class _FakeIdentity:
-    def __init__(self, *, execution_mode: str = "live") -> None:
+    def __init__(self, *, execution_mode: Any = "live") -> None:
         self.execution_mode = execution_mode
         self.deployment_id = "dep-1"
         self.deployment_id = "strat-1"
@@ -39,7 +40,7 @@ class _FakeIdentity:
 class _FakeEvent:
     """Minimal stand-in for a typed accounting event."""
 
-    def __init__(self, payload: dict[str, Any], *, execution_mode: str = "live") -> None:
+    def __init__(self, payload: dict[str, Any], *, execution_mode: Any = "live") -> None:
         self.identity = _FakeIdentity(execution_mode=execution_mode)
         self._payload = payload
         self.schema_version = 1
@@ -313,3 +314,35 @@ async def test_writer_wraps_unexpected_error_in_live():
     with pytest.raises(AccountingPersistenceError) as excinfo:
         await writer.write(event)
     assert isinstance(excinfo.value.cause, RuntimeError)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", [RunMode.PAPER, "", None])
+async def test_writer_accepts_typed_and_legacy_non_live_modes(mode: Any) -> None:
+    event = _FakeEvent({"event_type": "REPAY"}, execution_mode=mode)
+    store = AsyncMock()
+    store.save_accounting_event.return_value = True
+
+    assert await AccountingWriter(store).write(event) is True
+    store.save_accounting_event.assert_awaited_once_with(event)
+
+
+@pytest.mark.asyncio
+async def test_writer_accepts_live_string_inside_error_contract() -> None:
+    event = _FakeEvent({"event_type": "REPAY"}, execution_mode="live")
+    store = AsyncMock()
+    store.save_accounting_event.side_effect = RuntimeError("backend exploded")
+
+    with pytest.raises(AccountingPersistenceError) as excinfo:
+        await AccountingWriter(store).write(event)
+    assert isinstance(excinfo.value.cause, RuntimeError)
+
+
+@pytest.mark.asyncio
+async def test_writer_contains_invalid_mode_as_non_live_failure(caplog: pytest.LogCaptureFixture) -> None:
+    event = _FakeEvent({"event_type": "REPAY"}, execution_mode="livve")
+    store = AsyncMock()
+
+    assert await AccountingWriter(store).write(event) is False
+    store.save_accounting_event.assert_not_awaited()
+    assert any("AccountingWriter.write failed" in record.message for record in caplog.records)

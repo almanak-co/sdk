@@ -1180,7 +1180,10 @@ class PositionServiceServicer(gateway_pb2_grpc.PositionServiceServicer):
                 id=f"reconciliation:{reconciliation_id}:{phantom['physical_identity_hash']}",
                 cycle_id=f"reconciliation:{reconciliation_id}",
                 deployment_id=deployment_id,
-                execution_mode="reconciliation",
+                # This sentinel is deliberately never persisted; absence keeps
+                # the LedgerEntry inside the real RunMode domain while the
+                # atomic primitive's registry_reconciliation mode skips it.
+                execution_mode="",
                 timestamp=datetime.now(UTC),
                 intent_type="",
                 token_in="",

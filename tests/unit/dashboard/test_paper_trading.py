@@ -21,15 +21,13 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
 from almanak.framework.dashboard.models import (
     EquityCurvePoint,
     PaperMetrics,
     Strategy,
     StrategyStatus,
 )
-
+from almanak.framework.models.run_mode import RunMode
 
 # ---------------------------------------------------------------------------
 # DASH-PT-03: Model layer tests
@@ -155,10 +153,10 @@ class TestStrategyModelPaperFields:
             pnl_24h_usd=Decimal("0"), total_value_usd=Decimal("0"),
             chain="arbitrum", protocol="Uniswap V3",
         )
-        assert strategy.execution_mode == "live"
+        assert strategy.execution_mode is RunMode.LIVE
         assert strategy.paper_metrics is None
 
-    def test_paper_execution_mode(self):
+    def test_paper_execution_mode_string_is_parsed(self):
         pm = PaperMetrics(tick_count=50, success_count=40, error_count=2)
         strategy = Strategy(
             id="paper:test", name="Test (Paper)", status=StrategyStatus.PAPER_TRADING,
@@ -166,7 +164,7 @@ class TestStrategyModelPaperFields:
             chain="arbitrum", protocol="Uniswap V3",
             execution_mode="paper", paper_metrics=pm,
         )
-        assert strategy.execution_mode == "paper"
+        assert strategy.execution_mode is RunMode.PAPER
         assert strategy.paper_metrics is not None
         assert strategy.paper_metrics.tick_count == 50
 

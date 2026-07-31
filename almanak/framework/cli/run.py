@@ -36,6 +36,7 @@ if TYPE_CHECKING:
 import click
 
 from almanak.config.cli_runtime import CliRuntimeConfig
+from almanak.config.runtime import SigningMode
 from almanak.core.chains import DEFAULT_CHAIN
 from almanak.framework.anvil import accounts as _anvil_accounts
 from almanak.framework.cli._run_options import DEFAULT_STRAT_RUN_INTERVAL, strategy_run_options
@@ -752,11 +753,11 @@ def _validate_safe_mode_preflight(execution_address: str) -> str | None:
         return "ALMANAK_GATEWAY_SAFE_MODE is set but ALMANAK_GATEWAY_SAFE_ADDRESS is missing."
 
     # Guard 3: Safe mode type must match (direct vs zodiac)
-    framework_exec_mode = cli_cfg.execution_mode or ""
-    expected_gw_mode = "zodiac" if framework_exec_mode == "safe_zodiac" else "direct"
+    framework_exec_mode = cli_cfg.execution_mode
+    expected_gw_mode = "zodiac" if framework_exec_mode is SigningMode.SAFE_ZODIAC else "direct"
     if gw_safe_mode != expected_gw_mode:
         return (
-            f"Safe mode type mismatch -- framework execution mode is '{framework_exec_mode}' "
+            f"Safe mode type mismatch -- framework execution mode is '{framework_exec_mode or ''}' "
             f"(expects gateway '{expected_gw_mode}') but gateway is '{gw_safe_mode}'."
         )
 

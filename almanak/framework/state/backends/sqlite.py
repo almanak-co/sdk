@@ -45,6 +45,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+from almanak.framework.models.run_mode import RunMode
+
 from ..state_manager import StateConflictError, StateData, StateTier
 
 
@@ -2934,7 +2936,7 @@ class SQLiteStore:
                 positions_json=row["positions_json"] or "[]",
                 cycle_id=row["cycle_id"],
                 deployment_id=row_deployment_id,
-                execution_mode=execution_mode,
+                execution_mode=RunMode.parse_optional(execution_mode),
                 is_complete=is_complete,
             )
 
@@ -3975,7 +3977,9 @@ class SQLiteStore:
                         id=row["id"],
                         cycle_id=row["cycle_id"],
                         deployment_id=row["deployment_id"],
-                        execution_mode=row["execution_mode"] if "execution_mode" in row_keys else "",
+                        execution_mode=RunMode.parse_optional(
+                            row["execution_mode"] if "execution_mode" in row_keys else None
+                        ),
                         timestamp=datetime.fromisoformat(row["timestamp"]),
                         intent_type=row["intent_type"],
                         token_in=row["token_in"] or "",

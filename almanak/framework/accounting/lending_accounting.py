@@ -54,6 +54,7 @@ from almanak.framework.accounting.lending_reads import (  # noqa: F401  (back-co
     read_lending_account_state,
     read_lending_market_health,
 )
+from almanak.framework.models.run_mode import RunMode
 
 logger = logging.getLogger(__name__)
 
@@ -1007,7 +1008,7 @@ def _build_lending_identity(
         ),
         deployment_id=deployment_id,
         cycle_id=cycle_id,
-        execution_mode=execution_mode,
+        execution_mode=RunMode.parse_optional(execution_mode),
         timestamp=context.now,
         chain=chain,
         protocol=context.protocol,
@@ -1140,7 +1141,7 @@ def build_lending_accounting_event(
         context=context,
         deployment_id=deployment_id,
         cycle_id=cycle_id,
-        execution_mode=execution_mode,
+        execution_mode=RunMode.parse_optional(execution_mode),
         chain=chain,
         wallet_address=wallet_address,
         ledger_entry_id=ledger_entry_id,

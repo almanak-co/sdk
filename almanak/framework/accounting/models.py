@@ -27,6 +27,7 @@ from enum import StrEnum
 from typing import Any
 
 from almanak.framework.accounting.measured import decode_money_payload, encode_money_payload
+from almanak.framework.models.run_mode import RunMode, RunModeStamp, serialize_run_mode
 
 
 class AccountingConfidence(StrEnum):
@@ -188,7 +189,7 @@ class AccountingIdentity:
     id: str
     deployment_id: str
     cycle_id: str
-    execution_mode: str
+    execution_mode: RunModeStamp
     timestamp: datetime
     chain: str
     protocol: str
@@ -196,8 +197,12 @@ class AccountingIdentity:
     tx_hash: str
     ledger_entry_id: str
 
+    def __post_init__(self) -> None:
+        self.execution_mode = RunMode.parse_optional(self.execution_mode)
+
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
+        d["execution_mode"] = serialize_run_mode(self.execution_mode)
         d["timestamp"] = self.timestamp.isoformat()
         return d
 

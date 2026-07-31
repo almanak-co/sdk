@@ -50,7 +50,6 @@ def _make_outbox_row(
         "id": "outbox-001",
         "ledger_entry_id": "ledger-001",
         "deployment_id": _DEPLOYMENT_ID,
-        "deployment_id": _DEPLOYMENT_ID,
         "cycle_id": _CYCLE_ID,
         "intent_type": intent_type,
         "wallet_address": "0xabc",
@@ -71,7 +70,6 @@ def _make_ledger_row(
 ) -> dict:
     return {
         "id": "ledger-001",
-        "deployment_id": _DEPLOYMENT_ID,
         "deployment_id": _DEPLOYMENT_ID,
         "cycle_id": _CYCLE_ID,
         "execution_mode": "live",

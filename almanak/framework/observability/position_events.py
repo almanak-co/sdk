@@ -65,6 +65,7 @@ from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import Any
 
+from almanak.framework.models.run_mode import RunMode, RunModeStamp, serialize_run_mode
 from almanak.framework.primitives.taxonomy import (  # noqa: F401 — taxonomy delegation lock
     UnknownIntentTypeError,
     record_for,
@@ -281,7 +282,7 @@ class PositionEvent:
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     deployment_id: str = ""
     cycle_id: str = ""  # Phase 4: correlation to iteration (VIB-2835)
-    execution_mode: str = ""  # Phase 4: "live", "paper", "dry_run" (VIB-2837)
+    execution_mode: RunModeStamp = ""
     position_id: str = ""
     position_type: PositionType | None = None
     event_type: PositionEventType | None = None
@@ -345,6 +346,8 @@ class PositionEvent:
         retains an unchecked string. Empty legacy defaults become explicit
         ``None`` and preserve the historical empty wire/storage value.
         """
+        self.execution_mode = RunMode.parse_optional(self.execution_mode)
+
         if isinstance(self.position_type, str):
             self.position_type = parse_position_type(self.position_type) if self.position_type else None
         elif self.position_type is not None and not isinstance(self.position_type, PositionType):
@@ -358,6 +361,7 @@ class PositionEvent:
     def to_dict(self) -> dict[str, Any]:
         """Serialize to the historical JSON/dict shape."""
         d = asdict(self)
+        d["execution_mode"] = serialize_run_mode(self.execution_mode)
         d["position_type"] = self.position_type.value if self.position_type is not None else ""
         d["event_type"] = self.event_type.value if self.event_type is not None else ""
         d["timestamp"] = self.timestamp.isoformat()
@@ -384,7 +388,7 @@ class PositionEvent:
             id=_persisted_text(row, "id"),
             deployment_id=_persisted_text(row, "deployment_id"),
             cycle_id=_persisted_text(row, "cycle_id"),
-            execution_mode=_persisted_text(row, "execution_mode"),
+            execution_mode=RunMode.parse_optional(_persisted_text(row, "execution_mode")),
             position_id=_persisted_text(row, "position_id"),
             position_type=parse_position_type(row.get("position_type")),
             event_type=parse_position_event_type(row.get("event_type")),

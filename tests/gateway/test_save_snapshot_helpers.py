@@ -25,8 +25,10 @@ from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import grpc
 import pytest
 
+from almanak.framework.models.run_mode import RunMode
 from almanak.framework.portfolio.models import PortfolioSnapshot, ValueConfidence
 from almanak.gateway.proto import gateway_pb2
 from almanak.gateway.services.state_service import StateServiceServicer
@@ -154,7 +156,9 @@ class TestBuildSqliteSnapshot:
 
     def test_bare_request_yields_minimal_snapshot(self, ts: datetime):
         req = _request(positions_json=b"")
-        snap = StateServiceServicer._build_sqlite_snapshot("Strat:abc", ts, req)
+        snap = StateServiceServicer._build_sqlite_snapshot(
+            "Strat:abc", ts, req, RunMode.parse_optional(req.execution_mode)
+        )
         assert isinstance(snap, PortfolioSnapshot)
         assert snap.deployment_id == "Strat:abc"
         assert snap.timestamp == ts
@@ -167,14 +171,18 @@ class TestBuildSqliteSnapshot:
 
     def test_identity_fields_propagate_to_snapshot(self, ts: datetime):
         req = _request(deployment_id="Strat:abc", cycle_id="cycle-7", execution_mode="live")
-        snap = StateServiceServicer._build_sqlite_snapshot("Strat:abc", ts, req)
+        snap = StateServiceServicer._build_sqlite_snapshot(
+            "Strat:abc", ts, req, RunMode.parse_optional(req.execution_mode)
+        )
         assert snap.deployment_id == "Strat:abc"
         assert snap.cycle_id == "cycle-7"
         assert snap.execution_mode == "live"
 
     def test_legacy_list_positions_pass_through(self, ts: datetime):
         req = _request(positions_json=json.dumps([_position("uniswap_v3:42")]).encode())
-        snap = StateServiceServicer._build_sqlite_snapshot("Strat:abc", ts, req)
+        snap = StateServiceServicer._build_sqlite_snapshot(
+            "Strat:abc", ts, req, RunMode.parse_optional(req.execution_mode)
+        )
         assert len(snap.positions) == 1
         assert snap.positions[0].label == "uniswap_v3:42"
 
@@ -184,7 +192,9 @@ class TestBuildSqliteSnapshot:
             "metadata": {"some_meta": "value"},
         }
         req = _request(positions_json=json.dumps(envelope).encode())
-        snap = StateServiceServicer._build_sqlite_snapshot("Strat:abc", ts, req)
+        snap = StateServiceServicer._build_sqlite_snapshot(
+            "Strat:abc", ts, req, RunMode.parse_optional(req.execution_mode)
+        )
         assert len(snap.positions) == 1
         assert snap.positions[0].label == "aave:USDC"
 
@@ -200,7 +210,9 @@ class TestBuildSqliteSnapshot:
             },
         }
         req = _request(positions_json=json.dumps(envelope).encode())
-        snap = StateServiceServicer._build_sqlite_snapshot("Strat:abc", ts, req)
+        snap = StateServiceServicer._build_sqlite_snapshot(
+            "Strat:abc", ts, req, RunMode.parse_optional(req.execution_mode)
+        )
         assert snap.deployed_capital_usd == Decimal("750.00")
         assert snap.wallet_total_value_usd == Decimal("250.00")
 
@@ -216,7 +228,9 @@ class TestBuildSqliteSnapshot:
             },
         }
         req = _request(positions_json=json.dumps(envelope).encode())
-        snap = StateServiceServicer._build_sqlite_snapshot("Strat:abc", ts, req)
+        snap = StateServiceServicer._build_sqlite_snapshot(
+            "Strat:abc", ts, req, RunMode.parse_optional(req.execution_mode)
+        )
         meta = snap.snapshot_metadata
         assert "__deployed_capital_usd__" not in meta
         assert "__wallet_total_value_usd__" not in meta
@@ -229,7 +243,9 @@ class TestBuildSqliteSnapshot:
             "token_prices": {"USDC": {"usd": 1.0}},
         }
         req = _request(positions_json=json.dumps(envelope).encode())
-        snap = StateServiceServicer._build_sqlite_snapshot("Strat:abc", ts, req)
+        snap = StateServiceServicer._build_sqlite_snapshot(
+            "Strat:abc", ts, req, RunMode.parse_optional(req.execution_mode)
+        )
         assert snap.token_prices == {"USDC": {"usd": 1.0}}
 
     def test_envelope_wallet_balances_lifted(self, ts: datetime):
@@ -241,7 +257,9 @@ class TestBuildSqliteSnapshot:
             ],
         }
         req = _request(positions_json=json.dumps(envelope).encode())
-        snap = StateServiceServicer._build_sqlite_snapshot("Strat:abc", ts, req)
+        snap = StateServiceServicer._build_sqlite_snapshot(
+            "Strat:abc", ts, req, RunMode.parse_optional(req.execution_mode)
+        )
         assert len(snap.wallet_balances) == 1
         assert snap.wallet_balances[0].symbol == "USDC"
         assert snap.wallet_balances[0].balance == Decimal("100")
@@ -249,14 +267,18 @@ class TestBuildSqliteSnapshot:
     def test_legacy_request_omits_envelope_extras(self, ts: datetime):
         # Legacy list positions ⇒ no token_prices / wallet_balances.
         req = _request(positions_json=json.dumps([_position("x")]).encode())
-        snap = StateServiceServicer._build_sqlite_snapshot("Strat:abc", ts, req)
+        snap = StateServiceServicer._build_sqlite_snapshot(
+            "Strat:abc", ts, req, RunMode.parse_optional(req.execution_mode)
+        )
         assert snap.token_prices == {}
         assert snap.wallet_balances == []
 
     def test_default_value_confidence_when_unset(self, ts: datetime):
         # Empty proto string ⇒ "HIGH" default per the orchestrator contract.
         req = _request(value_confidence="", positions_json=b"")
-        snap = StateServiceServicer._build_sqlite_snapshot("Strat:abc", ts, req)
+        snap = StateServiceServicer._build_sqlite_snapshot(
+            "Strat:abc", ts, req, RunMode.parse_optional(req.execution_mode)
+        )
         assert snap.value_confidence == ValueConfidence.HIGH
 
 
@@ -280,7 +302,9 @@ class TestSaveSnapshotPostgres:
         ts = datetime(2026, 5, 7, 12, 0, 0, tzinfo=UTC)
         now = datetime(2026, 5, 7, 12, 0, 1, tzinfo=UTC)
         req = _request(deployment_id="Strat:abc", cycle_id="cycle-7", execution_mode="live")
-        snap_id = await pg_service._save_snapshot_postgres("Strat:abc", ts, now, req)
+        snap_id = await pg_service._save_snapshot_postgres(
+            "Strat:abc", ts, now, req, RunMode.parse_optional(req.execution_mode)
+        )
         assert snap_id == 4242
 
     @pytest.mark.asyncio
@@ -291,7 +315,9 @@ class TestSaveSnapshotPostgres:
         ts = datetime(2026, 5, 7, 12, 0, 0, tzinfo=UTC)
         now = datetime(2026, 5, 7, 12, 0, 1, tzinfo=UTC)
         req = _request()
-        snap_id = await pg_service._save_snapshot_postgres("Strat:abc", ts, now, req)
+        snap_id = await pg_service._save_snapshot_postgres(
+            "Strat:abc", ts, now, req, RunMode.parse_optional(req.execution_mode)
+        )
         assert snap_id == 0
 
     @pytest.mark.asyncio
@@ -300,7 +326,9 @@ class TestSaveSnapshotPostgres:
         ts = datetime(2026, 5, 7, 12, 0, 0, tzinfo=UTC)
         now = datetime(2026, 5, 7, 12, 0, 1, tzinfo=UTC)
         req = _request(deployment_id="Strat:abc", cycle_id="cycle-7", execution_mode="paper")
-        await pg_service._save_snapshot_postgres("Strat:abc", ts, now, req)
+        await pg_service._save_snapshot_postgres(
+            "Strat:abc", ts, now, req, RunMode.parse_optional(req.execution_mode)
+        )
         args = pg_service._snapshot_fetchrow.await_args.args
         # VIB-4721/4722: portfolio_snapshots has a single identity column,
         # deployment_id ($1, the validated wire id). cycle_id / execution_mode
@@ -319,7 +347,9 @@ class TestSaveSnapshotPostgres:
         ts = datetime(2026, 5, 7, 12, 0, 0, tzinfo=UTC)
         now = datetime(2026, 5, 7, 12, 0, 1, tzinfo=UTC)
         req = _request()  # cycle_id / execution_mode = ""
-        await pg_service._save_snapshot_postgres("Strat:abc", ts, now, req)
+        await pg_service._save_snapshot_postgres(
+            "Strat:abc", ts, now, req, RunMode.parse_optional(req.execution_mode)
+        )
         args = pg_service._snapshot_fetchrow.await_args.args
         assert args[1] == "Strat:abc"  # deployment_id always present
         assert tuple(args[-2:]) == ("", "")
@@ -330,7 +360,9 @@ class TestSaveSnapshotPostgres:
         ts = datetime(2026, 5, 7, 12, 0, 0, tzinfo=UTC)
         now = datetime(2026, 5, 7, 12, 0, 1, tzinfo=UTC)
         req = _request(value_confidence="")
-        await pg_service._save_snapshot_postgres("Strat:abc", ts, now, req)
+        await pg_service._save_snapshot_postgres(
+            "Strat:abc", ts, now, req, RunMode.parse_optional(req.execution_mode)
+        )
         args = pg_service._snapshot_fetchrow.await_args.args
         # value_confidence is the 6th param after SQL → args[6]
         # (deployment_id, ts, iter, total, available, value_conf)
@@ -342,7 +374,9 @@ class TestSaveSnapshotPostgres:
         ts = datetime(2026, 5, 7, 12, 0, 0, tzinfo=UTC)
         now = datetime(2026, 5, 7, 12, 0, 1, tzinfo=UTC)
         req = _request(positions_json=b"")
-        await pg_service._save_snapshot_postgres("Strat:abc", ts, now, req)
+        await pg_service._save_snapshot_postgres(
+            "Strat:abc", ts, now, req, RunMode.parse_optional(req.execution_mode)
+        )
         args = pg_service._snapshot_fetchrow.await_args.args
         # positions_json is param 7 (after SQL)
         assert args[7] == "[]"
@@ -371,7 +405,9 @@ class TestSaveSnapshotPostgres:
             "token_prices": token_prices,
         }
         req = _request(positions_json=json.dumps(envelope).encode())
-        await pg_service._save_snapshot_postgres("Strat:abc", ts, now, req)
+        await pg_service._save_snapshot_postgres(
+            "Strat:abc", ts, now, req, RunMode.parse_optional(req.execution_mode)
+        )
         args = pg_service._snapshot_fetchrow.await_args.args
         # Bind order: ... created_at($9)=args[9], deployed_capital_usd=args[10],
         # wallet_total_value_usd=args[11], wallet_balances_json=args[12],
@@ -392,12 +428,50 @@ class TestSaveSnapshotPostgres:
         ts = datetime(2026, 5, 7, 12, 0, 0, tzinfo=UTC)
         now = datetime(2026, 5, 7, 12, 0, 1, tzinfo=UTC)
         req = _request(positions_json=json.dumps([_position("x")]).encode())
-        await pg_service._save_snapshot_postgres("Strat:abc", ts, now, req)
+        await pg_service._save_snapshot_postgres(
+            "Strat:abc", ts, now, req, RunMode.parse_optional(req.execution_mode)
+        )
         args = pg_service._snapshot_fetchrow.await_args.args
         assert args[10] == "0"
         assert args[11] == "0"
         assert json.loads(args[12]) == []
         assert json.loads(args[13]) == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("wire_mode", "canonical"),
+    [(" LIVE ", "live"), ("paper", "paper"), ("", "")],
+)
+async def test_snapshot_rpc_normalizes_mode_before_postgres_dispatch(wire_mode: str, canonical: str) -> None:
+    service = StateServiceServicer(_make_settings(database_url="postgres://x/y"))
+    service._snapshot_pool = MagicMock()
+    service._snapshot_pool_initialized = True
+    service._ensure_snapshot_pool = AsyncMock()
+    service._save_snapshot_postgres = AsyncMock(return_value=7)
+    context = MagicMock(spec=grpc.aio.ServicerContext)
+
+    response = await service.SavePortfolioSnapshot(
+        _request(deployment_id="deploy-1", execution_mode=wire_mode), context
+    )
+
+    assert response.success is True
+    assert service._save_snapshot_postgres.await_args.args[-1] == canonical
+
+
+@pytest.mark.asyncio
+async def test_snapshot_rpc_rejects_invalid_mode_before_backend_dispatch() -> None:
+    service = StateServiceServicer(_make_settings(database_url="postgres://x/y"))
+    service._ensure_snapshot_pool = AsyncMock()
+    service._save_snapshot_postgres = AsyncMock()
+    context = MagicMock(spec=grpc.aio.ServicerContext)
+
+    response = await service.SavePortfolioSnapshot(_request(deployment_id="deploy-1", execution_mode="livve"), context)
+
+    assert response.success is False
+    context.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
+    service._ensure_snapshot_pool.assert_not_awaited()
+    service._save_snapshot_postgres.assert_not_awaited()
 
     def test_conflict_update_does_not_clobber_wallet_columns_with_defaults(self):
         # VIB-5007 (CodeRabbit Major) — a conflicting upsert for the same

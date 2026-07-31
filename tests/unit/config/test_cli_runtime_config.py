@@ -35,6 +35,7 @@ from almanak.config.cli_runtime import (
     max_value_usd_override,
     subprocess_env_with_overrides,
 )
+from almanak.config.runtime import ConfigurationError
 
 # Every env var the factory reads. Listed explicitly so a future field
 # addition that forgets to wire up the scrub fails loudly here rather
@@ -238,6 +239,12 @@ class TestEnvReads:
         monkeypatch.setenv("ALMANAK_EXECUTION_MODE", "SAFE_ZODIAC")
         cfg = cli_runtime_config_from_env()
         assert cfg.execution_mode == "safe_zodiac"
+
+    def test_invalid_execution_mode_raises_configuration_error(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("ALMANAK_EXECUTION_MODE", "private_key")
+
+        with pytest.raises(ConfigurationError, match="execution_mode"):
+            cli_runtime_config_from_env()
 
     def test_safe_address_pair(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("ALMANAK_GATEWAY_SAFE_ADDRESS", "0xgateway")

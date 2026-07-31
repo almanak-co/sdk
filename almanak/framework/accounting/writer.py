@@ -43,6 +43,7 @@ from almanak.framework.accounting.position_reference import (
 )
 from almanak.framework.accounting.settlement_accounting import SettlementAccountingEvent
 from almanak.framework.accounting.vault_accounting import VaultAccountingEvent
+from almanak.framework.models.run_mode import RunMode
 from almanak.framework.primitives.taxonomy import (
     UnknownIntentTypeError,
     primitive_for,
@@ -449,21 +450,25 @@ class AccountingWriter:
         the record. In non-live modes, errors are logged and ``False`` is
         returned so the loop continues.
         """
-        is_live = event.identity.execution_mode == "live"
-        if not hasattr(self._store, "save_accounting_event"):
-            msg = (
-                f"Store {type(self._store).__name__} does not support "
-                f"save_accounting_event; accounting event would be silently dropped"
-            )
-            if is_live:
-                raise AccountingPersistenceError(
-                    AccountingWriteKind.ACCOUNTING,
-                    deployment_id=event.identity.deployment_id,
-                    message=msg,
-                )
-            logger.warning(msg)
-            return False
+        # Keep boundary parsing inside the writer's mode-aware error contract.
+        # Invalid legacy/fake identities are not live and therefore degrade to
+        # ``False``; a canonical live stamp still fails closed below.
+        is_live = False
         try:
+            is_live = RunMode.parse_optional(event.identity.execution_mode) is RunMode.LIVE
+            if not hasattr(self._store, "save_accounting_event"):
+                msg = (
+                    f"Store {type(self._store).__name__} does not support "
+                    f"save_accounting_event; accounting event would be silently dropped"
+                )
+                if is_live:
+                    raise AccountingPersistenceError(
+                        AccountingWriteKind.ACCOUNTING,
+                        deployment_id=event.identity.deployment_id,
+                        message=msg,
+                    )
+                logger.warning(msg)
+                return False
             return await self._store.save_accounting_event(event)
         except AccountingPersistenceError:
             # Already typed — propagate untouched in live mode, swallow with

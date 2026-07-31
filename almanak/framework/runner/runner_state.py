@@ -28,6 +28,7 @@ from ..accounting.capital_flows import (
 )
 from ..deployment import is_hosted
 from ..intents.vocabulary import AnyIntent, BorrowIntent, HoldIntent, PerpCloseIntent, PerpOpenIntent
+from ..models.run_mode import RunMode
 from ..portfolio import (
     PortfolioMetrics,
     PortfolioSnapshot,
@@ -94,15 +95,14 @@ def _stamp_snapshot_identity(runner: Any, snapshot: PortfolioSnapshot) -> None:
 
     Critical: ``StrategyRunner`` does NOT expose ``execution_mode`` as an
     attribute. The production source of truth is
-    ``derive_execution_mode_from_config(runner.config)`` returning an
-    ``ExecutionMode`` enum (already used at strategy_runner.py:2172 for
-    ledger entries and on the metrics path below). Never read
+    ``derive_run_mode_from_config(runner.config)`` returning a
+    ``RunMode`` enum (also used by the ledger and metrics paths). Never read
     ``getattr(runner, "execution_mode", "")`` — that path silently
     returns ``""`` in production while passing on any test fake that
     sets the attribute.
     """
     from almanak.framework.runner.strategy_runner import (
-        derive_execution_mode_from_config,
+        derive_run_mode_from_config,
     )
 
     # cycle_id: prefer runner._last_cycle_id (survives clear_cycle_id in
@@ -124,10 +124,10 @@ def _stamp_snapshot_identity(runner: Any, snapshot: PortfolioSnapshot) -> None:
 
     snapshot.deployment_id = getattr(runner, "deployment_id", "") or snapshot.deployment_id
 
-    existing_mode = getattr(snapshot, "execution_mode", "") or ""
+    existing_mode = snapshot.execution_mode
     try:
-        mode = derive_execution_mode_from_config(runner.config)
-        snapshot.execution_mode = mode.value if hasattr(mode, "value") else str(mode)
+        mode = derive_run_mode_from_config(runner.config)
+        snapshot.execution_mode = mode
     except Exception:  # noqa: BLE001
         # Defensive: never crash a snapshot save on a missing config —
         # but log so the gap is visible in regression checks. Preserve any
@@ -233,10 +233,10 @@ async def update_state(
     # Mode derivation — same defensive pattern as
     # _persist_position_state_snapshots; the import stays lazy because
     # strategy_runner imports this module at load time.
-    from almanak.framework.runner.strategy_runner import derive_execution_mode_from_config
+    from almanak.framework.runner.strategy_runner import derive_run_mode_from_config
 
     try:
-        execution_mode = derive_execution_mode_from_config(runner.config) if runner is not None else None
+        execution_mode = derive_run_mode_from_config(runner.config) if runner is not None else None
     except Exception:  # noqa: BLE001
         execution_mode = None
     is_live = bool(execution_mode and str(execution_mode).lower() == "live")
@@ -349,10 +349,10 @@ async def persist_copy_trading_state(
     the only cross-restart dedup for leader-wallet activity -- a silently
     stale cursor replays already-copied trades after a restart.
     """
-    from almanak.framework.runner.strategy_runner import derive_execution_mode_from_config
+    from almanak.framework.runner.strategy_runner import derive_run_mode_from_config
 
     try:
-        execution_mode = derive_execution_mode_from_config(runner.config) if runner is not None else None
+        execution_mode = derive_run_mode_from_config(runner.config) if runner is not None else None
     except Exception:  # noqa: BLE001
         execution_mode = None
     is_live = bool(execution_mode and str(execution_mode).lower() == "live")
@@ -419,10 +419,10 @@ async def persist_vault_state(
     carries settlement_phase / last_settlement_epoch / settlement_nonce -- a
     silently stale phase/epoch risks duplicate on-chain settlement of an epoch.
     """
-    from almanak.framework.runner.strategy_runner import derive_execution_mode_from_config
+    from almanak.framework.runner.strategy_runner import derive_run_mode_from_config
 
     try:
-        execution_mode = derive_execution_mode_from_config(runner.config) if runner is not None else None
+        execution_mode = derive_run_mode_from_config(runner.config) if runner is not None else None
     except Exception:  # noqa: BLE001
         execution_mode = None
     is_live = bool(execution_mode and str(execution_mode).lower() == "live")
@@ -669,11 +669,11 @@ async def _persist_position_state_snapshots(  # noqa: C901
     # rather than silently masking the gap that G15/LP2/L2 are designed to
     # detect. Paper and dry-run keep the loud-but-non-blocking semantics
     # (log + continue) per the teardown lane pattern.
-    from almanak.framework.runner.strategy_runner import derive_execution_mode_from_config
+    from almanak.framework.runner.strategy_runner import derive_run_mode_from_config
     from almanak.framework.state.exceptions import AccountingWriteKind
 
     try:
-        execution_mode = derive_execution_mode_from_config(runner.config) if runner is not None else None
+        execution_mode = derive_run_mode_from_config(runner.config) if runner is not None else None
     except Exception:  # noqa: BLE001
         execution_mode = None
     is_live = bool(execution_mode and str(execution_mode).lower() == "live")
@@ -1748,9 +1748,9 @@ async def _build_metrics_for_snapshot(  # noqa: C901
         # Phase 4: derive deployment_id, execution_mode, and cycle_id from runner context.
         # VIB-3157: shared helper keeps the tri-state mapping aligned with
         # ledger entries (``StrategyRunner._derive_execution_mode``).
-        from almanak.framework.runner.strategy_runner import derive_execution_mode_from_config
+        from almanak.framework.runner.strategy_runner import derive_run_mode_from_config
 
-        execution_mode = derive_execution_mode_from_config(runner.config)
+        execution_mode = derive_run_mode_from_config(runner.config)
 
         # Get cycle_id: prefer runner._last_cycle_id (survives clear_cycle_id in finally block)
         # Fall back to observability context for non-runner callers
@@ -1826,7 +1826,7 @@ async def _build_metrics_for_snapshot(  # noqa: C901
                 metrics,
                 snapshot,
                 deployment_id=deployment_id,
-                is_live=execution_mode == "live",
+                is_live=execution_mode is RunMode.LIVE,
             )
             await _populate_capital_flows(runner, metrics, snapshot, deployment_id=deployment_id)
             return metrics
@@ -1843,7 +1843,7 @@ async def _build_metrics_for_snapshot(  # noqa: C901
             existing,
             snapshot,
             deployment_id=deployment_id,
-            is_live=execution_mode == "live",
+            is_live=execution_mode is RunMode.LIVE,
         )
         await _populate_capital_flows(runner, existing, snapshot, deployment_id=deployment_id)
         return existing

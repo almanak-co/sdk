@@ -28,6 +28,7 @@ from click.testing import CliRunner
 
 from almanak.framework.cli import run_helpers
 from almanak.framework.cli._run_context import ComponentBundle
+from almanak.framework.models.run_mode import RunMode
 from tests.unit.cli.test_run_helpers_components import (
     _FakeMissingEnvErr,
     _make_fake_local_config,
@@ -1210,6 +1211,54 @@ class TestInitCopyTradingExtras:
 
 
 class TestVaultLifecycleExtras:
+    @pytest.mark.parametrize(
+        ("effective_dry_run", "expected"),
+        [(True, RunMode.DRY_RUN), (False, RunMode.LIVE)],
+    )
+    def test_vault_lifecycle_receives_typed_run_mode(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        effective_dry_run: bool,
+        expected: RunMode,
+    ) -> None:
+        mocks = _patch_component_factories(monkeypatch)
+        mocks["_has_placeholder_vault_address"].return_value = False
+
+        class _FakeStateMgr:
+            async def load_state(self, _sid: str) -> Any:
+                return None
+
+        captured: dict[str, Any] = {}
+        from almanak.framework.vault import lifecycle as vlc_mod
+
+        def _capture(**kwargs: Any) -> Any:
+            captured.update(kwargs)
+            return MagicMock()
+
+        monkeypatch.setattr(vlc_mod, "VaultLifecycleManager", _capture)
+        run_helpers._maybe_auto_deploy_vault(
+            strategy_config={
+                "chain": "arbitrum",
+                "vault": {
+                    "vault_address": "0x" + "a" * 40,
+                    "valuator_address": "0x" + "b" * 40,
+                    "underlying_token": "USDC",
+                    "settlement_interval_minutes": 60,
+                },
+            },
+            resolved_network="mainnet",
+            effective_dry_run=effective_dry_run,
+            config_chain="arbitrum",
+            runtime_config=_make_fake_local_config(),
+            gateway_client=MagicMock(),
+            execution_orchestrator=MagicMock(),
+            state_manager=_FakeStateMgr(),
+            strategy_instance=_make_strategy_instance(),
+            deployment_id="vault-mode",
+        )
+
+        assert captured["execution_mode"] is expected
+
     def test_vault_initial_state_loaded_from_persistent_state(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Vault initial_state falls back to strategy.persistent_state (2013-2018)."""
         mocks = _patch_component_factories(monkeypatch)

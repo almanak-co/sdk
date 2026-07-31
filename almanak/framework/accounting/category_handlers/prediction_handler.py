@@ -31,6 +31,7 @@ from almanak.framework.accounting.models import (
     PredictionAccountingEvent,
     PredictionEventType,
 )
+from almanak.framework.models.run_mode import RunMode, RunModeStamp
 
 if TYPE_CHECKING:
     from almanak.framework.accounting.basis import FIFOBasisStore
@@ -80,7 +81,9 @@ def handle_prediction(
     # ── Identity fields ──────────────────────────────────────────────────────
     deployment_id = ledger_row.get("deployment_id") or outbox_row.get("deployment_id") or ""
     cycle_id = ledger_row.get("cycle_id") or outbox_row.get("cycle_id") or ""
-    execution_mode = ledger_row.get("execution_mode") or ""
+    # Parse before BUY can update its aggregate.  Invalid persisted modes must
+    # leave shares and loaded basis untouched so an outbox retry is idempotent.
+    execution_mode = RunMode.parse_optional(ledger_row.get("execution_mode"))
     chain = ledger_row.get("chain") or ""
     protocol = (ledger_row.get("protocol") or "").lower()
     tx_hash = ledger_row.get("tx_hash") or ""
@@ -174,7 +177,7 @@ def _handle_buy(
     basis_store: FIFOBasisStore,
     deployment_id: str,
     cycle_id: str,
-    execution_mode: str,
+    execution_mode: RunModeStamp,
     chain: str,
     protocol: str,
     tx_hash: str,
@@ -369,7 +372,7 @@ def _handle_sell_or_redeem(
     basis_store: FIFOBasisStore,
     deployment_id: str,
     cycle_id: str,
-    execution_mode: str,
+    execution_mode: RunModeStamp,
     chain: str,
     protocol: str,
     tx_hash: str,
@@ -597,7 +600,7 @@ def _build_event(
     event_type: PredictionEventType,
     deployment_id: str,
     cycle_id: str,
-    execution_mode: str,
+    execution_mode: RunModeStamp,
     chain: str,
     protocol: str,
     tx_hash: str,

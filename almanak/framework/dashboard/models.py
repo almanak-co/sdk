@@ -9,6 +9,8 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 
+from almanak.framework.models.run_mode import RunMode
+
 
 class StrategyStatus(StrEnum):
     """Status of a strategy."""
@@ -393,8 +395,12 @@ class Strategy:
     # Value confidence indicator (HIGH, ESTIMATED, STALE, UNAVAILABLE)
     value_confidence: str | None = None
     # Paper trading support
-    execution_mode: str = "live"  # "live" or "paper"
+    execution_mode: RunMode = RunMode.LIVE
     paper_metrics: PaperMetrics | None = None
+
+    def __post_init__(self) -> None:
+        """Canonicalize legacy wire/model inputs to the typed run-mode vocabulary."""
+        self.execution_mode = RunMode.parse(self.execution_mode)
 
 
 @dataclass

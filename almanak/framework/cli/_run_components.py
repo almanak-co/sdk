@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 import click
 
+from ..models.run_mode import RunMode
 from ..strategies.metadata import LEGACY_COMPAT_DATA_REQUIREMENTS, StrategyDataRequirements
 from ._run_context import ComponentBundle
 from ._run_setup import _DryRunVaultEarlyExit, _runtime_private_key_override
@@ -1176,7 +1177,7 @@ def _maybe_auto_deploy_vault(
         # Mode-aware failure semantics for the share-backed AUM guard (VIB-5672):
         # dry-run surfaces a violation loudly but continues; live refuses. The local
         # CLI exposes only dry-run here; live is the safe default for real runs.
-        execution_mode="dry_run" if effective_dry_run else "live",
+        execution_mode=RunMode.DRY_RUN if effective_dry_run else RunMode.LIVE,
     )
     click.echo(
         f"  Vault lifecycle initialized: "

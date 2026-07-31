@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, MagicMock
 import grpc
 import pytest
 
+from almanak.framework.models.run_mode import RunMode
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2
 from almanak.gateway.services.state_service import StateServiceServicer
@@ -142,6 +143,13 @@ def _position_request(**overrides) -> gateway_pb2.SavePositionEventRequest:
 
 class TestSaveAccountingEventValidation:
     @pytest.mark.asyncio
+    async def test_invalid_execution_mode(self, service, ctx):
+        resp = await service.SaveAccountingEvent(_accounting_request(execution_mode="livve"), ctx)
+
+        assert resp.success is False
+        ctx.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("deployment_id", ["", "   "])
     async def test_missing_deployment_id(self, service, ctx, deployment_id):
         req = _accounting_request(deployment_id=deployment_id)
@@ -262,11 +270,13 @@ class TestSaveAccountingEventValidation:
         warm.save_accounting_event = AsyncMock(return_value=True)
         service._state_manager = MagicMock()
         service._state_manager.warm_backend = warm
-        req = _accounting_request()
+        req = _accounting_request(execution_mode=" PAPER ")
         resp = await service.SaveAccountingEvent(req, ctx)
         assert resp.success is True
         ctx.set_code.assert_not_called()
         warm.save_accounting_event.assert_called_once()
+        event = warm.save_accounting_event.call_args.args[0]
+        assert event.identity.execution_mode is RunMode.PAPER
 
     @pytest.mark.asyncio
     async def test_backend_returns_false(self, service, ctx):
@@ -342,6 +352,13 @@ class TestSaveAccountingEventValidation:
 
 
 class TestSavePositionEventValidation:
+    @pytest.mark.asyncio
+    async def test_invalid_execution_mode(self, service, ctx):
+        resp = await service.SavePositionEvent(_position_request(execution_mode="livve"), ctx)
+
+        assert resp.success is False
+        ctx.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
+
     @pytest.mark.asyncio
     async def test_missing_event_id(self, service, ctx):
         req = _position_request(id="")
@@ -422,7 +439,7 @@ class TestSavePositionEventValidation:
         warm.save_position_event = AsyncMock(return_value=True)
         service._state_manager = MagicMock()
         service._state_manager.warm_backend = warm
-        req = _position_request()
+        req = _position_request(execution_mode=" PAPER ")
         resp = await service.SavePositionEvent(req, ctx)
         assert resp.success is True
         ctx.set_code.assert_not_called()
@@ -430,6 +447,7 @@ class TestSavePositionEventValidation:
         saved = warm.save_position_event.call_args.args[0]
         from almanak.framework.observability.position_events import PositionEventType, PositionType
 
+        assert saved.execution_mode is RunMode.PAPER
         assert saved.position_type is PositionType.LP
         assert saved.event_type is PositionEventType.OPEN
 

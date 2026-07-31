@@ -9,14 +9,16 @@ respects the fail-closed contract on backend failures, and preserves
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import grpc
 import pytest
 
+from almanak.framework.models.run_mode import RunMode
 from almanak.framework.observability.ledger import LedgerEntry
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2
+from almanak.gateway.services import state_service as state_service_module
 from almanak.gateway.services.state_service import StateServiceServicer
 
 
@@ -77,6 +79,23 @@ def _base_request(**overrides) -> gateway_pb2.SaveLedgerEntryRequest:
 
 class TestSaveLedgerEntryValidation:
     """Handler rejects malformed requests before touching the backend."""
+
+    @pytest.mark.asyncio
+    async def test_invalid_execution_mode(self, state_service, mock_context):
+        state_service._ensure_snapshot_pool = AsyncMock()
+        with patch.object(
+            state_service_module,
+            "_canonical_execution_mode",
+            wraps=state_service_module._canonical_execution_mode,
+        ) as parse_mode:
+            response = await state_service.SaveLedgerEntry(_base_request(execution_mode="livve"), mock_context)
+
+        assert response.success is False
+        assert response.error == "invalid run mode 'livve'; expected one of: dry_run, paper, live"
+        mock_context.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
+        mock_context.set_details.assert_called_once_with(response.error)
+        parse_mode.assert_called_once_with("livve")
+        state_service._ensure_snapshot_pool.assert_not_awaited()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("deployment_id", ["", "   "])
@@ -165,7 +184,7 @@ class TestSaveLedgerEntrySqliteDelegate:
         mock_sm.warm_backend = warm
         state_service._state_manager = mock_sm
 
-        request = _base_request(slippage_bps=12.5)
+        request = _base_request(slippage_bps=12.5, execution_mode=" LIVE ")
         response = await state_service.SaveLedgerEntry(request, mock_context)
 
         assert response.success is True
@@ -177,7 +196,7 @@ class TestSaveLedgerEntrySqliteDelegate:
         assert entry.id == _ENTRY_UUID
         assert entry.cycle_id == "cycle-1"
         assert entry.deployment_id == "deploy-1"
-        assert entry.execution_mode == "live"
+        assert entry.execution_mode is RunMode.LIVE
         assert entry.timestamp == datetime.fromtimestamp(1712000000, tz=UTC)
         assert entry.intent_type == "SWAP"
         assert entry.slippage_bps == pytest.approx(12.5)
@@ -312,6 +331,14 @@ class TestSaveLedgerEntryPostgresJsonbColumns:
         assert args[21] == '{"USDC": "1.00"}'
         assert args[22] == '{"hf": "1.5"}'
         assert args[23] == '{"hf": "1.4"}'
+
+    @pytest.mark.asyncio
+    async def test_execution_mode_is_canonicalized_before_postgres_write(self, pg_service, mock_context):
+        response = await pg_service.SaveLedgerEntry(_base_request(execution_mode=" PAPER "), mock_context)
+
+        assert response.success is True
+        args = pg_service._snapshot_execute.call_args.args
+        assert args[4] == "paper"
 
     @pytest.mark.asyncio
     async def test_all_four_jsonb_fields_empty_bind_none(self, pg_service, mock_context):

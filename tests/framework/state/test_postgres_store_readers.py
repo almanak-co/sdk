@@ -23,6 +23,7 @@ from decimal import Decimal
 
 import pytest
 
+from almanak.framework.models.run_mode import RunMode
 from almanak.framework.state.state_manager import (
     _PG_FINITE_NUMERIC_PATTERN,
     PostgresStore,
@@ -1245,7 +1246,7 @@ def test_build_pg_upsert_args_appends_total_value_and_positions():
     request = gateway_pb2.SaveMetricsRequest()
     now = datetime(2026, 5, 4, tzinfo=UTC)
 
-    args = build_pg_upsert_args(inputs, request, now, Decimal("12345.67"))
+    args = build_pg_upsert_args(inputs, request, RunMode.PAPER, now, Decimal("12345.67"))
 
     # Length matches $1..$12 placeholders in PG_UPSERT_QUERY (VIB-4721/4722:
     # portfolio_metrics has a single identity column, deployment_id — the
@@ -1256,7 +1257,7 @@ def test_build_pg_upsert_args_appends_total_value_and_positions():
     assert args[11] == "[]"  # positions_json default
 
     # Override positions_json explicitly.
-    args2 = build_pg_upsert_args(inputs, request, now, Decimal("0"), positions_json='[{"x":1}]')
+    args2 = build_pg_upsert_args(inputs, request, RunMode.PAPER, now, Decimal("0"), positions_json='[{"x":1}]')
     assert args2[11] == '[{"x":1}]'
 
 

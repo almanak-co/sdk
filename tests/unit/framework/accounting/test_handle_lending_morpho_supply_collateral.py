@@ -53,7 +53,6 @@ def _make_outbox_row(
         "id": str(uuid.uuid4()),
         "ledger_entry_id": ledger_entry_id,
         "deployment_id": _DEPLOYMENT_ID,
-        "deployment_id": _DEPLOYMENT_ID,
         "cycle_id": _CYCLE_ID,
         "intent_type": intent_type,
         "wallet_address": _WALLET,
@@ -79,7 +78,6 @@ def _make_ledger_row(
 ) -> dict[str, Any]:
     return {
         "id": ledger_entry_id,
-        "deployment_id": _DEPLOYMENT_ID,
         "deployment_id": _DEPLOYMENT_ID,
         "cycle_id": _CYCLE_ID,
         "execution_mode": "live",

@@ -32,7 +32,6 @@ def _outbox_row(position_key: str) -> dict:
     return {
         "outbox_id": "ob-1",
         "deployment_id": "d1",
-        "deployment_id": "s1",
         "cycle_id": "c1",
         "position_key": position_key,
         "wallet_address": WALLET,
@@ -43,7 +42,6 @@ def _ledger_row_open(*, protocol: str, extracted_data: dict) -> dict:
     return {
         "id": "le-1",
         "deployment_id": "d1",
-        "deployment_id": "s1",
         "cycle_id": "c1",
         "intent_type": "LP_OPEN",
         "protocol": protocol,
@@ -64,7 +62,6 @@ def _ledger_row_close(*, protocol: str, extracted_data: dict) -> dict:
     return {
         "id": "le-2",
         "deployment_id": "d1",
-        "deployment_id": "s1",
         "cycle_id": "c1",
         "intent_type": "LP_CLOSE",
         "protocol": protocol,
@@ -110,7 +107,6 @@ class TestV4LPOpenIntegration:
         ledger = {
             "id": "le-1",
             "deployment_id": "d1",
-            "deployment_id": "s1",
             "cycle_id": "c1",
             "intent_type": "LP_OPEN",
             "protocol": "uniswap_v4",

@@ -108,6 +108,18 @@ def _install_warm_backend(service: StateServiceServicer, warm: MagicMock | None)
     service._state_manager = mock_sm
 
 
+@pytest.mark.asyncio
+async def test_invalid_execution_mode_rejected_before_metrics_backend(service, context) -> None:
+    service._snapshot_pool = MagicMock()
+    service._snapshot_fetchrow = AsyncMock()
+
+    response = await service.SavePortfolioMetrics(_make_request(execution_mode="livve"), context)
+
+    assert response.success is False
+    context.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
+    service._snapshot_fetchrow.assert_not_awaited()
+
+
 # ---------------------------------------------------------------------------
 # 1. Deployment ID validation
 # ---------------------------------------------------------------------------
@@ -348,7 +360,7 @@ async def test_postgres_branch_success(service, context):
         gas_spent_usd="25",
         deployment_id="depl-1",
         cycle_id="cyc-1",
-        execution_mode="live",
+        execution_mode=" LIVE ",
         is_complete=True,
     )
 
@@ -577,7 +589,7 @@ async def test_phase4_accounting_fields_propagated(service, context):
         _make_request(
             deployment_id="my-deploy",
             cycle_id="cycle-42",
-            execution_mode="paper",
+            execution_mode=" PAPER ",
             is_complete=True,
         ),
         context,

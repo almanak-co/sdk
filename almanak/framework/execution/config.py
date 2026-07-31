@@ -20,7 +20,8 @@ What moved to :mod:`almanak.config.runtime`:
     * ``runtime_config_from_env`` (the env-reading factory).
     * ``_resolve_private_key_from_env``, ``_create_safe_signer_from_env``.
     * ``CHAIN_IDS``, ``ConfigurationError``, ``MissingEnvironmentVariableError``,
-      ``DataFreshnessPolicy``, ``ExecutionMode`` are RE-EXPORTED here for
+      ``DataFreshnessPolicy``, ``SigningMode`` and the historical
+      ``ExecutionMode`` alias are RE-EXPORTED here for
       back-compat — they have a single canonical home in ``almanak.config.runtime``.
 
 Example:
@@ -52,7 +53,7 @@ from eth_account import Account
 # almanak.config.runtime is reversed: this module now imports the canonical
 # types FROM the config service. ``CHAIN_IDS`` / ``ConfigurationError`` /
 # ``MissingEnvironmentVariableError`` / ``DataFreshnessPolicy`` /
-# ``ExecutionMode`` live in almanak.config.runtime and are re-exported here.
+# signing-mode names live in almanak.config.runtime and are re-exported here.
 from almanak.config.runtime import (
     CHAIN_IDS,
     ConfigurationError,
@@ -60,6 +61,7 @@ from almanak.config.runtime import (
     ExecutionMode,
     MissingEnvironmentVariableError,
     RuntimeConfig,
+    SigningMode,
     gateway_wallets_configured,
     multi_chain_rpc_urls_from_env,
 )
@@ -240,8 +242,8 @@ SUPPORTED_PROTOCOLS: dict[str, set[str]] = _DerivedProtocolMatrix()
 
 
 # =============================================================================
-# Execution Mode (canonical home: ``almanak.config.runtime.ExecutionMode``;
-# re-exported above for back-compat).
+# Signing Mode (canonical home: ``almanak.config.runtime.SigningMode``;
+# ambiguous ``ExecutionMode`` re-exported above for back-compat).
 # =============================================================================
 
 
@@ -1314,12 +1316,12 @@ class MultiChainRuntimeConfig:
             create_safe_signer,
         )
 
-        mode = ExecutionMode.from_string(execution_mode)
+        mode = SigningMode.from_string(execution_mode)
 
         # Create Safe signer if needed
         safe_signer: SafeSigner | None = None
 
-        if mode == ExecutionMode.SAFE_DIRECT:
+        if mode == SigningMode.SAFE_DIRECT:
             if not safe_address:
                 raise ConfigurationError(
                     field="safe_address",
@@ -1338,7 +1340,7 @@ class MultiChainRuntimeConfig:
             )
             safe_signer = create_safe_signer(signer_config)
 
-        elif mode == ExecutionMode.SAFE_ZODIAC:
+        elif mode == SigningMode.SAFE_ZODIAC:
             if not safe_address:
                 raise ConfigurationError(
                     field="safe_address",
@@ -1723,6 +1725,7 @@ __all__ = [
     "ConfigurationError",
     "MissingEnvironmentVariableError",
     "ExecutionMode",
+    "SigningMode",
     "CHAIN_IDS",
     "SUPPORTED_PROTOCOLS",
     "DataFreshnessPolicy",

@@ -64,6 +64,7 @@ from enum import Enum
 from typing import Any
 
 from almanak.core.chains import ChainRegistry
+from almanak.framework.models.run_mode import RunMode, RunModeStamp, serialize_run_mode
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +97,7 @@ class LedgerEntry:
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     cycle_id: str = ""
     deployment_id: str = ""
-    execution_mode: str = ""  # Phase 4: "live", "paper", "dry_run" (VIB-2837)
+    execution_mode: RunModeStamp = ""
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
     intent_type: str = ""
     token_in: str = ""
@@ -118,6 +119,7 @@ class LedgerEntry:
     post_state_json: str = ""  # on-chain state after execution (VIB-3480)
 
     def __post_init__(self) -> None:
+        self.execution_mode = RunMode.parse_optional(self.execution_mode)
         # transaction_ledger.chain participates in case-sensitive SQLite keys
         # and accounting joins; canonicalize known chains at construction so a
         # mixed-case producer can never fork rows ("ETHEREUM" vs "ethereum").
@@ -131,6 +133,7 @@ class LedgerEntry:
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a dictionary for storage."""
         d = asdict(self)
+        d["execution_mode"] = serialize_run_mode(self.execution_mode)
         d["timestamp"] = self.timestamp.isoformat()
         return d
 
@@ -146,7 +149,7 @@ class LedgerEntry:
             id=data.get("id", str(uuid.uuid4())),
             cycle_id=data.get("cycle_id", ""),
             deployment_id=data["deployment_id"],
-            execution_mode=data.get("execution_mode", ""),
+            execution_mode=RunMode.parse_optional(data.get("execution_mode")),
             timestamp=ts,
             intent_type=data.get("intent_type", ""),
             token_in=data.get("token_in", ""),

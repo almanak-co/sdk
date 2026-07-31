@@ -28,6 +28,7 @@ from almanak.framework.accounting.models import (
     SwapAccountingEvent,
     SwapEventType,
 )
+from almanak.framework.models.run_mode import RunMode
 
 if TYPE_CHECKING:
     from almanak.framework.accounting.basis import FIFOBasisStore
@@ -315,7 +316,9 @@ def handle_swap(
     # ── Identity fields ──────────────────────────────────────────────────────
     deployment_id = ledger_row.get("deployment_id") or outbox_row.get("deployment_id") or ""
     cycle_id = ledger_row.get("cycle_id") or outbox_row.get("cycle_id") or ""
-    execution_mode = ledger_row.get("execution_mode") or ""
+    # Validate the persisted identity before any acquisition/disposal mutates
+    # the shared wallet FIFO pool.
+    execution_mode = RunMode.parse_optional(ledger_row.get("execution_mode"))
     chain = ledger_row.get("chain") or ""
     protocol = (ledger_row.get("protocol") or "").lower()
     tx_hash = ledger_row.get("tx_hash") or ""

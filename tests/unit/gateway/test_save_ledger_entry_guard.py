@@ -30,6 +30,7 @@ from typing import Any
 import pytest
 
 from almanak.framework.accounting.ledger_guard import DEGRADED_PREFIX
+from almanak.framework.models.run_mode import RunMode
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 STATE_SERVICE = REPO_ROOT / "almanak" / "gateway" / "services" / "state_service.py"
@@ -332,6 +333,7 @@ def _build_atomic_entry(request):
         str(uuid.uuid4()),
         "deployment:abc123abc123",
         datetime.now(UTC),
+        RunMode.parse_optional(request.execution_mode),
     )
 
 
