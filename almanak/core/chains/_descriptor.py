@@ -87,7 +87,7 @@ class NativeToken:
 
     Attributes:
         symbol: e.g. ``"ETH"``, ``"AVAX"``, ``"BNB"``.
-        name: Human-readable name (e.g. ``"Ethereum"``, ``"BNB"``).
+        name: Human-readable name (e.g. ``"Ether"``, ``"BNB"``).
         decimals: Decimal places (18 for every EVM chain, 9 for SOL).
         wrapped_address: Address of the wrapped ERC-20 (or SPL mint for Solana).
             ``None`` is reserved for chains with no canonical wrapper — every

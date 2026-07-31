@@ -5,10 +5,10 @@ Three layers of guarantee:
 1. **Structural** — every chain in the frozen historical inventory has a
    registered ``ChainDescriptor``; names / aliases / chain_ids are
    well-formed; the registry round-trips correctly.
-2. **Legacy byte-identity** — every derived view (CHAIN_IDS,
+2. **Legacy compatibility** — every derived view (CHAIN_IDS,
    ALLOWED_CHAINS, the 6 gas / timeout dicts, NATIVE_TOKEN_INFO,
-   NATIVE_TOKEN_SYMBOLS, CHAIN_NATIVE_SYMBOL, fork_manager.CHAIN_IDS) is
-   byte-identical to the literal it replaced.
+   NATIVE_TOKEN_SYMBOLS, CHAIN_NATIVE_SYMBOL, fork_manager.CHAIN_IDS) matches
+   the audited compatibility snapshot, including deliberate metadata fixes.
 3. **Import-graph isolation** — the registry module ``almanak.core.chains``
    does not import any framework / connector / strategy code. The
    gateway's ``ALLOWED_CHAINS`` allowlist must be deterministic at import
@@ -226,16 +226,16 @@ HISTORICAL_NATIVE_TOKEN_SYMBOLS = {
     "solana": "SOL",
 }
 
-# Pre-VIB-4801 ``NATIVE_TOKEN_INFO`` literal from
-# ``almanak/gateway/services/onchain_lookup.py``. Covered only 9 chains —
-# the registry-derived view now exposes all 16 EVM chains; the byte-identity
-# test below asserts the historical entries remain unchanged (superset
-# semantics, deliberate expansion documented in the PR body).
-HISTORICAL_NATIVE_TOKEN_INFO = {
-    "ethereum": {"symbol": "ETH", "name": "Ethereum", "decimals": 18},
-    "arbitrum": {"symbol": "ETH", "name": "Ethereum", "decimals": 18},
-    "optimism": {"symbol": "ETH", "name": "Ethereum", "decimals": 18},
-    "base": {"symbol": "ETH", "name": "Ethereum", "decimals": 18},
+# Expected compatibility subset for the pre-VIB-4801 ``NATIVE_TOKEN_INFO``
+# literal from ``almanak/gateway/services/onchain_lookup.py``. The old literal
+# covered only 9 chains; the registry-derived view now exposes every EVM chain.
+# ETH is intentionally named "Ether" here: Ethereum is the chain, while Ether
+# is its native asset.
+EXPECTED_NATIVE_TOKEN_INFO = {
+    "ethereum": {"symbol": "ETH", "name": "Ether", "decimals": 18},
+    "arbitrum": {"symbol": "ETH", "name": "Ether", "decimals": 18},
+    "optimism": {"symbol": "ETH", "name": "Ether", "decimals": 18},
+    "base": {"symbol": "ETH", "name": "Ether", "decimals": 18},
     "polygon": {"symbol": "MATIC", "name": "Polygon", "decimals": 18},
     "avalanche": {"symbol": "AVAX", "name": "Avalanche", "decimals": 18},
     "bsc": {"symbol": "BNB", "name": "BNB", "decimals": 18},
@@ -325,6 +325,15 @@ class TestRegistryStructure:
         with pytest.raises(ValueError, match="Unknown chain_id"):
             ChainRegistry.by_id(999_999_999)
 
+    def test_eth_native_tokens_use_ether_asset_name(self) -> None:
+        """ETH is Ether; Ethereum names the chain, not its native asset."""
+        eth_descriptors = tuple(descriptor for descriptor in ChainRegistry.all() if descriptor.native.symbol == "ETH")
+
+        assert eth_descriptors
+        assert {descriptor.name: descriptor.native.name for descriptor in eth_descriptors} == {
+            descriptor.name: "Ether" for descriptor in eth_descriptors
+        }
+
     def test_register_rejects_duplicate_canonical_name(self) -> None:
         """Two descriptors claiming the same canonical name must raise."""
         with pytest.raises(ValueError, match="Canonical name.*collides"):
@@ -333,7 +342,7 @@ class TestRegistryStructure:
                     name="ethereum",
                     chain_id=1,
                     family=ChainFamily.EVM,
-                    native=NativeToken(symbol="ETH", name="Ethereum", decimals=18),
+                    native=NativeToken(symbol="ETH", name="Ether", decimals=18),
                     gas=GasProfile(),
                     timeouts=Timeouts(),
                 )
@@ -347,7 +356,7 @@ class TestRegistryStructure:
                 name="ethereum",
                 chain_id=1,
                 family=ChainFamily.EVM,
-                native=NativeToken(symbol="ETH", name="Ethereum", decimals=18),
+                native=NativeToken(symbol="ETH", name="Ether", decimals=18),
                 gas=GasProfile(),
                 timeouts=Timeouts(),
                 reorg_safe_depth=-1,
@@ -370,7 +379,7 @@ class TestRegistryStructure:
                     name="ethereum",
                     chain_id=1,
                     family=ChainFamily.EVM,
-                    native=NativeToken(symbol="ETH", name="Ethereum", decimals=18),
+                    native=NativeToken(symbol="ETH", name="Ether", decimals=18),
                     gas=GasProfile(),
                     timeouts=Timeouts(),
                 )
@@ -480,22 +489,21 @@ class TestLegacyDictByteIdentity:
 
         assert dict(NATIVE_TOKEN_SYMBOLS) == HISTORICAL_NATIVE_TOKEN_SYMBOLS
 
-    def test_native_token_info_historical_subset_unchanged(self) -> None:
+    def test_native_token_info_expected_subset(self) -> None:
         """The pre-VIB-4801 ``NATIVE_TOKEN_INFO`` literal only covered 9
         chains; the registry-derived view now covers all 16 EVM chains
-        (deliberate expansion documented in the PR body). The 9 historical
-        entries must remain byte-identical — the test guards the trust
-        boundary on what was previously declared, while allowing the new
-        entries the registry adds.
+        (deliberate expansion documented in the original PR). The expected
+        subset guards the trust boundary while allowing intentional metadata
+        corrections and the additional entries supplied by the registry.
         """
         from almanak.gateway.services.onchain_lookup import NATIVE_TOKEN_INFO
 
-        for chain_name, expected_info in HISTORICAL_NATIVE_TOKEN_INFO.items():
+        for chain_name, expected_info in EXPECTED_NATIVE_TOKEN_INFO.items():
             assert chain_name in NATIVE_TOKEN_INFO, (
-                f"Historical NATIVE_TOKEN_INFO entry {chain_name!r} disappeared from the registry-derived view."
+                f"Expected NATIVE_TOKEN_INFO entry {chain_name!r} disappeared from the registry-derived view."
             )
             assert NATIVE_TOKEN_INFO[chain_name] == expected_info, (
-                f"NATIVE_TOKEN_INFO[{chain_name!r}] drifted from the historical literal."
+                f"NATIVE_TOKEN_INFO[{chain_name!r}] drifted from the expected metadata."
             )
 
     def test_chain_native_symbol_byte_identical(self) -> None:
@@ -653,7 +661,7 @@ class TestRpcProfile:
             name="ethereum",
             chain_id=1,
             family=ChainFamily.EVM,
-            native=NativeToken(symbol="ETH", name="Ethereum", decimals=18),
+            native=NativeToken(symbol="ETH", name="Ether", decimals=18),
             gas=GasProfile(),
             timeouts=Timeouts(),
         )
@@ -672,7 +680,7 @@ class TestRpcProfile:
             name="ethereum",
             chain_id=1,
             family=ChainFamily.EVM,
-            native=NativeToken(symbol="ETH", name="Ethereum", decimals=18),
+            native=NativeToken(symbol="ETH", name="Ether", decimals=18),
             gas=GasProfile(),
             timeouts=Timeouts(),
             rpc=rpc,

@@ -201,7 +201,7 @@ class ResolvedToken:
         decimals: Token decimal places
         chain: Canonical lowercase chain name where this token is resolved
         chain_id: Numeric chain ID for the resolved chain
-        name: Human-readable token name (e.g., "Ethereum", "USD Coin")
+        name: Human-readable token name (e.g., "Ether", "USD Coin")
         coingecko_id: CoinGecko API identifier for price fetching
         is_stablecoin: Whether this token is a stablecoin
         is_native: Whether this is the native gas token (ETH, MATIC, AVAX, etc.)
@@ -360,7 +360,7 @@ class Token:
 
     Attributes:
         symbol: Token symbol (e.g., "ETH", "USDC", "WBTC")
-        name: Human-readable token name (e.g., "Ethereum", "USD Coin")
+        name: Human-readable token name (e.g., "Ether", "USD Coin")
         decimals: Default decimal places for the token (usually 18, but 6 for USDC/USDT, 8 for WBTC)
         addresses: Dictionary mapping chain names to contract addresses
                    (e.g., {"ethereum": "0x...", "arbitrum": "0x..."})

@@ -77,7 +77,7 @@ class TestTokenMetadata:
         """Native token metadata has is_native=True."""
         metadata = TokenMetadata(
             symbol="ETH",
-            name="Ethereum",
+            name="Ether",
             decimals=18,
             address=NATIVE_SENTINEL_ADDRESS,
             is_native=True,
@@ -148,7 +148,7 @@ class TestOnChainLookupNativeTokens:
 
         assert result is not None
         assert result.symbol == "ETH"
-        assert result.name == "Ethereum"
+        assert result.name == "Ether"
         assert result.decimals == 18
         assert result.is_native is True
 
@@ -159,6 +159,7 @@ class TestOnChainLookupNativeTokens:
 
         assert result is not None
         assert result.symbol == "ETH"
+        assert result.name == "Ether"
         assert result.is_native is True
 
     @pytest.mark.asyncio

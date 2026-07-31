@@ -69,7 +69,7 @@ DESCRIPTOR = register_chain(
         family=ChainFamily.EVM,
         native=NativeToken(
             symbol="ETH",
-            name="Ethereum",
+            name="Ether",
             decimals=18,
             # Canonical WETH — token0 of the earliest V3 pools; WETH9-style
             # (deposit()/withdraw() present). Verified on-chain 2026-07-09.

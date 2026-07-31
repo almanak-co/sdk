@@ -443,7 +443,7 @@ def _descriptor(external_ids: dict[str, str] | None) -> ChainDescriptor:
         name="ethereum",
         chain_id=1,
         family=ChainFamily.EVM,
-        native=NativeToken(symbol="ETH", name="Ethereum", decimals=18),
+        native=NativeToken(symbol="ETH", name="Ether", decimals=18),
         gas=GasProfile(),
         external_ids=external_ids,
     )
