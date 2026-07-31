@@ -21,6 +21,12 @@ from ..interfaces import (
     validate_timeframe,
 )
 from ..models import CEX_SYMBOL_MAP
+from ..timeframes import (
+    BINANCE_OHLCV_TIMEFRAMES,
+    COINGECKO_OHLCV_TIMEFRAMES,
+    COINGECKO_ONCHAIN_OHLCV_TIMEFRAMES,
+    OHLCVTimeframe,
+)
 
 if TYPE_CHECKING:
     from almanak.framework.gateway_client import GatewayClient
@@ -62,19 +68,9 @@ TOKEN_TO_BINANCE_SYMBOL = {
     "1INCH": "1INCHUSDT",
 }
 
-# Timeframe mapping: our timeframes to Binance intervals. Keys must stay
-# exactly ``VALID_TIMEFRAMES`` (``almanak.framework.data.interfaces``) — the
-# request vocabulary ``validate_timeframe`` enforces. Binance natively supports
-# more intervals (30m, 2h, …); widening this map is a vocabulary change that
-# starts at ``VALID_TIMEFRAMES``, not here.
-TIMEFRAME_TO_BINANCE_INTERVAL = {
-    "1m": "1m",
-    "5m": "5m",
-    "15m": "15m",
-    "1h": "1h",
-    "4h": "4h",
-    "1d": "1d",
-}
+# Compatibility export. The immutable mapping is owned by the canonical
+# exhaustive provider specification in ``data.timeframes``.
+TIMEFRAME_TO_BINANCE_INTERVAL = BINANCE_OHLCV_TIMEFRAMES.mapping
 
 
 @dataclass
@@ -124,8 +120,10 @@ class GatewayOHLCVProvider:
             print(f"Got {len(candles)} candles")
     """
 
-    _SUPPORTED_TIMEFRAMES: ClassVar[list[str]] = ["1m", "5m", "15m", "1h", "4h", "1d"]
-    _LIVE_TIMEFRAMES: ClassVar[set[str]] = {"1m", "5m"}
+    _SUPPORTED_TIMEFRAMES: ClassVar[tuple[OHLCVTimeframe, ...]] = BINANCE_OHLCV_TIMEFRAMES.supported
+    _LIVE_TIMEFRAMES: ClassVar[frozenset[OHLCVTimeframe]] = frozenset(
+        {OHLCVTimeframe.ONE_MINUTE, OHLCVTimeframe.FIVE_MINUTES}
+    )
 
     def __init__(
         self,
@@ -142,7 +140,7 @@ class GatewayOHLCVProvider:
         """
         self._gateway_client = gateway_client
         self._metrics = OHLCVHealthMetrics()
-        self._cache: dict[tuple[str, str, int], CacheEntry] = {}
+        self._cache: dict[tuple[str, OHLCVTimeframe, int], CacheEntry] = {}
         self._cache_ttl_live = cache_ttl_live
         self._cache_ttl_historical = cache_ttl_historical
 
@@ -153,13 +151,13 @@ class GatewayOHLCVProvider:
         )
 
     @property
-    def supported_timeframes(self) -> list[str]:
+    def supported_timeframes(self) -> tuple[OHLCVTimeframe, ...]:
         """Return the list of timeframes this provider supports.
 
         Returns:
             List of supported timeframe strings.
         """
-        return self._SUPPORTED_TIMEFRAMES.copy()
+        return self._SUPPORTED_TIMEFRAMES
 
     def _resolve_binance_symbol(self, token: str) -> str | None:
         """Resolve token symbol to Binance trading pair.
@@ -186,7 +184,7 @@ class GatewayOHLCVProvider:
                 return mapped
         return TOKEN_TO_BINANCE_SYMBOL.get(token_upper)
 
-    def _get_cache_ttl(self, timeframe: str) -> float:
+    def _get_cache_ttl(self, timeframe: OHLCVTimeframe) -> float:
         """Get the appropriate cache TTL for a timeframe.
 
         Args:
@@ -199,7 +197,11 @@ class GatewayOHLCVProvider:
             return self._cache_ttl_live
         return self._cache_ttl_historical
 
-    def _get_cached(self, cache_key: tuple[str, str, int], ttl: float) -> list[OHLCVCandle] | None:
+    def _get_cached(
+        self,
+        cache_key: tuple[str, OHLCVTimeframe, int],
+        ttl: float,
+    ) -> list[OHLCVCandle] | None:
         """Get cached data if still valid.
 
         Args:
@@ -225,7 +227,7 @@ class GatewayOHLCVProvider:
         self,
         token: str,
         quote: str = "USD",  # noqa: ARG002 - unused, internally uses USDT pairs
-        timeframe: str = "1h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
         limit: int = 100,
     ) -> list[OHLCVCandle]:
         """Get OHLCV data for a token through gateway.
@@ -246,7 +248,7 @@ class GatewayOHLCVProvider:
             DataSourceUnavailable: If data cannot be fetched
             ValueError: If timeframe is not supported
         """
-        validate_timeframe(timeframe)
+        timeframe = validate_timeframe(timeframe)
         self._metrics.total_requests += 1
 
         # Check cache first
@@ -267,11 +269,7 @@ class GatewayOHLCVProvider:
             raise DataSourceUnavailable(source="gateway_ohlcv", reason=error_msg)
 
         # Map timeframe to Binance interval
-        binance_interval = TIMEFRAME_TO_BINANCE_INTERVAL.get(timeframe)
-        if binance_interval is None:
-            error_msg = f"Unsupported timeframe: {timeframe}"
-            self._metrics.errors += 1
-            raise DataSourceUnavailable(source="gateway_ohlcv", reason=error_msg)
+        binance_interval = BINANCE_OHLCV_TIMEFRAMES.resolve(timeframe)
 
         try:
             from almanak.gateway.proto import gateway_pb2
@@ -366,8 +364,10 @@ class GatewayCoinGeckoOnchainOHLCVProvider:
     instead of Binance.
     """
 
-    _SUPPORTED_TIMEFRAMES: ClassVar[list[str]] = ["1m", "5m", "15m", "1h", "4h", "1d"]
-    _LIVE_TIMEFRAMES: ClassVar[set[str]] = {"1m", "5m"}
+    _SUPPORTED_TIMEFRAMES: ClassVar[tuple[OHLCVTimeframe, ...]] = COINGECKO_ONCHAIN_OHLCV_TIMEFRAMES.supported
+    _LIVE_TIMEFRAMES: ClassVar[frozenset[OHLCVTimeframe]] = frozenset(
+        {OHLCVTimeframe.ONE_MINUTE, OHLCVTimeframe.FIVE_MINUTES}
+    )
 
     def __init__(
         self,
@@ -379,15 +379,20 @@ class GatewayCoinGeckoOnchainOHLCVProvider:
         self._gateway_client = gateway_client
         self._chain = chain
         self._metrics = OHLCVHealthMetrics()
-        self._cache: dict[tuple[str, str, str, int], CacheEntry] = {}
+        self._cache: dict[tuple[str, str, OHLCVTimeframe, int], CacheEntry] = {}
         self._cache_ttl_live = cache_ttl_live
         self._cache_ttl_historical = cache_ttl_historical
+
+    @property
+    def supported_timeframes(self) -> tuple[OHLCVTimeframe, ...]:
+        """Return the canonical intervals supported by CoinGecko Onchain."""
+        return self._SUPPORTED_TIMEFRAMES
 
     async def get_ohlcv(
         self,
         token: str,
         quote: str = "USD",
-        timeframe: str = "1h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
         limit: int = 100,
         *,
         pool_address: str | None = None,
@@ -406,7 +411,7 @@ class GatewayCoinGeckoOnchainOHLCVProvider:
         Returns:
             List of OHLCVCandle sorted by timestamp ascending.
         """
-        validate_timeframe(timeframe)
+        timeframe = validate_timeframe(timeframe)
         self._metrics.total_requests += 1
         target_chain = chain or self._chain
 
@@ -424,7 +429,7 @@ class GatewayCoinGeckoOnchainOHLCVProvider:
             request = gateway_pb2.CoinGeckoOnchainOHLCVRequest(
                 token=token,
                 chain=target_chain,
-                timeframe=timeframe,
+                timeframe=timeframe.value,
                 limit=min(limit, 1000),
                 pool_address=pool_address or "",
                 quote=quote,
@@ -509,8 +514,8 @@ class GatewayCoinGeckoOHLCVProvider:
     endpoint carries no volume.
     """
 
-    _SUPPORTED_TIMEFRAMES: ClassVar[list[str]] = ["1h", "4h", "1d"]
-    _LIVE_TIMEFRAMES: ClassVar[set[str]] = {"1h"}
+    _SUPPORTED_TIMEFRAMES: ClassVar[tuple[OHLCVTimeframe, ...]] = COINGECKO_OHLCV_TIMEFRAMES.supported
+    _LIVE_TIMEFRAMES: ClassVar[frozenset[OHLCVTimeframe]] = frozenset({OHLCVTimeframe.ONE_HOUR})
 
     def __init__(
         self,
@@ -520,20 +525,20 @@ class GatewayCoinGeckoOHLCVProvider:
     ) -> None:
         self._gateway_client = gateway_client
         self._metrics = OHLCVHealthMetrics()
-        self._cache: dict[tuple[str, str, str, int], CacheEntry] = {}
+        self._cache: dict[tuple[str, str, OHLCVTimeframe, int], CacheEntry] = {}
         self._cache_ttl_live = cache_ttl_live
         self._cache_ttl_historical = cache_ttl_historical
 
     @property
-    def supported_timeframes(self) -> list[str]:
+    def supported_timeframes(self) -> tuple[OHLCVTimeframe, ...]:
         """Return the list of timeframes this provider supports."""
-        return self._SUPPORTED_TIMEFRAMES.copy()
+        return self._SUPPORTED_TIMEFRAMES
 
     async def get_ohlcv(
         self,
         token: str,
         quote: str = "USD",
-        timeframe: str = "1h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
         limit: int = 100,
     ) -> list[OHLCVCandle]:
         """Get CEX-reference OHLCV data for a token through the gateway.
@@ -552,8 +557,14 @@ class GatewayCoinGeckoOHLCVProvider:
             DataSourceUnavailable: If data cannot be fetched.
             ValueError: If timeframe is not supported.
         """
-        validate_timeframe(timeframe)
+        timeframe = validate_timeframe(timeframe)
         self._metrics.total_requests += 1
+
+        try:
+            COINGECKO_OHLCV_TIMEFRAMES.resolve(timeframe)
+        except ValueError as exc:
+            self._metrics.errors += 1
+            raise DataSourceUnavailable(source="gateway_coingecko", reason=str(exc)) from exc
 
         cache_key = (token.upper(), quote.upper(), timeframe, limit)
         ttl = self._cache_ttl_live if timeframe in self._LIVE_TIMEFRAMES else self._cache_ttl_historical
@@ -568,7 +579,7 @@ class GatewayCoinGeckoOHLCVProvider:
 
             request = gateway_pb2.CoinGeckoOHLCVRequest(
                 token=token,
-                timeframe=timeframe,
+                timeframe=timeframe.value,
                 limit=min(limit, 1000),
                 quote=quote,
             )

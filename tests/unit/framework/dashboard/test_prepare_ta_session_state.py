@@ -769,11 +769,9 @@ def test_ohlcv_limit_policy_scales_per_timeframe():
     # Coarse granularities get a longer recent span.
     assert ohlcv_limit_for_timeframe("4h") == 180
     assert ohlcv_limit_for_timeframe("1d") == 120
-    # Case / whitespace tolerant.
-    assert ohlcv_limit_for_timeframe(" 5M ") == 720
-    # Unknown timeframe → fail-safe to the legacy default, never unbounded.
-    assert ohlcv_limit_for_timeframe("3h") == DEFAULT_CANDLE_LIMIT
-    assert ohlcv_limit_for_timeframe("") == DEFAULT_CANDLE_LIMIT
+    for invalid in (" 5M ", "3h", ""):
+        with pytest.raises(ValueError, match="Invalid dashboard timeframe"):
+            ohlcv_limit_for_timeframe(invalid)
 
 
 def test_prepare_requests_ohlcv_with_configured_timeframe_and_scaled_limit():
@@ -827,17 +825,13 @@ def test_get_rsi_config_default_timeframe_matches_market_default():
     assert get_rsi_config().timeframe == DEFAULT_TIMEFRAME
 
 
-def test_normalize_timeframe_coerces_falsy_to_default():
-    """VIB-4969 (Gemini): None / empty / whitespace must not reach get_ohlcv.
-
-    A strategy may carry ``data_granularity: null``; passing that straight
-    through would error at the data layer. Non-empty values pass unchanged.
-    """
+def test_normalize_timeframe_defaults_only_absent_value():
+    """Null means absent; malformed strings are never rewritten."""
     assert normalize_timeframe(None) == "1h"
-    assert normalize_timeframe("") == "1h"
-    assert normalize_timeframe("   ") == "1h"
     assert normalize_timeframe("5m") == "5m"
-    assert normalize_timeframe(" 1h ") == "1h"
+    for invalid in ("", "   ", " 1h ", "1H"):
+        with pytest.raises(ValueError, match="Invalid dashboard timeframe"):
+            normalize_timeframe(invalid)
 
 
 def test_prepare_requests_1h_when_config_timeframe_is_none():
@@ -883,9 +877,7 @@ def test_rsi_series_is_computed_from_the_returned_frame():
     expected = expected.dropna()
     assert not rsi_history.empty
     assert rsi_history.index.equals(expected.index)
-    pd.testing.assert_series_equal(
-        rsi_history.astype(float), expected.astype(float), check_names=False
-    )
+    pd.testing.assert_series_equal(rsi_history.astype(float), expected.astype(float), check_names=False)
 
 
 def test_multi_signal_extras_inherit_primary_timeframe():

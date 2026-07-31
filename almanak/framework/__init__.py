@@ -100,6 +100,7 @@ if TYPE_CHECKING:
         MarketSnapshotBuilder,
         MarketSnapshotError,
         MultiChainMarketSnapshot,
+        OHLCVTimeframe,
         PriceData,
         PriceOracle,
         RSIData,
@@ -228,6 +229,8 @@ _LAZY_IMPORTS: dict[str, LazySpec] = {
     "DataMeta": ".data.models",
     "Instrument": ".data.models",
     "resolve_instrument": ".data.models",
+    # data.timeframes
+    "OHLCVTimeframe": ".data.timeframes",
     # data.pools
     "AggregatedPrice": ".data.pools",
     "LiquidityDepth": ".data.pools",

@@ -32,6 +32,7 @@ from ..interfaces import (
     InsufficientDataError,
     OHLCVProvider,
 )
+from ..timeframes import OHLCVTimeframe, parse_ohlcv_timeframe
 
 logger = logging.getLogger(__name__)
 
@@ -173,7 +174,12 @@ class MovingAverageCalculator:
 
         return weighted_sum / weight_sum
 
-    async def sma(self, token: str, period: int = 20, timeframe: str = "1h") -> float:
+    async def sma(
+        self,
+        token: str,
+        period: int = 20,
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
+    ) -> float:
         """Calculate Simple Moving Average for a token.
 
         SMA is the unweighted mean of the last N closing prices.
@@ -195,6 +201,7 @@ class MovingAverageCalculator:
             sma_20 = await ma_calc.sma("WETH", period=20, timeframe="1h")
             sma_200 = await ma_calc.sma("WETH", period=200, timeframe="1d")
         """
+        timeframe = parse_ohlcv_timeframe(timeframe, field_name="SMA timeframe")
         limit = period + 10  # Buffer
 
         logger.debug(
@@ -235,7 +242,7 @@ class MovingAverageCalculator:
         self,
         token: str,
         period: int = 12,
-        timeframe: str = "1h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
         smoothing: float = 2.0,
     ) -> float:
         """Calculate Exponential Moving Average for a token.
@@ -260,6 +267,7 @@ class MovingAverageCalculator:
             ema_12 = await ma_calc.ema("WETH", period=12, timeframe="1h")
             ema_26 = await ma_calc.ema("WETH", period=26, timeframe="1h")
         """
+        timeframe = parse_ohlcv_timeframe(timeframe, field_name="EMA timeframe")
         # Request more data for EMA to have stable values
         limit = period * 3
 
@@ -297,7 +305,12 @@ class MovingAverageCalculator:
 
         return ema
 
-    async def wma(self, token: str, period: int = 20, timeframe: str = "1h") -> float:
+    async def wma(
+        self,
+        token: str,
+        period: int = 20,
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
+    ) -> float:
         """Calculate Weighted Moving Average for a token.
 
         WMA assigns higher weights to more recent data points linearly.
@@ -318,6 +331,7 @@ class MovingAverageCalculator:
         Example:
             wma_20 = await ma_calc.wma("WETH", period=20, timeframe="1h")
         """
+        timeframe = parse_ohlcv_timeframe(timeframe, field_name="WMA timeframe")
         limit = period + 10  # Buffer
 
         logger.debug(
@@ -357,7 +371,7 @@ class MovingAverageCalculator:
     async def calculate(
         self,
         token: str,
-        timeframe: str = "1h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
         **params: Any,
     ) -> dict[str, float]:
         """Calculate moving average (BaseIndicator protocol implementation).

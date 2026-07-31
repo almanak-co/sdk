@@ -7,8 +7,10 @@ A custom dashboard calling new methods (``get_ohlcv``, ``get_position_events``,
 
 from __future__ import annotations
 
-from almanak.framework.dashboard.custom.renderer import create_mock_api_client
+import pytest
 
+from almanak.framework.dashboard.custom.renderer import create_mock_api_client
+from almanak.framework.data.timeframes import OHLCVTimeframe
 
 # =============================================================================
 # D2.3 — mock client implements the full new API surface
@@ -50,6 +52,16 @@ def test_mock_returns_empty_not_synthetic() -> None:
     assert mock.get_ohlcv("WETH", chain="arbitrum") == []
     assert mock.get_position_events() == []
     assert mock.get_position_history(position_id="pid-1") == []
+
+
+def test_mock_get_ohlcv_validates_timeframe_like_real_client() -> None:
+    """Fallback rendering must not hide malformed dashboard configuration."""
+    mock = create_mock_api_client()
+
+    assert mock.get_ohlcv("WETH", timeframe=OHLCVTimeframe.ONE_HOUR) == []
+    assert mock.get_ohlcv("WETH", timeframe="1h") == []  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="MockAPIClient.get_ohlcv.timeframe"):
+        mock.get_ohlcv("WETH", timeframe="1H")  # type: ignore[arg-type]
 
 
 # =============================================================================

@@ -1,6 +1,5 @@
 """Tests for the CoinGeckoOnchainGetOHLCV gRPC handler in IntegrationServiceServicer."""
 
-import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -9,6 +8,7 @@ import grpc
 import pytest
 
 from almanak.framework.data.interfaces import OHLCVCandle
+from almanak.framework.data.timeframes import OHLCVTimeframe
 from almanak.gateway.proto import gateway_pb2
 
 # Real pool addresses, used only for shape: the provider is always mocked.
@@ -79,20 +79,27 @@ class TestCoinGeckoOnchainGetOHLCV:
         """Unsupported timeframe triggers INVALID_ARGUMENT."""
         ctx = _make_context()
         request = gateway_pb2.CoinGeckoOnchainOHLCVRequest(
-            token="ALMANAK", chain="base", timeframe="2h",
+            token="ALMANAK",
+            chain="base",
+            timeframe="2h",
         )
 
         await service.CoinGeckoOnchainGetOHLCV(request, ctx)
 
         ctx.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
-        assert "Invalid timeframe" in ctx.set_details.call_args[0][0]
+        details = ctx.set_details.call_args.args[0]
+        assert "CoinGeckoOnchainOHLCVRequest.timeframe" in details
+        assert "1m, 5m, 15m, 1h, 4h, 1d" in details
 
     @pytest.mark.asyncio
     async def test_limit_out_of_range_returns_invalid_argument(self, service):
         """Limit outside 1-1000 triggers INVALID_ARGUMENT."""
         ctx = _make_context()
         request = gateway_pb2.CoinGeckoOnchainOHLCVRequest(
-            token="ALMANAK", chain="base", timeframe="1h", limit=1001,
+            token="ALMANAK",
+            chain="base",
+            timeframe="1h",
+            limit=1001,
         )
 
         await service.CoinGeckoOnchainGetOHLCV(request, ctx)
@@ -105,7 +112,10 @@ class TestCoinGeckoOnchainGetOHLCV:
         """Happy path: candles from provider are mapped to response proto."""
         ctx = _make_context()
         request = gateway_pb2.CoinGeckoOnchainOHLCVRequest(
-            token="ALMANAK", chain="base", timeframe="1h", limit=2,
+            token="ALMANAK",
+            chain="base",
+            timeframe="1h",
+            limit=2,
         )
 
         candles = [_make_ohlcv_candle(0), _make_ohlcv_candle(1)]
@@ -124,6 +134,7 @@ class TestCoinGeckoOnchainGetOHLCV:
         assert len(response.candles) == 2
         assert response.candles[0].close == "1810.0"
         assert response.candles[0].volume == "50000.0"
+        assert mock_provider.get_ohlcv.call_args.kwargs["timeframe"] is OHLCVTimeframe.ONE_HOUR
         # Should NOT have set an error code
         ctx.set_code.assert_not_called()
 
@@ -132,7 +143,10 @@ class TestCoinGeckoOnchainGetOHLCV:
         """VIB-4875: the proto flag is threaded through to the provider call."""
         ctx = _make_context()
         request = gateway_pb2.CoinGeckoOnchainOHLCVRequest(
-            token="NVDAON", chain="ethereum", timeframe="1h", limit=2,
+            token="NVDAON",
+            chain="ethereum",
+            timeframe="1h",
+            limit=2,
             include_empty_intervals=True,
         )
 
@@ -155,7 +169,10 @@ class TestCoinGeckoOnchainGetOHLCV:
         """Provider exceptions yield INTERNAL with sanitized message."""
         ctx = _make_context()
         request = gateway_pb2.CoinGeckoOnchainOHLCVRequest(
-            token="ALMANAK", chain="base", timeframe="1h", limit=10,
+            token="ALMANAK",
+            chain="base",
+            timeframe="1h",
+            limit=10,
         )
 
         mock_provider = AsyncMock()
@@ -181,7 +198,10 @@ class TestCoinGeckoOnchainGetOHLCV:
         """ValueError from provider yields INVALID_ARGUMENT."""
         ctx = _make_context()
         request = gateway_pb2.CoinGeckoOnchainOHLCVRequest(
-            token="ALMANAK", chain="base", timeframe="1h", limit=10,
+            token="ALMANAK",
+            chain="base",
+            timeframe="1h",
+            limit=10,
         )
 
         mock_provider = AsyncMock()

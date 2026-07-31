@@ -16,6 +16,8 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
+from almanak.framework.data.timeframes import OHLCVTimeframe, parse_ohlcv_timeframe
+
 from ._token_decimals import resolve_token_decimals as _resolve_token_decimals
 
 logger = logging.getLogger(__name__)
@@ -490,7 +492,7 @@ class DashboardAPIClient:
         self,
         token: str,
         quote: str = "USD",
-        timeframe: str = "1h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
         limit: int = 168,
         chain: str | None = None,
         pool_address: str | None = None,
@@ -526,9 +528,11 @@ class DashboardAPIClient:
             preserve full ``Decimal`` precision), plus the envelope's
             provenance fields when available: ``source`` (which provider
             answered), ``confidence`` (0.0 – 1.0), and ``cache_hit``.
-            Returns ``[]`` on any failure — does **not** raise, does **not**
-            substitute synthetic data.
+            Returns ``[]`` on data-source failure — does **not** substitute
+            synthetic data. A malformed timeframe raises ``ValueError`` at
+            this boundary before any provider call.
         """
+        timeframe = parse_ohlcv_timeframe(timeframe, field_name="DashboardAPIClient.get_ohlcv.timeframe")
         try:
             from almanak.framework.data.ohlcv import create_ohlcv_stack
 

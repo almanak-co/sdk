@@ -171,7 +171,8 @@ def test_legacy_ohlcv_window_values_unchanged() -> None:
     assert ow.ohlcv_limit_for_timeframe("1h") == 168
     assert ow.ohlcv_limit_for_timeframe("4h") == 180
     assert ow.ohlcv_limit_for_timeframe("1d") == 120
-    assert ow.ohlcv_limit_for_timeframe("unknown") == ow.DEFAULT_CANDLE_LIMIT
+    with pytest.raises(ValueError, match="Invalid dashboard timeframe"):
+        ow.ohlcv_limit_for_timeframe("unknown")
 
 
 # ---------------------------------------------------------------------------
@@ -222,8 +223,9 @@ def test_candles_for_range_clamped_to_budget() -> None:
     assert candles_for_range(365 * 86_400, "1m") == DEFAULT_CANDLE_BUDGET
 
 
-def test_candles_for_range_unknown_timeframe_falls_back_to_budget() -> None:
-    assert candles_for_range(86_400, "3h") == DEFAULT_CANDLE_BUDGET
+def test_candles_for_range_unknown_timeframe_is_rejected() -> None:
+    with pytest.raises(ValueError, match="Invalid timeframe"):
+        candles_for_range(86_400, "3h")
 
 
 def test_candles_for_range_nonpositive_range_falls_back_to_budget() -> None:

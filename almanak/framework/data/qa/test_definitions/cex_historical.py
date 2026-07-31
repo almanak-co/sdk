@@ -25,6 +25,7 @@ from typing import Any
 from almanak.framework.data.indicators.rsi import CoinGeckoOHLCVProvider
 from almanak.framework.data.interfaces import DataSourceUnavailable, OHLCVCandle
 from almanak.framework.data.qa.config import QAConfig
+from almanak.framework.data.timeframes import CANONICAL_OHLCV_TIMEFRAMES, OHLCVTimeframe
 
 logger = logging.getLogger(__name__)
 
@@ -71,13 +72,8 @@ class CEXHistoricalResult:
 
 
 # Mapping of timeframe to seconds
-TIMEFRAME_SECONDS: dict[str, int] = {
-    "1m": 60,
-    "5m": 300,
-    "15m": 900,
-    "1h": 3600,
-    "4h": 14400,
-    "1d": 86400,
+TIMEFRAME_SECONDS: dict[OHLCVTimeframe, int] = {
+    timeframe: timeframe.seconds for timeframe in CANONICAL_OHLCV_TIMEFRAMES
 }
 
 
@@ -156,7 +152,7 @@ class CEXHistoricalTest:
         Returns:
             Expected number of candles
         """
-        timeframe_seconds = TIMEFRAME_SECONDS.get(self.config.timeframe, 14400)
+        timeframe_seconds = self.config.timeframe.seconds
         total_seconds = self.config.historical_days * 24 * 3600
         return total_seconds // timeframe_seconds
 
@@ -172,7 +168,7 @@ class CEXHistoricalTest:
         if len(candles) < 2:
             return 0, 0.0
 
-        timeframe_seconds = TIMEFRAME_SECONDS.get(self.config.timeframe, 14400)
+        timeframe_seconds = self.config.timeframe.seconds
         expected_interval = timedelta(seconds=timeframe_seconds)
         tolerance = timedelta(seconds=timeframe_seconds * 0.1)  # 10% tolerance
 

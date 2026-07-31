@@ -74,9 +74,9 @@ class TestBacktestOHLCVView:
         assert df["close"].iloc[-2] == 43.0
         assert df["timestamp"].diff().dropna().unique().tolist() == [timedelta(hours=4)]
 
-    def test_non_multiple_timeframe_refuses(self):
+    def test_noncanonical_timeframe_refuses(self):
         view = _view(_engine_with_series("WETH", [1.0] * 24))
-        with pytest.raises(ValueError, match="derivable"):
+        with pytest.raises(ValueError, match="Invalid BacktestOHLCVView.timeframe '90m'"):
             view.get_ohlcv("WETH", timeframe="90m")
 
     def test_jittered_hourly_cadence_serves_hourly_candles(self):
@@ -242,9 +242,7 @@ class TestPoolPairProxy:
     def test_mismatched_pair_pin_refuses(self):
         view = _view(_engine_with_series("WETH", [3000.0] * 10))
         with pytest.raises(ValueError, match="check the pool pin"):
-            view.get_pool_ohlcv(
-                self.ETH_USDC_WETH_POOL, chain="ethereum", timeframe="1h", requested_symbol="WBTC/USDC"
-            )
+            view.get_pool_ohlcv(self.ETH_USDC_WETH_POOL, chain="ethereum", timeframe="1h", requested_symbol="WBTC/USDC")
 
     def test_unknown_pool_still_refuses(self):
         view = _view(_engine_with_series("WETH", [3000.0] * 10))

@@ -23,6 +23,7 @@ from typing import Any
 import yaml
 
 from almanak.core.chains import DEFAULT_CHAIN, LEGACY_SERIALIZED_CHAIN
+from almanak.framework.data.timeframes import OHLCVTimeframe, parse_ohlcv_timeframe
 
 logger = logging.getLogger(__name__)
 
@@ -61,12 +62,16 @@ class QAConfig:
 
     chain: str = DEFAULT_CHAIN
     historical_days: int = 30
-    timeframe: str = "4h"
+    timeframe: OHLCVTimeframe = OHLCVTimeframe.FOUR_HOURS
     rsi_period: int = 14
     thresholds: QAThresholds = field(default_factory=QAThresholds)
     popular_tokens: list[str] = field(default_factory=list)
     additional_tokens: list[str] = field(default_factory=list)
     dex_tokens: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        """Parse YAML/programmatic string input at the configuration boundary."""
+        self.timeframe = parse_ohlcv_timeframe(self.timeframe, field_name="QAConfig.timeframe")
 
     @property
     def all_tokens(self) -> list[str]:
@@ -78,7 +83,7 @@ class QAConfig:
         return {
             "chain": self.chain,
             "historical_days": self.historical_days,
-            "timeframe": self.timeframe,
+            "timeframe": self.timeframe.value,
             "rsi_period": self.rsi_period,
             "thresholds": {
                 "min_confidence": self.thresholds.min_confidence,

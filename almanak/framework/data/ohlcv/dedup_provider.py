@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 
 from almanak.framework.data.interfaces import OHLCVCandle, OHLCVProvider
+from almanak.framework.data.timeframes import OHLCVTimeframe, parse_ohlcv_timeframe
 
 logger = logging.getLogger(__name__)
 
@@ -42,10 +43,10 @@ class DedupingOHLCVProvider(OHLCVProvider):
         self._inner = inner
         # Cache key = (token, quote, timeframe). Values are the full candle
         # series from the largest fetch seen so far for that key.
-        self._cache: dict[tuple[str, str, str], list[OHLCVCandle]] = {}
+        self._cache: dict[tuple[str, str, OHLCVTimeframe], list[OHLCVCandle]] = {}
 
     @property
-    def supported_timeframes(self) -> list[str]:
+    def supported_timeframes(self) -> tuple[OHLCVTimeframe, ...]:
         """Pass through the inner provider's supported timeframes."""
         return self._inner.supported_timeframes
 
@@ -53,7 +54,7 @@ class DedupingOHLCVProvider(OHLCVProvider):
         self,
         token: str,
         quote: str = "USD",
-        timeframe: str = "1h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
         limit: int = 100,
     ) -> list[OHLCVCandle]:
         """Return ``limit`` most-recent candles, fetching upstream only when needed.
@@ -84,6 +85,7 @@ class DedupingOHLCVProvider(OHLCVProvider):
         """
         if limit <= 0:
             raise ValueError(f"limit must be a positive integer, got {limit}")
+        timeframe = parse_ohlcv_timeframe(timeframe)
         key = (token, quote, timeframe)
         cached = self._cache.get(key)
         if cached is not None and len(cached) >= limit:

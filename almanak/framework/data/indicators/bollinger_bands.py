@@ -32,6 +32,7 @@ from ..interfaces import (
     InsufficientDataError,
     OHLCVProvider,
 )
+from ..timeframes import OHLCVTimeframe, parse_ohlcv_timeframe
 from .base import BollingerBandsResult
 
 logger = logging.getLogger(__name__)
@@ -146,7 +147,7 @@ class BollingerBandsCalculator:
         token: str,
         period: int = 20,
         std_dev: float = 2.0,
-        timeframe: str = "1h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
     ) -> BollingerBandsResult:
         """Calculate Bollinger Bands for a token.
 
@@ -179,6 +180,7 @@ class BollingerBandsCalculator:
             if bb.bandwidth < 0.05:
                 print("Low volatility - squeeze detected")
         """
+        timeframe = parse_ohlcv_timeframe(timeframe, field_name="Bollinger Bands timeframe")
         limit = period + 10  # Buffer
 
         logger.debug(
@@ -220,7 +222,7 @@ class BollingerBandsCalculator:
     async def calculate(
         self,
         token: str,
-        timeframe: str = "1h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
         **params: Any,
     ) -> dict[str, float]:
         """Calculate Bollinger Bands (BaseIndicator protocol implementation).

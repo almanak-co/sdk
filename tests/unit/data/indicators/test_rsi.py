@@ -29,6 +29,7 @@ from almanak.framework.data.interfaces import (
     InsufficientDataError,
     OHLCVCandle,
 )
+from almanak.framework.data.timeframes import OHLCVTimeframe
 
 T = TypeVar("T")
 
@@ -539,6 +540,49 @@ class TestCoinGeckoOHLCVProviderFetching:
         assert result[0].close == Decimal("2520")
         assert result[2].close == Decimal("2560")
 
+    def test_one_hour_limit_above_plan_capacity_is_rejected_before_http(self) -> None:
+        """A one-day 30m source window cannot supply 100 exact hourly candles."""
+        provider = CoinGeckoOHLCVProvider()
+
+        with patch.object(provider, "_get_session") as mock_session:
+            with pytest.raises(DataSourceUnavailable) as exc_info:
+                run_async(provider.get_ohlcv("WETH", "USD", OHLCVTimeframe.ONE_HOUR, limit=100))
+
+        assert exc_info.value.source == "coingecko_ohlcv"
+        assert "at most 24 candles" in exc_info.value.reason
+        assert "limit=100" in exc_info.value.reason
+        mock_session.assert_not_called()
+
+    def test_one_hour_aggregation_drops_partial_edge_buckets(self) -> None:
+        """Close-stamped 30m rows produce only complete, open-stamped 1h candles."""
+        provider = CoinGeckoOHLCVProvider()
+        first_close = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+        mock_data = [
+            [
+                int((first_close + timedelta(minutes=30 * index)).timestamp() * 1000),
+                100 + index,
+                102 + index,
+                99 + index,
+                101 + index,
+            ]
+            for index in range(6)
+        ]
+        mock_resp = AsyncMock(status=200)
+        mock_resp.json = AsyncMock(return_value=mock_data)
+
+        with patch.object(provider, "_get_session") as mock_session:
+            mock_session.return_value.get = MagicMock(
+                return_value=AsyncMock(__aenter__=AsyncMock(return_value=mock_resp))
+            )
+            result = run_async(provider.get_ohlcv("WETH", "USD", OHLCVTimeframe.ONE_HOUR, limit=10))
+
+        assert [candle.timestamp for candle in result] == [
+            datetime(2026, 1, 1, 0, 0, tzinfo=UTC),
+            datetime(2026, 1, 1, 1, 0, tzinfo=UTC),
+        ]
+        assert result[0].open == Decimal("101")
+        assert result[0].close == Decimal("103")
+
     def test_fetch_ohlcv_unknown_token(self) -> None:
         """Test fetch with unknown token raises error."""
         provider = CoinGeckoOHLCVProvider()
@@ -619,13 +663,12 @@ class TestCoinGeckoOHLCVProviderFetching:
         # Sort oldest first
         test_data.sort(key=lambda x: x.timestamp)
 
-        # Use the correct cache key based on timeframe and calculated days
-        # For timeframe="4h" and limit=5, days = max(7, (5 // 6) + 2) = 7
-        provider._cache["WETH:4h:7"] = OHLCVCacheEntry(
+        # The canonical CoinGecko plan requests 30 days for exact native 4h candles.
+        provider._cache["WETH:4h:30"] = OHLCVCacheEntry(
             data=test_data,
             cached_at=datetime.now(UTC),
             token="WETH",
-            timeframe="4h",
+            timeframe=OHLCVTimeframe.FOUR_HOURS,
         )
 
         # Should return cached data (last 5 items based on limit)
@@ -689,6 +732,16 @@ class TestRSICalculatorIntegration:
 
         # With pure uptrend, RSI should be 100
         assert rsi == 100.0
+        assert mock_provider.get_ohlcv.call_args.kwargs["timeframe"] is OHLCVTimeframe.FOUR_HOURS
+
+    def test_calculate_rsi_rejects_malformed_timeframe_before_provider_call(self) -> None:
+        mock_provider = AsyncMock()
+        calculator = RSICalculator(ohlcv_provider=mock_provider)
+
+        with pytest.raises(ValueError, match="Invalid RSI timeframe"):
+            run_async(calculator.calculate_rsi("WETH", timeframe=" 1h"))  # type: ignore[arg-type]
+
+        mock_provider.get_ohlcv.assert_not_called()
 
     def test_calculate_rsi_insufficient_data(self) -> None:
         """Test RSI calculation with insufficient data."""

@@ -22,7 +22,10 @@ Example:
             return 14
 
         async def calculate(
-            self, token: str, timeframe: str = "1h", **params
+            self,
+            token: str,
+            timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
+            **params,
         ) -> dict[str, float]:
             # Implementation
             return {"value": 50.0}
@@ -30,6 +33,8 @@ Example:
 
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
+
+from ..timeframes import OHLCVTimeframe
 
 
 @runtime_checkable
@@ -55,7 +60,10 @@ class BaseIndicator(Protocol):
                 return 15  # period + 1
 
             async def calculate(
-                self, token: str, timeframe: str = "1h", **params
+                self,
+                token: str,
+                timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
+                **params,
             ) -> dict[str, float]:
                 period = params.get("period", 14)
                 # ... calculation logic
@@ -87,7 +95,7 @@ class BaseIndicator(Protocol):
     async def calculate(
         self,
         token: str,
-        timeframe: str = "1h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
         **params: Any,
     ) -> dict[str, float]:
         """Calculate the indicator value(s) for a token.

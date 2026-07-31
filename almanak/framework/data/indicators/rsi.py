@@ -44,6 +44,8 @@ from ..interfaces import (
     OHLCVProvider,
     validate_timeframe,
 )
+from ..ohlcv.aggregation import aggregate_complete_candles, open_time_from_close_time
+from ..timeframes import COINGECKO_OHLCV_TIMEFRAMES, OHLCVTimeframe, parse_ohlcv_timeframe
 from ..tokens import get_coingecko_id
 
 logger = logging.getLogger(__name__)
@@ -99,7 +101,7 @@ class OHLCVCacheEntry:
     data: list[OHLCVData]
     cached_at: datetime
     token: str
-    timeframe: str
+    timeframe: OHLCVTimeframe
 
 
 @dataclass
@@ -133,15 +135,9 @@ class CoinGeckoOHLCVProvider:
     Fetches historical OHLCV data from CoinGecko API for technical analysis.
     Implements the OHLCVProvider protocol from src/data/interfaces.py.
 
-    Note on timeframe support:
-        CoinGecko's OHLC API has granularity limitations based on the day range:
-        - 1-2 days: Returns 30-minute candles (supports 1m, 5m, 15m approximation)
-        - 3-30 days: Returns 4-hour candles (supports 1h, 4h)
-        - 31+ days: Returns daily candles (supports 1d)
-
-        For finer timeframes (1m, 5m, 15m), we request 1-2 day ranges and return
-        the 30-minute candles. Strategies requiring exact minute-level candles
-        should use a more granular data source.
+    CoinGecko's native OHLC granularity depends on the requested day range.
+    The shared capability plan rejects sub-hour intervals and aggregates native
+    candles only when that produces the exact requested 1h, 4h, or 1d interval.
 
     Attributes:
         api_key: Optional CoinGecko API key (uses pro API if provided)
@@ -159,9 +155,7 @@ class CoinGeckoOHLCVProvider:
     _FREE_API_BASE = "https://api.coingecko.com/api/v3"
     _PRO_API_BASE = "https://pro-api.coingecko.com/api/v3"
 
-    # Supported timeframes per OHLCVProvider protocol
-    # Note: 1m, 5m, 15m return 30-minute candles from CoinGecko (best available)
-    _SUPPORTED_TIMEFRAMES: list[str] = ["1m", "5m", "15m", "1h", "4h", "1d"]
+    _SUPPORTED_TIMEFRAMES = COINGECKO_OHLCV_TIMEFRAMES.supported
 
     # CoinGecko OHLC API day limits per granularity:
     # - 1-2 days: 30-minute candles
@@ -207,14 +201,9 @@ class CoinGeckoOHLCVProvider:
         )
 
     @property
-    def supported_timeframes(self) -> list[str]:
-        """Return the list of timeframes this provider supports.
-
-        Returns:
-            List of supported timeframe strings.
-            Note: 1m, 5m, 15m return 30-minute candles (CoinGecko's finest granularity)
-        """
-        return self._SUPPORTED_TIMEFRAMES.copy()
+    def supported_timeframes(self) -> tuple[OHLCVTimeframe, ...]:
+        """Return the exact canonical intervals this provider can produce."""
+        return self._SUPPORTED_TIMEFRAMES
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create HTTP session."""
@@ -229,11 +218,11 @@ class CoinGeckoOHLCVProvider:
             await self._session.close()
             self._session = None
 
-    def _get_cache_key(self, token: str, timeframe: str, days: int) -> str:
+    def _get_cache_key(self, token: str, timeframe: OHLCVTimeframe, days: int) -> str:
         """Generate cache key for OHLCV data."""
         return f"{token.upper()}:{timeframe}:{days}"
 
-    def _get_cached(self, token: str, timeframe: str, days: int) -> list[OHLCVData] | None:
+    def _get_cached(self, token: str, timeframe: OHLCVTimeframe, days: int) -> list[OHLCVData] | None:
         """Get cached OHLCV data if exists and not expired."""
         cache_key = self._get_cache_key(token, timeframe, days)
         entry = self._cache.get(cache_key)
@@ -247,7 +236,7 @@ class CoinGeckoOHLCVProvider:
 
         return entry.data
 
-    def _update_cache(self, token: str, timeframe: str, days: int, data: list[OHLCVData]) -> None:
+    def _update_cache(self, token: str, timeframe: OHLCVTimeframe, days: int, data: list[OHLCVData]) -> None:
         """Update cache with OHLCV data."""
         cache_key = self._get_cache_key(token, timeframe, days)
         self._cache[cache_key] = OHLCVCacheEntry(
@@ -261,11 +250,19 @@ class CoinGeckoOHLCVProvider:
         """Resolve token symbol to CoinGecko ID."""
         return get_coingecko_id(token.upper())
 
+    def max_candles_for_timeframe(self, timeframe: OHLCVTimeframe) -> int | None:
+        """Return this fixed-window provider's exact target-candle capacity."""
+        timeframe = validate_timeframe(timeframe)
+        try:
+            return COINGECKO_OHLCV_TIMEFRAMES.resolve(timeframe).max_candles
+        except ValueError:
+            return None
+
     async def get_ohlcv(
         self,
         token: str,
         quote: str = "USD",
-        timeframe: str = "1h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
         limit: int = 100,
     ) -> list[OHLCVCandle]:
         """Get OHLCV data for a token.
@@ -276,8 +273,7 @@ class CoinGeckoOHLCVProvider:
         Args:
             token: Token symbol (e.g., "WETH", "ETH")
             quote: Quote currency (default "USD")
-            timeframe: Candle timeframe. Supported: "1m", "5m", "15m", "1h", "4h", "1d"
-                Note: 1m, 5m, 15m return 30-minute candles (CoinGecko's finest granularity)
+            timeframe: Exact candle timeframe. CoinGecko supports 1h, 4h, and 1d.
             limit: Number of candles to fetch
 
         Returns:
@@ -288,38 +284,16 @@ class CoinGeckoOHLCVProvider:
             DataSourceUnavailable: If data cannot be fetched
             ValueError: If timeframe is not supported
         """
-        # Validate timeframe
-        validate_timeframe(timeframe)
+        timeframe = validate_timeframe(timeframe)
         self._metrics.total_requests += 1
         token_upper = token.upper()
 
-        # Calculate days needed based on timeframe and limit
-        # CoinGecko OHLC API only accepts specific days values: 1, 7, 14, 30, 90, 180, 365, max
-        # CoinGecko OHLC granularity:
-        # - 1-2 days: ~48 30-min candles per day
-        # - 3-30 days: ~6 4-hour candles per day
-        # - 31+ days: 1 daily candle per day
-        valid_days = [1, 7, 14, 30, 90, 180, 365]
-
-        if timeframe in ("1m", "5m", "15m"):
-            # For minute timeframes, use 1 day to get 30-min candles
-            days = 1
-        elif timeframe == "1h":
-            # For hourly, we get 4-hour candles and need more days
-            # To get ~limit hourly data points, we need limit/6 days worth of 4-hour candles
-            needed_days = max(7, (limit // 6) + 2)
-            # Find the smallest valid days value that covers needed_days
-            days = next((d for d in valid_days if d >= needed_days), 30)
-        elif timeframe == "4h":
-            needed_days = max(7, (limit // 6) + 2)
-            # Find the smallest valid days value that covers needed_days
-            days = next((d for d in valid_days if d >= needed_days), 30)
-        elif timeframe == "1d":
-            needed_days = limit + 5  # Add buffer for daily
-            # Find the smallest valid days value that covers needed_days
-            days = next((d for d in valid_days if d >= needed_days), 90)
-        else:
-            days = 30  # Default fallback
+        try:
+            plan = COINGECKO_OHLCV_TIMEFRAMES.resolve(timeframe)
+            plan.validate_limit(timeframe, limit)
+        except ValueError as exc:
+            raise DataSourceUnavailable(source="coingecko_ohlcv", reason=str(exc)) from exc
+        days = int(plan.days)
 
         # Check cache
         cached = self._get_cached(token_upper, timeframe, days)
@@ -400,7 +374,10 @@ class CoinGeckoOHLCVProvider:
                     if len(candle) >= 5:
                         ohlcv_list.append(
                             OHLCVData(
-                                timestamp=datetime.fromtimestamp(candle[0] / 1000, tz=UTC),
+                                timestamp=open_time_from_close_time(
+                                    datetime.fromtimestamp(candle[0] / 1000, tz=UTC),
+                                    plan.native_stride_seconds,
+                                ),
                                 open=Decimal(str(candle[1])),
                                 high=Decimal(str(candle[2])),
                                 low=Decimal(str(candle[3])),
@@ -410,6 +387,23 @@ class CoinGeckoOHLCVProvider:
 
                 # Sort by timestamp (oldest first)
                 ohlcv_list.sort(key=lambda x: x.timestamp)
+                if timeframe.seconds > plan.native_stride_seconds:
+                    aggregated = aggregate_complete_candles(
+                        ohlcv_list,
+                        native_stride_seconds=plan.native_stride_seconds,
+                        target_stride_seconds=timeframe.seconds,
+                    )
+                    ohlcv_list = [
+                        OHLCVData(
+                            timestamp=candle.timestamp,
+                            open=candle.open,
+                            high=candle.high,
+                            low=candle.low,
+                            close=candle.close,
+                            volume=None,
+                        )
+                        for candle in aggregated
+                    ]
 
                 # Update cache
                 self._update_cache(token_upper, timeframe, days, ohlcv_list)
@@ -592,7 +586,12 @@ class RSICalculator:
 
         return rsi
 
-    async def calculate_rsi(self, token: str, period: int = 14, timeframe: str = "4h") -> float:
+    async def calculate_rsi(
+        self,
+        token: str,
+        period: int = 14,
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.FOUR_HOURS,
+    ) -> float:
         """Calculate RSI for a token.
 
         Fetches OHLCV data from the configured provider and calculates
@@ -602,8 +601,7 @@ class RSICalculator:
             token: Token symbol (e.g., "WETH", "ETH")
             period: RSI calculation period (default 14)
             timeframe: OHLCV candle timeframe (default "4h")
-                Supported: "1m", "5m", "15m", "1h", "4h", "1d"
-                Note: 1m/5m/15m may return 30-min candles (CoinGecko limitation)
+                Exact support depends on the configured OHLCV provider.
 
         Returns:
             RSI value from 0 to 100
@@ -622,10 +620,32 @@ class RSICalculator:
             # Daily candles for longer-term analysis
             rsi_1d = await calculator.calculate_rsi("WETH", period=14, timeframe="1d")
         """
+        timeframe = parse_ohlcv_timeframe(timeframe, field_name="RSI timeframe")
         # Need at least period + 1 data points for RSI calculation.
         # Request ``RSI_DECISION_BUFFER`` extra for Wilder warm-up; this is the
         # per-decision sliding window the dashboard mirrors (VIB-4969).
         limit = period + RSI_DECISION_BUFFER
+        # Inspect the provider type so dynamic mocks/proxies cannot fabricate a
+        # capability method through ``__getattr__`` and return a coroutine.
+        capacity_resolver = getattr(type(self._ohlcv_provider), "max_candles_for_timeframe", None)
+        if callable(capacity_resolver):
+            capacity = capacity_resolver(self._ohlcv_provider, timeframe)
+            minimum = period + 1
+            if capacity is not None and capacity < minimum:
+                raise InsufficientDataError(
+                    required=minimum,
+                    available=capacity,
+                    indicator="RSI",
+                )
+            if capacity is not None and limit > capacity:
+                logger.debug(
+                    "RSI warm-up request for %s %s is capped by provider capacity: %d -> %d candles",
+                    token,
+                    timeframe,
+                    limit,
+                    capacity,
+                )
+                limit = capacity
 
         logger.debug(
             "Calculating RSI for %s with period=%d, timeframe=%s (fetching %d candles)",

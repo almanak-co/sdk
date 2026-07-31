@@ -116,6 +116,7 @@ from almanak.framework.data.price.dex_twap import (
     DEXTWAPDataProvider,
     LowLiquidityWarning,
 )
+from almanak.framework.data.timeframes import OHLCVTimeframe, parse_ohlcv_timeframe
 from almanak.framework.execution.orchestrator import (
     ExecutionContext,
     ExecutionOrchestrator,
@@ -775,7 +776,7 @@ class _BinanceDataProviderAdapter:
 
         token = str(kwargs.get("token", ""))
         quote = str(kwargs.get("quote", "USD"))
-        timeframe = str(kwargs.get("timeframe", "1h"))
+        timeframe = parse_ohlcv_timeframe(kwargs.get("timeframe", OHLCVTimeframe.ONE_HOUR))
         limit = int(kwargs.get("limit", 100))  # type: ignore[call-overload]
 
         start = time.monotonic()
@@ -1749,8 +1750,12 @@ class PaperTrader:
 
         for token in list(token_prices.keys()):
             for period in [14]:
-                for timeframe in ["1h", "4h", "1d"]:
-                    cache_key: tuple[str, str, int] = (token, timeframe, period)
+                for timeframe in [
+                    OHLCVTimeframe.ONE_HOUR,
+                    OHLCVTimeframe.FOUR_HOURS,
+                    OHLCVTimeframe.ONE_DAY,
+                ]:
+                    cache_key: tuple[str, OHLCVTimeframe, int] = (token, timeframe, period)
                     try:
                         rsi_val = await self._rsi_calculator.calculate_rsi(token, period, timeframe)
                         rsi_data = RSIData(value=Decimal(str(rsi_val)), period=period)

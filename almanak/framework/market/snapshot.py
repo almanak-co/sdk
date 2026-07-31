@@ -25,6 +25,7 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from ..data.timeframes import OHLCVTimeframe, parse_ohlcv_timeframe
 from ..data.tokens.deprecation import warn_or_reject_symbol_token_reference
 from ..data.tokens.exceptions import SymbolTokenResolutionError
 from .models import (
@@ -91,7 +92,7 @@ class MultiDexUnavailableError(ValueError, NotImplementedError):
 
 # Default OHLCV timeframe used by indicator methods when neither an explicit
 # timeframe argument nor a strategy-level default_timeframe is provided.
-DEFAULT_TIMEFRAME = "4h"
+DEFAULT_TIMEFRAME = OHLCVTimeframe.FOUR_HOURS
 
 # Fallback gRPC deadline (seconds) for gateway price reads (e.g. ``pt_price``)
 # when the connected client exposes no configured timeout. Matches the
@@ -498,7 +499,7 @@ class MarketSnapshot:
         rate_monitor: Any | None = None,
         funding_rate_provider: Any | None = None,
         gateway_client: Any | None = None,
-        default_timeframe: str | None = None,
+        default_timeframe: OHLCVTimeframe | None = None,
         runtime_surface: str = "unit_test",
         chains: tuple[str, ...] | list[str] | None = None,
         gas_oracle: Any | None = None,
@@ -556,7 +557,11 @@ class MarketSnapshot:
         self._price_oracle = price_oracle
         self._rsi_provider = rsi_provider
         self._balance_provider = balance_provider
-        self._default_timeframe = default_timeframe
+        self._default_timeframe = (
+            parse_ohlcv_timeframe(default_timeframe, field_name="default_timeframe")
+            if default_timeframe is not None
+            else None
+        )
         self._timestamp = timestamp or datetime.now(UTC)
         self._wallet_activity_provider = wallet_activity_provider
         self._prediction_provider = prediction_provider
@@ -618,7 +623,7 @@ class MarketSnapshot:
 
         # Cache for fetched data
         self._price_cache: dict[str, PriceData] = {}
-        self._rsi_cache: dict[tuple[str, str, int], RSIData] = {}
+        self._rsi_cache: dict[tuple[str, OHLCVTimeframe, int], RSIData] = {}
         self._balance_cache: dict[str, TokenBalance] = {}
         # Explicit plain-symbol -> "chain:0xaddress" read/write aliases for
         # address-native backtest snapshots (VIB-5508 follow-up). Populated
@@ -659,11 +664,11 @@ class MarketSnapshot:
         self._pool_analytics_refusal_detail: str | None = None
 
         # Per-indicator caches (tuple keys for timeframe-aware caching)
-        self._macd_cache: dict[tuple[str, str, int, int, int], MACDData] = {}
-        self._bollinger_cache: dict[tuple[str, str, int, float], BollingerBandsData] = {}
-        self._stochastic_cache: dict[tuple[str, str, int, int], StochasticData] = {}
-        self._atr_cache: dict[tuple[str, str, int], ATRData] = {}
-        self._ma_cache: dict[tuple[str, str, str, int], MAData] = {}
+        self._macd_cache: dict[tuple[str, OHLCVTimeframe, int, int, int], MACDData] = {}
+        self._bollinger_cache: dict[tuple[str, OHLCVTimeframe, int, float], BollingerBandsData] = {}
+        self._stochastic_cache: dict[tuple[str, OHLCVTimeframe, int, int], StochasticData] = {}
+        self._atr_cache: dict[tuple[str, OHLCVTimeframe, int], ATRData] = {}
+        self._ma_cache: dict[tuple[str, OHLCVTimeframe, str, int], MAData] = {}
 
         # Lending rate cache (populated by lending_rate() or set_lending_rate())
         self._lending_rate_cache: dict[str, Any] = {}
@@ -679,29 +684,29 @@ class MarketSnapshot:
         # Pre-populated data (can be set directly)
         self._prices: dict[str, Decimal] = {}
         self._balances: dict[str, TokenBalance] = {}
-        self._rsi_values: dict[str, tuple[RSIData, str | None]] = {}
+        self._rsi_values: dict[str, tuple[RSIData, OHLCVTimeframe | None]] = {}
 
         # Pre-populated indicator data (for all TA indicators)
         # Stored as (data, timeframe) tuples; timeframe=None matches any query
-        self._macd_values: dict[str, tuple[MACDData, str | None]] = {}
-        self._bollinger_values: dict[str, tuple[BollingerBandsData, str | None]] = {}
-        self._stochastic_values: dict[str, tuple[StochasticData, str | None]] = {}
-        self._atr_values: dict[str, tuple[ATRData, str | None]] = {}
-        self._ma_values: dict[str, tuple[MAData, str | None]] = {}
-        self._adx_cache: dict[tuple[str, str, int], ADXData] = {}
-        self._obv_cache: dict[tuple[str, str, int], OBVData] = {}
-        self._cci_cache: dict[tuple[str, str, int], CCIData] = {}
-        self._ichimoku_cache: dict[tuple[str, str, int, int, int], IchimokuData] = {}
-        self._adx_values: dict[str, tuple[ADXData, str | None]] = {}
-        self._obv_values: dict[str, tuple[OBVData, str | None]] = {}
-        self._cci_values: dict[str, tuple[CCIData, str | None]] = {}
-        self._ichimoku_values: dict[str, tuple[IchimokuData, str | None]] = {}
+        self._macd_values: dict[str, tuple[MACDData, OHLCVTimeframe | None]] = {}
+        self._bollinger_values: dict[str, tuple[BollingerBandsData, OHLCVTimeframe | None]] = {}
+        self._stochastic_values: dict[str, tuple[StochasticData, OHLCVTimeframe | None]] = {}
+        self._atr_values: dict[str, tuple[ATRData, OHLCVTimeframe | None]] = {}
+        self._ma_values: dict[str, tuple[MAData, OHLCVTimeframe | None]] = {}
+        self._adx_cache: dict[tuple[str, OHLCVTimeframe, int], ADXData] = {}
+        self._obv_cache: dict[tuple[str, OHLCVTimeframe, int], OBVData] = {}
+        self._cci_cache: dict[tuple[str, OHLCVTimeframe, int], CCIData] = {}
+        self._ichimoku_cache: dict[tuple[str, OHLCVTimeframe, int, int, int], IchimokuData] = {}
+        self._adx_values: dict[str, tuple[ADXData, OHLCVTimeframe | None]] = {}
+        self._obv_values: dict[str, tuple[OBVData, OHLCVTimeframe | None]] = {}
+        self._cci_values: dict[str, tuple[CCIData, OHLCVTimeframe | None]] = {}
+        self._ichimoku_values: dict[str, tuple[IchimokuData, OHLCVTimeframe | None]] = {}
 
         # Fork RPC URL for paper trading on-chain reads (VIB-1956)
         self._fork_rpc_url: str | None = None
         self._fork_block: int | None = None
 
-    def _resolve_timeframe(self, timeframe: str | None) -> str:
+    def _resolve_timeframe(self, timeframe: OHLCVTimeframe | None) -> OHLCVTimeframe:
         """Resolve the effective OHLCV timeframe for indicator methods.
 
         Priority: explicit argument > strategy-level default > module constant.
@@ -712,7 +717,15 @@ class MarketSnapshot:
         Returns:
             A concrete timeframe string (e.g. "15m", "1h", "4h").
         """
-        return timeframe or self._default_timeframe or DEFAULT_TIMEFRAME
+        candidate = timeframe if timeframe is not None else self._default_timeframe
+        if candidate is None:
+            candidate = DEFAULT_TIMEFRAME
+        return parse_ohlcv_timeframe(candidate)
+
+    @staticmethod
+    def _parse_optional_timeframe(timeframe: OHLCVTimeframe | None) -> OHLCVTimeframe | None:
+        """Parse an optional seed value while preserving ``None`` wildcard semantics."""
+        return parse_ohlcv_timeframe(timeframe) if timeframe is not None else None
 
     @property
     def chain(self) -> str:
@@ -1173,7 +1186,12 @@ class MarketSnapshot:
             timestamp=composed_at,
         )
 
-    def rsi(self, token: str, period: int = 14, timeframe: str | None = None) -> RSIData:
+    def rsi(
+        self,
+        token: str,
+        period: int = 14,
+        timeframe: OHLCVTimeframe | None = None,
+    ) -> RSIData:
         """Get RSI (Relative Strength Index) for a token.
 
         Args:
@@ -1346,7 +1364,7 @@ class MarketSnapshot:
         fast_period: int = 12,
         slow_period: int = 26,
         signal_period: int = 9,
-        timeframe: str | None = None,
+        timeframe: OHLCVTimeframe | None = None,
     ) -> MACDData:
         """Get MACD (Moving Average Convergence Divergence) for a token.
 
@@ -1417,7 +1435,11 @@ class MarketSnapshot:
         raise ValueError(f"MACD data not available for {token}")
 
     def bollinger_bands(
-        self, token: str, period: int = 20, std_dev: float = 2.0, timeframe: str | None = None
+        self,
+        token: str,
+        period: int = 20,
+        std_dev: float = 2.0,
+        timeframe: OHLCVTimeframe | None = None,
     ) -> BollingerBandsData:
         """Get Bollinger Bands for a token.
 
@@ -1482,7 +1504,11 @@ class MarketSnapshot:
         raise ValueError(f"Bollinger Bands data not available for {token}")
 
     def stochastic(
-        self, token: str, k_period: int = 14, d_period: int = 3, timeframe: str | None = None
+        self,
+        token: str,
+        k_period: int = 14,
+        d_period: int = 3,
+        timeframe: OHLCVTimeframe | None = None,
     ) -> StochasticData:
         """Get Stochastic Oscillator for a token.
 
@@ -1544,7 +1570,12 @@ class MarketSnapshot:
         self._record_critical_data_failure("stochastic", str(cache_key), f"Stochastic data not available for {token}")
         raise ValueError(f"Stochastic data not available for {token}")
 
-    def atr(self, token: str, period: int = 14, timeframe: str | None = None) -> ATRData:
+    def atr(
+        self,
+        token: str,
+        period: int = 14,
+        timeframe: OHLCVTimeframe | None = None,
+    ) -> ATRData:
         """Get ATR (Average True Range) for a token.
 
         Args:
@@ -1605,7 +1636,12 @@ class MarketSnapshot:
         self._record_critical_data_failure("atr", str(cache_key), f"ATR data not available for {token}")
         raise ValueError(f"ATR data not available for {token}")
 
-    def sma(self, token: str, period: int = 20, timeframe: str | None = None) -> MAData:
+    def sma(
+        self,
+        token: str,
+        period: int = 20,
+        timeframe: OHLCVTimeframe | None = None,
+    ) -> MAData:
         """Get Simple Moving Average for a token.
 
         Args:
@@ -1660,7 +1696,12 @@ class MarketSnapshot:
         )
         raise ValueError(f"SMA data not available for {token} with period {period}")
 
-    def ema(self, token: str, period: int = 12, timeframe: str | None = None) -> MAData:
+    def ema(
+        self,
+        token: str,
+        period: int = 12,
+        timeframe: OHLCVTimeframe | None = None,
+    ) -> MAData:
         """Get Exponential Moving Average for a token.
 
         Args:
@@ -1716,7 +1757,12 @@ class MarketSnapshot:
         )
         raise ValueError(f"EMA data not available for {token} with period {period}")
 
-    def adx(self, token: str, period: int = 14, timeframe: str | None = None) -> ADXData:
+    def adx(
+        self,
+        token: str,
+        period: int = 14,
+        timeframe: OHLCVTimeframe | None = None,
+    ) -> ADXData:
         """Get ADX (Average Directional Index) for a token.
 
         Args:
@@ -1765,7 +1811,12 @@ class MarketSnapshot:
         self._record_critical_data_failure("adx", str(cache_key), f"ADX data not available for {token}")
         raise ValueError(f"ADX data not available for {token}")
 
-    def obv(self, token: str, signal_period: int = 21, timeframe: str | None = None) -> OBVData:
+    def obv(
+        self,
+        token: str,
+        signal_period: int = 21,
+        timeframe: OHLCVTimeframe | None = None,
+    ) -> OBVData:
         """Get OBV (On-Balance Volume) for a token.
 
         Args:
@@ -1814,7 +1865,12 @@ class MarketSnapshot:
         self._record_critical_data_failure("obv", str(cache_key), f"OBV data not available for {token}")
         raise ValueError(f"OBV data not available for {token}")
 
-    def cci(self, token: str, period: int = 20, timeframe: str | None = None) -> CCIData:
+    def cci(
+        self,
+        token: str,
+        period: int = 20,
+        timeframe: OHLCVTimeframe | None = None,
+    ) -> CCIData:
         """Get CCI (Commodity Channel Index) for a token.
 
         Args:
@@ -1869,7 +1925,7 @@ class MarketSnapshot:
         tenkan_period: int = 9,
         kijun_period: int = 26,
         senkou_b_period: int = 52,
-        timeframe: str | None = None,
+        timeframe: OHLCVTimeframe | None = None,
     ) -> IchimokuData:
         """Get Ichimoku Cloud data for a token.
 
@@ -2856,7 +2912,12 @@ class MarketSnapshot:
         self._balance_usd_unmeasured.discard(f"{token}@{chain}")
         self._balance_usd_unmeasured.discard(token)
 
-    def set_rsi(self, token: str, rsi_data: RSIData, timeframe: str | None = None) -> None:
+    def set_rsi(
+        self,
+        token: str,
+        rsi_data: RSIData,
+        timeframe: OHLCVTimeframe | None = None,
+    ) -> None:
         """Pre-populate RSI for a token.
 
         Args:
@@ -2864,10 +2925,16 @@ class MarketSnapshot:
             rsi_data: RSI data
             timeframe: OHLCV timeframe this data was computed from (None matches any)
         """
+        timeframe = self._parse_optional_timeframe(timeframe)
         token = self._token_cache_key(token)
         self._rsi_values[token] = (rsi_data, timeframe)
 
-    def set_macd(self, token: str, macd_data: MACDData, timeframe: str | None = None) -> None:
+    def set_macd(
+        self,
+        token: str,
+        macd_data: MACDData,
+        timeframe: OHLCVTimeframe | None = None,
+    ) -> None:
         """Pre-populate MACD data for a token.
 
         Args:
@@ -2882,10 +2949,16 @@ class MarketSnapshot:
                 histogram=Decimal("0.2"),
             ))
         """
+        timeframe = self._parse_optional_timeframe(timeframe)
         token = self._token_cache_key(token)
         self._macd_values[token] = (macd_data, timeframe)
 
-    def set_bollinger_bands(self, token: str, bb_data: BollingerBandsData, timeframe: str | None = None) -> None:
+    def set_bollinger_bands(
+        self,
+        token: str,
+        bb_data: BollingerBandsData,
+        timeframe: OHLCVTimeframe | None = None,
+    ) -> None:
         """Pre-populate Bollinger Bands data for a token.
 
         Args:
@@ -2901,10 +2974,16 @@ class MarketSnapshot:
                 percent_b=Decimal("0.5"),
             ))
         """
+        timeframe = self._parse_optional_timeframe(timeframe)
         token = self._token_cache_key(token)
         self._bollinger_values[token] = (bb_data, timeframe)
 
-    def set_stochastic(self, token: str, stoch_data: StochasticData, timeframe: str | None = None) -> None:
+    def set_stochastic(
+        self,
+        token: str,
+        stoch_data: StochasticData,
+        timeframe: OHLCVTimeframe | None = None,
+    ) -> None:
         """Pre-populate Stochastic data for a token.
 
         Args:
@@ -2918,10 +2997,16 @@ class MarketSnapshot:
                 d_value=Decimal("30"),
             ))
         """
+        timeframe = self._parse_optional_timeframe(timeframe)
         token = self._token_cache_key(token)
         self._stochastic_values[token] = (stoch_data, timeframe)
 
-    def set_atr(self, token: str, atr_data: ATRData, timeframe: str | None = None) -> None:
+    def set_atr(
+        self,
+        token: str,
+        atr_data: ATRData,
+        timeframe: OHLCVTimeframe | None = None,
+    ) -> None:
         """Pre-populate ATR data for a token.
 
         Args:
@@ -2935,11 +3020,17 @@ class MarketSnapshot:
                 value_percent=Decimal("2.5"),
             ))
         """
+        timeframe = self._parse_optional_timeframe(timeframe)
         token = self._token_cache_key(token)
         self._atr_values[token] = (atr_data, timeframe)
 
     def set_ma(
-        self, token: str, ma_data: MAData, ma_type: str = "SMA", period: int = 20, timeframe: str | None = None
+        self,
+        token: str,
+        ma_data: MAData,
+        ma_type: str = "SMA",
+        period: int = 20,
+        timeframe: OHLCVTimeframe | None = None,
     ) -> None:
         """Pre-populate Moving Average data for a token.
 
@@ -2958,6 +3049,7 @@ class MarketSnapshot:
                 current_price=Decimal("3050"),
             ), ma_type="SMA", period=20)
         """
+        timeframe = self._parse_optional_timeframe(timeframe)
         token = self._token_cache_key(token)
         cache_key = f"{token}:{ma_type}:{period}"
         entry = (ma_data, timeframe)
@@ -2965,7 +3057,12 @@ class MarketSnapshot:
         # Also store under simple token key for convenience
         self._ma_values[token] = entry
 
-    def set_adx(self, token: str, adx_data: ADXData, timeframe: str | None = None) -> None:
+    def set_adx(
+        self,
+        token: str,
+        adx_data: ADXData,
+        timeframe: OHLCVTimeframe | None = None,
+    ) -> None:
         """Pre-populate ADX data for a token.
 
         Args:
@@ -2980,10 +3077,16 @@ class MarketSnapshot:
                 minus_di=Decimal("15"),
             ))
         """
+        timeframe = self._parse_optional_timeframe(timeframe)
         token = self._token_cache_key(token)
         self._adx_values[token] = (adx_data, timeframe)
 
-    def set_obv(self, token: str, obv_data: OBVData, timeframe: str | None = None) -> None:
+    def set_obv(
+        self,
+        token: str,
+        obv_data: OBVData,
+        timeframe: OHLCVTimeframe | None = None,
+    ) -> None:
         """Pre-populate OBV data for a token.
 
         Args:
@@ -2997,10 +3100,16 @@ class MarketSnapshot:
                 signal_line=Decimal("950000"),
             ))
         """
+        timeframe = self._parse_optional_timeframe(timeframe)
         token = self._token_cache_key(token)
         self._obv_values[token] = (obv_data, timeframe)
 
-    def set_cci(self, token: str, cci_data: CCIData, timeframe: str | None = None) -> None:
+    def set_cci(
+        self,
+        token: str,
+        cci_data: CCIData,
+        timeframe: OHLCVTimeframe | None = None,
+    ) -> None:
         """Pre-populate CCI data for a token.
 
         Args:
@@ -3013,10 +3122,16 @@ class MarketSnapshot:
                 value=Decimal("-120"),
             ))
         """
+        timeframe = self._parse_optional_timeframe(timeframe)
         token = self._token_cache_key(token)
         self._cci_values[token] = (cci_data, timeframe)
 
-    def set_ichimoku(self, token: str, ichimoku_data: IchimokuData, timeframe: str | None = None) -> None:
+    def set_ichimoku(
+        self,
+        token: str,
+        ichimoku_data: IchimokuData,
+        timeframe: OHLCVTimeframe | None = None,
+    ) -> None:
         """Pre-populate Ichimoku data for a token.
 
         Args:
@@ -3033,6 +3148,7 @@ class MarketSnapshot:
                 current_price=Decimal("3100"),
             ))
         """
+        timeframe = self._parse_optional_timeframe(timeframe)
         token = self._token_cache_key(token)
         self._ichimoku_values[token] = (ichimoku_data, timeframe)
 
@@ -5435,7 +5551,7 @@ class MarketSnapshot:
         self,
         token: str,
         window_days: int = 30,
-        timeframe: str = "1h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
         estimator: str = "close_to_close",
         *,
         ohlcv_limit: int | None = None,
@@ -5463,6 +5579,7 @@ class MarketSnapshot:
             DataMeta,
         )
 
+        timeframe = parse_ohlcv_timeframe(timeframe)
         if self._volatility_calculator is None:
             self._record_critical_data_failure(
                 "realized_vol", "unconfigured", "realized_vol unavailable: no provider configured"
@@ -5499,7 +5616,7 @@ class MarketSnapshot:
         self,
         token: str,
         windows: list[int] | None = None,
-        timeframe: str = "1h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
         estimator: str = "close_to_close",
         *,
         ohlcv_limit: int | None = None,
@@ -5527,6 +5644,7 @@ class MarketSnapshot:
             DataMeta,
         )
 
+        timeframe = parse_ohlcv_timeframe(timeframe)
         if self._volatility_calculator is None:
             self._record_critical_data_failure(
                 "vol_cone", "unconfigured", "vol_cone unavailable: no provider configured"
@@ -5714,7 +5832,7 @@ class MarketSnapshot:
         self,
         token: str,
         window_days: int,
-        timeframe: str,
+        timeframe: OHLCVTimeframe,
         ohlcv_limit: int | None,
     ) -> list:
         """Fetch OHLCV candles for volatility calculations.
@@ -5724,16 +5842,7 @@ class MarketSnapshot:
         from almanak.framework.data.interfaces import OHLCVCandle
         from almanak.framework.data.market_snapshot import VolatilityUnavailableError
 
-        hours_per_candle = {
-            "1m": 1 / 60,
-            "5m": 5 / 60,
-            "15m": 0.25,
-            "1h": 1.0,
-            "4h": 4.0,
-            "1d": 24.0,
-        }
-        if timeframe not in hours_per_candle:
-            raise ValueError(f"Unsupported timeframe '{timeframe}'")
+        hours_per_candle = timeframe.seconds / 3600
 
         # Validate explicit ``ohlcv_limit`` strictly: ``0`` and negatives are not
         # "use the default" — they are caller bugs that would otherwise propagate
@@ -5742,18 +5851,18 @@ class MarketSnapshot:
             if ohlcv_limit <= 0:
                 raise ValueError(
                     f"ohlcv_limit must be > 0 (got {ohlcv_limit!r}) for "
-                    f"token={token!r} timeframe={timeframe!r} window_days={window_days}"
+                    f"token={token!r} timeframe={timeframe.value!r} window_days={window_days}"
                 )
             limit = ohlcv_limit
         else:
-            limit = max(int(window_days * 24 / hours_per_candle[timeframe]), 100)
+            limit = max(int(window_days * 24 / hours_per_candle), 100)
 
         # Guard against runaway implicit fetches at sub-hourly resolutions
         # (see ``_MAX_VOL_CANDLE_LIMIT`` rationale). Explicit ``ohlcv_limit``
         # bypasses the cap — the caller has measured the cost of the call.
         if ohlcv_limit is None and limit > _MAX_VOL_CANDLE_LIMIT:
             raise ValueError(
-                f"Volatility request for token={token!r} with timeframe={timeframe!r} "
+                f"Volatility request for token={token!r} with timeframe={timeframe.value!r} "
                 f"and window_days={window_days} would fetch {limit} candles, exceeding "
                 f"the safe implicit cap of {_MAX_VOL_CANDLE_LIMIT}. Pass ``ohlcv_limit`` "
                 f"explicitly to opt in, or use a coarser timeframe."
@@ -5787,7 +5896,7 @@ class MarketSnapshot:
     def ohlcv(
         self,
         token: str | Instrument,
-        timeframe: str = "1h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
         limit: int = 100,
         quote: str = "USD",
         gap_strategy: GapStrategy = "nan",
@@ -5813,6 +5922,7 @@ class MarketSnapshot:
             ValueError: If no OHLCV module/router is configured.
             OHLCVUnavailableError: If OHLCV data cannot be retrieved.
         """
+        timeframe = parse_ohlcv_timeframe(timeframe)
         token_str = token if isinstance(token, str) else token.pair
 
         if self._ohlcv_router is not None:
@@ -5864,7 +5974,7 @@ class MarketSnapshot:
     def _fetch_ohlcv_via_router(
         self,
         token: str | Instrument,
-        timeframe: str,
+        timeframe: OHLCVTimeframe,
         limit: int,
         pool_address: str | None,
         quote: str,
@@ -5899,7 +6009,7 @@ class MarketSnapshot:
         token: str | Instrument,
         token_str: str,
         quote: str,
-        timeframe: str,
+        timeframe: OHLCVTimeframe,
         gap_strategy: GapStrategy,
     ) -> pd.DataFrame:
         """Materialize a router envelope into the documented DataFrame shape."""
@@ -5909,7 +6019,7 @@ class MarketSnapshot:
         attrs = {
             "base": _derive_ohlcv_base_symbol(token, token_str),
             "quote": quote,
-            "timeframe": timeframe,
+            "timeframe": timeframe.value,
             "source": envelope.meta.source,
             "chain": self._chain,
             "fetched_at": datetime.now(UTC).isoformat(),
@@ -5931,7 +6041,7 @@ class MarketSnapshot:
     def _fetch_ohlcv_legacy(
         self,
         token: str | Instrument,
-        timeframe: str,
+        timeframe: OHLCVTimeframe,
         limit: int,
         quote: str,
         gap_strategy: GapStrategy,
@@ -6294,7 +6404,11 @@ class MarketSnapshot:
                 for k, v in self._balances.items()
             },
             "rsi_values": {
-                k: {"value": str(data.value), "period": data.period, "timeframe": tf}
+                k: {
+                    "value": str(data.value),
+                    "period": data.period,
+                    "timeframe": tf.value if tf is not None else None,
+                }
                 for k, (data, tf) in self._rsi_values.items()
             },
         }
@@ -6357,7 +6471,7 @@ class MarketSnapshot:
         self,
         token: str,
         data: RSIData,
-        timeframe: str | None = None,
+        timeframe: OHLCVTimeframe | None = None,
     ) -> None:
         """Seed an ``RSIData`` instance (timeframe-keyed)."""
         self.set_rsi(token, data, timeframe=timeframe)
@@ -6366,7 +6480,7 @@ class MarketSnapshot:
         self,
         token: str,
         data: MACDData,
-        timeframe: str | None = None,
+        timeframe: OHLCVTimeframe | None = None,
     ) -> None:
         self.set_macd(token, data, timeframe=timeframe)
 
@@ -6374,7 +6488,7 @@ class MarketSnapshot:
         self,
         token: str,
         data: BollingerBandsData,
-        timeframe: str | None = None,
+        timeframe: OHLCVTimeframe | None = None,
     ) -> None:
         self.set_bollinger_bands(token, data, timeframe=timeframe)
 

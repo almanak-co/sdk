@@ -28,6 +28,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from almanak.framework.data.models import DataClassification, DataEnvelope, DataMeta
+from almanak.framework.data.timeframes import OHLCVTimeframe, parse_ohlcv_timeframe
 
 if TYPE_CHECKING:
     from almanak.framework.data.ohlcv.gateway_provider import (
@@ -80,7 +81,7 @@ class GatewayOHLCVDataProvider:
         """
         token = str(kwargs.get("token", ""))
         quote = str(kwargs.get("quote", "USD"))
-        timeframe = str(kwargs.get("timeframe", "1h"))
+        timeframe = parse_ohlcv_timeframe(kwargs.get("timeframe", OHLCVTimeframe.ONE_HOUR))
         limit = int(kwargs.get("limit", 100))  # type: ignore[call-overload]
 
         start = time.monotonic()
@@ -144,7 +145,7 @@ class CoinGeckoOnchainGatewayDataProvider:
         if not token:
             raise ValueError("`token` is a required argument and cannot be empty.")
         quote = str(kwargs.get("quote", "USD"))
-        timeframe = str(kwargs.get("timeframe", "1h"))
+        timeframe = parse_ohlcv_timeframe(kwargs.get("timeframe", OHLCVTimeframe.ONE_HOUR))
         limit = int(kwargs.get("limit", 100))  # type: ignore[call-overload]
         chain_raw = kwargs.get("chain")
         chain = str(chain_raw).strip() if chain_raw is not None else None
@@ -222,7 +223,7 @@ class CoinGeckoGatewayDataProvider:
         """
         token = str(kwargs.get("token", ""))
         quote = str(kwargs.get("quote", "USD"))
-        timeframe = str(kwargs.get("timeframe", "1h"))
+        timeframe = parse_ohlcv_timeframe(kwargs.get("timeframe", OHLCVTimeframe.ONE_HOUR))
         limit = int(kwargs.get("limit", 100))  # type: ignore[call-overload]
 
         start = time.monotonic()

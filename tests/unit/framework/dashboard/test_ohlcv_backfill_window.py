@@ -22,6 +22,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pandas as pd
+import pytest
 
 from almanak.framework.dashboard.chart_window import TIMEFRAME_SECONDS
 from almanak.framework.dashboard.templates import get_rsi_config, prepare_ta_session_state
@@ -94,11 +95,9 @@ def test_operator_windowed_path_is_never_widened() -> None:
     assert out is windowed
 
 
-def test_unknown_timeframe_is_left_alone() -> None:
-    # No seconds mapping => fail-safe, leave the window untouched (never guess).
-    window = ChartWindow(timeframe="3h", limit=168, from_ts=None)
-    out = extend_window_to_cover_signal(window, _NOW - timedelta(days=30), now=_NOW)
-    assert out is window
+def test_unknown_timeframe_is_rejected_at_window_boundary() -> None:
+    with pytest.raises(ValueError, match="Invalid ChartWindow.timeframe"):
+        ChartWindow(timeframe="3h", limit=168, from_ts=None)
 
 
 def test_buffer_keeps_oldest_marker_off_the_left_edge() -> None:

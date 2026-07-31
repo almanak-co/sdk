@@ -33,6 +33,11 @@ from almanak.connectors._base.gateway_capabilities import (
 from almanak.connectors._gateway_registry import GATEWAY_REGISTRY
 from almanak.core.chains import ChainRegistry
 from almanak.core.chains._helpers import native_symbols_for
+from almanak.framework.data.timeframes import (
+    COINGECKO_OHLCV_TIMEFRAMES,
+    OHLCVTimeframe,
+    parse_ohlcv_timeframe,
+)
 from almanak.framework.data.tokens.exceptions import AmbiguousTokenError
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
@@ -2061,7 +2066,11 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
                 from almanak.framework.data.indicators.rsi import CoinGeckoOHLCVProvider, RSICalculator
 
                 period = int(params.get("period", "14"))
-                timeframe = params.get("timeframe", "1h")
+                timeframe = parse_ohlcv_timeframe(
+                    params.get("timeframe", OHLCVTimeframe.ONE_HOUR),
+                    field_name="IndicatorRequest.params.timeframe",
+                )
+                COINGECKO_OHLCV_TIMEFRAMES.resolve(timeframe)
 
                 api_key = self.settings.coingecko_api_key if self.settings.coingecko_api_key is not None else ""
                 async with CoinGeckoOHLCVProvider(api_key=api_key) as ohlcv_provider:
@@ -2070,7 +2079,7 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
 
                 return gateway_pb2.IndicatorResponse(
                     value=str(value),
-                    metadata={"period": str(period), "timeframe": timeframe},
+                    metadata={"period": str(period), "timeframe": timeframe.value},
                     timestamp=int(time.time()),
                 )
             else:
@@ -2078,6 +2087,10 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
                 context.set_details(f"Indicator type '{indicator_type}' not supported")
                 return gateway_pb2.IndicatorResponse()
 
+        except (TypeError, ValueError) as e:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return gateway_pb2.IndicatorResponse()
         except Exception as e:
             logger.error(f"GetIndicator failed for {indicator_type} on {token}: {e}")
             context.set_code(grpc.StatusCode.INTERNAL)

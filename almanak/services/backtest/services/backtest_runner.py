@@ -656,16 +656,19 @@ def _derive_interval_seconds(
     cannot (instead of refusing the author's timeframe tick-by-tick over a
     grid it never chose).
     """
+    from almanak.framework.data.timeframes import parse_ohlcv_timeframe
+
+    declared = (
+        parse_ohlcv_timeframe(
+            strategy_timeframe,
+            field_name="strategy timeframe",
+        ).seconds
+        if strategy_timeframe is not None
+        else None
+    )
     if quick:
         return 86_400
-    if not strategy_timeframe:
-        return _DEFAULT_INTERVAL_SECONDS
-    from almanak.framework.backtesting.pnl.indicator_engine import _timeframe_seconds
-
-    try:
-        declared = int(_timeframe_seconds(str(strategy_timeframe)))
-    except ValueError:
-        logger.warning("Unrecognized strategy timeframe %r; ticking hourly", strategy_timeframe)
+    if declared is None:
         return _DEFAULT_INTERVAL_SECONDS
     if declared >= _DEFAULT_INTERVAL_SECONDS:
         # Coarser-than-hourly candles derive cleanly from hourly ticks;

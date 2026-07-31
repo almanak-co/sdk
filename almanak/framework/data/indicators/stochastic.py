@@ -31,6 +31,7 @@ from ..interfaces import (
     OHLCVCandle,
     OHLCVProvider,
 )
+from ..timeframes import OHLCVTimeframe, parse_ohlcv_timeframe
 from .base import StochasticResult
 
 logger = logging.getLogger(__name__)
@@ -158,7 +159,7 @@ class StochasticCalculator:
         token: str,
         k_period: int = 14,
         d_period: int = 3,
-        timeframe: str = "1h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
     ) -> StochasticResult:
         """Calculate Stochastic Oscillator for a token.
 
@@ -188,6 +189,7 @@ class StochasticCalculator:
             if stoch.k_value > stoch.d_value:
                 print("Bullish - %K above %D")
         """
+        timeframe = parse_ohlcv_timeframe(timeframe, field_name="Stochastic timeframe")
         limit = k_period + d_period + 10  # Buffer
 
         logger.debug(
@@ -226,7 +228,7 @@ class StochasticCalculator:
     async def calculate(
         self,
         token: str,
-        timeframe: str = "1h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
         **params: Any,
     ) -> dict[str, float]:
         """Calculate Stochastic (BaseIndicator protocol implementation).

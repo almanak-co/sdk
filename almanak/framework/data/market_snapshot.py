@@ -26,6 +26,8 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
+from .timeframes import OHLCVTimeframe
+
 if TYPE_CHECKING:
     # Pandas is heavy (~83 MB resident with pyarrow/numpy). Imported only for
     # static type-checker visibility on the two ``pd.DataFrame`` return
@@ -338,7 +340,12 @@ class RSICalculator(Protocol):
     for a given token and period.
     """
 
-    async def calculate_rsi(self, token: str, period: int = 14, timeframe: str = "4h") -> float:
+    async def calculate_rsi(
+        self,
+        token: str,
+        period: int = 14,
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.FOUR_HOURS,
+    ) -> float:
         """Calculate RSI for a token.
 
         Args:

@@ -1,5 +1,7 @@
 """Tick interval derived from the strategy's declared timeframe (ALM-2943)."""
 
+import pytest
+
 from almanak.services.backtest.services.backtest_runner import _derive_interval_seconds
 
 DAY = 86_400
@@ -24,9 +26,17 @@ class TestDeriveIntervalSeconds:
         assert _derive_interval_seconds("4h", 90 * DAY, quick=False) == 3600
         assert _derive_interval_seconds("1d", 90 * DAY, quick=False) == 3600
 
-    def test_absent_or_bad_timeframe_defaults(self) -> None:
+    def test_absent_timeframe_defaults(self) -> None:
         assert _derive_interval_seconds(None, DAY, quick=False) == 3600
-        assert _derive_interval_seconds("candles", DAY, quick=False) == 3600
+
+    @pytest.mark.parametrize("timeframe", ["candles", "", "1H", " 1h", "1h "])
+    def test_malformed_timeframe_is_rejected(self, timeframe: str) -> None:
+        with pytest.raises(ValueError, match="Invalid strategy timeframe"):
+            _derive_interval_seconds(timeframe, DAY, quick=False)
+
+    def test_quick_mode_still_validates_declared_timeframe(self) -> None:
+        with pytest.raises(ValueError, match="Invalid strategy timeframe"):
+            _derive_interval_seconds("candles", DAY, quick=True)
 
 
 class TestEndDateRecency:
@@ -52,7 +62,8 @@ class TestEndDateRecency:
         # A date-only end of TODAY moves the WHOLE config to now — end_time,
         # window, and recency stay coherent, so 15m serves for an intraday
         # window instead of clamping against a midnight end.
-        from datetime import UTC, datetime, time as dtime
+        from datetime import UTC, datetime
+        from datetime import time as dtime
 
         today = datetime.now(UTC).date()
         config = self._config(str(today), str(today))
@@ -61,7 +72,8 @@ class TestEndDateRecency:
         assert config.end_time > datetime.combine(today, dtime(0), tzinfo=UTC)  # runs to now, not midnight
 
     def test_historical_end_dates_keep_midnight_and_clamp(self) -> None:
-        from datetime import UTC, datetime, time as dtime, timedelta
+        from datetime import UTC, datetime, timedelta
+        from datetime import time as dtime
 
         today = datetime.now(UTC).date()
         end_day = today - timedelta(days=7)

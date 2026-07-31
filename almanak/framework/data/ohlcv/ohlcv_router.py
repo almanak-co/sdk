@@ -65,6 +65,10 @@ from almanak.framework.data.models import (
     resolve_instrument,
 )
 from almanak.framework.data.routing.config import DataProvider
+from almanak.framework.data.timeframes import (
+    OHLCVTimeframe,
+    parse_ohlcv_timeframe,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -288,28 +292,6 @@ _FINALIZATION_AGE = timedelta(hours=24)
 # intervals, while still catching "MATICUSDT hasn't traded in 2+ days but
 # Binance is happy to keep echoing 5m klines from June".
 #
-# Mapping is duplicated from ``data.qa.test_definitions.cex_historical`` rather
-# than imported to keep the router free of QA-test transitive imports — the QA
-# suite pulls in pandas + grading machinery this hot path doesn't need. Keys
-# are a superset of ``VALID_TIMEFRAMES`` (the request vocabulary): the extra
-# Binance-native intervals are defensive coverage, and unknown keys fall back
-# to 1h inside ``_staleness_budget``.
-
-_TIMEFRAME_SECONDS: dict[str, int] = {
-    "1m": 60,
-    "3m": 180,
-    "5m": 300,
-    "15m": 900,
-    "30m": 1800,
-    "1h": 3600,
-    "2h": 7200,
-    "4h": 14400,
-    "6h": 21600,
-    "8h": 28800,
-    "12h": 43200,
-    "1d": 86400,
-}
-
 # How many full timeframes the youngest candle may lag wall-clock before the
 # upstream is judged stale. Two is the smallest value that doesn't false-alarm
 # on a normal 5m fetch where the most recent in-progress candle hasn't closed
@@ -506,7 +488,7 @@ class OHLCVRouter:
         self,
         disk_key: str,
         limit: int,
-        timeframe: str,
+        timeframe: OHLCVTimeframe,
         now: datetime,
     ) -> DataEnvelope | None:
         """Disk-cache lookup with the ALM-2697 staleness guard at read time.
@@ -601,7 +583,7 @@ class OHLCVRouter:
         self,
         instrument: Instrument,
         target_chain: str,
-        timeframe: str,
+        timeframe: OHLCVTimeframe,
         limit: int,
         pool_address: str | None,
         force_provider: str | None,
@@ -660,7 +642,7 @@ class OHLCVRouter:
     @staticmethod
     def _build_stale_response_miss(
         candles: list[OHLCVCandle],
-        timeframe: str,
+        timeframe: OHLCVTimeframe,
         provider_name: str,
         instrument: Instrument,
         target_chain: str,
@@ -714,7 +696,7 @@ class OHLCVRouter:
     def _apply_dex_forward_fill(
         candles: list[OHLCVCandle],
         provider_name: str,
-        timeframe: str,
+        timeframe: OHLCVTimeframe,
         instrument: Instrument,
         now: datetime,
     ) -> tuple[list[OHLCVCandle], int]:
@@ -746,7 +728,7 @@ class OHLCVRouter:
         self,
         candles: list[OHLCVCandle],
         provider_name: str,
-        timeframe: str,
+        timeframe: OHLCVTimeframe,
         instrument: Instrument,
         now: datetime,
         limit: int,
@@ -851,7 +833,7 @@ class OHLCVRouter:
         self,
         token: str | Instrument,
         chain: str | None = None,
-        timeframe: str = "1h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
         limit: int = 100,
         *,
         pool_address: str | None = None,
@@ -878,6 +860,7 @@ class OHLCVRouter:
         Raises:
             DataSourceUnavailable: If all providers fail.
         """
+        timeframe = parse_ohlcv_timeframe(timeframe)
         target_chain = (chain or self.default_chain).lower()
         instrument = (
             resolve_instrument(token, target_chain, quote=quote) if not isinstance(token, Instrument) else token
@@ -1102,20 +1085,20 @@ def _split_by_finality(
     return finalized, provisional
 
 
-def _staleness_budget(timeframe: str, *, is_dex: bool = False) -> timedelta:
+def _staleness_budget(timeframe: OHLCVTimeframe, *, is_dex: bool = False) -> timedelta:
     """Return the wall-clock lag budget for the youngest candle on *timeframe*.
 
     See module-level ``_STALE_TIMEFRAME_MULTIPLE`` / ``_STALE_MIN_BUDGET``
-    notes for rationale. Unknown timeframes fall back to 1 hour, matching
-    the router's default ``timeframe="1h"`` so the floor remains meaningful
-    even when a caller passes an unsupported interval.
+    notes for rationale. Public strings are parsed strictly here; unsupported
+    intervals are never assigned a guessed budget.
 
     When ``is_dex`` is set (a DEX quiet-pool source, see
     ``_DEX_QUIET_POOL_PROVIDERS``) the relaxed ``_DEX_STALE_TIMEFRAME_MULTIPLE``
     is used instead — this is the dead-pool horizon: a quiet pool may legitimately
     lag wall-clock by many timeframes without the feed being broken (VIB-4875).
     """
-    seconds = _TIMEFRAME_SECONDS.get(timeframe, 3600)
+    timeframe = parse_ohlcv_timeframe(timeframe)
+    seconds = timeframe.seconds
     multiple = _DEX_STALE_TIMEFRAME_MULTIPLE if is_dex else _STALE_TIMEFRAME_MULTIPLE
     budget = timedelta(seconds=seconds * multiple)
     return max(budget, _STALE_MIN_BUDGET)
@@ -1123,7 +1106,7 @@ def _staleness_budget(timeframe: str, *, is_dex: bool = False) -> timedelta:
 
 def _is_upstream_stale(
     candles: list[OHLCVCandle],
-    timeframe: str,
+    timeframe: OHLCVTimeframe,
     now: datetime,
     *,
     is_dex: bool = False,
@@ -1159,7 +1142,7 @@ def _is_upstream_stale(
 
 def _forward_fill_dex_candles(
     candles: list[OHLCVCandle],
-    timeframe: str,
+    timeframe: OHLCVTimeframe,
     now: datetime,
 ) -> tuple[list[OHLCVCandle], int]:
     """Trailing-edge forward-fill for a quiet on-chain DEX pool (VIB-4875).
@@ -1188,7 +1171,8 @@ def _forward_fill_dex_candles(
     if not candles:
         return candles, 0
 
-    tf_seconds = _TIMEFRAME_SECONDS.get(timeframe, 3600)
+    timeframe = parse_ohlcv_timeframe(timeframe)
+    tf_seconds = timeframe.seconds
     step = timedelta(seconds=tf_seconds)
     youngest = max(candles, key=lambda c: c.timestamp)
     gap = now - youngest.timestamp

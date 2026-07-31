@@ -8,6 +8,7 @@ import grpc
 import pytest
 
 from almanak.framework.data.interfaces import DataSourceUnavailable, OHLCVCandle
+from almanak.framework.data.timeframes import OHLCVTimeframe
 from almanak.gateway.proto import gateway_pb2
 
 
@@ -57,10 +58,30 @@ class TestCoinGeckoGetOHLCV:
         assert "limit must be between" in ctx.set_details.call_args[0][0]
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("timeframe", ["2h", "1H", " 1h", "1h "])
+    async def test_noncanonical_wire_timeframe_returns_actionable_invalid_argument(
+        self,
+        service,
+        timeframe: str,
+    ) -> None:
+        ctx = _make_context()
+        request = gateway_pb2.CoinGeckoOHLCVRequest(token="WETH", timeframe=timeframe)
+
+        response = await service.CoinGeckoGetOHLCV(request, ctx)
+
+        assert len(response.candles) == 0
+        ctx.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
+        details = ctx.set_details.call_args.args[0]
+        assert "CoinGeckoOHLCVRequest.timeframe" in details
+        assert "1m, 5m, 15m, 1h, 4h, 1d" in details
+
+    @pytest.mark.asyncio
     async def test_success_maps_candles_without_volume(self, service, monkeypatch):
         ctx = _make_context()
+        captured: dict[str, object] = {}
 
         async def _fake_get_ohlcv(self, **kwargs):  # noqa: ANN001
+            captured.update(kwargs)
             return [_candle(0), _candle(1), _candle(2)]
 
         monkeypatch.setattr(
@@ -75,6 +96,7 @@ class TestCoinGeckoGetOHLCV:
         assert response.candles[0].close == "100.5"
         # Proto candle has no volume field at all — price-only, by design.
         assert not any(f.name == "volume" for f in response.candles[0].DESCRIPTOR.fields)
+        assert captured["timeframe"] is OHLCVTimeframe.ONE_HOUR
         ctx.set_code.assert_not_called()
 
     @pytest.mark.asyncio

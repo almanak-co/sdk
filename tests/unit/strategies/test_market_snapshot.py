@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from almanak.framework.data.timeframes import OHLCVTimeframe
 from almanak.framework.market import MarketSnapshot, MultiChainMarketSnapshot, PriceData, RSIData
 from almanak.framework.strategies.intent_strategy import DEFAULT_TIMEFRAME
 
@@ -250,9 +251,7 @@ class TestMultiDexFacadeMethods:
         result = market.price_across_dexs("USDC", "WETH", Decimal("1000"), dexs=["uniswap_v3"])
 
         assert result is mock_result
-        mock_service.get_prices_across_dexs.assert_awaited_once_with(
-            "USDC", "WETH", Decimal("1000"), ["uniswap_v3"]
-        )
+        mock_service.get_prices_across_dexs.assert_awaited_once_with("USDC", "WETH", Decimal("1000"), ["uniswap_v3"])
 
     def test_best_dex_price_delegates_to_service(self):
         """best_dex_price() delegates to multi_dex_service.get_best_dex_price()."""
@@ -268,9 +267,7 @@ class TestMultiDexFacadeMethods:
         result = market.best_dex_price("USDC", "WETH", Decimal("500"))
 
         assert result is mock_result
-        mock_service.get_best_dex_price.assert_awaited_once_with(
-            "USDC", "WETH", Decimal("500"), None
-        )
+        mock_service.get_best_dex_price.assert_awaited_once_with("USDC", "WETH", Decimal("500"), None)
 
     def test_price_across_dexs_default_dexs_is_none(self):
         """price_across_dexs() passes None for dexs when not specified."""
@@ -284,9 +281,7 @@ class TestMultiDexFacadeMethods:
         )
         market.price_across_dexs("WETH", "USDC", Decimal("1"))
 
-        mock_service.get_prices_across_dexs.assert_awaited_once_with(
-            "WETH", "USDC", Decimal("1"), None
-        )
+        mock_service.get_prices_across_dexs.assert_awaited_once_with("WETH", "USDC", Decimal("1"), None)
 
 
 class TestCollateralValueUsd:
@@ -464,12 +459,18 @@ class TestMarketSnapshotTimeframeResolution:
             default_timeframe="15m",
         )
         # Explicit "1h" should win over the "15m" default
-        assert market._resolve_timeframe("1h") == "1h"
+        assert market._resolve_timeframe("1h") is OHLCVTimeframe.ONE_HOUR
 
-    def test_explicit_timeframe_overrides_fallback(self):
-        """An explicit timeframe should override the 4h module-level fallback."""
+    def test_noncanonical_explicit_timeframe_is_rejected(self):
+        """A legacy value outside the canonical vocabulary must not be normalized."""
         market = MarketSnapshot(chain="arbitrum", wallet_address="0xtest")
-        assert market._resolve_timeframe("30m") == "30m"
+        with pytest.raises(ValueError, match="Invalid timeframe '30m'"):
+            market._resolve_timeframe("30m")
+
+    def test_empty_explicit_timeframe_is_rejected_instead_of_defaulted(self):
+        market = MarketSnapshot(chain="arbitrum", wallet_address="0xtest")
+        with pytest.raises(ValueError, match="Invalid timeframe ''"):
+            market._resolve_timeframe("")
 
     def test_config_data_granularity_used_as_default(self):
         """When no explicit timeframe is passed, the config default_timeframe should be used."""
@@ -478,14 +479,14 @@ class TestMarketSnapshotTimeframeResolution:
             wallet_address="0xtest",
             default_timeframe="15m",
         )
-        assert market._resolve_timeframe(None) == "15m"
+        assert market._resolve_timeframe(None) is OHLCVTimeframe.FIFTEEN_MINUTES
 
     def test_fallback_to_4h_when_no_config(self):
         """When neither explicit timeframe nor config default is set, fall back to DEFAULT_TIMEFRAME."""
         market = MarketSnapshot(chain="arbitrum", wallet_address="0xtest")
         result = market._resolve_timeframe(None)
-        assert result == DEFAULT_TIMEFRAME
-        assert result == "4h"
+        assert result is DEFAULT_TIMEFRAME
+        assert result is OHLCVTimeframe.FOUR_HOURS
 
     def test_timeframe_resolution_flows_through_rsi(self):
         """Verify _resolve_timeframe is actually used by indicator methods (RSI)."""
@@ -503,11 +504,11 @@ class TestMarketSnapshotTimeframeResolution:
             default_timeframe="15m",
         )
         market_with_config.rsi("ETH", period=14)
-        assert captured_timeframes[-1] == "15m"
+        assert captured_timeframes[-1] is OHLCVTimeframe.FIFTEEN_MINUTES
 
         # Case 2: explicit timeframe should override config default
         market_with_config.rsi("BTC", period=14, timeframe="1h")
-        assert captured_timeframes[-1] == "1h"
+        assert captured_timeframes[-1] is OHLCVTimeframe.ONE_HOUR
 
         # Case 3: no config, no explicit -> 4h fallback
         market_no_config = MarketSnapshot(
@@ -516,4 +517,4 @@ class TestMarketSnapshotTimeframeResolution:
             rsi_provider=mock_rsi_provider,
         )
         market_no_config.rsi("ETH", period=14)
-        assert captured_timeframes[-1] == "4h"
+        assert captured_timeframes[-1] is OHLCVTimeframe.FOUR_HOURS

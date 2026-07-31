@@ -37,6 +37,12 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 
+from almanak.framework.data.timeframes import (
+    CANONICAL_OHLCV_TIMEFRAMES,
+    OHLCVTimeframe,
+    parse_ohlcv_timeframe,
+)
+
 # ---------------------------------------------------------------------------
 # Point budget constants
 # ---------------------------------------------------------------------------
@@ -174,13 +180,8 @@ def decimate_nav(points: list[NavPoint], max_points: int) -> list[NavPoint]:
 # OHLCV granularity ladder (generalizes _ohlcv_window for arbitrary ranges)
 # ---------------------------------------------------------------------------
 
-TIMEFRAME_SECONDS: dict[str, int] = {
-    "1m": 60,
-    "5m": 300,
-    "15m": 900,
-    "1h": 3600,
-    "4h": 14400,
-    "1d": 86400,
+TIMEFRAME_SECONDS: dict[OHLCVTimeframe, int] = {
+    timeframe: timeframe.seconds for timeframe in CANONICAL_OHLCV_TIMEFRAMES
 }
 """Canonical OHLCV timeframe → seconds ladder, finest → coarsest. Single source
 of truth for the range→granularity mapping (``_ohlcv_window`` keeps its legacy
@@ -192,7 +193,10 @@ recent-window caps in ``_ohlcv_window`` (1m/5m/15m → 720) so the windowed path
 never asks the OHLCV provider for an unbounded candle count."""
 
 
-def granularity_for_range(range_seconds: float, candle_budget: int = DEFAULT_CANDLE_BUDGET) -> str:
+def granularity_for_range(
+    range_seconds: float,
+    candle_budget: int = DEFAULT_CANDLE_BUDGET,
+) -> OHLCVTimeframe:
     """Pick the finest OHLCV timeframe whose candle count fits ``candle_budget``.
 
     Walks the ladder finest → coarsest and returns the first timeframe ``tf``
@@ -210,14 +214,18 @@ def granularity_for_range(range_seconds: float, candle_budget: int = DEFAULT_CAN
     if range_seconds <= 0 or candle_budget <= 0:
         # Degenerate request: hand back the finest timeframe and let the bounded
         # OHLCV layer cap the count — never raise, never unbounded.
-        return "1m"
+        return OHLCVTimeframe.ONE_MINUTE
     for tf, secs in TIMEFRAME_SECONDS.items():
         if range_seconds / secs <= candle_budget:
             return tf
-    return "1d"
+    return OHLCVTimeframe.ONE_DAY
 
 
-def candles_for_range(range_seconds: float, timeframe: str, candle_budget: int = DEFAULT_CANDLE_BUDGET) -> int:
+def candles_for_range(
+    range_seconds: float,
+    timeframe: OHLCVTimeframe,
+    candle_budget: int = DEFAULT_CANDLE_BUDGET,
+) -> int:
     """Candle count to request for ``range_seconds`` at ``timeframe`` — bounded.
 
     Pairs with :func:`granularity_for_range` so a windowed price-chart fetch
@@ -226,12 +234,11 @@ def candles_for_range(range_seconds: float, timeframe: str, candle_budget: int =
     candle_budget]``. Because :func:`granularity_for_range` chose ``timeframe``
     precisely so the span fits the budget, the clamp is a defensive ceiling, not
     the normal path — a 7-day window at ``15m`` resolves to ~672 candles, a
-    1-year window at ``1d`` to ~365, never an unbounded request. An unknown
-    timeframe (not in :data:`TIMEFRAME_SECONDS`) falls back to the full budget
-    rather than guessing a span — fail-safe, never unbounded.
+    1-year window at ``1d`` to ~365, never an unbounded request. Invalid
+    timeframes are rejected instead of being mapped to an unrelated span.
     """
-    secs = TIMEFRAME_SECONDS.get(timeframe)
-    if not secs or range_seconds <= 0:
+    timeframe = parse_ohlcv_timeframe(timeframe)
+    if range_seconds <= 0:
         return max(1, candle_budget)
-    needed = math.ceil(range_seconds / secs)  # ceil — correct for int and float range_seconds
+    needed = math.ceil(range_seconds / timeframe.seconds)  # ceil — correct for int and float range_seconds
     return max(1, min(needed, candle_budget))

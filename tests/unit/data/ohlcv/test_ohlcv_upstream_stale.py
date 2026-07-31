@@ -117,8 +117,9 @@ class TestStalenessHelpers:
         # 1m -> 2 * 60s = 120s, raised to the 5-minute floor
         assert _staleness_budget("1m") == timedelta(seconds=300)
 
-    def test_unknown_timeframe_falls_back_to_1h(self):
-        assert _staleness_budget("nonsense") == timedelta(seconds=7200)
+    def test_unknown_timeframe_is_rejected(self):
+        with pytest.raises(ValueError, match="Invalid timeframe"):
+            _staleness_budget("nonsense")
 
     def test_fresh_response_not_stale(self):
         now = datetime.now(UTC)

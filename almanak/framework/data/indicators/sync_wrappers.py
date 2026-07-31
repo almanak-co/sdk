@@ -14,6 +14,8 @@ from collections.abc import Callable
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
+from ..timeframes import OHLCVTimeframe
+
 if TYPE_CHECKING:
     from ...strategies.intent_strategy import (
         ADXData,
@@ -70,7 +72,11 @@ def create_sync_rsi_func(
     """
     from ...strategies.intent_strategy import RSIData
 
-    def sync_rsi(token: str, period: int = 14, timeframe: str = "4h") -> RSIData:
+    def sync_rsi(
+        token: str,
+        period: int = 14,
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.FOUR_HOURS,
+    ) -> RSIData:
         rsi_value = _run_async(rsi_calculator.calculate_rsi(token, period, timeframe=timeframe))
         return RSIData(value=Decimal(str(rsi_value)), period=period)
 
@@ -95,7 +101,7 @@ def create_sync_macd_func(
         fast_period: int = 12,
         slow_period: int = 26,
         signal_period: int = 9,
-        timeframe: str = "4h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.FOUR_HOURS,
     ) -> MACDData:
         result = _run_async(
             macd_calculator.calculate_macd(token, fast_period, slow_period, signal_period, timeframe=timeframe)
@@ -129,7 +135,7 @@ def create_sync_bollinger_func(
         token: str,
         period: int = 20,
         std_dev: float = 2.0,
-        timeframe: str = "4h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.FOUR_HOURS,
     ) -> BollingerBandsData:
         result = _run_async(bb_calculator.calculate_bollinger_bands(token, period, std_dev, timeframe=timeframe))
         return BollingerBandsData(
@@ -162,7 +168,7 @@ def create_sync_stochastic_func(
         token: str,
         k_period: int = 14,
         d_period: int = 3,
-        timeframe: str = "4h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.FOUR_HOURS,
     ) -> StochasticData:
         result = _run_async(stoch_calculator.calculate_stochastic(token, k_period, d_period, timeframe=timeframe))
         return StochasticData(
@@ -195,7 +201,7 @@ def create_sync_atr_func(
     def sync_atr(
         token: str,
         period: int = 14,
-        timeframe: str = "4h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.FOUR_HOURS,
     ) -> ATRData:
         atr_value = _run_async(atr_calculator.calculate_atr(token, period, timeframe=timeframe))
         atr_decimal = Decimal(str(atr_value))
@@ -235,7 +241,7 @@ def create_sync_sma_func(
     def sync_sma(
         token: str,
         period: int = 20,
-        timeframe: str = "4h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.FOUR_HOURS,
     ) -> MAData:
         ma_value = _run_async(ma_calculator.sma(token, period, timeframe=timeframe))
 
@@ -273,7 +279,7 @@ def create_sync_ema_func(
     def sync_ema(
         token: str,
         period: int = 12,
-        timeframe: str = "4h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.FOUR_HOURS,
     ) -> MAData:
         ma_value = _run_async(ma_calculator.ema(token, period, timeframe=timeframe))
 
@@ -307,7 +313,7 @@ def create_sync_adx_func(
     def sync_adx(
         token: str,
         period: int = 14,
-        timeframe: str = "4h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.FOUR_HOURS,
     ) -> ADXData:
         result = _run_async(adx_calculator.calculate_adx(token, period=period, timeframe=timeframe))
         return ADXData(
@@ -336,7 +342,7 @@ def create_sync_obv_func(
     def sync_obv(
         token: str,
         signal_period: int = 21,
-        timeframe: str = "4h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.FOUR_HOURS,
     ) -> OBVData:
         result = _run_async(obv_calculator.calculate_obv(token, signal_period=signal_period, timeframe=timeframe))
         return OBVData(
@@ -364,7 +370,7 @@ def create_sync_cci_func(
     def sync_cci(
         token: str,
         period: int = 20,
-        timeframe: str = "4h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.FOUR_HOURS,
     ) -> CCIData:
         cci_value = _run_async(cci_calculator.calculate_cci(token, period=period, timeframe=timeframe))
         return CCIData(value=Decimal(str(cci_value)), period=period)
@@ -390,7 +396,7 @@ def create_sync_ichimoku_func(
         tenkan_period: int = 9,
         kijun_period: int = 26,
         senkou_b_period: int = 52,
-        timeframe: str = "4h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.FOUR_HOURS,
     ) -> IchimokuData:
         result = _run_async(
             ichimoku_calculator.calculate_ichimoku(

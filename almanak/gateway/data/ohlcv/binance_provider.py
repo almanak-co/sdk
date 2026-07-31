@@ -4,7 +4,7 @@ This module provides an OHLCV data provider using the Binance public API,
 offering true minute-level granularity for candlestick data.
 
 Key Features:
-    - True 1m, 3m, 5m, 15m, 30m granularity (not approximated like CoinGecko)
+    - True canonical 1m, 5m, 15m, 1h, 4h, and 1d granularity
     - Up to 1000 candles per request
     - Caching with configurable TTL
     - Rate limiting support (1200 requests/minute)
@@ -36,6 +36,7 @@ from almanak.framework.data.interfaces import (
     validate_timeframe,
 )
 from almanak.framework.data.models import CEX_SYMBOL_MAP
+from almanak.framework.data.timeframes import BINANCE_OHLCV_TIMEFRAMES, OHLCVTimeframe
 
 logger = logging.getLogger(__name__)
 
@@ -107,24 +108,10 @@ BINANCE_SYMBOL_MAP: dict[str, str] = {
     "FIL": "FILUSDT",
 }
 
-# Binance timeframe to API interval mapping
-BINANCE_INTERVAL_MAP: dict[str, str] = {
-    "1m": "1m",
-    "3m": "3m",
-    "5m": "5m",
-    "15m": "15m",
-    "30m": "30m",
-    "1h": "1h",
-    "2h": "2h",
-    "4h": "4h",
-    "6h": "6h",
-    "8h": "8h",
-    "12h": "12h",
-    "1d": "1d",
-    "3d": "3d",
-    "1w": "1w",
-    "1M": "1M",
-}
+# Compatibility export for the OHLCV provider's immutable canonical mapping.
+# Binance's wider native interval vocabulary belongs to the raw integration
+# endpoint, not to this SDK OHLCV contract.
+BINANCE_INTERVAL_MAP = BINANCE_OHLCV_TIMEFRAMES.mapping
 
 
 @dataclass
@@ -134,7 +121,7 @@ class BinanceOHLCVCacheEntry:
     data: list[OHLCVCandle]
     cached_at: datetime
     token: str
-    timeframe: str
+    timeframe: OHLCVTimeframe
 
 
 @dataclass
@@ -184,19 +171,10 @@ class BinanceOHLCVProvider:
 
     API_BASE = "https://api.binance.com/api/v3"
 
-    # Supported timeframes — true minute-level granularity. Capped by
-    # ``VALID_TIMEFRAMES`` (``validate_timeframe`` gates ``get_ohlcv``), so
-    # advertising Binance's wider native interval set here would lie to
-    # callers; ``BINANCE_INTERVAL_MAP`` intentionally keeps the full native
-    # vocabulary as a translation table.
-    SUPPORTED_TIMEFRAMES: list[str] = [
-        "1m",
-        "5m",
-        "15m",
-        "1h",
-        "4h",
-        "1d",
-    ]
+    # Supported timeframes — true minute-level granularity. The shared spec is
+    # exhaustive over the SDK vocabulary; Binance's wider raw API intervals
+    # intentionally remain outside this strategy-facing provider contract.
+    SUPPORTED_TIMEFRAMES: tuple[OHLCVTimeframe, ...] = BINANCE_OHLCV_TIMEFRAMES.supported
 
     def __init__(
         self,
@@ -232,14 +210,14 @@ class BinanceOHLCVProvider:
         )
 
     @property
-    def supported_timeframes(self) -> list[str]:
+    def supported_timeframes(self) -> tuple[OHLCVTimeframe, ...]:
         """Return the list of timeframes this provider supports.
 
         Returns:
-            List of supported timeframe strings.
+            Canonical supported timeframes.
             All timeframes are true granularity (not approximated).
         """
-        return self.SUPPORTED_TIMEFRAMES.copy()
+        return self.SUPPORTED_TIMEFRAMES
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create HTTP session.
@@ -272,11 +250,11 @@ class BinanceOHLCVProvider:
             await self._session.close()
             self._session = None
 
-    def _get_cache_key(self, token: str, timeframe: str, limit: int) -> str:
+    def _get_cache_key(self, token: str, timeframe: OHLCVTimeframe, limit: int) -> str:
         """Generate cache key for OHLCV data."""
         return f"{token.upper()}:{timeframe}:{limit}"
 
-    def _get_cached(self, token: str, timeframe: str, limit: int) -> list[OHLCVCandle] | None:
+    def _get_cached(self, token: str, timeframe: OHLCVTimeframe, limit: int) -> list[OHLCVCandle] | None:
         """Get cached OHLCV data if exists and not expired."""
         cache_key = self._get_cache_key(token, timeframe, limit)
         entry = self._cache.get(cache_key)
@@ -290,7 +268,13 @@ class BinanceOHLCVProvider:
 
         return entry.data
 
-    def _update_cache(self, token: str, timeframe: str, limit: int, data: list[OHLCVCandle]) -> None:
+    def _update_cache(
+        self,
+        token: str,
+        timeframe: OHLCVTimeframe,
+        limit: int,
+        data: list[OHLCVCandle],
+    ) -> None:
         """Update cache with OHLCV data."""
         cache_key = self._get_cache_key(token, timeframe, limit)
         self._cache[cache_key] = BinanceOHLCVCacheEntry(
@@ -371,15 +355,15 @@ class BinanceOHLCVProvider:
             logger.debug("Skipping negative cache for %s due to transient errors during probe", token_upper)
         return None
 
-    def _resolve_interval(self, timeframe: str) -> str | None:
+    def _resolve_interval(self, timeframe: OHLCVTimeframe) -> str:
         """Resolve timeframe to Binance API interval."""
-        return BINANCE_INTERVAL_MAP.get(timeframe)
+        return BINANCE_OHLCV_TIMEFRAMES.resolve(timeframe)
 
     async def get_ohlcv(
         self,
         token: str,
         quote: str = "USD",
-        timeframe: str = "1h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
         limit: int = 100,
     ) -> list[OHLCVCandle]:
         """Get OHLCV data for a token from Binance.
@@ -401,7 +385,7 @@ class BinanceOHLCVProvider:
             ValueError: If timeframe is not supported
         """
         # Validate timeframe
-        validate_timeframe(timeframe)
+        timeframe = validate_timeframe(timeframe)
         self._metrics.total_requests += 1
         token_upper = token.upper()
 
@@ -430,10 +414,6 @@ class BinanceOHLCVProvider:
             raise DataSourceUnavailable(source="binance_ohlcv", reason=error_msg)
 
         interval = self._resolve_interval(timeframe)
-        if interval is None:
-            error_msg = f"Unsupported timeframe: {timeframe}"
-            self._metrics.errors += 1
-            raise DataSourceUnavailable(source="binance_ohlcv", reason=error_msg)
 
         # Build API URL
         url = f"{self.API_BASE}/klines"

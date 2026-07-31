@@ -11,6 +11,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from almanak.framework.data.interfaces import OHLCVCandle
+from almanak.framework.data.timeframes import OHLCVTimeframe, parse_ohlcv_timeframe
 
 
 class OHLCVCache:
@@ -93,7 +94,7 @@ class OHLCVCache:
         self,
         token: str,
         quote: str,
-        timeframe: str,
+        timeframe: OHLCVTimeframe,
         chain: str,
         start: datetime | None = None,
         end: datetime | None = None,
@@ -111,12 +112,13 @@ class OHLCVCache:
         Returns:
             List of OHLCVCandle objects sorted by timestamp ascending
         """
+        timeframe = parse_ohlcv_timeframe(timeframe)
         query = """
             SELECT timestamp, open, high, low, close, volume
             FROM ohlcv_candles
             WHERE token = ? AND quote = ? AND timeframe = ? AND chain = ?
         """
-        params: list[str] = [token, quote, timeframe, chain]
+        params: list[str] = [token, quote, timeframe.value, chain]
 
         if start is not None:
             query += " AND timestamp >= ?"
@@ -149,7 +151,7 @@ class OHLCVCache:
         candles: list[OHLCVCandle],
         token: str,
         quote: str,
-        timeframe: str,
+        timeframe: OHLCVTimeframe,
         chain: str,
     ) -> int:
         """Store OHLCV candles in the cache.
@@ -167,6 +169,7 @@ class OHLCVCache:
         Returns:
             Number of candles stored/updated
         """
+        timeframe = parse_ohlcv_timeframe(timeframe)
         if not candles:
             return 0
 
@@ -181,7 +184,7 @@ class OHLCVCache:
                     (
                         token,
                         quote,
-                        timeframe,
+                        timeframe.value,
                         chain,
                         candle.timestamp.isoformat(),
                         str(candle.open),
@@ -200,7 +203,7 @@ class OHLCVCache:
         self,
         token: str,
         quote: str,
-        timeframe: str,
+        timeframe: OHLCVTimeframe,
         chain: str,
     ) -> datetime | None:
         """Get the timestamp of the most recent cached candle.
@@ -218,13 +221,14 @@ class OHLCVCache:
             The timestamp of the most recent candle, or None if no
             candles are cached for this combination.
         """
+        timeframe = parse_ohlcv_timeframe(timeframe)
         query = """
             SELECT MAX(timestamp)
             FROM ohlcv_candles
             WHERE token = ? AND quote = ? AND timeframe = ? AND chain = ?
         """
         with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute(query, (token, quote, timeframe, chain))
+            cursor = conn.execute(query, (token, quote, timeframe.value, chain))
             row = cursor.fetchone()
             if row and row[0]:
                 return datetime.fromisoformat(row[0])
@@ -234,7 +238,7 @@ class OHLCVCache:
         self,
         token: str | None = None,
         quote: str | None = None,
-        timeframe: str | None = None,
+        timeframe: OHLCVTimeframe | None = None,
         chain: str | None = None,
     ) -> int:
         """Clear cached candles.
@@ -261,7 +265,7 @@ class OHLCVCache:
             params.append(quote)
         if timeframe is not None:
             query += " AND timeframe = ?"
-            params.append(timeframe)
+            params.append(parse_ohlcv_timeframe(timeframe).value)
         if chain is not None:
             query += " AND chain = ?"
             params.append(chain)
@@ -275,7 +279,7 @@ class OHLCVCache:
         self,
         token: str | None = None,
         quote: str | None = None,
-        timeframe: str | None = None,
+        timeframe: OHLCVTimeframe | None = None,
         chain: str | None = None,
     ) -> int:
         """Count cached candles.
@@ -300,7 +304,7 @@ class OHLCVCache:
             params.append(quote)
         if timeframe is not None:
             query += " AND timeframe = ?"
-            params.append(timeframe)
+            params.append(parse_ohlcv_timeframe(timeframe).value)
         if chain is not None:
             query += " AND chain = ?"
             params.append(chain)

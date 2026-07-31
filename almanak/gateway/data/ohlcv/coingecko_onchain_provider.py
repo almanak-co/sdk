@@ -47,6 +47,11 @@ from almanak.framework.data.models import (
     DataEnvelope,
     DataMeta,
 )
+from almanak.framework.data.timeframes import (
+    COINGECKO_ONCHAIN_OHLCV_TIMEFRAMES,
+    OHLCVTimeframe,
+    parse_ohlcv_timeframe,
+)
 from almanak.gateway.utils.rpc_provider import _get_gateway_api_key
 
 logger = logging.getLogger(__name__)
@@ -61,17 +66,6 @@ _SOURCE = "coingecko_onchain"
 # their own namespace ("eth", "polygon_pos"), distinct from the token-level
 # asset-platform ids under the ``coingecko`` vendor key.
 _CHAIN_TO_NETWORK: Mapping[str, str] = MappingProxyType(vendor_chain_map("coingecko_onchain"))
-
-# CoinGecko Onchain timeframe -> API parameter mapping. The endpoint uses day,
-# hour, minute path segments plus an aggregate query param.
-_TIMEFRAME_TO_GT: dict[str, dict[str, str]] = {
-    "1m": {"aggregate": "1", "timeframe": "minute"},
-    "5m": {"aggregate": "5", "timeframe": "minute"},
-    "15m": {"aggregate": "15", "timeframe": "minute"},
-    "1h": {"aggregate": "1", "timeframe": "hour"},
-    "4h": {"aggregate": "4", "timeframe": "hour"},
-    "1d": {"aggregate": "1", "timeframe": "day"},
-}
 
 
 @dataclass
@@ -127,7 +121,7 @@ class CoinGeckoOnchainOHLCVProvider:
         data_class: INFORMATIONAL classification.
     """
 
-    SUPPORTED_TIMEFRAMES: list[str] = ["1m", "5m", "15m", "1h", "4h", "1d"]
+    SUPPORTED_TIMEFRAMES: tuple[OHLCVTimeframe, ...] = COINGECKO_ONCHAIN_OHLCV_TIMEFRAMES.supported
 
     def __init__(
         self,
@@ -191,7 +185,7 @@ class CoinGeckoOnchainOHLCVProvider:
 
         token = str(kwargs.get("token", ""))
         quote = str(kwargs.get("quote", "USD"))
-        timeframe = str(kwargs.get("timeframe", "1h"))
+        timeframe = parse_ohlcv_timeframe(kwargs.get("timeframe", OHLCVTimeframe.ONE_HOUR))
         limit = int(kwargs.get("limit", 100))  # type: ignore[call-overload]
         pool_address = kwargs.get("pool_address")
         chain = str(kwargs.get("chain", "ethereum"))
@@ -267,15 +261,15 @@ class CoinGeckoOnchainOHLCVProvider:
     # -- OHLCVProvider protocol -------------------------------------------------
 
     @property
-    def supported_timeframes(self) -> list[str]:
+    def supported_timeframes(self) -> tuple[OHLCVTimeframe, ...]:
         """Return supported timeframes."""
-        return self.SUPPORTED_TIMEFRAMES.copy()
+        return self.SUPPORTED_TIMEFRAMES
 
     async def get_ohlcv(
         self,
         token: str,
         quote: str = "USD",
-        timeframe: str = "1h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
         limit: int = 100,
         *,
         pool_address: str | None = None,
@@ -305,7 +299,7 @@ class CoinGeckoOnchainOHLCVProvider:
             DataSourceUnavailable: On API errors, rate limiting, or missing data.
             ValueError: If timeframe is invalid.
         """
-        validate_timeframe(timeframe)
+        timeframe = validate_timeframe(timeframe)
         self._metrics.total_requests += 1
         limit = min(limit, 1000)
 
@@ -336,13 +330,7 @@ class CoinGeckoOnchainOHLCVProvider:
             )
 
         # Resolve timeframe params
-        tf_params = _TIMEFRAME_TO_GT.get(timeframe)
-        if tf_params is None:
-            self._metrics.errors += 1
-            raise DataSourceUnavailable(
-                source=_SOURCE,
-                reason=f"Unsupported timeframe: {timeframe}",
-            )
+        tf_params = COINGECKO_ONCHAIN_OHLCV_TIMEFRAMES.resolve(timeframe)
 
         if not self._api_key:
             self._metrics.errors += 1
@@ -356,13 +344,13 @@ class CoinGeckoOnchainOHLCVProvider:
 
         # Build URL
         if pool_address:
-            url = f"{self._api_base}/networks/{network}/pools/{pool_address}/ohlcv/{tf_params['timeframe']}"
+            url = f"{self._api_base}/networks/{network}/pools/{pool_address}/ohlcv/{tf_params.timeframe}"
         else:
             # Search for pool by token symbol -- use top pool from search
-            url = await self._resolve_pool_ohlcv_url(token, quote, network, tf_params["timeframe"])
+            url = await self._resolve_pool_ohlcv_url(token, quote, network, tf_params.timeframe)
 
         params: dict[str, str | int] = {
-            "aggregate": tf_params["aggregate"],
+            "aggregate": tf_params.aggregate,
             "limit": limit,
             "currency": "usd",
         }
@@ -573,7 +561,7 @@ class CoinGeckoOnchainOHLCVProvider:
         self,
         token: str,
         chain: str,
-        timeframe: str,
+        timeframe: OHLCVTimeframe,
         limit: int,
         pool_address: str | None,
     ) -> str:

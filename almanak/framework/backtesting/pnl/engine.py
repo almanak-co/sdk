@@ -147,6 +147,7 @@ from almanak.framework.backtesting.pnl.support_matrix import (
     boot_compliance_violations,
     evaluate_backtest_support,
 )
+from almanak.framework.data.timeframes import OHLCVTimeframe, parse_ohlcv_timeframe
 
 # Import strategy-related types
 from almanak.framework.market import MarketSnapshot, TokenBalance
@@ -704,7 +705,7 @@ def create_market_snapshot_from_state(
     rsi_provider: Any | None = None,
     indicator_provider: Any | None = None,
     gas_view: Any | None = None,
-    default_timeframe: str | None = None,
+    default_timeframe: OHLCVTimeframe | None = None,
     ohlcv_module: Any | None = None,
     lending_rates: "list[Any] | None" = None,
     position_view: "SimulatedPositionView | None" = None,
@@ -1016,7 +1017,7 @@ class BacktestOHLCVView:
         self._manifest = manifest
         self._chain = str(chain) if chain else None
         self._timestamp: datetime | None = None
-        self._truncation_warned: set[tuple[str, str]] = set()
+        self._truncation_warned: set[tuple[str, OHLCVTimeframe]] = set()
         self._pool_proxy_warned: set[tuple[str, str]] = set()
 
     def _record_serve(self, key: str, source: str, outcome: str, detail: str = "") -> None:
@@ -1068,11 +1069,12 @@ class BacktestOHLCVView:
     def get_ohlcv(
         self,
         token: str,
-        timeframe: str = "1h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
         limit: int = 100,
         quote: str = "USD",
         gap_strategy: str = "nan",
     ) -> Any:
+        timeframe = parse_ohlcv_timeframe(timeframe, field_name="BacktestOHLCVView.timeframe")
         try:
             return self._serve_ohlcv(token, timeframe=timeframe, limit=limit, quote=quote, gap_strategy=gap_strategy)
         except ValueError as exc:
@@ -1092,7 +1094,7 @@ class BacktestOHLCVView:
     def _serve_ohlcv(
         self,
         token: str,
-        timeframe: str = "1h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
         limit: int = 100,
         quote: str = "USD",
         gap_strategy: str = "nan",
@@ -1178,7 +1180,7 @@ class BacktestOHLCVView:
         df.attrs = {
             "base": base.upper(),
             "quote": pair_quote or "USD",
-            "timeframe": timeframe,
+            "timeframe": timeframe.value,
             "source": "backtest_price_series:close_only" + (":pair_ratio" if pair_quote else ""),
             "confidence": "close_only",
             "capacity_truncated": capacity_truncated,
@@ -1195,7 +1197,7 @@ class BacktestOHLCVView:
         self,
         pool_address: str,
         chain: str,
-        timeframe: str = "1h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
         limit: int = 100,
         gap_strategy: str = "nan",
         requested_symbol: str | None = None,
@@ -2274,7 +2276,7 @@ class BacktestVolatilityCalculator:
         self,
         candles: Any,
         window_days: int = 30,
-        timeframe: str = "1h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
         estimator: str = "close_to_close",
     ) -> Any:
         self._ensure_vol_retention()
@@ -2287,7 +2289,7 @@ class BacktestVolatilityCalculator:
         self,
         candles: Any,
         windows: list[int] | None = None,
-        timeframe: str = "1h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
         estimator: str = "close_to_close",
         token: str = "",
     ) -> Any:

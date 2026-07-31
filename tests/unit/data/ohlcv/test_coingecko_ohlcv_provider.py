@@ -37,6 +37,7 @@ from almanak.framework.data.ohlcv.ohlcv_router import (
     OHLCVRouter,
     provider_names_in_chains,
 )
+from almanak.framework.data.timeframes import OHLCVTimeframe
 from almanak.framework.gateway_client import GatewayClient
 from almanak.gateway.data.ohlcv.coingecko_provider import CoinGeckoOHLCVProvider
 from almanak.gateway.proto import gateway_pb2
@@ -48,6 +49,8 @@ from almanak.gateway.proto import gateway_pb2
 
 def _ohlc_rows(*, count: int, end_ms: int, step_s: int) -> list[list[float]]:
     """CoinGecko-style ``[ts_ms, o, h, l, c]`` rows (price-only)."""
+    alignment_s = 3600 if step_s == 1800 else step_s
+    end_ms = end_ms // (alignment_s * 1000) * alignment_s * 1000
     rows: list[list[float]] = []
     for i in range(count):
         ts = end_ms - (count - 1 - i) * step_s * 1000
@@ -91,8 +94,44 @@ class TestCoinGeckoOHLCVProvider:
         assert mock_integration.get_ohlc.call_args.kwargs["days"] == "1"
         # All candles carry NO volume (CoinGecko OHLC is price-only).
         assert all(c.volume is None for c in candles)
-        # Aggregated candle count is fewer than native input.
-        assert 0 < len(candles) <= 6
+        assert len(candles) == 3
+
+    @pytest.mark.asyncio
+    async def test_1h_drops_partial_leading_and_trailing_buckets(self, mock_integration):
+        """Only two complete hours survive six close-stamped edge candles."""
+        first_close = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+        mock_integration.get_ohlc.return_value = [
+            [
+                int((first_close + timedelta(minutes=30 * index)).timestamp() * 1000),
+                99.0 + index,
+                101.0 + index,
+                98.0 + index,
+                100.0 + index,
+            ]
+            for index in range(6)
+        ]
+        provider = CoinGeckoOHLCVProvider(integration=mock_integration)
+
+        candles = await provider.get_ohlcv("WETH", timeframe="1h", limit=10)
+
+        assert [candle.timestamp for candle in candles] == [
+            datetime(2026, 1, 1, 0, 0, tzinfo=UTC),
+            datetime(2026, 1, 1, 1, 0, tzinfo=UTC),
+        ]
+        assert candles[0].open == Decimal("100.0")
+        assert candles[0].close == Decimal("102.0")
+
+    @pytest.mark.asyncio
+    async def test_large_limit_is_documented_best_effort_on_gateway_surface(self, mock_integration):
+        """Gateway fallback treats limit as a maximum, unlike strict indicator input."""
+        now_ms = int(time.time() * 1000)
+        mock_integration.get_ohlc.return_value = _ohlc_rows(count=4, end_ms=now_ms, step_s=1800)
+        provider = CoinGeckoOHLCVProvider(integration=mock_integration)
+
+        candles = await provider.get_ohlcv("WETH", timeframe="1h", limit=100)
+
+        assert len(candles) == 2
+        mock_integration.get_ohlc.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_4h_native_no_aggregation(self, mock_integration):
@@ -123,7 +162,7 @@ class TestCoinGeckoOHLCVProvider:
         for tf in ("5m", "15m", "1m"):
             with pytest.raises(DataSourceUnavailable) as exc:
                 await provider.get_ohlcv("WETH", timeframe=tf, limit=10)
-            assert "cannot serve" in exc.value.reason.lower()
+            assert "does not support" in exc.value.reason.lower()
         # The unsupported timeframe must short-circuit BEFORE egress.
         mock_integration.get_ohlc.assert_not_called()
 
@@ -245,7 +284,11 @@ class TestCoinGeckoOHLCVProvider:
 
     def test_supported_timeframes(self, mock_integration):
         provider = CoinGeckoOHLCVProvider(integration=mock_integration)
-        assert provider.supported_timeframes == ["1h", "4h", "1d"]
+        assert provider.supported_timeframes == (
+            OHLCVTimeframe.ONE_HOUR,
+            OHLCVTimeframe.FOUR_HOURS,
+            OHLCVTimeframe.ONE_DAY,
+        )
         assert provider.name == "coingecko"
 
 

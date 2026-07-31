@@ -24,6 +24,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from almanak.core.chains import DEFAULT_CHAIN
+from almanak.framework.data.timeframes import OHLCVTimeframe, parse_ohlcv_timeframe
 
 from .snapshot import MarketSnapshot
 
@@ -48,7 +49,7 @@ class MarketSnapshotBuilder:
         multi_chain_price_oracle: Any | None = None,
         multi_chain_balance_provider: Any | None = None,
         aave_health_factor_provider: Any | None = None,
-        default_timeframe: str | None = None,
+        default_timeframe: OHLCVTimeframe | None = None,
     ) -> MarketSnapshot:
         """Build a snapshot for the live / hosted runner.
 
@@ -195,6 +196,15 @@ class MarketSnapshotBuilder:
                 runtime_surface=runtime_surface,
             )
 
+        timeframe_value = (
+            default_timeframe if default_timeframe is not None else getattr(strategy, "default_timeframe", None)
+        )
+        resolved_timeframe = (
+            parse_ohlcv_timeframe(timeframe_value, field_name="strategy default_timeframe")
+            if timeframe_value is not None
+            else None
+        )
+
         return MarketSnapshot(
             chain=resolved_chain,
             wallet_address=wallet_address,
@@ -226,7 +236,7 @@ class MarketSnapshotBuilder:
             risk_calculator=risk_calculator,
             gateway_client=gateway_client,
             ohlcv_router=ohlcv_router,
-            default_timeframe=default_timeframe or getattr(strategy, "default_timeframe", None),
+            default_timeframe=resolved_timeframe,
             runtime_surface=runtime_surface,
         )
 
@@ -472,7 +482,11 @@ class MarketSnapshotBuilder:
                 # Key form: "TOKEN:indicator:period:timeframe" (e.g. "ETH:rsi:14:4h")
                 parts = key.split(":")
                 token = parts[0]
-                timeframe = parts[3] if len(parts) > 3 else None
+                timeframe = (
+                    parse_ohlcv_timeframe(parts[3], field_name=f"indicator seed key {key!r}")
+                    if len(parts) > 3
+                    else None
+                )
                 if isinstance(data, RSIData):
                     snapshot.seed_rsi(token, data, timeframe=timeframe)
                 elif isinstance(data, MACDData):

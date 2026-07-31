@@ -33,6 +33,7 @@ from ..interfaces import (
     InsufficientDataError,
     OHLCVProvider,
 )
+from ..timeframes import OHLCVTimeframe, parse_ohlcv_timeframe
 from .base import MACDResult
 
 logger = logging.getLogger(__name__)
@@ -190,7 +191,7 @@ class MACDCalculator:
         fast_period: int = 12,
         slow_period: int = 26,
         signal_period: int = 9,
-        timeframe: str = "1h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
     ) -> MACDResult:
         """Calculate MACD for a token.
 
@@ -219,6 +220,7 @@ class MACDCalculator:
                 # MACD below signal - bearish momentum
                 print("Bearish crossover")
         """
+        timeframe = parse_ohlcv_timeframe(timeframe, field_name="MACD timeframe")
         # Request enough data for stable calculations
         limit = slow_period + signal_period + 50
 
@@ -261,7 +263,7 @@ class MACDCalculator:
     async def calculate(
         self,
         token: str,
-        timeframe: str = "1h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
         **params: Any,
     ) -> dict[str, float]:
         """Calculate MACD (BaseIndicator protocol implementation).

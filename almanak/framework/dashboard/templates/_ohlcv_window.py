@@ -28,8 +28,8 @@ each request bounded while still spanning a useful recent window:
  ``1d``      120                ~120 days
 ==========  =================  ===================
 
-Unknown / future timeframes fall back to the legacy ``168`` rather than an
-unbounded or guessed request — fail-safe, never silently unbounded.
+Unknown / future timeframes are rejected at the configuration boundary. This
+prevents a typo from silently selecting a semantically different window.
 
 This policy lives in one module so the TA and LP templates (and any future
 template that fetches OHLCV for a chart) cannot drift apart.
@@ -41,20 +41,22 @@ import math
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 
-_TIMEFRAME_CANDLE_LIMITS: dict[str, int] = {
-    "1m": 720,
-    "5m": 720,
-    "15m": 720,
-    "1h": 168,
-    "4h": 180,
-    "1d": 120,
+from almanak.framework.data.timeframes import OHLCVTimeframe, parse_ohlcv_timeframe
+
+_TIMEFRAME_CANDLE_LIMITS: dict[OHLCVTimeframe, int] = {
+    OHLCVTimeframe.ONE_MINUTE: 720,
+    OHLCVTimeframe.FIVE_MINUTES: 720,
+    OHLCVTimeframe.FIFTEEN_MINUTES: 720,
+    OHLCVTimeframe.ONE_HOUR: 168,
+    OHLCVTimeframe.FOUR_HOURS: 180,
+    OHLCVTimeframe.ONE_DAY: 120,
 }
 
 DEFAULT_CANDLE_LIMIT = 168
-"""Legacy fallback (1 week at 1h). Used for unknown timeframes."""
+"""Legacy candle count for the canonical one-hour window."""
 
-DEFAULT_TIMEFRAME = "1h"
-"""Fallback granularity when a caller passes a falsy/unset timeframe."""
+DEFAULT_TIMEFRAME = OHLCVTimeframe.ONE_HOUR
+"""Fallback granularity when a caller has no configured timeframe."""
 
 BACKFILL_CANDLE_BUFFER = 12
 """Extra candles fetched beyond the earliest plotted signal (VIB-5156) so the
@@ -136,28 +138,25 @@ def display_window_bounds(
     return (start, data_end)
 
 
-def normalize_timeframe(timeframe: str | None) -> str:
-    """Coerce a falsy / empty timeframe to :data:`DEFAULT_TIMEFRAME`.
+def normalize_timeframe(timeframe: OHLCVTimeframe | None) -> OHLCVTimeframe:
+    """Parse a configured timeframe, defaulting only an absent value.
 
     A strategy may carry ``data_granularity: null`` (or omit it), and callers
-    may pass ``None`` / ``""`` / whitespace. Handing that straight to
-    ``api_client.get_ohlcv(timeframe=...)`` errors at the data layer, so
-    normalize at the boundary. Non-empty values pass through unchanged (the
-    OHLCV layer owns case/alias canonicalization).
+    ``None`` means the field was absent. Empty, whitespace, case variants, and
+    aliases are invalid because silently rewriting them can change semantics.
     """
     if timeframe is None:
         return DEFAULT_TIMEFRAME
-    tf = str(timeframe).strip()
-    return tf or DEFAULT_TIMEFRAME
+    return parse_ohlcv_timeframe(timeframe, field_name="dashboard timeframe")
 
 
-def ohlcv_limit_for_timeframe(timeframe: str) -> int:
+def ohlcv_limit_for_timeframe(timeframe: OHLCVTimeframe) -> int:
     """Return the recent-window candle count to request for ``timeframe``.
 
-    See the module docstring for the policy. Unknown timeframes fall back to
-    :data:`DEFAULT_CANDLE_LIMIT` (168) rather than an unbounded request.
+    See the module docstring for the policy. Invalid timeframes are rejected at
+    this boundary rather than mapped to an unrelated window.
     """
-    return _TIMEFRAME_CANDLE_LIMITS.get(str(timeframe).lower().strip(), DEFAULT_CANDLE_LIMIT)
+    return _TIMEFRAME_CANDLE_LIMITS[parse_ohlcv_timeframe(timeframe, field_name="dashboard timeframe")]
 
 
 @dataclass(frozen=True)
@@ -171,12 +170,23 @@ class ChartWindow:
     therefore the rendered chart — is byte-for-byte the pre-VIB-5114 behaviour.
     """
 
-    timeframe: str
+    timeframe: OHLCVTimeframe
     limit: int
     from_ts: datetime | None
 
+    def __post_init__(self) -> None:
+        """Parse legacy string construction without accepting aliases."""
+        object.__setattr__(
+            self,
+            "timeframe",
+            parse_ohlcv_timeframe(self.timeframe, field_name="ChartWindow.timeframe"),
+        )
 
-def build_chart_window(config_timeframe: str | None, range_seconds: int | None) -> ChartWindow:
+
+def build_chart_window(
+    config_timeframe: OHLCVTimeframe | None,
+    range_seconds: int | None,
+) -> ChartWindow:
     """Build the price-chart :class:`ChartWindow` for a (possibly unset) range.
 
     Pure (no Streamlit, no I/O) so both templates and unit tests share one
@@ -210,16 +220,9 @@ def build_chart_window(config_timeframe: str | None, range_seconds: int | None) 
     )
 
 
-def _timeframe_seconds(timeframe: str) -> int | None:
-    """Seconds per candle for ``timeframe`` (single source of truth shared with
-    the windowed path), or ``None`` for an unknown timeframe.
-
-    Imported lazily so this lean-import module does not eagerly pull the heavier
-    ``chart_window`` compute module on every import (mirrors
-    :func:`build_chart_window`)."""
-    from almanak.framework.dashboard.chart_window import TIMEFRAME_SECONDS
-
-    return TIMEFRAME_SECONDS.get(normalize_timeframe(timeframe).lower())
+def _timeframe_seconds(timeframe: OHLCVTimeframe) -> int:
+    """Seconds per candle for a validated canonical ``timeframe``."""
+    return normalize_timeframe(timeframe).seconds
 
 
 def extend_window_to_cover_signal(
@@ -247,14 +250,11 @@ def extend_window_to_cover_signal(
     * ``earliest_signal_ts is None`` — no signals to cover.
     * the earliest signal is **not older** than the current ``limit`` already
       reaches back (``earliest_signal_ts >= now - limit * timeframe_seconds``).
-    * the timeframe is unknown (no seconds mapping) — fail-safe, leave it alone.
     """
     if window.from_ts is not None or earliest_signal_ts is None:
         return window
 
     secs = _timeframe_seconds(window.timeframe)
-    if not secs:
-        return window
 
     # Defensive: the sole production caller (``_earliest_signal_ts``) always
     # returns UTC-aware, but this is a public pure helper — normalize a naive

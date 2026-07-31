@@ -89,6 +89,7 @@ from almanak.framework.dashboard.templates._ohlcv_window import (
     display_window_bounds,
     extend_window_to_cover_signal,
 )
+from almanak.framework.data.timeframes import OHLCVTimeframe, parse_ohlcv_timeframe
 
 logger = logging.getLogger(__name__)
 
@@ -104,13 +105,13 @@ logger = logging.getLogger(__name__)
 try:
     from almanak.framework.market.snapshot import DEFAULT_TIMEFRAME as _DEFAULT_TIMEFRAME
 except Exception:  # pragma: no cover - import guard for the dashboard subprocess
-    _DEFAULT_TIMEFRAME = "4h"
+    _DEFAULT_TIMEFRAME = OHLCVTimeframe.FOUR_HOURS
 
 
 def _resolve_chart_window(
     deployment_id: str | None,
     session_state: dict[str, Any] | None,
-    config_timeframe: str | None,
+    config_timeframe: OHLCVTimeframe | None,
 ) -> ChartWindow:
     """Pick the OHLCV timeframe / limit / marker ``from_ts`` for this render.
 
@@ -198,9 +199,13 @@ class TADashboardConfig:
     protocol: str = "Uniswap V3"
     base_token: str = "WETH"
     quote_token: str = "USDC"
-    timeframe: str = _DEFAULT_TIMEFRAME
+    timeframe: OHLCVTimeframe = _DEFAULT_TIMEFRAME
     extra_indicators: list["TADashboardConfig"] = field(default_factory=list)
     display_window_seconds: int = DEFAULT_DISPLAY_WINDOW_SECONDS
+
+    def __post_init__(self) -> None:
+        """Parse programmatic/config string input at the dashboard boundary."""
+        self.timeframe = parse_ohlcv_timeframe(self.timeframe, field_name="TADashboardConfig.timeframe")
 
 
 def multi_ta_config(primary: TADashboardConfig, *extras: TADashboardConfig) -> TADashboardConfig:
@@ -2353,7 +2358,10 @@ def _render_performance(session_state: dict[str, Any]) -> None:
 
 
 def get_rsi_config(
-    period: int = 14, overbought: float = 70, oversold: float = 30, timeframe: str = _DEFAULT_TIMEFRAME
+    period: int = 14,
+    overbought: float = 70,
+    oversold: float = 30,
+    timeframe: OHLCVTimeframe = _DEFAULT_TIMEFRAME,
 ) -> TADashboardConfig:
     """Get pre-configured RSI dashboard config.
 
@@ -2387,7 +2395,10 @@ def _macd_signal_fn(session_state: dict[str, Any]) -> str:
 
 
 def get_macd_config(
-    fast: int = 12, slow: int = 26, signal: int = 9, timeframe: str = _DEFAULT_TIMEFRAME
+    fast: int = 12,
+    slow: int = 26,
+    signal: int = 9,
+    timeframe: OHLCVTimeframe = _DEFAULT_TIMEFRAME,
 ) -> TADashboardConfig:
     """Get pre-configured MACD dashboard config.
 
@@ -2405,7 +2416,10 @@ def get_macd_config(
 
 
 def get_cci_config(
-    period: int = 20, overbought: float = 100, oversold: float = -100, timeframe: str = _DEFAULT_TIMEFRAME
+    period: int = 20,
+    overbought: float = 100,
+    oversold: float = -100,
+    timeframe: OHLCVTimeframe = _DEFAULT_TIMEFRAME,
 ) -> TADashboardConfig:
     """Get pre-configured CCI dashboard config.
 
@@ -2428,7 +2442,7 @@ def get_stochastic_config(
     slow_d: int = 3,
     overbought: float = 80,
     oversold: float = 20,
-    timeframe: str = _DEFAULT_TIMEFRAME,
+    timeframe: OHLCVTimeframe = _DEFAULT_TIMEFRAME,
 ) -> TADashboardConfig:
     """Get pre-configured Stochastic dashboard config.
 
@@ -2446,7 +2460,10 @@ def get_stochastic_config(
     )
 
 
-def get_atr_config(period: int = 14, timeframe: str = _DEFAULT_TIMEFRAME) -> TADashboardConfig:
+def get_atr_config(
+    period: int = 14,
+    timeframe: OHLCVTimeframe = _DEFAULT_TIMEFRAME,
+) -> TADashboardConfig:
     """Get pre-configured ATR dashboard config.
 
     ``timeframe`` must match the strategy's ``data_granularity`` (VIB-4969).
@@ -2461,7 +2478,9 @@ def get_atr_config(period: int = 14, timeframe: str = _DEFAULT_TIMEFRAME) -> TAD
 
 
 def get_adx_config(
-    period: int = 14, trend_threshold: float = 25, timeframe: str = _DEFAULT_TIMEFRAME
+    period: int = 14,
+    trend_threshold: float = 25,
+    timeframe: OHLCVTimeframe = _DEFAULT_TIMEFRAME,
 ) -> TADashboardConfig:
     """Get pre-configured ADX dashboard config.
 
@@ -2477,7 +2496,9 @@ def get_adx_config(
 
 
 def get_bollinger_config(
-    period: int = 20, std_dev: float = 2.0, timeframe: str = _DEFAULT_TIMEFRAME
+    period: int = 20,
+    std_dev: float = 2.0,
+    timeframe: OHLCVTimeframe = _DEFAULT_TIMEFRAME,
 ) -> TADashboardConfig:
     """Get pre-configured Bollinger Bands dashboard config.
 

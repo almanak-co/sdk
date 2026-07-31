@@ -107,6 +107,8 @@ if TYPE_CHECKING:
     from almanak.framework.backtesting.pnl.indicator_engine import BacktestIndicatorEngine
     from almanak.framework.backtesting.pnl.logging_utils import BacktestLogger
     from almanak.framework.backtesting.pnl.providers.perp.snapshot_funding import SnapshotFundingRateSource
+    from almanak.framework.data.timeframes import OHLCVTimeframe
+    from almanak.framework.market import MarketSnapshot
 
 
 logger = logging.getLogger(__name__)
@@ -643,6 +645,48 @@ def _gas_prefetch_symbol(chain: str, data_tokens: list[TokenRef], data_provider:
 # =============================================================================
 
 
+def _populate_snapshot_indicators(
+    indicator_engine: BacktestIndicatorEngine,
+    snapshot: MarketSnapshot,
+    strategy_config: dict[str, Any],
+    active_tokens: set[str],
+    timeframe: OHLCVTimeframe | None,
+) -> None:
+    """Populate eager indicators only when the tick has a canonical interval."""
+    if timeframe is None:
+        return
+    indicator_engine.populate_snapshot(
+        snapshot,
+        strategy_config,
+        active_tokens=active_tokens,
+        timeframe=timeframe,
+    )
+
+
+def _resolve_tick_ohlcv_timeframes(
+    interval_seconds: int,
+    bt_logger: BacktestLogger,
+) -> tuple[str, OHLCVTimeframe | None, OHLCVTimeframe]:
+    """Resolve tick and snapshot defaults, warning once on noncanonical cadence."""
+    from almanak.framework.backtesting.pnl.indicator_engine import (
+        ohlcv_timeframe_for_interval,
+        timeframe_label,
+    )
+    from almanak.framework.data.timeframes import OHLCVTimeframe
+
+    tick_label = timeframe_label(interval_seconds)
+    tick_timeframe = ohlcv_timeframe_for_interval(interval_seconds)
+    default_timeframe = tick_timeframe or OHLCVTimeframe.FOUR_HOURS
+    if tick_timeframe is None:
+        bt_logger.warning(
+            f"Backtest tick interval {interval_seconds}s ({tick_label}) is outside the canonical OHLCV vocabulary; "
+            "eager indicator prepopulation is disabled and indicator reads without an explicit timeframe fall back "
+            f"to {default_timeframe.value}. The fallback is available only when it can be derived exactly from the "
+            "tick cadence."
+        )
+    return tick_label, tick_timeframe, default_timeframe
+
+
 async def execute_iteration_loop(
     backtester: PnLBacktester,
     strategy: BacktestableStrategy,
@@ -709,11 +753,17 @@ async def execute_iteration_loop(
         build_backtest_lending_rates,
         sync_il_calculator_positions,
     )
-    from almanak.framework.backtesting.pnl.indicator_engine import cadence_is_coarser, timeframe_label
+    from almanak.framework.backtesting.pnl.indicator_engine import (
+        cadence_is_coarser,
+        timeframe_label,
+    )
     from almanak.framework.data.lp import ILCalculator
     from almanak.framework.data.risk.metrics import PortfolioRiskCalculator
 
-    tick_timeframe = timeframe_label(config.interval_seconds)
+    tick_timeframe, tick_ohlcv_timeframe, default_ohlcv_timeframe = _resolve_tick_ohlcv_timeframes(
+        config.interval_seconds,
+        bt_logger,
+    )
     rsi_provider, indicator_provider = state.indicator_engine.snapshot_providers(
         state.strategy_config, config.interval_seconds
     )
@@ -836,7 +886,7 @@ async def execute_iteration_loop(
                 rsi_provider=rsi_provider,
                 indicator_provider=indicator_provider,
                 gas_view=gas_view,
-                default_timeframe=tick_timeframe,
+                default_timeframe=default_ohlcv_timeframe,
                 ohlcv_module=ohlcv_view,
                 lending_rates=lending_rates,
                 position_view=position_view,
@@ -868,8 +918,12 @@ async def execute_iteration_loop(
                     tick_tokens.add(token)
                 except KeyError:
                     pass
-            state.indicator_engine.populate_snapshot(
-                snapshot, state.strategy_config, active_tokens=tick_tokens, timeframe=tick_timeframe
+            _populate_snapshot_indicators(
+                state.indicator_engine,
+                snapshot,
+                state.strategy_config,
+                tick_tokens,
+                tick_ohlcv_timeframe,
             )
             state.indicator_engine.enrich_price_data(snapshot, config.interval_seconds, active_tokens=tick_tokens)
 

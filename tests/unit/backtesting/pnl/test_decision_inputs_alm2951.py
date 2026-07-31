@@ -104,12 +104,14 @@ class TestOnDemandProviders:
         # 4h series is every 4th close — a genuinely different series.
         assert four_hour.value != one_hour.value
 
-    def test_resamples_arbitrary_multiples(self):
-        # "2h" isn't a canonical label — the parser must handle any <n><unit>.
+    def test_rejects_noncanonical_whole_multiple(self):
+        # A derivable duration is still not a valid OHLCV timeframe unless it
+        # belongs to the SDK's canonical vocabulary.
         engine = _engine_with_series(n=200)
         rsi_provider, _ = engine.snapshot_providers({}, 3600)
 
-        assert rsi_provider("WETH", 14, timeframe="2h").period == 14
+        with pytest.raises(ValueError, match="Invalid timeframe '2h'"):
+            rsi_provider("WETH", 14, timeframe="2h")
 
     def test_rejects_non_derivable_timeframe(self):
         engine = _engine_with_series()

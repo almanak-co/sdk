@@ -34,6 +34,7 @@ from ..interfaces import (
     OHLCVCandle,
     OHLCVProvider,
 )
+from ..timeframes import OHLCVTimeframe, parse_ohlcv_timeframe
 
 logger = logging.getLogger(__name__)
 
@@ -204,7 +205,7 @@ class ATRCalculator:
         self,
         token: str,
         period: int = 14,
-        timeframe: str = "1h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
     ) -> float:
         """Calculate ATR for a token.
 
@@ -233,6 +234,7 @@ class ATRCalculator:
             position_size = risk_per_trade / atr
             print(f"Position size: {position_size:.2f} units")
         """
+        timeframe = parse_ohlcv_timeframe(timeframe, field_name="ATR timeframe")
         limit = period + 20  # Buffer
 
         logger.debug(
@@ -271,7 +273,7 @@ class ATRCalculator:
     async def calculate(
         self,
         token: str,
-        timeframe: str = "1h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
         **params: Any,
     ) -> dict[str, float]:
         """Calculate ATR (BaseIndicator protocol implementation).

@@ -12,6 +12,7 @@ from ..interfaces import (
     OHLCVCandle,
     OHLCVProvider,
 )
+from ..timeframes import OHLCVTimeframe, parse_ohlcv_timeframe
 from .base import ADXResult
 
 logger = logging.getLogger(__name__)
@@ -120,9 +121,10 @@ class ADXCalculator:
         self,
         token: str,
         period: int = 14,
-        timeframe: str = "1h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
     ) -> ADXResult:
         """Calculate ADX for a token."""
+        timeframe = parse_ohlcv_timeframe(timeframe, field_name="ADX timeframe")
         limit = period * 3 + 10
 
         ohlcv_data = await self._ohlcv_provider.get_ohlcv(
@@ -144,7 +146,7 @@ class ADXCalculator:
     async def calculate(
         self,
         token: str,
-        timeframe: str = "1h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
         **params: Any,
     ) -> dict[str, float]:
         """Calculate ADX (BaseIndicator protocol implementation)."""

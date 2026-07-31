@@ -8,7 +8,9 @@ VIB-1957: Health telemetry counters
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 
 class TestIndicatorFallback:
@@ -109,6 +111,30 @@ class TestBinanceDataProviderAdapter:
         health = adapter.health()
         assert health["status"] == "degraded"
         assert health["consecutive_failures"] == 3
+
+    def test_adapter_parses_legacy_string_to_canonical_enum(self):
+        from almanak.framework.backtesting.paper.engine import _BinanceDataProviderAdapter
+        from almanak.framework.data.timeframes import OHLCVTimeframe
+
+        provider = MagicMock()
+        provider.get_ohlcv = AsyncMock(return_value=[])
+        adapter = _BinanceDataProviderAdapter(provider)
+
+        adapter.fetch(token="WETH", timeframe="1h")
+
+        assert provider.get_ohlcv.await_args.kwargs["timeframe"] is OHLCVTimeframe.ONE_HOUR
+
+    def test_adapter_rejects_noncanonical_timeframe_before_provider_call(self):
+        from almanak.framework.backtesting.paper.engine import _BinanceDataProviderAdapter
+
+        provider = MagicMock()
+        provider.get_ohlcv = AsyncMock(return_value=[])
+        adapter = _BinanceDataProviderAdapter(provider)
+
+        with pytest.raises(ValueError, match="Invalid timeframe '60m'"):
+            adapter.fetch(token="WETH", timeframe="60m")
+
+        provider.get_ohlcv.assert_not_awaited()
 
 
 class TestForkRpcUrl:

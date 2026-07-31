@@ -40,6 +40,12 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
+from almanak.framework.data.timeframes import (
+    CANONICAL_OHLCV_TIMEFRAMES,
+    OHLCVTimeframe,
+    parse_ohlcv_timeframe,
+)
+
 if TYPE_CHECKING:
     from almanak.framework.data.tokens.models import ResolvedToken
 
@@ -980,21 +986,20 @@ class BalanceProvider(Protocol):
         ...
 
 
-# Valid OHLCV timeframes
-VALID_TIMEFRAMES: list[str] = ["1m", "5m", "15m", "1h", "4h", "1d"]
+# Deprecated compatibility alias. New code should use OHLCVTimeframe directly.
+VALID_TIMEFRAMES: tuple[OHLCVTimeframe, ...] = CANONICAL_OHLCV_TIMEFRAMES
 
 
-def validate_timeframe(timeframe: str) -> None:
-    """Validate that a timeframe is one of the supported values.
+def validate_timeframe(timeframe: OHLCVTimeframe | str) -> OHLCVTimeframe:
+    """Parse a timeframe using the canonical OHLCV vocabulary.
 
     Args:
-        timeframe: The timeframe string to validate
+        timeframe: Canonical enum or an exact legacy string value.
 
     Raises:
         ValueError: If the timeframe is not valid
     """
-    if timeframe not in VALID_TIMEFRAMES:
-        raise ValueError(f"Invalid timeframe '{timeframe}'. Must be one of: {', '.join(VALID_TIMEFRAMES)}")
+    return parse_ohlcv_timeframe(timeframe)
 
 
 @runtime_checkable
@@ -1009,16 +1014,16 @@ class OHLCVProvider(Protocol):
     - Handle caching to avoid repeated API calls
     - Gracefully degrade if full history unavailable
 
-    The supported_timeframes property should return the subset of
-    VALID_TIMEFRAMES that this provider can supply data for.
+    The ``supported_timeframes`` property returns the canonical subset this
+    provider can supply without changing candle semantics.
     """
 
     @property
-    def supported_timeframes(self) -> list[str]:
-        """Return the list of timeframes this provider supports.
+    def supported_timeframes(self) -> tuple[OHLCVTimeframe, ...]:
+        """Return the canonical timeframes this provider supports.
 
         Returns:
-            List of supported timeframe strings (e.g., ["1h", "4h", "1d"])
+            Supported enum values in canonical finest-to-coarsest order.
         """
         ...
 
@@ -1026,7 +1031,7 @@ class OHLCVProvider(Protocol):
         self,
         token: str,
         quote: str = "USD",
-        timeframe: str = "1h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
         limit: int = 100,
     ) -> list[OHLCVCandle]:
         """Get OHLCV data for a token.
@@ -1056,6 +1061,7 @@ class OHLCVProvider(Protocol):
 __all__ = [
     # Constants
     "VALID_TIMEFRAMES",
+    "OHLCVTimeframe",
     # Utility functions
     "validate_timeframe",
     "data_source_error_from_grpc",

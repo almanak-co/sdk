@@ -202,6 +202,7 @@ if TYPE_CHECKING:
         LSTProtocol,
         SolanaLSTProvider,
     )
+    from .timeframes import OHLCVTimeframe
     from .volatility import (
         RealizedVolatilityCalculator,
         VolatilityResult,
@@ -371,6 +372,8 @@ _LAZY_IMPORTS: dict[str, LazySpec] = {
     "LSTExchangeRate": (".staking", "LSTExchangeRate"),
     "LSTProtocol": (".staking", "LSTProtocol"),
     "SolanaLSTProvider": (".staking", "SolanaLSTProvider"),
+    # .timeframes
+    "OHLCVTimeframe": (".timeframes", "OHLCVTimeframe"),
     # .volatility
     "RealizedVolatilityCalculator": (".volatility", "RealizedVolatilityCalculator"),
     "VolatilityResult": (".volatility", "VolatilityResult"),

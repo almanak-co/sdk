@@ -16,15 +16,18 @@ from __future__ import annotations
 
 import math
 from decimal import Decimal
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+from almanak.framework.backtesting.pnl._engine_helpers import _resolve_tick_ohlcv_timeframes
 from almanak.framework.backtesting.pnl.indicator_engine import (
     DEFAULT_INDICATORS,
     DEFAULT_MAX_HISTORY,
     BacktestIndicatorEngine,
+    ohlcv_timeframe_for_interval,
 )
+from almanak.framework.data.timeframes import OHLCVTimeframe
 from almanak.framework.market import ATRData, BollingerBandsData, MACDData, MarketSnapshot, RSIData
 
 # =============================================================================
@@ -100,6 +103,34 @@ class TestBacktestIndicatorEngineInit:
         """Price buffers should be empty at initialization."""
         engine = BacktestIndicatorEngine()
         assert len(engine._price_buffers) == 0
+
+    def test_tick_interval_only_maps_to_exact_canonical_ohlcv_timeframe(self) -> None:
+        assert ohlcv_timeframe_for_interval(3600) is OHLCVTimeframe.ONE_HOUR
+        assert ohlcv_timeframe_for_interval(1800) is None
+
+    def test_noncanonical_tick_interval_warns_once_about_indicator_fallback(self) -> None:
+        bt_logger = MagicMock()
+
+        label, tick_timeframe, default_timeframe = _resolve_tick_ohlcv_timeframes(1800, bt_logger)
+
+        assert label == "30m"
+        assert tick_timeframe is None
+        assert default_timeframe is OHLCVTimeframe.FOUR_HOURS
+        bt_logger.warning.assert_called_once()
+        warning = bt_logger.warning.call_args.args[0]
+        assert "1800s (30m)" in warning
+        assert "prepopulation is disabled" in warning
+        assert "fall back to 4h" in warning
+
+    def test_canonical_tick_interval_needs_no_fallback_warning(self) -> None:
+        bt_logger = MagicMock()
+
+        label, tick_timeframe, default_timeframe = _resolve_tick_ohlcv_timeframes(3600, bt_logger)
+
+        assert label == "1h"
+        assert tick_timeframe is OHLCVTimeframe.ONE_HOUR
+        assert default_timeframe is OHLCVTimeframe.ONE_HOUR
+        bt_logger.warning.assert_not_called()
 
 
 # =============================================================================

@@ -256,7 +256,7 @@ class TestEdgeCases:
     def test_unsupported_timeframe_raises(self):
         """Should raise ValueError for unknown timeframe."""
         candles = _make_candles([100.0] * 50, timeframe="1h")
-        with pytest.raises(ValueError, match="Unsupported timeframe"):
+        with pytest.raises(ValueError, match="Invalid timeframe"):
             self.calc.realized_vol(candles, window_days=2, timeframe="2h")
 
     def test_unknown_estimator_raises(self):

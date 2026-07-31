@@ -102,6 +102,7 @@ if TYPE_CHECKING:
         MultiChainMarketSnapshot,
         MultiStepStrategy,
         NotificationCallback,
+        OHLCVTimeframe,
         OperatorCardGenerator,
         PauseStrategyCallback,
         PendingTransaction,
@@ -200,6 +201,7 @@ __all__ = [
     "StrategyBase",
     "MarketSnapshot",
     "MultiChainMarketSnapshot",
+    "OHLCVTimeframe",
     # MarketSnapshot typed errors (VIB-5153 / ALM-2814): exported top-level so
     # strategies can catch transient market-data failures by type rather than
     # relying on a bare ``except`` or accidentally letting them escape into a

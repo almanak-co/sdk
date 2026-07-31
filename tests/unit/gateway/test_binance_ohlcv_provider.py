@@ -19,6 +19,7 @@ import aiohttp
 import pytest
 
 from almanak.framework.data.interfaces import DataSourceUnavailable, OHLCVCandle
+from almanak.framework.data.timeframes import CANONICAL_OHLCV_TIMEFRAMES, OHLCVTimeframe
 from almanak.gateway.data.ohlcv import binance_provider as bp
 from almanak.gateway.data.ohlcv.binance_provider import BinanceOHLCVProvider
 
@@ -108,16 +109,11 @@ class TestGetOhlcvValidation:
             with pytest.raises(DataSourceUnavailable, match="Unknown token"):
                 await provider.get_ohlcv("ZZ_9", timeframe="1h")
 
-    @pytest.mark.asyncio()
-    async def test_timeframe_missing_from_interval_map(self, provider, monkeypatch):
-        """A timeframe that passes validate_timeframe but has no Binance interval
-        mapping raises DataSourceUnavailable (defensive branch: every entry of
-        VALID_TIMEFRAMES is currently present in BINANCE_INTERVAL_MAP)."""
-        monkeypatch.delitem(bp.BINANCE_INTERVAL_MAP, "1h")
-
-        with pytest.raises(DataSourceUnavailable, match="Unsupported timeframe: 1h"):
-            await provider.get_ohlcv("WETH", timeframe="1h")
-        assert provider.get_health_metrics()["errors"] == 1
+    def test_interval_mapping_is_canonical_exhaustive_and_immutable(self, provider):
+        assert provider.supported_timeframes == CANONICAL_OHLCV_TIMEFRAMES
+        assert bp.BINANCE_INTERVAL_MAP[OHLCVTimeframe.ONE_HOUR] == "1h"
+        with pytest.raises(TypeError):
+            bp.BINANCE_INTERVAL_MAP[OHLCVTimeframe.ONE_HOUR] = "60m"  # type: ignore[index]
 
 
 class TestGetOhlcvCacheAndLimit:
@@ -242,9 +238,7 @@ class TestGetOhlcvSuccess:
         from types import SimpleNamespace
 
         ticks = itertools.count(start=1)
-        monkeypatch.setattr(
-            bp, "time", SimpleNamespace(time=lambda: next(ticks) * 0.05)
-        )
+        monkeypatch.setattr(bp, "time", SimpleNamespace(time=lambda: next(ticks) * 0.05))
 
         with patch.object(provider, "_get_session", return_value=session):
             result = await provider.get_ohlcv("WETH", timeframe="1h", limit=100)

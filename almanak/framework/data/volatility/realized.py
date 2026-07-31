@@ -26,6 +26,11 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from almanak.framework.data.interfaces import InsufficientDataError, OHLCVCandle
+from almanak.framework.data.timeframes import (
+    CANONICAL_OHLCV_TIMEFRAMES,
+    OHLCVTimeframe,
+    parse_ohlcv_timeframe,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,23 +44,8 @@ MIN_OBSERVATIONS = 30
 DEFAULT_VOL_CONE_WINDOWS_DAYS: tuple[int, ...] = (7, 14, 30, 90)
 
 # Annualization factors: periods per year for each timeframe.
-_PERIODS_PER_YEAR: dict[str, int] = {
-    "1m": 525_600,  # 365 * 24 * 60
-    "5m": 105_120,  # 365 * 24 * 12
-    "15m": 35_040,  # 365 * 24 * 4
-    "1h": 8_760,  # 365 * 24
-    "4h": 2_190,  # 365 * 6
-    "1d": 365,
-}
-
-# Hours per candle for each timeframe (used for window_days -> candle count).
-_HOURS_PER_CANDLE: dict[str, float] = {
-    "1m": 1 / 60,
-    "5m": 5 / 60,
-    "15m": 0.25,
-    "1h": 1.0,
-    "4h": 4.0,
-    "1d": 24.0,
+_PERIODS_PER_YEAR: dict[OHLCVTimeframe, int] = {
+    timeframe: 365 * 24 * 60 * 60 // timeframe.seconds for timeframe in CANONICAL_OHLCV_TIMEFRAMES
 }
 
 
@@ -117,7 +107,7 @@ class VolConeResult:
 
     entries: list[VolConeEntry]
     token: str
-    timeframe: str
+    timeframe: OHLCVTimeframe
 
 
 class RealizedVolatilityCalculator:
@@ -136,7 +126,7 @@ class RealizedVolatilityCalculator:
         self,
         candles: list[OHLCVCandle],
         window_days: int = 30,
-        timeframe: str = "1h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
         estimator: str = "close_to_close",
     ) -> VolatilityResult:
         """Calculate realized volatility over a lookback window.
@@ -155,8 +145,7 @@ class RealizedVolatilityCalculator:
             InsufficientDataError: If fewer than 30 observations in the window.
             ValueError: If timeframe is unsupported or estimator unknown.
         """
-        if timeframe not in _PERIODS_PER_YEAR:
-            raise ValueError(f"Unsupported timeframe '{timeframe}'. Supported: {sorted(_PERIODS_PER_YEAR.keys())}")
+        timeframe = parse_ohlcv_timeframe(timeframe)
         if estimator not in ("close_to_close", "parkinson"):
             raise ValueError(f"Unknown estimator '{estimator}'. Use 'close_to_close' or 'parkinson'.")
 
@@ -191,7 +180,7 @@ class RealizedVolatilityCalculator:
         self,
         candles: list[OHLCVCandle],
         windows: list[int] | None = None,
-        timeframe: str = "1h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
         estimator: str = "close_to_close",
         token: str = "",
     ) -> VolConeResult:
@@ -217,11 +206,9 @@ class RealizedVolatilityCalculator:
             InsufficientDataError: If not enough data for the smallest window.
             ValueError: If timeframe is unsupported.
         """
+        timeframe = parse_ohlcv_timeframe(timeframe)
         if windows is None:
             windows = list(DEFAULT_VOL_CONE_WINDOWS_DAYS)
-
-        if timeframe not in _PERIODS_PER_YEAR:
-            raise ValueError(f"Unsupported timeframe '{timeframe}'. Supported: {sorted(_PERIODS_PER_YEAR.keys())}")
 
         entries: list[VolConeEntry] = []
 
@@ -288,7 +275,7 @@ class RealizedVolatilityCalculator:
         self,
         candles: list[OHLCVCandle],
         window_days: int,
-        timeframe: str,
+        timeframe: OHLCVTimeframe,
     ) -> list[OHLCVCandle]:
         """Select the most recent ``window_days`` of candles."""
         candles_needed = self._window_to_candles(window_days, timeframe)
@@ -304,7 +291,7 @@ class RealizedVolatilityCalculator:
 
         return window
 
-    def _window_to_candles(self, window_days: int, timeframe: str) -> int:
+    def _window_to_candles(self, window_days: int, timeframe: OHLCVTimeframe) -> int:
         """Convert a window in days to an approximate number of candles.
 
         Floors at ``MIN_OBSERVATIONS + 1`` candles: the close-to-close
@@ -314,9 +301,8 @@ class RealizedVolatilityCalculator:
         (e.g. ``window_days=1`` at 1h -> 30 candles -> 29 returns ->
         InsufficientDataError, unconditionally).
         """
-        hours_per_candle = _HOURS_PER_CANDLE[timeframe]
-        total_hours = window_days * 24
-        return max(int(total_hours / hours_per_candle), MIN_OBSERVATIONS + 1)
+        total_seconds = window_days * 24 * 60 * 60
+        return max(total_seconds // timeframe.seconds, MIN_OBSERVATIONS + 1)
 
     def _close_to_close_vol(self, candles: list[OHLCVCandle]) -> tuple[float, int]:
         """Compute per-period volatility using close-to-close log returns.
@@ -380,7 +366,7 @@ class RealizedVolatilityCalculator:
         self,
         candles: list[OHLCVCandle],
         window_size: int,
-        timeframe: str,
+        timeframe: OHLCVTimeframe,
         estimator: str,
     ) -> list[float]:
         """Compute rolling annualized vols across the full candle history.

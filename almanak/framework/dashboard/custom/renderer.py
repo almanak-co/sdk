@@ -11,6 +11,8 @@ from typing import Any
 
 import streamlit as st
 
+from almanak.framework.data.timeframes import OHLCVTimeframe, parse_ohlcv_timeframe
+
 from .api_client import DashboardAPIClient, create_api_client
 from .discoverer import CustomDashboardInfo
 from .loader import (
@@ -365,12 +367,13 @@ def create_mock_api_client():
             self,
             token: str,
             quote: str = "USD",
-            timeframe: str = "1h",
+            timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
             limit: int = 168,
             chain: str | None = None,
             pool_address: str | None = None,
         ) -> list[dict]:
             """Mock get_ohlcv — returns empty list."""
+            parse_ohlcv_timeframe(timeframe, field_name="MockAPIClient.get_ohlcv.timeframe")
             return []
 
         def get_position_events(

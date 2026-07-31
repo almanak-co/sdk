@@ -22,6 +22,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from almanak.framework.data.interfaces import OHLCVCandle, validate_timeframe
+from almanak.framework.data.timeframes import CANONICAL_OHLCV_TIMEFRAMES, OHLCVTimeframe
 
 if TYPE_CHECKING:
     from almanak.framework.data.ohlcv.ohlcv_router import OHLCVRouter
@@ -29,7 +30,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Intersection of timeframes supported by both CoinGecko Onchain and Gateway/Binance
-_SUPPORTED_TIMEFRAMES: list[str] = ["1m", "5m", "15m", "1h", "4h", "1d"]
+_SUPPORTED_TIMEFRAMES: tuple[OHLCVTimeframe, ...] = CANONICAL_OHLCV_TIMEFRAMES
 
 
 class RoutingOHLCVProvider:
@@ -69,15 +70,15 @@ class RoutingOHLCVProvider:
     # -- OHLCVProvider protocol ------------------------------------------------
 
     @property
-    def supported_timeframes(self) -> list[str]:
+    def supported_timeframes(self) -> tuple[OHLCVTimeframe, ...]:
         """Return timeframes supported by the routing layer."""
-        return _SUPPORTED_TIMEFRAMES.copy()
+        return _SUPPORTED_TIMEFRAMES
 
     async def get_ohlcv(
         self,
         token: str,
         quote: str = "USD",
-        timeframe: str = "1h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
         limit: int = 100,
     ) -> list[OHLCVCandle]:
         """Fetch OHLCV candles via multi-provider routing.
@@ -98,12 +99,7 @@ class RoutingOHLCVProvider:
             DataSourceUnavailable: If all providers in the chain fail.
             ValueError: If timeframe is not valid.
         """
-        validate_timeframe(timeframe)
-        if timeframe not in _SUPPORTED_TIMEFRAMES:
-            raise ValueError(
-                f"Timeframe '{timeframe}' not supported by routing provider. "
-                f"Supported: {', '.join(_SUPPORTED_TIMEFRAMES)}"
-            )
+        timeframe = validate_timeframe(timeframe)
 
         envelope = await asyncio.to_thread(
             self._router.get_ohlcv,

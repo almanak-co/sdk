@@ -68,6 +68,7 @@ from almanak.framework.dashboard.templates._ohlcv_window import (
     ohlcv_limit_for_timeframe,
 )
 from almanak.framework.dashboard.utils import registry_handle_from_payload
+from almanak.framework.data.timeframes import OHLCVTimeframe, parse_ohlcv_timeframe
 
 
 @dataclass
@@ -107,7 +108,11 @@ class LPDashboardConfig:
     pool_address: str | None = None
     token0_address: str | None = None
     token1_address: str | None = None
-    timeframe: str = "1h"
+    timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR
+
+    def __post_init__(self) -> None:
+        """Parse programmatic/config string input at the dashboard boundary."""
+        self.timeframe = parse_ohlcv_timeframe(self.timeframe, field_name="LPDashboardConfig.timeframe")
 
 
 class LPSessionState(TypedDict, total=False):
@@ -591,7 +596,7 @@ def _fetch_pool_candles(
     chain: str,
     pool_address: str | None,
     token0: str,
-    timeframe: str = "1h",
+    timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
     *,
     limit: int | None = None,
 ) -> list[Any]:
@@ -654,7 +659,7 @@ def _populate_price_history_by_pool(
     # VIB-5114: follow the operator-selected NAV range when one is active; the
     # resolved window falls back to the configured recent window otherwise, so a
     # ``None`` ``chart_window`` (legacy callers) preserves the prior behaviour.
-    config_timeframe = config.timeframe if config else "1h"
+    config_timeframe = config.timeframe if config else OHLCVTimeframe.ONE_HOUR
     window = chart_window if chart_window is not None else build_chart_window(config_timeframe, None)
     for chain, pool_address in candidates:
         if (chain, pool_address) in by_pool:
@@ -1253,7 +1258,7 @@ def get_uniswap_v3_config(
     token1: str = "USDC",
     fee_tier: str = "0.30%",
     chain: str = "arbitrum",
-    timeframe: str = "1h",
+    timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
 ) -> LPDashboardConfig:
     """Get pre-configured Uniswap V3 LP dashboard config.
 
@@ -1274,7 +1279,7 @@ def get_aerodrome_config(
     token1: str = "USDC",
     pool_type: str = "volatile",
     chain: str = "base",
-    timeframe: str = "1h",
+    timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
 ) -> LPDashboardConfig:
     """Get pre-configured Aerodrome LP dashboard config.
 
@@ -1295,7 +1300,7 @@ def get_traderjoe_v2_config(
     token1: str = "USDC",
     bin_step: str = "20",
     chain: str = "avalanche",
-    timeframe: str = "1h",
+    timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
 ) -> LPDashboardConfig:
     """Get pre-configured TraderJoe V2 LP dashboard config.
 
@@ -1316,7 +1321,7 @@ def get_pancakeswap_v3_config(
     token1: str = "USDT",
     fee_tier: str = "0.25%",
     chain: str = "bsc",
-    timeframe: str = "1h",
+    timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
 ) -> LPDashboardConfig:
     """Get pre-configured PancakeSwap V3 LP dashboard config.
 

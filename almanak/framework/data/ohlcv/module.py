@@ -13,6 +13,7 @@ import pandas as pd
 
 from almanak.framework.data.cache.ohlcv_cache import OHLCVCache
 from almanak.framework.data.interfaces import OHLCVCandle, OHLCVProvider, validate_timeframe
+from almanak.framework.data.timeframes import OHLCVTimeframe
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +65,7 @@ class OHLCVModule:
     def get_ohlcv(
         self,
         token: str,
-        timeframe: str = "1h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
         limit: int = 100,
         quote: str = "USD",
         gap_strategy: GapStrategy = "nan",
@@ -105,8 +106,7 @@ class OHLCVModule:
         Raises:
             ValueError: If timeframe is invalid
         """
-        # Validate timeframe
-        validate_timeframe(timeframe)
+        timeframe = validate_timeframe(timeframe)
 
         # Run async fetch synchronously
         candles = asyncio.get_event_loop().run_until_complete(self._fetch_with_cache(token, quote, timeframe, limit))
@@ -122,7 +122,7 @@ class OHLCVModule:
         df.attrs = {
             "base": token,
             "quote": quote,
-            "timeframe": timeframe,
+            "timeframe": timeframe.value,
             "source": self._get_source_name(),
             "chain": self.chain,
             "fetched_at": datetime.now(UTC).isoformat(),
@@ -134,7 +134,7 @@ class OHLCVModule:
         self,
         token: str,
         quote: str,
-        timeframe: str,
+        timeframe: OHLCVTimeframe,
         limit: int,
     ) -> list[OHLCVCandle]:
         """Fetch candles with incremental caching.
@@ -246,7 +246,7 @@ class OHLCVModule:
 
         return df
 
-    def _timeframe_to_seconds(self, timeframe: str) -> int:
+    def _timeframe_to_seconds(self, timeframe: OHLCVTimeframe) -> int:
         """Convert a timeframe string to seconds.
 
         Args:
@@ -255,21 +255,13 @@ class OHLCVModule:
         Returns:
             Number of seconds in the timeframe
         """
-        mapping = {
-            "1m": 60,
-            "5m": 300,
-            "15m": 900,
-            "1h": 3600,
-            "4h": 14400,
-            "1d": 86400,
-        }
-        return mapping.get(timeframe, 3600)  # Default to 1h
+        return validate_timeframe(timeframe).seconds
 
     def _handle_gaps(
         self,
         df: pd.DataFrame,
         token: str,
-        timeframe: str,
+        timeframe: OHLCVTimeframe,
         gap_strategy: GapStrategy,
     ) -> pd.DataFrame:
         """Detect and handle gaps in OHLCV data.
@@ -379,7 +371,7 @@ class OHLCVModule:
 
         return longest_segment.reset_index(drop=True)
 
-    def _fill_gaps_nan(self, df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+    def _fill_gaps_nan(self, df: pd.DataFrame, timeframe: OHLCVTimeframe) -> pd.DataFrame:
         """Fill gaps with NaN values for missing timestamps.
 
         Args:
@@ -410,7 +402,7 @@ class OHLCVModule:
 
         return df
 
-    def _fill_gaps_ffill(self, df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+    def _fill_gaps_ffill(self, df: pd.DataFrame, timeframe: OHLCVTimeframe) -> pd.DataFrame:
         """Fill gaps with forward-filled values.
 
         Args:

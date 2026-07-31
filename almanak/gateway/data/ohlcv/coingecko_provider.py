@@ -48,39 +48,12 @@ from almanak.framework.data.interfaces import (
     OHLCVCandle,
     validate_timeframe,
 )
+from almanak.framework.data.ohlcv.aggregation import aggregate_complete_candles, open_time_from_close_time
+from almanak.framework.data.timeframes import COINGECKO_OHLCV_TIMEFRAMES, OHLCVTimeframe
 from almanak.gateway.data.price.coingecko import GLOBAL_TOKEN_IDS
 from almanak.gateway.integrations.coingecko import CoinGeckoIntegration
 
 logger = logging.getLogger(__name__)
-
-
-# Canonical framework timeframes CoinGecko OHLC can serve. Constrained to the
-# intersection of ``VALID_TIMEFRAMES`` (1m,5m,15m,1h,4h,1d) and what the
-# endpoint's days-keyed granularity supports. Sub-hour is below the native
-# 30m floor and is intentionally excluded (see module docstring).
-_SUPPORTED_TIMEFRAMES: list[str] = ["1h", "4h", "1d"]
-
-# Per-timeframe ``days`` window that yields candles at or finer than the
-# requested timeframe, paired with the native candle stride (seconds) that
-# window returns. We aggregate the native stride up to the requested timeframe.
-#   days=1       -> 30-minute native candles
-#   days=7/14/30 -> 4-hour native candles
-#   days>=31     -> 4-day native candles
-_NATIVE_30M = 30 * 60
-_NATIVE_4H = 4 * 3600
-
-_TIMEFRAME_PLAN: dict[str, tuple[str, int]] = {
-    # timeframe: (coingecko days window, native candle stride seconds)
-    "1h": ("1", _NATIVE_30M),  # 30m native -> aggregate to 1h
-    "4h": ("30", _NATIVE_4H),  # 4h native (no aggregation)
-    "1d": ("30", _NATIVE_4H),  # 4h native -> aggregate to 1d
-}
-
-_TIMEFRAME_SECONDS: dict[str, int] = {
-    "1h": 3600,
-    "4h": 14400,
-    "1d": 86400,
-}
 
 
 class CoinGeckoOHLCVProvider:
@@ -91,7 +64,7 @@ class CoinGeckoOHLCVProvider:
     handler. Egress runs through :class:`CoinGeckoIntegration`.
     """
 
-    SUPPORTED_TIMEFRAMES: ClassVar[list[str]] = _SUPPORTED_TIMEFRAMES
+    SUPPORTED_TIMEFRAMES: ClassVar[tuple[OHLCVTimeframe, ...]] = COINGECKO_OHLCV_TIMEFRAMES.supported
 
     def __init__(self, integration: CoinGeckoIntegration | None = None) -> None:
         """Initialize the provider.
@@ -109,9 +82,9 @@ class CoinGeckoOHLCVProvider:
         return "coingecko"
 
     @property
-    def supported_timeframes(self) -> list[str]:
-        """Return supported timeframes (30m and coarser)."""
-        return list(self.SUPPORTED_TIMEFRAMES)
+    def supported_timeframes(self) -> tuple[OHLCVTimeframe, ...]:
+        """Return the canonical timeframes CoinGecko can serve exactly."""
+        return self.SUPPORTED_TIMEFRAMES
 
     def _resolve_token_id(self, token: str) -> str | None:
         """Resolve a token SYMBOL to a CoinGecko coin id, or None.
@@ -165,7 +138,7 @@ class CoinGeckoOHLCVProvider:
         self,
         token: str,
         quote: str = "USD",
-        timeframe: str = "1h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
         limit: int = 100,
     ) -> list[OHLCVCandle]:
         """Fetch OHLCV candles for a token from CoinGecko.
@@ -174,9 +147,13 @@ class CoinGeckoOHLCVProvider:
             token: Token symbol (e.g. "WETH", "ARB").
             quote: Quote currency (CoinGecko OHLC is fiat-quoted; non-fiat
                 quotes are priced against USD).
-            timeframe: Candle timeframe. Supported: 30m, 1h, 2h, 4h, 6h, 8h,
-                12h, 1d.
-            limit: Number of candles to return (most-recent ``limit``).
+            timeframe: Canonical candle timeframe. Supported: 1h, 4h, 1d.
+            limit: Maximum number of candles to return. This gateway routing
+                surface is intentionally best-effort for historical fallback:
+                a fixed CoinGecko window may contain fewer candles than the
+                requested maximum. Indicator code that requires an exact
+                minimum negotiates the plan capacity before calling its strict
+                framework provider.
 
         Returns:
             List of OHLCVCandle sorted ascending by timestamp. Volume is
@@ -187,16 +164,15 @@ class CoinGeckoOHLCVProvider:
                 API error.
             ValueError: If the timeframe is structurally invalid.
         """
-        validate_timeframe(timeframe)
+        timeframe = validate_timeframe(timeframe)
 
-        if timeframe not in _TIMEFRAME_PLAN:
+        try:
+            plan = COINGECKO_OHLCV_TIMEFRAMES.resolve(timeframe)
+        except ValueError as exc:
             raise DataSourceUnavailable(
                 source="coingecko",
-                reason=(
-                    f"CoinGecko OHLC cannot serve timeframe {timeframe} at native "
-                    f"granularity; supported: {', '.join(self.SUPPORTED_TIMEFRAMES)}"
-                ),
-            )
+                reason=str(exc),
+            ) from exc
 
         token_id = self._resolve_token_id(token)
         if token_id is None:
@@ -210,12 +186,10 @@ class CoinGeckoOHLCVProvider:
         if vs_currency in ("usdt", "usdc", "usd", "dai"):
             vs_currency = "usd"
 
-        days, native_stride = _TIMEFRAME_PLAN[timeframe]
-
         try:
             rows = await self._integration.get_ohlc(
                 token_id=token_id,
-                days=days,
+                days=plan.days,
                 vs_currency=vs_currency,
             )
         except DataSourceUnavailable:
@@ -226,22 +200,26 @@ class CoinGeckoOHLCVProvider:
                 reason=f"CoinGecko OHLC request failed for {token}: {e}",
             ) from e
 
-        candles = _rows_to_candles(rows)
+        candles = _rows_to_candles(rows, native_stride_seconds=plan.native_stride_seconds)
         if not candles:
             raise DataSourceUnavailable(
                 source="coingecko",
                 reason=f"No CoinGecko OHLC data for {token} ({token_id})",
             )
 
-        target_stride = _TIMEFRAME_SECONDS[timeframe]
-        if target_stride > native_stride:
-            candles = _aggregate_candles(candles, target_stride)
+        target_stride = timeframe.seconds
+        if target_stride > plan.native_stride_seconds:
+            candles = aggregate_complete_candles(
+                candles,
+                native_stride_seconds=plan.native_stride_seconds,
+                target_stride_seconds=target_stride,
+            )
 
         return candles[-limit:] if limit and len(candles) > limit else candles
 
 
-def _rows_to_candles(rows: list[list[float]]) -> list[OHLCVCandle]:
-    """Convert CoinGecko ``[ts_ms, o, h, l, c]`` rows to ascending candles."""
+def _rows_to_candles(rows: list[list[float]], *, native_stride_seconds: int) -> list[OHLCVCandle]:
+    """Convert CoinGecko close-stamped rows to SDK open-stamped candles."""
     candles: list[OHLCVCandle] = []
     for row in rows:
         if not isinstance(row, list) or len(row) < 5:
@@ -249,7 +227,10 @@ def _rows_to_candles(rows: list[list[float]]) -> list[OHLCVCandle]:
         try:
             candles.append(
                 OHLCVCandle(
-                    timestamp=datetime.fromtimestamp(row[0] / 1000, tz=UTC),
+                    timestamp=open_time_from_close_time(
+                        datetime.fromtimestamp(row[0] / 1000, tz=UTC),
+                        native_stride_seconds,
+                    ),
                     open=Decimal(str(row[1])),
                     high=Decimal(str(row[2])),
                     low=Decimal(str(row[3])),
@@ -262,38 +243,6 @@ def _rows_to_candles(rows: list[list[float]]) -> list[OHLCVCandle]:
             continue
     candles.sort(key=lambda c: c.timestamp)
     return candles
-
-
-def _aggregate_candles(candles: list[OHLCVCandle], target_stride_s: int) -> list[OHLCVCandle]:
-    """Bucket finer-grained candles up to ``target_stride_s`` boundaries.
-
-    Buckets are aligned to epoch multiples of the target stride so the
-    produced candles' start-times are deterministic and line up with the
-    router's wall-clock staleness budget. Open = first, close = last, high =
-    max, low = min within the bucket. Volume stays ``None`` (price-only).
-    """
-    if not candles:
-        return []
-
-    buckets: dict[int, list[OHLCVCandle]] = {}
-    for c in candles:
-        bucket_start = int(c.timestamp.timestamp()) // target_stride_s * target_stride_s
-        buckets.setdefault(bucket_start, []).append(c)
-
-    aggregated: list[OHLCVCandle] = []
-    for bucket_start in sorted(buckets):
-        group = sorted(buckets[bucket_start], key=lambda c: c.timestamp)
-        aggregated.append(
-            OHLCVCandle(
-                timestamp=datetime.fromtimestamp(bucket_start, tz=UTC),
-                open=group[0].open,
-                high=max(c.high for c in group),
-                low=min(c.low for c in group),
-                close=group[-1].close,
-                volume=None,
-            )
-        )
-    return aggregated
 
 
 __all__ = ["CoinGeckoOHLCVProvider"]

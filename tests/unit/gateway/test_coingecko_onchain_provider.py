@@ -22,9 +22,14 @@ import pytest
 
 from almanak.framework.data.interfaces import DataSourceUnavailable, OHLCVCandle
 from almanak.framework.data.models import DataClassification, DataEnvelope
+from almanak.framework.data.timeframes import (
+    CANONICAL_OHLCV_TIMEFRAMES,
+    COINGECKO_ONCHAIN_OHLCV_TIMEFRAMES,
+    CoinGeckoOnchainOHLCVParams,
+    OHLCVTimeframe,
+)
 from almanak.gateway.data.ohlcv.coingecko_onchain_provider import (
     _CHAIN_TO_NETWORK,
-    _TIMEFRAME_TO_GT,
     CoinGeckoOnchainOHLCVProvider,
     _TokenBucket,
 )
@@ -122,10 +127,8 @@ class TestOHLCVProviderProtocol:
 
     def test_supported_timeframes(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
         tf = provider.supported_timeframes
-        assert tf == ["1m", "5m", "15m", "1h", "4h", "1d"]
-        # Returns a copy, not the original list
-        tf.append("999m")
-        assert "999m" not in provider.supported_timeframes
+        assert tf == CANONICAL_OHLCV_TIMEFRAMES
+        assert all(isinstance(timeframe, OHLCVTimeframe) for timeframe in tf)
 
     @pytest.mark.asyncio
     async def test_invalid_timeframe_raises(self, provider: CoinGeckoOnchainOHLCVProvider) -> None:
@@ -186,7 +189,11 @@ class TestGetOHLCV:
         provider._session = mock_session
 
         await provider.get_ohlcv(
-            "WETH", timeframe="1h", limit=100, pool_address="0xabc123", chain="ethereum",
+            "WETH",
+            timeframe="1h",
+            limit=100,
+            pool_address="0xabc123",
+            chain="ethereum",
             include_empty_intervals=True,
         )
 
@@ -564,14 +571,14 @@ class TestMappings:
 
     def test_timeframe_mapping_coverage(self) -> None:
         """All OHLCV timeframes are mapped."""
-        expected = {"1m", "5m", "15m", "1h", "4h", "1d"}
-        assert expected == set(_TIMEFRAME_TO_GT.keys())
+        assert set(CANONICAL_OHLCV_TIMEFRAMES) == set(COINGECKO_ONCHAIN_OHLCV_TIMEFRAMES.mapping)
 
     def test_timeframe_mapping_values(self) -> None:
-        assert _TIMEFRAME_TO_GT["1m"] == {"aggregate": "1", "timeframe": "minute"}
-        assert _TIMEFRAME_TO_GT["1h"] == {"aggregate": "1", "timeframe": "hour"}
-        assert _TIMEFRAME_TO_GT["4h"] == {"aggregate": "4", "timeframe": "hour"}
-        assert _TIMEFRAME_TO_GT["1d"] == {"aggregate": "1", "timeframe": "day"}
+        mapping = COINGECKO_ONCHAIN_OHLCV_TIMEFRAMES.mapping
+        assert mapping[OHLCVTimeframe.ONE_MINUTE] == CoinGeckoOnchainOHLCVParams(aggregate="1", timeframe="minute")
+        assert mapping[OHLCVTimeframe.ONE_HOUR] == CoinGeckoOnchainOHLCVParams(aggregate="1", timeframe="hour")
+        assert mapping[OHLCVTimeframe.FOUR_HOURS] == CoinGeckoOnchainOHLCVParams(aggregate="4", timeframe="hour")
+        assert mapping[OHLCVTimeframe.ONE_DAY] == CoinGeckoOnchainOHLCVParams(aggregate="1", timeframe="day")
 
 
 # ---------------------------------------------------------------------------

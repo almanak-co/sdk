@@ -32,9 +32,7 @@ def _make_mock_client() -> MagicMock:
 
 
 def _kline(open_time_ms: int, o="1800.0", h="1820.0", low="1790.0", c="1810.0", v="50000.0"):
-    return gateway_pb2.BinanceKline(
-        open_time=open_time_ms, open=o, high=h, low=low, close=c, volume=v
-    )
+    return gateway_pb2.BinanceKline(open_time=open_time_ms, open=o, high=h, low=low, close=c, volume=v)
 
 
 def _klines_response(*klines) -> gateway_pb2.BinanceKlinesResponse:
@@ -83,9 +81,7 @@ class TestGetOhlcvSuccess:
 
     @pytest.mark.asyncio
     async def test_request_maps_symbol_interval_and_caps_limit(self, provider, mock_client):
-        mock_client.integration.BinanceGetKlines.return_value = _klines_response(
-            _kline(1_700_000_000_000)
-        )
+        mock_client.integration.BinanceGetKlines.return_value = _klines_response(_kline(1_700_000_000_000))
 
         await provider.get_ohlcv("WETH", timeframe="1d", limit=5000)
 
@@ -110,9 +106,7 @@ class TestGetOhlcvSuccess:
 
     @pytest.mark.asyncio
     async def test_cache_hit_skips_second_rpc(self, provider, mock_client):
-        mock_client.integration.BinanceGetKlines.return_value = _klines_response(
-            _kline(1_700_000_000_000)
-        )
+        mock_client.integration.BinanceGetKlines.return_value = _klines_response(_kline(1_700_000_000_000))
 
         first = await provider.get_ohlcv("WETH", timeframe="1h", limit=1)
         second = await provider.get_ohlcv("WETH", timeframe="1h", limit=1)
@@ -143,20 +137,6 @@ class TestGetOhlcvFailures:
 
         assert provider.get_health_metrics()["errors"] == 1
         mock_client.integration.BinanceGetKlines.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_timeframe_without_binance_interval_raises_unavailable(self, provider, monkeypatch):
-        """Defense-in-depth branch: a timeframe that passes validation but has
-        no Binance interval mapping must fail loudly, not guess."""
-        monkeypatch.setattr(
-            "almanak.framework.data.ohlcv.gateway_provider.validate_timeframe",
-            lambda _tf: None,
-        )
-
-        with pytest.raises(DataSourceUnavailable, match="Unsupported timeframe"):
-            await provider.get_ohlcv("WETH", timeframe="2h")
-
-        assert provider.get_health_metrics()["errors"] == 1
 
     @pytest.mark.asyncio
     async def test_empty_klines_raises_unavailable(self, provider, mock_client):

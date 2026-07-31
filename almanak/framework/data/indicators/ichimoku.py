@@ -8,6 +8,7 @@ from ..interfaces import (
     OHLCVCandle,
     OHLCVProvider,
 )
+from ..timeframes import OHLCVTimeframe, parse_ohlcv_timeframe
 from .base import IchimokuResult
 
 logger = logging.getLogger(__name__)
@@ -74,9 +75,10 @@ class IchimokuCalculator:
         tenkan_period: int = 9,
         kijun_period: int = 26,
         senkou_b_period: int = 52,
-        timeframe: str = "1h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
     ) -> IchimokuResult:
         """Calculate Ichimoku for a token."""
+        timeframe = parse_ohlcv_timeframe(timeframe, field_name="Ichimoku timeframe")
         limit = senkou_b_period + 60
 
         ohlcv_data = await self._ohlcv_provider.get_ohlcv(
@@ -103,7 +105,7 @@ class IchimokuCalculator:
     async def calculate(
         self,
         token: str,
-        timeframe: str = "1h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
         **params: Any,
     ) -> dict[str, float]:
         """Calculate Ichimoku (BaseIndicator protocol implementation)."""

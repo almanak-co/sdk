@@ -8,6 +8,7 @@ from ..interfaces import (
     OHLCVCandle,
     OHLCVProvider,
 )
+from ..timeframes import OHLCVTimeframe, parse_ohlcv_timeframe
 
 logger = logging.getLogger(__name__)
 
@@ -60,9 +61,10 @@ class CCICalculator:
         self,
         token: str,
         period: int = 20,
-        timeframe: str = "1h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
     ) -> float:
         """Calculate CCI for a token."""
+        timeframe = parse_ohlcv_timeframe(timeframe, field_name="CCI timeframe")
         limit = period + 20
 
         ohlcv_data = await self._ohlcv_provider.get_ohlcv(
@@ -84,7 +86,7 @@ class CCICalculator:
     async def calculate(
         self,
         token: str,
-        timeframe: str = "1h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
         **params: Any,
     ) -> dict[str, float]:
         """Calculate CCI (BaseIndicator protocol implementation)."""

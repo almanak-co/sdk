@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 
 import grpc
 
+from almanak.framework.data.timeframes import OHLCVTimeframe, parse_ohlcv_timeframe
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.integrations.base import BaseIntegration, IntegrationError
 from almanak.gateway.integrations.binance import BinanceIntegration
@@ -638,7 +639,15 @@ class IntegrationServiceServicer(gateway_pb2_grpc.IntegrationServiceServicer):
             context.set_details("token is required and cannot be empty")
             return gateway_pb2.CoinGeckoOHLCVResponse()
 
-        req_timeframe = request.timeframe or "1h"
+        try:
+            req_timeframe = parse_ohlcv_timeframe(
+                request.timeframe or OHLCVTimeframe.ONE_HOUR,
+                field_name="CoinGeckoOHLCVRequest.timeframe",
+            )
+        except (TypeError, ValueError) as e:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return gateway_pb2.CoinGeckoOHLCVResponse()
         req_limit = request.limit or 100
         if req_limit < 1 or req_limit > 1000:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
@@ -801,11 +810,14 @@ class IntegrationServiceServicer(gateway_pb2_grpc.IntegrationServiceServicer):
             context.set_details("chain is required and cannot be empty")
             return gateway_pb2.CoinGeckoOnchainOHLCVResponse()
 
-        req_timeframe = request.timeframe or "1h"
-        valid_timeframes = {"1m", "5m", "15m", "1h", "4h", "1d"}
-        if req_timeframe not in valid_timeframes:
+        try:
+            req_timeframe = parse_ohlcv_timeframe(
+                request.timeframe or OHLCVTimeframe.ONE_HOUR,
+                field_name="CoinGeckoOnchainOHLCVRequest.timeframe",
+            )
+        except (TypeError, ValueError) as e:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details(f"Invalid timeframe: {req_timeframe}. Valid: {sorted(valid_timeframes)}")
+            context.set_details(str(e))
             return gateway_pb2.CoinGeckoOnchainOHLCVResponse()
 
         req_limit = request.limit or 100

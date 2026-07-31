@@ -8,6 +8,7 @@ from ..interfaces import (
     OHLCVCandle,
     OHLCVProvider,
 )
+from ..timeframes import OHLCVTimeframe, parse_ohlcv_timeframe
 from .base import OBVResult
 
 logger = logging.getLogger(__name__)
@@ -65,9 +66,10 @@ class OBVCalculator:
         self,
         token: str,
         signal_period: int = 21,
-        timeframe: str = "1h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
     ) -> OBVResult:
         """Calculate OBV for a token."""
+        timeframe = parse_ohlcv_timeframe(timeframe, field_name="OBV timeframe")
         limit = signal_period + 200
 
         ohlcv_data = await self._ohlcv_provider.get_ohlcv(
@@ -89,7 +91,7 @@ class OBVCalculator:
     async def calculate(
         self,
         token: str,
-        timeframe: str = "1h",
+        timeframe: OHLCVTimeframe = OHLCVTimeframe.ONE_HOUR,
         **params: Any,
     ) -> dict[str, float]:
         """Calculate OBV (BaseIndicator protocol implementation)."""

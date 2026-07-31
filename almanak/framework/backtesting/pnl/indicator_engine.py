@@ -20,7 +20,6 @@ Usage:
 """
 
 import logging
-import re
 from collections import deque
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -35,6 +34,7 @@ from almanak.framework.data.indicators.moving_averages import MovingAverageCalcu
 from almanak.framework.data.indicators.rsi import RSICalculator
 from almanak.framework.data.indicators.stochastic import StochasticCalculator
 from almanak.framework.data.interfaces import InsufficientDataError, OHLCVCandle
+from almanak.framework.data.timeframes import OHLCVTimeframe, parse_ohlcv_timeframe
 from almanak.framework.market import (
     ADXData,
     ATRData,
@@ -74,22 +74,17 @@ def timeframe_label(interval_seconds: int) -> str:
     return _TIMEFRAME_LABELS.get(int(interval_seconds), f"{int(interval_seconds)}s")
 
 
-_SECONDS_BY_LABEL = {label: seconds for seconds, label in _TIMEFRAME_LABELS.items()}
+def ohlcv_timeframe_for_interval(interval_seconds: int) -> OHLCVTimeframe | None:
+    """Return the canonical OHLCV interval matching a backtest tick, if any."""
+    return next(
+        (timeframe for timeframe in OHLCVTimeframe if timeframe.seconds == int(interval_seconds)),
+        None,
+    )
 
 
-_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
-_TIMEFRAME_RE = re.compile(r"^(\d+)([smhd])$")
-
-
-def _timeframe_seconds(timeframe: str) -> int:
-    """Seconds for any ``<n><unit>`` timeframe (e.g. "2h", "45m", "3d")."""
-    label = timeframe.strip().lower()
-    if label in _SECONDS_BY_LABEL:
-        return _SECONDS_BY_LABEL[label]
-    match = _TIMEFRAME_RE.match(label)
-    if match:
-        return int(match.group(1)) * _UNIT_SECONDS[match.group(2)]
-    raise ValueError(f"unknown timeframe {timeframe!r}")
+def _timeframe_seconds(timeframe: OHLCVTimeframe) -> int:
+    """Seconds for a canonical OHLCV timeframe."""
+    return parse_ohlcv_timeframe(timeframe).seconds
 
 
 #: Cadence jitter cap (ALM-2962): vendors emit slightly irregular timestamps
@@ -212,7 +207,7 @@ class BacktestIndicatorEngine:
         snapshot: MarketSnapshot,
         config: dict | None = None,
         active_tokens: set[str] | None = None,
-        timeframe: str | None = None,
+        timeframe: OHLCVTimeframe | None = None,
     ) -> None:
         """Compute indicators and set them on the snapshot.
 
@@ -287,7 +282,7 @@ class BacktestIndicatorEngine:
         token: str,
         prices: list[Decimal],
         config: dict,
-        timeframe: str | None = None,
+        timeframe: OHLCVTimeframe | None = None,
     ) -> None:
         """Compute RSI and set on snapshot. Silently skips if insufficient data."""
         period = int(config.get("rsi_period", 14))
@@ -310,7 +305,7 @@ class BacktestIndicatorEngine:
         token: str,
         prices: list[Decimal],
         config: dict,
-        timeframe: str | None = None,
+        timeframe: OHLCVTimeframe | None = None,
     ) -> None:
         """Compute MACD and set on snapshot. Silently skips if insufficient data."""
         fast = int(config.get("macd_fast", 12))
@@ -339,7 +334,7 @@ class BacktestIndicatorEngine:
         token: str,
         prices: list[Decimal],
         config: dict,
-        timeframe: str | None = None,
+        timeframe: OHLCVTimeframe | None = None,
     ) -> None:
         """Compute Bollinger Bands and set on snapshot. Silently skips if insufficient data."""
         period = int(config.get("bb_period", 20))
@@ -368,7 +363,7 @@ class BacktestIndicatorEngine:
         token: str,
         prices: list[Decimal],
         config: dict,
-        timeframe: str | None = None,
+        timeframe: OHLCVTimeframe | None = None,
     ) -> None:
         """Compute ATR from close prices and set on snapshot.
 
@@ -435,7 +430,7 @@ class BacktestIndicatorEngine:
         token: str,
         prices: list[Decimal],
         config: dict,
-        timeframe: str | None = None,
+        timeframe: OHLCVTimeframe | None = None,
     ) -> None:
         """Compute EMA(s) and set on snapshot for each configured period.
 
@@ -507,7 +502,7 @@ class BacktestIndicatorEngine:
         token: str,
         prices: list[Decimal],
         config: dict,
-        timeframe: str | None = None,
+        timeframe: OHLCVTimeframe | None = None,
     ) -> None:
         """Compute SMA and set on snapshot. Silently skips if insufficient data."""
         period = int(config.get("sma_period", 20))
@@ -534,7 +529,7 @@ class BacktestIndicatorEngine:
         token: str,
         candles: list[OHLCVCandle],
         config: dict,
-        timeframe: str | None = None,
+        timeframe: OHLCVTimeframe | None = None,
     ) -> None:
         """Compute Stochastic (close-derived) and set on snapshot."""
         k_period = int(config.get("stochastic_k_period", 14))
@@ -560,7 +555,7 @@ class BacktestIndicatorEngine:
         token: str,
         candles: list[OHLCVCandle],
         config: dict,
-        timeframe: str | None = None,
+        timeframe: OHLCVTimeframe | None = None,
     ) -> None:
         """Compute ADX (close-derived) and set on snapshot."""
         period = int(config.get("adx_period", 14))
@@ -585,7 +580,7 @@ class BacktestIndicatorEngine:
         token: str,
         candles: list[OHLCVCandle],
         config: dict,
-        timeframe: str | None = None,
+        timeframe: OHLCVTimeframe | None = None,
     ) -> None:
         """Compute CCI (close-derived typical price) and set on snapshot."""
         period = int(config.get("cci_period", 20))
@@ -608,7 +603,7 @@ class BacktestIndicatorEngine:
         token: str,
         candles: list[OHLCVCandle],
         config: dict,
-        timeframe: str | None = None,
+        timeframe: OHLCVTimeframe | None = None,
     ) -> None:
         """Compute Ichimoku (close-derived midpoints) and set on snapshot."""
         tenkan = int(config.get("ichimoku_tenkan_period", 9))
@@ -787,7 +782,12 @@ class BacktestIndicatorEngine:
             and cadence_is_coarser(self._data_granularity_seconds, self._tick_interval_seconds)
         )
 
-    def _series_for(self, token: str, timeframe: str | None, tick_interval_seconds: int) -> list[Decimal]:
+    def _series_for(
+        self,
+        token: str,
+        timeframe: OHLCVTimeframe | None,
+        tick_interval_seconds: int,
+    ) -> list[Decimal]:
         """Close series for ``timeframe``, resampled from the tick series.
 
         ``None`` or the tick timeframe returns the raw buffer. A timeframe
@@ -840,7 +840,11 @@ class BacktestIndicatorEngine:
         """
         _ = config
 
-        def _rsi(token: str, period: int = 14, timeframe: str | None = None) -> RSIData:
+        def _rsi(
+            token: str,
+            period: int = 14,
+            timeframe: OHLCVTimeframe | None = None,
+        ) -> RSIData:
             prices = self._series_for(token, timeframe, tick_interval_seconds)
             value = RSICalculator.calculate_rsi_from_prices(prices, int(period))
             return RSIData(value=Decimal(str(round(value, 4))), period=int(period))

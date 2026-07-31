@@ -1,5 +1,6 @@
 """Unit tests for OHLCVCache filesystem fallback logic."""
 
+import sqlite3
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -9,6 +10,7 @@ import pytest
 
 from almanak.framework.data.cache.ohlcv_cache import OHLCVCache
 from almanak.framework.data.interfaces import OHLCVCandle
+from almanak.framework.data.timeframes import OHLCVTimeframe
 
 
 class TestOHLCVCacheFilesystemFallback:
@@ -93,3 +95,24 @@ class TestOHLCVCacheCount:
         cache.clear(token="ETH", timeframe="1h")
         assert cache.count(token="ETH", timeframe="1h") == 0
         assert cache.count() == 2  # 1d ETH row + ARB row survive
+
+    def test_legacy_string_rows_are_retrievable_with_canonical_enum(self, tmp_path) -> None:
+        db_path = tmp_path / "ohlcv_cache.db"
+        cache = OHLCVCache(db_path=str(db_path))
+
+        cache.store_candles([_candle(0)], "ETH", "USD", "1h", "ethereum")  # type: ignore[arg-type]
+
+        assert cache.get_candles(
+            "ETH",
+            "USD",
+            OHLCVTimeframe.ONE_HOUR,
+            "ethereum",
+        ) == [_candle(0)]
+        with sqlite3.connect(db_path) as connection:
+            stored_timeframe = connection.execute("SELECT timeframe FROM ohlcv_candles").fetchone()[0]
+        assert stored_timeframe == "1h"
+
+    def test_invalid_timeframe_is_rejected_even_for_empty_write(self, tmp_path) -> None:
+        cache = OHLCVCache(db_path=str(tmp_path / "ohlcv_cache.db"))
+        with pytest.raises(ValueError, match="Invalid timeframe"):
+            cache.store_candles([], "ETH", "USD", " 1h", "ethereum")  # type: ignore[arg-type]
