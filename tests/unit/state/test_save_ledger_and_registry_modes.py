@@ -29,6 +29,7 @@ from almanak.framework.accounting.commit import RegistryRow
 from almanak.framework.observability.ledger import LedgerEntry
 from almanak.framework.primitives.types import AccountingCategory, Primitive
 from almanak.framework.state.backends.sqlite import SQLiteConfig, SQLiteStore
+from almanak.framework.state.ledger_registry_mode import LedgerRegistrySaveMode
 from almanak.framework.state.registry_errors import RegistryAutoCollisionError
 
 
@@ -107,7 +108,7 @@ async def test_default_mode_writes_ledger(store):
 async def test_explicit_commit_mode_equals_default(store):
     """mode='commit' (explicit) === mode= (default). Wire-compat invariant."""
     s, db_path = store
-    await s.save_ledger_and_registry_atomic(_ledger(), _registry(), None, "commit")
+    await s.save_ledger_and_registry_atomic(_ledger(), _registry(), None, LedgerRegistrySaveMode.COMMIT)
 
     conn = sqlite3.connect(db_path)
     try:
@@ -127,7 +128,7 @@ async def test_registry_reconciliation_mode_skips_ledger(store):
     """
     s, db_path = store
     await s.save_ledger_and_registry_atomic(
-        _ledger(), _registry(), None, "registry_reconciliation"
+        _ledger(), _registry(), None, LedgerRegistrySaveMode.REGISTRY_RECONCILIATION
     )
 
     conn = sqlite3.connect(db_path)
@@ -146,7 +147,10 @@ async def test_registry_reconciliation_mode_writes_payload(store):
     """The registry row written under registry_reconciliation carries the full payload."""
     s, db_path = store
     await s.save_ledger_and_registry_atomic(
-        _ledger(), _registry(pih="hash_reconciled"), None, "registry_reconciliation"
+        _ledger(),
+        _registry(pih="hash_reconciled"),
+        None,
+        LedgerRegistrySaveMode.REGISTRY_RECONCILIATION,
     )
 
     conn = sqlite3.connect(db_path)
@@ -174,7 +178,10 @@ async def test_registry_reconciliation_with_handle_writes_handle_column(store):
     """Handle backfill UPDATE still runs under registry_reconciliation mode."""
     s, db_path = store
     await s.save_ledger_and_registry_atomic(
-        _ledger(), _registry(pih="hash_with_handle", handle="leg_a"), None, "registry_reconciliation"
+        _ledger(),
+        _registry(pih="hash_with_handle", handle="leg_a"),
+        None,
+        LedgerRegistrySaveMode.REGISTRY_RECONCILIATION,
     )
 
     conn = sqlite3.connect(db_path)
@@ -190,27 +197,26 @@ async def test_registry_reconciliation_with_handle_writes_handle_column(store):
 
 
 @pytest.mark.asyncio
-async def test_invalid_mode_raises_value_error(store):
-    """mode='BOGUS' / mode=None / etc. raises ValueError BEFORE opening tx.
-
-    Silent fallthrough to a default branch is the anti-pattern this fast-fail
-    guard prevents. UAT card §D3.F6 silent-error guard.
-    """
+async def test_internal_mode_rejects_unparsed_string(store):
+    """Internal storage APIs reject strings instead of reparsing them."""
     s, _ = store
-    with pytest.raises(ValueError, match="invalid mode"):
-        await s.save_ledger_and_registry_atomic(_ledger(), _registry(), None, "BOGUS")
-    # Also reject None (proto3 default '' must be normalized upstream).
-    with pytest.raises(ValueError, match="invalid mode"):
-        await s.save_ledger_and_registry_atomic(_ledger(), _registry(), None, "")
+    with pytest.raises(TypeError, match="require LedgerRegistrySaveMode"):
+        await s.save_ledger_and_registry_atomic(
+            _ledger(), _registry(), None, "commit"  # type: ignore[arg-type]
+        )
 
 
 @pytest.mark.asyncio
-async def test_registry_reconciliation_atomicity_under_failure(store):
-    """If the registry UPSERT fails, NEITHER ledger NOR registry row commits.
+@pytest.mark.parametrize(
+    "mode",
+    [LedgerRegistrySaveMode.COMMIT, LedgerRegistrySaveMode.REGISTRY_RECONCILIATION],
+)
+async def test_each_mode_rolls_back_every_write_on_registry_failure(store, mode):
+    """Both transaction modes roll back their complete write set on failure.
 
-    UAT card §D3.F4 (mid-flight termination invariant): registry_reconciliation
-    is atomic just like the legacy three-write contract. Forcing a failure by
-    passing an invalid status value (CHECK violation) leaves the DB unchanged.
+    In COMMIT mode this proves the ledger INSERT preceding the failing registry
+    UPSERT is rolled back. In REGISTRY_RECONCILIATION mode it proves the
+    registry/handle transaction also leaves no partial row.
     """
     s, db_path = store
     # Force a CHECK violation: status='garbage' is not in the CHECK list.
@@ -226,10 +232,8 @@ async def test_registry_reconciliation_atomicity_under_failure(store):
         payload={"source": "reconciliation_discovery"},
         matching_policy_version=1,
     )
-    with pytest.raises(Exception):  # noqa: PT011 — IntegrityError subclass
-        await s.save_ledger_and_registry_atomic(
-            _ledger(), bad_registry, None, "registry_reconciliation"
-        )
+    with pytest.raises(sqlite3.IntegrityError):
+        await s.save_ledger_and_registry_atomic(_ledger(), bad_registry, None, mode)
 
     conn = sqlite3.connect(db_path)
     try:
@@ -258,7 +262,7 @@ async def test_registry_reconciliation_raises_on_db_error(store):
         _ledger(id_="first"),
         _registry(pih="hash_first", sgk="arbitrum:same_pool"),
         None,
-        "commit",
+        LedgerRegistrySaveMode.COMMIT,
     )
 
     # Second commit under registry_reconciliation with a DIFFERENT pih
@@ -270,7 +274,7 @@ async def test_registry_reconciliation_raises_on_db_error(store):
             _ledger(id_="second"),
             second_registry,
             None,
-            "registry_reconciliation",
+            LedgerRegistrySaveMode.REGISTRY_RECONCILIATION,
         )
     # The collision classifier must fire under registry_reconciliation too —
     # NOT just on the legacy 'commit' path. Validates UAT §D3.F9.

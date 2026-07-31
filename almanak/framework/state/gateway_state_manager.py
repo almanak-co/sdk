@@ -22,6 +22,7 @@ import grpc
 from almanak.framework.gateway_client import GatewayClient
 from almanak.framework.models.run_mode import RunMode
 from almanak.framework.state.exceptions import AccountingPersistenceError, AccountingWriteKind
+from almanak.framework.state.ledger_registry_mode import LedgerRegistrySaveMode
 from almanak.framework.state.state_manager import StateData
 from almanak.gateway.proto import gateway_pb2
 
@@ -1411,7 +1412,7 @@ class GatewayStateManager:
         ledger: "LedgerEntry",
         registry: Any,
         handle: Any,
-        mode: str = "commit",
+        mode: LedgerRegistrySaveMode = LedgerRegistrySaveMode.COMMIT,
     ) -> gateway_pb2.SaveLedgerAndRegistryRequest:
         """Marshal LedgerEntry + RegistryRow + optional HandleMapping → proto.
 
@@ -1482,7 +1483,7 @@ class GatewayStateManager:
             # T24 / VIB-4210: proto3 default "" + server-side normalization
             # to "commit" means existing callers (who don't pass mode) keep
             # bit-identical wire behaviour.
-            mode=mode if mode != "commit" else "",
+            mode=mode.to_wire(),
         )
         if ledger.slippage_bps is not None:
             request.slippage_bps = float(ledger.slippage_bps)
@@ -1535,7 +1536,7 @@ class GatewayStateManager:
         ledger: "LedgerEntry",
         registry: Any,  # RegistryRow — lazy import to avoid module-load cycle
         handle: Any = None,  # HandleMapping | None
-        mode: str = "commit",
+        mode: LedgerRegistrySaveMode = LedgerRegistrySaveMode.COMMIT,
     ) -> None:
         """Atomic ledger + position_registry + handle commit (T11 / VIB-4197).
 

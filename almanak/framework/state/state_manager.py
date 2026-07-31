@@ -41,6 +41,7 @@ from enum import Enum, IntEnum, auto
 from typing import TYPE_CHECKING, Any, Optional, Protocol, runtime_checkable
 
 from almanak.framework.models.run_mode import RunMode
+from almanak.framework.state.ledger_registry_mode import LedgerRegistrySaveMode
 
 if TYPE_CHECKING:
     from almanak.framework.accounting.commit import HandleMapping, RegistryRow
@@ -3316,7 +3317,7 @@ class StateManager:
         ledger: "LedgerEntry",
         registry: "RegistryRow",
         handle: "HandleMapping | None" = None,
-        mode: str = "commit",
+        mode: LedgerRegistrySaveMode = LedgerRegistrySaveMode.COMMIT,
     ) -> None:
         """Atomic single-transaction commit of ledger + registry + handle.
 
@@ -3382,11 +3383,10 @@ class StateManager:
 
         start = time.perf_counter()
         try:
-            # T24 / VIB-4210: pass mode as keyword so existing 3-arg spies
-            # (handle defaults to None in the wrapper) keep working without
-            # update — the kwarg path is what test_d3_f4_atomic_primitive_
-            # is_actually_invoked_test_bug_guard depends on.
-            if mode == "commit":
+            # Preserve the original three-argument call shape for COMMIT so
+            # existing backend wrappers/spies that rely on the typed default
+            # remain compatible. Non-default semantics are always explicit.
+            if mode is LedgerRegistrySaveMode.COMMIT:
                 await self._warm.save_ledger_and_registry_atomic(  # type: ignore[attr-defined]
                     ledger,
                     registry,

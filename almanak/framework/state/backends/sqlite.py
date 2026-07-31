@@ -46,6 +46,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from almanak.framework.models.run_mode import RunMode
+from almanak.framework.state.ledger_registry_mode import (
+    LedgerRegistrySaveMode,
+    ledger_registry_save_behavior,
+)
 
 from ..state_manager import StateConflictError, StateData, StateTier
 
@@ -3462,7 +3466,7 @@ class SQLiteStore:
         entry: "LedgerEntry",
         registry: "RegistryRow",
         handle: "HandleMapping | None",
-        mode: str = "commit",
+        mode: LedgerRegistrySaveMode = LedgerRegistrySaveMode.COMMIT,
     ) -> None:
         """Single-transaction commit of ledger + position_registry + handle.
 
@@ -3545,16 +3549,7 @@ class SQLiteStore:
         # open=0; closed=1; reorg_invalidated=1.
         new_status_priority = 0 if registry.status == "open" else 1
 
-        # T24 / VIB-4210: validate mode at the boundary so a typo lands
-        # as a typed ValueError, not a silent fall-through to the default
-        # branch. Only two values are valid; anything else is a bug.
-        if mode not in ("commit", "registry_reconciliation"):
-            raise ValueError(
-                f"save_ledger_and_registry_atomic: invalid mode={mode!r}; "
-                "expected 'commit' (default, write ledger+registry+handle) "
-                "or 'registry_reconciliation' (skip ledger, write registry+handle only)."
-            )
-        _skip_ledger = mode == "registry_reconciliation"
+        behavior = ledger_registry_save_behavior(mode)
 
         def _sync_atomic_commit() -> None:
             with self._db_lock:
@@ -3580,7 +3575,7 @@ class SQLiteStore:
                     # surface. The skip is localised to ONE branch inside
                     # the existing transaction (ADR §8.1 Option (c)) so
                     # there is still a single registry writer path.
-                    if not _skip_ledger:
+                    if behavior.writes_ledger:
                         conn.execute(
                             """
                             INSERT OR REPLACE INTO transaction_ledger

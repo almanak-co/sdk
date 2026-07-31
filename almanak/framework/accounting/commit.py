@@ -50,6 +50,7 @@ from almanak.framework.accounting.ledger_guard import (
     classify_ledger_row,
 )
 from almanak.framework.primitives.types import AccountingCategory, Primitive
+from almanak.framework.state.ledger_registry_mode import LedgerRegistrySaveMode
 
 if TYPE_CHECKING:
     from almanak.framework.observability.ledger import LedgerEntry
@@ -298,19 +299,22 @@ async def save_ledger_and_registry(
     # T24 / VIB-4210: function-level mode 'registry_reconciliation' routes
     # through the storage layer's same-named mode (which SKIPS the ledger
     # write atomically). Function-level mode 'registry' uses the storage
-    # layer's default three-write path; we build the kwargs dict so the
-    # final call site stays a SINGLE state_manager.save_ledger_and_registry
+    # layer's default three-write path. The final call site stays a SINGLE
+    # state_manager.save_ledger_and_registry
     # invocation (preserves the single-delegation invariant enforced by
     # tests/unit/state/test_position_registry_no_writers.py::test_layer_b_
     # commit_py_delegation_shape — bug #2130 split-commit guard).
-    storage_kwargs: dict[str, Any] = {
-        "ledger": ledger,
-        "registry": registry,
-        "handle": handle,
-    }
-    if mode == "registry_reconciliation":
-        storage_kwargs["mode"] = mode
-    await state_manager.save_ledger_and_registry(**storage_kwargs)
+    storage_mode = (
+        LedgerRegistrySaveMode.REGISTRY_RECONCILIATION
+        if mode == "registry_reconciliation"
+        else LedgerRegistrySaveMode.COMMIT
+    )
+    await state_manager.save_ledger_and_registry(
+        ledger=ledger,
+        registry=registry,
+        handle=handle,
+        mode=storage_mode,
+    )
 
 
 def _validate_inputs(

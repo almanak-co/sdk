@@ -48,6 +48,7 @@ from almanak.framework.models.run_mode import RunMode
 from almanak.framework.observability.ledger import LedgerEntry
 from almanak.framework.state.backends.sqlite import SQLiteConfig, SQLiteStore
 from almanak.framework.state.gateway_state_manager import GatewayStateManager
+from almanak.framework.state.ledger_registry_mode import LedgerRegistrySaveMode
 from almanak.framework.state.registry_errors import RegistryAutoCollisionError
 from almanak.framework.state.state_manager import StateManager, StateManagerConfig
 from almanak.gateway.core.settings import GatewaySettings
@@ -1124,6 +1125,10 @@ class _FakePgTransaction:
 
     async def __aexit__(self, exc_type, exc, tb) -> bool:  # noqa: ANN001
         self._conn.transaction_exits += 1
+        if exc_type is None:
+            self._conn.transaction_commits += 1
+        else:
+            self._conn.transaction_rollbacks += 1
         self._conn._transaction_depth -= 1
         return False
 
@@ -1152,6 +1157,8 @@ class _FakePgConn:
         self.operations: list[tuple[str, str, tuple[Any, ...], bool]] = []
         self.transaction_entries = 0
         self.transaction_exits = 0
+        self.transaction_commits = 0
+        self.transaction_rollbacks = 0
         self._transaction_depth = 0
         self.execute_failures: list[tuple[str, BaseException]] = []
 
@@ -1235,6 +1242,23 @@ class TestSaveLedgerAndRegistry:
         assert response.success is True
         ledger = sm.save_ledger_and_registry.await_args.kwargs["ledger"]
         assert ledger.execution_mode is RunMode.PAPER
+        assert sm.save_ledger_and_registry.await_args.kwargs["mode"] is LedgerRegistrySaveMode.COMMIT
+
+    @pytest.mark.asyncio
+    async def test_wire_reconciliation_mode_is_parsed_once_to_enum(self, state_service, mock_context):
+        sm = MagicMock()
+        sm.save_ledger_and_registry = AsyncMock()
+        state_service._state_manager = sm
+        request = _ledger_registry_request(execution_mode="paper")
+        request.mode = "registry_reconciliation"
+
+        response = await state_service.SaveLedgerAndRegistry(request, mock_context)
+
+        assert response.success is True
+        assert (
+            sm.save_ledger_and_registry.await_args.kwargs["mode"]
+            is LedgerRegistrySaveMode.REGISTRY_RECONCILIATION
+        )
 
     @pytest.mark.asyncio
     async def test_happy_path_via_real_sqlite(self, gsm_client):
@@ -1374,6 +1398,9 @@ class TestSaveLedgerAndRegistry:
         silently routing an unknown mode through the legacy path would
         defeat the purpose of the field.
         """
+        state_service._decode_registry_payload = MagicMock(
+            side_effect=AssertionError("invalid mode must fail before payload decoding")
+        )
         req = gateway_pb2.SaveLedgerAndRegistryRequest(
             id="55555555-5555-5555-5555-555555555555",
             cycle_id="cyc-5",
@@ -1396,8 +1423,12 @@ class TestSaveLedgerAndRegistry:
         )
         resp = await state_service.SaveLedgerAndRegistry(req, mock_context)
         assert not resp.success
-        mock_context.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
-        assert "invalid mode" in resp.error
+        mock_context.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
+        assert resp.error == (
+            "invalid ledger/registry save mode 'invalid_mode'; "
+            "expected one of: 'commit', 'registry_reconciliation'"
+        )
+        state_service._decode_registry_payload.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_postgres_atomic_commit_sql_order(self, state_service):
@@ -1412,12 +1443,14 @@ class TestSaveLedgerAndRegistry:
             registry=registry,
             effective_handle="lp:auto-slot",
             ledger_id=ledger.id,
-            mode="commit",
+            mode=LedgerRegistrySaveMode.COMMIT,
         )
 
         assert resp.success is True
         assert conn.transaction_entries == 1
         assert conn.transaction_exits == 1
+        assert conn.transaction_commits == 1
+        assert conn.transaction_rollbacks == 0
         assert all(in_tx for _, _, _, in_tx in conn.operations)
         assert [kind for kind, *_ in conn.operations] == [
             "fetchval",
@@ -1449,12 +1482,14 @@ class TestSaveLedgerAndRegistry:
             registry=registry,
             effective_handle="lp:auto-slot",
             ledger_id=ledger.id,
-            mode="registry_reconciliation",
+            mode=LedgerRegistrySaveMode.REGISTRY_RECONCILIATION,
         )
 
         assert resp.success is True
         assert conn.transaction_entries == 1
         assert conn.transaction_exits == 1
+        assert conn.transaction_commits == 1
+        assert conn.transaction_rollbacks == 0
         assert all(in_tx for _, _, _, in_tx in conn.operations)
         sqls = [sql for _, sql, _, _ in conn.operations]
         assert all("transaction_ledger" not in sql for sql in sqls)
@@ -1478,7 +1513,7 @@ class TestSaveLedgerAndRegistry:
             registry=_make_registry_row(),
             effective_handle="lp:auto-slot",
             ledger_id=ledger.id,
-            mode="commit",
+            mode=LedgerRegistrySaveMode.COMMIT,
         )
 
         assert resp.success is False
@@ -1507,10 +1542,41 @@ class TestSaveLedgerAndRegistry:
             registry=_make_registry_row(),
             effective_handle=None,
             ledger_id=ledger.id,
-            mode="commit",
+            mode=LedgerRegistrySaveMode.COMMIT,
         )
 
         assert resp.success is False
         assert resp.error_class == "RegistryAutoCollisionError"
         assert "0xexisting" in resp.error
         state_service._snapshot_fetchrow.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "mode",
+        [LedgerRegistrySaveMode.COMMIT, LedgerRegistrySaveMode.REGISTRY_RECONCILIATION],
+    )
+    async def test_postgres_each_mode_rolls_back_on_registry_failure(self, state_service, mode):
+        """Failure injection proves both hosted write sets exit via rollback."""
+        conn = _FakePgConn()
+        conn.execute_failures.append(
+            ("INSERT INTO position_registry", asyncpg.CheckViolationError("bad registry row"))
+        )
+        _pg_service_with_conn(state_service, conn)
+
+        ledger = _make_ledger()
+        resp = await state_service._save_ledger_and_registry_pg(
+            ledger=ledger,
+            registry=_make_registry_row(),
+            effective_handle="lp:auto-slot",
+            ledger_id=ledger.id,
+            mode=mode,
+        )
+
+        assert resp.success is False
+        assert resp.error_class == "AccountingPersistenceError"
+        assert conn.transaction_entries == 1
+        assert conn.transaction_exits == 1
+        assert conn.transaction_commits == 0
+        assert conn.transaction_rollbacks == 1
+        ledger_writes = [sql for _, sql, _, _ in conn.operations if "INSERT INTO transaction_ledger" in sql]
+        assert bool(ledger_writes) is mode.behavior.writes_ledger

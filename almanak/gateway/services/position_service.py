@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING, Any
 
 import grpc
 
+from almanak.framework.state.ledger_registry_mode import LedgerRegistrySaveMode
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
 from almanak.gateway.validation import (
@@ -1209,7 +1210,7 @@ class PositionServiceServicer(gateway_pb2_grpc.PositionServiceServicer):
                     ledger=sentinel_ledger,
                     registry=registry,
                     handle=None,
-                    mode="registry_reconciliation",
+                    mode=LedgerRegistrySaveMode.REGISTRY_RECONCILIATION,
                 )
             except RegistryAutoCollisionError as e:
                 # ADR §5.1 + UAT D3.F9: surface collision as a typed

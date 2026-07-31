@@ -24,6 +24,10 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 import grpc
 
 from almanak.framework.models.run_mode import RunMode, RunModeStamp, serialize_run_mode
+from almanak.framework.state.ledger_registry_mode import (
+    LedgerRegistrySaveMode,
+    ledger_registry_save_behavior,
+)
 from almanak.framework.state.state_manager import StateNotFoundError
 
 if TYPE_CHECKING:
@@ -4972,7 +4976,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         registry: Any,
         effective_handle: str | None,
         ledger_id: str,
-        mode: str = "commit",
+        mode: LedgerRegistrySaveMode = LedgerRegistrySaveMode.COMMIT,
     ) -> gateway_pb2.SaveLedgerAndRegistryResponse:
         """Atomic Postgres commit of ledger + position_registry + handle (T19 / VIB-4205).
 
@@ -5023,15 +5027,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
 
         assert self._snapshot_pool is not None
 
-        # T24 / VIB-4210: validate mode at the boundary. Same rule as the
-        # SQLite path (sqlite.py:save_ledger_and_registry_atomic) — only
-        # two values are accepted; anything else surfaces as ValueError
-        # rather than silently routing to a default branch.
-        if mode not in ("commit", "registry_reconciliation"):
-            raise ValueError(
-                f"_save_ledger_and_registry_pg: invalid mode={mode!r}; expected 'commit' or 'registry_reconciliation'."
-            )
-        skip_ledger = mode == "registry_reconciliation"
+        behavior = ledger_registry_save_behavior(mode)
 
         primitive_str = registry.primitive_value()
         category_str = registry.accounting_category_value()
@@ -5222,7 +5218,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             # T24 / VIB-4210: under mode='registry_reconciliation' the ledger
             # INSERT is skipped, but the transaction stays open so registry
             # UPSERT + handle backfill still commit atomically.
-            if not skip_ledger:
+            if behavior.writes_ledger:
                 await _upsert_ledger_row(conn)
             await _release_reusable_terminal_handle(conn)
             await _upsert_registry_row(conn)
@@ -5328,21 +5324,23 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             return validated
         deployment_id, _, ledger_id, ts = validated
 
+        # Parse the proto string exactly once. Proto3's empty default maps to
+        # COMMIT; every unknown value is rejected before payload decoding or
+        # either persistence backend can be reached.
+        try:
+            mode = LedgerRegistrySaveMode.parse_wire(request.mode)
+        except (TypeError, ValueError) as exc:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(exc))
+            return gateway_pb2.SaveLedgerAndRegistryResponse(
+                success=False,
+                error=str(exc),
+                error_class="ValueError",
+            )
+
         payload = self._decode_registry_payload(request, context)
         if isinstance(payload, gateway_pb2.SaveLedgerAndRegistryResponse):
             return payload
-
-        # T24 / VIB-4210: mode validation at the boundary. Proto3 default
-        # "" routes to the legacy ("commit") path bit-identically.
-        mode = request.mode or "commit"
-        if mode not in ("commit", "registry_reconciliation"):
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details(f"invalid mode={mode!r}; expected 'commit' or 'registry_reconciliation'")
-            return gateway_pb2.SaveLedgerAndRegistryResponse(
-                success=False,
-                error=f"invalid mode={mode!r}",
-                error_class="ValueError",
-            )
 
         try:
             execution_mode = _canonical_execution_mode(request.execution_mode)
