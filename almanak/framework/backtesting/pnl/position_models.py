@@ -19,8 +19,8 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 
+from almanak.core.intent_types import IntentType
 from almanak.framework.backtesting.models import (
-    IntentType,
     TradeRecord,
 )
 from almanak.framework.backtesting.pnl.data_provider import TokenRef, normalize_token_ref, token_ref_display

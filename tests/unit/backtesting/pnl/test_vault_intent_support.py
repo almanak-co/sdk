@@ -19,11 +19,11 @@ from typing import Any
 
 import pytest
 
-from almanak.framework.backtesting.models import IntentType
+from almanak.core.intent_types import IntentType
 from almanak.framework.backtesting.pnl.data_provider import MarketState
 from almanak.framework.backtesting.pnl.engine import (
-    PnLBacktester,
     _ZERO_SLIPPAGE_INTENTS,
+    PnLBacktester,
 )
 from almanak.framework.intents.vocabulary import (
     VaultDepositIntent,
@@ -105,10 +105,10 @@ class TestVaultIntentTypeEnum:
     """Test that VAULT_DEPOSIT and VAULT_REDEEM exist in backtester IntentType."""
 
     def test_vault_deposit_in_enum(self):
-        assert IntentType.VAULT_DEPOSIT == "VAULT_DEPOSIT"
+        assert IntentType.VAULT_DEPOSIT.value == "VAULT_DEPOSIT"
 
     def test_vault_redeem_in_enum(self):
-        assert IntentType.VAULT_REDEEM == "VAULT_REDEEM"
+        assert IntentType.VAULT_REDEEM.value == "VAULT_REDEEM"
 
     def test_vault_deposit_from_string(self):
         assert IntentType("VAULT_DEPOSIT") == IntentType.VAULT_DEPOSIT

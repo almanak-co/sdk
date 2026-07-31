@@ -7,9 +7,11 @@ from typing import Any
 
 import pytest
 
-from almanak.framework.backtesting.models import IntentType
+from almanak.core.intent_types import IntentType
+from almanak.framework.backtesting.intent_types import UnrecognizedIntentType, UnrecognizedIntentTypeError
 from almanak.framework.backtesting.pnl.data_provider import MarketState
 from almanak.framework.backtesting.pnl.intent_extraction import (
+    classify_intent_type,
     get_intent_amount_usd,
     get_intent_protocol,
     get_intent_tokens,
@@ -48,33 +50,15 @@ def _market_state() -> MarketState:
         (IntentType.SWAP, IntentType.SWAP),
         ("LP_OPEN", IntentType.LP_OPEN),
         (_ExternalIntentType("VAULT_REDEEM"), IntentType.VAULT_REDEEM),
-        (_StringFallbackIntentType(), IntentType.REPAY),
     ],
 )
 def test_get_intent_type_prefers_intent_type_attribute(intent_type_value: Any, expected: IntentType) -> None:
     assert get_intent_type(_IntentWithType(intent_type_value)) == expected
 
 
-@pytest.mark.parametrize(
-    ("class_name", "expected"),
-    [
-        ("SwapIntent", IntentType.SWAP),
-        ("LpOpenIntent", IntentType.LP_OPEN),
-        ("LpCloseIntent", IntentType.LP_CLOSE),
-        ("PerpOpenIntent", IntentType.PERP_OPEN),
-        ("PerpCloseIntent", IntentType.PERP_CLOSE),
-        ("SupplyIntent", IntentType.SUPPLY),
-        ("WithdrawIntent", IntentType.WITHDRAW),
-        ("BorrowIntent", IntentType.BORROW),
-        ("RepayIntent", IntentType.REPAY),
-        ("BridgeIntent", IntentType.BRIDGE),
-        ("VaultDepositIntent", IntentType.VAULT_DEPOSIT),
-        ("VaultRedeemIntent", IntentType.VAULT_REDEEM),
-        ("HoldIntent", IntentType.HOLD),
-        ("NoopIntent", IntentType.UNKNOWN),
-    ],
-)
-def test_get_intent_type_falls_back_to_class_name(class_name: str, expected: IntentType) -> None:
+@pytest.mark.parametrize("expected", list(IntentType))
+def test_get_intent_type_falls_back_for_every_canonical_class_name(expected: IntentType) -> None:
+    class_name = f"{expected.value.replace('_', '').title()}Intent"
     intent = type(class_name, (), {})()
 
     assert get_intent_type(intent) == expected
@@ -86,8 +70,12 @@ def test_get_intent_type_uses_class_name_after_invalid_attribute() -> None:
     assert get_intent_type(intent) == IntentType.BORROW
 
 
-def test_get_intent_type_none_is_unknown() -> None:
-    assert get_intent_type(None) == IntentType.UNKNOWN
+@pytest.mark.parametrize("intent", [None, object(), _IntentWithType(_StringFallbackIntentType())])
+def test_get_intent_type_refuses_unrecognized_boundary_values(intent: object) -> None:
+    classified = classify_intent_type(intent)
+    assert isinstance(classified, UnrecognizedIntentType)
+    with pytest.raises(UnrecognizedIntentTypeError):
+        get_intent_type(intent)
 
 
 @pytest.mark.parametrize("attr", ["protocol", "protocol_name", "connector", "adapter"])
@@ -211,8 +199,8 @@ class TestAmountAllSentinel:
         # UnsupportedIntentError upstream and the promised rejected-trade
         # blotter record can never be built (BRIDGE is the excluded case:
         # refused wholesale for ANY amount, not just "all").
-        from almanak.framework.backtesting.pnl._engine_helpers import GENERIC_SIMULATED_INTENT_TYPES
         from almanak.framework.backtesting.pnl.intent_extraction import WALLET_BALANCE_ALL_INTENT_TYPES
+        from almanak.framework.backtesting.pnl.intent_support import GENERIC_SIMULATED_INTENT_TYPES
 
         assert WALLET_BALANCE_ALL_INTENT_TYPES <= GENERIC_SIMULATED_INTENT_TYPES
         assert IntentType.BRIDGE not in WALLET_BALANCE_ALL_INTENT_TYPES
@@ -333,7 +321,7 @@ class TestWalletBalanceCategoryParity:
         # Each documented exclusion must remain un-simulated; if an engine lane
         # ever appears for one, this forces the exclusion list (and the fate of
         # its "all" sizing) to be revisited rather than staying stale.
-        from almanak.framework.backtesting.pnl._engine_helpers import GENERIC_SIMULATED_INTENT_TYPES
+        from almanak.framework.backtesting.pnl.intent_support import GENERIC_SIMULATED_INTENT_TYPES
 
         simulated = {t.name for t in GENERIC_SIMULATED_INTENT_TYPES}
         assert self.DOCUMENTED_BACKTEST_EXCLUSIONS & simulated == set()

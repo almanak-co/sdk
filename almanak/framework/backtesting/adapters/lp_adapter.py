@@ -2756,7 +2756,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         protocol: str,
         reason: str,
     ) -> "SimulatedFill":
-        from almanak.framework.backtesting.models import IntentType
+        from almanak.core.intent_types import IntentType
         from almanak.framework.backtesting.pnl.portfolio import SimulatedFill
 
         return SimulatedFill(
@@ -3068,7 +3068,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         position: "SimulatedPosition",
         plan: _LPOpenPlan,
     ) -> "SimulatedFill":
-        from almanak.framework.backtesting.models import IntentType
+        from almanak.core.intent_types import IntentType
         from almanak.framework.backtesting.pnl.portfolio import SimulatedFill
 
         return SimulatedFill(
@@ -3188,7 +3188,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         reason: str,
         position_close_id: str | None = None,
     ) -> "SimulatedFill":
-        from almanak.framework.backtesting.models import IntentType
+        from almanak.core.intent_types import IntentType
         from almanak.framework.backtesting.pnl.portfolio import SimulatedFill
 
         return SimulatedFill(
@@ -3331,7 +3331,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         amounts: _LPUpdateAmounts,
         close_result: _LPCloseResult,
     ) -> "SimulatedFill":
-        from almanak.framework.backtesting.models import IntentType
+        from almanak.core.intent_types import IntentType
         from almanak.framework.backtesting.pnl.portfolio import SimulatedFill
 
         return SimulatedFill(

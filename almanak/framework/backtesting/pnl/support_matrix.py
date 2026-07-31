@@ -651,7 +651,7 @@ def _check_intents_lane(chain: str, protocols: list[str], report: BacktestSuppor
     no-op). An adapter that genuinely handles a type outside the envelope is
     unaffected; the warning states the contract precisely.
     """
-    from almanak.framework.backtesting.pnl._engine_helpers import GENERIC_SIMULATED_INTENT_TYPES
+    from almanak.framework.backtesting.pnl.intent_support import GENERIC_SIMULATED_INTENT_TYPES
 
     simulated = {intent_type.value for intent_type in GENERIC_SIMULATED_INTENT_TYPES}
     for protocol in protocols:

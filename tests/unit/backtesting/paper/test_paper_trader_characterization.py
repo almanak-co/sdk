@@ -34,11 +34,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from almanak.core.intent_types import IntentType
+from almanak.framework.backtesting.intent_types import UNKNOWN_INTENT_TYPE
 from almanak.framework.backtesting.models import (
     BacktestEngine,
     BacktestMetrics,
     EquityPoint,
-    IntentType,
 )
 from almanak.framework.backtesting.paper.config import ForkLifecycle, PaperTraderConfig
 from almanak.framework.backtesting.paper.engine import (
@@ -654,7 +655,7 @@ class TestResultAssembly:
 
         _install_fast_run_harness(trader, tick_behaviour=_add_trade)
         result = await trader.run(_MockStrategy(), duration_seconds=3600.0, max_ticks=1)
-        assert result.trades[0].intent_type == IntentType.UNKNOWN
+        assert result.trades[0].intent_type == UNKNOWN_INTENT_TYPE
 
     @pytest.mark.asyncio
     async def test_equity_curve_passed_through(self) -> None:

@@ -28,6 +28,8 @@ from typing import Any
 
 import pytest
 
+from almanak.core.intent_types import IntentType
+from almanak.framework.backtesting.intent_types import UNKNOWN_INTENT_TYPE, UnrecognizedIntentType
 from almanak.framework.backtesting.models import (
     AccuracyEstimate,
     AggregatedPortfolioView,
@@ -38,7 +40,6 @@ from almanak.framework.backtesting.models import (
     DataCoverageMetrics,
     EquityPoint,
     GasPriceRecord,
-    IntentType,
     LendingLiquidationEvent,
     LendingMetrics,
     LPMetrics,
@@ -76,6 +77,20 @@ def _minimal_dict(**overrides: Any) -> dict[str, Any]:
     }
     base.update(overrides)
     return base
+
+
+def _minimal_trade_dict(intent_type: object = IntentType.SWAP.value) -> dict[str, Any]:
+    """Build the smallest serialized trade accepted by ``from_dict``."""
+    return {
+        "timestamp": "2024-01-01T10:00:00",
+        "intent_type": intent_type,
+        "executed_price": "2500.50",
+        "fee_usd": "1.25",
+        "slippage_usd": "0.50",
+        "gas_cost_usd": "2.00",
+        "pnl_usd": "100.00",
+        "success": True,
+    }
 
 
 def _sample_backtest_result(**overrides: Any) -> BacktestResult:
@@ -571,6 +586,46 @@ class TestNestedDataclassRehydration:
         assert trade.actual_amount_in is None
         assert trade.actual_amount_out is None
         assert trade.delayed_at_end is False
+
+    @pytest.mark.parametrize("intent_type", list(IntentType), ids=lambda intent: intent.value)
+    def test_every_canonical_intent_preserves_wire_value(self, intent_type: IntentType) -> None:
+        result = BacktestResult.from_dict(_minimal_dict(trades=[_minimal_trade_dict(intent_type.value)]))
+
+        assert result.trades[0].intent_type is intent_type
+        assert result.to_dict()["trades"][0]["intent_type"] == intent_type.value
+
+    def test_unknown_future_intent_round_trips_losslessly_without_becoming_canonical(self) -> None:
+        result = BacktestResult.from_dict(_minimal_dict(trades=[_minimal_trade_dict("FUTURE_INTENT")]))
+
+        assert result.trades[0].intent_type == UnrecognizedIntentType("FUTURE_INTENT")
+        assert result.to_dict()["trades"][0]["intent_type"] == "FUTURE_INTENT"
+
+    def test_unknown_future_intent_preserves_surrounding_whitespace(self) -> None:
+        wire_value = "  FUTURE_INTENT  "
+        result = BacktestResult.from_dict(_minimal_dict(trades=[_minimal_trade_dict(wire_value)]))
+
+        assert result.trades[0].intent_type == UnrecognizedIntentType(wire_value)
+        assert result.to_dict()["trades"][0]["intent_type"] == wire_value
+
+    @pytest.mark.parametrize("wire_value", [None, "", "UNKNOWN"], ids=["missing", "empty", "legacy_unknown"])
+    def test_legacy_missing_unknown_intent_uses_explicit_boundary_sentinel(self, wire_value: object) -> None:
+        trade = _minimal_trade_dict()
+        if wire_value is None:
+            trade.pop("intent_type")
+        else:
+            trade["intent_type"] = wire_value
+
+        result = BacktestResult.from_dict(_minimal_dict(trades=[trade]))
+
+        assert result.trades[0].intent_type is UNKNOWN_INTENT_TYPE
+        assert result.to_dict()["trades"][0]["intent_type"] == "UNKNOWN"
+
+    def test_public_backtesting_exports_share_canonical_enum_identity(self) -> None:
+        from almanak.framework.backtesting import IntentType as PublicIntentType
+        from almanak.framework.backtesting.models import IntentType as ModelsIntentType
+
+        assert PublicIntentType is IntentType
+        assert ModelsIntentType is IntentType
 
     def test_trades_rehydrate_optional_decimals_when_present(self) -> None:
         data = _minimal_dict(

@@ -20,7 +20,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
-from almanak.framework.backtesting.models import IntentType
+from almanak.core.intent_types import IntentType
 from almanak.framework.backtesting.pnl.intent_extraction import (
     _CHAINED_SIZING_ATTRIBUTES,
     UNSUPPORTED_ALL_SIZING_REASON,

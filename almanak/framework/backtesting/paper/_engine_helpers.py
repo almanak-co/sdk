@@ -33,12 +33,13 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
+from almanak.core.intent_types import IntentType
+from almanak.framework.backtesting.intent_types import parse_backtest_intent_type
 from almanak.framework.backtesting.models import (
     BacktestEngine,
     BacktestMetrics,
     BacktestResult,
     EquityPoint,
-    IntentType,
     TradeRecord,
 )
 from almanak.framework.backtesting.numeraire import (
@@ -407,7 +408,7 @@ def build_trade_records(trades: list[PaperTrade]) -> list[TradeRecord]:
     * ``tokens = tokens_in.keys() + tokens_out.keys()`` (in-order)
     * ``pnl_usd = net_token_flow_usd`` (pre-gas; ``TradeRecord.net_pnl_usd``
       is what subtracts gas itself)
-    * unknown / empty intent_type -> ``IntentType.UNKNOWN``
+    * unknown / empty intent_type -> explicit non-canonical boundary value
     * ``executed_price / fee_usd / slippage_usd`` are zeroed by design — per
       the engine comment they are "embedded in execution"
     * ``success=True`` — every entry in ``_trades`` is a successful execution
@@ -418,7 +419,7 @@ def build_trade_records(trades: list[PaperTrade]) -> list[TradeRecord]:
         records.append(
             TradeRecord(
                 timestamp=trade.timestamp,
-                intent_type=(IntentType(trade.intent_type) if trade.intent_type else IntentType.UNKNOWN),
+                intent_type=parse_backtest_intent_type(trade.intent_type),
                 executed_price=Decimal("0"),
                 fee_usd=Decimal("0"),
                 slippage_usd=Decimal("0"),

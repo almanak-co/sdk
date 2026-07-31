@@ -78,13 +78,13 @@ if TYPE_CHECKING:
 from almanak.core.chains import ChainRegistry
 from almanak.core.chains._helpers import chain_name_for_id as _chain_name_for_id
 from almanak.core.chains._helpers import chainlink_usd_feeds_map
+from almanak.core.intent_types import IntentType
 from almanak.framework.anvil.accounts import ANVIL_DEFAULT_ADDRESS, ANVIL_DEFAULT_PRIVATE_KEY
 from almanak.framework.anvil.fork_manager import TOKEN_ADDRESSES, RollingForkManager
 from almanak.framework.backtesting.models import (
     BacktestMetrics,
     BacktestResult,
     EquityPoint,
-    IntentType,
 )
 from almanak.framework.backtesting.paper import _engine_helpers
 from almanak.framework.backtesting.paper.config import ForkLifecycle, PaperTraderConfig
@@ -2827,60 +2827,13 @@ class PaperTrader:
 
         return False
 
-    _INTENT_TYPE_CLASS_MAPPINGS = {
-        "SWAP": IntentType.SWAP,
-        "LPOPEN": IntentType.LP_OPEN,
-        "LP_OPEN": IntentType.LP_OPEN,
-        "LPCLOSE": IntentType.LP_CLOSE,
-        "LP_CLOSE": IntentType.LP_CLOSE,
-        "PERPOPEN": IntentType.PERP_OPEN,
-        "PERP_OPEN": IntentType.PERP_OPEN,
-        "PERPCLOSE": IntentType.PERP_CLOSE,
-        "PERP_CLOSE": IntentType.PERP_CLOSE,
-        "SUPPLY": IntentType.SUPPLY,
-        "WITHDRAW": IntentType.WITHDRAW,
-        "BORROW": IntentType.BORROW,
-        "REPAY": IntentType.REPAY,
-        "BRIDGE": IntentType.BRIDGE,
-        "HOLD": IntentType.HOLD,
-    }
-
-    def _intent_type_from_value(self, intent_type_value: Any) -> IntentType | None:
-        if isinstance(intent_type_value, IntentType):
-            return intent_type_value
-
-        if hasattr(intent_type_value, "value"):
-            try:
-                return IntentType(intent_type_value.value)
-            except ValueError:
-                pass
-
-        try:
-            return IntentType(str(intent_type_value))
-        except ValueError:
-            return None
-
-    def _intent_type_from_attr(self, intent: Any) -> IntentType | None:
-        if not hasattr(intent, "intent_type"):
-            return None
-        return self._intent_type_from_value(intent.intent_type)
-
-    def _intent_type_from_class_name(self, intent: Any) -> IntentType:
-        class_name = intent.__class__.__name__.upper()
-        for key, intent_type in self._INTENT_TYPE_CLASS_MAPPINGS.items():
-            if key in class_name:
-                return intent_type
-        return IntentType.UNKNOWN
-
     def _get_intent_type(self, intent: Any) -> IntentType:
-        """Extract IntentType from an intent object."""
+        """Extract the shared canonical intent type or fail closed."""
         if intent is None:
             return IntentType.HOLD
+        from almanak.framework.backtesting.pnl.intent_extraction import get_intent_type
 
-        intent_type = self._intent_type_from_attr(intent)
-        if intent_type is not None:
-            return intent_type
-        return self._intent_type_from_class_name(intent)
+        return get_intent_type(intent)
 
     def _compile_intent(self, intent: Any) -> ActionBundle | None:
         """Compile an intent to an ActionBundle.

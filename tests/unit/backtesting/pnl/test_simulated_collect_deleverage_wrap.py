@@ -20,17 +20,14 @@ semantics:
   through the wrapped ERC-20 (MarketState native->wrapped lookup alias).
 """
 
-from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
-
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
 
-from almanak.framework.backtesting.models import IntentType
+from almanak.core.intent_types import IntentType
 from almanak.framework.backtesting.pnl._engine_helpers import (
-    GENERIC_SIMULATED_INTENT_TYPES,
     _wrap_conversion_legs,
     resolve_native_wrap_pair,
 )
@@ -41,6 +38,7 @@ from almanak.framework.backtesting.pnl.engine import (
     PnLBacktestConfig,
     PnLBacktester,
 )
+from almanak.framework.backtesting.pnl.intent_support import GENERIC_SIMULATED_INTENT_TYPES
 from almanak.framework.backtesting.pnl.portfolio import (
     SimulatedPortfolio,
     SimulatedPosition,
@@ -48,6 +46,7 @@ from almanak.framework.backtesting.pnl.portfolio import (
 from almanak.framework.intents.advanced_intents import UnwrapNativeIntent, WrapNativeIntent
 from almanak.framework.intents.lending_intents import DeleverageIntent, RepayIntent
 from almanak.framework.intents.vocabulary import CollectFeesIntent
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 from tests.unit.backtesting.pnl._mocks import MockDataProvider
 
 TS = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)

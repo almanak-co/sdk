@@ -47,6 +47,8 @@ Usage:
 # LP Performance Tracking
 from typing import TYPE_CHECKING
 
+from almanak.core.intent_types import IntentType
+
 from .lp_performance import (
     LPPerformanceReport,
     LPPerformanceTracker,
@@ -62,7 +64,6 @@ from .models import (
     BacktestMetrics,
     BacktestResult,
     EquityPoint,
-    IntentType,
     TradeRecord,
 )
 

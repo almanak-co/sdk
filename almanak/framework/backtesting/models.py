@@ -38,6 +38,8 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from almanak.core.chains import DEFAULT_CHAIN, LEGACY_SERIALIZED_CHAIN
+from almanak.core.intent_types import IntentType
+from almanak.framework.backtesting.intent_types import BacktestIntentType, parse_backtest_intent_type
 
 if TYPE_CHECKING:
     # Type-only: pnl.support_matrix imports this module at runtime, so a
@@ -1473,33 +1475,6 @@ class DataCoverageMetrics:
         )
 
 
-class IntentType(StrEnum):
-    """Types of intents that can be executed during backtesting."""
-
-    SWAP = "SWAP"
-    LP_OPEN = "LP_OPEN"
-    LP_CLOSE = "LP_CLOSE"
-    BORROW = "BORROW"
-    REPAY = "REPAY"
-    SUPPLY = "SUPPLY"
-    WITHDRAW = "WITHDRAW"
-    PERP_OPEN = "PERP_OPEN"
-    PERP_CLOSE = "PERP_CLOSE"
-    BRIDGE = "BRIDGE"
-    VAULT_DEPOSIT = "VAULT_DEPOSIT"
-    VAULT_REDEEM = "VAULT_REDEEM"
-    # LP fee harvest without removing liquidity (CollectFeesIntent).
-    LP_COLLECT_FEES = "LP_COLLECT_FEES"
-    # 1:1 native <-> wrapped conversions (WrapNativeIntent / UnwrapNativeIntent).
-    WRAP_NATIVE = "WRAP_NATIVE"
-    UNWRAP_NATIVE = "UNWRAP_NATIVE"
-    # Emergency deleverage — structurally a REPAY, kept distinct so accounting
-    # can tell forced unwinds from routine repays (DeleverageIntent).
-    DELEVERAGE = "DELEVERAGE"
-    HOLD = "HOLD"
-    UNKNOWN = "UNKNOWN"
-
-
 @dataclass
 class EquityPoint:
     """A single point on the equity curve.
@@ -1627,7 +1602,7 @@ class TradeRecord:
     """
 
     timestamp: datetime
-    intent_type: IntentType
+    intent_type: BacktestIntentType
     executed_price: Decimal
     fee_usd: Decimal
     slippage_usd: Decimal
@@ -2900,7 +2875,7 @@ class BacktestResult:
         opt_dec = BacktestResult._optional_decimal
         return TradeRecord(
             timestamp=datetime.fromisoformat(t_data["timestamp"]),
-            intent_type=IntentType(t_data["intent_type"]),
+            intent_type=parse_backtest_intent_type(t_data.get("intent_type")),
             executed_price=Decimal(t_data["executed_price"]),
             fee_usd=Decimal(t_data["fee_usd"]),
             slippage_usd=Decimal(t_data["slippage_usd"]),
@@ -3089,6 +3064,7 @@ __all__ = [
     "StrategyType",
     "ACCURACY_MATRIX",
     "AccuracyEstimate",
+    "BacktestIntentType",
     "IntentType",
     "LiquidationEvent",
     "LendingLiquidationEvent",

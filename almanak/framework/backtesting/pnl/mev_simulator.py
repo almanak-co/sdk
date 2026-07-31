@@ -44,7 +44,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
-from almanak.framework.backtesting.models import IntentType
+from almanak.core.intent_types import IntentType
 
 logger = logging.getLogger(__name__)
 

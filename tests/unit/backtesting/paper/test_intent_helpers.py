@@ -9,7 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from almanak.framework.backtesting.models import IntentType
+from almanak.core.intent_types import IntentType
+from almanak.framework.backtesting.intent_types import UnrecognizedIntentTypeError
 from almanak.framework.backtesting.paper.engine import PaperTrader
 from almanak.framework.models.reproduction_bundle import ActionBundle
 
@@ -86,7 +87,8 @@ def test_get_intent_type_from_enum_value_and_class_name() -> None:
     assert trader._get_intent_type(SimpleNamespace(intent_type=IntentType.SUPPLY)) is IntentType.SUPPLY
     assert trader._get_intent_type(SimpleNamespace(intent_type=_IntentEnum.SWAP)) is IntentType.SWAP
     assert trader._get_intent_type(PerpCloseIntent()) is IntentType.PERP_CLOSE
-    assert trader._get_intent_type(object()) is IntentType.UNKNOWN
+    with pytest.raises(UnrecognizedIntentTypeError):
+        trader._get_intent_type(object())
 
 
 def test_is_hold_intent_variants() -> None:

@@ -19,11 +19,12 @@ from typing import TYPE_CHECKING, Any
 
 from almanak.core.chains import DEFAULT_CHAIN
 from almanak.core.constants import STABLECOINS  # noqa: F401 - used by SimulatedPortfolio._STABLECOIN_SYMBOLS
+from almanak.core.intent_types import IntentType
+from almanak.framework.backtesting.intent_types import parse_backtest_intent_type
 from almanak.framework.backtesting.models import (
     BacktestMetrics,
     DataCoverageMetrics,
     EquityPoint,
-    IntentType,
     LendingLiquidationEvent,
     LendingMetrics,
     LiquidationEvent,
@@ -3767,7 +3768,7 @@ class SimulatedPortfolio:
     def _trade_record_from_dict(data: dict[str, Any]) -> TradeRecord:
         return TradeRecord(
             timestamp=datetime.fromisoformat(data["timestamp"]),
-            intent_type=IntentType(data["intent_type"]),
+            intent_type=parse_backtest_intent_type(data.get("intent_type")),
             executed_price=Decimal(data["executed_price"]),
             fee_usd=Decimal(data["fee_usd"]),
             slippage_usd=Decimal(data["slippage_usd"]),

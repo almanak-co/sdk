@@ -816,7 +816,7 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
         if params.collateral_amount == "all":
             # Sizing has one owner: delegate to the shared resolver, which
             # sizes collateral "all" from the spendable balance (phase 5).
-            from almanak.framework.backtesting.models import IntentType
+            from almanak.core.intent_types import IntentType
             from almanak.framework.backtesting.pnl.sizing import (
                 ResolvedAllSizing,
                 SizingRejection,
@@ -939,7 +939,7 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
         reason: str,
         validation_type: str = "margin",
     ) -> "SimulatedFill":
-        from almanak.framework.backtesting.models import IntentType
+        from almanak.core.intent_types import IntentType
         from almanak.framework.backtesting.pnl.portfolio import SimulatedFill
 
         logger.warning(

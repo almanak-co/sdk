@@ -78,6 +78,7 @@ if TYPE_CHECKING:
 
 from almanak.core.chains import DEFAULT_CHAIN, ChainRegistry
 from almanak.core.chains._helpers import native_symbols_for
+from almanak.core.intent_types import IntentType
 from almanak.framework.backtesting.adapters.base import StrategyBacktestAdapter
 
 # Import adapter registry for strategy type detection
@@ -88,12 +89,12 @@ from almanak.framework.backtesting.adapters.registry import (
 )
 from almanak.framework.backtesting.config import BacktestDataConfig
 from almanak.framework.backtesting.exceptions import NoAcceptableDataSourceError, UnsupportedIntentError
+from almanak.framework.backtesting.intent_types import UnrecognizedIntentType
 from almanak.framework.backtesting.models import (
     BacktestMetrics,
     BacktestResult,
     GasPriceRecord,
     GasPriceSummary,
-    IntentType,
     ParameterSource,
     ParameterSourceTracker,
     PreflightCheckResult,
@@ -120,6 +121,7 @@ from almanak.framework.backtesting.pnl.error_handling import (
     BacktestErrorHandler,
 )
 from almanak.framework.backtesting.pnl.indicator_engine import BacktestIndicatorEngine
+from almanak.framework.backtesting.pnl.intent_support import GENERIC_SIMULATED_INTENT_TYPES
 from almanak.framework.backtesting.pnl.logging_utils import (
     BacktestLogger,
     log_trade_execution,
@@ -4570,6 +4572,17 @@ class PnLBacktester:
         """
         from .sizing import ResolvedAllSizing, SizingRejection, apply_resolved_sizing, resolve_all_sizing
 
+        # Collections and non-canonical identities have no sizing semantics.
+        # Refuse them at ingress so they cannot leak into a generic sizing or
+        # cost lane before the unsupported-intent diagnostic is produced.
+        if isinstance(intent, list | tuple):
+            self._refuse_unsupported_intent(intent)
+        else:
+            from .intent_extraction import classify_intent_type
+
+            if isinstance(classify_intent_type(intent), UnrecognizedIntentType):
+                self._refuse_unsupported_intent(intent)
+
         # Lane INGRESS: "all" sizing is resolved (or rejected) exactly once,
         # before adapters, pricing, or USD extraction. Downstream lanes see a
         # concrete amount, never the sentinel.
@@ -5445,8 +5458,10 @@ class PnLBacktester:
             label = f"{type(intent).__name__} of {len(intent)} intents"
             hint = "decide() returned multiple intents; the PnL engine executes a single intent per tick (VIB-5094)."
         else:
-            intent_type = self._get_intent_type(intent)
-            if intent_type in _engine_helpers.GENERIC_SIMULATED_INTENT_TYPES:
+            from .intent_extraction import classify_intent_type
+
+            intent_type = classify_intent_type(intent)
+            if intent_type in GENERIC_SIMULATED_INTENT_TYPES:
                 return
             declared = getattr(intent, "intent_type", None)
             declared_label = getattr(declared, "value", declared)
@@ -5462,7 +5477,7 @@ class PnLBacktester:
 
         raise UnsupportedIntentError(
             label,
-            tuple(sorted(t.value for t in _engine_helpers.GENERIC_SIMULATED_INTENT_TYPES)),
+            tuple(sorted(t.value for t in GENERIC_SIMULATED_INTENT_TYPES)),
             hint,
         )
 

@@ -9,18 +9,16 @@ BRIDGE, STAKE, PERP_CANCEL_ORDER; WRAP_NATIVE/UNWRAP_NATIVE, LP_COLLECT_FEES
 and DELEVERAGE have since gained real simulation lanes and left this set).
 """
 
-from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
-
 from datetime import datetime
 from decimal import Decimal
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from almanak.core.intent_types import IntentType
 from almanak.framework.backtesting.exceptions import UnsupportedIntentError
-from almanak.framework.backtesting.models import IntentType
 from almanak.framework.backtesting.pnl._engine_helpers import (
     _SIMPLE_FLOW_HANDLERS,
-    GENERIC_SIMULATED_INTENT_TYPES,
 )
 from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 from almanak.framework.backtesting.pnl.data_provider import MarketState
@@ -30,7 +28,13 @@ from almanak.framework.backtesting.pnl.engine import (
     PnLBacktester,
 )
 from almanak.framework.backtesting.pnl.error_handling import classify_error
+from almanak.framework.backtesting.pnl.intent_support import (
+    BACKTEST_INTENT_DISPOSITIONS,
+    GENERIC_SIMULATED_INTENT_TYPES,
+    BacktestIntentDisposition,
+)
 from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 
 class _EmptyDataProvider:
@@ -42,7 +46,7 @@ class _EmptyDataProvider:
 
 
 class _StakeDuck:
-    """Intent type with no simulation lane (maps to IntentType.UNKNOWN)."""
+    """Canonical intent type with no simulation lane."""
 
     intent_type = "STAKE"
     token = "ETH"
@@ -57,6 +61,12 @@ class _BridgeDuck:
     to_chain = "arbitrum"
     token = "USDC"
     amount_usd = Decimal("100")
+
+
+class _UnrecognizedDuck:
+    """Intent integration value that is not in the canonical vocabulary."""
+
+    intent_type = "NOT_A_REAL_TYPE"
 
 
 class _SwapDuck:
@@ -118,6 +128,26 @@ class TestUnsupportedIntentRefusal:
             await engine._execute_intent(_BridgeDuck(), portfolio, state, state.timestamp, _config())
 
     @pytest.mark.asyncio
+    async def test_unrecognized_intent_is_refused_before_sizing_or_adapter_dispatch(self, monkeypatch):
+        """Unknown integration values preserve the public refusal contract at ingress."""
+        engine = _engine()
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("10000"), chain="ethereum")
+        state = _market_state()
+        resolve_all_sizing = Mock(side_effect=AssertionError("sizing must not run"))
+        adapter_dispatch = AsyncMock(side_effect=AssertionError("adapter dispatch must not run"))
+        monkeypatch.setattr(
+            "almanak.framework.backtesting.pnl.sizing.resolve_all_sizing",
+            resolve_all_sizing,
+        )
+        monkeypatch.setattr(engine, "_execute_with_adapter_if_available", adapter_dispatch)
+
+        with pytest.raises(UnsupportedIntentError, match="NOT_A_REAL_TYPE"):
+            await engine._execute_intent(_UnrecognizedDuck(), portfolio, state, state.timestamp, _config())
+
+        resolve_all_sizing.assert_not_called()
+        adapter_dispatch.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_intent_list_is_refused_with_multi_intent_hint(self):
         """A bare list[Intent] from decide() is refused loudly with the VIB-5094 hint."""
         engine = _engine()
@@ -167,9 +197,47 @@ class TestEnvelopeDefinition:
             IntentType.PERP_CLOSE,
         }
 
-    def test_bridge_and_unknown_are_outside_the_envelope(self):
+    def test_bridge_is_explicitly_refused_outside_the_envelope(self):
         assert IntentType.BRIDGE not in GENERIC_SIMULATED_INTENT_TYPES
-        assert IntentType.UNKNOWN not in GENERIC_SIMULATED_INTENT_TYPES
+        assert BACKTEST_INTENT_DISPOSITIONS[IntentType.BRIDGE] is BacktestIntentDisposition.REFUSED
+
+    def test_every_canonical_intent_has_an_explicit_disposition(self):
+        assert set(BACKTEST_INTENT_DISPOSITIONS) == set(IntentType)
+
+    def test_refused_intents_are_an_explicit_reviewed_set(self):
+        refused = {
+            intent_type
+            for intent_type, disposition in BACKTEST_INTENT_DISPOSITIONS.items()
+            if disposition is BacktestIntentDisposition.REFUSED
+        }
+        assert refused == {
+            IntentType.PERP_CANCEL_ORDER,
+            IntentType.PERP_WITHDRAW,
+            IntentType.BRIDGE,
+            IntentType.ENSURE_BALANCE,
+            IntentType.FLASH_LOAN,
+            IntentType.STAKE,
+            IntentType.UNSTAKE,
+            IntentType.PREDICTION_BUY,
+            IntentType.PREDICTION_SELL,
+            IntentType.PREDICTION_REDEEM,
+            IntentType.VAULT_REALLOCATE,
+            IntentType.VAULT_MANAGE,
+        }
+
+    def test_connectorless_placeholders_are_explicitly_not_applicable(self):
+        placeholders = {
+            intent_type
+            for intent_type, disposition in BACKTEST_INTENT_DISPOSITIONS.items()
+            if disposition is BacktestIntentDisposition.PLACEHOLDER_NOT_APPLICABLE
+        }
+        assert placeholders == {
+            IntentType.LIQUIDATE,
+            IntentType.OPEN_CDP,
+            IntentType.MINT_STABLE,
+            IntentType.REPAY_STABLE,
+            IntentType.CLOSE_CDP,
+        }
 
 
 class TestClassification:

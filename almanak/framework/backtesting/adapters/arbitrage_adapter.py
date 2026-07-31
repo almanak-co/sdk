@@ -504,7 +504,7 @@ class ArbitrageBacktestAdapter(StrategyBacktestAdapter):
         if intent.amount == "all" and getattr(intent, "amount_usd", None) is None:
             # Sizing has one owner: delegate to the shared resolver (direct
             # callers bypass the engine ingress, so the adapter delegates too).
-            from almanak.framework.backtesting.models import IntentType
+            from almanak.core.intent_types import IntentType
             from almanak.framework.backtesting.pnl.portfolio import SimulatedFill
             from almanak.framework.backtesting.pnl.sizing import (
                 SizingRejection,
@@ -678,7 +678,7 @@ class ArbitrageBacktestAdapter(StrategyBacktestAdapter):
         max_slippage: Decimal,
         execution_result: ArbitrageExecutionResult,
     ) -> "SimulatedFill":
-        from almanak.framework.backtesting.models import IntentType
+        from almanak.core.intent_types import IntentType
         from almanak.framework.backtesting.pnl.portfolio import SimulatedFill
 
         return SimulatedFill(
@@ -715,7 +715,7 @@ class ArbitrageBacktestAdapter(StrategyBacktestAdapter):
         route_hops: list[tuple[str, str, Decimal]],
         max_hops: int,
     ) -> "SimulatedFill":
-        from almanak.framework.backtesting.models import IntentType
+        from almanak.core.intent_types import IntentType
         from almanak.framework.backtesting.pnl.portfolio import SimulatedFill
 
         return SimulatedFill(
@@ -776,7 +776,7 @@ class ArbitrageBacktestAdapter(StrategyBacktestAdapter):
         expected_amount_out: Decimal,
         execution_result: ArbitrageExecutionResult,
     ) -> "SimulatedFill":
-        from almanak.framework.backtesting.models import IntentType
+        from almanak.core.intent_types import IntentType
         from almanak.framework.backtesting.pnl.portfolio import SimulatedFill
 
         # Record exactly what the hop model charged: slippage applies to the
@@ -1130,7 +1130,7 @@ class ArbitrageBacktestAdapter(StrategyBacktestAdapter):
         if mev_simulator is None:
             return Decimal("0"), Decimal("0")
 
-        from almanak.framework.backtesting.models import IntentType
+        from almanak.core.intent_types import IntentType
 
         step_usd = initial_amount_usd * (current_amount / initial_amount)
         mev_result = mev_simulator.simulate_mev_cost(
@@ -1215,7 +1215,7 @@ class ArbitrageBacktestAdapter(StrategyBacktestAdapter):
         if mev_simulator is None:
             return Decimal("0"), Decimal("0"), False
 
-        from almanak.framework.backtesting.models import IntentType
+        from almanak.core.intent_types import IntentType
 
         result = mev_simulator.simulate_mev_cost(
             trade_amount_usd=trade_amount_usd,

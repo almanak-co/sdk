@@ -905,7 +905,7 @@ class LendingBacktestAdapter(StrategyBacktestAdapter):
             SimulatedFill with success=False if health factor validation fails,
             or None to proceed with default execution.
         """
-        from almanak.framework.backtesting.models import IntentType
+        from almanak.core.intent_types import IntentType
         from almanak.framework.backtesting.pnl.portfolio import SimulatedFill
         from almanak.framework.intents.vocabulary import BorrowIntent
 

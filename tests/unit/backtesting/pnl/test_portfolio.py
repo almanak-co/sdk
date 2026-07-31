@@ -12,6 +12,7 @@ from decimal import Decimal
 
 import pytest
 
+from almanak.framework.backtesting.intent_types import UnrecognizedIntentType
 from almanak.framework.backtesting.models import (
     BacktestMetrics,
     EquityPoint,
@@ -1394,6 +1395,28 @@ class TestPortfolioHelperMethods:
         assert restored_trade.estimated_mev_cost_usd == Decimal("0.2")
         assert restored_trade.delayed_at_end is True
         assert restored_trade.position_id == "pos-1"
+
+    def test_unknown_trade_intent_round_trips_losslessly(self, base_timestamp: datetime) -> None:
+        """Checkpoint restore preserves intent values unknown to this SDK."""
+        wire_value = "  FUTURE_INTENT  "
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("10000"))
+        portfolio.trades.append(
+            TradeRecord(
+                timestamp=base_timestamp,
+                intent_type=UnrecognizedIntentType(wire_value),
+                executed_price=Decimal("0"),
+                fee_usd=Decimal("0"),
+                slippage_usd=Decimal("0"),
+                gas_cost_usd=Decimal("0"),
+                pnl_usd=None,
+                success=False,
+            )
+        )
+
+        restored = SimulatedPortfolio.from_dict(portfolio.to_dict())
+
+        assert restored.trades[0].intent_type == UnrecognizedIntentType(wire_value)
+        assert restored.to_dict()["trades"][0]["intent_type"] == wire_value
 
     def test_address_keyed_portfolio_serialization(
         self,

@@ -21,7 +21,7 @@ import pytest
 
 from almanak.connectors.aave_v3.fee_model import AaveV3FeeModel
 from almanak.connectors.compound_v3.fee_model import CompoundV3FeeModel
-from almanak.framework.backtesting.models import IntentType
+from almanak.core.intent_types import IntentType
 from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 from almanak.framework.backtesting.pnl.data_provider import MarketState
 from almanak.framework.backtesting.pnl.engine import (
@@ -59,7 +59,7 @@ CHARGED_INTENTS = frozenset(
         IntentType.PERP_OPEN,
         IntentType.PERP_CLOSE,
         IntentType.BRIDGE,
-        IntentType.UNKNOWN,
+        IntentType.FLASH_LOAN,
     }
 )
 
@@ -88,7 +88,7 @@ class TestZeroFeeIntentSet:
 class TestDefaultFeeModelLendingVault:
     """DefaultFeeModel: zero fee on lending/vault, swap fee unchanged."""
 
-    @pytest.mark.parametrize("intent_type", sorted(NON_SWAP_INTENTS))
+    @pytest.mark.parametrize("intent_type", sorted(NON_SWAP_INTENTS, key=lambda intent: intent.value))
     def test_non_swap_intents_zero_fee(self, intent_type: IntentType, market_state: MarketState) -> None:
         model = DefaultFeeModel(fee_pct=Decimal("0.003"))
         fee = model.calculate_fee(
@@ -98,7 +98,7 @@ class TestDefaultFeeModelLendingVault:
         )
         assert fee == Decimal("0")
 
-    @pytest.mark.parametrize("intent_type", sorted(CHARGED_INTENTS))
+    @pytest.mark.parametrize("intent_type", sorted(CHARGED_INTENTS, key=lambda intent: intent.value))
     def test_market_trade_intents_still_charged(self, intent_type: IntentType, market_state: MarketState) -> None:
         model = DefaultFeeModel(fee_pct=Decimal("0.003"))
         fee = model.calculate_fee(
@@ -224,7 +224,7 @@ class TestEngineGenericPathFees:
         result = await _make_backtester().backtest(_SupplyOnceStrategy(), _make_config())
 
         assert result.success
-        supply_trades = [t for t in result.trades if t.intent_type == "SUPPLY" and t.success]
+        supply_trades = [t for t in result.trades if t.intent_type is IntentType.SUPPLY and t.success]
         assert supply_trades, "expected a filled SUPPLY trade on the generic path"
         for trade in supply_trades:
             assert trade.fee_usd == Decimal("0")
@@ -241,7 +241,7 @@ class TestEngineGenericPathFees:
         result = await backtester.backtest(_SupplyOnceStrategy(), _make_config())
 
         assert result.success
-        supply_trades = [t for t in result.trades if t.intent_type == "SUPPLY" and t.success]
+        supply_trades = [t for t in result.trades if t.intent_type is IntentType.SUPPLY and t.success]
         assert supply_trades, "expected a filled SUPPLY trade via the connector fee model"
         assert all(t.fee_usd == Decimal("0") for t in supply_trades)
 
@@ -250,7 +250,7 @@ class TestEngineGenericPathFees:
         result = await _make_backtester().backtest(_SwapOnceStrategy(), _make_config())
 
         assert result.success
-        swap_trades = [t for t in result.trades if t.intent_type == "SWAP" and t.success]
+        swap_trades = [t for t in result.trades if t.intent_type is IntentType.SWAP and t.success]
         assert swap_trades, "expected a filled SWAP trade"
         for trade in swap_trades:
             assert trade.fee_usd == trade.amount_usd * Decimal("0.003")

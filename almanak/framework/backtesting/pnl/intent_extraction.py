@@ -15,8 +15,14 @@ from collections.abc import Callable, Mapping, Sequence
 from decimal import Decimal
 from typing import Any
 
+from almanak.core.intent_types import IntentType
 from almanak.core.perp_markets import perp_market_base
-from almanak.framework.backtesting.models import IntentType
+from almanak.framework.backtesting.intent_types import (
+    BacktestIntentType,
+    UnrecognizedIntentType,
+    UnrecognizedIntentTypeError,
+    parse_backtest_intent_type,
+)
 from almanak.framework.backtesting.pnl.data_provider import MarketState, is_address_like, is_token_key
 from almanak.framework.intents.vocabulary import lp_range_bounds, lp_range_is_ticks
 
@@ -28,18 +34,36 @@ _CLASS_NAME_INTENT_TYPES: tuple[tuple[tuple[str, ...], IntentType], ...] = (
     (("LP_CLOSE", "LPCLOSE"), IntentType.LP_CLOSE),
     (("PERP_OPEN", "PERPOPEN"), IntentType.PERP_OPEN),
     (("PERP_CLOSE", "PERPCLOSE"), IntentType.PERP_CLOSE),
+    (("PERP_CANCEL_ORDER", "PERPCANCELORDER"), IntentType.PERP_CANCEL_ORDER),
+    (("PERP_WITHDRAW", "PERPWITHDRAW"), IntentType.PERP_WITHDRAW),
     (("SUPPLY",), IntentType.SUPPLY),
     (("WITHDRAW",), IntentType.WITHDRAW),
     (("BORROW",), IntentType.BORROW),
+    # REPAY_STABLE must precede REPAY: the class name contains both markers.
+    (("REPAY_STABLE", "REPAYSTABLE"), IntentType.REPAY_STABLE),
     (("REPAY",), IntentType.REPAY),
     (("BRIDGE",), IntentType.BRIDGE),
+    (("ENSURE_BALANCE", "ENSUREBALANCE"), IntentType.ENSURE_BALANCE),
+    (("FLASH_LOAN", "FLASHLOAN"), IntentType.FLASH_LOAN),
+    # UNSTAKE must precede STAKE: "UNSTAKE" contains the "STAKE" marker.
+    (("UNSTAKE",), IntentType.UNSTAKE),
+    (("STAKE",), IntentType.STAKE),
+    (("PREDICTION_BUY", "PREDICTIONBUY"), IntentType.PREDICTION_BUY),
+    (("PREDICTION_SELL", "PREDICTIONSELL"), IntentType.PREDICTION_SELL),
+    (("PREDICTION_REDEEM", "PREDICTIONREDEEM"), IntentType.PREDICTION_REDEEM),
     (("VAULTDEPOSIT", "VAULT_DEPOSIT"), IntentType.VAULT_DEPOSIT),
     (("VAULTREDEEM", "VAULT_REDEEM"), IntentType.VAULT_REDEEM),
+    (("VAULTREALLOCATE", "VAULT_REALLOCATE"), IntentType.VAULT_REALLOCATE),
+    (("VAULTMANAGE", "VAULT_MANAGE"), IntentType.VAULT_MANAGE),
     (("COLLECTFEES", "COLLECT_FEES", "LP_COLLECT"), IntentType.LP_COLLECT_FEES),
     # UNWRAP must precede WRAP: "UNWRAPNATIVE" contains the "WRAPNATIVE" marker.
     (("UNWRAPNATIVE", "UNWRAP_NATIVE"), IntentType.UNWRAP_NATIVE),
     (("WRAPNATIVE", "WRAP_NATIVE"), IntentType.WRAP_NATIVE),
     (("DELEVERAGE",), IntentType.DELEVERAGE),
+    (("LIQUIDATE",), IntentType.LIQUIDATE),
+    (("OPEN_CDP", "OPENCDP"), IntentType.OPEN_CDP),
+    (("MINT_STABLE", "MINTSTABLE"), IntentType.MINT_STABLE),
+    (("CLOSE_CDP", "CLOSECDP"), IntentType.CLOSE_CDP),
     (("HOLD",), IntentType.HOLD),
 )
 
@@ -355,39 +379,45 @@ def is_hold_intent(intent: Any) -> bool:
     return False
 
 
-def get_intent_type(intent: Any) -> IntentType:
-    """Extract the IntentType from an intent object.
+def classify_intent_type(intent: Any) -> BacktestIntentType:
+    """Classify an intent at the duck-typed strategy boundary.
 
     Args:
         intent: Intent object
 
     Returns:
-        IntentType enum value
+        Canonical ``IntentType`` or an explicit unrecognized boundary value.
     """
     # Check for intent_type attribute
     if hasattr(intent, "intent_type"):
         intent_type_value = intent.intent_type
-        # If it's already an IntentType, return it
-        if isinstance(intent_type_value, IntentType):
-            return intent_type_value
-        # If it has a value attribute (enum from another module)
-        if hasattr(intent_type_value, "value"):
-            try:
-                return IntentType(intent_type_value.value)
-            except ValueError:
-                pass
-        # Try direct conversion
-        try:
-            return IntentType(str(intent_type_value))
-        except ValueError:
-            pass
+        parsed = parse_backtest_intent_type(intent_type_value)
+        if isinstance(parsed, IntentType):
+            return parsed
 
     class_name = intent.__class__.__name__.upper()
     for markers, intent_type in _CLASS_NAME_INTENT_TYPES:
         if any(marker in class_name for marker in markers):
             return intent_type
 
-    return IntentType.UNKNOWN
+    declared = getattr(intent, "intent_type", None)
+    if declared is not None:
+        return parse_backtest_intent_type(declared)
+    return UnrecognizedIntentType(type(intent).__name__ or "UNKNOWN")
+
+
+def get_intent_type(intent: Any) -> IntentType:
+    """Return a canonical execution identity or fail on unknown input.
+
+    Internal simulation code only accepts canonical members. Call
+    :func:`classify_intent_type` at an ingestion/refusal boundary when an
+    unrecognized value must be retained for diagnostics.
+    """
+
+    classified = classify_intent_type(intent)
+    if isinstance(classified, UnrecognizedIntentType):
+        raise UnrecognizedIntentTypeError(classified)
+    return classified
 
 
 def get_intent_protocol(intent: Any) -> str:
@@ -1574,7 +1604,6 @@ def estimate_gas_for_intent(intent_type: IntentType) -> int:
         IntentType.VAULT_DEPOSIT: 250000,  # ERC-4626 deposit (approve + deposit)
         IntentType.VAULT_REDEEM: 200000,  # ERC-4626 redeem
         IntentType.HOLD: 0,  # No execution
-        IntentType.UNKNOWN: 200000,  # Conservative default
     }
     return gas_estimates.get(intent_type, 200000)
 

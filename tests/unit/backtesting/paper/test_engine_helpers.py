@@ -16,11 +16,12 @@ from typing import Any
 
 import pytest
 
+from almanak.core.intent_types import IntentType
+from almanak.framework.backtesting.intent_types import UNKNOWN_INTENT_TYPE
 from almanak.framework.backtesting.models import (
     BacktestEngine,
     BacktestMetrics,
     EquityPoint,
-    IntentType,
     TradeRecord,
 )
 from almanak.framework.backtesting.paper import _engine_helpers
@@ -763,7 +764,7 @@ class TestBuildTradeRecords:
     def test_unknown_intent_when_empty(self) -> None:
         trade = _mktrade(intent_type="")
         recs = _engine_helpers.build_trade_records([trade])
-        assert recs[0].intent_type == IntentType.UNKNOWN
+        assert recs[0].intent_type == UNKNOWN_INTENT_TYPE
 
     def test_amount_usd_default_zero(self) -> None:
         trade = _mktrade(metadata={})
@@ -1214,7 +1215,9 @@ class TestIntentFallbackTokenFlows:
     def test_unknown_intent_type_returns_empty(self) -> None:
         rec = _FallbackRecorder()
         intent = SimpleNamespace()
-        tokens_in, tokens_out = _engine_helpers.intent_fallback_token_flows(IntentType.UNKNOWN, intent, None, rec, "bt")
+        tokens_in, tokens_out = _engine_helpers.intent_fallback_token_flows(
+            IntentType.FLASH_LOAN, intent, None, rec, "bt"
+        )
         assert tokens_in == {}
         assert tokens_out == {}
 
