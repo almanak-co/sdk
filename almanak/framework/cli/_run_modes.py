@@ -756,10 +756,31 @@ def _measure_open_positions_after_teardown(strategy_instance: Any) -> tuple[list
 
 
 def _teardown_step_ok(step: dict) -> bool:
-    """Pass criterion for a teardown step: completed as TEARDOWN with no measured residual (ALM-2900)."""
+    """Pass criterion for a teardown step (ALM-2900, VIB-6285).
+
+    Passes iff the iteration completed as TEARDOWN, no residual was MEASURED
+    (``open_positions_after_teardown``), **and** the residual check actually
+    produced a measurement (``open_positions_check`` absent).
+
+    The third clause is VIB-6285 (W0.1). ``_measure_open_positions_after_teardown``
+    honours Empty ≠ Zero and returns ``([], "<reason>")`` when the read itself
+    failed, and the caller routes that reason into ``open_positions_check`` — but
+    the pass criterion used to read only ``open_positions_after_teardown``, so an
+    UNMEASURED post-teardown read yielded ``teardown_passed = True``. That is the
+    same false-success class as certifying a teardown nothing measured.
+
+    The two failure states stay DISTINCT in the output dict — ``open_positions_check``
+    means "could not measure", ``open_positions_after_teardown`` means "residual
+    found" — so a caller can still tell them apart. They must never be conflated:
+    "could not measure" is not a claim that positions are open.
+    """
     from ..runner import IterationStatus
 
-    return step["status"] == IterationStatus.TEARDOWN.value and not step.get("open_positions_after_teardown")
+    return (
+        step["status"] == IterationStatus.TEARDOWN.value
+        and not step.get("open_positions_after_teardown")
+        and not step.get("open_positions_check")
+    )
 
 
 def _run_test_lifecycle(  # noqa: C901
@@ -1079,6 +1100,15 @@ def _run_test_lifecycle(  # noqa: C901
                                     + ", ".join(
                                         f"{r['protocol']}/{r['position_id']} (${r['value_usd']})" for r in residuals
                                     ),
+                                    err=True,
+                                )
+                            # VIB-6285: the unmeasured case gets its OWN wording —
+                            # it must never be printed as "left N open position(s)".
+                            if residual_check_error is not None:
+                                click.echo(
+                                    "  teardown closure UNVERIFIED: post-teardown position read could not be "
+                                    f"measured ({residual_check_error}). This does NOT mean positions are open — "
+                                    "it means closure was not proven. Verify on-chain.",
                                     err=True,
                                 )
 

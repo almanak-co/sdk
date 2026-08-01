@@ -252,11 +252,21 @@ def _uniswap_v3_post_condition(
     # closed=True with a residual note so the verifier moves on. Balance-
     # zero verification for TOKEN positions is the strategy's
     # ``get_open_positions()`` contract, not this hook's responsibility.
+    #
+    # VIB-6285: this skip carries ``not_applicable=True``. It used to return a
+    # bare ``closed=True``, indistinguishable from a real measurement — so the
+    # verifier counted the position chain-verified and recorded a hook proof
+    # having read NOTHING on-chain. Under the "at least one measured closure"
+    # certification rule that fabricated proof satisfied the whole teardown set,
+    # inverting the rule to fail-open for every swap-only strategy. It must NOT
+    # become ``unmeasured=True`` either — that would block certification for the
+    # same strategy class. Out-of-scope contributes neither proof nor doubt.
     position_type_raw = getattr(position, "position_type", None)
     position_type_value = (getattr(position_type_raw, "value", None) or str(position_type_raw or "")).upper()
     if position_type_value and position_type_value != "LP":
         return ClosureCheckResult(
             closed=True,
+            not_applicable=True,
             protocol=protocol,
             position_id=position_id,
             residual={
@@ -542,6 +552,34 @@ def _register_default_fungible_lp_post_conditions() -> None:
                 _register_teardown_post_condition(slug, fungible_lp_teardown_post_condition)
 
 
+def position_type_post_condition(position: Any) -> TeardownPostCondition | None:
+    """Framework-default closure authority keyed on POSITION TYPE, not protocol.
+
+    VIB-6285. The TD-14 registry is keyed by protocol slug alone, which cannot
+    express "this primitive has a closure authority regardless of venue". A
+    ``PositionType.TOKEN`` row appears under whatever slug its strategy uses
+    (``uniswap_v3``, ``uniswap_v4``, ``lido``, ``metamorpho``, …) — sometimes a
+    slug already owned by an NFT-shaped LP hook that is structurally out of scope
+    for it, sometimes a slug with no hook at all. Either way TOKEN had no chain
+    authority, so a TOKEN teardown carried no measured closure evidence.
+
+    This resolver is consulted by ``_verify_closure_detailed`` in two places: when
+    no protocol hook is registered, and when the protocol hook returns
+    ``not_applicable`` (out of scope for this position). It never overrides a
+    protocol hook that actually answered — same no-clobber discipline as the
+    VAULT / fungible-LP / V3 defaults above, applied on the other axis.
+
+    Returns ``None`` for position types with no framework default.
+    """
+    raw = getattr(position, "position_type", None)
+    position_type = (getattr(raw, "value", None) or str(raw or "")).upper()
+    if position_type == "TOKEN":
+        from almanak.framework.teardown.token_post_condition import token_balance_teardown_post_condition
+
+        return token_balance_teardown_post_condition
+    return None
+
+
 _register_default_v3_post_conditions()
 _register_lp_v4_primitive_alias()
 _register_default_vault_post_conditions()
@@ -553,4 +591,5 @@ __all__ = [
     "TeardownPostCondition",
     "get_teardown_post_condition",
     "has_teardown_post_condition",
+    "position_type_post_condition",
 ]

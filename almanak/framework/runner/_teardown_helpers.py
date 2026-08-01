@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Any
 from almanak.core.lifecycle import LifecycleState
 
 from ..teardown.decision_log import TeardownDecisionPhase, log_teardown_decision
+from ..teardown.models import CLOSURE_UNKNOWN_ERROR
 
 if TYPE_CHECKING:
     from ..teardown import TeardownMode
@@ -541,6 +542,44 @@ def _warm_teardown_pt_yt_prices(
         )
 
 
+def _resolve_closure_refusal(
+    verification: Any, *, deployment_id: str, verify_error_msg: str | None
+) -> tuple[str | None, bool]:
+    """Decide whether closure verification refuses to certify, and why.
+
+    Returns ``(verify_error_msg, must_refuse)``. Extracted from
+    ``execute_and_verify`` unchanged — behaviour-preserving, and the caller's
+    single ``if must_refuse:`` replaces the two predicates that previously read
+    the same two flags in two places.
+
+    VIB-6285 (W0.1): a teardown that measured nothing must not certify, but the
+    reason is a SEPARATE branch from ``all_closed`` on purpose.
+    ``all_closed=False`` asserts residual on-chain risk; ``closure_unknown``
+    asserts only that closure was not proven. The two must never share a
+    message — conflating them is the VIB-6198 false-failure class, which tells
+    an operator their money is still exposed when the only established fact is
+    an absence of proof.
+
+    Ordering is load-bearing: the measured residual is checked first so the
+    actionable, louder signal wins the error slot when both are true.
+    """
+    if not verification.all_closed:
+        if verify_error_msg is None:
+            verify_error_msg = "Post-teardown verification failed: positions still open. Manual check required."
+        logger.warning(f"Post-teardown verification: {deployment_id} incomplete. Marking as failed.")
+    elif verification.closure_unknown:
+        verify_error_msg = CLOSURE_UNKNOWN_ERROR
+        logger.warning(
+            "Post-teardown verification: %s closure is UNPROVEN for protocol(s) %s (no "
+            "measured on-chain evidence either way). Refusing to certify success — this is "
+            "NOT a claim that positions are open. Terminal: re-run teardown manually after "
+            "verifying on-chain.",
+            deployment_id,
+            ", ".join(verification.unproven_protocols) or "<unnamed>",
+        )
+    return verify_error_msg, (not verification.all_closed or verification.closure_unknown)
+
+
 async def execute_and_verify(
     runner: Any,
     teardown_mgr: Any,
@@ -744,21 +783,36 @@ async def execute_and_verify(
             deployment_id=deployment_id,
             teardown_id=teardown_state.teardown_id,
             phase=TeardownDecisionPhase.VERIFY,
-            outcome="verified" if verification.all_closed else "verify_failed",
+            # VIB-6285: three-way — an UNMEASURED closure must not be recorded as
+            # ``verified`` in the audit trail, and must not be recorded as
+            # ``verify_failed`` either (nothing measured open).
+            outcome=(
+                "verify_failed"
+                if not verification.all_closed
+                else ("verify_unmeasured" if verification.closure_unknown else "verified")
+            ),
             description=(
                 f"closure verification: {verification.positions_closed}/"
                 f"{verification.positions_total} closed "
-                f"({verification.verification_status.value})"
+                f"({verification.verification_status.value}"
+                f"{', closure_unknown' if verification.closure_unknown else ''})"
             ),
             position_count=verification.positions_total,
             positions_closed=verification.positions_closed,
             verification_status=verification.verification_status.value,
         )
 
-        if not verification.all_closed:
-            if verify_error_msg is None:
-                verify_error_msg = "Post-teardown verification failed: positions still open. Manual check required."
-            logger.warning(f"Post-teardown verification: {deployment_id} incomplete. Marking as failed.")
+        # VIB-6285 (W0.1): a teardown nothing measured must not certify. A
+        # SEPARATE branch from ``all_closed`` on purpose — ``all_closed=False``
+        # asserts residual on-chain risk, ``closure_unknown`` asserts only that
+        # closure was not proven, and the two must never share a message
+        # (conflating them is the VIB-6198 false-failure class). Ordered second so
+        # a measured residual — the actionable, louder signal — wins the error slot.
+        verify_error_msg, must_refuse = _resolve_closure_refusal(
+            verification, deployment_id=deployment_id, verify_error_msg=verify_error_msg
+        )
+
+        if must_refuse:
             teardown_result = replace(
                 teardown_result,
                 success=False,
@@ -1074,6 +1128,23 @@ def map_teardown_result(
         )
 
     logger.warning(f"🛑 {deployment_id} teardown incomplete via TeardownManager: {teardown_result.error}")
+    # VIB-6285: mirror the closure-confidence signal onto the FAILURE branch. The
+    # equivalent warning above lives inside ``if teardown_result.success:``, so
+    # before this it went silent on exactly the runs W0.1 exists to flag — an
+    # unproven closure now sets success=False, which skipped the only passive
+    # operator surface a hosted run has. Emitted here so a failure caused by
+    # *absence of proof* is never mistaken for a failure caused by residual risk.
+    # The persisted row carries the same reason via ``error_message`` (rendered by
+    # the CLI FAILED branch); ``verification_status`` is NOT persisted on the
+    # failure path — ``mark_failed`` takes no result payload. See the PR report.
+    if teardown_result.verification_status in (VerificationStatus.UNVERIFIED, VerificationStatus.NOT_RUN):
+        logger.warning(
+            "🛑 %s teardown closure was NOT chain-confirmed (verification_status=%s). If the error "
+            "above is the unproven-closure reason, this is an ABSENCE of proof, NOT evidence that "
+            "positions are open — verify on-chain before acting.",
+            deployment_id,
+            teardown_result.verification_status.value,
+        )
     if request:
         if teardown_result.has_position_breakdown:
             # VIB-5085: verification ran (e.g. a verify-fail flipped success to

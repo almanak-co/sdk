@@ -168,14 +168,28 @@ def test_unvalued_residual_still_fails_teardown(capsys, monkeypatch):
     assert residuals[0]["value_usd"] == "unknown"
 
 
-def test_unmeasured_check_does_not_fail_teardown(capsys, monkeypatch):
-    """A read fault is UNMEASURED — surfaced, never fabricated into a residual."""
+def test_unmeasured_check_does_not_pass_teardown(capsys, monkeypatch):
+    """A read fault is UNMEASURED: it must not CERTIFY, and must not be a fabricated residual.
+
+    VIB-6285 (W0.1) INVERTED the first half of this test. It previously asserted
+    ``teardown_passed is True`` — i.e. it asserted the defect: ``_teardown_step_ok``
+    read only ``open_positions_after_teardown``, so a post-teardown read that FAILED
+    passed the ladder. An unmeasured teardown must not certify.
+
+    The other half of the original intent is preserved and still asserted: the
+    unmeasured read is NOT fabricated into a residual. ``open_positions_after_teardown``
+    stays absent and only ``open_positions_check`` is populated, so a consumer can
+    still tell "could not measure" apart from "positions still open" — conflating
+    them is the VIB-6198 false-failure class.
+    """
     strategy = _make_strategy(open_positions_error=RuntimeError("gateway gone"))
     exit_code, _ = _run(strategy, monkeypatch)
     payload = _parse_last_json_object(capsys.readouterr().out)
-    assert exit_code == 0
-    assert payload["summary"]["teardown_passed"] is True
+    assert exit_code == 1
+    assert payload["summary"]["teardown_passed"] is False
     assert "unmeasured" in payload["steps"][0]["open_positions_check"]
+    # Never fabricated into a residual — the two states stay distinct.
+    assert "open_positions_after_teardown" not in payload["steps"][0]
 
 
 def test_explicit_asset_policy_reaches_teardown_request(capsys, monkeypatch):
@@ -261,13 +275,20 @@ def test_lifecycle_stop_default_policy_unchanged(monkeypatch):
 
 
 def test_missing_positions_collection_is_unmeasured(capsys, monkeypatch):
-    """A summary without a positions collection is a broken hook, not a clean teardown."""
+    """A summary without a positions collection is a broken hook, not a clean teardown.
+
+    VIB-6285 (W0.1): the assertion was inverted (it previously asserted
+    ``exit_code == 0``, which contradicted this test's own docstring). A broken
+    hook is UNMEASURED, and an unmeasured teardown must not certify — but it is
+    still recorded as unmeasured, never as a residual.
+    """
     strategy = _make_strategy(open_positions=[])
     strategy.get_open_positions = MagicMock(return_value=object())  # no .positions
     exit_code, _ = _run(strategy, monkeypatch)
     payload = _parse_last_json_object(capsys.readouterr().out)
-    assert exit_code == 0  # unmeasured surfaces, does not fail
+    assert exit_code == 1  # unmeasured surfaces AND does not certify
     assert "no positions collection" in payload["steps"][0]["open_positions_check"]
+    assert "open_positions_after_teardown" not in payload["steps"][0]
 
 
 def test_nonfinite_value_counts_as_unknown_residual(capsys, monkeypatch):

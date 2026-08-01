@@ -42,6 +42,7 @@ from almanak.framework.teardown.models import (
     TeardownResult,
     TeardownState,
     TeardownStatus,
+    VerificationStatus,
 )
 from almanak.framework.teardown.runner_helpers import TeardownRunnerHelpers
 from almanak.framework.teardown.slippage_manager import EscalatingSlippageManager
@@ -206,6 +207,34 @@ def _result(*, success: bool, succeeded: int = 1, failed: int = 0, total: int = 
     )
 
 
+def _clean_lp_closure() -> ClosureVerification:
+    """What ``_verify_closure_detailed`` really returns for a CLEAN uniswap_v3 LP teardown.
+
+    VIB-6285: these fixtures used to return a bare
+    ``ClosureVerification(all_closed=True, positions_total=1, positions_closed=1)``,
+    which is a LOWER-fidelity double than production — uniswap_v3 has a registered
+    TD-14 post-condition, so a clean close comes back CHAIN_VERIFIED with
+    ``has_position_breakdown=True`` and the position's hook proof recorded in
+    ``hook_proven_position_keys`` (see ``_verify_closure_detailed``).
+
+    The distinction now matters: ``verify_closure_against_chain`` refuses to
+    certify a teardown with ZERO measured closure evidence, and this module's
+    doubles supply no gateway client, so the Plan-A re-read returns UNVERIFIABLE
+    ("no gateway client to chain-verify LP"). Without the hook proof the fixture
+    describes an unmeasured teardown — which correctly does not certify. These
+    tests are about token-consolidation GATING, not about closure certification,
+    so the fixture is raised to production fidelity rather than the guard weakened.
+    """
+    return ClosureVerification(
+        all_closed=True,
+        positions_total=1,
+        positions_closed=1,
+        has_position_breakdown=True,
+        verification_status=VerificationStatus.CHAIN_VERIFIED,
+        hook_proven_position_keys=(("uniswap_v3", CHAIN, "123"),),
+    )
+
+
 def _closing_strategy_for_execute():
     """Strategy double for TeardownManager.execute (needs pause + intents)."""
     strategy = _make_strategy()
@@ -231,9 +260,7 @@ class TestManagerExecuteHook:
     async def test_consolidation_runs_only_after_successful_closure_and_verify(self):
         mgr = TeardownManager(config=TeardownConfig.default())
         mgr._execute_intents = AsyncMock(return_value=_result(success=True))
-        mgr._verify_closure_detailed = AsyncMock(
-            return_value=ClosureVerification(all_closed=True, positions_total=1, positions_closed=1)
-        )
+        mgr._verify_closure_detailed = AsyncMock(return_value=_clean_lp_closure())
         mgr.run_token_consolidation = AsyncMock(return_value=ConsolidationOutcome(planned=1, succeeded=1, failed=0))
 
         result = await mgr.execute(_closing_strategy_for_execute(), mode="graceful", is_auto_mode=True)
@@ -278,9 +305,7 @@ class TestManagerExecuteHook:
     async def test_consolidation_failure_keeps_execute_success_true(self):
         mgr = TeardownManager(config=TeardownConfig.default())
         mgr._execute_intents = AsyncMock(return_value=_result(success=True))
-        mgr._verify_closure_detailed = AsyncMock(
-            return_value=ClosureVerification(all_closed=True, positions_total=1, positions_closed=1)
-        )
+        mgr._verify_closure_detailed = AsyncMock(return_value=_clean_lp_closure())
         mgr.run_token_consolidation = AsyncMock(
             return_value=ConsolidationOutcome(planned=1, succeeded=0, failed=1, warnings=["swap failed"])
         )

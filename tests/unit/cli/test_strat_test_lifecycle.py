@@ -8,10 +8,12 @@ fail-fast with `failure_logs`, and the JSON summary shape.
 import json
 import logging
 import re
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 from almanak.framework.cli.run_helpers import _run_test_lifecycle
 from almanak.framework.runner.runner_models import IterationResult, IterationStatus
+from almanak.framework.teardown.models import TeardownPositionSummary
 
 
 def _parse_last_json_object(stream: str) -> dict:
@@ -58,6 +60,16 @@ def _make_strategy() -> MagicMock:
             "load_state_async",
             "_wallet_activity_provider",
             "flush_pending_saves",
+            # VIB-6285: ``get_open_positions`` is a concrete method on
+            # ``IntentStrategy`` — EVERY real strategy has it. Omitting it from the
+            # spec made this double lower-fidelity than production: the
+            # post-teardown residual read raised AttributeError, i.e. the check was
+            # UNMEASURED. That used to pass the ladder silently; an unmeasured
+            # post-teardown read no longer certifies, so the double now models what
+            # a real strategy actually exposes. The genuinely-unreadable case keeps
+            # its own dedicated coverage in
+            # tests/unit/cli/test_strat_test_teardown_residual.py.
+            "get_open_positions",
         ]
     )
     s.deployment_id = "TestStrategy:abc"
@@ -67,6 +79,13 @@ def _make_strategy() -> MagicMock:
     s.load_state_async = AsyncMock(return_value=False)
     s._wallet_activity_provider = None  # not a copy-trading strategy
     s.flush_pending_saves = AsyncMock()
+    s.get_open_positions = MagicMock(
+        return_value=TeardownPositionSummary(
+            deployment_id="TestStrategy:abc",
+            timestamp=datetime.now(UTC),
+            positions=[],
+        )
+    )
     return s
 
 

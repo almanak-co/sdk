@@ -56,12 +56,19 @@ def uniswap_v4_post_condition(
 
     # Gate by position type: this NFT-shaped check must only run on LP positions.
     # A non-LP position (e.g. a TOKEN surfaced by a swap-only strategy) is outside
-    # scope — report closed=True so the verifier moves on (mirrors the V3 hook).
+    # scope — mirrors the V3 hook.
+    #
+    # VIB-6285: ``not_applicable=True``, not a bare ``closed=True``. A bare
+    # closed=True is indistinguishable from a real measurement and made this skip
+    # a fabricated closure proof (see the V3 hook and ``ClosureCheckResult``).
+    # Not ``unmeasured=True`` either — out-of-scope contributes neither proof nor
+    # doubt, and marking it unmeasured would block every swap-strategy teardown.
     position_type_raw = getattr(position, "position_type", None)
     position_type_value = (getattr(position_type_raw, "value", None) or str(position_type_raw or "")).upper()
     if position_type_value and position_type_value != "LP":
         return ClosureCheckResult(
             closed=True,
+            not_applicable=True,
             protocol=protocol,
             position_id=position_id,
             residual={

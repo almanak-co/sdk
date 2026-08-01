@@ -42,6 +42,7 @@ from almanak.framework.teardown.config import TeardownConfig
 from almanak.framework.teardown.decision_log import TeardownDecisionPhase, log_teardown_decision
 from almanak.framework.teardown.error_taxonomy import Disposition, classify_teardown_failure
 from almanak.framework.teardown.models import (
+    CLOSURE_UNKNOWN_ERROR,
     LARGE_POSITION_WARNING_THRESHOLD_USD,
     ApprovalRequest,
     ApprovalResponse,
@@ -567,6 +568,20 @@ def _teardown_wallet_for_chain(strategy: Any, chain: str) -> str:
     multi-chain teardown leg stamps the wallet that actually holds the funds on
     that chain; falls back to ``wallet_address`` for single-chain strategies and
     for any strategy object that does not expose the accessor.
+
+    Only a NON-EMPTY STRING is accepted as a resolved wallet (PR #3531). The
+    accessor's contract is ``str | None``, but the previous ``if resolved:
+    return str(resolved)`` coerced *any* truthy object into a wallet — so a
+    registry (or a test double) handing back a non-string produced a plausible
+    but meaningless address like ``"<MagicMock id=…>"``, which then reached
+    calldata and made every read on that leg fail as "unmeasured". Falling back
+    to the primary wallet is the honest answer: a value we cannot interpret is
+    not a per-chain wallet.
+
+    Deliberately a type check and not an address-shape check — this helper is
+    chain-agnostic and serves non-EVM legs (Solana) whose addresses are not
+    EVM-shaped. Address-shape validation belongs in the EVM-only reader that
+    encodes the calldata, e.g. the TOKEN post-condition's own guard.
     """
     getter = getattr(strategy, "get_wallet_for_chain", None)
     if callable(getter) and chain:
@@ -574,9 +589,63 @@ def _teardown_wallet_for_chain(strategy: Any, chain: str) -> str:
             resolved = getter(chain)
         except Exception:  # noqa: BLE001 — never let wallet resolution break teardown
             resolved = None
-        if resolved:
-            return str(resolved)
+        if isinstance(resolved, str) and resolved.strip():
+            return resolved.strip()
     return str(getattr(strategy, "wallet_address", "") or "")
+
+
+def _resolve_and_run_post_condition(
+    position: Any,
+    *,
+    wallet_address: str,
+    gateway_client: Any | None,
+    rpc_url: str | None,
+    block: int | str | None,
+) -> Any | None:
+    """Run the closure authority that applies to ``position`` (VIB-6285).
+
+    Resolution order, and the whole reason this is not a one-line registry
+    lookup: the TD-14 registry is keyed by PROTOCOL slug alone, which cannot
+    express "this primitive has a closure authority regardless of venue".
+
+    1. The protocol-registered hook, when one exists.
+    2. Otherwise the position-TYPE default (``position_type_post_condition``).
+    3. If the protocol hook answers ``not_applicable`` — structurally out of
+       scope for this position, e.g. an NFT-shaped LP hook handed a
+       ``PositionType.TOKEN`` row because the slug is shared — hand off to the
+       type default rather than leaving the position unmeasured.
+
+    Returns the ``ClosureCheckResult``, or ``None`` when no authority applies
+    (the caller's "no hook" path). Deliberately does NOT catch: a raising hook
+    is a read fault the caller converts to UNMEASURED, and swallowing it here
+    would hide the traceback VIB-5573 kept on purpose.
+    """
+    from almanak.framework.teardown.post_conditions import (
+        get_teardown_post_condition,
+        position_type_post_condition,
+    )
+
+    protocol = (getattr(position, "protocol", "") or "").lower()
+    hook = get_teardown_post_condition(protocol)
+    type_default = position_type_post_condition(position)
+    if hook is None:
+        hook = type_default
+    if hook is None:
+        return None
+
+    def _run(chosen: Any) -> Any:
+        return chosen(
+            position=position,
+            wallet_address=wallet_address,
+            gateway_client=gateway_client,
+            rpc_url=rpc_url,
+            block=block,
+        )
+
+    check = _run(hook)
+    if getattr(check, "not_applicable", False) and type_default is not None and type_default is not hook:
+        check = _run(type_default)
+    return check
 
 
 class TeardownManager:
@@ -1015,22 +1084,46 @@ class TeardownManager:
                     deployment_id=strategy.deployment_id,
                     teardown_id=teardown_id,
                     phase=TeardownDecisionPhase.VERIFY,
-                    outcome="verified" if verification.all_closed else "verify_failed",
+                    # VIB-6285: three-way — an UNMEASURED closure must not be
+                    # recorded as ``verified`` in the audit trail, and must not be
+                    # recorded as ``verify_failed`` either (nothing measured open).
+                    outcome=(
+                        "verify_failed"
+                        if not verification.all_closed
+                        else ("verify_unmeasured" if verification.closure_unknown else "verified")
+                    ),
                     description=(
                         f"closure verification: {verification.positions_closed}/"
                         f"{verification.positions_total} closed "
-                        f"({verification.verification_status.value})"
+                        f"({verification.verification_status.value}"
+                        f"{', closure_unknown' if verification.closure_unknown else ''})"
                     ),
                     position_count=verification.positions_total,
                     positions_closed=verification.positions_closed,
                     verification_status=verification.verification_status.value,
                 )
 
+                # VIB-6285 (W0.1): a teardown nothing measured must not certify.
+                # Deliberately a SEPARATE branch from ``all_closed`` — the two say
+                # different things and must not share a message. ``all_closed=False``
+                # asserts residual on-chain risk; ``closure_unknown`` asserts only
+                # that closure was not proven. Ordered second so a measured residual
+                # (the actionable, louder signal) always wins the error slot.
                 if not verification.all_closed:
                     logger.warning(
                         f"Post-teardown verification: {strategy.deployment_id} still reports "
                         f"open positions (or verification errored). Marking teardown as incomplete."
                     )
+                elif verification.closure_unknown:
+                    logger.warning(
+                        "Post-teardown verification: %s closure is UNPROVEN (no measured "
+                        "on-chain evidence either way). Refusing to certify success — this is "
+                        "NOT a claim that positions are open.",
+                        strategy.deployment_id,
+                    )
+                    verify_error_msg = CLOSURE_UNKNOWN_ERROR
+
+                if not verification.all_closed or verification.closure_unknown:
                     result = replace(
                         result,
                         success=False,
@@ -1040,6 +1133,10 @@ class TeardownManager:
                     # Reflect the verification failure in persisted state — otherwise
                     # a postmortem reader sees status=COMPLETED even though the
                     # result says the teardown failed.
+                    # VIB-6285: FAILED is also what the unknown-closure case persists.
+                    # It is the only non-success terminal member, and it means "the
+                    # teardown operation failed", NOT "positions are open" — honest
+                    # when paired with the honest ``CLOSURE_UNKNOWN_ERROR`` message.
                     teardown_state.status = TeardownStatus.FAILED
                     teardown_state.updated_at = datetime.now(UTC)
                     if self.state_manager:
@@ -3033,10 +3130,7 @@ class TeardownManager:
         snapshot_positions = list(getattr(snapshot, "positions", []) or [])
 
         if snapshot_positions:
-            from almanak.framework.teardown.post_conditions import (
-                ClosureCheckResult,
-                get_teardown_post_condition,
-            )
+            from almanak.framework.teardown.post_conditions import ClosureCheckResult
 
             # Plumb gateway client / RPC through to post-conditions.
             # ``compiler`` and ``orchestrator`` may both expose either; we
@@ -3065,23 +3159,31 @@ class TeardownManager:
             hook_proven_keys: list[tuple[str, str, str]] = []
             for position in snapshot_positions:
                 protocol = (getattr(position, "protocol", "") or "").lower()
-                hook = get_teardown_post_condition(protocol)
-                if hook is None:
-                    # No post-condition registered for this protocol — log
-                    # at debug; the in-memory check below will still run.
-                    logger.debug(
-                        "Teardown verification: no on-chain post-condition "
-                        "registered for protocol %r (position_id=%s); "
-                        "falling back to in-memory state.",
-                        protocol,
-                        getattr(position, "position_id", ""),
-                    )
-                    continue
-
+                # PER-CHAIN wallet, not the hoisted primary (Codex P1 + claude-pr-auditor,
+                # PR #3531). Multi-chain teardown is supported and per-chain wallets can
+                # legitimately differ, so the primary address reads the WRONG account on a
+                # non-primary leg. Every other wallet consumer in this file already resolves
+                # per chain — the two Plan-A calls thread ``wallet_for_chain=`` and the
+                # receipt-stamp site at ``_teardown_wallet_for_chain(strategy, intent_chain)``
+                # warns that the primary "would stamp the WRONG address on a non-primary leg".
+                # This TD-14 hook loop was the last site that did not.
+                #
+                # VIB-6285 is what makes it a SAFETY bug rather than a cosmetic one: the TOKEN
+                # authority reads ``balanceOf(wallet)``, and a wrong-wallet read returns 0. That
+                # used to be a harmless "no residual"; now it is affirmative evidence that
+                # certifies the whole protocol group — a fabricated proof of exactly the class
+                # this change exists to remove.
+                #
+                # ``or wallet_address`` preserves the hoisted fallback: ``_teardown_wallet_for_chain``
+                # falls back to ``strategy.wallet_address`` only, while ``_teardown_wallet_address``
+                # also accepts ``_wallet_address``.
+                position_wallet = (
+                    _teardown_wallet_for_chain(strategy, str(getattr(position, "chain", "") or "")) or wallet_address
+                )
                 try:
-                    check = hook(
-                        position=position,
-                        wallet_address=wallet_address,
+                    check = _resolve_and_run_post_condition(
+                        position,
+                        wallet_address=position_wallet,
                         gateway_client=gateway_client,
                         rpc_url=rpc_url,
                         block=close_receipt_block,
@@ -3104,6 +3206,18 @@ class TeardownManager:
                     )
                     continue
 
+                if check is None:
+                    # No closure authority applies to this position — log at
+                    # debug; the in-memory check below will still run.
+                    logger.debug(
+                        "Teardown verification: no on-chain post-condition "
+                        "registered for protocol %r (position_id=%s); "
+                        "falling back to in-memory state.",
+                        protocol,
+                        getattr(position, "position_id", ""),
+                    )
+                    continue
+
                 # VIB-5573: an explicit UNMEASURED result (gateway/RPC fault after
                 # the hook's own bounded read-retry, missing client, unsupported
                 # vault interface) is honest "don't-know". It must NOT be counted as
@@ -3118,11 +3232,41 @@ class TeardownManager:
                     )
                     continue
 
+                # VIB-6285: a hook that is structurally OUT OF SCOPE for this
+                # position (the NFT-shaped uniswap_v3/v4 LP hooks reached with a
+                # PositionType.TOKEN row from a swap-only strategy) read NOTHING
+                # on-chain. It used to return a bare ``closed=True``, which fell
+                # through to the branch below and recorded a hook proof off zero
+                # reads — a FABRICATED measurement. Skipped before BOTH counters:
+                # it is not a chain-verified position and it is not evidence.
+                # Distinct from ``unmeasured`` on purpose (see ClosureCheckResult):
+                # out-of-scope contributes neither proof nor doubt, so it does not
+                # lower confidence either.
+                if getattr(check, "not_applicable", False):
+                    logger.debug(
+                        "Teardown verification NOT_APPLICABLE for %s position %s: %s — "
+                        "contributes no closure evidence and no doubt.",
+                        protocol,
+                        getattr(position, "position_id", ""),
+                        check.residual,
+                    )
+                    continue
+
                 positions_with_hook += 1
                 if not check.closed:
                     failed_results.append(check)
                 else:
                     proven_id = str(getattr(position, "position_id", "") or "").strip()
+                    # Deliberately conservative (VIB-6285): a position whose hook
+                    # MEASURED it closed but that carries an EMPTY position_id
+                    # records no key, so it contributes no closure evidence. If it
+                    # were a teardown's only evidence the result is a FALSE
+                    # UNKNOWN — blocked rather than certified. That fails in the
+                    # SAFE direction and must stay: appending unconditionally would
+                    # let an unidentified entry into the evidence set (an empty id
+                    # matches nothing, so it can only ever be a free proof), which
+                    # is the fail-OPEN this guard exists to close. False-unknown is
+                    # acceptable; false-proven is not. Do not "tidy" this guard away.
                     if proven_id:
                         # Fully lowercased triple — matches _entry_key below and the
                         # report-side _key (CodeRabbit: position_id embeds EVM addresses
@@ -3301,6 +3445,14 @@ class TeardownManager:
            false success on a never-existed position (AC-(b)), so it lowers
            CHAIN_VERIFIED → UNVERIFIED.
 
+        On top of those three it sets a fourth, orthogonal signal (VIB-6285 / W0.1):
+        ``closure_unknown`` — True when NEITHER authority measured a single position
+        closed while at least one position existed to prove. It never touches
+        ``all_closed`` (it makes no claim that anything is open); it only refuses to
+        certify success off zero evidence. See the block comment at the bottom of
+        this method for the exact rule, why it is a deliberately weak ratchet stage,
+        and the hole it knowingly leaves open.
+
         Never raises — a reconciliation fault degrades to the incoming
         ``verification`` (the CHECK must never fault the teardown lane).
         """
@@ -3428,6 +3580,110 @@ class TeardownManager:
                 positions_closed=max(positions_total - len(residual), 0),
                 has_position_breakdown=True,
                 verification_status=VerificationStatus.FAILED,  # == status (post report failed)
+            )
+
+        # ------------------------------------------------------------------
+        # VIB-6285 (W0.1): an UNMEASURED teardown must not certify success.
+        #
+        # Reaching here means nothing is MEASURED OPEN. That is NOT the same as
+        # something being measured CLOSED: for PERP / VAULT / STAKE / TOKEN / CEX /
+        # PREDICTION positions Plan-A returns UNVERIFIABLE ("no per-position Plan-A
+        # chain read") and the TD-14 hook loop skips an unmeasured post-condition,
+        # so both authorities abstain in the same run and the teardown certifies
+        # off zero evidence. Empirically: a GMX perp teardown reported
+        # positions_closed=2 / positions_failed=0 while the chain showed the
+        # positions had never existed.
+        #
+        # The rule implemented here is exactly, GROUPED PER PROTOCOL:
+        #
+        #     certify  iff  for EVERY protocol present in the teardown set:
+        #                     (that protocol has >= 1 MEASURED CLOSED position)
+        #               and  (no position anywhere is MEASURED OPEN)
+        #
+        # Grouping matters: a global existential lets a multi-protocol teardown
+        # certify off an UNRELATED protocol's evidence — a strategy holding a GMX
+        # perp AND an Aave leg gets DIVERGED_CLOSED x2 from Aave and certifies
+        # while the perp is unmeasured (ALM-3038 reproducing in any realistic
+        # multi-protocol strategy). It costs nothing: it groups on the ``protocol``
+        # field already on every position, and duplicate enumeration rows always
+        # share a protocol, so a phantom is covered by its real sibling.
+        #
+        # MEASURED CLOSED is either arm of the measured-evidence set:
+        #   * a POST-teardown Plan-A ``DIVERGED_CLOSED`` entry (the chain read the
+        #     position closed), or
+        #   * a ``hook_proven_position_keys`` entry — recorded only for a TD-14
+        #     post-condition hook that MEASURED zero residual. Every other hook
+        #     outcome bails before the append: a raise, an ``unmeasured=True``
+        #     result, a measured residual, and (VIB-6285) an out-of-scope
+        #     ``not_applicable=True`` skip. That last one is why this tuple can be
+        #     trusted at all: the NFT-shaped uniswap_v3/v4 hooks used to return a
+        #     bare ``closed=True`` for non-LP positions, fabricating a proof off
+        #     zero chain reads for every swap-only strategy.
+        #
+        # This only ADDS a signal: ``all_closed`` is untouched, so no measured
+        # residual claim is invented. ``closure_unknown`` says "not proven", never
+        # "still open" (see ``ClosureVerification`` — conflating them is the
+        # VIB-6198 false-failure class), and it is DERIVED from the two tuples
+        # written here, never set directly.
+        #
+        # RATCHET STAGE, not the end state. The per-protocol existential is still
+        # weaker than "*every position* must be measured closed", which is
+        # unsatisfiable today: ``registry_enumeration._dedupe_key`` has arms only
+        # for lending and LP and falls through to the raw ``position_id``
+        # otherwise, so one physical position is enumerated twice (Pendle:
+        # ``pendle_pt_0`` + registry ``pt-steth-30dec2027``; GMX: symbolic id +
+        # ``bytes32`` order key). The phantom row can never acquire evidence, so
+        # the strict rule would fail a clean teardown. Per-physical-identity
+        # dedupe (a connector-registered identity capability, workplan W2.2) is
+        # what unblocks it. KNOWN HOLE, knowingly left open: within one protocol,
+        # a single measured-closed position still certifies unmeasured siblings.
+        # ------------------------------------------------------------------
+        def _protocol_of(obj: Any) -> str:
+            return str(getattr(obj, "protocol", "") or "").strip().lower()
+
+        # The teardown set: the pre-execution positions this verification is about,
+        # UNIONED with the entries Plan-A actually examined. Union rather than
+        # either alone — each can be the poorer view (the CLI lane may hand a
+        # summary the detailed verifier never saw; Plan-A may not emit an entry per
+        # row) and a protocol missing from ``protocols_to_prove`` is a protocol
+        # nobody is required to prove. A blank protocol is kept as its own group:
+        # it can never acquire evidence, so it blocks — the SAFE direction.
+        #
+        # That last sentence is an INVARIANT, and it only holds because BOTH
+        # evidence arms below drop the blank group (CodeRabbit, PR #3531).
+        # ``PositionReconciliation.protocol`` is built unconditionally as
+        # ``str(position.protocol or "")`` (``plan_a_reconciliation.py:858``) and
+        # the verdict is computed by ``_reconcile_one`` without consulting it, so
+        # a blank-protocol ``DIVERGED_CLOSED`` entry is reachable. Left unfiltered
+        # on the Plan-A arm it would have removed ``""`` from
+        # ``unproven_protocols`` and certified an unnamed position — and, because
+        # ``""`` is a CATCH-ALL rather than a real protocol, it would have let one
+        # measured-closed unnamed position vouch for structurally unrelated
+        # unnamed siblings. That is the widest possible form of the known hole,
+        # not an instance of it. The hook arm already filtered; this makes the two
+        # agree.
+        pre_positions = getattr(pre_execution_positions, "positions", None) or []
+        protocols_to_prove = {_protocol_of(p) for p in pre_positions} | {_protocol_of(e) for e in post_report.entries}
+        measured_closed_protocols = {proto for e in post_report.diverged if (proto := _protocol_of(e))} | {
+            proto for proto, _chain, _pid in verification.hook_proven_position_keys if proto
+        }
+
+        verification = replace(
+            verification,
+            protocols_to_prove=tuple(sorted(protocols_to_prove)),
+            measured_closed_protocols=tuple(sorted(measured_closed_protocols)),
+        )
+        if verification.closure_unknown:
+            logger.error(
+                "🛑 TD-15 (VIB-6285): %s teardown closure is UNMEASURED for protocol(s) %s — "
+                "no Plan-A DIVERGED_CLOSED read and no TD-14 hook proof for any of their "
+                "positions, and nothing measured OPEN. This does NOT mean positions are open; "
+                "it means closure was not proven. Refusing to certify success — manual on-chain "
+                "verification required. (proved: %s; positions_total=%d)",
+                deployment_id,
+                ", ".join(verification.unproven_protocols) or "<unnamed>",
+                ", ".join(verification.measured_closed_protocols) or "none",
+                verification.positions_total,
             )
 
         if status is not verification.verification_status:

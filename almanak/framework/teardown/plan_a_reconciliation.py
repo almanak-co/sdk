@@ -673,6 +673,18 @@ async def _reconcile_one(
         # Plan-A chain-read capability yet — be honest: UNVERIFIABLE, never a
         # fabricated CONFIRMED. (Their per-position verify is owned by their own
         # cutover / post-condition tickets, not this read-path check.)
+        #
+        # KNOWN LIMITATION under the VIB-6285 W0.1 ratchet, shipped deliberately (VIB-6311)
+        # (docs/internal/plans/vib-6285-w01-known-limitations-followup-20260801.md):
+        # UNVERIFIABLE here means "a reader was attempted and failed", but for these
+        # types NO READER EXISTS — a coverage gap. The ratchet cannot tell the two
+        # apart, so a primitive nothing can measure lands in a demand set it can
+        # never satisfy: `closure_unknown` -> `success=False` -> token consolidation
+        # skipped on a terminal request, for a teardown that removed all on-chain
+        # risk. Affects hyperliquid PERP (no connector but gmx_v2 declares
+        # `supports_open_state_reconciliation`), polymarket PREDICTION, and STAKE —
+        # which `cli/new_strategy.py` emits into every scaffolded strategy.
+        # The fix is a capability gate, NOT a wider verdict here; see the doc.
         return (
             ReconciliationVerdict.UNVERIFIABLE,
             f"no per-position Plan-A chain read for {position.position_type} positions",

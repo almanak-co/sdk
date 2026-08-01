@@ -39,6 +39,8 @@ from unittest.mock import MagicMock
 import pytest
 from click.testing import CliRunner
 
+from almanak.framework.teardown.models import CLOSURE_UNKNOWN_ERROR
+
 teardown_cli_module = importlib.import_module("almanak.framework.cli.teardown")
 
 
@@ -58,6 +60,11 @@ def cli_runner() -> CliRunner:
 
 class _FakeGatewayClient:
     """Minimal gateway client that satisfies the CLI's connect/health probe."""
+
+    # VIB-6285: every balanceOf the TOKEN closure authority performs, recorded so
+    # a test can assert closure was MEASURED rather than merely unchallenged.
+    # Class-level because the CLI constructs the client itself.
+    erc20_reads: list[tuple[str, str]] = []
 
     def __init__(self, _config) -> None:
         self.connected = False
@@ -81,6 +88,19 @@ class _FakeGatewayClient:
         # unanswerable read (which is the correct behaviour for a genuinely broken
         # gateway, but not what these no-op tests intend to exercise).
         return "0x" + ("0" * 64)
+
+    def query_erc20_balance(self, chain=None, token_address=None, wallet_address=None, block=None) -> int:  # noqa: ARG002
+        # VIB-6285: the TOKEN closure authority reads balanceOf through the
+        # gateway. These fixtures model a wallet whose token balance is GENUINELY
+        # zero — that is why the SWAP is short-circuited by
+        # ``_zero_balance_swap_skip_reason`` in the first place — so a healthy
+        # gateway answers 0. This makes the zero a MEASURED zero: the teardown
+        # exits 0 because closure was proven on-chain, not because nothing
+        # verified it. Returning a fabricated value here, or omitting the method
+        # so the read faults, would put the fixture back to certifying off
+        # nothing.
+        type(self).erc20_reads.append((str(chain), str(token_address).lower()))
+        return 0
 
 
 def _write_swap_only_strategy_files(tmp_path) -> tuple[str, str]:
@@ -335,6 +355,15 @@ class _StrategyWithZeroBalanceSwap:
         # Report a non-empty positions list so we get past Branch 1, but
         # set value_usd=0 so SafetyGuard's loss-cap math doesn't try to
         # enforce anything against a real number.
+        #
+        # VIB-6285: ``details={"asset": ...}`` raises this double to production
+        # fidelity. Every real TOKEN emitter writes an asset SYMBOL there
+        # (uniswap_rsi, lido_staker, metamorpho_base_yield, mantle_mnt_accumulator,
+        # pancakeswap_aave_carry_bsc); this double omitted it only because nothing
+        # read it before. With it, the TOKEN closure authority resolves the symbol
+        # and MEASURES the zero balance on-chain, so this test now exits 0 because
+        # closure was proven — not because no authority ever looked. The
+        # ``uniswap_v4`` slug makes this the swap-on-an-LP-slug case end to end.
         position = SimpleNamespace(
             position_type=SimpleNamespace(value="token"),
             protocol="uniswap_v4",
@@ -342,7 +371,7 @@ class _StrategyWithZeroBalanceSwap:
             position_id="phantom",
             value_usd=Decimal("0"),
             health_factor=None,
-            details={},
+            details={"asset": "WETH"},
         )
         return SimpleNamespace(
             positions=[position],
@@ -387,6 +416,7 @@ def test_all_intents_skipped_as_no_op_exits_zero(
     either the manager OR the CLI cannot silently re-introduce exit 1.
     """
     _, config_file = _write_swap_only_strategy_files(tmp_path)
+    _FakeGatewayClient.erc20_reads = []
 
     monkeypatch.setattr(
         teardown_cli_module,
@@ -415,6 +445,26 @@ def test_all_intents_skipped_as_no_op_exits_zero(
     # canonical no-op message, the [FAILED] line must NEVER appear when
     # nothing actually failed.
     assert "[FAILED]" not in result.output
+
+    # VIB-6285 — pass for the RIGHT REASON. Exit 0 alone is what this test
+    # returned before the ratchet existed, when NOTHING verified closure, so the
+    # exit code cannot distinguish "proven closed" from "never checked".
+    #
+    # Assert POSITIVELY that a chain read happened: the TOKEN closure authority
+    # must have resolved the position's asset and read balanceOf through the
+    # gateway. Absence-assertions on the CLI output do not work here — the
+    # verification status is not rendered on this path, so "UNVERIFIED not in
+    # output" holds vacuously even with the ratchet disabled (verified: that
+    # control passed, i.e. it discriminated nothing).
+    #
+    # This assertion fails if the TOKEN authority is reverted, if the fixture
+    # regresses to an unresolvable asset, or if dispatch stops reaching it —
+    # i.e. exactly the certify-off-nothing regressions.
+    assert _FakeGatewayClient.erc20_reads, (
+        "closure was never MEASURED — no balanceOf read reached the gateway, so exit 0 "
+        "means 'nothing checked', not 'proven closed'"
+    )
+    assert CLOSURE_UNKNOWN_ERROR not in result.output
 
 
 # ---------------------------------------------------------------------------

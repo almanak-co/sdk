@@ -396,6 +396,24 @@ class VerificationStatus(StrEnum):
     NOT_RUN = "not_run"
 
 
+# VIB-6285 (W0.1): the single wording both success lanes use when
+# ``ClosureVerification.closure_unknown`` blocks certification. Kept here, shared,
+# so the two lanes cannot drift — and worded so it can NEVER be read as "positions
+# are still open" (that claim belongs to ``all_closed=False`` alone; conflating the
+# two is the VIB-6198 false-failure class).
+#
+# The outcome it names is TERMINAL, not automatically retryable: ``mark_failed``
+# makes the request terminal and the crash watchdog
+# (``_sweep_stale_executing_teardowns``) only re-queues rows stuck at
+# ``executing``, so a FAILED row is never re-dispatched. ``recovery_options`` on
+# the result is OPERATOR GUIDANCE for a manual re-run, not a retry contract.
+CLOSURE_UNKNOWN_ERROR = (
+    "Teardown closure could not be verified: no measured on-chain evidence of closure. "
+    "This does NOT mean positions are open — it means closure was not proven. "
+    "Manual on-chain verification required."
+)
+
+
 @dataclass(frozen=True)
 class ClosureVerification:
     """Position-level result of post-teardown closure verification (VIB-5085).
@@ -426,6 +444,74 @@ class ClosureVerification:
     counted closed-by-execution (``UNVERIFIED``), or failed. See
     :class:`VerificationStatus`. It is derived alongside the counts so a caller
     can both count and qualify the closure without re-deriving it.
+
+    :attr:`closure_unknown` (VIB-6285 / W0.1) is a THIRD, orthogonal signal, and
+    the distinction from ``all_closed`` is load-bearing:
+
+    - ``all_closed=False`` **asserts residual on-chain risk** — "positions are
+      still open", a measured claim about the chain.
+    - ``closure_unknown=True`` asserts **nothing about openness**. It says only
+      that no measurement of closure was obtained for some protocol in the
+      teardown set: neither a Plan-A ``DIVERGED_CLOSED`` read nor a TD-14
+      post-condition hook measured any of its positions closed. Those positions
+      may be perfectly closed; we simply cannot prove it.
+
+    Conflating the two recreates the VIB-6198 false-failure class (a teardown
+    wrongly reporting a position open, sending an operator to hunt a residual
+    that does not exist). A caller acting on ``closure_unknown`` must therefore
+    never emit "positions still open" phrasing.
+
+    ``closure_unknown`` is a **derived property**, not a stored field: it is
+    computed from the evidence tuples below, so it cannot be constructed
+    inconsistently and the meaningless combinations (``FAILED`` +
+    ``closure_unknown``, ``NOT_RUN`` + ``closure_unknown``) are impossible by
+    construction rather than by convention. It is deliberately NOT a new
+    :class:`VerificationStatus` member — an unhandled new enum member in a money
+    path is how this codebase has generated P0s before.
+
+    **The rule, grouped per protocol**::
+
+        certify  iff  for EVERY protocol present in the teardown set:
+                        (that protocol has >= 1 MEASURED CLOSED position)
+                  and  (no position anywhere is MEASURED OPEN)
+
+    Grouping by protocol rather than quantifying over the whole set is what stops
+    a multi-protocol teardown certifying off an *unrelated* protocol's evidence: a
+    strategy holding a GMX perp and an Aave leg would otherwise get
+    ``DIVERGED_CLOSED`` x2 from Aave and certify while the perp is unmeasured —
+    ALM-3038 reproducing in any realistic multi-protocol strategy. It costs
+    nothing: it groups on the ``protocol`` field already present on every
+    position, and it does not reintroduce the duplicate-identity problem below,
+    because duplicate rows always share a protocol.
+
+    **Ratchet stage — not the end state.** The per-protocol existential is still
+    weaker than the intended end state, "*every position* must be measured
+    closed". That is **unsatisfiable today**: ``registry_enumeration.py``'s
+    ``_dedupe_key`` has arms only for lending and LP and falls through to the raw
+    ``position_id`` for every other type, so one physical position is enumerated
+    twice (Pendle: strategy-authored ``pendle_pt_0`` + registry
+    ``pt-steth-30dec2027``; GMX: symbolic id + ``bytes32`` order key). The phantom
+    duplicate can never acquire evidence, so the strict rule would fail a
+    completely clean teardown. Reaching the end state requires a
+    connector-registered per-physical-identity capability (workplan W2.2).
+
+    **Known holes left open by this stage**, both documented rather than
+    accidental:
+
+    1. Within a single protocol, one measured-closed position still certifies its
+       unmeasured siblings (the duplicate-identity blocker above).
+    2. **Two evidence sources, two definitions of "closed."**
+       ``live_position_reads.chain_verify_lp_open`` reads LP *liquidity only*,
+       while the V3 TD-14 post-condition additionally requires
+       ``tokensOwed0 == 0 and tokensOwed1 == 0``. So an LP position with zero
+       liquidity but uncollected fees is ``DIVERGED_CLOSED`` to Plan-A and a
+       measured residual to the hook. This is pre-existing and W0.1 makes it
+       load-bearing rather than creating it: when the hook runs and measures the
+       residual, ``all_closed=False`` short-circuits before this property is ever
+       consulted, so the stricter authority wins. The exposure is only when the
+       hook is absent or unmeasured AND Plan-A certifies away a fee residual.
+       Unifying the two definitions changes what "closed" means for every
+       V3-family teardown and is deliberately follow-up work, not this seam.
     """
 
     all_closed: bool
@@ -443,6 +529,56 @@ class ClosureVerification:
     # position_id, and an id-only match could mark one hook-proven off the other's
     # proof (Codex P1). Empty on the fallback/no-hook paths.
     hook_proven_position_keys: tuple[tuple[str, str, str], ...] = ()
+    # VIB-6285 (W0.1) — the evidence tuples ``closure_unknown`` is derived from.
+    # Both are lowercased protocol slugs. Empty defaults mean "the ratchet was
+    # never armed for this record", which derives ``closure_unknown=False``, so
+    # every pre-existing constructor and every path that never reaches
+    # ``verify_closure_against_chain`` keeps its exact prior behaviour.
+    #
+    # ``protocols_to_prove``      — every protocol present in the teardown set.
+    # ``measured_closed_protocols`` — protocols with >= 1 MEASURED CLOSED
+    #   position: a Plan-A ``DIVERGED_CLOSED`` re-read, or a TD-14 hook proof
+    #   (``hook_proven_position_keys``, which records only measured closures —
+    #   out-of-scope ``not_applicable`` skips and unmeasured hooks never reach it).
+    protocols_to_prove: tuple[str, ...] = ()
+    measured_closed_protocols: tuple[str, ...] = ()
+
+    @property
+    def unproven_protocols(self) -> tuple[str, ...]:
+        """Protocols in the teardown set with NO measured closure evidence.
+
+        Sorted for deterministic operator output. Empty when every protocol
+        present has at least one measured closure — or when the ratchet was
+        never armed (both tuples empty).
+        """
+        return tuple(sorted(frozenset(self.protocols_to_prove) - frozenset(self.measured_closed_protocols)))
+
+    @property
+    def closure_unknown(self) -> bool:
+        """True iff some protocol in the teardown set has NO measured closure.
+
+        NOT a claim that positions are open — see the class docstring. Two
+        short-circuits come first, and both are load-bearing:
+
+        * ``all_closed=False`` — a MEASURED residual is a claim, not an absence.
+          Returning True here would let a failed teardown also read "unknown",
+          the meaningless combination this property exists to make impossible.
+        * ``positions_total == 0`` — a teardown with nothing to close is NOT an
+          unverified teardown. The legacy in-memory path
+          (``teardown_manager._verify_closure_detailed`` last-resort branch)
+          returns ``positions_total=0`` with no hook keys, and the POST Plan-A
+          over that empty summary checks nothing; without this short-circuit
+          EVERY balance-driven teardown that closed real positions but exposes
+          no ``PositionInfo`` rows would flip to failure — the case
+          ``has_position_breakdown`` above exists to name. Paper and dry-run
+          lanes hit it too, and it reaches CI through ``strat test`` and the
+          demo gates.
+        """
+        if not self.all_closed:
+            return False
+        if self.positions_total == 0:
+            return False
+        return bool(self.unproven_protocols)
 
 
 @dataclass

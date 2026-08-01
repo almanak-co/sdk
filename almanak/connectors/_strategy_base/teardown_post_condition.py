@@ -23,14 +23,40 @@ class ClosureCheckResult:
     Only a *positive on-chain measurement* of residual value is ``closed=False``
     (→ ``FAILED``).
 
+    VIB-6285 adds a FOURTH state, ``not_applicable``, for a hook that is
+    structurally OUT OF SCOPE for the position it was handed — e.g. the
+    NFT-shaped Uniswap V3/V4 LP hooks reached with a ``PositionType.TOKEN`` row,
+    because ``protocol="uniswap_v3"`` is shared between LP NFT positions and the
+    TOKEN rows swap-only strategies surface. These skips previously returned a
+    bare ``closed=True``, which is indistinguishable from a real measurement:
+    the verifier counted the position chain-verified and recorded a
+    ``hook_proven_position_keys`` entry having read NOTHING on-chain. That is a
+    fabricated proof, and it is exactly the false-green vector
+    ``lending_post_condition`` already refuses ("NOT a silent closed=True skip …
+    a silent skip is a false-green vector").
+
+    Out-of-scope is NOT the same as unmeasured, and the two must not be merged:
+    marking these skips ``unmeasured=True`` would lower every swap-strategy
+    teardown to UNVERIFIED and block certification for a whole strategy class.
+    ``not_applicable`` says "this hook has no opinion about this position" — it
+    contributes neither proof nor doubt, mirroring ``NOT_APPLICABLE`` in
+    ``plan_a_reconciliation``.
+
     Attributes:
         closed: True iff the post-condition MEASURED the position fully closed
-            on-chain. Only meaningful when ``unmeasured`` is False.
+            on-chain. Only meaningful when ``unmeasured`` and ``not_applicable``
+            are both False.
         unmeasured: True iff the check could not obtain a trustworthy on-chain
             reading (gateway/RPC fault after bounded read-retry, missing client,
             unresolved address, unsupported vault interface). The composition
             seam lowers this to ``UNVERIFIED`` — never ``FAILED``. When True,
             ``closed`` is ignored and MUST NOT be treated as a residual.
+        not_applicable: True iff this hook is structurally out of scope for the
+            position (wrong ``position_type`` for the check it implements).
+            Takes precedence over ``closed``: the result contributes NO closure
+            evidence — not to ``positions_with_hook``, not to
+            ``hook_proven_position_keys`` — and is never a residual. Use this,
+            never a bare ``closed=True``, for an out-of-scope skip.
         protocol: Protocol the result is for, for logs and operator output.
         position_id: Position identifier checked.
         residual: Protocol-specific residual data (only set on a MEASURED
@@ -45,6 +71,7 @@ class ClosureCheckResult:
     residual: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
     unmeasured: bool = False
+    not_applicable: bool = False
 
 
 class TeardownPostCondition(Protocol):

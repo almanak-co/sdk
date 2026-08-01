@@ -189,9 +189,41 @@ def redrive_lending_position(
         )
         return None
 
+    # VIB-6285: the SAME reasoning as the ``health is None`` guard above, applied
+    # per FIELD. A health object that exists but whose value field is MISSING or
+    # ``None`` used to coerce through the ``getattr(..., "0") or "0"`` defaults to
+    # ``Decimal("0")`` — a FABRICATED measured zero. ``_reconcile_lending`` reads
+    # that as at/under dust ⇒ ``DIVERGED_CLOSED``, and since W0.1 that verdict is
+    # no longer merely "fails to lower confidence": it is affirmative evidence
+    # that CERTIFIES the position's protocol group. A missing field would
+    # certify a live lending position closed and strand it.
+    #
+    # Empty ≠ Zero: only a genuinely PRESENT, numeric value is a measured zero.
+    # Missing / ``None`` ⇒ unavailable (unmeasured), exactly like ``health is
+    # None`` above and the non-numeric branch below. ``_MISSING`` is used rather
+    # than a ``None`` default so "attribute absent" and "attribute present but
+    # None" both land here without being confused with a real value.
+    _MISSING = object()
+    raw_values = {
+        "collateral_value_usd": getattr(health, "collateral_value_usd", _MISSING),
+        "debt_value_usd": getattr(health, "debt_value_usd", _MISSING),
+    }
+    for field_name, raw in raw_values.items():
+        if raw is _MISSING or raw is None:
+            logger.warning(
+                "Teardown live re-derivation: position_health is missing %s for "
+                "protocol=%s market_id=%s — treating as unavailable (unmeasured), NOT a "
+                "measured zero; certifying closure off a fabricated zero would strand a "
+                "live position (VIB-6285)",
+                field_name,
+                protocol,
+                market_id,
+            )
+            return None
+
     try:
-        collateral_value_usd = Decimal(str(getattr(health, "collateral_value_usd", "0") or "0"))
-        debt_value_usd = Decimal(str(getattr(health, "debt_value_usd", "0") or "0"))
+        collateral_value_usd = Decimal(str(raw_values["collateral_value_usd"]))
+        debt_value_usd = Decimal(str(raw_values["debt_value_usd"]))
     except (InvalidOperation, ValueError, TypeError):
         logger.warning(
             "Teardown live re-derivation: position_health returned non-numeric "
