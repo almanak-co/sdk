@@ -153,7 +153,15 @@ def _reduce_gmx_positions(query: PerpsPositionQuery, results: list[str | None]) 
         )
         if pos.is_active:  # size_in_usd > 0 — matches the legacy reader's filter
             positions.append(pos)
-    return PerpsReadResult(positions=tuple(positions), ok=True)
+    # The read requests a fixed window `[0, _MAX_POSITION_RANGE)`, so a page that
+    # comes back FULL may have been cut short. This must be computed from the RAW
+    # decoded array, before the `is_active` filter above discards rows — after
+    # filtering the information is gone and no caller can recover it.
+    return PerpsReadResult(
+        positions=tuple(positions),
+        ok=True,
+        truncated=len(decoded) >= _MAX_POSITION_RANGE,
+    )
 
 
 def _gmx_market_metadata(market_address: str, chain: str) -> PerpsMarketMeta | None:

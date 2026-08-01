@@ -113,6 +113,23 @@ class PerpsReadResult:
 
     positions: tuple[PerpsPositionOnChain, ...]
     ok: bool
+    #: Whether the venue read may have returned only a PAGE of the account.
+    #:
+    #: ``ok`` says the read RAN; ``truncated`` says whether what it returned is the
+    #: WHOLE account. They are different questions, and any caller that treats the
+    #: absence of a position as evidence of closure needs the second one — an
+    #: absent key proves nothing when the page was cut short.
+    #:
+    #: Mirrors ``PendingOrdersResult.truncated``, which already makes this
+    #: distinction for the order read.
+    #:
+    #: Defaults to ``False`` so existing producers keep working, but a producer
+    #: that CANNOT determine completeness must set it ``True`` rather than leave
+    #: the default: for a consumer reasoning about absence, ``False`` is the
+    #: fail-open value. ``positions`` is filtered before this dataclass is built,
+    #: so completeness is only knowable at the reducer — a caller-side length test
+    #: cannot recover it (VIB-6313, #3533 panel).
+    truncated: bool = False
 
 
 @dataclass(frozen=True)

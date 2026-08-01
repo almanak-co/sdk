@@ -201,6 +201,252 @@ def _capture_settlement_baseline(
     )
 
 
+def _goal_is_baseline_free_decidable(intent_type: str) -> bool:
+    """Can this intent's target be judged from the current position read alone?
+
+    Writing ``b`` for the unmeasured baseline size at a target key, ``d`` for the
+    requested delta and ``c`` for the measured current size:
+
+    - ``PERP_CLOSE`` wants ``c <= max(0, b - d)``. At ``c == 0`` that holds for every
+      ``b`` and ``d``, so a flat account settles a close with no baseline. Sufficient,
+      not necessary — a partial close at ``c > 0`` stays undecidable.
+    - ``PERP_OPEN`` wants ``c >= b + d``. Undecidable: a pre-existing position of
+      sufficient size satisfies any absolute reading while the order may in fact have
+      been cancelled.
+
+    Deliberately a named predicate rather than an ``if`` inside the caller, so the
+    classification of every verb is one greppable place with a census test over it
+    (``tests/unit/connectors/gmx_v2/test_baseline_free_verb_census_vib6297.py``).
+    Falling through to the close branch by omission is the failure this shape prevents.
+    """
+    return intent_type == "PERP_CLOSE"
+
+
+def _baseline_free_verdict(
+    *,
+    gateway_client: Any,
+    chain: str,
+    wallet_address: str,
+    requested_keys: set[str],
+    requested_deltas: dict[_PositionKey, int],
+    intent: Any,
+    still_pending: set[str],
+) -> AsyncSettlementVerdict:
+    """Judge an order that left the pending set before any baseline could be captured.
+
+    Reached only when at least one requested order is already gone and
+    ``observation_state`` is ``None``. A gone order can never re-enter the pending set,
+    so ``_capture_settlement_baseline`` is unreachable from here forever and **every
+    further poll is information-free**. The verdict must therefore be reached now, and
+    must be terminal wherever it is sound to be terminal — that is what stops the
+    barrier from burning its whole budget on a close that already succeeded (VIB-6297).
+
+    EXACTLY ONE STATE IS DECIDABLE HERE: every requested order gone, and every requested
+    target measured flat. Nothing else. An earlier version of this function judged more
+    than that, and both audit engines on #3533 refuted it independently:
+
+    * **Terminal SETTLED while a sibling is still pending** (Codex P1). The earlier
+      docstring argued the optimistic branch needed no ``still_pending`` gate "because a
+      flat position means the goal holds regardless of the sibling". That is wrong: an
+      unfilled GMX order **holds its collateral in the OrderVault**. Declaring the group
+      settled lets teardown proceed to consolidation and sweep past that collateral, and
+      blueprint 14 requires the exact accepted orders stay pending until terminal
+      settlement. The flat position is not the whole goal state — the live order is part
+      of it.
+
+    * **Terminal FAILED on a correctly-filled partial close** (Grok, high). A close of
+      delta ``d`` against size ``b`` leaves ``c = b - d > 0`` when it works perfectly.
+      The earlier code called that TERMINAL_FAILED, and the claim that a retry is "a
+      cheap no-op" only ever held for a FULL close — retrying a partial closes ``d``
+      again and **over-closes**. Without a baseline, "filled correctly" and "cancelled"
+      are genuinely indistinguishable at ``c > 0``, so neither may be asserted.
+
+    So the pessimistic branch is gone entirely. Anything not provably settled returns
+    non-terminal OBSERVATION_FAILED — the pre-existing behaviour, which is an honest
+    "unknown" and costs the barrier's budget. That budget is the price of not guessing;
+    the mainnet stall this ticket fixes is the full-close-to-flat case, and that case is
+    still decided on poll #1.
+
+    Fail-safe polarity, corrected: a false ``SETTLED`` on a close completes teardown over
+    a live position or live collateral — the silent strand, forbidden. A false
+    ``TERMINAL_FAILED`` is NOT symmetrically cheap, which is what the earlier version got
+    wrong. Only an honest unknown is safe in every direction.
+
+    KNOWN LIMITATION — THIS VERDICT PROVES A GOAL STATE, NOT AN ATTRIBUTION (VIB-6334)
+    ---------------------------------------------------------------------------------
+    ``SETTLED`` here means "every requested order has left the pending set AND every
+    requested target is measured flat". It does **not** prove that *our* order is what
+    flattened the target. Without a baseline there is no before-image to difference
+    against, so a position that went flat by liquidation, by an operator's manual close,
+    or by any other actor is indistinguishable from one our close filled.
+
+    Scoped deliberately, because the two consumers do not care equally:
+
+    * **Teardown — sound.** Teardown's goal is the absence of exposure, not the
+      authorship of it. A target that is flat is flat regardless of who flattened it, and
+      the ``still_pending`` gate above independently covers the one way a gone-but-
+      unfilled order can still hold money (collateral parked in the OrderVault). There is
+      no strand in this direction.
+    * **Accounting — NOT exposed today, and the reason is structural.** A consumer that
+      read ``SETTLED`` as "our order filled" and booked a fill from it would attribute a
+      trade that never executed. Measured, no consumer does: this verdict is constructed
+      with **no receipts**, and both call sites
+      (``strategy_runner._await_async_settlement`` and
+      ``teardown/runner_helpers.py``) gate enrichment on ``if barrier.receipts:``, so the
+      baseline-free path appends nothing and enriches nothing. It only unblocks lifecycle
+      success. Stated as a measurement rather than a reassurance, because it is the
+      emptiness of ``receipts`` — not any check on attribution — that closes the hole.
+
+    Deliberately NOT fixed here. The sound fix is to gate ``SETTLED`` on a measured
+    ``OrderExecuted`` log via the reader already in ``perp_settlement.py``, which needs a
+    submission block on ``AsyncOrderData`` — a shared execution shape, so it is a design
+    change rather than a clause added to this function. Successive review rounds narrowed
+    this verdict until it was nearly unreachable, which is the signal that the seam is
+    wrong and not that one more condition is missing. VIB-6334 carries it.
+
+    Until then, the load-bearing rule is: **never give this verdict receipts, and never
+    key a fill-booking path on it.** The safety above is not a property of the verdict —
+    it is a property of the empty ``receipts`` tuple. Attaching receipts here, or adding a
+    consumer that books from the status alone, converts a rare mis-attribution into a
+    money-correctness bug. ``test_baseline_free_settled_carries_no_receipts`` fails if the
+    first half is ever violated.
+    """
+    intent_type = _intent_type_str(intent)
+    if not _goal_is_baseline_free_decidable(intent_type):
+        # Checked before the read, not after: a position read this verdict cannot use is
+        # a wasted round-trip on every remaining poll of the barrier's budget.
+        return _observation_failed(
+            f"GMX order left the pending set before a position baseline could be measured; "
+            f"intent={intent_type or 'unmeasured'} has no target that is decidable without one"
+        )
+
+    if still_pending:
+        # A requested order is positively observed still live. It can fill, and until it
+        # resolves it holds collateral in the OrderVault, so nothing here is terminal.
+        return _observation_failed(
+            "GMX order left the pending set with no baseline while a sibling order is "
+            "still pending; the group cannot be judged until every requested order resolves"
+        )
+
+    positions = read_open_positions(gateway_client, chain, wallet_address)
+    if not getattr(positions, "ok", False):
+        # Empty is not zero: an unreadable account is UNMEASURED, never "measured flat".
+        # Unlike the baseline, this read genuinely can succeed on a later poll.
+        return _observation_failed("GMX position state was unmeasured with no settlement baseline")
+
+    # ABSENCE MUST BE MEASURABLE BEFORE IT CAN MEAN "FLAT".
+    #
+    # The read requests a fixed window `getAccountPositions(dataStore, account, 0, 100)`,
+    # so a full page may have been cut short. A requested position beyond the page would
+    # then be missing from `current_sizes` and read as size 0 — manufacturing SETTLED
+    # over live exposure.
+    #
+    # The baseline path is not exposed to this: its `before.get(target, 0) > 0` guard
+    # turns a truncated read into TERMINAL_FAILED — loud. Without a baseline there is no
+    # such proof, so the silent direction is reachable, and that asymmetry is introduced
+    # here rather than inherited.
+    #
+    # `truncated` is computed at the REDUCER from the raw decoded array, because
+    # `positions` is filtered to ACTIVE rows before `PerpsReadResult` is built and no
+    # caller-side length test can recover completeness afterwards. An earlier revision of
+    # this function tried exactly that (`len(positions) >= _MAX_POSITION_RANGE`) and it
+    # could not work: a full page containing any inactive row yields fewer active rows
+    # than the range and slips straight past. Both audit engines on #3533 called it, and
+    # deferring it to a follow-up ticket was the wrong call under AGENTS.md §The Bar —
+    # a SETTLED verdict that depends on a guard which cannot discriminate is not a
+    # shippable safe design.
+    if getattr(positions, "truncated", True):
+        return _observation_failed(
+            "GMX position read may be truncated (its page came back full), so the "
+            "absence of a target position is not measurable and cannot mean 'closed'"
+        )
+
+    current_sizes = _active_position_sizes(positions)
+
+    # KEY ABSENCE IS NOT CLOSURE.
+    #
+    # `current_sizes.get(target, 0) == 0` cannot tell "the target existed and went
+    # to zero" from "the target never existed, we were reading the wrong key". The
+    # baseline path had that evidence and used it — `_position_delta_reached`
+    # requires `before.get(target, 0) > 0` before a close may settle — and deleting
+    # the baseline deleted the only existence check with it (#3533 panel).
+    #
+    # The two keys come from DIFFERENT SOURCES and can legitimately disagree:
+    #   requested: (market, initial_collateral_token, is_long) from the OrderCreated
+    #              event (`receipt_parser`), where the collateral is whatever the
+    #              close intent resolved — and `full_close.py` falls back to
+    #              `details["asset"]` when `collateral_token` is absent.
+    #   measured:  (market, collateralToken, is_long) from `getAccountPositions`.
+    # USDC vs USDC.e on Arbitrum is the obvious trigger; the `asset` fallback is the
+    # general one. Either way the decrease order names a GMX position key that does
+    # not exist, the keeper cancels it, and the keyed lookup reads 0.
+    #
+    # On `main` this same mistake fails LOUD (no baseline ⇒ the 360s burn; with one
+    # ⇒ TERMINAL_FAILED). Settling on key absence would convert that into a SILENT
+    # STRAND — the forbidden direction, introduced here.
+    #
+    # So settlement additionally requires that NO active position exists at the
+    # requested (market, is_long) under ANY collateral token. That closes the
+    # collateral-aliasing hole without demanding a wallet-wide zero, which would
+    # break every multi-market strategy.
+    #
+    # THIS DELIBERATELY OVER-REFUSES IN ONE CASE, and it is not free. GMX's position
+    # key is keccak(account, market, collateralToken, isLong), so `collateralToken`
+    # is part of the identity: a wallet CAN legitimately hold two distinct positions
+    # at the same (market, isLong) under different collateral. Closing one of them
+    # leaves the other live at that (market, is_long), and this guard then refuses to
+    # settle the close that actually succeeded.
+    #
+    # That is the correct trade. The ambiguity is real and unresolvable here — an
+    # active position at the requested market/side under a different collateral is
+    # EITHER our own position seen through a mis-resolved collateral (the aliasing
+    # bug: settling would strand it) OR a genuinely separate position (refusing costs
+    # a wait). Nothing in this branch can tell them apart, and the two errors are not
+    # symmetric: settling wrongly is a silent strand, refusing wrongly is loud.
+    #
+    # And the cost is bounded to "no improvement", not "regression": refusing returns
+    # the same non-terminal OBSERVATION_FAILED that `main` returns for this ENTIRE
+    # branch today, so that case degrades exactly to current behaviour — the barrier
+    # spends its budget and reports the close resumable. Nothing that works today
+    # stops working; the multi-collateral case simply does not get the speed-up.
+    #
+    # If it ever needs to get it, the fix is a real baseline (VIB-6299), not a looser
+    # predicate here.
+    live_market_sides = {
+        (market, is_long) for (market, _collateral, is_long), size in current_sizes.items() if size > 0
+    }
+    still_live = [
+        (market, is_long)
+        for (market, _collateral, is_long) in requested_deltas
+        if (market, is_long) in live_market_sides
+    ]
+    if still_live:
+        return _observation_failed(
+            "GMX order left the pending set with no baseline and an active position "
+            f"remains at the requested market/side {sorted(still_live)} (under some "
+            f"collateral token); measured={_describe_position_sizes(current_sizes)}. "
+            "Key absence is not closure — refusing to settle."
+        )
+
+    if all(current_sizes.get(target, 0) == 0 for target in requested_deltas):
+        return AsyncSettlementVerdict(
+            status=AsyncSettlementStatus.SETTLED,
+            terminal=True,
+            orders=_order_verdict_rows(requested_keys, AsyncSettlementStatus.SETTLED),
+            reason=None,
+        )
+
+    # c > 0 for some requested target. With a baseline this would be decidable via
+    # `c <= max(0, b - d)`; without one, a correctly-filled partial close and a cancelled
+    # order look identical. Refuse to assert either.
+    return _observation_failed(
+        "GMX order left the pending set with no baseline and its target position is not "
+        f"flat (intent={intent_type}, requested={_describe_position_sizes(requested_deltas)}, "
+        f"measured={_describe_position_sizes(current_sizes)}, baseline=unmeasured); a partial "
+        "fill and a cancellation are indistinguishable without a baseline"
+    )
+
+
 def _final_position_verdict(
     *,
     gateway_client: Any,
@@ -342,15 +588,24 @@ class GmxV2RunnerHookConnector(
             )
 
         if observation_state is None:
-            if len(still_pending) != len(requested_keys):
-                return _observation_failed(
-                    "GMX order left the pending set before a position baseline could be measured"
+            if len(still_pending) == len(requested_keys):
+                return _capture_settlement_baseline(
+                    gateway_client=gateway_client,
+                    chain=chain,
+                    wallet_address=wallet_address,
+                    requested_keys=requested_keys,
                 )
-            return _capture_settlement_baseline(
+            # At least one order is already gone and no baseline exists. It can never
+            # re-enter the pending set, so no later poll can capture one — decide now
+            # from the absolute goal state instead of polling to the deadline.
+            return _baseline_free_verdict(
                 gateway_client=gateway_client,
                 chain=chain,
                 wallet_address=wallet_address,
                 requested_keys=requested_keys,
+                requested_deltas=requested_deltas,
+                intent=intent,
+                still_pending=still_pending,
             )
 
         if not isinstance(observation_state, _GmxSettlementBaseline):
