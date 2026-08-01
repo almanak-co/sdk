@@ -150,11 +150,19 @@ def test_measured_zero_flows_are_byte_identical() -> None:
         "nav_usd": Decimal("1000"),
         "lifetime_pnl_usd": Decimal("0"),
         "lifetime_pnl_pct": Decimal("0"),
-        "net_apr_pct": Decimal("0"),
+        # VIB-6283 (deliberate contract change): this fixture's window is
+        # shorter than the minimum annualisation period, so APR is UNMEASURED.
+        # It previously fabricated Decimal("0"), which renders "0.00%" and
+        # reads as "this strategy returned zero" when the truth is "not
+        # computable yet". Empty ≠ Zero.
+        "net_apr_pct": None,
         "max_drawdown_pct": Decimal("0"),
         "current_drawdown_pct": Decimal("0"),
         "value_confidence": "HIGH",
         "age_days": 0,
+        # VIB-6283: fractional elapsed days — the annualisation denominator,
+        # split from the whole-day DISPLAY value above.
+        "age_days_exact": Decimal("0"),
         "capital_flows_unmeasured": False,
         "deployed_capital_usd": Decimal("0"),
         "available_cash_usd": Decimal("1000"),
@@ -259,7 +267,14 @@ async def test_rpc_measured_path_wire_unchanged() -> None:
     assert proto.deployed_usd == "800"
     assert proto.lifetime_pnl_usd == "200"
     assert proto.lifetime_pnl_pct == "25.00"
-    assert proto.net_apr_pct == "0.00"
+    # VIB-6283 (contract change): this fixture's window is shorter than the
+    # minimum annualisation period, so net_apr_pct is UNMEASURED and serialises
+    # as the "" sentinel — it used to fabricate "0.00", which reads as "this
+    # strategy returned 0%" when the truth is "not computable yet". The wire
+    # encoding itself is unchanged: VIB-5866 already defined "" as unmeasured
+    # here and the client already decodes it via _safe_optional_decimal, so an
+    # existing client needs no change.
+    assert proto.net_apr_pct == ""
 
 
 def test_client_decodes_empty_string_as_unmeasured() -> None:

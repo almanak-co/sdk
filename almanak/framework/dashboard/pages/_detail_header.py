@@ -284,6 +284,14 @@ _STRATEGY_APR_HELP = (
 # unaffected; above it, a 0 cost basis means "unmeasured", not "free money".
 _COST_BASIS_DUST_USD = Decimal("0.01")
 
+# VIB-6283 — minimum observation window before a return may be annualised.
+# Annualising multiplies the observed return by 365/age, so a 2-minute window
+# scales noise by ~260,000 and yields a confident absurdity. One hour is short
+# enough that a normal 6 h test run reports an APR (the symptom this fixes) and
+# long enough that the multiplier stays under ~9,000. Below the floor the tile
+# renders "—": not-yet-computable, never a fabricated zero.
+_MIN_ANNUALISATION_DAYS = Decimal("1") / Decimal("24")
+
 
 def _net_realized_pnl_usd(cost: CostStackInfo) -> Decimal:
     """Realized component PnL from accounting — mirrors the G6 component
@@ -292,9 +300,23 @@ def _net_realized_pnl_usd(cost: CostStackInfo) -> Decimal:
     + interest net − gas. Wallet-independent (sourced from accounting_events,
     not wallet cash deltas), so idle balances never leak in.
     """
+    # VIB-6283: ``fees_earned_usd`` is None only when the bucket does not APPLY
+    # (no LP close / collect row exists yet), and a non-applicable bucket really
+    # does contribute zero. When it applies, the value is always carried — even
+    # if only some events supplied their term — so the partial sum lands here
+    # rather than being dropped.
+    #
+    # An earlier revision gated the WIRE value on ``fees_earned_measured`` and
+    # claimed here that this "matches the pre-VIB-6283 behaviour exactly, so
+    # Strategy PnL does not move". That was false on the partial case, which the
+    # corpus says is the common one: two LP closes, one without
+    # ``fees_total_usd``, blanked the whole bucket and this ``or Decimal("0")``
+    # booked real measured fee income as zero — understating the headline by the
+    # full amount. Coverage now travels as ``cost.fees_earned_measured``; read
+    # THAT to caveat a tile, never the absence of the number.
     return (
         cost.realized_pnl_usd
-        + cost.fees_earned_usd
+        + (cost.fees_earned_usd or Decimal("0"))
         + (cost.funding_earned_usd - cost.funding_paid_usd)
         + (cost.interest_earned_usd - cost.interest_paid_usd)
         - cost.cost_gas_usd
@@ -337,13 +359,34 @@ def _strategy_pnl_usd(p: PnLSummary, cost: CostStackInfo | None, open_position_n
     return _net_realized_pnl_usd(cost) + unrealized + inventory_unrealized
 
 
-def _strategy_apr_pct(strategy_pnl: Decimal | None, deployed_capital_usd: Decimal, age_days: int) -> Decimal | None:
+def _strategy_apr_pct(
+    strategy_pnl: Decimal | None,
+    deployed_capital_usd: Decimal,
+    age_days: int,
+    age_days_exact: Decimal | None = None,
+) -> Decimal | None:
     """Annualised Strategy PnL ÷ open cost basis. ``None`` when undefined — no
     realized data, sub-dust cost basis (nothing meaningfully deployed —
-    avoids astronomical APR from a dust denominator), or zero age."""
-    if strategy_pnl is None or deployed_capital_usd <= _COST_BASIS_DUST_USD or age_days <= 0:
+    avoids astronomical APR from a dust denominator), or too-short a window.
+
+    VIB-6283 — annualise on FRACTIONAL days. ``age_days`` is whole days, so a
+    6 h run gave a denominator of ``0`` and this returned ``None``: the APR
+    tile could not populate on ANY run shorter than 24 h. That was the single
+    highest-frequency symptom in the dashboard-audit corpus (16 of 26 blind
+    audits), and it was arithmetic, not missing data.
+
+    ``age_days_exact`` is ``None`` only against a gateway predating the field;
+    we then fall back to whole days, reproducing the old behaviour exactly
+    rather than silently changing what an old gateway reports.
+
+    A floor of :data:`_MIN_ANNUALISATION_DAYS` still applies: annualising a
+    two-minute window multiplies noise by ~260,000 and produces a confident
+    absurdity. Below the floor the honest answer is "not yet", i.e. ``None``.
+    """
+    age = age_days_exact if age_days_exact is not None else Decimal(str(age_days))
+    if strategy_pnl is None or deployed_capital_usd <= _COST_BASIS_DUST_USD or age < _MIN_ANNUALISATION_DAYS:
         return None
-    return (strategy_pnl / deployed_capital_usd) * Decimal("365") / Decimal(str(age_days)) * Decimal("100")
+    return (strategy_pnl / deployed_capital_usd) * Decimal("365") / age * Decimal("100")
 
 
 def render_money_trail(p: PnLSummary, cost: CostStackInfo | None = None) -> None:
@@ -481,7 +524,7 @@ def render_money_trail(p: PnLSummary, cost: CostStackInfo | None = None) -> None
                 help=_STRATEGY_PNL_HELP,
             )
     with c7:
-        apr = _strategy_apr_pct(strategy_pnl, p.deployed_capital_usd, p.age_days)
+        apr = _strategy_apr_pct(strategy_pnl, p.deployed_capital_usd, p.age_days, p.age_days_exact)
         st.metric(
             "Strategy APR",
             f"{_pct(apr)} APR" if apr is not None else "—",
@@ -527,6 +570,38 @@ def render_cost_stack(cost: CostStackInfo) -> None:
         if cost.cost_slippage_usd is None
         else f"<span style='color:#f44336;'>Slip −{format_usd(cost.cost_slippage_usd, precise_small=True)}</span>"
     )
+    # VIB-6283: Earn = LP fees + lending interest. LP fees are presence-aware
+    # (None until a close / collect lands); interest is a non-optional Decimal,
+    # so its zero is always a MEASURED zero. Previously this summed an
+    # unconditional Decimal("0") LP leg and printed a bare "Earn +$0.00" over a
+    # position with real accrued fees — the unmeasured leg vanished into the
+    # total.
+    #
+    # The first version of this fix branched on
+    # ``fees_earned_usd is None and interest_earned_usd == 0`` and rendered
+    # "— unmeasured". That inverted Empty≠Zero in the opposite direction: a
+    # lending-only strategy with a genuinely measured $0 of interest and no LP
+    # leg at all read as unmeasured. Value is not applicability. The suffix
+    # already carries the partial-measurement signal, so there is no branch to
+    # make: render the measured total and name what is missing beside it.
+    earn_total = (cost.fees_earned_usd or Decimal("0")) + cost.interest_earned_usd
+    # Caveat only when the bucket APPLIES but is incompletely covered. Keying
+    # this off ``fees_earned_usd is None`` (the old shape) captioned every
+    # perp / lending / TA strategy with "(LP fees unmeasured)" forever, for a
+    # quantity that is not unmeasured but INAPPLICABLE — the same "value is not
+    # applicability" error the interest leg above avoids.
+    # Three states, three captions. ``fees_earned_partial`` says an LP fee leg
+    # EXISTS but is not fully covered; the value then says how much of it we
+    # have. No flag at all means either a complete measurement or no LP leg —
+    # and a strategy with no LP leg must not be captioned about LP fees, which
+    # is the "value is not applicability" error the interest leg above avoids.
+    if not cost.fees_earned_partial:
+        earn_suffix = ""
+    elif cost.fees_earned_usd is None:
+        earn_suffix = " <span style='color:#888;'>(LP fees unmeasured)</span>"
+    else:
+        earn_suffix = " <span style='color:#888;'>(LP fees partially measured)</span>"
+    earn_html = f"<span style='color:#00c853;'>Earn +{format_usd(earn_total, precise_small=True)}</span>{earn_suffix}"
     cost_html = (
         f"<div style='color:#888;font-size:0.85rem;'>Cost stack (LTD)</div>"
         f"<div style='font-size:0.95rem;line-height:1.5;'>"
@@ -536,7 +611,7 @@ def render_cost_stack(cost: CostStackInfo) -> None:
         # reads as "$0.00", and honour Empty≠Zero for the unmeasured fee/slip case.
         f"{fees_html}<br>"
         f"{slip_html}<br>"
-        f"<span style='color:#00c853;'>Earn +{format_usd(cost.fees_earned_usd + cost.interest_earned_usd, precise_small=True)}</span><br>"
+        f"{earn_html}<br>"
         # VIB-4984: swap-inventory unrealized as its own line.
         f"{inv_html}"
         f"</div>"

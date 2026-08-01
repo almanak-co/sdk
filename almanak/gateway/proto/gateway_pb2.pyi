@@ -8640,6 +8640,7 @@ class PnLSummary(_message.Message):
     CURRENT_DRAWDOWN_PCT_FIELD_NUMBER: _builtins.int
     VALUE_CONFIDENCE_FIELD_NUMBER: _builtins.int
     AGE_DAYS_FIELD_NUMBER: _builtins.int
+    AGE_DAYS_EXACT_FIELD_NUMBER: _builtins.int
     DEPLOYED_CAPITAL_USD_FIELD_NUMBER: _builtins.int
     AVAILABLE_CASH_USD_FIELD_NUMBER: _builtins.int
     OPEN_POSITION_COUNT_FIELD_NUMBER: _builtins.int
@@ -8664,6 +8665,15 @@ class PnLSummary(_message.Message):
     value_confidence: _builtins.str
     """HIGH | ESTIMATED | STALE | UNAVAILABLE"""
     age_days: _builtins.int
+    """WHOLE elapsed days — a DISPLAY label ("0d age")"""
+    age_days_exact: _builtins.str
+    """VIB-6283: FRACTIONAL elapsed days, decimal string ("" when unknown). The
+    annualisation denominator. ``age_days`` floors to whole days, so every run
+    shorter than 24 h annualised against 0 and the APR tile could only render
+    "—" — the highest-frequency symptom in the dashboard-audit corpus (16/26).
+    ADDITIVE + optional: an old gateway leaves this "" and the client falls
+    back to ``age_days``, reproducing the previous behaviour exactly.
+    """
     deployed_capital_usd: _builtins.str
     """Position + cash
     open positions (sum of cost bases)
@@ -8708,6 +8718,7 @@ class PnLSummary(_message.Message):
         current_drawdown_pct: _builtins.str = ...,
         value_confidence: _builtins.str = ...,
         age_days: _builtins.int = ...,
+        age_days_exact: _builtins.str = ...,
         deployed_capital_usd: _builtins.str = ...,
         available_cash_usd: _builtins.str = ...,
         open_position_count: _builtins.int = ...,
@@ -8718,7 +8729,7 @@ class PnLSummary(_message.Message):
         perp_positions: _abc.Iterable[Global___PerpPositionSummary] | None = ...,
         positions_as_of: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["age_days", b"age_days", "available_cash_usd", b"available_cash_usd", "current_drawdown_pct", b"current_drawdown_pct", "deployed_capital_usd", b"deployed_capital_usd", "deployed_usd", b"deployed_usd", "lifetime_pnl_pct", b"lifetime_pnl_pct", "lifetime_pnl_usd", b"lifetime_pnl_usd", "max_drawdown_pct", b"max_drawdown_pct", "nav_usd", b"nav_usd", "net_apr_pct", b"net_apr_pct", "open_position_count", b"open_position_count", "perp_positions", b"perp_positions", "positions_as_of", b"positions_as_of", "primary_risk_color", b"primary_risk_color", "primary_risk_kind", b"primary_risk_kind", "primary_risk_label", b"primary_risk_label", "primary_risk_value", b"primary_risk_value", "value_confidence", b"value_confidence"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["age_days", b"age_days", "age_days_exact", b"age_days_exact", "available_cash_usd", b"available_cash_usd", "current_drawdown_pct", b"current_drawdown_pct", "deployed_capital_usd", b"deployed_capital_usd", "deployed_usd", b"deployed_usd", "lifetime_pnl_pct", b"lifetime_pnl_pct", "lifetime_pnl_usd", b"lifetime_pnl_usd", "max_drawdown_pct", b"max_drawdown_pct", "nav_usd", b"nav_usd", "net_apr_pct", b"net_apr_pct", "open_position_count", b"open_position_count", "perp_positions", b"perp_positions", "positions_as_of", b"positions_as_of", "primary_risk_color", b"primary_risk_color", "primary_risk_kind", b"primary_risk_kind", "primary_risk_label", b"primary_risk_label", "primary_risk_value", b"primary_risk_value", "value_confidence", b"value_confidence"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___PnLSummary: _TypeAlias = PnLSummary  # noqa: Y015
@@ -8814,6 +8825,8 @@ class CostStackInfo(_message.Message):
     REALIZED_PNL_USD_FIELD_NUMBER: _builtins.int
     IL_USD_FIELD_NUMBER: _builtins.int
     INVENTORY_UNREALIZED_USD_FIELD_NUMBER: _builtins.int
+    FEES_EARNED_PARTIAL_FIELD_NUMBER: _builtins.int
+    IL_PARTIAL_FIELD_NUMBER: _builtins.int
     cost_gas_usd: _builtins.str
     cost_protocol_fees_usd: _builtins.str
     cost_slippage_usd: _builtins.str
@@ -8829,6 +8842,43 @@ class CostStackInfo(_message.Message):
     """VIB-4984: mark-to-market of held directional swap inventory.
     Empty string => unmeasured (None client-side), NOT zero (Empty≠Zero).
     """
+    fees_earned_partial: _builtins.bool
+    """VIB-6283: measurement COVERAGE for the two LP buckets, carried beside the
+    value instead of overloading the ""-sentinel on it.
+
+    The ""-sentinel answers "is there a MEASURED number to carry" — it is sent
+    whenever no applicable event contributed its term. Read together with the
+    flag it distinguishes three states, and the two ""-states are NOT the same
+    thing:
+
+      ""      + partial=false -> INAPPLICABLE. No LP close/collect exists; a
+                                 perp / lending / swap strategy. Tile shows "—"
+                                 and says nothing about LP fees.
+      ""      + partial=true  -> APPLICABLE BUT UNMEASURED. An LP event landed
+                                 and supplied no term (e.g. a bundled-fee close
+                                 the parser could not attribute). Tile shows "—"
+                                 AND names the LP leg as unmeasured.
+      <value> + partial=true  -> PARTIAL. A real measured sum, incomplete.
+      <value> + partial=false -> fully measured.
+
+    These bools answer the question "did some applicable LP event fail to
+    contribute its term". Folding both
+    onto one string dropped real money: a strategy with two closes, one
+    carrying ``fees_total_usd`` and one not, sent "" and the client's
+    ``_net_realized_pnl_usd`` turned that into ``Decimal("0")`` — the Strategy
+    PnL headline silently lost the measured fee income of the first close.
+    18 of 66 LP_CLOSE rows in the 2026-06/07 corpus carry no ``fees_total_usd``,
+    so partial coverage is the common case, not the corner.
+
+    Stated as PARTIAL rather than MEASURED so that proto3's ``false`` default
+    is the harmless answer. An old gateway omits the field, the client reads
+    ``false`` = "no reason to caveat", and it keeps the value it was already
+    being sent — exactly pre-VIB-6283 behaviour. A ``measured`` spelling would
+    make the same absence mean "unmeasured" and caption every old-gateway
+    deployment forever, and proto3 gives no way to tell an omitted bool from a
+    deliberate ``false``.
+    """
+    il_partial: _builtins.bool
     def __init__(
         self,
         *,
@@ -8843,8 +8893,10 @@ class CostStackInfo(_message.Message):
         realized_pnl_usd: _builtins.str = ...,
         il_usd: _builtins.str = ...,
         inventory_unrealized_usd: _builtins.str = ...,
+        fees_earned_partial: _builtins.bool = ...,
+        il_partial: _builtins.bool = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["cost_gas_usd", b"cost_gas_usd", "cost_protocol_fees_usd", b"cost_protocol_fees_usd", "cost_slippage_usd", b"cost_slippage_usd", "fees_earned_usd", b"fees_earned_usd", "funding_earned_usd", b"funding_earned_usd", "funding_paid_usd", b"funding_paid_usd", "il_usd", b"il_usd", "interest_earned_usd", b"interest_earned_usd", "interest_paid_usd", b"interest_paid_usd", "inventory_unrealized_usd", b"inventory_unrealized_usd", "realized_pnl_usd", b"realized_pnl_usd"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["cost_gas_usd", b"cost_gas_usd", "cost_protocol_fees_usd", b"cost_protocol_fees_usd", "cost_slippage_usd", b"cost_slippage_usd", "fees_earned_partial", b"fees_earned_partial", "fees_earned_usd", b"fees_earned_usd", "funding_earned_usd", b"funding_earned_usd", "funding_paid_usd", b"funding_paid_usd", "il_partial", b"il_partial", "il_usd", b"il_usd", "interest_earned_usd", b"interest_earned_usd", "interest_paid_usd", b"interest_paid_usd", "inventory_unrealized_usd", b"inventory_unrealized_usd", "realized_pnl_usd", b"realized_pnl_usd"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___CostStackInfo: _TypeAlias = CostStackInfo  # noqa: Y015

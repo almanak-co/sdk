@@ -28,6 +28,7 @@ from almanak.connectors._strategy_base.lending_read_registry import LendingReadR
 from almanak.connectors._strategy_base.perps_read_registry import PerpsReadRegistry
 from almanak.framework.data.market_snapshot import DEFAULT_STABLECOINS
 from almanak.framework.portfolio.models import (
+    STRATEGY_REPORTED_VALUATION_SOURCE,
     PortfolioSnapshot,
     PositionValue,
     TokenBalance,
@@ -4349,10 +4350,57 @@ class PortfolioValuer:
         strategy-reported value (an explicit assertion we trust); otherwise flag
         ``no_path`` so the snapshot confidence drops to UNAVAILABLE rather than
         masquerading as a measured zero.
+
+        VIB-6283: the fallback also stamps ``valuation_source`` so a downstream
+        reader can tell *why* the mark is estimated — see
+        :meth:`_strategy_reported_details`.
         """
         if position.value_usd > 0:
-            return position.value_usd, {"valuation_status": "estimated"}, True
+            return position.value_usd, PortfolioValuer._strategy_reported_details(), True
         return position.value_usd, {}, False
+
+    @staticmethod
+    def _strategy_reported_details() -> dict[str, Any]:
+        """Provenance for a mark that is the STRATEGY'S OWN number, not a measurement.
+
+        VIB-6283 limb 2. When no on-chain path can value a position, the valuer may
+        still carry the strategy's self-reported ``value_usd`` so the position does
+        not vanish from NAV. That number is an *assertion*, not a measurement: for a
+        concentrated-liquidity LP it is typically the **requested** deployment amount
+        frozen at config time, while the real position's composition drifts with
+        price from the first block (V4 mints only what the range needs and refunds
+        the rest, so requested ≠ actual is the norm there).
+
+        Field-proven on mainnet 2026-07-31 (batch ``20260731-1745-lpdash4``): a V4
+        leg whose real cost basis was $2.6373 and whose realized PnL was -$0.0026
+        persisted ``total_value_usd = 4.4434`` — exactly ``config.amount0 × price +
+        config.amount1`` — at **HIGH** confidence for 48 consecutive snapshots,
+        rendering ``Strategy PnL +$1.80 (+68.28%)``.
+
+        Two stamps, because they answer different questions:
+
+        * ``valuation_status="estimated"`` — degrades the SNAPSHOT confidence to
+          ESTIMATED (:meth:`_determine_value_confidence`), so the row can never read as
+          measured on-chain truth.
+        * ``valuation_source="strategy_reported"`` — names the mark as unmeasured
+          so NAV-derived *ratios* (drawdown, PnL %) can exclude it. Confidence alone
+          cannot carry this: ``ESTIMATED`` is also stamped by genuinely-measured
+          approximate paths (a CEX estimate, a price-ratio tick reconstruction), and
+          those SHOULD stay in the folds. Without a distinct marker the drawdown
+          fold keeps every ESTIMATED sample by design
+          (``quant_aggregations.py`` ``_wallet_navs_from_nav_text``) — which is why
+          the phantom above manufactured a **23.14%** max-drawdown badge on a leg
+          whose measured drawdown was **0.35%**.
+
+        Deliberately NOT ``no_path``: that would drop the whole snapshot to
+        UNAVAILABLE (:meth:`_determine_value_confidence` — one unvalued position poisons the
+        row), and ``_build_metrics_for_snapshot`` then writes NO
+        ``portfolio_metrics`` row at all. Every LP family without a registered
+        repricer (traderjoe_v2 bin LP, meteora, orca, raydium, Pendle LP) would lose
+        its entire dashboard rather than gain an honest one. Keep the mark, name it
+        unmeasured, and let the ratio consumers refuse it.
+        """
+        return {"valuation_status": "estimated", "valuation_source": STRATEGY_REPORTED_VALUATION_SOURCE}
 
     def _resolve_v4_pool_key(self, position: "PositionInfo", chain: str) -> Any | None:
         """Resolve the canonical V4 PoolKey from the position's pool_id via the gateway.
@@ -4397,8 +4445,68 @@ class PortfolioValuer:
         carries a 40-hex pool *contract* address (or none), since a V4 pool has no
         contract address (it lives in the singleton PoolManager). This keeps the
         framework valuer free of any hardcoded ``"uniswap_v4"`` protocol string.
+
+        VIB-6283: shape alone is NOT a safe router — see
+        :meth:`_is_v4_family_protocol`. This predicate is retained because a
+        64-hex pool id positively identifies a V4 position even from a connector
+        that has not declared family membership, and because the pool id it
+        extracts is what the V4 gateway lookup needs. Callers must treat it as
+        *identity evidence*, never as the sole dispatch gate.
         """
         return cls._extract_v4_pool_id(position) is not None
+
+    @staticmethod
+    def _is_v4_family_protocol(protocol: str) -> bool:
+        """Does ``protocol`` belong to the Uniswap-V4 LP grouping family?
+
+        VIB-6283 limb 2 — the routing half. :meth:`_is_v4_lp_position` gates on a
+        64-hex PoolKey hash in the position's ``details``, but the **shipped**
+        ``uniswap_v4_hooks`` demo reports ``details["pool"] = "WETH/USDC/3000"`` —
+        a human label from ``config.json`` — with no ``pool_id`` and no
+        ``pool_address``. It computes the real pool id during discovery, logs it,
+        and then drops it. So the shape gate returned ``False`` for the only V4
+        strategy that ships in the box: the entire VIB-5018 / VIB-5024 / VIB-4586
+        two-tier V4 valuation never ran in production, and the V4 tokenId fell
+        into the V3 ``positions(uint256)`` read instead — the exact mis-route
+        VIB-5018 exists to prevent. 48 consecutive ``LP reprice miss`` lines on
+        mainnet, one per snapshot.
+
+        The class of bug is a detector tested only against a shape its producer
+        never emits: every test in ``test_v4_lp_valuation_vib5018.py`` builds its
+        fixture with a 64-hex ``pool_address``, so the fixture shape and the
+        shipped-strategy shape had never met.
+
+        Family membership is the durable discriminator: it is declared by the
+        connector itself (``uniswap_v4/protocol_family.py`` →
+        ``ProtocolFamily.UNIV4_LP_GROUPING``) and reaches us through the
+        framework-side registry-derived union, so this stays free of any
+        hardcoded connector name and honours the same VIB-4636 discipline the
+        shape gate was written for. Identity (the pool id) is still resolved from
+        data shape *inside* the V4 path — shape validates, family routes.
+
+        Fails safe on any registry problem: an unpopulated / unimportable
+        registry returns ``False``, which is exactly today's behaviour.
+
+        It fails safe **loudly**. Silently returning ``False`` reverts to the
+        pre-VIB-6283 shape-only routing — i.e. the dead V4 path this method
+        exists to fix — and the whole point of that defect was that it left no
+        trace for 48 consecutive snapshots. A fail-safe whose failure mode is
+        invisible reproduces the bug it guards.
+        """
+        if not protocol:
+            return False
+        try:
+            from almanak.framework.intents.compiler_constants import UNIV4_LP_GROUPING_PROTOCOLS
+        except Exception:  # noqa: BLE001 — registry unavailable ⇒ shape-only routing (status quo)
+            logger.warning(
+                "V4 LP-grouping protocol registry unavailable — falling back to shape-only "
+                "routing for protocol=%s. V4 positions that do not publish a 64-hex pool_id "
+                "will fall through to the generic LP tail and be marked strategy_reported.",
+                protocol,
+                exc_info=True,
+            )
+            return False
+        return protocol.strip().lower() in UNIV4_LP_GROUPING_PROTOCOLS
 
     @staticmethod
     def _extract_v4_pool_id(position: "PositionInfo") -> str | None:
@@ -5569,7 +5677,7 @@ class PortfolioValuer:
           F3.1: only flag ``no_path`` when no value source exists anywhere —
           a strategy-reported ``value_usd > 0`` is a value we trust.
         """
-        if self._is_v4_lp_position(position):
+        if self._is_v4_lp_position(position) or self._is_v4_family_protocol(position.protocol):
             return self._reprice_v4_lp_enriched(position, chain, market)
 
         if self._fungible_lp_reader.supports(position.protocol):
@@ -5595,7 +5703,15 @@ class PortfolioValuer:
         if result is not None:
             return result[0], result[1], True
         if position.value_usd > 0:
-            return position.value_usd, {}, True
+            # VIB-6283 limb 2 — carry the strategy's number so the position does not
+            # vanish from NAV, but STAMP IT AS UNMEASURED. This branch used to return
+            # ``{}`` (no marker) with ``repriced=True``, which persisted a frozen,
+            # config-derived estimate at HIGH confidence — the only LP branch in this
+            # dispatch that did so. Its two siblings above (fungible, Curve) already
+            # refuse to trust a strategy mark, and the Curve comment names this very
+            # line as "the stale strategy estimate" it routes around. See
+            # ``_strategy_reported_details`` for the field-proven failure.
+            return position.value_usd, self._strategy_reported_details(), True
         return position.value_usd, {}, False
 
     def _reprice_fungible_lp_enriched(

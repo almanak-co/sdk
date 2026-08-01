@@ -643,6 +643,49 @@ def _build_paper_metrics(
     }
 
 
+def cost_stack_to_proto(cs: Any) -> gateway_pb2.CostStackInfo:
+    """Serialise a ``CostStack`` onto the wire (VIB-5942 / VIB-4984 / VIB-6283).
+
+    Module-level and public on purpose: this is the only place the dashboard's
+    money crosses the gateway boundary, and while it lived inline inside
+    ``GetCostStack`` nothing could test it. That gap is not hypothetical — a
+    revision of this function gated the ``fees_earned_usd`` VALUE on the
+    all-or-nothing ``fees_earned_measured`` meter, silently deleting real
+    measured fee income from the Strategy PnL headline, and the whole unit
+    suite plus a 17-mutation harness stayed green because no test and no
+    mutation anchor could reach the expression.
+
+    Two orthogonal signals, deliberately not folded together:
+
+    * the ``""`` sentinel  -> the bucket is INAPPLICABLE (no contributing event
+      exists at all). The client reads ``None`` and renders "—". Never "$0.00":
+      a fabricated zero here contradicted ~$88 of fees genuinely owed on-chain
+      on a real fork.
+    * ``*_measured``        -> every applicable event supplied its term. False
+      with a value present means "this sum is REAL but partial" — show it and
+      caption it. Dropping it is what cost the headline its money.
+    """
+    return gateway_pb2.CostStackInfo(
+        cost_gas_usd=str(cs.gas_usd),
+        cost_protocol_fees_usd=(str(cs.protocol_fees_usd) if cs.protocol_fees_measured else ""),
+        cost_slippage_usd=(str(cs.slippage_usd) if cs.slippage_measured else ""),
+        fees_earned_usd=(str(cs.fees_earned_usd) if cs.fees_earned_any_measured else ""),
+        interest_paid_usd=str(cs.interest_paid_usd),
+        interest_earned_usd=str(cs.interest_earned_usd),
+        funding_paid_usd=str(cs.funding_paid_usd),
+        funding_earned_usd=str(cs.funding_earned_usd),
+        realized_pnl_usd=str(cs.realized_pnl_usd),
+        il_usd=(str(cs.il_usd) if cs.il_any_measured else ""),
+        # Coverage travels BESIDE the value, never as an absence of it.
+        # PARTIAL = the bucket applies but some applicable event withheld its
+        # term. Not-applicable is already said by the ""-sentinel above, so it
+        # must not also raise this flag.
+        fees_earned_partial=(cs.fees_earned_applicable and not cs.fees_earned_measured),
+        il_partial=(cs.il_applicable and not cs.il_measured),
+        inventory_unrealized_usd=("" if cs.inventory_unrealized_usd is None else str(cs.inventory_unrealized_usd)),
+    )
+
+
 class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
     """Implements DashboardService gRPC interface.
 
@@ -2699,6 +2742,9 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             current_drawdown_pct=f"{pnl.current_drawdown_pct:.2f}",
             value_confidence=serialize_value_confidence(pnl.value_confidence),
             age_days=pnl.age_days,
+            # VIB-6283: fractional age as a decimal string; the annualisation
+            # denominator. "" would mean unknown — we always have it here.
+            age_days_exact=str(pnl.age_days_exact),
             deployed_capital_usd=str(pnl.deployed_capital_usd),
             available_cash_usd=str(pnl.available_cash_usd),
             open_position_count=pnl.open_position_count,
@@ -2772,25 +2818,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                 accounting_events, deployment_id, latest_token_prices
             )
 
-        return gateway_pb2.CostStackInfo(
-            cost_gas_usd=str(cs.gas_usd),
-            # Empty≠Zero (VIB-5942): "" => UNMEASURED (no contributing event carried
-            # the term, e.g. a perp whose receipt parser hasn't populated fees yet),
-            # presence-aware on the client. A MEASURED value (incl. a measured "0")
-            # is stringified. Same ""-sentinel convention as inventory_unrealized.
-            cost_protocol_fees_usd=(str(cs.protocol_fees_usd) if cs.protocol_fees_measured else ""),
-            cost_slippage_usd=(str(cs.slippage_usd) if cs.slippage_measured else ""),
-            fees_earned_usd=str(cs.fees_earned_usd),
-            interest_paid_usd=str(cs.interest_paid_usd),
-            interest_earned_usd=str(cs.interest_earned_usd),
-            funding_paid_usd=str(cs.funding_paid_usd),
-            funding_earned_usd=str(cs.funding_earned_usd),
-            realized_pnl_usd=str(cs.realized_pnl_usd),
-            il_usd=str(cs.il_usd),
-            # Empty string => unmeasured (None); presence-aware on the client
-            # side. Never coerce None → "0" (Empty≠Zero).
-            inventory_unrealized_usd=("" if cs.inventory_unrealized_usd is None else str(cs.inventory_unrealized_usd)),
-        )
+        return cost_stack_to_proto(cs)
 
     async def GetAuditPosture(
         self,

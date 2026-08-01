@@ -447,6 +447,78 @@ def _pt_strategy_positions_from_snapshot(
     return out
 
 
+#: ``PositionValue.details`` keys carrying an LP position's CURRENT token
+#: composition as the valuer measured it, plus the provenance a reader needs to
+#: decide whether to trust it. Mirrors the field names the valuer stamps in
+#: ``portfolio_valuer._reprice_lp_*_enriched``.
+_LP_COMPOSITION_DETAIL_KEYS: tuple[str, ...] = (
+    "amount0",
+    "amount1",
+    "token0_symbol",
+    "token1_symbol",
+    "valuation_source",
+    "valuation_status",
+    "in_range",
+)
+
+
+def _lp_strategy_positions_from_snapshot(
+    snapshot: PortfolioSnapshot | None,
+) -> list[gateway_pb2.StrategyPosition]:
+    """Surface LP rows' MEASURED composition to the dashboard (VIB-6283 limb 2).
+
+    **Test location is a known gap (VIB-6337).** The path instruction for
+    ``almanak/gateway/**`` is "changes require gateway unit tests
+    (``tests/gateway/``)", and this helper's coverage currently lives in
+    ``tests/unit/dashboard/test_lp_composition_source_vib6283.py::TestGatewaySurfacesLpComposition``
+    — the behaviour IS proven, but from the dashboard lane, so a gateway-only
+    change could regress it without the gateway suite going red. Flagged by
+    CodeRabbit on PR #3532; moved to a ticket rather than fixed here to keep
+    that PR scoped to the money defect.
+
+    The valuer already re-prices an LP position every snapshot and stamps the
+    live ``amount0`` / ``amount1`` (plus ``valuation_source``) into
+    ``positions_json``. Nothing carried that to the dashboard, so the LP
+    "Position Status" card had only two candidate sources — the wallet's token
+    balances and the LP_OPEN event's mint amounts — and **both are wrong**: the
+    first is not the position at all, the second is frozen at entry. On mainnet
+    the card showed a V3 position's composition unchanged to the digit across a
+    4-hour in-range price move while ``positions_json`` recorded it moving
+    0.000910 → 0.001355 WETH.
+
+    This reuses the existing ``strategy_positions`` seam rather than adding a
+    surface: the same channel already carries valuer-computed PT inventory
+    (VIB-5317), and the proto needs no change. Read-only and additive — rows are
+    appended, never replacing ``token_balances`` or the registry positions.
+
+    Empty ≠ Zero: only keys the valuer actually stamped are copied, so a missing
+    composition stays missing rather than becoming a zero the card would render
+    as a real amount.
+    """
+    if snapshot is None or not getattr(snapshot, "positions", None):
+        return []
+    out: list[gateway_pb2.StrategyPosition] = []
+    for pos in snapshot.positions:
+        if str(getattr(pos.position_type, "value", pos.position_type)) != "LP":
+            continue
+        details = getattr(pos, "details", None) or {}
+        proto_details = {k: str(details[k]) for k in _LP_COMPOSITION_DETAIL_KEYS if details.get(k) not in (None, "")}
+        if not proto_details:
+            continue
+        position_id = str(details.get("position_id") or details.get("token_id") or pos.label or "")
+        sp = gateway_pb2.StrategyPosition(
+            position_type="LP",
+            position_id=position_id,
+            chain=pos.chain,
+            protocol=pos.protocol,
+            details=proto_details,
+        )
+        if pos.value_usd is not None:
+            sp.value_usd = str(pos.value_usd)
+        out.append(sp)
+    return out
+
+
 def build_position_proto(
     state: dict | None,
     cached_positions: Any,
@@ -522,6 +594,12 @@ def build_position_proto(
     # is the ONLY hop that gets them onto the displayed surface. Inserted BEFORE
     # the heartbeat-cached positions so the operator sees inventory first.
     position.strategy_positions.extend(_pt_strategy_positions_from_snapshot(snapshot))
+
+    # Measured LP composition (VIB-6283 limb 2). Carries the valuer's live
+    # ``amount0``/``amount1`` + provenance so the LP dashboard's Position Status
+    # card can render what the position IS right now, instead of falling back to
+    # wallet balances or the frozen LP_OPEN mint amounts.
+    position.strategy_positions.extend(_lp_strategy_positions_from_snapshot(snapshot))
 
     # Include cached strategy positions from heartbeat
     if cached_positions:

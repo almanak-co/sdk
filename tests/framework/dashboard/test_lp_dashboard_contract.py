@@ -94,16 +94,62 @@ class TestPrepareProducesAllCriticalKeys:
         result = prepare_lp_session_state(mock_api_client, config=config)
         assert result["in_range"] is None
 
-    def test_token_amounts_matched_by_symbol(self, mock_api_client, config):
-        result = prepare_lp_session_state(mock_api_client, config=config)
-        assert result["token0_amount"] == 0.0176
-        assert result["token1_amount"] == 42.49
+    def test_token_amounts_come_from_the_measured_lp_position(self, mock_api_client, config):
+        """VIB-6283: composition is the POSITION's, never the wallet's.
 
-    def test_token_amounts_symbol_match_is_case_insensitive(self, mock_api_client, config):
+        This test previously asserted that the wallet's WETH/USDC balances became
+        ``token0_amount``/``token1_amount``. They are different quantities: a
+        strategy holding 0.0176 WETH in its wallet while its LP holds 0.0009 WETH
+        would render the wallet figure as the position's. It now reads the
+        composition the valuer measured for the LP itself.
+        """
         mock_api_client.get_position.return_value = {
             "token_balances": [
-                {"symbol": "weth", "balance": "1.0", "value_usd": "2000"},
-                {"symbol": "usdc", "balance": "500", "value_usd": "500"},
+                # Present, realistic, and deliberately DIFFERENT from the position —
+                # a regression that re-reads the wallet fails loudly here.
+                {"symbol": "WETH", "balance": "0.0176", "value_usd": "41.52"},
+                {"symbol": "USDC", "balance": "42.49", "value_usd": "42.49"},
+            ],
+            "strategy_positions": [
+                {
+                    "position_type": "LP",
+                    "position_id": "4977387",
+                    "chain": "base",
+                    "protocol": "uniswap_v3",
+                    "value_usd": "84.01",
+                    "details": {
+                        "amount0": "0.0009713",
+                        "amount1": "2.23",
+                        "token0_symbol": "WETH",
+                        "token1_symbol": "USDC",
+                        "valuation_source": "on_chain",
+                    },
+                }
+            ],
+        }
+        result = prepare_lp_session_state(mock_api_client, config=config)
+        assert result["token0_amount"] == 0.0009713
+        assert result["token1_amount"] == 2.23
+
+    def test_token_amounts_symbol_match_is_case_insensitive(self, mock_api_client, config):
+        """Symbol matching survives the source change (now against the LP row)."""
+        mock_api_client.get_position.return_value = {
+            "token_balances": [],
+            "strategy_positions": [
+                {
+                    "position_type": "LP",
+                    "position_id": "4977387",
+                    "chain": "base",
+                    "protocol": "uniswap_v3",
+                    "value_usd": "2500",
+                    "details": {
+                        "amount0": "1.0",
+                        "amount1": "500",
+                        "token0_symbol": "weth",
+                        "token1_symbol": "usdc",
+                        "valuation_source": "on_chain",
+                    },
+                }
             ],
         }
         result = prepare_lp_session_state(mock_api_client, config=config)
@@ -144,10 +190,19 @@ class TestPrepareGracefulDegradation:
     """prepare_lp_session_state should degrade gracefully, never crash."""
 
     def test_position_api_failure(self, mock_api_client, config):
+        """A failed read is UNMEASURED, not a zero holding (VIB-6283, Empty ≠ Zero).
+
+        Previously asserted ``== 0``. A gateway that is merely unreachable would
+        then render the position as empty — the same conflation that let a dead
+        panel pass for a flat strategy. The key still exists (LP_CRITICAL_KEYS);
+        its value is ``None`` and the panel shows an em-dash.
+        """
         mock_api_client.get_position.side_effect = Exception("network error")
         result = prepare_lp_session_state(mock_api_client, config=config)
-        assert result["token0_amount"] == 0
-        assert result["token1_amount"] == 0
+        assert "token0_amount" in result
+        assert "token1_amount" in result
+        assert result["token0_amount"] is None
+        assert result["token1_amount"] is None
 
     def test_empty_state(self, mock_api_client, config):
         mock_api_client.get_state.return_value = {}
@@ -215,11 +270,30 @@ class TestPrepareGracefulDegradation:
         assert result["range_lower"] == "1234.5"
         assert result["range_upper"] == "2345.6"
 
-    def test_no_token_balances_defaults_to_zero(self, mock_api_client, config):
-        mock_api_client.get_position.return_value = {"token_balances": []}
+    def test_no_measured_composition_is_unmeasured_not_zero(self, mock_api_client, config):
+        """VIB-6283: this test previously asserted the defect it was written to guard.
+
+        It was ``test_no_token_balances_defaults_to_zero`` and asserted
+        ``token0_amount == 0.0`` when the wallet reported no balances. Two things
+        were wrong with that, and the mainnet run made both visible:
+
+        1. **Wallet balances are not LP composition.** ``_load_token_amounts`` read
+           ``get_position()["token_balances"]`` — the wallet's holdings — and
+           presented them as the position's. That is how a torn-down strategy
+           rendered ``Position ID: None`` above ``WETH 0.001723 / USDC 1.56``.
+        2. **Empty ≠ Zero.** "We have no measurement" rendered as a real ``0``
+           holding, indistinguishable from a genuinely empty position.
+
+        The key must still EXIST (the LP_CRITICAL_KEYS contract, asserted by
+        ``test_all_critical_keys_present``) — it is now present and ``None``, which
+        the panel renders as an em-dash.
+        """
+        mock_api_client.get_position.return_value = {"token_balances": [], "strategy_positions": []}
         result = prepare_lp_session_state(mock_api_client, config=config)
-        assert result["token0_amount"] == 0.0
-        assert result["token1_amount"] == 0.0
+        assert "token0_amount" in result
+        assert "token1_amount" in result
+        assert result["token0_amount"] is None
+        assert result["token1_amount"] is None
 
     def test_get_state_failure_still_produces_all_keys(self, mock_api_client, config):
         mock_api_client.get_state.side_effect = Exception("gateway unavailable")

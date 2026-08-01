@@ -251,6 +251,13 @@ class PnLSummary:
     # the client renders no perp section (additive/optional; degrades cleanly).
     perp_positions: list[PerpPositionInfo] = field(default_factory=list)
     positions_as_of: str = ""  # ISO ts of the source snapshot ("" if none)
+    # VIB-6283: fractional elapsed days — the annualisation denominator.
+    # ``age_days`` above is whole days and is a DISPLAY label only; annualising
+    # on it made APR uncomputable on every run shorter than 24 h. Additive +
+    # optional (defaulted) so an old gateway, and every existing constructor,
+    # keep working: ``None`` ⇒ callers fall back to ``age_days``, reproducing
+    # the previous behaviour exactly rather than silently changing it.
+    age_days_exact: Decimal | None = None
 
     def __post_init__(self) -> None:
         """Canonicalize direct/legacy construction to the typed vocabulary."""
@@ -270,16 +277,32 @@ class CostStackInfo:
     # on the wire, same as inventory_unrealized_usd.
     cost_protocol_fees_usd: Decimal | None
     cost_slippage_usd: Decimal | None
-    fees_earned_usd: Decimal
+    # VIB-6283 (Empty≠Zero): None = UNMEASURED, renders "—". An OPEN LP
+    # position has no LP_CLOSE / LP_COLLECT_FEES row yet, so both are None
+    # until one lands — distinct from a measured Decimal("0") (a close that
+    # genuinely earned nothing / had zero IL).
+    fees_earned_usd: Decimal | None
     interest_paid_usd: Decimal
     interest_earned_usd: Decimal
     funding_paid_usd: Decimal
     funding_earned_usd: Decimal
     realized_pnl_usd: Decimal
-    il_usd: Decimal
+    il_usd: Decimal | None
     # VIB-4984: mark-to-market of held directional swap inventory.
     # None = unmeasured (Empty≠Zero), set presence-aware from the proto.
     inventory_unrealized_usd: Decimal | None = None
+    # VIB-6283: measurement COVERAGE for the LP pair above. Read these, not the
+    # ``is None`` of the value, to decide whether to caveat a bucket — ``None``
+    # alone is ambiguous and conflating its two meanings is the bug this pair
+    # exists to remove:
+    #   None,      partial False -> INAPPLICABLE (no LP leg at all)  -> "—", no caveat
+    #   None,      partial True  -> applicable but NOTHING measured  -> "—" + "unmeasured"
+    #   value set, partial True  -> a REAL sum missing some terms    -> value + "partial"
+    #   value set, partial False -> fully measured                   -> value
+    # ``False`` default = "no reason to caveat", which is what an old gateway
+    # that never sends the field should mean. Money is never gated on these.
+    fees_earned_partial: bool = False
+    il_partial: bool = False
 
 
 @dataclass
@@ -404,6 +427,7 @@ def _convert_pnl_summary(proto: gateway_pb2.PnLSummary) -> PnLSummary:
             field_name="PnLSummary.value_confidence",
         ),
         age_days=proto.age_days,
+        age_days_exact=_safe_optional_decimal(proto.age_days_exact),
         deployed_capital_usd=_safe_decimal(proto.deployed_capital_usd),
         available_cash_usd=_safe_decimal(proto.available_cash_usd),
         open_position_count=proto.open_position_count,
@@ -444,15 +468,19 @@ def _convert_cost_stack(proto: gateway_pb2.CostStackInfo) -> CostStackInfo:
         cost_gas_usd=_safe_decimal(proto.cost_gas_usd),
         cost_protocol_fees_usd=_safe_optional_decimal(proto.cost_protocol_fees_usd),
         cost_slippage_usd=_safe_optional_decimal(proto.cost_slippage_usd),
-        fees_earned_usd=_safe_decimal(proto.fees_earned_usd),
+        # VIB-6283: presence-aware — "" => None (unmeasured), never Decimal("0").
+        fees_earned_usd=_safe_optional_decimal(proto.fees_earned_usd),
         interest_paid_usd=_safe_decimal(proto.interest_paid_usd),
         interest_earned_usd=_safe_decimal(proto.interest_earned_usd),
         funding_paid_usd=_safe_decimal(proto.funding_paid_usd),
         funding_earned_usd=_safe_decimal(proto.funding_earned_usd),
         realized_pnl_usd=_safe_decimal(proto.realized_pnl_usd),
-        il_usd=_safe_decimal(proto.il_usd),
+        il_usd=_safe_optional_decimal(proto.il_usd),
         # VIB-4984: presence-aware — "" => None (unmeasured), never Decimal("0").
         inventory_unrealized_usd=_safe_optional_decimal(proto.inventory_unrealized_usd),
+        # VIB-6283: coverage flags, carried beside the values above.
+        fees_earned_partial=bool(proto.fees_earned_partial),
+        il_partial=bool(proto.il_partial),
     )
 
 

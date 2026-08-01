@@ -35,10 +35,11 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from almanak.framework.observability.ledger import LedgerQuantStats, lenient_ledger_decimal
-from almanak.framework.portfolio.models import ValueConfidence
+from almanak.framework.portfolio.models import STRATEGY_REPORTED_VALUATION_SOURCE, ValueConfidence
 from almanak.framework.valuation.net_debt import (
     net_debt_from_positions_json,
     net_debt_from_snapshot,
+    parse_positions_payload,
     read_position_decimal,
     wallet_nav_usd,
 )
@@ -235,6 +236,27 @@ class CostStack:
     funding_earned_usd: Decimal = Decimal("0")
     realized_pnl_usd: Decimal = Decimal("0")
     il_usd: Decimal = Decimal("0")  # diagnostic (not in net PnL)
+    # VIB-6283 (Empty≠Zero): the LP earn / IL buckets have exactly the same
+    # measured-vs-unmeasured ambiguity the fee / slippage buckets above got
+    # flags for in VIB-5942, and for a sharper reason — ``lp_accounting``
+    # already emits ``fees_total_usd = None`` / ``il_usd = None`` when the
+    # quantity is unmeasurable (bundled-fee close it could not attribute, an
+    # N-coin pool with no two-token HODL anchor), and the LP fold used to
+    # flatten that ``None`` into a confident ``Decimal("0")`` via
+    # ``_payload_decimal``'s "0" default. 18 of 66 LP_CLOSE rows in the
+    # 2026-06/07 run corpus carry no ``fees_total_usd`` at all, so that
+    # fabrication was reaching real dashboards. A bucket is measured only when
+    # every applicable LP event contributed its term.
+    fees_earned_measured: bool = False
+    # Whether the bucket APPLIES at all (>= 1 LP close / collect), and whether
+    # ANY applicable event actually contributed a term. See the three-state
+    # comment in ``compute_cost_stack``: applicable drives the caveat,
+    # any_measured drives whether a number is carried at all.
+    fees_earned_applicable: bool = False
+    il_applicable: bool = False
+    fees_earned_any_measured: bool = False
+    il_any_measured: bool = False
+    il_measured: bool = False
     # VIB-4984: mark-to-market of held directional swap inventory (e.g. RSI
     # net-long WETH). None = unmeasured (Empty≠Zero), NOT Decimal("0").
     # Computed separately by compute_inventory_unrealized (needs token prices)
@@ -523,6 +545,9 @@ class PnLSummary:
     current_drawdown_pct: Decimal = Decimal("0")
     value_confidence: ValueConfidence | None = None
     age_days: int = 0
+    # VIB-6283: fractional elapsed days — the annualisation denominator.
+    # ``age_days`` above is the whole-day DISPLAY label.
+    age_days_exact: Decimal = Decimal("0")
     # VIB-5866: True when ``deposits_usd`` / ``withdrawals_usd`` could not be
     # measured, so the three metrics above are suppressed. Diagnostic for local
     # renderers; the gateway wire signal is the empty string on those fields.
@@ -572,6 +597,9 @@ class QuantHeader:
     current_drawdown_pct: Decimal = Decimal("0")
     value_confidence: ValueConfidence | None = None
     age_days: int = 0
+    # VIB-6283: fractional elapsed days — the annualisation denominator.
+    # ``age_days`` above is the whole-day DISPLAY label.
+    age_days_exact: Decimal = Decimal("0")
     capital_flows_unmeasured: bool = False
     deployed_capital_usd: Decimal = Decimal("0")
     available_cash_usd: Decimal = Decimal("0")
@@ -803,6 +831,9 @@ def compute_cost_stack(
     # measured only when EVERY applicable event contributed its term.
     fee_meter = [0, 0]
     slip_meter = [0, 0]
+    # VIB-6283: same [applicable, measured] shape for the LP earn / IL buckets.
+    earn_meter = [0, 0]
+    il_meter = [0, 0]
     # VIB-3872 WI-4: per-component supersession. The estimate branch merges each
     # economic field (settlement-measured-else-estimate); the settlement branch folds
     # only ORPHAN settlements (no submission estimate present). Together: exactly one
@@ -855,10 +886,43 @@ def compute_cost_stack(
         # LP family
         if event_type == "LP_OPEN":
             continue
-        if event_type == "LP_CLOSE":
-            stack.fees_earned_usd += _payload_decimal(payload, "fees_total_usd")
-            stack.realized_pnl_usd += _payload_decimal(payload, "realized_pnl_usd")
-            stack.il_usd += _payload_decimal(payload, "il_usd")
+        if event_type in ("LP_CLOSE", "LP_COLLECT_FEES"):
+            # VIB-6283 — two fixes to one branch.
+            #
+            # (1) ``LP_COLLECT_FEES`` was never folded here. It is a
+            #     first-class accounting event (FIFO basis replay at
+            #     ``basis.py``'s ``_replay_lp``; emitted by every LP
+            #     connector) and it CREDITS the wallet, so a strategy that
+            #     harvests fees without closing had real USD income landing
+            #     in wallet PnL but never in Σ component PnL — a G6 gap whose
+            #     true cause was a missing fold. No double-count risk: a
+            #     CLOSE's ``fees_total_usd`` covers only the fees collected in
+            #     that close tx, mid-life harvests having already been paid
+            #     out on their own ``LP_COLLECT_FEES`` rows.
+            #
+            # (2) ``_payload_decimal`` defaults a missing / empty key to
+            #     ``Decimal("0")``, destroying the unmeasured signal
+            #     ``lp_accounting`` deliberately preserves as ``None``. Use
+            #     the presence-aware twin + meters, exactly as the SWAP branch
+            #     above does for fees / slippage (VIB-5942).
+            _accumulate_term(stack, "fees_earned_usd", earn_meter, _payload_decimal_or_none(payload, "fees_total_usd"))
+            # realized PnL and IL are CLOSE-ONLY. A fee harvest disposes of no
+            # principal, so neither is realised by it — and the producer's
+            # number for a COLLECT is actively wrong to fold:
+            # ``lp_handler._lp_close_realized_pnl`` runs for the whole
+            # ``_LP_CLOSE_LIKE`` set and computes ``cost_basis_usd -
+            # open_basis``, where a COLLECT's ``cost_basis_usd`` is only the USD
+            # value of the fees collected. On a $1,000 position harvesting $10
+            # that emits ``realized_pnl_usd ≈ -990`` — the still-deployed
+            # principal booked as a realized loss. Widening this branch to
+            # LP_COLLECT_FEES for the fee-income fix above must therefore NOT
+            # widen the realized/IL folds with it. (The producer emitting a
+            # meaningless realized_pnl_usd on a COLLECT at all is tracked
+            # separately; the dashboard refusing to fold it is correct either
+            # way.)
+            if event_type == "LP_CLOSE":
+                stack.realized_pnl_usd += _payload_decimal(payload, "realized_pnl_usd")
+                _accumulate_term(stack, "il_usd", il_meter, _payload_decimal_or_none(payload, "il_usd"))
             continue
 
         # PERP family — a measured EXECUTED PERP_SETTLEMENT supersedes the ESTIMATED
@@ -873,6 +937,35 @@ def compute_cost_stack(
     # Any-missing → unmeasured ("" sentinel on the wire → "— unmeasured").
     stack.protocol_fees_measured = fee_meter[0] > 0 and fee_meter[1] == fee_meter[0]
     stack.slippage_measured = slip_meter[0] > 0 and slip_meter[1] == slip_meter[0]
+    # VIB-6283 — same rule for the LP buckets. Note what "unmeasured" means for
+    # an OPEN LP position: no LP_CLOSE / LP_COLLECT_FEES row exists yet, so
+    # ``earn_meter[0] == 0`` and the tile renders "—". That is the honest
+    # answer. Fees ARE accruing on-chain (a real fork with induced volume shows
+    # ~$88 owed on a $1.26M position), but nothing in the accounting lane has
+    # measured them until a collect or close lands — and "we have not measured
+    # this" must never be rendered as "$0.00".
+    stack.fees_earned_measured = earn_meter[0] > 0 and earn_meter[1] == earn_meter[0]
+    stack.il_measured = il_meter[0] > 0 and il_meter[1] == il_meter[0]
+    # Three states, not two — collapsing them to two is what cost the headline
+    # its money in one direction and fabricated a $0 in the other:
+    #
+    #   any_measured False              -> NOTHING was measured. "" on the wire,
+    #                                      "—" on the tile. A close that carried
+    #                                      no ``fees_total_usd`` at all must not
+    #                                      render "$0.00" (18 of 66 corpus rows).
+    #   any_measured True, measured False-> PARTIAL. The sum is REAL — it is the
+    #                                      fees we did measure — and must travel,
+    #                                      flagged. Dropping it understated
+    #                                      Strategy PnL by exactly that amount.
+    #   measured True                   -> complete.
+    #
+    # ``applicable`` (>=1 LP event) is a fourth, separate fact: it distinguishes
+    # "no LP leg at all" from "an LP leg we failed to measure", which is what
+    # keeps the caveat off every perp / lending / swap strategy.
+    stack.fees_earned_applicable = earn_meter[0] > 0
+    stack.il_applicable = il_meter[0] > 0
+    stack.fees_earned_any_measured = earn_meter[1] > 0
+    stack.il_any_measured = il_meter[1] > 0
     return stack
 
 
@@ -1100,8 +1193,20 @@ def compute_reconciliation(
             # compute_cost_stack — keep both sites in lockstep so the
             # reconciliation buckets agree on the SWAP signal.
             sum_swap += _payload_decimal(payload, "realized_pnl_usd_matched", "realized_pnl_usd")
-        elif event_type == "LP_CLOSE":
-            sum_lp += _payload_decimal(payload, "realized_pnl_usd")
+        elif event_type in ("LP_CLOSE", "LP_COLLECT_FEES"):
+            # VIB-6283: mirrors the compute_cost_stack LP branch — keep both
+            # folds in lockstep (the same lockstep note the SWAP branch above
+            # makes). A mid-life LP_COLLECT_FEES credits the wallet, so
+            # omitting it here left its income in wallet PnL but absent from
+            # Σ component PnL, i.e. a G6 gap reported as "unexplained" when the
+            # real cause was this missing fold. Lockstep also means the
+            # realized-PnL half stays CLOSE-only here for the same reason it
+            # does there: a COLLECT's producer-side ``realized_pnl_usd`` is
+            # ``fees_value - full_open_basis``, so folding it would book the
+            # still-deployed principal as a realized loss and blow up the very
+            # G6 gap this branch was widened to close.
+            if event_type == "LP_CLOSE":
+                sum_lp += _payload_decimal(payload, "realized_pnl_usd")
             sum_fees += _payload_decimal(payload, "fees_total_usd")
         elif event_type in ("PERP_CLOSE", "PERP_SETTLEMENT"):
             # WI-4: per-component supersession (settlement-measured-else-estimate),
@@ -1455,9 +1560,24 @@ def _drawdowns(snapshots: list[Any]) -> tuple[Decimal, Decimal]:
     trusted as a measured sample; folding one would manufacture a drawdown or move
     the high-watermark. ``ESTIMATED`` / ``STALE`` remain valued because they are
     priced, merely imprecise or late. Unknown strings fail at this named boundary.
+
+    VIB-6283: and skip snapshots carrying a ``strategy_reported`` mark, by the
+    same rule and the same predicate the lifetime path uses. This is NOT a
+    duplicate gate — it is the SECOND drawdown entrypoint.
+    :func:`compute_pnl_summary` falls back here whenever the lifetime scan is
+    unavailable (no state manager, empty series, or a transient
+    ``get_nav_series`` failure — ``dashboard_service._get_lifetime_drawdown``
+    returns ``None``), so gating only the lifetime reader left the documented
+    graceful-degrade path folding exactly the phantom this fix exists to remove.
+    Both PR #3532 reviewers found this independently; the fault was fixing one
+    entrypoint of a two-entrypoint rule.
     """
     values: list[Decimal] = []
     for snap in snapshots:
+        if _snapshot_has_strategy_reported_mark(snap):
+            # Checked BEFORE the confidence gate: such a row is typically
+            # stamped ESTIMATED, which that gate deliberately keeps.
+            continue
         confidence = _snapshot_value_confidence(snap, field_name="drawdown snapshot.value_confidence")
         if confidence is None or confidence == ValueConfidence.UNAVAILABLE:
             continue
@@ -1540,6 +1660,70 @@ def fold_drawdowns(state: DrawdownState, navs: Iterable[Decimal]) -> DrawdownSta
     return DrawdownState(running_peak=running_peak, max_drawdown=max_dd, latest_nav=latest)
 
 
+def _snapshot_positions(snap: Any) -> list[Any]:
+    """Positions of a snapshot object OR dict row, typed-first (VIB-6283).
+
+    **Precedence mirrors :func:`net_debt_from_snapshot` deliberately, line for
+    line.** ``StateManager.get_recent_snapshots`` returns typed
+    ``PortfolioSnapshot`` objects on both backends, and a real
+    ``PortfolioSnapshot`` has **no** ``positions_json`` attribute — reading it
+    yields ``None``, the caller silently no-ops, and the feature is inert in
+    production while every dict-shaped unit test passes. That is VIB-5170,
+    which `net_debt.py` documents eight lines into the sibling helper this
+    module already imports. The first version of this accessor read
+    ``positions_json`` only and reproduced VIB-5170 exactly: `_drawdowns`
+    returned a 74% max-drawdown on the very phantom the gate was added to
+    refuse. Do not "simplify" this back to a single attribute read.
+    """
+    positions = getattr(snap, "positions", None)
+    if positions is not None and not isinstance(snap, dict):
+        return list(positions)
+    if isinstance(snap, dict):
+        payload = snap.get("positions_json")
+        if payload is None:
+            payload = snap.get("positions")
+    else:
+        payload = getattr(snap, "positions_json", None)
+    return parse_positions_payload(payload)
+
+
+def _position_is_strategy_reported(position: Any) -> bool:
+    """Is this ONE position valued from the strategy's self-report? (VIB-6283)
+
+    Shape-tolerant on purpose: the lifetime path parses JSON text into ``dict``
+    rows while the recent-window path holds typed ``PositionValue`` dataclasses.
+    A dict-only check made the second path inert — the same half of the VIB-5170
+    trap as the accessor above, and the reason this predicate is a named
+    function rather than an inline expression at two call sites.
+    """
+    details = getattr(position, "details", None)
+    if details is None and isinstance(position, dict):
+        details = position.get("details")
+    return isinstance(details, dict) and details.get("valuation_source") == STRATEGY_REPORTED_VALUATION_SOURCE
+
+
+def _snapshot_has_strategy_reported_mark(snap: Any) -> bool:
+    """Provenance gate for a snapshot OBJECT (the recent-window drawdown path)."""
+    return any(_position_is_strategy_reported(p) for p in _snapshot_positions(snap))
+
+
+def _has_strategy_reported_mark(positions_json: Any) -> bool:
+    """Provenance gate for a raw ``positions_json`` PAYLOAD (the lifetime path).
+
+    ``True`` when ANY position in the payload was valued from the strategy's own
+    self-report rather than a measurement — one such position is enough to make
+    the row's ``total_value_usd`` untrustworthy as a NAV sample, exactly as one
+    unmeasured position makes an ``UNAVAILABLE`` row's NAV deflated.
+
+    Reuses :func:`parse_positions_payload` so the text/dict/list/envelope
+    unwrapping has one owner — hand-rolling ``json.loads`` here would silently
+    return ``[]`` for the already-deserialized payloads hosted Postgres hands
+    back (the VIB-5170 inert-feature bug), and the gate would never fire in
+    hosted mode.
+    """
+    return any(_position_is_strategy_reported(p) for p in parse_positions_payload(positions_json))
+
+
 def _wallet_navs_from_nav_text(rows: Iterable[tuple[Any, ...]]) -> list[Decimal]:
     """Positive, debt-netted wallet-NAVs from ``get_nav_series`` rows (Empty≠Zero).
 
@@ -1583,9 +1767,37 @@ def _wallet_navs_from_nav_text(rows: Iterable[tuple[Any, ...]]) -> list[Decimal]
     (lifetime drawdown is a default header metric that must degrade gracefully). A
     row with no confidence element, ``""``, or ``None`` is unmeasured and skipped;
     an unknown non-empty value is surfaced as an error instead of being trusted.
+
+    **VIB-6283 strategy-reported gate.** The paragraph above is right that an
+    ``ESTIMATED`` snapshot is normally "priced, just imprecisely" — but one
+    ``ESTIMATED`` producer is not priced at all: when no on-chain path can value a
+    position, the valuer may carry the STRATEGY'S OWN reported number, which for
+    an LP is typically its *requested* config amounts, frozen at entry. That mark
+    is stamped ``valuation_source="strategy_reported"``
+    (:data:`STRATEGY_REPORTED_VALUATION_SOURCE`) and is skipped here for exactly
+    the reason an unmeasured confidence is: it does not track the position, so
+    folding it manufactures a drawdown out of the *mark's* movement rather than
+    the portfolio's.
+
+    Field-proven: on mainnet a V4 leg carried a frozen $4.4434 mark for its whole
+    hold, then went to $0 at close. The fold read that evaporation as a real
+    drawdown and rendered **-23.1% max DD** on a position that lost **$0.0078**;
+    re-folding the same series against the measured value gives **0.35%**. And
+    because max-drawdown is a running EXTREME it *latches* — the badge stayed
+    wrong permanently even after the mark itself corrected at close. Demoting the
+    mark's confidence alone cannot fix this: ``ESTIMATED`` is deliberately still
+    valued by the gate above, which is why provenance is a separate axis from
+    confidence.
     """
     navs: list[Decimal] = []
     for row in rows:
+        if len(row) > 4 and _has_strategy_reported_mark(row[4]):
+            # Not a measurement — see the VIB-6283 paragraph above. Same
+            # skip-carry-forward policy: the running peak is left untouched rather
+            # than being set by a number nobody measured. Checked BEFORE the
+            # confidence gate because such a row is typically stamped ESTIMATED,
+            # which that gate deliberately keeps.
+            continue
         raw_confidence = row[5] if len(row) > 5 else None
         confidence = ValueConfidence.parse_optional(
             raw_confidence,
@@ -1662,15 +1874,42 @@ def lifetime_drawdowns_from_nav_text(
     return fold_nav_text(_EMPTY_DRAWDOWN_STATE, rows).as_pcts()
 
 
-def _annualised_return(initial_value: Decimal, current_value: Decimal, age_days: int) -> Decimal:
-    """Naïve annualised return = (NAV/Deployed - 1) × 365 / age_days × 100."""
-    if initial_value <= Decimal("0") or age_days <= 0:
-        return Decimal("0")
+# VIB-6283 — see ``pages/_detail_header._MIN_ANNUALISATION_DAYS``. Kept in
+# lockstep with that constant: the two annualisation sites must agree on when a
+# window is too short to annualise, or they reproduce the very disagreement
+# (one "—", one "0.00%") this change removes.
+_MIN_ANNUALISATION_DAYS = Decimal("1") / Decimal("24")
+
+
+def _annualised_return(initial_value: Decimal, current_value: Decimal, age_days: Decimal | int) -> Decimal | None:
+    """Naïve annualised return = (NAV/Deployed - 1) × 365 / age_days × 100.
+
+    VIB-6283 — two fixes.
+
+    ``age_days`` is now FRACTIONAL (see :func:`strategy_age_days_exact`). It
+    used to be integer floor days, so every run shorter than 24 h annualised
+    against a denominator of ``0`` and fell into the guard below.
+
+    The guard used to ``return Decimal("0")`` — a FABRICATED ZERO that read as
+    "this strategy returned 0 %" when the truth was "not computable yet". It
+    now returns ``None`` (unmeasured), matching ``_strategy_apr_pct``, which
+    returned ``None`` on the identical condition. Two computations of
+    annualised return with opposite Empty≠Zero behaviour was itself a bug.
+    """
+    age = Decimal(str(age_days))
+    if initial_value <= Decimal("0") or age < _MIN_ANNUALISATION_DAYS:
+        return None
     raw = (current_value - initial_value) / initial_value
-    return raw * Decimal("365") / Decimal(str(age_days)) * Decimal("100")
+    return raw * Decimal("365") / age * Decimal("100")
 
 
-def _strategy_age_days(portfolio_metrics: Any) -> int:
+def _strategy_age_seconds(portfolio_metrics: Any) -> int:
+    """Elapsed seconds since the strategy's first measured value, or 0.
+
+    VIB-6283 — the shared, unquantised age primitive. Both the DISPLAY age
+    (whole days, "3d age") and the ANNUALISATION denominator (fractional days)
+    derive from this, so they can never disagree about how old a run is.
+    """
     initial_ts = getattr(portfolio_metrics, "initial_timestamp", None)
     if not initial_ts:
         return 0
@@ -1684,7 +1923,26 @@ def _strategy_age_days(portfolio_metrics: Any) -> int:
     except (ValueError, TypeError):
         return 0
     delta: timedelta = datetime.now(tz=UTC) - initial_dt
-    return max(int(delta.total_seconds() // 86400), 0)
+    return max(int(delta.total_seconds()), 0)
+
+
+def _strategy_age_days(portfolio_metrics: Any) -> int:
+    """Whole elapsed days — the DISPLAY value ("0d age" on a 6 h run).
+
+    Correct as a label; it was never correct as an annualisation denominator.
+    Use :func:`strategy_age_days_exact` for that.
+    """
+    return _strategy_age_seconds(portfolio_metrics) // 86400
+
+
+def strategy_age_days_exact(portfolio_metrics: Any) -> Decimal:
+    """Fractional elapsed days — the ANNUALISATION denominator (VIB-6283).
+
+    ``_strategy_age_days`` floors to whole days, so a 6 h run yielded ``0`` and
+    every annualised figure on a sub-24 h run was suppressed or fabricated.
+    A 6 h run is ``Decimal("0.25")`` here.
+    """
+    return Decimal(_strategy_age_seconds(portfolio_metrics)) / Decimal("86400")
 
 
 # ---------------------------------------------------------------------------
@@ -1807,6 +2065,7 @@ def compute_pnl_summary(
         deposits = _to_decimal_or_none(getattr(portfolio_metrics, "deposits_usd", "0"))
         withdrawals = _to_decimal_or_none(getattr(portfolio_metrics, "withdrawals_usd", "0"))
         pnl.age_days = _strategy_age_days(portfolio_metrics)
+        pnl.age_days_exact = strategy_age_days_exact(portfolio_metrics)
 
     if deposits is None or withdrawals is None:
         # No flow adjustment at all — adding a half-measured flow would be as
@@ -1848,7 +2107,7 @@ def compute_pnl_summary(
         pnl.lifetime_pnl_usd = wallet_nav - pnl.deployed_usd
         if pnl.deployed_usd > Decimal("0"):
             pnl.lifetime_pnl_pct = (pnl.lifetime_pnl_usd / pnl.deployed_usd) * Decimal("100")
-        pnl.net_apr_pct = _annualised_return(pnl.deployed_usd, wallet_nav, pnl.age_days)
+        pnl.net_apr_pct = _annualised_return(pnl.deployed_usd, wallet_nav, pnl.age_days_exact)
 
     # VIB-3914: Open exposure must read from accounting_events when the
     # snapshot writer has not summed open-position cost basis (the
@@ -2040,6 +2299,7 @@ def build_quant_header(
         current_drawdown_pct=pnl.current_drawdown_pct,
         value_confidence=pnl.value_confidence,
         age_days=pnl.age_days,
+        age_days_exact=pnl.age_days_exact,
         capital_flows_unmeasured=pnl.capital_flows_unmeasured,
         deployed_capital_usd=pnl.deployed_capital_usd,
         available_cash_usd=pnl.available_cash_usd,

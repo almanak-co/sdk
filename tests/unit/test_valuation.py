@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, PropertyMock, patch
 import pytest
 
 from almanak.framework.portfolio.models import (
+    STRATEGY_REPORTED_VALUATION_SOURCE,
     PortfolioSnapshot,
     TokenBalance,
     ValueConfidence,
@@ -361,7 +362,16 @@ class TestPortfolioValuer:
         assert snapshot.wallet_total_value_usd == Decimal("15000")  # 5000 wallet + 10000 LP
         assert len(snapshot.positions) == 1
         assert snapshot.positions[0].value_usd == Decimal("10000")
-        assert snapshot.value_confidence == ValueConfidence.HIGH
+        # VIB-6283: this asserted HIGH, which was the defect. The $10,000 is the
+        # STRATEGY'S OWN reported number — no on-chain repricer ran (no gateway,
+        # no accounting store), so nothing measured this position. Carrying it is
+        # correct (the position must not vanish from NAV); calling it HIGH is not.
+        # On mainnet that exact combination persisted a frozen, config-derived
+        # $4.4434 mark at HIGH for 48 snapshots and rendered "+68.28%".
+        # The rest of this test's contract — position-scoped total, wallet
+        # separation, the position surviving into `positions` — is unchanged.
+        assert snapshot.value_confidence == ValueConfidence.ESTIMATED
+        assert snapshot.positions[0].details["valuation_source"] == STRATEGY_REPORTED_VALUATION_SOURCE
 
     def test_positions_failure_gives_estimated(self):
         """If get_open_positions raises, wallet values used with ESTIMATED confidence."""

@@ -499,20 +499,46 @@ class UniswapV4HooksStrategy(IntentStrategy[UniswapV4HooksConfig]):
                 t0_price = Decimal("0")
                 t1_price = Decimal("0")
 
+            details: dict[str, Any] = {
+                "pool": self.pool,
+                "hook_address": self.hook_address,
+                "hook_capabilities": self.hook_flags.active_flags,
+                "token0": self.token0_symbol,
+                "token1": self.token1_symbol,
+            }
+            # VIB-6283: publish the canonical 64-hex PoolKey hash we already
+            # resolved during discovery. ``details["pool"]`` is a human label
+            # ("WETH/USDC/3000"), NOT an identifier — the framework's V4 valuation
+            # path needs the real pool_id to look up the PoolKey, and without it
+            # this position used to fall into the Uniswap-V3 NFT read, which
+            # cannot value a V4 tokenId. We computed this id, logged it, and then
+            # threw it away.
+            pool_id = getattr(self._pool_discovery, "pool_id", None)
+            if pool_id:
+                details["pool_id"] = str(pool_id)
+
             positions.append(
                 PositionInfo(
                     position_type=PositionType.LP,
                     position_id=self._current_position_id,
                     chain=self.chain,
                     protocol="uniswap_v4",
+                    # VIB-6283 — this is a ROUGH SIZE ESTIMATE for the teardown
+                    # safety lane, NOT a portfolio mark. ``self.amount0/1`` are
+                    # the amounts requested from config; V4 mints only what the
+                    # tick range needs and refunds the rest, so this overstates a
+                    # real position from the first block. It is deliberately NOT
+                    # zeroed: ``TeardownPositionSummary`` totals feed
+                    # ``calculate_max_acceptable_loss``, where a $0 total selects
+                    # the most PERMISSIVE 3% loss cap (see
+                    # ``teardown/discovery.py:to_teardown_summary``) — zeroing it
+                    # to "stop inventing money" would quietly loosen a safety cap.
+                    # Portfolio valuation no longer trusts this number: the valuer
+                    # routes V4 by protocol family and re-marks the receipt-parsed
+                    # OPEN amounts, and any surviving self-report is stamped
+                    # ``valuation_source=strategy_reported``.
                     value_usd=self.amount0 * t0_price + self.amount1 * t1_price,
-                    details={
-                        "pool": self.pool,
-                        "hook_address": self.hook_address,
-                        "hook_capabilities": self.hook_flags.active_flags,
-                        "token0": self.token0_symbol,
-                        "token1": self.token1_symbol,
-                    },
+                    details=details,
                 )
             )
 

@@ -605,7 +605,10 @@ def test_lifetime_pnl_zero_when_wallet_is_only_native_gas():
     assert pnl.deployed_usd == eth_value
     assert pnl.nav_usd == eth_value
     assert pnl.lifetime_pnl_usd == Decimal("0")
-    assert pnl.net_apr_pct == Decimal("0")
+    # VIB-6283 (deliberate contract change): a gas-only wallet has no elapsed
+    # window past the annualisation floor, so APR is UNMEASURED and renders
+    # "—". It previously fabricated Decimal("0") → "0.00%". Empty ≠ Zero.
+    assert pnl.net_apr_pct is None
 
 
 def test_lifetime_pnl_phantom_gas_when_deployed_excludes_native_gas():

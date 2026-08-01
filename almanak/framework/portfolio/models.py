@@ -87,6 +87,34 @@ def serialize_value_confidence(confidence: ValueConfidence | None) -> str:
     return ValueConfidence.parse(confidence).value if confidence is not None else ""
 
 
+#: ``details["valuation_source"]`` marking a position mark that is the STRATEGY'S
+#: OWN reported number rather than any measurement (VIB-6283 limb 2).
+#:
+#: This is deliberately a distinct axis from :class:`ValueConfidence`. ``ESTIMATED``
+#: says "measured, but approximate" and is stamped by genuinely-measured paths (a CEX
+#: balance, a price-ratio tick reconstruction) whose samples SHOULD remain in
+#: NAV-derived series. ``strategy_reported`` says "not measured at all" — the number
+#: is an assertion the strategy made, typically its *requested* deployment amount
+#: frozen at config time. Confidence cannot carry that distinction, which is why the
+#: drawdown fold (keeping every ESTIMATED sample by design) let a phantom mark
+#: manufacture a 23.14% max-drawdown on a position whose measured drawdown was 0.35%.
+#:
+#: One owner, one spelling: producers stamp it via
+#: ``PortfolioValuer._strategy_reported_details()``; consumers compare against this
+#: constant. Never re-spell the literal at a call site.
+#:
+#: **Namespace warning.** ``valuation_source`` names two different things in this
+#: codebase and they must not be conflated. This one is a **position-level**
+#: ``PositionValue.details`` key describing how one leg was valued. There is also
+#: a **snapshot-level** ``valuation_source`` mirrored into ``StateData.state`` by
+#: ``runner_state._RECONCILIATION_STATE_KEYS``, which records external-reconciliation
+#: provenance for the whole snapshot; and a third, disjoint vocabulary
+#: (``"simple"`` / ``"portfolio_valuer"``) under ``backtesting/models.py``. No
+#: collision exists today because every reader compares against a specific value
+#: rather than testing for the key's presence — keep it that way.
+STRATEGY_REPORTED_VALUATION_SOURCE = "strategy_reported"
+
+
 @dataclass
 class TokenBalance:
     """Token balance with USD value.
@@ -432,6 +460,45 @@ class PortfolioSnapshot:
 _ZERO_VALUE_INVALID_POSITION_TYPES: frozenset[str] = frozenset({"LP", "SUPPLY", "VAULT", "STAKE"})
 
 
+def _guard_applies(snapshot: "PortfolioSnapshot") -> bool:
+    """Does the VIB-4970 $0-at-confidence guard run on this snapshot? (VIB-6283)
+
+    HIGH always. ESTIMATED **only when the snapshot carries a
+    ``strategy_reported`` leg** — this restores exactly the reach VIB-6283 took
+    away and not one row more.
+
+    Why the reach moved: the guard originally skipped every non-HIGH snapshot
+    ("already degraded; nothing to demote"), which was true while non-HIGH meant
+    the row was already known-bad. VIB-6283 then started demoting any snapshot
+    containing a strategy self-report to ESTIMATED — so a row that would have
+    been HIGH, and would have been caught, now walks past the guard while still
+    being persisted and still being folded into drawdown (ESTIMATED rows are
+    kept by design: priced, merely imprecise). That is directly reachable, not
+    theoretical: a strategy whose price lookup fails reports ``value_usd = 0``
+    for a genuinely open LP — the shipped ``uniswap_v4_hooks`` demo does exactly
+    that in its ``except`` clause.
+
+    Why not simply "HIGH or ESTIMATED": that would newly demote ESTIMATED
+    snapshots which are ESTIMATED for unrelated reasons (stale price, partial
+    data) and happen to hold a $0 open leg. Those were untouched before this PR,
+    and demoting them to UNAVAILABLE suppresses the whole ``portfolio_metrics``
+    row — the exact collateral damage this PR refused when it declined to fail
+    closed in the valuer. Repairing my own regression is in scope; widening a
+    money-safety guard past it is not.
+    ``tests/unit/runner/test_capture_portfolio_snapshot.py::test_non_high_snapshot_untouched``
+    pins that boundary and must stay green.
+    """
+    if snapshot.value_confidence == ValueConfidence.HIGH:
+        return True
+    if snapshot.value_confidence != ValueConfidence.ESTIMATED:
+        return False
+    return any(
+        isinstance(getattr(p, "details", None), dict)
+        and p.details.get("valuation_source") == STRATEGY_REPORTED_VALUATION_SOURCE
+        for p in snapshot.positions
+    )
+
+
 def find_zero_valued_open_positions(snapshot: "PortfolioSnapshot") -> list[PositionValue]:
     """Return long, value-bearing deployed positions valued at ``$0`` / negative.
 
@@ -484,13 +551,14 @@ def enforce_open_position_value_invariant(snapshot: "PortfolioSnapshot") -> "Por
     unchanged — the guard must never blanket-demote healthy rows. Non-HIGH
     snapshots are returned untouched (already degraded; nothing to demote).
     """
-    if snapshot.value_confidence != ValueConfidence.HIGH:
+    if not _guard_applies(snapshot):
         return snapshot
 
     offenders = find_zero_valued_open_positions(snapshot)
     if not offenders:
         return snapshot
 
+    refused_confidence = snapshot.value_confidence
     snapshot.value_confidence = ValueConfidence.UNAVAILABLE
     offender_ids = []
     for p in offenders:
@@ -503,7 +571,10 @@ def enforce_open_position_value_invariant(snapshot: "PortfolioSnapshot") -> "Por
         p.details["value_invariant_violation"] = "vib-4970"
 
     reason = (
-        "VIB-4970 writer invariant: refused HIGH confidence — "
+        # ``ValueConfidence`` is a StrEnum, so it formats as its own value. Used
+        # instead of ``.value`` because the field is typed ``… | None`` even
+        # though ``_guard_applies`` has already excluded None by construction.
+        f"VIB-4970 writer invariant: refused {refused_confidence} confidence — "
         f"{len(offenders)} open value-bearing position(s) valued at $0 "
         f"(unmeasured, not measured zero): {', '.join(offender_ids)}"
     )

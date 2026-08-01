@@ -3392,7 +3392,14 @@ message PnLSummary {
   string max_drawdown_pct = 6;
   string current_drawdown_pct = 7;
   string value_confidence = 8;      // HIGH | ESTIMATED | STALE | UNAVAILABLE
-  int64  age_days = 9;
+  int64  age_days = 9;            // WHOLE elapsed days — a DISPLAY label ("0d age")
+  // VIB-6283: FRACTIONAL elapsed days, decimal string ("" when unknown). The
+  // annualisation denominator. ``age_days`` floors to whole days, so every run
+  // shorter than 24 h annualised against 0 and the APR tile could only render
+  // "—" — the highest-frequency symptom in the dashboard-audit corpus (16/26).
+  // ADDITIVE + optional: an old gateway leaves this "" and the client falls
+  // back to ``age_days``, reproducing the previous behaviour exactly.
+  string age_days_exact = 10;
 
   // Position + cash
   string deployed_capital_usd = 20; // open positions (sum of cost bases)
@@ -3462,6 +3469,42 @@ message CostStackInfo {
   // VIB-4984: mark-to-market of held directional swap inventory.
   // Empty string => unmeasured (None client-side), NOT zero (Empty≠Zero).
   string inventory_unrealized_usd = 11;
+  // VIB-6283: measurement COVERAGE for the two LP buckets, carried beside the
+  // value instead of overloading the ""-sentinel on it.
+  //
+  // The ""-sentinel answers "is there a MEASURED number to carry" — it is sent
+  // whenever no applicable event contributed its term. Read together with the
+  // flag it distinguishes three states, and the two ""-states are NOT the same
+  // thing:
+  //
+  //   ""      + partial=false -> INAPPLICABLE. No LP close/collect exists; a
+  //                              perp / lending / swap strategy. Tile shows "—"
+  //                              and says nothing about LP fees.
+  //   ""      + partial=true  -> APPLICABLE BUT UNMEASURED. An LP event landed
+  //                              and supplied no term (e.g. a bundled-fee close
+  //                              the parser could not attribute). Tile shows "—"
+  //                              AND names the LP leg as unmeasured.
+  //   <value> + partial=true  -> PARTIAL. A real measured sum, incomplete.
+  //   <value> + partial=false -> fully measured.
+  //
+  // These bools answer the question "did some applicable LP event fail to
+  // contribute its term". Folding both
+  // onto one string dropped real money: a strategy with two closes, one
+  // carrying ``fees_total_usd`` and one not, sent "" and the client's
+  // ``_net_realized_pnl_usd`` turned that into ``Decimal("0")`` — the Strategy
+  // PnL headline silently lost the measured fee income of the first close.
+  // 18 of 66 LP_CLOSE rows in the 2026-06/07 corpus carry no ``fees_total_usd``,
+  // so partial coverage is the common case, not the corner.
+  //
+  // Stated as PARTIAL rather than MEASURED so that proto3's ``false`` default
+  // is the harmless answer. An old gateway omits the field, the client reads
+  // ``false`` = "no reason to caveat", and it keeps the value it was already
+  // being sent — exactly pre-VIB-6283 behaviour. A ``measured`` spelling would
+  // make the same absence mean "unmeasured" and caption every old-gateway
+  // deployment forever, and proto3 gives no way to tell an omitted bool from a
+  // deliberate ``false``.
+  bool fees_earned_partial = 12;
+  bool il_partial = 13;
 }
 
 // AuditPosture — Reconciliation (G6) + audit-trail completeness +

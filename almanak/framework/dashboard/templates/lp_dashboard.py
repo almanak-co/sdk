@@ -50,6 +50,7 @@ import streamlit as st
 logger = logging.getLogger(__name__)
 
 from almanak.core.chains import DEFAULT_CHAIN
+from almanak.framework.dashboard.money import reject_caller_money_keys
 from almanak.framework.dashboard.plots import (
     plot_fee_accumulation,
     plot_impermanent_loss,
@@ -67,8 +68,9 @@ from almanak.framework.dashboard.templates._ohlcv_window import (
     normalize_timeframe,
     ohlcv_limit_for_timeframe,
 )
-from almanak.framework.dashboard.utils import registry_handle_from_payload
+from almanak.framework.dashboard.utils import format_usd, registry_handle_from_payload
 from almanak.framework.data.timeframes import OHLCVTimeframe, parse_ohlcv_timeframe
+from almanak.framework.portfolio.models import STRATEGY_REPORTED_VALUATION_SOURCE
 
 
 @dataclass
@@ -135,9 +137,15 @@ class LPSessionState(TypedDict, total=False):
         token1_amount: Amount of token1 in the position.
 
     Optional keys (strategy may or may not provide):
-        total_fees_usd, impermanent_loss_pct, net_pnl_usd: Performance metrics.
         tick_data, lower_tick, upper_tick, current_tick: Liquidity distribution.
         position_history, price_history, fee_history, il_history: Chart data.
+
+    IGNORED (VIB-6283): ``total_fees_usd`` / ``impermanent_loss_pct`` /
+    ``net_pnl_usd`` are MONEY and are no longer read from here. They are
+    sourced from the accounting tables via the gateway; a caller-supplied
+    value is stripped and logged (blueprint 22 §"Money ownership contract").
+    They remain declared below only so an existing strategy that still passes
+    them type-checks — the values have no effect.
     """
 
     # From strategy state
@@ -181,6 +189,16 @@ LP_CRITICAL_KEYS: list[str] = [
     "token1_amount",
 ]
 """Keys that ``prepare_lp_session_state`` must produce and the template reads."""
+
+
+LP_MEASURED_COMPOSITION_KEYS: frozenset[str] = frozenset({"token0_amount", "token1_amount"})
+"""Composition keys owned exclusively by the valuer's measured read (VIB-6283).
+
+Stronger than :data:`LP_LIVE_STATE_KEYS` membership: those merely lose to a live
+read, whereas these are *dropped* from a strategy-supplied ``get_state()`` payload
+before the live read runs, because :func:`_load_token_amounts` short-circuits on
+their presence. Only an explicit ``preserve_keys`` pin overrides that.
+"""
 
 
 LP_LIVE_STATE_KEYS: frozenset[str] = frozenset(LP_CRITICAL_KEYS) | {
@@ -322,6 +340,15 @@ def prepare_lp_session_state(
     result.setdefault("range_lower", None)
     result.setdefault("range_upper", None)
     result.setdefault("total_value_usd", "0")
+    # VIB-6283: the LP_CRITICAL_KEYS contract says these keys always EXIST; Empty ≠
+    # Zero says an unmeasured composition is not a holding of zero. Both hold at
+    # once only if the key is present with ``None``. Applied here, last, so a live
+    # read (``_load_token_amounts``) or an event hydration
+    # (``_hydrate_active_position_from_events``) still wins — seeding ``None``
+    # earlier would make every later ``setdefault`` a no-op and freeze the panel
+    # blank.
+    result.setdefault("token0_amount", None)
+    result.setdefault("token1_amount", None)
 
     _refresh_in_range(result)
 
@@ -344,6 +371,17 @@ def _merge_live_and_caller_state(
     - Custom / non-live caller keys pass through as a base layer for the
       chart-population helpers. Live-state keys (:data:`LP_LIVE_STATE_KEYS`) are
       intentionally NOT seeded from the caller here so the live reads own them.
+
+    VIB-6283: that live-ownership rule was applied to ``caller_state`` only, so
+    ``get_state()`` — the STRATEGY runner's state, not the valuer's — could still
+    seed the composition keys, and :func:`_load_token_amounts` short-circuits the
+    moment both are present. A strategy that mirrors its mint amounts into state
+    for its own UI (a normal thing to do) would therefore pin the Position Status
+    card at entry amounts forever: the same frozen-composition bug as the
+    LP_OPEN-event clobber, one layer lower. Composition is now owned by the
+    valuer's measured read, so drop an unpinned state-sourced value before that
+    read. Scoped to the two composition keys deliberately — ``current_position_id``
+    and the tick fields are still legitimately strategy-published.
     """
     try:
         # ``get_state() or {}`` — a client returning ``None`` for an empty /
@@ -354,6 +392,8 @@ def _merge_live_and_caller_state(
         result = {}
 
     pinned: set[str] = set(preserve_keys) if preserve_keys else set()
+    for key in LP_MEASURED_COMPOSITION_KEYS - pinned:
+        result.pop(key, None)
     for key in pinned:
         if key in caller_state:
             result[key] = caller_state[key]
@@ -366,34 +406,108 @@ def _merge_live_and_caller_state(
 
 
 def _load_token_amounts(api_client: Any, result: dict[str, Any], config: LPDashboardConfig | None) -> None:
-    """Load token0/token1 amounts from the live position snapshot.
+    """Load the LP position's CURRENT token composition (VIB-6283 limb 2).
 
-    Matches balances by symbol when ``config`` is available, falling back to
-    index order. Degrades to a measured zero on any read failure so the
-    template always has the amounts (LP_CRITICAL_KEYS contract).
+    Single source: the ``strategy_positions`` row the valuer measured for this
+    LP, carrying ``amount0`` / ``amount1`` as of the latest portfolio snapshot.
+
+    **This function used to read ``position["token_balances"]`` — the WALLET's
+    token balances — and present them as the position's holdings.** They are a
+    different quantity entirely, which is why a torn-down strategy rendered
+    ``Position ID: None`` above ``WETH 0.001723 / USDC 1.56`` (wallet residuals)
+    and why an open position's card never agreed with its own NAV. Wallet
+    balances are removed here; they have their own surface.
+
+    Empty ≠ Zero: when no measured composition exists the keys are left ABSENT so
+    the panel renders an em-dash. The old code defaulted to ``0.0`` on both the
+    miss and the exception path, which renders as a real "0.0000" holding — a
+    measured zero the valuer never measured.
     """
     if "token0_amount" in result and "token1_amount" in result:
         return
     try:
-        # ``or {}`` guards a client that returns ``None`` when there is no
-        # active position (avoids a spurious AttributeError + warning).
         position = (api_client.get_position() if api_client else {}) or {}
-        balances = position.get("token_balances", [])
-        t0_amount = 0.0
-        t1_amount = 0.0
-        if config and balances:
-            bal_map = {b["symbol"].upper(): float(b.get("balance", 0)) for b in balances}
-            t0_amount = bal_map.get(config.token0.upper(), 0.0)
-            t1_amount = bal_map.get(config.token1.upper(), 0.0)
-        elif balances:
-            t0_amount = float(balances[0].get("balance", 0)) if len(balances) >= 1 else 0.0
-            t1_amount = float(balances[1].get("balance", 0)) if len(balances) >= 2 else 0.0
-        result.setdefault("token0_amount", t0_amount)
-        result.setdefault("token1_amount", t1_amount)
+        composition = _measured_lp_composition(position.get("strategy_positions") or [], config)
+        if composition is None:
+            return
+        amount0, amount1 = composition
+        if amount0 is not None:
+            result.setdefault("token0_amount", amount0)
+        if amount1 is not None:
+            result.setdefault("token1_amount", amount1)
     except Exception:
-        logger.warning("Failed to load position data for LP dashboard")
-        result.setdefault("token0_amount", 0)
-        result.setdefault("token1_amount", 0)
+        logger.warning("Failed to load measured LP composition for LP dashboard")
+
+
+def _measured_lp_composition(
+    strategy_positions: list[dict[str, Any]],
+    config: LPDashboardConfig | None,
+) -> tuple[float | None, float | None] | None:
+    """Pull ``(amount0, amount1)`` from the valuer's measured LP row.
+
+    Returns ``None`` when no LP row carries a composition — the caller then
+    leaves the keys unset so the panel shows "unmeasured" rather than zero.
+
+    A row whose ``valuation_source`` is ``strategy_reported`` is REFUSED: that
+    marks a mark the valuer echoed from the strategy (typically its *requested*
+    config amounts) because no on-chain path could value the position. Rendering
+    those as the live composition is precisely the freeze this fixes — the
+    number would look measured while being frozen at entry.
+
+    The returned pair is in the DASHBOARD's ``config.token0/token1`` order, not
+    the valuer's. The valuer follows canonical on-chain address order while a
+    pool label follows whatever the author typed, so an Ethereum ``WETH/USDC``
+    dashboard can legitimately receive canonical ``USDC/WETH`` details. Matching
+    the pair as an unordered set and then returning ``amount0, amount1``
+    unswapped would print each amount under the other token's name — a display
+    lie in the same family as the one this function exists to remove.
+    """
+    for sp in strategy_positions:
+        if not isinstance(sp, dict) or sp.get("position_type") != "LP":
+            continue
+        details = sp.get("details") or {}
+        if details.get("valuation_source") == STRATEGY_REPORTED_VALUATION_SOURCE:
+            continue
+        sym0 = str(details.get("token0_symbol") or "").upper()
+        sym1 = str(details.get("token1_symbol") or "").upper()
+        reversed_pair = False
+        if config is not None:
+            if not (sym0 and sym1):
+                # REFUSE rather than accept-unswapped. Without symbols there is
+                # no way to know whether this row is even the configured pair,
+                # let alone which order its amounts are in — accepting it would
+                # print canonical-order amounts under author-order labels, the
+                # exact display lie the ordering fix below removes. Every LP
+                # path that stamps ``amount0`` today also stamps
+                # ``token0_symbol``, so this refuses nothing in practice; it
+                # makes a future repricer that omits them fail visibly (an
+                # em-dash) instead of mislabelling silently.
+                continue
+            # Guard against a multi-LP strategy: only accept a row whose token
+            # pair matches the pair this dashboard is configured to render.
+            want0, want1 = config.token0.upper(), config.token1.upper()
+            if {sym0, sym1} != {want0, want1}:
+                continue
+            # Same pair, opposite order → the amounts must be swapped to land
+            # under the right labels. ``want0 != want1`` guards the degenerate
+            # same-symbol pool, where no swap is meaningful.
+            reversed_pair = want0 != want1 and sym0 == want1
+        amount0 = _coerce_float_or_none(details.get("amount0"))
+        amount1 = _coerce_float_or_none(details.get("amount1"))
+        if amount0 is None and amount1 is None:
+            continue
+        return (amount1, amount0) if reversed_pair else (amount0, amount1)
+    return None
+
+
+def _coerce_float_or_none(value: Any) -> float | None:
+    """Empty ≠ Zero: unparseable / absent → ``None``, never ``0.0``."""
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _normalize_position_id(result: dict[str, Any]) -> None:
@@ -481,10 +595,19 @@ def _hydrate_active_position_from_events(
     _chain = config.chain if config else None
     amount0 = _token_amount_to_display(active_open.get("amount0"), config.token0 if config else None, _chain)
     amount1 = _token_amount_to_display(active_open.get("amount1"), config.token1 if config else None, _chain)
+    # VIB-6283 limb 2 — ENTRY amounts, so they may only FILL, never OVERWRITE.
+    # These come from the LP_OPEN event: the mint deposit, frozen for the life of
+    # the position by construction. This function runs AFTER
+    # ``_load_token_amounts``, so a direct assignment here clobbered the measured
+    # composition with entry amounts on every render — on mainnet the Position
+    # Status card showed a V3 position's mint amounts unchanged to the digit
+    # across a 4-hour in-range price move while the snapshot recorded the real
+    # composition moving 0.000910 → 0.001355 WETH. Every sibling field in this
+    # function already uses ``setdefault``; these two were the only assignments.
     if amount0 is not None:
-        result["token0_amount"] = amount0
+        result.setdefault("token0_amount", amount0)
     if amount1 is not None:
-        result["token1_amount"] = amount1
+        result.setdefault("token1_amount", amount1)
     result.setdefault("total_value_usd", active_open.get("value_usd") or result.get("total_value_usd") or "0")
 
     if config is not None:
@@ -779,6 +902,11 @@ def render_lp_dashboard(
             are skipped silently — backward-compatible with every existing
             ``render_lp_dashboard(...)`` call site.
     """
+    # VIB-6283: money never comes from the caller. Strip any money-shaped key
+    # before the template can read one, and say so loudly — the failure this
+    # replaces was silent.
+    session_state = reject_caller_money_keys(session_state, surface="render_lp_dashboard")
+
     # Warn about missing critical keys so silent N/A failures are visible
     missing = [k for k in LP_CRITICAL_KEYS if k not in session_state]
     if missing:
@@ -893,7 +1021,7 @@ def render_lp_dashboard(
 
     # Performance Summary
     st.subheader("Performance Summary")
-    _render_performance_summary(session_state)
+    _render_performance_summary(session_state, deployment_id)
 
     # Position registry + lifecycle sections (PR 2 / Problem A2). Reuses the
     # existing gateway-backed ``render_positions_section`` and the new
@@ -1147,9 +1275,9 @@ def _render_position_status(
     # Row 4
     col_a, col_b = st.columns(2)
     with col_a:
-        st.metric(config.token0, _fmt_token_amount(session_state.get("token0_amount", 0)))
+        st.metric(config.token0, _fmt_token_amount(session_state.get("token0_amount")))
     with col_b:
-        st.metric(config.token1, _fmt_token_amount(session_state.get("token1_amount", 0)))
+        st.metric(config.token1, _fmt_token_amount(session_state.get("token1_amount")))
 
 
 def _fmt_token_amount(value: Any) -> str:
@@ -1159,9 +1287,15 @@ def _fmt_token_amount(value: Any) -> str:
     ``0.00`` — a 0.0001346 WBTC position disappears entirely. Use 4
     significant figures for sub-1 values and 2dp thousands-separated for
     ≥1, matching the trade-tape headline convention.
+
+    Empty ≠ Zero (VIB-6283): ``None`` means the valuer produced no measured
+    composition for this position, which is NOT a holding of zero — render the
+    unmeasured em-dash. A real ``Decimal("0")`` still renders ``"0"``.
     """
+    if value is None:
+        return "—"
     try:
-        d = Decimal(str(value)) if value is not None else Decimal("0")
+        d = Decimal(str(value))
     except (ArithmeticError, ValueError, TypeError):
         return str(value)
     if not d.is_finite():
@@ -1199,8 +1333,31 @@ def _fmt_pool_price(value: Any, config: LPDashboardConfig) -> str:
 
 def _render_performance_summary(
     session_state: dict[str, Any],
+    deployment_id: str | None = None,
 ) -> None:
-    """Render the performance summary section."""
+    """Render the LP performance decomposition (VIB-6283).
+
+    **Money is never sourced from ``session_state``** (blueprint 22 §"Money
+    ownership contract"). Fees / IL / Net PnL come from the accounting-backed
+    L1+L2 object; the caller dict contributes only the position-value fallback
+    for legacy fixtures that render this panel without a gateway.
+
+    Before VIB-6283 this read ``total_fees_usd`` / ``impermanent_loss_pct`` /
+    ``net_pnl_usd`` straight out of ``session_state``. Nothing ever wrote them
+    — ``impermanent_loss_pct`` had ZERO writers codebase-wide — so the three
+    tiles could only render ``$0.00 / +0.00% / $+0.00`` while the headline
+    Strategy PnL tile, rendered by a different owner off the gateway path,
+    showed a real number on the same page. On a real Arbitrum fork with
+    induced volume this panel read ``$0.00`` fees against ~$88 of fees
+    provably owed on-chain.
+
+    Empty ≠ Zero throughout: an unmeasured quantity renders ``—``, never a
+    fabricated ``$0.00``. Amounts use ``precise_small`` so a real sub-cent
+    value (the corpus median LP fee is ~$0.007) does not collapse to ``$0.00``
+    — a 2-dp formatter would have re-hidden the very numbers this fix
+    surfaces.
+    """
+    from almanak.framework.dashboard.money import load_strategy_money
 
     def _safe_decimal(value: Any, fallback: str = "0") -> Decimal:
         try:
@@ -1208,23 +1365,105 @@ def _render_performance_summary(
         except Exception:
             return Decimal(fallback)
 
+    money = load_strategy_money(deployment_id) if deployment_id else None
+
     col1, col2, col3, col4 = st.columns(4)
 
     with col1:
-        total_fees = _safe_decimal(session_state.get("total_fees_usd", "0"))
-        st.metric("Total Fees", f"${float(total_fees):,.2f}")
+        _money_metric(
+            "Total Fees",
+            money.lp_fees_earned_usd if money else None,
+            partial=money.lp_fees_earned_partial if money else False,
+            help_text=(
+                "LP fees earned, from accounting events (LP_CLOSE + mid-life "
+                "LP_COLLECT_FEES). Shows — until a close or collect lands: fees "
+                "accrue on-chain continuously but are only MEASURED when harvested."
+            ),
+        )
 
     with col2:
-        il = _safe_decimal(session_state.get("impermanent_loss_pct", "0"))
-        st.metric("Impermanent Loss", f"{float(il):+.2f}%")
+        _money_metric(
+            "Impermanent Loss",
+            money.lp_il_usd if money else None,
+            partial=money.lp_il_partial if money else False,
+            help_text=(
+                "V_lp − V_hodl at close, from accounting events — what the LP made "
+                "or lost versus simply holding the deposited tokens. Negative = the "
+                "LP underperformed HODL. Shows — until a close lands."
+            ),
+        )
 
     with col3:
-        net_pnl = _safe_decimal(session_state.get("net_pnl_usd", "0"))
-        st.metric("Net PnL", f"${float(net_pnl):+,.2f}")
+        _money_metric(
+            # VIB-6283: labelled STRATEGY Net PnL, not "Net PnL".
+            #
+            # This tile is strategy/wallet-scoped — it is literally the headline
+            # Strategy PnL, recomputed by the same function. The PnL Attribution
+            # table further down the same page reports POSITION-lifecycle-scoped
+            # figures (its "Price PnL" equals the LP_CLOSE payload's
+            # ``realized_pnl_usd``). Both are correct and they legitimately
+            # differ, but two tiles both called "Net PnL" on one page reporting
+            # different scopes is the same read-as-contradiction failure this
+            # ticket exists to remove. While the tile was dead at $0.00 it could
+            # not disagree with anything; making it live is what made the naming
+            # collision reachable, so disambiguating it is part of this fix.
+            "Strategy Net PnL",
+            money.strategy_pnl_usd if money else None,
+            signed=True,
+            help_text=(
+                "STRATEGY-scoped: the SAME computation as the Strategy PnL tile at "
+                "the top of this page — realized (accounting) + unrealized (open "
+                "mark-to-market − cost basis). One computation, two presentations. "
+                "Not the same scope as the PnL Attribution table below, which "
+                "reports per-position-lifecycle figures."
+            ),
+        )
 
     with col4:
-        position_value = _position_value_usd_for_summary(session_state, _safe_decimal)
-        st.metric("Position Value", f"${float(position_value):,.2f}")
+        position_value = money.open_position_nav_usd if money else None
+        if position_value is None:
+            position_value = _position_value_usd_for_summary(session_state, _safe_decimal)
+        st.metric(
+            "Position Value",
+            format_usd(position_value, precise_small=True),
+            help="Current mark-to-market value of the strategy's open positions.",
+        )
+
+
+def _money_metric(
+    label: str,
+    value: Decimal | None,
+    *,
+    signed: bool = False,
+    help_text: str = "",
+    partial: bool = False,
+) -> None:
+    """Render one money tile, honouring Empty ≠ Zero (VIB-6283).
+
+    ``None`` is UNMEASURED and renders ``—``. ``Decimal("0")`` is a measured
+    zero and renders ``$0.00``. The two must stay visually distinct — conflating
+    them is what let a dead panel pass for a flat strategy for fourteen months.
+
+    ``partial=True`` is the THIRD state: a real number that is known to be
+    incomplete (some applicable events did not supply their term). It renders
+    the value — suppressing it understated the Strategy PnL headline by the
+    fees that WERE measured — with a "partial" caption so it does not read as a
+    complete total.
+    """
+    if value is None:
+        st.metric(label, "—", help=help_text + " (— = not measured yet, not zero.)")
+        return
+    rendered = format_usd(value, precise_small=True)
+    if signed and value > 0:
+        rendered = f"+{rendered}"
+    if partial:
+        st.metric(
+            f"{label} (partial)",
+            rendered,
+            help=help_text + " PARTIAL: some applicable events did not report this term.",
+        )
+        return
+    st.metric(label, rendered, help=help_text)
 
 
 def _position_value_usd_for_summary(
