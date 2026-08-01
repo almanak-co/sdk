@@ -82,6 +82,13 @@ CONNECTOR = Connector(
         module="almanak.connectors.gmx_v2.teardown_residual_discovery",
         attribute="gmx_v2_teardown_residual_discovery",
     ),
+    # VIB-6287: alias tokens naming a GMX position, so the teardown union stops
+    # enumerating one physical position as two when its producers disagree about
+    # whether ``details["market"]`` holds a symbol or an address.
+    perp_identity=ImportRef(
+        module="almanak.connectors.gmx_v2.perp_identity",
+        attribute="gmx_v2_perp_identity",
+    ),
     capabilities=CapabilitiesSpec(
         keys=("gmx_v2",),
         module="almanak.connectors.gmx_v2.capabilities",

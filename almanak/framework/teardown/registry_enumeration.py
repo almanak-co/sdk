@@ -43,10 +43,12 @@ the on-chain scan is wallet-scoped, not deployment-scoped).
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
+from almanak.connectors._strategy_base.perp_identity import is_residual_marked
 from almanak.connectors._strategy_base.teardown_post_condition import resolve_nft_token_id
 from almanak.framework.teardown.models import (
     PositionInfo,
@@ -88,6 +90,199 @@ def _lp_identity(position: PositionInfo) -> str:
     if token_id is not None:
         return f"nft:{token_id}"
     return str(position.position_id)
+
+
+def _lp_default_identity(position: PositionInfo) -> frozenset[tuple[str, ...]]:
+    """Framework default identity for an LP position (moved verbatim, VIB-5723).
+
+    Collapses the same physical NFT position across sources (registry bare token
+    id vs strategy composite key) — see :func:`_lp_identity`.
+    """
+    return frozenset({("lp", _lp_identity(position))})
+
+
+def _lending_default_identity(position: PositionInfo) -> frozenset[tuple[str, ...]]:
+    """Framework default identity for a lending leg (moved verbatim, VIB-5523).
+
+    The strategy and the registry name the SAME leg with DIFFERENT
+    ``position_id`` formats — the strategy emits e.g.
+    ``aave-supply-wstETH-arbitrum`` while the registry row stores the
+    ``market_id`` (``wsteth``). Keying lending on ``position_id`` double-counts
+    the leg (4 union entries for 2 real positions), and the two registry
+    duplicates then get flagged uncovered by the completeness check. Key lending
+    instead on the shared semantic identity ``(protocol, market_or_asset)``: the
+    registry row's ``market_id`` equals the strategy's asset symbol for
+    one-pool-per-chain protocols (Aave / Spark / Compound), and an
+    isolated-market protocol (Morpho) carries its bytes32 ``market_id`` on BOTH
+    sides, so the key matches the same leg without ever merging two
+    genuinely-distinct markets.
+    """
+    details = position.details if isinstance(position.details, dict) else {}
+    asset = ""
+    for key in ("asset", "asset_symbol", "collateral_token", "supply_token", "borrow_token", "debt_token"):
+        value = details.get(key)
+        if value:
+            asset = str(value).lower()
+            break
+    # Prefer market_id when present; otherwise the asset symbol. For Aave the
+    # registry's market_id IS the asset symbol, so a market_id-bearing registry
+    # row and an asset-only strategy row resolve to the same discriminator and
+    # dedup correctly.
+    #
+    # Use an explicit ``is None`` check — ``market_id or ""`` would turn a
+    # legitimate ``market_id == 0`` (int) into ``""`` and silently fall back to
+    # ``asset``, mis-keying the leg.
+    market_id_val = details.get("market_id")
+    market_id_str = "" if market_id_val is None else str(market_id_val).lower()
+    discriminator = market_id_str or asset
+    return frozenset({("lending", str(position.protocol or "").lower(), discriminator)})
+
+
+def _perp_default_identity(position: PositionInfo) -> frozenset[tuple[str, ...]]:
+    """Framework default identity for a perp when its venue publishes no hook.
+
+    Kept from the pre-VIB-6287 arm table so the four perp venues without an
+    identity hook (``aster_perps`` / ``drift`` / ``hyperliquid`` /
+    ``pancakeswap_perps``) keep the exact behaviour they have today. It is a
+    LAST resort, consulted only when the venue itself declined to name the
+    position, because it compares ``details`` values VERBATIM and the producers
+    of a perp row write different value spaces under the same key names — the
+    polysemy that is VIB-6287.
+
+    Returns an empty set when any component is absent: incomplete identity must
+    never collapse two positions, so the caller falls through to the raw
+    ``position_id``.
+
+    A row carrying a ``kind`` marker is never named here, mirroring the guard in
+    the GMX hook. A residual — a pending unfilled order, an unverified sweep
+    sentinel — can carry the SAME market, collateral and side as a real open
+    position while being a different thing holding its own collateral, so naming
+    it would let the union merge the two and suppress one; a suppressed residual
+    is never recovered. LATENT rather than live today: residuals reach the
+    enumeration through ``_union_residuals``, a separate lane, and
+    ``_position_info_from_perp_registry_row`` does not copy ``kind`` onto perp
+    registry rows. It is guarded anyway so the connector hook and the framework
+    default cannot disagree about what a residual is — a venue with no hook
+    would otherwise be the one place this hole stayed open.
+    """
+    details = position.details if isinstance(position.details, dict) else {}
+    if is_residual_marked(details):
+        return frozenset()
+    market = str(details.get("market_address") or details.get("market") or "").lower()
+    collateral = str(details.get("collateral_address") or details.get("collateral_token") or "").lower()
+    # ``details["side"]`` is read for the same reason the GMX hook reads it: shipped
+    # perp demos write it (`gmx_v2_directional_perp`, `hyperliquid_trailing_perp`).
+    # Same long/short value space as ``direction``, so it cannot introduce a
+    # VIB-6287-style polysemy — swept every PERP producer to confirm none uses
+    # ``side`` for a different vocabulary.
+    #
+    # INERT for those demos today, stated rather than implied: they write no
+    # collateral, and this default requires market AND collateral AND direction, so
+    # their rows still fall through to raw ``position_id``. Correct to read, but it
+    # does not yet serve the demos an earlier version of this comment claimed it
+    # served (#3534 panel).
+    direction = str(
+        position.direction
+        or details.get("direction")
+        or details.get("side")
+        or ("long" if details.get("is_long") is True else "short" if details.get("is_long") is False else "")
+    ).lower()
+    protocol = str(position.protocol or "").lower()
+    if protocol and market and collateral and direction:
+        return frozenset({("perp", protocol, market, collateral, direction)})
+    return frozenset()
+
+
+# Framework per-``PositionType`` identity default, consulted ONLY when the
+# position's own venue publishes no identity hook or declines to name it. Every
+# entry moved here VERBATIM from the former ``_dedupe_key`` if/elif arm table.
+_IDENTITY_DEFAULTS: dict[PositionType, Callable[[PositionInfo], frozenset[tuple[str, ...]]]] = {
+    PositionType.LP: _lp_default_identity,
+    PositionType.SUPPLY: _lending_default_identity,
+    PositionType.BORROW: _lending_default_identity,
+    PositionType.PERP: _perp_default_identity,
+}
+
+# Position types that deliberately key on the raw ``position_id`` — the
+# pre-VIB-6287 fall-through, made explicit so the census test can require every
+# ``PositionType`` to be a NAMED decision rather than a silent omission.
+#
+# These are NOT "no identity needed forever"; they are "no cross-source identity
+# problem has been measured yet". Each carries the ticket that would revisit it:
+#
+#   * TOKEN / STAKE  — fungible holdings; the raw id is the token itself and no
+#     second producer writes them, so there is nothing to reconcile (VIB-6287).
+#   * VAULT          — ERC-4626 shares keyed by vault address on both sides.
+#   * CEX            — off-chain venue; no registry producer exists (VIB-6287).
+#   * PREDICTION     — no registry cutover; single producer (VIB-6287).
+#
+# Pendle carries a live duplicate under LP, which is why Pendle is NOT here.
+_RAW_ID_TYPES: frozenset[PositionType] = frozenset(
+    {
+        PositionType.TOKEN,
+        PositionType.STAKE,
+        PositionType.VAULT,
+        PositionType.CEX,
+        PositionType.PREDICTION,
+    }
+)
+
+
+def _dedupe_keys(
+    position: PositionInfo,
+    *,
+    wallet_for_chain: Callable[[str], str | None] | None = None,
+) -> frozenset[tuple[str, ...]]:
+    """Every ``(chain, position_type, alias)`` key that names ``position``.
+
+    Two rows are the same position iff their key sets intersect. Identity is
+    resolved in three steps, most-authoritative first:
+
+    1. **The position's own venue**, through the connector-published identity
+       hook. Only the venue knows how it names a position, and — critically —
+       the different producers of one row write different VALUE SPACES under the
+       same ``details`` key names (symbol vs address), which no framework-side
+       comparison of raw fields can reconcile (VIB-6287).
+    2. **The framework per-type default** (:data:`_IDENTITY_DEFAULTS`), the
+       pre-VIB-6287 behaviour preserved verbatim, for types and venues with no
+       hook.
+    3. **The raw ``position_id``** — the original fall-through.
+
+    ``chain`` and ``position_type`` scope every key. Keying on a bare id would
+    let a strategy-reported LP ``token_id=N`` on chain A suppress a
+    registry-open LP ``token_id=N`` on chain B → under-report → strand chain B's
+    position (the inline multi-chain teardown lane, ``runner_teardown``
+    §"For multi-chain strategies").
+
+    Non-perp positions return a SINGLE key, so their behaviour is unchanged.
+
+    Venue tokens are placed in the key VERBATIM — never case-folded (see
+    ``almanak.connectors._strategy_base.perp_identity``: ``drift``'s identity
+    contains a case-SENSITIVE base58 pubkey, and folding it here would merge two
+    distinct Solana accounts). Only ``chain`` — a slug, not a token — is folded.
+    """
+    chain = str(position.chain or "").lower()
+    ptype = str(position.position_type)
+
+    from .perp_identity import venue_identity_tokens, wallet_for
+
+    # Venue tokens are single-element tuples so every key is a flat tuple of
+    # STRUCTURED parts. Joining parts into one string instead would make the
+    # key ambiguous — ("a:b", "c") and ("a", "b:c") would render identically —
+    # and an ambiguous key can only ever over-collapse, which suppresses a row
+    # so nothing closes it.
+    tokens: frozenset[tuple[str, ...]] = frozenset(
+        ("venue", t) for t in venue_identity_tokens(position, wallet_for(wallet_for_chain, position.chain))
+    )
+    if not tokens:
+        default = _IDENTITY_DEFAULTS.get(position.position_type)
+        if default is not None:
+            tokens = default(position)
+    if not tokens:
+        # Empty ≠ Zero: an UNMEASURED identity must never collapse two rows, so
+        # it falls back to the raw id rather than to a permissive wildcard.
+        return frozenset({(chain, ptype, "id", str(position.position_id))})
+    return frozenset((chain, ptype, *parts) for parts in tokens)
 
 
 @dataclass(frozen=True)
@@ -653,6 +848,7 @@ def reconcile_lp_with_registry(
     strategy_summary: TeardownPositionSummary | None,
     registry_positions: list[PositionInfo],
     registry_available: bool,
+    wallet_for_chain: Callable[[str], str | None] | None = None,
 ) -> TeardownPositionSummary:
     """Fold the ``position_registry`` WARM read into the strategy's enumeration.
 
@@ -674,87 +870,158 @@ def reconcile_lp_with_registry(
     registry's open set — the determinism the ticket requires. When the registry
     is NOT available (no backend / hosted pre-T19) or holds no rows, the strategy
     summary is returned unchanged (the legacy enumeration is the degrade path).
+
+    ``wallet_for_chain`` is a CALLABLE, not a scalar wallet: the union spans
+    chains and a multi-chain deployment holds a different wallet on each
+    (``_teardown_wallet_for_chain``). It lets a venue that derives an identity
+    from the account do so.
+
+    **Omitting it is NOT free, and an earlier version of this note said it was.**
+    It claimed omission "costs at most a derived alias and can only ever
+    over-split, never over-collapse". That held for the old pairwise pass. Under
+    the transitive closure a venue can no longer verify that a row's recorded key
+    and its attributes name the same position, so a keyed row falls back to
+    emitting only its venue key — which costs the key<->semantic join on that path
+    (over-split, loud) rather than risking a merge of two distinct positions.
+    Defaulting to ``None`` still keeps every existing caller working; it just
+    yields less collapsing, not more.
     """
     if strategy_summary is None:
         strategy_summary = TeardownPositionSummary.empty("unknown")
     if not registry_available or not registry_positions:
         return strategy_summary
 
-    # Dedupe on (chain, position_type, position_id) — NOT bare position_id. A
-    # bare NFT token_id is unique only within a chain, and a single deployment
-    # can span chains (the inline multi-chain teardown lane, runner_teardown
-    # §"For multi-chain strategies"). Keying on token_id alone would let a
-    # strategy-reported LP token_id=N on chain A suppress a registry-open LP
-    # token_id=N on chain B → under-report → strand chain B's position.
-    #
-    # Lending legs (SUPPLY/BORROW) are the exception (VIB-5523): the strategy and
-    # the registry name the SAME leg with DIFFERENT ``position_id`` formats — the
-    # strategy emits e.g. ``aave-supply-wstETH-arbitrum`` while the registry row
-    # stores the ``market_id`` (``wsteth``). Keying lending on ``position_id``
-    # double-counts the leg (4 union entries for 2 real positions), and the two
-    # registry duplicates then get flagged uncovered by the completeness check.
-    # Key lending instead on the shared semantic identity
-    # ``(chain, type, protocol, market_or_asset)``: the registry row's
-    # ``market_id`` equals the strategy's asset symbol for one-pool-per-chain
-    # protocols (Aave / Spark / Compound), and an isolated-market protocol
-    # (Morpho) carries its bytes32 ``market_id`` on BOTH sides, so the key
-    # matches the same leg without ever merging two genuinely-distinct markets.
-    def _dedupe_key(position: PositionInfo) -> tuple[str, ...]:
-        chain = str(position.chain or "").lower()
-        ptype = str(position.position_type)
-        if position.position_type in (PositionType.SUPPLY, PositionType.BORROW):
-            details = position.details if isinstance(position.details, dict) else {}
-            asset = ""
-            for key in ("asset", "asset_symbol", "collateral_token", "supply_token", "borrow_token", "debt_token"):
-                value = details.get(key)
-                if value:
-                    asset = str(value).lower()
-                    break
-            # Prefer market_id when present; otherwise the asset symbol. For Aave
-            # the registry's market_id IS the asset symbol, so a market_id-bearing
-            # registry row and an asset-only strategy row resolve to the same
-            # discriminator and dedup correctly.
-            #
-            # Use an explicit ``is None`` check — ``market_id or ""`` would turn a
-            # legitimate ``market_id == 0`` (int) into ``""`` and silently fall
-            # back to ``asset``, mis-keying the leg.
-            market_id_val = details.get("market_id")
-            market_id_str = "" if market_id_val is None else str(market_id_val).lower()
-            discriminator = market_id_str or asset
-            return (chain, ptype, str(position.protocol or "").lower(), discriminator)
-        if position.position_type == PositionType.PERP:
-            # A perp venue position is economically keyed by
-            # (chain, protocol, market, collateral, direction). Strategy HOT
-            # state often uses a synthetic label while the WARM registry uses
-            # the venue's bytes32 position key. When both surfaces carry this
-            # full canonical tuple they are the SAME position and must not be
-            # counted twice. Fall back to the raw position_id if any component
-            # is absent: incomplete identity must never collapse two positions.
-            details = position.details if isinstance(position.details, dict) else {}
-            market = str(details.get("market_address") or details.get("market") or "").lower()
-            collateral = str(details.get("collateral_address") or details.get("collateral_token") or "").lower()
-            direction = str(
-                position.direction
-                or details.get("direction")
-                or ("long" if details.get("is_long") is True else "short" if details.get("is_long") is False else "")
-            ).lower()
-            protocol = str(position.protocol or "").lower()
-            if protocol and market and collateral and direction:
-                return (chain, ptype, protocol, market, collateral, direction)
-        if position.position_type == PositionType.LP:
-            # VIB-5723: collapse the same physical NFT position across sources
-            # (registry bare token id vs strategy composite key) — see
-            # ``_lp_identity``.
-            return (chain, ptype, _lp_identity(position))
-        return (chain, ptype, str(position.position_id))
+    def _keys(position: PositionInfo) -> frozenset[tuple[str, ...]]:
+        return _dedupe_keys(position, wallet_for_chain=wallet_for_chain)
 
-    seen = {_dedupe_key(p) for p in strategy_summary.positions}
+    # Two rows are the SAME position iff their alias sets INTERSECT (VIB-6287).
+    # A row may legitimately carry several aliases — a GMX registry row carries
+    # both the venue position key it recorded and the market/collateral/side
+    # tuple it can resolve — and a row carrying both BRIDGES a key-only row to a
+    # tuple-only row. "Same iff intersecting" is therefore not an equivalence on
+    # its own: it must be closed transitively, or the bridge is wasted.
+    #
+    # A greedy single pass CANNOT do that. Strategy row {sem}, registry rows {key}
+    # and {key, sem}:
+    #
+    #   {key}       disjoint from {sem}  -> APPENDED
+    #   {key, sem}  intersects           -> discarded, and its aliases are LOST
+    #
+    # so `key ~ sem` is never learned and one position enumerates as two.
+    #
+    # PRECISE SHAPE, because two reviewers and I each described this differently
+    # and all three descriptions were partly right (#3534 panel):
+    #
+    #   * NON-TRANSITIVE ALWAYS. A discarded row's aliases are never absorbed, so
+    #     the bridge is lost in every arrangement.
+    #   * ADDITIONALLY ORDER-DEPENDENT whenever `seen` is NOT pre-seeded by a
+    #     strategy row — i.e. the RESTART shape, where every row comes from the
+    #     registry, which is the shape the registry cutover exists for. Measured:
+    #     (key, bridge, sem) -> 2 rows, (bridge, key, sem) -> 1 row, same inputs.
+    #     With a strategy row present, order genuinely cannot matter: `seen` holds
+    #     {sem} before the loop, so the bridge always intersects and is always
+    #     discarded.
+    #
+    # The registry read carries NO `ORDER BY` (`state/backends/sqlite.py`), so row
+    # order is whatever the backend returns — rowid order on SQLite in practice,
+    # genuinely unspecified on Postgres and free to shift after updates or VACUUM.
+    #
+    # Absorbing a duplicate's aliases instead of dropping them fixes neither shape:
+    # by the time the bridge arrives the key-only row has already been appended.
+    # Only computing the components BEFORE choosing representatives is correct.
+    #
+    # POLARITY — over-SPLIT, loud, never a silent strand. Five vectors were checked
+    # for a consumer that could SKIP a position instead of double-processing it
+    # (positional/`zip` pairing, first-match intent consumption, abort-on-first-
+    # failure, caps/truncation, dict-overwrite); all five refuted. But the
+    # mechanism is stronger than "an extra row only adds an obligation": a
+    # duplicate makes `type_counts[PERP] == 2`, which flips the VIB-5494 Item-2
+    # guard in `check_intent_coverage` and RETROACTIVELY TIGHTENS the requirement
+    # on the REAL row — an intent that would have passed as a lenient default is
+    # then rejected. So a duplicate can turn an otherwise-PASSING teardown into a
+    # failing one. Still the loud direction; not merely a cosmetic extra row.
+    #
+    # LATENT, NOT LIVE — and the reason is worth keeping. The arrangement needs two
+    # `position_registry` rows for one physical position, which the table's
+    # PRIMARY KEY (deployment_id, chain, primitive, physical_identity_hash)
+    # forbids: all three perp producers feed the same normalised tuple, and the
+    # backfill inserts ON CONFLICT DO NOTHING. **But that PK lives in a schema this
+    # repo does not own** (AGENTS.md §Database schema ownership — the deployed
+    # Postgres schema is owned by `metrics-database`, and the in-repo
+    # `POSTGRES_SCHEMA` is legacy reference-only). Verified unreachable on local
+    # SQLite against the real CREATE TABLE; NOT verifiable for hosted Postgres from
+    # this repo, and no SDK-side code asserts it. That is precisely why the fix
+    # ships anyway: the invariant now holds STRUCTURALLY in the enumeration instead
+    # of depending on a constraint the SDK can neither see nor test.
+    #
+    # A row with an EMPTY alias set is UNMEASURED: it links nothing, joins no
+    # component, and is always kept. Empty must never behave like a shared alias,
+    # which would collapse every unmeasured row into one.
+    #
+    # WHY THE CLOSURE STAYS — the question was open at the end of the #3534 panel
+    # and was settled by MEASUREMENT, not by preference. Six rounds of review found
+    # a defect in each, four of them over-collapse regressions in this closure's own
+    # fixes, and the honest reading at that point was "a latent fix that keeps
+    # producing reachable strands". Replacing the closure with the greedy pairwise
+    # pass and running the suite is what actually answers it:
+    #
+    #   4 failed, 1769 passed  (tests/unit/teardown, pairwise variant)
+    #
+    # and all four are the transitive cases — `..._bridge_row_collapses_...` and
+    # `..._restart_shape_is_order_independent`. Nothing else moves; every
+    # mainnet-proven VIB-6287 case passes either way. So the closure is load-bearing
+    # for exactly one thing: making "same iff the sets intersect" an actual
+    # equivalence relation. Intersection is not transitive, so the pairwise pass does
+    # not implement the contract stated in
+    # `_strategy_base/perp_identity.py` — it implements "matches an
+    # already-claimed set", which is order-dependent (measured: (key, bridge, sem)
+    # -> 2 rows, (bridge, key, sem) -> 1) against a registry read carrying no
+    # ORDER BY. Shipping it would mean either a module whose own documented contract
+    # is false, or weakening that contract for every venue that adopts the seam
+    # later.
+    #
+    # What made the closure dangerous was never the closure: it was rows emitting an
+    # UNVERIFIED multi-alias set, which merges two distinct positions. That is now
+    # refused at the source (`gmx_v2/perp_identity.py`, "a row may emit at most one
+    # identity family"), so a row bridges only when the venue has VERIFIED by
+    # keccak derivation that its id and its attributes name one position.
+    #
+    # THE REMAINING GAP, stated rather than implied: that precondition is a contract
+    # the framework asserts and CANNOT enforce. GMX honours it structurally; the next
+    # connector to publish a hook can emit an unverified multi-alias set and silently
+    # strand. VIB-6329 adds the framework-side census guard. Until it lands, the
+    # emission contract in `_strategy_base/perp_identity.py` is the only thing
+    # standing between a new hook and the silent direction — which is why this
+    # paragraph is here and not in a commit message.
+    parent: dict[tuple[str, ...], tuple[str, ...]] = {}
+
+    def _find(alias: tuple[str, ...]) -> tuple[str, ...]:
+        parent.setdefault(alias, alias)
+        while parent[alias] != alias:
+            parent[alias] = parent[parent[alias]]
+            alias = parent[alias]
+        return alias
+
+    def _link(aliases: frozenset[tuple[str, ...]]) -> None:
+        ordered = sorted(aliases)
+        for other in ordered[1:]:
+            root_a, root_b = _find(ordered[0]), _find(other)
+            if root_a != root_b:
+                parent[root_a] = root_b
+
+    strategy_keys = [_keys(p) for p in strategy_summary.positions]
+    registry_keys = [_keys(rp) for rp in registry_positions]
+    for keys in (*strategy_keys, *registry_keys):
+        _link(keys)
+
+    claimed: set[tuple[str, ...]] = {_find(k) for keys in strategy_keys for k in keys}
     net_new: list[PositionInfo] = []
-    for rp in registry_positions:
-        key = _dedupe_key(rp)
-        if key not in seen:
-            net_new.append(rp)
-            seen.add(key)
+    for rp, keys in zip(registry_positions, registry_keys, strict=True):
+        roots = {_find(k) for k in keys}
+        if roots & claimed:
+            continue
+        net_new.append(rp)
+        claimed |= roots
     if not net_new:
         return strategy_summary
 
@@ -895,10 +1162,21 @@ async def resolve_open_positions_with_registry(strategy: Any) -> TeardownPositio
         deployment_id=deployment_id,
         chain=None,
     )
+    # VIB-6287: give the union the deployment's wallet so a venue that derives a
+    # position identity from the account can do so. Deferred import: the manager
+    # imports this module, and ``_teardown_wallet_for_chain`` is the SAME
+    # per-chain resolver the teardown lane stamps intents with, so the identity
+    # and the execution agree about which account owns the position.
+    from almanak.framework.teardown.teardown_manager import _teardown_wallet_for_chain
+
+    def _wallet_for_chain(chain: str) -> str | None:
+        return _teardown_wallet_for_chain(strategy, chain) or None
+
     reconciled = reconcile_lp_with_registry(
         strategy_summary=summary,
         registry_positions=read.positions + lending_positions + perp_positions + pendle_positions,
         registry_available=read.available or lending_available or perp_available or pendle_available,
+        wallet_for_chain=_wallet_for_chain,
     )
     # VIB-5116: fold in off-position on-chain residuals (e.g. GMX V2 pending
     # unfilled orders holding collateral in the OrderVault) discovered directly

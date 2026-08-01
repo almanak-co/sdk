@@ -20,7 +20,9 @@ from typing import Any
 
 import pytest
 
+from almanak.connectors.gmx_v2.addresses import GMX_V2_MARKETS, GMX_V2_TOKENS
 from almanak.framework.migration import CutoverStorageNotSupported
+from almanak.framework.teardown import registry_enumeration as registry_enumeration_module
 from almanak.framework.teardown.models import (
     PositionInfo,
     PositionType,
@@ -1073,13 +1075,28 @@ def test_reconcile_deduplicates_strategy_and_registry_perp_by_full_economic_iden
     assert merged.positions == [strategy_position]
 
 
+# Real Arbitrum GMX addresses (VIB-6287). The former fixtures — "0xeth",
+# "0xusdc", "0xbtc", "0xusdt" — are not address-shaped, so the venue identity
+# hook resolved NOTHING for either row and both fell through to the framework
+# default. The test therefore passed with the venue mechanism disabled and
+# discriminated on none of the five axes its name claims. Using catalogue
+# addresses puts both rows through the real resolution path, so each axis now
+# has to hold up against the mechanism that is actually shipping.
+_ARB_ETH_MARKET = GMX_V2_MARKETS["arbitrum"]["ETH/USD"]
+_ARB_BTC_MARKET = GMX_V2_MARKETS["arbitrum"]["BTC/USD"]
+_ARB_USDC = GMX_V2_TOKENS["arbitrum"]["USDC"]
+_ARB_USDT = GMX_V2_TOKENS["arbitrum"]["USDT"]
+# An account, so the DERIVE path is exercised too and not just the semantic one.
+_WALLET = "0xafeB2f5c213b5e7F37c3Fc171dfCb6270d07e21a"
+
+
 @pytest.mark.parametrize(
     ("dimension", "registry_value"),
     [
         ("chain", "avalanche"),
         ("protocol", "other_perp"),
-        ("market", "0xbtc"),
-        ("collateral", "0xusdt"),
+        ("market", _ARB_BTC_MARKET),
+        ("collateral", _ARB_USDT),
         ("direction", "short"),
     ],
 )
@@ -1087,14 +1104,21 @@ def test_reconcile_never_deduplicates_distinct_perp_economic_identity(
     dimension: str,
     registry_value: str,
 ) -> None:
-    """Every component of the perp semantic key independently prevents collapse."""
+    """Every component of the perp identity independently prevents collapse.
+
+    Negative control for VIB-6287: the alias-set union must never merge two
+    genuinely distinct positions. Over-collapse is the strictly worse failure —
+    a suppressed registry row is never closed and the funds strand silently,
+    with no alarm — so each axis is asserted separately rather than in one
+    all-different fixture that any single working axis would satisfy.
+    """
     strategy_position = PositionInfo(
         position_type=PositionType.PERP,
         position_id="eth-long",
         chain="arbitrum",
         protocol="gmx_v2",
         value_usd=Decimal("20"),
-        details={"market": "0xeth", "collateral_token": "0xusdc", "is_long": True},
+        details={"market": _ARB_ETH_MARKET, "collateral_token": _ARB_USDC, "is_long": True},
     )
     registry_position = PositionInfo(
         position_type=PositionType.PERP,
@@ -1103,8 +1127,8 @@ def test_reconcile_never_deduplicates_distinct_perp_economic_identity(
         protocol=registry_value if dimension == "protocol" else "gmx_v2",
         value_usd=Decimal("0"),
         details={
-            "market": registry_value if dimension == "market" else "0xeth",
-            "collateral_token": registry_value if dimension == "collateral" else "0xusdc",
+            "market": registry_value if dimension == "market" else _ARB_ETH_MARKET,
+            "collateral_token": registry_value if dimension == "collateral" else _ARB_USDC,
             "direction": registry_value if dimension == "direction" else "long",
         },
     )
@@ -1118,9 +1142,55 @@ def test_reconcile_never_deduplicates_distinct_perp_economic_identity(
         strategy_summary=summary,
         registry_positions=[registry_position],
         registry_available=True,
+        wallet_for_chain=lambda _chain: _WALLET,
     )
 
     assert {p.position_id for p in merged.positions} == {"eth-long", "btc-long"}
+
+
+def test_reconcile_collapses_the_same_perp_across_value_spaces() -> None:
+    """The POSITIVE control the negative one above needs to be meaningful.
+
+    Identical to the fixtures above except that the registry row names the same
+    market and collateral by SYMBOL where the strategy row names them by
+    ADDRESS. If this did not collapse, every parametrisation above would pass
+    for the trivial reason that nothing ever collapses.
+    """
+    strategy_position = PositionInfo(
+        position_type=PositionType.PERP,
+        position_id="eth-long",
+        chain="arbitrum",
+        protocol="gmx_v2",
+        value_usd=Decimal("20"),
+        details={"market": _ARB_ETH_MARKET, "collateral_token": _ARB_USDC, "is_long": True},
+    )
+    # The position_id is the REAL venue key these details derive for `_WALLET`
+    # (verified against the mainnet run of record). A placeholder key here would make
+    # the row internally inconsistent — naming one position by id and another by
+    # attributes — which the hook now refuses to name at all, because emitting both
+    # would bridge two distinct positions under the transitive closure (#3534 panel).
+    registry_position = PositionInfo(
+        position_type=PositionType.PERP,
+        position_id="0xbf58e0307a44a17ea51e30850651f5269c9fc0f306990576c015e9a88ac9bafa",
+        chain="arbitrum",
+        protocol="gmx_v2",
+        value_usd=Decimal("0"),
+        details={"market": "ETH/USD", "collateral_token": "USDC", "direction": "long"},
+    )
+    summary = TeardownPositionSummary(
+        deployment_id=DEPLOYMENT_ID,
+        timestamp=datetime.now(UTC),
+        positions=[strategy_position],
+    )
+
+    merged = reconcile_lp_with_registry(
+        strategy_summary=summary,
+        registry_positions=[registry_position],
+        registry_available=True,
+        wallet_for_chain=lambda _chain: _WALLET,
+    )
+
+    assert {p.position_id for p in merged.positions} == {"eth-long"}
 
 
 @pytest.mark.asyncio
@@ -1307,3 +1377,133 @@ async def test_vib5723_completeness_check_matches_composite_id_no_false_absent()
     # Matched via the source-independent identity → the discrepancy set is
     # empty → zero chain reads (and therefore no false ABSENT warning).
     verify.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Alias identity must be closed TRANSITIVELY (VIB-6287, found by Codex on #3534)
+# ---------------------------------------------------------------------------
+
+
+def _alias_row(position_id: str) -> PositionInfo:
+    return PositionInfo(
+        position_type=PositionType.PERP,
+        position_id=position_id,
+        chain="arbitrum",
+        protocol="gmx_v2",
+        value_usd=Decimal("0"),
+        details={},
+    )
+
+
+@pytest.mark.parametrize("order", [("A", "B"), ("B", "A")], ids=["bridge-last", "bridge-first"])
+def test_a_bridge_row_collapses_a_key_only_row_into_a_tuple_only_row(monkeypatch, order):
+    """ "Same iff intersecting" is not an equivalence until it is closed transitively.
+
+    A row may carry several aliases, and a row carrying BOTH a venue key and a
+    market/collateral/side tuple bridges a key-only row to a tuple-only row. The
+    original greedy single pass could not use that bridge: the key-only row was
+    appended before the bridge arrived, and the bridge was then discarded with
+    its aliases, so ``key ~ sem`` was never learned and one physical position
+    enumerated as two — VIB-6287's exact symptom, surviving inside its own fix.
+
+    Both orderings are pinned because in THIS shape — a strategy row present —
+    order genuinely cannot matter: ``seen`` holds ``{sem}`` before the loop, so the
+    bridge always intersects and is always discarded. That is what makes "absorb
+    the duplicate's aliases instead of dropping them" an insufficient fix: by then
+    the key-only row is already appended.
+
+    The RESTART shape is order-dependent and is pinned separately below; the
+    registry read carries no ``ORDER BY``, so row order is a backend detail.
+
+    Aliases are injected rather than derived so this tests the UNION algorithm
+    and cannot pass or fail for a reason belonging to key derivation.
+    """
+    aliases = {
+        "S": frozenset({("sem",)}),
+        "A": frozenset({("key",)}),
+        "B": frozenset({("key",), ("sem",)}),
+    }
+    monkeypatch.setattr(
+        registry_enumeration_module,
+        "_dedupe_keys",
+        lambda position, wallet_for_chain=None: aliases[position.position_id],
+    )
+
+    out = reconcile_lp_with_registry(
+        strategy_summary=TeardownPositionSummary(
+            deployment_id="d", timestamp=datetime.now(UTC), positions=[_alias_row("S")]
+        ),
+        registry_positions=[_alias_row(x) for x in order],
+        registry_available=True,
+    )
+
+    assert [p.position_id for p in out.positions] == ["S"], (
+        "one physical position enumerated more than once — the bridge row's aliases "
+        "were not used to join the key-only row to the strategy row"
+    )
+
+
+def test_unmeasured_rows_never_collapse_into_one_another():
+    """The non-vacuity control: EMPTY is not a shared alias.
+
+    An empty alias set means UNMEASURED. If the component build treated it as a
+    linkable token, every unmeasured row across every venue would join one
+    component and all but one would be suppressed — over-collapse, the silent
+    strand. Each must survive as its own row.
+    """
+    monkeypatch_free_empty = frozenset()
+    rows = [_alias_row("R1"), _alias_row("R2")]
+    import unittest.mock as _mock
+
+    with _mock.patch.object(
+        registry_enumeration_module,
+        "_dedupe_keys",
+        lambda position, wallet_for_chain=None: monkeypatch_free_empty,
+    ):
+        out = reconcile_lp_with_registry(
+            strategy_summary=TeardownPositionSummary(deployment_id="d", timestamp=datetime.now(UTC), positions=[]),
+            registry_positions=rows,
+            registry_available=True,
+        )
+
+    assert [p.position_id for p in out.positions] == ["R1", "R2"]
+
+
+@pytest.mark.parametrize(
+    "order",
+    [("A", "B", "S"), ("B", "A", "S"), ("S", "A", "B")],
+    ids=["key-bridge-sem", "bridge-key-sem", "sem-key-bridge"],
+)
+def test_the_restart_shape_is_order_independent(monkeypatch, order):
+    """The shape the registry cutover exists for: the strategy reports NOTHING.
+
+    With no strategy row, ``seen`` starts empty, so which row is appended first
+    depends purely on iteration order — and the registry read carries **no
+    ``ORDER BY``**, so that order is whatever the backend returns (rowid order on
+    SQLite in practice, unspecified on Postgres and free to shift after updates or
+    VACUUM). Under the old greedy pass the same three rows enumerated as 2, 1 or 2
+    depending only on arrival order.
+
+    One physical position must enumerate as one row under every permutation.
+    """
+    aliases = {
+        "S": frozenset({("sem",)}),
+        "A": frozenset({("key",)}),
+        "B": frozenset({("key",), ("sem",)}),
+    }
+    monkeypatch.setattr(
+        registry_enumeration_module,
+        "_dedupe_keys",
+        lambda position, wallet_for_chain=None: aliases[position.position_id],
+    )
+
+    out = reconcile_lp_with_registry(
+        strategy_summary=TeardownPositionSummary(deployment_id="d", timestamp=datetime.now(UTC), positions=[]),
+        registry_positions=[_alias_row(x) for x in order],
+        registry_available=True,
+    )
+
+    assert len(out.positions) == 1, (
+        f"restart shape, arrival order {order}: one physical position enumerated as "
+        f"{[p.position_id for p in out.positions]}"
+    )

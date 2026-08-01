@@ -44,6 +44,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any
 
 from almanak.framework.teardown.models import (
@@ -581,6 +582,53 @@ def _lp_carries_identity(intent: Any, position: PositionInfo) -> bool:
     return bool(intent_id) and intent_id == _norm_identity(position.position_id)
 
 
+def _perp_intent_venue_aliases(intent: Any, position: PositionInfo) -> frozenset[str]:
+    """Venue alias tokens for the position a perp closing ``intent`` targets.
+
+    Built from ONLY the three fields a ``PerpCloseIntent`` definitively names —
+    ``market``, ``collateral_token``, ``is_long`` — so the tokens are statements
+    the intent actually makes. The intent's own ``position_id`` is deliberately
+    NOT used: it is venue-specific, documented as ignored for GMX, and adopting
+    an id the intent merely carries could credit a position the intent does not
+    close. Over-crediting here reports a teardown complete while a position is
+    still open, so this side must be strictly conservative.
+
+    ``chain`` / ``protocol`` come from the POSITION: it is the authority on where
+    it lives (the intent's ``chain`` is optional), and ``_chain_compatible`` has
+    already established the two are compatible.
+
+    Because the probe borrows the POSITION's protocol, an intent that explicitly
+    names a DIFFERENT venue is refused outright — otherwise a ``hyperliquid``
+    intent would be handed to GMX's hook and credited against a GMX position.
+    ``_covers_perp``'s ``_protocol_compatible`` already filters that before this
+    function is reached, so this is defence in depth rather than a live hole —
+    but it is the exact mistake the designer's own prototype made, and its
+    failure mode (crediting an intent that does not close the position) reports a
+    teardown complete while money is still on-chain. Lenient on ABSENCE, strict
+    on an explicit mismatch, matching ``_protocol_compatible``.
+    """
+    intent_protocol = str(_field(intent, "protocol") or "").strip().lower()
+    position_protocol = str(position.protocol or "").strip().lower()
+    if intent_protocol and position_protocol and intent_protocol != position_protocol:
+        return frozenset()
+    market = _field(intent, "market")
+    collateral = _field(intent, "collateral_token")
+    is_long = _field(intent, "is_long")
+    if market is None or collateral is None or not isinstance(is_long, bool):
+        return frozenset()
+    from almanak.framework.teardown.perp_identity import venue_identity_tokens
+
+    probe = PositionInfo(
+        position_type=PositionType.PERP,
+        position_id="",
+        chain=position.chain,
+        protocol=position.protocol,
+        value_usd=Decimal("0"),
+        details={"market": market, "collateral_token": collateral, "is_long": is_long},
+    )
+    return venue_identity_tokens(probe)
+
+
 def _perp_carries_identity(intent: Any, position: PositionInfo) -> bool:
     """A perp close/cancel strictly identifies a PERP by its ``market``. A pending
     -order / free-margin residual is matched on its order_key / kind in
@@ -588,6 +636,48 @@ def _perp_carries_identity(intent: Any, position: PositionInfo) -> bool:
 
     Empty ≠ Zero: a market / position_id of ``0`` is a measured identity, so it is
     preserved (not coalesced to absent) when resolving the position's market.
+
+    VIB-6287 — STRICTLY WIDENING, AND CURRENTLY UNREACHABLE FOR THE CASE IT
+    TARGETS. Read this before assuming the restart path is fixed; it is not.
+
+    The widening itself is correct at this layer: the raw comparison below is
+    unchanged and still tried first, and a venue-alias match is an ADDITIONAL
+    way for the two to agree. It was written for the RESTART path, where the
+    enumeration is re-derived from the registry — whose rows carry a market
+    ADDRESS under the ``market`` key while the strategy's regenerated intent
+    names the market SYMBOL, the identical polysemy that made the union
+    double-count.
+
+    But it never runs for that case. ``_position_is_covered`` computes
+    ``covering = [i for i in intents if _covers(i, position)]`` and returns
+    ``False`` when that list is empty, so ``_intent_carries_position_identity``
+    — and therefore this function — is only consulted for intents that ALREADY
+    passed ``_covers``. ``_covers_perp``'s last clause (``completeness.py``
+    ~:806-811) is ``_lenient_identity_match(intent, position, "market",
+    ("market",))``, which is lenient only when a side OMITS its market; with
+    both sides naming one it requires equality, so the address-vs-symbol pair is
+    rejected one layer earlier. Measured:
+    ``_covers -> False`` while ``_perp_carries_identity -> True``.
+
+    Widening ``_covers_perp`` was deliberately NOT done here: it is the gate
+    deciding whether a teardown reports SUCCESS, no real-fork proof of the
+    restart path is available (the mainnet A/B exercises the main path, and
+    managed-Anvil cannot open a GMX position because its keeper is unreachable
+    from the production lane — VIB-6288), and over-crediting is the one direction
+    that strands funds with no alarm. Tracked as a follow-up;
+    ``test_c3_restart_path_end_to_end_is_still_broken`` is a STRICT xfail that
+    turns into a failure the moment that gate is widened.
+
+    It must never get STRICTER: a coverage check that starts rejecting matches
+    turns working teardowns into ``FAILED``, a regression that would read as an
+    improvement. Hence ``raw OR alias``, never ``alias`` alone.
+
+    Residual (measured, not speculative): a registry row that carries NO market
+    at all (the backfill folder writes ``market: None``) yields only a venue-key
+    alias, which an intent — carrying no venue key — cannot match. Such a
+    position still falls back to the raw comparison exactly as before. Closing
+    that gap needs the account threaded into this lane, which ``check_intent_
+    coverage`` (pure, wallet-free) does not have today.
     """
     kind = str((position.details or {}).get("kind") or "").lower()
     if kind in ("pending_order", "hypercore_cash"):
@@ -595,7 +685,14 @@ def _perp_carries_identity(intent: Any, position: PositionInfo) -> bool:
     market = (position.details or {}).get("market")
     pos_market = _norm_identity(market if market is not None else position.position_id)
     intent_market = _norm_identity(_field(intent, "market"))
-    return bool(intent_market) and intent_market == pos_market
+    if bool(intent_market) and intent_market == pos_market:
+        return True
+    from almanak.framework.teardown.perp_identity import venue_identity_tokens
+
+    intent_aliases = _perp_intent_venue_aliases(intent, position)
+    if not intent_aliases:
+        return False
+    return not intent_aliases.isdisjoint(venue_identity_tokens(position))
 
 
 def _vault_carries_identity(intent: Any, position: PositionInfo) -> bool:

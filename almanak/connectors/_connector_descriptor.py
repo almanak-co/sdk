@@ -938,6 +938,13 @@ class Connector:
     swap_route_inference: ImportRef | None = None
     teardown_post_condition: ImportRef | None = None
     teardown_residual_discovery: ImportRef | None = None
+    # VIB-6287: how THIS venue names a position — a set of opaque alias tokens,
+    # every one of which the venue is CERTAIN names the position. The teardown
+    # union treats two rows as the same position iff their token sets intersect.
+    # Only the connector knows its venue's identity rule (there is no formula
+    # that generalises across perp venues); the framework never guesses. See
+    # ``_strategy_base/perp_identity.py`` for the emission contract.
+    perp_identity: ImportRef | None = None
     deferred_refresh: ImportRef | None = None
     pool_reader: ImportRef | None = None
     capabilities: CapabilitiesSpec | None = None
@@ -1250,6 +1257,8 @@ class Connector:
                 "Connector.teardown_residual_discovery must be None or an ImportRef, "
                 f"got {self.teardown_residual_discovery!r}"
             )
+        if self.perp_identity is not None and not isinstance(self.perp_identity, ImportRef):
+            raise ValueError(f"Connector.perp_identity must be None or an ImportRef, got {self.perp_identity!r}")
 
     def _validate_deferred_refresh(self) -> None:
         """Validate the strategy-side deferred-refresh provider import reference."""
@@ -1876,6 +1885,10 @@ class ConnectorRegistry:
     def with_teardown_residual_discovery(self) -> tuple[Connector, ...]:
         """Return connectors that publish teardown residual-discovery hooks (VIB-5116)."""
         return tuple(d for d in self.all() if d.teardown_residual_discovery is not None)
+
+    def with_perp_identity(self) -> tuple[Connector, ...]:
+        """Return connectors that publish venue position identity hooks (VIB-6287)."""
+        return tuple(d for d in self.all() if d.perp_identity is not None)
 
     def with_deferred_refresh(self) -> tuple[Connector, ...]:
         """Return connectors that publish deferred transaction refresh providers."""
