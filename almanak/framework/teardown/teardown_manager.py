@@ -70,6 +70,11 @@ from almanak.framework.teardown.swap_clamp import SwapClampDecision, decide_swap
 
 logger = logging.getLogger(__name__)
 
+_ACCEPTED_ASYNC_SUBMISSION_KEY = "_teardown_async_submission_accepted"
+_ACCEPTED_ASYNC_ORDER_KEYS_KEY = "_teardown_async_submission_order_keys"
+_ACCEPTED_ASYNC_LEDGER_ID_KEY = "_teardown_async_submission_ledger_id"
+ASYNC_SETTLEMENT_PENDING_ERROR = "Accepted async submission remains unsettled; teardown is resumable"
+
 # VIB-5573 (WI-2): bounded time-axis retry for a vetted TRANSIENT revert (e.g.
 # MetaMorpho withdraw-queue Panic 0x11 that clears within blocks). The retry is
 # DEFERRED — the intent is re-queued to the END of the work queue and re-fired
@@ -331,11 +336,121 @@ def _serialize_intent_for_state(intent: Any) -> Any:
     """
     if hasattr(intent, "to_dict"):
         return intent.to_dict()
+    if hasattr(intent, "serialize"):
+        # BaseIntent subclasses add their dispatch discriminator in
+        # ``serialize()``; bare Pydantic ``model_dump()`` omits that property.
+        return intent.serialize()
     if hasattr(intent, "model_dump"):
         return intent.model_dump(mode="json")
     if isinstance(intent, dict):
         return intent
     return str(intent)
+
+
+def _mark_persisted_async_submission_accepted(
+    state: TeardownState,
+    intent_index: int,
+    *,
+    order_keys: tuple[str, ...],
+    ledger_entry_id: str | None,
+) -> bool:
+    """Durably mark one accepted async intent so resume can never submit it again."""
+    try:
+        plan = json.loads(state.pending_intents_json) if state.pending_intents_json else []
+        if not isinstance(plan, list) or not 0 <= intent_index < len(plan):
+            return False
+        serialized = plan[intent_index]
+        if not isinstance(serialized, dict):
+            return False
+        plan[intent_index] = {
+            **serialized,
+            _ACCEPTED_ASYNC_SUBMISSION_KEY: True,
+            _ACCEPTED_ASYNC_ORDER_KEYS_KEY: list(order_keys),
+            _ACCEPTED_ASYNC_LEDGER_ID_KEY: ledger_entry_id,
+        }
+        state.pending_intents_json = json.dumps(plan)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def _is_persisted_async_submission_accepted(intent: Any) -> bool:
+    return isinstance(intent, dict) and intent.get(_ACCEPTED_ASYNC_SUBMISSION_KEY) is True
+
+
+def has_accepted_async_submission(state: TeardownState | None) -> bool:
+    """Return whether a persisted plan owns a durable accepted async order."""
+    if state is None or not state.pending_intents_json:
+        return False
+    try:
+        plan = json.loads(state.pending_intents_json)
+    except (TypeError, ValueError):
+        return False
+    return isinstance(plan, list) and any(_is_persisted_async_submission_accepted(item) for item in plan)
+
+
+def accepted_async_order_keys(state: TeardownState | None) -> frozenset[str]:
+    """Return exact durable order keys owned by accepted plan markers."""
+    if state is None or not state.pending_intents_json:
+        return frozenset()
+    try:
+        plan = json.loads(state.pending_intents_json)
+    except (TypeError, ValueError):
+        return frozenset()
+    if not isinstance(plan, list):
+        return frozenset()
+    return frozenset(
+        key
+        for item in plan
+        if _is_persisted_async_submission_accepted(item)
+        for key in _accepted_async_submission_metadata(item)[1]
+    )
+
+
+def _accepted_async_submission_metadata(intent: Any) -> tuple[str | None, tuple[str, ...]]:
+    if not _is_persisted_async_submission_accepted(intent):
+        return None, ()
+    ledger_entry_id = str(intent.get(_ACCEPTED_ASYNC_LEDGER_ID_KEY) or "") or None
+    raw_keys = intent.get(_ACCEPTED_ASYNC_ORDER_KEYS_KEY)
+    order_keys = tuple(str(key).lower() for key in raw_keys or () if str(key)) if isinstance(raw_keys, list) else ()
+    return ledger_entry_id, order_keys
+
+
+def _clear_persisted_async_submission(state: TeardownState, intent_index: int) -> dict[str, Any] | None:
+    """Clear a terminal old submission before dispatching its replacement close."""
+    try:
+        plan = json.loads(state.pending_intents_json) if state.pending_intents_json else []
+        if not isinstance(plan, list) or not 0 <= intent_index < len(plan):
+            return None
+        serialized = plan[intent_index]
+        if not isinstance(serialized, dict):
+            return None
+        clean = {
+            key: value
+            for key, value in serialized.items()
+            if key
+            not in {
+                _ACCEPTED_ASYNC_SUBMISSION_KEY,
+                _ACCEPTED_ASYNC_ORDER_KEYS_KEY,
+                _ACCEPTED_ASYNC_LEDGER_ID_KEY,
+            }
+        }
+        plan[intent_index] = clean
+        state.pending_intents_json = json.dumps(plan)
+        return clean
+    except (TypeError, ValueError):
+        return None
+
+
+def _deserialize_persisted_intent(payload: dict[str, Any]) -> Any:
+    """Restore a JSON plan item while tolerating the legacy ``intent_type`` key."""
+    from almanak.framework.intents import Intent
+
+    clean = dict(payload)
+    serialized_kind = clean.pop("intent_type", None)
+    if "type" not in clean and serialized_kind is not None:
+        clean["type"] = serialized_kind
+    return Intent.deserialize(clean)
 
 
 def _teardown_chain(intents: list[Any]) -> str | None:
@@ -1031,7 +1146,9 @@ class TeardownManager:
         strategy: IntentStrategy,
         on_approval_needed: ApprovalCallback | None = None,
         on_progress: Callable[[int, str], Awaitable[None]] | None = None,
+        is_auto_mode: bool = False,
         market: Any = None,
+        accepted_async_recovery_intents: list[Any] | None = None,
     ) -> TeardownResult | None:
         """Resume an interrupted teardown.
 
@@ -1043,6 +1160,7 @@ class TeardownManager:
             strategy: The strategy instance
             on_approval_needed: Callback for approval requests
             on_progress: Callback for progress updates
+            is_auto_mode: Whether this is auto-protect mode
 
         Returns:
             TeardownResult if resumed and completed, None if nothing to resume
@@ -1074,6 +1192,21 @@ class TeardownManager:
 
         # Staleness check
         age_seconds = (datetime.now(UTC) - state.updated_at).total_seconds()
+        previous_plan = json.loads(state.pending_intents_json) if state.pending_intents_json else []
+        if age_seconds > self.config.staleness_threshold_seconds and any(
+            _is_persisted_async_submission_accepted(item) for item in previous_plan
+        ):
+            # An accepted asynchronous submission is correlated by its exact
+            # durable order key. Keep that plan intact until the order is
+            # measured terminal: regenerating it would require matching
+            # strategy-facing aliases (for example USDC / ETH-USD) against
+            # connector-facing addresses and could drop the no-resubmit marker.
+            logger.warning(
+                "State is stale (%.1fs old) but contains an accepted async submission; "
+                "retaining the correlated plan until terminal settlement",
+                age_seconds,
+            )
+            age_seconds = 0
         if age_seconds > self.config.staleness_threshold_seconds:
             logger.info(f"State is stale ({age_seconds}s old), regenerating intents")
             positions = strategy.get_open_positions()
@@ -1099,7 +1232,10 @@ class TeardownManager:
                     "Teardown resume lending guard synthesised HF-safe unwind staircase for %s (VIB-4466)", synth
                 )
             intents = guarded.intents
-            state.pending_intents_json = json.dumps([_serialize_intent_for_state(i) for i in intents])
+            # Accepted asynchronous plans never enter regeneration: the guard
+            # above retains their exact correlated order-key payload. Ordinary
+            # stale plans have no accepted marker to carry forward.
+            state.pending_intents_json = json.dumps([_serialize_intent_for_state(intent) for intent in intents])
             # The guard can EXPAND (synthesis) or SHRINK (drops) the plan, so keep the
             # progress denominator in sync — otherwise a resumed teardown reports
             # progress against the stale pre-guard intent count (VIB-4466 / CodeRabbit).
@@ -1206,6 +1342,15 @@ class TeardownManager:
         # keep ``current_intent_index`` in the max() so a legitimately larger
         # persisted index is still honored.
         resume_from_index = max(state.current_intent_index, state.completed_intents)
+        accepted_indices = [
+            index for index, item in enumerate(intents_data) if _is_persisted_async_submission_accepted(item)
+        ]
+        if accepted_indices:
+            # A marker is stronger than a legacy/stale progress counter. Older
+            # persisted rows may have advanced the counter after createOrder;
+            # always revisit the earliest correlated order before skipping any
+            # plan prefix so terminal proof, not arithmetic, decides completion.
+            resume_from_index = min(resume_from_index, min(accepted_indices))
 
         return await self._execute_intents(
             teardown_id=state.teardown_id,
@@ -1217,8 +1362,10 @@ class TeardownManager:
             on_approval_needed=on_approval_needed,
             on_progress=on_progress,
             start_from_index=resume_from_index,
+            is_auto_mode=is_auto_mode,
             price_oracle=price_oracle,
             market=market,
+            accepted_async_recovery_intents=accepted_async_recovery_intents,
         )
 
     def _consolidation_noop_target(
@@ -1522,6 +1669,7 @@ class TeardownManager:
         price_oracle: dict | None = None,
         market: Any = None,
         consolidation_consent: bool = False,
+        accepted_async_recovery_intents: list[Any] | None = None,
     ) -> TeardownResult:
         """Execute intents with escalating slippage.
 
@@ -1570,6 +1718,11 @@ class TeardownManager:
         # commit calls. Surfaced on TeardownResult.accounting_degraded /
         # accounting_degraded_count for operator visibility + reconciliation.
         accounting_degraded_records: list[Any] = []
+        # A create-order transaction that landed but is not yet measured
+        # terminal must keep this teardown resumable. Marking the run COMPLETED
+        # would orphan its durable marker and let a fresh teardown submit a
+        # second economic close while the first order is still live.
+        unsettled_async_submission = False
 
         # VIB-5573 (WI-2): iterate a mutable work QUEUE, not a fixed range, so a
         # TRANSIENT-reverting close can be re-queued to the TAIL and retried on
@@ -1600,6 +1753,151 @@ class TeardownManager:
 
         while work:
             i, intent, attempts = work.popleft()
+
+            if _is_persisted_async_submission_accepted(intent):
+                # The submission transaction already landed before a prior
+                # process exited. Its durable ledger/order key is owned by the
+                # settlement reconciler; replaying the intent would create a
+                # duplicate close order. It is dispatch-complete but not proven
+                # terminal, so keep the intent pending and fail conservatively;
+                # a bare resume must never report success while the position may
+                # still be open. The durable reconciler continues to own it.
+                ledger_entry_id, order_keys = _accepted_async_submission_metadata(intent)
+                settlement_status: str | None = None
+                if self.runner_helpers.check_intent_settlement is not None:
+                    settlement_status = await self.runner_helpers.check_intent_settlement(
+                        strategy,
+                        ledger_entry_id=ledger_entry_id,
+                        order_keys=order_keys,
+                        cycle_id=teardown_cycle_id,
+                        chain=str(intent.get("chain") or getattr(strategy, "chain", "") or ""),
+                        wallet_address=_teardown_wallet_for_chain(
+                            strategy,
+                            str(intent.get("chain") or getattr(strategy, "chain", "") or ""),
+                        ),
+                    )
+                if settlement_status == "executed":
+                    succeeded += 1
+                    _pending_indices.discard(i)
+                    logger.info(
+                        "Accepted async teardown intent %d/%d is terminally executed and booked; completing resume",
+                        i + 1,
+                        len(intents),
+                    )
+                    try:
+                        callback_payload = {
+                            key: value
+                            for key, value in intent.items()
+                            if key
+                            not in {
+                                _ACCEPTED_ASYNC_SUBMISSION_KEY,
+                                _ACCEPTED_ASYNC_ORDER_KEYS_KEY,
+                                _ACCEPTED_ASYNC_LEDGER_ID_KEY,
+                            }
+                        }
+                        callback_intent = _deserialize_persisted_intent(callback_payload)
+                        if hasattr(strategy, "on_intent_executed"):
+                            callback_result = strategy.on_intent_executed(callback_intent, True, None)
+                            if asyncio.iscoroutine(callback_result):
+                                await callback_result
+                        if hasattr(strategy, "save_state"):
+                            strategy.save_state()
+                        if hasattr(strategy, "flush_pending_saves"):
+                            await strategy.flush_pending_saves()
+                    except Exception:  # noqa: BLE001 — settlement proof remains authoritative
+                        logger.exception("Failed to persist strategy state after recovered async settlement")
+                    continue
+
+                if settlement_status == "terminal_failed":
+                    # Every old order is measured terminal and at least one did
+                    # not execute. Persist removal of the old marker before a
+                    # replacement is dispatched; a save fault therefore leaves
+                    # the durable no-resubmit marker in the conservative state.
+                    prior_pending_intents_json = teardown_state.pending_intents_json
+                    replacement_intent = _clear_persisted_async_submission(teardown_state, i)
+                    if replacement_intent is None:
+                        unsettled_async_submission = True
+                        failed += 1
+                        logger.error(
+                            "Terminally failed async teardown intent %d/%d could not clear its persisted marker; "
+                            "refusing replacement submission",
+                            i + 1,
+                            len(intents),
+                        )
+                        continue
+                    teardown_state.updated_at = datetime.now(UTC)
+                    if self.state_manager:
+                        try:
+                            await self.state_manager.save_teardown_state(teardown_state)
+                        except Exception:
+                            # The backend still has the marker. Keep this object
+                            # equally conservative if the caller retries it in
+                            # process after the failed persistence attempt.
+                            teardown_state.pending_intents_json = prior_pending_intents_json
+                            unsettled_async_submission = True
+                            failed += 1
+                            logger.exception(
+                                "Terminally failed async teardown intent %d/%d could not persist marker removal; "
+                                "refusing replacement submission",
+                                i + 1,
+                                len(intents),
+                            )
+                            continue
+                    try:
+                        intent = _deserialize_persisted_intent(replacement_intent)
+                    except (TypeError, ValueError):
+                        failed += 1
+                        logger.exception(
+                            "Terminally failed async teardown intent %d/%d could not deserialize its "
+                            "persisted replacement; recording intent failure",
+                            i + 1,
+                            len(intents),
+                        )
+                        continue
+                    logger.warning(
+                        "Accepted async teardown intent %d/%d is terminally failed; dispatching one replacement close",
+                        i + 1,
+                        len(intents),
+                    )
+                else:
+                    unsettled_async_submission = True
+                    exact_cancel = next(
+                        (
+                            candidate
+                            for candidate in accepted_async_recovery_intents or []
+                            if str(_intent_field(candidate, "intent_type") or "").upper() == "PERP_CANCEL_ORDER"
+                            and str(_intent_field(candidate, "order_key") or "").lower() in set(order_keys)
+                        ),
+                        None,
+                    )
+                    if exact_cancel is not None:
+                        # VIB-5568 already enforced the venue age gate. Route
+                        # cancellation of this exact durable key through the
+                        # ordinary compiler/commit lane; keep the marker until a
+                        # later measured terminal_failed verdict authorizes one
+                        # replacement close.
+                        intent = exact_cancel
+                        logger.warning(
+                            "Accepted async teardown intent %d/%d remains pending and is now cancellable; "
+                            "dispatching exact-order recovery",
+                            i + 1,
+                            len(intents),
+                        )
+                    else:
+                        failed += 1
+                        logger.error(
+                            "Refusing to resubmit accepted async teardown intent %d/%d; "
+                            "terminal settlement is unproven",
+                            i + 1,
+                            len(intents),
+                        )
+                        floor = _resume_floor()
+                        teardown_state.completed_intents = floor
+                        teardown_state.current_intent_index = floor
+                        teardown_state.updated_at = datetime.now(UTC)
+                        if self.state_manager:
+                            await self.state_manager.save_teardown_state(teardown_state)
+                        continue
 
             # VIB-5573 (WI-2): a re-queued transient waits a bounded backoff
             # BEFORE re-firing so the underflow/queue-inconsistency has time to
@@ -1777,7 +2075,12 @@ class TeardownManager:
                     intent_count=1,
                 )
 
-            # Execute with escalating slippage
+            # Execute with escalating slippage. Once any transaction reports
+            # success, this per-intent latch permanently forbids ladder re-entry:
+            # a later accounting/state/observer exception cannot make an already
+            # landed on-chain action safe to submit again.
+            submission_landed = False
+
             async def execute_at_slippage(  # noqa: C901
                 intent_to_exec: Any, slippage: Decimal, *, intent_index: int = i
             ) -> ExecutionAttempt:
@@ -1786,6 +2089,17 @@ class TeardownManager:
                 Compiles the intent to an ActionBundle and executes it via the
                 orchestrator. Returns the execution result.
                 """
+                nonlocal submission_landed, unsettled_async_submission
+                if submission_landed:
+                    return ExecutionAttempt(
+                        success=False,
+                        slippage_used=slippage,
+                        actual_slippage=Decimal("0"),
+                        error="On-chain submission already landed; refusing duplicate teardown execution",
+                        retryable=False,
+                        disposition=Disposition.NON_RETRYABLE.value,
+                    )
+
                 logger.info(f"Executing intent {intent_index + 1}/{len(intents)} at {slippage:.1%} slippage")
 
                 # Check if we have real execution capability
@@ -2130,16 +2444,47 @@ class TeardownManager:
                     )
 
                     if exec_result.success:
+                        submission_landed = True
+                        # VIB-6254: GMX-style createOrder transactions are only
+                        # submissions. A keeper settles the economic close in a
+                        # later transaction. Extract its order key before the
+                        # Phase-1 commit; the accepted submission is persisted
+                        # before waiting so crash recovery can never re-submit
+                        # the createOrder transaction.
+                        settlement_error: str | None = None
+                        async_submission_accepted = False
+                        accepted_order_keys: tuple[str, ...] = ()
+                        accepted_marker_persisted = False
+                        accepted_marker_save_error: Exception | None = None
+                        durable_async_correlation = False
+                        if self.runner_helpers.has_async_settlement:
+                            preparation = self.runner_helpers.prepare_intent_settlement(  # type: ignore[misc]
+                                strategy,
+                                intent_to_exec,
+                                exec_result,
+                                context,
+                                bundle_metadata=getattr(compilation_result.action_bundle, "metadata", None) or None,
+                            )
+                            async_submission_accepted = preparation.applicable
+                            settlement_error = preparation.error
+                            if async_submission_accepted:
+                                accepted_order_keys = tuple(
+                                    str(getattr(order, "order_id", "") or getattr(order, "order_key", "") or "").lower()
+                                    for order in preparation.orders
+                                    if str(getattr(order, "order_id", "") or getattr(order, "order_key", "") or "")
+                                )
+
                         # Calculate actual slippage from execution results
                         # This is an estimate - actual slippage depends on protocol
                         actual_slippage = slippage * Decimal("0.5")  # Typically less than max
                         tx_hash = (
                             exec_result.transaction_results[0].tx_hash if exec_result.transaction_results else "unknown"
                         )
-                        logger.info(
-                            f"Intent {intent_index + 1}/{len(intents)} executed successfully. "
-                            f"TX: {tx_hash}, Gas used: {exec_result.total_gas_used}"
-                        )
+                        if settlement_error is None:
+                            logger.info(
+                                f"Intent {intent_index + 1}/{len(intents)} executed successfully. "
+                                f"TX: {tx_hash}, Gas used: {exec_result.total_gas_used}"
+                            )
 
                         # VIB-3918 — reconcile post-execution balances now
                         # that the TX has confirmed. The recon dict carries
@@ -2170,6 +2515,7 @@ class TeardownManager:
                         # the deferred-write log, never raise — so the
                         # slippage manager never sees an accounting failure
                         # and the next teardown intent runs regardless.
+                        commit_outcome = None
                         if self.runner_helpers.has_commit:
                             commit_outcome = await self.runner_helpers.commit(  # type: ignore[misc]
                                 strategy,
@@ -2192,6 +2538,116 @@ class TeardownManager:
                                     len(intents),
                                     commit_outcome.degraded_reason or "unknown",
                                 )
+
+                        if async_submission_accepted:
+                            # Phase 1 is the durable source from which a missing
+                            # marker can be reconstructed after restart. Never
+                            # persist a marker with no ledger: that creates a
+                            # post-marker/pre-ledger state which can neither be
+                            # reconciled nor safely replaced.
+                            ledger_entry_id = (
+                                str(commit_outcome.ledger_entry_id)
+                                if commit_outcome and commit_outcome.ledger_entry_id
+                                else None
+                            )
+                            if not accepted_order_keys and ledger_entry_id:
+                                recover_keys = self.runner_helpers.recover_accepted_order_keys
+                                if recover_keys is not None:
+                                    accepted_order_keys = await recover_keys(ledger_entry_id)
+                            durable_async_correlation = bool(ledger_entry_id and accepted_order_keys)
+                            marked = (
+                                _mark_persisted_async_submission_accepted(
+                                    teardown_state,
+                                    intent_index,
+                                    order_keys=accepted_order_keys,
+                                    ledger_entry_id=ledger_entry_id,
+                                )
+                                if durable_async_correlation
+                                else False
+                            )
+                            if not marked:
+                                logger.error(
+                                    "Accepted async teardown intent %d/%d could not be marked in the persisted plan; "
+                                    "the contiguous resume floor remains the no-resubmit backstop",
+                                    intent_index + 1,
+                                    len(intents),
+                                )
+                            accepted_floor = _resume_floor()
+                            teardown_state.completed_intents = accepted_floor
+                            teardown_state.current_intent_index = accepted_floor
+                            teardown_state.updated_at = datetime.now(UTC)
+                            if marked and self.state_manager:
+                                try:
+                                    await self.state_manager.save_teardown_state(teardown_state)
+                                    accepted_marker_persisted = True
+                                    accepted_marker_save_error = None
+                                except Exception as exc:  # noqa: BLE001 — submission already landed; never retry it
+                                    accepted_marker_save_error = exc
+                                    logger.exception(
+                                        "Accepted async teardown marker persistence failed after Phase-1 commit"
+                                    )
+                            elif marked:
+                                accepted_marker_persisted = True
+                                accepted_marker_save_error = None
+                            if not accepted_marker_persisted:
+                                settlement_error = (
+                                    "Accepted async submission could not be durably correlated for crash-safe recovery; "
+                                    f"refusing resubmission: {accepted_marker_save_error or 'missing Phase-1 ledger/order key'}"
+                                )
+
+                        if async_submission_accepted and settlement_error is None:
+                            settlement_error = await self.runner_helpers.await_intent_settlement(  # type: ignore[misc]
+                                strategy,
+                                intent_to_exec,
+                                exec_result,
+                                context,
+                                bundle_metadata=getattr(compilation_result.action_bundle, "metadata", None) or None,
+                                preparation=preparation,
+                            )
+                            if settlement_error is None:
+                                phase2_degraded = await self.runner_helpers.reconcile_intent_settlement(  # type: ignore[misc]
+                                    strategy,
+                                    exec_result,
+                                    context,
+                                    teardown_cycle_id,
+                                )
+                                if phase2_degraded:
+                                    accounting_degraded_records.extend(phase2_degraded)
+                                    logger.error(
+                                        "Teardown intent %d/%d terminal settlement accounting degraded — %s",
+                                        intent_index + 1,
+                                        len(intents),
+                                        "; ".join(
+                                            str(getattr(record, "error", "") or "unknown") for record in phase2_degraded
+                                        ),
+                                    )
+                                    settlement_error = (
+                                        "Terminal async settlement was observed but Phase-2 booking remains degraded; "
+                                        "keeping the correlated teardown resumable"
+                                    )
+
+                        if settlement_error is not None:
+                            # The create-order transaction and resume floor are
+                            # durable, so fail without any slippage retry. A
+                            # later settlement reconciler can still observe and
+                            # book the exact pending order; resubmission here
+                            # would risk duplicate economic execution.
+                            logger.error(
+                                "Intent %d/%d was accepted but did not settle terminally; refusing resubmission: %s",
+                                intent_index + 1,
+                                len(intents),
+                                settlement_error,
+                            )
+                            if async_submission_accepted and (accepted_marker_persisted or durable_async_correlation):
+                                unsettled_async_submission = True
+                            return ExecutionAttempt(
+                                success=False,
+                                slippage_used=slippage,
+                                actual_slippage=Decimal("0"),
+                                error=settlement_error,
+                                retryable=False,
+                                disposition=Disposition.NON_RETRYABLE.value,
+                            )
 
                         return ExecutionAttempt(
                             success=True,
@@ -2230,6 +2686,19 @@ class TeardownManager:
                         )
 
                 except Exception as e:
+                    if submission_landed:
+                        logger.exception(
+                            "Post-submit teardown processing failed; refusing duplicate execution: %s",
+                            e,
+                        )
+                        return ExecutionAttempt(
+                            success=False,
+                            slippage_used=slippage,
+                            actual_slippage=Decimal("0"),
+                            error=f"On-chain submission landed but post-submit processing failed: {e}",
+                            retryable=False,
+                            disposition=Disposition.NON_RETRYABLE.value,
+                        )
                     revert_class, disposition = classify_teardown_failure(str(e))
                     logger.exception(
                         "Exception during intent execution [%s -> %s]: %s",
@@ -2412,8 +2881,9 @@ class TeardownManager:
                 await self.state_manager.save_teardown_state(teardown_state)
 
         # All intents processed
-        completed_at = datetime.now(UTC)
-        teardown_state.status = TeardownStatus.COMPLETED
+        finished_at = datetime.now(UTC)
+        completed_at = None if unsettled_async_submission else finished_at
+        teardown_state.status = TeardownStatus.EXECUTING if unsettled_async_submission else TeardownStatus.COMPLETED
         teardown_state.completed_at = completed_at
         if self.state_manager:
             await self.state_manager.save_teardown_state(teardown_state)
@@ -2429,12 +2899,12 @@ class TeardownManager:
             )
 
         return TeardownResult(
-            success=failed == 0,
+            success=failed == 0 and not unsettled_async_submission,
             deployment_id=strategy.deployment_id,
             mode=mode_str,
             started_at=started_at,
             completed_at=completed_at,
-            duration_seconds=(completed_at - started_at).total_seconds(),
+            duration_seconds=(finished_at - started_at).total_seconds(),
             intents_total=len(intents),
             intents_succeeded=succeeded,
             intents_failed=failed,
@@ -2442,7 +2912,14 @@ class TeardownManager:
             final_value_usd=final_value,
             total_costs_usd=total_costs,
             final_balances=final_balances,
-            error=None if failed == 0 else f"{failed} intents failed",
+            error=(
+                ASYNC_SETTLEMENT_PENDING_ERROR
+                if unsettled_async_submission
+                else None
+                if failed == 0
+                else f"{failed} intents failed"
+            ),
+            async_settlement_pending=unsettled_async_submission,
             accounting_degraded=bool(accounting_degraded_records),
             accounting_degraded_count=len(accounting_degraded_records),
             last_receipt_block=last_receipt_block,
@@ -2768,6 +3245,8 @@ class TeardownManager:
                 gateway_client=self._teardown_gateway_client(),
                 market=market,
                 network=str(getattr(strategy, "_gateway_network", "") or ""),
+                wallet_address=self._teardown_wallet_address(strategy),
+                wallet_for_chain=getattr(strategy, "get_wallet_for_chain", None),
             )
         except Exception:  # noqa: BLE001 — the CHECK must never fault the teardown lane
             logger.exception(
@@ -2847,6 +3326,8 @@ class TeardownManager:
                 gateway_client=gateway_client,
                 market=post_market,
                 network=network,
+                wallet_address=self._teardown_wallet_address(strategy),
+                wallet_for_chain=getattr(strategy, "get_wallet_for_chain", None),
                 # VIB-5923: POST phase — here "chain reports CLOSED" is the
                 # EXPECTED success signal for every properly closed position, so
                 # the CHECK must not page ERROR per position on a healthy

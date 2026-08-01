@@ -43,6 +43,7 @@ direct RPC / HTTP is opened here, and no new egress is introduced.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from enum import StrEnum
@@ -579,7 +580,12 @@ def _reconcile_lending(*, position: PositionInfo, market: MarketSnapshot | None)
 
 
 async def _reconcile_one(
-    *, position: PositionInfo, gateway_client: Any, market: MarketSnapshot | None, network: str
+    *,
+    position: PositionInfo,
+    gateway_client: Any,
+    market: MarketSnapshot | None,
+    network: str,
+    wallet_address: str,
 ) -> tuple[ReconciliationVerdict, str]:
     """Dispatch one KNOWN position to its protocol-scoped chain read.
 
@@ -632,7 +638,38 @@ async def _reconcile_one(
             return await _reconcile_lp(position=position, gateway_client=gateway_client, network=network)
         if position.position_type in (PositionType.SUPPLY, PositionType.BORROW):
             return _reconcile_lending(position=position, market=market)
-        # PERP / VAULT / STAKE / TOKEN / CEX / PREDICTION have no per-position
+        if position.position_type is PositionType.PERP:
+            from almanak.framework.teardown.post_conditions import get_teardown_post_condition
+
+            hook = get_teardown_post_condition(str(position.protocol or ""))
+            if hook is None or getattr(hook, "supports_open_state_reconciliation", False) is not True:
+                return (
+                    ReconciliationVerdict.UNVERIFIABLE,
+                    "perp connector has no measured open-state reconciliation capability",
+                )
+            if gateway_client is None:
+                return ReconciliationVerdict.UNVERIFIABLE, "no gateway client to chain-verify perp"
+            if not str(wallet_address or "").strip():
+                return ReconciliationVerdict.UNVERIFIABLE, "no wallet address to chain-verify perp"
+            check = hook(
+                position=position,
+                wallet_address=wallet_address,
+                gateway_client=gateway_client,
+                rpc_url=None,
+                block=None,
+            )
+            if getattr(check, "unmeasured", False):
+                return (
+                    ReconciliationVerdict.UNVERIFIABLE,
+                    str(getattr(check, "error", "") or "perp open-state read was unmeasured"),
+                )
+            if getattr(check, "closed", False):
+                return ReconciliationVerdict.DIVERGED_CLOSED, "connector measured the perp position closed"
+            return (
+                ReconciliationVerdict.CONFIRMED_OPEN,
+                f"connector measured residual perp state: {getattr(check, 'residual', {})}",
+            )
+        # VAULT / STAKE / TOKEN / CEX / PREDICTION have no per-position
         # Plan-A chain-read capability yet — be honest: UNVERIFIABLE, never a
         # fabricated CONFIRMED. (Their per-position verify is owned by their own
         # cutover / post-condition tickets, not this read-path check.)
@@ -718,6 +755,8 @@ async def reconcile_known_positions_against_chain(
     gateway_client: Any,
     market: MarketSnapshot | None,
     network: str = "",
+    wallet_address: str = "",
+    wallet_for_chain: Callable[[str], str | None] | None = None,
     phase: ReconciliationPhase = "pre",
 ) -> ReconciliationReport:
     """Plan-A reconciliation CHECK: confirm each KNOWN position's live chain state.
@@ -739,6 +778,13 @@ async def reconcile_known_positions_against_chain(
             read. ``None`` ⇒ lending positions reconcile as ``UNVERIFIABLE``.
         network: Gateway network override (``""`` uses the gateway's configured
             network — the fork on a managed-Anvil run).
+        wallet_address: Deployment wallet used by connector-declared PERP
+            open-state reconciliation. Empty leaves PERP positions
+            ``UNVERIFIABLE``; no wallet-wide discovery is performed here.
+        wallet_for_chain: Optional per-chain wallet resolver. When supplied, a
+            non-empty result takes precedence over ``wallet_address`` for each
+            enumerated position. Resolver faults fall back to the deployment
+            wallet and never fault this observational CHECK.
         phase: Which teardown lane is calling — ``"pre"`` (default; before any
             closing intent fired) or ``"post"`` (the TD-15 re-read after every
             closing intent fired). **Log severity only** (VIB-5923): a
@@ -784,8 +830,26 @@ async def reconcile_known_positions_against_chain(
     # concurrent gateway reads exactly while the gateway is busy servicing the
     # teardown's risk-reducing unwind RPCs.
     for position in positions:
+        position_wallet = wallet_address
+        if wallet_for_chain is not None:
+            try:
+                resolved_wallet = wallet_for_chain(str(position.chain or ""))
+            except Exception:  # noqa: BLE001 — wallet resolution cannot fault the CHECK
+                logger.debug(
+                    "TD-08 reconciliation: per-chain wallet resolution failed for %s; "
+                    "falling back to the deployment wallet",
+                    position.chain,
+                    exc_info=True,
+                )
+            else:
+                if resolved_wallet:
+                    position_wallet = str(resolved_wallet)
         verdict, detail = await _reconcile_one(
-            position=position, gateway_client=gateway_client, market=market, network=network
+            position=position,
+            gateway_client=gateway_client,
+            market=market,
+            network=network,
+            wallet_address=position_wallet,
         )
         entry = PositionReconciliation(
             position_type=str(position.position_type),

@@ -252,13 +252,47 @@ async def test_live_mode_write_failure_is_caught_and_non_terminal(monkeypatch) -
     _stub_resolver(monkeypatch, _executed_verdict())
 
     # Must NOT raise out of the reconciler (catch boundary).
-    await psr.reconcile_perp_settlements(
+    outcome = await psr.reconcile_perp_settlements(
         runner, _strategy(), deployment_id=_DEPLOYMENT, cycle_id="c", gateway_client=object()
     )
+    assert outcome.attempted == 1
+    assert outcome.booked == 0
+    assert outcome.accounting_degraded is True
+    assert outcome.degraded_reasons == (f"order {_ORDER_KEY}: settlement commit failed",)
     assert writer.written == []  # nothing booked
     # The ledger is still un-settled → a subsequent tick re-derives it.
     watch = await psr._derive_watch_set(runner, _DEPLOYMENT)
     assert ("gmx_v2", _ORDER_KEY.lower()) in watch
+
+
+@pytest.mark.asyncio
+async def test_execution_identity_overrides_strategy_defaults(monkeypatch) -> None:
+    """Immediate teardown reconciliation observes the chain/wallet that executed the close."""
+    writer = _FakeWriter()
+    sm = _FakeStateManager([_ledger("ledger-1", "PERP_OPEN", _ORDER_KEY)], writer)
+    runner = _runner(sm, _FakeProcessor(writer))
+    observed: dict[str, str] = {}
+
+    def _resolve(*, gateway_client, chain, wallet_address, watch):  # noqa: ARG001
+        observed.update(chain=chain, wallet_address=wallet_address)
+        return {"gmx_v2": [_executed_verdict()]}
+
+    monkeypatch.setattr(psr, "_resolve_all_verdicts", _resolve)
+    outcome = await psr.reconcile_perp_settlements(
+        runner,
+        _strategy(),
+        deployment_id=_DEPLOYMENT,
+        cycle_id="c",
+        gateway_client=object(),
+        chain="avalanche",
+        wallet_address="0xexecutionwallet",
+    )
+
+    assert observed == {"chain": "avalanche", "wallet_address": "0xexecutionwallet"}
+    assert outcome.attempted == 1
+    assert outcome.booked == 1
+    assert outcome.attempted_order_keys == (_ORDER_KEY.lower(),)
+    assert outcome.booked_order_keys == (_ORDER_KEY.lower(),)
 
 
 @pytest.mark.asyncio
@@ -622,6 +656,47 @@ async def test_different_cycle_ids_still_book_exactly_once(monkeypatch) -> None:
     )
     assert len(writer.written) == 1  # MINUS filter dedups; and even a miss would ON CONFLICT the same id
     assert writer.written[0].identity.id == first_id
+
+
+@pytest.mark.asyncio
+async def test_executed_close_stamps_registry_settlement_block(monkeypatch) -> None:
+    """The terminal keeper block is durable reconciliation evidence."""
+    writer = _FakeWriter()
+    processor = _FakeProcessor(writer)
+    ledger = _ledger("ledger-close", "PERP_CLOSE", _ORDER_KEY)
+    sm = _FakeStateManager([ledger], writer)
+    runner = _runner(sm, processor)
+    saved: list[Any] = []
+
+    async def _save(_state_manager, *, ledger, registry, mode):
+        saved.append((ledger, registry, mode))
+
+    monkeypatch.setattr("almanak.framework.accounting.commit.save_ledger_and_registry", _save)
+    verdict = _executed_verdict()
+
+    from almanak.framework.runner.perp_settlement_commit import commit_perp_settlement
+
+    outcome = await commit_perp_settlement(
+        runner,
+        _strategy(),
+        verdict=verdict,
+        submission_ledger=ledger,
+        is_open=False,
+        settlement_cycle_id="teardown-1",
+        chain="arbitrum",
+        protocol="gmx_v2",
+        wallet_address="0xw",
+    )
+
+    assert outcome.booked is True
+    assert len(saved) == 1
+    saved_ledger, row, mode = saved[0]
+    assert saved_ledger is ledger
+    assert mode == "registry_reconciliation"
+    assert row.status == "closed"
+    assert row.closed_at_block == 123
+    assert row.last_reconciled_at_block == 123
+    assert row.opened_at_block is None
 
 
 @pytest.mark.asyncio

@@ -452,16 +452,12 @@ class GMXV2Compiler(BasePerpCompiler):
         adapter's documented parameter contract and for order metadata.
 
         Fails **closed** (VIB-6219): there is no fallback to the historical
-        "accept any price" sentinel. The two failure classes are kept distinct
-        because they route differently:
-
-        * a price/metadata READ gap is ``is_transient=True`` — teardown reads
-          ``retryable=compilation_result.is_transient``
-          (``teardown_manager.py``), so an RPC blip must not become a permanent
-          teardown failure;
-        * a refusal to build an unprotected order is ``is_safety_refusal=True``
-          (VIB-5746) → ``FailureKind.GUARD_REFUSED``, which deliberately does
-          NOT count toward the circuit breaker: zero calldata was built.
+        "accept any price" sentinel. A missing price in the compiler's fixed
+        in-memory oracle is a non-transient safety refusal (VIB-6254): retrying
+        the same compile with more slippage cannot populate that oracle.
+        Teardown maps ``is_transient`` to slippage-ladder retryability, so
+        misclassifying this refusal as transient escalates loss tolerance and
+        can request human approval for an action that cannot help.
         """
         leg = "PERP_OPEN" if is_increase else "PERP_CLOSE"
         context = f"gmx_v2 {leg} {intent.market} on {ctx.chain}"
@@ -510,8 +506,8 @@ class GMXV2Compiler(BasePerpCompiler):
             # (placeholder mode => every token reported missing) and is what the
             # teardown lane uses for the same reason; reusing it keeps one
             # definition of "is this a real price" rather than inventing a
-            # second. Transient, not a refusal: the price returns once the
-            # oracle populates.
+            # second. The fixed oracle cannot populate during this compile, so
+            # absence is a non-transient refusal; the caller must warm first.
             #
             # EXEMPT: offline permission discovery. The Zodiac Roles manifest is
             # built by compiling synthetic intents purely to enumerate the
@@ -526,16 +522,17 @@ class GMXV2Compiler(BasePerpCompiler):
             if not ctx.permission_discovery:
                 ctx.services.assert_prices_available([symbol])
             index_price_usd = ctx.services.require_token_price(symbol)
-        except Exception as exc:  # noqa: BLE001 - any read gap is retryable, never a licence to skip the bound
+        except Exception as exc:  # noqa: BLE001 - never a licence to skip the bound
             return CompilationResult(
                 status=CompilationStatus.FAILED,
                 error=(
-                    f"GMX V2 {leg}: could not read the {symbol} index price needed to bound "
-                    f"execution ({exc}). Refusing to submit an unprotected order; retrying once "
-                    "the price is available is safe."
+                    f"GMX V2 {leg}: no usable USD price for the {symbol} index token is present "
+                    f"in this compile's price oracle ({exc}). Refusing to submit an unprotected "
+                    "order. Retrying this compile or increasing slippage will not populate the "
+                    "oracle; warm the index price before compiling."
                 ),
                 intent_id=intent.intent_id,
-                is_transient=True,
+                is_safety_refusal=True,
             )
 
         # GMX's tolerance granularity is a basis point, and `int()` TRUNCATES:

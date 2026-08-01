@@ -555,6 +555,8 @@ async def execute_and_verify(
     price_oracle: dict | None,
     request: Any | None,
     state_manager: Any,
+    *,
+    resume_accepted_async: bool = False,
 ) -> TeardownResult:
     """Run ``_execute_intents`` and the post-execution closure verification.
 
@@ -602,18 +604,30 @@ async def execute_and_verify(
     _warm_teardown_pt_yt_prices(strategy, teardown_market, teardown_intents, price_oracle)
 
     # Execute intents with escalating slippage
-    teardown_result = await teardown_mgr._execute_intents(
-        teardown_id=teardown_state.teardown_id,
-        strategy=strategy,
-        intents=teardown_intents,
-        positions=positions,
-        mode=teardown_mode,
-        teardown_state=teardown_state,
-        on_approval_needed=approval_callback,
-        is_auto_mode=is_auto_mode,
-        price_oracle=price_oracle,
-        market=teardown_market,
-    )
+    if resume_accepted_async:
+        teardown_result = await teardown_mgr.resume(
+            deployment_id,
+            strategy,
+            on_approval_needed=approval_callback,
+            market=teardown_market,
+            is_auto_mode=is_auto_mode,
+            accepted_async_recovery_intents=teardown_intents,
+        )
+        if teardown_result is None:
+            raise RuntimeError("Accepted async teardown state disappeared before production resume")
+    else:
+        teardown_result = await teardown_mgr._execute_intents(
+            teardown_id=teardown_state.teardown_id,
+            strategy=strategy,
+            intents=teardown_intents,
+            positions=positions,
+            mode=teardown_mode,
+            teardown_state=teardown_state,
+            on_approval_needed=approval_callback,
+            is_auto_mode=is_auto_mode,
+            price_oracle=price_oracle,
+            market=teardown_market,
+        )
 
     # Post-execution verification: check positions are actually closed.
     if teardown_result.success:
@@ -922,6 +936,22 @@ def map_teardown_result(
 
     deployment_id = strategy.deployment_id
     mode_str = "graceful" if teardown_mode == TeardownMode.SOFT else "emergency"
+
+    if teardown_result.completed_at is None and teardown_result.async_settlement_pending:
+        # The createOrder transaction is durable and still live. Keep the
+        # request active and the runner alive so the next teardown tick enters
+        # the correlated resume path. A terminal mark_failed/shutdown here
+        # would orphan the marker and allow a fresh request to resubmit.
+        logger.warning(
+            "🛑 %s teardown is awaiting terminal async settlement; keeping request active for correlated resume",
+            deployment_id,
+        )
+        return IterationResult(
+            status=IterationStatus.TEARDOWN,
+            error=teardown_result.error,
+            deployment_id=deployment_id,
+            duration_ms=runner._calculate_duration_ms(start_time),
+        )
 
     if teardown_result.success:
         logger.info(

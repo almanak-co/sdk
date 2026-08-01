@@ -1027,6 +1027,102 @@ async def test_read_perp_unavailable_on_backend_without_cutover_storage() -> Non
     assert positions == []
 
 
+def test_reconcile_deduplicates_strategy_and_registry_perp_by_full_economic_identity() -> None:
+    """Synthetic HOT ids and venue WARM keys may name one aggregate perp."""
+    market_address = "0x70d95587d40a2caf56bd97485ab3eec10bee6336"
+    collateral_address = "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
+    strategy_position = PositionInfo(
+        position_type=PositionType.PERP,
+        position_id="gmx-ETH/USD-arbitrum",
+        chain="arbitrum",
+        protocol="gmx_v2",
+        value_usd=Decimal("20"),
+        details={
+            "market": "ETH/USD",
+            "market_address": market_address,
+            "collateral_token": "USDC",
+            "collateral_address": collateral_address,
+            "is_long": True,
+        },
+    )
+    registry_position = PositionInfo(
+        position_type=PositionType.PERP,
+        position_id="0xvenuepositionkey",
+        chain="arbitrum",
+        protocol="gmx_v2",
+        value_usd=Decimal("0"),
+        details={
+            "market": market_address,
+            "collateral_token": collateral_address,
+            "direction": "long",
+            "source": "position_registry",
+        },
+    )
+    summary = TeardownPositionSummary(
+        deployment_id=DEPLOYMENT_ID,
+        timestamp=datetime.now(UTC),
+        positions=[strategy_position],
+    )
+
+    merged = reconcile_lp_with_registry(
+        strategy_summary=summary,
+        registry_positions=[registry_position],
+        registry_available=True,
+    )
+
+    assert merged.positions == [strategy_position]
+
+
+@pytest.mark.parametrize(
+    ("dimension", "registry_value"),
+    [
+        ("chain", "avalanche"),
+        ("protocol", "other_perp"),
+        ("market", "0xbtc"),
+        ("collateral", "0xusdt"),
+        ("direction", "short"),
+    ],
+)
+def test_reconcile_never_deduplicates_distinct_perp_economic_identity(
+    dimension: str,
+    registry_value: str,
+) -> None:
+    """Every component of the perp semantic key independently prevents collapse."""
+    strategy_position = PositionInfo(
+        position_type=PositionType.PERP,
+        position_id="eth-long",
+        chain="arbitrum",
+        protocol="gmx_v2",
+        value_usd=Decimal("20"),
+        details={"market": "0xeth", "collateral_token": "0xusdc", "is_long": True},
+    )
+    registry_position = PositionInfo(
+        position_type=PositionType.PERP,
+        position_id="btc-long",
+        chain=registry_value if dimension == "chain" else "arbitrum",
+        protocol=registry_value if dimension == "protocol" else "gmx_v2",
+        value_usd=Decimal("0"),
+        details={
+            "market": registry_value if dimension == "market" else "0xeth",
+            "collateral_token": registry_value if dimension == "collateral" else "0xusdc",
+            "direction": registry_value if dimension == "direction" else "long",
+        },
+    )
+    summary = TeardownPositionSummary(
+        deployment_id=DEPLOYMENT_ID,
+        timestamp=datetime.now(UTC),
+        positions=[strategy_position],
+    )
+
+    merged = reconcile_lp_with_registry(
+        strategy_summary=summary,
+        registry_positions=[registry_position],
+        registry_available=True,
+    )
+
+    assert {p.position_id for p in merged.positions} == {"eth-long", "btc-long"}
+
+
 @pytest.mark.asyncio
 async def test_resolve_restart_rederives_perp_from_warm() -> None:
     """Wiped-state restart re-derives the open perp from the durable registry —

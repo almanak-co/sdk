@@ -1925,12 +1925,13 @@ def _proto_ledger_to_dict(entry: "gateway_pb2.LedgerEntryInfo") -> dict:
     """Convert a wire ``LedgerEntryInfo`` to the dict shape the clamp's synthetic
     NO_ACCOUNTING projection reads (VIB-5416, ``basis.synthetic_wallet_movement_events``).
 
-    Only the fields the projection consumes are mapped (id / intent_type / token &
-    amount legs / chain / success / timestamp). ``timestamp`` stays an int epoch —
+    Carries the fields consumed by both the teardown inventory and synthetic
+    NO_ACCOUNTING projection. ``timestamp`` stays an int epoch —
     ``basis._timestamp_to_iso`` normalises it.
     """
     return {
         "id": entry.id,
+        "cycle_id": entry.cycle_id,
         "deployment_id": entry.deployment_id,
         "intent_type": entry.intent_type,
         "token_in": entry.token_in,
@@ -1938,6 +1939,7 @@ def _proto_ledger_to_dict(entry: "gateway_pb2.LedgerEntryInfo") -> dict:
         "token_out": entry.token_out,
         "amount_out": entry.amount_out,
         "chain": entry.chain,
+        "protocol": entry.protocol,
         "timestamp": entry.timestamp,
         "success": entry.success,
         # The capital-flow producer keys its own-tx exclusion on tx_hash

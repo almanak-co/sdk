@@ -29,16 +29,122 @@ both in production.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..runner._run_loop_helpers import TeardownSnapshotOutcome
     from ..runner.teardown_commit import TeardownCommitOutcome
 
 logger = logging.getLogger(__name__)
+
+_TERMINAL_SETTLEMENT_MARKER = "_teardown_async_settlement_terminal"
+_TERMINAL_SETTLEMENT_ORDER_KEYS = "_teardown_async_settlement_order_keys"
+
+
+def _set_terminal_settlement_marker(execution_result: Any, orders: tuple[Any, ...]) -> None:
+    """Mark terminal settlement and retain the exact accepted order identities."""
+
+    def _order_key(order: Any) -> str:
+        if isinstance(order, dict):
+            raw = order.get("order_id") or order.get("order_key") or ""
+        else:
+            raw = getattr(order, "order_id", "") or getattr(order, "order_key", "") or ""
+        return str(raw).lower()
+
+    order_keys = tuple(order_key for order in orders if (order_key := _order_key(order)))
+    if isinstance(execution_result, dict):
+        execution_result[_TERMINAL_SETTLEMENT_MARKER] = True
+        execution_result[_TERMINAL_SETTLEMENT_ORDER_KEYS] = order_keys
+    else:
+        setattr(execution_result, _TERMINAL_SETTLEMENT_MARKER, True)
+        setattr(execution_result, _TERMINAL_SETTLEMENT_ORDER_KEYS, order_keys)
+
+
+def _has_terminal_settlement_marker(execution_result: Any) -> bool:
+    if isinstance(execution_result, dict):
+        return execution_result.get(_TERMINAL_SETTLEMENT_MARKER) is True
+    return getattr(execution_result, _TERMINAL_SETTLEMENT_MARKER, False) is True
+
+
+def _terminal_settlement_order_keys(execution_result: Any) -> tuple[str, ...]:
+    if isinstance(execution_result, dict):
+        raw = execution_result.get(_TERMINAL_SETTLEMENT_ORDER_KEYS, ())
+    else:
+        raw = getattr(execution_result, _TERMINAL_SETTLEMENT_ORDER_KEYS, ())
+    return tuple(str(key).lower() for key in raw or () if str(key))
+
+
+async def _reconcile_terminal_perp_settlement(
+    runner: Any,
+    strategy: Any,
+    execution_result: Any,
+    execution_context: Any,
+    teardown_cycle_id: str,
+) -> tuple[Any, ...]:
+    """Book correlated Phase-2 settlement after Phase-1 teardown commit."""
+    if not _has_terminal_settlement_marker(execution_result):
+        return ()
+    # Phase 1 (submission ledger/event) must exist before Phase 2 settlement
+    # accounting. Reuse the restart-safe, order-key-correlated reconciler
+    # immediately after the terminal barrier so teardown does not exit before
+    # booking keeper economics / closing the durable registry row. Never parse
+    # an uncorrelated batched keeper receipt through ResultEnricher (VIB-6152).
+    try:
+        from ..runner.perp_settlement_reconciler import reconcile_perp_settlements
+
+        reconciliation = await reconcile_perp_settlements(
+            runner,
+            strategy,
+            deployment_id=strategy.deployment_id,
+            cycle_id=teardown_cycle_id or strategy.deployment_id,
+            gateway_client=runner._get_gateway_client(),
+            chain=str(getattr(execution_context, "chain", "") or getattr(strategy, "chain", "") or ""),
+            wallet_address=str(
+                getattr(execution_context, "wallet_address", "") or getattr(strategy, "wallet_address", "") or ""
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001 — settlement accounting is loud but never strands risk reduction
+        logger.exception(
+            "Teardown terminal perp settlement reconciliation raised for %s; "
+            "the durable watch set will retry on the next runner tick",
+            strategy.deployment_id,
+        )
+        degraded_reason = f"terminal settlement reconciliation raised: {exc}"
+    else:
+        expected_order_keys = set(_terminal_settlement_order_keys(execution_result))
+        booked_order_keys = {str(key).lower() for key in reconciliation.booked_order_keys}
+        missing_order_keys = expected_order_keys - booked_order_keys
+        if not reconciliation.accounting_degraded and not missing_order_keys:
+            return ()
+        reasons = list(reconciliation.degraded_reasons)
+        if missing_order_keys:
+            reasons.append(
+                "terminal settlement was observed but Phase-2 did not book accepted order(s): "
+                + ", ".join(sorted(missing_order_keys))
+            )
+        elif not expected_order_keys and reconciliation.booked == 0:
+            # Fail loud for legacy/test result containers that carry only the
+            # terminal marker. Production markers always retain exact keys.
+            reasons.append("terminal settlement was observed but Phase-2 booked no settlement")
+        degraded_reason = "; ".join(reasons) or "terminal settlement reconciliation degraded"
+
+    from ..accounting.deferred_log import DeferredWrite
+    from ..accounting.deferred_log import append as deferred_append
+
+    record = DeferredWrite.now(
+        kind="perp_settlement",
+        deployment_id=strategy.deployment_id,
+        cycle_id=teardown_cycle_id or strategy.deployment_id,
+        intent_type="PERP_SETTLEMENT",
+        error=degraded_reason,
+    )
+    deferred_append(record)
+    return (record,)
 
 
 CommitTeardownIntent = Callable[..., Awaitable["TeardownCommitOutcome"]]
@@ -159,6 +265,40 @@ deployment opened — a sibling strategy's live LP on the same wallet is not in
 the set. Never raises; on total read failure returns ``available=False`` so
 recovery refuses to close anything (ownership unprovable)."""
 
+AwaitIntentSettlement = Callable[..., Awaitable[str | None]]
+"""Async settlement barrier for one successfully submitted teardown intent.
+
+The callable enriches the submission receipt to discover connector-owned async
+orders, waits for terminal settlement, and attaches any keeper receipts to the
+execution result before teardown reconciliation/accounting runs. ``None`` means
+the intent is synchronous or terminally settled; a string is a fail-closed,
+operator-facing reason. The caller must never resubmit after a non-``None``
+result because the original order was already accepted on-chain.
+"""
+
+
+@dataclass(frozen=True)
+class SettlementPreparation:
+    """Pre-commit classification of an accepted async submission."""
+
+    applicable: bool
+    error: str | None = None
+    orders: tuple[Any, ...] = ()
+
+
+PrepareIntentSettlement = Callable[..., SettlementPreparation]
+"""Pre-commit extraction of the accepted connector-owned async order key."""
+
+ReconcileIntentSettlement = Callable[..., Awaitable[tuple[Any, ...]]]
+"""Immediate Phase-2 reconciliation after terminal settlement."""
+
+RecoverAcceptedOrderKeys = Callable[[str], Awaitable[tuple[str, ...]]]
+"""Recover receipt-enriched order keys from one durable Phase-1 ledger row."""
+
+AcceptedIntentSettlement = Literal["executed", "terminal_failed", "unproven"]
+CheckIntentSettlement = Callable[..., Awaitable[AcceptedIntentSettlement | None]]
+"""Classify persisted accepted orders; ``None`` means the read was unmeasured."""
+
 
 @dataclass(frozen=True)
 class TeardownRunnerHelpers:
@@ -188,6 +328,11 @@ class TeardownRunnerHelpers:
     get_tracked_swap_inventory: GetTrackedSwapInventory | None = None
     discover_lp_positions: DiscoverLpPositions | None = None
     get_deployment_lp_ownership: GetDeploymentLpOwnership | None = None
+    prepare_intent_settlement: PrepareIntentSettlement | None = None
+    await_intent_settlement: AwaitIntentSettlement | None = None
+    reconcile_intent_settlement: ReconcileIntentSettlement | None = None
+    recover_accepted_order_keys: RecoverAcceptedOrderKeys | None = None
+    check_intent_settlement: CheckIntentSettlement | None = None
 
     @property
     def has_commit(self) -> bool:
@@ -244,6 +389,278 @@ class TeardownRunnerHelpers:
     def has_lp_discovery(self) -> bool:
         """True iff the on-chain LP discovery fallback is wired (VIB-5138)."""
         return self.discover_lp_positions is not None and self.get_deployment_lp_ownership is not None
+
+    @property
+    def has_async_settlement(self) -> bool:
+        """True iff terminal async settlement is wired for teardown intents."""
+        return (
+            self.prepare_intent_settlement is not None
+            and self.await_intent_settlement is not None
+            and self.reconcile_intent_settlement is not None
+        )
+
+
+def _intent_protocol(intent: Any) -> str:
+    raw = intent.get("protocol") if isinstance(intent, dict) else getattr(intent, "protocol", None)
+    return str(raw or "").lower()
+
+
+def _async_settlement_capability(intent: Any) -> tuple[bool, str | None]:
+    """Return whether the connector requires a terminal barrier, plus lookup failure."""
+    protocol = _intent_protocol(intent)
+    if not protocol:
+        return False, None
+    try:
+        from almanak.connectors._base.types import ProtocolName
+        from almanak.connectors._strategy_runner_hook_registry import STRATEGY_RUNNER_HOOK_REGISTRY
+
+        policy = STRATEGY_RUNNER_HOOK_REGISTRY.async_settlement_policy(ProtocolName(protocol))
+    except (ValueError, KeyError):
+        return False, None
+    except Exception as policy_exc:  # noqa: BLE001 — submission already landed; never escape into retry
+        return (
+            True,
+            f"Async settlement capability lookup failed after submission; refusing to retry the order: {policy_exc}",
+        )
+    return policy is not None, None
+
+
+def _async_settlement_enrichment_failure(intent: Any, exc: Exception) -> str | None:
+    """Classify a receipt-enrichment failure without permitting resubmission."""
+    required, lookup_error = _async_settlement_capability(intent)
+    if lookup_error is not None:
+        return lookup_error
+    if not required:
+        return None
+    protocol = _intent_protocol(intent)
+    return (
+        "Async settlement receipt enrichment failed; refusing to treat the submitted "
+        f"{protocol} order as terminal: {exc}"
+    )
+
+
+def _enrich_teardown_async_orders(
+    runner: Any,
+    strategy: Any,
+    intent: Any,
+    execution_result: Any,
+    execution_context: Any,
+    *,
+    bundle_metadata: dict[str, Any] | None = None,
+) -> tuple[tuple[Any, ...], str | None]:
+    """Extract connector-owned async order identities from the submission."""
+    from ..execution.result_enricher import ResultEnricher
+
+    # Async order identifiers are receipt-enriched data. This preliminary
+    # enrichment happens before the Phase-1 submission commit so the durable
+    # ledger carries the accepted order key before any keeper wait. The commit
+    # repeats submission enrichment for its ordinary accounting pipeline;
+    # terminal keeper economics are booked separately by the order-key-
+    # correlated settlement reconciler.
+    try:
+        enricher = ResultEnricher(
+            live_mode=runner._is_live_mode(),
+            pool_key_lookup=runner._build_pool_key_lookup(),
+            pool_meta_lookup=runner._build_curve_pool_meta_lookup(),
+        )
+        enriched = enricher.enrich(
+            execution_result,
+            intent,
+            execution_context,
+            bundle_metadata=bundle_metadata,
+        )
+    except Exception as exc:  # noqa: BLE001 — fail closed only for connectors that declare async settlement
+        logger.exception(
+            "Teardown pre-settlement enrichment failed for %s; async barrier could not inspect the receipt",
+            strategy.deployment_id,
+        )
+        return (), _async_settlement_enrichment_failure(intent, exc)
+    return tuple(getattr(enriched, "async_orders", ()) or ()), None
+
+
+def _prepare_teardown_intent_settlement(
+    runner: Any,
+    strategy: Any,
+    intent: Any,
+    execution_result: Any,
+    execution_context: Any,
+    *,
+    bundle_metadata: dict[str, Any] | None = None,
+) -> SettlementPreparation:
+    """Attach async order identities before the accepted submission is committed."""
+    orders, enrichment_error = _enrich_teardown_async_orders(
+        runner,
+        strategy,
+        intent,
+        execution_result,
+        execution_context,
+        bundle_metadata=bundle_metadata,
+    )
+    if not orders and enrichment_error is None:
+        required, lookup_error = _async_settlement_capability(intent)
+        if lookup_error is not None:
+            enrichment_error = lookup_error
+        elif required:
+            enrichment_error = (
+                "Async settlement receipt enrichment produced no accepted order identity; "
+                "refusing to treat the submitted order as terminal"
+            )
+    return SettlementPreparation(
+        applicable=bool(orders) or enrichment_error is not None,
+        error=enrichment_error,
+        orders=orders,
+    )
+
+
+async def _await_teardown_intent_settlement(
+    runner: Any,
+    strategy: Any,
+    intent: Any,
+    execution_result: Any,
+    execution_context: Any,
+    *,
+    bundle_metadata: dict[str, Any] | None = None,
+    preparation: SettlementPreparation | None = None,
+) -> str | None:
+    """Wait for pre-enriched connector-owned async orders after Phase-1 commit."""
+    from ..runner.async_settlement import await_async_settlement
+
+    del bundle_metadata
+    orders = (
+        preparation.orders if preparation is not None else tuple(getattr(execution_result, "async_orders", ()) or ())
+    )
+    if not orders:
+        return "Async settlement was applicable but its accepted order identity was unavailable"
+    gateway_client = runner._get_gateway_client()
+    if gateway_client is None:
+        return "Async settlement could not be observed because no gateway client is available"
+
+    try:
+        barrier = await await_async_settlement(
+            gateway_client=gateway_client,
+            chain=getattr(execution_context, "chain", "") or getattr(strategy, "chain", ""),
+            wallet_address=getattr(execution_context, "wallet_address", "")
+            or getattr(strategy, "wallet_address", "")
+            or "",
+            network=str(getattr(strategy, "_gateway_network", "") or ""),
+            orders=orders,
+            intent=intent,
+            timeout_seconds=runner.config.async_settlement_timeout_seconds,
+            poll_interval_seconds=runner.config.async_settlement_poll_interval_seconds,
+        )
+    except Exception as exc:  # noqa: BLE001 — submission already landed; caller persists then fails without retry
+        logger.exception(
+            "Teardown async settlement observation raised after submission for %s",
+            strategy.deployment_id,
+        )
+        return f"Async settlement observation failed after submission; refusing to retry the order: {exc}"
+    if barrier.terminal and barrier.status.value == "SETTLED":
+        if barrier.receipts:
+            runner._append_settlement_receipts(execution_result, barrier.receipts)
+        _set_terminal_settlement_marker(execution_result, orders)
+        logger.info(
+            "Teardown async settlement terminal: deployment=%s orders=%s keeper_receipts=%d attempts=%d",
+            strategy.deployment_id,
+            [str(getattr(order, "order_id", "") or "") for order in orders],
+            len(barrier.receipts),
+            barrier.attempts,
+        )
+        return None
+
+    return (
+        f"Async settlement {barrier.status.value}: "
+        f"{barrier.reason or 'submitted order did not reach terminal settlement'}"
+    )
+
+
+async def _recover_accepted_order_keys(runner: Any, ledger_entry_id: str) -> tuple[str, ...]:
+    """Recover receipt-enriched order keys from a committed Phase-1 ledger row."""
+    hydrate = getattr(getattr(runner, "state_manager", None), "get_ledger_entry_by_id", None)
+    if not callable(hydrate):
+        return ()
+    try:
+        ledger_row = await hydrate(ledger_entry_id)
+    except Exception:  # noqa: BLE001 — unmeasured recovery remains fail-closed
+        logger.exception(
+            "Could not hydrate Phase-1 ledger %s for accepted order-key recovery",
+            ledger_entry_id,
+        )
+        return ()
+    if not isinstance(ledger_row, dict):
+        return ()
+    from ..runner.perp_settlement_reconciler import _parse_async_orders
+
+    return tuple(key.lower() for key, _is_long in _parse_async_orders(ledger_row.get("extracted_data_json") or ""))
+
+
+async def _check_teardown_intent_settlement(
+    runner: Any,
+    strategy: Any,
+    *,
+    ledger_entry_id: str | None,
+    order_keys: tuple[str, ...],
+    cycle_id: str,
+    chain: str,
+    wallet_address: str,
+) -> AcceptedIntentSettlement | None:
+    """Reconcile once, then classify the exact persisted accepted orders."""
+    if not order_keys and ledger_entry_id:
+        # A preliminary receipt-enrichment fault may have persisted the
+        # no-resubmit marker before Phase 1 repeated enrichment successfully.
+        # Recover the exact accepted keys from that durable ledger row instead
+        # of turning the conservative marker into a permanent liveness trap.
+        order_keys = await _recover_accepted_order_keys(runner, ledger_entry_id)
+    if not order_keys:
+        return None
+    from ..runner.perp_settlement_reconciler import reconcile_perp_settlements
+
+    await reconcile_perp_settlements(
+        runner,
+        strategy,
+        deployment_id=strategy.deployment_id,
+        cycle_id=cycle_id,
+        gateway_client=runner._get_gateway_client(),
+        chain=chain,
+        wallet_address=wallet_address,
+    )
+    state_manager = getattr(runner, "state_manager", None)
+    reader = getattr(state_manager, "read_accounting_events_measured", None)
+    if reader is None:
+        return None
+    events, measured = await asyncio.to_thread(reader, strategy.deployment_id)
+    if not measured:
+        return None
+    states_by_key: dict[str, str] = {}
+    for event in events or ():
+        if not isinstance(event, dict):
+            continue
+        if str(event.get("event_type") or "").upper() != "PERP_SETTLEMENT":
+            continue
+        if ledger_entry_id and str(event.get("ledger_entry_id") or "") != ledger_entry_id:
+            continue
+        try:
+            payload = json.loads(event.get("payload_json") or "{}")
+        except (TypeError, ValueError):
+            continue
+        order_key = str(payload.get("order_key") or "").lower()
+        if order_key in order_keys:
+            states_by_key[order_key] = str(payload.get("settlement_state") or "").upper()
+    expected = set(order_keys)
+    if not expected.issubset(states_by_key):
+        return "unproven"
+    states = {states_by_key[key] for key in expected}
+    # One accepted close may own multiple venue order keys (for example after
+    # cancellation/replacement recovery). Any measured execution fulfills the
+    # economic close; never authorize another close merely because a sibling
+    # key was cancelled or frozen.
+    if "EXECUTED" in states:
+        return "executed"
+    # EXECUTED/CANCELLED/FROZEN are measured venue-terminal states. Once every
+    # old order is in that set, no prior order can later execute; a replacement
+    # close is safe and necessary when any order did not execute.
+    if states.issubset({"EXECUTED", "CANCELLED", "FROZEN"}):
+        return "terminal_failed"
+    return "unproven"
 
 
 def build_runner_helpers(runner: Any) -> TeardownRunnerHelpers:
@@ -415,6 +832,11 @@ def build_runner_helpers(runner: Any) -> TeardownRunnerHelpers:
         get_deployment_lp_ownership=partial(_deployment_lp_ownership, runner),
         get_accounting_events=_get_accounting_events,
         get_tracked_swap_inventory=_get_tracked_swap_inventory,
+        prepare_intent_settlement=partial(_prepare_teardown_intent_settlement, runner),
+        await_intent_settlement=partial(_await_teardown_intent_settlement, runner),
+        reconcile_intent_settlement=partial(_reconcile_terminal_perp_settlement, runner),
+        recover_accepted_order_keys=partial(_recover_accepted_order_keys, runner),
+        check_intent_settlement=partial(_check_teardown_intent_settlement, runner),
     )
 
 
@@ -665,6 +1087,10 @@ __all__ = [
     "SnapshotIntentV4LpCloseFees",
     "SnapshotIntentV4LpCloseNativePrincipal",
     "TeardownRunnerHelpers",
+    "AwaitIntentSettlement",
+    "PrepareIntentSettlement",
+    "ReconcileIntentSettlement",
+    "SettlementPreparation",
     "WarnSweepNonStrategyBalance",
     "build_runner_helpers",
 ]

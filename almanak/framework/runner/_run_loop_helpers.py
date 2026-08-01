@@ -2434,8 +2434,10 @@ def _sweep_stale_executing_teardowns(runner: StrategyRunner, deployment_id: str)
 
     Why ``'pending'`` and not ``'failed'`` (teardown risk contract): the row
     stays ``is_active=True``, so the runner's ``should_teardown()`` re-enters
-    teardown on boot, regenerates intents from current on-chain state, and
-    finishes the unwind — no operator action needed. A crash mid-unwind leaves
+    teardown on boot. A durable accepted-async marker resumes its exact
+    order-key-correlated plan; otherwise the runner regenerates intents from
+    current on-chain state and finishes the unwind — no operator action needed.
+    A crash mid-unwind leaves
     residual on-chain risk; per CLAUDE.md §Teardown the watchdog must keep the
     next risk-reducing intent flowing, not require a manual re-trigger. The
     crash is still recorded loudly (WARNING + crash note on the request reason).

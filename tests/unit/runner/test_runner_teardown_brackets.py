@@ -18,11 +18,12 @@ end-to-end without spinning up real orchestration.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -32,7 +33,7 @@ from almanak.framework.observability.context import (
     set_cycle_id,
 )
 from almanak.framework.runner._run_loop_helpers import TeardownSnapshotOutcome
-from almanak.framework.runner.runner_teardown import execute_teardown_via_manager
+from almanak.framework.runner.runner_teardown import execute_teardown, execute_teardown_via_manager
 from almanak.framework.teardown.models import (
     TeardownMode,
     TeardownPositionSummary,
@@ -77,6 +78,22 @@ def _make_teardown_result(*, accounting_degraded: bool = False) -> TeardownResul
         accounting_degraded=accounting_degraded,
         accounting_degraded_count=int(accounting_degraded),
     )
+
+
+def _phase1_close_row(ledger_id: str, teardown_id: str, order_key: str | None) -> dict[str, Any]:
+    orders = [] if order_key is None else [{"order_id": order_key, "is_long": True}]
+    return {
+        "id": ledger_id,
+        "cycle_id": f"teardown-{teardown_id}",
+        "intent_type": "PERP_CLOSE",
+        "protocol": "gmx_v2",
+        "success": True,
+        "extracted_data_json": json.dumps({"async_orders": orders}),
+    }
+
+
+def _phase1_inventory(*rows: dict[str, Any], measured: bool = True, reason: str | None = None) -> Any:
+    return SimpleNamespace(rows=tuple(rows), measured=measured, degraded_reason=reason)
 
 
 def _strategy() -> Any:
@@ -189,12 +206,15 @@ def patched_helpers(monkeypatch: pytest.MonkeyPatch):
     # Build the manager mock with the helper bag attached.
     mgr = MagicMock(name="TeardownManager")
     mgr.runner_helpers = helpers
-    monkeypatch.setattr(_h, "build_teardown_manager", MagicMock(return_value=(mgr, MagicMock())))
+    adapter = MagicMock()
+    adapter.get_teardown_state = AsyncMock(return_value=None)
+    monkeypatch.setattr(_h, "build_teardown_manager", MagicMock(return_value=(mgr, adapter)))
 
     return {
         "commit_calls": commit_calls,
         "snapshot_calls": snapshot_calls,
         "state": state,
+        "manager": mgr,
     }
 
 
@@ -243,6 +263,382 @@ async def test_t13_outer_cycle_id_swap_dual_surface(
         assert result is not None  # mapped IterationResult
     finally:
         clear_cycle_id()
+
+
+@pytest.mark.asyncio
+async def test_production_reentry_resumes_correlated_accepted_async_plan(
+    patched_helpers, monkeypatch: pytest.MonkeyPatch
+):
+    """Runner re-entry must not persist a fresh submit-ready teardown plan."""
+    from almanak.framework.runner import _teardown_helpers as _h
+
+    state = patched_helpers["state"]
+    state.pending_intents_json = json.dumps(
+        [
+            {
+                "type": "PERP_CLOSE",
+                "protocol": "gmx_v2",
+                "_teardown_async_submission_accepted": True,
+                "_teardown_async_submission_order_keys": ["0x" + "77" * 32],
+            }
+        ]
+    )
+    adapter = MagicMock(name="teardown_state_adapter")
+    adapter.get_teardown_state = AsyncMock(return_value=state)
+    monkeypatch.setattr(
+        _h,
+        "build_teardown_manager",
+        MagicMock(return_value=(patched_helpers["manager"], adapter)),
+    )
+
+    runner = _make_runner()
+    runner._teardown_recovery_incomplete = True
+    runner._teardown_recovery_warning = "accepted order was not yet cancellable"
+    runner._teardown_lp_recovery_incomplete = False
+    runner._teardown_lp_recovery_warning = None
+    runner._teardown_pending_recovery_keys = frozenset({"0x" + "77" * 32})
+    state_mgr = MagicMock(name="state_manager")
+    state_mgr.db_path = None
+
+    await execute_teardown_via_manager(
+        runner=runner,
+        strategy=_strategy(),
+        teardown_intents=[SimpleNamespace(intent_type="PERP_CLOSE")],
+        teardown_mode=TeardownMode.SOFT,
+        teardown_market=None,
+        start_time=datetime.now(UTC),
+        request=SimpleNamespace(requested_by="system"),
+        state_manager=state_mgr,
+    )
+
+    _h.run_cancel_window_and_persist.assert_not_awaited()
+    assert _h.execute_and_verify.await_args.kwargs["resume_accepted_async"] is True
+    assert _h.execute_and_verify.await_args.args[3] is state
+    assert _h.map_teardown_result.call_args.args[3].success is True
+
+
+@pytest.mark.asyncio
+async def test_unmeasured_accepted_recovery_defers_manager_without_fresh_dispatch(
+    patched_helpers, monkeypatch: pytest.MonkeyPatch
+):
+    """A transient ledger read cannot fall through to plan persistence/execution."""
+    from almanak.framework.runner import _teardown_helpers as _h
+    from almanak.framework.runner import perp_settlement_reconciler as reconciler
+    from almanak.framework.runner.runner_models import IterationStatus
+
+    state = patched_helpers["state"]
+    state.pending_intents_json = json.dumps([{"type": "PERP_CLOSE", "protocol": "gmx_v2"}])
+    adapter = MagicMock()
+    adapter.get_teardown_state = AsyncMock(return_value=state)
+    monkeypatch.setattr(
+        _h,
+        "build_teardown_manager",
+        MagicMock(return_value=(patched_helpers["manager"], adapter)),
+    )
+
+    monkeypatch.setattr(
+        reconciler,
+        "_read_phase1_close_inventory",
+        AsyncMock(return_value=_phase1_inventory(measured=False, reason="Phase-1 ledger inventory was unmeasured")),
+    )
+    runner = _make_runner()
+
+    result = await execute_teardown_via_manager(
+        runner=runner,
+        strategy=_strategy(),
+        teardown_intents=[SimpleNamespace(intent_type="PERP_CLOSE")],
+        teardown_mode=TeardownMode.SOFT,
+        teardown_market=None,
+        start_time=datetime.now(UTC),
+        request=SimpleNamespace(requested_by="system"),
+        state_manager=SimpleNamespace(db_path=None),
+    )
+
+    assert result.status == IterationStatus.TEARDOWN
+    assert result.error == "Phase-1 ledger inventory was unmeasured"
+    _h.run_cancel_window_and_persist.assert_not_awaited()
+    _h.execute_and_verify.assert_not_awaited()
+    runner._request_teardown_failure_shutdown.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_missing_marker_is_recovered_from_exact_phase1_ledger(monkeypatch: pytest.MonkeyPatch):
+    """A failed marker save must not permit a fresh close on the next tick."""
+    from almanak.framework.runner import perp_settlement_reconciler as reconciler
+    from almanak.framework.runner import runner_teardown as rt
+
+    state = _make_teardown_state(teardown_id="td-ledger-recovery")
+    state.pending_intents_json = json.dumps(
+        [{"type": "PERP_CLOSE", "protocol": "gmx_v2", "chain": "arbitrum"}]
+    )
+    adapter = MagicMock()
+    adapter.get_teardown_state = AsyncMock(return_value=state)
+    adapter.save_teardown_state = AsyncMock()
+    order_key = "0x" + "79" * 32
+    ledger = _phase1_close_row("ledger-close", "td-ledger-recovery", order_key)
+
+    monkeypatch.setattr(
+        reconciler,
+        "_read_phase1_close_inventory",
+        AsyncMock(return_value=_phase1_inventory(ledger)),
+    )
+
+    lookup = await rt._load_resumable_accepted_async_state(
+        adapter,
+        "strat-1",
+        runner=_make_runner(),
+    )
+
+    assert lookup.state is state
+    assert lookup.blocked_reason is None
+    marker = json.loads(state.pending_intents_json)[0]
+    assert marker["_teardown_async_submission_accepted"] is True
+    assert marker["_teardown_async_submission_ledger_id"] == "ledger-close"
+    assert marker["_teardown_async_submission_order_keys"] == [order_key]
+    adapter.save_teardown_state.assert_awaited_once_with(state)
+
+
+@pytest.mark.asyncio
+async def test_missing_marker_recovery_refuses_ambiguous_same_protocol_plan(monkeypatch: pytest.MonkeyPatch):
+    """Ledger recovery must never guess which same-protocol close was accepted."""
+    from almanak.framework.runner import perp_settlement_reconciler as reconciler
+    from almanak.framework.runner import runner_teardown as rt
+
+    state = _make_teardown_state(teardown_id="td-ledger-ambiguous")
+    state.pending_intents_json = json.dumps(
+        [
+            {"type": "PERP_CLOSE", "protocol": "gmx_v2", "position_id": "one"},
+            {"type": "PERP_CLOSE", "protocol": "gmx_v2", "position_id": "two"},
+        ]
+    )
+    adapter = MagicMock()
+    adapter.get_teardown_state = AsyncMock(return_value=state)
+    adapter.save_teardown_state = AsyncMock()
+    ledger = _phase1_close_row("ledger-close", "td-ledger-ambiguous", "0x" + "80" * 32)
+
+    monkeypatch.setattr(
+        reconciler,
+        "_read_phase1_close_inventory",
+        AsyncMock(return_value=_phase1_inventory(ledger)),
+    )
+
+    lookup = await rt._load_resumable_accepted_async_state(
+        adapter,
+        "strat-1",
+        runner=_make_runner(),
+    )
+
+    assert lookup.state is None
+    assert "unique pending plan match" in str(lookup.blocked_reason)
+    assert '"_teardown_async_submission_accepted": true' not in state.pending_intents_json
+    adapter.save_teardown_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_missing_marker_recovery_defers_when_inventory_is_unmeasured(monkeypatch: pytest.MonkeyPatch):
+    """An unreadable ledger is not authoritative evidence that no close exists."""
+    from almanak.framework.runner import perp_settlement_reconciler as reconciler
+    from almanak.framework.runner import runner_teardown as rt
+
+    state = _make_teardown_state(teardown_id="td-ledger-unmeasured")
+    state.pending_intents_json = json.dumps([{"type": "PERP_CLOSE", "protocol": "gmx_v2"}])
+    adapter = MagicMock()
+    adapter.get_teardown_state = AsyncMock(return_value=state)
+
+    monkeypatch.setattr(
+        reconciler,
+        "_read_phase1_close_inventory",
+        AsyncMock(return_value=_phase1_inventory(measured=False, reason="Phase-1 ledger inventory was unmeasured")),
+    )
+
+    lookup = await rt._load_resumable_accepted_async_state(adapter, "strat-1", runner=_make_runner())
+
+    assert lookup.state is None
+    assert lookup.blocked_reason == "Phase-1 ledger inventory was unmeasured"
+
+
+@pytest.mark.asyncio
+async def test_missing_marker_recovery_defers_unhydrated_exact_cycle_close(monkeypatch: pytest.MonkeyPatch):
+    """A measured candidate with an unmeasured hydrate must block dispatch."""
+    from almanak.framework.runner import perp_settlement_reconciler as reconciler
+    from almanak.framework.runner import runner_teardown as rt
+
+    state = _make_teardown_state(teardown_id="td-ledger-unhydrated")
+    state.pending_intents_json = json.dumps([{"type": "PERP_CLOSE", "protocol": "gmx_v2"}])
+    adapter = MagicMock()
+    adapter.get_teardown_state = AsyncMock(return_value=state)
+
+    monkeypatch.setattr(
+        reconciler,
+        "_read_phase1_close_inventory",
+        AsyncMock(return_value=_phase1_inventory(measured=False, reason="Phase-1 close ledger hydrate failed")),
+    )
+
+    lookup = await rt._load_resumable_accepted_async_state(adapter, "strat-1", runner=_make_runner())
+
+    assert lookup.state is None
+    assert lookup.blocked_reason == "Phase-1 close ledger hydrate failed"
+
+
+@pytest.mark.asyncio
+async def test_missing_marker_recovery_defers_measured_ledger_without_order_keys(monkeypatch: pytest.MonkeyPatch):
+    """A measured Phase-1 row is not absent merely because key parsing is empty."""
+    from almanak.framework.runner import perp_settlement_reconciler as reconciler
+    from almanak.framework.runner import runner_teardown as rt
+
+    state = _make_teardown_state(teardown_id="td-ledger-unkeyed")
+    state.pending_intents_json = json.dumps([{"type": "PERP_CLOSE", "protocol": "gmx_v2"}])
+    adapter = MagicMock()
+    adapter.get_teardown_state = AsyncMock(return_value=state)
+    ledger = _phase1_close_row("ledger-unkeyed", "td-ledger-unkeyed", None)
+    monkeypatch.setattr(
+        reconciler,
+        "_read_phase1_close_inventory",
+        AsyncMock(return_value=_phase1_inventory(ledger)),
+    )
+
+    lookup = await rt._load_resumable_accepted_async_state(adapter, "strat-1", runner=_make_runner())
+
+    assert lookup.state is None
+    assert lookup.blocked_reason == "the Phase-1 close ledger has no exact order keys"
+
+
+@pytest.mark.asyncio
+async def test_missing_marker_recovery_refuses_multiple_phase1_ledgers(monkeypatch: pytest.MonkeyPatch):
+    """Two old close submissions cannot be collapsed into one accepted marker."""
+    from almanak.framework.runner import perp_settlement_reconciler as reconciler
+    from almanak.framework.runner import runner_teardown as rt
+
+    state = _make_teardown_state(teardown_id="td-ledger-duplicate")
+    state.pending_intents_json = json.dumps([{"type": "PERP_CLOSE", "protocol": "gmx_v2"}])
+    adapter = MagicMock()
+    adapter.get_teardown_state = AsyncMock(return_value=state)
+    rows = (
+        _phase1_close_row("ledger-81", "td-ledger-duplicate", "0x" + "81" * 32),
+        _phase1_close_row("ledger-82", "td-ledger-duplicate", None),
+    )
+
+    monkeypatch.setattr(
+        reconciler,
+        "_read_phase1_close_inventory",
+        AsyncMock(return_value=_phase1_inventory(*rows)),
+    )
+
+    lookup = await rt._load_resumable_accepted_async_state(adapter, "strat-1", runner=_make_runner())
+
+    assert lookup.state is None
+    assert lookup.blocked_reason == "multiple Phase-1 close ledgers match this teardown cycle"
+    adapter.save_teardown_state.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_zero_generated_intents_still_route_persisted_accepted_plan(monkeypatch: pytest.MonkeyPatch):
+    """A late keeper fill must not hit the generic no-positions completion path."""
+    from almanak.framework import teardown as teardown_module
+    from almanak.framework.runner import runner_teardown as rt
+    from almanak.framework.runner.runner_models import IterationResult, IterationStatus
+
+    state = _make_teardown_state(teardown_id="td-zero-intents-resume")
+    accepted = {
+        "type": "PERP_CLOSE",
+        "protocol": "gmx_v2",
+        "_teardown_async_submission_accepted": True,
+        "_teardown_async_submission_order_keys": ["0x" + "78" * 32],
+    }
+    state.pending_intents_json = json.dumps([accepted])
+    runner = _make_runner()
+    runner._is_multi_chain = False
+    runner._get_gateway_client = MagicMock(return_value=MagicMock())
+    runner._execute_teardown_via_manager = AsyncMock(
+        return_value=IterationResult(
+            status=IterationStatus.TEARDOWN,
+            deployment_id="dep-1",
+            duration_ms=1,
+        )
+    )
+    strategy = _strategy()
+    strategy.create_market_snapshot = MagicMock(return_value=None)
+    strategy.generate_teardown_intents = MagicMock(return_value=[])
+    request_manager = MagicMock()
+    request_manager.get_active_request.return_value = SimpleNamespace(requested_by="system")
+
+    monkeypatch.setattr(
+        teardown_module,
+        "get_teardown_state_manager_for_runtime",
+        lambda **_kwargs: request_manager,
+    )
+    monkeypatch.setattr(
+        rt,
+        "_recover_orphaned_lp_intents",
+        AsyncMock(side_effect=lambda _r, _s, intents, _m: (intents, False, None)),
+    )
+    monkeypatch.setattr(
+        rt,
+        "_recover_pending_order_intents",
+        AsyncMock(side_effect=lambda _r, _s, intents, _m: (intents, False, None)),
+    )
+    monkeypatch.setattr(rt, "_apply_lending_unwind_guard", lambda intents, *_args, **_kwargs: intents)
+    monkeypatch.setattr(
+        rt,
+        "_load_runtime_resumable_accepted_async_state",
+        AsyncMock(return_value=rt._AcceptedAsyncResumeLookup(state=state)),
+    )
+
+    result = await execute_teardown(
+        runner,
+        strategy,
+        TeardownMode.SOFT,
+        datetime.now(UTC),
+    )
+
+    assert result.status == IterationStatus.TEARDOWN
+    runner._execute_teardown_via_manager.assert_awaited_once()
+    assert runner._execute_teardown_via_manager.await_args.kwargs["teardown_intents"] == [accepted]
+    request_manager.mark_completed.assert_not_called()
+    runner.request_shutdown.assert_not_called()
+
+
+def test_unsettled_async_result_keeps_request_active_and_runner_alive():
+    from almanak.framework.runner import _teardown_helpers as _h
+    from almanak.framework.runner.runner_models import IterationStatus
+    from almanak.framework.teardown.teardown_manager import ASYNC_SETTLEMENT_PENDING_ERROR
+
+    runner = _make_runner()
+    request = MagicMock()
+    state_manager = MagicMock()
+    now = datetime.now(UTC)
+    result = TeardownResult(
+        success=False,
+        deployment_id="dep-1",
+        mode="graceful",
+        started_at=now,
+        completed_at=None,
+        duration_seconds=1.0,
+        intents_total=1,
+        intents_succeeded=0,
+        intents_failed=1,
+        starting_value_usd=Decimal("4"),
+        final_value_usd=Decimal("4"),
+        total_costs_usd=Decimal("0"),
+            final_balances={},
+            error=ASYNC_SETTLEMENT_PENDING_ERROR,
+            async_settlement_pending=True,
+        )
+
+    mapped = _h.map_teardown_result(
+        runner,
+        _strategy(),
+        now,
+        result,
+        TeardownMode.SOFT,
+        request,
+        state_manager,
+    )
+
+    assert mapped.status == IterationStatus.TEARDOWN
+    state_manager.mark_failed.assert_not_called()
+    runner._request_teardown_failure_shutdown.assert_not_called()
+    runner.request_shutdown.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -322,8 +718,10 @@ async def test_degraded_snapshot_bracket_increments_result_count(
 
     mgr = MagicMock(name="TeardownManager")
     mgr.runner_helpers = helpers
+    adapter = MagicMock()
+    adapter.get_teardown_state = AsyncMock(return_value=None)
     monkeypatch.setattr(
-        _h, "build_teardown_manager", MagicMock(return_value=(mgr, MagicMock()))
+        _h, "build_teardown_manager", MagicMock(return_value=(mgr, adapter))
     )
 
     state_mgr = MagicMock(name="state_manager")

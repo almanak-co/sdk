@@ -18,6 +18,7 @@ from decimal import Decimal
 
 import pytest
 
+from almanak.connectors._strategy_base.teardown_post_condition import ClosureCheckResult
 from almanak.framework.teardown import live_position_reads
 from almanak.framework.teardown.models import (
     PositionInfo,
@@ -627,6 +628,196 @@ async def test_perp_is_unverifiable_not_fabricated_confirmed():
         value_usd=Decimal("0"),
     )
     report = await reconcile_known_positions_against_chain(summary=_summary(perp), gateway_client=object(), market=None)
+    assert report.entries[0].verdict is ReconciliationVerdict.UNVERIFIABLE
+
+
+def _declared_perp_hook(result: ClosureCheckResult):
+    def _hook(position, wallet_address, gateway_client=None, rpc_url=None, block=None):
+        assert wallet_address == "0xwallet"
+        assert gateway_client is not None
+        return result
+
+    _hook.supports_open_state_reconciliation = True  # type: ignore[attr-defined]
+    return _hook
+
+
+@pytest.mark.asyncio
+async def test_perp_connector_measured_residual_confirms_open(monkeypatch):
+    from almanak.connectors._strategy_base import teardown_post_condition as tpc
+
+    monkeypatch.setitem(
+        tpc._REGISTRY,
+        "measured_perp",
+        _declared_perp_hook(
+            ClosureCheckResult(
+                closed=False,
+                protocol="measured_perp",
+                position_id="0xkey",
+                residual={"active_positions": 1},
+            )
+        ),
+    )
+    perp = PositionInfo(
+        position_type=PositionType.PERP,
+        position_id="0xkey",
+        chain="arbitrum",
+        protocol="measured_perp",
+        value_usd=Decimal("0"),
+    )
+
+    report = await reconcile_known_positions_against_chain(
+        summary=_summary(perp),
+        gateway_client=object(),
+        market=None,
+        wallet_address="0xwallet",
+    )
+
+    assert report.entries[0].verdict is ReconciliationVerdict.CONFIRMED_OPEN
+    assert report.is_clean
+
+
+@pytest.mark.asyncio
+async def test_perp_reconciliation_resolves_wallet_per_position_chain(monkeypatch):
+    """A multi-chain CHECK must not read every perp through the primary wallet."""
+    from almanak.connectors._strategy_base import teardown_post_condition as tpc
+
+    observed: list[tuple[str, str]] = []
+
+    def _hook(position, wallet_address, gateway_client=None, rpc_url=None, block=None):
+        observed.append((str(position.chain), wallet_address))
+        return ClosureCheckResult(
+            closed=False,
+            protocol="measured_perp",
+            position_id=position.position_id,
+            residual={"active_positions": 1},
+        )
+
+    _hook.supports_open_state_reconciliation = True  # type: ignore[attr-defined]
+    monkeypatch.setitem(tpc._REGISTRY, "measured_perp", _hook)
+    positions = (
+        PositionInfo(
+            position_type=PositionType.PERP,
+            position_id="0xarb",
+            chain="arbitrum",
+            protocol="measured_perp",
+            value_usd=Decimal("0"),
+        ),
+        PositionInfo(
+            position_type=PositionType.PERP,
+            position_id="0xavax",
+            chain="avalanche",
+            protocol="measured_perp",
+            value_usd=Decimal("0"),
+        ),
+    )
+
+    report = await reconcile_known_positions_against_chain(
+        summary=_summary(*positions),
+        gateway_client=object(),
+        market=None,
+        wallet_address="0xprimary",
+        wallet_for_chain=lambda chain: {
+            "arbitrum": "0xarbwallet",
+            "avalanche": "0xavaxwallet",
+        }[chain],
+    )
+
+    assert report.is_clean
+    assert observed == [
+        ("arbitrum", "0xarbwallet"),
+        ("avalanche", "0xavaxwallet"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_perp_connector_measured_empty_diverges_closed(monkeypatch):
+    from almanak.connectors._strategy_base import teardown_post_condition as tpc
+
+    monkeypatch.setitem(
+        tpc._REGISTRY,
+        "measured_perp",
+        _declared_perp_hook(
+            ClosureCheckResult(closed=True, protocol="measured_perp", position_id="0xkey")
+        ),
+    )
+    perp = PositionInfo(
+        position_type=PositionType.PERP,
+        position_id="0xkey",
+        chain="arbitrum",
+        protocol="measured_perp",
+        value_usd=Decimal("0"),
+    )
+
+    report = await reconcile_known_positions_against_chain(
+        summary=_summary(perp),
+        gateway_client=object(),
+        market=None,
+        wallet_address="0xwallet",
+    )
+
+    assert report.entries[0].verdict is ReconciliationVerdict.DIVERGED_CLOSED
+
+
+@pytest.mark.asyncio
+async def test_perp_connector_unmeasured_stays_unverifiable(monkeypatch):
+    from almanak.connectors._strategy_base import teardown_post_condition as tpc
+
+    monkeypatch.setitem(
+        tpc._REGISTRY,
+        "measured_perp",
+        _declared_perp_hook(
+            ClosureCheckResult(
+                closed=False,
+                protocol="measured_perp",
+                position_id="0xkey",
+                error="gateway unavailable",
+                unmeasured=True,
+            )
+        ),
+    )
+    perp = PositionInfo(
+        position_type=PositionType.PERP,
+        position_id="0xkey",
+        chain="arbitrum",
+        protocol="measured_perp",
+        value_usd=Decimal("0"),
+    )
+
+    report = await reconcile_known_positions_against_chain(
+        summary=_summary(perp),
+        gateway_client=object(),
+        market=None,
+        wallet_address="0xwallet",
+    )
+
+    assert report.entries[0].verdict is ReconciliationVerdict.UNVERIFIABLE
+    assert "gateway unavailable" in report.entries[0].detail
+
+
+@pytest.mark.asyncio
+async def test_perp_open_state_capability_requires_exact_true(monkeypatch):
+    from almanak.connectors._strategy_base import teardown_post_condition as tpc
+
+    hook = _declared_perp_hook(
+        ClosureCheckResult(closed=False, protocol="measured_perp", position_id="0xkey")
+    )
+    hook.supports_open_state_reconciliation = "true"  # type: ignore[attr-defined]
+    monkeypatch.setitem(tpc._REGISTRY, "measured_perp", hook)
+    perp = PositionInfo(
+        position_type=PositionType.PERP,
+        position_id="0xkey",
+        chain="arbitrum",
+        protocol="measured_perp",
+        value_usd=Decimal("0"),
+    )
+
+    report = await reconcile_known_positions_against_chain(
+        summary=_summary(perp),
+        gateway_client=object(),
+        market=None,
+        wallet_address="0xwallet",
+    )
+
     assert report.entries[0].verdict is ReconciliationVerdict.UNVERIFIABLE
 
 

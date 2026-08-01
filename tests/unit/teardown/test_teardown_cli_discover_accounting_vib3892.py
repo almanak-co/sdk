@@ -43,9 +43,7 @@ def test_cli_construction_yields_runner_helpers_with_commit_and_snapshot():
 
     state_manager = GatewayStateManager(gateway_client)
     price_oracle = GatewayPriceOracle(gateway_client, default_chain=chain)
-    balance_provider = GatewayBalanceProvider(
-        client=gateway_client, wallet_address=wallet, chain=chain
-    )
+    balance_provider = GatewayBalanceProvider(client=gateway_client, wallet_address=wallet, chain=chain)
     runner_config = RunnerConfig(dry_run=False, enable_state_persistence=True)
     runner = StrategyRunner(
         price_oracle=price_oracle,
@@ -64,6 +62,10 @@ def test_cli_construction_yields_runner_helpers_with_commit_and_snapshot():
         "VIB-3892: build_runner_helpers must produce a callable .capture_snapshot; "
         "without this the post-teardown portfolio_snapshots row never lands."
     )
+    assert helpers.has_async_settlement, (
+        "VIB-6254: teardown must await connector-owned asynchronous settlement "
+        "before accounting or closure verification."
+    )
 
 
 def test_teardown_manager_with_helpers_drives_commit_pipeline():
@@ -74,9 +76,7 @@ def test_teardown_manager_with_helpers_drives_commit_pipeline():
     gateway_client = _stub_gateway_client()
     state_manager = GatewayStateManager(gateway_client)
     price_oracle = GatewayPriceOracle(gateway_client, default_chain="arbitrum")
-    balance_provider = GatewayBalanceProvider(
-        client=gateway_client, wallet_address="0xWALLET", chain="arbitrum"
-    )
+    balance_provider = GatewayBalanceProvider(client=gateway_client, wallet_address="0xWALLET", chain="arbitrum")
     runner = StrategyRunner(
         price_oracle=price_oracle,
         balance_provider=balance_provider,
@@ -99,6 +99,7 @@ def test_teardown_manager_with_helpers_drives_commit_pipeline():
     # "writes the canonical augmentation pipeline."
     assert manager.runner_helpers.has_commit is True
     assert manager.runner_helpers.has_snapshot is True
+    assert manager.runner_helpers.has_async_settlement is True
 
 
 def test_default_teardown_manager_without_helpers_still_safe():

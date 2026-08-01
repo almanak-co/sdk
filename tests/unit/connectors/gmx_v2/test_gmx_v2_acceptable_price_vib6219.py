@@ -93,9 +93,7 @@ def _make_compiler(chain: str = "arbitrum", prices: dict[str, Decimal] | None = 
     compiler._using_placeholders = False
     compiler._placeholder_warning_logged = False
     compiler._stablecoin_fallback_logged = set()
-    compiler.price_oracle = (
-        {"ETH": ETH_PRICE_USD, "USDC": Decimal("1")} if prices is None else prices
-    )
+    compiler.price_oracle = {"ETH": ETH_PRICE_USD, "USDC": Decimal("1")} if prices is None else prices
     compiler.default_deadline_seconds = 600
     compiler.default_protocol = "gmx_v2"
     compiler._token_resolver = None
@@ -325,31 +323,25 @@ class TestEncodedAcceptablePriceAllFourCombos:
 class TestFailsClosedWhenItCannotBoundThePrice:
     """No price, no order. The old code shipped an unbounded order instead."""
 
-    def test_missing_index_price_fails_TRANSIENT(self) -> None:
-        """An unreadable price is retryable — NOT a permanent failure.
-
-        Teardown reads ``retryable=compilation_result.is_transient``
-        (``teardown_manager.py``). Failing closed without marking a transient
-        read transient would turn an RPC blip into a permanent teardown failure
-        — worse liveness than the bug being fixed.
-        """
+    def test_missing_index_price_is_a_SAFETY_REFUSAL(self) -> None:
+        """A fixed-oracle miss cannot be repaired by the slippage ladder."""
         compiler = _make_compiler(prices={"USDC": Decimal("1")})  # no ETH price
         result = _compile(compiler, _open_intent(is_long=True))
 
         assert result.status == CompilationStatus.FAILED
-        assert result.is_transient is True
-        assert result.is_safety_refusal is False
+        assert result.is_transient is not True
+        assert result.is_safety_refusal is True
         assert result.transactions == []
         assert "ETH" in (result.error or "")
 
-    def test_missing_index_price_on_CLOSE_is_also_transient(self) -> None:
+    def test_missing_index_price_on_CLOSE_is_also_a_safety_refusal(self) -> None:
         """Same classification on the teardown-reachable leg."""
         compiler = _make_compiler(prices={"USDC": Decimal("1")})
         result = _compile(compiler, _close_intent(is_long=True))
 
         assert result.status == CompilationStatus.FAILED
-        assert result.is_transient is True
-        assert result.is_safety_refusal is False
+        assert result.is_transient is not True
+        assert result.is_safety_refusal is True
         assert result.transactions == []
 
     def test_hundred_percent_slippage_is_rejected_at_construction_since_VIB_6217(self) -> None:
@@ -495,12 +487,20 @@ class TestDeriveAcceptablePrice:
         exact = price * Decimal(10) ** 12
 
         upper = derive_acceptable_price_30dec(
-            index_price_usd=price, index_token_decimals=18, slippage_bps=0,
-            is_long=True, is_increase=True, context="test",
+            index_price_usd=price,
+            index_token_decimals=18,
+            slippage_bps=0,
+            is_long=True,
+            is_increase=True,
+            context="test",
         )
         lower = derive_acceptable_price_30dec(
-            index_price_usd=price, index_token_decimals=18, slippage_bps=0,
-            is_long=False, is_increase=True, context="test",
+            index_price_usd=price,
+            index_token_decimals=18,
+            slippage_bps=0,
+            is_long=False,
+            is_increase=True,
+            context="test",
         )
         assert upper <= exact, "a maximum must never round up"
         assert lower >= exact, "a minimum must never round down"
@@ -510,16 +510,24 @@ class TestDeriveAcceptablePrice:
     def test_out_of_range_slippage_is_refused(self, slippage_bps: int) -> None:
         with pytest.raises(UnprotectedTradeError):
             derive_acceptable_price_30dec(
-                index_price_usd=ETH_PRICE_USD, index_token_decimals=18,
-                slippage_bps=slippage_bps, is_long=True, is_increase=True, context="test",
+                index_price_usd=ETH_PRICE_USD,
+                index_token_decimals=18,
+                slippage_bps=slippage_bps,
+                is_long=True,
+                is_increase=True,
+                context="test",
             )
 
     @pytest.mark.parametrize("price", [Decimal("0"), Decimal("-1")])
     def test_non_positive_price_is_refused(self, price: Decimal) -> None:
         with pytest.raises(UnprotectedTradeError):
             derive_acceptable_price_30dec(
-                index_price_usd=price, index_token_decimals=18, slippage_bps=100,
-                is_long=True, is_increase=True, context="test",
+                index_price_usd=price,
+                index_token_decimals=18,
+                slippage_bps=100,
+                is_long=True,
+                is_increase=True,
+                context="test",
             )
 
     @pytest.mark.parametrize("decimals", [-1, 31])
@@ -527,8 +535,12 @@ class TestDeriveAcceptablePrice:
         """A bad scale silently moves the bound by orders of magnitude — refuse instead."""
         with pytest.raises(UnprotectedTradeError):
             derive_acceptable_price_30dec(
-                index_price_usd=ETH_PRICE_USD, index_token_decimals=decimals,
-                slippage_bps=100, is_long=True, is_increase=True, context="test",
+                index_price_usd=ETH_PRICE_USD,
+                index_token_decimals=decimals,
+                slippage_bps=100,
+                is_long=True,
+                is_increase=True,
+                context="test",
             )
 
     def test_a_lower_bound_can_never_be_returned_as_zero(self) -> None:
@@ -547,8 +559,12 @@ class TestDeriveAcceptablePrice:
         """
         # 30 decimals => scale 10**0, so this would floor to 0.
         derived = derive_acceptable_price_30dec(
-            index_price_usd=Decimal("0.0001"), index_token_decimals=30,
-            slippage_bps=100, is_long=False, is_increase=True, context="test",
+            index_price_usd=Decimal("0.0001"),
+            index_token_decimals=30,
+            slippage_bps=100,
+            is_long=False,
+            is_increase=True,
+            context="test",
         )
         assert derived == 1, "a sub-unit minimum must round UP to 1, never down to the sentinel"
 
@@ -596,7 +612,7 @@ class TestPriceIsReachableOnTheProductionPath:
         assert checked >= 15, "expected the real market catalogue, not a patched stub"
 
     def test_symbol_lookup_is_alias_independent(self) -> None:
-        """"ETH", "WETH" and "ETH/USD" all resolve to one market — and one symbol.
+        """ "ETH", "WETH" and "ETH/USD" all resolve to one market — and one symbol.
 
         Keying off the resolved ADDRESS (not the user-typed ``intent.market``)
         is what makes that true; keying off the raw string would ask the oracle
@@ -621,11 +637,31 @@ class TestPriceIsReachableOnTheProductionPath:
                 decimals = index_token_decimals(chain, address)
                 assert decimals is not None, f"{chain}/{market_name}"
                 bound = derive_acceptable_price_30dec(
-                    index_price_usd=Decimal("100"), index_token_decimals=decimals,
-                    slippage_bps=100, is_long=True, is_increase=True,
+                    index_price_usd=Decimal("100"),
+                    index_token_decimals=decimals,
+                    slippage_bps=100,
+                    is_long=True,
+                    is_increase=True,
                     context=f"{chain}/{market_name}",
                 )
                 assert bound > 0
+
+    @pytest.mark.parametrize(
+        ("chain", "market"),
+        [(chain, market) for chain, markets in GMX_V2_MARKETS.items() for market in markets],
+    )
+    def test_every_catalogued_market_compiles_the_CLOSE_leg(self, chain: str, market: str) -> None:
+        """Guard the teardown-reachable compile path across the whole catalogue."""
+        index_symbol = market.split("/", 1)[0]
+        compiler = _make_compiler(
+            chain,
+            prices={index_symbol: Decimal("100"), "USDC": Decimal("1")},
+        )
+
+        result = _compile(compiler, _close_intent(is_long=True, market=market))
+
+        assert result.status == CompilationStatus.SUCCESS, f"{chain}/{market}: {result.error}"
+        assert _decode_acceptable_price(result) > 0
 
 
 # =============================================================================
@@ -802,7 +838,8 @@ class TestPlaceholderPricesCannotProduceABound:
             f"acceptablePrice={result.action_bundle.metadata.get('acceptable_price_30dec') if result.action_bundle else None}"
         )
         assert result.transactions == [], "no calldata may be built from a placeholder price"
-        assert result.is_transient is True, "the price returns once the oracle populates — retry is right"
+        assert result.is_transient is not True
+        assert result.is_safety_refusal is True
 
     @pytest.mark.parametrize("is_long", [True, False])
     def test_close_refuses_too(self, is_long: bool) -> None:
@@ -810,7 +847,8 @@ class TestPlaceholderPricesCannotProduceABound:
         result = _compile(self._placeholder_mode_compiler(), _close_intent(is_long=is_long, market="BTC/USD"))
         assert result.status == CompilationStatus.FAILED
         assert result.transactions == []
-        assert result.is_transient is True
+        assert result.is_transient is not True
+        assert result.is_safety_refusal is True
 
     def test_a_real_oracle_still_compiles(self) -> None:
         """Negative control: the guard must not reject a genuine price.

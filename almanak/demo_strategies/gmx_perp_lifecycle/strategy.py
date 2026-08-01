@@ -274,13 +274,12 @@ class GMXPerpLifecycleStrategy(IntentStrategy):
             self._position_size_usd = Decimal(str(state.get("position_size_usd", "0")))
         except Exception:  # noqa: BLE001
             self._position_size_usd = Decimal("0")
-        logger.info(
-            f"Restored state: loop_state={self._loop_state}, position_size_usd={self._position_size_usd}"
-        )
+        logger.info(f"Restored state: loop_state={self._loop_state}, position_size_usd={self._position_size_usd}")
 
     # --- Teardown ---
 
     def get_open_positions(self):
+        from almanak.connectors.gmx_v2.addresses import GMX_V2_MARKETS, GMX_V2_TOKENS
         from almanak.framework.teardown import PositionInfo, PositionType, TeardownPositionSummary
 
         positions = []
@@ -297,9 +296,11 @@ class GMXPerpLifecycleStrategy(IntentStrategy):
                     value_usd=self._position_size_usd,
                     details={
                         "market": self.market,
+                        "market_address": GMX_V2_MARKETS.get(self.chain, {}).get(self.market),
                         "is_long": self.is_long,
                         "leverage": str(self.leverage),
                         "collateral_token": self.collateral_token,
+                        "collateral_address": GMX_V2_TOKENS.get(self.chain, {}).get(self.collateral_token),
                         "size_known": self._position_size_usd > 0,
                     },
                 )

@@ -17,6 +17,7 @@ the same measured price fixture used to compile the intents.
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
@@ -141,7 +142,7 @@ def _receipt_dict(execution: Any, transaction_index: int = -1) -> dict[str, Any]
 class TestGmxV2PerpCloseIntent:
     @pytest.mark.intent(IntentType.PERP_CLOSE)
     @pytest.mark.no_zodiac(reason="Managed GMX keeper execution impersonates protocol roles on Anvil")
-    async def test_close_eth_long_returns_collateral(
+    async def test_recent_fork_close_eth_long_returns_collateral(
         self,
         web3: Web3,
         funded_wallet: str,
@@ -149,6 +150,10 @@ class TestGmxV2PerpCloseIntent:
         anvil_rpc_url: str,
         price_oracle_arbitrum: dict[str, Decimal],
     ) -> None:
+        fork_age_seconds = int(time.time()) - int(web3.eth.get_block("latest")["timestamp"])
+        assert abs(fork_age_seconds) <= 7 * 24 * 60 * 60, (
+            f"GMX PERP_CLOSE intent proof requires a fork no older than seven days; age={fork_age_seconds}s"
+        )
         parser = GMXv2ReceiptParser()
         compiler = _build_compiler(
             wallet=funded_wallet,

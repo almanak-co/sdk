@@ -30,6 +30,7 @@ import asyncio
 import json
 import logging
 import re
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -53,6 +54,21 @@ _ORDER_ID_RE = re.compile(r"order_id=['\"](0x[0-9a-fA-F]{64})['\"]")
 _IS_LONG_RE = re.compile(r"is_long=(True|False|None)")
 
 
+@dataclass(frozen=True)
+class PerpSettlementReconcileOutcome:
+    """Aggregate visibility for an immediate teardown reconciliation tick."""
+
+    attempted: int = 0
+    booked: int = 0
+    attempted_order_keys: tuple[str, ...] = ()
+    booked_order_keys: tuple[str, ...] = ()
+    degraded_reasons: tuple[str, ...] = ()
+
+    @property
+    def accounting_degraded(self) -> bool:
+        return bool(self.degraded_reasons)
+
+
 async def reconcile_perp_settlements(
     runner: StrategyRunner,
     strategy: StrategyProtocol,
@@ -60,46 +76,80 @@ async def reconcile_perp_settlements(
     deployment_id: str,
     cycle_id: str,
     gateway_client: Any,
-) -> None:
+    chain: str | None = None,
+    wallet_address: str | None = None,
+) -> PerpSettlementReconcileOutcome:
     """One reconciler tick. Never raises (the catch boundary is internal)."""
     if gateway_client is None:
         # No gateway (paper/dry-run without a managed fork) — cannot read keeper
         # events; the watch set persists and is retried when a gateway is present.
-        return
+        return PerpSettlementReconcileOutcome()
 
-    chain = str(getattr(strategy, "chain", "") or getattr(runner.config, "chain", "") or "").lower()
-    wallet_address = str(getattr(strategy, "wallet_address", "") or "")
-    if not chain:
-        return
+    resolved_chain = str(chain or getattr(strategy, "chain", "") or getattr(runner.config, "chain", "") or "").lower()
+    resolved_wallet = str(wallet_address or getattr(strategy, "wallet_address", "") or "")
+    if not resolved_chain:
+        return PerpSettlementReconcileOutcome()
 
     watch = await _derive_watch_set(runner, deployment_id)
     if not watch:
-        return
+        if not getattr(watch, "complete", watch.measured):
+            return PerpSettlementReconcileOutcome(
+                degraded_reasons=("settlement watch set was unmeasured; durable reconciliation will retry",)
+            )
+        return PerpSettlementReconcileOutcome()
 
     # Resolve keeper verdicts off the event loop (WI-2 resolve does gateway RPCs).
     verdicts_by_protocol = await asyncio.to_thread(
         _resolve_all_verdicts,
         gateway_client=gateway_client,
-        chain=chain,
-        wallet_address=wallet_address,
+        chain=resolved_chain,
+        wallet_address=resolved_wallet,
         watch=watch,
     )
 
+    attempted = 0
+    booked = 0
+    attempted_order_keys: list[str] = []
+    booked_order_keys: list[str] = []
+    degraded_reasons: list[str] = (
+        ["one or more settlement ledger rows were unmeasured; durable reconciliation will retry"]
+        if not getattr(watch, "complete", watch.measured)
+        else []
+    )
     for protocol, verdicts in verdicts_by_protocol.items():
         for verdict in verdicts:
             entry = watch.get((protocol, str(getattr(verdict, "order_key", "")).lower()))
             if entry is None or not getattr(verdict, "terminal", False):
                 continue  # unknown / still-PENDING / non-terminal UNMEASURED → keep watching
-            await _commit_verdict(
+            attempted += 1
+            attempted_order_keys.append(entry.order_key.lower())
+            outcome = await _commit_verdict(
                 runner,
                 strategy,
                 verdict=verdict,
                 entry=entry,
                 cycle_id=cycle_id,
-                chain=chain,
+                chain=resolved_chain,
                 protocol=protocol,
-                wallet_address=wallet_address,
+                wallet_address=resolved_wallet,
             )
+            if outcome is None:
+                degraded_reasons.append(f"order {entry.order_key}: settlement commit failed")
+            else:
+                if outcome.booked:
+                    booked += 1
+                    booked_order_keys.append(entry.order_key.lower())
+                if outcome.accounting_degraded or not outcome.booked:
+                    degraded_reasons.append(
+                        f"order {entry.order_key}: {outcome.degraded_reason or 'settlement was not booked'}"
+                    )
+    return PerpSettlementReconcileOutcome(
+        attempted=attempted,
+        booked=booked,
+        attempted_order_keys=tuple(attempted_order_keys),
+        booked_order_keys=tuple(booked_order_keys),
+        degraded_reasons=tuple(degraded_reasons),
+    )
 
 
 class _WatchEntry:
@@ -127,6 +177,75 @@ class _WatchEntry:
         self.submission_timestamp = submission_timestamp
 
 
+class _DerivedWatch(dict[tuple[str, str], _WatchEntry]):
+    """Watch entries plus whether the backing reads were authoritative."""
+
+    def __init__(
+        self,
+        *args: Any,
+        measured: bool = True,
+        unmeasured_candidates: tuple[dict[str, Any], ...] = (),
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.measured = measured
+        self.unmeasured_candidates = unmeasured_candidates
+
+    @property
+    def complete(self) -> bool:
+        """Whether every measured candidate row was hydrated authoritatively."""
+        return self.measured and not self.unmeasured_candidates
+
+
+@dataclass(frozen=True)
+class _Phase1CloseInventory:
+    """All successful exact-cycle close ledgers, before the settled MINUS."""
+
+    rows: tuple[dict[str, Any], ...] = ()
+    measured: bool = True
+    degraded_reason: str | None = None
+
+
+async def _read_phase1_close_inventory(
+    runner: StrategyRunner, deployment_id: str, expected_cycle_id: str
+) -> _Phase1CloseInventory:
+    """Hydrate every possible exact-cycle close row without filtering settled rows."""
+    sm = runner.state_manager
+    ledger_reader = getattr(sm, "read_ledger_entries_measured", None)
+    hydrate = getattr(sm, "get_ledger_entry_by_id", None)
+    if not callable(ledger_reader) or not callable(hydrate):
+        return _Phase1CloseInventory(measured=False, degraded_reason="Phase-1 ledger readers are unavailable")
+    candidates = await _read_perp_candidates(ledger_reader, deployment_id)
+    if candidates is None:
+        return _Phase1CloseInventory(measured=False, degraded_reason="Phase-1 ledger inventory was unmeasured")
+
+    exact_rows: list[dict[str, Any]] = []
+    for candidate in candidates:
+        if str(candidate.get("intent_type") or "").upper() != "PERP_CLOSE" or not candidate.get("success", False):
+            continue
+        cycle_hint = str(candidate.get("cycle_id") or "")
+        if cycle_hint and cycle_hint != expected_cycle_id:
+            continue
+        ledger_id = str(candidate.get("id") or "")
+        if not ledger_id:
+            continue
+        try:
+            full = await hydrate(ledger_id)
+        except Exception as exc:  # noqa: BLE001 — candidate identity is unmeasured
+            return _Phase1CloseInventory(
+                measured=False,
+                degraded_reason=f"Phase-1 close ledger {ledger_id} hydrate failed: {exc}",
+            )
+        if not isinstance(full, dict):
+            return _Phase1CloseInventory(
+                measured=False,
+                degraded_reason=f"Phase-1 close ledger {ledger_id} hydrate was unmeasured",
+            )
+        if str(full.get("cycle_id") or "") == expected_cycle_id:
+            exact_rows.append(full)
+    return _Phase1CloseInventory(rows=tuple(exact_rows))
+
+
 # Warn-once (per state_manager class, per process) that the runtime backend lacks the
 # measured-read API — VIB-6107: this class of interface mismatch must NEVER be silent
 # again (the WI-3 reconciler was dead code in every real strat run because the probe
@@ -147,7 +266,7 @@ def _warn_missing_reader_once(sm: Any) -> None:
     )
 
 
-async def _derive_watch_set(runner: StrategyRunner, deployment_id: str) -> dict[tuple[str, str], _WatchEntry]:
+async def _derive_watch_set(runner: StrategyRunner, deployment_id: str) -> _DerivedWatch:
     """Re-derive the pending-settlement watch set from persisted rows (no new storage).
 
     watch = {perp ledger rows with async-order keys} MINUS {rows that already have a
@@ -189,14 +308,14 @@ async def _derive_watch_set(runner: StrategyRunner, deployment_id: str) -> dict[
     hydrate = getattr(sm, "get_ledger_entry_by_id", None)
     if sm is None or not callable(ledger_reader) or not callable(events_reader) or not callable(hydrate):
         _warn_missing_reader_once(sm)
-        return {}
+        return _DerivedWatch(measured=False)
 
     settled_ledger_ids = await _read_settled_ledger_ids(events_reader, deployment_id)
     if settled_ledger_ids is None:  # UNMEASURED read ⇒ skip tick (never fabricate an empty set)
-        return {}
+        return _DerivedWatch(measured=False)
     candidates = await _read_perp_candidates(ledger_reader, deployment_id)
     if candidates is None:  # UNMEASURED read ⇒ skip tick
-        return {}
+        return _DerivedWatch(measured=False)
 
     # Only unsettled successful perp submission rows need a hydrate RPC. The MINUS keeps
     # this tiny in steady state; surface an unexpectedly large fan-out (e.g. a fresh boot
@@ -205,10 +324,16 @@ async def _derive_watch_set(runner: StrategyRunner, deployment_id: str) -> dict[
     logger.debug("perp settlement reconciler: %d perp candidate row(s) need hydration", len(to_hydrate))
     _notice_large_fanout_once(len(to_hydrate))
 
-    watch: dict[tuple[str, str], _WatchEntry] = {}
+    watch = _DerivedWatch()
+    unmeasured_candidates: list[dict[str, Any]] = []
     for row in to_hydrate:
-        for key, entry in await _hydrate_watch_entries(hydrate, row):
+        hydrated = await _hydrate_watch_entries(hydrate, row)
+        if hydrated is None:
+            unmeasured_candidates.append(row)
+            continue
+        for key, entry in hydrated:
             watch[key] = entry
+    watch.unmeasured_candidates = tuple(unmeasured_candidates)
     return watch
 
 
@@ -288,14 +413,14 @@ def _needs_hydrate(row: dict[str, Any], settled_ledger_ids: set[str]) -> bool:
     return bool(row.get("success", False))
 
 
-async def _hydrate_watch_entries(hydrate: Any, row: dict[str, Any]) -> list[tuple[tuple[str, str], _WatchEntry]]:
+async def _hydrate_watch_entries(hydrate: Any, row: dict[str, Any]) -> list[tuple[tuple[str, str], _WatchEntry]] | None:
     """Zero or more watch entries for one candidate row (assumed to pass ``_needs_hydrate``).
 
     Hydrates the full ledger row via ``get_ledger_entry_by_id`` (the list projection lacks
     ``extracted_data_json``) and parses its ``async_orders``. A perp submission row can
-    carry multiple async orders → multiple entries. Returns ``[]`` when the hydrate is
-    UNMEASURED (``None`` ⇒ retry next tick; never fabricate an empty order list) or the
-    hydrated row has no protocol.
+    carry multiple async orders → multiple entries. Returns ``None`` when the hydrate is
+    UNMEASURED (retry next tick; never fabricate an empty order list), and ``[]`` only
+    when the measured hydrated row has no usable protocol/order entries.
     """
     from ..observability.ledger import LedgerEntry
 
@@ -313,9 +438,9 @@ async def _hydrate_watch_entries(hydrate: Any, row: dict[str, Any]) -> list[tupl
             exc,
             exc_info=True,
         )
-        return []
+        return None
     if not isinstance(full, dict):
-        return []
+        return None
     protocol = str(full.get("protocol") or row.get("protocol") or "").lower()
     if not protocol:
         return []
@@ -476,7 +601,7 @@ async def _commit_verdict(
     chain: str,
     protocol: str,
     wallet_address: str,
-) -> None:
+) -> Any | None:
     """Commit one terminal verdict, catching the accounting-persistence boundary."""
     try:
         outcome = await commit_perp_settlement(
@@ -501,7 +626,7 @@ async def _commit_verdict(
             getattr(exc, "write_kind", "?"),
             exc,
         )
-        return
+        return None
     except Exception as exc:  # noqa: BLE001 — never let one order's commit crash the pre-decide step
         logger.error(
             "perp settlement reconciler: unexpected commit failure for order=%s (continuing): %s",
@@ -509,7 +634,7 @@ async def _commit_verdict(
             exc,
             exc_info=True,
         )
-        return
+        return None
 
     if outcome.booked:
         logger.info(
@@ -525,6 +650,7 @@ async def _commit_verdict(
             entry.order_key,
             outcome.degraded_reason,
         )
+    return outcome
 
 
-__all__ = ["reconcile_perp_settlements"]
+__all__ = ["PerpSettlementReconcileOutcome", "reconcile_perp_settlements"]

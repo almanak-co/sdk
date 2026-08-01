@@ -198,5 +198,12 @@ def gmx_v2_teardown_post_condition(
 # the on-chain pending set (_verify_pending_order). A post-condition without
 # this declaration keeps pending-order residuals UNVERIFIABLE in Plan-A.
 gmx_v2_teardown_post_condition.handles_pending_orders = True  # type: ignore[attr-defined]
+# The same measured gateway read can be inverted by TD-08 Plan-A: residual
+# account position(s) prove the deployment still has perp risk; a measured empty
+# book proves it is flat. This is conservative for multiple GMX markets under
+# the mandatory 1-gateway:1-deployment identity: any residual marks every
+# enumerated GMX position open rather than falsely attributing a wallet-wide
+# empty/non-empty result to the wrong deployment.
+gmx_v2_teardown_post_condition.supports_open_state_reconciliation = True  # type: ignore[attr-defined]
 
 __all__ = ["gmx_v2_teardown_post_condition"]

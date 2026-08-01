@@ -300,6 +300,7 @@ class TestManagerExecuteHook:
 def _mgr_mock_for_runner_lane(*, closure_result: TeardownResult, verify_ok: bool = True):
     mgr = MagicMock(name="TeardownManager")
     mgr._execute_intents = AsyncMock(return_value=closure_result)
+    mgr.resume = AsyncMock(return_value=closure_result)
     mgr._verify_closure_detailed = AsyncMock(
         return_value=ClosureVerification(
             all_closed=verify_ok, positions_total=1, positions_closed=1 if verify_ok else 0
@@ -320,6 +321,36 @@ def _mgr_mock_for_runner_lane(*, closure_result: TeardownResult, verify_ok: bool
 
 
 class TestRunnerLaneHook:
+    @pytest.mark.asyncio
+    async def test_correlated_resume_preserves_auto_mode(self):
+        from almanak.framework.runner import _teardown_helpers as _h
+
+        pending = _result(success=False, succeeded=0, failed=1)
+        pending.completed_at = None
+        pending.async_settlement_pending = True
+        mgr = _mgr_mock_for_runner_lane(closure_result=pending)
+
+        result = await _h.execute_and_verify(
+            MagicMock(),
+            mgr,
+            MagicMock(),
+            _make_state(pending=[{"type": "PERP_CLOSE"}], completed=0),
+            _make_strategy(),
+            [{"type": "PERP_CLOSE"}],
+            _make_positions(),
+            TeardownMode.SOFT,
+            None,
+            True,
+            None,
+            MagicMock(),
+            MagicMock(),
+            resume_accepted_async=True,
+        )
+
+        assert result is pending
+        assert mgr.resume.await_args.kwargs["is_auto_mode"] is True
+        mgr._execute_intents.assert_not_awaited()
+
     @pytest.mark.asyncio
     async def test_update_progress_called_with_token_consolidation_then_phase_runs(self):
         from almanak.framework.runner import _teardown_helpers as _h

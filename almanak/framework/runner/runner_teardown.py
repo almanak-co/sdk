@@ -8,13 +8,15 @@ via a thin delegation stub in StrategyRunner.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import time
 from collections.abc import Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from almanak.core.chains._helpers import bridged_stablecoin_map
@@ -487,6 +489,8 @@ async def reconcile_known_positions(runner: Any, strategy: Any, teardown_market:
             gateway_client=gateway_client,
             market=teardown_market,
             network=network,
+            wallet_address=str(getattr(strategy, "wallet_address", "") or ""),
+            wallet_for_chain=getattr(strategy, "get_wallet_for_chain", None),
         )
     except Exception:
         logger.debug(
@@ -666,8 +670,23 @@ async def _prepare_deferred_pending_orders(strategy: Any, residuals: list[Any]) 
     return progressed
 
 
+def _record_teardown_pending_recovery_keys(runner: Any, keys: frozenset[str] | None) -> None:
+    """Expose measured pending keys to the exact accepted-order resume lane."""
+    if runner is not None:
+        runner._teardown_pending_recovery_keys = keys
+
+
+def _pending_order_keys(residuals: list[Any]) -> frozenset[str]:
+    """Normalize measured pending-order keys for exact resume correlation."""
+    return frozenset(
+        str((residual.details or {}).get("order_key") or "").lower()
+        for residual in residuals
+        if str((residual.details or {}).get("order_key") or "")
+    )
+
+
 async def _recover_pending_order_intents(
-    runner: Any,  # noqa: ARG001 — signature parity with _recover_orphaned_lp_intents
+    runner: Any,
     strategy: Any,
     teardown_intents: list,
     teardown_mode: TeardownMode,  # noqa: ARG001 — a cancel is mode-agnostic (always full recovery)
@@ -700,6 +719,11 @@ async def _recover_pending_order_intents(
     from ..teardown.residual_discovery import discover_teardown_residuals, remeasure_teardown_residuals
 
     deployment_id = getattr(strategy, "deployment_id", "")
+
+    # ``None`` means the read was unmeasured; an empty set means a measured
+    # empty pending-order book. The production resume lane uses this to clear
+    # only an incompleteness signal attributable to its exact accepted keys.
+    _record_teardown_pending_recovery_keys(runner, None)
     try:
         residuals = discover_teardown_residuals(strategy)
     except Exception as exc:  # noqa: BLE001 — discovery must never block risk reduction
@@ -720,6 +744,7 @@ async def _recover_pending_order_intents(
         )
 
     if not residuals:
+        _record_teardown_pending_recovery_keys(runner, frozenset())
         return teardown_intents, False, None
 
     # Residuals were MEASURED — from here a crash must fail CLOSED (do not certify
@@ -741,6 +766,7 @@ async def _recover_pending_order_intents(
         # DEFERRED — cancelling it now would just revert (RequestNotYetCancellable) and
         # burn the slippage-escalation ladder to FAILED.
         pending = [p for p in residuals if (p.details or {}).get("kind") == "pending_order"]
+        _record_teardown_pending_recovery_keys(runner, _pending_order_keys(pending))
         cancellable = [p for p in pending if (p.details or {}).get("cancellable")]
         deferred = [p for p in pending if not (p.details or {}).get("cancellable")]
 
@@ -1067,6 +1093,8 @@ async def execute_teardown(  # noqa: C901
     teardown_intents, recovery_incomplete, recovery_warning = await _recover_orphaned_lp_intents(
         runner, strategy, teardown_intents, teardown_mode
     )
+    lp_recovery_incomplete = recovery_incomplete
+    lp_recovery_warning = recovery_warning
     # Step T2.45 (VIB-5568): recover collateral from stranded pending (unfilled)
     # perp orders. Residual discovery (VIB-5116) DETECTS them and #3130 fails the
     # teardown loud on them; this RECOVERS them — turning each into a
@@ -1087,6 +1115,8 @@ async def execute_teardown(  # noqa: C901
     # completion-mark sites below / in execute_teardown_via_manager.
     runner._teardown_recovery_incomplete = recovery_incomplete
     runner._teardown_recovery_warning = recovery_warning
+    runner._teardown_lp_recovery_incomplete = lp_recovery_incomplete
+    runner._teardown_lp_recovery_warning = lp_recovery_warning
 
     # Step T2.5 (VIB-5139): universal fresh-state guard for lending unwind.
     # Strategies hand-roll REPAY/WITHDRAW teardown intents from cached exposure;
@@ -1106,6 +1136,25 @@ async def execute_teardown(  # noqa: C901
         teardown_mode,
         teardown_id=getattr(request, "teardown_id", None),
     )
+
+    if not teardown_intents:
+        accepted_lookup = await _load_runtime_resumable_accepted_async_state(runner, manager, deployment_id)
+        if accepted_lookup.blocked_reason:
+            return _accepted_async_recovery_pending_result(
+                runner, deployment_id, start_time, accepted_lookup.blocked_reason
+            )
+        accepted_state = accepted_lookup.state
+        if accepted_state is not None:
+            # A keeper may have filled between ticks, causing the strategy to
+            # generate no new close. Preserve the persisted accepted plan so
+            # the manager can prove/book its terminal result; never let the
+            # generic no-positions fast path complete over a live marker.
+            persisted_plan = json.loads(accepted_state.pending_intents_json)
+            teardown_intents = persisted_plan if isinstance(persisted_plan, list) else []
+            logger.warning(
+                "🛑 %s generated no teardown intents but owns accepted async state; routing correlated resume",
+                deployment_id,
+            )
 
     if not teardown_intents:
         # TD-11 (VIB-5469): completeness enforcement at the no-intents gate. The
@@ -1312,6 +1361,225 @@ async def execute_teardown(  # noqa: C901
 # -------------------------------------------------------------------------
 
 
+def _load_pending_teardown_plan(state: Any) -> tuple[list[Any], int] | None:
+    """Parse the persisted plan and its conservative resume floor."""
+    try:
+        plan = json.loads(state.pending_intents_json) if state.pending_intents_json else []
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(plan, list):
+        return None
+    floor = max(0, min(int(getattr(state, "current_intent_index", 0) or 0), len(plan)))
+    return plan, floor
+
+
+def _unique_pending_perp_close_index(plan: list[Any], floor: int, protocol: str) -> int | None:
+    """Return one unambiguous same-protocol close index, never a guess."""
+    candidate_indexes = [
+        index
+        for index in range(floor, len(plan))
+        if isinstance(plan[index], dict)
+        and str(plan[index].get("type", plan[index].get("intent_type", ""))).upper() == "PERP_CLOSE"
+        and str(plan[index].get("protocol") or "").lower() == protocol
+    ]
+    return candidate_indexes[0] if len(candidate_indexes) == 1 else None
+
+
+@dataclass(frozen=True)
+class _AcceptedAsyncResumeLookup:
+    """Tri-state accepted-order lookup: recovered, absent, or fail-closed."""
+
+    state: Any | None = None
+    blocked_reason: str | None = None
+
+
+def _recovery_blocked(reason: str) -> _AcceptedAsyncResumeLookup:
+    logger.error("Accepted async teardown recovery is unproven; deferring without dispatch: %s", reason)
+    return _AcceptedAsyncResumeLookup(blocked_reason=reason)
+
+
+async def _persist_recovered_async_marker(teardown_state_adapter: Any, state: Any, ledger_id: str) -> None:
+    """Best-effort marker persistence; durable ledger recovery repeats next tick."""
+    save_state = getattr(teardown_state_adapter, "save_teardown_state", None)
+    if not callable(save_state):
+        return
+    try:
+        maybe_saved = save_state(state)
+        if inspect.isawaitable(maybe_saved):
+            await maybe_saved
+    except Exception:  # noqa: BLE001 — ledger reconstruction repeats every tick
+        logger.exception(
+            "Recovered accepted async marker from Phase-1 ledger %s but could not persist it; "
+            "using the in-memory marker for this tick",
+            ledger_id,
+        )
+
+
+async def _recover_accepted_async_marker_from_ledger(
+    runner: Any, teardown_state_adapter: Any, state: Any
+) -> _AcceptedAsyncResumeLookup:
+    """Rebuild a missing marker from the exact unsettled Phase-1 ledger row."""
+    from ..runner.perp_settlement_reconciler import _parse_async_orders, _read_phase1_close_inventory
+    from ..teardown.teardown_manager import _mark_persisted_async_submission_accepted
+
+    expected_cycle_id = f"teardown-{state.teardown_id}"
+    inventory = await _read_phase1_close_inventory(runner, state.deployment_id, expected_cycle_id)
+    if not inventory.measured:
+        return _recovery_blocked(inventory.degraded_reason or "Phase-1 close ledger inventory was unmeasured")
+    if not inventory.rows:
+        return _AcceptedAsyncResumeLookup()
+    if len(inventory.rows) != 1:
+        return _recovery_blocked("multiple Phase-1 close ledgers match this teardown cycle")
+    parsed_plan = _load_pending_teardown_plan(state)
+    if parsed_plan is None:
+        return _recovery_blocked("the persisted teardown plan could not be parsed")
+    plan, floor = parsed_plan
+    for ledger in inventory.rows:
+        ledger_id = str(ledger.get("id") or "")
+        protocol = str(ledger.get("protocol") or "").lower()
+        # The ledger proves which protocol/order settled, but it does not carry
+        # the teardown-plan index. Guessing between two same-protocol closes
+        # could suppress the wrong intent, so ambiguous recovery fails closed.
+        intent_index = _unique_pending_perp_close_index(plan, floor, protocol)
+        if intent_index is None:
+            return _recovery_blocked("the Phase-1 close ledger has no unique pending plan match")
+        order_keys = tuple(
+            key.lower() for key, _is_long in _parse_async_orders(ledger.get("extracted_data_json") or "")
+        )
+        if not order_keys:
+            return _recovery_blocked("the Phase-1 close ledger has no exact order keys")
+        if not _mark_persisted_async_submission_accepted(
+            state,
+            intent_index,
+            order_keys=order_keys,
+            ledger_entry_id=ledger_id,
+        ):
+            return _recovery_blocked("the accepted close could not be represented in the persisted plan")
+        await _persist_recovered_async_marker(teardown_state_adapter, state, ledger_id)
+        logger.warning(
+            "Recovered missing accepted async marker from exact Phase-1 ledger %s (%d order key(s))",
+            ledger_id,
+            len(order_keys),
+        )
+        return _AcceptedAsyncResumeLookup(state=state)
+    return _recovery_blocked("the Phase-1 close ledger could not be correlated")
+
+
+async def _load_resumable_accepted_async_state(
+    teardown_state_adapter: Any, deployment_id: str, *, runner: Any | None = None
+) -> _AcceptedAsyncResumeLookup:
+    """Load only a resumable state that owns an accepted async submission."""
+    from ..teardown.teardown_manager import has_accepted_async_submission
+
+    if teardown_state_adapter is None:
+        return _recovery_blocked("the teardown execution-state adapter is unavailable")
+    get_persisted_state = getattr(teardown_state_adapter, "get_teardown_state", None)
+    if not callable(get_persisted_state):
+        return _recovery_blocked("the teardown execution-state reader is unavailable")
+    maybe_state = get_persisted_state(deployment_id)
+    if not inspect.isawaitable(maybe_state):
+        return _recovery_blocked("the teardown execution-state read was unmeasured")
+    state = await maybe_state
+    if state is None or not state.is_resumable:
+        return _AcceptedAsyncResumeLookup()
+    if has_accepted_async_submission(state):
+        return _AcceptedAsyncResumeLookup(state=state)
+    if runner is None:
+        return _recovery_blocked("ledger recovery is unavailable for a resumable teardown")
+    return await _recover_accepted_async_marker_from_ledger(runner, teardown_state_adapter, state)
+
+
+async def _load_runtime_resumable_accepted_async_state(
+    runner: Any, request_state_manager: Any, deployment_id: str
+) -> _AcceptedAsyncResumeLookup:
+    """Resolve the execution-state adapter before the no-intents fast path."""
+    from ..teardown import create_teardown_state_adapter_for_runtime
+
+    raw_db_path = getattr(request_state_manager, "db_path", None)
+    sqlite_path = raw_db_path if isinstance(raw_db_path, str | Path) else None
+    adapter = create_teardown_state_adapter_for_runtime(
+        gateway_client=runner._get_gateway_client(),
+        sqlite_path=sqlite_path,
+    )
+    return await _load_resumable_accepted_async_state(adapter, deployment_id, runner=runner)
+
+
+def _accepted_async_recovery_pending_result(
+    runner: Any, deployment_id: str, start_time: datetime, reason: str
+) -> IterationResult:
+    """Defer one teardown tick without dispatch while recovery is unproven."""
+    from .runner_models import IterationResult, IterationStatus
+
+    logger.error("🛑 %s accepted-order recovery deferred: %s", deployment_id, reason)
+    return IterationResult(
+        status=IterationStatus.TEARDOWN,
+        intent=None,
+        error=reason,
+        deployment_id=deployment_id,
+        duration_ms=runner._calculate_duration_ms(start_time),
+    )
+
+
+async def _resolve_manager_execution_state(
+    runner: Any,
+    teardown_mgr: Any,
+    strategy: Any,
+    teardown_intents: list[Any],
+    teardown_mode: Any,
+    is_auto_mode: bool,
+    start_time: datetime,
+    accepted_lookup: _AcceptedAsyncResumeLookup,
+) -> tuple[Any | None, IterationResult | None]:
+    """Choose correlated resume, fail-closed deferral, or fresh persistence."""
+    from . import _teardown_helpers as _h
+
+    if accepted_lookup.blocked_reason:
+        return None, _accepted_async_recovery_pending_result(
+            runner,
+            strategy.deployment_id,
+            start_time,
+            accepted_lookup.blocked_reason,
+        )
+    if accepted_lookup.state is not None:
+        logger.warning(
+            "🛑 Resuming accepted async teardown %s from its correlated persisted plan",
+            accepted_lookup.state.teardown_id,
+        )
+        return accepted_lookup.state, None
+    return await _h.run_cancel_window_and_persist(
+        runner,
+        teardown_mgr,
+        strategy,
+        teardown_intents,
+        teardown_mode,
+        is_auto_mode,
+        start_time,
+    )
+
+
+def _clear_stale_pending_recovery_after_accepted_fill(
+    runner: Any,
+    resumable_state: Any,
+    teardown_result: Any,
+    *,
+    resume_accepted_async: bool,
+) -> None:
+    """Drop only pre-resume pending evidence superseded by exact terminal proof."""
+    if not resume_accepted_async or not teardown_result.success:
+        return
+    from ..teardown.teardown_manager import accepted_async_order_keys
+
+    accepted_keys = accepted_async_order_keys(resumable_state)
+    pending_recovery_keys = getattr(runner, "_teardown_pending_recovery_keys", None)
+    if pending_recovery_keys is None or not pending_recovery_keys.issubset(accepted_keys):
+        return
+    # Residual discovery ran before the terminal resume check. Every deferred
+    # key was exactly the accepted set now proved EXECUTED; preserve only an
+    # independent LP-discovery failure.
+    runner._teardown_recovery_incomplete = bool(getattr(runner, "_teardown_lp_recovery_incomplete", False))
+    runner._teardown_recovery_warning = getattr(runner, "_teardown_lp_recovery_warning", None)
+
+
 async def execute_teardown_via_manager(
     runner: Any,
     strategy: StrategyProtocol,
@@ -1368,6 +1636,9 @@ async def execute_teardown_via_manager(
     teardown_mgr, teardown_state_adapter = _h.build_teardown_manager(
         runner, compiler, state_manager, request, strategy=strategy
     )
+    accepted_lookup = await _load_resumable_accepted_async_state(teardown_state_adapter, deployment_id, runner=runner)
+    resumable_state = accepted_lookup.state
+    resume_accepted_async = resumable_state is not None
 
     logger.info(
         f"🛑 Routing {deployment_id} teardown through TeardownManager (mode={mode_str}, intents={len(teardown_intents)})"
@@ -1403,8 +1674,18 @@ async def execute_teardown_via_manager(
             return safety_error
 
         # Phase 5: persist state + cancel window (may short-circuit cancel).
-        teardown_state, cancel_short_circuit = await _h.run_cancel_window_and_persist(
-            runner, teardown_mgr, strategy, teardown_intents, teardown_mode, is_auto_mode, start_time
+        # Production re-entry consumes the exact persisted order-key plan;
+        # unproven recovery defers without dispatch; only authoritative absence
+        # reaches fresh plan persistence.
+        teardown_state, cancel_short_circuit = await _resolve_manager_execution_state(
+            runner,
+            teardown_mgr,
+            strategy,
+            teardown_intents,
+            teardown_mode,
+            is_auto_mode,
+            start_time,
+            accepted_lookup,
         )
         if cancel_short_circuit is not None:
             return cancel_short_circuit
@@ -1467,6 +1748,14 @@ async def execute_teardown_via_manager(
             price_oracle,
             request,
             state_manager,
+            resume_accepted_async=resume_accepted_async,
+        )
+
+        _clear_stale_pending_recovery_after_accepted_fill(
+            runner,
+            resumable_state,
+            teardown_result,
+            resume_accepted_async=resume_accepted_async,
         )
 
         # VIB-5667 Phase 8a: vault-safe release. After the strategy's closing
@@ -1577,6 +1866,9 @@ async def execute_teardown_via_manager(
         # subsequent teardown on the same runner.
         runner._teardown_recovery_incomplete = False
         runner._teardown_recovery_warning = None
+        runner._teardown_lp_recovery_incomplete = False
+        runner._teardown_lp_recovery_warning = None
+        runner._teardown_pending_recovery_keys = None
 
     # Phase 9: map TeardownResult -> IterationResult + terminal side effects.
     return _h.map_teardown_result(runner, strategy, start_time, teardown_result, teardown_mode, request, state_manager)
@@ -2328,6 +2620,45 @@ def build_teardown_compiler(
         return None
 
 
+def _extract_perp_index_chains(intents: list) -> dict[str, str | None]:
+    """Return shared teardown index-symbol extraction without blocking unwind."""
+    try:
+        from ..teardown.oracle_warmup import extract_warmable_token_chains
+
+        return extract_warmable_token_chains(intents, None)
+    except Exception as e:  # noqa: BLE001 - price warming is best-effort
+        logger.warning("Could not extract perp index symbols for teardown price prefetch: %s", e)
+        return {}
+
+
+def _prefetch_teardown_price(
+    market: Any,
+    token: str,
+    symbol: str,
+    token_chain: str | None,
+) -> str | None:
+    """Warm one measured price, returning the identifier that succeeded."""
+    try:
+        if token_chain:
+            market.price(symbol, chain=token_chain)
+        else:
+            market.price(symbol)
+        return symbol
+    except Exception:  # noqa: BLE001 - price warming is best-effort
+        pass
+
+    if symbol != token:
+        try:
+            market.price(token)
+            return token
+        except Exception:  # noqa: BLE001 - price warming is best-effort
+            logger.debug("Could not pre-fetch price for teardown token %s (symbol=%s)", token, symbol)
+            return None
+
+    logger.debug("Could not pre-fetch price for teardown token %s", token)
+    return None
+
+
 def prefetch_teardown_prices(market: Any, intents: list) -> None:
     """Eagerly fetch prices for tokens referenced in teardown intents.
 
@@ -2340,6 +2671,11 @@ def prefetch_teardown_prices(market: Any, intents: list) -> None:
     than symbol. market.price() expects a symbol, so we resolve addresses to
     symbols first using the token resolver. Without this, tokens like ALMANAK
     (not in CoinGecko/Chainlink) fail price resolution during teardown.
+
+    Perp index symbols are sourced from the shared teardown extractor. A perp's
+    priceable index lives in ``intent.market`` (for example ``ETH/USD``), not in
+    the token attributes below. Keeping that rule in one place prevents the
+    live-runner and manager teardown lanes from drifting (VIB-6254).
     """
     token_attrs = ("from_token", "to_token", "token", "collateral_token", "borrow_token", "token_in")
     tokens: set[str] = set()
@@ -2348,6 +2684,9 @@ def prefetch_teardown_prices(market: Any, intents: list) -> None:
             val = getattr(intent, attr, None)
             if val and isinstance(val, str):
                 tokens.add(val)
+
+    index_chains = _extract_perp_index_chains(intents)
+    tokens.update(index_chains)
 
     if not tokens:
         return
@@ -2375,19 +2714,9 @@ def prefetch_teardown_prices(market: Any, intents: list) -> None:
     for token in sorted(tokens):
         # Try the symbol if we resolved the address, otherwise try the raw value
         symbol = address_to_symbol.get(token, token)
-        try:
-            market.price(symbol)
-            fetched.append(symbol)
-        except Exception:
-            # If symbol lookup failed and we have the original address, try that too
-            if symbol != token:
-                try:
-                    market.price(token)
-                    fetched.append(token)
-                except Exception:
-                    logger.debug(f"Could not pre-fetch price for teardown token {token} (symbol={symbol})")
-            else:
-                logger.debug(f"Could not pre-fetch price for teardown token {token}")
+        fetched_token = _prefetch_teardown_price(market, token, symbol, index_chains.get(token))
+        if fetched_token is not None:
+            fetched.append(fetched_token)
 
     if fetched:
         logger.info(f"Pre-fetched {len(fetched)} teardown prices: {fetched}")

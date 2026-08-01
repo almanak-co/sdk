@@ -225,6 +225,25 @@ def test_client_projection_carries_tx_hash():
     assert rows[0]["tx_hash"] == "0x160a765a"
 
 
+def test_client_projection_carries_cycle_and_protocol_for_teardown_recovery():
+    entry = gateway_pb2.LedgerEntryInfo(
+        id="led-close",
+        cycle_id="teardown-td-1",
+        deployment_id=_DEPLOYMENT_ID,
+        intent_type="PERP_CLOSE",
+        chain="arbitrum",
+        protocol="gmx_v2",
+        success=True,
+    )
+    gsm = _make_gsm(gateway_pb2.ACCOUNTING_BACKEND_STATUS_AVAILABLE, entries=[entry])
+
+    rows, measured = gsm.read_ledger_entries_measured(_DEPLOYMENT_ID)
+
+    assert measured is True
+    assert rows[0]["cycle_id"] == "teardown-td-1"
+    assert rows[0]["protocol"] == "gmx_v2"
+
+
 def test_client_absent_is_unmeasured():
     gsm = _make_gsm(gateway_pb2.ACCOUNTING_BACKEND_STATUS_ABSENT)
     rows, measured = gsm.read_ledger_entries_measured(_DEPLOYMENT_ID)

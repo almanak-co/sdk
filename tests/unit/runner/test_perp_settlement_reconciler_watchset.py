@@ -25,7 +25,10 @@ from typing import Any
 import pytest
 
 from almanak.framework.runner import perp_settlement_reconciler as reconciler
-from almanak.framework.runner.perp_settlement_reconciler import _derive_watch_set
+from almanak.framework.runner.perp_settlement_reconciler import (
+    _derive_watch_set,
+    _read_phase1_close_inventory,
+)
 
 _DEPLOYMENT = "deployment:wi6"
 _OPEN_KEY = "0x585d42d95b9a4e84e78d53073d85fa6e67304c119fc000a6052661068200f9cf"
@@ -45,6 +48,7 @@ def _info_row(ledger_id: str, intent_type: str, *, success: bool = True) -> dict
     """The LedgerEntryInfo-projection shape (list read) — NO extracted_data_json."""
     return {
         "id": ledger_id,
+        "cycle_id": "cyc-0",
         "intent_type": intent_type,
         "protocol": "gmx_v2",
         "success": success,
@@ -154,14 +158,19 @@ async def test_old_statemanager_api_is_not_consulted() -> None:
 
     watch = await _derive_watch_set(_runner(_OldStateManager()), _DEPLOYMENT)
     assert watch == {}
+    assert watch.measured is False
 
 
 @pytest.mark.asyncio
 async def test_missing_reader_warns_once_never_silent(caplog: Any) -> None:
     sm = SimpleNamespace()  # no measured-read API at all
     with caplog.at_level(logging.WARNING):
-        assert await _derive_watch_set(_runner(sm), _DEPLOYMENT) == {}
-        assert await _derive_watch_set(_runner(sm), _DEPLOYMENT) == {}  # second tick
+        first = await _derive_watch_set(_runner(sm), _DEPLOYMENT)
+        second = await _derive_watch_set(_runner(sm), _DEPLOYMENT)
+        assert first == {}
+        assert second == {}  # second tick
+        assert first.measured is False
+        assert second.measured is False
     warnings = [r for r in caplog.records if "lacks the measured-read API" in r.message]
     assert len(warnings) == 1, "must WARN (not silent) and exactly once per backend class"
     assert warnings[0].levelno == logging.WARNING
@@ -176,7 +185,9 @@ async def test_unmeasured_ledger_read_skips_tick() -> None:
         full_by_id={"l-open": _full_row("l-open", "PERP_OPEN", _OPEN_KEY)},
         ledger_measured=False,
     )
-    assert await _derive_watch_set(_runner(sm), _DEPLOYMENT) == {}
+    watch = await _derive_watch_set(_runner(sm), _DEPLOYMENT)
+    assert watch == {}
+    assert watch.measured is False
     assert sm.hydrate_calls == []  # skipped before hydrate
 
 
@@ -188,7 +199,9 @@ async def test_unmeasured_events_read_skips_tick() -> None:
         full_by_id={"l-open": _full_row("l-open", "PERP_OPEN", _OPEN_KEY)},
         events_measured=False,
     )
-    assert await _derive_watch_set(_runner(sm), _DEPLOYMENT) == {}
+    watch = await _derive_watch_set(_runner(sm), _DEPLOYMENT)
+    assert watch == {}
+    assert watch.measured is False
 
 
 @pytest.mark.asyncio
@@ -206,7 +219,56 @@ async def test_settled_row_is_excluded_by_minus() -> None:
 @pytest.mark.asyncio
 async def test_measured_empty_is_authoritative_nothing_to_do() -> None:
     sm = _FakeGatewaySM(ledger_rows=[], events=[], full_by_id={})
-    assert await _derive_watch_set(_runner(sm), _DEPLOYMENT) == {}
+    watch = await _derive_watch_set(_runner(sm), _DEPLOYMENT)
+    assert watch == {}
+    assert watch.measured is True
+
+
+@pytest.mark.asyncio
+async def test_phase1_close_inventory_keeps_already_settled_exact_cycle_row() -> None:
+    """Marker recovery inventories submissions before the reconciler's settled MINUS."""
+    sm = _FakeGatewaySM(
+        ledger_rows=[_info_row("l-close", "PERP_CLOSE")],
+        events=[_settlement_event("l-close")],
+        full_by_id={"l-close": _full_row("l-close", "PERP_CLOSE", _CLOSE_KEY)},
+    )
+
+    inventory = await _read_phase1_close_inventory(_runner(sm), _DEPLOYMENT, "cyc-0")
+
+    assert inventory.measured is True
+    assert [row["id"] for row in inventory.rows] == ["l-close"]
+    assert sm.hydrate_calls == ["l-close"]
+
+
+@pytest.mark.asyncio
+async def test_phase1_close_inventory_marks_unmeasured_hydrate() -> None:
+    sm = _FakeGatewaySM(
+        ledger_rows=[_info_row("l-close", "PERP_CLOSE")],
+        events=[],
+        full_by_id={},
+    )
+
+    inventory = await _read_phase1_close_inventory(_runner(sm), _DEPLOYMENT, "cyc-0")
+
+    assert inventory.measured is False
+    assert inventory.rows == ()
+    assert "unmeasured" in str(inventory.degraded_reason)
+
+
+@pytest.mark.asyncio
+async def test_unmeasured_watch_surfaces_degraded_reconciliation() -> None:
+    outcome = await reconciler.reconcile_perp_settlements(
+        _runner(SimpleNamespace()),
+        SimpleNamespace(chain="arbitrum", wallet_address="0xwallet"),
+        deployment_id=_DEPLOYMENT,
+        cycle_id="teardown-1",
+        gateway_client=object(),
+    )
+
+    assert outcome.attempted == 0
+    assert outcome.booked == 0
+    assert outcome.accounting_degraded is True
+    assert "unmeasured" in outcome.degraded_reasons[0]
 
 
 @pytest.mark.asyncio
@@ -239,8 +301,22 @@ async def test_hydrate_none_skips_row_no_fabrication() -> None:
         events=[],
         full_by_id={},  # hydrate returns None
     )
-    assert await _derive_watch_set(_runner(sm), _DEPLOYMENT) == {}
+    watch = await _derive_watch_set(_runner(sm), _DEPLOYMENT)
+    assert watch == {}
+    assert watch.measured is True
+    assert watch.complete is False
+    assert watch.unmeasured_candidates == (_info_row("l-open", "PERP_OPEN"),)
     assert sm.hydrate_calls == ["l-open"]
+
+    outcome = await reconciler.reconcile_perp_settlements(
+        _runner(sm),
+        SimpleNamespace(chain="arbitrum", wallet_address="0xwallet"),
+        deployment_id=_DEPLOYMENT,
+        cycle_id="teardown-1",
+        gateway_client=object(),
+    )
+    assert outcome.accounting_degraded is True
+    assert "unmeasured" in outcome.degraded_reasons[0]
 
 
 @pytest.mark.asyncio

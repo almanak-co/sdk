@@ -722,6 +722,25 @@ def reconcile_lp_with_registry(
             market_id_str = "" if market_id_val is None else str(market_id_val).lower()
             discriminator = market_id_str or asset
             return (chain, ptype, str(position.protocol or "").lower(), discriminator)
+        if position.position_type == PositionType.PERP:
+            # A perp venue position is economically keyed by
+            # (chain, protocol, market, collateral, direction). Strategy HOT
+            # state often uses a synthetic label while the WARM registry uses
+            # the venue's bytes32 position key. When both surfaces carry this
+            # full canonical tuple they are the SAME position and must not be
+            # counted twice. Fall back to the raw position_id if any component
+            # is absent: incomplete identity must never collapse two positions.
+            details = position.details if isinstance(position.details, dict) else {}
+            market = str(details.get("market_address") or details.get("market") or "").lower()
+            collateral = str(details.get("collateral_address") or details.get("collateral_token") or "").lower()
+            direction = str(
+                position.direction
+                or details.get("direction")
+                or ("long" if details.get("is_long") is True else "short" if details.get("is_long") is False else "")
+            ).lower()
+            protocol = str(position.protocol or "").lower()
+            if protocol and market and collateral and direction:
+                return (chain, ptype, protocol, market, collateral, direction)
         if position.position_type == PositionType.LP:
             # VIB-5723: collapse the same physical NFT position across sources
             # (registry bare token id vs strategy composite key) — see

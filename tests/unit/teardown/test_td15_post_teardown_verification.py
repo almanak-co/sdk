@@ -52,6 +52,10 @@ def _mgr() -> TeardownManager:
 class _Strategy:
     deployment_id = "deployment:td15"
     _gateway_network = "arbitrum"
+    wallet_address = "0xprimary"
+
+    def get_wallet_for_chain(self, chain: str) -> str:
+        return f"0x{chain}"
 
 
 class _Health:
@@ -414,6 +418,32 @@ async def test_pre_teardown_reconciliation_reads_chain(monkeypatch):
     assert out is sentinel
     assert captured["summary"] is summary
     assert captured["network"] == "arbitrum"
+    assert captured["wallet_address"] == "0xprimary"
+    assert captured["wallet_for_chain"]("avalanche") == "0xavalanche"
+
+
+@pytest.mark.asyncio
+async def test_post_teardown_reconciliation_threads_per_chain_wallet_resolver(monkeypatch):
+    """The fresh POST CHECK must retain the same per-position wallet mapping."""
+    from almanak.framework.teardown import teardown_manager as tm
+
+    captured = {}
+
+    async def _fake_reconcile(**kwargs):
+        captured.update(kwargs)
+        return ReconciliationReport(entries=[])
+
+    monkeypatch.setattr(tm, "reconcile_known_positions_against_chain", _fake_reconcile)
+    await _mgr().verify_closure_against_chain(
+        _Strategy(),
+        verification=_verified(VerificationStatus.CHAIN_VERIFIED),
+        pre_execution_positions=_summary(_lp_position()),
+        market=None,
+    )
+
+    assert captured["phase"] == "post"
+    assert captured["wallet_address"] == "0xprimary"
+    assert captured["wallet_for_chain"]("avalanche") == "0xavalanche"
 
 
 @pytest.mark.asyncio

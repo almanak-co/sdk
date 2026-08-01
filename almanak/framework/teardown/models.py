@@ -475,6 +475,11 @@ class TeardownResult:
     error: str | None = None
     recovery_options: list[str] = field(default_factory=list)
 
+    # A create-order transaction landed but has not reached a measured terminal
+    # venue state. This typed signal keeps the runner in correlated-resume mode;
+    # ``error`` remains operator-facing text and may safely gain detail.
+    async_settlement_pending: bool = False
+
     # VIB-3773: accounting-degraded teardown — chain-side work succeeded but
     # one or more accounting writes failed and were recorded into the
     # deferred-write log. The teardown loop continued (degraded-but-continue

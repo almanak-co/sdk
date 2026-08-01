@@ -217,6 +217,9 @@ async def _complete_registry(
 
         opened = bool(is_open)
         tx_hash = str(getattr(submission_ledger, "tx_hash", "") or "") or None
+        settlement_block = getattr(event, "block_number", None)
+        if settlement_block is not None:
+            settlement_block = int(settlement_block)
         payload: dict[str, Any] = {
             "protocol": protocol,
             "position_id": position_key.lower(),
@@ -239,8 +242,11 @@ async def _complete_registry(
             status="open" if opened else "closed",
             payload=payload,
             matching_policy_version=MatchingPolicy.for_primitive(Primitive.PERP),
+            opened_at_block=settlement_block if opened else None,
             opened_tx=tx_hash if opened else None,
+            closed_at_block=None if opened else settlement_block,
             closed_tx=None if opened else tx_hash,
+            last_reconciled_at_block=settlement_block,
         )
         await save_ledger_and_registry(
             runner.state_manager,
