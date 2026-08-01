@@ -25,6 +25,14 @@ lint-check: ## Ruff check + format, no fixes (CI)
 	# formatting debt (all 8 files would be rewritten). `ruff check` is the half that
 	# catches defects and it now gates these mainnet-signing scripts in CI.
 	uv run ruff format almanak --check
+	$(MAKE) test-quant-report
+
+test-quant-report: ## Fail-closed guards in the quant-test report renderer
+	# These guards decide whether a mainnet QA run reads PASS or FAIL. They were
+	# executed only when a human typed the command, which is how a guard rots. Hung
+	# off lint-check because that is what CI already invokes; needs no network,
+	# no chain, no fixtures.
+	uv run python scripts/quant-test/render_report.py selftest
 
 check-ci-status: ## Validate the statusCheckRollup green predicate (PR-manager gates)
 	bash scripts/pr-manager/test-ci-status.sh
