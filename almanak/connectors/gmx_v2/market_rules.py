@@ -60,6 +60,17 @@ logger = logging.getLogger(__name__)
 # Synthetic markets (index token not native to the chain, e.g. DOGE/USD on
 # Arbitrum) use WETH as the long token on Arbitrum and WAVAX as the long token
 # on Avalanche, per GMX's synthetic-pool design.
+#
+# Every row below is verified against on-chain ``Reader.getMarket()`` by
+# ``tests/audit/test_gmx_v2_market_identity.py`` — that audit, not this comment,
+# is what keeps the table true.
+#
+# KNOWN LIMITATION (VIB-6401): naming a symbol here does not make it usable.
+# ``compiler._resolve_collateral`` resolves symbols only through
+# ``GMX_V2_TOKENS``, which lacks the long token of nine of these markets
+# (LINK, ARB, UNI, AAVE, GMX, SOL, WAVAX and OP on Arbitrum; SOL on Avalanche).
+# Those markets currently reject their own correct long-side collateral with
+# "Unknown collateral token" and can only be opened short-side.
 
 _GMX_V2_MARKET_COLLATERALS: dict[str, dict[str, tuple[str, ...]]] = {
     "arbitrum": {
@@ -80,16 +91,25 @@ _GMX_V2_MARKET_COLLATERALS: dict[str, dict[str, tuple[str, ...]]] = {
         "XRP/USD": ("WETH", "USDC"),
         "ATOM/USD": ("WETH", "USDC"),
         "NEAR/USD": ("WETH", "USDC"),
-        "AVAX/USD": ("WETH", "USDC"),
-        "OP/USD": ("WETH", "USDC"),
+        # AVAX/USD and OP/USD are NOT synthetic on Arbitrum — both pools hold
+        # the bridged index token itself as longToken. They were listed as
+        # WETH-long because the market addresses above pointed at the wrong
+        # markets entirely (VIB-6155); Reader.getMarket() on the corrected
+        # addresses returns (WAVAX, USDC) and (OP, USDC).
+        "AVAX/USD": ("WAVAX", "USDC"),
+        "OP/USD": ("OP", "USDC"),
     },
     "avalanche": {
         # Native-index markets.
         "AVAX/USD": ("WAVAX", "USDC"),
         "ETH/USD": ("WETH.e", "USDC"),
-        "BTC/USD": ("WBTC.e", "USDC"),
-        # Synthetic markets — long token is WAVAX on Avalanche.
-        "SOL/USD": ("WAVAX", "USDC"),
+        # VIB-6155: was "WBTC.e", which is not the symbol of this market's
+        # longToken NOR a key in GMX_V2_TOKENS["avalanche"] — so the one
+        # correct collateral, BTC.b, was rejected at compile time.
+        "BTC/USD": ("BTC.b", "USDC"),
+        # SOL/USD holds bridged SOL as longToken (not synthetic); only LTC/USD
+        # follows the WAVAX-long synthetic convention here (VIB-6155).
+        "SOL/USD": ("SOL", "USDC"),
         "LTC/USD": ("WAVAX", "USDC"),
     },
 }

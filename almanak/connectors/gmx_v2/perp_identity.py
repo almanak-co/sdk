@@ -35,40 +35,30 @@ neither yields NO token — never a degraded one, because an under-specified tok
 is the only way this design can over-collapse, and over-collapse strands funds
 silently.
 
-KNOWN CATALOGUE DEFECT — do NOT fix it here (VIB-6155): ``GMX_V2_MARKETS``
-lists ``0xB7e69749E3d2EDd90ea59A4932EFEa2D41E245d7`` for BOTH
-``arbitrum:AVAX/USD`` and ``avalanche:ETH/USD`` — the Arbitrum entry is the
-Avalanche ETH/USD address. It is the one cross-chain duplicate; within each
-chain the tables are injective (asserted by the census tests). Resolution here
-is chain-scoped, so the duplicate cannot route an Arbitrum row to an Avalanche
-identity, and OVER-COLLAPSE is therefore impossible — that much was checked.
+CATALOGUE DEFECT — FIXED in VIB-6155, and worth keeping as the worked example of
+how this module fails. ``GMX_V2_MARKETS`` used to list
+``0xB7e69749E3d2EDd90ea59A4932EFEa2D41E245d7`` for BOTH ``arbitrum:AVAX/USD``
+and ``avalanche:ETH/USD`` — the Arbitrum entry held the Avalanche address. Four
+further rows were wrong in the same table; ``Reader.getMarket()`` found all five.
 
-**But this fix does NOT work for ``arbitrum:AVAX/USD``, and an earlier version of
-this paragraph claimed it did.** It said: *"Two rows for the same physical
-position both resolve through the same wrong entry, so they still agree."* That
-holds only when BOTH rows are in symbol space. The premise of this whole ticket
-is that they are not — the settlement reconciler and the adapter's on-chain
-discovery emit ADDRESSES. So the symbol side resolves through the wrong
-catalogue entry to ``0xb7e6…`` while the address side carries the real Arbitrum
-AVAX market, the two ``sem`` tokens are disjoint, and the position still
-enumerates as two.
+Chain-scoped resolution meant OVER-COLLAPSE was impossible. The damage was on the
+other axis: the symbol side resolved through the wrong catalogue entry while the
+address side — emitted by the settlement reconciler and the adapter's on-chain
+discovery — carried the market the chain actually reports. The two ``sem`` tokens
+were disjoint and one position enumerated as two. Direction is over-split ⇒ loud
+false FAILED ⇒ fail-safe. Found by the #3534 audit panel, which caught an earlier
+version of this paragraph claiming the opposite ("both rows resolve through the
+same wrong entry, so they still agree") — true only when BOTH rows are in symbol
+space, which is precisely not the premise here.
 
-Method note, because it cost a wrong test: the obvious reproduction — a symbol
-row plus an "address" row built from ``GMX_V2_MARKETS["arbitrum"]["AVAX/USD"]``
-— does NOT fail. Both sides then resolve through the same wrong entry and agree,
-which is the (true, but irrelevant) case the old prose described. Reproducing it
-needs the address the CHAIN reports for the Arbitrum AVAX market, which is not
-in this tree. So the in-tree test asserts the CONSTANT collision rather than the
-consequence, and says so instead of fabricating an address to look stronger.
-
-The DERIVE key for that market is computed from the wrong market address too, so
-it names a position that does not exist — a violation of this module's own
-"emit only with CERTAINTY" contract, though keccak makes an actual collision
-impossible.
-
-Direction is over-split ⇒ loud false FAILED ⇒ fail-safe. Found by the #3534 audit
-panel, which caught the false claim precisely because it tested the case the
-prose asserted was safe.
+Two things survive the fix. First, the failure SHAPE is generic: any catalogue
+row that disagrees with the chain reproduces it, so nothing here should assume
+``GMX_V2_MARKETS`` is right — that is what the ``sem``-token discipline above is
+for. Second, no in-tree assertion can detect the next one. Reproducing the defect
+needs the address the CHAIN reports, which is not in this tree, and the obvious
+symbol-plus-symbol reproduction passes because both sides resolve through the
+same wrong entry. The guard therefore lives on-chain, in
+``tests/audit/test_gmx_v2_market_identity.py``, and NOT in this module's census.
 
 WALLET SCOPE UNDER SAFE / ZODIAC — **traced, and it is correct**: the venue key
 is scoped to the account that submits the order, which under Safe/Zodiac is the

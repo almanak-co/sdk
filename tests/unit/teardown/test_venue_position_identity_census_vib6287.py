@@ -482,16 +482,21 @@ def test_the_identity_layer_agrees_now_that_the_lanes_share_a_wallet():
 
 
 # ---------------------------------------------------------------------------
-# The catalogue defect this fix deliberately does NOT touch
+# Identity collapse is a WITHIN-chain property
 # ---------------------------------------------------------------------------
 
 
 def test_gmx_market_catalogue_is_injective_within_each_chain():
     """Derivation is chain-scoped, so a WITHIN-chain duplicate would be the thing
-    that makes two distinct positions resolve to one identity. The known
-    cross-chain duplicate (VIB-6155: ``arbitrum:AVAX/USD`` holds the Avalanche
-    ETH/USD address) is deliberately NOT fixed here and cannot cause a collapse,
-    because the chain is part of every key."""
+    that makes two distinct positions resolve to one identity.
+
+    This stays chain-scoped on purpose even though VIB-6155 has since corrected
+    the catalogue. A cross-chain duplicate cannot collapse an identity here,
+    because the chain is part of every key — and it is not inherently a defect
+    either, since CREATE2 legitimately lands the same address on two chains.
+    Whether each address IS the market it claims to be is a different question
+    that no uniqueness assert can answer; it is settled on-chain against
+    ``Reader.getMarket`` in ``tests/audit/test_gmx_v2_market_identity.py``."""
     for chain, table in GMX_V2_MARKETS.items():
         addresses = [a.lower() for a in table.values()]
         assert len(addresses) == len(set(addresses)), f"{chain} market catalogue is no longer injective"
@@ -602,36 +607,36 @@ def test_the_side_key_shipped_demos_actually_write_is_read():
     )
 
 
-def test_vib6155_the_catalogue_still_maps_an_arbitrum_market_to_an_avalanche_address():
-    """Pin the constant defect itself — the only part provable from in-tree data.
+def test_vib6155_is_fixed_and_its_guard_is_deliberately_not_in_this_module():
+    """VIB-6155 is corrected; this test records why no census test replaces it.
 
-    ``GMX_V2_MARKETS["arbitrum"]["AVAX/USD"]`` holds the **Avalanche ETH/USD**
-    market address. Chain-scoped resolution means it can never route an Arbitrum
-    row to an Avalanche identity, so OVER-COLLAPSE is impossible — verified
-    separately by the injectivity test above.
+    The predecessor of this test asserted the defect itself — that
+    ``GMX_V2_MARKETS["arbitrum"]["AVAX/USD"]`` equalled the Avalanche ETH/USD
+    address — and instructed its own deletion once VIB-6155 landed. It has landed
+    (five wrong rows, not one), so the assertion is inverted here rather than
+    dropped silently, and the reasoning that made it un-replaceable is kept.
 
-    What it does break: a row in SYMBOL space resolves ``"AVAX/USD"`` through this
-    wrong entry, while a row in ADDRESS space carries whatever address the chain
-    actually reports for the Arbitrum AVAX market. Those differ, the ``sem`` tokens
-    are disjoint, and one position enumerates as two — over-split, loud. The DERIVE
-    key is computed from the wrong market too, naming a position that does not
-    exist, which violates this module's emit-only-with-CERTAINTY contract.
+    **Why this module cannot own the durable guard.** Reproducing the defect
+    needs the address the CHAIN reports; the obvious in-tree reproduction — a
+    symbol row plus an "address" row built from ``GMX_V2_MARKETS[...]`` — passes,
+    because both sides resolve through the same wrong entry and agree. Any purely
+    in-tree successor would be that same non-discriminating test.
 
-    METHOD NOTE, because it cost a wrong test: the obvious way to write this is a
-    symbol row plus an "address" row built from ``GMX_V2_MARKETS[...]["AVAX/USD"]``.
-    That does NOT reproduce the defect — both sides then resolve through the same
-    wrong entry and agree, which is exactly the (true, but irrelevant) claim the old
-    module docstring made. Reproducing it needs the address the CHAIN reports, which
-    is not in this tree. So this test asserts the constant, not the consequence, and
-    says so rather than fabricating an address to make a stronger-looking assertion.
+    **And the tempting cheap invariant is the wrong one.** VIB-6155 originally
+    proposed a cross-chain address-uniqueness assert. It would have caught one of
+    the five: ``arbitrum:OP/USD`` held a real, live, *unique* Arbitrum address —
+    the wstETH/WETH swap pool. Uniqueness is also wrong as a permanent rule, since
+    identical CREATE2 addresses across chains are legitimately possible.
 
-    Fails when VIB-6155 corrects the constant — at which point delete it.
+    The guard therefore lives on-chain in
+    ``tests/audit/test_gmx_v2_market_identity.py``, which compares every declared
+    market against that chain's ``Reader.getMarket()``. Its negative control was
+    15 failures on the pre-fix tree.
     """
-    arbitrum_avax = GMX_V2_MARKETS["arbitrum"]["AVAX/USD"].lower()
-    avalanche_eth = GMX_V2_MARKETS["avalanche"]["ETH/USD"].lower()
-    assert arbitrum_avax == avalanche_eth, (
-        "VIB-6155 appears fixed — delete this test and the KNOWN CATALOGUE DEFECT "
-        "paragraph in almanak/connectors/gmx_v2/perp_identity.py"
+    assert GMX_V2_MARKETS["arbitrum"]["AVAX/USD"].lower() != GMX_V2_MARKETS["avalanche"]["ETH/USD"].lower(), (
+        "VIB-6155 has regressed: the Arbitrum AVAX/USD row is holding the Avalanche "
+        "ETH/USD address again. Run tests/audit/test_gmx_v2_market_identity.py -m audit "
+        "for the full picture — this assertion only sees the one duplicate."
     )
 
 

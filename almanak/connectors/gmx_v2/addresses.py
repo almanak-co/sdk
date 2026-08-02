@@ -91,23 +91,43 @@ GMX_V2_MARKETS: dict[str, dict[str, str]] = {
         "LINK/USD": "0x7f1fa204bb700853D36994DA19F830b6Ad18455C",
         "ARB/USD": "0xC25cEf6061Cf5dE5eb761b50E4743c1F5D7E5407",
         "SOL/USD": "0x09400D9DB990D5ed3f35D7be61DfAEB900Af03C9",
-        "UNI/USD": "0xC7aBb2C5F3bf3CEB389df0Ebb3cFE90EcE8A1bAa",
+        # VIB-6155: was 0xC7aBb2C5F3bf3CEB389df0Ebb3cFE90EcE8A1bAa — a
+        # transcription slip of the address below (identical through
+        # "0xc7Abb2C5f3BF3CEB389dF0E", then divergent). Reader.getMarket()
+        # returns the zero Props for the old value: no such market.
+        # GMX lists two UNI markets; this is the UNI-long one, which is what
+        # the collateral rule ("UNI", "USDC") already declared.
+        "UNI/USD": "0xc7Abb2C5f3BF3CEB389dF0Eecd6120D451170B50",
         "DOGE/USD": "0x6853EA96FF216fAb11D2d930CE3C508556A4bdc4",
         "LTC/USD": "0xD9535bB5f58A1a75032416F2dFe7880C30575a41",
         "XRP/USD": "0x0CCB4fAa6f1F1B30911619f1184082aB4E25813c",
         "ATOM/USD": "0x248C35760068cE009a13076D573ed3497A47bCD4",
         "NEAR/USD": "0x63Dc80EE90F26363B3FCD609007CC9e14c8991BE",
         "AAVE/USD": "0x1CbBa6346F110c8A5ea739ef2d1eb182990e4EB2",
-        "AVAX/USD": "0xB7e69749E3d2EDd90ea59A4932EFEa2D41E245d7",
-        "OP/USD": "0xb56E5E2eB50cf5383342914b0C85Fe62DbD861C8",
+        # VIB-6155: was 0xB7e69749E3d2EDd90ea59A4932EFEa2D41E245d7 — the
+        # AVALANCHE ETH/USD market, copy-pasted onto an Arbitrum row. GMX V2
+        # market tokens are per-deployment CREATE2 products, so that address
+        # is not a market on Arbitrum at all (zero Props).
+        "AVAX/USD": "0x7BbBf946883a5701350007320F525c5379B8178A",
+        # VIB-6155: was 0xb56E5E2eB50cf5383342914b0C85Fe62DbD861C8 — a REAL
+        # Arbitrum market, but the wstETH/WETH SWAP pool (indexToken == 0x0),
+        # not OP/USD. This is the class a cross-chain uniqueness check cannot
+        # see: the address was unique and live, just not this market. Only
+        # Reader.getMarket() distinguishes them, which is why the audit in
+        # tests/audit/test_gmx_v2_market_identity.py compares against it.
+        "OP/USD": "0x4fDd333FF9cA409df583f306B6F5a7fFdE790739",
         "GMX/USD": "0x55391D178Ce46e7AC8eaAEa50A72D1A5a8A622Da",
     },
     "avalanche": {
         "AVAX/USD": GMX_V2["avalanche"]["avax_usd_market"],
         "ETH/USD": "0xB7e69749E3d2EDd90ea59A4932EFEa2D41E245d7",
         "BTC/USD": "0xFb02132333A79C8B5Bd0b64E3AbccA5f7fAf2937",
-        "SOL/USD": "0x91ccF2053d79e16beE6B8c4b9F8e67Ba64669B98",
-        "LTC/USD": "0x7e0d5dc8C0c4F04c37568a5E3C2B29cA6C54a8e7",
+        # VIB-6155: both were addresses that Reader.getMarket() answers with
+        # the zero Props on Avalanche — no such markets. Replaced with the
+        # live SOL/USD and LTC/USD market tokens enumerated from
+        # Reader.getMarkets() on 2026-08-02.
+        "SOL/USD": "0xd2eFd1eA687CD78c41ac262B3Bc9B53889ff1F70",
+        "LTC/USD": "0xA74586743249243D3b77335E15FE768bA8E1Ec5A",
     },
 }
 
@@ -175,8 +195,16 @@ def _assert_gmx_v2_decimal_coverage() -> None:
     It does NOT cover markets we did not open — a third party's market seen in a
     shared keeper tx may be absent from the table, which is why the price path
     still fails closed rather than trusting a default. Replacing this table with
-    a chain-backed resolver is VIB-6156; a cross-chain address-uniqueness check
-    (the table currently has one duplicate) is VIB-6155.
+    a chain-backed resolver is VIB-6156.
+
+    It also does NOT check that a listed address IS the market it claims to be —
+    it only checks the two local tables agree with each other, so it stays green
+    when both name the same wrong address. VIB-6155 found five such rows. The
+    only authority for identity is on-chain ``Reader.getMarket()``; the audit
+    that compares against it is ``tests/audit/test_gmx_v2_market_identity.py``.
+    Note that a cross-chain uniqueness assert would NOT be that guard: it would
+    have caught only one of the five (identical CREATE2 addresses across chains
+    are legitimately possible, and four of the five rows were unique anyway).
     """
     missing: dict[str, list[str]] = {}
     extra: dict[str, list[str]] = {}
