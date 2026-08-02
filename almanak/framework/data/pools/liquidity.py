@@ -30,6 +30,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
+from almanak.core.finality import DataFinality
 from almanak.framework.data.exceptions import DataUnavailableError
 from almanak.framework.data.models import (
     DataClassification,
@@ -362,7 +363,7 @@ class LiquidityDepthReader:
             source=self._source_name,
             observed_at=datetime.now(UTC),
             block_number=None,
-            finality="latest",
+            finality=DataFinality.LATEST,
             staleness_ms=0,
             latency_ms=latency_ms,
             confidence=1.0,
@@ -946,7 +947,7 @@ class SlippageEstimator:
             source=self._source_name,
             observed_at=datetime.now(UTC),
             block_number=None,
-            finality="latest",
+            finality=DataFinality.LATEST,
             staleness_ms=0,
             latency_ms=latency_ms,
             confidence=1.0,
@@ -1056,7 +1057,7 @@ class SlippageEstimator:
             source=self._source_name,
             observed_at=datetime.now(UTC),
             block_number=None,
-            finality="latest",
+            finality=DataFinality.LATEST,
             staleness_ms=0,
             latency_ms=latency_ms,
             confidence=1.0,

@@ -78,6 +78,7 @@ if TYPE_CHECKING:
 
 from almanak.core.chains import DEFAULT_CHAIN, ChainRegistry
 from almanak.core.chains._helpers import native_symbols_for
+from almanak.core.finality import DataFinality
 from almanak.core.intent_types import IntentType
 from almanak.framework.backtesting.adapters.base import StrategyBacktestAdapter
 
@@ -1731,7 +1732,7 @@ class BacktestPoolPriceView:
             source="backtest_price_series:pair_ratio_proxy",
             observed_at=self._timestamp,
             block_number=None,
-            finality="off_chain",
+            finality=DataFinality.OFF_CHAIN,
             confidence=1.0,
             cache_hit=False,
             proxy_source=f"{sym0}/{sym1}",
@@ -1928,7 +1929,7 @@ class BacktestPoolHistoryReader:
             source="backtest_pool_history:" + ("+".join(sorted(sources)) if sources else "unknown"),
             # The bound tick, NOT wall clock: results stay deterministic.
             observed_at=self._timestamp,
-            finality="off_chain",
+            finality=DataFinality.OFF_CHAIN,
             staleness_ms=0,
             latency_ms=0,
             confidence=0.85,
@@ -2049,7 +2050,7 @@ class BacktestPoolAnalyticsReader:
         meta = DataMeta(
             source="backtest_pool_history:" + ("+".join(sorted(sources)) if sources else "unknown"),
             observed_at=self._timestamp,  # bound tick — deterministic
-            finality="off_chain",
+            finality=DataFinality.OFF_CHAIN,
             staleness_ms=0,
             latency_ms=0,
             confidence=confidence,
@@ -2191,7 +2192,7 @@ class BacktestRateHistoryReader:
         meta = DataMeta(
             source="backtest_funding_history",
             observed_at=self._timestamp,  # bound tick — deterministic
-            finality="off_chain",
+            finality=DataFinality.OFF_CHAIN,
             staleness_ms=0,
             latency_ms=0,
             confidence=0.85,
@@ -2424,7 +2425,7 @@ class SimulatedSlippageView:
             source=f"backtest_slippage_model:{model_name}",
             observed_at=self._timestamp,
             block_number=None,
-            finality="off_chain",
+            finality=DataFinality.OFF_CHAIN,
             confidence=1.0,
             cache_hit=False,
         )

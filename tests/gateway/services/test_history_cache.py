@@ -21,8 +21,9 @@ import asyncio
 
 import pytest
 
-from almanak.gateway.proto import gateway_pb2
+from almanak.core.finality import CacheFinality, DataFinality
 from almanak.gateway.core.settings import GatewaySettings
+from almanak.gateway.proto import gateway_pb2
 from almanak.gateway.services._history_cache import (
     DEFAULT_MAX_BYTES,
     DEFAULT_MAX_ENTRIES,
@@ -178,6 +179,21 @@ def test_put_replaces_existing_entry():
     assert len(cache.get(key).snapshots) == 5
 
 
+def test_put_accepts_legacy_finality_string():
+    cache = _public_cache()
+    key = _public_key()
+
+    cache.put(key, _snapshot_response(), "provisional")  # type: ignore[arg-type]
+
+    assert cache._entries[key].finality_band is CacheFinality.PROVISIONAL
+
+
+def test_put_rejects_foreign_finality_enum():
+    cache = _public_cache()
+    with pytest.raises(TypeError, match="CacheFinality, not DataFinality"):
+        cache.put(_public_key(), _snapshot_response(), DataFinality.FINALIZED)  # type: ignore[arg-type]
+
+
 def test_put_rejects_unknown_finality_band():
     cache = _public_cache()
     with pytest.raises(ValueError, match="finality_band"):
@@ -235,6 +251,56 @@ def test_finalized_ttl_eventually_expires():
     cache.put(_public_key(), _snapshot_response(), FINALITY_FINALIZED)
     clock.advance(11.0)
     assert cache.get(_public_key()) is None
+
+
+def test_expired_provisional_entry_promotes_to_finalized():
+    clock = _FakeClock()
+    calls: list[CacheFinality] = []
+
+    def repromoter(_value) -> CacheFinality:
+        calls.append(CacheFinality.FINALIZED)
+        return CacheFinality.FINALIZED
+
+    cache = _public_cache(
+        provisional_ttl_seconds=1.0,
+        finalized_ttl_seconds=100.0,
+        clock=clock,
+        repromoter=repromoter,
+    )
+    key = _public_key()
+    response = _snapshot_response()
+    cache.put(key, response, CacheFinality.PROVISIONAL)
+
+    clock.advance(2.0)
+
+    assert cache.get(key) is response
+    assert cache._entries[key].finality_band is CacheFinality.FINALIZED
+    assert calls == [CacheFinality.FINALIZED]
+
+
+def test_expired_provisional_entry_rejects_provisional_repromotion():
+    clock = _FakeClock()
+    calls = 0
+
+    def repromoter(_value) -> CacheFinality:
+        nonlocal calls
+        calls += 1
+        return CacheFinality.PROVISIONAL
+
+    cache = _public_cache(
+        provisional_ttl_seconds=1.0,
+        finalized_ttl_seconds=100.0,
+        clock=clock,
+        repromoter=repromoter,
+    )
+    key = _public_key()
+    cache.put(key, _snapshot_response(), CacheFinality.PROVISIONAL)
+
+    clock.advance(2.0)
+
+    assert cache.get(key) is None
+    assert key not in cache._entries
+    assert calls == 1
 
 
 # ============================================================================

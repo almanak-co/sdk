@@ -18,10 +18,11 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from almanak.core.finality import CacheFinality, DataFinality
 from almanak.framework.data.cache.versioned_cache import VersionedDataCache
 from almanak.framework.data.exceptions import DataUnavailableError
 from almanak.framework.data.market_snapshot import (
@@ -38,6 +39,7 @@ from almanak.framework.data.rates.history import (
     _safe_decimal,
     _serialize_funding_snapshots,
     _serialize_lending_snapshots,
+    _snapshots_finality_status,
 )
 from almanak.framework.market import MarketSnapshot
 
@@ -644,10 +646,82 @@ class TestFundingRateFromHyperliquid:
 # ---------------------------------------------------------------------------
 
 
+class TestRateHistoryCache:
+    """Active gateway-mocked coverage for cache-finality metadata."""
+
+    def test_lending_finalized_cache_hit_metadata(self, reader: RateHistoryReader) -> None:
+        now = datetime(2026, 8, 1, 12, tzinfo=UTC)
+        snapshots = [
+            LendingRateSnapshot(
+                supply_apy=Decimal("5"),
+                borrow_apy=Decimal("7"),
+                utilization=Decimal("80"),
+                timestamp=now - timedelta(hours=25),
+            )
+        ]
+        fetch = MagicMock(return_value=snapshots)
+        reader._fetch_lending_via_gateway = fetch
+
+        with patch("almanak.framework.data.rates.history.datetime", wraps=datetime) as mock_datetime:
+            mock_datetime.now.return_value = now
+            fetched = reader.get_lending_rate_history("aave_v3", "USDC", "ethereum", days=2)
+            cached = reader.get_lending_rate_history("aave_v3", "USDC", "ethereum", days=2)
+
+        fetch.assert_called_once()
+        assert fetched.meta.source == "gateway"
+        assert fetched.meta.confidence == 0.85
+        assert fetched.meta.finality is DataFinality.OFF_CHAIN
+        assert fetched.meta.cache_hit is False
+        assert cached.meta.source == "cache(finalized)"
+        assert cached.meta.confidence == 0.9
+        assert cached.meta.finality is DataFinality.OFF_CHAIN
+        assert cached.meta.cache_hit is True
+
+    def test_funding_provisional_cache_hit_metadata(self, reader: RateHistoryReader) -> None:
+        now = datetime(2026, 8, 1, 12, tzinfo=UTC)
+        snapshots = [
+            FundingRateSnapshot(
+                rate=Decimal("0.0001"),
+                annualized_rate=Decimal("0.876"),
+                timestamp=now - timedelta(hours=1),
+            )
+        ]
+        fetch = MagicMock(return_value=snapshots)
+        reader._fetch_funding_via_gateway = fetch
+
+        with patch("almanak.framework.data.rates.history.datetime", wraps=datetime) as mock_datetime:
+            mock_datetime.now.return_value = now
+            fetched = reader.get_funding_rate_history("hyperliquid", "ETH-USD", hours=24)
+            cached = reader.get_funding_rate_history("hyperliquid", "ETH-USD", hours=24)
+
+        fetch.assert_called_once()
+        assert fetched.meta.source == "gateway"
+        assert fetched.meta.confidence == 0.85
+        assert fetched.meta.finality is DataFinality.OFF_CHAIN
+        assert fetched.meta.cache_hit is False
+        assert cached.meta.source == "cache(provisional)"
+        assert cached.meta.confidence == 0.7
+        assert cached.meta.finality is DataFinality.OFF_CHAIN
+        assert cached.meta.cache_hit is True
+
+    @pytest.mark.parametrize(
+        ("age", "expected"),
+        [
+            (timedelta(hours=25), CacheFinality.FINALIZED),
+            (timedelta(hours=1), CacheFinality.PROVISIONAL),
+        ],
+    )
+    def test_snapshot_finality_classifier(self, age: timedelta, expected: CacheFinality) -> None:
+        now = datetime(2026, 8, 1, 12, tzinfo=UTC)
+        snapshots = [MagicMock(timestamp=now - age)]
+
+        assert _snapshots_finality_status(snapshots, now) is expected
+
+
 @pytest.mark.skip(
     reason=("VIB-4859 W7: cache integration tests need rewriting to use gateway-mocked data flow; tracked in VIB-4869.")
 )
-class TestRateHistoryCache:
+class TestRateHistoryCacheLegacy:
     def test_lending_cache_hit(self, reader: RateHistoryReader) -> None:
         """Test that second call returns cached data."""
         mock_response = {

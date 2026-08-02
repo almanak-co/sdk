@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from almanak.core.finality import CacheFinality, DataFinality
 from almanak.framework.data.cache.versioned_cache import (
     CacheEntry,
     CacheStats,
@@ -35,10 +36,10 @@ class TestCacheEntry:
             data={"price": "1800"},
             dataset_version=1,
             fetched_at="2026-01-01T00:00:00+00:00",
-            finality_status="finalized",
+            finality_status=CacheFinality.FINALIZED,
             checksum="abc123",
         )
-        assert entry.finality_status == "finalized"
+        assert entry.finality_status is CacheFinality.FINALIZED
         assert entry.dataset_version == 1
 
     def test_valid_provisional(self):
@@ -46,13 +47,13 @@ class TestCacheEntry:
             data=[1, 2, 3],
             dataset_version=1,
             fetched_at="2026-01-01T00:00:00+00:00",
-            finality_status="provisional",
+            finality_status=CacheFinality.PROVISIONAL,
             checksum="def456",
         )
-        assert entry.finality_status == "provisional"
+        assert entry.finality_status is CacheFinality.PROVISIONAL
 
     def test_invalid_finality_status(self):
-        with pytest.raises(ValueError, match="finality_status must be"):
+        with pytest.raises(ValueError, match="Invalid finality_status"):
             CacheEntry(
                 data={},
                 dataset_version=1,
@@ -205,6 +206,43 @@ class TestVersioning:
 
 
 class TestFinalityTagging:
+    def test_typed_status_serializes_as_historical_string_and_round_trips(self, cache: VersionedDataCache):
+        entry = cache.put("key1", {"stable": True}, finality_status=CacheFinality.FINALIZED)
+
+        raw = json.loads(cache._version_path("key1", 1).read_text())
+        assert raw["finality_status"] == "finalized"
+        assert entry.finality_status is CacheFinality.FINALIZED
+        retrieved = cache.get("key1")
+        assert retrieved is not None
+        assert retrieved.finality_status is CacheFinality.FINALIZED
+
+    def test_historical_string_input_is_parsed_without_semantic_change(self, cache: VersionedDataCache):
+        entry = cache.put("key1", {"legacy": True}, finality_status="provisional")  # type: ignore[arg-type]
+        assert entry.finality_status is CacheFinality.PROVISIONAL
+
+    def test_foreign_data_finality_is_rejected(self, cache: VersionedDataCache):
+        with pytest.raises(TypeError, match="CacheFinality, not DataFinality"):
+            cache.put("key1", {}, finality_status=DataFinality.FINALIZED)  # type: ignore[arg-type]
+
+    def test_unknown_persisted_status_degrades_to_cache_miss(self, cache: VersionedDataCache):
+        data = {"future": True}
+        path = cache._provisional_path("key1")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "data": data,
+                    "dataset_version": 1,
+                    "fetched_at": "2026-01-01T00:00:00+00:00",
+                    "finality_status": "future_state",
+                    "checksum": cache._compute_checksum(data),
+                }
+            )
+        )
+
+        assert cache.get("key1") is None
+        assert cache.stats.misses == 1
+
     def test_provisional_overwritten_by_provisional(self, cache: VersionedDataCache):
         cache.put("key1", {"old": True}, finality_status="provisional")
         cache.put("key1", {"new": True}, finality_status="provisional")

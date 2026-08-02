@@ -48,6 +48,7 @@ from typing import Any
 import aiohttp
 
 from almanak.core.chains._helpers import vendor_chain_map
+from almanak.core.finality import DataFinality
 from almanak.framework.data.interfaces import DataSourceUnavailable, OHLCVCandle
 from almanak.framework.data.models import (
     DataClassification,
@@ -260,7 +261,7 @@ class DefiLlamaProvider:
         meta = DataMeta(
             source=self.name,
             observed_at=datetime.now(UTC),
-            finality="off_chain",
+            finality=DataFinality.OFF_CHAIN,
             staleness_ms=0,
             latency_ms=latency_ms,
             confidence=0.85,

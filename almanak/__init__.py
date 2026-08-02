@@ -60,6 +60,7 @@ if TYPE_CHECKING:
         CreateTestResult,
         DataClassification,
         DataEnvelope,
+        DataFinality,
         DataMeta,
         DataProvider,
         DataRouter,
@@ -347,6 +348,7 @@ __all__ = [
     "new_strategy",
     # V2 Framework - Quant Data Layer
     "DataEnvelope",
+    "DataFinality",
     "DataMeta",
     "DataClassification",
     "Instrument",

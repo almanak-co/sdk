@@ -8,6 +8,7 @@ from decimal import Decimal
 
 import pytest
 
+from almanak.core.finality import CacheFinality, DataFinality
 from almanak.framework.data.models import DataClassification, DataEnvelope, DataMeta
 
 # ---------------------------------------------------------------------------
@@ -44,7 +45,7 @@ class TestDataMeta:
         assert meta.source == "alchemy_rpc"
         assert meta.observed_at == now
         assert meta.block_number == 19_000_000
-        assert meta.finality == "off_chain"
+        assert meta.finality is DataFinality.OFF_CHAIN
         assert meta.confidence == 1.0
         assert meta.cache_hit is False
 
@@ -54,13 +55,13 @@ class TestDataMeta:
             source="coingecko_onchain",
             observed_at=now,
             block_number=100,
-            finality="finalized",
+            finality=DataFinality.FINALIZED,
             staleness_ms=500,
             latency_ms=120,
             confidence=0.95,
             cache_hit=True,
         )
-        assert meta.finality == "finalized"
+        assert meta.finality is DataFinality.FINALIZED
         assert meta.staleness_ms == 500
         assert meta.latency_ms == 120
         assert meta.confidence == 0.95
@@ -80,15 +81,15 @@ class TestDataMeta:
         assert meta.is_on_chain is False
 
     def test_is_finalized_true(self):
-        meta = _make_meta(finality="finalized")
+        meta = _make_meta(finality=DataFinality.FINALIZED)
         assert meta.is_finalized is True
 
     def test_is_finalized_false_safe(self):
-        meta = _make_meta(finality="safe")
+        meta = _make_meta(finality=DataFinality.SAFE)
         assert meta.is_finalized is False
 
     def test_is_finalized_false_latest(self):
-        meta = _make_meta(finality="latest")
+        meta = _make_meta(finality=DataFinality.LATEST)
         assert meta.is_finalized is False
 
     def test_confidence_lower_bound(self):
@@ -112,9 +113,17 @@ class TestDataMeta:
             _make_meta(finality="unknown")
 
     def test_valid_finalities(self):
-        for finality in ("finalized", "safe", "latest", "off_chain"):
+        for finality in DataFinality:
             meta = _make_meta(finality=finality)
-            assert meta.finality == finality
+            assert meta.finality is finality
+
+    def test_historical_string_is_parsed_without_semantic_change(self):
+        meta = _make_meta(finality="safe")
+        assert meta.finality is DataFinality.SAFE
+
+    def test_cache_finality_is_rejected_despite_overlapping_wire_value(self):
+        with pytest.raises(TypeError, match="DataFinality, not CacheFinality"):
+            _make_meta(finality=CacheFinality.FINALIZED)
 
 
 # ---------------------------------------------------------------------------

@@ -52,6 +52,8 @@ from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Hashable
 from dataclasses import dataclass
 
+from almanak.core.finality import CacheFinality, parse_cache_finality
+
 logger = logging.getLogger(__name__)
 
 
@@ -88,12 +90,11 @@ ENV_MAX_BYTES: str = "ALMANAK_GATEWAY_POOL_HISTORY_CACHE_MAX_BYTES"
 
 
 # -----------------------------------------------------------------------------
-# Finality band — explicit Literal-style for typo safety
+# Finality band — compatibility aliases for the canonical typed vocabulary
 # -----------------------------------------------------------------------------
 
-FINALITY_PROVISIONAL: str = "provisional"
-FINALITY_FINALIZED: str = "finalized"
-_VALID_FINALITY_BANDS: frozenset[str] = frozenset({FINALITY_PROVISIONAL, FINALITY_FINALIZED})
+FINALITY_PROVISIONAL: CacheFinality = CacheFinality.PROVISIONAL
+FINALITY_FINALIZED: CacheFinality = CacheFinality.FINALIZED
 
 
 # -----------------------------------------------------------------------------
@@ -109,7 +110,7 @@ class _CacheEntry[V]:
     value: V
     expires_at: float  # monotonic clock; compared with the cache's clock fn
     size_bytes: int
-    finality_band: str
+    finality_band: CacheFinality
 
 
 # -----------------------------------------------------------------------------
@@ -146,7 +147,7 @@ class HistoryCache[K: Hashable, V]:
         finalized_ttl_seconds: float = DEFAULT_FINALIZED_TTL_SECONDS,
         clock: Callable[[], float] = time.monotonic,
         partition_extractor: Callable[[K], str] | None = None,
-        repromoter: Callable[[V], str | None] | None = None,
+        repromoter: Callable[[V], CacheFinality | None] | None = None,
         name: str = "history_cache",
     ) -> None:
         if max_entries <= 0:
@@ -246,11 +247,14 @@ class HistoryCache[K: Hashable, V]:
         if self._repromoter is None or entry.finality_band != FINALITY_PROVISIONAL:
             return False
         new_band = self._repromoter(entry.value)
-        if new_band is None or new_band == FINALITY_PROVISIONAL:
+        if new_band is None:
             return False
-        # The guard above already returned for None / provisional, and
-        # ``finalized`` is the only other valid band, so a re-promotion always
-        # extends to the finalized TTL.
+        new_band = parse_cache_finality(new_band, field_name="repromoter finality")
+        if new_band is CacheFinality.PROVISIONAL:
+            return False
+        # Canonical transition validation is shared with the versioned cache.
+        # A repromoter can never demote or inject a foreign state.
+        new_band = entry.finality_band.transition_to(new_band)
         ttl = self._finalized_ttl
         entry.finality_band = new_band
         entry.expires_at = now + ttl
@@ -258,18 +262,21 @@ class HistoryCache[K: Hashable, V]:
         self._hits += 1
         return True
 
-    def put(self, key: K, value: V, finality_band: str) -> None:
+    def put(self, key: K, value: V, finality_band: CacheFinality) -> None:
         """Insert / replace ``key`` with ``value``. Evicts as needed.
 
         ``finality_band`` selects the TTL (``provisional`` ≈ 60s,
         ``finalized`` ≈ 24h by default; both knobs are construction args).
         """
-        if finality_band not in _VALID_FINALITY_BANDS:
-            raise ValueError(f"finality_band must be one of {sorted(_VALID_FINALITY_BANDS)}, got {finality_band!r}")
+        finality_band = parse_cache_finality(finality_band, field_name="finality_band")
         size_bytes = self._size_estimator(value)
         if size_bytes < 0:
             raise ValueError(f"size_estimator returned negative bytes: {size_bytes}")
-        ttl = self._provisional_ttl if finality_band == FINALITY_PROVISIONAL else self._finalized_ttl
+        match finality_band:
+            case CacheFinality.PROVISIONAL:
+                ttl = self._provisional_ttl
+            case CacheFinality.FINALIZED:
+                ttl = self._finalized_ttl
         expires_at = self._clock() + ttl
         entry = _CacheEntry(value=value, expires_at=expires_at, size_bytes=size_bytes, finality_band=finality_band)
         with self._lock:
@@ -304,7 +311,7 @@ class HistoryCache[K: Hashable, V]:
     async def get_or_fetch(
         self,
         key: K,
-        fetcher: Callable[[], Awaitable[tuple[V, str]]],
+        fetcher: Callable[[], Awaitable[tuple[V, CacheFinality]]],
     ) -> V:
         """Get from cache or dedupe concurrent cold fetches (inherited #8).
 
@@ -521,11 +528,11 @@ def load_max_bytes_from_settings(settings: object) -> int:
 # ``HistoryCache`` class verbatim.
 
 #: Public-cache key (7 fields). Provider OMITTED — see PoolX.md §D6.
-PoolHistoryPublicKey = tuple[str, str, str, int, int, int, str]
+PoolHistoryPublicKey = tuple[str, str, str, int, int, int, CacheFinality]
 #                            chain  pool   protocol  start_ts  end_ts  resolution  finality_band
 
 #: Raw-cache key (8 fields). Provider is the 8th dimension.
-PoolHistoryRawKey = tuple[str, str, str, int, int, int, str, str]
+PoolHistoryRawKey = tuple[str, str, str, int, int, int, CacheFinality, str]
 #                         chain  pool   protocol  start_ts  end_ts  resolution  finality_band  provider
 
 
@@ -537,11 +544,12 @@ def make_public_key(
     start_ts: int,
     end_ts: int,
     resolution: int,
-    finality_band: str,
+    finality_band: CacheFinality,
 ) -> PoolHistoryPublicKey:
     """Build a normalized public-cache key. Chain + protocol are
     lowercased; pool_address is taken as-is (caller is responsible for
     chain-aware normalization — see ``_history_common.normalize_pool_address``)."""
+    finality_band = parse_cache_finality(finality_band, field_name="finality_band")
     return (
         chain.lower(),
         pool_address,
@@ -561,10 +569,11 @@ def make_raw_key(
     start_ts: int,
     end_ts: int,
     resolution: int,
-    finality_band: str,
+    finality_band: CacheFinality,
     provider: str,
 ) -> PoolHistoryRawKey:
     """Build a normalized raw-cache key (public key + ``provider``)."""
+    finality_band = parse_cache_finality(finality_band, field_name="finality_band")
     return (
         chain.lower(),
         pool_address,

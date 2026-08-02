@@ -27,6 +27,13 @@ from typing import TYPE_CHECKING
 from almanak._lazy import LazySpec, build_lazy_module_dispatch
 
 if TYPE_CHECKING:
+    from almanak.core.finality import (
+        CacheFinality,
+        DataFinality,
+        parse_cache_finality,
+        parse_data_finality,
+    )
+
     from ..market import MarketSnapshot
     from .exceptions import (
         DataUnavailableError,
@@ -223,6 +230,11 @@ _LAZY_IMPORTS: dict[str, LazySpec] = {
     "DataUnavailableError": (".exceptions", "DataUnavailableError"),
     "LowConfidenceError": (".exceptions", "LowConfidenceError"),
     "QuantStaleDataError": (".exceptions", "StaleDataError"),
+    # almanak.core.finality
+    "CacheFinality": ("almanak.core.finality", "CacheFinality"),
+    "DataFinality": ("almanak.core.finality", "DataFinality"),
+    "parse_cache_finality": ("almanak.core.finality", "parse_cache_finality"),
+    "parse_data_finality": ("almanak.core.finality", "parse_data_finality"),
     # .funding
     "SUPPORTED_FUNDING_MARKETS": (".funding", "SUPPORTED_MARKETS"),
     "SUPPORTED_VENUES": (".funding", "SUPPORTED_VENUES"),

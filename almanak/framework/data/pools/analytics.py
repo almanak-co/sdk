@@ -37,6 +37,7 @@ import grpc
 
 from almanak.core.chains import ChainRegistry
 from almanak.core.enums import ChainFamily
+from almanak.core.finality import DataFinality
 from almanak.framework.data.interfaces import DataSourceUnavailable
 from almanak.framework.data.models import (
     DataClassification,
@@ -309,7 +310,7 @@ class PoolAnalyticsReader:
         meta = DataMeta(
             source=response.source or "gateway",
             observed_at=observed_at,
-            finality="off_chain",
+            finality=DataFinality.OFF_CHAIN,
             staleness_ms=0,
             latency_ms=0,
             confidence=confidence,

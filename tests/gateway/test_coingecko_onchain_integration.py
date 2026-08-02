@@ -1,5 +1,6 @@
 """Tests for the CoinGeckoOnchainGetOHLCV gRPC handler in IntegrationServiceServicer."""
 
+import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -7,8 +8,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import grpc
 import pytest
 
+from almanak.core.finality import DataFinality
 from almanak.framework.data.interfaces import OHLCVCandle
 from almanak.framework.data.timeframes import OHLCVTimeframe
+from almanak.gateway.data.ohlcv.coingecko_onchain_provider import CoinGeckoOnchainOHLCVProvider
 from almanak.gateway.proto import gateway_pb2
 
 # Real pool addresses, used only for shape: the provider is always mocked.
@@ -33,6 +36,19 @@ def _make_ohlcv_candle(ts_offset: int = 0) -> OHLCVCandle:
         close=Decimal("1810.0"),
         volume=Decimal("50000.0"),
     )
+
+
+def test_provider_fetch_success_stamps_off_chain_finality() -> None:
+    """The gateway-owned provider preserves its historical finality wire value."""
+    provider = CoinGeckoOnchainOHLCVProvider(api_key="test-key")
+    provider.get_ohlcv = AsyncMock(return_value=[_make_ohlcv_candle()])
+
+    with asyncio.Runner() as runner:
+        with patch("asyncio.get_event_loop", return_value=runner.get_loop()):
+            envelope = provider.fetch(token="ALMANAK", chain="base")
+
+    assert envelope.meta.finality is DataFinality.OFF_CHAIN
+    assert envelope.meta.finality.value == "off_chain"
 
 
 class TestCoinGeckoOnchainGetOHLCV:

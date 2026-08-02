@@ -25,6 +25,8 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from almanak.core.finality import DataFinality
+
 from ..data.timeframes import OHLCVTimeframe, parse_ohlcv_timeframe
 from ..data.tokens.deprecation import warn_or_reject_symbol_token_reference
 from ..data.tokens.exceptions import SymbolTokenResolutionError
@@ -5597,7 +5599,7 @@ class MarketSnapshot:
             meta = DataMeta(
                 source="computed",
                 observed_at=self._timestamp,
-                finality="off_chain",
+                finality=DataFinality.OFF_CHAIN,
                 confidence=1.0,
                 cache_hit=False,
             )
@@ -5669,7 +5671,7 @@ class MarketSnapshot:
             meta = DataMeta(
                 source="computed",
                 observed_at=self._timestamp,
-                finality="off_chain",
+                finality=DataFinality.OFF_CHAIN,
                 confidence=1.0,
                 cache_hit=False,
             )
@@ -5758,7 +5760,7 @@ class MarketSnapshot:
             meta = DataMeta(
                 source="computed",
                 observed_at=self._timestamp,
-                finality="off_chain",
+                finality=DataFinality.OFF_CHAIN,
                 confidence=1.0,
                 cache_hit=False,
             )
@@ -5818,7 +5820,7 @@ class MarketSnapshot:
             meta = DataMeta(
                 source="computed",
                 observed_at=self._timestamp,
-                finality="off_chain",
+                finality=DataFinality.OFF_CHAIN,
                 confidence=1.0,
                 cache_hit=False,
             )

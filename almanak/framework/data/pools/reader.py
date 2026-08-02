@@ -67,6 +67,7 @@ from almanak.connectors._strategy_base.v4_pool_abi import (
     encode_get_slot0,
 )
 from almanak.connectors._strategy_pool_reader_registry import POOL_READER_REGISTRY
+from almanak.core.finality import DataFinality, parse_data_finality
 from almanak.framework.data.exceptions import DataUnavailableError
 from almanak.framework.data.models import (
     DataClassification,
@@ -310,7 +311,7 @@ class UniswapV3PoolPriceReader:
         pool_address: str,
         chain: str,
         block_number: int | None = None,
-        finality: str = "latest",
+        finality: DataFinality = DataFinality.LATEST,
     ) -> DataEnvelope[PoolPrice]:
         """Read the current price from a Uniswap V3 pool.
 
@@ -322,7 +323,7 @@ class UniswapV3PoolPriceReader:
             pool_address: Pool contract address.
             chain: Chain name (e.g. "arbitrum", "ethereum").
             block_number: Optional block number (if known from RPC response).
-            finality: Block finality tag (default "latest").
+            finality: Typed block/data finality tag (default ``LATEST``).
 
         Returns:
             DataEnvelope[PoolPrice] with provenance metadata.
@@ -330,6 +331,7 @@ class UniswapV3PoolPriceReader:
         Raises:
             DataUnavailableError: If RPC call fails or response is invalid.
         """
+        finality = parse_data_finality(finality)
         chain_lower = chain.lower()
         pool_lower = pool_address.lower()
         cache_key = (pool_lower, chain_lower)
@@ -820,9 +822,10 @@ class CurvePoolReader(UniswapV3PoolPriceReader):
         pool_address: str,
         chain: str,
         block_number: int | None = None,
-        finality: str = "latest",
+        finality: DataFinality = DataFinality.LATEST,
     ) -> DataEnvelope[PoolPrice]:
         """Read the current price from a Curve pool (see class docstring)."""
+        finality = parse_data_finality(finality)
         chain_lower = chain.lower()
         pool_lower = pool_address.lower()
         cache_key = (pool_lower, chain_lower)
@@ -1080,9 +1083,10 @@ class UniswapV4PoolReader(UniswapV3PoolPriceReader):
         pool_address: str,
         chain: str,
         block_number: int | None = None,
-        finality: str = "latest",
+        finality: DataFinality = DataFinality.LATEST,
     ) -> DataEnvelope[PoolPrice]:
         """Read the current price for a V4 PoolId (see class docstring)."""
+        finality = parse_data_finality(finality)
         chain_lower = chain.lower()
         pool_id_lower = pool_address.lower()
         cache_key = (pool_id_lower, chain_lower)

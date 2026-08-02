@@ -60,6 +60,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from almanak.core.finality import CacheFinality, DataFinality
 from almanak.framework.data.cache.versioned_cache import VersionedDataCache
 from almanak.framework.data.exceptions import DataUnavailableError
 from almanak.framework.data.interfaces import DataSourceUnavailable
@@ -160,15 +161,15 @@ def _funding_points_to_snapshots(points: Any) -> list[FundingRateSnapshot]:
     return snapshots
 
 
-def _build_cached_envelope(snapshots: list[Any], finality_status: str) -> Any:
+def _build_cached_envelope(snapshots: list[Any], finality_status: CacheFinality) -> Any:
     """Build the cache-hit ``DataEnvelope`` for a list of snapshots."""
     meta = DataMeta(
-        source=f"cache({finality_status})",
+        source=f"cache({finality_status.value})",
         observed_at=datetime.now(UTC),
-        finality="off_chain",
+        finality=DataFinality.OFF_CHAIN,
         staleness_ms=0,
         latency_ms=0,
-        confidence=0.9 if finality_status == "finalized" else 0.7,
+        confidence=0.9 if finality_status is CacheFinality.FINALIZED else 0.7,
         cache_hit=True,
     )
     return DataEnvelope(
@@ -183,7 +184,7 @@ def _build_fetched_envelope(snapshots: list[Any], source: str, latency_ms: int, 
     meta = DataMeta(
         source=source,
         observed_at=now,
-        finality="off_chain",
+        finality=DataFinality.OFF_CHAIN,
         staleness_ms=0,
         latency_ms=latency_ms,
         confidence=0.85,
@@ -196,11 +197,15 @@ def _build_fetched_envelope(snapshots: list[Any], source: str, latency_ms: int, 
     )
 
 
-def _snapshots_finality_status(snapshots: list[Any], now: datetime) -> str:
-    """Return ``"finalized"`` if every snapshot is older than 24 h, else ``"provisional"``."""
+def _snapshots_finality_status(snapshots: list[Any], now: datetime) -> CacheFinality:
+    """Return the cache finality for the snapshots.
+
+    Return ``CacheFinality.FINALIZED`` if every snapshot is older than 24 h;
+    otherwise return ``CacheFinality.PROVISIONAL``.
+    """
     cutoff = now - timedelta(hours=24)
     all_finalized = all(s.timestamp < cutoff for s in snapshots)
-    return "finalized" if all_finalized else "provisional"
+    return CacheFinality.FINALIZED if all_finalized else CacheFinality.PROVISIONAL
 
 
 def _build_lending_snapshot(supply_point: Any, borrow_by_ts: dict[int, str]) -> Any:

@@ -10,6 +10,7 @@ Features:
     - Versioned historical data with finality tagging and checksum integrity
 """
 
+from almanak.core.finality import CacheFinality
 from almanak.framework.data.cache.data_cache import (
     CacheKey,
     CacheStats,
@@ -27,6 +28,7 @@ from almanak.framework.data.cache.versioned_cache import (
 
 __all__ = [
     "CacheEntry",
+    "CacheFinality",
     "CacheKey",
     "CacheStats",
     "DataCache",

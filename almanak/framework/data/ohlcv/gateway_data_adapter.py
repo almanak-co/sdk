@@ -27,6 +27,7 @@ import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from almanak.core.finality import DataFinality
 from almanak.framework.data.models import DataClassification, DataEnvelope, DataMeta
 from almanak.framework.data.timeframes import OHLCVTimeframe, parse_ohlcv_timeframe
 
@@ -107,7 +108,7 @@ class GatewayOHLCVDataProvider:
         meta = DataMeta(
             source=self.name,
             observed_at=datetime.now(UTC),
-            finality="off_chain",
+            finality=DataFinality.OFF_CHAIN,
             staleness_ms=0,
             latency_ms=latency_ms,
             confidence=1.0,
@@ -176,7 +177,7 @@ class CoinGeckoOnchainGatewayDataProvider:
         meta = DataMeta(
             source=self.name,
             observed_at=datetime.now(UTC),
-            finality="off_chain",
+            finality=DataFinality.OFF_CHAIN,
             staleness_ms=0,
             latency_ms=latency_ms,
             confidence=1.0,
@@ -248,7 +249,7 @@ class CoinGeckoGatewayDataProvider:
         meta = DataMeta(
             source=self.name,
             observed_at=datetime.now(UTC),
-            finality="off_chain",
+            finality=DataFinality.OFF_CHAIN,
             staleness_ms=0,
             latency_ms=latency_ms,
             confidence=1.0,

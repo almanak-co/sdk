@@ -37,6 +37,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
+from almanak.core.finality import DataFinality
 from almanak.framework.data.models import (
     DataClassification,
     DataEnvelope,
@@ -147,7 +148,7 @@ class GatewayMarketPriceAggregator(PriceAggregator):
             # (rate_history_service.py) — never "alchemy_rpc" (VIB-4924 F2/M3).
             source=resp.source or "on_chain",
             observed_at=start_time,
-            finality="latest",
+            finality=DataFinality.LATEST,
             staleness_ms=0,
             latency_ms=int((datetime.now(UTC) - start_time).total_seconds() * 1000),
             confidence=1.0,
@@ -278,7 +279,7 @@ class GatewayMarketPriceAggregator(PriceAggregator):
         meta = DataMeta(
             source=resp.source or "gateway_rpc",
             observed_at=start_time,
-            finality="latest",
+            finality=DataFinality.LATEST,
             staleness_ms=0,
             latency_ms=int((datetime.now(UTC) - start_time).total_seconds() * 1000),
             confidence=1.0,

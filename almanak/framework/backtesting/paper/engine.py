@@ -78,6 +78,7 @@ if TYPE_CHECKING:
 from almanak.core.chains import ChainRegistry
 from almanak.core.chains._helpers import chain_name_for_id as _chain_name_for_id
 from almanak.core.chains._helpers import chainlink_usd_feeds_map
+from almanak.core.finality import DataFinality
 from almanak.core.intent_types import IntentType
 from almanak.framework.anvil.accounts import ANVIL_DEFAULT_ADDRESS, ANVIL_DEFAULT_PRIVATE_KEY
 from almanak.framework.anvil.fork_manager import TOKEN_ADDRESSES, RollingForkManager
@@ -805,7 +806,7 @@ class _BinanceDataProviderAdapter:
         meta = DataMeta(
             source="binance",
             observed_at=datetime.now(UTC),
-            finality="off_chain",
+            finality=DataFinality.OFF_CHAIN,
             staleness_ms=0,
             latency_ms=latency_ms,
             confidence=0.9,

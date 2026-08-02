@@ -24,6 +24,9 @@ import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import assert_never
+
+from almanak.core.finality import CacheFinality, parse_cache_finality
 
 logger = logging.getLogger(__name__)
 
@@ -43,19 +46,21 @@ class CacheEntry:
         data: The cached payload (any JSON-serializable structure).
         dataset_version: Monotonically increasing version number.
         fetched_at: UTC ISO timestamp when the data was fetched from source.
-        finality_status: ``"finalized"`` or ``"provisional"``.
+        finality_status: Typed cache-entry lifecycle state.
         checksum: SHA256 hex digest of the serialized ``data`` payload.
     """
 
     data: object
     dataset_version: int
     fetched_at: str
-    finality_status: str  # "finalized" | "provisional"
+    finality_status: CacheFinality
     checksum: str
 
     def __post_init__(self) -> None:
-        if self.finality_status not in ("finalized", "provisional"):
-            raise ValueError(f"finality_status must be 'finalized' or 'provisional', got '{self.finality_status}'")
+        # Preserve construction from exact historical strings at runtime while
+        # keeping the annotated field closed for static callers. Foreign enum
+        # domains are rejected even if they share the value ``"finalized"``.
+        object.__setattr__(self, "finality_status", parse_cache_finality(self.finality_status))
         if self.dataset_version < 1:
             raise ValueError(f"dataset_version must be >= 1, got {self.dataset_version}")
 
@@ -139,7 +144,7 @@ class VersionedDataCache:
         self,
         key: str,
         data: object,
-        finality_status: str = "finalized",
+        finality_status: CacheFinality = CacheFinality.FINALIZED,
     ) -> CacheEntry:
         """Store data under *key* with automatic versioning.
 
@@ -152,19 +157,24 @@ class VersionedDataCache:
         Args:
             key: Opaque cache key.
             data: Any JSON-serializable payload.
-            finality_status: ``"finalized"`` or ``"provisional"``.
+            finality_status: Cache-entry lifecycle state. Exact historical
+                strings remain accepted at runtime at this compatibility
+                boundary, but typed callers use :class:`CacheFinality`.
 
         Returns:
             The ``CacheEntry`` that was written (or matched).
         """
+        finality_status = parse_cache_finality(finality_status)
         checksum = self._compute_checksum(data)
         now = datetime.now(UTC).isoformat()
 
-        if finality_status == "provisional":
-            return self._write_provisional(key, data, checksum, now)
-
-        # Finalized path
-        return self._write_finalized(key, data, checksum, now)
+        match finality_status:
+            case CacheFinality.PROVISIONAL:
+                return self._write_provisional(key, data, checksum, now)
+            case CacheFinality.FINALIZED:
+                return self._write_finalized(key, data, checksum, now)
+            case _ as unreachable:
+                assert_never(unreachable)
 
     def get_versions(self, key: str) -> list[int]:
         """Return sorted list of available dataset versions for *key*."""
@@ -250,11 +260,19 @@ class VersionedDataCache:
             return None
         try:
             raw = json.loads(path.read_text())
+            try:
+                finality_status = parse_cache_finality(raw["finality_status"])
+            except (TypeError, ValueError) as exc:
+                # Cache files are historical/local persistence boundaries.
+                # Unknown lifecycle values degrade to a cache miss rather than
+                # being silently mapped or aborting a strategy run.
+                logger.warning("Ignoring cache entry %s with invalid finality_status: %s", path, exc)
+                return None
             return CacheEntry(
                 data=raw["data"],
                 dataset_version=raw["dataset_version"],
                 fetched_at=raw["fetched_at"],
-                finality_status=raw["finality_status"],
+                finality_status=finality_status,
                 checksum=raw["checksum"],
             )
         except Exception:
@@ -293,7 +311,7 @@ class VersionedDataCache:
             data=data,
             dataset_version=next_version,
             fetched_at=fetched_at,
-            finality_status="finalized",
+            finality_status=CacheFinality.FINALIZED,
             checksum=checksum,
         )
         self._write_entry(self._version_path(key, next_version), entry)
@@ -322,7 +340,7 @@ class VersionedDataCache:
             data=data,
             dataset_version=version,
             fetched_at=fetched_at,
-            finality_status="provisional",
+            finality_status=CacheFinality.PROVISIONAL,
             checksum=checksum,
         )
         self._write_entry(self._provisional_path(key), entry)
@@ -335,7 +353,8 @@ class VersionedDataCache:
             "data": entry.data,
             "dataset_version": entry.dataset_version,
             "fetched_at": entry.fetched_at,
-            "finality_status": entry.finality_status,
+            # Explicit compatibility boundary: keep the historical JSON value.
+            "finality_status": entry.finality_status.value,
             "checksum": entry.checksum,
         }
         path.write_text(json.dumps(payload, default=str))

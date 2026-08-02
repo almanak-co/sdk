@@ -42,6 +42,7 @@ from decimal import Decimal, InvalidOperation
 
 import aiohttp
 
+from almanak.core.finality import CacheFinality
 from almanak.gateway.data._thegraph_network import (
     MISSING_THEGRAPH_API_KEY_MESSAGE,
     build_registered_subgraph_deployments,
@@ -457,7 +458,7 @@ class PoolHistoryDispatcher:
         provider: str,
         snapshots: list[gateway_pb2.PoolSnapshot],
         now_seconds: int,
-    ) -> tuple[str, bool]:
+    ) -> tuple[CacheFinality, bool]:
         """Return ``(finality_band, finalized_only)`` for a successful response.
 
         POOL-6 (VIB-4754): a response is ``finalized_only`` iff its newest row
@@ -476,13 +477,15 @@ class PoolHistoryDispatcher:
         eagerly would load ``almanak.gateway.services.__init__`` ->
         ``pool_history_service`` -> this package while it is still initializing.
         """
-        from almanak.gateway.services._history_cache import FINALITY_FINALIZED, FINALITY_PROVISIONAL
         from almanak.gateway.services._history_common import compute_finalized_only
 
         cutoff = self._finality_cutoffs.get(provider, _DEFAULT_FINALITY_CUTOFF_SECONDS)
         newest_ts = max((int(s.timestamp) for s in snapshots), default=0)
         finalized_only = compute_finalized_only(newest_ts=newest_ts, now_seconds=now_seconds, cutoff_seconds=cutoff)
-        return (FINALITY_FINALIZED if finalized_only else FINALITY_PROVISIONAL, finalized_only)
+        return (
+            CacheFinality.FINALIZED if finalized_only else CacheFinality.PROVISIONAL,
+            finalized_only,
+        )
 
     # -- Fallback loop ----------------------------------------------------
 
@@ -495,7 +498,8 @@ class PoolHistoryDispatcher:
         start_ts: int,
         end_ts: int,
         resolution: int,
-        on_provider_success: Callable[[str, list[gateway_pb2.PoolSnapshot], str], Awaitable[None]] | None = None,
+        on_provider_success: Callable[[str, list[gateway_pb2.PoolSnapshot], CacheFinality], Awaitable[None]]
+        | None = None,
     ) -> _DispatchOutcome:
         """Try each eligible provider in order; return the first success.
 

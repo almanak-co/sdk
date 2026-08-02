@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING
 from almanak._lazy import LazySpec, build_lazy_module_dispatch
 
 if TYPE_CHECKING:
+    from almanak.core.finality import DataFinality
+
     from .alerting import (
         AlertManager,
         AlertSendResult,
@@ -223,6 +225,8 @@ _LAZY_IMPORTS: dict[str, LazySpec] = {
     # data.exceptions
     "DataUnavailableError": ".data.exceptions",
     "LowConfidenceError": ".data.exceptions",
+    # core.finality
+    "DataFinality": "almanak.core.finality",
     # data.models
     "DataClassification": ".data.models",
     "DataEnvelope": ".data.models",

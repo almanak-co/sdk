@@ -65,6 +65,7 @@ from almanak.connectors._base.gateway_capabilities import (
     GatewayLendingRateHistoryCapability,
 )
 from almanak.connectors._gateway_registry import GATEWAY_REGISTRY
+from almanak.core.finality import CacheFinality
 from almanak.framework.data.interfaces import DataSourceRateLimited
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.data.gas import fetch_gas_price_at
@@ -1058,7 +1059,7 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
             return limiter
 
     @staticmethod
-    def _funding_finality_band(end_ts: int) -> str:
+    def _funding_finality_band(end_ts: int) -> CacheFinality:
         """Current-hour windows are provisional; completed hours are final."""
         current_hour_start = int(time.time() // 3600) * 3600
         return FINALITY_FINALIZED if end_ts < current_hour_start else FINALITY_PROVISIONAL
@@ -1118,7 +1119,7 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
             end_ts,
         )
 
-        async def fetcher() -> tuple[gateway_pb2.FundingRateHistoryResponse, str]:
+        async def fetcher() -> tuple[gateway_pb2.FundingRateHistoryResponse, CacheFinality]:
             points = await self._fetch_funding_history_with_retry(
                 provider,
                 source,

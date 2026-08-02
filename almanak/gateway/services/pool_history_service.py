@@ -57,6 +57,7 @@ from typing import cast
 
 import grpc
 
+from almanak.core.finality import CacheFinality
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.data.pool_history import (
     PoolHistoryDispatcher,
@@ -918,7 +919,7 @@ class PoolHistoryServiceServicer(gateway_pb2_grpc.PoolHistoryServiceServicer):
 
         self._metrics["per_rpc"]["requests_total"] = cast(int, self._metrics["per_rpc"].get("requests_total", 0)) + 1
 
-        async def _fetch() -> tuple[gateway_pb2.PoolHistoryResponse, str]:
+        async def _fetch() -> tuple[gateway_pb2.PoolHistoryResponse, CacheFinality]:
             # Raw-cache write per successful provider (D2.M4 partition): the
             # 8-tuple raw key carries the provider so a TheGraph-served entry
             # and a DefiLlama-served entry for the same public key stay
@@ -927,7 +928,7 @@ class PoolHistoryServiceServicer(gateway_pb2_grpc.PoolHistoryServiceServicer):
             async def _on_success(
                 provider: str,
                 snapshots: list[gateway_pb2.PoolSnapshot],
-                band: str,
+                band: CacheFinality,
             ) -> None:
                 raw_key = make_raw_key(
                     chain=chain,
@@ -1056,7 +1057,7 @@ class PoolHistoryServiceServicer(gateway_pb2_grpc.PoolHistoryServiceServicer):
                 source=response.source,
                 snapshots_count=len(response.snapshots),
                 truncation_reason=response.truncation_reason,
-                finality_band=FINALITY_FINALIZED if response.finalized_only else FINALITY_PROVISIONAL,
+                finality_band=(CacheFinality.FINALIZED if response.finalized_only else CacheFinality.PROVISIONAL).value,
                 latency_ms=int((time.monotonic() - started_monotonic) * 1000),
                 grpc_code=grpc.StatusCode.OK,
                 error="",
@@ -1091,7 +1092,7 @@ class PoolHistoryServiceServicer(gateway_pb2_grpc.PoolHistoryServiceServicer):
             error="",
         )
 
-    def _repromote_public_entry(self, value: gateway_pb2.PoolHistoryResponse) -> str | None:
+    def _repromote_public_entry(self, value: gateway_pb2.PoolHistoryResponse) -> CacheFinality | None:
         """Finality re-promotion hook for the public cache (POOL-6 / VIB-4754).
 
         Called by ``HistoryCache`` (under its lock) when a provisional entry's

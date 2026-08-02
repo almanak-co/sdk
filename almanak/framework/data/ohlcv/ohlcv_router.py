@@ -49,6 +49,7 @@ from pathlib import Path
 from typing import Any
 
 from almanak.core.chains import DEFAULT_CHAIN
+from almanak.core.finality import DataFinality
 from almanak.framework.data.interfaces import (
     DataSourceRateLimited,
     DataSourceTimeout,
@@ -521,7 +522,7 @@ class OHLCVRouter:
             meta=DataMeta(
                 source="disk_cache",
                 observed_at=now,
-                finality="off_chain",
+                finality=DataFinality.OFF_CHAIN,
                 staleness_ms=0,
                 latency_ms=0,
                 confidence=1.0,
@@ -805,7 +806,7 @@ class OHLCVRouter:
         meta = DataMeta(
             source=provider_name,
             observed_at=now,
-            finality="off_chain",
+            finality=DataFinality.OFF_CHAIN,
             staleness_ms=0,
             latency_ms=latency_ms,
             confidence=confidence,

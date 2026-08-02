@@ -55,6 +55,7 @@ from typing import TYPE_CHECKING, Any
 
 import grpc
 
+from almanak.core.finality import DataFinality
 from almanak.framework.data.interfaces import DataSourceUnavailable
 from almanak.framework.data.models import (
     DataClassification,
@@ -472,7 +473,7 @@ class PoolHistoryReader:
         meta = DataMeta(
             source=observed_source,
             observed_at=datetime.now(UTC),
-            finality="off_chain",
+            finality=DataFinality.OFF_CHAIN,
             staleness_ms=0,
             latency_ms=0,
             confidence=0.85,

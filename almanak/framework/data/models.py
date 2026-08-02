@@ -7,13 +7,16 @@ Also provides Instrument, a canonical identifier for trading pairs that avoids
 CEX/DEX symbol confusion across all data methods.
 
 Example:
+    from datetime import UTC, datetime
+
+    from almanak import DataFinality
     from almanak.framework.data.models import DataMeta, DataEnvelope, DataClassification
 
     meta = DataMeta(
         source="alchemy_rpc",
         observed_at=datetime.now(UTC),
         block_number=19_000_000,
-        finality="finalized",
+        finality=DataFinality.FINALIZED,
         staleness_ms=120,
         latency_ms=45,
         confidence=0.99,
@@ -36,6 +39,8 @@ import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
+
+from almanak.core.finality import DataFinality, parse_data_finality
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +66,9 @@ class DataMeta:
         source: Provider name (e.g. 'alchemy_rpc', 'coingecko_onchain', 'binance').
         observed_at: UTC timestamp when the value was observed at the source.
         block_number: On-chain block number (None for off-chain data).
-        finality: Block finality level or 'off_chain' for API data.
+        finality: Typed block/data finality level. Historical exact strings are
+            parsed for runtime compatibility; internal callers use
+            :class:`DataFinality`.
         staleness_ms: Milliseconds since the value was observed.
         latency_ms: Milliseconds between request and response.
         confidence: 0.0 (unreliable) to 1.0 (fully confident).
@@ -75,7 +82,7 @@ class DataMeta:
     source: str
     observed_at: datetime
     block_number: int | None = None
-    finality: str = "off_chain"
+    finality: DataFinality = DataFinality.OFF_CHAIN
     staleness_ms: int = 0
     latency_ms: int = 0
     confidence: float = 1.0
@@ -86,9 +93,12 @@ class DataMeta:
     def __post_init__(self) -> None:
         if not 0.0 <= self.confidence <= 1.0:
             raise ValueError(f"confidence must be between 0.0 and 1.0, got {self.confidence}")
-        valid_finalities = {"finalized", "safe", "latest", "off_chain"}
-        if self.finality not in valid_finalities:
-            raise ValueError(f"finality must be one of {valid_finalities}, got '{self.finality}'")
+        # Dataclass annotations give static callers the closed domain, while
+        # this boundary parse preserves runtime compatibility for historical
+        # code constructing DataMeta with an exact serialized string. Foreign
+        # enum domains are rejected by ``parse_data_finality`` even when their
+        # wire value overlaps (for example CacheFinality.FINALIZED).
+        object.__setattr__(self, "finality", parse_data_finality(self.finality))
 
     @property
     def is_on_chain(self) -> bool:
@@ -98,7 +108,7 @@ class DataMeta:
     @property
     def is_finalized(self) -> bool:
         """Whether the underlying block is finalized."""
-        return self.finality == "finalized"
+        return self.finality.is_finalized
 
 
 @dataclass(frozen=True)
