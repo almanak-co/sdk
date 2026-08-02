@@ -56,6 +56,20 @@ CONNECTOR = Connector(
     perps_read=PerpsReadDecl(
         spec=ImportRef(module="almanak.connectors.hyperliquid.perps_read", attribute="PERPS_READ_SPEC"),
     ),
+    # VIB-6387 — TD-14 closure authority. Without it
+    # ``get_teardown_post_condition("hyperliquid")`` is None, Plan-A's PERP branch
+    # returns UNVERIFIABLE, and the VIB-6285 ratchet fails a teardown that closed
+    # every position (measured on mainnet 2026-08-01, deployment:919d5bab4916).
+    # ``_connector_teardown_slugs`` (VIB-5573) registers it under this connector's
+    # ``discovery_keys`` | ``compiler_protocols`` | ``name``, which here is exactly
+    # {"hyperliquid"} — the protocol string both position producers emit (the demo's
+    # ``_PROTOCOL`` and the registry perp arm). The ``hl`` / ``hyper`` aliases above
+    # belong to ``FeeModelDecl`` and are NOT connector protocol keys, so they are
+    # deliberately not part of that set; a position never carries them.
+    teardown_post_condition=ImportRef(
+        module="almanak.connectors.hyperliquid.teardown_post_condition",
+        attribute="hyperliquid_teardown_post_condition",
+    ),
     capabilities=CapabilitiesSpec(
         keys=("hyperliquid",),
         module="almanak.connectors.hyperliquid.capabilities",

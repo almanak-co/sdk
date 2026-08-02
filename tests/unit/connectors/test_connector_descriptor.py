@@ -671,6 +671,10 @@ EXPECTED_TEARDOWN_POST_CONDITION_MODULES = {
     "benqi": "almanak.connectors.benqi.teardown_post_condition",
     "euler_v2": "almanak.connectors.euler_v2.teardown_post_condition",
     "gmx_v2": "almanak.connectors.gmx_v2.teardown_post_condition",
+    # VIB-6387: hyperliquid perp closure authority over the HyperCore 0x0800
+    # position precompile. Position-scoped, not account-scoped like gmx_v2 —
+    # HyperCore has no "all positions" call.
+    "hyperliquid": "almanak.connectors.hyperliquid.teardown_post_condition",
     "pendle": "almanak.connectors.pendle.teardown_post_condition",
     "silo_v2": "almanak.connectors.silo_v2.teardown_post_condition",
     "traderjoe_v2": "almanak.connectors.traderjoe_v2.teardown_post_condition",
