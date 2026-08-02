@@ -3424,6 +3424,20 @@ message PnLSummary {
   // stamp provenance / staleness — a snapshot is not live venue truth.
   repeated PerpPositionSummary perp_positions = 40;
   string positions_as_of = 41;      // ISO-8601 ts of the source snapshot ("" if none)
+
+  // VIB-6308: TRUE when a leg counted into open-position NAV contributed NO
+  // cost basis, so ``NAV - cost_basis`` differences two sides with mismatched
+  // coverage and books the unbacked mark as profit (a carry's borrowed-and-
+  // swapped holding read +41.8% on a flat position). The client suppresses the
+  // Strategy PnL / APR tiles rather than render the phantom.
+  //
+  // Named ``_partial`` and not ``_measured`` deliberately: proto3 cannot
+  // distinguish an omitted bool from a deliberate ``false``, so the default
+  // MUST be the harmless state. An old gateway omits it -> ``false`` -> "no
+  // known gap" -> the client keeps today's behaviour, which is correct because
+  // an old gateway genuinely cannot assess coverage. Inverting the name would
+  // make every old gateway's silence read as "nothing is measured".
+  bool cost_basis_partial = 42;
 }
 
 // PerpPositionSummary — one open perp position as MEASURED by the latest

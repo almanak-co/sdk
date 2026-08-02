@@ -164,6 +164,9 @@ def test_measured_zero_flows_are_byte_identical() -> None:
         # split from the whole-day DISPLAY value above.
         "age_days_exact": Decimal("0"),
         "capital_flows_unmeasured": False,
+        # VIB-6308 — additive; False is the harmless default ("no known
+        # coverage gap"), so this legacy shape stays behaviourally identical.
+        "cost_basis_partial": False,
         "deployed_capital_usd": Decimal("0"),
         "available_cash_usd": Decimal("1000"),
         "open_position_count": 0,

@@ -1836,3 +1836,223 @@ class TestLPRepricingPoolDescriptorGuard:
         # Address from ``pool_address`` reached slot0; descriptor under ``pool``
         # was ignored.
         valuer._lp_reader.read_pool_slot0.assert_called_once_with("arbitrum", valid_pool)
+
+
+# ---------------------------------------------------------------------------
+# VIB-6308: an unbacked NAV leg must not book as profit
+# ---------------------------------------------------------------------------
+
+
+class TestNavBasisCoverageVib6308:
+    """The writer stamps which NAV legs carried no cost basis.
+
+    Strategy PnL = ``open_position_nav − cost_basis``. The cost side skips any
+    leg whose ``cost_basis_usd`` did not survive serialization, so an unbacked
+    leg's mark books as pure profit. Only the writer can measure the gap: the
+    reader would have to re-derive the VIB-4909 wallet-overlap partition to know
+    which legs reached NAV.
+    """
+
+    _WALLET = "0x1234567890123456789012345678901234567890"
+
+    def _wire_supply_basis(self, valuer):
+        """Give the SUPPLY leg a real measured basis via the accounting store.
+
+        Without this every leg is unbacked and the snapshot is uniformly
+        unmeasured — which is NOT the defect. The defect is PARTIAL coverage:
+        the collateral IS measured, the borrowed-and-swapped holding is not, and
+        that mix sails past the tile's all-or-nothing dust guard.
+        """
+        mock_store = MagicMock()
+        mock_store.get_accounting_events_sync.return_value = [
+            {
+                "timestamp": "2026-04-26T10:00:00",
+                "event_type": "SUPPLY",
+                "position_key": f"lending:arbitrum:aave_v3:{self._WALLET}:usdc",
+                "deployment_id": "test-deployment",
+                "ledger_entry_id": "ledger-001",
+                "payload_json": '{"principal_delta_usd": "2944", "interest_delta_usd": null}',
+            }
+        ]
+        valuer.set_accounting_context(mock_store, "test-deployment")
+
+    def _carry(self):
+        """Collateral + debt + a holding swapped from the borrowed funds.
+
+        Built from ``PositionInfo`` so the BORROW's negative sign comes from the
+        production normalizer, not from the fixture.
+        """
+        legs = [
+            PositionInfo(
+                position_type=PositionType.SUPPLY,
+                position_id="aave-usdc-supply",
+                chain="arbitrum",
+                protocol="aave_v3",
+                value_usd=Decimal("2944"),
+                details={"asset": "USDC", "wallet": self._WALLET, "wallet_address": self._WALLET},
+            ),
+            PositionInfo(
+                position_type=PositionType.BORROW,
+                position_id="aave-usdc-borrow",
+                chain="arbitrum",
+                protocol="aave_v3",
+                value_usd=Decimal("880"),
+                details={"asset": "USDC", "wallet": self._WALLET, "wallet_address": self._WALLET},
+            ),
+            PositionInfo(
+                position_type=PositionType.TOKEN,
+                position_id="held-usdt",
+                chain="arbitrum",
+                protocol="uniswap_v3",
+                value_usd=Decimal("880"),
+                details={"asset": "USDT", "origin": "swapped_from_borrow"},
+            ),
+        ]
+        return _make_strategy(tracked_tokens=["ETH"], positions=legs)
+
+    def _coverage(self, snapshot):
+        return (snapshot.snapshot_metadata or {}).get("nav_basis_coverage")
+
+    def test_writer_stamps_the_unbacked_leg(self):
+        valuer = PortfolioValuer()
+        self._wire_supply_basis(valuer)
+        market = _make_market(prices={"ETH": Decimal("3300")}, balances={"ETH": Decimal("10")})
+
+        snapshot = valuer.value(self._carry(), market)
+        coverage = self._coverage(snapshot)
+
+        assert coverage is not None, "writer must always stamp coverage"
+        # SUPPLY + the held TOKEN reach NAV; the BORROW is negative so it does not.
+        assert coverage["legs_in_nav"] == 2
+        assert coverage["legs_missing_basis"] == 1
+        assert Decimal(coverage["missing_basis_usd"]) == Decimal("880")
+
+    def test_a_fully_backed_snapshot_stamps_nothing(self):
+        """Absence is the documented "nothing to report" state for snapshot
+        metadata, so a fully-backed strategy stays byte-identical to the
+        pre-VIB-6308 writer.
+
+        The tradeoff is deliberate: absence conflates "no gap" with "older
+        writer". The reader's decision is the same in both cases (do not
+        suppress), so nothing the flag actually drives is lost.
+        """
+        valuer = PortfolioValuer()
+        strategy = _make_strategy(tracked_tokens=["ETH"], positions=[])
+        market = _make_market(prices={"ETH": Decimal("3300")}, balances={"ETH": Decimal("10")})
+
+        assert self._coverage(valuer.value(strategy, market)) is None
+
+    def test_coverage_counts_only_legs_that_reached_nav(self):
+        """A wallet pseudo-position is excluded from NAV (VIB-4909), so its
+        missing basis is NOT a coverage gap — it never entered the subtraction.
+
+        This is the case that makes a reader-side implementation wrong: it would
+        see two unbacked legs where only one can distort PnL. The unbacked TOKEN
+        holding is here too, so the assertion discriminates (1, not 2) rather
+        than merely observing an absent stamp.
+        """
+        valuer = PortfolioValuer()
+        self._wire_supply_basis(valuer)
+        strategy = self._carry()
+        strategy.get_open_positions.return_value.positions.append(
+            PositionInfo(
+                position_type=PositionType.TOKEN,
+                position_id="wallet-eth",
+                chain="arbitrum",
+                protocol="uniswap_v3",
+                value_usd=Decimal("33000"),
+                details={"asset": "ETH", "wallet": self._WALLET, "wallet_address": self._WALLET},
+            )
+        )
+        market = _make_market(prices={"ETH": Decimal("3300")}, balances={"ETH": Decimal("10")})
+
+        coverage = self._coverage(valuer.value(strategy, market))
+
+        assert coverage["legs_missing_basis"] == 1
+        assert Decimal(coverage["missing_basis_usd"]) == Decimal("880")
+
+    def test_coverage_survives_the_positions_json_envelope(self):
+        """The stamp must reach the reader, which sees the serialized envelope."""
+        valuer = PortfolioValuer()
+        market = _make_market(prices={"ETH": Decimal("3300")}, balances={"ETH": Decimal("10")})
+
+        self._wire_supply_basis(valuer)
+        payload = valuer.value(self._carry(), market).to_positions_payload()
+
+        assert payload["metadata"]["nav_basis_coverage"]["legs_missing_basis"] == 1
+
+    # --- the SECOND entrypoint: external reconciliation replaces the legs ---
+    #
+    # ``value()`` stamps coverage from the FRAMEWORK legs and then hands the
+    # snapshot to ``_reconcile_with_external``, which can replace positions and
+    # ``total_value_usd`` wholesale while carrying that metadata forward. Gating
+    # only the framework path leaves this twin unguarded, and an ABSENT stamp
+    # reads downstream as "no known gap" — so the tile would render Strategy PnL
+    # against an entirely unbacked external NAV.
+
+    def _external_leg(self, value_usd, cost_basis_usd=None):
+        from almanak.framework.portfolio.models import PositionValue
+
+        leg = PositionValue(
+            position_type=PositionType.TOKEN,
+            protocol="zerion",
+            chain="arbitrum",
+            value_usd=Decimal(value_usd),
+            label="external",
+            tokens=["USDC"],
+            details={"source": "external_portfolio_api"},
+        )
+        if cost_basis_usd is not None:
+            leg.cost_basis_usd = Decimal(cost_basis_usd)
+        return leg
+
+    def _framework_snapshot(self, metadata):
+        return PortfolioSnapshot(
+            timestamp=datetime.now(UTC),
+            deployment_id="test-deployment",
+            total_value_usd=Decimal("0"),
+            available_cash_usd=Decimal("0"),
+            deployed_capital_usd=Decimal("0"),
+            wallet_total_value_usd=Decimal("0"),
+            value_confidence=ValueConfidence.ESTIMATED,
+            positions=[],
+            wallet_balances=[],
+            chain="arbitrum",
+            snapshot_metadata=metadata,
+        )
+
+    def test_external_reconciled_snapshot_recomputes_coverage(self):
+        """External legs carry no basis at all, so the reconciled snapshot must
+        stamp the gap rather than inherit the framework's silence."""
+        valuer = PortfolioValuer()
+        external = {"positions": [self._external_leg("500")], "total_value_usd": Decimal("500")}
+
+        snapshot = valuer._build_external_reconciled_snapshot(
+            self._framework_snapshot({"valuation_source": "reconciled_external"}),
+            external,
+            {"valuation_source": "reconciled_external"},
+        )
+        coverage = self._coverage(snapshot)
+
+        assert coverage is not None, "an unbacked external NAV must not read as 'no known gap'"
+        assert coverage["legs_in_nav"] == 1
+        assert coverage["legs_missing_basis"] == 1
+        assert Decimal(coverage["missing_basis_usd"]) == Decimal("500")
+
+    def test_external_reconciled_snapshot_drops_a_stale_inherited_stamp(self):
+        """The inverse: a stamp describing framework legs that no longer exist
+        must not outlive them, or a fully-backed reconciled NAV renders '—'."""
+        valuer = PortfolioValuer()
+        stale = {"legs_in_nav": 9, "legs_missing_basis": 9, "missing_basis_usd": "12345"}
+        external = {
+            "positions": [self._external_leg("500", cost_basis_usd="480")],
+            "total_value_usd": Decimal("500"),
+        }
+
+        snapshot = valuer._build_external_reconciled_snapshot(
+            self._framework_snapshot({"nav_basis_coverage": stale}),
+            external,
+            {"nav_basis_coverage": stale},
+        )
+
+        assert self._coverage(snapshot) is None

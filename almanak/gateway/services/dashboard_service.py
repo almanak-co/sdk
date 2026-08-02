@@ -2730,6 +2730,10 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             nav_usd=str(pnl.nav_usd),
             perp_positions=perp_positions,
             positions_as_of=positions_as_of,
+            # VIB-6308: coverage travels beside the money it qualifies, so a
+            # client can never render Strategy PnL over a basis that covers only
+            # part of the NAV it is differenced against.
+            cost_basis_partial=bool(pnl.cost_basis_partial),
             # VIB-5866: a suppressed (None) metric goes on the wire as the
             # empty string — the same presence-aware "" => unmeasured encoding
             # CostStackInfo.inventory_unrealized_usd uses (VIB-4984), so no

@@ -552,7 +552,6 @@ class PnLSummary:
     # measured, so the three metrics above are suppressed. Diagnostic for local
     # renderers; the gateway wire signal is the empty string on those fields.
     capital_flows_unmeasured: bool = False
-
     # Position + cash
     deployed_capital_usd: Decimal = Decimal("0")
     available_cash_usd: Decimal = Decimal("0")
@@ -568,6 +567,19 @@ class PnLSummary:
     primary_risk_value: str = ""
     primary_risk_color: str = "neutral"
     primary_risk_kind: str = "none"
+
+    # VIB-6308: True when a leg counted into open-position NAV contributed NO
+    # cost basis to the netted basis, so ``NAV - cost`` differences two sides
+    # with mismatched coverage and books the unbacked mark as profit. ``False``
+    # is the harmless default: it means "no known gap", which is also what a
+    # pre-VIB-6308 snapshot (no coverage stamp) yields -- those keep today's
+    # behaviour rather than being retro-labelled partial on no evidence.
+    #
+    # APPENDED, never inserted — same reason as the client-side twin in
+    # ``dashboard/gateway_client.py``: this is a plain dataclass, so a
+    # positional caller would have every later field silently rebound by an
+    # inserted default. New fields go last.
+    cost_basis_partial: bool = False
 
     def __post_init__(self) -> None:
         """Canonicalize direct/legacy construction to the typed vocabulary."""
@@ -1707,6 +1719,54 @@ def _snapshot_has_strategy_reported_mark(snap: Any) -> bool:
     return any(_position_is_strategy_reported(p) for p in _snapshot_positions(snap))
 
 
+def _nav_basis_partial(snapshot: Any) -> bool:
+    """Did a leg counted into open-position NAV contribute no cost basis? (VIB-6308)
+
+    Reads the writer's ``nav_basis_coverage`` stamp -- see
+    ``portfolio_valuer._nav_basis_coverage`` for why only the writer can measure
+    this. Three states:
+
+    * stamp present, ``legs_missing_basis > 0`` -> **partial** (return ``True``),
+    * stamp present, ``legs_missing_basis == 0`` -> fully backed (``False``),
+    * **stamp absent** -> coverage UNKNOWN (a fully-backed snapshot also omits
+      it, by the metadata convention). Returns ``False``: a snapshot we cannot
+      assess must not be labelled partial on no evidence, which would flip every
+      historical row's tile to a warning.
+
+    Tolerates the typed ``PortfolioSnapshot`` (``snapshot_metadata``) and the
+    dict / envelope shapes the legacy readers hand in, because both reach this
+    function in practice -- a real snapshot has no ``positions_json`` attribute
+    (the VIB-5170 inert-feature class), so keying on one shape alone silently
+    no-ops in production.
+    """
+    meta: Any = None
+    if snapshot is not None:
+        meta = (
+            snapshot.get("snapshot_metadata")
+            if isinstance(snapshot, dict)
+            else getattr(snapshot, "snapshot_metadata", None)
+        )
+    if not isinstance(meta, dict):
+        payload = (
+            snapshot.get("positions_json") if isinstance(snapshot, dict) else getattr(snapshot, "positions_json", None)
+        )
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except (json.JSONDecodeError, TypeError):
+                payload = None
+        meta = payload.get("metadata") if isinstance(payload, dict) else None
+    if not isinstance(meta, dict):
+        return False
+    coverage = meta.get("nav_basis_coverage")
+    if not isinstance(coverage, dict):
+        return False
+    try:
+        return int(coverage.get("legs_missing_basis") or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 def _has_strategy_reported_mark(positions_json: Any) -> bool:
     """Provenance gate for a raw ``positions_json`` PAYLOAD (the lifetime path).
 
@@ -2037,6 +2097,14 @@ def compute_pnl_summary(
         if _display_count is not None:
             pnl.open_position_count = _display_count
 
+        # VIB-6308: Strategy PnL differences a fully-measured NAV against a cost
+        # basis that SKIPS any leg whose ``cost_basis_usd`` did not survive
+        # serialization, so an unbacked leg's mark books as pure profit. The
+        # writer stamps which NAV legs lacked a basis (it is the only layer that
+        # knows the VIB-4909 wallet-overlap partition); read it here rather than
+        # re-deriving that partition a second time.
+        pnl.cost_basis_partial = _nav_basis_partial(latest)
+
     # VIB-3914: Anchor "Deployed" to the wallet snapshot the strategy
     # itself captured at first intent, not the ``portfolio_metrics``
     # row (which is seeded from the config knob and unaware of pre-existing
@@ -2118,6 +2186,35 @@ def compute_pnl_summary(
         reconstructed = _open_position_cost_basis(accounting_events)
         if reconstructed > Decimal("0"):
             pnl.deployed_capital_usd = reconstructed
+            # VIB-6308: the writer's coverage stamp measures the POSITION LEGS.
+            # It cannot know that this branch just supplied a basis from a
+            # different source — the accounting events. Once it has, the cost
+            # side is no longer missing, so suppressing Strategy PnL would hide
+            # a number the reader can actually compute.
+            #
+            # Measured on the 20260801 real-money batch: this branch fires on
+            # 63/63 traderjoe-lp-avax snapshots (leg basis absent, accounting
+            # basis $2.48, tile rendered -$0.07) and on only 2/64
+            # pcs-aave-carry-bsc snapshots (leg basis present at $3.82) — so
+            # clearing here restores the honest small number and leaves the
+            # +42% phantom on the carry suppressed, which is the whole point.
+            #
+            # Deliberately narrow: this does NOT claim the reconstruction covers
+            # exactly the legs that reached NAV.
+            #
+            # KNOWN RESIDUAL, stated in BOTH directions (VIB-6351). On a
+            # MULTI-LEG snapshot this treats "a reconstruction exists" as "every
+            # NAV leg is covered", and it does not. Two unbacked legs ($2.41 +
+            # $5.00) with one LP_OPEN carrying $2.48 clears the flag and renders
+            # +$4.93 where leaving it set renders "-" -- the same unbacked-mark-
+            # as-profit shape VIB-6308 exists to kill. It is NOT a regression
+            # (pre-VIB-6308 rendered that too, and the carry stays suppressed for
+            # two independent reasons: its column is only <= 0 on post-teardown
+            # zero-NAV rows, and _open_position_cost_basis returns 0 for it), but
+            # it is a hole this clearing re-opens rather than merely a loss of
+            # information. Gating on the stamp's ``legs_in_nav == 1`` would fence
+            # it; the general fix is provenance-aware coverage in VIB-6351.
+            pnl.cost_basis_partial = False
             # VIB-5339/VIB-5738: only synthesize a count when no dust-aware
             # DISPLAY count was available (dict/legacy snapshot). If a typed
             # snapshot already resolved 0 (torn-down / dust-only wallet), a

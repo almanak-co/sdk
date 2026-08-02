@@ -8650,6 +8650,7 @@ class PnLSummary(_message.Message):
     PRIMARY_RISK_COLOR_FIELD_NUMBER: _builtins.int
     PERP_POSITIONS_FIELD_NUMBER: _builtins.int
     POSITIONS_AS_OF_FIELD_NUMBER: _builtins.int
+    COST_BASIS_PARTIAL_FIELD_NUMBER: _builtins.int
     deployed_usd: _builtins.str
     """Money trail (G1, G4, G5)
     initial + deposits - withdrawals
@@ -8695,6 +8696,20 @@ class PnLSummary(_message.Message):
     """"green" | "yellow" | "red" | "neutral" """
     positions_as_of: _builtins.str
     """ISO-8601 ts of the source snapshot ("" if none)"""
+    cost_basis_partial: _builtins.bool
+    """VIB-6308: TRUE when a leg counted into open-position NAV contributed NO
+    cost basis, so ``NAV - cost_basis`` differences two sides with mismatched
+    coverage and books the unbacked mark as profit (a carry's borrowed-and-
+    swapped holding read +41.8% on a flat position). The client suppresses the
+    Strategy PnL / APR tiles rather than render the phantom.
+
+    Named ``_partial`` and not ``_measured`` deliberately: proto3 cannot
+    distinguish an omitted bool from a deliberate ``false``, so the default
+    MUST be the harmless state. An old gateway omits it -> ``false`` -> "no
+    known gap" -> the client keeps today's behaviour, which is correct because
+    an old gateway genuinely cannot assess coverage. Inverting the name would
+    make every old gateway's silence read as "nothing is measured".
+    """
     @_builtins.property
     def perp_positions(self) -> _containers.RepeatedCompositeFieldContainer[Global___PerpPositionSummary]:
         """VIB-5942 (ALM-2977): snapshot-derived perp position story (direction,
@@ -8728,8 +8743,9 @@ class PnLSummary(_message.Message):
         primary_risk_color: _builtins.str = ...,
         perp_positions: _abc.Iterable[Global___PerpPositionSummary] | None = ...,
         positions_as_of: _builtins.str = ...,
+        cost_basis_partial: _builtins.bool = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["age_days", b"age_days", "age_days_exact", b"age_days_exact", "available_cash_usd", b"available_cash_usd", "current_drawdown_pct", b"current_drawdown_pct", "deployed_capital_usd", b"deployed_capital_usd", "deployed_usd", b"deployed_usd", "lifetime_pnl_pct", b"lifetime_pnl_pct", "lifetime_pnl_usd", b"lifetime_pnl_usd", "max_drawdown_pct", b"max_drawdown_pct", "nav_usd", b"nav_usd", "net_apr_pct", b"net_apr_pct", "open_position_count", b"open_position_count", "perp_positions", b"perp_positions", "positions_as_of", b"positions_as_of", "primary_risk_color", b"primary_risk_color", "primary_risk_kind", b"primary_risk_kind", "primary_risk_label", b"primary_risk_label", "primary_risk_value", b"primary_risk_value", "value_confidence", b"value_confidence"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["age_days", b"age_days", "age_days_exact", b"age_days_exact", "available_cash_usd", b"available_cash_usd", "cost_basis_partial", b"cost_basis_partial", "current_drawdown_pct", b"current_drawdown_pct", "deployed_capital_usd", b"deployed_capital_usd", "deployed_usd", b"deployed_usd", "lifetime_pnl_pct", b"lifetime_pnl_pct", "lifetime_pnl_usd", b"lifetime_pnl_usd", "max_drawdown_pct", b"max_drawdown_pct", "nav_usd", b"nav_usd", "net_apr_pct", b"net_apr_pct", "open_position_count", b"open_position_count", "perp_positions", b"perp_positions", "positions_as_of", b"positions_as_of", "primary_risk_color", b"primary_risk_color", "primary_risk_kind", b"primary_risk_kind", "primary_risk_label", b"primary_risk_label", "primary_risk_value", b"primary_risk_value", "value_confidence", b"value_confidence"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___PnLSummary: _TypeAlias = PnLSummary  # noqa: Y015

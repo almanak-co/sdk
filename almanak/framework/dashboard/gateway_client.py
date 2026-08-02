@@ -258,6 +258,17 @@ class PnLSummary:
     # keep working: ``None`` ⇒ callers fall back to ``age_days``, reproducing
     # the previous behaviour exactly rather than silently changing it.
     age_days_exact: Decimal | None = None
+    # VIB-6308: a leg counted into open-position NAV contributed NO cost basis,
+    # so Strategy PnL would difference a fully-measured NAV against a basis
+    # covering only part of it. ``False`` is the harmless default — an old
+    # gateway omits the field and cannot assess coverage, so the client keeps
+    # today's behaviour rather than suppressing on no evidence.
+    #
+    # APPENDED, never inserted. This is a plain dataclass, so positional
+    # construction is legal even though every caller in this repo uses
+    # keywords; inserting a defaulted field mid-list silently rebinds every
+    # field after it for any positional caller. New fields go last.
+    cost_basis_partial: bool = False
 
     def __post_init__(self) -> None:
         """Canonicalize direct/legacy construction to the typed vocabulary."""
@@ -439,6 +450,7 @@ def _convert_pnl_summary(proto: gateway_pb2.PnLSummary) -> PnLSummary:
         # ``perp_positions`` empty → no perp section (clean degrade, never a crash).
         perp_positions=[_convert_perp_position(p) for p in proto.perp_positions],
         positions_as_of=proto.positions_as_of or "",
+        cost_basis_partial=bool(proto.cost_basis_partial),
     )
 
 

@@ -369,6 +369,47 @@ def _token_overlaps_wallet_index(
 _SWAP_INVENTORY_SOURCE = "swap_inventory_lots"
 
 
+def _nav_basis_coverage(nav_legs: list["PositionValue"]) -> dict[str, Any]:
+    """Cost-basis coverage of the legs that entered ``total_value_usd`` (VIB-6308).
+
+    Strategy PnL is ``open_position_nav - cost_basis``. The NAV side counts a
+    leg's full mark; the cost side (``valuation/net_debt.py``) skips any leg
+    whose ``cost_basis_usd`` is absent. So an unbacked leg is differenced
+    against nothing and reads as pure profit -- a carry's borrowed-and-swapped
+    USDT booked +41.8% on a flat position for its whole life, and
+    ``PositionType.TOKEN`` has no ``_enrich_position_pnl`` branch at all, so
+    that is its permanent state.
+
+    Only the writer can measure this honestly: the reader would have to
+    re-derive the VIB-4909 wallet-overlap partition to know which legs reached
+    NAV, and a second copy of that rule is exactly the enumeration that drifts.
+    So the split is stamped here, computed from the SAME ``nav_legs`` list that
+    produced ``total_value_usd`` -- the two cannot disagree.
+
+    ``_build_snapshot_metadata`` stamps this only when a leg is actually
+    unbacked, keeping a fully-backed strategy byte-identical to the
+    pre-VIB-6308 writer (the metadata convention documented there).
+
+    **Why the test is falsiness, not ``is None``.** ``cost_basis_usd`` defaults
+    to ``Decimal("0")``, so an un-enriched leg holds a measured-looking zero in
+    memory; ``_position_to_dict`` then drops the key entirely because
+    ``Decimal("0")`` is falsy, and the reader sees ``None``. The two states are
+    indistinguishable by construction on BOTH sides of the wire, and a
+    genuinely measured zero basis is not representable at all. Testing
+    falsiness matches exactly what the reader will do with the serialized leg --
+    the property that governs whether the PnL subtraction is backed. (That
+    serializer conflation is itself an Empty!=Zero defect, tracked separately:
+    giving ``cost_basis_usd`` a real unmeasured sentinel changes every consumer
+    of the field.)
+    """
+    missing = [p for p in nav_legs if not p.cost_basis_usd]
+    return {
+        "legs_in_nav": len(nav_legs),
+        "legs_missing_basis": len(missing),
+        "missing_basis_usd": str(sum((p.value_usd for p in missing), Decimal("0"))),
+    }
+
+
 def _is_swap_inventory_row(position: Any) -> bool:
     """True iff ``position`` is a lot-derived deployed-inventory row (VIB-5057).
 
@@ -1809,18 +1850,16 @@ class PortfolioValuer:
             # DEPLOYED strategy capital — they count into total_value_usd
             # (open-position NAV) while their value is subtracted from
             # available_cash_usd, keeping NAV invariant.
-            position_value_positive = sum(
-                (
-                    p.value_usd
-                    for p in positions
-                    if p.value_usd > 0
-                    and (
-                        _is_swap_inventory_row(p)
-                        or not (p.position_type == PositionType.TOKEN and _token_overlaps_wallet_index(p, wallet_index))
-                    )
-                ),
-                Decimal("0"),
-            )
+            nav_legs = [
+                p
+                for p in positions
+                if p.value_usd > 0
+                and (
+                    _is_swap_inventory_row(p)
+                    or not (p.position_type == PositionType.TOKEN and _token_overlaps_wallet_index(p, wallet_index))
+                )
+            ]
+            position_value_positive = sum((p.value_usd for p in nav_legs), Decimal("0"))
 
             # VIB-4909: ``wallet_total_value_usd`` is the operator-facing
             # full-portfolio value (wallet + real protocol positions); wallet
@@ -1851,7 +1890,11 @@ class PortfolioValuer:
                 chain=chain,
                 iteration_number=iteration_number,
                 snapshot_metadata=self._build_snapshot_metadata(
-                    gas_native_status, swap_inventory.metadata, pt_inventory.metadata, stable_depeg=stable_depeg
+                    gas_native_status,
+                    swap_inventory.metadata,
+                    pt_inventory.metadata,
+                    stable_depeg=stable_depeg,
+                    nav_basis_coverage=_nav_basis_coverage(nav_legs),
                 ),
             )
             # Reconciliation is advisory — never let it downgrade the framework snapshot.
@@ -2233,6 +2276,7 @@ class PortfolioValuer:
         pt_inventory_metadata: dict[str, Any] | None = None,
         *,
         stable_depeg: dict[str, str] | None = None,
+        nav_basis_coverage: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Assemble the writer-side ``snapshot_metadata`` dict.
 
@@ -2251,6 +2295,14 @@ class PortfolioValuer:
             metadata["pt_inventory"] = pt_inventory_metadata
         if stable_depeg:
             metadata["stable_depeg"] = dict(stable_depeg)
+        # VIB-6308: stamped ONLY when a NAV leg is unbacked, matching the
+        # "absence is the documented nothing-to-report state" convention above --
+        # a fully-backed strategy stays byte-identical to the pre-VIB-6308
+        # writer. This does conflate "no gap" with "written by an older writer",
+        # but the reader's decision is identical in both cases (do not suppress),
+        # so no information the flag actually drives is lost.
+        if nav_basis_coverage and nav_basis_coverage.get("legs_missing_basis"):
+            metadata["nav_basis_coverage"] = nav_basis_coverage
         return metadata
 
     def _reconcile_with_external(
@@ -2389,9 +2441,30 @@ class PortfolioValuer:
         # VIB-3614: use position-scoped sum as total_value_usd, consistent with
         # the framework path.  external_total (full wallet from Zerion) goes to
         # wallet_total_value_usd for operator debugging.
-        pos_total = sum((p.value_usd for p in merged_positions if p.value_usd > 0), Decimal("0"))
+        nav_legs = [p for p in merged_positions if p.value_usd > 0]
+        pos_total = sum((p.value_usd for p in nav_legs), Decimal("0"))
         gross_position_total = sum((p.value_usd for p in merged_positions), Decimal("0"))
         available_cash_usd = max(Decimal("0"), external_total - gross_position_total)
+
+        # VIB-6308 -- the SECOND entrypoint of the coverage rule. ``metadata``
+        # carries a stamp computed from the FRAMEWORK legs, but this snapshot's
+        # ``total_value_usd`` is ``pos_total``, summed over ``merged_positions``.
+        # External legs never carry a basis at all (``_external_position_to_value``
+        # does not set ``cost_basis_usd``), so the inherited stamp describes
+        # different legs than the NAV it now accompanies -- and an ABSENT stamp
+        # reads downstream as "no known gap", which would render Strategy PnL
+        # against an entirely unbacked external NAV: exactly the phantom this
+        # guard exists to stop. Recompute from the legs that actually produced
+        # ``pos_total`` so the writer's invariant ("stamped from the same list
+        # that produced total_value_usd") holds on this path too. Popping when
+        # the new legs ARE fully backed matters just as much: a stale inherited
+        # stamp must not outlive the legs it described.
+        metadata = dict(metadata)
+        coverage = _nav_basis_coverage(nav_legs)
+        if coverage["legs_missing_basis"]:
+            metadata["nav_basis_coverage"] = coverage
+        else:
+            metadata.pop("nav_basis_coverage", None)
 
         # VIB-4584 / F3.1: preserve UNAVAILABLE when the framework couldn't
         # value at least one position through a registered path. External

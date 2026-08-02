@@ -338,10 +338,21 @@ def _strategy_pnl_usd(p: PnLSummary, cost: CostStackInfo | None, open_position_n
       snapshot (VIB-3932 cluster); "—" is correct until a clean snapshot
       lands. A genuinely-flat (all-closed) strategy has ``open_position_nav``
       ~ 0 and computes normally (realized only).
+    * VIB-6308 -- the same defect PARTIALLY: a leg counted into
+      ``open_position_nav`` contributed no cost basis, so the subtraction below
+      differences a fully-measured NAV against a basis covering only some of it
+      and books the unbacked mark as profit. The dust guard above catches only
+      the all-or-nothing case (basis ~0); a leveraged carry whose collateral IS
+      measured and whose borrowed-and-swapped holding is NOT sails past it and
+      reported **+41.8% on a flat position** for its entire life. Coverage is
+      measured by the writer (``portfolio_valuer._nav_basis_coverage``) because
+      only it knows which legs reached NAV.
     """
     if cost is None:
         return None
     if p.deployed_capital_usd <= _COST_BASIS_DUST_USD and open_position_nav > _COST_BASIS_DUST_USD:
+        return None
+    if p.cost_basis_partial and open_position_nav > _COST_BASIS_DUST_USD:
         return None
     unrealized = open_position_nav - p.deployed_capital_usd
     # VIB-4984: on LEGACY snapshots, held directional swap inventory (e.g. RSI
