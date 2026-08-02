@@ -867,10 +867,18 @@ class TeardownManager:
             # distinct from on-chain verification (TD-15). Computed here; for the
             # intents-present path it is folded into the result AFTER execution so
             # the risk-reducing intents still run first (inverted semantics).
+            # VIB-6316 — gate site G2, the TWIN of ``_teardown_helpers.py``'s G1.
+            # It is a genuinely different site, not a duplicate: G1's positions
+            # come from the registry union while these come from
+            # ``strategy.get_open_positions()`` (or ``precomputed_positions``,
+            # which the CLI ``teardown execute --discover`` lane fills with
+            # registry-SHAPED rows). Wiring G1 alone leaves that lane on the old
+            # wallet-blind comparison — the named failure mode of this fix.
             completeness = check_intent_coverage(
                 positions,
                 intents,
                 consolidation_target_token=self._consolidation_noop_target(strategy, intents),
+                wallet_for_chain=lambda c: _teardown_wallet_for_chain(strategy, c) or None,
             )
 
             if not intents:

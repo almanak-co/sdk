@@ -613,6 +613,7 @@ async def execute_and_verify(
     """
     from ..teardown.completeness import check_intent_coverage
     from ..teardown.models import ClosureVerification, TeardownStatus, VerificationStatus
+    from ..teardown.teardown_manager import _teardown_wallet_for_chain
     from .runner_teardown import _make_approval_callback, _safe_mark
 
     deployment_id = strategy.deployment_id
@@ -728,10 +729,20 @@ async def execute_and_verify(
         # VIB-5727: strategy + intents supply the CHAIN, without which the
         # "no preference" sentinel resolves to legacy USDC and this gate credits
         # the wrong token on a USDC-less chain (robinhood holds USDG, not USDC).
+        # VIB-6316: thread the SAME wallet resolver the enumeration used
+        # (``resolve_open_positions_with_registry`` →
+        # ``registry_enumeration``). The registry-union positions reaching this
+        # gate carry venue-derived identity that only resolves with the owning
+        # account; without it a registry row's adopted venue key cannot match the
+        # strategy's symbol-shaped closing intent, the union stays split, and a
+        # teardown that closed every position reports FAILED (mainnet-proven, R5).
+        # This is gate site G1 — ``teardown_manager.py`` has the twin, and wiring
+        # only one of them leaves the CLI lane broken.
         completeness = check_intent_coverage(
             positions,
             teardown_intents,
             consolidation_target_token=teardown_mgr._consolidation_noop_target(strategy, teardown_intents),
+            wallet_for_chain=lambda c: _teardown_wallet_for_chain(strategy, c) or None,
         )
         if not completeness.complete:
             # The uncovered positions are definitively NOT closed (no intent even

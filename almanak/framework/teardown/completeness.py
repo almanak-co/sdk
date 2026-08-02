@@ -42,7 +42,7 @@ position it cannot evaluate — Empty ≠ Zero applied to *enforceability*.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
@@ -570,7 +570,7 @@ def _norm_identity(value: Any) -> str:
     return "" if value is None else str(value).strip().lower()
 
 
-def _lp_carries_identity(intent: Any, position: PositionInfo) -> bool:
+def _lp_carries_identity(intent: Any, position: PositionInfo, wallet: str | None = None) -> bool:
     """An LP_CLOSE strictly identifies an LP only by its ``position_id`` (the pool
     is shared across NFTs, so a pool-only match is lenient, not disambiguating).
 
@@ -629,7 +629,36 @@ def _perp_intent_venue_aliases(intent: Any, position: PositionInfo) -> frozenset
     return venue_identity_tokens(probe)
 
 
-def _perp_carries_identity(intent: Any, position: PositionInfo) -> bool:
+def _perp_venue_alias_match(intent: Any, position: PositionInfo, wallet: str | None) -> bool:
+    """Do the intent's venue aliases and the POSITION's venue tokens intersect?
+
+    VIB-6316 — the single predicate shared by ``_covers_perp`` and
+    ``_perp_carries_identity``. It is deliberately ONE function rather than the
+    same expression written twice: the two are the pair that must agree, and the
+    measured failure mode of this fix is exactly "one of the two was widened and
+    the other was not" (either half alone is inert). Two copies can drift; one
+    cannot.
+
+    ``wallet`` is threaded to the POSITION side only. The position's ``sem`` token
+    is emitted only after the venue has verified by its own derivation that
+    ``position_id`` and ``details`` name the same position, so a match here is
+    venue-corroborated. The intent probe stays wallet-free on purpose — see
+    ``_perp_intent_venue_aliases``; a derived-key match from the probe is
+    corroborated by nothing, and threading it over-credits an ETH close against a
+    BTC-market registry row whose ``position_id`` disagrees with its details.
+
+    Empty aliases or empty position tokens mean UNMEASURED, never "no match on
+    purpose": both fall back to the caller's raw comparison.
+    """
+    intent_aliases = _perp_intent_venue_aliases(intent, position)
+    if not intent_aliases:
+        return False
+    from almanak.framework.teardown.perp_identity import venue_identity_tokens
+
+    return not intent_aliases.isdisjoint(venue_identity_tokens(position, wallet))
+
+
+def _perp_carries_identity(intent: Any, position: PositionInfo, wallet: str | None = None) -> bool:
     """A perp close/cancel strictly identifies a PERP by its ``market``. A pending
     -order / free-margin residual is matched on its order_key / kind in
     ``_covers_perp`` — inherently specific, not a market-wide default.
@@ -637,36 +666,35 @@ def _perp_carries_identity(intent: Any, position: PositionInfo) -> bool:
     Empty ≠ Zero: a market / position_id of ``0`` is a measured identity, so it is
     preserved (not coalesced to absent) when resolving the position's market.
 
-    VIB-6287 — STRICTLY WIDENING, AND CURRENTLY UNREACHABLE FOR THE CASE IT
-    TARGETS. Read this before assuming the restart path is fixed; it is not.
+    VIB-6287 introduced the venue-alias arm; VIB-6316 made it REACHABLE. Both are
+    STRICTLY WIDENING: the raw comparison below is unchanged and still tried
+    first, and a venue-alias match is an ADDITIONAL way for the two to agree.
 
-    The widening itself is correct at this layer: the raw comparison below is
-    unchanged and still tried first, and a venue-alias match is an ADDITIONAL
-    way for the two to agree. It was written for the RESTART path, where the
-    enumeration is re-derived from the registry — whose rows carry a market
-    ADDRESS under the ``market`` key while the strategy's regenerated intent
-    names the market SYMBOL, the identical polysemy that made the union
-    double-count.
+    It targets the RESTART / registry-union shape, where the enumeration is
+    re-derived from the registry — whose rows carry a market ADDRESS under the
+    ``market`` key while the strategy's regenerated intent names the market
+    SYMBOL, the identical polysemy that made the union double-count.
 
-    But it never runs for that case. ``_position_is_covered`` computes
-    ``covering = [i for i in intents if _covers(i, position)]`` and returns
-    ``False`` when that list is empty, so ``_intent_carries_position_identity``
-    — and therefore this function — is only consulted for intents that ALREADY
-    passed ``_covers``. ``_covers_perp``'s last clause (``completeness.py``
-    ~:806-811) is ``_lenient_identity_match(intent, position, "market",
-    ("market",))``, which is lenient only when a side OMITS its market; with
-    both sides naming one it requires equality, so the address-vs-symbol pair is
-    rejected one layer earlier. Measured:
-    ``_covers -> False`` while ``_perp_carries_identity -> True``.
+    WHY IT USED TO BE UNREACHABLE, AND WHAT CHANGED. ``_position_is_covered``
+    computes ``covering = [i for i in intents if _covers(i, position)]`` and
+    returns ``False`` when that list is empty, so this function is only consulted
+    for intents that ALREADY passed ``_covers``. ``_covers_perp``'s final clause
+    was ``_lenient_identity_match(intent, position, "market", ("market",))``
+    alone, which is lenient only when a side OMITS its market; with both sides
+    naming one it requires equality, so the address-vs-symbol pair was rejected
+    one layer earlier — measured ``_covers -> False`` while this returned
+    ``True``. VIB-6316 adds the SAME ``_perp_venue_alias_match`` arm to
+    ``_covers_perp``, so the two layers now agree. **Widening only one of them is
+    inert** — that is the measured trap, not a theoretical one.
 
-    Widening ``_covers_perp`` was deliberately NOT done here: it is the gate
-    deciding whether a teardown reports SUCCESS, no real-fork proof of the
-    restart path is available (the mainnet A/B exercises the main path, and
-    managed-Anvil cannot open a GMX position because its keeper is unreachable
-    from the production lane — VIB-6288), and over-crediting is the one direction
-    that strands funds with no alarm. Tracked as a follow-up;
-    ``test_c3_restart_path_end_to_end_is_still_broken`` is a STRICT xfail that
-    turns into a failure the moment that gate is widened.
+    The second half of VIB-6316 is the ``wallet``. GMX emits its ``sem`` token
+    only when it can resolve the account, so a wallet-blind call gets the adopted
+    venue key ALONE and cannot intersect a symbol-shaped intent probe. Threading
+    the wallet is what makes the alias arm produce a token to match. ``None`` is
+    UNMEASURED (the pre-VIB-6316 behaviour) and falls back to the raw comparison,
+    which is why every signature in this chain defaults it — and also why a code-
+    only PR would be green and inert. See the N1-N6 controls in
+    ``tests/unit/teardown/test_completeness_venue_identity_vib6316.py``.
 
     It must never get STRICTER: a coverage check that starts rejecting matches
     turns working teardowns into ``FAILED``, a regression that would read as an
@@ -676,8 +704,9 @@ def _perp_carries_identity(intent: Any, position: PositionInfo) -> bool:
     at all (the backfill folder writes ``market: None``) yields only a venue-key
     alias, which an intent — carrying no venue key — cannot match. Such a
     position still falls back to the raw comparison exactly as before. Closing
-    that gap needs the account threaded into this lane, which ``check_intent_
-    coverage`` (pure, wallet-free) does not have today.
+    that gap needs a corroboration mechanism that does not exist: the intent
+    probe carries no ``position_id`` to check a derived key against, so crediting
+    one would be uncorroborated (VIB-6316 §4.1).
     """
     kind = str((position.details or {}).get("kind") or "").lower()
     if kind in ("pending_order", "hypercore_cash"):
@@ -687,20 +716,15 @@ def _perp_carries_identity(intent: Any, position: PositionInfo) -> bool:
     intent_market = _norm_identity(_field(intent, "market"))
     if bool(intent_market) and intent_market == pos_market:
         return True
-    from almanak.framework.teardown.perp_identity import venue_identity_tokens
-
-    intent_aliases = _perp_intent_venue_aliases(intent, position)
-    if not intent_aliases:
-        return False
-    return not intent_aliases.isdisjoint(venue_identity_tokens(position))
+    return _perp_venue_alias_match(intent, position, wallet)
 
 
-def _vault_carries_identity(intent: Any, position: PositionInfo) -> bool:
+def _vault_carries_identity(intent: Any, position: PositionInfo, wallet: str | None = None) -> bool:
     """A VAULT_REDEEM strictly identifies a VAULT by its ``vault_address``."""
     return _identity_present_and_matches(intent, position, "vault_address", ("vault_address", "address", "vault"))
 
 
-def _lending_carries_identity(intent: Any, position: PositionInfo) -> bool:
+def _lending_carries_identity(intent: Any, position: PositionInfo, wallet: str | None = None) -> bool:
     """A repay/withdraw strictly identifies a lending leg by naming this leg's
     ``protocol`` (+ isolated-market ``market_id`` when the leg carries one).
 
@@ -743,7 +767,7 @@ _IDENTITY_HANDLERS = {
 }
 
 
-def _intent_carries_position_identity(intent: Any, position: PositionInfo) -> bool:
+def _intent_carries_position_identity(intent: Any, position: PositionInfo, wallet: str | None = None) -> bool:
     """Does a KNOWN-covering ``intent`` name THIS position's own disambiguating
     identity (VIB-5494 Item 2)?
 
@@ -756,10 +780,10 @@ def _intent_carries_position_identity(intent: Any, position: PositionInfo) -> bo
     (TOKEN / STAKE) returns ``True`` — no multi-position ambiguity to guard.
     """
     handler = _IDENTITY_HANDLERS.get(position.position_type)
-    return handler(intent, position) if handler is not None else True
+    return handler(intent, position, wallet) if handler is not None else True
 
 
-def _covers_borrow(intent: Any, position: PositionInfo, itype: str) -> bool:
+def _covers_borrow(intent: Any, position: PositionInfo, itype: str, wallet: str | None = None) -> bool:
     # DELEVERAGE is structurally a repay (emergency forced repay with risk-event
     # context — same on-chain path, same ``token`` field; see DeleverageIntent).
     # A BORROW closed by an HF-guard deleverage instead of a routine repay must
@@ -767,11 +791,11 @@ def _covers_borrow(intent: Any, position: PositionInfo, itype: str) -> bool:
     return itype in ("REPAY", "DELEVERAGE") and _covers_lending_leg(intent, position, "token")
 
 
-def _covers_supply(intent: Any, position: PositionInfo, itype: str) -> bool:
+def _covers_supply(intent: Any, position: PositionInfo, itype: str, wallet: str | None = None) -> bool:
     return itype == "WITHDRAW" and _covers_lending_leg(intent, position, "token")
 
 
-def _covers_lp(intent: Any, position: PositionInfo, itype: str) -> bool:
+def _covers_lp(intent: Any, position: PositionInfo, itype: str, wallet: str | None = None) -> bool:
     if itype != "LP_CLOSE":
         return False
     pos_id = str(position.position_id or "").lower()
@@ -796,7 +820,7 @@ def _covers_lp(intent: Any, position: PositionInfo, itype: str) -> bool:
 _UNCOVERABLE_PERP_KINDS: frozenset[str] = frozenset({"residual_unverified"})
 
 
-def _covers_perp(intent: Any, position: PositionInfo, itype: str) -> bool:
+def _covers_perp(intent: Any, position: PositionInfo, itype: str, wallet: str | None = None) -> bool:
     kind = str((position.details or {}).get("kind") or "").lower()
     # A pending (unfilled) ORDER residual (VIB-5116) is committed-but-unfilled
     # collateral, NOT an open position. It is covered ONLY by a PERP_CANCEL_ORDER
@@ -840,15 +864,24 @@ def _covers_perp(intent: Any, position: PositionInfo, itype: str) -> bool:
     # (only an explicit mismatch breaks coverage), so framework-built closes
     # (which always stamp protocol + is_long) catch the real long/short strand
     # while under-specified hand-rolled intents preserve today's behaviour.
+    # VIB-6316: ``raw OR alias``, never ``alias`` alone. The three guards above
+    # (type, protocol, side) are UNCHANGED and still gate every path — the alias
+    # arm widens only the final market-identity clause, and only when the venue
+    # itself corroborates the match. A registry row carrying a market ADDRESS and
+    # a regenerated intent naming the market SYMBOL are the same position; the
+    # raw clause cannot see that, the venue can.
     return (
         itype == "PERP_CLOSE"
         and _protocol_compatible(position, intent)
         and _side_compatible(position, intent)
-        and _lenient_identity_match(intent, position, "market", ("market",))
+        and (
+            _lenient_identity_match(intent, position, "market", ("market",))
+            or _perp_venue_alias_match(intent, position, wallet)
+        )
     )
 
 
-def _covers_vault(intent: Any, position: PositionInfo, itype: str) -> bool:
+def _covers_vault(intent: Any, position: PositionInfo, itype: str, wallet: str | None = None) -> bool:
     # Detail keys mirror ``full_close._close_intent_for_position`` which resolves
     # the redeem target via ``_first(details, "vault_address", "address", "vault")
     # or position_id`` — ``address`` must be here or an address-keyed vault whose
@@ -859,7 +892,7 @@ def _covers_vault(intent: Any, position: PositionInfo, itype: str) -> bool:
     )
 
 
-def _covers_stake(intent: Any, position: PositionInfo, itype: str) -> bool:
+def _covers_stake(intent: Any, position: PositionInfo, itype: str, wallet: str | None = None) -> bool:
     if itype == "UNSTAKE" and _intent_token_matches(intent, position, "token_in"):
         return True
     # A cooldown-complete Ethena (sUSDe) teardown closes the STAKE with a CLAIM
@@ -872,7 +905,7 @@ def _covers_stake(intent: Any, position: PositionInfo, itype: str) -> bool:
     return itype == "SWAP" and _intent_token_matches(intent, position, "from_token")
 
 
-def _covers_token(intent: Any, position: PositionInfo, itype: str) -> bool:
+def _covers_token(intent: Any, position: PositionInfo, itype: str, wallet: str | None = None) -> bool:
     # VIB-5494 Item 1 (fixed): ``full_close`` emits NO intent for a held
     # TOKEN/STAKE position whose token already equals the consolidation target
     # (nothing to swap). That no-op is now credited BEFORE this handler runs, in
@@ -923,7 +956,7 @@ _COVERAGE_HANDLERS = {
 }
 
 
-def _covers(intent: Any, position: PositionInfo) -> bool:
+def _covers(intent: Any, position: PositionInfo, wallet: str | None = None) -> bool:
     """Does ``intent`` plausibly close ``position``? (structural pre-exec test).
 
     Conservative: matches by position type → expected closing intent vocabulary
@@ -936,13 +969,14 @@ def _covers(intent: Any, position: PositionInfo) -> bool:
     handler = _COVERAGE_HANDLERS.get(position.position_type)
     if handler is None:
         return False
-    return handler(intent, position, _intent_type(intent))
+    return handler(intent, position, _intent_type(intent), wallet)
 
 
 def _position_is_covered(
     position: PositionInfo,
     intent_list: list[Any],
     same_type_count: int,
+    wallet: str | None = None,
 ) -> bool:
     """Whether ``position`` has a closing intent — with the VIB-5494 Item 2
     multi-position disambiguation guard applied.
@@ -955,10 +989,10 @@ def _position_is_covered(
       positions of a disambiguation-requiring type exist, since one
       under-specified intent must not blanket-cover several distinct positions.
     """
-    covering = [i for i in intent_list if _covers(i, position)]
+    covering = [i for i in intent_list if _covers(i, position, wallet)]
     if not covering:
         return False
-    if any(_intent_carries_position_identity(i, position) for i in covering):
+    if any(_intent_carries_position_identity(i, position, wallet) for i in covering):
         return True
     # Covered only via a lenient default (no positional identity on any intent).
     if position.position_type in _TYPES_REQUIRING_DISAMBIGUATION and same_type_count >= 2:
@@ -986,6 +1020,7 @@ def check_intent_coverage(
     intents: Iterable[Any] | None,
     *,
     consolidation_target_token: str | None = None,
+    wallet_for_chain: Callable[[str], str | None] | None = None,
 ) -> CompletenessReport:
     """Verify every KNOWN open position has at least one closing intent targeting it.
 
@@ -1003,6 +1038,18 @@ def check_intent_coverage(
             covered: ``full_close`` emits no swap for it (nothing to do) and the
             wallet ends holding exactly the target. ``None`` (default) preserves the
             strict behaviour for entry-token / keep-outputs policies.
+        wallet_for_chain: Resolver from a position's chain to the account that owns
+            it (VIB-6316). A perp venue can only derive its own position key from
+            ``(account, market, collateral, side)``, so WITHOUT this the identity
+            lane sees a registry row's adopted venue key alone and cannot match a
+            symbol-shaped closing intent — the union splits and a teardown that
+            closed everything reports FAILED. ``None`` is UNMEASURED, not "no
+            wallet": every comparison falls back to the raw pre-VIB-6316 path, so
+            omitting it is exactly the old behaviour. Pass
+            ``lambda c: _teardown_wallet_for_chain(strategy, c) or None`` — the SAME
+            resolver ``resolve_open_positions_with_registry`` threads into the
+            enumeration. Two lanes on different resolvers can disagree about who
+            owns a position, which is this defect one level up.
 
     Returns:
         A :class:`CompletenessReport`. ``complete`` is ``True`` when every
@@ -1027,7 +1074,21 @@ def check_intent_coverage(
     for p in active:
         type_counts[p.position_type] = type_counts.get(p.position_type, 0) + 1
 
-    uncovered = [p for p in active if not _position_is_covered(p, intent_list, type_counts[p.position_type])]
+    # VIB-6316: resolve the wallet ONCE PER POSITION, not per (position, intent)
+    # pair — the resolver may hit strategy state, and a position's owner does not
+    # vary by which intent is being tested against it.
+    from almanak.framework.teardown.perp_identity import wallet_for
+
+    uncovered = [
+        p
+        for p in active
+        if not _position_is_covered(
+            p,
+            intent_list,
+            type_counts[p.position_type],
+            wallet_for(wallet_for_chain, getattr(p, "chain", "")),
+        )
+    ]
 
     if uncovered:
         logger.error(

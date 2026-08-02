@@ -447,6 +447,14 @@ async def _check_no_intent_completeness(strategy: Any, request: Any = None) -> A
         # the only chain source available here.
         chain=getattr(strategy, "chain", None) or None,
     )
+    # VIB-6316 deliberately does NOT thread ``wallet_for_chain`` here (gate site
+    # G3). This call passes NO intents, and ``_position_is_covered`` returns
+    # ``False`` the moment its covering list is empty — before any identity
+    # comparison runs. The wallet is unreachable by construction, so passing a
+    # resolver would add a call per position that nothing ever reads, and would
+    # read to a future maintainer as load-bearing wiring. G1
+    # (``_teardown_helpers.py``) and G2 (``teardown_manager.py``) are the two
+    # sites that matter; this is the no-intents gate.
     return check_intent_coverage(positions, [], consolidation_target_token=noop_target)
 
 

@@ -336,17 +336,27 @@ def _registry_row(market=None, collateral=None, position_id=VENUE_KEY) -> Positi
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="completeness.py calls venue_identity_tokens(position) with NO wallet, so a keyed "
-    "row now emits only its venue key and cannot match a symbol-space intent. The two lanes "
-    "resolve identity by different rules; threading the wallet into the completeness lane is "
-    "the follow-up. Inert today — _covers_perp rejects the pair one layer earlier.",
-)
 def test_c3_identity_layer_now_matches_across_value_spaces():
     """``_perp_carries_identity`` credits a SYMBOL intent against an ADDRESS
-    position — the widening itself works at its own layer."""
-    assert _perp_carries_identity(_CloseIntent("ETH/USD"), _registry_row())
+    position — the widening itself works at its own layer.
+
+    Was a strict xfail until VIB-6316; the wallet is what it was waiting for.
+    GMX derives its own position key from ``(account, market, collateral, side)``,
+    so without the account the row emits its adopted venue key ALONE and there is
+    nothing for a symbol-space intent to intersect.
+    """
+    assert _perp_carries_identity(_CloseIntent("ETH/USD"), _registry_row(), WALLET)
+
+
+def test_c3_identity_layer_is_unmeasured_without_a_wallet():
+    """The sibling that proves the wallet is LOAD-BEARING, not decorative.
+
+    Kept deliberately: if this ever starts returning True, the test above stops
+    demonstrating anything about the wallet, and VIB-6316 could be reverted with
+    the whole file still green. Empty ≠ Zero — ``None`` is UNMEASURED identity,
+    which correctly falls back to the raw comparison rather than guessing.
+    """
+    assert not _perp_carries_identity(_CloseIntent("ETH/USD"), _registry_row())
 
 
 def test_c3_identity_layer_is_strictly_wider_than_the_raw_compare(monkeypatch):
@@ -385,82 +395,90 @@ def test_c3_never_credits_an_intent_that_does_not_name_this_position(label, inte
     """The negative controls. Crediting an intent that does NOT close the position
     reports a teardown complete while money is still on-chain — the one direction
     this widening must never fail in, and the reason it is ``raw OR alias`` and
-    never a replacement."""
-    assert not _perp_carries_identity(intent, _registry_row()), f"falsely credited on: {label}"
+    never a replacement.
 
-
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "MEASURED, NOT SPECULATIVE (VIB-6287). C3's widening of "
-        "_perp_carries_identity is INERT for the restart path, because the "
-        "rejection happens one layer EARLIER:\n"
-        "    _intent_type      -> PERP_CLOSE\n"
-        "    _chain_compatible -> True\n"
-        "    _covers           -> False   <-- rejects here\n"
-        "    _perp_carries_id  -> True    <-- the widening works, never runs\n"
-        "_position_is_covered computes `covering = [i for i in intents if "
-        "_covers(i, position)]` and returns False when that list is empty, so "
-        "_intent_carries_position_identity is never consulted. THE REJECTING "
-        "LINE IS completeness.py:806-811 (_covers_perp), whose last clause is "
-        "_lenient_identity_match(intent, position, 'market', ('market',)) — "
-        "lenient only when a side OMITS its market; with BOTH sides naming one "
-        "it requires equality. Here the registry row's details['market'] is "
-        "'0x70d95587d40a2caf56bd97485ab3eec10bee6336' while the regenerated "
-        "PerpCloseIntent.market is 'ETH/USD'. The identical symbol-vs-address "
-        "polysemy as the enumeration union, one layer up.\n"
-        "NOT FIXED HERE, DELIBERATELY (team-lead decision, option 2): widening "
-        "_covers_perp means widening the gate that decides whether a teardown "
-        "reports SUCCESS, on a money path, with no real-fork proof available — "
-        "the mainnet A/B exercises the main path, not the restart path, and "
-        "managed-Anvil cannot open a GMX position at all because its keeper is "
-        "unreachable from the production lane (VIB-6288). Over-credit is the one "
-        "direction with no alarm, and US-017 exists because fixture-green hid "
-        "VIB-4983. This test is STRICT so it flips to a FAILURE the moment "
-        "_covers_perp is widened — at that point delete the xfail, not the test."
-    ),
-)
-def test_c3_restart_path_end_to_end_is_still_broken():
-    """The end-to-end restart case C3 was scoped to fix. Still red — on purpose.
-
-    Pinned as a strict xfail rather than deleted so the tree records that the
-    restart path is NOT fixed. An inert fix that reads as green is the exact
-    failure class US-017 exists to catch.
+    Asserts BOTH paths: with ``WALLET`` (the production alias arm after VIB-6316)
+    and without (the pre-VIB-6316 inertness baseline). Wallet-free alone is not a
+    proof that the alias path rejects wrong market/side/protocol/collateral — a
+    registry row without a wallet never emits the alias token, so every negative
+    would vacuously pass.
     """
-    report = check_intent_coverage([_registry_row()], [_CloseIntent("ETH/USD")])
-    assert report.complete
+    assert not _perp_carries_identity(intent, _registry_row(), WALLET), (
+        f"alias path falsely credited on: {label}"
+    )
+    assert not _perp_carries_identity(intent, _registry_row()), (
+        f"wallet-free path falsely credited on: {label}"
+    )
 
 
-def test_covers_is_the_layer_that_rejects_the_restart_pair():
-    """``_covers`` is what rejects the restart pair, one layer before identity.
+def test_c3_restart_path_end_to_end_is_fixed():
+    """The end-to-end restart case C3 was scoped to fix. FIXED by VIB-6316.
+
+    Was a strict xfail carrying a long "NOT FIXED HERE, DELIBERATELY" rationale:
+    widening ``_covers_perp`` decides whether a teardown reports SUCCESS on a
+    money path, and no real-fork proof of the 2-row split existed. **R5 supplied
+    it** (mainnet arbitrum, 2026-08-02, `docs/internal/gmx-readiness/r5-20260802/`)
+    — the split reproduced on-chain against a shipped demo, with TD-08
+    chain-confirming both rows CLOSED in the same iteration the gate called one
+    stranded.
+
+    ONE PREDICTION IN THE OLD REASON WAS WRONG, AND IT IS WORTH KEEPING. It said
+    this test "flips to a FAILURE the moment _covers_perp is widened". It did NOT:
+    every VIB-6316 signature defaults the wallet to ``None``, so widening alone
+    left this call — which passed no resolver — returning False. A tripwire that
+    depends on a default it does not control is not a tripwire. Hence the explicit
+    resolver here and the wallet-less sibling below.
+    """
+    report = check_intent_coverage([_registry_row()], [_CloseIntent("ETH/USD")], wallet_for_chain=lambda _chain: WALLET)
+    assert report.complete, f"uncovered after a full close: {report.uncovered}"
+
+
+def test_c3_restart_path_without_a_wallet_still_reports_uncovered():
+    """The inertness control for the end-to-end lane.
+
+    Not a defect: ``None`` is UNMEASURED, and falling back to the raw comparison
+    is the fail-SAFE direction (a split reported loudly beats a strand reported
+    as success). It is pinned because it is what makes the test above evidence
+    about the wallet rather than about the fixture.
+    """
+    assert not check_intent_coverage([_registry_row()], [_CloseIntent("ETH/USD")]).complete
+
+
+def test_covers_is_the_layer_that_rejected_the_restart_pair():
+    """``_covers`` is what rejected the restart pair, one layer before identity.
 
     SPLIT OUT OF A STRICT XFAIL, because under it this claim was never measured.
     A strict xfail is satisfied by the FIRST failing assertion, and the identity
-    assertion it used to sit behind fails today — so this line never executed
-    while its docstring claimed it pinned the rejecting layer. An assertion that
-    cannot run is not evidence (found by the #3534 panel).
+    assertion it used to sit behind failed — so this line never executed while
+    its docstring claimed it pinned the rejecting layer. An assertion that cannot
+    run is not evidence (found by the #3534 panel).
 
-    Runs and must stay green until ``_covers_perp`` is widened, at which point it
-    flips and forces the change to be acknowledged rather than absorbed.
+    ITS OWN PREDICTION WAS WRONG, AND THE CORRECTION IS THE POINT. The docstring
+    said this "must stay green until ``_covers_perp`` is widened, at which point
+    it flips". ``_covers_perp`` IS widened (VIB-6316) and this is still green —
+    because the widening's alias arm needs a WALLET, and this call passes none.
+    So it did not flip, and nothing forced anyone to acknowledge the change. Left
+    green deliberately as the no-wallet inertness control, with the prediction
+    corrected rather than deleted: a tripwire whose trigger condition was
+    mis-stated is worth recording, because the next one will be written the same
+    way. The assertion that actually moves is
+    ``test_c3_restart_path_end_to_end_is_fixed``.
     """
     assert not _covers(_CloseIntent("ETH/USD"), _registry_row())
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="completeness.py calls venue_identity_tokens(position) with NO wallet, so a keyed "
-    "row now emits only its venue key and cannot match a symbol-space intent. The two lanes "
-    "resolve identity by different rules; threading the wallet into the completeness lane is "
-    "the follow-up (VIB-6316).",
-)
-def test_the_identity_layer_would_agree_if_the_lanes_shared_a_wallet():
-    """The identity-layer half of the old combined test, alone under the xfail.
+def test_the_identity_layer_agrees_now_that_the_lanes_share_a_wallet():
+    """The two lanes now ask the venue the SAME question.
 
-    Records that the enumeration and completeness lanes disagree by construction:
-    enumeration threads a wallet, completeness does not. Flips green the moment
-    VIB-6316 makes them ask the venue the same question.
+    Recorded that the enumeration and completeness lanes disagreed *by
+    construction* — enumeration threaded a wallet, completeness did not — which
+    is the whole of VIB-6316. Both now resolve through
+    ``_teardown_wallet_for_chain``; using two different resolvers would put the
+    disagreement back one level up, which is why the production wiring is
+    asserted structurally in
+    ``test_completeness_venue_identity_vib6316.py::test_n3_n4_*``.
     """
-    assert _perp_carries_identity(_CloseIntent("ETH/USD"), _registry_row())
+    assert _perp_carries_identity(_CloseIntent("ETH/USD"), _registry_row(), WALLET)
 
 
 # ---------------------------------------------------------------------------
@@ -951,10 +969,16 @@ def test_the_multi_alias_proof_gate_is_not_vacuous():
 # was sound; the subject was blind. This pins it for free.
 # ---------------------------------------------------------------------------
 
-# Mirrors almanak/demo_strategies/gmx_v2_directional_perp/strategy.py:410-432.
-# _test_the_directional_perp_demo_still_omits_collateral_token below fails if the
-# demo is repaired, so this copy cannot silently rot into a fiction.
-_DIRECTIONAL_PERP_DEMO_DETAILS = {"market": "ETH/USD", "side": "long", "size_usd": "10"}
+# An UNDER-DESCRIBED perp row: market + side, no collateral under ANY alias.
+#
+# This was a hand-copy of ``gmx_v2_directional_perp.get_open_positions`` until
+# VIB-6316 repaired that demo to name its collateral. It is kept as a SYNTHETIC
+# fixture — the A2 split it produces is a property of under-described rows in
+# general, not of one demo, and nothing in the framework compels a strategy to
+# name its collateral. ``test_the_directional_perp_demo_now_names_its_collateral``
+# below pins the repair from the other side, so this constant no longer claims to
+# mirror anything and cannot rot into a fiction.
+_UNDERDESCRIBED_PERP_DETAILS = {"market": "ETH/USD", "side": "long", "size_usd": "10"}
 
 
 def _hot_summary(details: dict) -> TeardownPositionSummary:
@@ -1003,7 +1027,7 @@ def test_a_perp_row_without_collateral_cannot_collapse_against_its_own_registry_
     This is a live defect, not a restart edge case: no ``kill -9``, no wiped
     state, no unresolvable wallet, no synthetic input.
     """
-    assert _union_size(_DIRECTIONAL_PERP_DEMO_DETAILS) == 2, (
+    assert _union_size(_UNDERDESCRIBED_PERP_DETAILS) == 2, (
         "the shipped demo's row shape now collapses — if the demo was repaired, "
         "delete this test and its xfail sibling rather than weakening them"
     )
@@ -1013,43 +1037,38 @@ def test_a_perp_row_without_collateral_cannot_collapse_against_its_own_registry_
     )
 
 
-def test_the_directional_perp_demo_still_omits_collateral_token():
-    """Bind the fixture above to its subject, so it cannot rot into a fiction.
+def test_the_directional_perp_demo_now_names_its_collateral():
+    """The root-cause repair, pinned from the producer side (VIB-6316).
 
-    ``_DIRECTIONAL_PERP_DEMO_DETAILS`` is a hand-copy of the demo's real details
-    dict. If someone repairs the demo (the recommended root-cause fix — the gate
-    should not depend on strategy-authoring discipline) this fails loudly and
-    points at the copy, instead of leaving a test that passes against a shape
-    nothing emits any more.
+    This test previously asserted the OPPOSITE — that the demo still omitted
+    collateral — as a tripwire so the repair could not land without re-evaluating
+    the A2 fixtures. The repair has landed and the fixtures were re-evaluated
+    (they are now explicitly synthetic), so the assertion is INVERTED rather than
+    deleted: the demo must not regress to the shape that made one physical
+    position enumerate twice.
+
+    Checks EVERY name the hook accepts, not just ``collateral_token``. The hook
+    reads ``_COLLATERAL_KEYS = ("collateral_address", "collateral_token")`` and the
+    sibling demo ``gmx_perp_lifecycle`` writes the address form, so a
+    ``collateral_token``-only assertion would go green on a demo that had been
+    "repaired" into a form the hook cannot read. Imported from the hook rather than
+    re-typed so a new alias cannot slip past.
     """
     import inspect
 
     from almanak.connectors.gmx_v2.perp_identity import _COLLATERAL_KEYS
     from almanak.demo_strategies.gmx_v2_directional_perp.strategy import GmxV2DirectionalPerp
 
-    # Check EVERY name the hook accepts for collateral, not just `collateral_token`.
-    # The hook reads `_COLLATERAL_KEYS = ("collateral_address", "collateral_token")`, and
-    # the sibling demo `gmx_perp_lifecycle` already writes the address form — so repairing
-    # this demo the idiomatic way would leave a `collateral_token`-only check green while
-    # the union silently collapses 2 -> 1, rotting the fixture into a fiction. Imported
-    # from the hook rather than re-typed so a new alias cannot slip past this guard.
     src = inspect.getsource(GmxV2DirectionalPerp.get_open_positions)
     written = [key for key in _COLLATERAL_KEYS if key in src]
-    assert not written, (
-        f"gmx_v2_directional_perp.get_open_positions now writes {written} — the "
-        "A2 union split is fixed at its root. Update _DIRECTIONAL_PERP_DEMO_DETAILS and "
-        "re-evaluate both A2 tests; do not simply delete this assertion."
+    assert written, (
+        "gmx_v2_directional_perp.get_open_positions names no collateral under any alias "
+        f"the identity hook accepts ({list(_COLLATERAL_KEYS)}). Without it the row derives "
+        "no venue key, falls through to its raw position_id, and one physical position "
+        "enumerates twice — mainnet R5 reported positions_total=2 for a single ETH/USD long."
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="VIB-6316 + the _covers_perp widening are a TRIPLE and none of it has landed: "
-    "_covers_perp still matches only on raw `market`, and _perp_carries_identity is still "
-    "wallet-blind, so the VIB-5494 Item-2 guard rejects the registry row once the union "
-    "carries two PERP rows. Flips green when all three land together — and asserts the "
-    "wallet is load-bearing, since check_intent_coverage takes no wallet resolver today.",
-)
 def test_a2_union_split_is_covered_by_a_single_symbol_space_close():
     """END-TO-END for shape A2 — the control that pins the THIRD change.
 
@@ -1061,14 +1080,37 @@ def test_a2_union_split_is_covered_by_a_single_symbol_space_close():
 
     No other test in this file exercises that interaction, which is why a fix
     shipped without this one would look green and be half-dead.
+
+    Was a strict xfail reading "VIB-6316 + the _covers_perp widening are a TRIPLE
+    and none of it has landed". All three have now landed together, and this is
+    the shape R5 reproduced on mainnet — see
+    ``test_completeness_venue_identity_vib6316.py`` for the per-leg revert
+    controls and the production call-site assertions.
     """
     merged = reconcile_lp_with_registry(
-        strategy_summary=_hot_summary(_DIRECTIONAL_PERP_DEMO_DETAILS),
+        strategy_summary=_hot_summary(_UNDERDESCRIBED_PERP_DETAILS),
         registry_positions=[_registry_row()],
         registry_available=True,
         wallet_for_chain=lambda _chain: WALLET,
     )
     assert len(merged.positions) == 2, "precondition: the A2 union must not collapse"
 
-    report = check_intent_coverage(merged.positions, [_CloseIntent("ETH/USD")])
+    report = check_intent_coverage(merged.positions, [_CloseIntent("ETH/USD")], wallet_for_chain=lambda _chain: WALLET)
     assert report.complete, f"uncovered after a full close: {report.uncovered}"
+
+
+def test_a2_union_split_without_a_wallet_is_the_r5_mainnet_failure():
+    """The R5 mainnet result, pinned as a unit test.
+
+    This exact configuration — the shipped demo's 2-row union and one full close,
+    no wallet resolver — is what reported ``failed (closed=1, failed=1)`` on
+    arbitrum on 2026-08-02 while TD-08 chain-confirmed 2/2 CLOSED. Kept so the
+    test above is evidence about the fix rather than about the fixture.
+    """
+    merged = reconcile_lp_with_registry(
+        strategy_summary=_hot_summary(_UNDERDESCRIBED_PERP_DETAILS),
+        registry_positions=[_registry_row()],
+        registry_available=True,
+        wallet_for_chain=lambda _chain: WALLET,
+    )
+    assert not check_intent_coverage(merged.positions, [_CloseIntent("ETH/USD")]).complete

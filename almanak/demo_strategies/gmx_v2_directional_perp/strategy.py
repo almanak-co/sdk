@@ -420,7 +420,20 @@ class GmxV2DirectionalPerp(IntentStrategy):
                     protocol="gmx_v2",
                     value_usd=Decimal("0"),
                     details={
+                        # ``collateral_token`` is REQUIRED for this row to name its
+                        # position (VIB-6316). ``gmx_v2_perp_identity`` derives the
+                        # venue key from market + collateral + side, resolving each
+                        # symbol through the connector catalogue; without collateral
+                        # it derives nothing, the row falls through to its raw
+                        # ``position_id``, and the SAME physical position enumerates
+                        # twice — once here and once as the registry's bytes32 key.
+                        # Measured on mainnet before this was added: a single ETH/USD
+                        # long reported positions_total=2, positions_closed=2.
+                        # ``generate_teardown_intents`` below already supplies it, so
+                        # omitting it here was an asymmetry between the two halves of
+                        # one strategy, not a deliberate shape.
                         "market": self.market,
+                        "collateral_token": self.collateral_token,
                         "side": self._position_side,
                         "size_usd": str(self.position_size_usd),
                     },
