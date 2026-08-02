@@ -9264,6 +9264,7 @@ class StrategyRunner:
         on the existing fast path.
         """
         if not self._require_terminal_async_settlement:
+            await self._fill_async_orders_on_managed_anvil(state)
             return None
         execution_result = state.last_execution_result
         if execution_result is None:
@@ -9328,6 +9329,120 @@ class StrategyRunner:
             deployment_id=state.deployment_id,
             duration_ms=self._calculate_duration_ms(state.start_time),
             async_settlement=settlement,
+        )
+
+    async def _fill_async_orders_on_managed_anvil(self, state: SingleChainExecutionState) -> None:
+        """Drive the managed-Anvil keeper on the production lane — fill, never block.
+
+        A fork has no GMX keeper, so a ``PERP_OPEN`` submitted on managed Anvil
+        sits pending until it is cancelled. Until VIB-6288 the only code that
+        ran the replacement keeper was the barrier above, gated behind
+        ``_require_terminal_async_settlement`` — a flag set only by
+        ``almanak strat test``. So ``strat run --network anvil`` could never
+        hold a perp, and every Anvil GMX checkpoint was green against a wallet
+        that never had a position.
+
+        This restores the fill without restoring the barrier: the barrier turns
+        a non-terminal settlement into ``ASYNC_SETTLEMENT_FAILED``, and
+        production must not do that (accounting is written and state persisted
+        before the keeper settles). This method asks the keeper to run and
+        adopts the receipts if it succeeded.
+
+        Two limits on that, both stated precisely because an earlier version of
+        this docstring claimed the absolutes and a reviewer disproved both:
+
+        * **It does not fail an iteration ON A SETTLEMENT OUTCOME** — every
+          barrier status, and any exception from ``await_async_settlement``,
+          returns ``None``. It is NOT true that nothing here can raise:
+          ``_single_chain_enrich_execution_result`` sits outside that ``try``
+          and deliberately re-raises ``CriticalAccountingError`` (VIB-3180), so
+          a keeper receipt the parser rejects becomes ``ACCOUNTING_FAILED``.
+          That is the repo's fail-closed accounting policy and is symmetric
+          with the barrier lane above — it is intended, not an escape.
+        * **It DOES wait.** Up to the connector's settlement timeout, which is
+          360s for GMX (``gmx_v2/runner_hooks.py:async_settlement_policy``);
+          the E2E measured 37s, which is the happy path, not the bound. On
+          Anvil only, and only for a connector declaring
+          ``supports_local_order_execution``. A stuck fork therefore stalls
+          each iteration, and a teardown signal waits with it because
+          ``_check_teardown_requested`` runs at the top of the next iteration.
+
+        Scope, deliberately: **the open side only.** The teardown lane already
+        reaches the same keeper ungated via
+        ``teardown/runner_helpers.py:_await_teardown_intent_settlement``, so
+        closes on Anvil already fill. VIB-6288's stated cause — "exactly one
+        caller" — was true when filed and stopped being true in #3511.
+
+        Mainnet is a strict no-op, guarded three deep:
+
+        1. the ``_gateway_network != "anvil"`` check below, which returns before
+           anything else runs. Its one writer is ``cli/_run_components.py``, fed
+           by ``resolve_network``, which returns ``MAINNET`` unconditionally when
+           ``not is_local()``; strategy code cannot set it;
+        2. ``anvil_order_executor.py`` (``… != "anvil"`` → structural refusal),
+           the CONNECTOR-level check. Note this is not
+           ``await_async_settlement``'s anvil branch — an earlier version of
+           this docstring named that one, and it is not a guard at all: for a
+           non-anvil network it does not refuse, it falls through to
+           ``_poll_until_settled`` and blocks for the full timeout;
+        3. the gateway's ``network == "anvil"`` method allowlist, which rejects
+           ``anvil_impersonateAccount`` / ``anvil_setBalance`` /
+           ``eth_sendTransaction`` on mainnet.
+
+        The measured network is FORWARDED rather than passed as the literal
+        ``"anvil"``. The literal would launder a non-Anvil network into an
+        Anvil-shaped argument if guard 1 were ever weakened, which is exactly
+        what guard 2 exists to catch.
+        """
+        network = str(getattr(state.strategy, "_gateway_network", "") or "")
+        if network.lower() != "anvil":
+            return
+        execution_result = state.last_execution_result
+        if execution_result is None:
+            return
+        orders = tuple(getattr(execution_result, "async_orders", ()) or ())
+        if not orders:
+            return
+        gateway_client = state.gateway_client or self._get_gateway_client()
+        if gateway_client is None:
+            logger.warning(
+                "Managed-Anvil keeper skipped for %s: no gateway client; async orders stay pending",
+                state.deployment_id,
+            )
+            return
+
+        from .async_settlement import await_async_settlement
+
+        strategy = state.strategy
+        try:
+            barrier = await await_async_settlement(
+                gateway_client=gateway_client,
+                chain=getattr(strategy, "chain", "") or getattr(state.last_execution_context, "chain", ""),
+                wallet_address=getattr(strategy, "wallet_address", "") or "",
+                network=network,
+                orders=orders,
+                intent=state.intent,
+                timeout_seconds=self.config.async_settlement_timeout_seconds,
+                poll_interval_seconds=self.config.async_settlement_poll_interval_seconds,
+            )
+        except Exception:  # noqa: BLE001 — a fork-only convenience must never fail production
+            logger.exception(
+                "Managed-Anvil keeper raised for %s; the order stays pending and the iteration continues",
+                state.deployment_id,
+            )
+            return
+
+        if barrier.terminal and barrier.status.value == "SETTLED":
+            if barrier.receipts:
+                self._append_settlement_receipts(execution_result, barrier.receipts)
+                self._single_chain_enrich_execution_result(state, additional_receipts=barrier.receipts)
+            logger.info("Managed-Anvil keeper filled %d async order(s) for %s", len(orders), state.deployment_id)
+            return
+        logger.warning(
+            "Managed-Anvil keeper did not fill async orders for %s: status=%s reason=%s",
+            state.deployment_id,
+            barrier.status.value,
+            barrier.reason,
         )
 
     async def _single_chain_slippage_guard(self, state: SingleChainExecutionState) -> IterationResult | None:
