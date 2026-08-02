@@ -929,3 +929,146 @@ def test_the_multi_alias_proof_gate_is_not_vacuous():
     finally:
         _pi._REGISTRY.pop(slug, None)
     assert slug not in registered_perp_identity_protocols()
+
+
+# ---------------------------------------------------------------------------
+# Shape A2 — the union split that is LIVE in a shipped demo, no restart needed.
+#
+# R3 (mainnet, 2026-08-02) passed its teardown because the strategy under test
+# writes ``collateral_token`` into its position details, so its HOT row and the
+# WARM registry row both emitted ``{key, sem}``, intersected, and COLLAPSED to one
+# row. That collapse is what hid the registry row from the completeness gate.
+#
+# The collapse is CONDITIONAL. ``gmx_v2_directional_perp`` — a shipped demo —
+# omits ``collateral_token`` from ``get_open_positions()`` while its own
+# ``generate_teardown_intents()`` supplies it. Its row therefore emits no venue
+# token at all, cannot intersect, and the union does NOT collapse: two rows for
+# one physical position, which is exactly what VIB-6287 exists to prevent.
+#
+# Why this lives here rather than in an on-chain run: TEST-PLAN §4 measurement 1
+# ("one physical position must enumerate as one") is the right check, but R3 ran
+# it against the one strategy that STRUCTURALLY CANNOT FAIL IT. The measurement
+# was sound; the subject was blind. This pins it for free.
+# ---------------------------------------------------------------------------
+
+# Mirrors almanak/demo_strategies/gmx_v2_directional_perp/strategy.py:410-432.
+# _test_the_directional_perp_demo_still_omits_collateral_token below fails if the
+# demo is repaired, so this copy cannot silently rot into a fiction.
+_DIRECTIONAL_PERP_DEMO_DETAILS = {"market": "ETH/USD", "side": "long", "size_usd": "10"}
+
+
+def _hot_summary(details: dict) -> TeardownPositionSummary:
+    """One strategy-reported (HOT) perp row carrying ``details``."""
+    return TeardownPositionSummary(
+        deployment_id="deployment:86f4562d5b6c",
+        timestamp=datetime.now(UTC),
+        positions=[
+            PositionInfo(
+                position_type=PositionType.PERP,
+                position_id="gmx-v2-ETH/USD-long",
+                chain=CHAIN,
+                protocol="gmx_v2",
+                value_usd=Decimal("10"),
+                details=details,
+            )
+        ],
+    )
+
+
+def _union_size(details: dict) -> int:
+    """Enumerated position count for a HOT row of ``details`` + R3's real WARM row."""
+    merged = reconcile_lp_with_registry(
+        strategy_summary=_hot_summary(details),
+        registry_positions=[_registry_row()],
+        registry_available=True,
+        wallet_for_chain=lambda _chain: WALLET,
+    )
+    return len(merged.positions)
+
+
+def test_a_perp_row_without_collateral_cannot_collapse_against_its_own_registry_row():
+    """THE MECHANISM. Collateral in the HOT details is what makes the union collapse.
+
+    Both rows describe the SAME physical position and the wallet is fully
+    resolved. The two detail dicts below differ in more than one way (symbol vs
+    address ``market``, ``side`` vs ``is_long``, ``size_usd``), but collateral is
+    the axis that decides: isolating it,
+    ``{market: 'ETH/USD', collateral_token: USDC, side: 'long', size_usd}``
+    collapses to 1, while ``{market: <addr>, is_long: True}`` stays at 2. The
+    GMX hook needs market AND collateral AND side to
+    emit ``sem`` (``gmx_v2/perp_identity.py``), so a row missing collateral emits
+    no venue token, cannot intersect the registry row's ``{key, sem}``, and
+    survives as a second row.
+
+    This is a live defect, not a restart edge case: no ``kill -9``, no wiped
+    state, no unresolvable wallet, no synthetic input.
+    """
+    assert _union_size(_DIRECTIONAL_PERP_DEMO_DETAILS) == 2, (
+        "the shipped demo's row shape now collapses — if the demo was repaired, "
+        "delete this test and its xfail sibling rather than weakening them"
+    )
+    assert _union_size({"market": MARKET, "collateral_token": USDC, "is_long": True}) == 1, (
+        "a collateral-carrying row must still collapse to one; if this fails the "
+        "regression is in _dedupe_keys, not in the demo"
+    )
+
+
+def test_the_directional_perp_demo_still_omits_collateral_token():
+    """Bind the fixture above to its subject, so it cannot rot into a fiction.
+
+    ``_DIRECTIONAL_PERP_DEMO_DETAILS`` is a hand-copy of the demo's real details
+    dict. If someone repairs the demo (the recommended root-cause fix — the gate
+    should not depend on strategy-authoring discipline) this fails loudly and
+    points at the copy, instead of leaving a test that passes against a shape
+    nothing emits any more.
+    """
+    import inspect
+
+    from almanak.connectors.gmx_v2.perp_identity import _COLLATERAL_KEYS
+    from almanak.demo_strategies.gmx_v2_directional_perp.strategy import GmxV2DirectionalPerp
+
+    # Check EVERY name the hook accepts for collateral, not just `collateral_token`.
+    # The hook reads `_COLLATERAL_KEYS = ("collateral_address", "collateral_token")`, and
+    # the sibling demo `gmx_perp_lifecycle` already writes the address form — so repairing
+    # this demo the idiomatic way would leave a `collateral_token`-only check green while
+    # the union silently collapses 2 -> 1, rotting the fixture into a fiction. Imported
+    # from the hook rather than re-typed so a new alias cannot slip past this guard.
+    src = inspect.getsource(GmxV2DirectionalPerp.get_open_positions)
+    written = [key for key in _COLLATERAL_KEYS if key in src]
+    assert not written, (
+        f"gmx_v2_directional_perp.get_open_positions now writes {written} — the "
+        "A2 union split is fixed at its root. Update _DIRECTIONAL_PERP_DEMO_DETAILS and "
+        "re-evaluate both A2 tests; do not simply delete this assertion."
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="VIB-6316 + the _covers_perp widening are a TRIPLE and none of it has landed: "
+    "_covers_perp still matches only on raw `market`, and _perp_carries_identity is still "
+    "wallet-blind, so the VIB-5494 Item-2 guard rejects the registry row once the union "
+    "carries two PERP rows. Flips green when all three land together — and asserts the "
+    "wallet is load-bearing, since check_intent_coverage takes no wallet resolver today.",
+)
+def test_a2_union_split_is_covered_by_a_single_symbol_space_close():
+    """END-TO-END for shape A2 — the control that pins the THIRD change.
+
+    One physical position enumerated as two rows, closed by one symbol-space
+    ``PERP_CLOSE``. Coverage must credit both. Reverting EITHER the ``_covers_perp``
+    widening OR the ``_perp_carries_identity`` wallet threading must re-break this:
+    the widening alone gets the registry row past ``_covers`` but not past the
+    Item-2 disambiguation guard, and the wallet alone never reaches the widening.
+
+    No other test in this file exercises that interaction, which is why a fix
+    shipped without this one would look green and be half-dead.
+    """
+    merged = reconcile_lp_with_registry(
+        strategy_summary=_hot_summary(_DIRECTIONAL_PERP_DEMO_DETAILS),
+        registry_positions=[_registry_row()],
+        registry_available=True,
+        wallet_for_chain=lambda _chain: WALLET,
+    )
+    assert len(merged.positions) == 2, "precondition: the A2 union must not collapse"
+
+    report = check_intent_coverage(merged.positions, [_CloseIntent("ETH/USD")])
+    assert report.complete, f"uncovered after a full close: {report.uncovered}"
