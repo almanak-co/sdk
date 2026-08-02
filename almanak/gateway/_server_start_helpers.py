@@ -235,8 +235,19 @@ def initialize_timeline_store(settings: GatewaySettings, timeline_factory: Any) 
     that tests patch).
     """
     if settings.database_url:
-        timeline_factory(database_url=settings.database_url)
-        logger.debug("TimelineStore initialized with PostgreSQL backend")
+        from almanak.framework.deployment.mode import deployment_id, is_hosted
+
+        # Hosted gateways serve exactly one deployment but share the
+        # platform-wide metrics DB; scope the startup load so boot memory
+        # and network transfer track THIS deployment's history, not the
+        # whole platform's (August 2026 Cloud NAT incident).
+        scope = deployment_id() if is_hosted() else None
+        timeline_factory(
+            database_url=settings.database_url,
+            scope_deployment_id=scope,
+            startup_load_limit=settings.timeline_startup_load_limit,
+        )
+        logger.debug("TimelineStore initialized with PostgreSQL backend (scope=%s)", scope or "unscoped")
     else:
         effective_timeline_db = settings.timeline_db_path or settings.gateway_db_path
         timeline_factory(db_path=effective_timeline_db)

@@ -141,10 +141,19 @@ class TimelineStore:
         events = store.get_events("my-strategy", limit=50)
     """
 
+    # Deadline for the truncated-history Postgres fallback in get_events.
+    # Must stay well under GatewaySettings.timeout (30s, the gRPC client
+    # deadline for GetTimeline/GetActivityFeed): a degraded DB has to fail
+    # fast enough that degradation to the cached page happens INSIDE the
+    # client budget, not as the caller's DEADLINE_EXCEEDED (PR 3560 review).
+    HISTORY_FALLBACK_TIMEOUT_SECONDS: float = 5.0
+
     def __init__(
         self,
         db_path: str | Path | None = None,
         database_url: str | None = None,
+        scope_deployment_id: str | None = None,
+        startup_load_limit: int = 10000,
     ):
         """Initialize the timeline store.
 
@@ -152,9 +161,33 @@ class TimelineStore:
             db_path: Path to SQLite database file (local development).
             database_url: PostgreSQL connection URL (deployed mode).
                 If both are provided, database_url takes precedence.
+            scope_deployment_id: When set, the Postgres startup load fetches
+                only this deployment's events. Hosted gateways serve exactly
+                one deployment but share the platform-wide metrics DB, so an
+                unscoped load scales with every deployment's history — not
+                this pod's.
+            startup_load_limit: Hard row cap on the Postgres startup load
+                (newest first). Bounds boot memory even if the scoped
+                history itself grows without bound.
         """
         self._db_path = Path(db_path) if db_path else None
         self._database_url = database_url
+        self._scope_deployment_id = scope_deployment_id
+        if startup_load_limit <= 0:
+            # GatewaySettings sanitizes its field the same way; this guard
+            # covers direct constructor callers so a bad value can't boot
+            # an empty-cache gateway (PR 3560 review).
+            logger.warning(
+                "startup_load_limit must be > 0 (got %d); using default 10000",
+                startup_load_limit,
+            )
+            startup_load_limit = 10000
+        self._startup_load_limit = startup_load_limit
+        # Set when the boot load hit the row cap: rows older than
+        # ``_pg_cache_floor`` may exist only in PostgreSQL, so cache-served
+        # reads that could reach below the floor must fall back to the DB.
+        self._pg_history_truncated = False
+        self._pg_cache_floor: datetime | None = None
         self._lock = threading.RLock()
         self._cache: dict[str, list[TimelineEvent]] = defaultdict(list)
         self._initialized = False
@@ -306,11 +339,19 @@ class TimelineStore:
             )
             return row is not None
 
-    def _pg_submit(self, coro: Any) -> Any:
-        """Submit coroutine to the background event loop and wait for result."""
+    def _pg_submit(self, coro: Any, timeout: float = 30) -> Any:
+        """Submit coroutine to the background event loop and wait for result.
+
+        On timeout the in-flight future is cancelled (best-effort) so an
+        abandoned query does not keep loading the DB behind the caller's back.
+        """
         assert self._pg_loop is not None, "PostgreSQL event loop not initialized"
         future = asyncio.run_coroutine_threadsafe(coro, self._pg_loop)
-        return future.result(timeout=30)
+        try:
+            return future.result(timeout=timeout)
+        except TimeoutError:
+            future.cancel()
+            raise
 
     def _load_from_postgres(self) -> None:
         """Load events from PostgreSQL into the in-memory cache.
@@ -325,65 +366,119 @@ class TimelineStore:
                 # Cache key = deployment_id from PostgreSQL (canonical id)
                 self._cache[event.deployment_id].append(event)
             if events:
-                logger.info(f"Loaded {len(events)} timeline events from PostgreSQL")
+                scope = self._scope_deployment_id or "ALL deployments"
+                logger.info(f"Loaded {len(events)} timeline events from PostgreSQL (scope={scope})")
+            if len(events) >= self._startup_load_limit:
+                self._pg_history_truncated = True
+                self._pg_cache_floor = min(e.timestamp for e in events)
+                logger.warning(
+                    "Timeline startup load hit the %d-row cap; reads that reach "
+                    "past the cached window fall back to Postgres on demand",
+                    self._startup_load_limit,
+                )
         except Exception:
             logger.exception("Failed to load timeline events from PostgreSQL")
 
-    # crap-allowlist: Postgres-only path; unit tests exercise SQLite store.
-    # PR2 (VIB-4041) added the conditional `related_select` for the typed
-    # column round-trip; the underlying CC=10 was already over-threshold
-    # against unit-test coverage. Postgres path is covered by hosted
-    # integration runs (the column-presence introspect is verified via
-    # `_async_detect_related_ledger_column` log lines at gateway boot).
-    async def _async_load_events(self) -> list[TimelineEvent]:
-        assert self._pg_pool is not None
+    def _pg_select_clause(self) -> str:
+        """SELECT projection shared by the boot load and history reads."""
         related_select = (
             ", COALESCE(related_ledger_entry_id, '') as related_ledger_entry_id"
             if self._pg_supports_related_ledger
             else ""
         )
-        async with self._pg_pool.acquire() as conn:
-            rows = await conn.fetch(
-                f"""
+        return f"""
                 SELECT event_id, deployment_id, timestamp, event_type,
                        description, tx_hash, chain, details_json,
                        COALESCE(cycle_id, '') as cycle_id,
                        COALESCE(phase, '') as phase
                        {related_select}
                 FROM timeline_events
-                ORDER BY timestamp DESC
                 """
-            )
-            events = []
-            for row in rows:
-                details = {}
-                if row["details_json"]:
-                    if isinstance(row["details_json"], str):
-                        try:
-                            details = json.loads(row["details_json"])
-                        except json.JSONDecodeError:
-                            pass
-                    elif isinstance(row["details_json"], dict):
-                        details = row["details_json"]
 
-                events.append(
-                    TimelineEvent(
-                        event_id=row["event_id"],
-                        deployment_id=row["deployment_id"],
-                        timestamp=row["timestamp"],
-                        event_type=row["event_type"],
-                        description=row["description"] or "",
-                        tx_hash=row["tx_hash"],
-                        chain=row["chain"],
-                        details=details,
-                        cycle_id=row["cycle_id"],
-                        phase=row["phase"],
-                        related_ledger_entry_id=(
-                            row["related_ledger_entry_id"] if self._pg_supports_related_ledger else ""
-                        ),
-                    )
-                )
-            return events
+    def _row_to_event(self, row: Any) -> TimelineEvent:
+        """Map a timeline_events row to a TimelineEvent."""
+        details = {}
+        if row["details_json"]:
+            if isinstance(row["details_json"], str):
+                try:
+                    details = json.loads(row["details_json"])
+                except json.JSONDecodeError:
+                    pass
+            elif isinstance(row["details_json"], dict):
+                details = row["details_json"]
+
+        return TimelineEvent(
+            event_id=row["event_id"],
+            deployment_id=row["deployment_id"],
+            timestamp=row["timestamp"],
+            event_type=row["event_type"],
+            description=row["description"] or "",
+            tx_hash=row["tx_hash"],
+            chain=row["chain"],
+            details=details,
+            cycle_id=row["cycle_id"],
+            phase=row["phase"],
+            related_ledger_entry_id=(row["related_ledger_entry_id"] if self._pg_supports_related_ledger else ""),
+        )
+
+    async def _async_load_events(self) -> list[TimelineEvent]:
+        assert self._pg_pool is not None
+        # The metrics DB is shared platform-wide: without the deployment
+        # scope this query transfers every deployment's history into one
+        # sidecar's memory (August 2026 NAT-cost incident). LIMIT bounds
+        # boot memory even for a single long-lived deployment.
+        scope_where = "WHERE deployment_id = $1" if self._scope_deployment_id else ""
+        args: list[Any] = [self._scope_deployment_id] if self._scope_deployment_id else []
+        limit_param = f"${len(args) + 1}"
+        args.append(self._startup_load_limit)
+        async with self._pg_pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"""
+                {self._pg_select_clause()}
+                {scope_where}
+                ORDER BY timestamp DESC
+                LIMIT {limit_param}
+                """,
+                *args,
+            )
+            return [self._row_to_event(row) for row in rows]
+
+    async def _async_fetch_events(
+        self,
+        deployment_id: str,
+        limit: int,
+        event_type: str | None,
+        since: datetime | None,
+        before: datetime | None,
+    ) -> list[TimelineEvent]:
+        """Scoped, filtered history read — the fallback when a page may
+        extend past the truncated boot cache (PR 3560 review). Served by
+        idx_timeline_events_deployment_time on hosted Postgres."""
+        assert self._pg_pool is not None
+        clauses = ["deployment_id = $1"]
+        args: list[Any] = [deployment_id]
+        if event_type is not None:
+            args.append(event_type)
+            clauses.append(f"event_type = ${len(args)}")
+        if since is not None:
+            args.append(since)
+            clauses.append(f"timestamp > ${len(args)}")
+        if before is not None:
+            args.append(before)
+            clauses.append(f"timestamp < ${len(args)}")
+        args.append(limit)
+        limit_param = f"${len(args)}"
+        async with self._pg_pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"""
+                {self._pg_select_clause()}
+                WHERE {" AND ".join(clauses)}
+                ORDER BY timestamp DESC
+                LIMIT {limit_param}
+                """,
+                *args,
+            )
+            return [self._row_to_event(row) for row in rows]
 
     def _persist_event_postgres(self, event: TimelineEvent, resolved_id: str) -> None:
         """Persist event to PostgreSQL under the canonical deployment_id."""
@@ -690,7 +785,28 @@ class TimelineStore:
                 events = [e for e in events if e.timestamp < before]
 
             # Apply limit
-            return events[:limit]
+            page = events[:limit]
+
+        # Truncated boot cache: a short page whose window is not fully inside
+        # the cached range may be missing rows that exist only in PostgreSQL
+        # (PR 3560 review — a `before` cursor older than the cache floor used
+        # to return an empty page). Read the authoritative page from the DB,
+        # outside the lock so a slow DB cannot stall writers.
+        if (
+            self._pg_history_truncated
+            and self._pg_cache_floor is not None
+            and len(page) < limit
+            and (since is None or since < self._pg_cache_floor)
+        ):
+            try:
+                return self._pg_submit(
+                    self._async_fetch_events(deployment_id, limit, event_type, since, before),
+                    timeout=self.HISTORY_FALLBACK_TIMEOUT_SECONDS,
+                )
+            except Exception:
+                logger.exception("Postgres history read failed; serving the cached page")
+
+        return page
 
     def get_recent_events(
         self,
@@ -787,6 +903,8 @@ _timeline_store: TimelineStore | None = None
 def get_timeline_store(
     db_path: str | Path | None = None,
     database_url: str | None = None,
+    scope_deployment_id: str | None = None,
+    startup_load_limit: int = 10000,
 ) -> TimelineStore:
     """Get the default timeline store (singleton).
 
@@ -795,13 +913,22 @@ def get_timeline_store(
             Only used on first call.
         database_url: PostgreSQL connection URL (deployed mode).
             Only used on first call. Takes precedence over db_path.
+        scope_deployment_id: Scope the Postgres startup load to one
+            deployment (hosted mode). Only used on first call.
+        startup_load_limit: Row cap for the Postgres startup load.
+            Only used on first call.
 
     Returns:
         Shared TimelineStore instance.
     """
     global _timeline_store
     if _timeline_store is None:
-        _timeline_store = TimelineStore(db_path=db_path, database_url=database_url)
+        _timeline_store = TimelineStore(
+            db_path=db_path,
+            database_url=database_url,
+            scope_deployment_id=scope_deployment_id,
+            startup_load_limit=startup_load_limit,
+        )
         _timeline_store.initialize()
     return _timeline_store
 

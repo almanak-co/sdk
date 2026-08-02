@@ -11,12 +11,15 @@ Tests cover:
 - Deployed-mode identity pass-through
 """
 
+import logging
 import tempfile
 import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from uuid import uuid4
+
+import pytest
 
 from almanak.gateway.timeline.store import (
     TimelineEvent,
@@ -701,3 +704,349 @@ class TestTimelineStoreSingleton:
     def teardown_method(self):
         """Reset singleton after each test."""
         reset_timeline_store()
+
+
+class _FakePgPool:
+    """Capture the SQL and args _async_load_events sends to Postgres."""
+
+    def __init__(self):
+        self.queries: list[tuple[str, tuple]] = []
+
+    def acquire(self):
+        pool = self
+
+        class _Ctx:
+            async def __aenter__(self):
+                class _Conn:
+                    async def fetch(self, sql, *args):
+                        pool.queries.append((sql, args))
+                        return []
+
+                return _Conn()
+
+            async def __aexit__(self, *exc):
+                return False
+
+        return _Ctx()
+
+
+class TestTimelineStoreStartupLoadBounds:
+    """The Postgres startup load must be deployment-scoped and row-capped.
+
+    August 2026 Cloud NAT incident: the unscoped, unlimited SELECT loaded the
+    platform-wide timeline_events table (2.5M rows) into every gateway
+    sidecar at boot, OOM-crashlooping 55 dashboards which re-downloaded the
+    table every 5 minutes (~7 TiB/day of NAT traffic).
+    """
+
+    def _run_load(self, store: TimelineStore) -> tuple[str, tuple]:
+        import asyncio
+
+        pool = _FakePgPool()
+        store._pg_pool = pool  # type: ignore[assignment]
+        asyncio.run(store._async_load_events())
+        assert len(pool.queries) == 1
+        return pool.queries[0]
+
+    def test_scoped_load_filters_by_deployment_and_caps_rows(self):
+        store = TimelineStore(
+            database_url="postgres://fake:5432/test",
+            scope_deployment_id="dep-abc",
+            startup_load_limit=123,
+        )
+        sql, args = self._run_load(store)
+        assert "WHERE deployment_id = $1" in sql
+        assert "LIMIT $2" in sql
+        assert args == ("dep-abc", 123)
+
+    def test_unscoped_load_still_caps_rows(self):
+        store = TimelineStore(
+            database_url="postgres://fake:5432/test",
+            startup_load_limit=456,
+        )
+        sql, args = self._run_load(store)
+        assert "WHERE" not in sql
+        assert "LIMIT $1" in sql
+        assert args == (456,)
+
+
+class TestLoadFromPostgres:
+    """Branch coverage for the boot-cache hydration wrapper.
+
+    ``_load_from_postgres`` owns three behaviors the CRAP gate requires
+    pinned: cache keying by deployment_id, the truncation warning when the
+    startup cap is hit, and swallow-and-log on load failure (a broken
+    metrics DB must not stop the gateway from booting).
+    """
+
+    def _event(self, event_id: str, deployment_id: str) -> TimelineEvent:
+        return TimelineEvent(
+            event_id=event_id,
+            deployment_id=deployment_id,
+            timestamp=datetime.now(UTC),
+            event_type="TRADE",
+            description="Test",
+        )
+
+    def _store(self, **kwargs) -> TimelineStore:
+        store = TimelineStore(database_url="postgres://fake:5432/test", **kwargs)
+        # Mark initialized so cache reads don't trigger a real PG connect
+        # (same sentinel style as TestTimelineStoreIdentityKeying).
+        store._initialized = True
+        return store
+
+    def test_load_populates_cache_keyed_by_deployment_id(self):
+        store = self._store()
+        events = [self._event("e1", "dep-a"), self._event("e2", "dep-b"), self._event("e3", "dep-a")]
+        with patch.object(store, "_pg_submit", return_value=events):
+            store._load_from_postgres()
+        assert sorted(store.get_deployment_ids()) == ["dep-a", "dep-b"]
+        assert {e.event_id for e in store.get_events("dep-a")} == {"e1", "e3"}
+
+    def test_truncation_warning_when_cap_hit(self, caplog):
+        store = self._store(startup_load_limit=2)
+        events = [self._event("e1", "dep-a"), self._event("e2", "dep-a")]
+        with (
+            patch.object(store, "_pg_submit", return_value=events),
+            caplog.at_level(logging.WARNING, logger="almanak.gateway.timeline.store"),
+        ):
+            store._load_from_postgres()
+        assert any("cap" in r.getMessage() for r in caplog.records)
+
+    def test_no_truncation_warning_below_cap(self, caplog):
+        store = self._store(startup_load_limit=10)
+        with (
+            patch.object(store, "_pg_submit", return_value=[self._event("e1", "dep-a")]),
+            caplog.at_level(logging.WARNING, logger="almanak.gateway.timeline.store"),
+        ):
+            store._load_from_postgres()
+        assert not any("cap" in r.getMessage() for r in caplog.records)
+
+    def test_empty_load_logs_nothing_and_caches_nothing(self, caplog):
+        store = self._store()
+        with (
+            patch.object(store, "_pg_submit", return_value=[]),
+            caplog.at_level(logging.INFO, logger="almanak.gateway.timeline.store"),
+        ):
+            store._load_from_postgres()
+        assert store.get_deployment_ids() == []
+        assert not any("Loaded" in r.getMessage() for r in caplog.records)
+
+    def test_load_failure_is_swallowed(self):
+        store = self._store()
+        with patch.object(store, "_pg_submit", side_effect=RuntimeError("db down")):
+            store._load_from_postgres()  # must not raise — gateway still boots
+        assert store.get_deployment_ids() == []
+
+
+class TestTruncatedHistoryFallback:
+    """PR 3560 review (P1): capping the boot cache must not truncate reads.
+
+    When the startup load hit the row cap, pages that may extend past the
+    cached window fall back to a scoped, filtered PostgreSQL read; pages
+    fully inside the cached window keep being served from memory.
+    """
+
+    def _event(self, event_id: str, ts: datetime) -> TimelineEvent:
+        return TimelineEvent(
+            event_id=event_id,
+            deployment_id="dep-a",
+            timestamp=ts,
+            event_type="TRADE",
+            description="Test",
+        )
+
+    def _truncated_store(self, floor: datetime, cached: list[TimelineEvent]) -> TimelineStore:
+        store = TimelineStore(database_url="postgres://fake:5432/test")
+        store._initialized = True
+        store._pg_history_truncated = True
+        store._pg_cache_floor = floor
+        for e in cached:
+            store._cache[e.deployment_id].append(e)
+        return store
+
+    def test_cursor_below_floor_falls_back_to_postgres(self):
+        now = datetime.now(UTC)
+        floor = now - timedelta(hours=1)
+        store = self._truncated_store(floor, [self._event("cached", now)])
+        db_events = [self._event("from-db", now - timedelta(hours=5))]
+        with patch.object(store, "_pg_submit", return_value=db_events) as submit:
+            page = store.get_events("dep-a", limit=50, before=floor)
+        submit.assert_called_once()
+        # PR 3560 review: the fallback must fail well inside the 30s gRPC
+        # client deadline so degradation happens instead of DEADLINE_EXCEEDED.
+        # The 5.0 contract is pinned — changing the constant is a deliberate
+        # decision that must touch this test.
+        assert submit.call_args.kwargs["timeout"] == TimelineStore.HISTORY_FALLBACK_TIMEOUT_SECONDS
+        assert TimelineStore.HISTORY_FALLBACK_TIMEOUT_SECONDS == 5.0
+        assert [e.event_id for e in page] == ["from-db"]
+
+    def test_full_cache_page_does_not_touch_postgres(self):
+        now = datetime.now(UTC)
+        floor = now - timedelta(hours=1)
+        store = self._truncated_store(floor, [self._event(f"e{i}", now - timedelta(minutes=i)) for i in range(5)])
+        with patch.object(store, "_pg_submit") as submit:
+            page = store.get_events("dep-a", limit=5)
+        submit.assert_not_called()
+        assert len(page) == 5
+
+    def test_window_inside_cache_does_not_touch_postgres(self):
+        now = datetime.now(UTC)
+        floor = now - timedelta(hours=1)
+        store = self._truncated_store(floor, [self._event("cached", now)])
+        with patch.object(store, "_pg_submit") as submit:
+            page = store.get_events("dep-a", limit=50, since=floor)
+        submit.assert_not_called()
+        assert [e.event_id for e in page] == ["cached"]
+
+    def test_untruncated_store_never_falls_back(self):
+        store = TimelineStore(database_url="postgres://fake:5432/test")
+        store._initialized = True
+        with patch.object(store, "_pg_submit") as submit:
+            page = store.get_events("dep-a", limit=50)
+        submit.assert_not_called()
+        assert page == []
+
+    def test_postgres_failure_degrades_to_cached_page(self):
+        now = datetime.now(UTC)
+        floor = now - timedelta(hours=1)
+        store = self._truncated_store(floor, [self._event("cached", now)])
+        with patch.object(store, "_pg_submit", side_effect=RuntimeError("db down")):
+            page = store.get_events("dep-a", limit=50)
+        assert [e.event_id for e in page] == ["cached"]
+
+    def test_fetch_query_shape_all_filters(self):
+        import asyncio
+
+        store = TimelineStore(database_url="postgres://fake:5432/test")
+        pool = _FakePgPool()
+        store._pg_pool = pool
+        now = datetime.now(UTC)
+        asyncio.run(store._async_fetch_events("dep-a", 25, "TRADE", now - timedelta(days=1), now))
+        sql, args = pool.queries[0]
+        assert "WHERE deployment_id = $1 AND event_type = $2 AND timestamp > $3 AND timestamp < $4" in sql
+        assert "LIMIT $5" in sql
+        assert args == ("dep-a", "TRADE", now - timedelta(days=1), now, 25)
+
+    def test_fetch_query_shape_no_filters(self):
+        import asyncio
+
+        store = TimelineStore(database_url="postgres://fake:5432/test")
+        pool = _FakePgPool()
+        store._pg_pool = pool
+        asyncio.run(store._async_fetch_events("dep-a", 50, None, None, None))
+        sql, args = pool.queries[0]
+        assert "WHERE deployment_id = $1" in sql
+        # No other predicate: a second one would be joined with " AND ".
+        assert " AND " not in sql
+        assert "LIMIT $2" in sql
+        assert args == ("dep-a", 50)
+
+    def test_constructor_clamps_non_positive_limit(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="almanak.gateway.timeline.store"):
+            store = TimelineStore(database_url="postgres://fake:5432/test", startup_load_limit=0)
+        assert store._startup_load_limit == 10000
+        assert any("must be > 0" in r.getMessage() for r in caplog.records)
+
+
+class TestRowToEvent:
+    """Row mapping branches: details_json variants and the related-ledger gate."""
+
+    def _row(self, **overrides):
+        row = {
+            "event_id": "e1",
+            "deployment_id": "dep-a",
+            "timestamp": datetime.now(UTC),
+            "event_type": "TRADE",
+            "description": "Test",
+            "tx_hash": None,
+            "chain": None,
+            "details_json": None,
+            "cycle_id": "",
+            "phase": "",
+        }
+        row.update(overrides)
+        return row
+
+    def _store(self, supports_related: bool = False) -> TimelineStore:
+        store = TimelineStore(database_url="postgres://fake:5432/test")
+        store._pg_supports_related_ledger = supports_related
+        return store
+
+    def test_details_json_string(self):
+        event = self._store()._row_to_event(self._row(details_json='{"amount": "100"}'))
+        assert event.details == {"amount": "100"}
+
+    def test_details_json_invalid_string_ignored(self):
+        event = self._store()._row_to_event(self._row(details_json="not json"))
+        assert event.details == {}
+
+    def test_details_json_dict_passthrough(self):
+        event = self._store()._row_to_event(self._row(details_json={"k": "v"}))
+        assert event.details == {"k": "v"}
+
+    def test_details_json_none(self):
+        event = self._store()._row_to_event(self._row())
+        assert event.details == {}
+
+    def test_empty_description_normalized(self):
+        event = self._store()._row_to_event(self._row(description=None))
+        assert event.description == ""
+
+    def test_related_ledger_gated(self):
+        row = self._row(related_ledger_entry_id="ledger-7")
+        assert self._store(supports_related=True)._row_to_event(row).related_ledger_entry_id == "ledger-7"
+        assert self._store(supports_related=False)._row_to_event(row).related_ledger_entry_id == ""
+
+
+class TestPgSubmitTimeout:
+    """_pg_submit must honor its per-call timeout and cancel the abandoned
+    future so a slow query cannot keep loading the DB behind the caller."""
+
+    def _store_with_loop(self):
+        import asyncio as _asyncio
+
+        store = TimelineStore(database_url="postgres://fake:5432/test")
+        loop = _asyncio.new_event_loop()
+        thread = threading.Thread(target=loop.run_forever, daemon=True)
+        thread.start()
+        store._pg_loop = loop
+        return store, loop
+
+    def test_timeout_raises_against_real_loop(self):
+        import asyncio as _asyncio
+
+        store, loop = self._store_with_loop()
+        try:
+            with pytest.raises(TimeoutError):
+                store._pg_submit(_asyncio.sleep(30), timeout=0.05)
+        finally:
+            loop.call_soon_threadsafe(loop.stop)
+
+    def test_timeout_cancels_the_abandoned_future(self):
+        """Removing future.cancel() from _pg_submit must fail this test —
+        an abandoned query would otherwise keep loading the DB."""
+        store = TimelineStore(database_url="postgres://fake:5432/test")
+        store._pg_loop = MagicMock()
+        fake_future = MagicMock()
+        fake_future.result.side_effect = TimeoutError
+        with (
+            patch(
+                "almanak.gateway.timeline.store.asyncio.run_coroutine_threadsafe",
+                return_value=fake_future,
+            ),
+            pytest.raises(TimeoutError),
+        ):
+            store._pg_submit(MagicMock(), timeout=0.05)
+        fake_future.result.assert_called_once_with(timeout=0.05)
+        fake_future.cancel.assert_called_once()
+
+    def test_result_returned_within_timeout(self):
+        async def _quick():
+            return "ok"
+
+        store, loop = self._store_with_loop()
+        try:
+            assert store._pg_submit(_quick(), timeout=5) == "ok"
+        finally:
+            loop.call_soon_threadsafe(loop.stop)

@@ -376,7 +376,11 @@ class TestStorageBootstrap:
             )
             server = _make_server(settings)
             await server.start()
-        mocks["timeline_factory"].assert_called_once_with(database_url="postgres://x/y")
+        mocks["timeline_factory"].assert_called_once_with(
+            database_url="postgres://x/y",
+            scope_deployment_id="agent-test",
+            startup_load_limit=10000,
+        )
 
     @pytest.mark.asyncio
     async def test_timeline_store_sqlite_fallback(self, monkeypatch: pytest.MonkeyPatch) -> None:

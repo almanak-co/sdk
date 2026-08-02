@@ -314,6 +314,13 @@ class GatewaySettings(_GatewaySettingsBase):  # type: ignore[valid-type,misc]
     # If None (default), timeline events are stored in gateway_db_path.
     timeline_db_path: str | None = None
 
+    # Hard cap on timeline events loaded into the in-memory cache at boot.
+    # The Postgres metrics DB is shared across every hosted deployment; an
+    # uncapped load scales with platform-wide history and OOMs the sidecar
+    # (August 2026 Cloud NAT incident: 2Gi gateways crash-looping against a
+    # 2.5M-row table, re-downloading it every 5 minutes).
+    timeline_startup_load_limit: int = 10000
+
     # Alerting configuration
     slack_webhook_url: str | None = None
     telegram_bot_token: str | None = None
@@ -520,6 +527,27 @@ class GatewaySettings(_GatewaySettingsBase):  # type: ignore[valid-type,misc]
         }
         field_name = info.field_name or ""
         default = defaults[field_name]
+        if value is None or value == "":
+            return default
+        try:
+            parsed = int(value)  # type: ignore[call-overload]
+        except (TypeError, ValueError):
+            return default
+        if parsed <= 0:
+            return default
+        return parsed
+
+    @field_validator("timeline_startup_load_limit", mode="before")
+    @classmethod
+    def _validate_timeline_startup_load_limit(cls, value: object) -> int:
+        # PR 3560 review: the boot cap must be > 0. ``0`` would boot with an
+        # empty timeline cache while still warning about truncation; a
+        # negative value makes PostgreSQL reject the boot query, which
+        # ``_load_from_postgres`` swallows — an empty feed either way.
+        # Non-positive or malformed env values fall back to the default so
+        # a typo can't silently disable the cap (same contract as the
+        # history-cache cap validators above).
+        default = 10000
         if value is None or value == "":
             return default
         try:

@@ -288,6 +288,8 @@ class TestPostgresCapabilityGate:
         # When gate is True, the SELECT projection must include the column.
         store = TimelineStore.__new__(TimelineStore)
         store._pg_supports_related_ledger = True
+        store._scope_deployment_id = None
+        store._startup_load_limit = 10000
         conn = MagicMock()
         conn.fetch = AsyncMock(return_value=[])
         pool = MagicMock()

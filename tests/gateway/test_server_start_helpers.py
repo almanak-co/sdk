@@ -136,7 +136,31 @@ class TestInitializeTimelineStore:
             _settings(database_url="postgres://x/y"),
             factory,
         )
-        factory.assert_called_once_with(database_url="postgres://x/y")
+        factory.assert_called_once_with(
+            database_url="postgres://x/y",
+            scope_deployment_id=None,
+            startup_load_limit=10000,
+        )
+
+    def test_postgres_hosted_scopes_load_to_deployment(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Hosted gateways must not slurp the platform-wide timeline table.
+
+        The metrics DB is shared across every deployment; the startup load
+        must be scoped to this pod's ALMANAK_DEPLOYMENT_ID (August 2026
+        Cloud NAT incident: unscoped loads OOM-crashlooped 55 sidecars).
+        """
+        monkeypatch.setenv("ALMANAK_IS_HOSTED", "true")
+        monkeypatch.setenv("ALMANAK_DEPLOYMENT_ID", "dep-123")
+        factory = MagicMock()
+        initialize_timeline_store(
+            _settings(database_url="postgres://x/y", timeline_startup_load_limit=500),
+            factory,
+        )
+        factory.assert_called_once_with(
+            database_url="postgres://x/y",
+            scope_deployment_id="dep-123",
+            startup_load_limit=500,
+        )
 
     def test_sqlite_fallback_when_no_database_url(self) -> None:
         factory = MagicMock()
@@ -652,3 +676,33 @@ class TestAcquireLocalDbFlock:
         # Fallback fired (effective != resolved) ⇒ operational stores follow
         # the state backend onto the private session DB.
         assert s.gateway_db_path == str(session)
+
+
+# ---------------------------------------------------------------------------
+# timeline_startup_load_limit validation (PR 3560 review, P2)
+# ---------------------------------------------------------------------------
+class TestTimelineStartupLoadLimitValidation:
+    """Non-positive or malformed values fall back to the default (10000),
+    matching the history-cache cap validators: a typo must not boot a
+    gateway with an empty timeline cache or a Postgres-rejected query."""
+
+    def test_default(self) -> None:
+        assert _settings().timeline_startup_load_limit == 10000
+
+    def test_valid_override(self) -> None:
+        assert _settings(timeline_startup_load_limit=500).timeline_startup_load_limit == 500
+
+    def test_zero_falls_back_to_default(self) -> None:
+        assert _settings(timeline_startup_load_limit=0).timeline_startup_load_limit == 10000
+
+    def test_negative_falls_back_to_default(self) -> None:
+        assert _settings(timeline_startup_load_limit=-5).timeline_startup_load_limit == 10000
+
+    def test_malformed_falls_back_to_default(self) -> None:
+        assert _settings(timeline_startup_load_limit="junk").timeline_startup_load_limit == 10000
+
+    def test_env_var_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ALMANAK_GATEWAY_TIMELINE_STARTUP_LOAD_LIMIT", "0")
+        assert _settings().timeline_startup_load_limit == 10000
+        monkeypatch.setenv("ALMANAK_GATEWAY_TIMELINE_STARTUP_LOAD_LIMIT", "2500")
+        assert _settings().timeline_startup_load_limit == 2500
