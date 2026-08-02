@@ -311,15 +311,14 @@ def gmx_v2_perp_identity(position: Any, *, wallet_address: str | None) -> frozen
             # itself with the venue's own authoritative identity — it simply does not
             # also vouch for attributes nobody checked.
             #
-            # WHY NOT `frozenset()` HERE (and why the disagreement branch above is
-            # also wrong to use it): a refused row does NOT fall through to the raw
-            # `position_id`. `_dedupe_keys` is venue -> _IDENTITY_DEFAULTS -> raw id,
-            # so it lands on the MIDDLE rung and is re-named in the DEFAULT namespace,
-            # where it can no longer intersect any venue-named row. That manufactures
-            # a duplicate `main` does not have, and a duplicate flips
-            # `type_counts[PERP] == 2` and retroactively tightens the VIB-5494 guard —
-            # a false FAILED. Emitting the adopted key alone keeps the row in venue
-            # space, which is why one change closes both.
+            # WHY NOT `frozenset()` HERE: VIB-6329 makes a registered hook's empty
+            # emission fall directly to raw `position_id`, avoiding the old lossy
+            # DEFAULT-namespace detour. But raw-id space still cannot intersect a
+            # venue-key-only registry row, so it manufactures a duplicate whenever
+            # the other producer names the same key through the hook. That duplicate
+            # flips `type_counts[PERP] == 2` and retroactively tightens the VIB-5494
+            # guard — a false FAILED. Emitting the adopted key alone keeps the row in
+            # venue space and preserves ADOPT<->ADOPT joins.
             #
             # COST, stated: on the no-wallet path the key<->sem bridge is gone, so a
             # symbol-space row and a key-space row no longer collapse. Over-split,

@@ -813,11 +813,10 @@ def test_an_unverifiable_keyed_row_emits_only_its_venue_key():
     So the row emits only its adopted key: it names itself with the venue's own
     authoritative identity without vouching for unchecked attributes.
 
-    NOT ``frozenset()`` — that was my first attempt and it is a different bug. A
-    refused row does not fall through to the raw ``position_id``; ``_dedupe_keys`` is
-    venue -> defaults -> raw, so it lands in the DEFAULT namespace where it can no
-    longer intersect any venue-named row, manufacturing a duplicate `main` does not
-    have.
+    NOT ``frozenset()`` — even though VIB-6329 now routes an empty registered-hook
+    result directly to raw ``position_id``, raw-id space cannot intersect the
+    venue-key space used by another producer of the same row. Emitting the adopted
+    key preserves that join and avoids manufacturing a duplicate.
     """
     chain = "arbitrum"
     key = "0x" + "1e" * 32
@@ -930,6 +929,266 @@ def test_no_hook_may_ship_multi_alias_identity_without_a_safety_proof():
         "proof exists. It buys a deliberate edit and a human reading this message — that\n"
         "is all. If you cannot state which of (a) or (b) your hook satisfies, do not edit\n"
         "the set; land VIB-6329 first."
+    )
+
+
+# ---------------------------------------------------------------------------
+# VIB-6329 — the structural rules the framework CAN enforce
+#
+# Each rung below has a NEGATIVE CONTROL (fails if the guard is reverted) and a
+# NON-VACUITY TWIN (fails if the guard is tightened into rejecting everything,
+# which would silently disable venue identity — over-split, loud, but a total
+# loss of VIB-6287's fix).
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def probe_hook(monkeypatch):
+    """Register a throwaway hook returning a fixed token set, and clean up."""
+    from almanak.connectors._strategy_base import perp_identity as seam
+
+    def _install(tokens, slug="probe_venue"):
+        monkeypatch.setitem(seam._REGISTRY, slug, lambda _p, *, wallet_address=None: frozenset(tokens))
+        return slug
+
+    return _install
+
+
+def _probe_perp(slug: str, ptype: PositionType = PositionType.PERP) -> PositionInfo:
+    return PositionInfo(
+        position_type=ptype,
+        position_id="probe-1",
+        chain=CHAIN,
+        protocol=slug,
+        value_usd=Decimal("0"),
+        details={},
+    )
+
+
+def test_two_tokens_of_the_same_family_drop_that_family(probe_hook):
+    """NEGATIVE CONTROL for the at-most-one-token-per-family rule (VIB-6329).
+
+    Two different ``key`` tokens on ONE row means the row names two different
+    positions in the same identity space. It is internally inconsistent by
+    construction, and under the enumeration's transitive closure it BRIDGES two
+    physically distinct positions — union-find merges their components, every
+    registry row but one is suppressed, nothing builds a closing intent for the
+    suppressed row, and nothing raises. Silently stranded funds.
+
+    This is the half of ``derive(key) == adopt`` that survives the oracle problem:
+    the framework cannot verify two tokens MEAN the same position (that needs the
+    venue's derivation, and asking the connector for it checks the connector
+    against itself), but it can see that two tokens of one family CANNOT.
+
+    Fails if the family rule is reverted.
+    """
+    slug = probe_hook(
+        {
+            f"probe_venue:key:{CHAIN}:0x" + "aa" * 32,
+            f"probe_venue:key:{CHAIN}:0x" + "bb" * 32,
+            f"probe_venue:sem:{CHAIN}:eth:usdc:long",
+        }
+    )
+    tokens = venue_identity_tokens(_probe_perp(slug))
+    assert tokens == frozenset({f"probe_venue:sem:{CHAIN}:eth:usdc:long"}), sorted(tokens)
+
+
+def test_a_fully_rejected_hook_emission_falls_to_raw_id_not_the_lossy_default(probe_hook):
+    """Rejection must not move a row into the coarser PERP default namespace.
+
+    Aster assigns one ``tradeHash`` per open call, so two distinct positions can
+    share ``(market, collateral, side)``. Drift has the same shape across
+    sub-accounts. If a future hook emits an invalid token set and the empty result
+    reaches ``_perp_default_identity``, those distinct positions collapse and one
+    receives no closing intent. Raw-id fallback is the only fund-safe direction.
+    """
+    slug = probe_hook(
+        {
+            f"probe_venue:key:{CHAIN}:trade-a",
+            f"probe_venue:key:{CHAIN}:trade-b",
+        }
+    )
+    shared_details = {"market": "ETH/USD", "collateral_token": "USDC", "is_long": True}
+    first = _probe_perp(slug)
+    first.details = dict(shared_details)
+    second = _probe_perp(slug)
+    second.position_id = "probe-2"
+    second.details = dict(shared_details)
+
+    first_keys = _dedupe_keys(first)
+    second_keys = _dedupe_keys(second)
+
+    assert first_keys == frozenset({(CHAIN, str(PositionType.PERP), "id", "probe-1")})
+    assert second_keys == frozenset({(CHAIN, str(PositionType.PERP), "id", "probe-2")})
+    assert first_keys.isdisjoint(second_keys), "fully rejected rows must never collapse through the PERP default"
+
+
+def test_a_perp_venue_without_a_hook_still_uses_the_framework_default():
+    """Non-vacuity twin: raw-id fallback is scoped to registered hooks only."""
+    row = _probe_perp("venue_without_hook")
+    row.details = {"market": "ETH/USD", "collateral_token": "USDC", "is_long": True}
+
+    assert _dedupe_keys(row) == frozenset(
+        {(CHAIN, str(PositionType.PERP), "perp", "venue_without_hook", "eth/usd", "usdc", "long")}
+    )
+
+
+def test_several_families_on_one_row_are_still_honoured(probe_hook):
+    """NON-VACUITY TWIN — multi-FAMILY emission is legal and load-bearing.
+
+    Measured on the shipped hook: 9 of 48 GMX row shapes emit more than one
+    family. The key<->sem bridge is how a backfill row (key only) reaches a
+    strategy row (sem only), which is the whole of VIB-6287. A rule that banned
+    multi-alias outright would pass the control above and GUT the fix.
+    """
+    slug = probe_hook(
+        {
+            f"probe_venue:key:{CHAIN}:0x" + "aa" * 32,
+            f"probe_venue:sem:{CHAIN}:eth:usdc:long",
+        }
+    )
+    assert len(venue_identity_tokens(_probe_perp(slug))) == 2
+
+
+def test_a_token_namespaced_for_a_venue_the_hook_does_not_own_is_dropped(probe_hook):
+    """NEGATIVE CONTROL for the namespace rule (VIB-6329, #3534 panel Grok).
+
+    ``_dedupe_keys`` builds ``(chain, position_type, "venue", <opaque token>)`` and
+    deliberately omits the protocol, so cross-venue safety rests ENTIRELY on each
+    connector namespacing its own tokens. Nothing checked that. A hook emitting a
+    token in another venue's namespace, on the same chain and position type,
+    over-collapses ACROSS protocols.
+
+    Fails if the namespace check is reverted.
+    """
+    slug = probe_hook({f"gmx_v2:key:{CHAIN}:0x" + "aa" * 32, f"probe_venue:sem:{CHAIN}:eth:usdc:long"})
+    tokens = venue_identity_tokens(_probe_perp(slug))
+    assert tokens == frozenset({f"probe_venue:sem:{CHAIN}:eth:usdc:long"}), sorted(tokens)
+
+
+def test_a_hook_registered_under_several_slugs_may_namespace_with_any_of_them():
+    """NON-VACUITY TWIN for the namespace rule.
+
+    One connector can be registered under several teardown slugs and may
+    legitimately namespace ALL its tokens with just one of them. Holding it to the
+    dispatch slug alone would reject conforming tokens and disable identity for
+    every multi-slug connector — over-split, loud, but a total loss.
+    """
+    from almanak.connectors._strategy_base import perp_identity as seam
+
+    slugs = frozenset({"probe_a", "probe_b"})
+    token = f"probe_a:key:{CHAIN}:0x" + "aa" * 32
+    for slug in slugs:
+        seam._register_perp_identity(slug, lambda _p, *, wallet_address=None: frozenset({token}), namespaces=slugs)
+    try:
+        # Dispatched under probe_b, emitting in probe_a's namespace: legal.
+        assert venue_identity_tokens(_probe_perp("probe_b")) == frozenset({token})
+    finally:
+        for slug in slugs:
+            seam._REGISTRY.pop(slug, None)
+            seam._NAMESPACES.pop(slug, None)
+
+
+def test_a_malformed_token_without_a_family_segment_is_dropped(probe_hook):
+    """NEGATIVE CONTROL for the grammar. A token with no ``<family>`` segment
+    cannot be checked for the family rule at all, so accepting it would be a hole
+    straight through the guard above."""
+    slug = probe_hook({"probe_venue:justakey", "nocolonsatall", f"probe_venue:sem:{CHAIN}:eth:usdc:long"})
+    tokens = venue_identity_tokens(_probe_perp(slug))
+    assert tokens == frozenset({f"probe_venue:sem:{CHAIN}:eth:usdc:long"}), sorted(tokens)
+
+
+def test_a_payload_containing_colons_survives_byte_identical(probe_hook):
+    """NON-VACUITY TWIN for the grammar, and the case-folding rule restated.
+
+    The payload may itself contain colons, and it is OPAQUE: ``drift``'s identity
+    carries a base58 Solana pubkey where ``'B' != 'b'`` is a different byte. The
+    framework folds the ``<slug>`` and ``<family>`` labels for COMPARISON ONLY and
+    must return the token byte-identical. A grammar check that split naively, or
+    folded the whole token, would corrupt exactly this venue.
+    """
+    token = "drift:acct:9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin:0:1"
+    slug = probe_hook({token}, slug="drift")
+    row = PositionInfo(
+        position_type=PositionType.PERP,
+        position_id="drift-1",
+        chain="solana",
+        protocol=slug,
+        value_usd=Decimal("0"),
+        details={},
+    )
+    assert venue_identity_tokens(row) == frozenset({token})
+
+
+def test_a_non_perp_row_is_never_named_by_a_perp_identity_hook(probe_hook):
+    """NEGATIVE CONTROL for PERP-scoped dispatch (VIB-6329, #3534 panel CodeRabbit).
+
+    The registry is keyed by protocol ALONE, and no hook checks the row's type, so
+    a non-perp row of a hook-publishing protocol would be handed a perp identity
+    hook and skip its own per-type default.
+
+    Unreachable today — every ``_dedupe_keys`` key is position-type-scoped, and
+    ``gmx_v2`` declares perp intents only — so this pins the LAYERING, which is
+    what makes the next connector's version of the mistake reachable.
+    """
+    slug = probe_hook({f"probe_venue:key:{CHAIN}:0x" + "aa" * 32})
+    assert venue_identity_tokens(_probe_perp(slug, PositionType.LP)) == frozenset()
+
+
+def test_a_perp_row_of_the_same_hook_is_still_named(probe_hook):
+    """NON-VACUITY TWIN for PERP scoping: the identical row typed PERP is named.
+
+    Without this, scoping the dispatch to a type nothing ever passes would satisfy
+    the control above while disabling the seam entirely.
+    """
+    slug = probe_hook({f"probe_venue:key:{CHAIN}:0x" + "aa" * 32})
+    assert venue_identity_tokens(_probe_perp(slug, PositionType.PERP))
+
+
+def test_the_shipped_gmx_hook_never_emits_two_tokens_of_one_family():
+    """The corpus check: GMX must satisfy the family rule UNCHANGED.
+
+    A guard that forces edits to the one working implementation is suspicious, so
+    this measures the shipped hook across the row shapes that actually occur —
+    venue-key / synthetic / absent ids, address- and symbol-space details, a
+    residual, an alias spelling, and the wallet present / absent / malformed —
+    rather than asserting the property from the code.
+
+    It also fails if a future GMX change starts emitting two ``key`` tokens, which
+    is exactly the internally-inconsistent row the family rule exists to catch.
+    """
+    ids = (VENUE_KEY, "0x" + "1e" * 32, "gmx-ETH/USD-arbitrum", "")
+    detail_shapes = (
+        {"market": MARKET, "collateral_token": USDC, "is_long": True},
+        {"market": "ETH/USD", "collateral_token": "USDC", "is_long": True},
+        {"market": MARKET, "collateral_token": USDC},
+        {"collateral_token": "USDC", "direction": "long"},
+        {"market": MARKET, "collateral_token": USDC, "is_long": True, "kind": "pending_order"},
+        {"market": "ETH", "collateral_token": "USDC", "side": "long"},
+    )
+    emitting = multi_family = 0
+    for position_id in ids:
+        for details in detail_shapes:
+            for wallet in (WALLET, None, "0xdead"):
+                tokens = gmx_v2_perp_identity(
+                    _perp(position_id=position_id, details=dict(details)), wallet_address=wallet
+                )
+                if not tokens:
+                    continue
+                emitting += 1
+                families: dict[str, set[str]] = {}
+                for token in tokens:
+                    families.setdefault(token.split(":")[1], set()).add(token)
+                worst = max(families.values(), key=len)
+                assert len(worst) == 1, (
+                    f"gmx_v2 emitted {sorted(worst)} — two tokens of one family for one row, "
+                    "which names two positions in one identity space"
+                )
+                multi_family += len(families) > 1
+    assert emitting, "corpus emitted no tokens at all — this check would be vacuous"
+    assert multi_family, (
+        "no row emitted more than one FAMILY — the key<->sem bridge is what VIB-6287 fixes, "
+        "so this corpus can no longer prove multi-alias emission is load-bearing"
     )
 
 

@@ -144,10 +144,12 @@ def _perp_default_identity(position: PositionInfo) -> frozenset[tuple[str, ...]]
     Kept from the pre-VIB-6287 arm table so the four perp venues without an
     identity hook (``aster_perps`` / ``drift`` / ``hyperliquid`` /
     ``pancakeswap_perps``) keep the exact behaviour they have today. It is a
-    LAST resort, consulted only when the venue itself declined to name the
-    position, because it compares ``details`` values VERBATIM and the producers
-    of a perp row write different value spaces under the same key names — the
-    polysemy that is VIB-6287.
+    LAST resort, consulted only when the venue publishes no identity hook,
+    because it compares ``details`` values VERBATIM and the producers of a perp
+    row write different value spaces under the same key names — the polysemy
+    that is VIB-6287. Once a venue publishes a hook, an empty or fully rejected
+    emission falls directly to raw ``position_id``; routing it through this
+    coarser namespace could collapse distinct venue positions.
 
     Returns an empty set when any component is absent: incomplete identity must
     never collapse two positions, so the caller falls through to the raw
@@ -194,8 +196,10 @@ def _perp_default_identity(position: PositionInfo) -> frozenset[tuple[str, ...]]
 
 
 # Framework per-``PositionType`` identity default, consulted ONLY when the
-# position's own venue publishes no identity hook or declines to name it. Every
-# entry moved here VERBATIM from the former ``_dedupe_key`` if/elif arm table.
+# position's own venue publishes no identity hook. A hook that declines or fails
+# validation falls directly to raw ``position_id`` so rejection cannot enter a
+# coarser, potentially lossy namespace. Every entry moved here VERBATIM from the
+# former ``_dedupe_key`` if/elif arm table.
 _IDENTITY_DEFAULTS: dict[PositionType, Callable[[PositionInfo], frozenset[tuple[str, ...]]]] = {
     PositionType.LP: _lp_default_identity,
     PositionType.SUPPLY: _lending_default_identity,
@@ -244,8 +248,10 @@ def _dedupe_keys(
        same ``details`` key names (symbol vs address), which no framework-side
        comparison of raw fields can reconcile (VIB-6287).
     2. **The framework per-type default** (:data:`_IDENTITY_DEFAULTS`), the
-       pre-VIB-6287 behaviour preserved verbatim, for types and venues with no
-       hook.
+       pre-VIB-6287 behaviour preserved verbatim, only for types and venues with
+       no applicable hook. A registered PERP hook that returns no usable token
+       skips this rung so validation failure cannot collapse positions in a
+       coarser namespace.
     3. **The raw ``position_id``** — the original fall-through.
 
     ``chain`` and ``position_type`` scope every key. Keying on a bare id would
@@ -264,7 +270,7 @@ def _dedupe_keys(
     chain = str(position.chain or "").lower()
     ptype = str(position.position_type)
 
-    from .perp_identity import venue_identity_tokens, wallet_for
+    from .perp_identity import has_perp_identity_hook, venue_identity_tokens, wallet_for
 
     # Venue tokens are single-element tuples so every key is a flat tuple of
     # STRUCTURED parts. Joining parts into one string instead would make the
@@ -274,7 +280,10 @@ def _dedupe_keys(
     tokens: frozenset[tuple[str, ...]] = frozenset(
         ("venue", t) for t in venue_identity_tokens(position, wallet_for(wallet_for_chain, position.chain))
     )
-    if not tokens:
+    applicable_perp_hook = position.position_type == PositionType.PERP and has_perp_identity_hook(
+        str(position.protocol or "").strip()
+    )
+    if not tokens and not applicable_perp_hook:
         default = _IDENTITY_DEFAULTS.get(position.position_type)
         if default is not None:
             tokens = default(position)

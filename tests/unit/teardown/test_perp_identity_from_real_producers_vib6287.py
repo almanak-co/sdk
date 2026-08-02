@@ -319,9 +319,12 @@ class TestVib6287TheMutationGate:
     exist). So: disable the venue hook, keep the wallet, and require the matrix
     to revert EXACTLY to its pre-fix counts.
 
-    The stub is installed by mutating the registry entry, and the entry's prior
-    existence is asserted first — a patch that silently creates a key it was
-    meant to replace is the same vacuous-green trap in a new costume.
+    The hook is removed from the registry, and its prior existence is asserted
+    first — a deletion that silently ignores a missing key would be the same
+    vacuous-green trap in a new costume. Replacing it with an empty callable is
+    not equivalent after VIB-6329: a registered hook is authoritative, so an
+    empty emission deliberately falls to raw identity rather than the coarser
+    pre-hook default.
     """
 
     @staticmethod
@@ -332,7 +335,7 @@ class TestVib6287TheMutationGate:
             "the gmx_v2 identity hook is not registered — this gate would be vacuous, "
             "and a hook that never resolves is indistinguishable from no fix at all"
         )
-        monkeypatch.setitem(seam._REGISTRY, "gmx_v2", lambda _position, *, wallet_address=None: frozenset())
+        monkeypatch.delitem(seam._REGISTRY, "gmx_v2")
 
     def test_matrix_reverts_to_the_pre_fix_counts_when_the_hook_is_disabled(self, monkeypatch):
         """The measured pre-fix baseline: 1 / 2 / 2 / 2."""

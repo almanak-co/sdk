@@ -59,22 +59,79 @@ over-collapse, and over-collapse is the strictly worse failure:
   **silently stranded funds**, with no alarm at all.
 
 Empty ≠ Zero: an empty token set means **UNMEASURED identity** — never "no
-identity", never "closed". The framework falls back to its own per-type default
-and, failing that, to the raw ``position_id``.
+identity", never "closed". For a venue that publishes a hook, the framework
+falls back directly to the raw ``position_id``. It must not reinterpret a
+hook-declined row through the coarser per-type default: that can put rows from
+one venue into two identity namespaces and, for venues whose default tuple is
+not unique, silently collapse distinct positions. The per-type default is only
+for venues that publish no hook.
 
-Tokens are opaque
------------------
-The framework compares tokens for equality and does **nothing else** — no
-parsing, no splitting, and in particular **no case folding**. ``drift``'s
-identity contains a base58 Solana pubkey, where ``'B' != 'b'`` is a different
-byte rather than a formatting variant, while the EVM registry writers lowercase
-hex reflexively. Normalisation belongs inside the connector, which is the only
-layer that knows the encoding. No Solana perp path reaches this seam today, so
-this is a latent trap for the next venue rather than a present bug — which is
-precisely why it is written down here instead of discovered later.
+Token grammar: ``<slug>:<family>:<payload>``
+--------------------------------------------
+Every token MUST have at least three colon-separated segments:
 
-Namespace your tokens with your own protocol slug so two venues can never emit
-the same string for different positions.
+* ``slug`` — a protocol slug the emitting connector OWNS. Two venues can then
+  never emit the same string for different positions.
+* ``family`` — which KIND of identity this token expresses (``key``, ``sem``,
+  ``acct``, …). A family is a label the connector chooses; the framework never
+  interprets it, it only compares one to another.
+* ``payload`` — everything after the second colon. Opaque. May itself contain
+  colons.
+
+**THE PAYLOAD IS OPAQUE; THE FIRST TWO SEGMENTS ARE NOT (VIB-6329).** This is a
+deliberate NARROWING of the contract this section used to state, which was that
+the framework "compares tokens for equality and does nothing else — no parsing,
+no splitting". That was true when written and it left the seam unable to detect
+its own worst failure, so it is narrowed here rather than quietly violated
+elsewhere:
+
+* the framework splits a token to read ``slug`` and ``family``, and folds
+  **those two segments only**, for COMPARISON ONLY;
+* it never folds, rewrites, reorders, or truncates a payload;
+* a token that survives validation is passed on **byte-identical** to what the
+  connector emitted.
+
+The no-case-folding rule that motivated the old wording is untouched and still
+load-bearing: ``drift``'s identity contains a base58 Solana pubkey where
+``'B' != 'b'`` is a different byte rather than a formatting variant, while the
+EVM registry writers lowercase hex reflexively. That pubkey lives in the
+PAYLOAD, which nothing here touches. Normalisation of a payload belongs inside
+the connector, the only layer that knows the encoding. No Solana perp path
+reaches this seam today, so it stays a latent trap for the next venue rather
+than a present bug.
+
+The grammar is not new; it is the de-facto convention made load-bearing. Every
+shipped token already conforms — ``gmx_v2:key:{chain}:{positionKey}`` and
+``gmx_v2:sem:{chain}:{market}:{collateral}:{side}``
+(``connectors/gmx_v2/perp_identity.py``), and the ``drift`` token pinned by
+``test_the_framework_never_case_folds_a_venue_token``,
+``drift:acct:9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin:0:1``, parses as
+slug ``drift`` / family ``acct`` / payload ``9xQe…:0:1`` with its case intact.
+
+What the grammar buys: at most ONE token per family
+---------------------------------------------------
+> **A row may emit several FAMILIES. It may never emit two different tokens of
+> the SAME family.**
+
+Two different ``key`` tokens on one row means the row names two different
+positions in the same identity space — it is internally inconsistent **by
+construction**, which is precisely the shape that BRIDGES two physically
+distinct positions under the enumeration's transitive closure and strands one
+silently. The framework can see that without understanding a single payload
+byte: it compares two structural labels for equality. That check is enforced in
+``framework/teardown/perp_identity.py``.
+
+**What the framework still CANNOT check, and why this is not enforcement of the
+emission contract.** A row emitting ``{slug:key:A, slug:sem:B}`` where ``A`` and
+``B`` name DIFFERENT positions is invisible here — the two tokens are in
+different families, so no structural rule is violated, and deciding whether they
+agree requires the venue's own derivation. Any framework-side "verification"
+would have to call connector-supplied code to answer it, i.e. check the
+connector against itself: a hook whose derivation returns its own
+``position_id`` passes perfectly. **The cross-family case is therefore closed by
+the emission contract below and by review — never by this seam.** Do not read
+the family rule as making multi-alias emission safe; it makes one specific,
+mechanically-detectable inconsistency impossible.
 """
 
 from __future__ import annotations
@@ -172,8 +229,19 @@ class VenuePositionIdentity(Protocol):
 
 _REGISTRY: dict[str, VenuePositionIdentity] = {}
 
+# Slug -> the protocol slugs whose namespace that hook may emit tokens under
+# (VIB-6329). Kept as a SEPARATE map rather than widening ``_REGISTRY``'s value
+# type on purpose: several tests inject a bare callable straight into
+# ``_REGISTRY`` via ``monkeypatch.setitem`` and would break on a tuple value.
+_NAMESPACES: dict[str, frozenset[str]] = {}
 
-def _register_perp_identity(protocol: str, hook: VenuePositionIdentity) -> None:
+
+def _register_perp_identity(
+    protocol: str,
+    hook: VenuePositionIdentity,
+    *,
+    namespaces: frozenset[str] | set[str] | tuple[str, ...] | None = None,
+) -> None:
     """Register an identity hook for ``protocol`` (framework-internal).
 
     Not a connector-facing API: connectors publish hooks through
@@ -183,12 +251,35 @@ def _register_perp_identity(protocol: str, hook: VenuePositionIdentity) -> None:
 
     Re-registering the same hook is idempotent. Replacing an existing hook logs
     a warning so accidental shadowing is visible in logs.
+
+    ``namespaces`` is every protocol slug this hook may namespace a token with —
+    the connector's full emittable slug set, because one connector can be
+    registered under several (``_connector_teardown_slugs``) and may legitimately
+    namespace all its tokens with just one of them. Omitted, it defaults to
+    ``{protocol}`` alone, which is the STRICTER reading: a hook must namespace
+    its tokens with the slug it was dispatched under. Defaulting the other way —
+    to "any slug" — would make the namespace check vacuous for exactly the
+    registration paths that forgot to declare, which is the failure mode this
+    map exists to prevent.
     """
     key = protocol.lower()
     existing = _REGISTRY.get(key)
     if existing is not None and existing is not hook:
         logger.warning("Replacing existing venue position identity hook for protocol %r", protocol)
     _REGISTRY[key] = hook
+    declared = frozenset(str(n).strip().lower() for n in (namespaces or ()) if str(n).strip())
+    _NAMESPACES[key] = declared or frozenset({key})
+
+
+def get_perp_identity_namespaces(protocol: str) -> frozenset[str]:
+    """Protocol slugs ``protocol``'s hook may namespace its tokens with.
+
+    Falls back to ``{protocol}`` when nothing was declared, so a hook injected
+    directly into ``_REGISTRY`` (tests) is still held to the strict default
+    rather than escaping the check.
+    """
+    key = protocol.lower()
+    return _NAMESPACES.get(key) or frozenset({key})
 
 
 def get_perp_identity_hook(protocol: str) -> VenuePositionIdentity | None:
@@ -214,6 +305,7 @@ __all__ = [
     "VenuePositionIdentity",
     "is_residual_marked",
     "get_perp_identity_hook",
+    "get_perp_identity_namespaces",
     "has_perp_identity_hook",
     "registered_perp_identity_protocols",
 ]
