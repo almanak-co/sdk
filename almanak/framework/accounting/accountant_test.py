@@ -1142,7 +1142,45 @@ def _cell_g4_capital_deployed(snapshots: list[dict[str, Any]]) -> CellResult:
     )
 
 
-def _cell_g5_initial_vs_current(metrics: list[dict[str, Any]], snapshots: list[dict[str, Any]]) -> CellResult:
+def _cell_g5_initial_vs_current(
+    metrics: list[dict[str, Any]],
+    snapshots: list[dict[str, Any]],
+    ledger: list[dict[str, Any]] | None = None,
+) -> CellResult:
+    """G5 — "Initial vs current equity is consistent across snapshots".
+
+    Blueprint 27 specifies a *consistency* assertion. Pre-VIB-6345 this cell
+    asserted nothing: it formatted ``current - initial`` and returned PASS
+    whenever both sides parsed. On mainnet R1 it reported ``+$5.709`` on a run
+    that lost ``$0.61`` — and passed. A wrong-signed PnL behind a green cell is
+    worse than a null, because the green is what certifies the books.
+
+    Two independent errors produced that number; both are addressed here.
+
+    **1. Denomination.** ``initial_value_usd`` is written as
+    ``snapshot.total_value_usd or snapshot.available_cash_usd``
+    (``runner_state.py``) — the *deployed* side alone whenever a position is
+    already open at the first snapshot, else cash. The current side is
+    ``_snapshot_equity`` = deployed + cash. Subtracting one from the other
+    mixes bases, which is how the sign flipped. The reported delta is now
+    equity-vs-equity, both sides from ``_snapshot_equity``, so a denomination
+    mismatch can no longer reach the number.
+
+    **2. The baseline itself.** When ``initial_value_usd`` equals snapshot 0's
+    *deployed* column while that same snapshot also carries cash, the ``or``
+    silently discarded the cash leg: the baseline is not the strategy's
+    starting equity, and every consumer that falls back to it inherits the
+    error. That is a FAIL, named. Measured across the committed fixtures this
+    fires on ``lp_curve`` (baseline ``$10.01`` against ``$155,787`` of starting
+    equity), ``lp_curve_tricrypto``, and the R1 GMX capture — and on none of
+    the six fixtures whose baseline is coherent.
+
+    Baseline *placement* is reported, never silently folded in: a first
+    snapshot that post-dates the first ledger row cannot see that
+    transaction's cost, so the delta is known to understate (R1: ``-$0.375``
+    measured against ``-$0.61`` on-chain). Correcting the placement is its own
+    change; G5 names it so the number is never read as exact.
+    """
     if not metrics:
         return CellResult("G5", "Initial vs current", "FAIL", "no portfolio_metrics row")
     m = metrics[-1]
@@ -1156,16 +1194,249 @@ def _cell_g5_initial_vs_current(metrics: list[dict[str, Any]], snapshots: list[d
             "FAIL",
             f"initial=${initial} but no snapshots for current",
         )
-    current = _snapshot_equity(snapshots[-1])
+    # ``_table_rows`` issues no ORDER BY, so positional access is only
+    # incidentally chronological. The endpoints of a PnL delta must not depend
+    # on SQLite's row order — the same unordered-read trap VIB-6287 measured on
+    # the position registry, where identical inputs yielded different answers.
+    # Ordering that cannot be established is a FAIL, never a fall-through to
+    # SQLite's accident order: this cell exists to stop a green wrong PnL, so
+    # "I could not order the endpoints" must not resolve to PASS.
+    ordered = _snapshots_in_time_order(snapshots)
+    if ordered is None:
+        return CellResult(
+            "G5",
+            "Initial vs current",
+            "FAIL",
+            "cannot order snapshots by time — at least one timestamp is unmeasured or "
+            "unparseable, and portfolio_snapshots is read without ORDER BY, so the PnL "
+            "endpoints would be SQLite row order rather than first/last",
+        )
+
+    # An UNAVAILABLE snapshot is the runner's *failure* contract, not a
+    # measurement: ``_make_unavailable_snapshot`` stamps total_value_usd=0 AND
+    # available_cash_usd=0 so the equity curve has no holes, and that row is
+    # persisted even when metrics are skipped. ``_snapshot_equity`` reads 0+0 as
+    # a measured zero, so using it as the opening endpoint would report the
+    # whole final equity as profit — the exact wrong-signed PASS this cell
+    # exists to kill.
+    usable = [s for s in ordered if _snapshot_confidence_can_anchor_pnl(s)]
+    refused = len(ordered) - len(usable)
+    if len(usable) < 2:
+        # One point is not a delta. Equity-vs-equity needs two measured
+        # endpoints; ``delta = $0`` would report "no change" as a measurement.
+        why = (
+            f"; {refused} refused as unmeasured/UNAVAILABLE"
+            if refused
+            else " (none were refused — the run has too few snapshots)"
+        )
+        return CellResult(
+            "G5",
+            "Initial vs current",
+            "FAIL",
+            f"need >=2 snapshots whose confidence can anchor a PnL endpoint; have {len(usable)} of {len(ordered)}{why}",
+        )
+    # Refusing the most recent row means ``current`` is not the run's last
+    # state. Dropping it is right — a 0/0 endpoint would fabricate a total
+    # loss — but the delta must not read as if it covered the whole run.
+    trailing_refused = not _snapshot_confidence_can_anchor_pnl(ordered[-1])
+    ordered = usable
+
+    current = _snapshot_equity(ordered[-1])
     if current is None:
         return CellResult("G5", "Initial vs current", "FAIL", f"initial=${initial} but current null")
-    delta = current - initial
-    return CellResult(
-        "G5",
-        "Initial vs current",
-        "PASS",
-        f"initial=${initial} current=${current} delta=${delta}",
+
+    # Equity-vs-equity. ``initial_value_usd`` is NOT used as the baseline —
+    # it is the value under test below.
+    opening = _snapshot_equity(ordered[0])
+    if opening is None:
+        return CellResult(
+            "G5",
+            "Initial vs current",
+            "FAIL",
+            f"first snapshot has no measured equity (initial=${initial} current=${current})",
+        )
+    delta = current - opening
+
+    detail = f"opening_equity=${opening} current=${current} delta=${delta}"
+    if trailing_refused:
+        detail += (
+            f"; NOTE current is NOT the run's last snapshot — {refused} trailing/other row(s) "
+            f"were refused as unmeasured, so this delta stops at the last measured point"
+        )
+
+    # The ``or``-drop signature: the persisted baseline is exactly the deployed
+    # column of the snapshot it was derived from, while that snapshot also held
+    # cash. Empty≠Zero — an unmeasured cash column is not a measured zero and
+    # cannot establish the drop, so both columns must be measured to fire.
+    opening_deployed = _dec(ordered[0].get("total_value_usd"))
+    opening_cash = _dec(ordered[0].get("available_cash_usd"))
+    if (
+        opening_deployed is not None
+        and opening_cash is not None
+        and initial == opening_deployed
+        and opening_cash > _G5_CASH_DROP_FLOOR_USD
+    ):
+        return CellResult(
+            "G5",
+            "Initial vs current",
+            "FAIL",
+            f"baseline excludes the cash leg: initial_value_usd=${initial} equals snapshot-0 "
+            f"deployed=${opening_deployed} while snapshot-0 held cash=${opening_cash}; "
+            f"opening equity was ${opening}, so any PnL measured against this baseline is "
+            f"offset by ${opening_cash}. TWO writers produce this shape and the DB cannot "
+            f"tell them apart (no baseline-provenance column): (a) the VIB-6349 defect — "
+            f"'total_value_usd or available_cash_usd' silently discarding cash when a "
+            f"position is already open at the first snapshot; (b) the VIB-3882 contract — "
+            f"a strategy declaring allocation_usd that coincidentally equals its deployed "
+            f"value, where excluding unrelated wallet cash is INTENDED. Confirm which "
+            f"before treating this as a defect. {detail}",
+        )
+
+    # Placement is a diagnostic on an otherwise-consistent baseline: the delta
+    # is real but understates by whatever the first transaction already spent.
+    late_by = _g5_baseline_lateness(ordered, ledger)
+    if late_by is not None:
+        detail += (
+            f"; NOTE baseline is LATE — first snapshot post-dates the first ledger row "
+            f"by {late_by}, so pre-baseline cost is invisible and the delta understates"
+        )
+
+    return CellResult("G5", "Initial vs current", "PASS", detail)
+
+
+# A measured-zero cash column is a legitimate all-deployed opening snapshot, and
+# sub-cent dust must not manufacture a FAIL. Above this, ``initial == deployed``
+# means the cash leg was genuinely discarded rather than absent.
+_G5_CASH_DROP_FLOOR_USD = Decimal("0.01")
+
+
+def _snapshot_confidence_can_anchor_pnl(snapshot: dict[str, Any]) -> bool:
+    """Whether this snapshot claims a measurement good enough to be a PnL endpoint.
+
+    ``UNAVAILABLE`` is the runner's *failure* contract, not a measurement:
+    ``runner_state._make_unavailable_snapshot`` stamps ``total_value_usd=0``
+    and ``available_cash_usd=0`` purely so the equity curve has no holes, and
+    that row reaches ``portfolio_snapshots`` even though it never establishes
+    ``initial_value_usd``. Reading its ``0 + 0`` as an opening equity reports
+    the entire final balance as profit.
+
+    A row whose confidence is missing or outside the vocabulary is also
+    refused. This is NOT "the writer always stamps it":
+    ``PortfolioSnapshot.value_confidence`` defaults to ``None`` and serialises
+    to ``""``, which happens exactly when the valuer returned no confidence —
+    i.e. precisely the rows ``PortfolioSnapshot.is_valid`` already calls
+    invalid. Refusing them is therefore agreeing with the framework, not
+    guessing. Measured across the nine committed fixtures, zero rows carry a
+    null or empty stamp, so the refusal costs nothing on real data.
+
+    ``STALE`` anchors: the value was genuinely measured, just old. That is a
+    freshness question, not a "this number is fabricated" question, and G9
+    owns freshness.
+    """
+    from almanak.framework.portfolio.models import ValueConfidence
+
+    raw = snapshot.get("value_confidence")
+    if raw is None:
+        return False
+    try:
+        parsed = ValueConfidence.parse(raw)
+    except (ValueError, TypeError):
+        # ``parse`` is deliberately exact — "accepting different casing or
+        # surrounding whitespace would turn an unknown boundary value into a
+        # trusted one" (portfolio/models.py). Folding case here would re-trust
+        # exactly what that contract refuses, so an unparseable stamp is
+        # unmeasured, not "probably fine".
+        return False
+    return parsed.value in _G5_ANCHORING_CONFIDENCES
+
+
+# Which ``ValueConfidence`` members may anchor a PnL endpoint. Pinned by
+# ``test_every_value_confidence_member_is_classified``: a closed classification
+# over the enum, so a new member fails that census until someone decides which
+# side it belongs on, rather than silently defaulting to "cannot anchor" (which
+# would quietly disable G5) or "can anchor" (which would quietly re-open the
+# UNAVAILABLE hole).
+_G5_ANCHORING_CONFIDENCES = frozenset({"HIGH", "ESTIMATED", "STALE"})
+
+# The complement, owned HERE rather than duplicated in the test. A census that
+# keeps its own second copy cannot detect a member being moved between the two.
+_G5_REFUSED_CONFIDENCES = frozenset({"UNAVAILABLE"})
+
+
+def _snapshots_in_time_order(snapshots: list[dict[str, Any]]) -> list[dict[str, Any]] | None:
+    """Snapshots oldest-first by timestamp, or ``None`` when that is impossible.
+
+    Returns ``None`` if ANY row's timestamp is unmeasured or unparseable. The
+    earlier revision fell back to the caller's order in that case, which was
+    the wrong failure direction: ``_table_rows`` issues no ``ORDER BY``, so the
+    "preserved historical behaviour" was SQLite row order, and a cell whose job
+    is to stop a green wrong PnL would have gone on to PASS with endpoints
+    chosen by accident. Refusing to order is information the caller must act
+    on, not a detail to swallow.
+    """
+    # Build the narrowed pairs explicitly rather than relying on the `any(...)`
+    # guard above: that guard proves None is absent to a reader but not to the
+    # type checker, and a `# type: ignore` here would suppress exactly the
+    # None-in-a-sort-key error worth keeping.
+    pairs: list[tuple[datetime, dict[str, Any]]] = []
+    for snapshot in snapshots:
+        parsed = _parse_ts(snapshot.get("timestamp"))
+        if parsed is None:
+            return None
+        pairs.append((parsed, snapshot))
+    return [s for _, s in sorted(pairs, key=lambda pair: pair[0])]
+
+
+def _parse_ts(value: Any) -> datetime | None:
+    """Best-effort timestamp read, ``None`` when unmeasured or unparseable.
+
+    Mirrors the normalisation ``basis.py`` already applies to event
+    timestamps: ``Z`` suffix accepted, naive values read as UTC. Ledger rows
+    reach us as ISO strings from SQLite but as int epochs when the gateway
+    serialised them, so both are handled.
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    if isinstance(value, int | float):
+        try:
+            return datetime.fromtimestamp(float(value), tz=UTC)
+        except (ValueError, OverflowError, OSError):
+            return None
+    if not isinstance(value, str):
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+
+
+def _g5_baseline_lateness(
+    snapshots: list[dict[str, Any]],
+    ledger: list[dict[str, Any]] | None,
+) -> str | None:
+    """How far the first snapshot post-dates the first ledger row, or ``None``.
+
+    A snapshot-derived delta whose baseline is captured *after* the first
+    money-moving transaction can never see that transaction's cost, so the
+    error is directional: it only ever understates. R1 measured ``-$0.375``
+    against an on-chain ``-$0.6145`` with the baseline 3s late.
+
+    ``None`` means "no evidence of lateness" — including the case where either
+    timestamp is unparseable, which is deliberately not reported as lateness.
+    """
+    if not snapshots or not ledger:
+        return None
+    snap_ts = _parse_ts(snapshots[0].get("timestamp"))
+    ledger_ts = min(
+        (t for t in (_parse_ts(r.get("timestamp")) for r in ledger) if t is not None),
+        default=None,
     )
+    if snap_ts is None or ledger_ts is None or snap_ts <= ledger_ts:
+        return None
+    return f"{(snap_ts - ledger_ts).total_seconds():.0f}s"
 
 
 def _cell_g6_reconciliation(  # noqa: C901
@@ -4407,7 +4678,7 @@ def evaluate_cells(
     cells.append(_cell_g2_cost_ledger(ledger))
     cells.append(_cell_g3_yield_ledger(pos_events, acct_events))
     cells.append(_cell_g4_capital_deployed(snapshots))
-    cells.append(_cell_g5_initial_vs_current(metrics, snapshots))
+    cells.append(_cell_g5_initial_vs_current(metrics, snapshots, ledger))
     g6, decomp = _cell_g6_reconciliation(
         snapshots, ledger, pos_events, acct_events, primitive, acct_payloads, payload_errors
     )

@@ -1,6 +1,7 @@
 {
-  "matching_policy_version": 6,
-  "ledger_row_count": 2,
+  "_notes": {
+    "G5": "VIB-6345. NOT a scoring regression \u2014 G5 became discriminating and this fixture always carried the defect it now detects. The frozen DB's portfolio_metrics.initial_value_usd is $307.24, exactly equal to snapshot-0's deployed column, while that same snapshot held $173,579.96 of cash: starting equity was $173,887.20, so every PnL derived from this baseline is overstated by $173,579.96. Cause is the writer, runner_state.py '_build_metrics_for_snapshot': 'initial = snapshot.total_value_usd or snapshot.available_cash_usd' takes the deployed branch whenever a position is already open at the first snapshot and silently discards the cash leg. Pinned FAIL rather than regenerated: the fixture is faithful to what the writer produced, and hiding it would remove the only committed evidence of the defect. Flips to PASS when the writer is fixed."
+  },
   "accounting_events_row_count": 2,
   "cells": {
     "CURVE1": "PASS",
@@ -19,11 +20,13 @@
     "G2": "PASS",
     "G3": "PASS",
     "G4": "PASS",
-    "G5": "PASS",
+    "G5": "FAIL",
     "G6": "FAIL",
     "G7": "PASS",
     "G8": "PASS",
     "G9": "PASS",
     "L5_22": "XFAIL"
-  }
+  },
+  "ledger_row_count": 2,
+  "matching_policy_version": 6
 }
