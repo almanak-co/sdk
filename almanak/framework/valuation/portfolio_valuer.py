@@ -594,6 +594,230 @@ def _aggregate_open_swap_lots(
     return totals
 
 
+# ---------------------------------------------------------------------------
+# TOKEN-leg cost basis from swap-acquisition lots (VIB-6362)
+# ---------------------------------------------------------------------------
+#
+# ``_enrich_position_pnl`` dispatches on position type and — until VIB-6362 —
+# had no ``PositionType.TOKEN`` branch, so a discovered token holding was NEVER
+# enriched. Its ``cost_basis_usd`` stayed the default ``Decimal("0")``, which
+# ``_position_to_dict`` then drops as falsy, so the leg reached every reader
+# with no basis at all, permanently. Strategy PnL differences a measured NAV
+# against that missing cost (``open_position_nav - deployed_capital_usd``), so
+# the ENTIRE holding booked as profit: the ``pancakeswap_aave_carry_bsc`` carry
+# rendered +$0.87 (+42.07%) on a flat position for its whole life on BSC
+# mainnet (tests/reports/vib6308-pnl-basis-coverage-mainnet-proof-20260801.md).
+#
+# VIB-6308 shipped the DISPLAY guard for that (``_nav_basis_coverage`` above →
+# the tile suppresses rather than renders a number it cannot trust). This is
+# the fix that produces the truth instead of hiding the lie.
+#
+# The basis comes from the same FIFO swap-acquisition lots the VIB-5057
+# classifier replays. Why the discovered leg needs its own path at all, when the
+# classifier already emits backed synthetic rows: the classifier only emits a row
+# when the token resolved in the snapshot's WALLET balance map. A token the
+# wallet map never resolved (``capped_to_zero`` — the carry's USDT, absent from
+# ``wallet_balances``) gets no synthetic row, while the strategy's own discovered
+# TOKEN leg still counts its full mark into ``total_value_usd``. That leg is the
+# one this path backs.
+#
+# **Only NAV-counting legs.** The scope is exactly the legs whose mark enters
+# ``total_value_usd`` — i.e. NOT the VIB-4909 wallet pseudo-positions, which the
+# NAV sum excludes because their value is already counted once in
+# ``wallet_balances``. ``deployed_capital_usd`` sums ``abs(cost_basis_usd)`` over
+# EVERY position without that exclusion, so backing a wallet-overlapping leg
+# would add cost with no matching open-NAV mark and push Strategy PnL negative by
+# the whole basis — a phantom LOSS, and on a declared ``quote_token``
+# (``numeraire_cash``, portfolio-scale after a de-risk) or a ``dust_residual``
+# it is reachable in exactly the skip cases this path otherwise targets. The
+# carry works only because its USDT is absent from the wallet map; that is a
+# property of the data, not a guard. ``_leg_mark_enters_nav`` is the guard.
+# (Grok, high-risk panel 2026-08-02.)
+#
+# **Chain-scoped.** Lots are aggregated per ``(chain, token)``, never per token
+# alone. A multi-chain deployment (VIB-5722) can hold the same symbol on two
+# chains; a symbol-only lookup would hand a chain-A leg the combined cross-chain
+# quantity and cost, and the exclusion stamp would suppress the reader's
+# inventory term for that symbol on EVERY chain. Accounting identity is
+# chain-scoped (blueprint 27); this lookup matches it. (Codex, same panel.)
+#
+# ``details["cost_basis_source"]`` is the data-shape marker (VIB-4636
+# discipline) consumers use to recognise a leg whose basis — and therefore
+# whose mark-to-market — is already folded into the position sums.
+_TOKEN_BASIS_SOURCE_KEY = "cost_basis_source"
+
+
+def _aggregate_open_swap_lots_by_chain(
+    events: list[dict[str, Any]],
+    deployment_id: str,
+) -> dict[tuple[str, str], tuple[Decimal, Decimal | None]]:
+    """Open swap-inventory lots per ``(chain, token)`` (VIB-6362).
+
+    The chain-scoped sibling of :func:`_aggregate_open_swap_lots`. That function
+    folds by token symbol alone, which is right for the VIB-5057 classifier (it
+    caps against a single combined wallet-balance map) and wrong here: a
+    discovered TOKEN leg names ONE chain, and giving it another chain's lot
+    quantity/cost misattributes basis across chains.
+
+    The chain is read off the lot's own ``swap:<chain>:<wallet>`` position key,
+    so it comes from the same record as the quantity — it cannot drift. A lot
+    whose key does not carry a parseable chain is DROPPED rather than folded into
+    a chainless bucket: an unattributable lot must not silently back a leg.
+
+    ``cost_total`` is ``None`` when ANY of that pair's open lots has an unmeasured
+    basis (Empty ≠ Zero — one unmeasured lot poisons the pair's whole basis; a
+    partial sum would understate cost and overstate unrealized PnL).
+    """
+    from almanak.framework.accounting.basis import FIFOBasisStore
+
+    scoped = [ev for ev in events if isinstance(ev, dict) and ev.get("deployment_id") == deployment_id]
+    store = FIFOBasisStore()
+    store.reconstruct_from_events(scoped)
+
+    totals: dict[tuple[str, str], tuple[Decimal, Decimal | None]] = {}
+    for position_key, token, remaining, cost_for_remaining in store.iter_open_swap_lots():
+        chain = _chain_from_swap_position_key(position_key)
+        if not chain:
+            continue
+        key = (chain, token.casefold())
+        prev_remaining, prev_cost = totals.get(key, (Decimal("0"), Decimal("0")))
+        cost = None if (prev_cost is None or cost_for_remaining is None) else prev_cost + cost_for_remaining
+        totals[key] = (prev_remaining + remaining, cost)
+    return totals
+
+
+def _chain_from_swap_position_key(position_key: str) -> str | None:
+    """``swap:<chain>:<wallet>`` -> case-folded ``<chain>``, else ``None``.
+
+    Shared by the writer's chain-scoped aggregation and the reader's exclusion
+    (``quant_aggregations.compute_inventory_unrealized``) so the two cannot
+    disagree on how a lot's chain is derived.
+    """
+    parts = (position_key or "").split(":")
+    if len(parts) < 3 or parts[0] != "swap" or not parts[1]:
+        return None
+    return parts[1].casefold()
+
+
+def _leg_mark_enters_nav(position_value: "PositionValue", wallet_index: "_WalletMatchIndex | None") -> bool:
+    """True iff this TOKEN leg's ``value_usd`` counts into ``total_value_usd``.
+
+    Mirrors the NAV sum's own predicate (``position_value_positive`` in
+    ``value()``): a lot-derived swap-inventory row always counts; a discovered
+    TOKEN leg counts unless it overlaps the wallet (VIB-4909 pseudo-position,
+    already counted once inside ``wallet_balances``).
+
+    ``wallet_index is None`` means the caller did not go through ``value()`` and
+    the partition is UNKNOWN. Returns ``False`` — an unknown partition must not
+    be assumed favourable, and an unbacked leg is the safe, pre-existing state.
+    """
+    if _is_swap_inventory_row(position_value):
+        return True
+    if wallet_index is None:
+        return False
+    return not _token_overlaps_wallet_index(position_value, wallet_index)
+
+
+def _token_identity_key(position_value: "PositionValue") -> str | None:
+    """Case-folded symbol naming the token a TOKEN leg holds, or ``None``.
+
+    Swap lots are keyed by token SYMBOL (``_aggregate_open_swap_lots`` folds
+    ``FIFOBasisStore``'s ``token_out``), so the leg must name one. ``asset`` is
+    the convention every discovered TOKEN row uses; the ``tokens`` list is the
+    fallback for rows that carry only it.
+    """
+    details = getattr(position_value, "details", None) or {}
+    asset = details.get("asset")
+    if isinstance(asset, str) and asset:
+        return asset.casefold()
+    for tok in getattr(position_value, "tokens", None) or []:
+        if isinstance(tok, str) and tok:
+            return tok.casefold()
+    return None
+
+
+def _token_position_quantity(position_value: "PositionValue") -> Decimal | None:
+    """Token quantity ``value_usd`` was computed from, or ``None`` if unknown.
+
+    ``spot_amount`` is preferred over ``amount``: it is the live balance the
+    spot repricer actually marked (``valuation_source == "spot_amount_price"``),
+    whereas ``amount`` is the strategy's own cached self-report, which can lag
+    the chain. Pro-rating a basis against a quantity that did NOT produce
+    ``value_usd`` would mismatch the two sides of the PnL subtraction.
+
+    ``_finite_positive_decimal``, not a bare ``Decimal(str(...))``: ``details``
+    is strategy-supplied, and ``Decimal("NaN")`` parses without raising. A NaN
+    quantity then defeats EVERY guard in :meth:`_enrich_token_pnl`, because a
+    NaN ordering comparison is False in both directions — ``quantity <= 0`` and
+    ``quantity > remaining`` would both pass — and the leg would be stamped
+    ``cost_basis_usd = NaN``, which is truthy. That reads as MEASURED: the
+    VIB-6308 coverage guard stands down and the token is named in
+    ``folded_into_positions``, suppressing the reader's inventory term for a lot
+    nobody measured. (CodeRabbit, high-risk panel 2026-08-02.)
+    """
+    details = getattr(position_value, "details", None) or {}
+    for key in ("spot_amount", "amount"):
+        quantity = _finite_positive_decimal(details.get(key))
+        if quantity is not None:
+            return quantity
+    return None
+
+
+def _swap_lot_tokens_folded_into_positions(positions: list["PositionValue"]) -> list[str]:
+    """``"<chain>:<token>"`` entries whose swap-lot basis reached a surviving leg.
+
+    Read off the FINAL position list — after the VIB-5738 dedup and the
+    synthetic-row append — so it can only ever name a leg that actually shipped
+    in ``positions_json``. Deriving it from the enrichment call sites instead
+    would name tokens whose leg was subsequently deduped away.
+
+    Chain-qualified, matching :func:`_aggregate_open_swap_lots_by_chain`: a
+    bare symbol would suppress the reader's inventory term for that token on
+    EVERY chain of a multi-chain deployment, including chains whose lots are
+    still classified as cash.
+
+    Consumed by ``dashboard_service.GetCostStack`` to exclude those lots from
+    the legacy VIB-4984 additive inventory-MTM term. Without the exclusion the
+    token's ``mark - cost`` would enter Strategy PnL twice: once through the
+    leg (``open_position_nav - deployed_capital_usd``, now that the leg carries
+    a basis) and again through the additive term, which fires whenever the
+    snapshot is not stamped ``swap_inventory.status == "applied"`` — exactly the
+    ``capped_to_zero`` snapshots this enrichment targets.
+
+    **Rollout ordering is one-way** (known limitation, VIB-6366): the writer
+    lives in the strategy container and the exclusion in the gateway. Gateway
+    first is safe (an empty exclusion set restores the pre-VIB-6362 behaviour);
+    writer first double-counts folded tokens for the lag window. Nothing in this
+    repo enforces the order, and no reader-side rule can — an old gateway simply
+    does not read the stamp.
+    """
+    folded: set[str] = set()
+    for pos in positions:
+        details = getattr(pos, "details", None) or {}
+        if details.get(_TOKEN_BASIS_SOURCE_KEY) != _SWAP_INVENTORY_SOURCE:
+            continue
+        token = _token_identity_key(pos)
+        chain = (getattr(pos, "chain", "") or "").casefold()
+        if token and chain:
+            folded.add(f"{chain}:{token}")
+    return sorted(folded)
+
+
+def _with_folded_tokens(metadata: dict[str, Any] | None, folded: list[str]) -> dict[str, Any] | None:
+    """Copy of ``metadata`` carrying ``folded_into_positions``; unchanged when empty.
+
+    No folds ⇒ the stamp is byte-identical to the pre-VIB-6362 writer. A fold
+    implies open swap lots exist, so ``_classify_swap_inventory`` returned a
+    real metadata dict rather than the ``_NO_SWAP_INVENTORY`` sentinel; the
+    ``None`` branch is defensive only, and never silently drops the stamp.
+    """
+    if not folded:
+        return metadata
+    merged = dict(metadata) if metadata else {"status": "unmeasured"}
+    merged["folded_into_positions"] = folded
+    return merged
+
+
 # Valuation-layer swap-inventory dust floor (VIB-5738). Derives from the SAME
 # constant as the teardown token-consolidation floor (VIB-5011) so "what teardown
 # strands as dust" and "what valuation books as wallet cash" can never drift: a
@@ -1382,6 +1606,19 @@ class PortfolioValuer:
         # degraded stamp — never a silent no-op).
         self._snapshot_events_flat: list[dict] | None = None
         self._snapshot_prefetch_failed: bool = False
+        # VIB-6362: per-snapshot memo of the open-swap-lot replay. Both the
+        # TOKEN-leg basis enrichment (per position, inside _get_positions) and
+        # the VIB-5057 classifier (once, after it) read the same aggregate; the
+        # memo makes the replay happen once AND guarantees the two cannot
+        # disagree about what the lots hold. Cleared in value()'s finally.
+        self._snapshot_swap_lot_totals: dict[str, tuple[Decimal, Decimal | None]] | None = None
+        self._snapshot_swap_lot_totals_by_chain: dict[tuple[str, str], tuple[Decimal, Decimal | None]] | None = None
+        # VIB-6362: the wallet-overlap index for THIS snapshot, set in value()
+        # before positions are enriched. The TOKEN-basis path needs it to tell a
+        # NAV-counting leg from a VIB-4909 wallet pseudo-position; ``None`` means
+        # the partition is unknown and the path refuses (see _leg_mark_enters_nav).
+        # Reset in value()'s finally so it never leaks across snapshots.
+        self._snapshot_wallet_index: _WalletMatchIndex | None = None
         # VIB-5420: the strategy wallet for THIS snapshot, set at the top of
         # value(). On-chain repricers (Curve LP) use it to read ``balanceOf`` for
         # strategy-reported positions whose details omit a wallet. Reset in the
@@ -1727,6 +1964,15 @@ class PortfolioValuer:
                     wallet_balances.append(native_row)
             wallet_value = total_value(wallet_balances)
 
+            # VIB-6362: publish the wallet-overlap index BEFORE positions are
+            # enriched. ``_enrich_token_pnl`` needs it to tell a NAV-counting
+            # TOKEN leg from a VIB-4909 wallet pseudo-position, and enrichment
+            # happens inside ``_get_positions`` on the next line. Set here (a
+            # per-snapshot field, the same idiom as ``_snapshot_events_flat`` and
+            # ``_strategy_wallet_address``) rather than threaded through three
+            # signatures on the snapshot hot path.
+            self._snapshot_wallet_index = _build_wallet_match_index(wallet_balances)
+
             # Step 4: Get non-wallet positions (LP, lending, perps) if available
             positions, position_value, positions_unavailable = self._get_positions(strategy, market, prices, chains)
 
@@ -1771,6 +2017,15 @@ class PortfolioValuer:
                 wallet_balances,
             )
             positions = [*positions, *swap_inventory.rows]
+
+            # VIB-6362: name the tokens whose swap-lot basis reached a surviving
+            # discovered TOKEN leg, so the reader's legacy additive
+            # inventory-MTM term can exclude those lots instead of marking them
+            # a second time. Computed HERE — after the dedup and the synthetic
+            # append — because only the final list says which legs shipped.
+            swap_inventory_metadata = _with_folded_tokens(
+                swap_inventory.metadata, _swap_lot_tokens_folded_into_positions(positions)
+            )
 
             # Step 4a-bis (VIB-5316): synthesize the held-PT inventory from FIFO
             # basis lots and value it via the gateway PT/USD authority — the LIVE
@@ -1891,7 +2146,7 @@ class PortfolioValuer:
                 iteration_number=iteration_number,
                 snapshot_metadata=self._build_snapshot_metadata(
                     gas_native_status,
-                    swap_inventory.metadata,
+                    swap_inventory_metadata,
                     pt_inventory.metadata,
                     stable_depeg=stable_depeg,
                     nav_basis_coverage=_nav_basis_coverage(nav_legs),
@@ -1923,6 +2178,11 @@ class PortfolioValuer:
             self._snapshot_event_cache = None
             self._snapshot_events_flat = None
             self._snapshot_prefetch_failed = False
+            # VIB-6362: the lot memo is derived from the events just dropped —
+            # keeping it would serve the previous snapshot's inventory.
+            self._snapshot_swap_lot_totals = None
+            self._snapshot_swap_lot_totals_by_chain = None
+            self._snapshot_wallet_index = None
             # VIB-5406: consume-once — the drain-barrier flag applies to THIS
             # snapshot only; the next caller re-sets it before value().
             self._drain_barrier_incomplete = False
@@ -2126,6 +2386,40 @@ class PortfolioValuer:
                     symbols.append(str(coin))
         return symbols
 
+    def _open_swap_lot_totals(self) -> dict[str, tuple[Decimal, Decimal | None]]:
+        """Memoized ``{token_key: (remaining, cost)}`` for this snapshot (VIB-6362).
+
+        Replays the prefetched event stream once per snapshot instead of once
+        per consumer. Callers must have checked ``_snapshot_events_flat`` is not
+        ``None``; an empty stream legitimately aggregates to ``{}``.
+
+        Deliberately NOT exception-swallowing: ``_swap_inventory_for_snapshot``
+        turns a replay failure into an explicit ``classification_error`` stamp,
+        and ``_enrich_token_pnl`` runs inside ``_enrich_position_pnl``'s
+        best-effort guard. Catching here would erase both signals and leave a
+        failed replay memoized as "no lots".
+        """
+        if self._snapshot_swap_lot_totals is None:
+            self._snapshot_swap_lot_totals = _aggregate_open_swap_lots(
+                self._snapshot_events_flat or [], self._deployment_id
+            )
+        return self._snapshot_swap_lot_totals
+
+    def _open_swap_lot_totals_by_chain(self) -> dict[tuple[str, str], tuple[Decimal, Decimal | None]]:
+        """Memoized ``{(chain, token): (remaining, cost)}`` for this snapshot (VIB-6362).
+
+        The chain-scoped view the TOKEN-basis path reads. Same replay, same
+        per-snapshot lifetime and same non-swallowing contract as
+        :meth:`_open_swap_lot_totals`; see
+        :func:`_aggregate_open_swap_lots_by_chain` for why the symbol-only view
+        is wrong for a leg that names one chain.
+        """
+        if self._snapshot_swap_lot_totals_by_chain is None:
+            self._snapshot_swap_lot_totals_by_chain = _aggregate_open_swap_lots_by_chain(
+                self._snapshot_events_flat or [], self._deployment_id
+            )
+        return self._snapshot_swap_lot_totals_by_chain
+
     def _swap_inventory_for_snapshot(
         self,
         chain: str,
@@ -2176,7 +2470,7 @@ class PortfolioValuer:
                 )
             return _NO_SWAP_INVENTORY
         try:
-            lot_totals = _aggregate_open_swap_lots(self._snapshot_events_flat, self._deployment_id)
+            lot_totals = self._open_swap_lot_totals()
             return _classify_swap_inventory(
                 lot_totals,
                 balances,
@@ -6576,6 +6870,7 @@ class PortfolioValuer:
         - LP: position_events table, OPEN event keyed by NFT position_id.
         - PERP: position_events table, OPEN event keyed by position_id.
         - VAULT: accounting_events table keyed by vault position_key (VAULT_DEPOSIT events).
+        - TOKEN: FIFO swap-acquisition lots replayed from accounting_events (VIB-6362).
         """
         if not self._accounting_store or not self._deployment_id:
             return
@@ -6590,8 +6885,83 @@ class PortfolioValuer:
                 self._enrich_perp_pnl(position_value, position_info)
             elif position_info.position_type == PositionType.VAULT:
                 self._enrich_vault_pnl(position_value, position_info, chain)
+            elif position_info.position_type == PositionType.TOKEN:
+                self._enrich_token_pnl(position_value)
         except Exception:
             logger.debug("_enrich_position_pnl failed for %s", position_info.position_id, exc_info=True)
+
+    def _enrich_token_pnl(self, position_value: PositionValue) -> None:
+        """Back a discovered TOKEN leg with its FIFO swap-acquisition basis (VIB-6362).
+
+        See the module-level VIB-6362 block for why the leg needs its own path
+        even though the VIB-5057 classifier already emits backed synthetic rows.
+
+        **Every exit below leaves the leg UNMEASURED rather than booking a
+        fabricated basis.** ``cost_basis_usd`` defaults to ``Decimal("0")`` and
+        the serializer drops it as falsy, so a wrong basis here is not merely
+        inaccurate — it makes an unbacked leg look *measured* and silently
+        disarms the VIB-6308 coverage guard that currently protects the tile.
+        Unmeasured keeps the guard armed and the tile honest.
+
+        The strict ``quantity > remaining`` refusal is the load-bearing one. A
+        wallet can hold more of a token than the SWAP lots account for — a USDT
+        BORROW lands in the same fungible wallet pool but is minted
+        ``source="BORROW"``, which ``iter_open_swap_lots`` deliberately excludes
+        (VIB-3964/VIB-4984). Booking the swap-lot cost against the LARGER
+        holding would understate the basis and re-create this very bug at a
+        smaller magnitude, while reading as fully backed.
+
+        The NAV-partition and chain-scope guards are the other two; both are
+        explained in the module-level VIB-6362 block.
+        """
+        # VIB-5406: the drain barrier timed out, so the event stream may be
+        # missing this unit's disposals — a lot that reads as still-held may
+        # already be sold. Same fail-closed rule the inventory classifiers use.
+        if self._drain_barrier_incomplete:
+            return
+        if self._snapshot_events_flat is None:
+            return
+        # The leg's mark must be on the SAME side of the NAV partition as the
+        # cost we are about to book. A wallet pseudo-position is excluded from
+        # ``total_value_usd`` but NOT from ``deployed_capital_usd``, so backing
+        # one adds cost with no matching open-NAV mark — a phantom loss of the
+        # whole basis. See the module-level VIB-6362 block.
+        if not _leg_mark_enters_nav(position_value, self._snapshot_wallet_index):
+            return
+        token_key = _token_identity_key(position_value)
+        chain_key = (getattr(position_value, "chain", "") or "").casefold()
+        if token_key is None or not chain_key:
+            return
+        lot = self._open_swap_lot_totals_by_chain().get((chain_key, token_key))
+        if lot is None:
+            return
+        remaining, cost = lot
+        # Empty≠Zero: one unmeasured lot poisons the pair's whole basis
+        # (_aggregate_open_swap_lots_by_chain collapses it to None).
+        if cost is None or remaining <= 0:
+            return
+        quantity = _token_position_quantity(position_value)
+        if quantity is None or quantity <= 0:
+            return
+        if quantity > remaining:
+            logger.debug(
+                "TOKEN leg %s on %s holds %s but swap lots only account for %s; leaving basis unmeasured",
+                token_key,
+                chain_key,
+                quantity,
+                remaining,
+            )
+            return
+        basis = cost if quantity == remaining else cost * (quantity / remaining)
+        position_value.cost_basis_usd = basis
+        position_value.unrealized_pnl_usd = position_value.value_usd - basis
+        # realized_pnl_usd is deliberately NOT set: a realized result belongs to
+        # the DISPOSAL, and the cost stack already sums it from the SWAP events
+        # (compute_cost_stack). Stamping it on the still-open leg too would
+        # double-count it into Strategy PnL.
+        if position_value.details is None:
+            position_value.details = {}
+        position_value.details[_TOKEN_BASIS_SOURCE_KEY] = _SWAP_INVENTORY_SOURCE
 
     def _enrich_lending_pnl(
         self,

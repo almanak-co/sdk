@@ -1034,6 +1034,7 @@ def compute_inventory_unrealized(
     accounting_events: list[dict[str, Any]],
     deployment_id: str,
     latest_token_prices: dict[str, Any],
+    exclude_tokens: frozenset[str] = frozenset(),
 ) -> Decimal | None:
     """Mark-to-market the held directional swap inventory (VIB-4984).
 
@@ -1061,11 +1062,31 @@ def compute_inventory_unrealized(
     The store-key reconstruction is per-``deployment_id`` so a shared wallet
     only marks this strategy's own inventory.
 
+    ``exclude_tokens`` (VIB-6362) holds case-folded ``"<chain>:<token>"`` keys
+    the snapshot writer already folded into a POSITION leg — stamped as
+    ``snapshot_metadata["swap_inventory"]["folded_into_positions"]`` when a
+    discovered ``PositionType.TOKEN`` row was backed with its swap-lot basis.
+    Those lots' ``mark - cost`` now flows through ``open_position_nav -
+    deployed_capital_usd``, so adding it here too would count it twice. The
+    whole-snapshot ``status == "applied"`` gate in ``GetCostStack`` cannot cover
+    this case: the fold happens precisely on the snapshots where the classifier
+    produced NO row for that token (``capped_to_zero``), and a co-held token that
+    IS still cash must keep its additive term.
+
+    Chain-qualified, matching the writer's stamp: a bare symbol would drop the
+    inventory term for that token on EVERY chain of a multi-chain deployment,
+    including chains whose lots the writer left classified as cash. The chain is
+    read off each lot's own ``swap:<chain>:<wallet>`` key — the same derivation
+    the writer uses (``portfolio_valuer._chain_from_swap_position_key``), so the
+    two sides cannot disagree about which lot a stamp names. A lot whose key has
+    no parseable chain can never match an exclusion and therefore keeps its term
+    — the safe direction, since dropping a term understates PnL silently.
+
     Returns ``None`` (unmeasured — Empty≠Zero) when:
       - ``deployment_id`` is missing/empty — we cannot scope events to this
         strategy, and summing a shared wallet's full event stream would leak a
         co-located strategy's inventory into this tile; fail closed,
-      - there are NO open swap inventory lots,
+      - there are NO open swap inventory lots left after ``exclude_tokens``,
       - any held lot has ``cost_usd_for_remaining is None`` (missing basis —
         do NOT read held inventory as pure profit),
       - a held token has no mark price in ``latest_token_prices`` (degrade —
@@ -1073,6 +1094,7 @@ def compute_inventory_unrealized(
     Otherwise returns the summed Decimal.
     """
     from almanak.framework.accounting.basis import FIFOBasisStore
+    from almanak.framework.valuation.portfolio_valuer import _chain_from_swap_position_key
 
     # Shared-wallet isolation: replay ONLY this deployment's events so a
     # co-located strategy on the same wallet cannot leak inventory into this
@@ -1091,7 +1113,15 @@ def compute_inventory_unrealized(
 
     total = Decimal("0")
     saw_lot = False
-    for _position_key, token, remaining, cost_for_remaining in store.iter_open_swap_lots():
+    for position_key, token, remaining, cost_for_remaining in store.iter_open_swap_lots():
+        # VIB-6362: this lot's mark already reached Strategy PnL through a
+        # position leg. Skipped BEFORE saw_lot so a snapshot whose every lot was
+        # folded returns None (nothing left in cash to recover) rather than a
+        # measured 0 — and before the basis/price refusals, which describe lots
+        # this term is still responsible for.
+        lot_chain = _chain_from_swap_position_key(position_key)
+        if lot_chain and f"{lot_chain}:{token.casefold()}" in exclude_tokens:
+            continue
         saw_lot = True
         if cost_for_remaining is None:
             # Missing basis — refuse to mark held inventory as pure profit.

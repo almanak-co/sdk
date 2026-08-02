@@ -183,6 +183,31 @@ class _QuantPositionSummary:
                             pass
 
 
+def _folded_inventory_tokens(swap_inventory_stamp: Any) -> frozenset[str]:
+    """Case-folded ``"<chain>:<token>"`` keys the writer folded into a leg (VIB-6362).
+
+    Reads ``snapshot_metadata["swap_inventory"]["folded_into_positions"]``.
+    Data-shape gate, version-tolerant across writer/reader rollouts: a snapshot
+    from a pre-VIB-6362 writer carries no key and yields the empty set, which
+    restores the previous behaviour exactly. Non-string members are dropped
+    rather than coerced — a malformed stamp must not widen the exclusion and
+    silently delete a legitimate inventory term.
+
+    **Known rollout limitation (VIB-6366).** Tolerance is one-way. Gateway
+    ahead of the writer is safe: no stamp, empty set, pre-VIB-6362 behaviour.
+    Writer ahead of the gateway double-counts folded tokens' mark-to-market for
+    the lag window, because an old gateway does not read this key at all — no
+    reader-side rule can close that, so it is a deployment-ordering constraint,
+    not a code one.
+    """
+    if not isinstance(swap_inventory_stamp, dict):
+        return frozenset()
+    folded = swap_inventory_stamp.get("folded_into_positions")
+    if not isinstance(folded, list):
+        return frozenset()
+    return frozenset(t.casefold() for t in folded if isinstance(t, str) and t)
+
+
 def _index_trade_tape_accounting_events(
     accounting_events: Sequence[Any],
 ) -> tuple[dict[str, dict[str, Any]], dict[str, list[dict[str, Any]]]]:
@@ -2818,8 +2843,19 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         if isinstance(swap_inventory_stamp, dict) and swap_inventory_stamp.get("status") == "applied":
             cs.inventory_unrealized_usd = None
         else:
+            # VIB-6362: the writer backs a discovered TOKEN leg with its swap-lot
+            # basis on snapshots the classifier produced no row for
+            # (``capped_to_zero`` / ``dust_residual``) — i.e. exactly the ones
+            # that do NOT stamp "applied" and so still reach this branch. Those
+            # tokens' mark now flows through the leg; marking them again here
+            # would double-count them in Strategy PnL. Per-token, not
+            # whole-snapshot: a co-held token still classified as cash keeps its
+            # additive term.
             cs.inventory_unrealized_usd = compute_inventory_unrealized(
-                accounting_events, deployment_id, latest_token_prices
+                accounting_events,
+                deployment_id,
+                latest_token_prices,
+                exclude_tokens=_folded_inventory_tokens(swap_inventory_stamp),
             )
 
         return cost_stack_to_proto(cs)
