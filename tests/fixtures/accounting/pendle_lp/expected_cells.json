@@ -12,7 +12,7 @@
     "G3": "FAIL",
     "G4": "PASS",
     "G5": "PASS",
-    "G6": "FAIL",
+    "G6": "XFAIL",
     "G7": "PASS",
     "G8": "PASS",
     "G9": "PASS",
@@ -28,7 +28,8 @@
   "matching_policy_version": 6,
   "cell_metrics": {
     "G6": {
-      "gap_usd": "0.700260884980000000000"
+      "gap_usd": "0.700260884980000000000",
+      "gas_usd_before_initial_endpoint": "0.70019296838"
     }
   }
 }

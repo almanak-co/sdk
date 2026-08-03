@@ -28,7 +28,8 @@
   "matching_policy_version": 3,
   "cell_metrics": {
     "G6": {
-      "gap_usd": "8.002"
+      "gap_usd": "8.002",
+      "gas_usd_before_initial_endpoint": "0"
     }
   }
 }

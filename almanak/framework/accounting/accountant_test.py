@@ -1294,7 +1294,7 @@ def _cell_g5_initial_vs_current(
 
     # Placement is a diagnostic on an otherwise-consistent baseline: the delta
     # is real but understates by whatever the first transaction already spent.
-    late_by = _g5_baseline_lateness(ordered, ledger)
+    late_by = _baseline_window_coverage(ordered[0] if ordered else None, ledger).late_by
     if late_by is not None:
         detail += (
             f"; NOTE baseline is LATE — first snapshot post-dates the first ledger row "
@@ -1413,30 +1413,128 @@ def _parse_ts(value: Any) -> datetime | None:
     return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
 
 
-def _g5_baseline_lateness(
-    snapshots: list[dict[str, Any]],
-    ledger: list[dict[str, Any]] | None,
-) -> str | None:
-    """How far the first snapshot post-dates the first ledger row, or ``None``.
+@dataclass(frozen=True)
+class WindowCoverage:
+    """Whether a snapshot endpoint brackets every money-moving row before it.
 
     A snapshot-derived delta whose baseline is captured *after* the first
     money-moving transaction can never see that transaction's cost, so the
     error is directional: it only ever understates. R1 measured ``-$0.375``
-    against an on-chain ``-$0.6145`` with the baseline 3s late.
+    against an on-chain ``-$0.6145`` with the baseline 3s late (VIB-6345).
 
-    ``None`` means "no evidence of lateness" — including the case where either
-    timestamp is unparseable, which is deliberately not reported as lateness.
+    ``measurable`` is False when the endpoint carries no parseable timestamp —
+    Empty != Zero, so ``covers`` is not a claim in that case and
+    ``gas_before_usd`` is ``None`` (unmeasured) rather than ``Decimal(0)``
+    (measured zero). Callers must branch on ``measurable`` before reading a
+    verdict off ``covers``.
     """
-    if not snapshots or not ledger:
-        return None
-    snap_ts = _parse_ts(snapshots[0].get("timestamp"))
-    ledger_ts = min(
-        (t for t in (_parse_ts(r.get("timestamp")) for r in ledger) if t is not None),
-        default=None,
+
+    measurable: bool
+    covers: bool
+    late_by: str | None
+    rows_before: int
+    gas_before_usd: Decimal | None
+    gas_before_unmeasured_rows: int
+    gas_before_complete: bool
+    rows_without_timestamp: int
+    earliest_before_ts: str
+
+    @property
+    def gas_before_measured(self) -> Decimal | None:
+        """The pre-window gas aggregate, or ``None`` when it is not a total.
+
+        Empty != Zero applies to the AGGREGATE, not just the terms: if any
+        pre-window row's ``gas_usd`` was unmeasured, the sum of the rest is a
+        subtotal, not "the gas spent before the baseline". Reporting that
+        subtotal as a measured magnitude would let the ratchet lock a floor
+        below the true value, and would let the verdict below call a gap
+        "explained" on partial evidence.
+        """
+        if self.gas_before_usd is None or not self.gas_before_complete:
+            return None
+        return self.gas_before_usd
+
+
+def _baseline_window_coverage(
+    endpoint: dict[str, Any] | None,
+    ledger: list[dict[str, Any]] | None,
+) -> WindowCoverage:
+    """Measure the ledger rows that predate a wallet-method endpoint.
+
+    Shared by G5 (diagnostic note on an otherwise-consistent baseline) and G6
+    (gating verdict — the gap is *arithmetically* wrong when the brackets
+    differ). It reports lateness rather than repairing it: the ratified fix is
+    producer-side, a pre-trade boot snapshot (VIB-5854).
+
+    A ledger row with no parseable timestamp is UNMEASURED, not "before": it is
+    counted in ``rows_without_timestamp`` and never trips the invariant. The
+    surrounding sort key ``r.get("timestamp") or ""`` sorts such a row *first*
+    (VIB-6348), which is exactly the mis-election this measurement must not
+    inherit.
+
+    KNOWN LIMITATION (VIB-6429): ``covers=True`` is weaker than it reads, in two
+    ways the panel identified. (a) Both writers serialise whole seconds —
+    ``int(...timestamp())`` at ``gateway_state_manager.py:316`` and ``:412`` — so a
+    transaction executed just *before* the endpoint within the same second stores
+    an EQUAL timestamp and is counted as covered by the ``<`` below. Two committed
+    fixtures (``lp_curve``, ``lp_curve_tricrypto``) show exactly 0s between their
+    first ledger row and their first priced snapshot, which is the signature of
+    that truncation rather than of simultaneity. (b) A row whose timestamp is
+    unparseable has an unknowable position, yet ``covers`` is still reported as a
+    measurement. Neither is a regression — both cases reach the same verdict as
+    they do without this guard, because the guard simply does not fire — so this
+    is a detector that is less sensitive than the data ideally allows, not a false
+    certification introduced here. Closing it needs an ordering source with
+    sub-second resolution (a cycle/sequence marker), which is a producer-side
+    change of the same family as the boot snapshot itself.
+    """
+    unmeasured = WindowCoverage(
+        measurable=False,
+        covers=False,
+        late_by=None,
+        rows_before=0,
+        gas_before_usd=None,
+        gas_before_unmeasured_rows=0,
+        gas_before_complete=False,
+        rows_without_timestamp=0,
+        earliest_before_ts="",
     )
-    if snap_ts is None or ledger_ts is None or snap_ts <= ledger_ts:
-        return None
-    return f"{(snap_ts - ledger_ts).total_seconds():.0f}s"
+    if endpoint is None:
+        return unmeasured
+    endpoint_ts = _parse_ts(endpoint.get("timestamp"))
+    if endpoint_ts is None:
+        return unmeasured
+    rows = ledger or []
+    untimed = 0
+    before: list[tuple[datetime, dict[str, Any]]] = []
+    for r in rows:
+        ts = _parse_ts(r.get("timestamp"))
+        if ts is None:
+            untimed += 1
+        elif ts < endpoint_ts:
+            before.append((ts, r))
+
+    gas_before = Decimal(0)
+    gas_unmeasured = 0
+    for _, r in before:
+        gas = _dec(r.get("gas_usd"))
+        if gas is None:
+            gas_unmeasured += 1
+        else:
+            gas_before += gas
+
+    earliest = min((ts for ts, _ in before), default=None)
+    return WindowCoverage(
+        measurable=True,
+        covers=not before,
+        late_by=(None if earliest is None else f"{(endpoint_ts - earliest).total_seconds():.0f}s"),
+        rows_before=len(before),
+        gas_before_usd=gas_before,
+        gas_before_unmeasured_rows=gas_unmeasured,
+        gas_before_complete=(gas_unmeasured == 0),
+        rows_without_timestamp=untimed,
+        earliest_before_ts=("" if earliest is None else earliest.isoformat()),
+    )
 
 
 def _cell_g6_reconciliation(  # noqa: C901
@@ -1889,6 +1987,59 @@ def _cell_g6_reconciliation(  # noqa: C901
     }
     has_nulls = any(v > 0 for v in null_breakdown.values())
 
+    # VIB-5854: the two methods must measure the same interval. The wallet method
+    # brackets ``[priced[0] … priced[-1]]``; the component method sums EVERY typed
+    # row in the DB. Those coincide only if no money moved before the first priced
+    # snapshot — and the runner captures its first snapshot *inside* iteration 1,
+    # after tx₁ has already executed. tx₁'s gas is spent before the baseline is
+    # read, so it can never appear in any snapshot-derived delta, while the
+    # component sum books it correctly. The residue lands in ``gap`` with no
+    # attribution: an operator cannot tell "the books lost money" from "the
+    # baseline was two seconds late".
+    coverage = _baseline_window_coverage(priced[0], ledger)
+    window_uncovered = coverage.measurable and not coverage.covers
+    # An uncovered window explains only as much of the gap as the pre-baseline
+    # spend it measured. The residue beyond that is an ordinary reconciliation
+    # failure and must keep failing: a late baseline is not a licence to excuse
+    # unrelated books errors, and XFAIL outranks FAIL, so an unconditional
+    # waiver would SOFTEN the validation contract relative to no guard at all.
+    # ``None`` when the aggregate is not measured — an unexplained residual and
+    # an unmeasurable one both fail, but for different stated reasons.
+    #
+    # Measured against the SIGNED discrepancy, never against ``gap``. The
+    # mechanism has exactly one sign — pre-baseline gas is booked by the
+    # component method and is invisible to the wallet method, so it can only
+    # push ``wallet - component`` POSITIVE by G. The residue is therefore
+    # ``|signed - G|``. Testing ``|gap - G| = ||signed| - G|`` instead loses the
+    # sign and understates the residue whenever an unrelated books error drives
+    # the discrepancy negative — one-directionally, always toward "explained".
+    # At ``signed = -G`` it reports a residue of exactly zero while the true
+    # residue is ``2G``: measured on a $165k fixture, a $1.40 error (14x ε) was
+    # certified "not a books error". Sign-blindness here reintroduces precisely
+    # the FAIL -> XFAIL softening this gate exists to prevent.
+    #
+    # KNOWN LIMITATION (VIB-6436): this nets the discrepancy against GAS ONLY, so
+    # the residue is not a clean measure of "unrelated books error". The component
+    # method books tx₁'s *economics* from ``accounting_events`` too — see the
+    # comment on the XFAIL branch below — and ``transaction_ledger`` carries no
+    # realized-PnL column at all. When tx₁ realizes R against pre-existing
+    # inventory the true structural offset is ``G - R``, so a run whose only defect
+    # is the late baseline can FAIL naming a books error that does not exist. The
+    # direction is FAIL, never XFAIL or PASS, so nothing is softened — but do not
+    # read this residue as "the books error" without checking for a pre-window
+    # realized leg.
+    #
+    # ``eps`` is the right tolerance: same question, same units, same run as the
+    # gap it bounds. KNOWN LIMITATION (VIB-6434): the VIB-5826 vacuity guard
+    # fires only on ``eps_vacuous and gap <= eps``, so a vacuous ε that also
+    # exceeds the gap reaches this test and can grant an XFAIL waiver — the very
+    # outcome that guard exists to deny a PASS. Needs a corrupted scaling base to
+    # reach, so it is not on a healthy run's path.
+    window_gas = coverage.gas_before_measured
+    signed_delta = wallet_pnl - component_pnl
+    window_residual = None if window_gas is None else abs(signed_delta - window_gas)
+    window_explained = window_residual is not None and window_residual <= eps
+
     decomp = {
         "wallet_pnl_usd": str(wallet_pnl),
         "component_pnl_usd": str(component_pnl),
@@ -1929,6 +2080,26 @@ def _cell_g6_reconciliation(  # noqa: C901
         "ε_vacuous": str(eps_vacuous),
         "ε_scaled_over_capital": ("" if eps_over_capital is None else str(eps_over_capital)),
         "il_diagnostic_usd_NOT_in_PnL": str(il_diagnostic),
+        # VIB-5854 window coverage. Always emitted so the wallet bracket is
+        # visible in the decomposition even on rows where it changes no verdict —
+        # the same rule ``ε_vacuous`` follows. Empty != Zero: when the endpoint
+        # carries no parseable timestamp the coverage is UNMEASURED, so these read
+        # "" rather than claiming a covered window nobody verified.
+        "initial_endpoint_covers_run": ("" if not coverage.measurable else str(coverage.covers)),
+        "initial_snapshot_cycle_id": priced[0].get("cycle_id") or "",
+        "ledger_rows_before_initial_endpoint": str(coverage.rows_before),
+        # The attributable magnitude: spend the wallet method structurally cannot
+        # see. Ratcheted, so it can only shrink — and it goes to zero when the
+        # producer-side boot snapshot lands, which is what proves that fix.
+        # "" when coverage could not be evaluated at all, AND when the aggregate
+        # is only a subtotal because some pre-window row's gas was unmeasured —
+        # Empty != Zero applies to the TOTAL, not merely to its terms.
+        "gas_usd_before_initial_endpoint": ("" if window_gas is None else str(window_gas)),
+        "gas_usd_before_initial_endpoint_unmeasured_count": str(coverage.gas_before_unmeasured_rows),
+        # The part of the gap a late baseline does NOT explain. This decides the
+        # verdict below, so it is always emitted — "" when it cannot be computed.
+        "window_residual_usd": ("" if window_residual is None else str(window_residual)),
+        "ledger_rows_without_timestamp": str(coverage.rows_without_timestamp),
         **{k: str(v) for k, v in null_breakdown.items()},
     }
 
@@ -1993,6 +2164,103 @@ def _cell_g6_reconciliation(  # noqa: C901
                 f"(${scaling_base} via {scaling_label}) before trusting this cell; a notional that "
                 f"exceeds capital usually means mis-scaled leg amounts, not real volume. "
                 f"wallet=${wallet_pnl} component=${component_pnl} gap=${gap}",
+                decomposition=decomp,
+            ),
+            decomp,
+        )
+    # VIB-5854: an uncovered window makes BOTH remaining verdicts unsound. A PASS
+    # would certify a reconciliation between two different intervals; a FAIL would
+    # bill the books for a residue the wallet method structurally cannot see.
+    # XFAIL is the honest verdict — measured-but-blocked, pending the
+    # producer-side pre-trade boot snapshot — and it is placed BEFORE the
+    # ``gap <= eps`` PASS because the false GREEN is the dangerous direction: in
+    # paper/dry_run a failed boot capture logs and continues, so without this
+    # guard the matrix scores green on a degraded run.
+    #
+    # NOT the repair. Windowing ``Σ_gas`` to the wallet bracket would make the two
+    # numbers agree and is incorrect, not merely narrow: the component books tx₁'s
+    # *economics* from ``accounting_events`` (FIFO lot, realized leg, notional into
+    # ε) and only its *gas* from ``transaction_ledger``, so windowing the gas alone
+    # drops one of tx₁'s terms and keeps the rest. That looks right only while tx₁
+    # is an acquiring swap with ``realized_pnl=None``; the day tx₁ disposes of
+    # pre-existing inventory it re-opens the gap with the opposite sign. Ranked
+    # below the null and vacuous-ε branches deliberately — both are more specific
+    # diagnoses, and neither may be softened into an XFAIL by this guard.
+    #
+    # And the waiver is bounded by what the late baseline actually EXPLAINS. An
+    # unconditional XFAIL would excuse an unrelated books error that merely
+    # happened to share a run with a late baseline — measured here as a $10.00
+    # gap of which $0.50 was pre-baseline gas, reported as "not a books error".
+    # Because XFAIL outranks FAIL, that is strictly WORSE than having no guard at
+    # all: a run that fails today would soft-pass. So the residue beyond the
+    # attributed spend keeps failing, and says so.
+    if window_uncovered and window_explained:
+        return (
+            CellResult(
+                "G6",
+                "Reconciliation",
+                "XFAIL",
+                f"wallet window does not cover the run: {coverage.rows_before} ledger row(s) "
+                f"predate the initial endpoint (earliest {coverage.earliest_before_ts}, "
+                f"baseline late by {coverage.late_by}), carrying ${window_gas} "
+                f"of gas the wallet method cannot see — which accounts for the gap to within "
+                f"${window_residual} (ε=${eps}). wallet=${wallet_pnl} "
+                f"component=${component_pnl} gap=${gap} — the endpoints measure different "
+                "intervals, so this gap is not a books error. Needs the producer-side "
+                "pre-trade boot snapshot (VIB-5854); do NOT window Σ_gas to match.",
+                decomposition=decomp,
+            ),
+            decomp,
+        )
+    if window_uncovered:
+        # The residue can exceed BOTH the gap and the spend, so it is a portion of
+        # neither and must not be written as one. It is measured against the SIGNED
+        # discrepancy, so when the two omissions partly cancel a near-zero gap can
+        # hide a large residue; and it is netted only against gas, the smaller limb
+        # (VIB-6436). Two rounds of this diagnostic each made the residue a part of
+        # whichever noun sat nearest — "$10.5 of a $10.0 gap", then "$10.5 of that
+        # $0.5 spend", the second false by 21x in the same sentence that states the
+        # $0.5. It is a quantity in its own right. The threshold sentence cites the
+        # residue because the residue is what this branch tested; printing
+        # "gap > ε" was false whenever the gap itself sat under ε.
+        unexplained = (
+            f"the discrepancy is not explained by that spend (residual=${window_residual} > ε=${eps})"
+            if window_residual is not None
+            else (
+                f"the pre-baseline gas is unmeasured on "
+                f"{coverage.gas_before_unmeasured_rows} row(s), so how much of the gap it "
+                "explains cannot be established"
+            )
+        )
+        # Claim a second defect only where one was measured. On the unmeasured
+        # branch the cell has just said the explained portion cannot be established
+        # — concluding "reconcile the residue as an ordinary gap" there asserts
+        # exactly what it disclaimed, and on the run that produced it the gap sat
+        # three orders of magnitude UNDER ε. The actionable fix on that branch is to
+        # populate gas_usd, not to reconcile the books.
+        measured_residue = window_residual is not None
+        headline = "TWO defects on one run." if measured_residue else "This cell cannot be decided."
+        closing = (
+            "Fixing the baseline alone will NOT close this cell — reconcile the residue as an ordinary gap."
+            if measured_residue
+            else (
+                f"Populate gas_usd on the {coverage.gas_before_unmeasured_rows} pre-baseline "
+                "row(s) before reading anything into this gap."
+            )
+        )
+        return (
+            CellResult(
+                "G6",
+                "Reconciliation",
+                "FAIL",
+                f"{headline} (1) The wallet window does not cover the run: "
+                f"{coverage.rows_before} ledger row(s) predate the initial endpoint "
+                f"(earliest {coverage.earliest_before_ts}, baseline late by "
+                f"{coverage.late_by}), carrying "
+                f"{'$' + str(window_gas) if window_gas is not None else 'an unmeasured amount'} "
+                f"of gas the wallet method cannot see — needs the producer-side pre-trade "
+                f"boot snapshot (VIB-5854). (2) {unexplained}: wallet=${wallet_pnl} "
+                f"component=${component_pnl} gap=${gap} (ε=${eps}). {closing}",
                 decomposition=decomp,
             ),
             decomp,

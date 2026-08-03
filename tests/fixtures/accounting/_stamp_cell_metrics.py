@@ -43,7 +43,7 @@ _FIXTURE_BASE = _REPO_ROOT / "tests" / "fixtures" / "accounting"
 # here must also be declared in ``_METRIC_DIRECTION`` in the gate, which fails
 # closed on an undeclared metric.
 _FLOORED: dict[str, tuple[str, ...]] = {
-    "G6": ("gap_usd",),
+    "G6": ("gap_usd", "gas_usd_before_initial_endpoint"),
 }
 
 
