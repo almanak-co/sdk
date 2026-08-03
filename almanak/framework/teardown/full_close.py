@@ -307,5 +307,12 @@ def full_close_intents(
             )
             continue
         intents.append(intent)
-
+    # VIB-6341: this builder deliberately does NOT de-duplicate a physical perp
+    # named twice by the (additive, never-subtractive) enumeration. The
+    # single-close guard is applied DISPATCH-ADJACENT instead — in the same
+    # function as the dispatch it protects — because its output crosses a
+    # function boundary before ``check_intent_coverage`` runs, and a builder that
+    # silently hid an intent from that gate would report a covered position as
+    # UNCOVERED and stamp a working teardown FAILED (#3574 audit). See
+    # ``single_close_guard`` §"The collapse decides DISPATCH".
     return intents

@@ -613,10 +613,23 @@ async def execute_and_verify(
     """
     from ..teardown.completeness import check_intent_coverage
     from ..teardown.models import ClosureVerification, TeardownStatus, VerificationStatus
+    from ..teardown.single_close_guard import collapse_duplicate_perp_closes
     from ..teardown.teardown_manager import _teardown_wallet_for_chain
     from .runner_teardown import _make_approval_callback, _safe_mark
 
     deployment_id = strategy.deployment_id
+
+    # VIB-6341: one physical perp position must be closed ONCE. Applied HERE and
+    # not in ``runner_teardown``'s plan build, because this function holds BOTH
+    # the dispatch below and gate site G1 — and the collapsed plan may only reach
+    # the dispatch. ``for_coverage`` (the plan as built) is what G1 is shown; the
+    # withheld intent is the proof the plan accounted for its position, and
+    # coverage's intent<->position predicate is strictly weaker than this guard's
+    # intent<->intent one, so withholding it from G1 would report a covered
+    # position UNCOVERED and stamp a working teardown FAILED (#3574 audit).
+    _single_close = collapse_duplicate_perp_closes(teardown_intents)
+    _coverage_intents = _single_close.for_coverage
+    teardown_intents = _single_close.dispatch
 
     # Build approval callback for slippage escalation (VIB-2927).
     # Only wire for manual mode — auto mode uses hard slippage limits.
@@ -740,7 +753,9 @@ async def execute_and_verify(
         # only one of them leaves the CLI lane broken.
         completeness = check_intent_coverage(
             positions,
-            teardown_intents,
+            # PRE-COLLAPSE plan — see the VIB-6341 note at the top of this
+            # function. Never ``teardown_intents``, which is dispatch-only.
+            _coverage_intents,
             consolidation_target_token=teardown_mgr._consolidation_noop_target(strategy, teardown_intents),
             wallet_for_chain=lambda c: _teardown_wallet_for_chain(strategy, c) or None,
         )

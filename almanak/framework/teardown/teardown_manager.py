@@ -63,6 +63,7 @@ from almanak.framework.teardown.plan_a_reconciliation import reconcile_known_pos
 from almanak.framework.teardown.revert_hints import annotate_teardown_error
 from almanak.framework.teardown.revert_transience import Transience, classify_revert_transience
 from almanak.framework.teardown.safety_guard import SafetyGuard
+from almanak.framework.teardown.single_close_guard import collapse_duplicate_perp_closes
 from almanak.framework.teardown.slippage_manager import (
     EscalatingSlippageManager,
     ExecutionAttempt,
@@ -859,6 +860,27 @@ class TeardownManager:
                     else:
                         raise
 
+            # VIB-6341: one physical perp position must be closed ONCE. This is
+            # gate site G2, and it is DISPATCH-ADJACENT — the execution below and
+            # the coverage check just after are both in this function, which is
+            # the only arrangement in which the split below is safe.
+            #
+            # ``single_close.dispatch`` is what may be submitted.
+            # ``single_close.for_coverage`` is the plan as BUILT, and it — never
+            # ``dispatch`` — is what the completeness gate is shown.
+            #
+            # An earlier revision passed the collapsed list to coverage on the
+            # reasoning that "the surviving close covers the duplicate rows by the
+            # same venue-alias predicate". That reasoning was WRONG and the #3574
+            # audit caught it: this guard's predicate is intent<->intent in ``sem``
+            # space, while coverage's is intent<->position, and a POSITION can emit
+            # a ``key``-only token with no ``sem`` at all (``gmx_v2/perp_identity.py``
+            # :291 key-disagreement, :328 no-wallet). The withheld intent can be the
+            # ONLY one covering such a row, so collapsing before the gate turned a
+            # teardown that closed everything into ``VerificationStatus.FAILED``.
+            single_close = collapse_duplicate_perp_closes(intents)
+            intents = single_close.dispatch
+
             # TD-11 (VIB-5469): completeness enforcement. Every KNOWN tracked-open
             # position must have a closing intent targeting it; a position with
             # none must FAIL the teardown LOUD, never be reported as a clean
@@ -876,7 +898,8 @@ class TeardownManager:
             # wallet-blind comparison — the named failure mode of this fix.
             completeness = check_intent_coverage(
                 positions,
-                intents,
+                # PRE-COLLAPSE plan — see the VIB-6341 note above. Never ``intents``.
+                single_close.for_coverage,
                 consolidation_target_token=self._consolidation_noop_target(strategy, intents),
                 wallet_for_chain=lambda c: _teardown_wallet_for_chain(strategy, c) or None,
             )
@@ -1337,6 +1360,16 @@ class TeardownManager:
                     "Teardown resume lending guard synthesised HF-safe unwind staircase for %s (VIB-4466)", synth
                 )
             intents = guarded.intents
+            # VIB-6341: a regenerated plan has also NOT passed the runner/CLI
+            # single-close guard, and the regeneration shape (state was stale, so
+            # the enumeration was re-derived) is exactly where one physical perp
+            # gets named twice. Collapse duplicate FULL closes before the plan is
+            # persisted to ``pending_intents_json`` — a duplicate written there
+            # survives every later resume. Dispatch-adjacent: ``resume()`` ends in
+            # ``_execute_intents`` and runs NO coverage gate, so there is no
+            # ``for_coverage`` consumer on this path — the collapsed plan is both
+            # what executes and what persists.
+            intents = collapse_duplicate_perp_closes(intents).dispatch
             # Accepted asynchronous plans never enter regeneration: the guard
             # above retains their exact correlated order-key payload. Ordinary
             # stale plans have no accepted marker to carry forward.

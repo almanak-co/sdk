@@ -1554,11 +1554,22 @@ async def _resolve_manager_execution_state(
             accepted_lookup.state.teardown_id,
         )
         return accepted_lookup.state, None
+    # VIB-6341: persist the DISPATCH plan, not the plan as built. The in-memory
+    # collapse in ``execute_and_verify`` protects only the first attempt; a
+    # process restart deserialises ``pending_intents_json`` and the non-stale
+    # resume path re-executes it without passing through that guard, so a
+    # persisted duplicate close survives every later resume and reaches the chain
+    # — the exact double-close this ticket exists to prevent (#3574 audit).
+    # Coverage is unaffected: ``execute_and_verify`` still receives the full
+    # pre-collapse list and derives ``for_coverage`` from it. The guard is pure
+    # and idempotent, so collapsing here and again there is a no-op.
+    from ..teardown.single_close_guard import collapse_duplicate_perp_closes
+
     return await _h.run_cancel_window_and_persist(
         runner,
         teardown_mgr,
         strategy,
-        teardown_intents,
+        collapse_duplicate_perp_closes(teardown_intents).dispatch,
         teardown_mode,
         is_auto_mode,
         start_time,
@@ -2093,8 +2104,17 @@ async def execute_teardown_inline(
         set_cycle_id,
     )
     from ..teardown.runner_helpers import build_runner_helpers
+    from ..teardown.single_close_guard import collapse_duplicate_perp_closes
 
     deployment_id = strategy.deployment_id
+
+    # VIB-6341: one physical perp position must be closed ONCE. Dispatch-adjacent,
+    # like every other site: this lane executes the plan itself and runs NO
+    # ``check_intent_coverage`` gate, so there is no ``for_coverage`` consumer here
+    # and the collapsed plan is simply what executes. Wiring it here rather than in
+    # ``execute_teardown``'s plan build is what keeps the manager route's G1 gate
+    # able to see the pre-collapse plan (#3574 audit).
+    teardown_intents = collapse_duplicate_perp_closes(teardown_intents).dispatch
 
     # VIB-3773: dual cycle-id swap so ledger/outbox/snapshot rows carry the
     # teardown's cycle id, not the iteration that triggered the inline path.
