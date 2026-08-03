@@ -26,7 +26,7 @@ avalanche
 
 | Key | Meaning |
 |---|---|
-| `pool` | `TOKEN_X/TOKEN_Y/BIN_STEP` (e.g. `WAVAX/USDC/20`). |
+| `pool` | `TOKEN_X/TOKEN_Y/BIN_STEP` (e.g. `WAVAX/USDT/20`). A pool's depth is a live mainnet fact, not a constant — re-check `getReserves()` before pointing a run at a different pair (VIB-6307). |
 | `range_width_pct` | Total LP range width (0.10 = ±5% around price). |
 | `amount_x` / `amount_y` / `num_bins` | Initial inventory + bin count. |
 | `min_position_usd` | Minimum total inventory (USD) to (re)open. |

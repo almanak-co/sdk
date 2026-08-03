@@ -9,24 +9,25 @@
             "amount_type": "token"
         },
         {
-            "symbol": "USDC",
-            "address": "0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e",
+            "symbol": "USDT",
+            "address": "0x9702230a8ea53601f5cd2dc00fdbc13d4df4a8c7",
             "chain": "avalanche",
             "amount": "10",
             "amount_type": "usd"
         }
     ],
-    "pool": "WAVAX/USDC/20",
+    "pool": "WAVAX/USDT/20",
     "range_width_pct": "0.10",
     "amount_x": "0.001",
     "amount_y": "3",
     "num_bins": 11,
+    "min_position_usd": "2",
     "rebalance_buffer_pct": "0.5",
     "rebalance_cooldown_minutes": 30,
     "max_slippage": "0.005",
     "anvil_funding": {
         "AVAX": 100,
         "WAVAX": 100,
-        "USDC": 10000
+        "USDT": 10000
     }
 }

@@ -57,6 +57,30 @@ TRADERJOE_V2_LBPAIRS: dict[str, list[dict[str, str | int]]] = {
             "bin_step": 20,
             "address": "0xD446eb1660F766d533BeCeEf890Df7A69d26f7d1",
         },
+        # VIB-6307 — WAVAX/USDT/20, the pair the ``traderjoe_lp`` demo now
+        # targets after WAVAX/USDC/20 drained to a one-sided 22,219 WAVAX /
+        # 0.21 USDC. Verified on-chain 2026-08-03 at Avalanche block 91930573:
+        # ``LBFactory.getLBPairInformation(WAVAX, USDT, 20)`` →
+        # ``0x87EB2F90…``; ``getTokenX()`` = WAVAX, ``getTokenY()`` = USDT;
+        # ``getReserves()`` = 13,157.166558 WAVAX / 14,005.854013 USDT.
+        #
+        # Registration is load-bearing, not decorative: the LBPair address is
+        # dynamic per (tokenX, tokenY, binStep), so a Safe-wallet LP_CLOSE
+        # ``approveForAll`` / LP_COLLECT_FEES ``collectFees`` on an
+        # unregistered pair yields an empty manifest slot and reverts at
+        # ``execTransactionWithRole``. Re-pointing the demo without this entry
+        # would have moved the demo onto a pair the Roles modifier cannot
+        # authorise.
+        #
+        # NOTE the token order: WAVAX (0xB31f…) is ``tokenX`` even though USDT
+        # (0x9702…) is the numerically-lower address. LB pair order is fixed at
+        # pool creation and is NOT address-sorted — see VIB-6383.
+        {
+            "tokenX": "WAVAX",
+            "tokenY": "USDT",
+            "bin_step": 20,
+            "address": "0x87EB2F90d7D0034571f343fb7429AE22C1Bd9F72",
+        },
     ],
     # Arbitrum WETH/USDC LBPair (bin_step=15) — the only WETH/USDC pair with
     # meaningful liquidity on the LBFactory at

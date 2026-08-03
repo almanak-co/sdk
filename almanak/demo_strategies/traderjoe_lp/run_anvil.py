@@ -10,7 +10,7 @@ It forks Avalanche C-Chain and tests the Liquidity Book LP operations.
 WHAT THIS SCRIPT DOES:
 ----------------------
 1. Starts an Anvil fork of Avalanche C-Chain
-2. Funds the test wallet with WAVAX and USDC
+2. Funds the test wallet with WAVAX and USDT
 3. Runs the strategy via the CLI runner
 4. The CLI handles market data, compilation, and execution
 
@@ -67,14 +67,30 @@ ANVIL_WALLET = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
 
 # Avalanche C-Chain token addresses
 WAVAX_ADDRESS = "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7"
-USDC_ADDRESS = "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E"  # Native USDC on Avalanche
+# VIB-6307 — the demo now LPs into WAVAX/USDT/20. This file is NOT a
+# hand-run-only helper: `.github/workflows/sidecar-regression.yml` funds the
+# sidecar wallet by invoking `run_anvil.py --skip-cli`, so the token funded
+# here MUST track `config.json`. Funding USDC while the strategy deposits USDT
+# fails the LP_OPEN pre-flight balance check at `txs_sent=0`.
+USDT_ADDRESS = "0x9702230A8Ea53601f5cD2dc00fDBc13d4dF4A8c7"  # Native USDT on Avalanche
 
 # ERC-20 `balances` mapping storage slot per token (Avalanche).
-# Native USDC on Avalanche is at slot 9 (matches tests/intents conftest).
-USDC_BALANCE_SLOT = 9
+#
+# Native USDT (`0x9702230A…`) is a proxy whose balances mapping sits at slot
+# **51**, NOT the 2 that `avalanche.anvil.balance_slots` advertises. Verified
+# empirically against an Avalanche fork on 2026-08-03 by writing
+# `keccak256(abi.encode(wallet, slot))` for every slot the framework probes
+# (`[0,1,2,3,4,5,9,51,52]`) and reading `balanceOf` back after `evm_mine`:
+# only 51 returns the written value.
+#
+# The descriptor's 2 is not load-bearing for managed-Anvil runs — the framework
+# verifies each candidate and falls through to its brute-force probe, which
+# covers 51 — but it IS wrong, and this script has no such fallback. Reported
+# separately; do not "correct" this constant to match the descriptor.
+USDT_BALANCE_SLOT = 51
 
 # Amounts to fund
-FUND_AMOUNT_USDC = 100  # 100 USDC
+FUND_AMOUNT_USDT = 100  # 100 USDT
 FUND_AMOUNT_WAVAX = Decimal("5")  # 5 WAVAX (~$150)
 
 # Anvil settings
@@ -187,8 +203,8 @@ def parse_cast_uint(output: str) -> int:
     return int(output.replace(",", ""))
 
 
-def fund_wallet_with_usdc(wallet: str, amount_usdc: int) -> bool:
-    """Fund wallet with native USDC via anvil_setStorageAt on the balances slot.
+def fund_wallet_with_usdt(wallet: str, amount_usdt: int) -> bool:
+    """Fund wallet with native USDT via anvil_setStorageAt on the balances slot.
 
     Slot-based funding is chosen here (vs whale-impersonation) because it does
     not depend on any specific whale's balance at the pinned fork block, and
@@ -198,21 +214,21 @@ def fund_wallet_with_usdc(wallet: str, amount_usdc: int) -> bool:
     verification so the strategy then failed at pre-flight.
     """
     print(f"\n{'=' * 60}")
-    print(f"FUNDING WALLET WITH {amount_usdc} USDC")
+    print(f"FUNDING WALLET WITH {amount_usdt} USDT")
     print(f"{'=' * 60}")
 
-    amount_wei = amount_usdc * 10**6
+    amount_wei = amount_usdt * 10**6
 
     try:
         # Compute storage key = keccak256(abi.encode(wallet, slot)).
-        storage_key = run_cast(["index", "address", wallet, str(USDC_BALANCE_SLOT)])
+        storage_key = run_cast(["index", "address", wallet, str(USDT_BALANCE_SLOT)])
         # Pad amount to 32 bytes.
         storage_value = "0x" + format(amount_wei, "064x")
         run_cast(
             [
                 "rpc",
                 "anvil_setStorageAt",
-                USDC_ADDRESS,
+                USDT_ADDRESS,
                 storage_key,
                 storage_value,
                 "--rpc-url",
@@ -224,7 +240,7 @@ def fund_wallet_with_usdc(wallet: str, amount_usdc: int) -> bool:
         balance = run_cast(
             [
                 "call",
-                USDC_ADDRESS,
+                USDT_ADDRESS,
                 "balanceOf(address)(uint256)",
                 wallet,
                 "--rpc-url",
@@ -232,14 +248,14 @@ def fund_wallet_with_usdc(wallet: str, amount_usdc: int) -> bool:
             ]
         )
         new_balance = parse_cast_uint(balance)
-        print(f"Wallet USDC balance: {new_balance / 10**6:,.2f}")
+        print(f"Wallet USDT balance: {new_balance / 10**6:,.2f}")
         if new_balance < amount_wei:
             # Fail hard rather than returning False -- the caller historically
             # treated this as "continuing anyway for testing", which let CI
             # advertise readiness when the wallet was actually unfunded.
             raise RuntimeError(
-                f"USDC funding verification failed: got {new_balance / 10**6}, "
-                f"expected at least {amount_usdc}"
+                f"USDT funding verification failed: got {new_balance / 10**6}, "
+                f"expected at least {amount_usdt}"
             )
         return True
 
@@ -247,7 +263,7 @@ def fund_wallet_with_usdc(wallet: str, amount_usdc: int) -> bool:
         # Re-raise so the outer try in main() catches and exits non-zero.
         # Returning False here previously masked setup failures and let the
         # demo proceed past the readiness marker with an empty wallet.
-        raise RuntimeError(f"Failed to fund wallet with USDC: {e}") from e
+        raise RuntimeError(f"Failed to fund wallet with USDT: {e}") from e
 
 
 def fund_wallet_with_wavax(wallet: str, amount_wavax: Decimal) -> bool:
@@ -353,10 +369,10 @@ def run_strategy_via_cli(force_action: str = "open") -> int:
     config = {
         "deployment_id": "demo_traderjoe_lp",
         "strategy_name": "demo_traderjoe_lp",
-        "pool": "WAVAX/USDC/20",
+        "pool": "WAVAX/USDT/20",
         "range_width_pct": 0.10,
         "amount_x": "1.0",  # 1 WAVAX
-        "amount_y": "30",  # 30 USDC (roughly matching at $30/AVAX)
+        "amount_y": "30",  # 30 USDT (roughly matching at $30/AVAX)
         "bin_step": 20,  # 0.2% fee tier
         "num_bins": 11,  # Distribute across 11 bins
         "force_action": force_action,
@@ -497,7 +513,7 @@ def main():
     print("=" * 60)
     print("\nThis test runs the TraderJoeLPStrategy through the full stack:")
     print("  1. Anvil fork of Avalanche C-Chain")
-    print("  2. Fund wallet with WAVAX + USDC")
+    print("  2. Fund wallet with WAVAX + USDT")
     print("  3. Run strategy via CLI runner")
     print("  4. CLI handles compilation and execution")
     print(f"\nAction: {args.action.upper()}")
@@ -523,9 +539,9 @@ def main():
         # fund_wallet_with_usdc raises on any failure (verification or exception)
         # so we don't need to check its return value -- main()'s outer except will
         # propagate the failure to a non-zero exit. Previously this branch
-        # silently continued past USDC funding misses, which let CI advertise
+        # silently continued past USDT funding misses, which let CI advertise
         # readiness even when the wallet was empty.
-        fund_wallet_with_usdc(ANVIL_WALLET, FUND_AMOUNT_USDC)
+        fund_wallet_with_usdt(ANVIL_WALLET, FUND_AMOUNT_USDT)
 
         # Run direct adapter test if requested
         if args.action == "test":

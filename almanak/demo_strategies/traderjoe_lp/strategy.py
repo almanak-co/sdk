@@ -90,7 +90,15 @@ class TraderJoeLPConfig:
     network: str = "anvil"
 
     # Strategy-specific config
-    pool: str = "WAVAX/USDC/20"
+    #
+    # VIB-6307 — the default pool is a *liquidity fact about mainnet*, not a
+    # constant. ``WAVAX/USDC/20`` (LBPair ``0xD446eb16…``) drained to a
+    # one-sided 22,219 WAVAX / 0.21 USDC and a $2 swap through it returns
+    # 0.003 USDC (99.8% impact), so the demo could not complete its own
+    # lifecycle as shipped. ``WAVAX/USDT/20`` (``0x87EB2F90…``) is the liquid
+    # WAVAX pair on the Avalanche LBFactory — re-verify reserves before
+    # changing this again.
+    pool: str = "WAVAX/USDT/20"
     range_width_pct: Decimal = field(default_factory=lambda: Decimal("0.10"))
     amount_x: Decimal = field(default_factory=lambda: Decimal("0.001"))
     amount_y: Decimal = field(default_factory=lambda: Decimal("3"))
@@ -207,10 +215,10 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
 
     Configuration Parameters (from config.json):
     --------------------------------------------
-    - pool: Pool identifier (e.g., "WAVAX/USDC/20")
+    - pool: Pool identifier (e.g., "WAVAX/USDT/20")
     - range_width_pct: Total width of price range (0.20 = 20%)
     - amount_x: Amount of token X to provide (e.g., "1.0" WAVAX)
-    - amount_y: Amount of token Y to provide (e.g., "30" USDC)
+    - amount_y: Amount of token Y to provide (e.g., "30" USDT)
     - bin_step: Bin step / fee tier (e.g., 20 = 0.2%)
     - min_position_usd: Minimum total inventory (USD) to (re)open a position (default 100)
     - force_action: Force "open" or "close" for testing
@@ -218,12 +226,12 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
     Example Config:
     ---------------
     {
-        "pool": "WAVAX/USDC/20",
+        "pool": "WAVAX/USDT/20",
         "range_width_pct": 0.10,
         "amount_x": "1.0",
         "amount_y": "30",
         "bin_step": 20,
-        "min_position_usd": "100",
+        "min_position_usd": "2",
         "force_action": "open"
     }
     """
@@ -258,7 +266,7 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
         # Parse pool to extract token symbols and bin step
         pool_parts = self.pool.split("/")
         self.token_x_symbol = pool_parts[0] if len(pool_parts) > 0 else "WAVAX"
-        self.token_y_symbol = pool_parts[1] if len(pool_parts) > 1 else "USDC"
+        self.token_y_symbol = pool_parts[1] if len(pool_parts) > 1 else "USDT"
         self.bin_step = int(pool_parts[2]) if len(pool_parts) > 2 else 20
 
         # Range width as percentage (e.g., 0.10 = 10% total width = ±5% from current price)
@@ -266,7 +274,7 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
 
         # Token amounts to provide
         self.amount_x = self.config.amount_x  # Token X (e.g., WAVAX)
-        self.amount_y = self.config.amount_y  # Token Y (e.g., USDC)
+        self.amount_y = self.config.amount_y  # Token Y (e.g., USDT)
 
         # Force action for testing ("open" or "close")
         self.force_action = str(self.config.force_action).lower()
@@ -342,7 +350,7 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
         # STEP 1: Get current market price
         # =================================================================
         # Price is expressed as token_y per token_x
-        # For WAVAX/USDC: price = USDC per WAVAX (e.g., 30)
+        # For WAVAX/USDT: price = USDT per WAVAX (e.g., 6.5)
 
         try:
             token_x_price_usd = market.price(self.token_x_symbol)

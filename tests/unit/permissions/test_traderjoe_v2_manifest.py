@@ -20,6 +20,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pytest
+from eth_utils import function_signature_to_4byte_selector
 
 from almanak.framework.intents.compiler import (
     IntentCompiler,
@@ -375,3 +376,126 @@ class TestTraderJoeV2LBPairLeastPrivilegeScoping:
             f"{intent_types} manifest must not include collectFees on any "
             f"target — {reason}. Got: {leaked}"
         )
+
+
+class TestTraderJoeV2RegisteredPairsReachTheManifest:
+    """VIB-6307 — every pair in ``TRADERJOE_V2_LBPAIRS`` must actually reach the
+    manifest, and the demo's configured pool must be one of them.
+
+    AGENTS.md §Connector additions #5 is explicit that presence is NOT proof:
+    ``test_connector_coverage.py`` only checks that ``permission_hints.py``
+    exists, and an empty ``PermissionHints()`` passes that gate while yielding
+    zero permissions. The classes above pin the WAVAX/USDC pair by hand-typed
+    literal, so they keep passing when a NEW pair is registered but not wired —
+    which is exactly the hole VIB-6307's re-point could have fallen through.
+
+    Three properties, none of which the existing tests cover:
+
+    1. **Registry completeness.** Every registered avalanche LBPair reaches the
+       manifest with its role-appropriate selector. Derived by iterating the
+       registry, so registering a pair and forgetting the wiring fails here
+       rather than at ``execTransactionWithRole`` on a live Safe.
+    2. **Demo/registry agreement.** The pool the shipped ``traderjoe_lp``
+       demo actually names in ``config.json`` must be registered. This is the
+       assertion that would have caught the re-point had the registry entry
+       been omitted, and it will catch the next re-point too.
+    3. **Non-empty selectors.** An entry whose selector list is empty satisfies
+       "the target appears" while authorising nothing.
+
+    Every address and selector is derived — from ``TRADERJOE_V2_LBPAIRS`` and
+    from the real function signatures — never hand-typed, so this test cannot
+    drift from the calldata the compiler emits.
+    """
+
+    @staticmethod
+    def _registered_pairs() -> list[dict]:
+        from almanak.connectors.traderjoe_v2.addresses import TRADERJOE_V2_LBPAIRS
+
+        return list(TRADERJOE_V2_LBPAIRS["avalanche"])
+
+    @staticmethod
+    def _selector(signature: str) -> str:
+        return "0x" + function_signature_to_4byte_selector(signature).hex()
+
+    def test_every_registered_lbpair_is_authorised_for_its_selectors(self) -> None:
+        close_manifest = _manifest_pairs_for(["LP_CLOSE"])
+        collect_manifest = _manifest_pairs_for(["LP_COLLECT_FEES"])
+        approve_for_all = self._selector("approveForAll(address,bool)")
+        collect_fees = self._selector("collectFees(address,uint256[])")
+
+        missing: list[str] = []
+        for pair in self._registered_pairs():
+            target = str(pair["address"]).lower()
+            label = f"{pair['tokenX']}/{pair['tokenY']}/{pair['bin_step']}"
+            if (target, approve_for_all) not in close_manifest:
+                missing.append(f"{label} {target} approveForAll (LP_CLOSE)")
+            if (target, collect_fees) not in collect_manifest:
+                missing.append(f"{label} {target} collectFees (LP_COLLECT_FEES)")
+
+        assert missing == [], (
+            "Registered LBPair(s) never reach the Zodiac manifest, so a Safe "
+            "strategy on them reverts at execTransactionWithRole (unauthorized) "
+            f"despite a green connector-coverage gate: {missing}"
+        )
+
+    def test_the_shipped_demo_pool_is_a_registered_lbpair(self) -> None:
+        """The demo names its pool as a ``TOKEN_X/TOKEN_Y/BIN_STEP`` symbol
+        triple; the registry keys on the same triple. Re-pointing the demo to an
+        unregistered pair yields an empty manifest slot for that pair.
+        """
+        import json
+        from pathlib import Path
+
+        import almanak
+
+        config_path = (
+            Path(almanak.__file__).parent / "demo_strategies" / "traderjoe_lp" / "config.json"
+        )
+        pool = json.loads(config_path.read_text())["pool"]
+        token_x, token_y, bin_step = pool.split("/")
+
+        registered = {
+            (str(p["tokenX"]).upper(), str(p["tokenY"]).upper(), int(p["bin_step"])): str(
+                p["address"]
+            ).lower()
+            for p in self._registered_pairs()
+        }
+        key = (token_x.upper(), token_y.upper(), int(bin_step))
+        assert key in registered, (
+            f"traderjoe_lp demo ships pool {pool!r} but that pair is not in "
+            f"TRADERJOE_V2_LBPAIRS['avalanche'] ({sorted(registered)}). Safe-wallet "
+            "LP_CLOSE approveForAll / LP_COLLECT_FEES collectFees would be unauthorised."
+        )
+
+        # Pin the ADDRESS literally, matching how the pre-existing WAVAX/USDC classes
+        # pin `0xd446eb16…`. The triple being present proves the registry has an entry
+        # for this pool; it does not prove the entry points at the right contract, and
+        # a fat-fingered address would authorise the Roles modifier for the WRONG
+        # target while every registry-iterating assertion stayed green. Read on-chain
+        # 2026-08-03 at Avalanche block 91930573 via
+        # `LBFactory.getLBPairInformation(WAVAX, USDT, 20)`. Raised by Grok on the
+        # #3577 panel.
+        assert registered[key] == "0x87eb2f90d7d0034571f343fb7429ae22c1bd9f72", (
+            f"WAVAX/USDT/20 is registered at {registered[key]}, not the on-chain LBPair "
+            "0x87EB2F90d7D0034571f343fb7429AE22C1Bd9F72"
+        )
+
+    def test_registered_pair_entries_carry_a_non_empty_selector_set(self) -> None:
+        """'The target appears' is not the same as 'a selector is authorised'."""
+        from almanak.core.intent_types import IntentType
+        from almanak.framework.permissions.discovery import discover_permissions
+
+        permissions, _warnings = discover_permissions(
+            "avalanche",
+            protocols=["traderjoe_v2"],
+            intent_types=[IntentType.LP_CLOSE, IntentType.LP_COLLECT_FEES],
+        )
+        by_target = {p.target.lower(): p for p in permissions}
+
+        for pair in self._registered_pairs():
+            target = str(pair["address"]).lower()
+            assert target in by_target, f"LBPair {target} absent from discovered permissions"
+            assert by_target[target].function_selectors, (
+                f"LBPair {target} is present but authorises ZERO selectors — an empty "
+                "PermissionHints() passes the coverage gate while granting nothing"
+            )
