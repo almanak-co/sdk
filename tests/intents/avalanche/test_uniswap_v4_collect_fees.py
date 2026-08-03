@@ -19,11 +19,16 @@ collecting fees from V4 LP positions via PositionManager on Avalanche:
 NO MOCKING. All tests execute real on-chain LP operations and verify state changes.
 
 Pool selection: ``AVAX/USDC/3000``. Avalanche V4 has the native-keyed
-``(NATIVE_AVAX, USDC, 3000, 60, 0x0)`` pool initialized at fork time
-(verified 2026-05-14 via the VIB-4366 sibling swap test:
-sqrtPriceX96=2.477e23, tick=-253527, liquidity=1.47e13 — sufficient for
-the small LP / counter-swap amounts the test uses; corresponds to
-~9.77 USDC per AVAX). Using ``AVAX`` symbol means
+``(NATIVE_AVAX, USDC, 3000, 60, 0x0)`` pool initialized at fork time, with
+depth sufficient for the small LP / counter-swap amounts the test uses.
+
+Every price this test depends on is read from that pool's ``sqrtPriceX96``
+at whatever block the weekly pin currently names — no spot price is
+hard-coded here, deliberately (VIB-4427, extended by VIB-6413). Earlier
+revisions quoted a 2026-05-14 snapshot of ~9.77 USDC/AVAX
+(sqrtPriceX96=2.477e23, tick=-253527, liquidity=1.47e13); by 2026-08-03 the
+pool was at ~6.53, which is why those numbers are recorded as history
+rather than as constants the test still trusts. Using ``AVAX`` symbol means
 ``UniswapV4Adapter._resolve_token(for_v4_pool=True)`` resolves currency0
 to ``address(0)`` at LP_OPEN time (AVAX is in the adapter's
 ``native_symbols = {"ETH", "AVAX", "MATIC", "BNB"}`` set), and the V4
@@ -112,9 +117,9 @@ CHAIN_NAME = "avalanche"
 # can't reach (VIB-4413 ERC20<>ERC20 revert).
 #
 # Fee tier 3000 matches the Base / Optimism / Polygon siblings (tick
-# spacing 60). The native AVAX/USDC pool at fee=3000 was verified
-# initialized at fork time by the VIB-4366 swap test:
-# liquidity=1.47e13 at tick=-253527 (~9.77 USDC per AVAX).
+# spacing 60). The native AVAX/USDC pool at fee=3000 is initialized at
+# every fork block the weekly pin has named so far; the test asserts that
+# rather than assuming it (see ``_derive_avax_price_from_slot0``).
 LP_POOL = "AVAX/USDC/3000"
 
 # Token symbols for the fee-generation counter-swap. ``AVAX`` symbol in
@@ -133,13 +138,16 @@ SWAP_TOKEN1_SYMBOL = "USDC"
 # against the pool.
 LP_AMOUNT_AVAX = Decimal("5")
 LP_AMOUNT_USDC = Decimal("50")
-# Tick range that brackets the current pool price (~9.77 USDC/AVAX at
-# avalanche mainnet fork-block time -- on-chain tick ~-253527). The range
-# must include the spot price so the position is in-range and accrues
-# fees from the counter-swap. A wider range (e.g. 0.01 - 1000) would
-# shrink the position's effective share at the spot tick to below the
-# precision of the fee accrual integers, and the parser would see zero
-# fees collected.
+# Tick range for the setup position. The range MUST bracket the pool's
+# spot price so the position is in-range and accrues fees from the
+# counter-swap; the test asserts that against the live spot rather than
+# trusting it (VIB-6413), because the pin is a rolling weekly block and a
+# range calibrated once will eventually sit outside the pool. A much wider
+# range (e.g. 0.01 - 1000) would shrink the position's effective share at
+# the spot tick to below the precision of the fee-accrual integers, and the
+# parser would see zero fees collected -- so this stays deliberately tight
+# around the band AVAX has traded in (it has spanned ~6.5 - ~10 across the
+# pins this test has run on).
 LP_RANGE_LOWER = Decimal("1")
 LP_RANGE_UPPER = Decimal("100")
 
@@ -163,19 +171,24 @@ def _derive_avax_price_from_slot0(anvil_rpc_url: str) -> Decimal:
     """Derive AVAX/USD price from the V4 pool's sqrtPriceX96 at fork time.
 
     Reads the on-chain sqrtPriceX96 from the Avalanche V4 StateView for
-    the ``(NATIVE_AVAX, USDC, 3000, 60, 0x0)`` pool.  The fork block is
-    pinned (``ANVIL_FORK_BLOCK_AVALANCHE``), so this value is constant
-    across CI runs and immune to live-price drift — eliminating the
-    VIB-4427 flake.
+    the ``(NATIVE_AVAX, USDC, 3000, 60, 0x0)`` pool. The fork block is
+    pinned (``ANVIL_FORK_BLOCK_AVALANCHE``), so this value is fixed for
+    the whole of any one run and immune to live-price drift — which is
+    what eliminated the VIB-4427 flake. It is NOT a constant across runs:
+    the pin rolls weekly, and the price moves with it (~9.77 in May 2026,
+    ~6.53 by August). Anything derived from it must be asserted against
+    the live read, never hard-coded (VIB-6413).
 
     Conversion: ``price_usdc_per_avax = (sqrtPriceX96 / 2**96)**2
                  * 10**(avax_decimals - usdc_decimals)``
     (18 - 6 = 12, USDC is currency1 / token1).
 
-    Falls back to a hard-coded fork-block snapshot price (~9.77 USDC/AVAX,
-    verified 2026-05-14 by the VIB-4366 swap test) if the StateView call
-    reverts — this makes the test fail-safe on infra issues while keeping
-    the price anchored to the fork block rather than the live market.
+    Fails closed if the StateView read is unavailable (VIB-6413). This used
+    to fall back to a hard-coded ~9.77 USDC/AVAX snapshot taken 2026-05-14;
+    by 2026-08-03 the pool was at ~6.53, so the fallback would have handed
+    the compiler a 50%-wrong price and produced a confusing downstream
+    revert instead of naming the actual problem. A stale plausible number is
+    worse than no number: raise and say the read failed.
     """
     tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
     usdc_addr = tokens["USDC"]
@@ -191,12 +204,19 @@ def _derive_avax_price_from_slot0(anvil_rpc_url: str) -> Decimal:
 
     try:
         sqrt_price = sdk.get_pool_sqrt_price(pool_key, rpc_url=anvil_rpc_url)
-    except Exception:  # noqa: BLE001 — fall through to fork-block snapshot on any RPC/decode failure
-        sqrt_price = None
-    if sqrt_price is None or sqrt_price == 0:
-        # Hard-coded fork-block snapshot (VIB-4427): ~9.77 USDC/AVAX
-        # verified 2026-05-14 via the VIB-4366 swap test (sqrtPriceX96=2.477e23).
-        return Decimal("9.77")
+    except Exception as exc:
+        raise AssertionError(
+            f"V4 StateView.getSlot0 read failed for the native AVAX/USDC pool at "
+            f"the current fork block; refusing to substitute a stale hard-coded "
+            f"price (VIB-6413). Underlying error: {exc!r}"
+        ) from exc
+    if not sqrt_price:
+        raise AssertionError(
+            "V4 StateView.getSlot0 returned no/zero sqrtPriceX96 for the native "
+            "AVAX/USDC pool — the pool is uninitialized at this fork block, or "
+            "the pool key is wrong. Refusing to substitute a stale hard-coded "
+            "price (VIB-6413)."
+        )
 
     # sqrtPriceX96 represents sqrt(token1/token0) in Q96 fixed-point.
     # token0 = native AVAX (18 dec), token1 = USDC (6 dec).
@@ -521,6 +541,30 @@ class TestUniswapV4CollectFeesIntent:
         # compiler's slippage protection can compute against native AVAX.
         # Price is derived from the fork-pinned sqrtPriceX96 (VIB-4427).
         prices_with_native = _build_price_oracle_with_native(price_oracle, anvil_rpc_url)
+
+        # VIB-6413: the fork pin is a rolling weekly block, so the pool's spot
+        # price is not a constant this file can encode. Assert the invariant the
+        # setup position actually needs -- spot inside the LP range -- against
+        # the live pool. Without this, a pin roll that moves AVAX outside
+        # [LP_RANGE_LOWER, LP_RANGE_UPPER] opens an out-of-range position that
+        # accrues nothing, and the test fails several steps later on a
+        # zero-fees assertion that says nothing about the real cause.
+        # Known limitation (VIB-6431): this asserts the pool's PRICE is usable,
+        # not its DEPTH. A pin whose pool is in-range but too thin for
+        # COUNTER_SWAP_USDC still fails later, inside execution, with a message
+        # about slippage rather than about liquidity. Adding the depth floor
+        # needs a measured threshold -- a literal picked to pass today's pin is
+        # the same stale-calibration trap this change removed -- so it is
+        # tracked separately rather than guessed at here.
+        spot_avax_usdc = prices_with_native["AVAX"]
+        assert LP_RANGE_LOWER < spot_avax_usdc < LP_RANGE_UPPER, (
+            f"Pool spot price {spot_avax_usdc:.4f} USDC/AVAX is outside the LP "
+            f"range [{LP_RANGE_LOWER}, {LP_RANGE_UPPER}] at this fork block. The "
+            f"weekly ANVIL_FORK_BLOCK_AVALANCHE pin has moved the pool outside "
+            f"the band this test is calibrated for -- widen the range (keeping it "
+            f"tight enough that fee accrual stays above integer precision) rather "
+            f"than re-pinning to an old block."
+        )
 
         # Fail-fast funding check: surface infra/fixture funding regressions
         # before LP_OPEN / counter-swap runs and produces a less-actionable error.

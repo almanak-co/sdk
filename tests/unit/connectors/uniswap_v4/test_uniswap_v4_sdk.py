@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from decimal import Decimal
 from unittest.mock import patch
 
@@ -19,11 +20,15 @@ from almanak.connectors.uniswap_v4.sdk import (
     UNISWAP_V4_GAS_ESTIMATES,
     UNIVERSAL_ROUTER_EXECUTE_SELECTOR,
     V4_SWAP_EXACT_IN_SINGLE,
+    V4_SWAP_GAS_CEILING,
+    V4_SWAP_ROUTER_OVERHEAD_GAS,
     PoolKey,
     SwapQuote,
     UniswapV4SDK,
     _encode_execute,
 )
+from almanak.core.chains import ChainRegistry
+from almanak.framework.execution.orchestrator import _gas_buffer_for
 
 # =============================================================================
 # Constants tests
@@ -339,6 +344,152 @@ class TestBuildSwapTx:
         assert tx.data.startswith("0x3593564c")  # UniversalRouter execute selector
         assert tx.gas_estimate == 250_000
         assert tx.value == 0  # Not native ETH
+
+    def test_unmeasured_quote_gas_keeps_the_static_floor(self):
+        """VIB-6413: an offline quote has nothing to scale by -> floor, not a guess."""
+        sdk = UniswapV4SDK(chain="arbitrum")
+        quote = SwapQuote(
+            amount_in=10**18,
+            amount_out=997 * 10**15,
+            fee_tier=3000,
+            token_in="0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            token_out="0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        )
+        assert quote.gas_estimate is None, "unmeasured quote must not fake a measurement"
+        tx = sdk.build_swap_tx(quote, recipient="0x1234567890123456789012345678901234567890")
+        assert tx.gas_estimate == UNISWAP_V4_GAS_ESTIMATES["swap"]
+
+    def test_cheap_measured_quote_does_not_lower_the_floor(self):
+        """A shallow swap stays on the historical budget -- no behaviour change.
+
+        MUST-NOT-CHANGE control, NOT a negative control: this assertion also
+        passes against pre-VIB-6413 code, which returned the static value
+        unconditionally. That is its job -- it pins that the fix did not move
+        the cheap case -- but it must not be counted as evidence that the
+        budget-scaling behaviour is present. The negative control for that is
+        ``test_deep_measured_quote_covers_the_real_avalanche_requirement``.
+        """
+        sdk = UniswapV4SDK(chain="arbitrum")
+        # base USDC->WETH at the weekly pin measured 42,279 gas in the Quoter.
+        quote = SwapQuote(
+            amount_in=10**18,
+            amount_out=997 * 10**15,
+            fee_tier=3000,
+            token_in="0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            token_out="0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            gas_estimate=42_279,
+        )
+        tx = sdk.build_swap_tx(quote, recipient="0x1234567890123456789012345678901234567890")
+        assert tx.gas_estimate == UNISWAP_V4_GAS_ESTIMATES["swap"]
+
+    def test_deep_measured_quote_covers_the_real_avalanche_requirement(self):
+        """VIB-6413 negative control: the exact swap that ran out of gas on main.
+
+        Avalanche V4 USDC -> native AVAX, 500 USDC, fork block 91880872:
+        the Quoter reported 175,922 gas for the pool swap and the tx genuinely
+        needed 312,135 (measured via ``eth_estimateGas``). The pre-fix static
+        250,000 budget yielded a 275,000 gas limit after Avalanche's 1.1
+        ``GasProfile.buffer`` -- the tx burned all of it and reverted with empty
+        revert data (``0x``).
+        """
+        # Read the buffer production actually applies rather than restating it,
+        # so this control cannot silently stop modelling the pipeline if
+        # ``almanak/core/chains/avalanche.py`` changes.
+        # Assert the descriptor RESOLVES, not merely that the number is positive:
+        # ``_gas_buffer_for`` returns the framework-wide DEFAULT_GAS_BUFFER (1.2)
+        # whenever the registry lookup fails, and 1.2 would sail past a ``> 0``
+        # check while silently modelling a chain other than Avalanche.
+        avalanche_descriptor = ChainRegistry.try_resolve("avalanche")
+        assert avalanche_descriptor is not None, "avalanche must resolve in the chain registry"
+        assert avalanche_descriptor.gas.buffer is not None, (
+            "avalanche must declare its own gas buffer, or this control silently "
+            "falls back to the framework default and stops modelling production"
+        )
+        avalanche_gas_buffer = Decimal(str(_gas_buffer_for("avalanche")))
+        assert avalanche_gas_buffer == Decimal(str(avalanche_descriptor.gas.buffer))
+        quoter_gas = 175_922
+        measured_requirement = 312_135
+
+        assert int(UNISWAP_V4_GAS_ESTIMATES["swap"] * avalanche_gas_buffer) < measured_requirement, (
+            "the static floor must still be the under-provisioned value this "
+            "test exists to catch, or the control is vacuous"
+        )
+
+        sdk = UniswapV4SDK(chain="avalanche")
+        quote = SwapQuote(
+            amount_in=500 * 10**6,
+            amount_out=68_390_946_940_197_870_144,
+            fee_tier=3000,
+            token_in="0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e",  # USDC
+            token_out=NATIVE_CURRENCY,
+            gas_estimate=quoter_gas,
+        )
+        tx = sdk.build_swap_tx(quote, recipient="0x1234567890123456789012345678901234567890")
+
+        assert tx.gas_estimate == quoter_gas + V4_SWAP_ROUTER_OVERHEAD_GAS
+        assert int(tx.gas_estimate * avalanche_gas_buffer) > measured_requirement, (
+            f"gas limit {int(tx.gas_estimate * avalanche_gas_buffer)} must cover the "
+            f"measured {measured_requirement} requirement"
+        )
+
+    def test_out_of_family_quoter_reading_is_clamped_not_propagated(self):
+        """VIB-6413: an unbounded uint256 from the Quoter must not become a gas limit."""
+        sdk = UniswapV4SDK(chain="arbitrum")
+        absurd = 2**64
+        assert absurd + V4_SWAP_ROUTER_OVERHEAD_GAS > V4_SWAP_GAS_CEILING, (
+            "the probe value must actually exceed the ceiling, or the control is vacuous"
+        )
+        quote = SwapQuote(
+            amount_in=10**18,
+            amount_out=997 * 10**15,
+            fee_tier=3000,
+            token_in="0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            token_out="0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            gas_estimate=absurd,
+        )
+        tx = sdk.build_swap_tx(quote, recipient="0x1234567890123456789012345678901234567890")
+        assert tx.gas_estimate == V4_SWAP_GAS_CEILING
+
+    def test_deepest_real_swap_stays_below_the_ceiling(self):
+        """The clamp must not bind on genuine traffic -- only on out-of-family readings.
+
+        MUST-NOT-CHANGE control, NOT a negative control: it passes against
+        pre-ceiling code too, and with ~9x of slack it would pass for any
+        ceiling above ~336k. It pins one data point -- that the deepest reading
+        actually observed is nowhere near the clamp -- and nothing more.
+        """
+        sdk = UniswapV4SDK(chain="avalanche")
+        quote = SwapQuote(
+            amount_in=500 * 10**6,
+            amount_out=68_390_946_940_197_870_144,
+            fee_tier=3000,
+            token_in="0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e",
+            token_out=NATIVE_CURRENCY,
+            gas_estimate=175_922,  # deepest Quoter reading measured on a real pool
+        )
+        tx = sdk.build_swap_tx(quote, recipient="0x1234567890123456789012345678901234567890")
+        assert tx.gas_estimate < V4_SWAP_GAS_CEILING
+
+    def test_measured_zero_is_not_treated_as_unmeasured(self, caplog):
+        """Empty is not Zero is not None: a measured 0 is an anomaly, not a cheap swap."""
+        sdk = UniswapV4SDK(chain="arbitrum")
+        quote = SwapQuote(
+            amount_in=10**18,
+            amount_out=997 * 10**15,
+            fee_tier=3000,
+            token_in="0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            token_out="0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            gas_estimate=0,
+        )
+        with caplog.at_level(logging.WARNING, logger="almanak.connectors.uniswap_v4.sdk"):
+            tx = sdk.build_swap_tx(quote, recipient="0x1234567890123456789012345678901234567890")
+
+        # Same safe budget as the unmeasured case ...
+        assert tx.gas_estimate == UNISWAP_V4_GAS_ESTIMATES["swap"]
+        # ... but, unlike None, it is reported rather than silently absorbed.
+        assert any("non-positive gasEstimate" in r.getMessage() for r in caplog.records), (
+            "a measured zero must be named in the logs, not collapsed into the unmeasured case"
+        )
 
     def test_build_native_swap_tx(self):
         sdk = UniswapV4SDK(chain="arbitrum")

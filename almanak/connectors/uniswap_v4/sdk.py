@@ -154,13 +154,67 @@ PM_TAKE_PORTION = ACTION_TAKE_PORTION
 UNISWAP_V4_GAS_ESTIMATES = {
     "approve": 65_000,  # Must cover proxy ERC-20s (e.g. Ethereum USDC ~56K gas)
     "permit2_approve": 55_000,
-    "swap": 250_000,  # Higher than V3 due to PoolManager unlock callback overhead
-    "swap_with_hooks": 400_000,
+    "swap": 250_000,  # Floor only — see V4_SWAP_ROUTER_OVERHEAD_GAS (VIB-6413)
+    "swap_with_hooks": 400_000,  # Currently unread — wire or delete (VIB-6428)
     "lp_mint": 450_000,  # Mint new LP position via PositionManager
     "lp_decrease": 300_000,  # Decrease liquidity
     "lp_burn": 200_000,  # Burn empty position NFT
     "lp_collect_fees": 250_000,  # Collect fees only (decrease with 0 liquidity + take)
 }
+
+# VIB-6413: everything a V4 swap tx costs OUTSIDE the pool-swap loop the Quoter
+# simulates — intrinsic gas + calldata, UniversalRouter dispatch, Permit2 pull,
+# SETTLE/TAKE, and the trailing SWEEP / WRAP_ETH / UNWRAP_WETH commands.
+#
+# The Quoter's ``gasEstimate`` covers only the swap through the pool, and that
+# part scales with the number of initialized ticks crossed — i.e. with live pool
+# depth. A single static budget therefore decalibrates as the pool moves, and
+# when it does the tx reverts with EMPTY revert data (``0x``) after burning the
+# whole limit, which reads as an unexplained failure rather than a gas problem.
+#
+# Measured as ``eth_estimateGas(swap) - quoter.gasEstimate``, which is stable
+# across chains and across all three UniversalRouter command shapes:
+#
+#   avalanche USDC -> native AVAX (SWEEP),      block 91315087:  136,213
+#   avalanche USDC -> native AVAX (SWEEP),      block 91880872:  136,213
+#   base      USDC -> WETH        (WRAP_ETH),   weekly pin:      135,922
+#   base      WETH -> USDC        (PERMIT2_TRANSFER_FROM+UNWRAP): 134,005
+#
+# 160k is the 136,213 ceiling rounded up with ~17% margin, on top of which the
+# chain's own ``GasProfile.buffer`` still applies. Note the sample shares one
+# blind spot: none of the four measurements is a swap whose recipient receives
+# the output ERC-20 for the first time, and that cold SSTORE costs up to ~20k
+# more — so the worst realistic overhead is nearer 156k than 136k. It still
+# clears 160k, but the true margin for that shape is a few percent, not 17%.
+#
+# Under-provisioning is a burnt, failed swap. Over-provisioning is NOT free
+# here, which is why the budget is bounded on both sides rather than simply
+# padded: the unused gas is refunded by the EVM, but two call sites key off the
+# LIMIT rather than the amount consumed —
+#
+#   * ``orchestrator._validate_gas_costs`` computes
+#     ``estimated_cost_wei = gas_limit * tx_gas_price``, so a strategy that sets
+#     ``max_gas_cost_native`` / ``max_gas_cost_usd`` tests the budget, not the
+#     spend (both default to 0.0 = no limit, so this is opt-in);
+#   * the node's own EIP-1559 admission rule is
+#     ``balance >= gas_limit * maxFeePerGas + value`` — see
+#     ``framework/execution/gas/fees.py`` (VIB-5673), where inflating the other
+#     factor in that same product rejected well-funded wallets with ``-32003``.
+#
+# Both fail safe (a refused submission, never a lost swap), and the durable fix
+# belongs in the execution pipeline rather than here — tracked as VIB-6427.
+V4_SWAP_ROUTER_OVERHEAD_GAS = 160_000
+
+# VIB-6413: upper bound on a Quoter-derived swap budget. ``gas_estimate`` is an
+# arbitrary ``uint256`` decoded from the Quoter's ``eth_call`` return, so without
+# a clamp a misconfigured quoter address or an out-of-family pool reading would
+# propagate straight into a transaction gas limit — and per the note above, an
+# absurdly high limit is refused (block gas limit, the ``-32003`` admission
+# check, or a strategy's cost guard) rather than merely wasteful. 3,000,000 is
+# ~9x the deepest budget observed (335,922) and far under every supported
+# chain's block gas limit, so it cannot mask a genuine multi-tick swap; exceeding
+# it means the reading is wrong, and a named refusal beats an opaque one.
+V4_SWAP_GAS_CEILING = 3_000_000
 
 # PoolManager addresses per chain
 POOL_MANAGER_ADDRESSES: dict[str, str] = {chain: addrs["pool_manager"] for chain, addrs in UNISWAP_V4.items()}
@@ -231,7 +285,12 @@ class SwapQuote:
     token_out: str
     sqrt_price_x96_after: int | None = None
     effective_price: Decimal | None = None
-    gas_estimate: int = UNISWAP_V4_GAS_ESTIMATES["swap"]
+    # VIB-6413 / Empty≠Zero: ``None`` means UNMEASURED (offline / local estimate),
+    # an int is the on-chain Quoter's own ``gasEstimate`` for the pool swap. The
+    # old default was the static ``UNISWAP_V4_GAS_ESTIMATES["swap"]``, which made
+    # a measured value indistinguishable from a never-measured one — so
+    # ``build_swap_tx`` could not tell whether it was allowed to scale the budget.
+    gas_estimate: int | None = None
 
 
 @dataclass
@@ -983,9 +1042,66 @@ class UniswapV4SDK:
             to=self.router,
             value=native_value,
             data=calldata,
-            gas_estimate=UNISWAP_V4_GAS_ESTIMATES["swap"],
+            gas_estimate=self._swap_gas_budget(quote),
             description=(f"Uniswap V4 swap {quote.token_in[:10]}... -> {quote.token_out[:10]}..."),
         )
+
+    @staticmethod
+    def _swap_gas_budget(quote: SwapQuote) -> int:
+        """Gas budget for a V4 swap tx, scaled by the Quoter's own estimate.
+
+        VIB-6413: the pool-swap portion of a V4 swap scales with the number of
+        initialized ticks the swap crosses, so a static budget silently
+        decalibrates as pool depth changes. ``get_quote`` already reads the
+        Quoter's ``gasEstimate`` for exactly that portion — this adds the fixed
+        router/settle/take overhead back and keeps the historical static value
+        as a floor, so cheap swaps are budgeted exactly as before.
+
+        An unmeasured quote (``gas_estimate is None`` — the offline /
+        ``get_quote_local`` path) gets the floor: there is nothing to scale by,
+        and inventing a scale factor would be a fabricated measurement.
+
+        A *measured* zero is a different thing and is not silently treated as
+        unmeasured: the Quoter returning 0 for a quote it claims succeeded means
+        it did not simulate the swap, which is an anomaly worth naming rather
+        than absorbing into the floor (Empty is not Zero is not None).
+
+        The result is clamped to ``V4_SWAP_GAS_CEILING`` so an out-of-family
+        Quoter reading cannot propagate an unbounded value into a transaction.
+        """
+        floor = UNISWAP_V4_GAS_ESTIMATES["swap"]
+        measured = quote.gas_estimate
+        if measured is None:
+            return floor
+        if measured <= 0:
+            logger.warning(
+                "V4 Quoter reported a non-positive gasEstimate (%s) for %s -> %s; "
+                "falling back to the static floor of %s gas. A successful quote "
+                "should always report positive gas — treat this as a quoter or "
+                "RPC anomaly, not a cheap swap (VIB-6413).",
+                measured,
+                quote.token_in,
+                quote.token_out,
+                floor,
+            )
+            return floor
+
+        budget = max(floor, measured + V4_SWAP_ROUTER_OVERHEAD_GAS)
+        if budget > V4_SWAP_GAS_CEILING:
+            logger.error(
+                "V4 Quoter reported gasEstimate=%s for %s -> %s, yielding a swap "
+                "budget of %s which exceeds the %s ceiling; clamping. This is far "
+                "outside the observed range and usually means a misconfigured "
+                "quoter address or a malformed RPC response rather than a genuine "
+                "multi-tick swap (VIB-6413).",
+                measured,
+                quote.token_in,
+                quote.token_out,
+                budget,
+                V4_SWAP_GAS_CEILING,
+            )
+            return V4_SWAP_GAS_CEILING
+        return budget
 
     def _encode_exact_input_single_params(
         self,
@@ -1725,4 +1841,6 @@ __all__ = [
     "V4_SWAP_EXACT_IN_SINGLE",
     "V4_SWAP_EXACT_OUT",
     "V4_SWAP_EXACT_OUT_SINGLE",
+    "V4_SWAP_GAS_CEILING",
+    "V4_SWAP_ROUTER_OVERHEAD_GAS",
 ]
