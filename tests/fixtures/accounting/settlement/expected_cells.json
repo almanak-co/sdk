@@ -21,5 +21,10 @@
     "SETTLE_REDEEM": "PASS"
   },
   "ledger_row_count": 4,
-  "matching_policy_version": 1
+  "matching_policy_version": 1,
+  "cell_metrics": {
+    "G6": {
+      "gap_usd": "5.0"
+    }
+  }
 }

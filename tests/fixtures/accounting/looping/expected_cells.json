@@ -25,5 +25,10 @@
     "L6": "FAIL"
   },
   "ledger_row_count": 6,
-  "matching_policy_version": 3
+  "matching_policy_version": 3,
+  "cell_metrics": {
+    "G6": {
+      "gap_usd": "8.002"
+    }
+  }
 }

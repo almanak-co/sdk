@@ -25,5 +25,10 @@
     "PEN6": "PASS"
   },
   "ledger_row_count": 2,
-  "matching_policy_version": 4
+  "matching_policy_version": 4,
+  "cell_metrics": {
+    "G6": {
+      "gap_usd": "0.00084750911519797052642788"
+    }
+  }
 }

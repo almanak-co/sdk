@@ -25,5 +25,10 @@
     "LP6": "XFAIL"
   },
   "ledger_row_count": 4,
-  "matching_policy_version": 6
+  "matching_policy_version": 6,
+  "cell_metrics": {
+    "G6": {
+      "gap_usd": "10.0"
+    }
+  }
 }

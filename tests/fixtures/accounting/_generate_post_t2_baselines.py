@@ -32,11 +32,12 @@ from almanak.framework.accounting.accountant_test import run_against_sqlite  # n
 from almanak.framework.accounting.payload_schemas import MATCHING_POLICY_VERSIONS  # noqa: E402
 from almanak.framework.primitives.types import Primitive  # noqa: E402
 from tests.fixtures.accounting._generate_baselines import (  # noqa: E402
-    generate_lp_fixture,
     generate_looping_fixture,
+    generate_lp_fixture,
     generate_perp_fixture,
     generate_settlement_fixture,
 )
+from tests.fixtures.accounting._stamp_cell_metrics import extract_cell_metrics  # noqa: E402
 
 _PRIMITIVE_VERSION_MAP = {
     "lp": Primitive.LP,
@@ -70,9 +71,20 @@ def _emit(primitive: str, generator) -> None:
         "ledger_row_count": _LEDGER_ROW_COUNT[primitive],
         "accounting_events_row_count": ae_count,
         "cells": cells,
+        # VIB-4226 §1a: the numeric floors travel WITH the manifest. This file
+        # rewrites expected_cells.json wholesale, so omitting them here would
+        # silently strip every floor the moment anyone regenerated a baseline —
+        # and the ratchet's own failure message points operators at this script.
+        #
+        # KNOWN LIMITATION (VIB-6414): this is the SECOND unconditional writer of
+        # cell_metrics (the first is _stamp_cell_metrics.py, which carries the same
+        # note). The ratchet's remedy text names both scripts, so re-generating
+        # after a regression lowers the floor by exactly the same route. Marking
+        # one entrypoint of a two-entrypoint rule would leave the other silent.
+        "cell_metrics": extract_cell_metrics(report),
     }
     (out_dir / "expected_cells.json").write_text(
-        json.dumps(expected, indent=2, sort_keys=True) + "\n"
+        json.dumps(expected, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
     )
 
 

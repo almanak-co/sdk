@@ -25,5 +25,10 @@
     "PLP6": "PASS"
   },
   "ledger_row_count": 2,
-  "matching_policy_version": 6
+  "matching_policy_version": 6,
+  "cell_metrics": {
+    "G6": {
+      "gap_usd": "0.700260884980000000000"
+    }
+  }
 }
