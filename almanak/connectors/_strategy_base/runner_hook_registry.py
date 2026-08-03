@@ -55,6 +55,13 @@ class AsyncSettlementStatus(StrEnum):
     PENDING = "PENDING"
     PENDING_SETTLEMENT_TIMEOUT = "PENDING_SETTLEMENT_TIMEOUT"
     INFRASTRUCTURE_UNSUPPORTED = "INFRASTRUCTURE_UNSUPPORTED"
+    # The venue executed the order and REJECTED it — a definitive, order-level
+    # answer at one block (VIB-6438). Retry-equivalent to
+    # INFRASTRUCTURE_UNSUPPORTED (both stop immediately, neither resubmits); the
+    # split exists because the two need opposite operator responses. Structural
+    # says "your setup cannot run this at all"; this one says "the setup is
+    # fine, this order was refused, and here is the reason".
+    ORDER_REJECTED = "ORDER_REJECTED"
     OBSERVATION_FAILED = "OBSERVATION_FAILED"
     TERMINAL_FAILED = "TERMINAL_FAILED"
 

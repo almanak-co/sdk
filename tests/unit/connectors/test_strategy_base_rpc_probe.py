@@ -16,10 +16,10 @@ from unittest.mock import MagicMock
 import pytest
 
 from almanak.connectors._strategy_base.rpc import (
-    _decode_revert_data,
-    _extract_revert_reason,
-    _looks_like_revert,
+    decode_revert_data,
     eth_call_static_probe,
+    extract_revert_reason,
+    looks_like_revert,
 )
 
 TO = "0x313698667d7FDD6789a9BC70821309ff891E729A"
@@ -41,40 +41,40 @@ def _error_string_blob(reason: str) -> str:
 
 class TestRevertDecoding:
     def test_error_string_blob_decodes(self) -> None:
-        assert _decode_revert_data(_error_string_blob("!wl")) == "!wl"
+        assert decode_revert_data(_error_string_blob("!wl")) == "!wl"
 
     def test_panic_blob_decodes(self) -> None:
         blob = "0x4e487b71" + format(0x11, "064x")
-        assert _decode_revert_data(blob) == "panic 0x11"
+        assert decode_revert_data(blob) == "panic 0x11"
 
     def test_custom_error_selector_surfaces(self) -> None:
         blob = "0xfb8f41b2" + format(0, "064x")
-        assert _decode_revert_data(blob) == "custom error 0xfb8f41b2"
+        assert decode_revert_data(blob) == "custom error 0xfb8f41b2"
 
     def test_extract_prefers_data_field_over_message(self) -> None:
         text = "{'code': 3, 'message': 'execution reverted', 'data': '" + _error_string_blob("!wl") + "'}"
-        assert _extract_revert_reason(text) == "!wl"
+        assert extract_revert_reason(text) == "!wl"
 
     def test_extract_falls_back_to_inline_message(self) -> None:
         text = "{'code': 3, 'message': 'execution reverted: Slippage'}"
-        assert _extract_revert_reason(text) == "Slippage"
+        assert extract_revert_reason(text) == "Slippage"
 
     def test_reasonless_revert_extracts_none(self) -> None:
         text = "{'code': 3, 'message': 'execution reverted'}"
-        assert _extract_revert_reason(text) is None
+        assert extract_revert_reason(text) is None
 
     def test_address_hex_in_message_is_not_misread_as_revert_data(self) -> None:
         # A 40-hex address elsewhere in the error text must not be decoded as
         # revert data (only the error object's ``data`` field is).
         text = f"RPC eth_call failed for {TO}: connection reset"
-        assert _extract_revert_reason(text) is None
-        assert _looks_like_revert(text) is False
+        assert extract_revert_reason(text) is None
+        assert looks_like_revert(text) is False
 
     def test_json_rpc_code_3_is_a_revert_even_without_the_word(self) -> None:
-        assert _looks_like_revert('{"code": 3, "message": "out of gas?"}') is True
+        assert looks_like_revert('{"code": 3, "message": "out of gas?"}') is True
 
     def test_transport_error_is_not_a_revert(self) -> None:
-        assert _looks_like_revert("Gateway eth_call transport error: UNAVAILABLE") is False
+        assert looks_like_revert("Gateway eth_call transport error: UNAVAILABLE") is False
 
 
 # =============================================================================

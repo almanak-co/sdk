@@ -24,7 +24,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal, InvalidOperation
-from typing import Any
+from typing import Any, Literal
 
 import grpc
 from eth_abi import decode as abi_decode
@@ -34,6 +34,11 @@ from eth_utils import function_signature_to_4byte_selector, keccak, to_checksum_
 from web3 import Web3
 from web3.types import RPCEndpoint
 
+from almanak.connectors._strategy_base.rpc import (
+    decode_revert_data,
+    extract_revert_reason,
+    looks_like_revert,
+)
 from almanak.connectors.gmx_v2.adapter import GMX_V2_ADDRESSES
 from almanak.connectors.gmx_v2.receipt_parser import (
     _EVENT_LOG_DATA_ABI_TYPE,
@@ -92,6 +97,62 @@ class GmxAnvilOrderExecutionError(RuntimeError):
     """Raised when the managed fork cannot safely execute a pending order."""
 
 
+class GmxAnvilOrderRejectedError(GmxAnvilOrderExecutionError):
+    """The venue refused THIS order. The fork itself is fine (VIB-6438).
+
+    Distinct from its parent because the two need opposite operator responses.
+    The parent means "this fork cannot execute orders at all" — no keeper role,
+    wrong network, unreadable dependencies. This one means the plumbing worked
+    and GMX declined this specific order.
+
+    GMX declines an order in **two** shapes, and both belong here:
+
+    * the keeper transaction is mined and REVERTS
+      (:class:`GmxAnvilTransactionRevertedError`); and
+    * the keeper transaction **SUCCEEDS** and GMX cancels or freezes the order
+      inside it — the *dominant* shape for a market order, covering
+      acceptable-price bounds, open-interest caps and collateral floors
+      (``_verify_execution_outcome``).
+
+    Classifying only the revert would leave the common case reported as
+    ``INFRASTRUCTURE_UNSUPPORTED``, which is the exact defect this ticket exists
+    to fix. Neither shape is retryable; the split exists to make the failure
+    legible, not to resubmit it.
+    """
+
+
+class GmxAnvilTransactionRevertedError(GmxAnvilOrderRejectedError):
+    """A keeper transaction for the ORDER was mined and reverted on-chain.
+
+    Raised only for ``OrderHandler.executeOrder``. A revert in the harness
+    oracle setup/cleanup (``setPrimaryPrice`` / ``setTimestamps`` /
+    ``clearAllPrices``) is NOT an order rejection — the venue never saw the
+    order — so those raise
+    :class:`GmxAnvilHarnessTransactionRevertedError` instead. Telling an operator
+    "the venue rejected this order" because our own oracle plumbing failed is the
+    same mislabel as the one this ticket fixes, pointed the other way.
+    """
+
+
+class GmxAnvilHarnessTransactionRevertedError(GmxAnvilOrderExecutionError):
+    """A HARNESS oracle transaction was mined and reverted on-chain (VIB-6438).
+
+    Deliberately NOT a :class:`GmxAnvilOrderRejectedError`: the venue never saw
+    the order, so calling this an order rejection would be the mislabel above,
+    reversed. But it is still a definitive on-chain answer, and it needs its own
+    type rather than the bare parent for one reason — ``_is_transient_execution_error``
+    falls through to a substring scan over ``_TRANSIENT_ERROR_MARKERS`` for any
+    exception it does not recognise, and the raised message now embeds the replay
+    diagnosis, which quotes node error text verbatim ("error sending request",
+    "Request timeout", …).
+
+    Without this class a mined, deterministic harness revert whose diagnosis
+    merely *mentions* a transport phrase is retried until the barrier's budget
+    runs out, and the operator is then handed a timeout instead of the revert —
+    the precise defect this ticket fixes, displaced onto the harness lane.
+    """
+
+
 @dataclass(frozen=True)
 class GmxAnvilOrderExecutionResult:
     """Measured result of one managed-fork execution pass."""
@@ -102,9 +163,18 @@ class GmxAnvilOrderExecutionResult:
     execution_receipts: tuple[dict[str, Any], ...] = ()
     reason: str | None = None
     # True when the failure is a transient cold-fork/upstream class the caller
-    # may retry within its own budget; False = structural (no keeper, wrong
-    # network, venue rejected the order).
+    # may retry within its own budget; False = the caller must not retry.
     transient: bool = False
+    # True when a keeper transaction was mined and reverted — the venue rejected
+    # THIS order at THIS block (VIB-6438). Mutually exclusive with ``transient``:
+    # a mined revert is a definitive answer, never a transport blip. Non-retryable
+    # exactly like a structural failure; it is reported separately so the operator
+    # is not told their infrastructure is unsupported.
+    order_rejected: bool = False
+
+    def __post_init__(self) -> None:
+        if self.transient and self.order_rejected:
+            raise ValueError("GmxAnvilOrderExecutionResult cannot be both transient and order_rejected")
 
 
 @dataclass(frozen=True)
@@ -323,6 +393,14 @@ _TRANSIENT_ERROR_MARKERS = (
 
 def _is_transient_execution_error(exc: Exception) -> bool:
     """True for the shapes a transient cold-fork RPC failure can take."""
+    # A mined revert is a definitive on-chain answer, so it is never transient —
+    # checked first because the decoded revert reason is now part of the message
+    # and a contract's own error text must never be pattern-matched as a
+    # transport marker below (VIB-6438). BOTH mined-revert types are listed:
+    # the harness one is not an order rejection, but it is just as definitive,
+    # and its message embeds the same node text.
+    if isinstance(exc, GmxAnvilOrderRejectedError | GmxAnvilHarnessTransactionRevertedError):
+        return False
     if isinstance(exc, grpc.RpcError):
         # Defer to the shared classifier rather than a local code list. The
         # local list admitted only DEADLINE_EXCEEDED, so a gateway rate limit
@@ -343,6 +421,195 @@ def _is_transient_execution_error(exc: Exception) -> bool:
     return any(marker in message for marker in _TRANSIENT_ERROR_MARKERS)
 
 
+# ---------------------------------------------------------------------------
+# Mined-revert diagnosis (VIB-6438)
+# ---------------------------------------------------------------------------
+#
+# A managed-Anvil keeper failure used to surface as gas numbers alone, so the
+# one datum that identifies the cause — the revert reason — was discarded at the
+# raise site and the mechanism had to be reconstructed from source. Anvil is the
+# one environment with guaranteed full trace access, so the replay probe below
+# is free here.
+#
+# EVERY function in this section is best-effort and MUST NOT raise: they run
+# inside an error path, and an exception here would mask the real failure with a
+# diagnostic-implementation bug. That is strictly worse than no diagnosis.
+
+
+@dataclass(frozen=True)
+class _ReplayProbe:
+    """Three-way outcome of one ``eth_call`` re-simulation.
+
+    Three states, not two, because ``GatewayWeb3Provider.make_request`` does NOT
+    raise for most transport failures — it collapses them into a JSON-RPC error
+    object with code ``-32603`` and RETURNS it (``gateway_provider.py:132-139``).
+    Reading any error object as a revert therefore reports a dropped channel or
+    an upstream timeout as a measured venue rejection.
+
+    ``Empty ≠ Zero``: an unmeasured replay is not a measured non-revert, and it
+    is not a measured revert either. ``transport`` says only "no answer".
+    """
+
+    outcome: Literal["success", "revert", "transport"]
+    reason: str | None = None
+    raw: str | None = None
+    error: str | None = None
+
+    def describe(self) -> str:
+        detail = self.reason or "no decodable reason"
+        return f"{detail} (raw={self.raw[:74]})" if self.raw else detail
+
+
+# Gas exhaustion is a MEASURED execution outcome, but it does not look like one:
+# on Anvil 1.5.1 the response is ``{"code": -32603, "message": "EVM error
+# OutOfGas"}`` — no revert data, no ``revert`` substring, and the *same*
+# ``-32603`` the gateway uses for genuine transport failures. Every arm of
+# ``looks_like_revert`` misses it, so it must be recognised by message.
+#
+# An exact-phrase ALLOWLIST, deliberately, not a substring scan. The gateway
+# embeds raw upstream text into transport error messages
+# (``rpc_service.py`` ``f"HTTP {status}: {error_text}"``), so ``"outofgas" in
+# message`` would classify an upstream 5xx body that merely mentions gas as an
+# executed revert — reporting a lost answer as a measured one, which is the
+# inversion this module exists to prevent. An unknown vendor spelling instead
+# reads as transport, i.e. unmeasured: the safe direction (VIB-6481).
+_OUT_OF_GAS_MESSAGES = frozenset({"evm error outofgas", "out of gas", "outofgas"})
+
+
+def _is_out_of_gas(message: str) -> bool:
+    """Whether a failed ``eth_call`` EXECUTED and exhausted its gas (VIB-6438)."""
+    return " ".join(message.split()).lower() in _OUT_OF_GAS_MESSAGES
+
+
+def _replay_once(provider: GatewayWeb3Provider, call: dict[str, str], block: str) -> _ReplayProbe:
+    """One ``eth_call`` at ``block``, classified three ways."""
+    response = provider.make_request(RPCEndpoint("eth_call"), [call, block])
+    # Success is the ABSENCE of an error, never the presence of one we could not
+    # parse (VIB-6438). Reading an unparseable error as success is not a lenient
+    # default — it is a fabricated measurement: a lost answer would be reported
+    # as "the replay SUCCEEDED", telling the operator the mined failure is not
+    # reproducible when in truth nothing was measured at all.
+    #
+    # Not hypothetical. The gateway forwards upstream JSON-RPC errors verbatim
+    # (``rpc_service.py`` ``rpc_error = data["error"]``) and its own code guards
+    # ``isinstance(rpc_error, dict)`` there, so a non-dict error is a shape the
+    # transport genuinely produces; ``gateway_provider.py`` then ``json.loads``
+    # it straight back into this response.
+    if not isinstance(response, dict):
+        return _ReplayProbe(outcome="transport", error=f"non-dict RPC response: {type(response).__name__}")
+    if "error" not in response:
+        # The gateway's success response carries no ``error`` key at all, so key
+        # presence is an exact discriminator.
+        return _ReplayProbe(outcome="success")
+    error = response["error"]
+    if not isinstance(error, dict):
+        return _ReplayProbe(outcome="transport", error=f"malformed RPC error: {error!r}")
+
+    message = str(error.get("message", "")).strip()
+    data = error.get("data")
+    # Discriminate an EXECUTED failure from a lost answer with the SAME predicate
+    # the connector static-call probe uses — a second local predicate would drift
+    # from it — widened by the out-of-gas shape that predicate cannot see.
+    # Anything that still does not positively look executed is inconclusive.
+    has_revert_data = isinstance(data, str) and data.startswith("0x") and len(data) > 2
+    out_of_gas = _is_out_of_gas(message)
+    if not has_revert_data and not out_of_gas and not looks_like_revert(str(error)):
+        return _ReplayProbe(outcome="transport", error=message or str(error))
+
+    # A bare "0x" is EMPTY revert data, not undecodable data — the two are
+    # different diagnoses. Only a non-empty payload goes to the decoder.
+    if has_revert_data:
+        return _ReplayProbe(outcome="revert", reason=decode_revert_data(str(data)), raw=str(data))
+    if out_of_gas:
+        # Executed and ran out of gas. Carry the node's own words: the ABI
+        # decoders have nothing to decode here, so falling through to them below
+        # would discard the one phrase that names the outcome.
+        return _ReplayProbe(outcome="revert", reason=message)
+    # No structured ``data`` field: fall back to the node's inline message text,
+    # which is what the gateway forwards for most revert shapes.
+    return _ReplayProbe(outcome="revert", reason=extract_revert_reason(message) if message else None)
+
+
+def _replay_revert_reason(
+    provider: GatewayWeb3Provider,
+    transaction: dict[str, str],
+    block_number: int,
+) -> str:
+    """Re-simulate the failed transaction where it ran and describe the outcome.
+
+    The replay targets the PARENT block: ``eth_call`` at block ``N`` executes
+    against the state *after* ``N`` is applied, while the transaction itself ran
+    against the state after ``N-1``. Anvil mines the keeper transaction into its
+    own block, so the parent block is exactly the pre-transaction state. This is
+    NOT an off-by-one — replaying at ``N`` would run against post-transaction
+    state.
+
+    ONE probe, carrying the transaction's own ``gas`` and ``gasPrice``, and it
+    reports only what that probe measured. An earlier revision also ran a second
+    ``eth_call`` with unbounded gas and reported ``GAS-BOUND`` when the outcome
+    flipped. That is removed: the executor tops the sender's balance to exactly
+    ``gas_estimate * gas_price``, so a probe omitting ``gas`` is billed against
+    the block gas limit and always fails ``Insufficient funds`` — the verdict
+    could never fire, and dead code on an error path is a place for defects to
+    live rather than a diagnostic. Rebuilding it correctly (``eth_call`` state
+    overrides) is VIB-6477.
+    """
+    # Carry every field that can DECIDE the outcome, not just the ones that
+    # identify the call. GMX validates ``executionFee >= gasLimit * tx.gasprice``
+    # (``sdk.py``), so dropping ``gasPrice`` lets a fee-caused revert replay as a
+    # success and exonerate the true cause — the same false negative as dropping
+    # ``gas`` (VIB-6438).
+    base = {
+        key: value
+        for key, value in transaction.items()
+        if key in ("from", "to", "data", "value", "gasPrice", "maxFeePerGas", "maxPriorityFeePerGas")
+    }
+    submitted_gas = transaction.get("gas")
+    if block_number <= 0:
+        # Without the receipt block the parent is unknown, and "latest" is
+        # POST-transaction state — a replay there measures the wrong state and
+        # could report a confident "SUCCEEDED". Unmeasured, so say so.
+        return "eth_call replay unavailable — the receipt carried no usable block number, and replaying at head would measure post-transaction state"
+    block = hex(block_number - 1)
+
+    faithful = _replay_once(provider, {**base, "gas": submitted_gas} if submitted_gas else base, block)
+    if faithful.outcome == "transport":
+        # Inconclusive, and it must READ as inconclusive. Returning a revert or a
+        # gas verdict here would be a fabricated measurement.
+        return f"eth_call replay unavailable — no answer from the node ({faithful.error or 'unknown'})"
+    if faithful.outcome == "success":
+        return (
+            f"eth_call replay at block {block} SUCCEEDED at the submitted gas limit — the mined failure "
+            "is not reproducible from that state with that gas, so it is neither a deterministic revert "
+            "nor gas exhaustion; look for state ordering (a prior transaction in the same block) or a "
+            "node-level condition"
+        )
+
+    return f"eth_call replay reverted: {faithful.describe()}"
+
+
+def _diagnose_mined_revert(
+    provider: GatewayWeb3Provider,
+    transaction: dict[str, str],
+    tx_hash: str,
+    block_number: int,
+) -> str:
+    """Assemble the best-effort cause of a mined revert. Never raises."""
+    parts: list[str] = []
+    for label, probe in (("replay", lambda: _replay_revert_reason(provider, transaction, block_number)),):
+        try:
+            detail = probe()
+        except Exception as exc:  # noqa: BLE001 — a diagnostic must never mask the real failure
+            logger.debug("GMX mined-revert %s probe failed: %s", label, exc, exc_info=True)
+            parts.append(f"{label} unavailable ({type(exc).__name__})")
+            continue
+        if detail:
+            parts.append(detail)
+    if not parts:
+        return "no revert reason could be obtained"
+    return "; ".join(parts)
+
+
 def _estimate_gas_with_warm_retry(provider: GatewayWeb3Provider, transaction: dict[str, str]) -> Any:
     for attempt in range(1, _ESTIMATE_GAS_ATTEMPTS + 1):
         try:
@@ -360,7 +627,20 @@ def _estimate_gas_with_warm_retry(provider: GatewayWeb3Provider, transaction: di
     raise GmxAnvilOrderExecutionError("eth_estimateGas retry loop exited without a result")  # pragma: no cover
 
 
-def _send_transaction(provider: GatewayWeb3Provider, sender: str, target: str, data: str) -> str:
+def _send_transaction(
+    provider: GatewayWeb3Provider,
+    sender: str,
+    target: str,
+    data: str,
+    *,
+    kind: Literal["order", "harness"],
+) -> str:
+    """Send one keeper transaction on the managed fork.
+
+    ``kind`` is keyword-only and required on purpose: it decides whether a mined
+    revert is reported as an order-level rejection, and a default would silently
+    mislabel the three harness call sites (VIB-6438).
+    """
     sender = to_checksum_address(sender)
     transaction = {
         "from": sender,
@@ -409,9 +689,21 @@ def _send_transaction(provider: GatewayWeb3Provider, sender: str, target: str, d
     )
     if int(receipt["status"]) != 1:
         gas_used = int(receipt["gasUsed"])
-        raise GmxAnvilOrderExecutionError(
-            f"GMX managed-Anvil transaction reverted: {tx_hash} "
-            f"(gas_used={gas_used}, measured_gas_limit={gas_estimate})"
+        # Diagnose BEFORE raising: the reason is the one datum that identifies
+        # the cause, and it is only obtainable here (VIB-6438).
+        try:
+            block_number = int(receipt["blockNumber"])
+        except (KeyError, TypeError, ValueError):
+            block_number = 0
+        diagnosis = _diagnose_mined_revert(provider, transaction_with_gas, tx_hash, block_number)
+        # Only the ORDER call can be an order-level rejection. A harness
+        # oracle setup/cleanup revert means our own plumbing failed and the
+        # venue never saw the order; reporting that as "the venue rejected this
+        # order" is the same mislabel this ticket fixes, reversed (VIB-6438).
+        error_type = GmxAnvilTransactionRevertedError if kind == "order" else GmxAnvilHarnessTransactionRevertedError
+        raise error_type(
+            f"GMX managed-Anvil {kind} transaction reverted: {tx_hash} "
+            f"(gas_used={gas_used}, measured_gas_limit={gas_estimate}) — {diagnosis}"
         )
     return tx_hash
 
@@ -523,6 +815,7 @@ def _seed_oracle_prices(
                     ["address", "(uint256,uint256)"],
                     [token, (minimum, maximum)],
                 ),
+                kind="harness",
             )
         )
 
@@ -537,6 +830,7 @@ def _seed_oracle_prices(
                 ["uint256", "uint256"],
                 [timestamp, timestamp],
             ),
+            kind="harness",
         )
     )
     return tuple(hashes)
@@ -590,6 +884,7 @@ def _clear_oracle_prices(provider: GatewayWeb3Provider, dependencies: _GmxDepend
         dependencies.order_handler,
         dependencies.oracle,
         _calldata(_CLEAR_ALL_PRICES_SIGNATURE),
+        kind="harness",
     )
 
 
@@ -609,6 +904,7 @@ def _execute_order(
             ["bytes32", "(address[],address[],bytes[])"],
             [key, ([], [], [])],
         ),
+        kind="order",
     )
     receipt = _rpc(provider, "eth_getTransactionReceipt", [tx_hash])
     if not isinstance(receipt, dict):
@@ -659,7 +955,7 @@ def _verify_execution_outcome(receipt: dict[str, Any], order_key: str, tx_hash: 
         return
     if "cancelled" in outcomes or "frozen" in outcomes:
         label = "cancelled" if "cancelled" in outcomes else "frozen"
-        raise GmxAnvilOrderExecutionError(
+        raise GmxAnvilOrderRejectedError(
             f"GMX keeper executeOrder {label} order {key} instead of filling it "
             f"(venue reason: {_venue_outcome_reason(outcomes[label])}; tx: {tx_hash})"
         )
@@ -842,11 +1138,15 @@ def execute_pending_orders_on_anvil(
             ok=False,
             reason=f"{type(exc).__name__}: {exc}",
             transient=_is_transient_execution_error(exc),
+            order_rejected=isinstance(exc, GmxAnvilOrderRejectedError),
         )
 
 
 __all__ = [
+    "GmxAnvilHarnessTransactionRevertedError",
     "GmxAnvilOrderExecutionError",
     "GmxAnvilOrderExecutionResult",
+    "GmxAnvilOrderRejectedError",
+    "GmxAnvilTransactionRevertedError",
     "execute_pending_orders_on_anvil",
 ]

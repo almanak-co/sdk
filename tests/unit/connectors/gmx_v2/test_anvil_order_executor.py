@@ -211,7 +211,7 @@ def test_impersonated_transaction_uses_measured_gas_limit() -> None:
         ) as rpc,
         patch("almanak.connectors.gmx_v2.anvil_order_executor.Web3", return_value=web3),
     ):
-        tx_hash = _send_transaction(provider, _ORDER_HANDLER, _ORACLE, "0x1234")
+        tx_hash = _send_transaction(provider, _ORDER_HANDLER, _ORACLE, "0x1234", kind="order")
 
     assert tx_hash == "0xtx"
     assert rpc.call_args_list[0] == call(
@@ -241,7 +241,7 @@ def test_impersonated_transaction_tops_up_only_measured_gas_cost() -> None:
         ) as rpc,
         patch("almanak.connectors.gmx_v2.anvil_order_executor.Web3", return_value=web3),
     ):
-        _send_transaction(provider, _ORDER_HANDLER, _ORACLE, "0x1234")
+        _send_transaction(provider, _ORDER_HANDLER, _ORACLE, "0x1234", kind="order")
 
     assert rpc.call_args_list[3] == call(
         provider,

@@ -19,12 +19,15 @@ if TYPE_CHECKING:
 
 __all__ = [
     "StaticCallProbe",
+    "decode_revert_data",
     "decode_uint256",
     "eth_call",
     "eth_call_hex",
     "eth_call_static_probe",
     "eth_call_uint256",
     "eth_estimate_gas",
+    "extract_revert_reason",
+    "looks_like_revert",
 ]
 
 
@@ -167,8 +170,13 @@ class StaticCallProbe:
     error: str | None = None
 
 
-def _decode_revert_data(hex_blob: str) -> str | None:
-    """Decode a revert-data hex blob to a human-readable reason, best-effort."""
+def decode_revert_data(hex_blob: str) -> str | None:
+    """Decode a revert-data hex blob to a human-readable reason, best-effort.
+
+    Public because the connector layer has two callers: the static-call probe
+    below, and the GMX managed-Anvil keeper replaying an already-mined revert
+    (VIB-6438). Both decode the same ABI payload, so they must not drift.
+    """
     blob = hex_blob.lower().removeprefix("0x")
     if blob.startswith(_ERROR_STRING_SELECTOR):
         try:
@@ -192,7 +200,7 @@ def _decode_revert_data(hex_blob: str) -> str | None:
     return None
 
 
-def _extract_revert_reason(error_text: str) -> str | None:
+def extract_revert_reason(error_text: str) -> str | None:
     """Best-effort revert reason from a stringified JSON-RPC error.
 
     Prefers decoding the error object's ``data`` field (exact — the ABI-encoded
@@ -201,7 +209,7 @@ def _extract_revert_reason(error_text: str) -> str | None:
     """
     data_match = _REVERT_DATA_FIELD_RE.search(error_text)
     if data_match:
-        decoded = _decode_revert_data(data_match.group(1))
+        decoded = decode_revert_data(data_match.group(1))
         if decoded:
             return decoded
     message_match = _REVERT_MESSAGE_RE.search(error_text)
@@ -212,8 +220,12 @@ def _extract_revert_reason(error_text: str) -> str | None:
     return None
 
 
-def _looks_like_revert(error_text: str) -> bool:
+def looks_like_revert(error_text: str) -> bool:
     """Whether a failed-call error text is an EXECUTED-and-reverted answer.
+
+    Public for the same reason as the decoders above: the GMX managed-Anvil
+    keeper must make the identical revert-vs-transport call when replaying an
+    already-mined transaction (VIB-6438), and a second predicate would drift.
 
     Everything that doesn't positively look like a revert is classified as
     transport — the safe default, because a transport outcome is treated as
@@ -260,8 +272,8 @@ def eth_call_static_probe(
             )
         except Exception as exc:  # noqa: BLE001 — classified below, never propagated
             text = str(exc)
-            if _looks_like_revert(text):
-                return StaticCallProbe(outcome="revert", revert_reason=_extract_revert_reason(text), error=text)
+            if looks_like_revert(text):
+                return StaticCallProbe(outcome="revert", revert_reason=extract_revert_reason(text), error=text)
             return StaticCallProbe(outcome="transport", error=text)
         raw = bytes.fromhex(result.removeprefix("0x")) if result and result != "0x" else b""
         return StaticCallProbe(outcome="success", data=raw)
@@ -281,8 +293,8 @@ def eth_call_static_probe(
         )
     except Exception as exc:  # noqa: BLE001 — classified below, never propagated
         text = str(exc)
-        if _looks_like_revert(text):
-            return StaticCallProbe(outcome="revert", revert_reason=_extract_revert_reason(text), error=text)
+        if looks_like_revert(text):
+            return StaticCallProbe(outcome="revert", revert_reason=extract_revert_reason(text), error=text)
         return StaticCallProbe(outcome="transport", error=text)
     return StaticCallProbe(outcome="success", data=raw_result if raw_result is not None else b"")
 

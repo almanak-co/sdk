@@ -84,6 +84,25 @@ class _SettlementPollState:
         )
 
 
+# Statuses that end the managed-Anvil execution lane at once instead of falling
+# through to the settlement poll loop. Named rather than inlined because
+# OMITTING a status here is silent: the membership test simply misses, the lane
+# returns ``None``, and the barrier then polls for the FULL remaining timeout
+# (360s for GMX) for an order that is already definitively finished. The census
+# test in tests/unit/connectors/gmx_v2/test_anvil_revert_legibility_vib6438.py
+# (test_every_settlement_status_has_an_explicit_barrier_decision) fails when a
+# new member is added without a decision here (VIB-6438).
+_IMMEDIATE_STOP_STATUSES: frozenset[AsyncSettlementStatus] = frozenset(
+    {
+        AsyncSettlementStatus.INFRASTRUCTURE_UNSUPPORTED,
+        # A rejected order is as final as a structural failure — waiting cannot
+        # un-reject it. Same retry semantics, different operator message.
+        AsyncSettlementStatus.ORDER_REJECTED,
+        AsyncSettlementStatus.OBSERVATION_FAILED,
+    }
+)
+
+
 def _failure_result(
     *,
     state: _SettlementPollState,
@@ -193,10 +212,7 @@ async def _execute_pending_orders_on_anvil(
             if remaining > 0:
                 await asyncio.sleep(min(poll_interval, remaining))
                 continue
-        if verdict.terminal or verdict.status in {
-            AsyncSettlementStatus.INFRASTRUCTURE_UNSUPPORTED,
-            AsyncSettlementStatus.OBSERVATION_FAILED,
-        }:
+        if verdict.terminal or verdict.status in _IMMEDIATE_STOP_STATUSES:
             return state.result(
                 status=verdict.status,
                 terminal=verdict.terminal,

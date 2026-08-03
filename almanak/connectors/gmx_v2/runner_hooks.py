@@ -46,6 +46,26 @@ class _GmxSettlementBaseline:
         return dict(self.position_sizes)
 
 
+def _classify_execution_failure(result: Any) -> AsyncSettlementStatus:
+    """Map a failed managed-Anvil execution onto a settlement status (VIB-6438).
+
+    ``transient`` is checked first and ``order_rejected`` second because the two
+    are mutually exclusive by construction (the executor's result rejects the
+    both-true combination), so the order only matters for a hand-built stub.
+    Preferring ``transient`` keeps the retryable reading in that case, which is
+    the safe direction: the barrier can still conclude by observation, whereas a
+    wrongly-immediate verdict cannot be revisited.
+
+    ``getattr`` defaults preserve the pre-existing tolerance for results that
+    predate either flag.
+    """
+    if getattr(result, "transient", False):
+        return AsyncSettlementStatus.OBSERVATION_FAILED
+    if getattr(result, "order_rejected", False):
+        return AsyncSettlementStatus.ORDER_REJECTED
+    return AsyncSettlementStatus.INFRASTRUCTURE_UNSUPPORTED
+
+
 def _intent_type_str(intent: Any) -> str:
     """Normalize ``intent.intent_type`` to its string value.
 
@@ -658,16 +678,21 @@ class GmxV2RunnerHookConnector(
             network=network,
         )
         if not result.ok:
-            # A transient cold-fork/upstream failure is retryable within the
-            # barrier's budget (OBSERVATION_FAILED, non-terminal); only a
-            # structural failure (no keeper role, venue rejected the order,
-            # wrong network) is INFRASTRUCTURE_UNSUPPORTED, which the barrier
-            # treats as immediate — waiting cannot fix it.
-            status = (
-                AsyncSettlementStatus.OBSERVATION_FAILED
-                if getattr(result, "transient", False)
-                else AsyncSettlementStatus.INFRASTRUCTURE_UNSUPPORTED
-            )
+            # Three failure classes, not two (VIB-6438):
+            #
+            # * transient cold-fork/upstream blip — retryable within the
+            #   barrier's budget (OBSERVATION_FAILED, non-terminal);
+            # * the keeper transaction was MINED and REVERTED — the venue
+            #   rejected this one order at this one block (ORDER_REJECTED);
+            # * everything else is genuinely structural — no keeper role, wrong
+            #   network, unreadable dependencies (INFRASTRUCTURE_UNSUPPORTED).
+            #
+            # The last two are retry-identical: the barrier stops immediately on
+            # both and neither resubmits. The split is about the OPERATOR, who
+            # was previously told their infrastructure was unsupported when the
+            # true message was "this order reverted, here is why" — the reason
+            # now rides on ``result.reason`` from the executor's replay/trace.
+            status = _classify_execution_failure(result)
             return AsyncSettlementVerdict(
                 status=status,
                 terminal=False,
