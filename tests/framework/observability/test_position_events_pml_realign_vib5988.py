@@ -589,3 +589,163 @@ def test_ncoin_additional_amounts_guard_blocks_leg_adoption(_resolver):
     assert (event.token0.upper(), event.token1.upper()) == ("WETH", "USDC"), (
         "additional_amounts must block declared-leg adoption for N-coin pools"
     )
+
+
+# ── VIB-6383: the precedence arm between VIB-6053 and VIB-5988 ───────────────
+#
+# These tests need a resolver double the CURRENCY branch can actually use, which
+# the module-level ``_resolver`` fixture is not. ``_resolve_lp_close_symbol``
+# calls ``resolver.resolve(cur, chain, log_errors=..., skip_gateway=...)`` with
+# ``chain`` POSITIONAL, while ``_resolver``'s double takes a single positional
+# arg. The mismatch raises ``TypeError`` inside the helper's broad fail-open
+# ``except``, which swallows it and reports ``""`` — i.e. "unresolved".
+#
+# That is VIB-6100 ("fail-open except in token resolvers turns a test double's
+# signature mismatch into a fake 'unresolved'"), and it bites here in the worst
+# way: with ``_resolver``, EVERY address reads as unresolvable, so a
+# fall-through test would pass no matter what address it was handed and would be
+# controlling for nothing. The double below takes the chain positionally so a
+# known address genuinely resolves and an unknown one genuinely does not — which
+# is what makes the resolved/unresolved pair below discriminating.
+
+
+@pytest.fixture
+def _currency_resolver(monkeypatch):
+    def _make():
+        class _Double:
+            def resolve(self, key, chain=None, **_kwargs):  # noqa: ARG002 — chain is positional
+                k = str(key).lower()
+                for sym, addr in _ADDR_BOOK.items():
+                    if addr.lower() == k or sym == str(key).upper():
+                        return SimpleNamespace(symbol=sym, address=addr, decimals=_DECIMALS[sym])
+                return None
+
+        return _Double()
+
+    for target in (
+        "almanak.framework.data.tokens.resolver.get_token_resolver",
+        "almanak.framework.observability.ledger.get_token_resolver",
+    ):
+        try:
+            monkeypatch.setattr(target, _make)
+        except AttributeError:
+            pass
+
+
+def _open_event_with_currencies(currency0: str, currency1: str, extracted_extra: dict | None = None):
+    """An LP_OPEN whose parser stamped currencies, in tokenX/tokenY slot order."""
+    lp_open = LPOpenData(
+        position_id=0,
+        tick_lower=-60_000,
+        tick_upper=60_000,
+        liquidity=500_000,
+        amount0=USDC_RAW,  # connector order (tokenX)
+        amount1=WETH_RAW,  # connector order (tokenY)
+        pool_address=_addr("ab"),
+        currency0=currency0,
+        currency1=currency1,
+    )
+    extracted = {"lp_open_data": lp_open, **(extracted_extra or {})}
+    return build_position_event_from_intent(
+        deployment_id="d1",
+        # Label order is the INVERSE of the connector's amount order, so any
+        # branch that silently keeps the label wins/loses visibly.
+        intent=_Intent("LP_OPEN", pool="WETH/USDC/25", from_token="WETH", to_token="USDC"),
+        result=_Result(extracted),
+        chain="ethereum",
+        price_oracle=_prices(),
+    )
+
+
+def test_unresolvable_currencies_fall_through_to_declared_legs(_currency_resolver):
+    """VIB-6383 — THE NEGATIVE CONTROL for the currencies/declared-legs precedence.
+
+    This is the test that decides the whole design question, so it is worth being
+    explicit about what it is controlling for.
+
+    VIB-6053 made the parser-currency branch outrank everything and be *terminal*:
+    on ``("", "")`` — currencies observed but unresolvable — it kept **label**
+    order rather than falling through. That was written when currencies existed
+    only for Uniswap V4, which declares no money legs, so no connector carried
+    both carriers. TraderJoe Liquidity Book is the first that does (VIB-6383
+    stamps ``currency0``/``currency1`` on the LB parser), and the collision made
+    this arm reachable for the first time.
+
+    The fix falls through to declared legs — and ONLY to declared legs. What is
+    controlled for here is that the fall-through actually reaches them rather
+    than the label: the intent's pool label is deliberately the INVERSE of the
+    connector's amount order, so keeping label order books the ~$1bn phantom and
+    adopting the legs books ~$4.
+
+    Regressing the caller back to a terminal ``return`` turns this red. Nothing
+    else in the suite covers it — and note that the helper's own three-way
+    contract is untouched, so
+    ``test_unresolvable_currencies_return_empty_pair_not_none`` in
+    ``tests/unit/observability/test_lp_token_identity_seam_vib6053.py`` stays
+    green alongside this. Both must hold.
+    """
+    # Addresses the fake resolver knows nothing about -> `("", "")`.
+    event = _open_event_with_currencies(
+        _addr("de"),
+        _addr("ad"),
+        {"primitive_money_legs": _tj_open_legs()},
+    )
+
+    assert event is not None
+    assert (event.token0.upper(), event.token1.upper()) == ("USDC", "WETH"), (
+        "unresolvable currencies must fall through to the declared legs "
+        f"(tokenX=USDC, tokenY=WETH), got {event.token0}/{event.token1}"
+    )
+    value = Decimal(event.value_usd)
+    assert SANE_LOW < value < SANE_HIGH, f"expected ~$4, got {value}"
+    assert value < PHANTOM_FLOOR
+
+
+def test_unresolvable_currencies_without_legs_keep_label_order_never_address_sort(
+    _currency_resolver, caplog
+):
+    """VIB-6383 — the guard: an address sort is not a valid stand-in for a failed
+    observation.
+
+    With no declared legs to fall through to, the caller must keep label order and
+    must NOT reach ``realign_token_pair_by_address``. The label here is
+    ``WETH/USDC`` while the address sort would produce ``USDC/WETH`` (USDC
+    ``0x11…`` < WETH ``0xcc…``), so the two outcomes are distinguishable and this
+    cannot pass by coincidence.
+    """
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        event = _open_event_with_currencies(_addr("de"), _addr("ad"))
+
+    assert event is not None
+    assert (event.token0.upper(), event.token1.upper()) == ("WETH", "USDC"), (
+        "must keep label order, not derive one from an address sort; got "
+        f"{event.token0}/{event.token1}"
+    )
+    assert any("VIB-6383" in r.message for r in caplog.records), (
+        "the degraded path must be observable, not silent"
+    )
+
+
+def test_resolvable_currencies_still_outrank_declared_legs(_currency_resolver):
+    """MUST-NOT-CHANGE — VIB-6053's actual rule is untouched.
+
+    When the currencies DO resolve they still win outright, even with declared
+    legs present. Pairing this with the fall-through test above is what makes the
+    change falsifiable: a "fix" that simply demoted currencies beneath declared
+    legs would pass the first test and fail this one.
+
+    The legs here are deliberately built in the WRONG order (WETH, USDC) so that
+    adopting them instead of the currencies is visible.
+    """
+    event = _open_event_with_currencies(
+        _ADDR_BOOK["USDC"],
+        _ADDR_BOOK["WETH"],
+        {"primitive_money_legs": _legs(("WETH", "0.001032"), ("USDC", "2.185779"), role="input")},
+    )
+
+    assert event is not None
+    assert (event.token0.upper(), event.token1.upper()) == ("USDC", "WETH"), (
+        "resolved parser currencies must outrank declared legs (VIB-6053)"
+    )

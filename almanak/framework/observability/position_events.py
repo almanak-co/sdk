@@ -881,7 +881,26 @@ def _pair_tokens_from_parser_currencies(lp_data: Any, chain: str) -> tuple[str, 
         ``("", "")`` when currencies were emitted but neither resolved to a symbol.
         That is deliberately NOT ``None``: the parser DID observe identity, so falling
         through to an address-sort derivation would let a weaker signal override a
-        stronger one on a money path. The caller keeps label order instead.
+        stronger one on a money path.
+
+    What the caller may do with ``("", "")`` (VIB-6383 — clarified, not changed).
+    The three-way return above is unchanged; this paragraph only states what the
+    third arm licenses. The prohibition this function encodes is specifically
+    against the **address sort**, which is what both sentences of the rationale
+    above name. It is NOT a prohibition on every fallback: declared
+    ``primitive_money_legs`` are parser-stamped, per-leg, and built from the SAME
+    receipt as the amounts, so they are a strictly better stand-in for an
+    observation that failed to materialise than the pool label is. The caller may
+    therefore consult declared legs on ``("", "")``, and must keep label order if
+    those are absent or unusable — but must never reach the address sort. The
+    resulting precedence is a monotone degradation,
+    ``currencies-resolved > declared-legs > label-order``.
+
+    This case could not arise when VIB-6053 was written: currencies existed only
+    for Uniswap V4, which declares no money legs, so no connector carried both
+    carriers until TraderJoe Liquidity Book. See VIB-6104 for the eventual
+    retirement of this whole ladder in favour of binding identity once at
+    evidence production.
     """
     cur0 = _lp_data_attr(lp_data, "currency0")
     cur1 = _lp_data_attr(lp_data, "currency1")
@@ -909,6 +928,17 @@ def _pair_tokens_from_parser_currencies(lp_data: Any, chain: str) -> tuple[str, 
     return ("", "")
 
 
+# Rationale for the allowlist immediately below. This function is a PRECEDENCE LADDER:
+#     currencies-resolved  >  declared-legs  >  label-order
+# with the address sort unreachable after ANY observation. Extracting each arm into a
+# helper would raise every individual arm's readability while hiding the one thing that
+# matters — the order — behind call sites. Getting that order wrong IS the defect class
+# (VIB-5851 / VIB-6383) that booked $228,032,393,195.42 on a $2.80 position. And this is
+# not a refactor deferral: VIB-6104 (Move C) DELETES this ladder rather than decomposing
+# it, so decomposing now would spread the ordering across helpers Move C must re-collapse.
+#
+# crap-allowlist: VIB-6475 — precedence ladder; the ORDER is the property, and VIB-6104
+# Move C deletes this function rather than decomposing it. Retire when Move C lands.
 def _realign_event_lp_pair_if_needed(event: PositionEvent, ctx: IntentEventContext, *, opening: bool) -> None:
     """VIB-5983 — re-pair ``event.token0``/``token1`` to on-chain address order.
 
@@ -997,21 +1027,45 @@ def _realign_event_lp_pair_if_needed(event: PositionEvent, ctx: IntentEventConte
     # identity, so the cross-producer divergence VIB-5988 surfaced cannot recur by
     # one lane re-deriving while the other adopts.
     parser_pair = _pair_tokens_from_parser_currencies(lp_data, ctx.chain or event.chain)
+    currencies_observed = parser_pair is not None
     if parser_pair is not None:
         s0, s1 = parser_pair
-        if s0 and s1 and (s0, s1) != (t0, t1):
-            logger.info(
-                "VIB-6053: re-paired LP position_events pair %s/%s -> %s/%s from "
-                "parser-emitted currencies (position_id=%s event_type=%s)",
-                t0,
-                t1,
-                s0,
-                s1,
-                event.position_id,
-                event.event_type,
-            )
-            event.token0, event.token1 = s0, s1
-        return
+        if s0 and s1:
+            if (s0, s1) != (t0, t1):
+                logger.info(
+                    "VIB-6053: re-paired LP position_events pair %s/%s -> %s/%s from "
+                    "parser-emitted currencies (position_id=%s event_type=%s)",
+                    t0,
+                    t1,
+                    s0,
+                    s1,
+                    event.position_id,
+                    event.event_type,
+                )
+                event.token0, event.token1 = s0, s1
+            return
+        # VIB-6383 — currencies were OBSERVED but did not resolve, so there is no
+        # observation to honour: fall through to the declared-legs branch ONLY.
+        #
+        # This completes VIB-6053's rule rather than overturning it. That rule's
+        # justification names the offending inference twice, and both times it is
+        # the ADDRESS SORT ("falling through to an address-sort derivation would
+        # let a weaker signal override a stronger one"). Declared money legs are
+        # not an address sort — they are parser-stamped, per-leg, from the SAME
+        # receipt as the amounts, so they are a strictly better stand-in for an
+        # observation that failed to materialise than the pool label is. The
+        # resulting order is a monotone degradation:
+        #
+        #     currencies-resolved  >  declared-legs  >  label-order
+        #
+        # with the address sort unreachable after ANY observation (the guard
+        # below). Label order is the guess tier and belongs last, not second.
+        #
+        # VIB-6053 could not have had this case in view: currencies existed only
+        # for V4, which declares no money legs, so no connector carried both
+        # carriers until TraderJoe Liquidity Book. See VIB-6104 (bind LP
+        # money-leg identity once at evidence production) for the eventual
+        # retirement of this ladder.
 
     if extracted.get("primitive_money_legs") is not None:
         d0, d1 = _pair_tokens_from_declared_legs(extracted, opening=opening)
@@ -1043,6 +1097,29 @@ def _realign_event_lp_pair_if_needed(event: PositionEvent, ctx: IntentEventConte
             t0,
             t1,
             ctx.chain or event.chain,
+            event.position_id,
+            event.event_type,
+        )
+        return
+
+    # VIB-6383 — an OBSERVATION was made and could not be resolved, and no usable
+    # declared legs stood in for it. Keep label order; the address sort must stay
+    # unreachable. This is the one path where the fall-through above could
+    # otherwise have reached it: the declared-legs branch returns in BOTH of its
+    # arms, so a connector that declares legs never gets here. Retained anyway —
+    # "it cannot happen today" is a property of the current branch shapes, not an
+    # invariant, and the whole point of this guard is that a future edit to those
+    # shapes must not silently re-open an address sort on a money path.
+    if currencies_observed:
+        logger.warning(
+            "VIB-6383: parser observed LP currencies on %s but they did not resolve, and no "
+            "usable declared money legs are present for %s/%s (position_id=%s event_type=%s); "
+            "keeping label order — an address sort is NOT a valid stand-in for a failed "
+            "observation and value_usd may be mis-paired if the label order differs from the "
+            "connector's amount order",
+            ctx.chain or event.chain,
+            t0,
+            t1,
             event.position_id,
             event.event_type,
         )

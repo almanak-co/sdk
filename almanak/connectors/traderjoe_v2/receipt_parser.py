@@ -557,6 +557,67 @@ class TraderJoeV2ReceiptParser:
         # would otherwise silently drop the amounts (Empty ≠ Zero).
         return filtered or transfers
 
+    @staticmethod
+    def _leg_currency_pair(transfers: list[TraderJoeV2Event]) -> tuple[str | None, str | None]:
+        """VIB-6383 — return the ERC-20 contracts that emitted legs 0 and 1.
+
+        ``amount0`` / ``amount1`` are the first two ``_lbpair_transfers`` values,
+        in the LBRouter's emission order (tokenX then tokenY). Nothing in the
+        emitted payload said *which* token each amount was, so the accounting
+        handler had to guess the pair order — and
+        ``lp_handler._v3_realign_token_pair`` guessed with
+        ``realign_token_pair_by_address``, an **address sort**. That sort is a
+        V3-family property (VIB-5851 / VIB-5983): Uniswap-V3-style pools define
+        ``token0()`` as the numerically-lower address. Liquidity Book does not —
+        ``getTokenX()`` / ``getTokenY()`` are fixed at pool creation. On
+        ``WAVAX/USDT/20`` the two orders disagree (USDT ``0x9702…`` < WAVAX
+        ``0xB31f…`` but ``tokenX`` is WAVAX), so the labels flipped while the
+        amounts stayed in pool order and each leg was scaled with its
+        counterpart's decimals: a $2.80 close booked
+        ``realized_pnl_usd = $228,032,393,195.42``.
+
+        Stamping the addresses here removes the guess at its source. Each
+        ``Transfer``'s ``contract_address`` IS the token that moved, read from
+        the same log the amount is read from, so ``(amount0, currency0)`` is one
+        contract's fact by construction — the same discipline
+        ``_build_close_output_leg`` / ``_build_open_input_leg`` already apply to
+        the declared money legs.
+
+        This deliberately re-uses an existing branch-out rather than adding a
+        third one. ``lp_handler`` already keys off ``currency0``/``currency1``
+        twice, and both work in our favour:
+
+        * ``_v4_realign_token_pair`` runs FIRST and is capability-gated, not
+          protocol-name-gated (its call site says so). It resolves the two
+          addresses to symbols, which re-pairs the labels onto the amounts.
+        * ``_v3_realign_token_pair`` then short-circuits on its existing
+          ``currency0 and currency1`` gate, so the V3 address sort no longer
+          reaches a Liquidity Book pair.
+
+        No framework change is needed, and no other connector's behaviour moves:
+        a parser that does not populate these fields sees the identical code path
+        it saw before.
+
+        Emission-order robustness comes free. The old pairing was correct only
+        while leg 0 happened to be tokenX; now leg 0's identity is stated rather
+        than assumed, so a router that transferred tokenY first would still book
+        correctly.
+
+        Returns ``(None, None)`` for a leg that is absent or carries no
+        contract address — never a fabricated or borrowed address. ``None``
+        re-enables the pre-existing fallback for that shape rather than
+        asserting a token identity the receipt did not carry (Empty ≠ Zero,
+        blueprint 27 §10.10).
+        """
+
+        def _addr(index: int) -> str | None:
+            if len(transfers) <= index:
+                return None
+            addr = getattr(transfers[index], "contract_address", None)
+            return addr.lower() if addr else None
+
+        return _addr(0), _addr(1)
+
     def parse_swap_events(self, receipt: dict[str, Any]) -> list[SwapEventData]:
         """Parse swap events from a receipt.
 
@@ -984,6 +1045,7 @@ class TraderJoeV2ReceiptParser:
                 amount_x = deposit_transfers[0].data.get("value", 0)
             if len(deposit_transfers) >= 2:
                 amount_y = deposit_transfers[1].data.get("value", 0)
+            currency0, currency1 = self._leg_currency_pair(deposit_transfers)
 
             return LPOpenData(
                 # Liquidity Book is fungible (ERC-1155), not an NFT — there is
@@ -994,6 +1056,9 @@ class TraderJoeV2ReceiptParser:
                 position_id=0,
                 amount0=amount_x,
                 amount1=amount_y,
+                # VIB-6383 — bind each amount to the contract it came from.
+                currency0=currency0,
+                currency1=currency1,
                 # Bin model has no tick bracket — leave None, do NOT fabricate.
                 tick_lower=None,
                 tick_upper=None,
@@ -1078,11 +1143,15 @@ class TraderJoeV2ReceiptParser:
                 amount_x = withdraw_transfers[0].data.get("value", 0)
             if len(withdraw_transfers) >= 2:
                 amount_y = withdraw_transfers[1].data.get("value", 0)
+            currency0, currency1 = self._leg_currency_pair(withdraw_transfers)
 
             if amount_x > 0 or amount_y > 0:
                 return LPCloseData(
                     amount0_collected=amount_x,
                     amount1_collected=amount_y,
+                    # VIB-6383 — bind each amount to the contract it came from.
+                    currency0=currency0,
+                    currency1=currency1,
                     # VIB-4470 — TraderJoe doesn't separate fees in events;
                     # fees are unmeasured (Empty ≠ Zero) rather than zero.
                     fees0=None,

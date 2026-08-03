@@ -504,6 +504,31 @@ def _v3_realign_token_pair(
 
     # V4 pairs are re-aligned by ``_v4_realign_token_pair`` via the receipt
     # currency addresses — never double-process here.
+    #
+    # VIB-6383 / VIB-6471 — this gate requires BOTH currencies, deliberately.
+    #
+    # A previous revision of THIS PR changed it to ``or``, to close a hole where a
+    # single-sided Liquidity Book close stamps only one currency and the address sort
+    # still ran on an LB pair (Grok M1). That change was REVERTED: it reopened the
+    # identical defect class for the entire V3 family.
+    #
+    # Why: ``_strategy_base/lp_leg_identity.currencies_for_amounts`` (VIB-6053, already
+    # shipped) binds each slot by VALUE and returns ``None`` for "a slot whose amount is
+    # None (unmeasured) or 0" — so uniswap_v3, sushiswap_v3, pancakeswap_v3 and
+    # aerodrome all stamp a PARTIAL ``(addr, None)`` pair on an ordinary out-of-range
+    # single-sided close, which is a routine lifecycle event, not an edge case. Under
+    # ``or`` that partial stamp short-circuits this gate, ``_v4_realign_token_pair``
+    # no-ops (it needs both), so NEITHER realignment runs and the label order ships —
+    # reproduced: label WETH/USDC with a 6-dec USDC raw in slot 0 returned
+    # ('WETH','USDC') under ``or`` where the address sort correctly gives
+    # ('USDC','WETH'). That is the VIB-5851 mis-scaling defect, re-introduced.
+    #
+    # So: BOTH present means the pair is already established (V4 realigned it, or
+    # there is nothing to do) and the sort must be skipped. Exactly ONE present is an
+    # observation this gate cannot act on — it suppresses nothing, and the partial
+    # case is tracked as VIB-6471, whose fix is POSITIONAL (place the observed
+    # currency in its own slot) rather than another adjustment to this boolean.
+    # A blanket ``or`` trades one connector family's correctness for four others'.
     if _lp_data_field(lp_data, "currency0") and _lp_data_field(lp_data, "currency1"):
         return token0, token1
 
