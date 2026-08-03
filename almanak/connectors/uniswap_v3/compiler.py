@@ -320,11 +320,18 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
             if preflight is not None:
                 return preflight
 
+            # VIB-6269: the tolerance is a PRICE band, mapped into per-leg
+            # minimums against the same slot0 the desired pair was aligned to.
+            # Passing slot0 here is what stops a swap-grade per-leg haircut from
+            # meaning 0.024% of price movement on a 0.5% setting.
             amount0_min, amount1_min = compute_lp_slippage_mins(
                 intent=intent,
                 amount0_desired=amount0_desired,
                 amount1_desired=amount1_desired,
                 default_lp_slippage=ctx.default_lp_slippage,
+                sqrt_price_x96=slot0[0] if slot0 else None,
+                tick_lower=tick_lower,
+                tick_upper=tick_upper,
             )
             self._extend_lp_approvals(
                 ctx=ctx,

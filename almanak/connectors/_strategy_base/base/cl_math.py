@@ -152,8 +152,46 @@ def compute_lp_slippage_mins(
     amount0_desired: int,
     amount1_desired: int,
     default_lp_slippage: Decimal,
+    sqrt_price_x96: int | None = None,
+    tick_lower: int | None = None,
+    tick_upper: int | None = None,
 ) -> tuple[int, int]:
     """Compute LP minimum amounts from the effective LP slippage.
+
+    The tolerance is read as a PRICE BAND and mapped into per-leg minimums by
+    ``lp_mint_mins_for_price_band`` (VIB-6269) when BOTH hold: the tolerance was
+    DECLARED (``protocol_params["lp_slippage"]`` or ``intent.max_slippage``), and
+    ``sqrt_price_x96`` plus the tick range are supplied. Otherwise the legacy flat
+    per-leg haircut is used -- so a caller that cannot read slot0 keeps working,
+    and a caller that declared nothing keeps byte-identical calldata.
+
+    Why the price-band form is the correct instrument for a MINT: ``amount0Min``
+    / ``amount1Min`` on ``mint`` constrain the deposit SPLIT, and the split is an
+    amplified function of price (elasticity 5x-400x for ordinary ranges), so a
+    flat haircut of ``s`` really tolerates only ``s / A`` of price movement. That
+    made a 0.5% tolerance mean 0.024% on a live Arbitrum WETH/USDC position and
+    revert on ordinary compile-to-submit staleness. See the decision doc
+    ``docs/internal/plans/vib-6269-cl-lp-open-minimum-decision.md``.
+
+    **Two triggers select the flat haircut instead, and the order matters.**
+
+    1. *Provenance (primary).* A tolerance that fell through to
+       ``default_lp_slippage`` is a permissive PLACEHOLDER (0.99, VIB-6225), not a
+       declared price tolerance, so it never reaches the band construction at all.
+    2. *Both legs zero (secondary).* A DECLARED tolerance wide enough to reach BOTH
+       range bounds yields ``(0, 0)`` -- truthful (nothing is guaranteed across such
+       a band) but it would ship a mint with no on-chain floor, so it falls back.
+
+    Do NOT collapse these into "both-zero handles it". An earlier revision assumed a
+    99% band always reaches both bounds and keyed the fallback on ``(0, 0)`` alone.
+    It does not: on a wide range the band crosses only the LOWER bound, so the
+    default path returned a changed pair -- measured at 4 of 7 sampled range widths,
+    including a token1 floor of literally ``0`` at ticks [-10000, 10000]. See the
+    inline comment at the guard below.
+
+    A SINGLE zero leg from a DECLARED tolerance is kept: that is the legitimate
+    band-aware case VIB-6269 (Defect B) measured and which its Q5
+    ``max(amount0_min, amount1_min)``-shaped reasoning explicitly endorses.
 
     ``protocol_params["lp_slippage"]`` FAILS CLOSED (VIB-6217). It used to be
     clamped with ``min(max(x, 0), 1)``, which turned every out-of-range value into
@@ -180,8 +218,85 @@ def compute_lp_slippage_mins(
             )
     else:
         lp_slippage = intent_max_slippage if intent_max_slippage is not None else default_lp_slippage
+    # PROVENANCE, not the band result, selects the instrument. `default_lp_slippage`
+    # is a permissive placeholder (0.99, VIB-6225), not a declared price tolerance,
+    # so it must never reach the price-band construction: feeding a placeholder to a
+    # correct instrument yields a correct-but-meaningless answer. Keying the fallback
+    # on `(0, 0)` instead was WRONG -- a 99% band does not cross BOTH bounds on a wide
+    # range, so at e.g. ticks [-10000, 10000] it returned one positive leg and one
+    # ZERO leg, silently dropping a default caller's token1 floor from 1%-of-desired
+    # to 0 and breaking the byte-identical-default contract this change promises.
+    tolerance_is_declared = protocol_lp_slippage is not None or intent_max_slippage is not None
     amount0_min = compute_min_amount_out(amount0_desired, lp_slippage)
     amount1_min = compute_min_amount_out(amount1_desired, lp_slippage)
+
+    if (
+        tolerance_is_declared
+        and sqrt_price_x96 is not None
+        and sqrt_price_x96 > 0
+        and tick_lower is not None
+        and tick_upper is not None
+    ):
+        from almanak.framework.intents.lp_math import lp_mint_mins_for_price_band
+
+        band0, band1 = lp_mint_mins_for_price_band(
+            sqrt_price_x96,
+            tick_lower,
+            tick_upper,
+            amount0_desired,
+            amount1_desired,
+            lp_slippage,
+        )
+        if band0 > 0 or band1 > 0:
+            # NEVER TIGHTER THAN THE LEGACY HAIRCUT. Analytically redundant --
+            # the amplification A >= 1 always, so the band-aware minimum is
+            # already <= the flat one -- but ``recompute_lp_amounts`` RETURNS ITS
+            # INPUTS UNCHANGED on its bail-out paths (out-of-bounds ticks,
+            # degenerate range, ZeroDivisionError). Without this clamp such a
+            # bail-out would emit ``min == desired``: the tightest possible
+            # floor, reverting on any drift at all, and strictly worse than what
+            # this change replaces. The clamp makes "no mint that compiles today
+            # gets a tighter floor tomorrow" a property of the code rather than
+            # of an argument about the math.
+            band0, band1 = min(band0, amount0_min), min(band1, amount1_min)
+            if (band0 == 0) != (band1 == 0):
+                # A ZERO MINIMUM IS SHIPPING. Legitimate here -- the band reaches
+                # that leg's range bound, so nothing is guaranteed for it and any
+                # positive floor would be a lie -- but `amount*Min = 0` is the
+                # exact shape VIB-6220 / VIB-6226 / VIB-6235 file as defects, so
+                # it must never appear silently. The alternative is not a better
+                # floor: on a range this narrow the flat haircut reverts on ~0.001%
+                # of price movement, i.e. on essentially every mint. The actionable
+                # remedy is the tolerance, not the instrument.
+                zero_leg = 0 if band0 == 0 else 1
+                logger.warning(
+                    "LP mint: amount%dMin = 0. The %.3f%% price band reaches the range bound "
+                    "of ticks [%s, %s], so token%d is not guaranteed at all across the declared "
+                    "tolerance and the mint will accept any amount of it. Set an LP tolerance "
+                    "SMALLER than the position's range half-width to keep both legs floored.",
+                    zero_leg,
+                    float(lp_slippage) * 100,
+                    tick_lower,
+                    tick_upper,
+                    zero_leg,
+                )
+            logger.debug(
+                "LP mint (price-band %.3f%%): amount0=%s (min=%s), amount1=%s (min=%s)",
+                float(lp_slippage) * 100,
+                amount0_desired,
+                band0,
+                amount1_desired,
+                band1,
+            )
+            return band0, band1
+        logger.debug(
+            "LP mint: price band %.3f%% spans the whole tick range [%s, %s]; "
+            "falling back to the flat per-leg haircut so the mint is not shipped unprotected",
+            float(lp_slippage) * 100,
+            tick_lower,
+            tick_upper,
+        )
+
     logger.debug(
         "LP mint: slippage=%.1f%%, amount0=%s (min=%s), amount1=%s (min=%s)",
         float(lp_slippage) * 100,

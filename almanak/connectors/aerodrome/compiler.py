@@ -1553,11 +1553,18 @@ def compile_lp_open_aerodrome_slipstream(compiler, intent: LPOpenIntent) -> Comp
 
         # LP slippage-based minimums computed from POOL-ALIGNED amounts, not
         # oracle inputs. Matches the V3-family connector compiler path.
+        # VIB-6269: same price-band instrument as the V3-family compiler --
+        # Slipstream pools are V3-shaped, so leaving this call site on the flat
+        # per-leg haircut would keep the identical deterministic-revert defect
+        # alive on the one connector that shares this helper.
         amount0_min, amount1_min = compute_lp_slippage_mins(
             intent=intent,
             amount0_desired=amount0_desired,
             amount1_desired=amount1_desired,
             default_lp_slippage=compiler.default_lp_slippage,
+            sqrt_price_x96=slot0[0] if slot0 else None,
+            tick_lower=tick_lower,
+            tick_upper=tick_upper,
         )
 
         # Create Aerodrome adapter

@@ -1437,7 +1437,14 @@ class TestCompileLPOpenSlot0Recompute:
         # Pin that _compile_lp_open actually USES the recomputed amounts and
         # not just that the branch ran. recompute_lp_amounts returned (100, 200);
         # those values must flow into action_bundle metadata unchanged.
-        mock_recompute.assert_called_once()
+        # Pin the ALIGNMENT call specifically, not the call count. Since
+        # VIB-6269 the same routine also prices the two protective-minimum band
+        # edges, so it is called three times; asserting "once" pinned an
+        # incidental number rather than the behaviour under test. Asserting the
+        # first call's arguments is strictly stronger: it fixes the live slot0
+        # sqrt-price and the pre-recompute amounts as the alignment inputs.
+        assert mock_recompute.call_args_list[0].args[0] == int(2**96)
+        assert mock_recompute.call_args_list[0].kwargs["current_tick"] == 0
         assert result.action_bundle.metadata["amount0_desired"] == "100"
         assert result.action_bundle.metadata["amount1_desired"] == "200"
 
@@ -1578,7 +1585,11 @@ class TestCompileLPOpenSlipstreamSlot0Recompute:
         assert result.status == CompilationStatus.SUCCESS, result.error
 
         mock_fetch_slot0.assert_called_once()
-        mock_recompute.assert_called_once()
+        # See the V3 sibling above: since VIB-6269 this routine also prices the
+        # protective-minimum band edges, so pin the alignment call's arguments
+        # rather than the (now incidental) call count.
+        assert mock_recompute.call_args_list[0].args[0] == int(2**96)
+        assert mock_recompute.call_args_list[0].kwargs["current_tick"] == 0
 
         # The recomputed sentinels (100, 200) must flow into the adapter call
         # via the wei-overload kwargs, not the raw Decimal amount_a / amount_b.

@@ -161,6 +161,86 @@ def recompute_lp_amounts(
         return amount0_desired, amount1_desired
 
 
+def lp_mint_mins_for_price_band(
+    sqrt_price_x96: int,
+    tick_lower: int,
+    tick_upper: int,
+    amount0_desired: int,
+    amount1_desired: int,
+    price_band: Decimal,
+) -> tuple[int, int]:
+    """Per-leg mint minimums that tolerate a ``+/- price_band`` price move (VIB-6269).
+
+    A concentrated-liquidity ``mint`` consumes whatever SPLIT of the desired pair
+    the live price implies, so ``amount0Min``/``amount1Min`` constrain the split,
+    not a quoted output (blueprint 03 "LP slippage doctrine"). Haircutting each
+    leg by the tolerance therefore states the tolerance in the WRONG DOMAIN: the
+    deposit ratio is an amplified function of price, with elasticity
+
+        A = 1/2 * [ sqrt(p)/(sqrt(p) - sqrt(a)) + sqrt(b)/(sqrt(b) - sqrt(p)) ]
+
+    which is unbounded at a range edge and measured at 5x-400x for ordinary
+    ranges. A flat ``s`` haircut thus tolerates only ``s / A`` of actual price
+    movement -- 0.0012% to 0.09% for s=0.5% depending purely on range width. That
+    is below ordinary compile-to-submit quote staleness, so the mint reverts
+    deterministically ("Price slippage check") even though nothing moved much.
+
+    This function states the tolerance in the PRICE domain instead and maps it
+    into the split domain the ABI can express, by asking the same
+    ``recompute_lp_amounts`` the desired pair was derived from what the pool
+    would consume at each adverse band edge:
+
+    * ``amount0Min`` = token0 consumed at ``p * (1 + price_band)`` -- price up
+      leaves token0 as the short leg (``amount0`` is non-increasing in price);
+    * ``amount1Min`` = token1 consumed at ``p * (1 - price_band)`` -- price down
+      leaves token1 as the short leg (``amount1`` is non-decreasing in price).
+
+    The result tolerates exactly ``price_band`` of price movement on every range,
+    with no amplification and no dependence on range width.
+
+    A leg's minimum is legitimately ``0`` when the band carries price past that
+    leg's range bound -- the band-aware property measured on VIB-6269 (Defect B).
+    Callers decide what to do when BOTH are zero; this function does not refuse.
+
+    Args:
+        sqrt_price_x96: Pool's current sqrtPriceX96 from slot0().
+        tick_lower: Lower tick of the LP position range.
+        tick_upper: Upper tick of the LP position range.
+        amount0_desired: Desired token0, in wei, already pool-ratio aligned.
+        amount1_desired: Desired token1, in wei, already pool-ratio aligned.
+        price_band: Price tolerance as a fraction in ``[0, 1)``.
+
+    Returns:
+        ``(amount0_min, amount1_min)`` in wei. ``(0, 0)`` when the band is so wide
+        relative to the range that neither leg is guaranteed across it.
+    """
+    if price_band < Decimal("0") or price_band >= Decimal("1"):
+        raise ValueError(f"price_band must be in [0, 1) (got {price_band})")
+    if sqrt_price_x96 <= 0:
+        return 0, 0
+
+    with localcontext() as ctx:
+        ctx.prec = 50
+        # price scales as sqrtPrice^2, so a +/- band on price is a
+        # sqrt(1 +/- band) factor on sqrtPriceX96.
+        #
+        # ROUND EACH EDGE OUTWARD. Truncating both would evaluate the UPPER edge at
+        # a slightly lower price, and amount0 is non-increasing in price, so the
+        # emitted amount0Min would come out marginally TIGHTER than the declared
+        # band -- making "tolerates exactly price_band" false by ~1 ULP of
+        # sqrtPriceX96 in the one direction that can cause a spurious revert.
+        # Flooring the low edge and ceiling the high edge keeps the emitted
+        # minimums on the loose side of the band on both legs.
+        sqrt_lo = int(Decimal(sqrt_price_x96) * (Decimal(1) - price_band).sqrt())
+        sqrt_hi = -int(-Decimal(sqrt_price_x96) * (Decimal(1) + price_band).sqrt())
+    sqrt_lo = max(sqrt_lo, MIN_SQRT_RATIO)
+    sqrt_hi = min(sqrt_hi, MAX_SQRT_RATIO)
+
+    amount0_min, _ = recompute_lp_amounts(sqrt_hi, tick_lower, tick_upper, amount0_desired, amount1_desired)
+    _, amount1_min = recompute_lp_amounts(sqrt_lo, tick_lower, tick_upper, amount0_desired, amount1_desired)
+    return max(amount0_min, 0), max(amount1_min, 0)
+
+
 # ---------------------------------------------------------------------------
 # Private math primitives (matching Uniswap V3 SqrtPriceMath.sol)
 # Uses full-precision integer arithmetic to avoid rounding loss from
