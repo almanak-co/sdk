@@ -50,7 +50,7 @@ from almanak.connectors.gmx_v2.acceptable_price import (
     price_30dec_to_usd,
 )
 from almanak.connectors.gmx_v2.addresses import GMX_V2_MARKETS, index_token_decimals
-from almanak.connectors.gmx_v2.sdk import GMXV2SDK
+from almanak.connectors.gmx_v2.sdk import GMXV2SDK, OrderType
 from almanak.framework.intents.compiler import IntentCompiler, IntentCompilerConfig
 from almanak.framework.intents.compiler_models import CompilationStatus
 from almanak.framework.intents.min_out_guard import UnprotectedTradeError
@@ -139,8 +139,8 @@ def _compile(compiler: IntentCompiler, intent: Any) -> Any:
         return compiler.compile(intent)
 
 
-def _decode_acceptable_price(result: Any) -> int:
-    """Pull ``acceptablePrice`` back out of the ENCODED createOrder calldata.
+def _decode_create_order_params(result: Any) -> Any:
+    """Pull the order params back out of the ENCODED createOrder calldata.
 
     Walks the real payload the wallet would sign: ``multicall(bytes[])`` →
     the ``createOrder`` element → ``params.numbers.acceptablePrice``. Decoding
@@ -159,7 +159,11 @@ def _decode_acceptable_price(result: Any) -> int:
         if inner_fn.fn_name == "createOrder":
             create_order_calls.append(inner_args["params"])
     assert len(create_order_calls) == 1, "expected exactly one createOrder in the multicall"
-    return int(create_order_calls[0]["numbers"]["acceptablePrice"])
+    return create_order_calls[0]
+
+
+def _decode_acceptable_price(result: Any) -> int:
+    return int(_decode_create_order_params(result)["numbers"]["acceptablePrice"])
 
 
 # =============================================================================
@@ -313,6 +317,39 @@ class TestEncodedAcceptablePriceAllFourCombos:
         assert metadata["acceptable_price_30dec"] == str(ETH_UPPER_BOUND_30DEC)
         assert metadata["acceptable_price_usd"] == "3030"
         assert int(metadata["acceptable_price_30dec"]) == _decode_acceptable_price(result)
+
+    def test_trigger_open_encodes_limit_order_with_trigger_anchored_bound(self) -> None:
+        """A strategy-authored resting open must remain cancellable on mainnet."""
+        result = _compile(
+            _make_compiler(prices={"ETH": Decimal("3000"), "USDC": Decimal("1")}),
+            _open_intent(
+                is_long=True,
+                trigger_price=Decimal("1500"),
+                max_slippage=Decimal("0.02"),
+            ),
+        )
+        assert result.status == CompilationStatus.SUCCESS, result.error
+
+        params = _decode_create_order_params(result)
+        assert int(params["orderType"]) == int(OrderType.LIMIT_INCREASE)
+        assert int(params["numbers"]["triggerPrice"]) == 1_500 * 10**12
+        assert int(params["numbers"]["acceptablePrice"]) == 1_530 * 10**12
+        assert result.action_bundle.metadata["trigger_price_usd"] == "1500"
+
+    @pytest.mark.parametrize(
+        ("is_long", "trigger_price"),
+        [(True, Decimal("3000")), (True, Decimal("3500")), (False, Decimal("3000")), (False, Decimal("2500"))],
+    )
+    def test_marketable_trigger_is_a_safety_refusal(self, is_long: bool, trigger_price: Decimal) -> None:
+        result = _compile(
+            _make_compiler(prices={"ETH": Decimal("3000"), "USDC": Decimal("1")}),
+            _open_intent(is_long=is_long, trigger_price=trigger_price),
+        )
+
+        assert result.status == CompilationStatus.FAILED
+        assert result.is_safety_refusal is True
+        assert result.transactions == []
+        assert "already marketable" in (result.error or "")
 
 
 # =============================================================================

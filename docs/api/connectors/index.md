@@ -25,7 +25,7 @@ Protocol connectors provide adapters for interacting with DeFi protocols. Each g
 | [Fluid DEX LP](fluid_dex_lp.md) | DEX | [Arbitrum](../../chains/arbitrum.md) | ``LP_CLOSE``, ``LP_OPEN`` | ``almanak.connectors.fluid_dex_lp`` |
 | [Fluid Vault](fluid_vault.md) | Lending | [Arbitrum](../../chains/arbitrum.md), [Base](../../chains/base.md) | ``BORROW``, ``REPAY``, ``SUPPLY``, ``WITHDRAW`` | ``almanak.connectors.fluid_vault`` |
 | [Gimo](gimo.md) | Staking | [0G](../../chains/zerog.md) | ``STAKE``, ``UNSTAKE`` | ``almanak.connectors.gimo`` |
-| [GMX V2](gmx_v2.md) | Perp | [Arbitrum](../../chains/arbitrum.md), [Avalanche](../../chains/avalanche.md) | ``PERP_CLOSE``, ``PERP_OPEN`` | ``almanak.connectors.gmx_v2`` |
+| [GMX V2](gmx_v2.md) | Perp | [Arbitrum](../../chains/arbitrum.md), [Avalanche](../../chains/avalanche.md) | ``PERP_CANCEL_ORDER``, ``PERP_CLOSE``, ``PERP_OPEN`` | ``almanak.connectors.gmx_v2`` |
 | [Hyperliquid](hyperliquid.md) | Perp | [Hyperevm](../../chains/hyperevm.md) | ``PERP_CLOSE``, ``PERP_OPEN``, ``PERP_WITHDRAW`` | ``almanak.connectors.hyperliquid`` |
 | [JoeLend](joelend.md) | Lending | No strategy support declared | No strategy intents registered | ``almanak.connectors.joelend`` |
 | [Jupiter](jupiter.md) | DEX | [Solana](../../chains/solana.md) | ``SWAP`` | ``almanak.connectors.jupiter`` |

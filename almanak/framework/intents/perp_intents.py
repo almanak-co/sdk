@@ -7,7 +7,7 @@ These intents support protocols like GMX V2, Hyperliquid, Drift, etc.
 import re
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import Field, model_validator
 
@@ -85,6 +85,9 @@ class PerpOpenIntent(BaseIntent):
             GMX V2) ignore this flag. When ``True`` the divergence is not silenced —
             it is recorded and warned (compile-time + post-fill venue-truth record).
         max_slippage: Maximum acceptable slippage (e.g., 0.01 = 1%)
+        trigger_price: Optional index price in USD for a resting increase order.
+            When provided, the venue must support trigger orders and the
+            acceptable-price bound is anchored to this price rather than spot.
         protocol: Perpetuals protocol (default "gmx_v2")
         chain: Optional target chain for execution (defaults to strategy's primary chain)
         intent_id: Unique identifier for this intent
@@ -110,6 +113,13 @@ class PerpOpenIntent(BaseIntent):
     # Default False: a connector unable to enforce ``leverage`` rejects the open
     # unless the strategy explicitly accepts the account-default venue leverage.
     accept_venue_leverage: bool = False
+    # ``submission`` is an explicit request to observe the accepted pending
+    # order before any managed-fork keeper convenience executes it. Production
+    # networks already return after submission; the distinction exists so the
+    # same strategy-authored cancel/replace state machine is reproducible on a
+    # managed fork. ``auto`` preserves the normal runner behaviour.
+    settlement_mode: Literal["auto", "submission"] = "auto"
+    trigger_price: OptionalSafeDecimal = None
     max_slippage: SafeDecimal = Field(default=Decimal("0.01"))
     protocol: str = "gmx_v2"
     chain: str | None = None
@@ -128,6 +138,17 @@ class PerpOpenIntent(BaseIntent):
         validate_max_slippage_fraction(self.max_slippage)
         if self.leverage < 1:
             raise ValueError("leverage must be >= 1")
+        if self.trigger_price is not None:
+            if self.trigger_price <= 0:
+                raise ValueError("trigger_price must be positive")
+            capabilities = _capabilities_for(self.protocol.lower())
+            if not capabilities.get("supports_trigger_orders", False):
+                raise InvalidProtocolParameterError(
+                    protocol=self.protocol,
+                    parameter="trigger_price",
+                    value=self.trigger_price,
+                    reason=f"Trigger orders are not supported by {self.protocol}",
+                )
         # Validate leverage against protocol capabilities
         self._validate_protocol_params()
         return self

@@ -1,4 +1,4 @@
-"""Four-layer GMX V2 PERP_CLOSE intent coverage on an Arbitrum fork.
+"""Four-layer GMX V2 PERP_CLOSE intent coverage on an Avalanche fork.
 
 The test first creates and settles a real GMX increase order on managed Anvil,
 then proves the close path end to end:
@@ -38,7 +38,7 @@ from almanak.framework.intents.vocabulary import IntentType
 from almanak.gateway.proto import gateway_pb2
 from tests.intents.conftest import fund_native_token, get_token_balance
 
-CHAIN_NAME = "arbitrum"
+CHAIN_NAME = "avalanche"
 USDC_ADDRESS = GMX_V2_TOKENS[CHAIN_NAME]["USDC"]
 EXCHANGE_ROUTER_ADDRESS = GMX_V2[CHAIN_NAME]["exchange_router"]
 _GMX_USD_SCALE = Decimal(10**30)
@@ -88,7 +88,9 @@ class _AnvilGateway:
 
     def __init__(self, web3: Web3, prices: dict[str, Decimal]) -> None:
         prices_by_token = {
-            address.lower(): prices[symbol] for symbol, address in GMX_V2_TOKENS[CHAIN_NAME].items() if symbol in prices
+            address.lower(): prices["WETH" if symbol == "WETH.e" else symbol]
+            for symbol, address in GMX_V2_TOKENS[CHAIN_NAME].items()
+            if ("WETH" if symbol == "WETH.e" else symbol) in prices
         }
         self.web3 = web3
         self.rpc = _RpcService(web3)
@@ -137,9 +139,9 @@ def _receipt_dict(execution: Any, transaction_index: int = -1) -> dict[str, Any]
     return receipt
 
 
-@pytest.mark.arbitrum
+@pytest.mark.avalanche
 @pytest.mark.asyncio
-class TestGmxV2PerpCloseIntent:
+class TestGmxV2PerpCloseIntentAvalanche:
     @pytest.mark.intent(IntentType.PERP_CLOSE)
     async def test_recent_fork_close_eth_long_returns_collateral(
         self,
@@ -147,7 +149,7 @@ class TestGmxV2PerpCloseIntent:
         funded_wallet: str,
         orchestrator: ExecutionOrchestrator,
         anvil_rpc_url: str,
-        price_oracle_arbitrum: dict[str, Decimal],
+        price_oracle_avalanche: dict[str, Decimal],
     ) -> None:
         fork_age_seconds = int(time.time()) - int(web3.eth.get_block("latest")["timestamp"])
         assert abs(fork_age_seconds) <= 7 * 24 * 60 * 60, (
@@ -157,9 +159,9 @@ class TestGmxV2PerpCloseIntent:
         compiler = _build_compiler(
             wallet=funded_wallet,
             orchestrator=orchestrator,
-            prices=price_oracle_arbitrum,
+            prices=price_oracle_avalanche,
         )
-        gateway = _AnvilGateway(web3, price_oracle_arbitrum)
+        gateway = _AnvilGateway(web3, price_oracle_avalanche)
 
         # Establish the real position that the PERP_CLOSE intent will consume.
         open_intent = PerpOpenIntent(

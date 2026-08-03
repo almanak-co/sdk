@@ -102,11 +102,11 @@ def test_taxonomy_classifies_as_no_accounting_refund():
 # --------------------------------------------------------------------------- #
 
 
-@pytest.fixture
-def compiler_ctx():
+@pytest.fixture(params=["arbitrum", "avalanche"])
+def compiler_ctx(request):
     compiler = GMXV2Compiler()
     ctx = PerpCompilerContext(
-        chain="arbitrum",
+        chain=request.param,
         wallet_address="0x" + "ab" * 20,
         rpc_url=None,
         rpc_timeout=10.0,
@@ -147,7 +147,7 @@ def test_cancel_selector_matches_canonical_signature():
 
 def test_compile_cancel_builds_cancel_order_calldata(compiler_ctx):
     compiler, ctx = compiler_ctx
-    intent = Intent.perp_cancel_order(order_key=_KEY, protocol="gmx_v2", chain="arbitrum")
+    intent = Intent.perp_cancel_order(order_key=_KEY, protocol="gmx_v2", chain=ctx.chain)
 
     result = compiler.compile(ctx, intent)
 
@@ -162,6 +162,28 @@ def test_compile_cancel_builds_cancel_order_calldata(compiler_ctx):
     assert tx.data[10:].lower() == _KEY[2:].lower()
     assert result.action_bundle.intent_type == "PERP_CANCEL_ORDER"
     assert result.action_bundle.metadata["order_key"] == _KEY
+
+
+def test_strategy_manifest_and_published_matrix_stay_in_lockstep():
+    """ALM-3101: authoring, compiler routing, and published info output must
+    expose the same GMX lifecycle on both supported chains."""
+    from almanak.connectors.gmx_v2.connector import CONNECTOR
+    from almanak.framework.cli.support_matrix import _build_matrix
+
+    expected_intents = {
+        IntentType.PERP_OPEN,
+        IntentType.PERP_CLOSE,
+        IntentType.PERP_CANCEL_ORDER,
+    }
+    assert set(CONNECTOR.strategy_intents or ()) == expected_intents
+    for chain in ("arbitrum", "avalanche"):
+        assert all(CONNECTOR.supports(chain=chain, intent=intent) for intent in expected_intents)
+
+    rows = [row for row in _build_matrix()["protocols"] if row["name"] == "gmx_v2"]
+    assert rows, "almanak info matrix must publish the connector-owned GMX row"
+    coverage = rows[0]["chainsByIntent"]
+    for intent in expected_intents:
+        assert coverage[intent.value] == ["arbitrum", "avalanche"]
 
 
 def test_compile_cancel_fails_closed_on_unsupported_chain(compiler_ctx):

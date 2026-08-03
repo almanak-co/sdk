@@ -725,7 +725,7 @@ class TestCategoryCollapseIsUndone:
 
     def test_gmx_is_perps_only(self, matrix_data: dict) -> None:
         row = _row(matrix_data, "gmx_v2", "perps")
-        assert set(row["chainsByIntent"]) == {"PERP_OPEN", "PERP_CLOSE"}
+        assert set(row["chainsByIntent"]) == {"PERP_OPEN", "PERP_CLOSE", "PERP_CANCEL_ORDER"}
 
     def test_lending_protocols_separate_supply_from_borrow(self, matrix_data: dict) -> None:
         row = _row(matrix_data, "morpho_blue", "lending")

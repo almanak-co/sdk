@@ -179,7 +179,7 @@ MIGRATED_STRATEGY_REGISTRATION = {
     "fluid": (("SWAP", "SUPPLY", "WITHDRAW"), ("arbitrum", "base", "ethereum", "polygon")),
     "fluid_dex_lp": (("LP_OPEN", "LP_CLOSE"), ("arbitrum",)),
     "gimo": (("STAKE", "UNSTAKE"), ("zerog",)),
-    "gmx_v2": (("PERP_OPEN", "PERP_CLOSE"), ("arbitrum", "avalanche")),
+    "gmx_v2": (("PERP_OPEN", "PERP_CLOSE", "PERP_CANCEL_ORDER"), ("arbitrum", "avalanche")),
     "jupiter": (("SWAP",), ("solana",)),
     "kamino": (("SUPPLY", "BORROW", "REPAY", "WITHDRAW"), ("solana",)),
     "kraken": (("SWAP",), None),

@@ -10,8 +10,8 @@
 
 | Chain | Family | Supported Intents |
 |-------|--------|-------------------|
-| [Arbitrum](../../chains/arbitrum.md) | EVM | ``PERP_CLOSE``, ``PERP_OPEN`` |
-| [Avalanche](../../chains/avalanche.md) | EVM | ``PERP_CLOSE``, ``PERP_OPEN`` |
+| [Arbitrum](../../chains/arbitrum.md) | EVM | ``PERP_CANCEL_ORDER``, ``PERP_CLOSE``, ``PERP_OPEN`` |
+| [Avalanche](../../chains/avalanche.md) | EVM | ``PERP_CANCEL_ORDER``, ``PERP_CLOSE``, ``PERP_OPEN`` |
 
 ## API Reference
 

@@ -9269,6 +9269,13 @@ class StrategyRunner:
         on the existing fast path.
         """
         if not self._require_terminal_async_settlement:
+            # A strategy that intends to cancel or replace an accepted order
+            # needs the submission callback while the order is still pending.
+            # Mainnet already behaves this way; this explicit mode prevents the
+            # managed-Anvil keeper convenience below from erasing that state
+            # before the callback can persist the authoritative order key.
+            if str(getattr(state.intent, "settlement_mode", "auto") or "auto").lower() == "submission":
+                return None
             await self._fill_async_orders_on_managed_anvil(state)
             return None
         execution_result = state.last_execution_result

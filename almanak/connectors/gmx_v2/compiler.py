@@ -142,16 +142,45 @@ class GMXV2Compiler(BasePerpCompiler):
                 return price_or_error
             acceptable_price_30dec, acceptable_price_usd = price_or_error
 
+            trigger_price_30dec = 0
+            if intent.trigger_price is not None:
+                decimals = index_token_decimals(ctx.chain, market_address)
+                if decimals is None:
+                    return CompilationResult(
+                        status=CompilationStatus.FAILED,
+                        error=f"GMX V2 PERP_OPEN: no index-token decimals for trigger price on {intent.market}",
+                        intent_id=intent.intent_id,
+                        is_safety_refusal=True,
+                    )
+                try:
+                    trigger_price_30dec = derive_acceptable_price_30dec(
+                        index_price_usd=Decimal(intent.trigger_price),
+                        index_token_decimals=decimals,
+                        slippage_bps=0,
+                        is_long=intent.is_long,
+                        is_increase=True,
+                        context=f"gmx_v2 PERP_OPEN trigger {intent.market} on {ctx.chain}",
+                    )
+                except UnprotectedTradeError as exc:
+                    return CompilationResult(
+                        status=CompilationStatus.FAILED,
+                        error=str(exc),
+                        intent_id=intent.intent_id,
+                        is_safety_refusal=True,
+                    )
+
             adapter = GMXv2Adapter(GMXv2Config(chain=ctx.chain, wallet_address=ctx.wallet_address))
             order_result = adapter.open_position(
                 market=canonical_market,
                 collateral_token=intent.collateral_token,
+                # mypy cannot preserve the Decimal narrowing across attribute reads.
                 collateral_amount=intent.collateral_amount,  # type: ignore[arg-type]
                 size_delta_usd=intent.size_usd,
                 is_long=intent.is_long,
                 # Plain USD, matching the adapter's documented parameter contract.
                 # The GMX-native integer below is what reaches calldata.
                 acceptable_price=acceptable_price_usd,
+                trigger_price=intent.trigger_price,
             )
             if not order_result.success:
                 return CompilationResult(
@@ -183,6 +212,7 @@ class GMXV2Compiler(BasePerpCompiler):
                 is_long=intent.is_long,
                 acceptable_price=acceptable_price_30dec,
                 execution_fee=execution_fee,
+                trigger_price=trigger_price_30dec,
             )
             tx_data = sdk.build_increase_order_multicall(order_params)
 
@@ -226,6 +256,8 @@ class GMXV2Compiler(BasePerpCompiler):
                     # createOrder, in GMX's 30-decimal convention plus plain USD.
                     "acceptable_price_30dec": str(acceptable_price_30dec),
                     "acceptable_price_usd": str(acceptable_price_usd),
+                    "trigger_price_30dec": str(trigger_price_30dec),
+                    "trigger_price_usd": str(intent.trigger_price) if intent.trigger_price is not None else None,
                     "order_key": order_result.order_key,
                     "chain": ctx.chain,
                 },
@@ -521,9 +553,11 @@ class GMXV2Compiler(BasePerpCompiler):
             # this exact trap). Caught by
             # tests/unit/permissions/test_protocol_compatibility.py, which is
             # why the guard is scoped rather than absolute.
+            strategy_trigger = getattr(intent, "trigger_price", None) if is_increase else None
             if not ctx.permission_discovery:
                 ctx.services.assert_prices_available([symbol])
-            index_price_usd = ctx.services.require_token_price(symbol)
+            measured_spot_usd = ctx.services.require_token_price(symbol)
+            index_price_usd = strategy_trigger if strategy_trigger is not None else measured_spot_usd
         except Exception as exc:  # noqa: BLE001 - never a licence to skip the bound
             return CompilationResult(
                 status=CompilationStatus.FAILED,
@@ -536,6 +570,23 @@ class GMXV2Compiler(BasePerpCompiler):
                 intent_id=intent.intent_id,
                 is_safety_refusal=True,
             )
+
+        if strategy_trigger is not None and not ctx.permission_discovery:
+            trigger_is_marketable = (intent.is_long and strategy_trigger >= measured_spot_usd) or (
+                not intent.is_long and strategy_trigger <= measured_spot_usd
+            )
+            if trigger_is_marketable:
+                direction = "long" if intent.is_long else "short"
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=(
+                        f"GMX V2 {leg}: {direction} trigger {strategy_trigger} is already marketable "
+                        f"against measured spot {measured_spot_usd}; refusing a resting-order request "
+                        "whose slippage bound would be anchored away from the current market"
+                    ),
+                    intent_id=intent.intent_id,
+                    is_safety_refusal=True,
+                )
 
         # GMX's tolerance granularity is a basis point, and `int()` TRUNCATES:
         # any 0 < max_slippage < 0.0001 collapses to 0 bps. That is not a safety

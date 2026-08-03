@@ -121,12 +121,11 @@ CONNECTOR = Connector(
         ),
     ),
     backtest_risk=_BACKTEST_RISK,
-    # PERP_CANCEL_ORDER (VIB-5568) is INTENTIONALLY NOT here. strategy_intents is the
-    # STRATEGY-AUTHORING universe (what a strategy's decide() may return, driving the
-    # intent-coverage gate + SKILL surface). A cancel is a framework TEARDOWN-RECOVERY
-    # verb — never authored by a strategy — so it lives on GMXV2Compiler.intents (the
-    # compilation universe, which routes it) but not here. Do not "fix" this by adding it.
-    strategy_intents=(IntentType.PERP_OPEN, IntentType.PERP_CLOSE),
+    # VIB-5568 introduced cancellation for teardown recovery. ALM-3101 promotes
+    # the same fail-closed verb to the public authoring surface: live strategies
+    # must be able to replace stale pending orders without pretending that a
+    # cancellation is a position close.
+    strategy_intents=(IntentType.PERP_OPEN, IntentType.PERP_CLOSE, IntentType.PERP_CANCEL_ORDER),
     supported_chains=SupportedChainsSpec(chains=(ARBITRUM, AVALANCHE)),
 )
 

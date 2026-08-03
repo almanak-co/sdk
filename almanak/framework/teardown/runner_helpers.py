@@ -405,6 +405,15 @@ def _intent_protocol(intent: Any) -> str:
     return str(raw or "").lower()
 
 
+def _intent_type(intent: Any) -> str:
+    raw = (
+        intent.get("type") or intent.get("intent_type")
+        if isinstance(intent, dict)
+        else getattr(intent, "intent_type", None)
+    )
+    return str(getattr(raw, "value", raw) or "").upper()
+
+
 def _async_settlement_capability(intent: Any) -> tuple[bool, str | None]:
     """Return whether the connector requires a terminal barrier, plus lookup failure."""
     protocol = _intent_protocol(intent)
@@ -422,7 +431,12 @@ def _async_settlement_capability(intent: Any) -> tuple[bool, str | None]:
             True,
             f"Async settlement capability lookup failed after submission; refusing to retry the order: {policy_exc}",
         )
-    return policy is not None, None
+    if policy is None:
+        return False, None
+    submission_intent_types = getattr(policy, "submission_intent_types", None)
+    if submission_intent_types is not None and _intent_type(intent) not in submission_intent_types:
+        return False, None
+    return True, None
 
 
 def _async_settlement_enrichment_failure(intent: Any, exc: Exception) -> str | None:

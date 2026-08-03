@@ -683,7 +683,7 @@ class GMXV2SDK:
         order_params: tuple[Any, ...] = (
             addresses,
             numbers,
-            OrderType.MARKET_INCREASE,  # orderType
+            OrderType.LIMIT_INCREASE if params.trigger_price > 0 else OrderType.MARKET_INCREASE,
             DecreasePositionSwapType.NO_SWAP,  # decreasePositionSwapType
             params.is_long,  # isLong
             False,  # shouldUnwrapNativeToken

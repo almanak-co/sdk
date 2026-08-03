@@ -61,12 +61,23 @@ class AsyncSettlementStatus(StrEnum):
 
 @dataclass(frozen=True)
 class AsyncSettlementPolicy:
-    """Connector-owned timing and managed-fork support declaration."""
+    """Connector-owned timing and managed-fork support declaration.
+
+    ``submission_intent_types`` scopes the barrier to verbs that create an
+    asynchronous order.  A connector can also expose synchronous verbs (for
+    example, GMX ``PERP_CANCEL_ORDER``): those transactions are terminal in
+    their own receipt and must not be treated as a second async submission just
+    because the connector supports asynchronous settlement elsewhere.
+
+    ``None`` preserves the legacy connector-wide contract.  Migrated
+    connectors should declare the exact intent set.
+    """
 
     timeout_seconds: int
     poll_interval_seconds: int
     supports_local_order_execution: bool
     supports_cancellation: bool
+    submission_intent_types: frozenset[str] | None = None
 
     def __post_init__(self) -> None:
         if self.timeout_seconds <= 0:
@@ -77,6 +88,11 @@ class AsyncSettlementPolicy:
             raise TypeError("AsyncSettlementPolicy.supports_local_order_execution must be a bool")
         if not isinstance(self.supports_cancellation, bool):
             raise TypeError("AsyncSettlementPolicy.supports_cancellation must be a bool")
+        if self.submission_intent_types is not None:
+            if not isinstance(self.submission_intent_types, frozenset) or not all(
+                isinstance(intent_type, str) and intent_type for intent_type in self.submission_intent_types
+            ):
+                raise TypeError("AsyncSettlementPolicy.submission_intent_types must be a frozenset of strings")
 
 
 @dataclass(frozen=True)

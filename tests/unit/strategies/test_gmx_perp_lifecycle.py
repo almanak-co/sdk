@@ -15,7 +15,9 @@ Two regression areas:
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -41,9 +43,16 @@ def strategy():
         s.is_long = True
         s.max_slippage_pct = Decimal("2.0")
         s.force_action = None
+        s.cancel_min_age_seconds = 315
+        s.pending_trigger_distance_pct = Decimal("50")
         s._loop_state = "idle"
         s._previous_stable_state = "idle"
         s._position_size_usd = Decimal("0")
+        s._pending_order_key = None
+        s._pending_order_created_at = None
+        s._replacement_order_key = None
+        s._close_order_key = None
+        s._position_observed = False
         return s
 
 
@@ -196,6 +205,147 @@ class TestTrackedTokensExcludeUsd:
         assert "ETH" in tokens
         assert "USDC" in tokens
 
+
+class TestStrategyAuthoredCancelLifecycle:
+    ORDER_A = "0x" + "11" * 32
+    ORDER_B = "0x" + "22" * 32
+    CLOSE_B = "0x" + "33" * 32
+
+    @staticmethod
+    def _intent(intent_type: str):
+        return SimpleNamespace(intent_type=SimpleNamespace(value=intent_type))
+
+    @staticmethod
+    def _result(order_key: str):
+        return SimpleNamespace(async_orders=[SimpleNamespace(order_id=order_key)])
+
+    def test_first_open_is_a_non_marketable_resting_order(self, strategy):
+        market = MagicMock()
+        market.price.return_value = Decimal("3000")
+        market.collateral_value_usd.return_value = Decimal("10")
+
+        intent = strategy.decide(market)
+
+        assert intent.intent_type.value == "PERP_OPEN"
+        assert intent.settlement_mode == "submission"
+        assert intent.trigger_price == Decimal("1500")
+        assert strategy._loop_state == "opening_a"
+
+    def test_open_a_callback_persists_authoritative_key(self, strategy):
+        strategy._loop_state = "opening_a"
+
+        strategy.on_intent_executed(self._intent("PERP_OPEN"), True, self._result(self.ORDER_A))
+
+        assert strategy._loop_state == "pending_a"
+        assert strategy._pending_order_key == self.ORDER_A
+        assert strategy._pending_order_created_at is None
+        state = strategy.get_persistent_state()
+        assert state["pending_order_key"] == self.ORDER_A
+        assert state["pending_order_created_at"] is None
+
+    def test_cancel_is_not_emitted_before_account_age_gate(self, strategy):
+        strategy._loop_state = "pending_a"
+        strategy._pending_order_key = self.ORDER_A
+        strategy._pending_order_created_at = datetime.now(UTC)
+        market = MagicMock()
+        market.block_timestamp.return_value = strategy._pending_order_created_at
+
+        intent = strategy.decide(market)
+
+        assert intent.intent_type.value == "HOLD"
+        assert "cancellation gate" in intent.reason
+        assert strategy._loop_state == "pending_a"
+
+    def test_cancel_uses_exact_persisted_key_after_age_gate(self, strategy):
+        strategy._loop_state = "pending_a"
+        strategy._pending_order_key = self.ORDER_A
+        strategy._pending_order_created_at = datetime.now(UTC) - timedelta(seconds=316)
+        market = MagicMock()
+        market.block_timestamp.return_value = datetime.now(UTC)
+
+        intent = strategy.decide(market)
+
+        assert intent.intent_type.value == "PERP_CANCEL_ORDER"
+        assert intent.order_key == self.ORDER_A
+        assert strategy._loop_state == "cancelling_a"
+
+    def test_cancel_callback_unlocks_replacement_and_clears_old_key(self, strategy):
+        strategy._loop_state = "cancelling_a"
+        strategy._pending_order_key = self.ORDER_A
+        strategy._pending_order_created_at = datetime.now(UTC) - timedelta(seconds=316)
+
+        strategy.on_intent_executed(self._intent("PERP_CANCEL_ORDER"), True, SimpleNamespace())
+
+        assert strategy._loop_state == "cancelled_a"
+        assert strategy._pending_order_key is None
+        assert strategy._pending_order_created_at is None
+
+    def test_replacement_callback_stays_pending_until_position_read(self, strategy):
+        strategy._loop_state = "opening_b"
+
+        strategy.on_intent_executed(self._intent("PERP_OPEN"), True, self._result(self.ORDER_B))
+
+        assert strategy._loop_state == "order_b_pending"
+        assert strategy._replacement_order_key == self.ORDER_B
+        assert strategy._position_observed is False
+
+    def test_close_callback_waits_for_measured_absence(self, strategy):
+        strategy._loop_state = "closing_b"
+        strategy._position_observed = True
+        strategy._position_size_usd = Decimal("20")
+
+        strategy.on_intent_executed(self._intent("PERP_CLOSE"), True, self._result(self.CLOSE_B))
+
+        assert strategy._loop_state == "close_submitted"
+        assert strategy._close_order_key == self.CLOSE_B
+        assert strategy._position_size_usd == Decimal("20")
+
+    def test_malformed_order_key_requires_recovery_without_raising(self, strategy):
+        strategy._loop_state = "opening_a"
+
+        strategy.on_intent_executed(
+            self._intent("PERP_OPEN"),
+            True,
+            self._result("adapter-placeholder"),
+        )
+
+        assert strategy._loop_state == "recovery_required"
+        assert strategy._previous_stable_state == "recovery_required"
+
+    @pytest.mark.parametrize("in_flight", ["opening", "opening_a", "closing", "cancelling_a", "opening_b", "closing_b"])
+    def test_restart_never_replays_in_flight_money_action(self, strategy, in_flight: str):
+        strategy.load_persistent_state(
+            {
+                "loop_state": in_flight,
+                "previous_stable_state": "idle",
+                "position_size_usd": "20",
+            }
+        )
+
+        assert strategy._loop_state == "recovery_required"
+        assert strategy.decide(MagicMock()).intent_type.value == "HOLD"
+
+    def test_chain_timestamp_is_required_for_cancel_age(self, strategy):
+        strategy._loop_state = "pending_a"
+        strategy._pending_order_key = self.ORDER_A
+        market = MagicMock()
+        market.block_timestamp.return_value = None
+
+        intent = strategy.decide(market)
+
+        assert intent.intent_type.value == "HOLD"
+        assert "timestamp is unmeasured" in intent.reason
+
+    def test_teardown_does_not_duplicate_submitted_close(self, strategy):
+        from almanak.framework.teardown import TeardownMode
+
+        strategy._loop_state = "close_submitted"
+        strategy._position_observed = True
+
+        assert strategy.generate_teardown_intents(TeardownMode.HARD) == []
+
+
+class TestTrackedTokensAdditional:
     def test_tracked_tokens_dedups_when_index_equals_collateral(self, strategy):
         strategy.market = "USDC/USD"
         strategy.collateral_token = "USDC"

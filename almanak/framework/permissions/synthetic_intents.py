@@ -278,6 +278,8 @@ def get_protocol_intent_matrix() -> dict[str, frozenset[IntentType]]:
         )
     for proto in _perp_protocols():
         matrix[proto].update({IntentType.PERP_OPEN, IntentType.PERP_CLOSE})
+        if IntentType.PERP_CANCEL_ORDER in get_permission_hints(proto).synthetic_discovery_intents:
+            matrix[proto].add(IntentType.PERP_CANCEL_ORDER)
     for proto, chains in VAULT_PROTOCOL_REPRESENTATIVE.items():
         if chains:
             matrix[proto].update({IntentType.VAULT_DEPOSIT, IntentType.VAULT_REDEEM})
@@ -866,7 +868,8 @@ def _build_perp_cancel_intents(protocol: str, chain: str) -> list[AnyIntent]:
 
     Gated on the connector DECLARING ``PERP_CANCEL_ORDER`` in its
     ``synthetic_discovery_intents`` — NOT on the broad ``_perp_protocols()``
-    membership. Cancel is a gmx_v2-only teardown-recovery verb (VIB-5569); every
+    membership. Cancel is a gmx_v2-only strategy and teardown verb (VIB-5569,
+    ALM-3101); every
     other perp connector (hyperliquid / aster_perps / pancakeswap_perps / drift)
     is in ``_perp_protocols()`` but has no cancel compile path, so gating on
     declaration keeps a cancel builder from being handed to a connector that would

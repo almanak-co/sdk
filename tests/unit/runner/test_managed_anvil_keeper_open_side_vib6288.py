@@ -42,6 +42,7 @@ def _state(
     network: str,
     orders: tuple = (_order(),),
     gateway_client: object | None = None,
+    settlement_mode: str = "auto",
 ) -> SimpleNamespace:
     execution_result = SimpleNamespace(async_orders=orders, error=None)
     return SimpleNamespace(
@@ -49,7 +50,7 @@ def _state(
         last_execution_result=execution_result,
         last_execution_context=SimpleNamespace(chain="arbitrum"),
         gateway_client=gateway_client if gateway_client is not None else MagicMock(),
-        intent=SimpleNamespace(),
+        intent=SimpleNamespace(settlement_mode=settlement_mode),
         deployment_id="deployment:abc123",
         record_metrics=False,
         start_time=0.0,
@@ -118,6 +119,17 @@ class TestMainnetIsAStrictNoOp:
 
 
 class TestAnvilProductionLaneFills:
+    @pytest.mark.asyncio
+    async def test_submission_mode_leaves_order_pending_for_strategy_authored_cancel(self, runner, monkeypatch) -> None:
+        called = AsyncMock(return_value=_settled())
+        monkeypatch.setattr("almanak.framework.runner.async_settlement.await_async_settlement", called)
+
+        assert (
+            await runner._single_chain_async_settlement_guard(_state(network="anvil", settlement_mode="submission"))
+            is None
+        )
+        assert called.await_count == 0
+
     @pytest.mark.asyncio
     async def test_the_keeper_runs_from_the_production_guard_on_anvil(self, runner, monkeypatch) -> None:
         """The defect itself: this awaited zero times before VIB-6288."""

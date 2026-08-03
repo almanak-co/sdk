@@ -1,11 +1,13 @@
 {
     "market": "ETH/USD",
     "collateral_token": "USDC",
-    "collateral_amount": "10",
+    "collateral_amount": "5",
     "leverage": "2.0",
     "is_long": true,
     "max_slippage_pct": 2.0,
     "force_action": null,
+    "cancel_min_age_seconds": 315,
+    "pending_trigger_distance_pct": "50",
     "chain": "arbitrum",
     "anvil_funding": {
         "ETH": 100,

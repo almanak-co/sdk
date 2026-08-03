@@ -8,6 +8,7 @@ from typing import Any
 PROTOCOL_CAPABILITIES: dict[str, dict[str, Any]] = {
     "gmx_v2": {
         "supports_leverage": True,
+        "supports_trigger_orders": True,
         "max_leverage": Decimal("100"),
         "min_leverage": Decimal("1.1"),
         "operations": ["perp_open", "perp_close"],

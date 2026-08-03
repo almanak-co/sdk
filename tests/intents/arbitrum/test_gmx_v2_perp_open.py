@@ -112,7 +112,6 @@ class TestGmxV2PerpOpenIntent:
     """
 
     @pytest.mark.intent(IntentType.PERP_OPEN)
-    @pytest.mark.no_zodiac(reason="GMX V2 uses a 3-call multicall; Zodiac extension is deferred")
     async def test_open_eth_long_usdc_collateral(
         self,
         web3: Web3,

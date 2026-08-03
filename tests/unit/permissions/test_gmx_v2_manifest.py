@@ -84,11 +84,10 @@ class TestGmxV2CancelManifest:
         cancelOrder in its Safe manifest without authoring the cancel verb.
 
         The manifest generator auto-expands PERP_OPEN → (PERP_CLOSE,
-        PERP_CANCEL_ORDER) as teardown-recovery complements (VIB-5569). This is
-        the leg that makes the fix real rather than merely capable: gmx_v2
-        deliberately keeps PERP_CANCEL_ORDER out of ``strategy_intents`` (it is a
-        framework teardown verb), so without expansion the hosted Safe cancel
-        would still be rejected at execTransactionWithRole.
+        PERP_CANCEL_ORDER) as teardown-recovery complements (VIB-5569). ALM-3101
+        also makes cancellation strategy-authorable, but the expansion remains
+        necessary for older strategies that declare only PERP_OPEN: teardown
+        must still be able to recover a stranded pending order.
         """
         selectors = _exchange_router_selectors(["PERP_OPEN"])
         assert _CANCEL_ORDER_SEL in selectors, (

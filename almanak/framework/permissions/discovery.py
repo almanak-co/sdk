@@ -123,13 +123,12 @@ def _supported_intent_types_for(
         warnings.append(f"Skipped unsupported permission discovery chain for {protocol} on {chain}")
         return None
 
-    # Permission generation may request framework-only recovery verbs that
-    # strategies cannot author (currently GMX PERP_CANCEL_ORDER), or
-    # connector-declared standalone fee collection. Those verbs are
-    # intentionally absent from ``strategy_intents``. Keep exact descriptor
-    # checks for strategy-authored intents and admit only those two
-    # recovery/discovery extensions; their builders remain gated by
-    # PermissionHints.
+    # Permission generation may request GMX's cancel verb while folding over a
+    # different perp connector, or connector-declared standalone fee collection
+    # even though that verb is absent from ``strategy_intents``. Keep exact
+    # descriptor checks for authored cells, but allow these discovery extensions
+    # through to their connector-owned hint gates. Non-GMX cancel then yields no
+    # synthetic intent and no misleading unsupported-cell warning (VIB-5569).
     hints = get_permission_hints(protocol)
     supported = [
         intent_type

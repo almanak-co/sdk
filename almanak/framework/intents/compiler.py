@@ -1079,9 +1079,9 @@ class IntentCompiler:
                 return self._compile_perp_via_registry(intent)  # type: ignore[arg-type]
             elif intent_type == IntentType.PERP_CANCEL_ORDER:
                 # VIB-5568: cancel a pending order (recover collateral). Routes through
-                # the SAME connector-owned perp compiler as open/close — the teardown
-                # recovery lane reaches the connector's compile_perp_cancel only via
-                # this top-level dispatch (the TeardownManager calls IntentCompiler).
+                # the SAME connector-owned perp compiler as open/close. Both a strategy
+                # callback (ALM-3101) and teardown recovery reach compile_perp_cancel
+                # through this top-level dispatch.
                 return self._compile_perp_via_registry(intent)  # type: ignore[arg-type]
             elif intent_type == IntentType.PERP_WITHDRAW:
                 # VIB-5617: withdraw free margin off the venue's off-chain account

@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from almanak.connectors._strategy_base.runner_hook_registry import AsyncSettlementStatus
+from almanak.connectors._strategy_base.runner_hook_registry import AsyncSettlementPolicy, AsyncSettlementStatus
 from almanak.framework.runner.async_settlement import AsyncSettlementBarrierResult
 from almanak.framework.runner.perp_settlement_reconciler import PerpSettlementReconcileOutcome
 from almanak.framework.teardown.runner_helpers import (
@@ -64,6 +64,41 @@ def test_async_settlement_enrichment_failure_fails_closed_for_async_connector() 
     assert error is not None
     assert "gmx_v2" in error
     assert "enrichment failed" in error
+
+
+def test_synchronous_cancel_on_async_connector_does_not_require_order_identity() -> None:
+    """VIB-6339: cancelOrder is terminal in its own receipt, not a new async order."""
+    policy = AsyncSettlementPolicy(
+        timeout_seconds=360,
+        poll_interval_seconds=5,
+        supports_local_order_execution=True,
+        supports_cancellation=True,
+        submission_intent_types=frozenset({"PERP_OPEN", "PERP_CLOSE"}),
+    )
+    runner = SimpleNamespace(
+        _is_live_mode=MagicMock(return_value=True),
+        _build_pool_key_lookup=MagicMock(return_value=None),
+        _build_curve_pool_meta_lookup=MagicMock(return_value=None),
+    )
+    intent = SimpleNamespace(protocol="gmx_v2", intent_type="PERP_CANCEL_ORDER")
+    with (
+        patch("almanak.framework.execution.result_enricher.ResultEnricher") as enricher_cls,
+        patch(
+            "almanak.connectors._strategy_runner_hook_registry.STRATEGY_RUNNER_HOOK_REGISTRY.async_settlement_policy",
+            return_value=policy,
+        ),
+    ):
+        enricher_cls.return_value.enrich.return_value = SimpleNamespace(async_orders=[])
+        prepare = build_runner_helpers(runner).prepare_intent_settlement
+        assert prepare is not None
+        preparation = prepare(
+            SimpleNamespace(deployment_id="dep"),
+            intent,
+            SimpleNamespace(),
+            SimpleNamespace(chain="arbitrum", wallet_address="0xwallet"),
+        )
+
+    assert preparation == SettlementPreparation(applicable=False, error=None, orders=())
 
 
 @pytest.mark.parametrize("intent", [SimpleNamespace(protocol="gmx_v2"), {"protocol": "gmx_v2"}])

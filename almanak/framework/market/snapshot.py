@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     import pandas as pd
 
     from almanak.connectors._strategy_base.lending_read_base import LendingPositionRef
+    from almanak.connectors._strategy_base.perps_read_base import PerpsReadResult
 
     from ..data.defi.pools import PoolReserves
     from ..data.funding import FundingRate, FundingRateSpread
@@ -3827,6 +3828,55 @@ class MarketSnapshot:
 
         self._position_health_cache[cache_key] = health
         return health
+
+    def perp_positions(self, protocol: str, *, chain: str | None = None) -> PerpsReadResult:
+        """Read the wallet's measured on-chain perp positions for ``protocol``.
+
+        Returns the protocol-neutral :class:`PerpsReadResult`. ``ok=True`` with
+        an empty tuple is measured flat; ``ok=False`` is an unavailable read and
+        must never be interpreted as zero exposure. All RPC access is routed
+        through the snapshot's gateway client.
+        """
+        from almanak.framework.valuation.perps_position_reader import PerpsPositionReader
+
+        effective_chain = self._resolve_chain(chain)
+        return PerpsPositionReader.from_gateway_client(self._gateway_client).read_positions(
+            effective_chain,
+            self._wallet_address,
+            protocol,
+        )
+
+    def block_timestamp(self, *, chain: str | None = None) -> datetime | None:
+        """Return the latest measured block timestamp through the gateway.
+
+        ``None`` means the chain clock is unmeasured. Callers must not substitute
+        wall time for venue rules that are defined in terms of ``block.timestamp``.
+        """
+        import grpc
+        from web3.types import RPCEndpoint
+
+        from almanak.framework.web3.gateway_provider import GatewayWeb3Provider
+
+        if self._gateway_client is None or not getattr(self._gateway_client, "is_connected", True):
+            return None
+        effective_chain = self._resolve_chain(chain)
+        try:
+            response = GatewayWeb3Provider(self._gateway_client, chain=effective_chain).make_request(
+                RPCEndpoint("eth_getBlockByNumber"), ["latest", False]
+            )
+        except grpc.RpcError:
+            return None
+        if not isinstance(response, Mapping):
+            return None
+        block = response.get("result")
+        if not isinstance(block, dict) or block.get("timestamp") is None:
+            return None
+        try:
+            raw_timestamp = block["timestamp"]
+            epoch = int(raw_timestamp, 16) if isinstance(raw_timestamp, str) else int(raw_timestamp)
+            return datetime.fromtimestamp(epoch, tz=UTC)
+        except (OSError, OverflowError, TypeError, ValueError):
+            return None
 
     def lp_position_value(
         self,

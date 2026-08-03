@@ -45,6 +45,9 @@ from almanak.framework.intents import (
     BorrowIntent,
     LPCloseIntent,
     LPOpenIntent,
+    PerpCancelIntent,
+    PerpCloseIntent,
+    PerpOpenIntent,
     RepayIntent,
     SupplyIntent,
     SwapIntent,
@@ -72,8 +75,29 @@ from tests.intents.conftest import (
     get_token_decimals,
 )
 
-# Gas ceiling for the Roles wrapper — inner call + ~80k Zodiac overhead.
-_ZODIAC_WRAPPER_GAS = 1_500_000
+# Minimum outer gas for the Roles wrapper plus conservative headroom above an
+# explicit inner-call limit. The wrapper cannot reuse the inner limit verbatim:
+# Roles/Safe dispatch and EIP-150 consume gas before forwarding to the target.
+_ZODIAC_MIN_WRAPPER_GAS = 1_500_000
+_ZODIAC_WRAPPER_OVERHEAD_GAS = 500_000
+
+
+def _zodiac_outer_gas(inner_gas: int | None) -> int:
+    """Size the outer Roles transaction without truncating the inner call."""
+    return max(_ZODIAC_MIN_WRAPPER_GAS, int(inner_gas or 0) + _ZODIAC_WRAPPER_OVERHEAD_GAS)
+
+
+def _inner_gas_hint(tx: Any) -> int | None:
+    """Read the compiler gas hint from either bundle or transaction shapes."""
+    if isinstance(tx, dict):
+        value = tx.get("gas_limit") or tx.get("gas") or tx.get("gas_estimate")
+    else:
+        value = (
+            getattr(tx, "gas_limit", None)
+            or getattr(tx, "gas", None)
+            or getattr(tx, "gas_estimate", None)
+        )
+    return int(value) if value is not None else None
 
 # Keys a case config can carry for pre-funding that are NOT intent constructor
 # kwargs. The harness pops these before unpacking the rest into the intent.
@@ -602,11 +626,9 @@ def _exec_bundle_via_zodiac(
         # infra stays in lockstep with the real signer path.
         op_type = get_operation_type(to_addr)
         # Mirror the gas sizing used by ``ZodiacOrchestrator``: the wrapper
-        # needs at least ``_ZODIAC_WRAPPER_GAS`` regardless of the inner-tx
-        # gas hint, and ``UnsignedTransaction`` uses ``gas_limit``.
-        inner_gas = (
-            tx.get("gas") if isinstance(tx, dict) else getattr(tx, "gas_limit", None) or getattr(tx, "gas", None)
-        )
+        # needs its own headroom above the inner-tx gas hint, and
+        # ``UnsignedTransaction`` uses ``gas_limit``.
+        inner_gas = _inner_gas_hint(tx)
         built = roles_c.functions.execTransactionWithRole(
             Web3.to_checksum_address(to_addr),
             value,
@@ -618,7 +640,7 @@ def _exec_bundle_via_zodiac(
             {
                 "from": member_addr,
                 "nonce": web3.eth.get_transaction_count(member_addr),
-                "gas": max(int(inner_gas or 0), _ZODIAC_WRAPPER_GAS),
+                "gas": _zodiac_outer_gas(inner_gas),
             }
         )
         signed = Account.sign_transaction(built, member_private_key)
@@ -2568,15 +2590,14 @@ class ZodiacOrchestrator:
 
             member_nonce = self.web3.eth.get_transaction_count(self.member_eoa)
             # Inner-tx gas is sized for the inner call, NOT the wrapper.
-            # ``execTransactionWithRole`` itself adds ~80k Zodiac overhead on
-            # top, so if we used a raw inner gas below ``_ZODIAC_WRAPPER_GAS``
-            # the outer tx would OOG before the inner call runs. Also:
+            # ``execTransactionWithRole`` adds Roles/Safe dispatch and EIP-150
+            # headroom on top of the inner call. Reusing a large inner limit as
+            # the outer limit truncates that call (GMX cancel is the regression
+            # case). Also:
             # ``UnsignedTransaction`` uses ``gas_limit`` rather than ``gas`` —
             # fall back to both names in case a dict-shaped tx with ``gas`` is
             # ever passed.
-            inner_gas = (
-                tx.get("gas") if isinstance(tx, dict) else getattr(tx, "gas_limit", None) or getattr(tx, "gas", None)
-            )
+            inner_gas = _inner_gas_hint(tx)
             built = self._roles_contract.functions.execTransactionWithRole(
                 Web3.to_checksum_address(to_addr),
                 value,
@@ -2588,7 +2609,7 @@ class ZodiacOrchestrator:
                 {
                     "from": self.member_eoa,
                     "nonce": member_nonce,
-                    "gas": max(int(inner_gas or 0), _ZODIAC_WRAPPER_GAS),
+                    "gas": _zodiac_outer_gas(inner_gas),
                 }
             )
             signed = Account.sign_transaction(built, self.member_private_key)
@@ -2777,6 +2798,7 @@ _INTENT_CLASS_TO_TYPE: dict[str, str] = {
     "RepayIntent": "REPAY",
     "PerpOpenIntent": "PERP_OPEN",
     "PerpCloseIntent": "PERP_CLOSE",
+    "PerpCancelIntent": "PERP_CANCEL_ORDER",
     "VaultDepositIntent": "VAULT_DEPOSIT",
     "VaultRedeemIntent": "VAULT_REDEEM",
     "BridgeIntent": "BRIDGE",
@@ -2820,6 +2842,12 @@ def _intent_token_symbols(intent: Any) -> list[str]:
         parts = pool.split("/")
         if len(parts) >= 2:
             return [parts[0], parts[1]]
+        return []
+    if isinstance(intent, PerpOpenIntent):
+        return [str(intent.collateral_token)]
+    if isinstance(intent, PerpCloseIntent):
+        return [str(intent.collateral_token)]
+    if isinstance(intent, PerpCancelIntent):
         return []
     # LPCloseIntent + any future intent types: tokens are inferred at compile
     # time (e.g. from ``position_id``); no explicit config contribution. Tests

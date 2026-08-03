@@ -524,6 +524,7 @@ class GmxV2RunnerHookConnector(
             poll_interval_seconds=PERP_SETTLEMENT_POLL_INTERVAL_SECONDS,
             supports_local_order_execution=True,
             supports_cancellation=True,
+            submission_intent_types=frozenset({"PERP_OPEN", "PERP_CLOSE"}),
         )
 
     def resolve_perp_settlements(
@@ -555,6 +556,7 @@ class GmxV2RunnerHookConnector(
             poll_interval_seconds=5,
             supports_local_order_execution=True,
             supports_cancellation=True,
+            submission_intent_types=frozenset({"PERP_OPEN", "PERP_CLOSE"}),
         )
 
     def observe_async_orders(
