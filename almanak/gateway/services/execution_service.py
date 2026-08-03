@@ -51,6 +51,20 @@ PRICE_SENSITIVE_INTENT_TYPES = frozenset(
     }
 )
 
+# Close-type intents whose payload legitimately carries no token symbols
+# (LPCloseIntent has only position_id/pool; PerpCloseIntent may too), so the
+# mainnet price gate cannot self-serve prices for them. VIB-6301: these are
+# allowed to compile without prices — refusing would strand capital, since an
+# empty extraction is the *normal* case for an LP close and teardown must never
+# be blocked from reducing on-chain risk (blueprint 14) — but they compile with
+# a real-but-empty oracle, never with fabricated placeholder prices.
+#
+# Deny-list failure mode after VIB-6301: a new close verb that is added to
+# PRICE_SENSITIVE_INTENT_TYPES but not here fails *closed* (safe) instead of
+# inheriting a fabricated oracle. Must remain a subset of
+# PRICE_SENSITIVE_INTENT_TYPES — the gate never reaches it otherwise.
+PRICE_OPTIONAL_CLOSE_INTENT_TYPES = frozenset({"LPCLOSE", "PERPCLOSE"})
+
 
 class _GatewaySolanaRouteRefresher:
     """Gateway-side Solana route refresher backed by connector capabilities."""
@@ -633,14 +647,27 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
         # Require prices for ALL extracted tokens to prevent partial placeholder usage
         all_covered = intent_tokens and all(t.upper() in self_served for t in intent_tokens)
         # LP_CLOSE/PERP_CLOSE with only position_id may have no extractable
-        # tokens — these operations don't need prices (decreaseLiquidity/collect).
+        # tokens. The original rationale here was "these operations don't need
+        # prices (decreaseLiquidity/collect)" — true of an LP close, and NOT
+        # true of a perp close: VIB-6219 made GMX derive a real protective
+        # `acceptablePrice` from the index price. So the branch below no longer
+        # claims the close needs no price; it claims only that the gateway
+        # cannot tell, and leaves the refusal to whoever actually reads one.
         # Only bypass the price gate for close-type intents; all others must
         # fail-closed to prevent compiling with placeholder prices.
         normalized_type = self._normalize_intent_type(intent_type).upper()
-        if not intent_tokens and normalized_type in ("LPCLOSE", "PERPCLOSE"):
+        if not intent_tokens and normalized_type in PRICE_OPTIONAL_CLOSE_INTENT_TYPES:
+            # VIB-6301: let the close proceed, but hand the compiler a
+            # real-but-empty oracle instead of the fabricated placeholder table
+            # (ETH=$2000, unknown=$1). Empty ≠ Zero: an unpriceable symbol now
+            # raises instead of silently pricing at a made-up number, while real
+            # pegs (USDC/USDT) still resolve through the known-stablecoin path.
+            if hasattr(compiler, "update_prices"):
+                compiler.update_prices({})
             logger.info(
                 f"No token symbols extractable from {intent_type} intent — "
-                f"skipping price gate for close-type intent, letting compiler proceed."
+                f"skipping price gate for close-type intent, letting compiler "
+                f"proceed with an empty (non-placeholder) price oracle."
             )
         elif not intent_tokens:
             error_msg = (
