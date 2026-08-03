@@ -40,6 +40,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterable
 
+from almanak.core.perp_markets import perp_market_pair_key
 from almanak.framework.intents.intent_errors import InvalidCollateralForMarketError
 
 logger = logging.getLogger(__name__)
@@ -130,15 +131,19 @@ def _normalise_chain(chain: str) -> str:
     return chain.lower()
 
 
-def _normalise_market(market: str) -> str:
-    """Normalise a market identifier for registry lookup.
+def canonicalise_market(market: str) -> str:
+    """Canonicalise a market identifier to the GMX registry form.
 
     Market identifiers in the registry use the canonical GMX form
-    (``"ETH/USD"``). Normalise to uppercase and strip surrounding whitespace
-    so that ``"eth/usd"``, ``" ETH/USD "``, and ``"ETH/USD"`` all resolve
-    identically.
+    (``"ETH/USD"``). The funding form (``"ETH-USD"``), underscore/colon
+    spellings, case variants, and the documented slash form all collapse to
+    that identity. Raw addresses pass through byte-for-byte so checksum case is
+    never changed. Bare SDK aliases such as ``"ETH"`` remain bare.
     """
-    return market.strip().upper()
+    candidate = market.strip()
+    if candidate.lower().startswith("0x"):
+        return candidate
+    return perp_market_pair_key(candidate) or candidate.upper()
 
 
 def is_market_registered(chain: str, market: str) -> bool:
@@ -153,7 +158,7 @@ def is_market_registered(chain: str, market: str) -> bool:
     chain_table = _GMX_V2_MARKET_COLLATERALS.get(_normalise_chain(chain))
     if chain_table is None:
         return False
-    return _normalise_market(market) in chain_table
+    return canonicalise_market(market) in chain_table
 
 
 def get_allowed_collaterals(chain: str, market: str) -> tuple[str, ...]:
@@ -177,7 +182,7 @@ def get_allowed_collaterals(chain: str, market: str) -> tuple[str, ...]:
     chain_table = _GMX_V2_MARKET_COLLATERALS.get(chain_key)
     if chain_table is None:
         raise KeyError(f"GMX V2 market rules are not registered for chain '{chain}'")
-    market_key = _normalise_market(market)
+    market_key = canonicalise_market(market)
     try:
         return chain_table[market_key]
     except KeyError as e:
@@ -271,6 +276,7 @@ def registered_markets(chain: str) -> Iterable[str]:
 
 
 __all__ = [
+    "canonicalise_market",
     "InvalidCollateralForMarketError",
     "get_allowed_collaterals",
     "is_market_registered",

@@ -565,7 +565,9 @@ class GMXV2SDK:
                     "AVAX/USD": avax_market,
                 }
             )
-        market = markets.get(index_token_symbol.upper())
+        from .market_rules import canonicalise_market
+
+        market = markets.get(canonicalise_market(index_token_symbol))
         if not market:
             raise ValueError(f"Unsupported market: {index_token_symbol}. Supported: {sorted(markets.keys())}")
         return market

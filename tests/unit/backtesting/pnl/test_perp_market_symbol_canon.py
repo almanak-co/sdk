@@ -22,7 +22,7 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.core.perp_markets import perp_market_base, perp_market_funding_key
+from almanak.core.perp_markets import perp_market_base, perp_market_funding_key, perp_market_pair_key
 from almanak.framework.backtesting.models import IntentType
 from almanak.framework.backtesting.pnl.data_provider import MarketState, token_ref_provider_symbol
 from almanak.framework.backtesting.pnl.engine import (
@@ -93,10 +93,21 @@ class TestCanonicalParse:
     def test_drift_perp_suffix_parses_to_base(self) -> None:
         assert perp_market_base("SOL-PERP") == "SOL"
 
+    @pytest.mark.parametrize(
+        "market",
+        ["ETH/USD", "ETH-USD", "ETH_USD", "ETH:USD", "eth/usd", " ETH/USD "],
+    )
+    def test_pair_key_is_slash_form_for_every_pair_spelling(self, market: str) -> None:
+        assert perp_market_pair_key(market) == "ETH/USD"
+
+    def test_pair_key_preserves_bare_connector_alias(self) -> None:
+        assert perp_market_pair_key("weth") == "WETH"
+
     @pytest.mark.parametrize("market", ["", "  ", "0x70d95587d40A2caf56bd97485aB3Eec10Bee6336", None, 42])
     def test_unparseable_markets_are_none(self, market: object) -> None:
         assert perp_market_base(market) is None
         assert perp_market_funding_key(market) is None
+        assert perp_market_pair_key(market) is None
 
 
 class TestPerpEntryPricing:
@@ -282,3 +293,17 @@ class TestFundingKeyParity:
         dash = await source.funding_rate_at("hyperliquid", "ETH-USD", TS)
         assert slash == dash
         assert len(source._cache) == 1
+
+
+def test_malformed_multi_separator_pair_is_rejected_not_canonicalised() -> None:
+    """A separator in the BASE means the input was never a clean pair.
+
+    Without this, ``perp_market_pair_key("eth-usd/foo")`` returned
+    ``"ETH-USD/FOO"`` — malformed input promoted to canonical. Added because the
+    delta review found the guard had no negative control anywhere in the suite
+    (delta review finding 6, PR #3565).
+    """
+    from almanak.core.perp_markets import perp_market_pair_key
+
+    assert perp_market_pair_key("eth-usd/foo") is None
+    assert perp_market_pair_key("ETH/USD") == "ETH/USD"

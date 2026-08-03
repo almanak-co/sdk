@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 import grpc
 
 from almanak.core.lifecycle import LifecycleCommand, LifecycleState
+from almanak.core.perp_markets import perp_market_identity_key
 
 if TYPE_CHECKING:
     from ..services.emergency_manager import EmergencyManager
@@ -6747,7 +6748,11 @@ class StrategyRunner:
 
             # Perp (PERP_OPEN / PERP_CLOSE / PERP_INCREASE / PERP_DECREASE / PERP_LIQUIDATE)
             if t in {"PERP_OPEN", "PERP_CLOSE", "PERP_INCREASE", "PERP_DECREASE", "PERP_LIQUIDATE"}:
-                market = str(getattr(intent, "market", "") or "").lower().replace(" ", "_")
+                # VIB-6412: canonicalise separators before keying. GMX V2 accepts
+                # several spellings of one market (ALM-3094), and the raw string
+                # would mint a distinct lot-matching key per spelling.
+                canonical = perp_market_identity_key(getattr(intent, "market", ""))
+                market = canonical.lower().replace(" ", "_")
                 position_key = f"perp:{protocol}:{chain.lower()}:{wallet_address.lower()}:{market}" if market else ""
                 return position_key, market
 

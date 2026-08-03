@@ -83,7 +83,6 @@ class GmxV2DirectionalPerp(IntentStrategy):
         super().__init__(*args, **kwargs)
 
         self.market = str(self.get_config("market", "ETH/USD"))
-        self.funding_market = str(self.get_config("funding_market", "ETH-USD"))
         self.base_token = str(self.get_config("base_token", "ETH"))
         self.collateral_token = str(self.get_config("collateral_token", "USDC"))
 
@@ -301,9 +300,9 @@ class GmxV2DirectionalPerp(IntentStrategy):
     def _funding_hourly(self, market: MarketSnapshot) -> Decimal | None:
         """Current hourly funding rate, or None if unavailable (never fabricated)."""
         try:
-            return Decimal(str(market.funding_rate("gmx_v2", self.funding_market).rate_hourly))
+            return Decimal(str(market.funding_rate("gmx_v2", self.market).rate_hourly))
         except Exception as exc:  # noqa: BLE001 — funding is advisory; absence must not crash decide()
-            logger.warning("Funding rate unavailable for %s: %s", self.funding_market, exc)
+            logger.warning("Funding rate unavailable for %s: %s", self.market, exc)
             return None
 
     def _forced_intent(self, market: MarketSnapshot) -> Intent:

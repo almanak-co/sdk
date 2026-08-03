@@ -15,6 +15,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 
+from almanak.core.perp_markets import perp_market_identity_key
 from almanak.framework.accounting.ids import make_accounting_event_id
 from almanak.framework.accounting.measured import encode_money_payload
 from almanak.framework.accounting.models import AccountingConfidence, AccountingIdentity, PerpEventType
@@ -208,8 +209,10 @@ def build_perp_accounting_event(
     is_long = getattr(intent, "is_long", None)
     leverage = _safe_decimal(getattr(intent, "leverage", None))
 
-    # Normalize market to a stable key component (strip 0x prefix for readability)
-    market_key = market.lower().replace(" ", "_")
+    # Normalize market to a stable key component (strip 0x prefix for readability).
+    # VIB-6412: canonicalise separators so GMX V2's several accepted spellings of
+    # one market (ALM-3094) cannot mint distinct lot-matching keys.
+    market_key = perp_market_identity_key(market).lower().replace(" ", "_")
 
     position_key = f"perp:{protocol}:{chain.lower()}:{wallet_address.lower()}:{market_key}"
 

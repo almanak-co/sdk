@@ -84,6 +84,24 @@ class TestCollateralUnits:
         assert intent.collateral_amount == Decimal("0.02")
 
 
+class TestMarketIdentity:
+    """ALM-3094: one public market identifier drives funding and execution."""
+
+    def test_demo_has_no_dual_funding_market_workaround(self, gmx):
+        _, strat = gmx
+        assert strat.market == "ETH/USD"
+        assert "funding_market" not in strat._config
+        assert not hasattr(strat, "funding_market")
+
+    def test_funding_read_uses_the_execution_market(self, gmx):
+        _, strat = gmx
+        snapshot = MagicMock()
+        snapshot.funding_rate.return_value.rate_hourly = "0.000012"
+
+        assert strat._funding_hourly(snapshot) == Decimal("0.000012")
+        snapshot.funding_rate.assert_called_once_with("gmx_v2", "ETH/USD")
+
+
 class TestFullCloseSemantics:
     """VIB-5950 / ALM-2976 regression pin.
 

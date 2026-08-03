@@ -1,7 +1,6 @@
 {
     "chain": "arbitrum",
     "market": "ETH/USD",
-    "funding_market": "ETH-USD",
     "base_token": "ETH",
     "collateral_token": "USDC",
     "position_size_usd": "100",

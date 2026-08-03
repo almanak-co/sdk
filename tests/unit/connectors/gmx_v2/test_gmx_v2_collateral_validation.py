@@ -25,13 +25,17 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from almanak.connectors._strategy_base.base.compiler import PerpCompilerContext
+from almanak.connectors.gmx_v2.addresses import GMX_V2_MARKETS
 from almanak.connectors.gmx_v2.compiler import GMXV2Compiler
+from almanak.connectors.gmx_v2.connector import CONNECTOR
 from almanak.connectors.gmx_v2.market_rules import (
+    canonicalise_market,
     get_allowed_collaterals,
     is_market_registered,
     registered_markets,
     validate_collateral,
 )
+from almanak.connectors.gmx_v2.sdk import GMXV2SDK
 from almanak.framework.intents.compiler import IntentCompiler, IntentCompilerConfig
 from almanak.framework.intents.compiler_models import CompilationStatus
 from almanak.framework.intents.intent_errors import InvalidCollateralForMarketError
@@ -230,6 +234,50 @@ class TestMarketRulesPureFunctions:
         """Chain and market inputs normalise before lookup."""
         assert set(get_allowed_collaterals("ARBITRUM", "eth/usd")) == {"WETH", "USDC"}
         assert set(get_allowed_collaterals("Avalanche", " AVAX/USD ")) == {"WAVAX", "USDC"}
+
+    @pytest.mark.parametrize("market", ["ETH/USD", "ETH-USD", "ETH_USD", "ETH:USD", "eth-usd"])
+    def test_all_pair_aliases_share_one_gmx_identity(self, market: str):
+        """ALM-3094: funding spellings must resolve through execution rules too."""
+        assert canonicalise_market(market) == "ETH/USD"
+        assert is_market_registered("arbitrum", market) is True
+        assert set(get_allowed_collaterals("arbitrum", market)) == {"WETH", "USDC"}
+
+    def test_raw_market_address_passes_through_unchanged(self):
+        address = GMX_V2_MARKETS["arbitrum"]["ETH/USD"]
+        assert canonicalise_market(address) == address
+
+    def test_every_declared_funding_market_is_compilable_on_a_supported_chain(self):
+        """Prevent the manifest/compiler split that allowed ALM-3094 through CI."""
+        assert CONNECTOR.funding_history is not None
+        for funding_market in CONNECTOR.funding_history.markets:
+            canonical = canonicalise_market(funding_market)
+            assert any(canonical in markets for markets in GMX_V2_MARKETS.values()), (
+                f"Funding manifest advertises {funding_market}, but no GMX execution registry "
+                f"contains its canonical identity {canonical}"
+            )
+
+
+class TestMarketAliasResolution:
+    """ALM-3094 regression at the SDK and connector-compiler boundaries."""
+
+    @pytest.mark.parametrize("market", ["ETH/USD", "ETH-USD", "eth/usd", "ETH_USD", "ETH:USD"])
+    def test_compiler_resolves_every_alias_to_the_same_market(self, market: str):
+        compiler = GMXV2Compiler()
+        sdk = MagicMock()
+        result = compiler._resolve_market(_make_perp_ctx(), sdk, market, "alm-3094")
+
+        assert result == GMX_V2_MARKETS["arbitrum"]["ETH/USD"]
+        sdk.get_market_address.assert_not_called()
+
+    @pytest.mark.parametrize("market", ["ETH/USD", "ETH-USD", "eth/usd", "ETH_USD", "ETH:USD"])
+    def test_sdk_resolves_every_alias_to_the_same_market(self, market: str):
+        sdk = GMXV2SDK.__new__(GMXV2SDK)
+        sdk.addresses = {
+            "ETH_USD_MARKET": GMX_V2_MARKETS["arbitrum"]["ETH/USD"],
+            "BTC_USD_MARKET": GMX_V2_MARKETS["arbitrum"]["BTC/USD"],
+        }
+
+        assert sdk.get_market_address(market) == GMX_V2_MARKETS["arbitrum"]["ETH/USD"]
 
     def test_registered_markets_is_case_insensitive(self):
         """Chain input normalises to its registry key."""

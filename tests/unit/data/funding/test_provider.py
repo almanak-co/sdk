@@ -28,7 +28,6 @@ from almanak.framework.data.funding import (
     VenueNotSupportedError,
 )
 
-
 # =============================================================================
 # Fake gateway stub
 # =============================================================================
@@ -155,9 +154,7 @@ class TestProviderInitialization:
 class TestGetFundingRate:
     @pytest.mark.asyncio
     async def test_returns_rich_funding_rate(self) -> None:
-        provider, stub = _make_provider(
-            {("gmx_v2", "ETH-USD"): _make_response(rate_hourly="0.000012")}
-        )
+        provider, stub = _make_provider({("gmx_v2", "ETH-USD"): _make_response(rate_hourly="0.000012")})
 
         rate = await provider.get_funding_rate(Venue.GMX_V2, "ETH-USD")
 
@@ -181,6 +178,17 @@ class TestGetFundingRate:
         assert rate.market == "ETH-USD"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("market", ["ETH/USD", "eth/usd", "ETH_USD", "ETH:USD"])
+    async def test_public_pair_aliases_use_the_funding_transport_key(self, market: str) -> None:
+        """ALM-3094: the documented execution identifier must pass funding validation."""
+        provider, stub = _make_provider()
+
+        rate = await provider.get_funding_rate("gmx_v2", market)
+
+        assert rate.market == "ETH-USD"
+        assert stub.calls[0].market == "ETH-USD"
+
+    @pytest.mark.asyncio
     async def test_unsupported_venue_raises(self) -> None:
         provider, _ = _make_provider()
         with pytest.raises(VenueNotSupportedError) as exc_info:
@@ -197,9 +205,7 @@ class TestGetFundingRate:
 
     @pytest.mark.asyncio
     async def test_gateway_failure_raises_unavailable(self) -> None:
-        provider, _ = _make_provider(
-            {("gmx_v2", "ETH-USD"): _make_response(success=False, error="boom")}
-        )
+        provider, _ = _make_provider({("gmx_v2", "ETH-USD"): _make_response(success=False, error="boom")})
         with pytest.raises(FundingRateUnavailableError) as exc_info:
             await provider.get_funding_rate(Venue.GMX_V2, "ETH-USD")
         assert exc_info.value.venue == "gmx_v2"
@@ -257,9 +263,7 @@ class TestGetFundingRateSpread:
             }
         )
 
-        spread = await provider.get_funding_rate_spread(
-            "ETH-USD", Venue.GMX_V2, Venue.HYPERLIQUID
-        )
+        spread = await provider.get_funding_rate_spread("ETH-USD", Venue.GMX_V2, Venue.HYPERLIQUID)
 
         assert isinstance(spread, FundingRateSpread)
         assert spread.market == "ETH-USD"
@@ -279,9 +283,7 @@ class TestGetFundingRateSpread:
             }
         )
 
-        spread = await provider.get_funding_rate_spread(
-            "ETH-USD", Venue.GMX_V2, Venue.HYPERLIQUID
-        )
+        spread = await provider.get_funding_rate_spread("ETH-USD", Venue.GMX_V2, Venue.HYPERLIQUID)
 
         assert spread.is_profitable is True
         assert spread.recommended_direction == "short_a_long_b"
@@ -411,3 +413,50 @@ class TestConstants:
 
     def test_hours_per_year(self) -> None:
         assert HOURS_PER_YEAR == 8760
+
+
+class TestFundingQuoteIsValidatedNotDiscarded:
+    """Canonicalising the market must not silently re-point the quote.
+
+    `perp_market_funding_key` derives "<BASE>-USD" and DISCARDS the supplied
+    quote. Routing `_validate_market` through it alone made ETH/EUR, ETH/BTC and
+    ETH-WHATEVER all resolve to ETH-USD, so a caller received funding for a
+    market it never asked for — on a value strategies gate entry decisions on.
+    `main` raised on all three; that fail-closed must survive the canonicalisation
+    (Codex P2 on PR #3565).
+    """
+
+    @pytest.mark.parametrize(
+        "market",
+        [
+            "ETH/EUR",
+            "ETH/BTC",
+            "ETH-WHATEVER",
+            "ETH:GBP",
+            # Multi-separator spellings. The first guard only covered inputs
+            # `perp_market_pair_key` could parse, so these still resolved to
+            # ETH-USD where `main` raised — the same discarded-quote fail-open
+            # at a spelling the guard did not reach (delta review finding 1).
+            "ETH-EUR-PERP",
+            "ETH/EUR/PERP",
+            "ETH:EUR:USD",
+            "ETH--USD",
+            "ETH-BTC-USD",
+            "ETH/USD/EUR",
+        ],
+    )
+    def test_unsupported_quote_is_rejected_not_coerced_to_usd(self, market: str) -> None:
+        from almanak.framework.data.funding.gateway_provider import _validate_market
+
+        with pytest.raises(MarketNotSupportedError):
+            _validate_market("gmx_v2", market)
+
+    @pytest.mark.parametrize(
+        ("market", "expected"),
+        [("ETH/USD", "ETH-USD"), ("ETH-USD", "ETH-USD"), ("ETH", "ETH-USD"), ("BTC/USD", "BTC-USD")],
+    )
+    def test_supported_forms_still_canonicalise(self, market: str, expected: str) -> None:
+        """The narrowing must not cost ALM-3094 its own goal."""
+        from almanak.framework.data.funding.gateway_provider import _validate_market
+
+        assert _validate_market("gmx_v2", market) == expected

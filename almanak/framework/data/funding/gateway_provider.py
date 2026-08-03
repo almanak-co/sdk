@@ -27,6 +27,11 @@ from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from almanak.core.chains import DEFAULT_CHAIN
+from almanak.core.perp_markets import (
+    PERP_MARKET_SEPARATORS,
+    perp_market_funding_key,
+    perp_market_pair_key,
+)
 
 from .models import (
     DEFAULT_CACHE_TTL_SECONDS,
@@ -56,11 +61,36 @@ def _normalize_venue(venue: Venue | str) -> str:
 
 
 def _validate_market(venue: str, market: str) -> str:
-    """Coerce market to upper-case and validate against the venue."""
-    market_upper = market.upper()
-    if market_upper not in SUPPORTED_MARKETS.get(venue, []):
-        raise MarketNotSupportedError(market_upper, venue)
-    return market_upper
+    """Canonicalize a public perp identifier and validate it for the venue.
+
+    Funding manifests use venue transport keys (``"ETH-USD"``), while public
+    perp intents and GMX execution registries use ``"ETH/USD"``. Both must
+    enter the funding lane through the shared canonicalization seam; otherwise
+    a strategy needs two identifiers for one market (ALM-3094).
+    """
+    # ``perp_market_funding_key`` derives "<BASE>-USD" and DISCARDS the quote,
+    # so on its own it maps ETH/EUR, ETH-WHATEVER and ETH-EUR-PERP all onto
+    # ETH-USD and this validator would accept them — returning funding for a
+    # market the caller never asked for, on a value strategies gate entry
+    # decisions on. ``main`` raised on every one of those (it exact-matched the
+    # upper-cased string); canonicalising must not turn that fail-closed into a
+    # fail-open (Codex P2 + delta review, #3565).
+    #
+    # Round-trip instead of enumerating served quotes: if the caller supplied a
+    # separator at all, the derived transport key must reproduce exactly the
+    # pair they wrote. That is total over every spelling — including the
+    # multi-separator ones ``perp_market_pair_key`` refuses to parse — and it
+    # needs no list of quote currencies to rot.
+    market_key = perp_market_funding_key(market)
+    if any(separator in market for separator in PERP_MARKET_SEPARATORS):
+        pair = perp_market_pair_key(market)
+        if pair is None or market_key is None or pair.replace("/", "-") != market_key:
+            raise MarketNotSupportedError(market.strip().upper(), venue)
+
+    if market_key is None or market_key not in SUPPORTED_MARKETS.get(venue, []):
+        rejected = market.strip().upper()
+        raise MarketNotSupportedError(rejected, venue)
+    return market_key
 
 
 class GatewayFundingRateProvider:

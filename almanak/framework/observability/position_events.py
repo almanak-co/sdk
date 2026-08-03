@@ -65,6 +65,7 @@ from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import Any
 
+from almanak.core.perp_markets import perp_market_identity_key
 from almanak.framework.models.run_mode import RunMode, RunModeStamp, serialize_run_mode
 from almanak.framework.primitives.taxonomy import (  # noqa: F401 — taxonomy delegation lock
     UnknownIntentTypeError,
@@ -725,7 +726,11 @@ def _seed_event(ctx: IntentEventContext) -> PositionEvent | None:
     if not position_id and position_type == PositionType.PERP:
         # strip THEN replace: " BTC-USD " must normalize to "btc-usd", not
         # "_btc-usd_", so whitespace-differing payloads can't mint distinct ids.
-        market_key = str(getattr(intent, "market", "") or "").strip().lower().replace(" ", "_")
+        # VIB-6412: canonicalise separators first — GMX V2 accepts several
+        # spellings of one market (ALM-3094), which would otherwise mint a
+        # distinct position_id per spelling for one on-chain position.
+        canonical_market = perp_market_identity_key(getattr(intent, "market", ""))
+        market_key = canonical_market.strip().lower().replace(" ", "_")
         if market_key and protocol and ctx.chain:
             is_long = getattr(intent, "is_long", None)
             side = "long" if is_long else "short" if is_long is not None else "na"

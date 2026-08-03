@@ -1525,8 +1525,11 @@ class GMXv2Adapter:
         if market.startswith("0x") and len(market) == 42:
             return market
 
-        # Look up by symbol
-        return self.markets.get(market)
+        # Look up by the canonical GMX pair form. Import locally to keep the
+        # adapter's import surface lean and avoid initialization cycles.
+        from .market_rules import canonicalise_market
+
+        return self.markets.get(canonicalise_market(market))
 
     def _resolve_token(self, token: str) -> str:
         """Resolve token identifier to address using TokenResolver."""

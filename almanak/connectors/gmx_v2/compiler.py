@@ -26,7 +26,7 @@ from almanak.framework.models.reproduction_bundle import ActionBundle
 from .acceptable_price import bound_is_maximum, derive_acceptable_price_30dec, price_30dec_to_usd
 from .adapter import GMX_V2_MARKETS, GMXv2Adapter, GMXv2Config
 from .addresses import index_token_decimals
-from .market_rules import validate_collateral
+from .market_rules import canonicalise_market, validate_collateral
 from .sdk import GMX_V2_TOKENS, GMXV2SDK, GMXV2OrderParams, PositionQueryError
 
 logger = logging.getLogger(__name__)
@@ -108,6 +108,7 @@ class GMXV2Compiler(BasePerpCompiler):
                     intent_id=intent.intent_id,
                 )
 
+            canonical_market = canonicalise_market(intent.market)
             try:
                 validate_collateral(chain=ctx.chain, market=intent.market, collateral_token=intent.collateral_token)
             except InvalidCollateralForMarketError as exc:
@@ -143,7 +144,7 @@ class GMXV2Compiler(BasePerpCompiler):
 
             adapter = GMXv2Adapter(GMXv2Config(chain=ctx.chain, wallet_address=ctx.wallet_address))
             order_result = adapter.open_position(
-                market=intent.market,
+                market=canonical_market,
                 collateral_token=intent.collateral_token,
                 collateral_amount=intent.collateral_amount,  # type: ignore[arg-type]
                 size_delta_usd=intent.size_usd,
@@ -202,7 +203,7 @@ class GMXV2Compiler(BasePerpCompiler):
                     data=tx_data.data,
                     gas_estimate=tx_data.gas_estimate,
                     description=(
-                        f"Open {'LONG' if intent.is_long else 'SHORT'} {intent.market} position: "
+                        f"Open {'LONG' if intent.is_long else 'SHORT'} {canonical_market} position: "
                         f"${intent.size_usd} size, {intent.collateral_amount} collateral"
                     ),
                     tx_type="perp_open",
@@ -214,7 +215,7 @@ class GMXV2Compiler(BasePerpCompiler):
                 transactions=[tx.to_dict() for tx in transactions],
                 metadata={
                     "protocol": intent.protocol,
-                    "market": intent.market,
+                    "market": canonical_market,
                     "collateral_token": intent.collateral_token,
                     "collateral_amount": str(intent.collateral_amount),
                     "size_usd": str(intent.size_usd),
@@ -252,6 +253,7 @@ class GMXV2Compiler(BasePerpCompiler):
                     intent_id=intent.intent_id,
                 )
 
+            canonical_market = canonicalise_market(intent.market)
             try:
                 validate_collateral(chain=ctx.chain, market=intent.market, collateral_token=intent.collateral_token)
             except InvalidCollateralForMarketError as exc:
@@ -302,7 +304,7 @@ class GMXV2Compiler(BasePerpCompiler):
 
             adapter = GMXv2Adapter(GMXv2Config(chain=ctx.chain, wallet_address=ctx.wallet_address))
             order_result = adapter.close_position(
-                market=intent.market,
+                market=canonical_market,
                 collateral_token=intent.collateral_token,
                 is_long=intent.is_long,
                 size_delta_usd=resolved_size_usd,
@@ -336,7 +338,7 @@ class GMXV2Compiler(BasePerpCompiler):
                     value=tx_data.value,
                     data=tx_data.data,
                     gas_estimate=tx_data.gas_estimate,
-                    description=f"Close {'LONG' if intent.is_long else 'SHORT'} {intent.market} position: {size_desc}",
+                    description=f"Close {'LONG' if intent.is_long else 'SHORT'} {canonical_market} position: {size_desc}",
                     tx_type="perp_close",
                 )
             )
@@ -346,7 +348,7 @@ class GMXV2Compiler(BasePerpCompiler):
                 transactions=[tx.to_dict() for tx in transactions],
                 metadata={
                     "protocol": intent.protocol,
-                    "market": intent.market,
+                    "market": canonical_market,
                     "collateral_token": intent.collateral_token,
                     "is_long": intent.is_long,
                     "size_usd": str(intent.size_usd) if intent.size_usd else None,
@@ -629,11 +631,12 @@ class GMXV2Compiler(BasePerpCompiler):
     def _resolve_market(
         self, ctx: PerpCompilerContext, sdk: GMXV2SDK, market: str, intent_id: str
     ) -> str | CompilationResult:
-        market_address = GMX_V2_MARKETS.get(ctx.chain, {}).get(market)
+        canonical_market = canonicalise_market(market)
+        market_address = GMX_V2_MARKETS.get(ctx.chain, {}).get(canonical_market)
         if market_address:
             return market_address
         try:
-            return sdk.get_market_address(market)
+            return sdk.get_market_address(canonical_market)
         except ValueError:
             return CompilationResult(
                 status=CompilationStatus.FAILED,

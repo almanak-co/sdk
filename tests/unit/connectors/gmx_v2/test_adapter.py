@@ -13,8 +13,6 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.connectors.gmx_v2.addresses import GMX_V2_TOKENS
-
 from almanak.connectors.gmx_v2.adapter import (
     DEFAULT_EXECUTION_FEE,
     GMX_V2_ADDRESSES,
@@ -26,6 +24,7 @@ from almanak.connectors.gmx_v2.adapter import (
     GMXv2Position,
     GMXv2PositionSide,
 )
+from almanak.connectors.gmx_v2.addresses import GMX_V2_TOKENS
 
 # =============================================================================
 # Configuration Tests
@@ -843,6 +842,11 @@ class TestGMXv2AdapterHelpers:
         market_address = adapter._resolve_market("ETH/USD")
 
         assert market_address == GMX_V2_MARKETS["arbitrum"]["ETH/USD"]
+
+    @pytest.mark.parametrize("market", ["ETH-USD", "eth/usd", "ETH_USD", "ETH:USD"])
+    def test_resolve_market_aliases(self, adapter: GMXv2Adapter, market: str) -> None:
+        """ALM-3094: every supported spelling reaches the canonical registry row."""
+        assert adapter._resolve_market(market) == GMX_V2_MARKETS["arbitrum"]["ETH/USD"]
 
     def test_resolve_market_by_address(self, adapter: GMXv2Adapter) -> None:
         """Test market resolution by address."""
