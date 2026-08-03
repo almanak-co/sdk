@@ -184,6 +184,8 @@ def _build_db(
     notional_usd: str,
     capital_usd: str = _CAPITAL,
     realized_pnl_usd: str | None = None,
+    ledger_offset: int = 30,
+    gas_usd: str = "0",
 ) -> None:
     """A net-flat round-trip whose only typed event is an acquiring SWAP.
 
@@ -197,6 +199,16 @@ def _build_db(
     ``capital = max(|initial|, |final|)`` (``accountant_test.py:1470``), so with
     non-negative equities an equity-derived gap can never outrun capital — and
     therefore can never outrun an ε that is itself >= capital.
+
+    ``ledger_offset`` places the ledger/accounting row relative to the snapshot
+    endpoints, which sit at 0s and 60s. The default 30 puts it INSIDE the wallet
+    bracket (``covers=True``), which is why every test written before VIB-6434 was
+    unable to reach the VIB-5854 window branch at all. A NEGATIVE offset puts it
+    before ``priced[0]`` and makes the window uncovered.
+
+    ``gas_usd`` is the gas on that row. It must be non-zero for a pre-window row to
+    carry a measured, attributable spend — with the default "0" the window branch
+    still fires but explains nothing.
     """
     if path.exists():
         path.unlink()
@@ -214,13 +226,13 @@ def _build_db(
                 _CYCLE,
                 _DEP,
                 "paper",
-                _ts(30),
+                _ts(ledger_offset),
                 "SWAP",
                 "USDC",
                 notional_usd,
                 "WETH",
                 "0.4",
-                "0",
+                gas_usd,
                 "0xswap",
                 _CHAIN,
                 _PROTO,
@@ -235,7 +247,7 @@ def _build_db(
                 _DEP,
                 _CYCLE,
                 "paper",
-                _ts(30),
+                _ts(ledger_offset),
                 _CHAIN,
                 _PROTO,
                 _WALLET,
@@ -412,3 +424,136 @@ def test_vacuity_ratio_is_emitted_on_every_row(tmp_path: Path) -> None:
     assert "ε_scaled_over_capital" in decomp
     # Empty != Zero: the ratio is a measured number here, not an empty string.
     assert decomp["ε_scaled_over_capital"] != ""
+
+
+def test_a_vacuous_eps_cannot_grant_the_window_xfail_waiver(tmp_path: Path) -> None:
+    """VIB-6434: the vacuity guard must deny the WAIVER, not only the PASS.
+
+    The guard fires on ``eps_vacuous and gap <= eps``. When ε is vacuous and the gap
+    ALSO outruns it, control used to fall through to the VIB-5854 window branch,
+    where ``window_residual <= eps`` is tested against that same unfalsifiable ε —
+    and grant an **XFAIL**. Since XFAIL outranks FAIL on the status ratchet, a
+    tolerance the cell itself calls meaningless was upgrading a failing row.
+
+    Construction (the numbers matter, and none of them is free):
+
+      ε_scaled = 0.0025 x $620,000 = $1,550 >= capital $1,000   -> vacuous
+      component = R - G = -$1,500 - $100                        -> gap  = $1,600 > ε
+      residual  = |signed - G| = |R|            = $1,500        -> residual <= ε
+
+    ``gap > eps`` is what stands the VIB-5826 guard down; ``residual <= eps`` is what
+    would have bought the waiver. Both must hold at once, which is a knife-edge: the
+    waiver needs ε inside ``[gap - G, gap)``, an interval only as wide as the
+    pre-baseline gas. That is why no committed fixture reaches it, and why this
+    synthetic row exists at all.
+
+    NOT hypothetical, though. Six real Hyperliquid DBs in the evidence corpus are
+    vacuous with the window uncovered, measured gas, and residual <= ε — satisfying
+    every condition here except ``gap > eps``. They are vacuous because HyperCore
+    collateral is missing from snapshot equity ($20,439 notional against $0.74 of
+    measured capital), not because of a corrupted notional.
+
+    MUTATION CHECK: drop ``not eps_vacuous`` from ``window_explained`` in
+    ``accountant_test.py`` and this test must fail with status XFAIL.
+    """
+    db = tmp_path / "g6_6434_vacuous_window_waiver.sqlite"
+    _build_db(
+        db,
+        notional_usd="620000",
+        capital_usd="1000.0",
+        realized_pnl_usd="-1500",
+        ledger_offset=-30,  # BEFORE priced[0] => the wallet window does not cover the run
+        gas_usd="100",  # measured pre-window spend => window_gas is not None
+    )
+    status, decomp, diagnostic = _g6(run_against_sqlite(db, primitive="lp"))
+
+    # Preconditions — assert the row really is the shape described above, so a
+    # future harness change cannot quietly retarget this test at a different class.
+    assert decomp["ε_vacuous"] == "True", decomp
+    assert decomp["initial_endpoint_covers_run"] == "False", decomp
+    assert Decimal(decomp["gap_usd"]) > Decimal(decomp["ε_threshold_usd"]), decomp
+    assert Decimal(decomp["window_residual_usd"]) <= Decimal(decomp["ε_threshold_usd"]), decomp
+
+    # The verdict: FAIL, never the XFAIL waiver.
+    assert status == "FAIL", (status, diagnostic)
+
+    # And it must say WHY it could not be decided, without asserting a false
+    # inequality. The measured arm prints "residual > ε" — which is exactly
+    # backwards here, with both numbers beside it.
+    assert "cannot be tested" in diagnostic, diagnostic
+    assert "compares nothing" in diagnostic, diagnostic
+    assert f"residual=${decomp['window_residual_usd']} > " not in diagnostic, diagnostic
+    # The actionable instruction is the scaling base, not the books.
+    assert "Root-cause the ε scaling base" in diagnostic, diagnostic
+
+
+def test_a_sound_eps_still_grants_the_window_xfail_waiver(tmp_path: Path) -> None:
+    """The must-not-change half: VIB-6434's guard may only bite when ε is vacuous.
+
+    Identical window shape to the test above — uncovered baseline, measured
+    pre-window gas, residual within ε — but with a SOUND ε. This row must still
+    reach the VIB-5854 waiver and report XFAIL. Without this, a change that simply
+    deleted the window branch would pass the test above and look like a fix.
+    """
+    db = tmp_path / "g6_6434_sound_eps_window.sqlite"
+    _build_db(
+        db,
+        notional_usd="620000",
+        capital_usd="2000000",  # capital now dwarfs ε_scaled => NOT vacuous
+        realized_pnl_usd=None,  # no component gap; the window gas is the whole story
+        ledger_offset=-30,
+        gas_usd="100",
+    )
+    status, decomp, diagnostic = _g6(run_against_sqlite(db, primitive="lp"))
+
+    assert decomp["ε_vacuous"] == "False", decomp
+    assert decomp["initial_endpoint_covers_run"] == "False", decomp
+    assert status == "XFAIL", (status, diagnostic)
+    assert "the endpoints measure different intervals" in diagnostic, diagnostic
+
+
+def test_a_residue_that_beats_even_a_vacuous_eps_is_named_not_called_undecidable(tmp_path: Path) -> None:
+    """A residue exceeding a vacuous ε is MORE conclusive, not less.
+
+    Found by the PR panel (Codex P2 and Grok #1, independently). The vacuous arm
+    was gated on ``eps_vacuous`` alone while its comment asserted "this branch is
+    reached precisely when residual <= ε" — which control flow did not enforce.
+    So a residue of $2,000 against ε=$1,550 was announced as "cannot be decided"
+    and "compares nothing", about a comparison that had just produced a definite
+    answer.
+
+    The direction matters: ``eps_vacuous`` means ε is too WIDE to discriminate, so
+    it can only ever excuse a SMALL residue. One that outruns even it has cleared a
+    threshold at or above the whole capital at risk, which is exactly the
+    "TWO defects" case — and steering the operator at the scaling base instead
+    buries a real reconciliation failure.
+
+    Constructed as the sibling of
+    ``test_a_vacuous_eps_cannot_grant_the_window_xfail_waiver``: identical except
+    the realized loss is $2,000 rather than $1,500, moving the residue from just
+    under ε to just over it. The pair is what pins the boundary — either alone
+    would be satisfied by a branch that always picks one arm.
+    """
+    db = tmp_path / "g6_6434_residue_beats_vacuous_eps.sqlite"
+    _build_db(
+        db,
+        notional_usd="620000",
+        capital_usd="1000",
+        realized_pnl_usd="-2000",  # residue $2000 > vacuous ε $1550
+        ledger_offset=-30,
+        gas_usd="100",
+    )
+    status, decomp, diagnostic = _g6(run_against_sqlite(db, primitive="lp"))
+
+    # Preconditions: vacuous ε, uncovered window, and the residue outruns ε.
+    assert decomp["ε_vacuous"] == "True", decomp
+    assert decomp["initial_endpoint_covers_run"] == "False", decomp
+    assert Decimal(decomp["window_residual_usd"]) > Decimal(decomp["ε_threshold_usd"]), decomp
+
+    assert status == "FAIL", (status, diagnostic)
+    # It must NAME the residue, not disclaim the comparison.
+    assert "TWO defects on one run." in diagnostic, diagnostic
+    assert "compares nothing" not in diagnostic, diagnostic
+    assert "cannot be decided" not in diagnostic, diagnostic
+    # And it must not send the reader after the scaling base as the only action.
+    assert "reconcile the residue as an ordinary gap" in diagnostic, diagnostic

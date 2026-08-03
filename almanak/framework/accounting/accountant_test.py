@@ -2030,15 +2030,41 @@ def _cell_g6_reconciliation(  # noqa: C901
     # realized leg.
     #
     # ``eps`` is the right tolerance: same question, same units, same run as the
-    # gap it bounds. KNOWN LIMITATION (VIB-6434): the VIB-5826 vacuity guard
-    # fires only on ``eps_vacuous and gap <= eps``, so a vacuous ε that also
-    # exceeds the gap reaches this test and can grant an XFAIL waiver — the very
-    # outcome that guard exists to deny a PASS. Needs a corrupted scaling base to
-    # reach, so it is not on a healthy run's path.
+    # gap it bounds — but only while it can still discriminate.
+    #
+    # VIB-6434. A tolerance the cell itself has ruled unfalsifiable may not license a
+    # waiver. The VIB-5826 vacuity guard below fires only on
+    # ``eps_vacuous and gap <= eps``, so a vacuous ε that ALSO exceeds the gap used to
+    # fall through to this test and grant an XFAIL — the exact outcome that guard
+    # exists to deny a PASS, and worse than denying it, because XFAIL outranks FAIL.
+    # ``not eps_vacuous`` is the narrowest possible closure: when ε is sound the
+    # expression is unchanged, so no healthy run moves.
+    #
+    # Two corrections to what the previous round of this comment asserted, both
+    # measured rather than reasoned:
+    #
+    #   * "Needs a corrupted scaling base, so it is not on a healthy run's path" was
+    #     half right. 6 of the 8 vacuous DBs in the evidence corpus are vacuous from
+    #     UNDERSTATED CAPITAL, not an inflated notional — Hyperliquid perp scores
+    #     max_perp_notional=$20,439 against measured equity of $0.74 because HyperCore
+    #     collateral is not in snapshot equity. Those six satisfy every condition of
+    #     the waiver branch except ``gap > eps``; this guard is the only thing between
+    #     them and it. It is a live shape, not a corrupted-data hypothetical.
+    #   * The waiver is NOT "near-trivially satisfiable" as VIB-6434 states. Reaching
+    #     it needs ``gap > eps``, which forces ``residual >= gap - G``; so ε must land
+    #     in ``[gap - G, gap)``, an interval of width at most G (the pre-baseline gas).
+    #     It is a knife-edge, which is why zero corpus rows take it today.
+    #
+    # NOT hoisted, and not written as a bare ``if eps_vacuous:`` at the guard below.
+    # That was the original VIB-5826 shape and review on PR #3290 rejected it: it
+    # swallows the ordinary-gap FAIL and sends the reader to "root-cause the scaling
+    # base" when the books are genuinely off. ``test_vacuous_eps_with_a_real_gap_
+    # reports_the_ordinary_gap_fail`` pins that, and the verdict is FAIL either way —
+    # so no ratchet would catch the regression, only that test would.
     window_gas = coverage.gas_before_measured
     signed_delta = wallet_pnl - component_pnl
     window_residual = None if window_gas is None else abs(signed_delta - window_gas)
-    window_explained = window_residual is not None and window_residual <= eps
+    window_explained = not eps_vacuous and window_residual is not None and window_residual <= eps
 
     decomp = {
         "wallet_pnl_usd": str(wallet_pnl),
@@ -2223,31 +2249,56 @@ def _cell_g6_reconciliation(  # noqa: C901
         # $0.5. It is a quantity in its own right. The threshold sentence cites the
         # residue because the residue is what this branch tested; printing
         # "gap > ε" was false whenever the gap itself sat under ε.
-        unexplained = (
-            f"the discrepancy is not explained by that spend (residual=${window_residual} > ε=${eps})"
-            if window_residual is not None
-            else (
+        #
+        # Three arms, because the reason the residue is unexplained decides what the
+        # reader should go and do — and two of them must NOT claim a books error.
+        # Claim a second defect only where one was measured: on the unmeasured-gas
+        # branch the cell has just said the explained portion cannot be established,
+        # so concluding "reconcile the residue as an ordinary gap" there asserts
+        # exactly what it disclaimed, and on the run that produced it the gap sat
+        # three orders of magnitude UNDER ε.
+        if eps_vacuous and window_residual is not None and window_residual <= eps:
+            # VIB-6434 redirects here, but ONLY where the waiver would actually have
+            # been granted. The guard has to name ``residual <= eps`` explicitly: an
+            # earlier revision fired on ``eps_vacuous`` alone and its comment claimed
+            # "this branch is reached precisely when residual <= ε", which control
+            # flow did not enforce. With a residue of $2,000 against ε=$1,550 it
+            # announced "cannot be decided" and "compares nothing" about a comparison
+            # that had just produced a definite answer — a vacuous ε is one that is
+            # too WIDE, so a residue exceeding even it is MORE conclusive, not less.
+            #
+            # That made three consecutive rounds of this diagnostic wrong, each right
+            # about the case it tested and blind to the axis beside it: "$10.5 of a
+            # $10.0 gap", then "$10.5 of that $0.5 spend", then a decidable residue
+            # called undecidable. The comment above described that pattern and the
+            # next revision repeated it, which is the argument for the condition
+            # being readable in the branch rather than asserted in prose.
+            unexplained = (
+                f"whether that spend explains the discrepancy cannot be tested: the "
+                f"tolerance is vacuous (notional-scaled ε=${eps_scaled} >= capital="
+                f"${capital}), so residual=${window_residual} against ε=${eps} compares "
+                "nothing"
+            )
+            headline = "This cell cannot be decided."
+            closing = (
+                f"Root-cause the ε scaling base (${scaling_base} via {scaling_label}) "
+                "first — while ε is vacuous neither the residue nor the gap can be judged."
+            )
+        elif window_residual is not None:
+            unexplained = f"the discrepancy is not explained by that spend (residual=${window_residual} > ε=${eps})"
+            headline = "TWO defects on one run."
+            closing = "Fixing the baseline alone will NOT close this cell — reconcile the residue as an ordinary gap."
+        else:
+            unexplained = (
                 f"the pre-baseline gas is unmeasured on "
                 f"{coverage.gas_before_unmeasured_rows} row(s), so how much of the gap it "
                 "explains cannot be established"
             )
-        )
-        # Claim a second defect only where one was measured. On the unmeasured
-        # branch the cell has just said the explained portion cannot be established
-        # — concluding "reconcile the residue as an ordinary gap" there asserts
-        # exactly what it disclaimed, and on the run that produced it the gap sat
-        # three orders of magnitude UNDER ε. The actionable fix on that branch is to
-        # populate gas_usd, not to reconcile the books.
-        measured_residue = window_residual is not None
-        headline = "TWO defects on one run." if measured_residue else "This cell cannot be decided."
-        closing = (
-            "Fixing the baseline alone will NOT close this cell — reconcile the residue as an ordinary gap."
-            if measured_residue
-            else (
+            headline = "This cell cannot be decided."
+            closing = (
                 f"Populate gas_usd on the {coverage.gas_before_unmeasured_rows} pre-baseline "
                 "row(s) before reading anything into this gap."
             )
-        )
         return (
             CellResult(
                 "G6",
@@ -2698,31 +2749,121 @@ def _cell_g14_sdk_eq_onchain(
         )
 
     # Track C is wired: evaluate the 1-bp tolerance.
-    eps_pct = Decimal("0.0001")  # 1 bp
+    #
+    # VIB-6399 / VIB-6310. Every row whose delta cannot be read is counted, never
+    # silently dropped, and the verdict is decided on the number of rows actually
+    # COMPARED — not the number present. The old shape ``continue``d past every
+    # unreadable row and then asserted
+    # ``f"all {len(position_state_rows)} rows within 1bp of on-chain state"``: on a
+    # run with 10 unmeasured rows it compared 0 and reported a successful
+    # comparison against on-chain state that never happened. That is the
+    # Empty != Zero rule (blueprint 27) violated in the validation layer itself,
+    # and it is worse than the defects the cell exists to catch — G14 and G15
+    # scored two free PASSes claiming Track C coverage on the very run where
+    # P2/P4/P6 XFAILed with the reason "needs Track C".
+    #
+    # Three skip routes reach the same place, and a fix that closes only the first
+    # leaves a cell that still cannot fail:
+    #   NULL          -> the producer never wrote a value (the corpus-wide case)
+    #   ""            -> the parser emitted nothing
+    #   unparseable   -> a value is present but is not a number ("n/a", a dict)
+    # They are counted separately because Empty != Zero distinguishes them and a
+    # merged count would hide which producer stage is at fault.
+    # KNOWN LIMITATION (VIB-6447): this is 1bp as a FRACTION, applied to a field
+    # named ``_pct`` whose PASS message says "1bp". If the producer ever writes a
+    # percent, the cell is 100x stricter than it advertises (0.005 — half a basis
+    # point — already FAILs); if it writes a fraction, the name and the message are
+    # the wrong pair. Exactly one is true and nothing here can tell which, because
+    # no producer exists (VIB-6443), so the units are undefined rather than merely
+    # undocumented. Left as-is deliberately: unreachable while nothing is compared,
+    # and the producer must settle it in the same change.
+    eps_pct = Decimal("0.0001")  # 1 bp, as a fraction — see VIB-6447
     bad: list[tuple[Any, Decimal]] = []
+    compared = 0
+    null_rows = 0
+    empty_rows = 0
+    unparseable_rows = 0
     for row in position_state_rows:
         raw = row.get("delta_vs_protocol_pct")
         if raw is None:
+            null_rows += 1
+            continue
+        if isinstance(raw, str) and raw.strip() == "":
+            empty_rows += 1
             continue
         try:
             delta = Decimal(str(raw))
         except (InvalidOperation, ValueError, TypeError):
+            unparseable_rows += 1
             continue
+        # A NaN CONSTRUCTS as a Decimal and then raises InvalidOperation on the
+        # comparison below — outside the try, so it propagated out of the cell and
+        # took the whole report down rather than scoring it. Found by the Phase 4
+        # UAT evaluator probing past ``"n/a"``: `nan`, `NaN`, `-nan`, `snan` and
+        # `json.dumps(float("nan"))` all reach here, and this column is written by a
+        # producer whose float pipeline can emit exactly that.
+        #
+        # NaN is "not a number", so no comparison against it is meaningful — it is
+        # unreadable, which is what the unparseable bucket means, and the
+        # three-bucket claim above is only true once it lands in one. Infinity is
+        # deliberately NOT swept in: ``abs(inf) > eps`` is well-defined and an
+        # infinite deviation is a real breach, so it stays a compared FAIL.
+        if delta.is_nan():
+            unparseable_rows += 1
+            continue
+        compared += 1
         if abs(delta) > eps_pct:
             bad.append((row.get("position_key") or row.get("id"), delta))
+    unread = f"unmeasured={null_rows} not-emitted={empty_rows} unparseable={unparseable_rows}"
+    decomp = {
+        "rows_present": str(len(position_state_rows)),
+        "rows_compared": str(compared),
+        "rows_null": str(null_rows),
+        "rows_empty": str(empty_rows),
+        "rows_unparseable": str(unparseable_rows),
+    }
     if bad:
         sample = bad[:3]
         return CellResult(
             "G14",
             "SDK ≡ on-chain reconciliation",
             "FAIL",
-            f"{len(bad)} position_state rows exceed 1bp delta vs on-chain (e.g. {sample!r})",
+            f"{len(bad)} of {compared} compared position_state rows exceed 1bp delta "
+            f"vs on-chain (e.g. {sample!r}); {unread}",
+            decomposition=decomp,
+        )
+    if compared == 0:
+        # Rows exist but not one carried a readable delta, so there is no evidence
+        # either way. XFAIL — measured-but-blocked — deliberately matching the
+        # status the row-absent branch above already returns for the same
+        # underlying condition (Track C present, nothing measured). SKIP would rank
+        # this BELOW those fixtures for an identical semantic state and park the
+        # floor one step off the bottom of the partial order.
+        #
+        # This is currently the outcome on every local SQLite DB, and that is a
+        # PRODUCER gap, not a scorer gap: `delta_vs_protocol_pct` is declared at
+        # position_state.py:87 and assigned in exactly one place in the tree —
+        # gateway/services/state_service.py, copying a proto row. The local
+        # materializer never computes it, so the column is unreachable by
+        # construction. G14 cannot advance past XFAIL until a producer writes it;
+        # read this status as "not yet measurable", never as "known-broken".
+        return CellResult(
+            "G14",
+            "SDK ≡ on-chain reconciliation",
+            "XFAIL",
+            f"{len(position_state_rows)} position_state row(s) present but 0 carried a "
+            f"comparable delta_vs_protocol_pct ({unread}) — nothing was compared against "
+            "on-chain state, so this cell asserts nothing. Needs a producer that computes "
+            "the delta (declared position_state.py:87, written only gateway-side today).",
+            decomposition=decomp,
         )
     return CellResult(
         "G14",
         "SDK ≡ on-chain reconciliation",
         "PASS",
-        f"all {len(position_state_rows)} position_state rows within 1bp of on-chain state",
+        f"{compared} of {len(position_state_rows)} position_state rows compared and within "
+        f"1bp of on-chain state; {unread}",
+        decomposition=decomp,
     )
 
 
