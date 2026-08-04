@@ -385,10 +385,38 @@ def _read_token_decimals(provider: GatewayWeb3Provider, token: str) -> int:
 
 
 def _gateway_usd_price(gateway_client: Any, chain: str, token: str, label: str) -> Decimal:
-    """One measured USD price from the gateway, or raise. Never substitutes."""
+    """One measured USD price from the gateway, or raise. Never substitutes.
+
+    ``stale`` is advisory here, never fatal (VIB-6491). This module only runs
+    against a managed Anvil fork (network guard in
+    :func:`execute_pending_orders_on_anvil`, plus the gateway rejecting Anvil
+    mutation methods on mainnet), and on a fork the flag measures the harness,
+    not the feed: the Chainlink ``updatedAt`` is frozen at the forked block
+    while the staleness clock is live wall time, so ANY fork pinned longer than
+    the 1-hour threshold flags every aggregate stale — treating that as fatal
+    gave pinned forks a hard shelf life and destroyed reproducibility of
+    chain-state-dependent defects (it cost VIB-6437 its only reproduction
+    block). The price layer itself already treats fork staleness as expected —
+    the Chainlink source returns the price at reduced confidence rather than
+    failing. A genuinely unavailable feed still fails loudly: it surfaces as a
+    gateway error or the invalid/non-positive guards below, never as a quiet
+    substitution.
+
+    Known limitation (VIB-6518): the aggregate ``stale`` boolean is a lossy OR —
+    the REST sources also set it when serving a cached price after an upstream
+    outage, and nothing on the wire attributes the flag to a source. Until the
+    gateway exposes per-source staleness, that cache-fallback case passes here
+    with the same warning instead of failing. Accepted on this Anvil-only path;
+    do not widen further, and narrow to Chainlink-attributed staleness once
+    VIB-6518 lands.
+    """
     response = gateway_client.market.GetPrice(gateway_pb2.PriceRequest(token=token, quote="USD", chain=chain.lower()))
     if bool(getattr(response, "stale", False)):
-        raise GmxAnvilOrderExecutionError(f"Gateway price for GMX oracle token {label} is stale")
+        logger.warning(
+            "Gateway price for GMX oracle token %s is stale; expected on a pinned Anvil fork "
+            "(fork-frozen feed timestamp vs live wall clock) — proceeding with the measured price (VIB-6491)",
+            label,
+        )
     try:
         price = Decimal(str(response.price))
     except (InvalidOperation, ValueError) as exc:

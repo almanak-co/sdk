@@ -11,6 +11,7 @@ import pytest
 from eth_abi import encode as abi_encode
 
 from almanak.connectors.gmx_v2.anvil_order_executor import (
+    GmxAnvilOrderExecutionError,
     _find_order_keeper,
     _GmxDependencies,
     _read_price_bounds,
@@ -183,6 +184,44 @@ def test_price_bounds_use_gateway_price_and_measured_on_chain_decimals() -> None
     request = gateway_client.market.GetPrice.call_args.args[0]
     assert request.token == _TOKEN
     assert request.chain == "arbitrum"
+
+
+def test_stale_gateway_price_is_advisory_on_the_anvil_path(caplog: pytest.LogCaptureFixture) -> None:
+    """VIB-6491: fork staleness must warn and return the price, never raise.
+
+    On a pinned fork the Chainlink ``updatedAt`` is frozen while the staleness
+    clock is live wall time, so every fork older than the threshold flags
+    stale. Raising here gave pinned forks a ~1h shelf life and destroyed the
+    only reproduction block of VIB-6437.
+    """
+    gateway_client = MagicMock()
+    gateway_client.market.GetPrice.return_value = SimpleNamespace(price="1.2345678901234", stale=True)
+    provider = MagicMock()
+
+    with (
+        patch("almanak.connectors.gmx_v2.anvil_order_executor._read_token_decimals", return_value=18),
+        caplog.at_level("WARNING", logger="almanak.connectors.gmx_v2.anvil_order_executor"),
+    ):
+        minimum, maximum = _read_price_bounds(gateway_client, provider, "arbitrum", _TOKEN)
+
+    # Same measured bounds as the fresh-price test: the price is used, not substituted.
+    assert minimum == 1_234_567_890_123
+    assert maximum == 1_234_567_890_124
+    # Liveness of the downgrade: the staleness must still be visible to the operator.
+    assert any("is stale" in record.message and record.levelname == "WARNING" for record in caplog.records)
+
+
+def test_invalid_gateway_price_still_fails_loudly_even_when_stale() -> None:
+    """VIB-6491 acceptance: the stale downgrade must not widen into ignoring bad prices."""
+    gateway_client = MagicMock()
+    provider = MagicMock()
+    for bad_price in ("not-a-price", "0", "-1"):
+        gateway_client.market.GetPrice.return_value = SimpleNamespace(price=bad_price, stale=True)
+        with (
+            patch("almanak.connectors.gmx_v2.anvil_order_executor._read_token_decimals", return_value=18),
+            pytest.raises(GmxAnvilOrderExecutionError),
+        ):
+            _read_price_bounds(gateway_client, provider, "arbitrum", _TOKEN)
 
 
 def test_keeper_is_enumerated_from_the_forked_role_store() -> None:
