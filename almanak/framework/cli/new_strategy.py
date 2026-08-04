@@ -2368,8 +2368,61 @@ def _get_template_teardown(
     # also requires a swap-free unwind above.
     # -------------------------------------------------------------------------
 
+    def _venue_probe(self, market=None):
+        """Ask the VENUE what it holds — never `self._position_state` (ALM-3109).
+
+        `_position_state` records what this strategy REQUESTED: it is set in
+        `on_intent_executed`, which fires when the order is accepted, not when the
+        venue fills it. On an async-settled perp venue (GMX V2, Hyperliquid,
+        Aster) the fill can revert, be cancelled, or land after a crash that lost
+        the state save -- and teardown enumerates from `get_open_positions()`, so
+        a position the cache never learned about is NEVER closed. That is a user
+        losing access to their own money, not a bookkeeping detail.
+
+        `probe_perp_position` returns THREE values, and the third is the point:
+
+            OPEN        the venue holds it        (measured)
+            FLAT        the venue does not       (measured)
+            UNMEASURED  the read did not run     (NOT flat)
+
+        Empty != Zero. Treating UNMEASURED as flat certifies a teardown that
+        closed nothing while the position is live (VIB-6497).
+        """
+        from almanak.framework.strategies import probe_perp_position
+
+        snapshot = market
+        if snapshot is None:
+            try:
+                snapshot = self.create_market_snapshot()
+            except Exception as e:  # no snapshot => UNMEASURED, never flat
+                logger.warning(f"teardown: no market snapshot for the venue probe: {{e}}")
+                snapshot = None
+        return probe_perp_position(
+            snapshot,
+            protocol=self.protocol,
+            chain=self.chain,
+            market_symbol=self.perp_market,
+        )
+
     def get_open_positions(self):
-        """Return all open positions for teardown preview."""
+        """Return all open positions for teardown preview -- from the VENUE.
+
+        VALUE THE POSITION FOR REAL. `value_usd=0` is NOT free: the harness drops
+        rows worth <= $0.01 as dust when it measures what teardown left behind, so
+        a truthful position valued at zero is invisible to exactly the check that
+        should catch it -- and a zero total buys the loosest tier of the
+        position-aware loss cap. When the notional cannot be priced, fall back to
+        the requested size PAIRED WITH both unmeasured markers
+        (`value_usd_unknown` for the teardown CLI preview, `valuation_status` for
+        the portfolio valuer) -- never publish an unmeasured number bare.
+
+        NOTE ON `teardown_state_derived_from_chain`: do NOT set it here. It is an
+        assertion that the open set is re-derived PURELY from chain, which would
+        make persisting `_position_state` optional. This implementation keeps the
+        cached side as its UNMEASURED fallback, so the state must still survive a
+        restart -- `get_persistent_state()`/`load_persistent_state()` above are
+        what make that true.
+        """
         from datetime import UTC, datetime
 
         from almanak.framework.teardown import (
@@ -2378,25 +2431,57 @@ def _get_template_teardown(
             TeardownPositionSummary,
         )
 
-        positions = []
-
-        if self._position_state == PerpsState.OPEN:
-            positions.append(
-                PositionInfo(
-                    position_type=PositionType.PERP,
-                    position_id=f"{strategy_name}_perp_{{self.direction.lower()}}",
-                    chain=self.chain,
-                    protocol=self.protocol,
-                    value_usd=self.position_size_usd,
-                    details={{
-                        "market": self.perp_market,
-                        "collateral_token": self.collateral_token,
-                        "is_long": self._is_long,
-                        "direction": self.direction,
-                        "entry_price": str(self._entry_price) if self._entry_price else "unknown",
-                    }},
-                )
+        def _row(is_long: bool, value_usd: Decimal, measured: bool) -> PositionInfo:
+            direction = "LONG" if is_long else "SHORT"
+            details = {{
+                "market": self.perp_market,
+                # REQUIRED: venue position identity is derived from
+                # market + collateral + side. Without collateral_token the row
+                # falls back to its raw position_id and the SAME physical
+                # position can enumerate twice (VIB-6316).
+                "collateral_token": self.collateral_token,
+                "is_long": is_long,
+                "direction": direction,
+                "entry_price": str(self._entry_price) if self._entry_price else "unknown",
+                "position_source": "venue" if measured else "strategy_cache_unverified",
+            }}
+            if not measured:
+                details["value_usd_unknown"] = True
+                details["valuation_status"] = "no_path"
+            return PositionInfo(
+                position_type=PositionType.PERP,
+                position_id=f"{strategy_name}_perp_{{direction.lower()}}",
+                chain=self.chain,
+                protocol=self.protocol,
+                value_usd=value_usd,
+                details=details,
             )
+
+        probe = self._venue_probe()
+        positions = []
+        if probe.is_open:
+            # The venue is authoritative -- including for the SIDE, which is what
+            # lets this report a position the cache never recorded.
+            positions = [
+                _row(
+                    found.is_long,
+                    found.notional_usd if found.notional_usd is not None else self.position_size_usd,
+                    found.notional_usd is not None,
+                )
+                for found in probe.positions
+            ]
+        elif not probe.is_measured:
+            logger.warning(
+                f"teardown: perp position read UNMEASURED ({{probe.reason}}) -- falling back to "
+                f"cached state {{self._position_state}}. An unmeasured read is not a flat account."
+            )
+            if self._position_state == PerpsState.OPEN:
+                positions = [_row(self._is_long, self.position_size_usd, measured=False)]
+        elif self._position_state == PerpsState.OPEN:
+            # Measured flat while the cache says open: the cache is stale (a
+            # reverted/cancelled fill). Publishing it would fail the teardown
+            # verdict with a phantom residual on an account that is really flat.
+            logger.info("teardown: venue measured FLAT while cached state is OPEN -- reporting the venue")
 
         return TeardownPositionSummary(
             deployment_id=getattr(self, "deployment_id", "{strategy_name}"),
@@ -2408,25 +2493,38 @@ def _get_template_teardown(
         """Generate intents to close all positions.
 
         Teardown goal: {teardown_comment}
+
+        Reads the SAME probe as get_open_positions(): an enumerated position with
+        no closing intent fails the teardown completeness check and is stranded
+        anyway, so the two halves must never disagree about what is open.
         """
         from almanak.framework.teardown import TeardownMode
 
-        intents: list[AnyIntent] = []
+        max_slippage = Decimal("0.03") if mode == TeardownMode.HARD else Decimal("0.005")
+        probe = self._venue_probe(market)
+        if probe.is_open:
+            sides = [found.is_long for found in probe.positions]
+        elif probe.is_flat:
+            sides = []
+        else:
+            sides = [self._is_long] if self._position_state == PerpsState.OPEN else []
 
-        if self._position_state == PerpsState.OPEN:
-            max_slippage = Decimal("0.03") if mode == TeardownMode.HARD else Decimal("0.005")
-            intents.append(
-                Intent.perp_close(
-                    market=self.perp_market,
-                    collateral_token=self.collateral_token,
-                    is_long=self._is_long,
-                    size_usd=self.position_size_usd,
-                    max_slippage=max_slippage,
-                    protocol=self.protocol,
-                )
+        return [
+            Intent.perp_close(
+                market=self.perp_market,
+                collateral_token=self.collateral_token,
+                is_long=is_long,
+                # None = close the FULL live position. A cached notional drifts
+                # from the venue via funding, price impact and partial fills;
+                # closing a stale number strands a residual while teardown
+                # reports success, and an OVER-sized decrease reverts outright
+                # (VIB-5950 / VIB-6160).
+                size_usd=None,
+                max_slippage=max_slippage,
+                protocol=self.protocol,
             )
-
-        return intents
+            for is_long in sides
+        ]
 
 '''
 

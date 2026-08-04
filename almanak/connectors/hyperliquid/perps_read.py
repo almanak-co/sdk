@@ -203,6 +203,15 @@ def _reduce_hyperliquid_positions(query: PerpsPositionQuery, results: list[str |
             logger.debug("Failed to decode Hyperliquid account-margin summary", exc_info=True)
 
     positions: list[PerpsPositionOnChain] = []
+    # Completeness is only knowable HERE: `positions` is filtered before the result
+    # dataclass is built, so a caller cannot recover which of the ~24 per-market
+    # calls came back (VIB-6313). This read is per-market, not a range read, so one
+    # failed call is a HOLE in the book — and a consumer reasoning about ABSENCE
+    # (teardown asking "is this market flat?") would otherwise read that hole as a
+    # measured "no position". `ok` says the read RAN; only `truncated` says whether
+    # what it returned is the whole account, and the field's contract requires a
+    # producer that cannot determine completeness to set it True.
+    incomplete = False
     result_iter = iter(position_blobs)
     for symbol in query.markets:
         try:
@@ -214,11 +223,16 @@ def _reduce_hyperliquid_positions(query: PerpsPositionQuery, results: list[str |
             continue
         blob = next(result_iter, None)
         if not blob:
-            continue  # a resolvable market whose read failed: skip, others measured
+            # A resolvable market whose read failed. Others are still measured, but
+            # THIS market was not: absence of a position here is not evidence of
+            # closure.
+            incomplete = True
+            continue
         try:
             pos = decode_position(blob)
         except Exception:  # noqa: BLE001 — a bad blob must not blind the others
             logger.debug("Failed to decode Hyperliquid position for %s", symbol, exc_info=True)
+            incomplete = True
             continue
         if pos.szi == 0:
             continue  # measured "no position"
@@ -239,7 +253,7 @@ def _reduce_hyperliquid_positions(query: PerpsPositionQuery, results: list[str |
                 key_prefix=_POSITION_KEY_PREFIX,
             )
         )
-    return PerpsReadResult(positions=tuple(positions), ok=True)
+    return PerpsReadResult(positions=tuple(positions), ok=True, truncated=incomplete)
 
 
 def _hyperliquid_market_metadata(market_symbol: str, chain: str) -> PerpsMarketMeta | None:

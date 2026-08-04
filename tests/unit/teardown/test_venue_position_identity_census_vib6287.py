@@ -403,12 +403,8 @@ def test_c3_never_credits_an_intent_that_does_not_name_this_position(label, inte
     registry row without a wallet never emits the alias token, so every negative
     would vacuously pass.
     """
-    assert not _perp_carries_identity(intent, _registry_row(), WALLET), (
-        f"alias path falsely credited on: {label}"
-    )
-    assert not _perp_carries_identity(intent, _registry_row()), (
-        f"wallet-free path falsely credited on: {label}"
-    )
+    assert not _perp_carries_identity(intent, _registry_row(), WALLET), f"alias path falsely credited on: {label}"
+    assert not _perp_carries_identity(intent, _registry_row()), f"wallet-free path falsely credited on: {label}"
 
 
 def test_c3_restart_path_end_to_end_is_fixed():
@@ -1301,6 +1297,47 @@ def test_a_perp_row_without_collateral_cannot_collapse_against_its_own_registry_
     )
 
 
+def _shipped_demo_row():
+    """Build the row the SHIPPED demo actually emits, via its public method.
+
+    The census fixtures below are deliberately synthetic; this is the one place
+    that touches the real ``gmx_v2_directional_perp``. If this stopped reading the
+    shipped module, every census assertion could stay green while the demo
+    regressed to the collateral-less shape that made one physical position
+    enumerate twice on mainnet.
+
+    The venue probe has no market snapshot here, so it returns UNMEASURED and the
+    demo falls back to its cached side — which is exactly the path that must still
+    name collateral, because an unmeasured read is not a flat account.
+    """
+    import importlib.util
+    import json
+    from pathlib import Path
+    from unittest.mock import patch
+
+    seed = Path(__file__).resolve().parents[3] / "almanak" / "demo_strategies" / "gmx_v2_directional_perp"
+    spec = importlib.util.spec_from_file_location("gmx_seed_census_row", seed / "strategy.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    cls = module.GmxV2DirectionalPerp
+    cfg = json.loads((seed / "config.json").read_text(encoding="utf-8"))
+    with patch(
+        "almanak.framework.strategies.intent_strategy.IntentStrategy.__init__",
+        return_value=None,
+    ):
+        strat = cls.__new__(cls)
+        strat._config = cfg
+        strat.get_config = lambda k, d=None: cfg.get(k, d)
+        cls.__init__(strat)
+    strat._chain = "arbitrum"
+    strat._position_side = "long"
+    summary = strat.get_open_positions()
+    assert len(summary.positions) == 1, (
+        f"fixture precondition: a cached long must yield exactly one row, got {len(summary.positions)}"
+    )
+    return summary.positions[0]
+
+
 def test_the_directional_perp_demo_now_names_its_collateral():
     """The root-cause repair, pinned from the producer side (VIB-6316).
 
@@ -1318,16 +1355,22 @@ def test_the_directional_perp_demo_now_names_its_collateral():
     "repaired" into a form the hook cannot read. Imported from the hook rather than
     re-typed so a new alias cannot slip past.
     """
-    import inspect
-
     from almanak.connectors.gmx_v2.perp_identity import _COLLATERAL_KEYS
-    from almanak.demo_strategies.gmx_v2_directional_perp.strategy import GmxV2DirectionalPerp
 
-    src = inspect.getsource(GmxV2DirectionalPerp.get_open_positions)
-    written = [key for key in _COLLATERAL_KEYS if key in src]
+    # Asserts on the row the demo EMITS, not on the source text of the method that
+    # builds it. The earlier form was ``inspect.getsource(get_open_positions)`` plus
+    # a substring search, which went red the moment the row builder was extracted
+    # into a helper — while the demo still emitted ``collateral_token`` and the
+    # property held. "Where does this string live" is not the property; "does the
+    # emitted row name its collateral" is.
+    row = _shipped_demo_row()
+    # VALUE, not membership: an empty or None collateral is present but names
+    # nothing, and the hook derives no venue key from it.
+    written = [key for key in _COLLATERAL_KEYS if row.details.get(key)]
     assert written, (
-        "gmx_v2_directional_perp.get_open_positions names no collateral under any alias "
-        f"the identity hook accepts ({list(_COLLATERAL_KEYS)}). Without it the row derives "
+        "gmx_v2_directional_perp.get_open_positions EMITS no collateral under any alias "
+        f"the identity hook accepts ({list(_COLLATERAL_KEYS)}); it emitted "
+        f"{sorted(row.details)}. Without it the row derives "
         "no venue key, falls through to its raw position_id, and one physical position "
         "enumerates twice — mainnet R5 reported positions_total=2 for a single ETH/USD long."
     )

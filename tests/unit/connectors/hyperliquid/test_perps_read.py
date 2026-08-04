@@ -113,6 +113,40 @@ class TestReduce:
         assert len(res.positions) == 1
         assert res.positions[0].is_long is False  # szi negative → short
 
+    def test_one_failed_market_marks_the_read_incomplete(self) -> None:
+        """A hole in a PER-MARKET book must be reported as such.
+
+        ``ok`` says the read RAN; ``truncated`` says whether what came back is the
+        WHOLE account. This read plans one call per market, so a single failed call
+        leaves a market unmeasured while the others are fine — and a consumer
+        reasoning about ABSENCE (teardown asking "is ETH flat?") would otherwise
+        read that hole as a measured "no position" and certify a teardown that
+        closed nothing. `PerpsReadResult.truncated` documents that a producer which
+        cannot determine completeness must set it True; before this, hyperliquid
+        never set it at all, so the probe's truncation guard was decorative for
+        this venue.
+        """
+        res = pr._reduce_hyperliquid_positions(
+            _q(("BTC", "ETH")), _results(None, _position_blob(-500, 300_000_000))
+        )
+        assert res.ok is True
+        assert res.truncated is True
+
+    def test_undecodable_market_blob_marks_the_read_incomplete(self) -> None:
+        res = pr._reduce_hyperliquid_positions(_q(("BTC",)), _results("0xdeadbeef"))
+        assert res.ok is True
+        assert res.truncated is True
+
+    def test_a_fully_measured_read_is_not_truncated(self) -> None:
+        """The liveness control: truncated must be able to be False, or the flag
+        would fail closed on every read and disable the venue entirely."""
+        res = pr._reduce_hyperliquid_positions(
+            _q(("BTC", "ETH")), _results(_position_blob(1000, 600_000_000), _position_blob(0, 0))
+        )
+        assert res.ok is True
+        assert res.truncated is False
+        assert len(res.positions) == 1
+
     def test_unresolvable_market_does_not_misalign_results(self) -> None:
         # _build_hyperliquid_calls SKIPS the unresolvable NOTACOIN, so the POSITION
         # results are 1:1 with the resolvable (BTC, ETH) calls (plus a trailing

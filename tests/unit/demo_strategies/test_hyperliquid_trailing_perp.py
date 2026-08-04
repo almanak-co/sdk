@@ -333,3 +333,104 @@ class TestFillReconciliation:
         intents = strat.generate_teardown_intents(_TeardownMode.SOFT)
         assert len(intents) == 1
         assert intents[0].intent_type.value == "PERP_CLOSE"
+
+
+class TestTeardownReadsTheVenueNotTheCache:
+    """ALM-3109 / VIB-6159 / VIB-6497, on the HyperCore side.
+
+    ``_position_side`` records a CoreWriter submission, not a fill. Teardown
+    enumerates from ``get_open_positions()``, so the venue has to be the source —
+    with one deliberate exception, the pending-submission override (VIB-5597).
+    """
+
+    def _venue(self, strat, *, positions, ok=True, price="3000"):
+        from almanak.connectors._strategy_base.perps_read_base import PerpsReadResult
+
+        snapshot = MagicMock()
+        snapshot.perp_positions.return_value = PerpsReadResult(positions=tuple(positions), ok=ok)
+        snapshot.price.return_value = Decimal(price)
+        strat.create_market_snapshot = lambda: snapshot
+        return snapshot
+
+    def _position(self, *, is_long=True):
+        from almanak.connectors._strategy_base.perps_read_base import PerpsPositionOnChain
+
+        return PerpsPositionOnChain(
+            account="0x" + "1" * 40,
+            market="ETH",  # HyperCore keys positions by symbol, not address
+            collateral_token="USDC",
+            size_in_usd=300 * 10**6,
+            size_in_tokens=1000,  # 0.1 ETH at szDecimals=4
+            collateral_amount=150 * 10**6,
+            is_long=is_long,
+            borrowing_factor=0,
+            funding_fee_amount_per_size=0,
+            increased_at_time=0,
+            decreased_at_time=0,
+            key_prefix="hyperliquid",
+        )
+
+    def _strategy(self, module):
+        strat = _make(module)
+        strat._chain = "hyperevm"
+        strat._deployment_id = "deployment:test"
+        return strat
+
+    def test_venue_position_the_cache_missed_is_reported_and_closed(self, module):
+        strat = self._strategy(module)
+        strat._position_side = None
+        strat._fill_confirmed = False
+        self._venue(strat, positions=[self._position(is_long=False)])
+
+        summary = strat.get_open_positions()
+        assert len(summary.positions) == 1
+        assert summary.positions[0].details["side"] == module.SHORT
+        assert summary.positions[0].details["position_source"] == "venue"
+        # 0.1 ETH @ $3000 — a real notional, not the dust-filtered $0.
+        assert summary.positions[0].value_usd == Decimal("300.0")
+
+        intents = strat.generate_teardown_intents(_TeardownMode.SOFT)
+        assert len(intents) == 1
+        assert intents[0].is_long is False
+        assert intents[0].size_usd is None
+
+    def test_measured_flat_venue_overrides_a_stale_confirmed_cache(self, module):
+        strat = self._strategy(module)
+        strat._position_side = module.LONG
+        strat._fill_confirmed = True
+        self._venue(strat, positions=[])
+
+        assert strat.get_open_positions().positions == []
+        assert strat.generate_teardown_intents(_TeardownMode.SOFT) == []
+
+    def test_measured_flat_does_NOT_drop_a_pending_submission(self, module):
+        """VIB-5597 must survive the migration.
+
+        A submitted order can fill microseconds after the read, and Hyperliquid
+        perps leave teardown no registry row to recover from (VIB-6392). A
+        reduce-only close is a safe no-op if nothing filled.
+        """
+        strat = self._strategy(module)
+        strat._position_side = module.LONG
+        strat._fill_confirmed = False  # PENDING
+        self._venue(strat, positions=[])
+
+        summary = strat.get_open_positions()
+        assert len(summary.positions) == 1
+        assert summary.positions[0].details["fill_confirmed"] is False
+        assert len(strat.generate_teardown_intents(_TeardownMode.SOFT)) == 1
+
+    def test_unavailable_read_is_not_reported_as_flat(self, module):
+        strat = self._strategy(module)
+        strat._position_side = module.LONG
+        strat._fill_confirmed = True
+        self._venue(strat, positions=[], ok=False)
+
+        summary = strat.get_open_positions()
+        assert len(summary.positions) == 1
+        row = summary.positions[0]
+        assert row.details["position_source"] == "strategy_cache_unverified"
+        assert row.details["value_usd_unknown"] is True
+        assert row.details["valuation_status"] == "no_path"
+        assert row.value_usd > Decimal("0.01")
+        assert len(strat.generate_teardown_intents(_TeardownMode.SOFT)) == 1

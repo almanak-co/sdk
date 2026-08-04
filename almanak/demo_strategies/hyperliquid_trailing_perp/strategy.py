@@ -80,7 +80,8 @@ from almanak.framework.market import MarketSnapshot
 from almanak.framework.strategies import IntentStrategy, almanak_strategy
 
 if TYPE_CHECKING:
-    from almanak.framework.teardown import TeardownMode, TeardownPositionSummary
+    from almanak.framework.strategies import PerpProbe
+    from almanak.framework.teardown import PositionInfo, TeardownMode, TeardownPositionSummary
 
 logger = logging.getLogger(__name__)
 
@@ -535,29 +536,116 @@ class HyperliquidTrailingPerp(IntentStrategy):
     def supports_teardown(self) -> bool:
         return True
 
-    def get_open_positions(self) -> "TeardownPositionSummary":
-        from almanak.framework.teardown import PositionInfo, PositionType, TeardownPositionSummary
+    def _venue_probe(self, market: MarketSnapshot | None = None) -> "PerpProbe":
+        """Ask HyperCore what it actually holds on this market (ALM-3109 / VIB-6159).
 
+        ``_position_side`` records what this strategy *requested* — CoreWriter
+        settles asynchronously (VIB-5597), so the cache and the venue diverge on
+        every unobserved fill, rejection, or liquidation. Teardown enumerates from
+        the answer below, so a position the cache never learned about would never
+        be closed. The read is the ``position(wallet, asset)`` precompile, routed
+        through the gateway like every other read.
+
+        ``UNMEASURED`` is NOT flat — see ``perp_position_probe``.
+        """
+        from almanak.framework.strategies import probe_perp_position
+
+        snapshot = market
+        if snapshot is None:
+            try:
+                snapshot = self.create_market_snapshot()
+            except Exception as exc:  # noqa: BLE001 — no snapshot ⇒ UNMEASURED, never flat
+                logger.warning("teardown: no market snapshot for the venue probe (%s)", exc)
+                snapshot = None
+        return probe_perp_position(
+            snapshot,
+            protocol=_PROTOCOL,
+            chain=self.chain,
+            market_symbol=self.market,
+        )
+
+    def _pending_submission(self) -> bool:
+        """A submission we have not yet seen fill (VIB-5597).
+
+        Kept as a fail-closed override on a measured-FLAT venue read: HyperCore may
+        fill the order microseconds after the read, and Hyperliquid perps write no
+        position-registry row for teardown to fall back on (VIB-6392). A reduce-only
+        close is a safe no-op if nothing filled, so the cheap direction is to keep
+        surfacing it.
+        """
+        return self._position_side is not None and not self._fill_confirmed
+
+    def _position_row(self, *, side: str, value_usd: Decimal, measured: bool) -> "PositionInfo":
+        from almanak.framework.teardown import PositionInfo, PositionType
+
+        details: dict[str, Any] = {
+            "market": self.market,
+            "side": side,
+            "size_usd": str(value_usd),
+            "fill_confirmed": self._fill_confirmed,
+            "position_source": "venue" if measured else "strategy_cache_unverified",
+        }
+        if not measured:
+            # Empty ≠ Zero: this is the size we ASKED for, not a venue measurement.
+            details["value_usd_unknown"] = True
+            details["valuation_status"] = "no_path"
+        return PositionInfo(
+            position_type=PositionType.PERP,
+            position_id=f"hyperliquid-{self.market}-{side}",
+            chain=self.chain,
+            protocol=_PROTOCOL,
+            value_usd=value_usd,
+            details=details,
+        )
+
+    def get_open_positions(self) -> "TeardownPositionSummary":
+        """Report what HyperCore holds; fall back to cache when unmeasured or pending.
+
+        * venue OPEN → the venue's own side and mark-valued notional, even when
+          ``_position_side`` is ``None`` (the divergence in ALM-3109 / VIB-6497).
+        * venue FLAT and no pending submission → report nothing (measured flat).
+        * venue FLAT with a PENDING submission → keep the row (VIB-5597, above).
+        * venue UNMEASURED → keep the cached row, marked unverified. Reporting
+          empty on an unmeasured read is the false certification in VIB-6497.
+
+        ``value_usd`` is a real notional, not ``0``: the harness drops ≤ $0.01 rows
+        as dust, so a truthful row valued at zero is invisible to the very check
+        that should catch a stranded position.
+        """
+        from almanak.framework.teardown import PositionInfo, TeardownPositionSummary
+
+        probe = self._venue_probe()
         positions: list[PositionInfo] = []
-        # A PENDING (unconfirmed) submission is STILL surfaced for teardown: the
-        # order may have filled on HyperCore even though we have not yet observed
-        # it, so teardown must fail-closed and reduce that possible risk (a
-        # reduce-only close is a safe no-op if nothing filled). VIB-5597.
-        if self._position_side is not None:
-            positions.append(
-                PositionInfo(
-                    position_type=PositionType.PERP,
-                    position_id=f"hyperliquid-{self.market}-{self._position_side}",
-                    chain=self.chain,
-                    protocol=_PROTOCOL,
-                    value_usd=Decimal("0"),
-                    details={
-                        "market": self.market,
-                        "side": self._position_side,
-                        "size_usd": str(self.size_usd),
-                        "fill_confirmed": self._fill_confirmed,
-                    },
+        if probe.is_open:
+            for found in probe.positions:
+                positions.append(
+                    self._position_row(
+                        side=LONG if found.is_long else SHORT,
+                        value_usd=(found.notional_usd if found.notional_usd is not None else self.size_usd),
+                        measured=found.notional_usd is not None,
+                    )
                 )
+        elif not probe.is_measured or self._pending_submission():
+            if not probe.is_measured:
+                logger.warning(
+                    "teardown: HyperCore position read UNMEASURED (%s) — falling back to cached side=%s. "
+                    "An unmeasured read is not a flat account.",
+                    probe.reason,
+                    self._position_side,
+                )
+            if self._position_side is not None:
+                positions.append(
+                    self._position_row(
+                        side=self._position_side,
+                        value_usd=self.size_usd,
+                        measured=False,
+                    )
+                )
+        elif self._position_side is not None:
+            logger.info(
+                "teardown: HyperCore measured FLAT on %s while cached side=%s — reporting the venue",
+                self.market,
+                self._position_side,
             )
         return TeardownPositionSummary(
             deployment_id=getattr(self, "deployment_id", "hyperliquid_trailing_perp"),
@@ -566,18 +654,31 @@ class HyperliquidTrailingPerp(IntentStrategy):
         )
 
     def generate_teardown_intents(self, mode: "TeardownMode", market: MarketSnapshot | None = None) -> list[AnyIntent]:
+        """Close what the venue holds. Must agree with ``get_open_positions()``.
+
+        An enumerated position with no closing intent fails the teardown
+        completeness check loudly and strands the position anyway (VIB-5469 /
+        ALM-2900), so both halves read the same probe and honour the same
+        pending-submission override.
+        """
         from almanak.framework.teardown import TeardownMode
 
-        if self._position_side is None:
-            return []
         slippage = max(self.max_slippage, Decimal("0.02")) if mode == TeardownMode.HARD else self.max_slippage
+        probe = self._venue_probe(market)
+        if probe.is_open:
+            sides = [found.is_long for found in probe.positions]
+        elif probe.is_measured and not self._pending_submission():
+            sides = []
+        else:
+            sides = [] if self._position_side is None else [self._position_side == LONG]
         return [
             Intent.perp_close(
                 market=self.market,
                 collateral_token=self.collateral_token,
-                is_long=self._position_side == LONG,
+                is_long=is_long,
                 size_usd=None,  # full reduce-only close
                 max_slippage=slippage,
                 protocol=_PROTOCOL,
             )
+            for is_long in sides
         ]

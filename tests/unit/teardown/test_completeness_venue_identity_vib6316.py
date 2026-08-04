@@ -166,6 +166,57 @@ def test_the_r5_mainnet_shape_no_longer_false_fails():
     )
 
 
+def _shipped_demo_row():
+    """Build the row the SHIPPED demo actually emits, via its public method.
+
+    This assertion used to be ``inspect.getsource(get_open_positions)`` plus a
+    substring search for a collateral alias. That proxy was defeated the moment
+    the row builder was extracted into a helper: the demo still emitted
+    ``collateral_token``, the property held, and the test went red anyway.
+
+    A source-text search answers "where does this string live", which is not the
+    property. The property is "does the emitted row NAME its collateral", so this
+    reads the row.
+
+    It matters that this reads the real demo rather than a literal. The companion
+    below (``test_the_repaired_demo_now_collapses_its_own_union``) proves the
+    identity MECHANISM against a hand-built ``repaired`` dict — so if this test
+    stopped touching the shipped module, the mechanism could stay green while the
+    demo regressed, and nothing would connect the two. This is the only link
+    between the mechanism and the code users copy.
+
+    The venue probe has no market snapshot here, so it returns UNMEASURED and the
+    demo falls back to its cached side — which is precisely the path that must
+    still name collateral, since an unmeasured read is not a flat account.
+    """
+    import importlib.util
+    import json
+    from pathlib import Path
+    from unittest.mock import patch
+
+    seed = Path(__file__).resolve().parents[3] / "almanak" / "demo_strategies" / "gmx_v2_directional_perp"
+    spec = importlib.util.spec_from_file_location("gmx_seed_row", seed / "strategy.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    cls = module.GmxV2DirectionalPerp
+    cfg = json.loads((seed / "config.json").read_text(encoding="utf-8"))
+    with patch(
+        "almanak.framework.strategies.intent_strategy.IntentStrategy.__init__",
+        return_value=None,
+    ):
+        strat = cls.__new__(cls)
+        strat._config = cfg
+        strat.get_config = lambda k, d=None: cfg.get(k, d)
+        cls.__init__(strat)
+    strat._chain = "arbitrum"
+    strat._position_side = "long"
+    summary = strat.get_open_positions()
+    assert len(summary.positions) == 1, (
+        f"fixture precondition: a cached long must yield exactly one row, got {len(summary.positions)}"
+    )
+    return summary.positions[0]
+
+
 def test_the_shipped_demo_now_names_its_own_position():
     """The producer-side repair, asserted against the shipped source.
 
@@ -182,15 +233,17 @@ def test_the_shipped_demo_now_names_its_own_position():
     not.
     """
     from almanak.connectors.gmx_v2.perp_identity import _COLLATERAL_KEYS
-    from almanak.demo_strategies.gmx_v2_directional_perp import strategy as demo
 
-    src = inspect.getsource(demo.GmxV2DirectionalPerp.get_open_positions)
-    # Match the census companion: accept any alias the identity hook reads, not
-    # only the literal ``collateral_token`` form the demo happens to write today.
-    written = [key for key in _COLLATERAL_KEYS if key in src]
+    row = _shipped_demo_row()
+    # VALUE, not membership: ``collateral_token=""`` or ``None`` is present but
+    # derives ZERO identity tokens, so a membership check passes on a row the
+    # identity hook cannot name — the same Empty ≠ Zero inversion this PR exists
+    # to remove, hiding inside its own guard.
+    written = [key for key in _COLLATERAL_KEYS if row.details.get(key)]
     assert written, (
-        "gmx_v2_directional_perp.get_open_positions names no collateral under any "
-        f"alias the identity hook accepts ({list(_COLLATERAL_KEYS)}). "
+        "gmx_v2_directional_perp.get_open_positions EMITS no collateral under any "
+        f"alias the identity hook accepts ({list(_COLLATERAL_KEYS)}); "
+        f"it emitted {sorted(row.details)}. "
         "Without it the row derives no venue key, falls through to its raw position_id, "
         "and one physical position enumerates twice again (mainnet R5: total=2, closed=2 "
         "for a single ETH/USD long)."

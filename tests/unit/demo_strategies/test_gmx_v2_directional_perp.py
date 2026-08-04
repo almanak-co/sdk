@@ -46,6 +46,10 @@ def gmx():
         strat.get_config = lambda k, d=None: cfg.get(k, d)
         cls.__init__(strat)
     strat._position_side = None
+    # ``IntentStrategy.__init__`` is patched out above, so the attributes it
+    # normally sets have to be supplied. ``chain`` (a read-only property over
+    # ``_chain``) is one the teardown path reads.
+    strat._chain = "arbitrum"
     return module, strat
 
 
@@ -126,3 +130,102 @@ class TestFullCloseSemantics:
         assert len(intents) == 1
         assert intents[0].intent_type.value == "PERP_CLOSE"
         assert intents[0].size_usd is None
+
+
+class TestTeardownReadsTheVenueNotTheCache:
+    """ALM-3109 / VIB-6159 / VIB-6497.
+
+    ``_position_side`` is written on submission success; the GMX keeper fill is
+    asynchronous and can revert or be cancelled afterwards. Teardown enumerates
+    from ``get_open_positions()``, so these three transitions are the difference
+    between closing the user's position and losing access to it.
+    """
+
+    ETH_USD_MARKET = "0x70d95587d40A2caf56bd97485aB3Eec10Bee6336"
+    USDC_ARBITRUM = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
+
+    def _venue(self, strat, *, positions, ok=True, price="3000"):
+        from almanak.connectors._strategy_base.perps_read_base import PerpsReadResult
+
+        snapshot = MagicMock()
+        snapshot.perp_positions.return_value = PerpsReadResult(positions=tuple(positions), ok=ok)
+        snapshot.price.return_value = Decimal(price)
+        strat.create_market_snapshot = lambda: snapshot
+        return snapshot
+
+    def _position(self, *, is_long=True):
+        from almanak.connectors._strategy_base.perps_read_base import PerpsPositionOnChain
+
+        return PerpsPositionOnChain(
+            account="0x" + "1" * 40,
+            market=self.ETH_USD_MARKET,
+            collateral_token=self.USDC_ARBITRUM,
+            size_in_usd=100 * 10**30,
+            size_in_tokens=10**17,  # 0.1 ETH
+            collateral_amount=50 * 10**6,
+            is_long=is_long,
+            borrowing_factor=0,
+            funding_fee_amount_per_size=0,
+            increased_at_time=0,
+            decreased_at_time=0,
+        )
+
+    def test_venue_position_the_cache_missed_is_reported_and_closed(self, gmx):
+        """The ALM-3109 divergence: cache flat, venue short. Both halves must act."""
+        from almanak.framework.teardown import TeardownMode
+
+        _, strat = gmx
+        strat._position_side = None  # the cache never learned about the fill
+        self._venue(strat, positions=[self._position(is_long=False)])
+
+        summary = strat.get_open_positions()
+        assert len(summary.positions) == 1
+        row = summary.positions[0]
+        assert row.details["side"] == "short"
+        assert row.details["position_source"] == "venue"
+
+        intents = strat.generate_teardown_intents(TeardownMode.SOFT)
+        assert len(intents) == 1
+        assert intents[0].is_long is False
+        assert intents[0].size_usd is None
+
+    def test_reported_value_is_a_real_notional_not_zero(self, gmx):
+        """``value_usd=0`` is dropped as dust (<= $0.01) by the teardown harness."""
+        _, strat = gmx
+        strat._position_side = None
+        self._venue(strat, positions=[self._position()], price="3000")
+
+        row = strat.get_open_positions().positions[0]
+        assert row.value_usd == Decimal("300.0")  # 0.1 ETH @ $3000
+        assert "value_usd_unknown" not in row.details
+
+    def test_measured_flat_venue_overrides_a_stale_open_cache(self, gmx):
+        """The phantom residual in ALM-3109: cache open, venue measured flat."""
+        from almanak.framework.teardown import TeardownMode
+
+        module, strat = gmx
+        strat._position_side = module.LONG
+        self._venue(strat, positions=[])
+
+        assert strat.get_open_positions().positions == []
+        assert strat.generate_teardown_intents(TeardownMode.SOFT) == []
+
+    def test_unavailable_read_is_not_reported_as_flat(self, gmx):
+        """VIB-6497: an unmeasured read must keep the cached row, marked unverified."""
+        from almanak.framework.teardown import TeardownMode
+
+        module, strat = gmx
+        strat._position_side = module.LONG
+        self._venue(strat, positions=[], ok=False)
+
+        summary = strat.get_open_positions()
+        assert len(summary.positions) == 1
+        row = summary.positions[0]
+        assert row.details["position_source"] == "strategy_cache_unverified"
+        # Unmeasured, but NOT a fabricated $0 — both markers, and a size the dust
+        # filter can see.
+        assert row.details["value_usd_unknown"] is True
+        assert row.details["valuation_status"] == "no_path"
+        assert row.value_usd > Decimal("0.01")
+
+        assert len(strat.generate_teardown_intents(TeardownMode.SOFT)) == 1

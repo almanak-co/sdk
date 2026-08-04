@@ -69,6 +69,12 @@ from .intent_strategy import (
     almanak_strategy,
 )
 from .multi_step_strategy import MultiStepStrategy, Step
+from .perp_position_probe import (
+    PerpProbe,
+    PerpProbePosition,
+    PerpProbeState,
+    probe_perp_position,
+)
 from .stateless_strategy import StatelessStrategy
 
 logger = logging.getLogger(__name__)
@@ -371,4 +377,9 @@ __all__ = [
     "Step",
     # Stateless Strategy
     "StatelessStrategy",
+    # Venue-truth perp probe (ALM-3109 / VIB-6159 / VIB-6497)
+    "PerpProbe",
+    "PerpProbePosition",
+    "PerpProbeState",
+    "probe_perp_position",
 ]

@@ -47,7 +47,8 @@ from almanak.framework.market import MarketSnapshot
 from almanak.framework.strategies import IntentStrategy, almanak_strategy
 
 if TYPE_CHECKING:
-    from almanak.framework.teardown import TeardownMode, TeardownPositionSummary
+    from almanak.framework.strategies import PerpProbe
+    from almanak.framework.teardown import PositionInfo, TeardownMode, TeardownPositionSummary
 
 logger = logging.getLogger(__name__)
 
@@ -406,37 +407,125 @@ class GmxV2DirectionalPerp(IntentStrategy):
     def supports_teardown(self) -> bool:
         return True
 
-    def get_open_positions(self) -> "TeardownPositionSummary":
-        from almanak.framework.teardown import PositionInfo, PositionType, TeardownPositionSummary
+    def _venue_probe(self, market: MarketSnapshot | None = None) -> "PerpProbe":
+        """Ask GMX what it actually holds on this market (ALM-3109 / VIB-6159).
 
+        ``_position_side`` records what this strategy *requested*: it is written in
+        ``on_intent_executed`` when the create-order transaction succeeds, but the
+        GMX keeper fill is asynchronous and can revert or be cancelled afterwards.
+        Teardown enumerates from the answer below, so trusting the cache means a
+        position the cache never learned about is never closed.
+
+        Returns a three-valued probe. ``UNMEASURED`` is NOT flat — see the module
+        docstring of ``perp_position_probe``.
+        """
+        from almanak.framework.strategies import probe_perp_position
+
+        snapshot = market
+        if snapshot is None:
+            try:
+                snapshot = self.create_market_snapshot()
+            except Exception as exc:  # noqa: BLE001 — no snapshot ⇒ UNMEASURED, never flat
+                logger.warning("teardown: no market snapshot for the venue probe (%s)", exc)
+                snapshot = None
+        return probe_perp_position(
+            snapshot,
+            protocol="gmx_v2",
+            chain=self.chain,
+            market_symbol=self.market,
+        )
+
+    def _position_row(self, *, side: str, value_usd: Decimal, measured: bool) -> "PositionInfo":
+        from almanak.framework.teardown import PositionInfo, PositionType
+
+        details: dict[str, Any] = {
+            # ``collateral_token`` is REQUIRED for this row to name its
+            # position (VIB-6316). ``gmx_v2_perp_identity`` derives the
+            # venue key from market + collateral + side, resolving each
+            # symbol through the connector catalogue; without collateral
+            # it derives nothing, the row falls through to its raw
+            # ``position_id``, and the SAME physical position enumerates
+            # twice — once here and once as the registry's bytes32 key.
+            # Measured on mainnet before this was added: a single ETH/USD
+            # long reported positions_total=2, positions_closed=2.
+            # ``generate_teardown_intents`` below already supplies it, so
+            # omitting it here was an asymmetry between the two halves of
+            # one strategy, not a deliberate shape.
+            "market": self.market,
+            "collateral_token": self.collateral_token,
+            "side": side,
+            "size_usd": str(value_usd),
+            "position_source": "venue" if measured else "strategy_cache_unverified",
+        }
+        if not measured:
+            # Empty ≠ Zero: the number is the size we ASKED for, not a measurement
+            # of what the venue holds. Mark it so the valuer and the teardown CLI
+            # preview treat it as unmeasured rather than as a priced position.
+            details["value_usd_unknown"] = True
+            details["valuation_status"] = "no_path"
+        return PositionInfo(
+            position_type=PositionType.PERP,
+            position_id=f"gmx-v2-{self.market}-{side}",
+            chain=self.chain,
+            protocol="gmx_v2",
+            value_usd=value_usd,
+            details=details,
+        )
+
+    def get_open_positions(self) -> "TeardownPositionSummary":
+        """Report what the VENUE holds, falling back to cache only when unmeasured.
+
+        Three outcomes, and the third is the one that matters:
+
+        * venue OPEN → report the venue's own side and mark-valued notional, even
+          if ``_position_side`` is ``None`` (the divergence in ALM-3109 / VIB-6497).
+        * venue FLAT → report nothing. A stale cache no longer publishes a phantom
+          residual that fails the teardown verdict on a flat account.
+        * venue UNMEASURED → keep the cached row, marked unverified. Reporting
+          empty here is the false certification in VIB-6497.
+
+        A real notional matters as much as the row: ``value_usd=0`` is dropped as
+        dust (≤ $0.01) by the harness's post-teardown residual measurement, so a
+        truthful row valued at zero is invisible to exactly the check that should
+        catch it.
+        """
+        from almanak.framework.teardown import PositionInfo, TeardownPositionSummary
+
+        probe = self._venue_probe()
         positions: list[PositionInfo] = []
-        if self._position_side is not None:
-            positions.append(
-                PositionInfo(
-                    position_type=PositionType.PERP,
-                    position_id=f"gmx-v2-{self.market}-{self._position_side}",
-                    chain=self.chain,
-                    protocol="gmx_v2",
-                    value_usd=Decimal("0"),
-                    details={
-                        # ``collateral_token`` is REQUIRED for this row to name its
-                        # position (VIB-6316). ``gmx_v2_perp_identity`` derives the
-                        # venue key from market + collateral + side, resolving each
-                        # symbol through the connector catalogue; without collateral
-                        # it derives nothing, the row falls through to its raw
-                        # ``position_id``, and the SAME physical position enumerates
-                        # twice — once here and once as the registry's bytes32 key.
-                        # Measured on mainnet before this was added: a single ETH/USD
-                        # long reported positions_total=2, positions_closed=2.
-                        # ``generate_teardown_intents`` below already supplies it, so
-                        # omitting it here was an asymmetry between the two halves of
-                        # one strategy, not a deliberate shape.
-                        "market": self.market,
-                        "collateral_token": self.collateral_token,
-                        "side": self._position_side,
-                        "size_usd": str(self.position_size_usd),
-                    },
+        if probe.is_open:
+            for found in probe.positions:
+                positions.append(
+                    self._position_row(
+                        side=LONG if found.is_long else SHORT,
+                        # Unpriceable notional degrades to the requested size WITH
+                        # the unmeasured markers — never a measured $0.
+                        value_usd=(
+                            found.notional_usd if found.notional_usd is not None else self.position_size_usd
+                        ),
+                        measured=found.notional_usd is not None,
+                    )
                 )
+        elif not probe.is_measured:
+            logger.warning(
+                "teardown: GMX position read UNMEASURED (%s) — falling back to cached side=%s. "
+                "An unmeasured read is not a flat account.",
+                probe.reason,
+                self._position_side,
+            )
+            if self._position_side is not None:
+                positions.append(
+                    self._position_row(
+                        side=self._position_side,
+                        value_usd=self.position_size_usd,
+                        measured=False,
+                    )
+                )
+        elif self._position_side is not None:
+            logger.info(
+                "teardown: GMX measured FLAT on %s while cached side=%s — reporting the venue",
+                self.market,
+                self._position_side,
             )
         return TeardownPositionSummary(
             deployment_id=getattr(self, "deployment_id", "gmx_v2_directional_perp"),
@@ -445,18 +534,30 @@ class GmxV2DirectionalPerp(IntentStrategy):
         )
 
     def generate_teardown_intents(self, mode: "TeardownMode", market: MarketSnapshot | None = None) -> list[AnyIntent]:
+        """Close what the venue holds. Must agree with ``get_open_positions()``.
+
+        If enumeration reports a venue position this never emits a close for, the
+        completeness check fails the teardown loudly and the position is stranded
+        anyway (VIB-5469 / ALM-2900) — so both halves read the same probe.
+        """
         from almanak.framework.teardown import TeardownMode
 
-        if self._position_side is None:
-            return []
         slippage = max(self.max_slippage, Decimal("0.02")) if mode == TeardownMode.HARD else self.max_slippage
+        probe = self._venue_probe(market)
+        if probe.is_open:
+            sides = [found.is_long for found in probe.positions]
+        elif probe.is_flat:
+            sides = []
+        else:
+            sides = [] if self._position_side is None else [self._position_side == LONG]
         return [
             Intent.perp_close(
                 market=self.market,
                 collateral_token=self.collateral_token,
-                is_long=self._position_side == LONG,
+                is_long=is_long,
                 size_usd=None,  # None = close the FULL on-chain position (never a cached notional — VIB-5950/ALM-2976)
                 max_slippage=slippage,
                 protocol="gmx_v2",
             )
+            for is_long in sides
         ]
