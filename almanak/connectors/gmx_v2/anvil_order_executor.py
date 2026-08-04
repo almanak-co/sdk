@@ -22,11 +22,15 @@ boundary beyond the connector-level network guard.
 
 from __future__ import annotations
 
+import json
 import logging
+import re
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal, InvalidOperation
+from pathlib import Path
 from typing import Any, Literal
 
 import grpc
@@ -37,6 +41,7 @@ from eth_utils import function_signature_to_4byte_selector, keccak, to_checksum_
 from web3 import Web3
 from web3.types import RPCEndpoint
 
+from almanak.config.connectors import connectors_config_from_env
 from almanak.connectors._strategy_base.rpc import (
     decode_revert_data,
     extract_revert_reason,
@@ -750,6 +755,158 @@ def _replay_revert_reason(
     return f"eth_call replay reverted: {faithful.describe()}"
 
 
+# Call-trace probe (VIB-6437). The replay above reports the OUTERMOST revert —
+# and on GMX that is structurally the wrong frame to explain anything: the venue
+# wraps order execution in a try/catch, so when the error HANDLER itself fails
+# (InsufficientGasForCancellation fired while cancelling), the primary revert
+# that put GMX on the cancellation path is swallowed before it can surface.
+# Every prior instrument on this ticket measured the symptom for exactly this
+# reason. Only a call trace can recover the inner frames' own revert payloads.
+#
+# ``debug_traceTransaction`` is Anvil-gated gateway-side (ANVIL_ONLY_RPC_METHODS,
+# ``almanak/gateway/validation.py``) and this module refuses non-anvil networks,
+# so this probe cannot run anywhere but a managed fork.
+
+_TRACE_DIR_ENV = "ALMANAK_GMX_ANVIL_TRACE_DIR"  # read via ConnectorsConfig, never directly
+_TRACE_MAX_FRAMES = 4096  # defensive cap on the tree walk; a GMX executeOrder is a few hundred frames
+_TX_HASH_PATTERN = re.compile(r"^0x[0-9a-fA-F]{64}$")
+
+
+def _trace_artifact_dir() -> str:
+    """The callTracer artifact directory, or empty when capture is off.
+
+    Routed through the typed config service (config-boundary gate,
+    ``scripts/ci/check_config_boundary.py``) and read at CALL time, not import
+    time, so ``ALMANAK_GMX_ANVIL_TRACE_DIR`` behaves as a per-run switch.
+    """
+    return (connectors_config_from_env().gmx_anvil_trace_dir or "").strip()
+
+
+def _call_tracer_trace(provider: GatewayWeb3Provider, tx_hash: str) -> dict[str, Any] | None:
+    """One ``debug_traceTransaction`` callTracer tree, or ``None``. Never raises.
+
+    ``None`` means UNMEASURED (transport failure, method unavailable, malformed
+    answer) — the caller must say so rather than treating it as an empty trace.
+    """
+    try:
+        result = _rpc(provider, "debug_traceTransaction", [tx_hash, {"tracer": "callTracer"}])
+    except Exception as exc:  # noqa: BLE001 — a diagnostic must never mask the real failure
+        logger.debug("GMX call-trace fetch failed for %s: %s", tx_hash, exc, exc_info=True)
+        return None
+    return result if isinstance(result, dict) else None
+
+
+def _erroring_frames(root: dict[str, Any]) -> tuple[list[dict[str, Any]], bool]:
+    """Erroring call frames in document order (outermost first), plus a truncation flag.
+
+    Document order matters for reading: the first frame is the outer revert the
+    receipt already names; the frames after it are the inner failures it
+    absorbed — the innermost one is normally the primary cause. Each returned
+    frame carries its ``depth`` so that nesting survives the flattening.
+    """
+    frames: list[dict[str, Any]] = []
+    stack: list[tuple[Any, int]] = [(root, 0)]
+    visited = 0
+    while stack:
+        if visited >= _TRACE_MAX_FRAMES:
+            return frames, True
+        node, depth = stack.pop()
+        visited += 1
+        if not isinstance(node, dict):
+            continue
+        if node.get("error"):
+            frames.append({**node, "depth": depth})
+        calls = node.get("calls")
+        if isinstance(calls, list):
+            for child in reversed(calls):
+                stack.append((child, depth + 1))
+    return frames, False
+
+
+def _describe_trace_frame(frame: dict[str, Any]) -> str:
+    """One erroring frame as a compact, ABI-faithful log fragment."""
+    parts: list[str] = [f"depth={frame.get('depth', '?')}"]
+    call_type = frame.get("type")
+    if call_type:
+        parts.append(str(call_type))
+    to = frame.get("to")
+    if to:
+        parts.append(f"to={to}")
+    raw_input = frame.get("input")
+    if isinstance(raw_input, str) and raw_input.startswith("0x") and len(raw_input) >= 10:
+        parts.append(f"selector={raw_input[:10]}")
+    gas_used = frame.get("gasUsed")
+    if isinstance(gas_used, str) and gas_used.startswith("0x"):
+        try:
+            parts.append(f"gas_used={int(gas_used, 16)}")
+        except ValueError:
+            pass
+    elif isinstance(gas_used, int):
+        parts.append(f"gas_used={gas_used}")
+    parts.append(f"error={frame.get('error')!r}")
+    revert_reason = frame.get("revertReason")
+    if revert_reason:
+        parts.append(f"reason={revert_reason!r}")
+    output = frame.get("output")
+    if isinstance(output, str) and output.startswith("0x") and len(output) > 2:
+        # The frame's own revert payload — the datum this probe exists for.
+        # Same decoder and same never-silently-cut formatting as the replay
+        # probe (VIB-6483), so the two probes cannot disagree about rendering.
+        parts.append(f"decoded={decode_revert_data(output)}")
+        parts.append(f"raw={_format_raw_payload(output)}")
+    return " ".join(parts)
+
+
+def _write_trace_artifact(tx_hash: str, trace: dict[str, Any]) -> None:
+    """Persist the raw callTracer JSON to ``$ALMANAK_GMX_ANVIL_TRACE_DIR``. Never raises.
+
+    A flattened log line cannot be diffed against a control run's call tree;
+    the raw JSON can. No-op unless the env var is set, so ordinary runs write
+    nothing.
+    """
+    directory = _trace_artifact_dir()
+    if not directory or not _TX_HASH_PATTERN.match(tx_hash):
+        return
+    try:
+        target = Path(directory)
+        target.mkdir(parents=True, exist_ok=True)
+        (target / f"{tx_hash.lower()}.calltrace.json").write_text(json.dumps(trace, indent=1))
+    except Exception as exc:  # noqa: BLE001 — an artifact writer must never mask the real failure
+        logger.warning("GMX call-trace artifact write failed for %s: %s", tx_hash, exc)
+
+
+def _capture_trace_artifact_if_enabled(provider: GatewayWeb3Provider, tx_hash: str) -> None:
+    """Trace a NON-reverting keeper transaction when artifact capture is on.
+
+    The revert path traces unconditionally (the trace IS the diagnosis); filling
+    transactions are traced only under ``ALMANAK_GMX_ANVIL_TRACE_DIR`` because
+    their only use is as the control arm of a differential — and a revert probe
+    without a control invites over-reading a single sample.
+    """
+    if not _trace_artifact_dir():
+        return
+    trace = _call_tracer_trace(provider, tx_hash)
+    if trace is not None:
+        _write_trace_artifact(tx_hash, trace)
+
+
+def _trace_revert_frames(provider: GatewayWeb3Provider, tx_hash: str) -> str:
+    """Describe the mined revert's erroring call frames. Never raises."""
+    trace = _call_tracer_trace(provider, tx_hash)
+    if trace is None:
+        return "call trace unavailable — debug_traceTransaction returned no usable answer"
+    _write_trace_artifact(tx_hash, trace)
+    frames, truncated = _erroring_frames(trace)
+    if not frames:
+        # Empty ≠ Zero, applied to traces: a mined revert whose trace shows no
+        # erroring frame means the TRACE is not corroborating, not that the
+        # revert did not happen. Say which one was measured.
+        return "call trace carried no erroring frames — trace does not corroborate the mined revert; treat the trace as unmeasured"
+    rendered = " || ".join(_describe_trace_frame(frame) for frame in frames)
+    suffix = f" (walk truncated at {_TRACE_MAX_FRAMES} frames)" if truncated else ""
+    return f"call trace erroring frames x{len(frames)}, outermost first: {rendered}{suffix}"
+
+
 def _diagnose_mined_revert(
     provider: GatewayWeb3Provider,
     transaction: dict[str, str],
@@ -758,7 +915,10 @@ def _diagnose_mined_revert(
 ) -> str:
     """Assemble the best-effort cause of a mined revert. Never raises."""
     parts: list[str] = []
-    for label, probe in (("replay", lambda: _replay_revert_reason(provider, transaction, block_number)),):
+    for label, probe in (
+        ("replay", lambda: _replay_revert_reason(provider, transaction, block_number)),
+        ("trace", lambda: _trace_revert_frames(provider, tx_hash)),
+    ):
         try:
             detail = probe()
         except Exception as exc:  # noqa: BLE001 — a diagnostic must never mask the real failure
@@ -787,6 +947,45 @@ def _estimate_gas_with_warm_retry(provider: GatewayWeb3Provider, transaction: di
                 exc,
             )
     raise GmxAnvilOrderExecutionError("eth_estimateGas retry loop exited without a result")  # pragma: no cover
+
+
+def _log_mined_block_timing(
+    provider: GatewayWeb3Provider,
+    tx_hash: str,
+    kind: str,
+    block_number: int,
+) -> None:
+    """Record where a keeper transaction landed in FORK TIME vs wall time. Never raises.
+
+    R15 (VIB-6437) enumerated the inputs that could distinguish a head-mode fork
+    from a pinned fork of the same base block, and the timestamps Anvil assigns
+    to newly mined blocks were the one input no artifact had ever recorded. The
+    ``wall_delta_s`` here is that measurement: ~0 means mined blocks track the
+    system clock; a large negative value means they continue the forked block's
+    frozen timeline.
+    """
+    if block_number <= 0:
+        return
+    try:
+        block = _rpc(provider, "eth_getBlockByNumber", [hex(block_number), False])
+        if not isinstance(block, dict) or "timestamp" not in block:
+            return
+        raw_timestamp = block["timestamp"]
+        # Same both-forms parse as _latest_block_timestamp: hex string on the
+        # wire, but int if a provider layer already decoded it — feeding a
+        # decimal int through int(str(x), 16) would log a silently wrong delta.
+        timestamp = int(raw_timestamp, 16) if isinstance(raw_timestamp, str) else int(raw_timestamp)
+    except Exception as exc:  # noqa: BLE001 — timing telemetry must never mask the transaction outcome
+        logger.debug("GMX keeper block-timing read failed for %s: %s", tx_hash, exc)
+        return
+    logger.info(
+        "GMX keeper %s transaction mined: %s block=%d timestamp=%d wall_delta_s=%+d",
+        kind,
+        tx_hash,
+        block_number,
+        timestamp,
+        timestamp - int(time.time()),
+    )
 
 
 def _send_transaction(
@@ -849,14 +1048,15 @@ def _send_transaction(
         HexStr(tx_hash),
         timeout=_TX_RECEIPT_TIMEOUT_SECONDS,
     )
+    try:
+        block_number = int(receipt["blockNumber"])
+    except (KeyError, TypeError, ValueError):
+        block_number = 0
+    _log_mined_block_timing(provider, tx_hash, kind, block_number)
     if int(receipt["status"]) != 1:
         gas_used = int(receipt["gasUsed"])
         # Diagnose BEFORE raising: the reason is the one datum that identifies
         # the cause, and it is only obtainable here (VIB-6438).
-        try:
-            block_number = int(receipt["blockNumber"])
-        except (KeyError, TypeError, ValueError):
-            block_number = 0
         diagnosis = _diagnose_mined_revert(provider, transaction_with_gas, tx_hash, block_number)
         # Only the ORDER call can be an order-level rejection. A harness
         # oracle setup/cleanup revert means our own plumbing failed and the
@@ -1105,6 +1305,9 @@ def _execute_order(
     receipt = _rpc(provider, "eth_getTransactionReceipt", [tx_hash])
     if not isinstance(receipt, dict):
         raise GmxAnvilOrderExecutionError(f"GMX executeOrder receipt was not a JSON-RPC object: {tx_hash}")
+    # BEFORE outcome verification: a cancelled/frozen order raises there, and a
+    # trace of that transaction is control-arm evidence, not an error artifact.
+    _capture_trace_artifact_if_enabled(provider, tx_hash)
     _verify_execution_outcome(dict(receipt), order_key, tx_hash)
     return tx_hash, dict(receipt)
 

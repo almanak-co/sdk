@@ -276,6 +276,7 @@ Read by the strategy launcher and gateway when running against an Anvil fork (`a
 | `ALMANAK_GATEWAY_ANVIL_WATCHDOG_INTERVAL` | Anvil-process watchdog interval (seconds). Must be `> 0`. | `5.0` |
 | `ALMANAK_FORK_RPC_TIMEOUT` | RPC timeout (seconds) for fork-mode strategies. | `8.0` |
 | `ALMANAK_FORK_HEALTH_TIMEOUT` | Health-probe timeout (seconds) when bringing up a fork. | `5.0` |
+| `ALMANAK_GMX_ANVIL_TRACE_DIR` | Diagnostics: directory for raw `callTracer` JSON artifacts of GMX managed-Anvil keeper transactions (one `<txhash>.calltrace.json` per `executeOrder`). When unset, only reverting transactions are traced, inline in the failure diagnosis. Anvil-only. | unset |
 | `SOLANA_VALIDATOR_PORT` | Solana local-validator port for fork tests. | `8899` |
 
 ---

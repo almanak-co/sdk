@@ -89,6 +89,13 @@ ANVIL_ONLY_RPC_METHODS = frozenset(
         # network == "anvil" branch is only reachable when the gateway itself
         # was launched for Anvil.
         "eth_sendTransaction",
+        # Read-only call tracing for fork diagnostics (VIB-6437): a mined keeper
+        # revert on GMX fires inside the venue's error HANDLER, so the primary
+        # revert reason is swallowed and only a call trace can recover it. The
+        # main allowlist's debug_* exclusion still stands for mainnet — this
+        # entry is reachable only on a gateway launched for Anvil, same as every
+        # method above.
+        "debug_traceTransaction",
     }
 )
 

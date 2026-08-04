@@ -665,3 +665,202 @@ def test_oracle_cleanup_failure_does_not_mask_the_body_failure() -> None:
             mod._clear_seeded_oracle_prices(MagicMock(), _DEPENDENCIES, hashes, body_failed=False)
 
     assert hashes == []
+
+
+# ---------------------------------------------------------------------------
+# Call-trace probe (VIB-6437): the primary revert GMX's error handler swallows
+# is recoverable only from a call trace, and the probe must never fabricate one.
+
+
+def _gmx_revert_tree() -> dict:
+    """A callTracer tree in the shape the VIB-6437 revert produces.
+
+    Outer executeOrder frame reverts with the HANDLER's error
+    (InsufficientGasForCancellation); the inner try/catch sub-call carries the
+    PRIMARY revert payload the handler swallowed.
+    """
+    return {
+        "type": "CALL",
+        "to": "0x" + "aa" * 20,
+        "input": "0x" + "e68e69a6" + "00" * 32,
+        "gasUsed": hex(3_252_233),
+        "error": "execution reverted",
+        "output": "0xd3dacaac" + "00" * 62 + "1234",
+        "calls": [
+            {"type": "STATICCALL", "to": "0x" + "bb" * 20, "input": "0x12345678", "gasUsed": "0x100"},
+            {
+                "type": "CALL",
+                "to": "0x" + "cc" * 20,
+                "input": "0xdeadbeef",
+                "gasUsed": hex(3_000_000),
+                "error": "execution reverted",
+                # The primary cause — a distinct custom error selector.
+                "output": "0x11223344" + "ab" * 32,
+                "calls": [],
+            },
+        ],
+    }
+
+
+def _fill_tree() -> dict:
+    """A callTracer tree for a clean fill: frames, no errors anywhere."""
+    return {
+        "type": "CALL",
+        "to": "0x" + "aa" * 20,
+        "input": "0x" + "e68e69a6",
+        "gasUsed": hex(900_000),
+        "calls": [{"type": "STATICCALL", "to": "0x" + "bb" * 20, "input": "0x12345678", "gasUsed": "0x100"}],
+    }
+
+
+def test_erroring_frames_returns_outermost_first_with_depths() -> None:
+    from almanak.connectors.gmx_v2 import anvil_order_executor as mod
+
+    frames, truncated = mod._erroring_frames(_gmx_revert_tree())
+
+    assert truncated is False
+    assert [frame["depth"] for frame in frames] == [0, 1]
+    assert frames[0]["output"].startswith("0xd3dacaac")
+    assert frames[1]["output"].startswith("0x11223344")
+
+
+def test_erroring_frames_on_a_fill_tree_is_empty() -> None:
+    """Negative control: a clean fill must yield NO erroring frames — the probe
+    must never fabricate a revert out of a successful trace."""
+    from almanak.connectors.gmx_v2 import anvil_order_executor as mod
+
+    frames, truncated = mod._erroring_frames(_fill_tree())
+
+    assert frames == []
+    assert truncated is False
+
+
+def test_erroring_frames_announces_truncation_at_the_walk_cap() -> None:
+    from almanak.connectors.gmx_v2 import anvil_order_executor as mod
+
+    wide = {"type": "CALL", "error": "boom", "calls": [{"type": "CALL", "error": "x"} for _ in range(50)]}
+    with patch.object(mod, "_TRACE_MAX_FRAMES", 10):
+        frames, truncated = mod._erroring_frames(wide)
+
+    assert truncated is True
+    assert len(frames) <= 10
+
+
+def test_trace_revert_frames_reports_the_inner_payload() -> None:
+    from almanak.connectors.gmx_v2 import anvil_order_executor as mod
+
+    provider = MagicMock()
+    provider.make_request.return_value = {"result": _gmx_revert_tree()}
+
+    detail = mod._trace_revert_frames(provider, "0x" + "11" * 32)
+
+    assert "outermost first" in detail
+    assert "0xd3dacaac" in detail
+    assert "0x11223344" in detail
+    method, params = provider.make_request.call_args.args
+    assert method == "debug_traceTransaction"
+    assert params[1] == {"tracer": "callTracer"}
+
+
+def test_trace_revert_frames_reads_unavailable_as_unmeasured() -> None:
+    """A lost trace must read as unmeasured, not as an empty or clean trace."""
+    from almanak.connectors.gmx_v2 import anvil_order_executor as mod
+
+    provider = MagicMock()
+    provider.make_request.return_value = {"error": {"message": "method not found"}}
+
+    detail = mod._trace_revert_frames(provider, "0x" + "11" * 32)
+
+    assert "unavailable" in detail
+
+
+def test_trace_without_erroring_frames_does_not_corroborate() -> None:
+    from almanak.connectors.gmx_v2 import anvil_order_executor as mod
+
+    provider = MagicMock()
+    provider.make_request.return_value = {"result": _fill_tree()}
+
+    detail = mod._trace_revert_frames(provider, "0x" + "11" * 32)
+
+    assert "does not corroborate" in detail
+
+
+def test_diagnose_mined_revert_trace_failure_never_masks_the_replay() -> None:
+    from almanak.connectors.gmx_v2 import anvil_order_executor as mod
+
+    with (
+        patch.object(mod, "_replay_revert_reason", return_value="replay says X"),
+        patch.object(mod, "_trace_revert_frames", side_effect=RuntimeError("tracer exploded")),
+    ):
+        diagnosis = mod._diagnose_mined_revert(MagicMock(), {}, "0x" + "11" * 32, 7)
+
+    assert "replay says X" in diagnosis
+    assert "trace unavailable" in diagnosis
+
+
+def test_trace_artifact_written_only_under_env_dir(tmp_path, monkeypatch) -> None:
+    from almanak.connectors.gmx_v2 import anvil_order_executor as mod
+
+    tx_hash = "0x" + "ab" * 32
+    monkeypatch.delenv(mod._TRACE_DIR_ENV, raising=False)
+    mod._write_trace_artifact(tx_hash, {"type": "CALL"})
+    assert list(tmp_path.iterdir()) == []
+
+    monkeypatch.setenv(mod._TRACE_DIR_ENV, str(tmp_path))
+    mod._write_trace_artifact(tx_hash, {"type": "CALL"})
+    written = list(tmp_path.iterdir())
+    assert [p.name for p in written] == [f"{tx_hash}.calltrace.json"]
+
+    # A non-hash never becomes a filename.
+    mod._write_trace_artifact("../../etc/passwd", {"type": "CALL"})
+    assert len(list(tmp_path.iterdir())) == 1
+
+
+def test_fill_trace_capture_is_inert_without_the_env_dir(monkeypatch) -> None:
+    from almanak.connectors.gmx_v2 import anvil_order_executor as mod
+
+    monkeypatch.delenv(mod._TRACE_DIR_ENV, raising=False)
+    provider = MagicMock()
+    mod._capture_trace_artifact_if_enabled(provider, "0x" + "ab" * 32)
+    provider.make_request.assert_not_called()
+
+
+def test_fill_trace_capture_writes_the_control_artifact(tmp_path, monkeypatch) -> None:
+    from almanak.connectors.gmx_v2 import anvil_order_executor as mod
+
+    monkeypatch.setenv(mod._TRACE_DIR_ENV, str(tmp_path))
+    provider = MagicMock()
+    provider.make_request.return_value = {"result": _fill_tree()}
+    tx_hash = "0x" + "cd" * 32
+    mod._capture_trace_artifact_if_enabled(provider, tx_hash)
+    assert (tmp_path / f"{tx_hash}.calltrace.json").exists()
+
+
+def test_trace_frame_and_block_timing_accept_decimal_ints(caplog: pytest.LogCaptureFixture) -> None:
+    """PR #3602 review: tracer/provider layers may deliver ints, not hex strings.
+
+    Feeding a decimal int through ``int(str(x), 16)`` logs a silently wrong
+    wall delta; dropping an int ``gasUsed`` hides the one number a starved
+    frame exists to show.
+    """
+    from almanak.connectors.gmx_v2 import anvil_order_executor as mod
+
+    assert "gas_used=10659" in mod._describe_trace_frame({"depth": 4, "error": "out of gas", "gasUsed": 10_659})
+
+    provider = MagicMock()
+    with (
+        patch.object(mod, "_rpc", return_value={"timestamp": 1_785_807_521}),
+        caplog.at_level("INFO", logger="almanak.connectors.gmx_v2.anvil_order_executor"),
+    ):
+        mod._log_mined_block_timing(provider, "0x" + "ab" * 32, "order", 42)
+
+    assert any("timestamp=1785807521" in record.getMessage() for record in caplog.records)
+
+    # A timing-read failure must never mask the transaction outcome (it is
+    # telemetry): the helper swallows the error and the caller proceeds.
+    with patch.object(mod, "_rpc", side_effect=RuntimeError("rpc down")):
+        mod._log_mined_block_timing(provider, "0x" + "ab" * 32, "order", 42)
+
+    # Malformed block data (no timestamp) is likewise a silent no-op.
+    with patch.object(mod, "_rpc", return_value={"number": "0x2a"}):
+        mod._log_mined_block_timing(provider, "0x" + "ab" * 32, "order", 42)

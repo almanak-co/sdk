@@ -270,10 +270,20 @@ class TestAnvilOnlyRpcMethods:
             with pytest.raises(ValidationError, match="not allowed"):
                 validate_rpc_method(method)
 
-    def test_anvil_network_does_not_allow_debug_methods(self):
-        """Even on Anvil, dangerous debug_* methods remain blocked."""
-        with pytest.raises(ValidationError, match="not allowed"):
-            validate_rpc_method("debug_traceTransaction", network="anvil")
+    def test_anvil_network_blocks_debug_methods_except_the_tracing_exception(self):
+        """debug_* stays blocked on Anvil — with ONE deliberate exception.
+
+        ``debug_traceTransaction`` joined ``ANVIL_ONLY_RPC_METHODS`` for the
+        VIB-6437 keeper-revert diagnostics: GMX's error handler swallows the
+        primary revert, and only a call trace recovers it. It is read-only and
+        reachable only on a gateway launched for Anvil. Every other debug_*
+        method remains blocked even there, and the exception itself remains
+        blocked without the anvil network (``test_dangerous_methods_still_blocked``).
+        """
+        assert validate_rpc_method("debug_traceTransaction", network="anvil") == "debug_traceTransaction"
+        for method in ("debug_traceCall", "debug_traceBlockByNumber", "debug_setHead"):
+            with pytest.raises(ValidationError, match="not allowed"):
+                validate_rpc_method(method, network="anvil")
 
     def test_anvil_network_still_accepts_evm_methods(self):
         """Normal EVM methods still work when network='anvil'."""

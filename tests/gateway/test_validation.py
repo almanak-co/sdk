@@ -256,6 +256,22 @@ class TestRpcMethodValidation:
             with pytest.raises(ValidationError):
                 validate_rpc_method(method)
 
+    def test_debug_trace_transaction_is_anvil_only(self):
+        """VIB-6437: call tracing is allowed ONLY on an Anvil gateway.
+
+        The fork keeper needs ``debug_traceTransaction`` to recover the primary
+        revert GMX's error handler swallows, but the main allowlist's debug_*
+        exclusion must keep holding everywhere else —
+        ``test_dangerous_methods_rejected`` above pins the no-network case.
+        """
+        assert validate_rpc_method("debug_traceTransaction", network="anvil") == "debug_traceTransaction"
+        for network in ("mainnet", "testnet", None):
+            with pytest.raises(ValidationError):
+                validate_rpc_method("debug_traceTransaction", network=network)
+        # Other debug_* methods gain nothing from the anvil scope.
+        with pytest.raises(ValidationError):
+            validate_rpc_method("debug_traceCall", network="anvil")
+
 
 class TestSymbolValidation:
     """Tests for trading symbol validation."""

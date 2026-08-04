@@ -200,6 +200,21 @@ class ConnectorsConfig(BaseModel):
     """
 
     # -------------------------------------------------------------------------
+    # Diagnostics — non-secret, unset in ordinary runs.
+    # -------------------------------------------------------------------------
+
+    gmx_anvil_trace_dir: str | None = Field(default=None)
+    """Directory for GMX managed-Anvil callTracer artifacts (``ALMANAK_GMX_ANVIL_TRACE_DIR``).
+
+    ``None`` means capture is off (the default). When set, the anvil keeper
+    persists raw callTracer JSON for every keeper ``executeOrder`` — filling
+    and reverting — plus any reverting harness (oracle setup/cleanup)
+    transaction whose diagnosis fetched a trace. The fill artifacts are the
+    control arm of revert differentials (VIB-6437 R16). Documented in
+    ``docs/environment-variables.md`` §Anvil & Fork Health.
+    """
+
+    # -------------------------------------------------------------------------
     # Base URLs — non-secret, defaulted to public production endpoints.
     # -------------------------------------------------------------------------
 
@@ -286,6 +301,7 @@ def connectors_config_from_env(
         "polymarket_gamma_url": os.environ.get("POLYMARKET_GAMMA_URL"),
         "polymarket_data_api_url": os.environ.get("POLYMARKET_DATA_API_URL"),
         "solana_rpc_url": os.environ.get("SOLANA_RPC_URL"),
+        "gmx_anvil_trace_dir": os.environ.get("ALMANAK_GMX_ANVIL_TRACE_DIR"),
     }
 
     # Base URLs — only set the field when the env var is provided so the
