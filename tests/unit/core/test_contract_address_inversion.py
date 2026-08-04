@@ -1,7 +1,7 @@
 """Equivalence tests for the CS-5 money-path inversions (VIB-4851 Phase E).
 
 Chainlink feeds, the Safe multisend map, LP position managers, and the
-Enso bridge token table move to descriptor / connector ownership. Every
+Enso bridge token table move to integration / descriptor / connector ownership. Every
 legacy literal is frozen verbatim below; the four DELIBERATE divergences
 are pinned individually, each backed by on-chain evidence gathered on
 2026-06-11 (eth_getCode: the legacy addresses are EMPTY, the registry
@@ -12,10 +12,12 @@ from __future__ import annotations
 
 from almanak.core.chains import ChainRegistry
 from almanak.core.chains._helpers import (
-    chainlink_chain_ids_map,
-    chainlink_eth_denominated_map,
-    chainlink_usd_feeds_map,
     contract_address_map,
+)
+from almanak.integrations.chainlink.catalog import (
+    CHAINLINK_CHAIN_IDS,
+    CHAINLINK_PRICE_FEEDS,
+    ETH_DENOMINATED_FEEDS,
 )
 
 # ── Frozen legacy literals (verbatim from the pre-CS-5 modules) ─────────────
@@ -268,22 +270,22 @@ FROZEN_ENSO_TOKENS: dict[str, dict[str, str]] = {
 
 class TestChainlinkInversion:
     def test_usd_feeds_byte_equivalent(self) -> None:
-        derived = {c: dict(v) for c, v in chainlink_usd_feeds_map().items()}
+        derived = {c: dict(v) for c, v in CHAINLINK_PRICE_FEEDS.items()}
         assert derived == FROZEN_CHAINLINK_PRICE_FEEDS
 
     def test_chain_ids_byte_equivalent(self) -> None:
-        assert dict(chainlink_chain_ids_map()) == FROZEN_CHAINLINK_CHAIN_IDS
+        assert dict(CHAINLINK_CHAIN_IDS) == FROZEN_CHAINLINK_CHAIN_IDS
 
     def test_chain_ids_cannot_drift_from_descriptor(self) -> None:
-        for chain, chain_id in chainlink_chain_ids_map().items():
+        for chain, chain_id in CHAINLINK_CHAIN_IDS.items():
             assert ChainRegistry.resolve(chain).chain_id == chain_id
 
     def test_eth_denominated_byte_equivalent(self) -> None:
-        derived = {c: dict(v) for c, v in chainlink_eth_denominated_map().items()}
+        derived = {c: dict(v) for c, v in ETH_DENOMINATED_FEEDS.items()}
         assert derived == FROZEN_ETH_DENOMINATED_FEEDS
 
     def test_public_module_views(self) -> None:
-        from almanak.core.chainlink import (
+        from almanak.integrations.chainlink.catalog import (
             CHAINLINK_CHAIN_IDS,
             CHAINLINK_PRICE_FEEDS,
             ETH_DENOMINATED_FEEDS,

@@ -138,9 +138,7 @@ def test_load_baseline_reads_legacy_v1_with_line_column(scanner, tmp_path):
     legacy = {
         "version": 1,
         "total": 1,
-        "findings": [
-            {"category": "CHAIN_STRING", "path": "almanak/x.py", "line": 5, "column": 9, "name": "arbitrum"}
-        ],
+        "findings": [{"category": "CHAIN_STRING", "path": "almanak/x.py", "line": 5, "column": 9, "name": "arbitrum"}],
     }
     dest = tmp_path / "legacy.json"
     dest.write_text(json.dumps(legacy), encoding="utf-8")
@@ -155,4 +153,49 @@ def test_write_baseline_schema_is_v2_and_deduped(scanner, tmp_path):
     assert payload["version"] == 2
     assert payload["total"] == 1  # deduped sites
     assert payload["raw_findings"] == 2  # underlying line-level findings
+    assert payload["exceptions"] == []
     assert len(payload["findings"]) == 1
+
+
+def test_write_baseline_does_not_preserve_stale_false_positive_exceptions(scanner, tmp_path):
+    finding = _finding(
+        scanner,
+        path="almanak/integrations/coingecko/integration.py",
+        name="hyperliquid",
+    )
+    dest = tmp_path / "baseline.json"
+    scanner.write_baseline_json([finding], dest)
+    payload = json.loads(dest.read_text())
+    assert payload["exceptions"] == []
+
+
+def test_only_provider_metadata_files_are_chain_homes(scanner, tmp_path):
+    integration = tmp_path / "almanak" / "integrations" / "chainlink"
+    gateway = integration / "gateway"
+    gateway.mkdir(parents=True)
+    (integration / "integration.py").write_text('CHAIN_IDS = {"arbitrum": "42161"}\nPROTOCOL = "hyperliquid"')
+    (gateway / "price_source.py").write_text('CHAIN = "arbitrum"')
+    framework = tmp_path / "almanak" / "framework"
+    framework.mkdir(parents=True)
+    (framework / "leak.py").write_text('CHAIN = "arbitrum"')
+
+    targets = scanner.list_target_files(tmp_path)
+    relative = {path.relative_to(tmp_path).as_posix() for path in targets}
+    assert "almanak/integrations/chainlink/integration.py" in relative
+    assert "almanak/integrations/chainlink/gateway/price_source.py" in relative
+    assert "almanak/framework/leak.py" in relative
+
+    provider_path = integration / "integration.py"
+    gateway_path = gateway / "price_source.py"
+    assert scanner.is_provider_chain_metadata_home(provider_path, tmp_path)
+    assert not scanner.is_provider_chain_metadata_home(gateway_path, tmp_path)
+    chain_targets = [path for path in targets if not scanner.is_provider_chain_metadata_home(path, tmp_path)]
+    chain_findings = scanner.scan_strings(chain_targets, tmp_path, "CHAIN_STRING", {"arbitrum"})
+    assert [(finding.path, finding.name) for finding in chain_findings] == [
+        ("almanak/framework/leak.py", "arbitrum"),
+        ("almanak/integrations/chainlink/gateway/price_source.py", "arbitrum"),
+    ]
+    protocol_findings = scanner.scan_strings(targets, tmp_path, "PROTOCOL_STRING", {"hyperliquid"})
+    assert [(finding.path, finding.name) for finding in protocol_findings] == [
+        ("almanak/integrations/chainlink/integration.py", "hyperliquid")
+    ]

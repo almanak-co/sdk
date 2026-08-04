@@ -92,14 +92,14 @@ class TestOkxIntegration:
 
     def test_chain_id_mapping(self, okx):
         """Chain names map to OKX numeric chain IDs via the registry (VIB-4851 B1)."""
-        from almanak.core.chains._helpers import external_id_for
+        from almanak.integrations.chains import integration_chain_id
 
-        assert external_id_for("ethereum", "okx") == "1"
-        assert external_id_for("arbitrum", "okx") == "42161"
-        assert external_id_for("base", "okx") == "8453"
-        assert external_id_for("polygon", "okx") == "137"
-        assert external_id_for("avalanche", "okx") == "43114"
-        assert external_id_for("solana", "okx") == "501"  # synthetic OKX literal
+        assert integration_chain_id("ethereum", "okx") == "1"
+        assert integration_chain_id("arbitrum", "okx") == "42161"
+        assert integration_chain_id("base", "okx") == "8453"
+        assert integration_chain_id("polygon", "okx") == "137"
+        assert integration_chain_id("avalanche", "okx") == "43114"
+        assert integration_chain_id("solana", "okx") == "501"  # synthetic OKX literal
 
     # -------------------------------------------------------------------------
     # Response normalization tests
@@ -321,6 +321,36 @@ class TestOkxIntegration:
             json_data={"walletAddressList": [{"chainIndex": "8453", "walletAddress": "0xabc"}]},
         )
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("chain", "expected_id"), [("ethereum", "1"), ("501", "501")])
+    async def test_wallet_portfolio_resolves_canonical_and_numeric_chain_ids(self, okx, chain, expected_id):
+        with patch.object(okx, "_fetch", return_value={"data": []}) as fetch:
+            await okx.get_wallet_portfolio("0xabc", chain)
+
+        fetch.assert_awaited_once_with(
+            "/api/v6/dex/balance/total-value-by-address",
+            params={"address": "0xabc", "chains": expected_id},
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("chain", "expected_id"), [("ethereum", "1"), ("501", "501")])
+    async def test_wallet_positions_resolves_canonical_and_numeric_chain_ids(self, okx, chain, expected_id):
+        with patch.object(okx, "_fetch", return_value={"data": []}) as fetch:
+            await okx.get_wallet_positions("0xabc", chain)
+
+        assert fetch.await_args_list[0].kwargs["params"] == {"address": "0xabc", "chains": expected_id}
+        assert fetch.await_args_list[1].kwargs["json_data"] == {
+            "walletAddressList": [{"chainIndex": expected_id, "walletAddress": "0xabc"}]
+        }
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("method_name", ["get_wallet_portfolio", "get_wallet_positions"])
+    async def test_wallet_methods_reject_unsupported_chain_before_fetch(self, okx, method_name):
+        with patch.object(okx, "_fetch") as fetch:
+            with pytest.raises(ValueError, match="does not support chain 'berachain'"):
+                await getattr(okx, method_name)("0xabc", "berachain")
+        fetch.assert_not_awaited()
+
     # -------------------------------------------------------------------------
     # DeFi API tests
     # -------------------------------------------------------------------------
@@ -351,6 +381,37 @@ class TestOkxIntegration:
         """Empty response returns no platforms."""
         payload = {"code": "0", "data": []}
         assert okx._extract_platforms(payload, "1") == []
+
+    def test_extract_platforms_preserves_upstream_platforms_without_lossy_filtering(self, okx):
+        payload = {
+            "data": [
+                {
+                    "walletIdPlatformList": [
+                        {
+                            "chainIndex": "42161",
+                            "platformList": [
+                                {"analysisPlatformId": "44", "platformName": "Aave V3"},
+                                {
+                                    "analysisPlatformId": "other",
+                                    "platformName": "Wrong chain",
+                                    "chainIndex": "1",
+                                },
+                            ],
+                        },
+                        {
+                            "chainIndex": "1",
+                            "platformList": [{"analysisPlatformId": "1", "platformName": "Ethereum"}],
+                        },
+                    ]
+                }
+            ]
+        }
+
+        assert okx._extract_platforms(payload, "42161") == [
+            {"id": "44", "name": "Aave V3"},
+            {"id": "other", "name": "Wrong chain"},
+            {"id": "1", "name": "Ethereum"},
+        ]
 
     def test_normalize_defi_details(self, okx):
         """DeFi detail response is normalized into positions."""

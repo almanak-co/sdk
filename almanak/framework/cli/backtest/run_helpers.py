@@ -37,8 +37,8 @@ def _funding_token_address_map(
     return funding_map
 
 
-def _native_symbol_set(native_coingecko_ids: Any) -> set[str]:
-    return {symbol.upper() for symbol in native_coingecko_ids()}
+def _native_symbol_set(asset_id_map: Any) -> set[str]:
+    return {symbol.upper() for symbol in asset_id_map()}
 
 
 def _resolve_registry_token_address(
@@ -141,7 +141,7 @@ def build_token_address_map(
 
     # Source 2: registry-resolve any remaining non-native tracked symbol.
     # The skip-set is exactly the provider's native projection
-    # (``native_coingecko_ids`` covers natives + accepted aliases + wrapped
+    # (the chain registry projection covers natives + accepted aliases + wrapped
     # natives like WETH); those resolve via the chain registry inside the
     # provider, so they need no address and must not trigger a registry lookup.
     address_map.update(

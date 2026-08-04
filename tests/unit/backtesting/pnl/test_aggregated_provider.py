@@ -608,7 +608,6 @@ class TestCreateFromConfig:
         assert aggregated.provider_names == ["chainlink", "coingecko", "twap"]
         assert chainlink.kwargs == {
             "chain": "base",
-            "rpc_url": "https://base.example",
             "cache_ttl_seconds": 90,
             "priority": 7,
         }
@@ -950,9 +949,7 @@ class TestCreateWithDataConfigThreadsTokenAddresses:
             token_addresses=addr_map,
         )
         cg = agg.providers[0]
-        assert cg._token_addresses == {
-            "WSTETH": ("arbitrum", "0x5979d7b546e38e414f7e9822514be443a4800529")
-        }
+        assert cg._token_addresses == {"WSTETH": ("arbitrum", "0x5979d7b546e38e414f7e9822514be443a4800529")}
 
 
 class TestCreateWithDataConfig:
@@ -1018,6 +1015,20 @@ class TestCreateWithDataConfig:
                 chain="arbitrum",
                 rpc_url="",
             )
+
+    @pytest.mark.asyncio
+    async def test_chainlink_creation_is_not_gated_by_archive_rpc_url(self, monkeypatch) -> None:
+        provider = MockProvider("chainlink")
+        constructor = MagicMock(return_value=provider)
+        monkeypatch.setattr(
+            "almanak.framework.backtesting.pnl.providers.chainlink.ChainlinkDataProvider",
+            constructor,
+        )
+
+        result = await AggregatedDataProvider._create_chainlink_provider("arbitrum", "")
+
+        assert result is provider
+        constructor.assert_called_once_with(chain="arbitrum", cache_ttl_seconds=120)
 
 
 class TestRegisterTokenAddresses:

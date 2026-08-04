@@ -12,16 +12,16 @@ Covers two units extracted during the TOKEN_IDS-removal change:
 """
 
 from __future__ import annotations
-from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from almanak.core.chains import ChainRegistry
 from almanak.framework.backtesting.pnl.engine import classify_token_availability
-
-
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 _TS = datetime(2024, 1, 1, tzinfo=UTC)
 
@@ -224,6 +224,51 @@ class TestBuildTokenAddressMap:
         assert "WETH" not in result
         assert result["ETH"] == ("arbitrum", "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
         resolver.resolve.assert_not_called()
+
+    def test_polygon_native_alias_is_not_mapped_as_an_erc20(self, monkeypatch) -> None:
+        from almanak.framework.cli.backtest import run_helpers
+
+        resolver = self._patch_resolver(monkeypatch, {})
+
+        result = run_helpers.build_token_address_map({}, ["POL"], "polygon")
+
+        # POL is an accepted alias for Polygon's native gas asset. The map's
+        # canonical native MATIC entry is correct, but POL itself must not gain
+        # a fabricated registry address or a second sentinel identity.
+        assert "POL" not in result
+        assert result["MATIC"] == ("polygon", "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
+        resolver.resolve.assert_not_called()
+
+    def test_unpriced_native_is_not_mapped_to_registry_or_sentinel(self, monkeypatch) -> None:
+        from almanak.framework.cli.backtest import run_helpers
+
+        base = ChainRegistry.get("ethereum")
+        descriptor = replace(
+            base,
+            name="unpriced",
+            aliases=(),
+            native=replace(
+                base.native,
+                symbol="UNPRICED",
+                accepted_symbols=(),
+                coingecko_id=None,
+            ),
+        )
+        original = ChainRegistry.try_resolve
+        monkeypatch.setattr(
+            ChainRegistry,
+            "try_resolve",
+            lambda chain: descriptor if chain.lower() == "unpriced" else original(chain),
+        )
+
+        resolved_native = MagicMock(address="0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE", is_native=True)
+        resolver = self._patch_resolver(monkeypatch, {"UNPRICED": resolved_native})
+
+        result = run_helpers.build_token_address_map({}, ["UNPRICED"], "unpriced")
+
+        assert "UNPRICED" not in result
+        assert all(address.lower() != "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" for _, address in result.values())
+        resolver.resolve.assert_called_once_with("UNPRICED", "unpriced")
 
     def test_registry_resolves_remaining_tracked_symbol(self, monkeypatch) -> None:
         from almanak.framework.cli.backtest import run_helpers

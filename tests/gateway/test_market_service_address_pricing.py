@@ -61,6 +61,9 @@ def _market_settings_stub(chains: list[str]) -> MagicMock:
     settings.network = "mainnet"
     settings.coingecko_api_key = ""
     settings.enable_manual_price_overrides = False
+    settings.stablecoin_verify = False
+    settings.stablecoin_chainlink_check_interval = 50
+    settings.stablecoin_verifier_failure_warning_threshold = 3
     # VIB-5375: PriceAggregator now bounds wall-time and operates numerically on
     # these — must be real floats, not auto-vivified Mocks.
     settings.price_source_timeout_seconds = 10.0

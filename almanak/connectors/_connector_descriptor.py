@@ -2274,8 +2274,8 @@ def vendor_protocol_map(vendor: str) -> dict[str, str]:
     matched case-insensitively. An unknown / never-declared vendor yields an
     empty dict.
 
-    Mirrors ``almanak.core.chains._helpers.vendor_chain_map`` for the
-    protocol layer (VIB-4851 B1, plan 024).
+    Mirrors provider integration chain maps for the protocol layer
+    (VIB-4851 B1, plan 024).
     """
     if not vendor:
         return {}

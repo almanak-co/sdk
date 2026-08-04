@@ -50,8 +50,8 @@ from almanak.framework.data.interfaces import (
 )
 from almanak.framework.data.ohlcv.aggregation import aggregate_complete_candles, open_time_from_close_time
 from almanak.framework.data.timeframes import COINGECKO_OHLCV_TIMEFRAMES, OHLCVTimeframe
-from almanak.gateway.data.price.coingecko import GLOBAL_TOKEN_IDS
-from almanak.gateway.integrations.coingecko import CoinGeckoIntegration
+from almanak.integrations.coingecko.gateway.client import CoinGeckoIntegration
+from almanak.integrations.coingecko.gateway.price_source import GLOBAL_TOKEN_IDS
 
 logger = logging.getLogger(__name__)
 
@@ -99,23 +99,15 @@ class CoinGeckoOHLCVProvider:
 
         1. ``GLOBAL_TOKEN_IDS`` — the curated per-chain + registry-derived slug
            table used by the price source's hardcoded fallback. This is
-           consulted **first** because it carries the deliberate wrapped-CEX
-           proxies that the Binance/CoinGecko failover chain depends on:
-           ``WBNB -> binancecoin`` and ``WAVAX -> avalanche-2`` map the wrapped
-           token to the SAME underlying asset the CEX leg already priced
-           (``BNBUSDT`` / ``AVAXUSDT``). The token registry instead resolves
-           ``WBNB -> wbnb`` and ``WAVAX -> wrapped-avax`` (the wrapped asset's
-           own CoinGecko id), which would price a DIFFERENT asset on failover —
-           the wrong-asset-candles regression Codex flagged (VIB-4847 re-audit).
-           Explicit/curated mappings must win.
+           consulted **first** because it carries exact native and wrapped
+           asset IDs (for example ``AVAX -> avalanche-2`` and
+           ``WAVAX -> wrapped-avax``, plus ``WMATIC -> wmatic``) as well as
+           other curated rows.
         2. ``get_coingecko_id`` over the canonical ``DEFAULT_TOKENS`` registry
-           (``tokens.json``) fills genuine misses — symbols absent from
-           ``GLOBAL_TOKEN_IDS`` entirely. This is where the MATIC/WMATIC/POL ->
-           ``polygon-ecosystem-token`` rebrand that motivated VIB-4847 resolves:
-           none of those symbols appear in ``GLOBAL_TOKEN_IDS`` (no Polygon
-           chain table), so the registry-encoded rebrand is the resolved id.
-           Returns ``None`` for ambiguous symbols (one symbol mapping to
-           multiple coin ids), in which case we fall through rather than guess.
+           (``tokens.json``) fills genuine misses such as OP, SUSHI, YFI, BAL,
+           and 1INCH. Returns ``None`` for ambiguous symbols (one symbol
+           mapping to multiple coin ids), in which case we fall through rather
+           than guess.
 
         The import is local: eager import of the framework token defaults at
         module load would widen this gateway-egress module's import graph and

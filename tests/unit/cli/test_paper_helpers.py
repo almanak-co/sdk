@@ -7,16 +7,21 @@ un-tested inner logic of the three Click commands.
 
 from __future__ import annotations
 
+import importlib
 import json
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import click
 import pytest
+from click.testing import CliRunner
 
 from almanak.framework.cli.backtest import helpers as cli_helpers
 from almanak.framework.cli.backtest import paper_helpers as ph
+
+paper_cli = importlib.import_module("almanak.framework.cli.backtest.paper")
 
 # ---------------------------------------------------------------------------
 # paper_start helpers (4 tests)
@@ -55,16 +60,69 @@ class TestPaperStartHelpers:
         with pytest.raises(click.Abort):
             ph.parse_initial_tokens_arg("USDC1000")  # missing colon
 
-    def test_apply_preset_yield_validation_mutates_config(self):
-        from almanak.framework.backtesting.paper.config import ForkLifecycle
+    def test_apply_preset_yield_validation_is_refused_before_boot(self):
+        from almanak.framework.backtesting.paper.config import PersistentForkOracleUnavailableError
 
         cfg = MagicMock()
-        ph.apply_preset(cfg, "yield-validation")
-        assert cfg.fork_lifecycle == ForkLifecycle.PERSISTENT
-        assert cfg.reset_fork_every_tick is False
-        assert cfg.yield_poker_enabled is True
-        assert cfg.use_rich_valuation is True
-        assert cfg.position_reconciler_enabled is True
+        with pytest.raises(PersistentForkOracleUnavailableError, match="execution-validation"):
+            ph.apply_preset(cfg, "yield-validation")
+
+    @pytest.mark.parametrize(
+        "unsupported_args",
+        [
+            ["--preset", "yield-validation"],
+            ["--no-reset-fork"],
+        ],
+        ids=["yield-validation-preset", "legacy-no-reset-flag"],
+    )
+    @pytest.mark.parametrize(
+        "execution_args",
+        [[], ["--foreground"]],
+        ids=["background", "foreground"],
+    )
+    def test_paper_start_refuses_unsupported_lifecycle_before_session_boot(
+        self,
+        unsupported_args: list[str],
+        execution_args: list[str],
+        tmp_path,
+        monkeypatch,
+    ):
+        """The Click boundary must refuse both public persistent-mode spellings."""
+        state_dir = tmp_path / "paper_sessions"
+        monkeypatch.setattr(cli_helpers, "PAPER_STATE_DIR", state_dir)
+
+        with (
+            patch.object(paper_cli, "validate_strategy_registered"),
+            patch.object(paper_cli, "abort_if_session_running"),
+            patch.object(paper_cli, "load_funding_from_config", return_value=(None, {}, {}, {})),
+            patch.object(
+                paper_cli,
+                "cli_runtime_config_from_env",
+                return_value=SimpleNamespace(allow_hardcoded_prices=False),
+            ),
+            patch.object(paper_cli, "BackgroundPaperTrader") as background_trader,
+            patch.object(paper_cli, "_run_paper_trading_foreground") as foreground_runner,
+            patch.object(paper_cli, "save_paper_session_state") as save_session_state,
+        ):
+            result = CliRunner().invoke(
+                paper_cli.paper_start,
+                [
+                    "--strategy",
+                    "review-test",
+                    "--rpc-url",
+                    "https://rpc.example",
+                    *execution_args,
+                    *unsupported_args,
+                ],
+            )
+
+        assert result.exit_code != 0
+        assert "Configuration error:" in result.output
+        assert "fork-bound gateway oracle" in result.output
+        background_trader.assert_not_called()
+        foreground_runner.assert_not_called()
+        save_session_state.assert_not_called()
+        assert not state_dir.exists()
 
     def test_parse_funding_dict_native_erc20_address_and_invalid(self, capsys):
         """`parse_funding_dict` collapses native tokens, checksums addresses, skips bad ones."""
@@ -163,9 +221,52 @@ class TestPaperResumeHelpers:
         assert cfg.initial_eth == Decimal("12.5")
         assert cfg.initial_tokens == {"USDC": Decimal("1000")}
 
-    def test_build_resume_config_preserves_preset_flags(self):
-        """Resume must restore preset-driven flags rather than silently dropping them."""
+    def test_build_resume_config_preserves_supported_saved_settings(self):
         from almanak.framework.backtesting.paper.config import ForkLifecycle
+
+        saved = {
+            "anvil_port": 8546,
+            "reset_fork_every_tick": True,
+            "initial_eth": "5.5",
+            "initial_tokens": {"WETH": "1.25"},
+            "bootstrap": {"arbitrum": {"USDC": "100", "WETH": 2}},
+            "strict_bootstrap": True,
+            "strict_price_mode": False,
+            "fork_lifecycle": ForkLifecycle.ROLLING_RESET.value,
+            "yield_poker_enabled": True,
+            "use_rich_valuation": True,
+            "position_reconciler_enabled": False,
+            "position_reconciler_tolerance_pct": "0.025",
+            "max_ticks": 10,
+        }
+
+        cfg = ph.build_resume_config(
+            saved_config=saved,
+            strategy="resumed",
+            chain="arbitrum",
+            rpc_url="https://x",
+            new_max_ticks=999,
+            tick_interval=15,
+        )
+
+        assert cfg.fork_lifecycle == ForkLifecycle.ROLLING_RESET
+        assert cfg.strict_bootstrap is True
+        assert cfg.strict_price_mode is False
+        assert cfg.yield_poker_enabled is True
+        assert cfg.use_rich_valuation is True
+        assert cfg.position_reconciler_enabled is False
+        assert cfg.bootstrap == {
+            "arbitrum": {"USDC": Decimal("100"), "WETH": Decimal("2")},
+        }
+        assert cfg.position_reconciler_tolerance_pct == Decimal("0.025")
+        assert cfg.max_ticks == 999
+
+    def test_build_resume_config_refuses_saved_persistent_session(self):
+        """Resume must refuse a saved mode that cannot satisfy the oracle boundary."""
+        from almanak.framework.backtesting.paper.config import (
+            ForkLifecycle,
+            PersistentForkOracleUnavailableError,
+        )
 
         saved = {
             "chain": "ethereum",  # overridden below
@@ -186,31 +287,15 @@ class TestPaperResumeHelpers:
             # An unknown / future field should be ignored, not crash __init__.
             "future_field": "ignored",
         }
-        cfg = ph.build_resume_config(
-            saved_config=saved,
-            strategy="resumed",
-            chain="arbitrum",
-            rpc_url="https://x",
-            new_max_ticks=999,
-            tick_interval=15,
-        )
-
-        # Resume overrides applied
-        assert cfg.deployment_id == "resumed"
-        assert cfg.chain == "arbitrum"
-        assert cfg.rpc_url == "https://x"
-        assert cfg.tick_interval_seconds == 15
-        assert cfg.max_ticks == 999
-
-        # Saved preset flags preserved
-        assert cfg.strict_bootstrap is True
-        assert cfg.strict_price_mode is False
-        assert cfg.fork_lifecycle == ForkLifecycle.PERSISTENT
-        assert cfg.yield_poker_enabled is True
-        assert cfg.use_rich_valuation is True
-        assert cfg.position_reconciler_enabled is True
-        assert cfg.log_level == "DEBUG"
-        assert cfg.bootstrap == {"arbitrum": {"USDC": Decimal("100")}}
+        with pytest.raises(PersistentForkOracleUnavailableError, match="Cannot resume saved paper session"):
+            ph.build_resume_config(
+                saved_config=saved,
+                strategy="resumed",
+                chain="arbitrum",
+                rpc_url="https://x",
+                new_max_ticks=999,
+                tick_interval=15,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -312,7 +397,9 @@ class TestListPaperSessions:
 
     def test_lists_valid_sessions_marks_stale_and_skips_corrupt_json(self, tmp_path, monkeypatch):
         monkeypatch.setattr(cli_helpers, "PAPER_STATE_DIR", tmp_path)
-        (tmp_path / "running.json").write_text(json.dumps({"deployment_id": "running", "pid": 111, "status": "running"}))
+        (tmp_path / "running.json").write_text(
+            json.dumps({"deployment_id": "running", "pid": 111, "status": "running"})
+        )
         (tmp_path / "stale.json").write_text(json.dumps({"deployment_id": "stale", "pid": 222, "status": "running"}))
         (tmp_path / "broken.json").write_text("{not-json")
 

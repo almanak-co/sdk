@@ -6,8 +6,8 @@ from ._contracts import safe_stack_contracts
 from ._descriptor import (
     AnvilProfile,
     ChainDescriptor,
-    ChainlinkFeeds,
     Explorer,
+    ExternalChainIds,
     GasProfile,
     NativeToken,
     RpcProfile,
@@ -28,8 +28,19 @@ DESCRIPTOR = register_chain(
             wrapped_address="0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",
             coingecko_id="avalanche-2",
             wrapped_symbol="WAVAX",
-            wrapped_coingecko_id="avalanche-2",
+            wrapped_coingecko_id="wrapped-avax",
             slip44=9000,  # SLIP-44 "Avalanche" — AVAX (CAIP-19)
+        ),
+        external_ids=ExternalChainIds(
+            tenderly="avalanche",
+            coingecko="avalanche",
+            dexscreener="avalanche",
+            coingecko_onchain="avax",
+            defillama="avax",
+            defillama_display="Avalanche",
+            zerion="avalanche",
+            moralis="avalanche",
+            okx="43114",
         ),
         gas=GasProfile(
             buffer=1.1,
@@ -101,37 +112,6 @@ DESCRIPTOR = register_chain(
             "wavax": "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",
         },
         simulation=SimulationProfile(tenderly_supported=True),
-        # VIB-4851 (B1): per-vendor external ids, transposed from the legacy
-        # standalone vendor maps (CoinGecko / DexScreener / CoinGecko Onchain /
-        # DeFiLlama / Zerion / Moralis / OKX). Values verbatim incl. case.
-        external_ids={
-            "tenderly": "avalanche",
-            "coingecko": "avalanche",
-            "dexscreener": "avalanche",
-            "coingecko_onchain": "avax",
-            "defillama": "avax",
-            "defillama_display": "Avalanche",
-            "zerion": "avalanche",
-            "moralis": "avalanche",
-            "okx": "43114",
-        },
-        # Chainlink aggregator addresses (VIB-4851 CS-5) — moved verbatim
-        # from the legacy almanak/core/chainlink.py per-chain dicts.
-        # Reference: https://docs.chain.link/data-feeds/price-feeds/addresses
-        chainlink=ChainlinkFeeds(
-            usd_feeds={
-                "AVAX/USD": "0x0A77230d17318075983913bC2145DB16C7366156",
-                "ETH/USD": "0x976B3D034E162d8bD72D6b9C989d545b839003b0",
-                "BTC/USD": "0x2779D32d5166BAaa2B2b658333bA7e6Ec0C65743",
-                "LINK/USD": "0x49cCd9Ca821efeAb2B98C60Dc60f518e765EdADc",
-                "USDC/USD": "0xF096872672F44d6EBA71458D74fe67F9a77a23B9",
-                "USDT/USD": "0xEBE676ee90Fe1112671f19b6B7459bC678B67e8a",
-                "DAI/USD": "0x51D7180edA2260cc4F6e4EebB82FEF5c3c2B8300",
-                "AAVE/USD": "0x3CA13391E9fb38a75330fb28f8cc2eB3D9ceceED",
-                "JOE/USD": "0x02D35d3a8aC3e1626d3eE09A78Dd87286F5E8e3a",
-                "WAVAX/USD": "0x0A77230d17318075983913bC2145DB16C7366156",
-            },
-        ),
         # Safe MultiSendCallOnly v1.4.1 — CREATE2, same address on every
         # chain Safe deploys to; presence here == deployment-verified
         # (legacy MULTISEND_ADDRESSES membership, VIB-4851 CS-5).

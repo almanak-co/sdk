@@ -1,8 +1,8 @@
 """Equivalence harness for the VIB-4851 B1 external-id inversion.
 
-Eleven standalone per-vendor chain maps were folded onto
-``ChainDescriptor.external_ids`` and now derive from the registry via
-``external_id_for`` / ``vendor_chain_map``:
+Eleven standalone per-vendor chain maps were folded onto typed
+``ExternalChainIds`` values implemented by chain descriptors and now project via
+``integration_chain_id`` / ``integration_chain_map``:
 
 * CoinGecko ``gateway/data/price/coingecko.py::COINGECKO_PLATFORM_IDS``
 * DexScreener ``gateway/data/price/dexscreener.py::CHAIN_TO_DEXSCREENER_PLATFORM``
@@ -23,16 +23,17 @@ preserved, not the design. It is the same Class-A/B equivalence harness the
 chain-string inversion campaign relies on (see
 ``tests/unit/core/test_native_symbols_inversion.py``).
 
-The most important assertion per vendor is **anti-widening**: the derived
-``vendor_chain_map`` must declare support for *exactly* the chains the legacy
-map did (minus pure aliases), never widening to chains a vendor lacks.
+The most important assertion per vendor is **bounded widening**: the derived
+``integration_chain_map`` must declare support for exactly the chains the legacy
+map did (minus pure aliases), plus explicitly pinned and provider-verified
+expansions. It must never widen implicitly to chains a vendor lacks.
 
 Three collapses were verified value-identical on every shared chain before the
 fold and are pinned here by name:
 
-* DexScreener #2/#3 agree on all 17 canonical chains; #2 additionally carried
-  the ``"bnb"`` alias (dropped — ``external_id_for`` resolves it via the
-  registry). The reconciled key-set is the 17 canonical chains.
+* DexScreener #2/#3 agree on all 19 canonical chains; #2 additionally carried
+  the ``"bnb"`` alias (dropped — ``integration_chain_id`` resolves it via the
+  registry). The reconciled key-set is the 19 canonical chains.
 * CoinGecko Onchain #4/#5 agree on all 9 shared chains; #4 additionally carried
   ``mantle``. The reconciled key-set is the union (10 chains).
 * DeFiLlama display #7/#8 are byte-identical.
@@ -40,19 +41,13 @@ fold and are pinned here by name:
 
 from __future__ import annotations
 
-from types import MappingProxyType
+from dataclasses import FrozenInstanceError, fields, replace
 
 import pytest
 
-from almanak.core.chains import ChainRegistry
-from almanak.core.chains._descriptor import (
-    KNOWN_VENDORS,
-    ChainDescriptor,
-    GasProfile,
-    NativeToken,
-)
-from almanak.core.chains._helpers import external_id_for, vendor_chain_map
-from almanak.core.enums import ChainFamily
+from almanak.core.chains import ChainRegistry, ExternalChainIds, ExternalIdProvider
+from almanak.core.chains._helpers import external_chain_id_map
+from almanak.integrations.chains import integration_chain_id, integration_chain_map
 
 # --- the 11 OLD maps, frozen verbatim from origin/main (pre-B1) ------------------
 #
@@ -254,10 +249,17 @@ FROZEN_OKX: dict[str, str] = {
 }
 
 # Pure-alias keys that the descriptor model resolves through the registry
-# rather than storing as a separate chain. ``external_id_for`` still answers
-# these (via ``ChainRegistry.try_resolve``); ``vendor_chain_map`` (canonical
+# rather than storing as a separate chain. ``integration_chain_id`` still answers
+# these (via ``ChainRegistry.try_resolve``); ``integration_chain_map`` (canonical
 # names only) does not.
 ALIAS_KEYS = frozenset({"bnb"})
+
+# Provider-verified additions made during the typed inversion. Keeping these
+# separate preserves the frozen legacy maps above while making every widening
+# explicit and reviewable.
+PINNED_VENDOR_WIDENINGS: dict[str, dict[str, str]] = {
+    "defillama": {"solana": "solana"},
+}
 
 
 def _frozen_for(vendor: str) -> dict[str, str]:
@@ -287,6 +289,11 @@ def _frozen_for(vendor: str) -> dict[str, str]:
     raise AssertionError(f"no frozen map for vendor {vendor!r}")
 
 
+def _expected_for(vendor: str) -> dict[str, str]:
+    """Return legacy coverage plus explicitly pinned provider support."""
+    return {**_frozen_for(vendor), **PINNED_VENDOR_WIDENINGS.get(vendor, {})}
+
+
 ALL_VENDORS = (
     "coingecko",
     "dexscreener",
@@ -300,18 +307,17 @@ ALL_VENDORS = (
 )
 
 
-# --- per-vendor anti-widening: derived support == frozen support (minus aliases) -
+# --- per-vendor bounded widening: legacy + pinned support only -----------------
 
 
 @pytest.mark.parametrize("vendor", ALL_VENDORS)
-def test_vendor_chain_map_does_not_widen(vendor: str) -> None:
-    # THE most important invariant: the derive declares support for exactly the
-    # chains the legacy vendor map covered (canonical only) — never more. A
-    # widened map would claim a chain a vendor cannot actually serve.
-    frozen = _frozen_for(vendor)
-    expected_chains = set(frozen) - ALIAS_KEYS
-    assert set(vendor_chain_map(vendor)) == expected_chains, (
-        f"{vendor}: derived support {set(vendor_chain_map(vendor))} != frozen canonical support {expected_chains}"
+def test_integration_chain_map_does_not_widen_implicitly(vendor: str) -> None:
+    # THE most important invariant: the derive declares support for exactly
+    # the legacy canonical chains plus reviewed provider-verified additions.
+    expected = _expected_for(vendor)
+    expected_chains = set(expected) - ALIAS_KEYS
+    assert set(integration_chain_map(vendor)) == expected_chains, (
+        f"{vendor}: derived support {set(integration_chain_map(vendor))} != frozen canonical support {expected_chains}"
     )
 
 
@@ -323,9 +329,11 @@ def test_external_id_values_match_frozen(vendor: str) -> None:
     # Catches arbitrum-one vs arbitrum (coingecko), eth vs ethereum
     # (coingecko_onchain/moralis), avax vs avalanche (defillama), and the
     # lowercase/Capitalised DeFiLlama split.
-    frozen = _frozen_for(vendor)
-    for chain, vid in frozen.items():
-        assert external_id_for(chain, vendor) == vid, f"{vendor}/{chain}: {external_id_for(chain, vendor)!r} != {vid!r}"
+    expected = _expected_for(vendor)
+    for chain, vid in expected.items():
+        assert integration_chain_id(chain, vendor) == vid, (
+            f"{vendor}/{chain}: {integration_chain_id(chain, vendor)!r} != {vid!r}"
+        )
 
 
 # --- non-derivable literals: OKX solana 501 is stored, not computed -------------
@@ -335,7 +343,7 @@ def test_okx_solana_is_synthetic_literal() -> None:
     # "501" is an OKX-specific id, NOT Solana's chain id (Solana has no EIP-155
     # id and is not indexed by ChainRegistry.by_id). The value must be stored
     # verbatim on the descriptor, never derived from a chain id.
-    assert external_id_for("solana", "okx") == "501"
+    assert integration_chain_id("solana", "okx") == "501"
     with pytest.raises(ValueError):
         ChainRegistry.by_id(501)
 
@@ -343,19 +351,19 @@ def test_okx_solana_is_synthetic_literal() -> None:
 # --- miss / fail-closed semantics -----------------------------------------------
 
 
-def test_external_id_for_misses_fail_closed() -> None:
+def test_integration_chain_id_misses_fail_closed() -> None:
     # A registered chain a vendor does not support -> None (OKX never listed
     # berachain).
-    assert external_id_for("berachain", "okx") is None
+    assert integration_chain_id("berachain", "okx") is None
     # An unregistered chain -> None.
-    assert external_id_for("not-a-chain", "coingecko") is None
+    assert integration_chain_id("not-a-chain", "coingecko") is None
     # An empty vendor -> None.
-    assert external_id_for("ethereum", "") is None
+    assert integration_chain_id("ethereum", "") is None
     # An empty chain -> None.
-    assert external_id_for("", "coingecko") is None
-    # A registered chain that declares no external_ids at all is also a clean
-    # miss — guard against any chain silently gaining a vendor it lacks.
-    assert external_id_for("ethereum", "definitely-not-a-vendor") is None
+    assert integration_chain_id("", "coingecko") is None
+    # An unknown integration is also a clean miss — guard against any chain
+    # silently gaining a provider mapping it lacks.
+    assert integration_chain_id("ethereum", "definitely-not-a-vendor") is None
 
 
 # --- alias resolution: "bnb" resolves to bsc through the registry ---------------
@@ -364,10 +372,10 @@ def test_external_id_for_misses_fail_closed() -> None:
 def test_alias_resolves_through_registry() -> None:
     # The legacy maps carried explicit "bnb" keys; the descriptor stores the id
     # on bsc only and resolves the alias via ChainRegistry.try_resolve.
-    assert external_id_for("bnb", "okx") == "56"
-    assert external_id_for("bnb", "dexscreener") == "bsc"
-    assert external_id_for("bnb", "zerion") == "binance-smart-chain"
-    assert external_id_for("bnb", "moralis") == "bsc"
+    assert integration_chain_id("bnb", "okx") == "56"
+    assert integration_chain_id("bnb", "dexscreener") == "bsc"
+    assert integration_chain_id("bnb", "zerion") == "binance-smart-chain"
+    assert integration_chain_id("bnb", "moralis") == "bsc"
     # Guard the alias is real (and canonicalises to bsc) so the assertions above
     # are meaningful rather than accidentally passing on a missing chain.
     resolved = ChainRegistry.try_resolve("bnb")
@@ -382,10 +390,10 @@ def test_dexscreener_collapse_keeps_all_canonical_chains() -> None:
     # #2 (CHAIN_TO_DEXSCREENER_PLATFORM) and #3 (CHAIN_SLUG_MAP) agreed on every
     # shared canonical chain; the only structural difference was #2's "bnb"
     # alias. Pin that optimism (present in BOTH) survives the collapse and that
-    # the reconciled key-set is exactly the 17 canonical chains.
-    assert external_id_for("optimism", "dexscreener") == "optimism"
+    # the reconciled key-set is exactly the 19 canonical chains.
+    assert integration_chain_id("optimism", "dexscreener") == "optimism"
     expected = (set(FROZEN_DEXSCREENER_PLATFORM) | set(FROZEN_DEXSCREENER_SLUG)) - ALIAS_KEYS
-    assert set(vendor_chain_map("dexscreener")) == expected
+    assert set(integration_chain_map("dexscreener")) == expected
     assert len(expected) == 19
 
 
@@ -393,96 +401,65 @@ def test_coingecko_onchain_collapse_is_union_with_mantle() -> None:
     # #4 (_CHAIN_TO_NETWORK) carried mantle; #5 (_CHAIN_TO_CG_ONCHAIN_NETWORK) did not.
     # The collapse is the union, so BOTH mantle and solana must be present by
     # name (they came from different source maps).
-    gt_map = vendor_chain_map("coingecko_onchain")
+    gt_map = integration_chain_map("coingecko_onchain")
     assert "mantle" in gt_map  # only in #4
     assert "solana" in gt_map  # in both #4 and #5
-    assert external_id_for("mantle", "coingecko_onchain") == "mantle"
-    assert external_id_for("solana", "coingecko_onchain") == "solana"
+    assert integration_chain_id("mantle", "coingecko_onchain") == "mantle"
+    assert integration_chain_id("solana", "coingecko_onchain") == "solana"
     expected = set(FROZEN_COINGECKO_ONCHAIN_NETWORK) | set(FROZEN_COINGECKO_ONCHAIN_GT)
     assert set(gt_map) == expected
 
 
 def test_defillama_slug_and_display_share_keys_differ_in_format() -> None:
-    # #7 and #8 were byte-identical; pin that the two DeFiLlama vendor keys
-    # cover the same chains BUT carry different value formats (lowercase slug vs
-    # Capitalised display) — the reason they are distinct vendor keys.
+    # #7 and #8 were byte-identical and already included Solana in the display
+    # map. Only the lowercase slug map (#6) gains Solana through
+    # PINNED_VENDOR_WIDENINGS["defillama"]. The widening makes both typed
+    # projections cover the same chains while preserving their distinct value
+    # formats (lowercase provider slug vs capitalised display label).
     assert FROZEN_DEFILLAMA_DISPLAY == FROZEN_DEFILLAMA_DISPLAY_AGG
-    slug_map = vendor_chain_map("defillama")
-    display_map = vendor_chain_map("defillama_display")
-    # defillama (slug) lacks solana; defillama_display has it. They are NOT the
-    # same key-set, which is exactly why the format-vs-coverage distinction
-    # matters — assert each against its own frozen source rather than each
-    # other.
-    assert set(slug_map) == set(FROZEN_DEFILLAMA)
+    slug_map = integration_chain_map("defillama")
+    display_map = integration_chain_map("defillama_display")
+    assert set(slug_map) == set(_expected_for("defillama"))
     assert set(display_map) == set(FROZEN_DEFILLAMA_DISPLAY)
     # The shared chains differ only in case (slug lowercase, display Capitalised).
-    assert external_id_for("ethereum", "defillama") == "ethereum"
-    assert external_id_for("ethereum", "defillama_display") == "Ethereum"
-    assert external_id_for("bsc", "defillama") == "bsc"
-    assert external_id_for("bsc", "defillama_display") == "BSC"
+    assert integration_chain_id("ethereum", "defillama") == "ethereum"
+    assert integration_chain_id("ethereum", "defillama_display") == "Ethereum"
+    assert integration_chain_id("bsc", "defillama") == "bsc"
+    assert integration_chain_id("bsc", "defillama_display") == "BSC"
+    assert integration_chain_id("solana", "defillama") == "solana"
+    assert integration_chain_id("solana", "defillama_display") == "Solana"
 
 
 def test_moralis_omits_solana() -> None:
     # Moralis intentionally has no solana entry; the derive must not invent one.
-    assert external_id_for("solana", "moralis") is None
-    assert "solana" not in vendor_chain_map("moralis")
+    assert integration_chain_id("solana", "moralis") is None
+    assert "solana" not in integration_chain_map("moralis")
 
 
-# --- descriptor-level field mechanics (mirrors the tokens-field precedent) -------
-
-
-def _descriptor(external_ids: dict[str, str] | None) -> ChainDescriptor:
-    """Build a throwaway descriptor with a given external_ids map.
-
-    Never registered into the singleton here — construction does not touch
-    ``ChainRegistry`` — so we exercise ``__post_init__`` in isolation without
-    disturbing the process-wide registry the inversion assertions above read
-    from.
-    """
-    return ChainDescriptor(
-        name="ethereum",
-        chain_id=1,
-        family=ChainFamily.EVM,
-        native=NativeToken(symbol="ETH", name="Ether", decimals=18),
-        gas=GasProfile(),
-        external_ids=external_ids,
-    )
-
-
-def test_external_ids_field_is_frozen_proxy() -> None:
-    # Wrapped in MappingProxyType like ``tokens`` so descriptor immutability
-    # survives a mutable dict literal at the call site.
-    descriptor = ChainRegistry.try_resolve("ethereum")
-    assert descriptor is not None
-    assert descriptor.external_ids is not None
-    assert isinstance(descriptor.external_ids, MappingProxyType)
+def test_external_chain_ids_are_typed_and_immutable() -> None:
+    external_ids = ChainRegistry.get("ethereum").external_ids
+    assert external_ids.coingecko == "ethereum"
+    assert external_ids.get(ExternalIdProvider.COINGECKO) == "ethereum"
+    assert external_ids.get("COINGECKO") == "ethereum"
+    assert external_ids.get("not-a-provider") is None
+    with pytest.raises(FrozenInstanceError):
+        external_ids.coingecko = "changed"  # type: ignore[misc]
     with pytest.raises(TypeError):
-        descriptor.external_ids["new"] = "x"  # type: ignore[index]
+        external_ids.as_mapping()["coingecko"] = "changed"  # type: ignore[index]
 
 
-def test_external_ids_vendor_keys_are_lowercased_values_verbatim() -> None:
-    # Only the vendor KEY is lowercased; the value is stored verbatim (case is
-    # load-bearing for DeFiLlama slug-vs-display).
-    descriptor = _descriptor({"CoinGecko": "Arbitrum-One"})
-    assert descriptor.external_ids is not None
-    assert dict(descriptor.external_ids) == {"coingecko": "Arbitrum-One"}
+def test_external_id_schema_matches_frozen_provider_set() -> None:
+    assert {field.name for field in fields(ExternalChainIds)} == {provider.value for provider in ExternalIdProvider}
+    declared = {provider.value for provider in ExternalIdProvider if external_chain_id_map(provider)}
+    assert declared == set(ALL_VENDORS)
 
 
-def test_external_ids_unknown_vendor_raises() -> None:
-    # A typo'd vendor must fail loudly at construction rather than silently
-    # producing an id no lookup will ever find.
-    with pytest.raises(ValueError, match="unknown external_ids vendor"):
-        _descriptor({"gecko": "eth"})
+def test_chain_descriptor_requires_typed_external_ids() -> None:
+    with pytest.raises(TypeError, match="external_ids must be ExternalChainIds"):
+        replace(ChainRegistry.get("ethereum"), external_ids={"coingecko": "ethereum"})  # type: ignore[arg-type]
 
 
-def test_external_ids_none_stays_none() -> None:
-    # The default / no-vendor-support case is None (not an empty proxy), matching
-    # the legacy ``map.get(chain)`` miss semantics.
-    assert _descriptor(None).external_ids is None
-
-
-def test_known_vendors_matches_declared_vendor_set() -> None:
-    # The frozen vendor set this test enumerates IS the descriptor's allowlist —
-    # guard they stay in lockstep so a newly added vendor key can't slip the
-    # anti-widening sweep above.
-    assert KNOWN_VENDORS == set(ALL_VENDORS)
+@pytest.mark.parametrize("value", ["", " trailing ", 1])
+def test_external_chain_ids_reject_invalid_values(value: object) -> None:
+    with pytest.raises(ValueError, match="coingecko"):
+        ExternalChainIds(coingecko=value)  # type: ignore[arg-type]

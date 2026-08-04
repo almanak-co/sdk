@@ -21,11 +21,13 @@ fabricate a price for an unpriced token, and collapse native onto wrapped in
 an identity map (ALM-3058's defect).
 """
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
 
+from almanak.core.chains import ChainRegistry
 from almanak.framework.backtesting.pnl.data_provider import (
     MarketState,
     native_token_map_entry,
@@ -274,6 +276,9 @@ class TestNativeAlwaysInTokenMap:
     def test_evm_chain_yields_native_at_sentinel(self):
         assert native_token_map_entry("arbitrum") == ("ETH", ("arbitrum", SENTINEL))
 
+    def test_chain_alias_yields_canonical_native_key(self):
+        assert native_token_map_entry("eth") == ("ETH", ("ethereum", SENTINEL))
+
     def test_symbol_is_per_chain_not_hardcoded(self):
         symbol, key = native_token_map_entry("polygon")
         assert symbol == "MATIC"
@@ -285,6 +290,23 @@ class TestNativeAlwaysInTokenMap:
 
     def test_unknown_chain_is_refused(self):
         assert native_token_map_entry("nosuchchain") is None
+
+    def test_evm_native_without_coingecko_id_is_refused(self, monkeypatch):
+        base = ChainRegistry.get("ethereum")
+        descriptor = replace(
+            base,
+            name="unpriced",
+            aliases=(),
+            native=replace(base.native, coingecko_id=None),
+        )
+        original = ChainRegistry.try_resolve
+        monkeypatch.setattr(
+            ChainRegistry,
+            "try_resolve",
+            lambda chain: descriptor if chain.lower() == "unpriced" else original(chain),
+        )
+
+        assert native_token_map_entry("unpriced") is None
 
     def test_cli_map_builder_registers_native_unprompted(self):
         """The CLI lane's Refinement-R1 native exclusion must not survive:

@@ -12,7 +12,7 @@ Key Features:
 
 Example:
     from almanak.gateway.data.price.aggregator import PriceAggregator
-    from almanak.gateway.data.price.coingecko import CoinGeckoPriceSource
+    from almanak.integrations.coingecko.gateway.price_source import CoinGeckoPriceSource
 
     sources = [CoinGeckoPriceSource()]
     aggregator = PriceAggregator(sources=sources)
@@ -23,6 +23,7 @@ Example:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import statistics
 import time
@@ -30,7 +31,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 if TYPE_CHECKING:
     from almanak.framework.data.tokens.models import ResolvedToken
@@ -42,6 +43,23 @@ from almanak.framework.data.interfaces import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@runtime_checkable
+class StablecoinVerificationSource(Protocol):
+    """Price source capable of forcing a measured stablecoin observation."""
+
+    @property
+    def provides_stablecoin_verification(self) -> bool: ...
+
+    async def get_price(
+        self,
+        token: str,
+        quote: str = "USD",
+        *,
+        resolved_token: ResolvedToken | None = None,
+        bypass_stablecoin_fallback: bool = False,
+    ) -> PriceResult: ...
 
 
 # Default configuration constants
@@ -119,6 +137,17 @@ STABLECOIN_PEG_DEVIATION_THRESHOLD = 0.02
 # "could not run" — the peg is still returned (best-effort) — but a check that
 # DOES complete and detects a de-peg makes the fast-path fail closed.
 STABLECOIN_PEG_CHECK_TIMEOUT_SECONDS = 1.5
+
+# Consecutive verifier failures per token before the gateway emits one WARNING
+# for the current outage streak. Successful verifier execution resets the
+# streak. Operators can tune this through GatewaySettings; non-positive values
+# disable the warning without changing the best-effort peg behavior.
+DEFAULT_STABLECOIN_VERIFIER_FAILURE_WARNING_THRESHOLD = 3
+
+# A stale or low-confidence observation is not execution-grade enough to clear
+# a latch or be returned directly, but measured off-peg evidence still suppresses
+# the synthetic peg and falls through to the multi-source aggregate.
+STABLECOIN_VERIFIER_MIN_CONFIDENCE = 0.9
 
 # Address-keyed fallback for stablecoins whose symbol clashes with non-stables.
 # Polymarket V2 collateral pUSD (Polygon ``0xC011...82DFB``) is enforced 1:1 vs
@@ -300,6 +329,7 @@ class PriceAggregator:
         *,
         stablecoin_verify: bool = False,
         stablecoin_chainlink_check_interval: int = DEFAULT_STABLECOIN_CHAINLINK_CHECK_INTERVAL,
+        stablecoin_verifier_failure_warning_threshold: int = (DEFAULT_STABLECOIN_VERIFIER_FAILURE_WARNING_THRESHOLD),
         per_source_timeout_seconds: float = DEFAULT_PER_SOURCE_TIMEOUT_SECONDS,
         global_timeout_seconds: float = DEFAULT_GLOBAL_TIMEOUT_SECONDS,
     ) -> None:
@@ -333,6 +363,12 @@ class PriceAggregator:
                 masks a de-peg by returning $1.00. When the check times out or
                 cannot run, the peg is returned best-effort. Non-positive values
                 disable the periodic check.
+            stablecoin_verifier_failure_warning_threshold: Consecutive failed
+                on-chain verification attempts per token before emitting one
+                WARNING for that outage streak (default 3). A successful
+                verifier call resets the token's streak. Non-positive values
+                disable the warning; verifier failures remain DEBUG and the peg
+                remains best-effort.
             per_source_timeout_seconds: VIB-5375 (RC-3). Wall-clock bound applied
                 to EACH source's ``get_price`` coroutine. A source that exceeds
                 this is recorded as an error (Empty≠Zero — "unmeasured", never a
@@ -375,6 +411,11 @@ class PriceAggregator:
         # VIB-4841 / FR-5002 stablecoin peg fast-path configuration.
         self._stablecoin_verify = stablecoin_verify
         self._stablecoin_chainlink_check_interval = stablecoin_chainlink_check_interval
+        self._stablecoin_verifier_failure_warning_threshold = max(
+            0,
+            stablecoin_verifier_failure_warning_threshold,
+        )
+        self._stablecoin_verifier = self._select_stablecoin_verifier(self._sources)
         # Counter of peg-served calls; drives the 1-in-N Chainlink sanity check.
         self._stablecoin_peg_calls = 0
         # VIB-4841 (Codex re-audit): per-token de-peg latch. With the 1-in-N
@@ -386,6 +427,10 @@ class PriceAggregator:
         # check runs every call so recovery is detected promptly. The latch is
         # cleared when the on-chain price returns within the peg threshold.
         self._depegged_tokens: set[str] = set()
+        # Per-token outage streaks for the measured peg verifier. The WARNING
+        # fires only when a streak first reaches the configured threshold, so a
+        # long outage cannot spam logs; a successful verifier call clears it.
+        self._stablecoin_verifier_failures: dict[str, int] = {}
 
         # Health metrics per source
         self._health_metrics: dict[str, SourceHealthMetrics] = {
@@ -404,10 +449,38 @@ class PriceAggregator:
                 "magnitude_outlier_ratio": magnitude_outlier_ratio,
                 "stablecoin_verify": stablecoin_verify,
                 "stablecoin_chainlink_check_interval": stablecoin_chainlink_check_interval,
+                "stablecoin_verifier_failure_warning_threshold": (self._stablecoin_verifier_failure_warning_threshold),
                 "per_source_timeout_seconds": self._per_source_timeout_seconds,
                 "global_timeout_seconds": self._global_timeout_seconds,
             },
         )
+
+    @staticmethod
+    def _select_stablecoin_verifier(
+        sources: Sequence[BasePriceSource],
+    ) -> StablecoinVerificationSource | None:
+        """Select and validate the measured stablecoin verifier at wiring time."""
+        for source in sources:
+            # Require an explicit capability declaration. Dynamic test doubles
+            # such as MagicMock synthesize arbitrary truthy attributes and must
+            # not accidentally opt into the verifier contract.
+            if getattr(source, "provides_stablecoin_verification", False) is not True:
+                continue
+            if not isinstance(source, StablecoinVerificationSource):
+                raise TypeError(f"Price source {source.source_name!r} has an invalid stablecoin verifier contract")
+            try:
+                inspect.signature(source.get_price).bind(
+                    "TOKEN",
+                    "USD",
+                    resolved_token=None,
+                    bypass_stablecoin_fallback=True,
+                )
+            except (TypeError, ValueError) as exc:
+                raise TypeError(
+                    f"Price source {source.source_name!r} has an incompatible stablecoin verifier signature"
+                ) from exc
+            return source
+        return None
 
     @property
     def sources(self) -> list[BasePriceSource]:
@@ -469,7 +542,11 @@ class PriceAggregator:
         # Check if all sources failed
         if not results.valid_results:
             # Stablecoin fallback: use $1.00 for known stablecoins when all sources fail
-            if quote.upper() == "USD" and is_stablecoin_for_fallback(token, resolved_token):
+            if (
+                quote.upper() == "USD"
+                and is_stablecoin_for_fallback(token, resolved_token)
+                and token.upper() not in self._depegged_tokens
+            ):
                 logger.warning(
                     "All price sources failed for stablecoin %s/%s, using $1.00 fallback. Errors: %s",
                     token,
@@ -592,24 +669,18 @@ class PriceAggregator:
         # else None (passed -> latch cleared / timed out / could not run / not
         # this call's turn). Whether the peg may be served also depends on the
         # latch state AFTER the check (see below).
-        depeg_price = await self._maybe_check_stablecoin_peg_onchain(token, resolved_token)
-        if depeg_price is not None:
+        depeg_result = await self._maybe_check_stablecoin_peg_onchain(token, resolved_token)
+        if depeg_result is not None:
             # Fail closed: a confirmed de-peg must never be masked by the peg.
-            if depeg_price > 0:
+            if depeg_result.price > 0:
                 logger.warning(
                     "Stablecoin %s/%s fast-path returning LIVE on-chain price %s instead of the "
                     "$1.00 peg — de-peg detected by the on-chain sanity check.",
                     token,
                     quote,
-                    depeg_price,
+                    depeg_result.price,
                 )
-                return PriceResult(
-                    price=depeg_price,
-                    source="onchain",
-                    timestamp=datetime.now(UTC),
-                    confidence=0.9,
-                    stale=False,
-                )
+                return depeg_result
             # De-peg detected but no usable live price — fall through to the
             # full multi-source aggregate rather than returning the peg.
             logger.warning(
@@ -617,7 +688,7 @@ class PriceAggregator:
                 "falling through to the full multi-source aggregate.",
                 token,
                 quote,
-                depeg_price,
+                depeg_result.price,
             )
             return None
 
@@ -656,7 +727,7 @@ class PriceAggregator:
         self,
         token: str,
         resolved_token: ResolvedToken | None,
-    ) -> Decimal | None:
+    ) -> PriceResult | None:
         """Verify the stable is ~$1.00 on-chain on the 1-in-N cadence (or every
         call while the token is latched de-pegged) and maintain the de-peg latch.
 
@@ -672,23 +743,26 @@ class PriceAggregator:
         promptly (VIB-4841, Codex re-audit).
 
         Latch maintenance (VIB-4841, Codex re-audit):
-            - On a completed check that detects a de-peg, the token is added to
-              ``self._depegged_tokens`` (keyed by upper-cased symbol).
-            - On a completed check that shows the price back within
-              ``STABLECOIN_PEG_DEVIATION_THRESHOLD``, the token is removed from
-              the latch (recovery), so the peg fast-path resumes.
+            - Any measured off-peg result adds the token to
+              ``self._depegged_tokens`` (keyed by upper-cased symbol), even if
+              the observation is stale or low-confidence.
+            - Only a fresh, high-confidence result back within
+              ``STABLECOIN_PEG_DEVIATION_THRESHOLD`` removes the token from the
+              latch, so the peg fast-path resumes.
             - A check that times out / errors / is skipped does NOT change the
               latch — a latched token stays latched until a check confirms
               recovery.
 
         Returns:
-            - The live on-chain :class:`Decimal` price when the check COMPLETES
-              and detects a de-peg (drift past ``STABLECOIN_PEG_DEVIATION_THRESHOLD``).
-              The caller fails closed on this — it must not return the peg.
+            - The live on-chain :class:`PriceResult` when a fresh,
+              high-confidence check detects a de-peg (drift past
+              ``STABLECOIN_PEG_DEVIATION_THRESHOLD``). The caller fails closed
+              on this — it must not return the peg.
             - ``None`` when the check passes (on-peg), is skipped (not this
               call's turn and not latched, no on-chain source wired, interval
-              disabled), times out, or the source errors. The caller then serves
-              the peg best-effort UNLESS the token is still latched.
+              disabled), times out, produces stale/low-confidence evidence, or
+              the source errors. The caller then serves the peg best-effort
+              UNLESS the token is still latched.
 
         Never raises. Egress here is correct: this is the gateway layer and the
         on-chain source already owns its RPC path.
@@ -708,10 +782,7 @@ class PriceAggregator:
             if (self._stablecoin_peg_calls - 1) % interval != 0:
                 return None
 
-        onchain_source = next(
-            (s for s in self._sources if s.source_name in ("onchain", "onchain_chainlink")),
-            None,
-        )
+        onchain_source = self._stablecoin_verifier
         if onchain_source is None:
             return None
 
@@ -720,10 +791,16 @@ class PriceAggregator:
             # timeout we treat the check as "could not run" and return the peg
             # best-effort (the 1-in-N cadence keeps steady-state latency low).
             result = await asyncio.wait_for(
-                onchain_source.get_price(token, "USD", resolved_token=resolved_token),
+                onchain_source.get_price(
+                    token,
+                    "USD",
+                    resolved_token=resolved_token,
+                    bypass_stablecoin_fallback=True,
+                ),
                 timeout=STABLECOIN_PEG_CHECK_TIMEOUT_SECONDS,
             )
         except TimeoutError:
+            self._record_stablecoin_verifier_failure(token, "timeout")
             logger.debug(
                 "Stablecoin peg on-chain sanity check timed out for %s after %.1fs; returning the peg best-effort.",
                 token,
@@ -731,6 +808,7 @@ class PriceAggregator:
             )
             return None
         except Exception as exc:
+            self._record_stablecoin_verifier_failure(token, type(exc).__name__)
             # On-chain feed unavailable (no RPC, no feed, Anvil) — not a de-peg
             # signal, so stay quiet at DEBUG. The peg is still returned upstream.
             logger.debug(
@@ -740,10 +818,13 @@ class PriceAggregator:
             )
             return None
 
+        self._reset_stablecoin_verifier_failures(token)
         deviation = abs(result.price - STABLECOIN_PEG_PRICE) / STABLECOIN_PEG_PRICE
+        execution_grade = not result.stale and result.confidence >= STABLECOIN_VERIFIER_MIN_CONFIDENCE
         if deviation > Decimal(str(STABLECOIN_PEG_DEVIATION_THRESHOLD)):
-            # Latch the de-peg so subsequent (non-sampled) calls keep failing
-            # closed instead of resuming the $1.00 fast-path.
+            # Any measured off-peg evidence suppresses the synthetic peg. A
+            # stale/low-confidence result is not returned directly; the latch
+            # makes the caller fall through to the full aggregate instead.
             self._depegged_tokens.add(token.upper())
             logger.warning(
                 "Stablecoin %s may be DE-PEGGED: Chainlink reports %s (%.2f%% off $1.00 peg). "
@@ -754,7 +835,16 @@ class PriceAggregator:
                 result.price,
                 float(deviation) * 100,
             )
-            return result.price
+            return result if execution_grade else None
+
+        if not execution_grade:
+            logger.debug(
+                "Stablecoin peg on-chain recovery evidence rejected for %s: stale=%s confidence=%.3f",
+                token,
+                result.stale,
+                result.confidence,
+            )
+            return None
 
         # On-peg: clear any prior latch so the fast-path resumes. ``discard``
         # is a no-op when the token was never latched.
@@ -775,6 +865,34 @@ class PriceAggregator:
                 STABLECOIN_PEG_DEVIATION_THRESHOLD * 100,
             )
         return None
+
+    def _record_stablecoin_verifier_failure(self, token: str, reason: str) -> None:
+        """Record one failed measured peg check and warn once per outage streak."""
+        token_key = token.upper()
+        failures = self._stablecoin_verifier_failures.get(token_key, 0) + 1
+        self._stablecoin_verifier_failures[token_key] = failures
+
+        threshold = self._stablecoin_verifier_failure_warning_threshold
+        if threshold > 0 and failures == threshold:
+            logger.warning(
+                "Stablecoin peg verifier unavailable for %s after %d consecutive checks "
+                "(latest failure: %s). Continuing the synthetic $1.00 peg best-effort for "
+                "unlatched tokens; the outage warning is suppressed until verification recovers.",
+                token_key,
+                failures,
+                reason,
+            )
+
+    def _reset_stablecoin_verifier_failures(self, token: str) -> None:
+        """Clear a token's verifier outage streak after any completed check."""
+        token_key = token.upper()
+        failures = self._stablecoin_verifier_failures.pop(token_key, 0)
+        if failures:
+            logger.debug(
+                "Stablecoin peg verifier recovered for %s after %d consecutive failed checks.",
+                token_key,
+                failures,
+            )
 
     async def _fetch_all_sources(
         self,
@@ -985,7 +1103,29 @@ class PriceAggregator:
         start_time = time.time()
 
         try:
-            result = await source.get_price(token, quote, resolved_token=resolved_token)
+            verifier = self._stablecoin_verifier
+            if (
+                verifier is not None
+                # Wiring validated that the protocol object is this exact
+                # BasePriceSource instance; the cast expresses that runtime
+                # intersection to mypy, which cannot model intersection types.
+                and source is cast(BasePriceSource, verifier)
+                and quote.upper() == "USD"
+                and is_stablecoin_for_fallback(token, resolved_token)
+                and (self._stablecoin_verify or token.upper() in self._depegged_tokens)
+            ):
+                # The verifier's ordinary path may synthesize the same $1 peg
+                # that this aggregator is deliberately suppressing. Preserve a
+                # measured price throughout the full aggregate when live
+                # verification is requested or a measured de-peg is latched.
+                result = await verifier.get_price(
+                    token,
+                    quote,
+                    resolved_token=resolved_token,
+                    bypass_stablecoin_fallback=True,
+                )
+            else:
+                result = await source.get_price(token, quote, resolved_token=resolved_token)
             latency_ms = (time.time() - start_time) * 1000
             metrics.record_success(latency_ms)
             return result

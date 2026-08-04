@@ -32,7 +32,6 @@ from almanak.core.chains import LEGACY_SERIALIZED_CHAIN
 from almanak.core.lifecycle import LifecycleValueError, parse_lifecycle_command, require_enqueueable_command
 from almanak.framework.portfolio.models import serialize_value_confidence
 from almanak.gateway.core.settings import GatewaySettings
-from almanak.gateway.integrations.portfolio_chain import PortfolioProviderChain, build_portfolio_chain
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
 from almanak.gateway.registry import get_instance_registry
 from almanak.gateway.services._dashboard_helpers import (
@@ -46,6 +45,7 @@ from almanak.gateway.services._dashboard_helpers import (
 )
 from almanak.gateway.timeline.store import get_timeline_store
 from almanak.gateway.validation import ValidationError, validate_deployment_id
+from almanak.integrations._base.gateway.portfolio_chain import PortfolioProviderChain, build_portfolio_chain
 
 logger = logging.getLogger(__name__)
 
@@ -819,6 +819,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                 portfolio_api_key=self.settings.portfolio_api_key,
                 portfolio_api_provider=self.settings.portfolio_api_provider,
                 portfolio_api_cache_ttl=self.settings.portfolio_api_cache_ttl,
+                settings=self.settings,
             )
         except Exception as e:
             logger.warning(f"DashboardService: Failed to initialize portfolio providers: {e}")

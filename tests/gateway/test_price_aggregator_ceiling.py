@@ -262,13 +262,13 @@ class TestChainlinkFeedConfig:
         """Base should NOT have a WSTETH/USD entry (it's an ETH-denominated feed)."""
         # Per-chain constants moved onto ChainDescriptor.chainlink
         # (VIB-4851 CS-5); the aggregate view is the public surface.
-        from almanak.core.chainlink import CHAINLINK_PRICE_FEEDS
+        from almanak.integrations.chainlink.catalog import CHAINLINK_PRICE_FEEDS
 
         assert "WSTETH/USD" not in CHAINLINK_PRICE_FEEDS["base"]
 
     def test_base_wsteth_in_eth_denominated_feeds(self):
         """Base should have WSTETH/ETH in the ETH-denominated feeds."""
-        from almanak.core.chainlink import ETH_DENOMINATED_FEEDS
+        from almanak.integrations.chainlink.catalog import ETH_DENOMINATED_FEEDS
 
         assert "base" in ETH_DENOMINATED_FEEDS
         assert "WSTETH/ETH" in ETH_DENOMINATED_FEEDS["base"]
@@ -276,7 +276,7 @@ class TestChainlinkFeedConfig:
 
     def test_arbitrum_wsteth_in_eth_denominated_feeds(self):
         """Arbitrum should also use ETH-denominated wstETH feed."""
-        from almanak.core.chainlink import ETH_DENOMINATED_FEEDS
+        from almanak.integrations.chainlink.catalog import ETH_DENOMINATED_FEEDS
 
         assert "WSTETH/ETH" in ETH_DENOMINATED_FEEDS["arbitrum"]
 
@@ -289,7 +289,7 @@ class TestChainlinkFeedConfig:
         the multi-source consensus has enough good data to remain robust
         without DexScreener.
         """
-        from almanak.core.chainlink import ETH_DENOMINATED_FEEDS
+        from almanak.integrations.chainlink.catalog import ETH_DENOMINATED_FEEDS
 
         assert "ethereum" in ETH_DENOMINATED_FEEDS
         assert "WSTETH/ETH" in ETH_DENOMINATED_FEEDS["ethereum"]
@@ -302,7 +302,7 @@ class TestChainlinkFeedConfig:
         """The B1 derived feed is ADDITIVE — Ethereum keeps the direct
         WSTETH/USD entry so the OnChain source has both paths and median
         consensus is computed from independent Chainlink aggregators."""
-        from almanak.core.chainlink import CHAINLINK_PRICE_FEEDS
+        from almanak.integrations.chainlink.catalog import CHAINLINK_PRICE_FEEDS
 
         assert "WSTETH/USD" in CHAINLINK_PRICE_FEEDS["ethereum"], (
             "Ethereum WSTETH/USD direct feed must remain. B1 added the "

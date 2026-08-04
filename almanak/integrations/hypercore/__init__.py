@@ -1,0 +1,1 @@
+"""HyperCore oracle integration metadata."""

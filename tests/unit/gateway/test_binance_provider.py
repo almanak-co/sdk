@@ -10,6 +10,7 @@ from almanak.gateway.data.ohlcv.binance_provider import (
     BINANCE_SYMBOL_MAP,
     BinanceOHLCVProvider,
 )
+from almanak.integrations.binance.integration import BINANCE_UNSAFE_MARKET_BASES
 
 
 def _cex_binance_bases() -> set[str]:
@@ -182,6 +183,13 @@ class TestDynamicSymbolResolution:
         assert result == "CACHEDUSDT"
         mock_session.get.assert_not_called()
 
+    @pytest.mark.asyncio()
+    @pytest.mark.parametrize("token", sorted(BINANCE_UNSAFE_MARKET_BASES))
+    async def test_retired_symbols_never_probe_dynamic_tickers(self, provider, token):
+        with patch.object(provider, "_get_session", side_effect=AssertionError("must not probe")):
+            assert provider._resolve_symbol(token) is None
+            assert await provider._resolve_symbol_dynamic(token) is None
+
 
 class TestThirdTableCanonicalParity:
     """``BinanceOHLCVProvider`` is the THIRD Binance symbol table (the
@@ -213,7 +221,9 @@ class TestThirdTableCanonicalParity:
         """Drift guard: every Binance base in ``CEX_SYMBOL_MAP`` must resolve via
         this third table, so it can never silently diverge from the canonical
         source (the CBBTC/PENDLE gap)."""
-        unresolved = sorted(b for b in _cex_binance_bases() if provider._resolve_symbol(b) is None)
+        unresolved = sorted(
+            b for b in _cex_binance_bases() - BINANCE_UNSAFE_MARKET_BASES if provider._resolve_symbol(b) is None
+        )
         assert unresolved == [], f"third-table Binance bases not resolvable: {unresolved}"
 
     def test_local_table_does_not_disagree_with_canonical(self):

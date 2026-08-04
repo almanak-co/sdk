@@ -9,7 +9,7 @@ compute-unit + priority-fee accounting, not gas multipliers).
 
 from almanak.core.enums import ChainFamily
 
-from ._descriptor import ChainDescriptor, Explorer, GasProfile, NativeToken, RpcProfile, Timeouts
+from ._descriptor import ChainDescriptor, Explorer, ExternalChainIds, GasProfile, NativeToken, RpcProfile, Timeouts
 from ._registry import register_chain
 
 # Solana cluster URLs. Solana names networks by *cluster* (mainnet-beta,
@@ -38,6 +38,14 @@ DESCRIPTOR = register_chain(
             wrapped_coingecko_id="solana",
             slip44=501,  # SLIP-44 registered coin type for SOL (CAIP-19 native)
         ),
+        external_ids=ExternalChainIds(
+            dexscreener="solana",
+            coingecko_onchain="solana",
+            defillama="solana",
+            defillama_display="Solana",
+            zerion="solana",
+            okx="501",
+        ),
         gas=GasProfile(
             buffer=None,
             simulation_buffer=None,
@@ -61,16 +69,6 @@ DESCRIPTOR = register_chain(
         # genesis block hash (chain_id=0 is the non-EVM sentinel and cannot
         # serve as a CAIP-2 reference). VIB-5175.
         caip2_reference="5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
-        # VIB-4851 (B1): per-vendor external ids, transposed from the legacy
-        # standalone vendor maps (CoinGecko / DexScreener / CoinGecko Onchain /
-        # DeFiLlama / Zerion / Moralis / OKX). Values verbatim incl. case.
-        external_ids={
-            "dexscreener": "solana",
-            "coingecko_onchain": "solana",
-            "defillama_display": "Solana",
-            "zerion": "solana",
-            "okx": "501",
-        },
         aliases=("sol",),
     )
 )

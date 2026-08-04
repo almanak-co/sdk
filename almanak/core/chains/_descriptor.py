@@ -25,6 +25,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from enum import StrEnum
 from types import MappingProxyType
 
 from almanak.core.enums import ChainFamily
@@ -46,39 +47,79 @@ CAIP2_NAMESPACE_BY_FAMILY: Mapping[ChainFamily, str] = MappingProxyType(
 # CAIP-2 reference grammar (from the spec): ``[-_a-zA-Z0-9]{1,32}``.
 _CAIP2_REFERENCE_RE = re.compile(r"^[-_a-zA-Z0-9]{1,32}$")
 
-# Recognised vendor keys for ``ChainDescriptor.external_ids`` (VIB-4851 B1).
-# Each key is a third-party data/integration vendor whose per-chain
-# identifier the SDK previously kept in a standalone vendor-side map; the
-# descriptor now owns the value. ``ChainDescriptor.__post_init__`` rejects any
-# external_ids key not in this set so a typo'd vendor (e.g. ``"gecko"``) fails
-# loudly at registration rather than silently producing an unreachable id.
-#
-# ``dexscreener`` and ``coingecko_onchain`` each collapse two legacy maps that
-# were verified value-identical on every shared chain (DexScreener:
-# ``CHAIN_TO_DEXSCREENER_PLATFORM`` + ``CHAIN_SLUG_MAP``; CoinGecko Onchain:
-# ``_CHAIN_TO_NETWORK`` + ``_CHAIN_TO_CG_ONCHAIN_NETWORK``). ``defillama``
-# (lowercase slug) and ``defillama_display`` (Capitalised display name) cover
-# the same chains but carry distinct value formats, so they remain separate
-# keys. ``coingecko`` (asset-platform id, e.g. ``"ethereum"``) and
-# ``coingecko_onchain`` (Onchain/DEX network slug, e.g. ``"eth"``) are the same
-# vendor but distinct identifier namespaces, so they are separate keys too.
-KNOWN_VENDORS: frozenset[str] = frozenset(
-    {
-        "coingecko",
-        "dexscreener",
-        "coingecko_onchain",
-        "defillama",
-        "defillama_display",
-        "zerion",
-        "moralis",
-        "okx",
-        # Tenderly DASHBOARD slug for trace URLs
-        # (https://dashboard.tenderly.co/tx/{slug}/{hash}). NOT the Tenderly
-        # simulation network id — that is always str(chain_id) by
-        # SimulationProfile design and is deliberately not stored anywhere.
-        "tenderly",
-    }
-)
+
+class ExternalIdProvider(StrEnum):
+    """Provider namespaces supported by :class:`ExternalChainIds`.
+
+    These values identify provider-specific *chain* namespaces. They are not
+    execution capabilities and they do not imply that a provider client is
+    available. Keeping the vocabulary closed makes misspelled provider names a
+    construction error instead of an unreachable key in a free-form mapping.
+    """
+
+    COINGECKO = "coingecko"
+    COINGECKO_ONCHAIN = "coingecko_onchain"
+    DEFILLAMA = "defillama"
+    DEFILLAMA_DISPLAY = "defillama_display"
+    DEXSCREENER = "dexscreener"
+    MORALIS = "moralis"
+    OKX = "okx"
+    TENDERLY = "tenderly"
+    ZERION = "zerion"
+
+    @classmethod
+    def try_parse(cls, value: object) -> ExternalIdProvider | None:
+        """Return the canonical provider for a boundary value, or ``None``."""
+        if isinstance(value, cls):
+            return value
+        if not isinstance(value, str) or not value.strip():
+            return None
+        try:
+            return cls(value.strip().lower())
+        except ValueError:
+            return None
+
+
+@dataclass(frozen=True)
+class ExternalChainIds:
+    """Typed provider-specific identifiers implemented by one chain.
+
+    Values are deliberately sparse: ``None`` means the provider does not
+    support the chain. The named fields are the formal interface between chain
+    declarations and provider integrations; adding a provider namespace is an
+    explicit schema change rather than an arbitrary dictionary key.
+    """
+
+    coingecko: str | None = None
+    coingecko_onchain: str | None = None
+    defillama: str | None = None
+    defillama_display: str | None = None
+    dexscreener: str | None = None
+    moralis: str | None = None
+    okx: str | None = None
+    tenderly: str | None = None
+    zerion: str | None = None
+
+    def __post_init__(self) -> None:
+        for provider in ExternalIdProvider:
+            value = getattr(self, provider.value)
+            if value is not None and (not isinstance(value, str) or not value or value != value.strip()):
+                raise ValueError(f"ExternalChainIds.{provider.value} must be a non-empty, whitespace-trimmed string")
+
+    def get(self, provider: ExternalIdProvider | str) -> str | None:
+        """Return one provider identifier, failing closed for unknown names."""
+        parsed = ExternalIdProvider.try_parse(provider)
+        return None if parsed is None else getattr(self, parsed.value)
+
+    def as_mapping(self) -> Mapping[str, str]:
+        """Return an immutable sparse mapping for compatibility consumers."""
+        return MappingProxyType(
+            {
+                provider.value: value
+                for provider in ExternalIdProvider
+                if (value := getattr(self, provider.value)) is not None
+            }
+        )
 
 
 @dataclass(frozen=True)
@@ -100,25 +141,16 @@ class NativeToken:
             route to the native-balance path. The accepted set is derived as
             ``{symbol, *accepted_symbols}`` — see
             ``almanak.core.chains._helpers.native_symbols_for`` (VIB-4851 A1).
-        coingecko_id: CoinGecko COIN id of the native asset (e.g.
-            ``"ethereum"``, ``"avalanche-2"``, ``"sonic-3"``). Distinct from
-            ``ChainDescriptor.external_ids["coingecko"]``, which is the
-            vendor's PLATFORM id for the chain ("price a token by contract
-            address on this chain"); this field prices the gas asset itself.
-            ``None`` means "not yet verified against CoinGecko" — the asset
-            simply stays absent from derived price maps (legacy miss
-            semantics). Mirrors the native rows of the legacy per-chain
-            ``*_TOKEN_IDS`` maps (VIB-4851 Phase E, CS-3b; drift precedent
-            VIB-3805).
+        coingecko_id: CoinGecko coin id for the native gas asset. This is
+            distinct from ``ChainDescriptor.external_ids.coingecko``, which is
+            CoinGecko's asset-platform id for the chain.
         wrapped_symbol: The wrapped-native ERC-20's actual on-chain symbol
             (``"WETH"``, ``"WMNT"``, ``"wS"``, ``"W0G"``). Stored verbatim,
             including case — NEVER derived as ``"W" + symbol`` (zerog wraps
             ``A0GI`` as ``W0G``; sonic's contract symbol is ``"wS"``).
-        wrapped_coingecko_id: CoinGecko COIN id used to price the wrapped
-            native. Chains whose wrapper has its own listing use it
-            (ethereum-family ``"weth"``, zerog ``"wrapped-0g"``); the rest
-            alias the native id (the established WAVAX/WBNB/WSOL/WMNT
-            pattern from the legacy maps). ``None`` == unverified/absent.
+        wrapped_coingecko_id: CoinGecko coin id for the wrapped native asset.
+            It may equal ``coingecko_id`` when the wrapper shares the native
+            listing. ``None`` means unverified or unsupported.
         slip44: SLIP-44 (https://github.com/satoshilabs/slips/blob/master/
             slip-0044.md) registered coin type for this chain's native asset,
             used as the CAIP-19 native-asset reference (``slip44:<coin_type>``).
@@ -140,6 +172,10 @@ class NativeToken:
     slip44: int | None = None
 
     def __post_init__(self) -> None:
+        for field_name in ("coingecko_id", "wrapped_coingecko_id"):
+            value = getattr(self, field_name)
+            if value is not None and (not isinstance(value, str) or not value or value != value.strip()):
+                raise ValueError(f"NativeToken {field_name} must be a non-empty, whitespace-trimmed string")
         # SLIP-44 coin types are non-negative registry indices. A negative
         # value is a copy/paste bug; fail loudly at registration like the
         # sibling descriptor validations.
@@ -150,8 +186,7 @@ class NativeToken:
 # Recognised L1 fee-oracle mechanism kinds (Plan 026). Each string names the
 # on-chain precompile/predeploy mechanism used to fetch L1 data-cost for an L2
 # chain. ``GasProfile.__post_init__`` rejects any kind not in this set so a
-# typo'd value fails loudly at registration. Idiom mirrors ``KNOWN_CONTRACT_KEYS``
-# (:340) and the ``KNOWN_VENDORS`` check (:522-535).
+# typo'd value fails loudly at registration. Idiom mirrors ``KNOWN_CONTRACT_KEYS``.
 #
 # Supported values:
 #   "arbitrum_nodeinterface" — Arbitrum ArbGasInfo precompile
@@ -282,8 +317,7 @@ class GasProfile:
             raise ValueError(f"GasProfile min_priority_fee_gwei must be non-negative, got {self.min_priority_fee_gwei}")
         # Validate l1_fee_oracle_kind / l1_fee_oracle_address pairing (Plan 026).
         # Kind must be in KNOWN_L1_FEE_ORACLE_KINDS; address must be set iff kind
-        # is set and must be a 0x-prefixed 40-hex-char string. Idiom mirrors the
-        # KNOWN_VENDORS check in ChainDescriptor.__post_init__ (:522-535).
+        # is set and must be a 0x-prefixed 40-hex-char string.
         if self.l1_fee_oracle_kind is not None:
             if self.l1_fee_oracle_kind not in KNOWN_L1_FEE_ORACLE_KINDS:
                 raise ValueError(
@@ -465,33 +499,7 @@ class AnvilProfile:
                 object.__setattr__(self, attr, MappingProxyType(dict(value)))
 
 
-@dataclass(frozen=True)
-class ChainlinkFeeds:
-    """Chainlink aggregator addresses for this chain (VIB-4851 Phase E, CS-5).
-
-    A dumb frozen pair→aggregator map — feed-SELECTION policy (USD-first,
-    ETH-denominated fallback, staleness thresholds) stays with the
-    consumers in ``almanak/core/chainlink.py`` and the price sources; only
-    the per-chain ADDRESSES live here. Mirrors the chain half of the
-    legacy ``CHAINLINK_PRICE_FEEDS`` / ``ETH_DENOMINATED_FEEDS`` dicts.
-
-    Attributes:
-        usd_feeds: ``"TOKEN/USD"`` pair → aggregator address.
-        eth_denominated: ``"TOKEN/ETH"`` pair → aggregator address, for
-            tokens whose USD price is derived as TOKEN/ETH × ETH/USD.
-            Empty for chains without such feeds.
-    """
-
-    usd_feeds: Mapping[str, str]
-    eth_denominated: Mapping[str, str] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "usd_feeds", MappingProxyType(dict(self.usd_feeds)))
-        object.__setattr__(self, "eth_denominated", MappingProxyType(dict(self.eth_denominated)))
-
-
-# Recognised keys for ``ChainDescriptor.contracts`` (VIB-4851 CS-5). Same
-# fail-loudly contract as KNOWN_VENDORS: a typo'd key raises at
+# Recognised keys for ``ChainDescriptor.contracts`` (VIB-4851 CS-5). A typo'd key raises at
 # registration. Protocol-owned contract addresses (position managers,
 # routers, …) do NOT belong here — they live on the owning connector's
 # address tables (AddressRegistry); this map is only for chain-level
@@ -620,22 +628,10 @@ class ChainDescriptor:
             import the ``framework`` token layer to check that at construction
             (backward import), so the invariant is enforced by a unit test
             (``tests/unit/core/test_chain_canonical_stable.py``). VIB-5727.
-        external_ids: Sparse, vendor-keyed mapping from a third-party data /
-            integration vendor (see :data:`KNOWN_VENDORS`) to that vendor's
-            per-chain identifier — e.g. ``{"coingecko": "arbitrum-one",
-            "okx": "42161"}``. Mirrors the chain half of the legacy
-            vendor-side maps (CoinGecko ``COINGECKO_PLATFORM_IDS``,
-            DexScreener, CoinGecko Onchain, DeFiLlama, Zerion, Moralis, OKX) so a
-            vendor identifier derives from the registry instead of a
-            standalone dict. **Sparse**: a chain declares only the vendors it
-            is actually supported on; ``None`` means "no vendor identifiers
-            today" (matches the legacy ``map.get(chain)`` → ``None`` miss
-            semantics). Values are stored **verbatim, including case** — the
-            distinction between ``"ethereum"`` (DeFiLlama slug) and
-            ``"Ethereum"`` (DeFiLlama display) is load-bearing, so only the
-            vendor *key* is lowercased, never the value. An unknown vendor key
-            raises ``ValueError`` at construction. Frozen at construction;
-            mutating after returns has no effect. VIB-4851 (B1).
+        external_ids: ``ExternalChainIds`` containing the sparse, typed
+            provider-specific chain identifiers implemented by this chain.
+            Provider integrations consume this metadata but do not own or
+            duplicate it.
         anvil: ``AnvilProfile`` — managed-Anvil fork-test funding facts
             (token addresses, balance slots, whale fallbacks, gas-limit
             quirk). Default-empty; test infra only. VIB-4851 (CS-6).
@@ -690,8 +686,7 @@ class ChainDescriptor:
     simulation: SimulationProfile = field(default_factory=SimulationProfile)
     tokens: Mapping[str, str] | None = None
     canonical_stable: str | None = None
-    external_ids: Mapping[str, str] | None = None
-    chainlink: ChainlinkFeeds | None = None
+    external_ids: ExternalChainIds = field(default_factory=ExternalChainIds)
     contracts: Mapping[str, str] | None = None
     anvil: AnvilProfile = field(default_factory=AnvilProfile)
     bridged_stablecoin_variants: tuple[str, ...] = ()
@@ -725,6 +720,11 @@ class ChainDescriptor:
         return f"{namespace}:{reference}"
 
     def __post_init__(self) -> None:
+        if not isinstance(self.external_ids, ExternalChainIds):
+            raise TypeError(
+                f"ChainDescriptor {self.name!r} external_ids must be ExternalChainIds, "
+                f"got {type(self.external_ids).__name__}"
+            )
         # VIB-3350: a confirmation depth is a non-negative block count. A negative
         # value would make ``receipt_block + depth`` nonsensical and the
         # confirmation-wait would treat the target as trivially already-reached.
@@ -742,25 +742,6 @@ class ChainDescriptor:
                 self,
                 "tokens",
                 MappingProxyType({k.lower(): v for k, v in self.tokens.items()}),
-            )
-        # Freeze the optional vendor-keyed external_ids the same way, lowercasing
-        # only the vendor KEY (values are verbatim — "ethereum" vs "Ethereum" is
-        # meaningful). Reject any key outside KNOWN_VENDORS so a typo'd vendor
-        # fails loudly at registration rather than silently producing an id that
-        # no lookup will ever find. VIB-4851 (B1).
-        if self.external_ids is not None:
-            frozen_external_ids = {k.lower(): v for k, v in self.external_ids.items()}
-            unknown = sorted(frozen_external_ids.keys() - KNOWN_VENDORS)
-            if unknown:
-                raise ValueError(
-                    f"ChainDescriptor {self.name!r} declares unknown external_ids "
-                    f"vendor key(s) {unknown}; known vendors are "
-                    f"{sorted(KNOWN_VENDORS)}"
-                )
-            object.__setattr__(
-                self,
-                "external_ids",
-                MappingProxyType(frozen_external_ids),
             )
         # Freeze + validate the optional chain-infrastructure contracts map
         # (VIB-4851 CS-5). Unknown keys fail loudly at registration.

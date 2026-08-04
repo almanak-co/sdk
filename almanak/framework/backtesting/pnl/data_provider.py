@@ -187,7 +187,7 @@ def native_token_map_entry(chain: str) -> tuple[str, TokenKey] | None:
     if descriptor is None or descriptor.family is not ChainFamily.EVM:
         return None
     native = descriptor.native
-    if not native.coingecko_id:
+    if native.coingecko_id is None:
         return None
     return native.symbol.upper(), normalize_token_key(descriptor.name, NATIVE_SENTINEL)
 

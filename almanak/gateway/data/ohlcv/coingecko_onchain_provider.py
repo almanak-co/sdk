@@ -36,7 +36,6 @@ from typing import Any
 
 import aiohttp
 
-from almanak.core.chains._helpers import vendor_chain_map
 from almanak.core.finality import DataFinality
 from almanak.framework.data.interfaces import (
     DataSourceUnavailable,
@@ -54,6 +53,7 @@ from almanak.framework.data.timeframes import (
     parse_ohlcv_timeframe,
 )
 from almanak.gateway.utils.rpc_provider import _get_gateway_api_key
+from almanak.integrations.chains import integration_chain_map
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +66,7 @@ _SOURCE = "coingecko_onchain"
 # Chain name -> CoinGecko Onchain network ID mapping. Onchain network ids are
 # their own namespace ("eth", "polygon_pos"), distinct from the token-level
 # asset-platform ids under the ``coingecko`` vendor key.
-_CHAIN_TO_NETWORK: Mapping[str, str] = MappingProxyType(vendor_chain_map("coingecko_onchain"))
+_CHAIN_TO_NETWORK: Mapping[str, str] = MappingProxyType(integration_chain_map("coingecko_onchain"))
 
 
 @dataclass

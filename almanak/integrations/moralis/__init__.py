@@ -1,0 +1,1 @@
+"""Moralis integration metadata."""

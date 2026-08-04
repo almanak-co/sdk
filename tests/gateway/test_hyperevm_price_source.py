@@ -166,7 +166,7 @@ class TestMarketServiceHyperevmStack:
         names = [s.source_name for s in servicer._price_aggregator._sources]
         # HyperCore oracle primary + DexScreener + CoinGecko fallback; NO Chainlink.
         assert names[0] == "hypercore_oracle"
-        assert "onchain" not in names  # no Chainlink on HyperEVM
+        assert "chainlink" not in names  # no Chainlink on HyperEVM
         assert "dexscreener" in names
         assert "coingecko" in names
         assert len(names) == 3

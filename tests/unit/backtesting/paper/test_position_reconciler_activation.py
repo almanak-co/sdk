@@ -46,6 +46,9 @@ from almanak.framework.backtesting.paper.position_reconciler import (
     PositionReconciler,
     PositionType,
 )
+from tests.unit.backtesting.paper._persistent_mode_test_seam import (
+    construct_unsupported_persistent_trader_for_test,
+)
 
 ENGINE_LOGGER = "almanak.framework.backtesting.paper.engine"
 WALLET = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
@@ -97,6 +100,7 @@ class _MockStrategy:
 
 
 def _make_config(**overrides: Any) -> PaperTraderConfig:
+    lifecycle = overrides.pop("fork_lifecycle", ForkLifecycle.ROLLING_RESET)
     kwargs: dict[str, Any] = {
         "chain": "arbitrum",
         "rpc_url": "https://arb.example/rpc",
@@ -106,23 +110,31 @@ def _make_config(**overrides: Any) -> PaperTraderConfig:
         "strict_price_mode": False,
     }
     kwargs.update(overrides)
-    return PaperTraderConfig(**kwargs)
+    config = PaperTraderConfig(**kwargs)
+    config.fork_lifecycle = lifecycle
+    config.reset_fork_every_tick = lifecycle != ForkLifecycle.PERSISTENT
+    return config
 
 
 def _make_trader(config: PaperTraderConfig | None = None) -> PaperTrader:
     cfg = config or _make_config()
-    with patch(
-        "almanak.framework.backtesting.paper.engine.CoinGeckoPriceSource"
-    ), patch(
-        "almanak.framework.backtesting.paper.engine.ChainlinkDataProvider"
-    ), patch(
-        "almanak.framework.backtesting.paper.engine.DEXTWAPDataProvider"
+    with (
+        patch("almanak.framework.backtesting.paper.engine.CoinGeckoPriceSource"),
+        patch("almanak.framework.backtesting.paper.engine.ChainlinkDataProvider"),
+        patch("almanak.framework.backtesting.paper.engine.DEXTWAPDataProvider"),
     ):
-        trader = PaperTrader(
-            fork_manager=_MockForkManager(),
-            portfolio_tracker=_MockPortfolioTracker(),
-            config=cfg,
-        )
+        if cfg.fork_lifecycle == ForkLifecycle.PERSISTENT:
+            trader = construct_unsupported_persistent_trader_for_test(
+                fork_manager=_MockForkManager(),
+                portfolio_tracker=_MockPortfolioTracker(),
+                config=cfg,
+            )
+        else:
+            trader = PaperTrader(
+                fork_manager=_MockForkManager(),
+                portfolio_tracker=_MockPortfolioTracker(),
+                config=cfg,
+            )
     trader._price_aggregator = MagicMock()
     trader._chainlink_provider = None
     trader._twap_provider = None
@@ -247,8 +259,7 @@ class TestTickGating:
             await trader.tick()
         assert calls["reconciler"] == 0
         assert any(
-            "Skipping PositionReconciler" in rec.message and rec.levelno == logging.DEBUG
-            for rec in caplog.records
+            "Skipping PositionReconciler" in rec.message and rec.levelno == logging.DEBUG for rec in caplog.records
         )
 
     @pytest.mark.asyncio
@@ -297,9 +308,7 @@ class TestRunPositionReconciler:
         discrepancy = _supply_discrepancy(DiscrepancyType.AMOUNT_MISMATCH)
         _install_reconciler(trader, [discrepancy])
         # Pre-track the supply so it counts as drift on an adopted baseline.
-        trader._position_reconciler.track_supply(
-            asset="USDC", asset_address=USDC_ARB.lower(), amount=1_000_000_000
-        )
+        trader._position_reconciler.track_supply(asset="USDC", asset_address=USDC_ARB.lower(), amount=1_000_000_000)
 
         with caplog.at_level(logging.WARNING, logger=ENGINE_LOGGER):
             await trader._run_position_reconciler()
@@ -328,9 +337,7 @@ class TestRunPositionReconciler:
             actual=1_375_000_000,
         )
         reconcile_mock = _install_reconciler(trader, [d1])
-        trader._position_reconciler.track_supply(
-            asset="USDC", asset_address=USDC_ARB.lower(), amount=1_000_000_000
-        )
+        trader._position_reconciler.track_supply(asset="USDC", asset_address=USDC_ARB.lower(), amount=1_000_000_000)
 
         await trader._run_position_reconciler()
         reconcile_mock.return_value = [d2]
@@ -359,9 +366,7 @@ class TestRunPositionReconciler:
     @pytest.mark.asyncio
     async def test_first_sight_lending_position_is_adopted_not_divergence(self) -> None:
         trader = _make_trader(_make_config(fork_lifecycle=ForkLifecycle.PERSISTENT))
-        discrepancy = _supply_discrepancy(
-            DiscrepancyType.MISSING_IN_TRACKER, expected=None, actual=1_000_000_000
-        )
+        discrepancy = _supply_discrepancy(DiscrepancyType.MISSING_IN_TRACKER, expected=None, actual=1_000_000_000)
         _install_reconciler(trader, [discrepancy])
 
         on_chain = AaveV3LendingPosition(
@@ -476,13 +481,9 @@ class TestRunPositionReconciler:
     @pytest.mark.asyncio
     async def test_missing_on_chain_warns_once_then_drops_baseline(self) -> None:
         trader = _make_trader(_make_config(fork_lifecycle=ForkLifecycle.PERSISTENT))
-        discrepancy = _supply_discrepancy(
-            DiscrepancyType.MISSING_ON_CHAIN, expected=1_000_000_000, actual=None
-        )
+        discrepancy = _supply_discrepancy(DiscrepancyType.MISSING_ON_CHAIN, expected=1_000_000_000, actual=None)
         _install_reconciler(trader, [discrepancy])
-        trader._position_reconciler.track_supply(
-            asset="USDC", asset_address=USDC_ARB.lower(), amount=1_000_000_000
-        )
+        trader._position_reconciler.track_supply(asset="USDC", asset_address=USDC_ARB.lower(), amount=1_000_000_000)
 
         await trader._run_position_reconciler()
 
@@ -545,16 +546,17 @@ class TestBalanceDivergence:
         return trader
 
     @pytest.mark.asyncio
-    async def test_divergence_above_threshold_warns_and_records(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    async def test_divergence_above_threshold_warns_and_records(self, caplog: pytest.LogCaptureFixture) -> None:
         trader = self._trader_with_balances({"USDC": Decimal("1000")})
         # On-chain: 900 USDC (6 decimals) -> 10% divergence vs tracked 1000.
         trader._snapshot_balances = AsyncMock(return_value={"USDC": 900_000_000})  # type: ignore[method-assign]
-        with patch(
-            "almanak.framework.backtesting.paper.engine.get_token_decimals_with_fallback",
-            new=AsyncMock(return_value=6),
-        ), caplog.at_level(logging.WARNING, logger=ENGINE_LOGGER):
+        with (
+            patch(
+                "almanak.framework.backtesting.paper.engine.get_token_decimals_with_fallback",
+                new=AsyncMock(return_value=6),
+            ),
+            caplog.at_level(logging.WARNING, logger=ENGINE_LOGGER),
+        ):
             await trader._check_balance_divergence(WALLET)
 
         assert any("Wallet balance divergence for USDC" in rec.message for rec in caplog.records)
@@ -568,10 +570,13 @@ class TestBalanceDivergence:
         trader = self._trader_with_balances({"USDC": Decimal("1000")})
         # On-chain: 999.5 USDC -> 0.05% divergence, below the 1% default.
         trader._snapshot_balances = AsyncMock(return_value={"USDC": 999_500_000})  # type: ignore[method-assign]
-        with patch(
-            "almanak.framework.backtesting.paper.engine.get_token_decimals_with_fallback",
-            new=AsyncMock(return_value=6),
-        ), caplog.at_level(logging.WARNING, logger=ENGINE_LOGGER):
+        with (
+            patch(
+                "almanak.framework.backtesting.paper.engine.get_token_decimals_with_fallback",
+                new=AsyncMock(return_value=6),
+            ),
+            caplog.at_level(logging.WARNING, logger=ENGINE_LOGGER),
+        ):
             await trader._check_balance_divergence(WALLET)
 
         assert not [r for r in caplog.records if r.name == ENGINE_LOGGER]

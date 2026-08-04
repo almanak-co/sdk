@@ -17,7 +17,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Generic, TypeVar
 
 
 class OHLCVTimeframe(StrEnum):
@@ -85,11 +84,8 @@ def parse_ohlcv_timeframe(value: object, *, field_name: str = "timeframe") -> OH
         ) from exc
 
 
-_ProviderValueT = TypeVar("_ProviderValueT")
-
-
 @dataclass(frozen=True)
-class OHLCVTimeframeCapabilities(Generic[_ProviderValueT]):
+class OHLCVTimeframeCapabilities[ProviderValueT]:
     """Exhaustive provider mapping over the canonical timeframe vocabulary.
 
     Every canonical interval must appear exactly once: either in ``mapping``
@@ -99,7 +95,7 @@ class OHLCVTimeframeCapabilities(Generic[_ProviderValueT]):
     """
 
     provider: str
-    mapping: Mapping[OHLCVTimeframe, _ProviderValueT]
+    mapping: Mapping[OHLCVTimeframe, ProviderValueT]
     unsupported: frozenset[OHLCVTimeframe]
 
     def __post_init__(self) -> None:
@@ -139,7 +135,7 @@ class OHLCVTimeframeCapabilities(Generic[_ProviderValueT]):
         keys = frozenset(self.mapping)
         return self._ordered(keys)
 
-    def resolve(self, timeframe: OHLCVTimeframe) -> _ProviderValueT:
+    def resolve(self, timeframe: OHLCVTimeframe) -> ProviderValueT:
         """Return the provider-native mapping or raise an actionable refusal."""
         try:
             return self.mapping[timeframe]

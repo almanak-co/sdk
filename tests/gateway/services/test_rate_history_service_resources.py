@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
+from unittest.mock import AsyncMock
 
 import grpc
 
@@ -120,6 +121,23 @@ def test_get_web3_reuses_single_instance_per_chain_under_concurrency(monkeypatch
 
     assert create_count == 1
     assert len({id(w) for w in instances}) == 1
+
+
+def test_close_isolates_oracle_reader_failures_and_clears_cache() -> None:
+    servicer = RateHistoryServiceServicer(GatewaySettings())
+    failing = AsyncMock()
+    failing.close.side_effect = RuntimeError("close failed")
+    succeeding = AsyncMock()
+    servicer._oracle_history_providers = {
+        ("chainlink", "ethereum"): failing,
+        ("chainlink", "arbitrum"): succeeding,
+    }
+
+    asyncio.run(servicer.close())
+
+    failing.close.assert_awaited_once()
+    succeeding.close.assert_awaited_once()
+    assert servicer._oracle_history_providers == {}
 
 
 # =============================================================================

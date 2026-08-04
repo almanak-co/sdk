@@ -78,11 +78,31 @@ class TestMultiChainBuild:
         # The arbitrum aggregator holds Chainlink (onchain), NOT the venue oracle.
         assert "onchain" in arb_names
         assert "hypercore_oracle" not in arb_names
+        assert "binance" in arb_names
 
         # The hyperevm aggregator holds the venue oracle, NOT Chainlink.
         assert "hypercore_oracle" in hyper_names
         assert "onchain" not in hyper_names
+        assert "binance" not in hyper_names
 
+        await servicer.close()
+
+    @pytest.mark.asyncio
+    async def test_propagates_stablecoin_verifier_warning_threshold(self):
+        settings = GatewaySettings(
+            chains=["arbitrum", "base"],
+            network="mainnet",
+            coingecko_api_key="",
+            stablecoin_verifier_failure_warning_threshold=7,
+        )
+        servicer = MarketServiceServicer(settings)
+
+        await servicer._ensure_initialized()
+
+        assert {
+            aggregator._stablecoin_verifier_failure_warning_threshold
+            for aggregator in servicer._price_aggregators.values()
+        } == {7}
         await servicer.close()
 
 
@@ -141,9 +161,9 @@ class TestEvmChainRouting:
 
         # Isolate the arbitrum Chainlink source and stub its feed read.
         arb_agg = servicer._price_aggregators["arbitrum"]
-        onchain_source = next(s for s in arb_agg.sources if s.source_name == "onchain")
-        arb_agg._sources = [onchain_source]
-        onchain_source._chain_id_validated = True  # skip the eth_chainId RPC
+        chainlink_source = next(s for s in arb_agg.sources if s.source_name == "onchain")
+        arb_agg._sources = [chainlink_source]
+        chainlink_source._chain_id_validated = True  # skip the eth_chainId RPC
         fetch = AsyncMock(return_value=(Decimal("2500"), 1.0))
 
         # The venue oracle must never be read for an arbitrum request.
@@ -153,7 +173,7 @@ class TestEvmChainRouting:
         venue_call = AsyncMock(side_effect=AssertionError("venue oracle read for an arbitrum request"))
 
         with (
-            patch.object(onchain_source, "_fetch_chainlink", new=fetch),
+            patch.object(chainlink_source, "_fetch_chainlink", new=fetch),
             patch.object(hyper_source, "_eth_call", new=venue_call),
         ):
             request = MagicMock()
@@ -302,9 +322,9 @@ class TestSharedSourceDedupAndClose:
 
         shared_binance = arb["binance"]
         shared_coingecko = arb["coingecko"]
-        arb_onchain = arb["onchain"]
-        base_onchain = base["onchain"]
-        for src in (shared_binance, shared_coingecko, arb_onchain, base_onchain):
+        arb_chainlink = arb["onchain"]
+        base_chainlink = base["onchain"]
+        for src in (shared_binance, shared_coingecko, arb_chainlink, base_chainlink):
             src.close = AsyncMock()
 
         await servicer._close_price_sources()
@@ -313,8 +333,8 @@ class TestSharedSourceDedupAndClose:
         shared_binance.close.assert_awaited_once()
         shared_coingecko.close.assert_awaited_once()
         # Per-chain instances each closed once too.
-        arb_onchain.close.assert_awaited_once()
-        base_onchain.close.assert_awaited_once()
+        arb_chainlink.close.assert_awaited_once()
+        base_chainlink.close.assert_awaited_once()
         # Map cleared after close.
         assert servicer._price_aggregators == {}
 
@@ -346,12 +366,13 @@ class TestSingleChainCompat:
         await servicer.close()
 
     @pytest.mark.asyncio
-    async def test_no_chain_gateway_uses_sentinel_key(self):
+    async def test_no_chain_gateway_uses_sentinel_key(self, caplog):
         """A gateway started with no chains keeps a single CoinGecko-only aggregator
         under the sentinel key — ``_aggregator_for`` always has a primary to fall
         back to."""
         servicer = MarketServiceServicer(_settings([]))
-        await servicer._ensure_initialized()
+        with caplog.at_level("WARNING"):
+            await servicer._ensure_initialized()
 
         assert set(servicer._price_aggregators.keys()) == {_NO_CHAIN_KEY}
         assert servicer._primary_chain == _NO_CHAIN_KEY
@@ -359,5 +380,6 @@ class TestSingleChainCompat:
         assert names == ["coingecko"]
         # A bare/unconfigured chain falls back to the primary (sentinel) aggregator.
         assert servicer._aggregator_for("hyperevm") is servicer._price_aggregators[_NO_CHAIN_KEY]
+        assert "RegisterChains / --chains" in caplog.text
 
         await servicer.close()

@@ -2,7 +2,15 @@
 
 from almanak.core.enums import ChainFamily
 
-from ._descriptor import ChainDescriptor, Explorer, GasProfile, NativeToken, SimulationProfile, Timeouts
+from ._descriptor import (
+    ChainDescriptor,
+    Explorer,
+    ExternalChainIds,
+    GasProfile,
+    NativeToken,
+    SimulationProfile,
+    Timeouts,
+)
 from ._registry import register_chain
 
 DESCRIPTOR = register_chain(
@@ -20,6 +28,7 @@ DESCRIPTOR = register_chain(
             wrapped_coingecko_id="weth",
             slip44=60,  # SLIP-44 coin type for Ether (CAIP-19 native)
         ),
+        external_ids=ExternalChainIds(coingecko="blast", dexscreener="blast"),
         gas=GasProfile(
             buffer=1.5,
             simulation_buffer=0.5,
@@ -32,13 +41,6 @@ DESCRIPTOR = register_chain(
             grpc_execute=None,  # legacy: not in CHAIN_GRPC_EXECUTE_TIMEOUTS
         ),
         simulation=SimulationProfile(tenderly_supported=True),
-        # VIB-4851 (B1): per-vendor external ids, transposed from the legacy
-        # standalone vendor maps (CoinGecko / DexScreener / CoinGecko Onchain /
-        # DeFiLlama / Zerion / Moralis / OKX). Values verbatim incl. case.
-        external_ids={
-            "coingecko": "blast",
-            "dexscreener": "blast",
-        },
         aliases=(),
     )
 )

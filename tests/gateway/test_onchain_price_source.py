@@ -1,4 +1,4 @@
-"""Tests for OnChainPriceSource -- Chainlink on-chain pricing."""
+"""Tests for ChainlinkPriceSource -- Chainlink on-chain pricing."""
 
 import time
 from decimal import Decimal
@@ -6,7 +6,32 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from almanak.gateway.data.price.onchain import OnChainPriceSource
+from almanak.integrations.chainlink.catalog import CATALOG
+from almanak.integrations.chainlink.gateway.live import ChainlinkPriceSource
+
+
+@pytest.fixture(autouse=True)
+def _seed_catalog_decimals(monkeypatch: pytest.MonkeyPatch):
+    """Keep latestRoundData tests focused; decimals behavior has dedicated tests."""
+    original_init = ChainlinkPriceSource.__init__
+
+    def seeded_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        self._feed_decimals.update(
+            {spec.address.lower(): spec.decimals for spec in CATALOG.feeds(self._chain).values()}
+        )
+
+    monkeypatch.setattr(ChainlinkPriceSource, "__init__", seeded_init)
+
+
+def test_legacy_onchain_module_is_a_true_compatibility_alias() -> None:
+    from almanak.gateway.data.price import onchain as legacy
+    from almanak.integrations.chainlink.gateway import live
+
+    assert legacy is live
+    assert legacy.ChainlinkPriceSource is ChainlinkPriceSource
+    assert legacy.OnChainPriceSource is ChainlinkPriceSource
+    assert legacy.RPCError is live.RPCError
 
 
 def _build_chainlink_response(answer: int, updated_at: int) -> str:
@@ -34,7 +59,7 @@ class TestStablecoins:
 
     @pytest.mark.asyncio
     async def test_usdc_returns_one(self):
-        source = OnChainPriceSource(chain="arbitrum")
+        source = ChainlinkPriceSource(chain="arbitrum")
         result = await source.get_price("USDC", "USD")
 
         assert result.price == Decimal("1.00")
@@ -45,7 +70,7 @@ class TestStablecoins:
 
     @pytest.mark.asyncio
     async def test_usdt_returns_one(self):
-        source = OnChainPriceSource(chain="arbitrum")
+        source = ChainlinkPriceSource(chain="arbitrum")
         result = await source.get_price("USDT", "USD")
 
         assert result.price == Decimal("1.00")
@@ -54,7 +79,7 @@ class TestStablecoins:
 
     @pytest.mark.asyncio
     async def test_dai_returns_one(self):
-        source = OnChainPriceSource(chain="ethereum")
+        source = ChainlinkPriceSource(chain="ethereum")
         result = await source.get_price("DAI", "USD")
 
         assert result.price == Decimal("1.00")
@@ -62,7 +87,7 @@ class TestStablecoins:
 
     @pytest.mark.asyncio
     async def test_stablecoin_case_insensitive(self):
-        source = OnChainPriceSource(chain="arbitrum")
+        source = ChainlinkPriceSource(chain="arbitrum")
         result = await source.get_price("usdc", "USD")
 
         assert result.price == Decimal("1.00")
@@ -70,13 +95,13 @@ class TestStablecoins:
 
     @pytest.mark.asyncio
     async def test_pusd_with_resolved_token_returns_one(self):
-        """``OnChainPriceSource.get_price`` accepts ``resolved_token`` and
+        """``ChainlinkPriceSource.get_price`` accepts ``resolved_token`` and
         routes through ``is_stablecoin_for_fallback`` so symbol-clash tokens
         like Polymarket pUSD (whose symbol is also used by ``Pleasing USD``,
         ``Palm USD``, ``Plume USD`` on other chains) get the $1.00 fast-path
         only when the resolved address matches the on-chain Polymarket pUSD.
         Aggregator-level tests exist in ``test_price_aggregator_ceiling.py``;
-        this is the direct unit assertion at the OnChainPriceSource layer."""
+        this is the direct unit assertion at the ChainlinkPriceSource layer."""
         from almanak.framework.data.tokens.models import BridgeType, ResolvedToken
 
         polymarket_pusd = ResolvedToken(
@@ -95,7 +120,7 @@ class TestStablecoins:
             source="static",
         )
 
-        source = OnChainPriceSource(chain="polygon")
+        source = ChainlinkPriceSource(chain="polygon")
         result = await source.get_price("PUSD", "USD", resolved_token=polymarket_pusd)
 
         assert result.price == Decimal("1.00")
@@ -112,7 +137,7 @@ class TestStablecoins:
         — never silently return $1.00."""
         from almanak.framework.data.interfaces import DataSourceUnavailable
 
-        source = OnChainPriceSource(chain="polygon")
+        source = ChainlinkPriceSource(chain="polygon")
         with pytest.raises(DataSourceUnavailable):
             await source.get_price("PUSD", "USD")
         await source.close()
@@ -122,9 +147,64 @@ class TestChainlinkPricing:
     """Chainlink latestRoundData() pricing."""
 
     @pytest.mark.asyncio
+    async def test_feed_decimals_are_measured_cached_and_verified(self):
+        source = ChainlinkPriceSource(chain="arbitrum", cache_ttl=0)
+        source._feed_decimals.clear()
+        now = int(time.time())
+        response = _build_chainlink_response(250000000000, now)
+        decimals = "0x" + (8).to_bytes(32, byteorder="big").hex()
+
+        with patch.object(
+            source,
+            "_eth_call",
+            new_callable=AsyncMock,
+            side_effect=[response, decimals, response],
+        ) as eth_call:
+            assert (await source.get_price("ETH", "USD")).price == Decimal("2500")
+            assert (await source.get_price("ETH", "USD")).price == Decimal("2500")
+
+        assert eth_call.await_count == 3  # two prices, one cached decimals read
+        await source.close()
+
+    @pytest.mark.asyncio
+    async def test_feed_decimals_mismatch_fails_closed(self):
+        from almanak.framework.data.interfaces import DataSourceUnavailable
+
+        source = ChainlinkPriceSource(chain="arbitrum", cache_ttl=0)
+        source._feed_decimals.clear()
+        response = _build_chainlink_response(250000000000, int(time.time()))
+        wrong_decimals = "0x" + (18).to_bytes(32, byteorder="big").hex()
+
+        with patch.object(
+            source,
+            "_eth_call",
+            new_callable=AsyncMock,
+            side_effect=[response, wrong_decimals],
+        ):
+            with pytest.raises(DataSourceUnavailable, match="decimals mismatch"):
+                await source.get_price("ETH", "USD")
+        await source.close()
+
+    @pytest.mark.asyncio
+    async def test_stablecoin_verification_bypasses_synthetic_peg(self):
+        source = ChainlinkPriceSource(chain="arbitrum", cache_ttl=0)
+        with patch.object(
+            source,
+            "_fetch_chainlink",
+            new_callable=AsyncMock,
+            return_value=(Decimal("0.92"), 0.95),
+        ) as fetch:
+            result = await source.get_price("USDC", "USD", bypass_stablecoin_fallback=True)
+
+        assert result.price == Decimal("0.92")
+        assert result.source == "onchain_chainlink"
+        fetch.assert_awaited_once()
+        await source.close()
+
+    @pytest.mark.asyncio
     async def test_eth_usd_price(self):
         """ETH/USD price decoded correctly from mocked latestRoundData."""
-        source = OnChainPriceSource(chain="arbitrum")
+        source = ChainlinkPriceSource(chain="arbitrum")
 
         # ETH at $2500.12345678 with 8 decimals -> answer = 250012345678
         answer = 250012345678
@@ -143,7 +223,7 @@ class TestChainlinkPricing:
     @pytest.mark.asyncio
     async def test_weth_returns_same_as_eth(self):
         """WETH maps to ETH/USD feed (same price)."""
-        source = OnChainPriceSource(chain="arbitrum")
+        source = ChainlinkPriceSource(chain="arbitrum")
 
         answer = 300000000000  # $3000.00
         now = int(time.time())
@@ -159,7 +239,7 @@ class TestChainlinkPricing:
     @pytest.mark.asyncio
     async def test_btc_usd_price(self):
         """BTC/USD price decoded correctly."""
-        source = OnChainPriceSource(chain="ethereum")
+        source = ChainlinkPriceSource(chain="ethereum")
 
         answer = 6700000000000  # $67000.00
         now = int(time.time())
@@ -174,7 +254,7 @@ class TestChainlinkPricing:
     @pytest.mark.asyncio
     async def test_arb_usd_price(self):
         """ARB/USD price on Arbitrum chain."""
-        source = OnChainPriceSource(chain="arbitrum")
+        source = ChainlinkPriceSource(chain="arbitrum")
 
         answer = 120000000  # $1.20
         now = int(time.time())
@@ -193,7 +273,7 @@ class TestStaleness:
     @pytest.mark.asyncio
     async def test_stale_data_returns_reduced_confidence(self):
         """Data older than threshold returns confidence=0.85 (not an error)."""
-        source = OnChainPriceSource(chain="arbitrum")
+        source = ChainlinkPriceSource(chain="arbitrum")
 
         answer = 250000000000  # $2500
         # updated_at is 2 hours ago -- stale
@@ -211,7 +291,7 @@ class TestStaleness:
     @pytest.mark.asyncio
     async def test_fresh_data_returns_full_confidence(self):
         """Data within threshold returns confidence=0.95."""
-        source = OnChainPriceSource(chain="arbitrum")
+        source = ChainlinkPriceSource(chain="arbitrum")
 
         answer = 250000000000
         now = int(time.time())
@@ -231,7 +311,7 @@ class TestCache:
     @pytest.mark.asyncio
     async def test_cache_prevents_duplicate_rpc(self):
         """Second call within TTL returns cached result, no new RPC call."""
-        source = OnChainPriceSource(chain="arbitrum", cache_ttl=60.0)
+        source = ChainlinkPriceSource(chain="arbitrum", cache_ttl=60.0)
 
         answer = 250000000000
         now = int(time.time())
@@ -251,7 +331,7 @@ class TestCache:
     @pytest.mark.asyncio
     async def test_stablecoin_cache(self):
         """Stablecoin results are cached too."""
-        source = OnChainPriceSource(chain="arbitrum", cache_ttl=60.0)
+        source = ChainlinkPriceSource(chain="arbitrum", cache_ttl=60.0)
 
         result1 = await source.get_price("USDC", "USD")
         result2 = await source.get_price("USDC", "USD")
@@ -268,7 +348,7 @@ class TestErrorHandling:
         """Token not in Chainlink feeds raises DataSourceUnavailable."""
         from almanak.framework.data.interfaces import DataSourceUnavailable
 
-        source = OnChainPriceSource(chain="arbitrum")
+        source = ChainlinkPriceSource(chain="arbitrum")
 
         with pytest.raises(DataSourceUnavailable, match="No Chainlink feed"):
             await source.get_price("OBSCURETOKEN123", "USD")
@@ -280,7 +360,7 @@ class TestErrorHandling:
         """RPC call failure raises DataSourceUnavailable."""
         from almanak.framework.data.interfaces import DataSourceUnavailable
 
-        source = OnChainPriceSource(chain="arbitrum")
+        source = ChainlinkPriceSource(chain="arbitrum")
 
         with patch.object(source, "_eth_call", new_callable=AsyncMock, side_effect=RuntimeError("RPC down")):
             with pytest.raises(DataSourceUnavailable, match="Chainlink RPC call failed"):
@@ -293,7 +373,7 @@ class TestErrorHandling:
         """Non-USD quote raises DataSourceUnavailable."""
         from almanak.framework.data.interfaces import DataSourceUnavailable
 
-        source = OnChainPriceSource(chain="arbitrum")
+        source = ChainlinkPriceSource(chain="arbitrum")
 
         with pytest.raises(DataSourceUnavailable, match="Only USD quote supported"):
             await source.get_price("ETH", "EUR")
@@ -305,8 +385,8 @@ class TestErrorHandling:
         """No RPC URL available raises DataSourceUnavailable."""
         from almanak.framework.data.interfaces import DataSourceUnavailable
 
-        with patch("almanak.gateway.data.price.onchain.get_rpc_url", side_effect=ValueError("No RPC")):
-            source = OnChainPriceSource(chain="nonexistent", network="mainnet")
+        with patch("almanak.integrations.chainlink.gateway.live.get_rpc_url", side_effect=ValueError("No RPC")):
+            source = ChainlinkPriceSource(chain="nonexistent", network="mainnet")
 
         # Stablecoins still work (no RPC needed)
         result = await source.get_price("USDC", "USD")
@@ -323,7 +403,7 @@ class TestErrorHandling:
         """Too-short Chainlink response raises DataSourceUnavailable."""
         from almanak.framework.data.interfaces import DataSourceUnavailable
 
-        source = OnChainPriceSource(chain="arbitrum")
+        source = ChainlinkPriceSource(chain="arbitrum")
 
         with patch.object(source, "_eth_call", new_callable=AsyncMock, return_value="0x" + "00" * 64):
             with pytest.raises(DataSourceUnavailable, match="response too short"):
@@ -336,7 +416,7 @@ class TestErrorHandling:
         """Malformed Chainlink hex response raises DataSourceUnavailable."""
         from almanak.framework.data.interfaces import DataSourceUnavailable
 
-        source = OnChainPriceSource(chain="arbitrum")
+        source = ChainlinkPriceSource(chain="arbitrum")
 
         with patch.object(source, "_eth_call", new_callable=AsyncMock, return_value="0xabc"):
             with pytest.raises(DataSourceUnavailable, match="Malformed RPC hex"):
@@ -349,7 +429,7 @@ class TestErrorHandling:
         """Chainlink returning answer=0 raises DataSourceUnavailable."""
         from almanak.framework.data.interfaces import DataSourceUnavailable
 
-        source = OnChainPriceSource(chain="arbitrum")
+        source = ChainlinkPriceSource(chain="arbitrum")
 
         now = int(time.time())
         mock_response = _build_chainlink_response(0, now)
@@ -365,7 +445,7 @@ class TestErrorHandling:
         """Chainlink returning answer<0 raises DataSourceUnavailable."""
         from almanak.framework.data.interfaces import DataSourceUnavailable
 
-        source = OnChainPriceSource(chain="arbitrum")
+        source = ChainlinkPriceSource(chain="arbitrum")
 
         now = int(time.time())
         mock_response = _build_chainlink_response(-1, now)
@@ -383,7 +463,7 @@ class TestSessionCleanup:
     @pytest.mark.asyncio
     async def test_close_cleans_up_session(self):
         """close() properly shuts down the aiohttp session."""
-        source = OnChainPriceSource(chain="arbitrum")
+        source = ChainlinkPriceSource(chain="arbitrum")
 
         # Force session creation via a stablecoin call (no RPC needed)
         await source.get_price("USDC", "USD")
@@ -400,7 +480,7 @@ class TestSessionCleanup:
     @pytest.mark.asyncio
     async def test_close_without_session(self):
         """close() is safe when no session exists."""
-        source = OnChainPriceSource(chain="arbitrum")
+        source = ChainlinkPriceSource(chain="arbitrum")
         await source.close()  # Should not raise
 
 
@@ -427,7 +507,7 @@ class TestChainIdValidation:
     @pytest.mark.asyncio
     async def test_matching_chain_id_keeps_rpc(self):
         """Correct chainId allows on-chain pricing to proceed."""
-        source = OnChainPriceSource(chain="arbitrum")
+        source = ChainlinkPriceSource(chain="arbitrum")
 
         mock_session = AsyncMock()
         mock_session.post = lambda *a, **kw: _MockChainIdResponse(42161)
@@ -442,7 +522,7 @@ class TestChainIdValidation:
     @pytest.mark.asyncio
     async def test_mismatched_chain_id_disables_rpc(self):
         """Wrong chainId disables on-chain pricing."""
-        source = OnChainPriceSource(chain="arbitrum")
+        source = ChainlinkPriceSource(chain="arbitrum")
 
         mock_session = AsyncMock()
         mock_session.post = lambda *a, **kw: _MockChainIdResponse(1)  # Ethereum, not Arbitrum
@@ -457,7 +537,7 @@ class TestChainIdValidation:
     @pytest.mark.asyncio
     async def test_chain_id_validation_failure_skips(self):
         """Network error during chainId check is non-fatal."""
-        source = OnChainPriceSource(chain="arbitrum")
+        source = ChainlinkPriceSource(chain="arbitrum")
         original_rpc = source._rpc_url
 
         with patch.object(source, "_get_session", new_callable=AsyncMock, side_effect=Exception("connection refused")):
@@ -470,7 +550,7 @@ class TestChainIdValidation:
     @pytest.mark.asyncio
     async def test_chain_id_validation_runs_once(self):
         """chainId validation only runs on first call."""
-        source = OnChainPriceSource(chain="arbitrum")
+        source = ChainlinkPriceSource(chain="arbitrum")
         source._chain_id_validated = True
 
         await source._validate_chain_id()
@@ -485,7 +565,7 @@ class TestBSCRouting:
         """BNB resolves to BNB/USD feed on BSC."""
         import time as _time
 
-        source = OnChainPriceSource(chain="bsc")
+        source = ChainlinkPriceSource(chain="bsc")
 
         answer = 60000000000  # $600.00
         now = int(_time.time())
@@ -503,7 +583,7 @@ class TestBSCRouting:
         """WBNB maps to BNB/USD feed (same as BNB)."""
         import time as _time
 
-        source = OnChainPriceSource(chain="bsc")
+        source = ChainlinkPriceSource(chain="bsc")
 
         answer = 60000000000  # $600.00
         now = int(_time.time())
@@ -521,7 +601,7 @@ class TestBSCRouting:
         """CAKE resolves to CAKE/USD feed on BSC."""
         import time as _time
 
-        source = OnChainPriceSource(chain="bsc")
+        source = ChainlinkPriceSource(chain="bsc")
 
         answer = 250000000  # $2.50
         now = int(_time.time())
@@ -536,7 +616,7 @@ class TestBSCRouting:
 
     def test_bsc_supported_tokens(self):
         """BSC source includes BNB, WBNB, CAKE in supported tokens."""
-        source = OnChainPriceSource(chain="bsc")
+        source = ChainlinkPriceSource(chain="bsc")
         tokens = source.supported_tokens
         assert "BNB" in tokens
         assert "WBNB" in tokens
@@ -545,7 +625,7 @@ class TestBSCRouting:
     @pytest.mark.asyncio
     async def test_bsc_chain_id_validation_matching(self):
         """Correct chain ID (56) keeps BSC RPC enabled."""
-        source = OnChainPriceSource(chain="bsc")
+        source = ChainlinkPriceSource(chain="bsc")
 
         mock_session = AsyncMock()
         mock_session.post = lambda *a, **kw: _MockChainIdResponse(56)
@@ -560,7 +640,7 @@ class TestBSCRouting:
     @pytest.mark.asyncio
     async def test_bsc_chain_id_validation_mismatch_disables_rpc(self):
         """Wrong chain ID (1 instead of 56) disables BSC RPC."""
-        source = OnChainPriceSource(chain="bsc")
+        source = ChainlinkPriceSource(chain="bsc")
 
         mock_session = AsyncMock()
         mock_session.post = lambda *a, **kw: _MockChainIdResponse(1)  # Ethereum, not BSC
@@ -577,11 +657,11 @@ class TestSourceProperties:
     """Source metadata properties."""
 
     def test_source_name(self):
-        source = OnChainPriceSource(chain="arbitrum")
+        source = ChainlinkPriceSource(chain="arbitrum")
         assert source.source_name == "onchain"
 
     def test_supported_tokens_arbitrum(self):
-        source = OnChainPriceSource(chain="arbitrum")
+        source = ChainlinkPriceSource(chain="arbitrum")
         tokens = source.supported_tokens
         assert "ETH" in tokens
         assert "WETH" in tokens
@@ -589,7 +669,7 @@ class TestSourceProperties:
         assert "GMX" in tokens
 
     def test_supported_tokens_ethereum(self):
-        source = OnChainPriceSource(chain="ethereum")
+        source = ChainlinkPriceSource(chain="ethereum")
         tokens = source.supported_tokens
         assert "ETH" in tokens
         assert "BTC" in tokens
@@ -597,12 +677,12 @@ class TestSourceProperties:
 
     def test_supported_tokens_unsupported_chain(self):
         """Chain without feeds returns empty list."""
-        with patch("almanak.gateway.data.price.onchain.get_rpc_url", side_effect=ValueError("No RPC")):
-            source = OnChainPriceSource(chain="nonexistent")
+        with patch("almanak.integrations.chainlink.gateway.live.get_rpc_url", side_effect=ValueError("No RPC")):
+            source = ChainlinkPriceSource(chain="nonexistent")
         assert source.supported_tokens == []
 
     def test_cache_ttl(self):
-        source = OnChainPriceSource(chain="arbitrum", cache_ttl=15.0)
+        source = ChainlinkPriceSource(chain="arbitrum", cache_ttl=15.0)
         assert source.cache_ttl_seconds == 15
 
 
@@ -612,7 +692,7 @@ class TestDerivedPricing:
     @pytest.mark.asyncio
     async def test_wsteth_derived_price_on_arbitrum(self):
         """wstETH uses WSTETH/ETH × ETH/USD when no direct WSTETH/USD feed exists."""
-        source = OnChainPriceSource(chain="arbitrum")
+        source = ChainlinkPriceSource(chain="arbitrum")
 
         now = int(time.time())
         # WSTETH/ETH = 1.18 (18 decimals) -> 1180000000000000000
@@ -644,7 +724,7 @@ class TestDerivedPricing:
     @pytest.mark.asyncio
     async def test_steth_derived_price_uses_wsteth_feed(self):
         """stETH maps to WSTETH/ETH feed for derived pricing."""
-        source = OnChainPriceSource(chain="arbitrum")
+        source = ChainlinkPriceSource(chain="arbitrum")
 
         now = int(time.time())
         wsteth_eth_response = _build_chainlink_response(1180000000000000000, now)
@@ -672,26 +752,26 @@ class TestDerivedPricing:
         WSTETH/USD path now (WSTETH/ETH × ETH/USD). The pre-B1 test
         ``test_derived_price_not_available_on_ethereum`` asserted the
         opposite — that the derived config was absent — which is the
-        behaviour B1 deliberately changed so the OnChain source has a
+        behaviour B1 deliberately changed so the Chainlink source has a
         second independent Chainlink path on Ethereum (the direct
         WSTETH/USD feed at ETHEREUM_PRICE_FEEDS keeps existing; B1 is
         additive).
         """
-        from almanak.core.chainlink import ETH_DENOMINATED_FEEDS
+        from almanak.integrations.chainlink.catalog import ETH_DENOMINATED_FEEDS
 
-        source = OnChainPriceSource(chain="ethereum")
+        source = ChainlinkPriceSource(chain="ethereum")
 
         # Config assertions — proves the B1 wiring at construction time.
         assert "WSTETH/ETH" in ETH_DENOMINATED_FEEDS.get("ethereum", {}), (
             "B1 must add WSTETH/ETH to ETH_DENOMINATED_FEEDS['ethereum']."
         )
         assert source._eth_feeds.get("WSTETH/ETH"), (
-            "OnChainPriceSource(chain='ethereum') must pick up the B1 derived "
+            "ChainlinkPriceSource(chain='ethereum') must pick up the B1 derived "
             f"feed config. Got _eth_feeds={source._eth_feeds!r}"
         )
         # The token->pair map must include WSTETH -> WSTETH/ETH for ethereum.
         assert source._token_to_eth_pair.get("WSTETH") == "WSTETH/ETH", (
-            f"OnChainPriceSource._token_to_eth_pair on ethereum must point "
+            f"ChainlinkPriceSource._token_to_eth_pair on ethereum must point "
             f"WSTETH -> WSTETH/ETH after B1. Got: {source._token_to_eth_pair!r}"
         )
 
@@ -700,7 +780,7 @@ class TestDerivedPricing:
     @pytest.mark.asyncio
     async def test_derived_price_caches_result(self):
         """Derived price is cached, second call doesn't make RPC calls."""
-        source = OnChainPriceSource(chain="arbitrum", cache_ttl=60.0)
+        source = ChainlinkPriceSource(chain="arbitrum", cache_ttl=60.0)
 
         now = int(time.time())
         wsteth_eth_response = _build_chainlink_response(1180000000000000000, now)

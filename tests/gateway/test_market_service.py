@@ -89,9 +89,7 @@ class TestMarketServiceGetPrice:
             # Verify USD was used as default. `resolved_token=None` is
             # always forwarded since the aggregator supports address-based
             # price lookups for unknown tokens.
-            mock_aggregator.get_aggregated_price.assert_called_once_with(
-                "WBTC", "USD", resolved_token=None
-            )
+            mock_aggregator.get_aggregated_price.assert_called_once_with("WBTC", "USD", resolved_token=None)
 
     @pytest.mark.asyncio
     async def test_get_price_error_handling(self, market_service, mock_context):
@@ -168,9 +166,7 @@ class TestMarketServiceGetBalance:
                 mock_provider.invalidate_cache.assert_called_once_with("WETH")
 
     @pytest.mark.asyncio
-    async def test_get_balance_unknown_address_dynamic_resolution(
-        self, market_service, mock_context
-    ):
+    async def test_get_balance_unknown_address_dynamic_resolution(self, market_service, mock_context):
         """GetBalance resolves an unknown ERC20 address on-chain and returns the balance.
 
         Direct regression for the OPENAGENTS staging bug: a strategy passes a raw
@@ -193,9 +189,7 @@ class TestMarketServiceGetBalance:
         # persistent disk cache) so prior runs can't pollute state. We replace it
         # with a mock that always misses statically and swallows register() calls.
         isolated_resolver = MagicMock()
-        isolated_resolver.resolve.side_effect = FrameworkTokenNotFoundError(
-            token=unknown_address, chain="base"
-        )
+        isolated_resolver.resolve.side_effect = FrameworkTokenNotFoundError(token=unknown_address, chain="base")
 
         # OnChainLookup returns valid ERC20 metadata for the unknown address.
         fake_lookup = MagicMock()
@@ -214,22 +208,22 @@ class TestMarketServiceGetBalance:
 
         # Patch at the class level so the real Web3BalanceProvider (built by
         # MarketServiceServicer._get_balance_provider) picks them up.
-        with patch(
-            "almanak.framework.data.tokens.resolver.get_token_resolver",
-            return_value=isolated_resolver,
-        ), patch.object(
-            Web3BalanceProvider, "_get_onchain_lookup", return_value=fake_lookup
-        ), patch.object(
-            Web3BalanceProvider,
-            "_get_erc20_balance_with_retry",
-            new=AsyncMock(return_value=raw_balance),
+        with (
+            patch(
+                "almanak.framework.data.tokens.resolver.get_token_resolver",
+                return_value=isolated_resolver,
+            ),
+            patch.object(Web3BalanceProvider, "_get_onchain_lookup", return_value=fake_lookup),
+            patch.object(
+                Web3BalanceProvider,
+                "_get_erc20_balance_with_retry",
+                new=AsyncMock(return_value=raw_balance),
+            ),
         ):
             market_service._initialized = True
             # Skip the USD-conversion pricing branch.
             with patch.object(market_service, "_price_aggregator") as mock_aggregator:
-                mock_aggregator.get_aggregated_price = AsyncMock(
-                    side_effect=Exception("Skip USD")
-                )
+                mock_aggregator.get_aggregated_price = AsyncMock(side_effect=Exception("Skip USD"))
 
                 request = gateway_pb2.BalanceRequest(
                     token=unknown_address,
@@ -310,7 +304,7 @@ class TestMarketServiceInitialization:
         service = MarketServiceServicer(settings)
 
         try:
-            with patch("almanak.gateway.data.price.onchain.get_rpc_url", return_value="http://localhost:8545"):
+            with patch("almanak.integrations.chainlink.gateway.live.get_rpc_url", return_value="http://localhost:8545"):
                 await service._ensure_initialized()
 
             assert service._price_aggregator is not None
@@ -338,7 +332,7 @@ class TestMarketServiceInitialization:
         service = MarketServiceServicer(settings)
 
         try:
-            with patch("almanak.gateway.data.price.onchain.get_rpc_url", return_value="http://localhost:8545"):
+            with patch("almanak.integrations.chainlink.gateway.live.get_rpc_url", return_value="http://localhost:8545"):
                 await service._ensure_initialized()
 
             sources = service._price_aggregator.sources
@@ -352,18 +346,24 @@ class TestMarketServiceInitialization:
             await service.close()
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("chain", ["arbitrum", "mantle"])
+    @pytest.mark.parametrize(
+        ("chain", "expected_sources"),
+        [
+            ("arbitrum", ["onchain", "binance", "dexscreener", "coingecko"]),
+            ("mantle", ["binance", "dexscreener", "coingecko"]),
+        ],
+    )
     @pytest.mark.parametrize("cg_key", [None, "key-123"])
-    async def test_all_evm_chains_get_four_sources(self, chain, cg_key):
-        """Aggregator has 4 real sources for any EVM chain; override off by default."""
+    async def test_evm_source_count_is_manifest_driven(self, chain, expected_sources, cg_key):
+        """Only integrations whose manifests support the chain are provisioned."""
         settings = GatewaySettings(coingecko_api_key=cg_key, chains=[chain])
         service = MarketServiceServicer(settings)
 
         try:
-            with patch("almanak.gateway.data.price.onchain.get_rpc_url", return_value="http://localhost:8545"):
+            with patch("almanak.integrations.chainlink.gateway.live.get_rpc_url", return_value="http://localhost:8545"):
                 await service._ensure_initialized()
 
-            assert len(service._price_aggregator.sources) == 4
+            assert [source.source_name for source in service._price_aggregator.sources] == expected_sources
             assert service._manual_price_override is None
         finally:
             await service.close()
@@ -378,7 +378,7 @@ class TestMarketServiceInitialization:
         service = MarketServiceServicer(settings)
 
         try:
-            with patch("almanak.gateway.data.price.onchain.get_rpc_url", return_value="http://localhost:8545"):
+            with patch("almanak.integrations.chainlink.gateway.live.get_rpc_url", return_value="http://localhost:8545"):
                 await service._ensure_initialized()
 
             # Override still stays OUT of the median aggregator
@@ -396,13 +396,13 @@ class TestMarketServiceInitialization:
         service = MarketServiceServicer(settings)
 
         try:
-            with patch("almanak.gateway.data.price.onchain.get_rpc_url", return_value="http://localhost:8545"):
+            with patch("almanak.integrations.chainlink.gateway.live.get_rpc_url", return_value="http://localhost:8545"):
                 await service._ensure_initialized()
 
             # Find the on-chain source
-            onchain_sources = [s for s in service._price_aggregator.sources if s.source_name == "onchain"]
-            assert len(onchain_sources) == 1
-            assert onchain_sources[0]._chain == "base"
+            chainlink_sources = [s for s in service._price_aggregator.sources if s.source_name == "onchain"]
+            assert len(chainlink_sources) == 1
+            assert chainlink_sources[0]._chain == "base"
         finally:
             await service.close()
 
@@ -489,9 +489,7 @@ class TestMarketServicePriceAlias:
 
         assert response.price == "3000.00"
         # Should only call once - no fallback needed.
-        market_service._price_aggregator.get_aggregated_price.assert_called_once_with(
-            "ETH", "USD", resolved_token=None
-        )
+        market_service._price_aggregator.get_aggregated_price.assert_called_once_with("ETH", "USD", resolved_token=None)
 
 
 class TestMarketServiceGetIndicator:
@@ -529,12 +527,12 @@ class TestGetPriceManualOverrideFallback:
         service = MarketServiceServicer(settings)
 
         try:
-            with patch("almanak.gateway.data.price.onchain.get_rpc_url", return_value="http://localhost:8545"):
+            with patch("almanak.integrations.chainlink.gateway.live.get_rpc_url", return_value="http://localhost:8545"):
                 await service._ensure_initialized()
 
             # Aggregator fails for W0G (no oracle coverage)
             service._price_aggregator.get_aggregated_price = AsyncMock(
-                side_effect=AllDataSourcesFailed(errors={"onchain": "no feed", "coingecko": "unknown"})
+                side_effect=AllDataSourcesFailed(errors={"chainlink": "no feed", "coingecko": "unknown"})
             )
             service._price_aggregator.get_last_details = MagicMock(return_value=None)
 
@@ -577,11 +575,11 @@ class TestGetPriceManualOverrideFallback:
         service = MarketServiceServicer(settings)
 
         try:
-            with patch("almanak.gateway.data.price.onchain.get_rpc_url", return_value="http://localhost:8545"):
+            with patch("almanak.integrations.chainlink.gateway.live.get_rpc_url", return_value="http://localhost:8545"):
                 await service._ensure_initialized()
 
             service._price_aggregator.get_aggregated_price = AsyncMock(
-                side_effect=AllDataSourcesFailed(errors={"onchain": "no feed"})
+                side_effect=AllDataSourcesFailed(errors={"chainlink": "no feed"})
             )
             service._price_aggregator.get_last_details = MagicMock(return_value=None)
             service._manual_price_override.get_price = AsyncMock(
@@ -611,13 +609,13 @@ class TestGetPriceManualOverrideFallback:
         service = MarketServiceServicer(settings)
 
         try:
-            with patch("almanak.gateway.data.price.onchain.get_rpc_url", return_value="http://localhost:8545"):
+            with patch("almanak.integrations.chainlink.gateway.live.get_rpc_url", return_value="http://localhost:8545"):
                 await service._ensure_initialized()
 
             assert service._manual_price_override is None
 
             service._price_aggregator.get_aggregated_price = AsyncMock(
-                side_effect=AllDataSourcesFailed(errors={"onchain": "no feed"})
+                side_effect=AllDataSourcesFailed(errors={"chainlink": "no feed"})
             )
             service._price_aggregator.get_last_details = MagicMock(return_value=None)
 

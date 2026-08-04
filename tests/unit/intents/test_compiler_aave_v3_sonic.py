@@ -330,7 +330,7 @@ class TestAaveV3SonicCrossCutting:
 
     def test_sonic_chainlink_feeds_exist(self):
         """Verify Sonic has Chainlink price feeds configured."""
-        from almanak.core.chainlink import CHAINLINK_PRICE_FEEDS
+        from almanak.integrations.chainlink.catalog import CHAINLINK_PRICE_FEEDS
 
         assert "sonic" in CHAINLINK_PRICE_FEEDS
         sonic_feeds = CHAINLINK_PRICE_FEEDS["sonic"]

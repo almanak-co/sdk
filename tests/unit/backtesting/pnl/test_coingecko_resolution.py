@@ -196,7 +196,7 @@ class TestHonestMisses:
 
     @pytest.mark.asyncio
     async def test_external_id_none_is_miss_no_price(self) -> None:
-        """A chain CoinGecko does not index (external_id_for -> None) is an honest miss."""
+        """A chain CoinGecko does not index is an honest miss."""
         provider = CoinGeckoDataProvider(
             retry_config=_fast_retry(),
             token_addresses={"TKN": ("nonexistent-chain", _WSTETH_ARB_ADDRESS)},

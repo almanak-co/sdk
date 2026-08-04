@@ -136,7 +136,12 @@ def paper() -> None:
 )
 @click.option("--rpc-url", type=str, default=None, help="Archive RPC URL to fork from (default: from environment)")
 @click.option("--anvil-port", type=int, default=8546, help="Port to run Anvil on (default: 8546)")
-@click.option("--no-reset-fork", is_flag=True, default=False, help="Don't reset fork to latest block each tick")
+@click.option(
+    "--no-reset-fork",
+    is_flag=True,
+    default=False,
+    help="Reserved; currently refused until fork-bound gateway oracle support exists",
+)
 @click.option(
     "--output", "-o", type=click.Path(exists=False), default=None, help="Output file for session results (optional)"
 )
@@ -155,7 +160,7 @@ def paper() -> None:
     help=(
         "Paper trading preset. "
         "'execution-validation' (default): rolling fork reset for TX smoke testing. "
-        "'yield-validation': persistent fork with time advancement for lending yield measurement."
+        "'yield-validation': reserved; currently refused until fork-bound gateway oracle support exists."
     ),
 )
 def paper_start(
@@ -249,11 +254,11 @@ def paper_start(
             reset_fork_every_tick=not no_reset_fork,
             strict_price_mode=not relaxed_prices,
         )
+        apply_preset(paper_config, preset)
     except ValueError as e:
         click.echo(f"Configuration error: {e}", err=True)
         raise click.Abort() from e
 
-    apply_preset(paper_config, preset)
     print_paper_config(
         strategy=strategy,
         chain=chain,

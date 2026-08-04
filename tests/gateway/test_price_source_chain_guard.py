@@ -23,7 +23,7 @@ from almanak.framework.data.interfaces import DataSourceUnavailable, PriceResult
 from almanak.framework.data.tokens import ResolvedToken
 from almanak.framework.data.tokens.models import CHAIN_ID_MAP
 from almanak.gateway.data.price.hyperevm import HypercoreOraclePriceSource
-from almanak.gateway.data.price.onchain import OnChainPriceSource
+from almanak.integrations.chainlink.gateway.live import ChainlinkPriceSource
 
 
 def _resolved(chain: str, *, symbol: str = "ETH", is_stablecoin: bool = False) -> ResolvedToken:
@@ -45,8 +45,8 @@ def _resolved(chain: str, *, symbol: str = "ETH", is_stablecoin: bool = False) -
     )
 
 
-class TestOnChainSourceChainGuard:
-    """``OnChainPriceSource`` (bound to one chain's Chainlink feeds) must reject a
+class TestChainlinkSourceChainGuard:
+    """``ChainlinkPriceSource`` (bound to one chain's Chainlink feeds) must reject a
     request tagged with a different chain — the load-bearing guard of §2."""
 
     @pytest.mark.asyncio
@@ -54,7 +54,7 @@ class TestOnChainSourceChainGuard:
         """THE CRUX: an arbitrum on-chain source handed a hyperevm-tagged token
         MUST raise ``DataSourceUnavailable(chain_mismatch)`` and MUST NOT return
         arbitrum's price. The raise is the proof it never fell through to a read."""
-        source = OnChainPriceSource(chain="arbitrum")
+        source = ChainlinkPriceSource(chain="arbitrum")
         rt = _resolved("hyperevm")
 
         with pytest.raises(DataSourceUnavailable) as exc_info:
@@ -64,7 +64,7 @@ class TestOnChainSourceChainGuard:
         assert "chain_mismatch" in exc_info.value.reason
         assert "hyperevm" in exc_info.value.reason
         assert "arbitrum" in exc_info.value.reason
-        # It was the *onchain* source that refused (not some downstream miss).
+        # Preserve the established wire label for downstream compatibility.
         assert exc_info.value.source == "onchain"
         await source.close()
 
@@ -75,7 +75,7 @@ class TestOnChainSourceChainGuard:
         We use a stablecoin so the source returns the $1.00 fast-path without any
         RPC — the point is only that the guard let the request through.
         """
-        source = OnChainPriceSource(chain="arbitrum")
+        source = ChainlinkPriceSource(chain="arbitrum")
         rt = _resolved("arbitrum", symbol="USDC", is_stablecoin=True)
 
         result = await source.get_price("USDC", "USD", resolved_token=rt)
@@ -88,7 +88,7 @@ class TestOnChainSourceChainGuard:
     async def test_none_resolved_token_skips_guard(self):
         """A bare-symbol request (``resolved_token=None``) must skip the guard
         entirely — that is today's lenient symbol behaviour (lead decision 1)."""
-        source = OnChainPriceSource(chain="arbitrum")
+        source = ChainlinkPriceSource(chain="arbitrum")
 
         # USDC symbol → $1.00 stablecoin fast-path, no RPC, no guard.
         result = await source.get_price("USDC", "USD", resolved_token=None)
@@ -100,7 +100,7 @@ class TestOnChainSourceChainGuard:
     async def test_chain_alias_is_accepted_by_guard(self):
         """Alias canonicalization: a ``bsc`` source handed a ``bnb``-tagged token
         must NOT trip the guard — both canonicalize to ``bsc`` via ChainRegistry."""
-        source = OnChainPriceSource(chain="bsc")
+        source = ChainlinkPriceSource(chain="bsc")
         rt = _resolved("bnb", symbol="USDC", is_stablecoin=True)
 
         result = await source.get_price("USDC", "USD", resolved_token=rt)

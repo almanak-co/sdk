@@ -11,7 +11,7 @@ Address verified on-chain 2026-04-29 via `description()` returning
 (answer / 1e8 ≈ $83 at verification).
 """
 
-from almanak.core.chainlink import CHAINLINK_PRICE_FEEDS, TOKEN_TO_PAIR
+from almanak.integrations.chainlink.catalog import CHAINLINK_PRICE_FEEDS, TOKEN_TO_PAIR
 
 # Per-chain feed dicts moved onto ChainDescriptor.chainlink (VIB-4851 CS-5);
 # the aggregate view is the public surface.

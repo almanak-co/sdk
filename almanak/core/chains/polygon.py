@@ -6,8 +6,8 @@ from ._contracts import safe_stack_contracts
 from ._descriptor import (
     AnvilProfile,
     ChainDescriptor,
-    ChainlinkFeeds,
     Explorer,
+    ExternalChainIds,
     GasProfile,
     NativeToken,
     RpcProfile,
@@ -24,7 +24,7 @@ DESCRIPTOR = register_chain(
         # Native symbol stays "MATIC" deliberately. Polygon renamed MATIC -> POL
         # (Sept 2024, 1:1), and the token resolver canonicalizes the native
         # sentinel to POL for token identity — but the gas/price/funding stack is
-        # pinned to MATIC (the Chainlink MATIC/USD feed key, the gateway native
+        # pinned to MATIC (the oracle MATIC/USD feed key, the gateway native
         # symbol derived from this descriptor, and every shipped Polygon config's
         # anvil_funding key). The two views are bridged: ``symbol`` stays MATIC
         # (gas/price/funding canonical) while ``accepted_symbols=("POL",)`` makes
@@ -41,8 +41,19 @@ DESCRIPTOR = register_chain(
             # POL id preferred over deprecated matic-network (VIB-3137)
             coingecko_id="polygon-ecosystem-token",
             wrapped_symbol="WMATIC",
-            wrapped_coingecko_id="polygon-ecosystem-token",
+            wrapped_coingecko_id="wmatic",
             slip44=966,  # SLIP-44 "Matic" — Polygon native (CAIP-19)
+        ),
+        external_ids=ExternalChainIds(
+            tenderly="polygon",
+            coingecko="polygon-pos",
+            dexscreener="polygon",
+            coingecko_onchain="polygon_pos",
+            defillama="polygon",
+            defillama_display="Polygon",
+            zerion="polygon",
+            moralis="polygon",
+            okx="137",
         ),
         gas=GasProfile(
             buffer=1.2,
@@ -112,38 +123,6 @@ DESCRIPTOR = register_chain(
             "weth": "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619",
         },
         simulation=SimulationProfile(tenderly_supported=True),
-        # VIB-4851 (B1): per-vendor external ids, transposed from the legacy
-        # standalone vendor maps (CoinGecko / DexScreener / CoinGecko Onchain /
-        # DeFiLlama / Zerion / Moralis / OKX). Values verbatim incl. case.
-        external_ids={
-            "tenderly": "polygon",
-            "coingecko": "polygon-pos",
-            "dexscreener": "polygon",
-            "coingecko_onchain": "polygon_pos",
-            "defillama": "polygon",
-            "defillama_display": "Polygon",
-            "zerion": "polygon",
-            "moralis": "polygon",
-            "okx": "137",
-        },
-        # Chainlink aggregator addresses (VIB-4851 CS-5) — moved verbatim
-        # from the legacy almanak/core/chainlink.py per-chain dicts.
-        # Reference: https://docs.chain.link/data-feeds/price-feeds/addresses
-        chainlink=ChainlinkFeeds(
-            usd_feeds={
-                "ETH/USD": "0xF9680D99D6C9589e2a93a78A04A279e509205945",
-                "BTC/USD": "0xc907E116054Ad103354f2D350FD2514433D57F6f",
-                "MATIC/USD": "0xAB594600376Ec9fD91F8e885dADF0CE036862dE0",
-                "LINK/USD": "0xd9FFdb71EbE7496cC440152d43986Aae0AB76665",
-                "USDC/USD": "0xfE4A8cc5b5B2366C1B58Bea3858e81843581b2F7",
-                "USDT/USD": "0x0A6513e40db6EB1b165753AD52E80663aeA50545",
-                "DAI/USD": "0x4746DeC9e833A82EC7C2C1356372CcF2cfcD2F3D",
-                "AAVE/USD": "0x72484B12719E23115761D5DA1646945632979bB6",
-                "UNI/USD": "0xdf0Fb4e4F928d2dCB76f438575fDD8682386e13C",
-                "CRV/USD": "0x336584C8E6Dc19637A5b36206B1c79923111b405",
-                "WSTETH/USD": "0x10f964234cae09cB6a9854B56FF7D4F38Cda5E6a",
-            },
-        ),
         # Safe MultiSendCallOnly v1.4.1 — CREATE2, same address on every
         # chain Safe deploys to; presence here == deployment-verified
         # (legacy MULTISEND_ADDRESSES membership, VIB-4851 CS-5).

@@ -13,11 +13,12 @@ servicer is constructed via ``__new__`` with ``_initialized = True`` so
 plain mocks.
 """
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import grpc
 import pytest
 
+from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.integrations.base import IntegrationError, IntegrationRateLimitError
 from almanak.gateway.proto import gateway_pb2
 from almanak.gateway.services.integration_service import IntegrationServiceServicer
@@ -41,6 +42,67 @@ def service() -> IntegrationServiceServicer:
     svc._zerion = None
     svc._portfolio_chain = None
     return svc
+
+
+class TestIntegrationServiceInitialization:
+    @pytest.mark.parametrize("name", ["binance", "coingecko", "thegraph"])
+    def test_build_api_client_resolves_factory_through_registry(self, name: str) -> None:
+        service = IntegrationServiceServicer(GatewaySettings())
+        expected = object()
+        factory = MagicMock()
+        factory.build.return_value = expected
+
+        with patch(
+            "almanak.gateway.services.integration_service.INTEGRATION_REGISTRY.gateway_api_client_factory",
+            return_value=factory,
+        ) as resolve:
+            assert service._build_api_client(name) is expected
+
+        resolve.assert_called_once_with(name)
+        factory.build.assert_called_once_with(settings=service.settings)
+
+    @pytest.mark.asyncio
+    async def test_initialization_reuses_portfolio_chain_zerion(self) -> None:
+        service = IntegrationServiceServicer(GatewaySettings())
+        clients = {name: MagicMock(name=name) for name in ("binance", "coingecko", "thegraph")}
+        zerion = MagicMock(name="zerion")
+        chain = MagicMock()
+        chain.get_provider.return_value = zerion
+        chain.providers = [zerion]
+
+        with (
+            patch.object(service, "_build_api_client", side_effect=lambda name: clients[name]) as build,
+            patch("almanak.gateway.services.integration_service.build_portfolio_chain", return_value=chain),
+        ):
+            await service._ensure_initialized()
+
+        assert service._binance is clients["binance"]
+        assert service._coingecko is clients["coingecko"]
+        assert service._thegraph is clients["thegraph"]
+        assert service._zerion is zerion
+        assert [call.args[0] for call in build.call_args_list] == ["binance", "coingecko", "thegraph"]
+
+    @pytest.mark.asyncio
+    async def test_initialization_builds_standalone_zerion_when_chain_has_none(self) -> None:
+        service = IntegrationServiceServicer(GatewaySettings())
+        clients = {name: MagicMock(name=name) for name in ("binance", "coingecko", "thegraph", "zerion")}
+        chain = MagicMock()
+        chain.get_provider.return_value = None
+        chain.providers = []
+
+        with (
+            patch.object(service, "_build_api_client", side_effect=lambda name: clients[name]) as build,
+            patch("almanak.gateway.services.integration_service.build_portfolio_chain", return_value=chain),
+        ):
+            await service._ensure_initialized()
+
+        assert service._zerion is clients["zerion"]
+        assert [call.args[0] for call in build.call_args_list] == [
+            "binance",
+            "coingecko",
+            "thegraph",
+            "zerion",
+        ]
 
 
 # =============================================================================
@@ -498,9 +560,7 @@ class TestBinanceGetOrderBook:
     @pytest.mark.asyncio
     async def test_missing_entry_fields_default_to_empty_strings(self, service):
         ctx = _make_context()
-        service._binance.get_order_book = AsyncMock(
-            return_value={"bids": [{}], "asks": [{"price": "1.0"}]}
-        )
+        service._binance.get_order_book = AsyncMock(return_value={"bids": [{}], "asks": [{"price": "1.0"}]})
         request = gateway_pb2.BinanceOrderBookRequest(symbol="ETHUSDT")
 
         response = await service.BinanceGetOrderBook(request, ctx)
@@ -685,9 +745,7 @@ class TestTheGraphQueryHandler:
         import json
 
         ctx = _make_context()
-        graph_service._thegraph.query = AsyncMock(
-            return_value={"data": {"pools": [{"id": "0xpool"}]}, "success": True}
-        )
+        graph_service._thegraph.query = AsyncMock(return_value={"data": {"pools": [{"id": "0xpool"}]}, "success": True})
         request = gateway_pb2.TheGraphQueryRequest(subgraph_id="uniswap-v3-ethereum", query=self.QUERY)
 
         response = await graph_service.TheGraphQuery(request, ctx)

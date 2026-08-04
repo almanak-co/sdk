@@ -232,7 +232,7 @@ class DexVolumeRegistry:
         if entry is None or entry.volume_subgraph_urls is None:
             return None
         # Fresh copy per call so callers cannot mutate registry state
-        # (same contract as vendor_chain_map on the chain side).
+        # (same copy-on-read contract as provider integration chain maps).
         return dict(entry.volume_subgraph_urls)
 
     @classmethod

@@ -808,3 +808,16 @@ class TestCoinGeckoPriceSourceAddressLookup:
         source = CoinGeckoPriceSource(cache_ttl=30)
         # USDC is in the static symbol registry.
         assert source._resolve_token_id("USDC") == "usd-coin"
+
+    @pytest.mark.parametrize(
+        ("symbol", "expected_id"),
+        [
+            ("WMATIC", "wmatic"),
+            ("WAVAX", "wrapped-avax"),
+            ("WMNT", "wrapped-mantle"),
+        ],
+    )
+    def test_wrapped_native_ids_win_over_default_registry(self, symbol: str, expected_id: str) -> None:
+        """Chain-owned exact wrapped listings take precedence over token defaults."""
+        source = CoinGeckoPriceSource(cache_ttl=30)
+        assert source._resolve_token_id(symbol) == expected_id

@@ -176,15 +176,20 @@ def _make_paper_config(
     position_reconciler_enabled: bool,
 ) -> PaperTraderConfig:
     # Minimal config: tick_interval trivially small so asyncio.sleep is instant.
-    return PaperTraderConfig(
+    lifecycle = fork_lifecycle or ForkLifecycle.ROLLING_RESET
+    config = PaperTraderConfig(
         chain="arbitrum",
         rpc_url="https://arb.example/rpc",
         deployment_id="t",
         tick_interval_seconds=0.001,
         price_source="coingecko",
-        fork_lifecycle=fork_lifecycle or ForkLifecycle.ROLLING_RESET,
         position_reconciler_enabled=position_reconciler_enabled,
     )
+    # Persistent construction is refused in production; helper tests mutate
+    # the validated rolling config to exercise lifecycle orchestration only.
+    config.fork_lifecycle = lifecycle
+    config.reset_fork_every_tick = lifecycle != ForkLifecycle.PERSISTENT
+    return config
 
 
 class _Strategy:
@@ -1024,110 +1029,6 @@ class TestFinalValuation:
 
         with pytest.raises(dataclasses.FrozenInstanceError):
             fv.value_usd = Decimal("2")  # type: ignore[misc]
-
-
-# ---------------------------------------------------------------------------
-# Oracle divergence helpers (W5 Sub-C — VIB-4082)
-# ---------------------------------------------------------------------------
-
-
-class _StubChainlinkProvider:
-    """Sync subset of ChainlinkDataProvider used by ``compute_max_oracle_divergence``."""
-
-    def __init__(
-        self,
-        prices: dict[str, Decimal | None],
-        raise_for: set[str] | None = None,
-    ) -> None:
-        self._prices = prices
-        self._raise_for = raise_for or set()
-
-    async def get_price(self, token: str, timestamp: Any = None) -> Decimal | None:
-        if token in self._raise_for:
-            raise RuntimeError(f"network error for {token}")
-        return self._prices.get(token)
-
-
-class TestResolveChainlinkDivergenceChain:
-    def test_known_chain_returns_mapping(self) -> None:
-        for chain in ("ethereum", "arbitrum", "base", "optimism", "polygon", "avalanche"):
-            assert _engine_helpers.resolve_chainlink_divergence_chain(chain) == chain
-
-    def test_unknown_chain_returns_none(self) -> None:
-        assert _engine_helpers.resolve_chainlink_divergence_chain("solana") is None
-        assert _engine_helpers.resolve_chainlink_divergence_chain("") is None
-
-
-class TestComputeMaxOracleDivergence:
-    @pytest.mark.asyncio
-    async def test_picks_largest_divergence(self) -> None:
-        provider = _StubChainlinkProvider(
-            {
-                "ETH": Decimal("3000"),  # live=3000, fork=3000 -> 0
-                "BTC": Decimal("60000"),  # live=66000, fork=60000 -> ~9.09%
-                "USDC": Decimal("1.005"),  # live=1.0, fork=1.005 -> 0.5%
-            }
-        )
-        max_div, worst = await _engine_helpers.compute_max_oracle_divergence(
-            provider,
-            {
-                "ETH": Decimal("3000"),
-                "BTC": Decimal("66000"),
-                "USDC": Decimal("1.0"),
-            },
-            backtest_id="bt-1",
-        )
-        assert worst == "BTC"
-        # |66000 - 60000| / 66000 = 0.0909...
-        assert max_div > Decimal("0.09")
-        assert max_div < Decimal("0.10")
-
-    @pytest.mark.asyncio
-    async def test_zero_divergence_when_prices_match(self) -> None:
-        provider = _StubChainlinkProvider({"ETH": Decimal("3000")})
-        max_div, worst = await _engine_helpers.compute_max_oracle_divergence(
-            provider, {"ETH": Decimal("3000")}, backtest_id="bt"
-        )
-        assert max_div == Decimal("0")
-        assert worst == ""
-
-    @pytest.mark.asyncio
-    async def test_per_token_failure_skipped(self) -> None:
-        provider = _StubChainlinkProvider(
-            {"ETH": Decimal("3300")},  # 10% diff
-            raise_for={"BTC"},  # BTC raises -> skipped
-        )
-        max_div, worst = await _engine_helpers.compute_max_oracle_divergence(
-            provider,
-            {"ETH": Decimal("3000"), "BTC": Decimal("60000")},
-            backtest_id="bt",
-        )
-        # ETH still picked despite BTC raising.
-        assert worst == "ETH"
-        assert max_div == Decimal("0.1")
-
-    @pytest.mark.asyncio
-    async def test_skips_non_positive_prices(self) -> None:
-        # Both non-positive live AND non-positive fork prices are skipped.
-        provider = _StubChainlinkProvider({"NULL": None, "BTC": Decimal("0")})
-        max_div, worst = await _engine_helpers.compute_max_oracle_divergence(
-            provider,
-            {"NULL": Decimal("3000"), "BTC": Decimal("60000"), "ZERO": Decimal("0")},
-            backtest_id="bt",
-        )
-        assert max_div == Decimal("0")
-        assert worst == ""
-
-    def test_error_message_format(self) -> None:
-        msg = _engine_helpers.build_divergence_error_message(
-            worst_token="ETH",
-            max_divergence=Decimal("0.0750"),
-            threshold=Decimal("0.05"),
-        )
-        assert "ETH" in msg
-        assert "7.5%" in msg
-        assert "5%" in msg
-        assert "Increase oracle_divergence_threshold" in msg
 
 
 # ---------------------------------------------------------------------------

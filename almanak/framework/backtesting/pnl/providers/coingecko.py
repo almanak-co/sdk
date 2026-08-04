@@ -44,15 +44,12 @@ import aiohttp
 
 from almanak.config.backtest import backtest_config_from_env
 from almanak.core.chains import DEFAULT_CHAIN
-from almanak.core.chains._helpers import (
-    external_id_for,
-    native_coingecko_ids,
-    vendor_chain_map,
-)
+from almanak.core.chains._helpers import native_coingecko_ids
 from almanak.core.chains._registry import ChainRegistry
 from almanak.core.constants import STABLECOINS
 from almanak.framework.backtesting.config import BacktestDataConfig
 from almanak.framework.data.tokens import NATIVE_SENTINEL, TokenResolutionError, get_token_resolver
+from almanak.integrations.chains import integration_chain_id, integration_chain_map
 
 from ..data_provider import (
     OHLCV,
@@ -703,13 +700,8 @@ class CoinGeckoDataProvider:
     # aliases (preserves the legacy "bnb" acceptance). Deliberate widening
     # vs the legacy 7-entry literal (VIB-4851 CS-3b).
     _SUPPORTED_CHAINS = sorted(
-        set(vendor_chain_map("coingecko"))
-        | {
-            alias
-            for d in ChainRegistry.all()
-            if (d.external_ids or {}).get("coingecko") is not None
-            for alias in d.aliases
-        }
+        set(integration_chain_map("coingecko"))
+        | {alias for d in ChainRegistry.all() if d.name in integration_chain_map("coingecko") for alias in d.aliases}
     )
 
     # Rate limits (requests per minute)
@@ -727,7 +719,7 @@ class CoinGeckoDataProvider:
 
     # Preflight signal (support matrix): contract-addressed token prices
     # resolve through the chain's CoinGecko asset-platform id
-    # (``external_id_for(chain, "coingecko")``). A chain without one cannot
+    # (``integration_chain_id(chain, "coingecko")``). A chain without one cannot
     # price any ERC20-style token, so ``evaluate_backtest_support`` keys its
     # price-lane hard failure on this attribute. Providers that do not price
     # via a vendor chain platform (custom/synthetic fixtures) leave it absent.
@@ -800,7 +792,7 @@ class CoinGeckoDataProvider:
         self._token_addresses = self._normalize_token_addresses(token_addresses)
 
         # Case-folded native symbol -> coin id projection, built once for O(1)
-        # case-insensitive lookup. Registry-derived (native_coingecko_ids keys
+        # case-insensitive lookup. Integration-catalogue keys
         # are verbatim case, e.g. "wS"), never a hardcoded allowlist.
         self._native_ids_by_upper = self._normalize_native_ids()
 
@@ -1086,7 +1078,7 @@ class CoinGeckoDataProvider:
 
         Lookup order: in-memory cache -> persistent SQLite cache -> CoinGecko
         ``/coins/{asset_platform}/contract/{address}``. The asset-platform id
-        comes from :func:`external_id_for` (registry-derived); a chain CoinGecko
+        comes from :func:`integration_chain_id`; a chain CoinGecko
         does not index returns ``None`` (honest miss, no fabricated price).
 
         The endpoint returns the chain-specific (BRIDGED) coin id the contract
@@ -1117,7 +1109,7 @@ class CoinGeckoDataProvider:
             self._coin_id_cache[cache_key] = persisted
             return persisted
 
-        platform = external_id_for(chain, "coingecko")
+        platform = integration_chain_id(chain, "coingecko")
         if platform is None:
             # CoinGecko does not index this chain: honest miss, no price.
             return None

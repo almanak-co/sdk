@@ -6,7 +6,7 @@ from ._contracts import safe_stack_contracts
 from ._descriptor import (
     AnvilProfile,
     ChainDescriptor,
-    ChainlinkFeeds,
+    ExternalChainIds,
     GasProfile,
     NativeToken,
     RpcProfile,
@@ -30,6 +30,7 @@ DESCRIPTOR = register_chain(
             wrapped_coingecko_id="weth",
             slip44=60,  # SLIP-44 coin type for Ether (CAIP-19 native)
         ),
+        external_ids=ExternalChainIds(coingecko="linea", dexscreener="linea"),
         gas=GasProfile(
             buffer=1.5,
             simulation_buffer=0.3,
@@ -60,25 +61,6 @@ DESCRIPTOR = register_chain(
         # Safe-enabled chain uses.
         contracts=safe_stack_contracts(),
         simulation=SimulationProfile(tenderly_supported=True),
-        # VIB-4851 (B1): per-vendor external ids, transposed from the legacy
-        # standalone vendor maps (CoinGecko / DexScreener / CoinGecko Onchain /
-        # DeFiLlama / Zerion / Moralis / OKX). Values verbatim incl. case.
-        external_ids={
-            "coingecko": "linea",
-            "dexscreener": "linea",
-        },
-        # Chainlink aggregator addresses (VIB-4851 CS-5) — moved verbatim
-        # from the legacy almanak/core/chainlink.py per-chain dicts.
-        # Reference: https://docs.chain.link/data-feeds/price-feeds/addresses
-        chainlink=ChainlinkFeeds(
-            usd_feeds={
-                "ETH/USD": "0x3c6Cd9Cc7c7a4c2Cf5a82734CD249D7D593354dA",
-                "BTC/USD": "0x7A99092816C8BD5ec8ba229e3a6E6Da1E628E1F9",
-                "USDC/USD": "0xAADAa473C1bDF7317ec07c915680Af29DeBfdCb5",
-                "USDT/USD": "0xefCA2bbe0EdD0E22b2e0d2F8248E99F4bEf4A7dB",
-                "DAI/USD": "0x5133D67c38AFbdd02997c14Abd8d83676B4e309A",
-            },
-        ),
         # Managed-Anvil fork-test funding facts (VIB-4851 CS-6) — moved
         # verbatim from framework/anvil/fork_manager.py (display-case keys).
         anvil=AnvilProfile(

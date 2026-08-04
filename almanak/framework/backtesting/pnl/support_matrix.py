@@ -45,7 +45,7 @@ from almanak.connectors._strategy_base.dex_volume_registry import DexVolumeRegis
 from almanak.connectors._strategy_base.funding_history_registry import FundingHistoryRegistry
 from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
 from almanak.core.chains import ChainRegistry
-from almanak.core.chains._helpers import external_id_for, vendor_chain_map
+from almanak.integrations.chains import integration_chain_id, integration_chain_map
 
 if TYPE_CHECKING:
     from almanak.framework.backtesting.config import BacktestDataConfig
@@ -404,7 +404,7 @@ def _check_price_lane(
         )
         return
 
-    platform = external_id_for(chain, vendor)
+    platform = integration_chain_id(chain, vendor)
     if platform is not None:
         report.lanes.append(
             LaneSupport(
@@ -415,7 +415,7 @@ def _check_price_lane(
         )
         return
 
-    supported_chains = ", ".join(sorted(vendor_chain_map(vendor)))
+    supported_chains = ", ".join(sorted(integration_chain_map(vendor)))
     report.lanes.append(
         LaneSupport(
             lane=LANE_PRICE,

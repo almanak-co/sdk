@@ -69,7 +69,6 @@ from almanak.core.finality import CacheFinality
 from almanak.framework.data.interfaces import DataSourceRateLimited
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.data.gas import fetch_gas_price_at
-from almanak.gateway.integrations.base import RateLimiter
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
 from almanak.gateway.services._grpc_errors import set_error_from_upstream
 from almanak.gateway.services._history_cache import (
@@ -80,6 +79,8 @@ from almanak.gateway.services._history_cache import (
     HistoryCache,
 )
 from almanak.gateway.utils.ssl_context import build_ssl_context
+from almanak.integrations._base import INTEGRATION_REGISTRY, GatewayOracleReader, OracleDataUnavailable
+from almanak.integrations._base.gateway.base import RateLimiter
 
 if TYPE_CHECKING:
     from web3 import AsyncWeb3
@@ -418,6 +419,11 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
         # Key: ``(dex_name, chain, address.lower())``.
         self._dex_pool_id_cache: dict[tuple[str, str, str], str] = {}
 
+        # Gateway-owned historical-oracle readers, keyed by provider + chain.
+        # They retain decoded round metadata and bounds across requests while
+        # archive RPC credentials never cross the gRPC boundary.
+        self._oracle_history_providers: dict[tuple[str, str], GatewayOracleReader] = {}
+
         # Resolve capability providers once at construction; same O(1)
         # dispatcher pattern as ``FundingRateService``. Each provider
         # map is keyed by the lowercase identifier the strategy submits
@@ -552,6 +558,12 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
         if self._http_session is not None and not self._http_session.closed:
             await self._http_session.close()
             self._http_session = None
+        for key, reader in self._oracle_history_providers.items():
+            try:
+                await reader.close()
+            except Exception:
+                logger.exception("Failed to close oracle history reader for %s", key)
+        self._oracle_history_providers.clear()
 
     # ---------------------------------------------------------------------
     # Wire-encoding helpers (server-side dataclass → proto)
@@ -1568,6 +1580,301 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
             source="the_graph",
             success=True,
         )
+
+    async def GetOraclePriceHistory(
+        self,
+        request: gateway_pb2.GetOraclePriceHistoryRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.OraclePriceHistoryResponse:
+        """Return a bounded provider-owned historical price series."""
+        provider = _normalize_key(request.provider)
+        chain = _normalize_key(request.chain)
+        token = request.token.strip().upper()
+        error = self._validate_oracle_history_request(
+            provider=provider,
+            chain=chain,
+            token=token,
+            start_ts=request.start_ts,
+            end_ts=request.end_ts,
+            max_points=request.max_points,
+            context=context,
+        )
+        if error is not None:
+            return gateway_pb2.OraclePriceHistoryResponse(
+                provider=provider,
+                chain=chain,
+                token=token,
+                success=False,
+                error=error,
+            )
+
+        try:
+            reader = self._oracle_history_reader(provider, chain)
+        except ValueError:
+            detail = self._set_oracle_reader_precondition(
+                context,
+                operation="history",
+                provider=provider,
+                chain=chain,
+                token=token,
+            )
+            return gateway_pb2.OraclePriceHistoryResponse(
+                provider=provider,
+                chain=chain,
+                token=token,
+                success=False,
+                error=detail,
+            )
+        except Exception:
+            logger.exception(
+                "GetOraclePriceHistory reader construction failed provider=%s chain=%s token=%s",
+                provider,
+                chain,
+                token,
+            )
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(_INTERNAL_ERROR_DETAIL)
+            return gateway_pb2.OraclePriceHistoryResponse(
+                provider=provider,
+                chain=chain,
+                token=token,
+                success=False,
+                error=_INTERNAL_ERROR_DETAIL,
+            )
+
+        try:
+            page = await reader.get_history_page(
+                token=token,
+                start_ts=request.start_ts,
+                end_ts=request.end_ts,
+                max_points=request.max_points,
+            )
+            history = page.points
+            truncated = page.truncated
+            recommended_split_ts = page.recommended_split_ts
+            points = [
+                gateway_pb2.OraclePricePoint(
+                    timestamp=point.timestamp,
+                    price=str(point.price),
+                    observation_id=str(point.observation_id),
+                )
+                for point in history
+            ]
+        except OracleDataUnavailable as exc:
+            return gateway_pb2.OraclePriceHistoryResponse(
+                provider=provider,
+                chain=chain,
+                token=token,
+                success=False,
+                error=str(exc),
+            )
+        except Exception:
+            logger.exception(
+                "GetOraclePriceHistory failed provider=%s chain=%s token=%s",
+                provider,
+                chain,
+                token,
+            )
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(_INTERNAL_ERROR_DETAIL)
+            return gateway_pb2.OraclePriceHistoryResponse(
+                provider=provider,
+                chain=chain,
+                token=token,
+                success=False,
+                error=_INTERNAL_ERROR_DETAIL,
+            )
+
+        return gateway_pb2.OraclePriceHistoryResponse(
+            provider=provider,
+            chain=chain,
+            token=token,
+            points=points,
+            success=True,
+            truncated=truncated,
+            recommended_split_ts=recommended_split_ts,
+        )
+
+    async def GetOraclePrice(
+        self,
+        request: gateway_pb2.GetOraclePriceRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.OraclePriceResponse:
+        """Return one provider-exact current oracle observation."""
+        provider = _normalize_key(request.provider)
+        chain = _normalize_key(request.chain)
+        token = request.token.strip().upper()
+        error = self._validate_oracle_request(
+            provider=provider,
+            chain=chain,
+            token=token,
+            context=context,
+        )
+        if error is not None:
+            return gateway_pb2.OraclePriceResponse(
+                provider=provider,
+                chain=chain,
+                token=token,
+                success=False,
+                error=error,
+            )
+        try:
+            reader = self._oracle_history_reader(provider, chain)
+        except ValueError:
+            detail = self._set_oracle_reader_precondition(
+                context,
+                operation="current",
+                provider=provider,
+                chain=chain,
+                token=token,
+            )
+            return gateway_pb2.OraclePriceResponse(
+                provider=provider,
+                chain=chain,
+                token=token,
+                success=False,
+                error=detail,
+            )
+        except Exception:
+            logger.exception(
+                "GetOraclePrice reader construction failed provider=%s chain=%s token=%s",
+                provider,
+                chain,
+                token,
+            )
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(_INTERNAL_ERROR_DETAIL)
+            return gateway_pb2.OraclePriceResponse(
+                provider=provider,
+                chain=chain,
+                token=token,
+                success=False,
+                error=_INTERNAL_ERROR_DETAIL,
+            )
+
+        try:
+            point = await reader.get_latest(token=token)
+        except OracleDataUnavailable as exc:
+            return gateway_pb2.OraclePriceResponse(
+                provider=provider,
+                chain=chain,
+                token=token,
+                success=False,
+                error=str(exc),
+            )
+        except Exception:
+            logger.exception("GetOraclePrice failed provider=%s chain=%s token=%s", provider, chain, token)
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(_INTERNAL_ERROR_DETAIL)
+            return gateway_pb2.OraclePriceResponse(
+                provider=provider,
+                chain=chain,
+                token=token,
+                success=False,
+                error=_INTERNAL_ERROR_DETAIL,
+            )
+        return gateway_pb2.OraclePriceResponse(
+            provider=provider,
+            chain=chain,
+            token=token,
+            point=gateway_pb2.OraclePricePoint(
+                timestamp=point.timestamp,
+                price=str(point.price),
+                observation_id=str(point.observation_id),
+            ),
+            success=True,
+        )
+
+    def _validate_oracle_request(
+        self,
+        *,
+        provider: str,
+        chain: str,
+        token: str,
+        context: grpc.aio.ServicerContext,
+    ) -> str | None:
+        if not chain or not token:
+            message = "chain and token are required"
+        else:
+            try:
+                factory = INTEGRATION_REGISTRY.gateway_oracle_reader_factory(provider)
+            except KeyError:
+                message = f"unknown oracle provider {provider!r}"
+            except Exception:
+                logger.exception("Oracle provider registry validation failed for %s", provider)
+                context.set_code(grpc.StatusCode.INTERNAL)
+                context.set_details(_INTERNAL_ERROR_DETAIL)
+                return _INTERNAL_ERROR_DETAIL
+            else:
+                if factory.supports(chain, token):
+                    return None
+                message = f"{provider} has no direct USD feed for {token} on {chain}"
+        _invalid_argument(context, message)
+        return message
+
+    def _validate_oracle_history_request(
+        self,
+        *,
+        provider: str,
+        chain: str,
+        token: str,
+        start_ts: int,
+        end_ts: int,
+        max_points: int,
+        context: grpc.aio.ServicerContext,
+    ) -> str | None:
+        message = self._validate_oracle_request(
+            provider=provider,
+            chain=chain,
+            token=token,
+            context=context,
+        )
+        if message is not None:
+            return message
+        if start_ts <= 0 or end_ts <= 0 or start_ts >= end_ts:
+            message = "start_ts and end_ts must form a positive increasing interval"
+        elif end_ts - start_ts > 366 * 86400:
+            message = "historical oracle interval cannot exceed 366 days"
+        elif max_points < 1 or max_points > 10_000:
+            message = "max_points must be between 1 and 10000"
+        else:
+            return None
+        _invalid_argument(context, message)
+        return message
+
+    @staticmethod
+    def _set_oracle_reader_precondition(
+        context: grpc.aio.ServicerContext,
+        *,
+        operation: str,
+        provider: str,
+        chain: str,
+        token: str,
+    ) -> str:
+        logger.exception(
+            "Oracle %s reader is not configured provider=%s chain=%s token=%s",
+            operation,
+            provider,
+            chain,
+            token,
+        )
+        detail = "oracle reader is not configured for the requested chain"
+        context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+        context.set_details(detail)
+        return detail
+
+    def _oracle_history_reader(self, provider: str, chain: str) -> GatewayOracleReader:
+        key = (provider, chain)
+        reader = self._oracle_history_providers.get(key)
+        if reader is not None:
+            return reader
+
+        factory = INTEGRATION_REGISTRY.gateway_oracle_reader_factory(provider)
+        reader = factory.build(chain=chain, settings=self.settings)
+        if not isinstance(reader, GatewayOracleReader):
+            raise TypeError(f"Integration {provider!r} built an invalid gateway oracle reader for chain {chain!r}")
+        self._oracle_history_providers[key] = reader
+        return reader
 
 
 __all__ = [

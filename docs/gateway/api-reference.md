@@ -18,7 +18,7 @@ This document describes the gRPC API exposed by the Almanak Gateway.
 | SimulationService | 1 | Transaction bundle simulation (Tenderly/Alchemy) |
 | PoolAnalyticsService | 2 | DEX pool analytics (TVL, volume, fees) + product-distinct token-pool listing |
 | PoolHistoryService | 1 | Historical pool snapshots (TVL, volume, fees over time). Disabled by default; hosted rollout enables via `ALMANAK_GATEWAY_POOL_HISTORY_ENABLED=true` deployment config |
-| RateHistoryService | 8 | Lending APY (live + historical), perp funding history, DEX TWAP (single + series), DEX LWAP (liquidity-weighted spot), DEX volume history, and gas prices (VIB-4859 / W7, VIB-4948). Strategy-side `RateMonitor` / backtesting rate providers are thin gRPC clients of this service. |
+| RateHistoryService | 10 | Lending APY (live + historical), perp funding history, DEX TWAP (single + series), DEX LWAP (liquidity-weighted spot), DEX volume history, gas prices, and provider-exact oracle prices (current + historical). Strategy-side `RateMonitor` / backtesting rate providers are thin gRPC clients of this service. |
 | PolymarketService | 20 | Polymarket CLOB API proxy (market data, orders, positions, price history, trade tape) |
 | EnsoService | 4 | Enso Finance routing and bundling |
 | TokenService | 4 | Token resolution and on-chain metadata |
@@ -1720,6 +1720,37 @@ message GetGasPriceAtRequest {
 ```
 
 **Response:** `GasPricePointResponse { chain, point: GasPricePoint, source, success, error }`.
+
+### GetOraclePrice
+
+Return the current observation from one explicitly requested oracle provider.
+This is provider-exact data rather than `MarketService.GetPrice`'s aggregated
+price policy, so freshness and divergence checks preserve their provenance.
+
+```protobuf
+rpc GetOraclePrice(GetOraclePriceRequest) returns (OraclePriceResponse)
+```
+
+**Request:** `GetOraclePriceRequest { provider, chain, token }`.
+
+**Response:** `OraclePriceResponse { provider, chain, token, point: OraclePricePoint, success, error }`.
+`OraclePricePoint.observation_id` is the provider-native identifier; Chainlink
+returns its `uint80` round ID as a decimal string.
+
+### GetOraclePriceHistory
+
+Return a bounded provider-exact oracle series over the half-open interval
+`[start_ts, end_ts)`. The caller must supply `max_points` in `[1, 10000]`; the
+gateway also rejects windows longer than 366 days. Provider-specific archive
+RPC selection, decoding, and historical traversal remain gateway-owned.
+
+```protobuf
+rpc GetOraclePriceHistory(GetOraclePriceHistoryRequest) returns (OraclePriceHistoryResponse)
+```
+
+**Request:** `GetOraclePriceHistoryRequest { provider, chain, token, start_ts, end_ts, max_points }`.
+
+**Response:** `OraclePriceHistoryResponse { provider, chain, token, points: OraclePricePoint[], success, error }`.
 
 **Wire conventions** — Decimal fields are encoded as strings (mirrors
 `PoolHistoryService` / `FundingRateService`). Empty string means

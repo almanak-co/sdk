@@ -35,6 +35,8 @@ import pkgutil
 # ``ChainDescriptor`` etc. from these private submodules.
 from ._descriptor import (
     ChainDescriptor,
+    ExternalChainIds,
+    ExternalIdProvider,
     GasProfile,
     NativeToken,
     RpcProfile,
@@ -105,6 +107,8 @@ __all__ = [
     "LEGACY_SERIALIZED_CHAIN",
     "ChainDescriptor",
     "ChainRegistry",
+    "ExternalChainIds",
+    "ExternalIdProvider",
     "GasProfile",
     "NativeToken",
     "RpcProfile",

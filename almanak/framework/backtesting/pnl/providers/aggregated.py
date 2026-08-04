@@ -467,7 +467,6 @@ class AggregatedDataProvider:
 
         return ChainlinkDataProvider(
             chain=chain,
-            rpc_url=config.rpc_url,
             cache_ttl_seconds=config.cache_ttl_seconds,
             priority=config.priority,
         )
@@ -668,23 +667,18 @@ class AggregatedDataProvider:
     async def _create_chainlink_provider(
         cls,
         chain: str,
-        rpc_url: str,
+        _rpc_url: str,
     ) -> Any | None:
-        """Create a ChainlinkDataProvider if RPC URL is available.
+        """Create the gateway-backed Chainlink provider.
 
         Returns:
             ChainlinkDataProvider instance or None if unavailable.
         """
-        if not rpc_url:
-            logger.debug("No RPC URL available for Chainlink provider")
-            return None
-
         try:
             from .chainlink import ChainlinkDataProvider
 
             provider = ChainlinkDataProvider(
                 chain=chain,
-                rpc_url=rpc_url,
                 cache_ttl_seconds=120,  # Longer cache for historical data
             )
             logger.debug("Created Chainlink provider for chain=%s", chain)

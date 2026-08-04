@@ -23,7 +23,6 @@ from almanak.connectors._base.gateway_capabilities import (
     LENDING_MARKET_SOURCE_CURATED_CATALOG,
     LENDING_MARKET_SOURCE_ONCHAIN_VERIFY,
     GatewayLendingMarketDiscoveryCapability,
-    GatewayOraclePriceCapability,
     GatewayPoolKeyCacheCapability,
     LendingMarketRecord,
     LendingMarketVerificationError,
@@ -140,74 +139,58 @@ def _is_native_symbol(token: str, chain: str) -> bool:
     return token.upper() in native_symbols_for(chain)
 
 
-def _chain_has_venue_oracle(chain: str) -> bool:
-    """True iff a perp connector publishes a venue-native oracle price for `chain`.
+class _IntegrationPriceSources:
+    """Manifest-discovered price-source provisioner.
 
-    Registry-driven (not a chain literal): a chain qualifies when some registered
-    ``GatewayOraclePriceCapability`` provider declares it via
-    ``oracle_price_chain()`` (e.g. HyperEVM/HyperCore's 0x0807 precompile). This
-    is the seam ``_init_price_sources`` keys on to pick the venue-oracle price
-    stack instead of the default EVM Chainlink stack — a new venue-oracle chain
-    wires itself by registering a provider, with no edit here (mirrors the
-    ChainRegistry-driven ``is_solana_chain`` routing branch above; VIB-5576).
-    """
-    if not chain:
-        return False
-    for provider in GATEWAY_REGISTRY.capability_providers(GatewayOraclePriceCapability):  # type: ignore[type-abstract]
-        if provider.oracle_price_chain() == chain:
-            return True
-    return False
-
-
-class _SharedPriceSources:
-    """Lazily-built, chain-agnostic price sources shared by every per-chain
-    sub-aggregator (VIB-5651 §5, no O(N) duplication).
-
-    Binance / CoinGecko / Pyth are chain-agnostic: instantiating exactly one of
-    each and referencing it from every per-chain ``PriceAggregator`` keeps
-    provisioning O(1) in those clients regardless of how many chains a gateway
-    serves. Each accessor constructs its source on first use and memoises it, so
-    a gateway with (say) two EVM chains shares a single Binance client, and one
-    with two Solana chains shares a single Pyth client.
-
-    Lifecycle: these instances are referenced by multiple aggregators, so
-    ``MarketService`` dedup-closes every distinct source by ``id()`` (lead
-    decision 2) rather than closing each aggregator — a shared instance is
-    therefore never closed twice.
+    ``MarketService`` knows only the provider-neutral factory capability. Shared
+    factories are instantiated once and reused across chain aggregators; chain
+    factories are instantiated once per chain. Provider order is declared by
+    manifests and therefore remains deterministic.
     """
 
-    def __init__(self, *, coingecko_api_key: str | None) -> None:
-        self._coingecko_api_key = coingecko_api_key
-        self._coingecko: Any = None
-        self._binance: Any = None
-        self._pyth: Any = None
+    def __init__(self, *, settings: Any) -> None:
+        from almanak.integrations import INTEGRATION_REGISTRY
 
-    def coingecko(self) -> Any:
-        """The shared CoinGecko source (global fallback tier — every chain uses it)."""
-        if self._coingecko is None:
-            from almanak.gateway.data.price.coingecko import CoinGeckoPriceSource
+        self._settings = settings
+        self._registry = INTEGRATION_REGISTRY
+        self._factories = self._registry.gateway_price_source_factories()
+        self._shared: dict[str, Any] = {}
 
-            self._coingecko = CoinGeckoPriceSource(
-                api_key=self._coingecko_api_key if self._coingecko_api_key is not None else "",
-                cache_ttl=30,
-            )
-        return self._coingecko
+    def for_chain(self, chain: str | None) -> list[Any]:
+        from almanak.integrations import PriceSourceScope
 
-    def binance(self) -> Any:
-        """The shared Binance source (EVM chains' secondary spot tier)."""
-        if self._binance is None:
-            from almanak.gateway.data.price.binance import BinancePriceSource
+        sources: list[Any] = []
+        candidates = [factory for factory in self._factories if factory.supports(chain)]
+        active_groups = {
+            group
+            for factory in candidates
+            for group in (self._registry.price_source_policy(factory.name)[0],)
+            if group is not None
+        }
+        claimed_groups: set[str] = set()
+        selected: list[Any] = []
+        for factory in candidates:
+            exclusive_group, blocked_groups = self._registry.price_source_policy(factory.name)
+            if blocked_groups & active_groups:
+                continue
+            if exclusive_group is not None:
+                if exclusive_group in claimed_groups:
+                    continue
+                claimed_groups.add(exclusive_group)
+            selected.append(factory)
 
-            self._binance = BinancePriceSource(cache_ttl=30, request_timeout=5.0)
-        return self._binance
-
-    def pyth(self) -> Any:
-        """The shared Pyth source (Solana chains' primary tier)."""
-        if self._pyth is None:
-            from almanak.gateway.data.price.pyth import PythPriceSource
-
-            self._pyth = PythPriceSource(cache_ttl=15)
-        return self._pyth
+        for factory in selected:
+            if factory.scope is PriceSourceScope.SHARED:
+                source = self._shared.get(factory.name)
+                if source is None:
+                    source = factory.build(chain=chain, settings=self._settings)
+                    if source is not None:
+                        self._shared[factory.name] = source
+            else:
+                source = factory.build(chain=chain, settings=self._settings)
+            if source is not None:
+                sources.append(source)
+        return sources
 
 
 def _block_pin_unsupported_reason(chain: str, block_tag: int | None) -> str | None:
@@ -677,7 +660,7 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         construction — the median for a chain is computed only from that chain's
         valid sources, so a hyperevm request can never be answered by an arbitrum
         Chainlink read. Chain-agnostic sources (Binance / CoinGecko / Pyth) are
-        instantiated once via ``_SharedPriceSources`` and referenced by every
+        instantiated once via ``_IntegrationPriceSources`` and referenced by every
         sub-aggregator; only chain-scoped sources are built per chain.
         """
         from almanak.gateway.data.price.aggregator import PriceAggregator
@@ -688,10 +671,15 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         # Chainlink oracle data for strategies running on a different chain (QA #4/#7/#8).
         # A no-chain gateway serves a single CoinGecko-only aggregator under the sentinel.
         self._primary_chain = chains[0] if chains else _NO_CHAIN_KEY
+        if not chains:
+            logger.warning(
+                "MarketService: No chain configured -- Chainlink pricing DISABLED. "
+                "Register a canonical chain with RegisterChains / --chains to enable on-chain pricing."
+            )
 
-        # Chain-agnostic sources built once and shared across every sub-aggregator
-        # (no O(N) client duplication as chain count grows — VIB-5651 §5).
-        shared = _SharedPriceSources(coingecko_api_key=self.settings.coingecko_api_key)
+        # Manifest discovery owns provider selection, ordering and lifecycle
+        # scope. Shared sources remain O(1) as chain count grows.
+        integrations = _IntegrationPriceSources(settings=self.settings)
 
         # Map key -> chain passed to the source builder. Real chains map to
         # themselves; a no-chain gateway keeps one entry under the sentinel key,
@@ -708,12 +696,17 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
                 sources=sources,
                 stablecoin_verify=getattr(self.settings, "stablecoin_verify", False),
                 stablecoin_chainlink_check_interval=getattr(self.settings, "stablecoin_chainlink_check_interval", 50),
+                stablecoin_verifier_failure_warning_threshold=getattr(
+                    self.settings,
+                    "stablecoin_verifier_failure_warning_threshold",
+                    3,
+                ),
                 per_source_timeout_seconds=getattr(self.settings, "price_source_timeout_seconds", 10.0),
                 global_timeout_seconds=getattr(self.settings, "price_aggregator_timeout_seconds", 15.0),
             )
 
         self._price_aggregators = {
-            key: _make_aggregator(self._build_sources_for_chain(chain, shared=shared))
+            key: _make_aggregator(self._build_sources_for_chain(chain, integrations=integrations))
             for key, chain in chain_by_key.items()
         }
 
@@ -737,84 +730,19 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
 
         self._initialized = True
 
-    def _build_sources_for_chain(self, chain: str | None, *, shared: _SharedPriceSources) -> list:
-        """Build the ordered price-source list for a single chain (VIB-5651).
-
-        Extracted verbatim from the four mutually-exclusive branches the flat
-        provisioning used: no-chain (CoinGecko only), Solana (Pyth primary),
-        venue-oracle (HyperCore primary), and the default EVM 4-source stack
-        (Chainlink + Binance + DexScreener + CoinGecko). Chain-agnostic sources
-        come from ``shared`` so they are instantiated once regardless of chain
-        count; chain-scoped sources (on-chain / venue oracle + a chain-bound
-        DexScreener) are built per chain. Preserves single-chain behaviour
-        byte-for-byte (one-entry map → identical source set).
-        """
-        from almanak.framework.data.interfaces import BasePriceSource
-        from almanak.gateway.validation import is_solana_chain
-
-        cg_source = shared.coingecko()
-
-        sources: list[BasePriceSource]
-        if not chain:
-            # No chain configured -- on-chain pricing unavailable.
-            # This can happen with standalone `almanak gateway` without --chains.
-            sources = [cg_source]
-            logger.warning(
-                "MarketService: No chain configured -- on-chain (Chainlink) pricing DISABLED. "
-                "Only CoinGecko is available. Pass --chains to the gateway or set "
-                "ALMANAK_GATEWAY_CHAINS for accurate on-chain pricing."
-            )
-        elif is_solana_chain(chain):
-            # Solana: Pyth (primary) + DexScreener (secondary) + CoinGecko (fallback)
-            # OnChainPriceSource is EVM-only (Chainlink), skip it for Solana
-            from almanak.gateway.data.price.dexscreener import DexScreenerPriceSource
-
-            pyth_source = shared.pyth()
-            # Solana-only gateway: keep a default chain so tokens arriving
-            # without a ResolvedToken still dispatch to the right platform.
-            dexscreener_source = DexScreenerPriceSource(default_chain_id="solana", cache_ttl=30)
-            sources = [pyth_source, dexscreener_source, cg_source]
-            logger.info("MarketService: Pyth (primary) + DexScreener + CoinGecko (fallback), chain=%s", chain)
-        elif _chain_has_venue_oracle(chain):
-            # A perp connector publishes a venue-native oracle price for this
-            # chain via GatewayOraclePriceCapability (e.g. HyperEVM/HyperCore's
-            # 0x0807 precompile). Such chains have no Chainlink feeds and their
-            # perp majors (ETH/BTC/…) have no ERC-20 to price by address, so the
-            # venue oracle is primary; DexScreener + CoinGecko stay as fallback
-            # for any spot token. No OnChainPriceSource (Chainlink). Keyed on the
-            # capability registry — not a chain literal — so a new venue-oracle
-            # chain wires itself by registering a provider.
-            from almanak.gateway.data.price.dexscreener import DexScreenerPriceSource
-            from almanak.gateway.data.price.hyperevm import HypercoreOraclePriceSource
-
-            venue_oracle_source = HypercoreOraclePriceSource(network=self.settings.network)
-            dexscreener_source = DexScreenerPriceSource(default_chain_id=chain.lower(), cache_ttl=30)
-            sources = [venue_oracle_source, dexscreener_source, cg_source]
-            logger.info("MarketService: venue oracle (primary) + DexScreener + CoinGecko (fallback), chain=%s", chain)
-        else:
-            # EVM: 4-source pricing for production resilience.
-            # All sources are queried concurrently; PriceAggregator returns the
-            # median with outlier detection. Sources that don't support a token
-            # raise DataSourceUnavailable, which the aggregator handles gracefully.
-            from almanak.framework.data.tokens import get_token_resolver
-            from almanak.gateway.data.price.dexscreener import DexScreenerPriceSource
-            from almanak.gateway.data.price.onchain import OnChainPriceSource
-
-            onchain_source = OnChainPriceSource(chain=chain, network=self.settings.network)
-            binance_source = shared.binance()
-            # Keep the primary chain as the default so bare-symbol requests
-            # (no ResolvedToken) still dispatch correctly. Multi-chain price
-            # requests carry a ResolvedToken whose .chain overrides this.
-            dexscreener_source = DexScreenerPriceSource(
-                default_chain_id=chain.lower(),
-                cache_ttl=30,
-                token_resolver=get_token_resolver(),
-            )
-            sources = [onchain_source, binance_source, dexscreener_source, cg_source]
-            logger.info(
-                "MarketService: 4-source EVM pricing (Chainlink + Binance + DexScreener + CoinGecko), chain=%s",
-                chain,
-            )
+    def _build_sources_for_chain(
+        self,
+        chain: str | None,
+        *,
+        integrations: _IntegrationPriceSources,
+    ) -> list[Any]:
+        """Build one chain's source stack exclusively from integration manifests."""
+        sources = integrations.for_chain(chain)
+        logger.info(
+            "MarketService: discovered price sources chain=%s sources=%s",
+            chain,
+            [source.source_name for source in sources],
+        )
         return sources
 
     async def reinitialize(self, chain: str) -> None:
@@ -842,7 +770,7 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             # that early-returns from ``_ensure_initialized`` always reads a
             # non-empty map (old before the rebind, new after) — never the empty
             # map the close-then-rebuild order briefly exposed. The old
-            # ``_SharedPriceSources`` instances are distinct from the freshly
+            # Manifest-shared source instances are distinct from the freshly
             # built ones, so closing them can't touch the live sources.
             old_aggregators = dict(self._price_aggregators)
             self._do_initialize()

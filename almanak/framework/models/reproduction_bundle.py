@@ -12,7 +12,7 @@ from types import MappingProxyType
 from typing import Any
 
 from almanak.core.chains import ChainRegistry
-from almanak.core.chains._helpers import vendor_chain_map
+from almanak.integrations.chains import integration_chain_map
 
 
 @dataclass
@@ -402,11 +402,11 @@ class FailureContext:
     tenderly_api_key: str | None = None
 
 
-# Tenderly DASHBOARD slugs for trace URLs — derived from
-# ``ChainDescriptor.external_ids["tenderly"]`` (VIB-4851 CS-4). These are
+# Tenderly DASHBOARD slugs for trace URLs — projected from typed chain
+# descriptor metadata. These are
 # the dashboard URL path slugs, NOT the simulation network id (which is
 # always ``str(chain_id)`` by SimulationProfile design).
-TENDERLY_CHAIN_SLUGS: Mapping[str, str] = MappingProxyType(vendor_chain_map("tenderly"))
+TENDERLY_CHAIN_SLUGS: Mapping[str, str] = MappingProxyType(integration_chain_map("tenderly"))
 
 
 def _generate_tenderly_trace_url(

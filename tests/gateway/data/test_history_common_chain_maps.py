@@ -1,9 +1,8 @@
 """Registry-derived chain-map compat views in ``almanak/gateway/data/_history_common.py``.
 
-VIB-4851 B1.3 folded the CoinGecko Onchain / DefiLlama-display chain-spelling
-tables onto ``ChainDescriptor.external_ids`` and replaced the standalone dict
-literals with read-only ``MappingProxyType`` views derived via
-``vendor_chain_map(...)``. These gateway-side assertions lock the exact map
+The CoinGecko Onchain / DefiLlama-display chain-spelling tables are
+provider-owned integration metadata and exposed as read-only
+``MappingProxyType`` views. These gateway-side assertions lock the exact map
 values the pool-history / pool-analytics providers consume, plus the one
 intentional widening: ``_CHAIN_TO_CG_ONCHAIN_NETWORK`` is now the UNION with the
 price-layer CoinGecko Onchain map and so gains ``mantle`` (the core inversion test

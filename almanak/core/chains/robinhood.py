@@ -12,7 +12,7 @@ present in the runtime bytecode, so it is managed-Anvil deposit-fundable.
 
 Registered plumbing-first (VIB-5706); Uniswap V3 (swap + LP) and Morpho Blue
 (lending) now target Robinhood (VIB-5709, VIB-5710). The fields nothing consumes
-today (receipt polling, gas buffers/caps, chainlink, simulation) remain at their
+today (receipt polling, gas buffers/caps, simulation) remain at their
 documented-miss defaults — the framework defaults apply and no measured
 chain-specific values have been taken yet.
 
@@ -20,14 +20,11 @@ chain-specific values have been taken yet.
 (VIB-5811) — each is a verified finding, not an unfinished deferral, and the
 per-field comments below carry the live evidence. Setting them does not enable
 backtesting; it silently corrupts it. Robinhood therefore stays out of
-``DEFAULT_ARCHIVE_RPC_CHAINS`` (``almanak/config/backtest.py``), which costs
-nothing real: the Chainlink and TWAP providers do not consult that tuple at all
-(their ``ARCHIVE_RPC_CHAINS`` lists are hardcoded, and ``CHAINLINK_PRICE_FEEDS``
-has no ``robinhood`` key), and the gas provider's archive path would return
-wrong-era data (see ``rpc``). Chainlink *is* live on 4663 (55 feeds in the
-official reference-data-directory, ``latestRoundData`` verified answering
-2026-07-14) — wiring it is its own ticket and needs an archive RPC: the
-descriptor's ``public_rpc`` is state-pruned (``eth_getBalance`` at an old block
+``DEFAULT_ARCHIVE_RPC_CHAINS`` (``almanak/config/backtest.py``). The current
+oracle integration has no Robinhood catalogue, and the gas provider's archive
+path would return wrong-era data (see ``rpc``). An oracle network is live on
+4663, but wiring it requires provider-owned catalogue metadata and an archive
+RPC: the descriptor's ``public_rpc`` is state-pruned (``eth_getBalance`` at an old block
 → "missing trie node"), while Alchemy serves archive depth. Three non-defaults:
 
 * ``gas`` declares the Arbitrum L1-fee oracle (``arbitrum_nodeinterface`` at the
@@ -56,6 +53,7 @@ from ._descriptor import (
     AnvilProfile,
     ChainDescriptor,
     Explorer,
+    ExternalChainIds,
     GasProfile,
     NativeToken,
     RpcProfile,
@@ -78,6 +76,12 @@ DESCRIPTOR = register_chain(
             wrapped_symbol="WETH",
             wrapped_coingecko_id="weth",
             slip44=60,  # SLIP-44 coin type for Ether (CAIP-19 native)
+        ),
+        external_ids=ExternalChainIds(
+            coingecko="robinhood",
+            dexscreener="robinhood",
+            coingecko_onchain="robinhood",
+            defillama="robinhood-chain",
         ),
         # Orbit L2: declare the Arbitrum ArbGasInfo precompile for L1 data-cost
         # estimation (Plan 026). Gas buffers/caps left unset — the framework
@@ -203,16 +207,6 @@ DESCRIPTOR = register_chain(
         # same fact; folding that override into this field is tracked separately
         # (it flips the Zodiac manifest and needs its own regression review).
         canonical_stable="USDG",
-        # Per-vendor chain slugs, all verified 2026-07-09: CoinGecko asset-platform
-        # id "robinhood" (chain_identifier 4663), DexScreener "robinhood",
-        # CoinGecko Onchain "robinhood" (went live 2026-07-09), and DeFiLlama chain slug
-        # "robinhood-chain" (/v2/historicalChainTvl/robinhood-chain returns data).
-        external_ids={
-            "coingecko": "robinhood",
-            "dexscreener": "robinhood",
-            "coingecko_onchain": "robinhood",
-            "defillama": "robinhood-chain",
-        },
         # Managed-Anvil fork-test funding (facts verified at block 5_610_000). WETH
         # additionally funds via WETH9 deposit() (wrapped_native_deposit). Balance
         # slots are standard keccak(abi.encode(holder, slot)); for WETH/USDG the

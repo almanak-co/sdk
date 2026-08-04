@@ -368,30 +368,20 @@ class TestAnvilProfileInversion:
 
 
 class TestPriceSourceIntersection:
-    """CS-7: the paper-engine 6-chain price-source set derives as
-    feeds ∩ TWAP pools instead of three hand-kept copies."""
+    """CS-7: the paper-engine price-source set derives as feeds ∩ TWAP pools."""
 
-    FROZEN_PRICE_SOURCE_CHAINS = frozenset(
-        {"ethereum", "arbitrum", "base", "optimism", "polygon", "avalanche"}
-    )
+    FROZEN_PRICE_SOURCE_CHAINS = frozenset({"ethereum", "arbitrum", "base", "optimism", "polygon", "avalanche"})
 
     def test_engine_set_byte_equivalent(self) -> None:
         from almanak.framework.backtesting.paper.engine import _PRICE_SOURCE_CHAINS
 
         assert _PRICE_SOURCE_CHAINS == self.FROZEN_PRICE_SOURCE_CHAINS
 
-    def test_divergence_gate_byte_equivalent(self) -> None:
-        from almanak.framework.backtesting.paper._engine_helpers import (
-            _chainlink_divergence_chains,
-        )
-
-        assert _chainlink_divergence_chains() == self.FROZEN_PRICE_SOURCE_CHAINS
-
     def test_subset_semantics_preserved(self) -> None:
         # bsc / linea / sonic have Chainlink feeds but no TWAP pools — they
         # must stay OUT (the legacy comment's deliberate-subset contract).
-        from almanak.core.chains._helpers import chainlink_usd_feeds_map
         from almanak.framework.backtesting.paper.engine import _PRICE_SOURCE_CHAINS
+        from almanak.integrations.chainlink.catalog import CHAINLINK_PRICE_FEEDS
 
-        assert {"bsc", "linea", "sonic"} <= set(chainlink_usd_feeds_map())
+        assert {"bsc", "linea", "sonic"} <= set(CHAINLINK_PRICE_FEEDS)
         assert not ({"bsc", "linea", "sonic"} & _PRICE_SOURCE_CHAINS)

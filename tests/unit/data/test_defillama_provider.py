@@ -184,9 +184,13 @@ class TestToLlamaCoinId:
         result = to_llama_coin_id("0xABCD", "Arbitrum")
         assert result == "arbitrum:0xABCD"
 
+    def test_solana_mapping(self):
+        result = to_llama_coin_id("So11111111111111111111111111111111111111112", "solana")
+        assert result == "solana:So11111111111111111111111111111111111111112"
+
     def test_unsupported_chain_raises(self):
         with pytest.raises(DataSourceUnavailable, match="Unsupported chain"):
-            to_llama_coin_id("0xABCD", "solana")
+            to_llama_coin_id("0xABCD", "unsupported")
 
     def test_all_chains_mapped(self):
         """Verify all chains in _CHAIN_TO_LLAMA produce valid coin IDs."""
@@ -378,7 +382,7 @@ class TestHistoricalPrices:
             asyncio.run(
                 provider.get_historical_prices(
                     token_address="0xABCD",
-                    chain="solana",
+                    chain="unsupported",
                 )
             )
 

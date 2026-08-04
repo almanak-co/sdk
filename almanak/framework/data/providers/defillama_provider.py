@@ -47,7 +47,6 @@ from typing import Any
 
 import aiohttp
 
-from almanak.core.chains._helpers import vendor_chain_map
 from almanak.core.finality import DataFinality
 from almanak.framework.data.interfaces import DataSourceUnavailable, OHLCVCandle
 from almanak.framework.data.models import (
@@ -56,6 +55,7 @@ from almanak.framework.data.models import (
     DataMeta,
 )
 from almanak.framework.data.ratelimit import get_bucket
+from almanak.integrations.chains import integration_chain_map
 
 logger = logging.getLogger(__name__)
 
@@ -65,8 +65,8 @@ _YIELDS_API = "https://yields.llama.fi"
 _TVL_API = "https://api.llama.fi"
 
 # Chain name -> DeFi Llama chain prefix mapping
-# Derived from ``ChainDescriptor.external_ids`` per VIB-4851 B1 (canonical-only).
-_CHAIN_TO_LLAMA: Mapping[str, str] = MappingProxyType(vendor_chain_map("defillama"))
+# Projected from typed chain-descriptor metadata (canonical-only).
+_CHAIN_TO_LLAMA: Mapping[str, str] = MappingProxyType(integration_chain_map("defillama"))
 
 
 @dataclass

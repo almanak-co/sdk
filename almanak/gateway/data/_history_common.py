@@ -12,16 +12,11 @@ construction — the pool-analytics servicer and the
 pool-history OHLCV provider previously each carried their own copies of
 the free/pro base-URL pair and the ``x-cg-pro-api-key`` header logic.
 
-The canonical home for these chain-string spellings is now the per-chain
-``ChainDescriptor.external_ids`` mapping on the registry — these module-level
-names are **derived compat views** (read-only ``MappingProxyType`` snapshots of
-``vendor_chain_map(...)``) kept so existing consumers can keep importing the same
-symbols. They are no longer the source of truth (VIB-4851 B1). The import of
-``almanak.core.chains`` eagerly registers all chains, so the module-level
-snapshot captures the complete registry.
-
-Leaf module: imports only ``almanak.core`` (the chain registry / enums + the
-derive helper), so both gateway services can depend on it without an import cycle.
+The canonical home for these chain-string spellings is each chain descriptor's
+typed ``ExternalChainIds`` declaration. These module-level names are **derived compat views**
+(read-only ``MappingProxyType`` snapshots of ``integration_chain_map(...)``)
+kept so existing consumers can keep importing the same symbols. Metadata
+lookup is pure and opens no network resources.
 
 No HTTP egress happens here — this is pure data + a registry lookup helper.
 """
@@ -32,20 +27,20 @@ from collections.abc import Mapping
 from types import MappingProxyType
 
 from almanak.core.chains import ChainRegistry
-from almanak.core.chains._helpers import vendor_chain_map
 from almanak.core.enums import ChainFamily
+from almanak.integrations.chains import integration_chain_map
 
 #: Chain -> CoinGecko Onchain network slug. Derived compat view (VIB-4851 B1);
-#: canonical home is ``ChainDescriptor.external_ids["coingecko_onchain"]``.
+#: canonical home is the chain descriptor's typed external-id declaration.
 #: INTENTIONALLY the union of this service's historical 9-entry map with the
 #: price-layer coingecko_onchain map — it gains ``mantle`` (9 -> 10 keys). Pinned by
 #: ``tests/unit/core/test_external_ids_inversion.py::test_coingecko_onchain_collapse_is_union_with_mantle``.
-_CHAIN_TO_CG_ONCHAIN_NETWORK: Mapping[str, str] = MappingProxyType(vendor_chain_map("coingecko_onchain"))
+_CHAIN_TO_CG_ONCHAIN_NETWORK: Mapping[str, str] = MappingProxyType(integration_chain_map("coingecko_onchain"))
 
 #: Chain -> DefiLlama display name (DefiLlama uses capitalized chain names).
-#: Derived compat view (VIB-4851 B1); canonical home is
-#: ``ChainDescriptor.external_ids["defillama_display"]`` (byte-identical, 9 keys).
-_CHAIN_TO_LLAMA_DISPLAY: Mapping[str, str] = MappingProxyType(vendor_chain_map("defillama_display"))
+#: Derived compat view; canonical home is each chain descriptor's typed
+#: DeFiLlama-display id (byte-identical, 9 keys).
+_CHAIN_TO_LLAMA_DISPLAY: Mapping[str, str] = MappingProxyType(integration_chain_map("defillama_display"))
 
 
 #: CoinGecko Onchain API bases. The org runs the paid CoinGecko key — keyed

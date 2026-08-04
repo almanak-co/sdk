@@ -6,6 +6,7 @@ from ._descriptor import (
     AnvilProfile,
     ChainDescriptor,
     Explorer,
+    ExternalChainIds,
     GasProfile,
     NativeToken,
     RpcProfile,
@@ -29,6 +30,7 @@ DESCRIPTOR = register_chain(
             wrapped_coingecko_id="monad",
             slip44=268435779,  # SLIP-44 "Monad" — MON (CAIP-19)
         ),
+        external_ids=ExternalChainIds(coingecko="monad", dexscreener="monad"),
         gas=GasProfile(
             buffer=1.1,
             simulation_buffer=0.1,
@@ -53,13 +55,6 @@ DESCRIPTOR = register_chain(
             "wbtc": "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c",
         },
         simulation=SimulationProfile(tenderly_supported=True),
-        # VIB-4851 (B1): per-vendor external ids, transposed from the legacy
-        # standalone vendor maps (CoinGecko / DexScreener / CoinGecko Onchain /
-        # DeFiLlama / Zerion / Moralis / OKX). Values verbatim incl. case.
-        external_ids={
-            "coingecko": "monad",
-            "dexscreener": "monad",
-        },
         # Managed-Anvil fork-test funding facts (VIB-4851 CS-6) — moved
         # verbatim from framework/anvil/fork_manager.py (display-case keys).
         anvil=AnvilProfile(

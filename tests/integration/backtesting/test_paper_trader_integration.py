@@ -32,15 +32,17 @@ def _require_cast() -> None:
     """Skip test if Foundry 'cast' CLI is not available."""
     if shutil.which("cast") is None:
         pytest.skip("Foundry 'cast' CLI not installed; required for Anvil funding helpers.")
+
+
 from web3 import Web3
 
-from almanak.framework.backtesting.models import BacktestEngine
-from almanak.framework.backtesting.paper.config import PaperTraderConfig
-from almanak.framework.backtesting.paper.engine import PaperTrader
 from almanak.framework.anvil.fork_manager import (
     ForkManagerConfig,
     RollingForkManager,
 )
+from almanak.framework.backtesting.models import BacktestEngine
+from almanak.framework.backtesting.paper.config import PaperTraderConfig
+from almanak.framework.backtesting.paper.engine import PaperTrader
 from almanak.framework.backtesting.paper.portfolio_tracker import PaperPortfolioTracker
 from almanak.framework.market import MarketSnapshot
 
@@ -120,7 +122,7 @@ def fund_erc20_token(
     # For WETH on Arbitrum, the balanceOf mapping is at slot 3
     slot_mappings = {
         USDC_ADDRESS.lower(): "0x33",  # USDC storage slot on Arbitrum
-        WETH_ADDRESS.lower(): "0x3",   # WETH storage slot on Arbitrum
+        WETH_ADDRESS.lower(): "0x3",  # WETH storage slot on Arbitrum
     }
 
     slot_base = slot_mappings.get(token_address.lower())
@@ -156,9 +158,7 @@ def fund_erc20_token(
 
 def get_token_balance(web3: Web3, token_address: str, wallet: str) -> int:
     """Get ERC20 token balance for a wallet."""
-    contract = web3.eth.contract(
-        address=Web3.to_checksum_address(token_address), abi=ERC20_ABI
-    )
+    contract = web3.eth.contract(address=Web3.to_checksum_address(token_address), abi=ERC20_ABI)
     return contract.functions.balanceOf(Web3.to_checksum_address(wallet)).call()
 
 
@@ -294,7 +294,7 @@ def paper_trader_config() -> PaperTraderConfig:
         tick_interval_seconds=1,  # Fast ticks for testing
         max_ticks=5,
         anvil_port=8546,
-        reset_fork_every_tick=False,  # Don't reset to preserve state during test
+        reset_fork_every_tick=True,
         startup_timeout_seconds=30.0,
     )
 
@@ -548,7 +548,7 @@ class TestHoldStrategy:
             tick_interval_seconds=1,
             max_ticks=3,  # Just 3 ticks
             anvil_port=8546,
-            reset_fork_every_tick=False,
+            reset_fork_every_tick=True,
         )
 
         paper_trader = PaperTrader(

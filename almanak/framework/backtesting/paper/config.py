@@ -29,7 +29,6 @@ Examples:
             initial_tokens={"USDC": Decimal("50000"), "WETH": Decimal("5")},
             tick_interval_seconds=30,
             max_ticks=1000,
-            reset_fork_every_tick=False,
         )
 
     Production-grade configuration with strict price validation:
@@ -65,14 +64,17 @@ class ForkLifecycle(StrEnum):
             Positions are destroyed and re-funded from the portfolio tracker.
             Best for execution validation (smoke testing TX flow).
 
-        PERSISTENT: Keep fork alive across ticks. Positions survive.
-            Time is advanced via evm_increaseTime + evm_mine between ticks.
-            Protocol poke transactions trigger interest accrual.
-            Best for yield-validation (measuring lending strategy PnL).
+        PERSISTENT: Reserved for a fork that survives across ticks. Public
+            configuration currently refuses this mode until the gateway can
+            attest that oracle reads target the active fork.
     """
 
     ROLLING_RESET = "rolling_reset"
     PERSISTENT = "persistent"
+
+
+class PersistentForkOracleUnavailableError(ValueError):
+    """Persistent paper mode lacks the required fork-bound oracle capability."""
 
 
 _RPC_URL_PREFIXES = ("http://", "https://", "ws://", "wss://")
@@ -319,10 +321,9 @@ class PaperTraderConfig:
 
     ROLLING_RESET (default): Reset fork to latest mainnet block each tick.
         Current behavior. Best for execution validation.
-    PERSISTENT: Keep fork alive across ticks with time advancement.
-        Positions survive, yield accrues. Best for yield-validation.
-
-    When set to PERSISTENT, reset_fork_every_tick is ignored.
+    PERSISTENT: Reserved for a fork that survives across ticks. Construction
+        raises PersistentForkOracleUnavailableError until an explicitly
+        fork-bound gateway oracle reader is available.
     """
 
     # Yield-validation options (only apply when fork_lifecycle == PERSISTENT)
@@ -352,12 +353,6 @@ class PaperTraderConfig:
     aToken-style balances accrue lazily on fork time advance (~0.006%/day at
     typical rates per the VIB-2630 spike), so small on-chain-vs-tracked gaps
     between pokes are normal and must not spam warnings.
-    """
-
-    oracle_divergence_threshold: Decimal = Decimal("0.05")
-    """Maximum allowed divergence between live and on-fork prices (5% default).
-    Paper trading halts with a clear error if this threshold is exceeded.
-    Only applies when fork_lifecycle == PERSISTENT.
     """
 
     # Wallet configuration
@@ -437,14 +432,10 @@ class PaperTraderConfig:
         # Anvil port validation
         _validate_anvil_port(self.anvil_port)
 
-        # Fork lifecycle validation (VIB-2631)
-        self.fork_lifecycle = _coerce_fork_lifecycle(self.fork_lifecycle)
-        # Sync reset_fork_every_tick with fork_lifecycle for backward compat
-        if self.fork_lifecycle == ForkLifecycle.PERSISTENT:
-            self.reset_fork_every_tick = False
-
-        # Oracle divergence threshold validation
-        _validate_fraction("oracle_divergence_threshold", self.oracle_divergence_threshold)
+        # Fork lifecycle validation (VIB-2631). This is deliberately also run
+        # by PaperTrader.__post_init__: PaperTraderConfig is mutable, so the
+        # execution boundary must not trust construction-time validation alone.
+        validate_fork_lifecycle(self)
 
         # Position reconciler tolerance validation (VIB-2634)
         _validate_fraction("position_reconciler_tolerance_pct", self.position_reconciler_tolerance_pct)
@@ -556,7 +547,6 @@ class PaperTraderConfig:
             "use_rich_valuation": self.use_rich_valuation,
             "position_reconciler_enabled": self.position_reconciler_enabled,
             "position_reconciler_tolerance_pct": str(self.position_reconciler_tolerance_pct),
-            "oracle_divergence_threshold": str(self.oracle_divergence_threshold),
             # Computed properties
             "max_duration_seconds": self.max_duration_seconds,
             "fork_rpc_url": self.fork_rpc_url,
@@ -633,9 +623,6 @@ class PaperTraderConfig:
             position_reconciler_tolerance_pct=Decimal(data["position_reconciler_tolerance_pct"])
             if "position_reconciler_tolerance_pct" in data
             else Decimal("0.01"),
-            oracle_divergence_threshold=Decimal(data["oracle_divergence_threshold"])
-            if "oracle_divergence_threshold" in data
-            else Decimal("0.05"),
         )
 
     @staticmethod
@@ -670,4 +657,32 @@ class PaperTraderConfig:
         )
 
 
-__all__ = ["ForkLifecycle", "PaperTraderConfig"]
+def validate_fork_lifecycle(config: PaperTraderConfig) -> None:
+    """Enforce the supported paper-fork lifecycle at an execution boundary.
+
+    ``PaperTraderConfig`` is intentionally mutable for CLI assembly and saved
+    session rehydration. Callers that are about to construct an execution
+    engine must therefore re-run this rule instead of assuming ``__post_init__``
+    is still authoritative.
+
+    Raises:
+        PersistentForkOracleUnavailableError: If the config selects any
+            non-resetting fork lifecycle before fork-bound gateway oracle
+            support is available.
+    """
+    config.fork_lifecycle = _coerce_fork_lifecycle(config.fork_lifecycle)
+    if config.fork_lifecycle == ForkLifecycle.PERSISTENT or not config.reset_fork_every_tick:
+        raise PersistentForkOracleUnavailableError(
+            "Non-resetting paper forks are unavailable because paper trading has no explicitly "
+            "fork-bound gateway oracle reader. Use fork_lifecycle='rolling_reset' with "
+            "reset_fork_every_tick=True; persistent mode can be re-enabled only when the gateway "
+            "can attest that oracle reads target the active fork."
+        )
+
+
+__all__ = [
+    "ForkLifecycle",
+    "PaperTraderConfig",
+    "PersistentForkOracleUnavailableError",
+    "validate_fork_lifecycle",
+]

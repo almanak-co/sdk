@@ -35,8 +35,9 @@ from almanak.framework.data.interfaces import (
     OHLCVCandle,
     validate_timeframe,
 )
-from almanak.framework.data.models import CEX_SYMBOL_MAP
 from almanak.framework.data.timeframes import BINANCE_OHLCV_TIMEFRAMES, OHLCVTimeframe
+from almanak.integrations.binance.integration import BINANCE_UNSAFE_MARKET_BASES
+from almanak.integrations.chains import integration_market_symbol, integration_market_symbol_map
 
 logger = logging.getLogger(__name__)
 
@@ -48,64 +49,9 @@ _NEGATIVE_CACHE_TTL = 4 * 3600  # 4 hours
 
 # Token symbol to Binance trading pair mapping
 BINANCE_SYMBOL_MAP: dict[str, str] = {
-    # Major tokens
-    "WETH": "ETHUSDT",
-    "ETH": "ETHUSDT",
-    "BTC": "BTCUSDT",
-    "WBTC": "BTCUSDT",
-    "BTCB": "BTCUSDT",  # Binance-Peg BTC on BSC; same spot pair as WBTC.
-    # Stablecoins (use USDC as proxy)
-    "USDC": "USDCUSDT",
-    "USDT": "USDCUSDT",  # USDT/USDT doesn't exist, use USDC
-    "DAI": "DAIUSDT",
-    # DeFi tokens
-    "LINK": "LINKUSDT",
-    "UNI": "UNIUSDT",
-    "AAVE": "AAVEUSDT",
-    "CRV": "CRVUSDT",
-    "MKR": "MKRUSDT",
-    "COMP": "COMPUSDT",
-    "SNX": "SNXUSDT",
-    "SUSHI": "SUSHIUSDT",
-    "YFI": "YFIUSDT",
-    "1INCH": "1INCHUSDT",
-    # L2 tokens
-    "ARB": "ARBUSDT",
-    "OP": "OPUSDT",
-    # Polygon renamed MATIC -> POL (Sept 2024). Binance delisted MATICUSDT;
-    # the live pair is POLUSDT. MATICUSDT still answers but with stale klines
-    # (caught by the ALM-2697 staleness guard, which then drops the whole
-    # provider) — so point every Polygon-native symbol at the live POLUSDT pair.
-    "MATIC": "POLUSDT",
-    "POL": "POLUSDT",
-    # Wrapped native tokens (chain-specific)
-    "WBNB": "BNBUSDT",
-    "BNB": "BNBUSDT",
-    "WAVAX": "AVAXUSDT",
-    "WMATIC": "POLUSDT",
-    "WPOL": "POLUSDT",
-    "S": "SUSDT",
-    "WS": "SUSDT",
-    # Other popular tokens
-    "SOL": "SOLUSDT",
-    "AVAX": "AVAXUSDT",
-    "DOGE": "DOGEUSDT",
-    "SHIB": "SHIBUSDT",
-    "LDO": "LDOUSDT",
-    "APE": "APEUSDT",
-    "GMX": "GMXUSDT",
-    "PEPE": "PEPEUSDT",
-    "WLD": "WLDUSDT",
-    "STX": "STXUSDT",
-    "INJ": "INJUSDT",
-    "TIA": "TIAUSDT",
-    "SEI": "SEIUSDT",
-    "SUI": "SUIUSDT",
-    "APT": "APTUSDT",
-    "FET": "FETUSDT",
-    "RNDR": "RNDRUSDT",
-    "GRT": "GRTUSDT",
-    "FIL": "FILUSDT",
+    base: symbol
+    for (provider, base, quote), symbol in integration_market_symbol_map().items()
+    if provider == "binance" and quote == "USDT" and base not in BINANCE_UNSAFE_MARKET_BASES
 }
 
 # Compatibility export for the OHLCV provider's immutable canonical mapping.
@@ -297,8 +243,10 @@ class BinanceOHLCVProvider:
         absent from ``CEX_SYMBOL_MAP``.
         """
         token_upper = token.upper()
+        if token_upper in BINANCE_UNSAFE_MARKET_BASES:
+            return None
         for quote in ("USDT", "USDC"):
-            mapped = CEX_SYMBOL_MAP.get(("binance", token_upper, quote))
+            mapped = integration_market_symbol("binance", token_upper, quote)
             if mapped:
                 return mapped
         return BINANCE_SYMBOL_MAP.get(token_upper)
@@ -310,6 +258,9 @@ class BinanceOHLCVProvider:
         Returns the first valid pair, or None. Caches results.
         """
         token_upper = token.upper()
+
+        if token_upper in BINANCE_UNSAFE_MARKET_BASES:
+            return None
 
         # Guard against non-alphanumeric tokens being injected into URLs
         if not token_upper.isalnum():

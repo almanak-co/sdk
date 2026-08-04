@@ -28,7 +28,7 @@ from almanak.framework.data.interfaces import (
     DataSourceUnavailable,
 )
 from almanak.framework.grpc.error_details import set_grpc_error
-from almanak.gateway.integrations.base import IntegrationError, IntegrationRateLimitError
+from almanak.integrations._base.gateway.base import IntegrationError, IntegrationRateLimitError
 
 logger = logging.getLogger(__name__)
 

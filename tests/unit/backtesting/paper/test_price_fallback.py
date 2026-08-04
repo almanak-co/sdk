@@ -821,11 +821,12 @@ class TestProviderInitialization:
                 config=config,
             )
 
-            # Verify Chainlink was initialized with correct chain
-            mock_chainlink.assert_called_once()
-            call_args = mock_chainlink.call_args
-            assert call_args[1]["chain"] == "arbitrum"
-            assert call_args[1]["rpc_url"] == "https://arb1.arbitrum.io/rpc"
+            # Chainlink is gateway-backed: framework construction identifies
+            # the chain but must not pass a strategy-controlled RPC URL.
+            mock_chainlink.assert_called_once_with(
+                chain="arbitrum",
+                cache_ttl_seconds=60,
+            )
             # _trader is used implicitly through the mocks; keep reference to avoid GC
             assert _trader._backtest_id is None  # Not run yet
 

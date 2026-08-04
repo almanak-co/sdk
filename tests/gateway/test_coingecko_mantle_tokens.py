@@ -13,16 +13,16 @@ class TestMantleTokenIds:
     def test_wmnt_mapped(self):
         """WMNT (Wrapped Mantle) has a CoinGecko ID."""
         assert "WMNT" in GLOBAL_TOKEN_IDS
-        assert GLOBAL_TOKEN_IDS["WMNT"] == "mantle"
+        assert GLOBAL_TOKEN_IDS["WMNT"] == "wrapped-mantle"
 
     def test_mnt_mapped(self):
         """MNT (native Mantle) has a CoinGecko ID."""
         assert "MNT" in GLOBAL_TOKEN_IDS
         assert GLOBAL_TOKEN_IDS["MNT"] == "mantle"
 
-    def test_wmnt_same_as_mnt(self):
-        """WMNT uses the same CoinGecko ID as MNT (wrapped = same price)."""
-        assert GLOBAL_TOKEN_IDS["WMNT"] == GLOBAL_TOKEN_IDS["MNT"]
+    def test_wmnt_distinct_from_mnt(self):
+        """WMNT uses its wrapped-token listing rather than native MNT's."""
+        assert GLOBAL_TOKEN_IDS["WMNT"] != GLOBAL_TOKEN_IDS["MNT"]
 
     def test_mantle_usdc_mapped(self):
         """USDC on Mantle resolves via MANTLE_TOKEN_IDS."""
@@ -41,5 +41,5 @@ class TestMantleTokenIds:
 
     def test_mantle_ids_included_in_global(self):
         """MANTLE_TOKEN_IDS are merged into GLOBAL_TOKEN_IDS."""
-        for symbol, cg_id in MANTLE_TOKEN_IDS.items():
+        for symbol in MANTLE_TOKEN_IDS:
             assert symbol in GLOBAL_TOKEN_IDS, f"{symbol} missing from GLOBAL_TOKEN_IDS"

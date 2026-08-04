@@ -6,8 +6,8 @@ from ._contracts import safe_stack_contracts
 from ._descriptor import (
     AnvilProfile,
     ChainDescriptor,
-    ChainlinkFeeds,
     Explorer,
+    ExternalChainIds,
     GasProfile,
     NativeToken,
     RpcProfile,
@@ -30,6 +30,17 @@ DESCRIPTOR = register_chain(
             wrapped_symbol="WETH",
             wrapped_coingecko_id="weth",
             slip44=60,  # SLIP-44 coin type for Ether (CAIP-19 native)
+        ),
+        external_ids=ExternalChainIds(
+            tenderly="base",
+            coingecko="base",
+            dexscreener="base",
+            coingecko_onchain="base",
+            defillama="base",
+            defillama_display="Base",
+            zerion="base",
+            moralis="base",
+            okx="8453",
         ),
         gas=GasProfile(
             buffer=1.5,
@@ -67,36 +78,6 @@ DESCRIPTOR = register_chain(
             "weth": "0x4200000000000000000000000000000000000006",
         },
         simulation=SimulationProfile(tenderly_supported=True, alchemy_network="base-mainnet"),
-        # VIB-4851 (B1): per-vendor external ids, transposed from the legacy
-        # standalone vendor maps (CoinGecko / DexScreener / CoinGecko Onchain /
-        # DeFiLlama / Zerion / Moralis / OKX). Values verbatim incl. case.
-        external_ids={
-            "tenderly": "base",
-            "coingecko": "base",
-            "dexscreener": "base",
-            "coingecko_onchain": "base",
-            "defillama": "base",
-            "defillama_display": "Base",
-            "zerion": "base",
-            "moralis": "base",
-            "okx": "8453",
-        },
-        # Chainlink aggregator addresses (VIB-4851 CS-5) — moved verbatim
-        # from the legacy almanak/core/chainlink.py per-chain dicts.
-        # Reference: https://docs.chain.link/data-feeds/price-feeds/addresses
-        chainlink=ChainlinkFeeds(
-            usd_feeds={
-                "ETH/USD": "0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70",
-                "BTC/USD": "0x64c911996d3C6Ac71e9B8934F4e4f21B9C3bD7d1",
-                "LINK/USD": "0x17CAb8FE31E32f08326e5E27412894e49B0f9D65",
-                "USDC/USD": "0x7e860098F58bBFC8648a4311b374B1D669a2bc6B",
-                "DAI/USD": "0x591e79239a7d679378eC8c847e5038150364C78F",
-                "CBETH/USD": "0xd7818272B9e248357d13057AAb0B417aF31E817d",
-            },
-            eth_denominated={
-                "WSTETH/ETH": "0x43a5C292A453A3bF3606fa856197f09D7B74251a",
-            },
-        ),
         # Safe MultiSendCallOnly v1.4.1 — CREATE2, same address on every
         # chain Safe deploys to; presence here == deployment-verified
         # (legacy MULTISEND_ADDRESSES membership, VIB-4851 CS-5).

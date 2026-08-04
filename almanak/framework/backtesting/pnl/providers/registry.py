@@ -30,7 +30,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from almanak.core.chains._helpers import vendor_chain_map
+from almanak.integrations.chains import integration_chain_map
 
 logger = logging.getLogger(__name__)
 
@@ -425,7 +425,7 @@ def _register_builtin_providers() -> None:
             # Chains declaring a CoinGecko platform id (VIB-4851 CS-3b).
             # Deliberate widening vs the legacy 6-chain literal: the
             # provider prices any chain CoinGecko itself supports.
-            "supported_chains": sorted(vendor_chain_map("coingecko")),
+            "supported_chains": sorted(integration_chain_map("coingecko")),
         },
     )
 

@@ -184,15 +184,10 @@ class TestCoinGeckoOHLCVProvider:
     # and the failover STILL ended in DATA_ERROR.
     #
     # The first fix flipped to registry-first, which covered those misses but
-    # introduced a wrong-asset regression (Codex re-audit): the registry maps
-    # WBNB -> wbnb and WAVAX -> wrapped-avax (the wrapped asset's OWN coin id),
-    # whereas GLOBAL_TOKEN_IDS carries the deliberate CEX proxies WBNB ->
-    # binancecoin / WAVAX -> avalanche-2 (the SAME underlying the CEX leg
-    # BNBUSDT/AVAXUSDT priced). The final shape is GLOBAL_TOKEN_IDS-FIRST so
-    # those explicit/curated mappings win, with the registry filling only
-    # genuine misses (MATIC/WMATIC/POL, OP, SUSHI, ... none of which appear in
-    # GLOBAL_TOKEN_IDS). The two parametrized blocks below pin both halves of
-    # that invariant.
+    # bypassed curated rows. The final shape is GLOBAL_TOKEN_IDS-FIRST so exact
+    # native/wrapped IDs and other curated mappings win, with the token registry
+    # filling only genuine misses. The two parametrized blocks below pin both
+    # halves of that invariant.
     # ------------------------------------------------------------------
 
     @pytest.mark.parametrize(
@@ -201,7 +196,7 @@ class TestCoinGeckoOHLCVProvider:
             # The rebrand that motivated VIB-4847: Binance kept the MATIC
             # ticker, but the coin is now POL == polygon-ecosystem-token.
             ("MATIC", "polygon-ecosystem-token"),
-            ("WMATIC", "polygon-ecosystem-token"),
+            ("WMATIC", "wmatic"),
             ("POL", "polygon-ecosystem-token"),
             # Other common Binance-listed tokens missing from GLOBAL_TOKEN_IDS.
             ("OP", "optimism"),
@@ -219,25 +214,20 @@ class TestCoinGeckoOHLCVProvider:
     @pytest.mark.parametrize(
         ("symbol", "expected_id"),
         [
-            # Wrapped-CEX proxies: GLOBAL_TOKEN_IDS maps these to the SAME
-            # underlying asset the CEX leg (BNBUSDT / AVAXUSDT) prices. The
-            # token registry instead maps WBNB -> wbnb and WAVAX -> wrapped-avax
-            # (the wrapped asset's own coin id), which would price a DIFFERENT
-            # asset on failover. Explicit mappings MUST win (Codex re-audit P2).
+            # Curated rows retain their intended IDs. WBNB shares the native
+            # BNB listing, while WAVAX has its own verified wrapped listing.
             ("WBNB", "binancecoin"),
-            ("WAVAX", "avalanche-2"),
+            ("WAVAX", "wrapped-avax"),
             # And the plain CEX bases resolve to the same underlying.
             ("BNB", "binancecoin"),
             ("AVAX", "avalanche-2"),
         ],
     )
     def test_explicit_cex_proxy_mappings_win_over_registry(self, mock_integration, symbol, expected_id):
-        """GLOBAL_TOKEN_IDS CEX proxies take precedence over the token registry.
+        """GLOBAL_TOKEN_IDS curated rows take precedence over the token registry.
 
-        Regression guard for the registry-first wrong-asset bug: if the registry
-        were consulted first, WBNB/WAVAX would resolve to wbnb/wrapped-avax and
-        the CoinGecko failover would price a different underlying than the stale
-        Binance BNBUSDT/AVAXUSDT leg the chain was failing over from.
+        Regression guard for accidentally bypassing chain-owned provider IDs in
+        favour of a separate token-registry catalogue.
         """
         provider = CoinGeckoOHLCVProvider(integration=mock_integration)
         assert provider._resolve_token_id(symbol) == expected_id
@@ -247,7 +237,7 @@ class TestCoinGeckoOHLCVProvider:
         ("symbol", "expected_id"),
         [
             ("MATIC", "polygon-ecosystem-token"),
-            ("WMATIC", "polygon-ecosystem-token"),
+            ("WMATIC", "wmatic"),
             ("OP", "optimism"),
             ("SUSHI", "sushi"),
         ],
@@ -465,7 +455,8 @@ class TestRealFactoryFailover:
         the CoinGecko egress provider raised "Unknown token for CoinGecko OHLC"
         for WMATIC/MATIC (absent from GLOBAL_TOKEN_IDS), so the failover STILL
         ended in DATA_ERROR. With the resolver now reaching the DEFAULT_TOKENS
-        registry (MATIC/WMATIC -> polygon-ecosystem-token, the POL rebrand),
+        registry (MATIC/POL -> polygon-ecosystem-token) and the chain-owned
+        wrapped mapping (WMATIC -> wmatic),
         the recovery works.
 
         Router-level failover mechanics mirror

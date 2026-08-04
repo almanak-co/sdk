@@ -13,6 +13,9 @@ from almanak.connectors._strategy_base.yield_poke_base import PokeResult
 from almanak.framework.anvil.accounts import ANVIL_DEFAULT_ADDRESS
 from almanak.framework.backtesting.paper.config import ForkLifecycle, PaperTraderConfig
 from almanak.framework.backtesting.paper.engine import PaperTrader
+from tests.unit.backtesting.paper._persistent_mode_test_seam import (
+    construct_unsupported_persistent_trader_for_test,
+)
 
 
 @dataclass
@@ -56,19 +59,25 @@ class _PortfolioTracker:
 
 
 def _make_config(**overrides: Any) -> PaperTraderConfig:
+    lifecycle = overrides.pop("fork_lifecycle", ForkLifecycle.PERSISTENT)
     kwargs: dict[str, Any] = {
         "chain": "arbitrum",
         "rpc_url": "https://arb.example/rpc",
         "deployment_id": "persistent-fork-test",
         "initial_eth": Decimal("1"),
         "tick_interval_seconds": 90,
-        "fork_lifecycle": ForkLifecycle.PERSISTENT,
         "yield_poker_enabled": True,
         "price_source": "coingecko",
         "strict_price_mode": False,
     }
     kwargs.update(overrides)
-    return PaperTraderConfig(**kwargs)
+    config = PaperTraderConfig(**kwargs)
+    # Persistent construction is intentionally refused in production until a
+    # fork-bound gateway oracle exists. These unit tests exercise the isolated
+    # time-advance machinery directly.
+    config.fork_lifecycle = lifecycle
+    config.reset_fork_every_tick = lifecycle != ForkLifecycle.PERSISTENT
+    return config
 
 
 def _make_trader(
@@ -77,14 +86,12 @@ def _make_trader(
     fork_manager: _ForkManager | None = None,
     yield_poker: _YieldPoker | None = None,
 ) -> PaperTrader:
-    with patch(
-        "almanak.framework.backtesting.paper.engine.CoinGeckoPriceSource"
-    ), patch(
-        "almanak.framework.backtesting.paper.engine.ChainlinkDataProvider"
-    ), patch(
-        "almanak.framework.backtesting.paper.engine.DEXTWAPDataProvider"
+    with (
+        patch("almanak.framework.backtesting.paper.engine.CoinGeckoPriceSource"),
+        patch("almanak.framework.backtesting.paper.engine.ChainlinkDataProvider"),
+        patch("almanak.framework.backtesting.paper.engine.DEXTWAPDataProvider"),
     ):
-        trader = PaperTrader(
+        trader = construct_unsupported_persistent_trader_for_test(
             fork_manager=fork_manager or _ForkManager(),  # type: ignore[arg-type]
             portfolio_tracker=_PortfolioTracker(),  # type: ignore[arg-type]
             config=config or _make_config(),

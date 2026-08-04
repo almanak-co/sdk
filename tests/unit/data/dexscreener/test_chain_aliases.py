@@ -2,7 +2,7 @@
 
 import pytest
 
-from almanak.core.chains._helpers import external_id_for
+from almanak.integrations.chains import integration_chain_id
 
 
 class TestDexScreenerChainAliases:
@@ -24,7 +24,7 @@ class TestDexScreenerChainAliases:
         ],
     )
     def test_chain_alias_maps_correctly(self, chain_name, expected_platform):
-        # B1 (VIB-4851): vendor ids now derive from ChainDescriptor.external_ids;
-        # the platform map is canonical-only, so the "bnb" alias resolves through
-        # the registry via external_id_for rather than living as a map key.
-        assert external_id_for(chain_name, "dexscreener") == expected_platform
+        # Provider IDs derive from the integration manifest. The platform map is
+        # canonical-only, so the "bnb" alias resolves through
+        # the integration registry rather than living as a map key.
+        assert integration_chain_id(chain_name, "dexscreener") == expected_platform

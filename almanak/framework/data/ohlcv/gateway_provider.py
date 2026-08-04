@@ -15,12 +15,13 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from almanak.integrations.chains import integration_market_symbol, integration_market_symbol_map
+
 from ..interfaces import (
     DataSourceUnavailable,
     OHLCVCandle,
     validate_timeframe,
 )
-from ..models import CEX_SYMBOL_MAP
 from ..timeframes import (
     BINANCE_OHLCV_TIMEFRAMES,
     COINGECKO_OHLCV_TIMEFRAMES,
@@ -37,35 +38,9 @@ logger = logging.getLogger(__name__)
 # Token symbol to Binance trading pair mapping
 # Assumes USDT as quote currency for most pairs
 TOKEN_TO_BINANCE_SYMBOL = {
-    "ETH": "ETHUSDT",
-    "WETH": "ETHUSDT",
-    "BTC": "BTCUSDT",
-    "WBTC": "BTCUSDT",
-    "ARB": "ARBUSDT",
-    "OP": "OPUSDT",
-    "AVAX": "AVAXUSDT",
-    "WAVAX": "AVAXUSDT",
-    "BNB": "BNBUSDT",
-    "WBNB": "BNBUSDT",
-    # Polygon MATIC -> POL rebrand (Sept 2024): MATICUSDT is delisted/stale,
-    # POLUSDT is the live pair. See gateway BinanceOHLCVProvider for detail.
-    "MATIC": "POLUSDT",
-    "WMATIC": "POLUSDT",
-    "POL": "POLUSDT",
-    "WPOL": "POLUSDT",
-    "SOL": "SOLUSDT",
-    "LINK": "LINKUSDT",
-    "UNI": "UNIUSDT",
-    "AAVE": "AAVEUSDT",
-    "CRV": "CRVUSDT",
-    "LDO": "LDOUSDT",
-    "MKR": "MKRUSDT",
-    "SNX": "SNXUSDT",
-    "COMP": "COMPUSDT",
-    "SUSHI": "SUSHIUSDT",
-    "YFI": "YFIUSDT",
-    "BAL": "BALUSDT",
-    "1INCH": "1INCHUSDT",
+    base: symbol
+    for (provider, base, quote), symbol in integration_market_symbol_map().items()
+    if provider == "binance" and quote == "USDT"
 }
 
 # Compatibility export. The immutable mapping is owned by the canonical
@@ -179,7 +154,7 @@ class GatewayOHLCVProvider:
         """
         token_upper = token.upper()
         for quote in ("USDT", "USDC"):
-            mapped = CEX_SYMBOL_MAP.get(("binance", token_upper, quote))
+            mapped = integration_market_symbol("binance", token_upper, quote)
             if mapped:
                 return mapped
         return TOKEN_TO_BINANCE_SYMBOL.get(token_upper)

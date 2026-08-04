@@ -2,7 +2,16 @@
 
 from almanak.core.enums import ChainFamily
 
-from ._descriptor import AnvilProfile, ChainDescriptor, Explorer, GasProfile, NativeToken, SimulationProfile, Timeouts
+from ._descriptor import (
+    AnvilProfile,
+    ChainDescriptor,
+    Explorer,
+    ExternalChainIds,
+    GasProfile,
+    NativeToken,
+    SimulationProfile,
+    Timeouts,
+)
 from ._registry import register_chain
 
 DESCRIPTOR = register_chain(
@@ -21,6 +30,7 @@ DESCRIPTOR = register_chain(
             wrapped_coingecko_id="berachain-bera",
             slip44=8008,  # SLIP-44 "Berachain" — BERA (CAIP-19)
         ),
+        external_ids=ExternalChainIds(coingecko="berachain", dexscreener="berachain"),
         gas=GasProfile(
             buffer=1.2,
             simulation_buffer=0.2,
@@ -33,13 +43,6 @@ DESCRIPTOR = register_chain(
             grpc_execute=300,
         ),
         simulation=SimulationProfile(tenderly_supported=True),
-        # VIB-4851 (B1): per-vendor external ids, transposed from the legacy
-        # standalone vendor maps (CoinGecko / DexScreener / CoinGecko Onchain /
-        # DeFiLlama / Zerion / Moralis / OKX). Values verbatim incl. case.
-        external_ids={
-            "coingecko": "berachain",
-            "dexscreener": "berachain",
-        },
         # Managed-Anvil fork-test funding facts (VIB-4851 CS-6) — moved
         # verbatim from framework/anvil/fork_manager.py (display-case keys).
         anvil=AnvilProfile(

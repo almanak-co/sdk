@@ -17,6 +17,7 @@ import asyncio
 import logging
 import re
 import time
+from types import MappingProxyType
 from typing import Any
 from urllib.parse import quote as _url_quote
 
@@ -33,11 +34,6 @@ from almanak.framework.data.tokens import (
 )
 from almanak.framework.data.tokens.exceptions import AmbiguousTokenError
 from almanak.gateway.core.settings import GatewaySettings
-
-# Single source of truth for chain -> CoinGecko platform IDs lives alongside
-# the price source so both search/resolver paths and the contract-address
-# price endpoint use the same mapping.
-from almanak.gateway.data.price.coingecko import COINGECKO_PLATFORM_IDS
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
 from almanak.gateway.services.dexscreener_lookup import (
     DexScreenerError,
@@ -56,6 +52,12 @@ from almanak.gateway.validation import (
     validate_batch_size,
     validate_chain,
 )
+from almanak.integrations.chains import integration_chain_map
+
+# Provider chain identity is descriptor-owned; generic services consume the
+# neutral projection rather than importing chain declarations or a concrete
+# gateway implementation.
+COINGECKO_PLATFORM_IDS = MappingProxyType(integration_chain_map("coingecko"))
 
 logger = logging.getLogger(__name__)
 

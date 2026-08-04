@@ -27,7 +27,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -101,12 +101,10 @@ def _make_config(**overrides: Any) -> PaperTraderConfig:
 
 def _make_trader(config: PaperTraderConfig | None = None) -> PaperTrader:
     cfg = config or _make_config()
-    with patch(
-        "almanak.framework.backtesting.paper.engine.CoinGeckoPriceSource"
-    ), patch(
-        "almanak.framework.backtesting.paper.engine.ChainlinkDataProvider"
-    ), patch(
-        "almanak.framework.backtesting.paper.engine.DEXTWAPDataProvider"
+    with (
+        patch("almanak.framework.backtesting.paper.engine.CoinGeckoPriceSource"),
+        patch("almanak.framework.backtesting.paper.engine.ChainlinkDataProvider"),
+        patch("almanak.framework.backtesting.paper.engine.DEXTWAPDataProvider"),
     ):
         trader = PaperTrader(
             fork_manager=_MockForkManager(),
@@ -355,6 +353,7 @@ def _install_execute_intent_harness(
     trader._orchestrator.signer.address = "0x" + "1" * 40
 
     if execute_raises is not None:
+
         async def _execute(*args: Any, **kwargs: Any) -> Any:
             raise execute_raises
 
@@ -538,122 +537,3 @@ class TestExecuteIntentException:
         assert spy["build_calls"] == 0
         kinds = [k for k, _ in spy["events"]]
         assert PaperTradeEventType.TRADE_FAILED in kinds
-
-
-class TestCheckOracleDivergence:
-    @pytest.mark.asyncio
-    async def test_no_cached_prices_returns_early(self) -> None:
-        trader = _make_trader()
-        trader._cached_prices = {}
-        trader.fork_manager = _MockForkManager()
-
-        with patch(
-            "almanak.framework.backtesting.paper.engine._engine_helpers.resolve_chainlink_divergence_chain"
-        ) as resolver, patch(
-            "almanak.framework.backtesting.paper.engine.ChainlinkDataProvider"
-        ) as provider_cls:
-            await trader._check_oracle_divergence()
-
-        resolver.assert_not_called()
-        provider_cls.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_no_fork_manager_returns_early(self) -> None:
-        trader = _make_trader()
-        trader._cached_prices = {"ETH": Decimal("3000")}
-        trader.fork_manager = None
-
-        with patch(
-            "almanak.framework.backtesting.paper.engine._engine_helpers.resolve_chainlink_divergence_chain"
-        ) as resolver, patch(
-            "almanak.framework.backtesting.paper.engine.ChainlinkDataProvider"
-        ) as provider_cls:
-            await trader._check_oracle_divergence()
-
-        resolver.assert_not_called()
-        provider_cls.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_chainlink_resolver_returns_none_returns_early(self) -> None:
-        trader = _make_trader()
-        trader._cached_prices = {"ETH": Decimal("3000")}
-        trader.fork_manager = _MockForkManager(rpc_url="http://127.0.0.1:8545")
-
-        with patch(
-            "almanak.framework.backtesting.paper.engine._engine_helpers.resolve_chainlink_divergence_chain",
-            return_value=None,
-        ) as resolver, patch(
-            "almanak.framework.backtesting.paper.engine.ChainlinkDataProvider"
-        ) as provider_cls:
-            await trader._check_oracle_divergence()
-
-        resolver.assert_called_once()
-        provider_cls.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_provider_construction_failure_returns_early(self) -> None:
-        trader = _make_trader()
-        trader._cached_prices = {"ETH": Decimal("3000")}
-        trader.fork_manager = _MockForkManager(rpc_url="http://127.0.0.1:8545")
-
-        with patch(
-            "almanak.framework.backtesting.paper.engine._engine_helpers.resolve_chainlink_divergence_chain",
-            return_value="arbitrum",
-        ), patch(
-            "almanak.framework.backtesting.paper.engine.ChainlinkDataProvider",
-            side_effect=RuntimeError("provider boom"),
-        ), patch(
-            "almanak.framework.backtesting.paper.engine._engine_helpers.compute_max_oracle_divergence",
-            new=AsyncMock(),
-        ) as compute:
-            await trader._check_oracle_divergence()
-
-        compute.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_divergence_below_threshold_returns_quietly(self) -> None:
-        trader = _make_trader(_make_config(oracle_divergence_threshold=0.1))
-        trader._cached_prices = {"ETH": Decimal("3000")}
-        trader.fork_manager = _MockForkManager(rpc_url="http://127.0.0.1:8545")
-
-        provider = MagicMock()
-        provider.close = AsyncMock(return_value=None)
-
-        with patch(
-            "almanak.framework.backtesting.paper.engine._engine_helpers.resolve_chainlink_divergence_chain",
-            return_value="arbitrum",
-        ), patch(
-            "almanak.framework.backtesting.paper.engine.ChainlinkDataProvider",
-            return_value=provider,
-        ), patch(
-            "almanak.framework.backtesting.paper.engine._engine_helpers.compute_max_oracle_divergence",
-            new=AsyncMock(return_value=(0.02, "ETH")),
-        ):
-            await trader._check_oracle_divergence()
-
-        provider.close.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_divergence_above_threshold_raises(self) -> None:
-        trader = _make_trader(_make_config(oracle_divergence_threshold=0.05))
-        trader._cached_prices = {"ETH": Decimal("3000")}
-        trader.fork_manager = _MockForkManager(rpc_url="http://127.0.0.1:8545")
-
-        provider = MagicMock()
-        provider.close = AsyncMock(return_value=None)
-
-        with patch(
-            "almanak.framework.backtesting.paper.engine._engine_helpers.resolve_chainlink_divergence_chain",
-            return_value="arbitrum",
-        ), patch(
-            "almanak.framework.backtesting.paper.engine.ChainlinkDataProvider",
-            return_value=provider,
-        ), patch(
-            "almanak.framework.backtesting.paper.engine._engine_helpers.compute_max_oracle_divergence",
-            new=AsyncMock(return_value=(0.5, "ETH")),
-        ), patch(
-            "almanak.framework.backtesting.paper.engine._engine_helpers.build_divergence_error_message",
-            return_value="divergence too high",
-        ):
-            with pytest.raises(RuntimeError, match="divergence too high"):
-                await trader._check_oracle_divergence()

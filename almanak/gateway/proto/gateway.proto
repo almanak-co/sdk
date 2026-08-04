@@ -2558,6 +2558,15 @@ service RateHistoryService {
   // archive-RPC calls. ``timestamp=0`` asks for current gas oracle data;
   // ``timestamp>0`` asks for the closest historical block estimate.
   rpc GetGasPriceAt(GetGasPriceAtRequest) returns (GasPricePointResponse);
+
+  // Single current oracle-price observation for (provider, chain, token).
+  rpc GetOraclePrice(GetOraclePriceRequest)
+      returns (OraclePriceResponse);
+
+  // Bounded historical oracle-price series. Provider-specific archive RPC,
+  // round traversal, decoding and feed metadata remain gateway-owned.
+  rpc GetOraclePriceHistory(GetOraclePriceHistoryRequest)
+      returns (OraclePriceHistoryResponse);
 }
 
 // -----------------------------------------------------------------------------
@@ -2652,6 +2661,15 @@ message GasPricePoint {
 
   // Legacy/effective gas price in gwei. Empty when unmeasured.
   string gas_price_gwei = 4;
+}
+
+message OraclePricePoint {
+  // Feed observation timestamp (updatedAt), Unix seconds UTC.
+  int64 timestamp = 1;
+  // Decimal-as-string price in the requested quote currency.
+  string price = 2;
+  // Provider-native observation id. Chainlink uses the uint80 round id.
+  string observation_id = 3;
 }
 
 // -----------------------------------------------------------------------------
@@ -2814,6 +2832,52 @@ message GasPricePointResponse {
   string source = 3;
   bool success = 4;
   string error = 5;
+}
+
+message GetOraclePriceHistoryRequest {
+  // Required integration slug (currently "chainlink").
+  string provider = 1;
+  // Required canonical chain name.
+  string chain = 2;
+  // Required token symbol.
+  string token = 3;
+  // Required half-open UTC interval [start_ts, end_ts).
+  int64 start_ts = 4;
+  int64 end_ts = 5;
+  // Required caller bound. Gateway rejects values outside [1, 10000].
+  int32 max_points = 6;
+}
+
+message GetOraclePriceRequest {
+  // Required integration slug (currently "chainlink").
+  string provider = 1;
+  // Required canonical chain name.
+  string chain = 2;
+  // Required token symbol.
+  string token = 3;
+}
+
+message OraclePriceResponse {
+  string provider = 1;
+  string chain = 2;
+  string token = 3;
+  OraclePricePoint point = 4;
+  bool success = 5;
+  string error = 6;
+}
+
+message OraclePriceHistoryResponse {
+  string provider = 1;
+  string chain = 2;
+  string token = 3;
+  repeated OraclePricePoint points = 4;
+  bool success = 5;
+  string error = 6;
+  // True when the requested interval contains more observations than
+  // max_points. Callers must split/page instead of treating points as complete.
+  bool truncated = 7;
+  // Suggested exclusive split point in Unix seconds when truncated=true.
+  int64 recommended_split_ts = 8;
 }
 
 message GetDexTwapRequest {

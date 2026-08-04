@@ -6,6 +6,7 @@ from ._descriptor import (
     AnvilProfile,
     ChainDescriptor,
     Explorer,
+    ExternalChainIds,
     GasProfile,
     NativeToken,
     RpcProfile,
@@ -31,6 +32,7 @@ DESCRIPTOR = register_chain(
             # No verified Plasma SLIP-44 entry; native CAIP-19 stays fail-loud.
             slip44=None,
         ),
+        external_ids=ExternalChainIds(coingecko="plasma", dexscreener="plasma", zerion="plasma"),
         gas=GasProfile(
             buffer=1.1,
             simulation_buffer=0.1,
@@ -50,14 +52,6 @@ DESCRIPTOR = register_chain(
         ),
         explorer=Explorer(browse_url="https://plasmascan.io"),
         simulation=SimulationProfile(tenderly_supported=True),
-        # VIB-4851 (B1): per-vendor external ids, transposed from the legacy
-        # standalone vendor maps (CoinGecko / DexScreener / CoinGecko Onchain /
-        # DeFiLlama / Zerion / Moralis / OKX). Values verbatim incl. case.
-        external_ids={
-            "coingecko": "plasma",
-            "dexscreener": "plasma",
-            "zerion": "plasma",
-        },
         # Managed-Anvil fork-test funding facts (VIB-4851 CS-6) — moved
         # verbatim from framework/anvil/fork_manager.py (display-case keys).
         anvil=AnvilProfile(

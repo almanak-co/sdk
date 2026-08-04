@@ -1,9 +1,8 @@
-"""VIB-2637: E2E test — Aave V3 lending strategy shows non-zero PnL in paper trading.
+"""Persistent-fork primitives and public availability checks.
 
-This is the acceptance test for the yield-aware paper trading epic (VIB-2629).
-It runs an Aave V3 USDC supply strategy in paper trading with
-`fork_lifecycle=PERSISTENT` for multiple ticks with time advancement,
-and verifies that PnL is non-zero and positive.
+The raw Anvil time-advance primitive remains covered for future fork-bound
+oracle support. Public paper configuration must reject a persistent session
+before boot until that capability exists.
 
 Run:
     pytest tests/integration/backtesting/test_yield_paper_trading.py -v -s
@@ -13,18 +12,18 @@ Requires:
     - `anvil` binary on PATH
 """
 
-import asyncio
 import logging
 import os
 from decimal import Decimal
 
 import pytest
 
-from almanak.framework.backtesting.paper.config import ForkLifecycle, PaperTraderConfig
-from almanak.framework.backtesting.paper.engine import PaperTrader
-from almanak.framework.backtesting.paper.models import PaperTradingSummary
-from almanak.framework.backtesting.paper.portfolio_tracker import PaperPortfolioTracker
 from almanak.framework.anvil.fork_manager import RollingForkManager
+from almanak.framework.backtesting.paper.config import (
+    ForkLifecycle,
+    PaperTraderConfig,
+    PersistentForkOracleUnavailableError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +34,6 @@ pytestmark = pytest.mark.skipif(
 )
 
 # Aave V3 contract addresses (Arbitrum)
-AAVE_V3_POOL = "0x794a61358D6845594F94dc1DB02A252b5b4814aD"
 USDC_ARBITRUM = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
 
 
@@ -109,37 +107,18 @@ async def test_persistent_fork_advances_time():
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(120)
-async def test_fork_lifecycle_persistent_config():
-    """Verify ForkLifecycle.PERSISTENT config works correctly."""
-    config = PaperTraderConfig(
-        chain="arbitrum",
-        rpc_url="https://example.com/rpc",
-        deployment_id="test",
-        fork_lifecycle=ForkLifecycle.PERSISTENT,
-        yield_poker_enabled=True,
-        use_rich_valuation=True,
-        position_reconciler_enabled=True,
-    )
-
-    assert config.fork_lifecycle == ForkLifecycle.PERSISTENT
-    assert config.reset_fork_every_tick is False  # Auto-synced
-    assert config.yield_poker_enabled is True
-    assert config.use_rich_valuation is True
-    assert config.position_reconciler_enabled is True
-
-    # Verify serialization roundtrip
-    d = config.to_dict()
-    assert d["fork_lifecycle"] == "persistent"
-
-    config2 = PaperTraderConfig.from_dict({
-        "chain": "arbitrum",
-        "rpc_url": "https://example.com/rpc",
-        "deployment_id": "test",
-        "fork_lifecycle": "persistent",
-        "yield_poker_enabled": True,
-        "use_rich_valuation": True,
-    })
-    assert config2.fork_lifecycle == ForkLifecycle.PERSISTENT
+async def test_fork_lifecycle_persistent_config_is_refused_before_boot():
+    """Persistent sessions cannot boot without a provably fork-bound oracle."""
+    with pytest.raises(PersistentForkOracleUnavailableError, match="fork-bound gateway oracle"):
+        PaperTraderConfig(
+            chain="arbitrum",
+            rpc_url="https://example.com/rpc",
+            deployment_id="test",
+            fork_lifecycle=ForkLifecycle.PERSISTENT,
+            yield_poker_enabled=True,
+            use_rich_valuation=True,
+            position_reconciler_enabled=True,
+        )
 
 
 @pytest.mark.asyncio

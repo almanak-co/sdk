@@ -6,9 +6,8 @@ Tests pin:
 
 * ``isinstance(connector, GatewayPriceIdCapability)`` is True iff the
   connector defines ``coingecko_ids`` and ``dexscreener_ids``.
-* The post-refactor ``GLOBAL_TOKEN_IDS`` is byte-identical to the
-  legacy hardcoded merge (every symbol the pre-refactor code resolved
-  still resolves to the same slug).
+* The post-refactor ``GLOBAL_TOKEN_IDS`` preserves the legacy hardcoded merge,
+  except for explicitly pinned verified asset-ID corrections.
 * The post-refactor DexScreener ``_KNOWN_TOKEN_ADDRESSES`` is
   byte-identical to the legacy Solana address dict.
 * Collisions (two providers publishing different slugs for the same
@@ -73,11 +72,12 @@ def test_registered_connectors_advertise_capability() -> None:
     assert expected.issubset(protocols)
 
 
-def test_coingecko_global_token_ids_matches_legacy_merge() -> None:
-    """``GLOBAL_TOKEN_IDS`` is byte-identical to the pre-refactor dict.
+def test_coingecko_global_token_ids_matches_reviewed_merge() -> None:
+    """``GLOBAL_TOKEN_IDS`` preserves legacy rows plus reviewed corrections.
 
     Every symbol+slug pair the hardcoded merge produced still resolves
-    the same way after the registry-driven re-assembly.
+    the same way after the registry-driven re-assembly unless a distinct
+    wrapped-asset CoinGecko record was explicitly verified.
     """
     from almanak.gateway.data.price.coingecko import GLOBAL_TOKEN_IDS
 
@@ -165,17 +165,22 @@ def test_coingecko_global_token_ids_matches_legacy_merge() -> None:
         "WEETH": "wrapped-eeth",
         "PUFETH": "pufeth",
     }
-    for symbol, slug in legacy.items():
-        assert GLOBAL_TOKEN_IDS.get(symbol) == slug, (
-            f"{symbol}: expected {slug}, got {GLOBAL_TOKEN_IDS.get(symbol)}"
+    verified_corrections = {
+        "WAVAX": "wrapped-avax",
+        "WMNT": "wrapped-mantle",
+        "WMATIC": "wmatic",
+    }
+    expected = {**legacy, **verified_corrections}
+    for symbol, expected_slug in expected.items():
+        assert GLOBAL_TOKEN_IDS.get(symbol) == expected_slug, (
+            f"{symbol}: expected {expected_slug}, got {GLOBAL_TOKEN_IDS.get(symbol)}"
         )
 
 
 def test_coingecko_id_collision_raises() -> None:
     """Two providers publishing different slugs for the same symbol raises."""
-    from almanak.gateway.data.price.coingecko import _build_registry_price_ids
-
     import almanak.connectors._gateway_registry as registry_mod
+    from almanak.gateway.data.price.coingecko import _build_registry_price_ids
 
     class _ProviderA:
         def coingecko_ids(self) -> dict[str, str]:
@@ -228,13 +233,64 @@ def test_dexscreener_known_addresses_matches_legacy() -> None:
     assert _KNOWN_TOKEN_ADDRESSES == legacy
 
 
+@pytest.mark.parametrize("operation", ["copy", "union", "update", "pop", "popitem", "setdefault"])
+def test_coingecko_lazy_mapping_builds_before_copy_and_mutation(monkeypatch, operation: str) -> None:
+    import almanak.integrations.coingecko.gateway.price_source as module
+
+    monkeypatch.setattr(module, "_CHAIN_TABLE_TOKEN_IDS", {"KNOWN": "known-id"})
+    monkeypatch.setattr(module, "_build_registry_price_ids", lambda: {})
+    mapping = module._LazyGlobalTokenIds()
+    assert not mapping._built
+
+    if operation == "copy":
+        assert mapping.copy()["KNOWN"] == "known-id"
+    elif operation == "union":
+        assert (mapping | {"NEW": "new-id"})["KNOWN"] == "known-id"
+    elif operation == "update":
+        mapping.update({"NEW": "new-id"})
+        assert mapping["KNOWN"] == "known-id"
+    elif operation == "pop":
+        assert mapping.pop("KNOWN") == "known-id"
+    elif operation == "popitem":
+        assert mapping.popitem() == ("KNOWN", "known-id")
+    else:
+        assert mapping.setdefault("KNOWN", "replacement") == "known-id"
+
+    assert mapping._built
+
+
+@pytest.mark.parametrize("operation", ["copy", "union", "update", "pop", "popitem", "setdefault"])
+def test_dexscreener_lazy_mapping_builds_before_copy_and_mutation(monkeypatch, operation: str) -> None:
+    import almanak.integrations.dexscreener.gateway.price_source as module
+
+    known = {"KNOWN": "0xknown"}
+    monkeypatch.setattr(module, "_build_registry_known_addresses", lambda: {"test-chain": known})
+    mapping = module._LazyKnownTokenAddresses()
+    assert not mapping._built
+
+    if operation == "copy":
+        assert mapping.copy()["test-chain"] == known
+    elif operation == "union":
+        assert (mapping | {"new-chain": {}})["test-chain"] == known
+    elif operation == "update":
+        mapping.update({"new-chain": {}})
+        assert mapping["test-chain"] == known
+    elif operation == "pop":
+        assert mapping.pop("test-chain") == known
+    elif operation == "popitem":
+        assert mapping.popitem() == ("test-chain", known)
+    else:
+        assert mapping.setdefault("test-chain", {}) == known
+
+    assert mapping._built
+
+
 def test_dexscreener_address_collision_raises() -> None:
     """Two providers publishing different addresses for (chain, symbol) raises."""
+    import almanak.connectors._gateway_registry as registry_mod
     from almanak.gateway.data.price.dexscreener import (
         _build_registry_known_addresses,
     )
-
-    import almanak.connectors._gateway_registry as registry_mod
 
     class _ProviderA:
         def coingecko_ids(self) -> dict[str, str]:

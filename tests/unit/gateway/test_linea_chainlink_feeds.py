@@ -18,7 +18,7 @@ from collections.abc import Mapping
 
 import pytest
 
-from almanak.core.chainlink import (
+from almanak.integrations.chainlink.catalog import (
     CHAINLINK_CHAIN_IDS,
     CHAINLINK_PRICE_FEEDS,
     TOKEN_TO_PAIR,

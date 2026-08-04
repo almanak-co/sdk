@@ -1,0 +1,1 @@
+"""DexScreener integration metadata."""

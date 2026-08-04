@@ -141,6 +141,13 @@ class GatewaySettings(_GatewaySettingsBase):  # type: ignore[valid-type,misc]
     # ``ALMANAK_GATEWAY_STABLECOIN_CHAINLINK_CHECK_INTERVAL``.
     stablecoin_chainlink_check_interval: int = 50
 
+    # Consecutive per-token Chainlink peg-check failures before PriceAggregator
+    # emits one WARNING for the current outage streak. A successful check resets
+    # the streak. Non-positive disables the warning without changing best-effort
+    # peg serving. Override via
+    # ``ALMANAK_GATEWAY_STABLECOIN_VERIFIER_FAILURE_WARNING_THRESHOLD``.
+    stablecoin_verifier_failure_warning_threshold: int = 3
+
     # VIB-5375 (RC-3) — PriceAggregator bounded timeouts. Without these a slow /
     # rate-limited non-CoinGecko price source (e.g. a cold Mantle RPC behind the
     # on-chain Chainlink source) could stall the concurrent price fan-out

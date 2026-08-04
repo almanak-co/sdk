@@ -41,6 +41,7 @@ from datetime import UTC, datetime
 from enum import Enum
 
 from almanak.core.finality import DataFinality, parse_data_finality
+from almanak.integrations.chains import lazy_integration_market_symbol_map
 
 logger = logging.getLogger(__name__)
 
@@ -211,41 +212,9 @@ OHLCV_PROXY_MAP: dict[str, str] = {
 # CEX Symbol Map
 # ---------------------------------------------------------------------------
 
-# Maps (exchange, base_symbol, quote_symbol) -> exchange-specific trading symbol.
-# Base/quote are canonical (wrapped) forms.
-CEX_SYMBOL_MAP: dict[tuple[str, str, str], str] = {
-    # Binance - uses unwrapped names, concatenated pairs
-    ("binance", "WETH", "USDC"): "ETHUSDC",
-    ("binance", "WETH", "USDT"): "ETHUSDT",
-    ("binance", "WBTC", "USDT"): "BTCUSDT",
-    ("binance", "WBTC", "USDC"): "BTCUSDC",
-    ("binance", "BTCB", "USDT"): "BTCUSDT",  # Binance-Peg BTC on BSC; same spot pair as WBTC.
-    ("binance", "BTCB", "USDC"): "BTCUSDC",
-    ("binance", "CBBTC", "USDT"): "BTCUSDT",  # Coinbase Wrapped BTC; CEX-side BTC spot pair.
-    ("binance", "CBBTC", "USDC"): "BTCUSDC",
-    ("binance", "LINK", "USDT"): "LINKUSDT",
-    ("binance", "UNI", "USDT"): "UNIUSDT",
-    ("binance", "AAVE", "USDT"): "AAVEUSDT",
-    ("binance", "ARB", "USDT"): "ARBUSDT",
-    ("binance", "OP", "USDT"): "OPUSDT",
-    ("binance", "WMATIC", "USDT"): "POLUSDT",  # MATIC->POL rebrand: POLUSDT is the live pair
-    ("binance", "WPOL", "USDT"): "POLUSDT",  # Post-rebrand canonical wrapped name
-    ("binance", "WAVAX", "USDT"): "AVAXUSDT",
-    ("binance", "WBNB", "USDT"): "BNBUSDT",
-    ("binance", "GMX", "USDT"): "GMXUSDT",
-    ("binance", "CRV", "USDT"): "CRVUSDT",
-    ("binance", "PENDLE", "USDT"): "PENDLEUSDT",
-    ("binance", "DAI", "USDT"): "DAIUSDT",
-    # Coinbase
-    ("coinbase", "WETH", "USDC"): "ETH-USD",
-    ("coinbase", "WBTC", "USDC"): "BTC-USD",
-    ("coinbase", "CBBTC", "USDC"): "CBBTC-USD",  # Coinbase Wrapped BTC; native pair on Coinbase.
-    ("coinbase", "LINK", "USDC"): "LINK-USD",
-    ("coinbase", "UNI", "USDC"): "UNI-USD",
-    ("coinbase", "AAVE", "USDC"): "AAVE-USD",
-    ("coinbase", "ARB", "USDC"): "ARB-USD",
-    ("coinbase", "OP", "USDC"): "OP-USD",
-}
+# Compatibility materialization. Provider market metadata is owned by each
+# integration manifest rather than this provider-neutral model module.
+CEX_SYMBOL_MAP = lazy_integration_market_symbol_map()
 
 
 @dataclass(frozen=True)

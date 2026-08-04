@@ -77,7 +77,6 @@ if TYPE_CHECKING:
 
 from almanak.core.chains import ChainRegistry
 from almanak.core.chains._helpers import chain_name_for_id as _chain_name_for_id
-from almanak.core.chains._helpers import chainlink_usd_feeds_map
 from almanak.core.finality import DataFinality
 from almanak.core.intent_types import IntentType
 from almanak.framework.anvil.accounts import ANVIL_DEFAULT_ADDRESS, ANVIL_DEFAULT_PRIVATE_KEY
@@ -88,7 +87,7 @@ from almanak.framework.backtesting.models import (
     EquityPoint,
 )
 from almanak.framework.backtesting.paper import _engine_helpers
-from almanak.framework.backtesting.paper.config import ForkLifecycle, PaperTraderConfig
+from almanak.framework.backtesting.paper.config import ForkLifecycle, PaperTraderConfig, validate_fork_lifecycle
 from almanak.framework.backtesting.paper.models import (
     DivergenceRecord,
     PaperTrade,
@@ -127,8 +126,9 @@ from almanak.framework.execution.result_enricher import enrich_result
 from almanak.framework.market import MarketSnapshot, TokenBalance
 from almanak.framework.models.reproduction_bundle import ActionBundle, TransactionReceipt
 from almanak.gateway.data.price import CoinGeckoPriceSource, PriceAggregator
-from almanak.gateway.data.price.binance import BinancePriceSource
-from almanak.gateway.data.price.dexscreener import DexScreenerPriceSource
+from almanak.integrations.binance.gateway.price_source import BinancePriceSource
+from almanak.integrations.chainlink.catalog import CATALOG as CHAINLINK_CATALOG
+from almanak.integrations.dexscreener.gateway.price_source import DexScreenerPriceSource
 
 logger = logging.getLogger(__name__)
 
@@ -167,7 +167,7 @@ CHAIN_ID_BASE = 8453
 # deliberate SUBSET of ChainlinkDataProvider._SUPPORTED_CHAINS: bsc/linea/
 # sonic have feeds but no TWAP pools, exactly as the legacy 6-chain
 # allowlist encoded.
-_PRICE_SOURCE_CHAINS: frozenset[str] = frozenset(chainlink_usd_feeds_map()) & frozenset(UNISWAP_V3_POOLS)
+_PRICE_SOURCE_CHAINS: frozenset[str] = frozenset(CHAINLINK_CATALOG.chains) & frozenset(UNISWAP_V3_POOLS)
 
 
 def _get_resolver():
@@ -902,6 +902,10 @@ class PaperTrader:
 
     def __post_init__(self) -> None:
         """Validate configuration after initialization."""
+        # PaperTraderConfig is mutable. Revalidate the fork lifecycle at the
+        # engine boundary before any providers or execution machinery start.
+        validate_fork_lifecycle(self.config)
+
         if self.config.tick_interval_seconds <= 0:
             raise ValueError("tick_interval_seconds must be positive")
 
@@ -1106,6 +1110,12 @@ class PaperTrader:
         Do not inline the helpers back into this method without rerunning the
         characterization suite.
         """
+        # PaperTraderConfig remains mutable after engine construction. Enforce
+        # the lifecycle refusal again at the public execution boundary so a
+        # caller cannot mutate a validated rolling config into an unsupported
+        # persistent/non-resetting session before starting the fork.
+        validate_fork_lifecycle(self.config)
+
         if self._running:
             raise RuntimeError("PaperTrader is already running")
 
@@ -2216,10 +2226,6 @@ class PaperTrader:
 
         now = datetime.now(UTC)
 
-        # For persistent forks: check oracle divergence before valuation
-        if self.config.fork_lifecycle == ForkLifecycle.PERSISTENT:
-            await self._check_oracle_divergence()
-
         # Try rich valuation first (includes LP + lending positions)
         # Persistent forks with use_rich_valuation strongly prefer this path
         rich = self._value_portfolio_rich()
@@ -2735,52 +2741,6 @@ class PaperTrader:
             max_divergence_pct=max(pcts) if pcts else None,
             records=records,
         )
-
-    async def _check_oracle_divergence(self) -> None:
-        """Check divergence between live prices and on-fork oracle prices.
-
-        For persistent forks, the fork's on-chain oracle prices become stale
-        over time since no real oracle updates occur. This method compares
-        the live price feed (CoinGecko/DexScreener) against on-fork Chainlink
-        prices and logs/halts if divergence exceeds the threshold.
-
-        Uses a fork-bound Chainlink provider (pointing at the Anvil fork RPC)
-        rather than the upstream RPC, so it reads the actual stale on-chain
-        oracle prices rather than the live upstream values.
-        """
-        if not self._cached_prices:
-            return
-
-        fork_rpc = self.fork_manager.get_rpc_url() if self.fork_manager else None
-        if not fork_rpc:
-            return
-
-        chainlink_chain = _engine_helpers.resolve_chainlink_divergence_chain(self.config.chain)
-        if not chainlink_chain:
-            return
-
-        try:
-            fork_chainlink = ChainlinkDataProvider(
-                chain=chainlink_chain,
-                rpc_url=fork_rpc,
-                cache_ttl_seconds=0,
-            )
-        except Exception as e:
-            logger.debug(f"[{self._backtest_id}] Failed to create fork-bound Chainlink provider: {e}")
-            return
-
-        try:
-            max_divergence, worst_token = await _engine_helpers.compute_max_oracle_divergence(
-                fork_chainlink, self._cached_prices, self._backtest_id
-            )
-        finally:
-            await fork_chainlink.close()
-
-        threshold = self.config.oracle_divergence_threshold
-        if max_divergence > threshold:
-            error_msg = _engine_helpers.build_divergence_error_message(worst_token, max_divergence, threshold)
-            logger.error(f"[{self._backtest_id}] {error_msg}")
-            raise RuntimeError(error_msg)
 
     def _emit_event(self, event_type: str, data: dict[str, Any]) -> None:
         """Emit a paper trading event.
@@ -3496,7 +3456,6 @@ class PaperTrader:
             if chainlink_chain:
                 self._chainlink_provider = ChainlinkDataProvider(
                     chain=chainlink_chain,
-                    rpc_url=self.config.rpc_url,
                     cache_ttl_seconds=60,
                 )
                 logger.info(

@@ -57,7 +57,12 @@ from almanak.framework.backtesting.paper.background import (
     PIDFile,
     TradeHistoryWriter,
 )
-from almanak.framework.backtesting.paper.config import ForkLifecycle, PaperTraderConfig
+from almanak.framework.backtesting.paper.config import (
+    ForkLifecycle,
+    PaperTraderConfig,
+    PersistentForkOracleUnavailableError,
+    validate_fork_lifecycle,
+)
 from almanak.framework.backtesting.paper.engine import (
     ERC20_DECIMALS_CALL_TIMEOUT,
     NATIVE_ETH_ADDRESS,
@@ -128,6 +133,8 @@ __all__ = [
     # Configuration
     "ForkLifecycle",
     "PaperTraderConfig",
+    "PersistentForkOracleUnavailableError",
+    "validate_fork_lifecycle",
     # Fork management
     "RollingForkManager",
     # Portfolio tracking

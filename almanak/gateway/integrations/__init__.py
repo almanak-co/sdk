@@ -14,16 +14,16 @@ All integrations inherit from BaseIntegration and provide:
 - Structured error handling
 """
 
-from almanak.gateway.integrations.base import (
+from almanak.integrations._base.gateway.base import (
     BaseIntegration,
     IntegrationError,
     IntegrationRateLimitError,
     IntegrationRegistry,
     RateLimiter,
 )
-from almanak.gateway.integrations.models import WalletPortfolioSnapshot, WalletPosition
-from almanak.gateway.integrations.okx import OkxIntegration
-from almanak.gateway.integrations.zerion import ZerionIntegration
+from almanak.integrations._base.gateway.models import WalletPortfolioSnapshot, WalletPosition
+from almanak.integrations.okx.gateway.client import OkxIntegration
+from almanak.integrations.zerion.gateway.client import ZerionIntegration
 
 __all__ = [
     "BaseIntegration",

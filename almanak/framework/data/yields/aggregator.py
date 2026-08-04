@@ -29,7 +29,6 @@ from typing import Any
 import aiohttp
 
 from almanak.connectors._connector_descriptor import vendor_protocol_map
-from almanak.core.chains._helpers import vendor_chain_map
 from almanak.core.finality import DataFinality
 from almanak.framework.data.interfaces import DataSourceUnavailable
 from almanak.framework.data.models import (
@@ -38,6 +37,7 @@ from almanak.framework.data.models import (
     DataMeta,
 )
 from almanak.framework.data.ratelimit import get_bucket
+from almanak.integrations.chains import integration_chain_map
 
 logger = logging.getLogger(__name__)
 
@@ -45,9 +45,9 @@ logger = logging.getLogger(__name__)
 _YIELDS_API = "https://yields.llama.fi"
 
 # Chain -> DeFi Llama display name (capitalized as returned by API).
-# Derived compat view (VIB-4851 B1); canonical home is
-# ``ChainDescriptor.external_ids["defillama_display"]`` (byte-identical, 9 keys).
-_CHAIN_TO_LLAMA_DISPLAY: Mapping[str, str] = MappingProxyType(vendor_chain_map("defillama_display"))
+# Derived compatibility view; canonical home is each chain descriptor's typed
+# DeFiLlama-display id (byte-identical, 9 keys).
+_CHAIN_TO_LLAMA_DISPLAY: Mapping[str, str] = MappingProxyType(integration_chain_map("defillama_display"))
 
 # Protocol -> DeFi Llama project slug.
 #

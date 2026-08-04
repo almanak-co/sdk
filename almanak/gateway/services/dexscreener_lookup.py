@@ -45,8 +45,8 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
-from almanak.core.chains._helpers import external_id_for, vendor_chain_map
 from almanak.framework.data.tokens.exceptions import AmbiguousTokenError
+from almanak.integrations.chains import integration_chain_id, integration_chain_map
 
 logger = logging.getLogger(__name__)
 
@@ -102,8 +102,9 @@ DEFAULT_GATE_CONFIG = DexScreenerGateConfig()
 # IMPORTANT: keep this map as a subset of ``almanak.gateway.validation.ALLOWED_CHAINS``
 # (plus ``"solana"``, which routes through Jupiter instead). Listing a chain here
 # that the gateway rejects upstream is dead code and misleading.
-# Derived from ``ChainDescriptor.external_ids`` per VIB-4851 B1 (canonical-only).
-CHAIN_SLUG_MAP: Mapping[str, str] = MappingProxyType(vendor_chain_map("dexscreener"))
+# Derived from chain-owned ``ExternalChainIds.dexscreener`` values
+# (canonical-only).
+CHAIN_SLUG_MAP: Mapping[str, str] = MappingProxyType(integration_chain_map("dexscreener"))
 
 
 # =============================================================================
@@ -165,13 +166,13 @@ class _Candidate:
 def chain_slug_for(chain: str) -> str | None:
     """Translate an SDK chain name to a DexScreener chainId.
 
-    Resolved from the registry via ``ChainDescriptor.external_ids["dexscreener"]``
-    (VIB-4851 B1), so chain aliases normalise through the registry — e.g.
+    Resolved from chain-owned provider identity, so chain aliases normalise
+    through the chain registry — e.g.
     ``chain_slug_for("bnb") == "bsc"``. Returns None if DexScreener does not
     index the chain. ``CHAIN_SLUG_MAP`` remains the derived (canonical-only)
     membership view for callers that enumerate supported chains.
     """
-    return external_id_for(chain, "dexscreener")
+    return integration_chain_id(chain, "dexscreener")
 
 
 async def find_token_address(

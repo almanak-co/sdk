@@ -1,4 +1,4 @@
-"""Tests for OnChainPriceSource SSL context initialization in _get_session()."""
+"""Tests for ChainlinkPriceSource SSL context initialization in _get_session()."""
 
 import ssl
 from unittest.mock import MagicMock, patch
@@ -10,13 +10,13 @@ import pytest
 @pytest.mark.asyncio
 async def test_get_session_uses_ssl_context():
     """_get_session() initializes aiohttp.ClientSession with build_ssl_context TCPConnector."""
-    from almanak.gateway.data.price.onchain import OnChainPriceSource
+    from almanak.integrations.chainlink.gateway.live import ChainlinkPriceSource
 
     fake_ctx = MagicMock(spec=ssl.SSLContext)
-    source = OnChainPriceSource(chain="arbitrum", network="mainnet")
+    source = ChainlinkPriceSource(chain="arbitrum", network="mainnet")
 
     with patch(
-        "almanak.gateway.data.price.onchain.build_ssl_context",
+        "almanak.integrations.chainlink.gateway.live.build_ssl_context",
         return_value=fake_ctx,
     ) as mock_build:
         session = await source._get_session()
@@ -35,13 +35,13 @@ async def test_get_session_uses_ssl_context():
 @pytest.mark.asyncio
 async def test_get_session_reuses_existing_open_session():
     """_get_session() returns the same session when called twice (lazy singleton)."""
-    from almanak.gateway.data.price.onchain import OnChainPriceSource
+    from almanak.integrations.chainlink.gateway.live import ChainlinkPriceSource
 
     fake_ctx = MagicMock(spec=ssl.SSLContext)
-    source = OnChainPriceSource(chain="arbitrum", network="mainnet")
+    source = ChainlinkPriceSource(chain="arbitrum", network="mainnet")
 
     with patch(
-        "almanak.gateway.data.price.onchain.build_ssl_context",
+        "almanak.integrations.chainlink.gateway.live.build_ssl_context",
         return_value=fake_ctx,
     ) as mock_build:
         session1 = await source._get_session()

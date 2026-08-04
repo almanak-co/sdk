@@ -3,7 +3,7 @@
 from almanak.core.enums import ChainFamily
 
 from ._contracts import safe_multisend_contracts
-from ._descriptor import AnvilProfile, ChainDescriptor, GasProfile, NativeToken, RpcProfile, Timeouts
+from ._descriptor import AnvilProfile, ChainDescriptor, ExternalChainIds, GasProfile, NativeToken, RpcProfile, Timeouts
 from ._registry import register_chain
 
 DESCRIPTOR = register_chain(
@@ -23,6 +23,7 @@ DESCRIPTOR = register_chain(
             # OKExChain, a different OKX chain, so native CAIP-19 stays fail-loud.
             slip44=None,
         ),
+        external_ids=ExternalChainIds(coingecko="xlayer", dexscreener="xlayer"),
         gas=GasProfile(
             buffer=1.3,
             simulation_buffer=0.3,
@@ -53,13 +54,6 @@ DESCRIPTOR = register_chain(
             # surfaced for callers that pass the explicit USDT0 / LayerZero
             # designation. Mirrors the legacy CHAIN_TOKENS shape.
             "usdt0": "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",
-        },
-        # VIB-4851 (B1): per-vendor external ids, transposed from the legacy
-        # standalone vendor maps (CoinGecko / DexScreener / CoinGecko Onchain /
-        # DeFiLlama / Zerion / Moralis / OKX). Values verbatim incl. case.
-        external_ids={
-            "coingecko": "xlayer",
-            "dexscreener": "xlayer",
         },
         # Safe MultiSendCallOnly v1.4.1 — CREATE2, same address on every
         # chain Safe deploys to; presence here == deployment-verified

@@ -150,6 +150,27 @@ class TestIntegrationRegistry:
         assert "integration1" in names
         assert "integration2" in names
 
+    @pytest.mark.asyncio
+    async def test_close_all_continues_after_one_integration_fails(self):
+        class TestIntegration(BaseIntegration):
+            async def health_check(self) -> bool:
+                return True
+
+        first = TestIntegration()
+        first.name = "first"
+        first.close = AsyncMock(side_effect=RuntimeError("close failed"))
+        second = TestIntegration()
+        second.name = "second"
+        second.close = AsyncMock()
+        registry = IntegrationRegistry.get_instance()
+        registry.register(first)
+        registry.register(second)
+
+        await registry.close_all()
+
+        first.close.assert_awaited_once()
+        second.close.assert_awaited_once()
+
 
 # =============================================================================
 # Binance Integration Tests
@@ -194,6 +215,29 @@ class TestBinanceIntegration:
             assert result1 == result2
             # _fetch should only be called once
             binance._fetch.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_caller_values_are_passed_as_query_params(self, binance):
+        with patch.object(binance, "_fetch", return_value={"bids": [], "asks": []}) as fetch:
+            await binance.get_ticker("btc&limit=1000")
+            fetch.assert_awaited_once_with(
+                "/api/v3/ticker/24hr",
+                params={"symbol": "BTC&LIMIT=1000"},
+            )
+
+        with patch.object(binance, "_fetch", return_value={"bids": [], "asks": []}) as fetch:
+            await binance.get_order_book("ethusdt", limit=20)
+            fetch.assert_awaited_once_with(
+                "/api/v3/depth",
+                params={"symbol": "ETHUSDT", "limit": 20},
+            )
+
+        with patch.object(binance, "_fetch", return_value={}) as fetch:
+            await binance.get_exchange_info("eth&permissions=spot")
+            fetch.assert_awaited_once_with(
+                "/api/v3/exchangeInfo",
+                params={"symbol": "ETH&PERMISSIONS=SPOT"},
+            )
 
     @pytest.mark.asyncio
     async def test_get_klines_validates_interval(self, binance):
@@ -425,7 +469,10 @@ class TestZerionIntegration:
         assert first.positions[0].protocol == "traderjoe_v2"
         assert first.positions[0].pool_address == "0xpool"
         assert first.positions[0].token_symbols == ["WAVAX", "USDT"]
+        assert first.cache_hit is False
         assert second.cache_hit is True
+        assert second is not first
+        assert second.positions is not first.positions
         fetch_mock.assert_called_once()
 
     @pytest.mark.asyncio
@@ -589,6 +636,32 @@ class TestTheGraphQuery:
         assert isinstance(exc_info.value.__cause__, aiohttp.ClientError)
 
     @pytest.mark.asyncio
+    async def test_timeout_wrapped_as_integration_error(self, thegraph):
+        session = _graph_session([], post_exc=TimeoutError("request timed out"))
+
+        with self._patched(thegraph, session):
+            with pytest.raises(IntegrationError, match="Timeout after 30.0s") as exc_info:
+                await thegraph.query(self.SUBGRAPH, self.QUERY)
+
+        assert exc_info.value.code == "TIMEOUT"
+        assert thegraph._metrics.failed_requests == 1
+        assert isinstance(exc_info.value.__cause__, TimeoutError)
+
+    @pytest.mark.asyncio
+    async def test_server_timeout_is_classified_as_timeout(self, thegraph):
+        import aiohttp
+
+        session = _graph_session([], post_exc=aiohttp.ServerTimeoutError("request timed out"))
+
+        with self._patched(thegraph, session):
+            with pytest.raises(IntegrationError, match="Timeout after 30.0s") as exc_info:
+                await thegraph.query(self.SUBGRAPH, self.QUERY)
+
+        assert exc_info.value.code == "TIMEOUT"
+        assert thegraph._metrics.failed_requests == 1
+        assert isinstance(exc_info.value.__cause__, aiohttp.ServerTimeoutError)
+
+    @pytest.mark.asyncio
     async def test_unallowed_subgraph_raises_before_any_http(self, thegraph):
         calls: list[dict] = []
         session = _graph_session([], calls)
@@ -670,3 +743,16 @@ class TestZerionExtractProtocol:
 
     def test_no_signals_at_all_returns_unknown(self, zerion):
         assert zerion._extract_protocol({}, {}) == "unknown"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("method_name", "path_suffix"),
+        [("get_wallet_positions", "positions"), ("get_wallet_portfolio", "portfolio")],
+    )
+    async def test_unknown_chain_fallback_is_logged(self, zerion, caplog, method_name, path_suffix):
+        with patch.object(zerion, "_fetch", return_value={"data": []}) as fetch:
+            await getattr(zerion, method_name)("0xwallet", "unknown-chain")
+
+        assert "has no chain-id mapping" in caplog.text
+        assert fetch.await_args.args[0] == f"/v1/wallets/0xwallet/{path_suffix}"
+        assert fetch.await_args.kwargs["params"]["filter[chain_ids]"] == "unknown-chain"

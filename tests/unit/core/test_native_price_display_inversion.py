@@ -1,15 +1,14 @@
 """Equivalence tests for the CS-3b / CS-4 inversions (VIB-4851 Phase E).
 
-CS-3b: native / wrapped-native CoinGecko coin ids move onto
-``NativeToken`` and project into the price maps via
-``native_coingecko_ids()`` — a DELIBERATE widening (every registered
+CS-3b: native / wrapped-native CoinGecko coin ids live on ``NativeToken`` and
+project into the price maps — a DELIBERATE widening (every registered
 chain's gas asset becomes priceable; previously plasma's XPL and sonic's
 S had no entry anywhere — the VIB-3805 drift class).
 CS-4: explorer browse URLs and Tenderly dashboard slugs move onto the
 descriptor; the three duplicate explorer maps derive from one helper.
 
-Frozen legacy literals are verbatim from the pre-CS-3b modules; widenings
-are pinned explicitly, never implied.
+Frozen legacy literals are verbatim from the pre-CS-3b modules; widenings and
+verified wrapped-asset corrections are pinned explicitly, never implied.
 """
 
 from __future__ import annotations
@@ -18,8 +17,8 @@ from almanak.core.chains import ChainRegistry
 from almanak.core.chains._helpers import (
     explorer_tx_prefix_map,
     native_coingecko_ids,
-    vendor_chain_map,
 )
+from almanak.integrations.chains import integration_chain_map
 
 # ── Frozen legacy literals ──────────────────────────────────────────────────
 
@@ -44,6 +43,15 @@ FROZEN_NATIVE_ROWS: dict[str, str] = {
     "POL": "polygon-ecosystem-token",
     "WMATIC": "polygon-ecosystem-token",
 }
+
+# CoinGecko exposes distinct, verified coin records for these wrapped native
+# assets. They deliberately correct the legacy underlying-asset aliases above.
+CORRECTED_WRAPPED_ROWS: dict[str, str] = {
+    "WAVAX": "wrapped-avax",
+    "WMNT": "wrapped-mantle",
+    "WMATIC": "wmatic",
+}
+EXPECTED_NATIVE_ROWS: dict[str, str] = {**FROZEN_NATIVE_ROWS, **CORRECTED_WRAPPED_ROWS}
 
 # Newly covered natives — the deliberate CS-3b widening, ids verified
 # against the live CoinGecko /search API on 2026-06-11.
@@ -93,9 +101,7 @@ FROZEN_DASHBOARD_EXPLORERS: dict[str, str] = {
     "robinhood": "https://robinhoodchain.blockscout.com/tx/",
 }
 
-FROZEN_TIMELINE_CHAINS = frozenset(
-    {"ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bsc"}
-)
+FROZEN_TIMELINE_CHAINS = frozenset({"ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bsc"})
 
 FROZEN_GATEWAY_SUPPORTED_TOKENS = frozenset(
     {
@@ -115,19 +121,24 @@ FROZEN_GATEWAY_SUPPORTED_TOKENS = frozenset(
     }
 )
 
-FROZEN_FRAMEWORK_SUPPORTED_CHAINS = frozenset(
-    {"arbitrum", "ethereum", "base", "optimism", "avalanche", "bnb", "bsc"}
-)
+FROZEN_FRAMEWORK_SUPPORTED_CHAINS = frozenset({"arbitrum", "ethereum", "base", "optimism", "avalanche", "bnb", "bsc"})
 
 
 class TestNativeCoinGeckoProjection:
-    def test_legacy_rows_byte_equivalent(self) -> None:
+    def test_legacy_rows_byte_equivalent_except_verified_corrections(self) -> None:
         projection = {s.upper(): v for s, v in native_coingecko_ids().items()}
         for symbol, cg_id in FROZEN_NATIVE_ROWS.items():
+            if symbol in CORRECTED_WRAPPED_ROWS:
+                continue
             assert projection.get(symbol.upper()) == cg_id, symbol
 
+    def test_wrapped_assets_use_verified_coin_ids(self) -> None:
+        projection = native_coingecko_ids()
+        for symbol, cg_id in CORRECTED_WRAPPED_ROWS.items():
+            assert projection[symbol] == cg_id
+
     def test_pinned_widening_rows(self) -> None:
-        projection = dict(native_coingecko_ids())
+        projection = native_coingecko_ids()
         for symbol, cg_id in PINNED_WIDENING_ROWS.items():
             assert projection.get(symbol) == cg_id, symbol
 
@@ -152,7 +163,7 @@ class TestNativeCoinGeckoProjection:
     def test_gateway_flat_map_values(self) -> None:
         from almanak.gateway.data.price.coingecko import GLOBAL_TOKEN_IDS
 
-        for symbol, cg_id in {**FROZEN_NATIVE_ROWS}.items():
+        for symbol, cg_id in EXPECTED_NATIVE_ROWS.items():
             assert GLOBAL_TOKEN_IDS.get(symbol) == cg_id, symbol
         # Legacy ethereum-map-wins precedence for chain-variant rows must
         # survive the projection merge (BSC's WBTC->bitcoin row is
@@ -178,7 +189,7 @@ class TestNativeCoinGeckoProjection:
 
         provider = CoinGeckoDataProvider()
         native_projection = provider._native_ids_by_upper
-        for symbol, cg_id in FROZEN_NATIVE_ROWS.items():
+        for symbol, cg_id in EXPECTED_NATIVE_ROWS.items():
             assert native_projection.get(symbol.upper()) == cg_id, symbol
 
     def test_framework_supported_chains_superset(self) -> None:
@@ -209,14 +220,11 @@ class TestExplorerDisplayLane:
         assert set(BLOCK_EXPLORER_URLS) == set(explorer_tx_prefix_map())
 
     def test_tenderly_slugs_byte_equivalent(self) -> None:
-        assert dict(vendor_chain_map("tenderly")) == FROZEN_TENDERLY_SLUGS
+        assert integration_chain_map("tenderly") == FROZEN_TENDERLY_SLUGS
 
         from almanak.framework.models.reproduction_bundle import (
             _generate_tenderly_trace_url,
         )
 
-        assert (
-            _generate_tenderly_trace_url("ethereum", "0xabc")
-            == "https://dashboard.tenderly.co/tx/mainnet/0xabc"
-        )
+        assert _generate_tenderly_trace_url("ethereum", "0xabc") == "https://dashboard.tenderly.co/tx/mainnet/0xabc"
         assert _generate_tenderly_trace_url("linea", "0xabc") is None

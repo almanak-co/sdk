@@ -449,6 +449,7 @@ class TestEnsureInitialized:
             portfolio_api_key="test-key",
             portfolio_api_provider="zerion",
             portfolio_api_cache_ttl=300,
+            settings=svc.settings,
         )
 
     @pytest.mark.asyncio

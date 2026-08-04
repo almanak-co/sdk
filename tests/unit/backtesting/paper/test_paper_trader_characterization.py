@@ -47,6 +47,10 @@ from almanak.framework.backtesting.paper.engine import (
     PaperTrader,
 )
 from almanak.framework.backtesting.paper.models import PaperTrade
+from tests.unit.backtesting.paper._persistent_mode_test_seam import (
+    construct_unsupported_persistent_trader_for_test,
+    run_unsupported_persistent_trader_for_test,
+)
 
 # ---------------------------------------------------------------------------
 # Shared deterministic mocks
@@ -96,6 +100,7 @@ class _MockStrategy:
 
 def _make_config(**overrides: Any) -> PaperTraderConfig:
     """Build a PaperTraderConfig with deterministic defaults for char tests."""
+    lifecycle = overrides.pop("fork_lifecycle", ForkLifecycle.ROLLING_RESET)
     kwargs: dict[str, Any] = {
         "chain": "arbitrum",
         "rpc_url": "https://arb.example/rpc",
@@ -105,7 +110,10 @@ def _make_config(**overrides: Any) -> PaperTraderConfig:
         "strict_price_mode": False,
     }
     kwargs.update(overrides)
-    return PaperTraderConfig(**kwargs)
+    config = PaperTraderConfig(**kwargs)
+    config.fork_lifecycle = lifecycle
+    config.reset_fork_every_tick = lifecycle != ForkLifecycle.PERSISTENT
+    return config
 
 
 def _make_trader(
@@ -117,19 +125,25 @@ def _make_trader(
     from unittest.mock import patch
 
     cfg = config or _make_config()
-    with patch(
-        "almanak.framework.backtesting.paper.engine.CoinGeckoPriceSource"
-    ), patch(
-        "almanak.framework.backtesting.paper.engine.ChainlinkDataProvider"
-    ), patch(
-        "almanak.framework.backtesting.paper.engine.DEXTWAPDataProvider"
+    with (
+        patch("almanak.framework.backtesting.paper.engine.CoinGeckoPriceSource"),
+        patch("almanak.framework.backtesting.paper.engine.ChainlinkDataProvider"),
+        patch("almanak.framework.backtesting.paper.engine.DEXTWAPDataProvider"),
     ):
-        trader = PaperTrader(
-            fork_manager=_MockForkManager(),
-            portfolio_tracker=_MockPortfolioTracker(),
-            config=cfg,
-            event_callback=event_callback,
-        )
+        if cfg.fork_lifecycle == ForkLifecycle.PERSISTENT:
+            trader = construct_unsupported_persistent_trader_for_test(
+                fork_manager=_MockForkManager(),
+                portfolio_tracker=_MockPortfolioTracker(),
+                config=cfg,
+                event_callback=event_callback,
+            )
+        else:
+            trader = PaperTrader(
+                fork_manager=_MockForkManager(),
+                portfolio_tracker=_MockPortfolioTracker(),
+                config=cfg,
+                event_callback=event_callback,
+            )
     # Null out providers so no network is touched.
     trader._price_aggregator = MagicMock()
     trader._chainlink_provider = None
@@ -219,8 +233,12 @@ def _install_fast_run_harness(
         return Decimal("10000")
 
     def _calculate_metrics() -> BacktestMetrics:
-        return metrics if metrics is not None else BacktestMetrics(
-            net_pnl_usd=Decimal("500"),
+        return (
+            metrics
+            if metrics is not None
+            else BacktestMetrics(
+                net_pnl_usd=Decimal("500"),
+            )
         )
 
     trader._initialize_fork = _initialize_fork  # type: ignore[method-assign]
@@ -375,14 +393,19 @@ class TestMainLoopOrdering:
         spy = _install_fast_run_harness(trader)
         await trader.run(_MockStrategy(), duration_seconds=60.0, max_ticks=3)
         # Filter to loop-only events (skip setup prefix).
-        loop_events = [e for e in spy["order"] if e not in {
-            "init_fork",
-            "init_orchestrator",
-            "init_portfolio_valuer",
-            "seed_initial_market_snapshot",
-            "cleanup",
-            "get_portfolio_prices",
-        }]
+        loop_events = [
+            e
+            for e in spy["order"]
+            if e
+            not in {
+                "init_fork",
+                "init_orchestrator",
+                "init_portfolio_valuer",
+                "seed_initial_market_snapshot",
+                "cleanup",
+                "get_portfolio_prices",
+            }
+        ]
         # First is the initial record_equity; then 3 tick cycles.
         assert loop_events[0] == "record_equity"
         # Exactly 3 execute_tick calls.
@@ -399,7 +422,12 @@ class TestMainLoopOrdering:
         )
         trader = _make_trader(config=cfg)
         spy = _install_fast_run_harness(trader)
-        await trader.run(_MockStrategy(), duration_seconds=60.0, max_ticks=3)
+        await run_unsupported_persistent_trader_for_test(
+            trader,
+            _MockStrategy(),
+            duration_seconds=60.0,
+            max_ticks=3,
+        )
 
         # Persistent mode: tick0 has no advance (tick_count==0 check),
         # ticks 1 and 2 have advance_persistent BEFORE execute_tick.

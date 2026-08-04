@@ -9,18 +9,12 @@ import json
 import logging
 import time
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any, cast
 
 import grpc
 
 from almanak.framework.data.timeframes import OHLCVTimeframe, parse_ohlcv_timeframe
 from almanak.gateway.core.settings import GatewaySettings
-from almanak.gateway.integrations.base import BaseIntegration, IntegrationError
-from almanak.gateway.integrations.binance import BinanceIntegration
-from almanak.gateway.integrations.coingecko import CoinGeckoIntegration
-from almanak.gateway.integrations.models import WalletPortfolioSnapshot
-from almanak.gateway.integrations.portfolio_chain import PortfolioProviderChain, build_portfolio_chain
-from almanak.gateway.integrations.thegraph import TheGraphIntegration
-from almanak.gateway.integrations.zerion import ZerionIntegration
 from almanak.gateway.metrics import record_integration_latency, record_integration_request
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
 from almanak.gateway.services._grpc_errors import set_error_from_upstream
@@ -32,6 +26,16 @@ from almanak.gateway.validation import (
     validate_symbol,
     validate_token_id,
 )
+from almanak.integrations._base import INTEGRATION_REGISTRY
+from almanak.integrations._base.gateway.base import BaseIntegration, IntegrationError
+from almanak.integrations._base.gateway.models import WalletPortfolioSnapshot
+from almanak.integrations._base.gateway.portfolio_chain import PortfolioProviderChain, build_portfolio_chain
+
+if TYPE_CHECKING:
+    from almanak.integrations.binance.gateway.client import BinanceIntegration
+    from almanak.integrations.coingecko.gateway.client import CoinGeckoIntegration
+    from almanak.integrations.thegraph.gateway.client import TheGraphIntegration
+    from almanak.integrations.zerion.gateway.client import ZerionIntegration
 
 logger = logging.getLogger(__name__)
 
@@ -64,16 +68,9 @@ class IntegrationServiceServicer(gateway_pb2_grpc.IntegrationServiceServicer):
         if self._initialized:
             return
 
-        # Initialize Binance (public API, no key required)
-        self._binance = BinanceIntegration()
-
-        # Initialize CoinGecko (uses API key from settings if available)
-        self._coingecko = CoinGeckoIntegration(
-            api_key=self.settings.coingecko_api_key,
-        )
-
-        # Initialize TheGraph
-        self._thegraph = TheGraphIntegration(api_key=self.settings.thegraph_api_key)
+        self._binance = self._build_api_client("binance")
+        self._coingecko = self._build_api_client("coingecko")
+        self._thegraph = self._build_api_client("thegraph")
 
         # Build multi-provider portfolio chain
         self._portfolio_chain = build_portfolio_chain(
@@ -81,16 +78,14 @@ class IntegrationServiceServicer(gateway_pb2_grpc.IntegrationServiceServicer):
             portfolio_api_key=self.settings.portfolio_api_key,
             portfolio_api_provider=self.settings.portfolio_api_provider,
             portfolio_api_cache_ttl=self.settings.portfolio_api_cache_ttl,
+            settings=self.settings,
         )
 
         # Reuse chain's zerion instance if available; otherwise create standalone
         if self._portfolio_chain:
-            self._zerion = self._portfolio_chain.get_provider("zerion")  # type: ignore[assignment]
+            self._zerion = cast("ZerionIntegration | None", self._portfolio_chain.get_provider("zerion"))
         if self._zerion is None:
-            self._zerion = ZerionIntegration(
-                api_key=self.settings.portfolio_api_key,
-                cache_ttl=self.settings.portfolio_api_cache_ttl,
-            )
+            self._zerion = self._build_api_client("zerion")
 
         self._initialized = True
         chain_names = [p.name for p in self._portfolio_chain.providers] if self._portfolio_chain else []
@@ -98,6 +93,10 @@ class IntegrationServiceServicer(gateway_pb2_grpc.IntegrationServiceServicer):
             "IntegrationService initialized with Binance, CoinGecko, TheGraph, portfolio chain=%s",
             chain_names or "not configured",
         )
+
+    def _build_api_client(self, name: str) -> Any:
+        """Build a provider client solely through its integration manifest."""
+        return INTEGRATION_REGISTRY.gateway_api_client_factory(name).build(settings=self.settings)
 
     # =========================================================================
     # Binance endpoints

@@ -4,7 +4,11 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.backtesting.paper.config import ForkLifecycle, PaperTraderConfig
+from almanak.framework.backtesting.paper.config import (
+    ForkLifecycle,
+    PaperTraderConfig,
+    PersistentForkOracleUnavailableError,
+)
 
 
 def _config(**overrides):
@@ -38,8 +42,6 @@ class TestPaperTraderConfigValidation:
     @pytest.mark.parametrize(
         ("field_name", "bad_value"),
         [
-            ("oracle_divergence_threshold", Decimal("NaN")),
-            ("oracle_divergence_threshold", Decimal("Infinity")),
             ("position_reconciler_tolerance_pct", Decimal("NaN")),
             ("position_reconciler_tolerance_pct", Decimal("Infinity")),
         ],
@@ -48,10 +50,13 @@ class TestPaperTraderConfigValidation:
         with pytest.raises(ValueError, match=f"{field_name} must be finite"):
             _config(**{field_name: bad_value})
 
-    def test_persistent_lifecycle_disables_rolling_reset(self):
-        config = _config(fork_lifecycle=ForkLifecycle.PERSISTENT, reset_fork_every_tick=True)
+    def test_persistent_lifecycle_is_refused_before_session_boot(self):
+        with pytest.raises(PersistentForkOracleUnavailableError, match="Use fork_lifecycle='rolling_reset'"):
+            _config(fork_lifecycle=ForkLifecycle.PERSISTENT, reset_fork_every_tick=True)
 
-        assert config.reset_fork_every_tick is False
+    def test_legacy_non_resetting_flag_is_refused_before_session_boot(self):
+        with pytest.raises(PersistentForkOracleUnavailableError, match="reset_fork_every_tick=True"):
+            _config(fork_lifecycle=ForkLifecycle.ROLLING_RESET, reset_fork_every_tick=False)
 
     def test_strict_price_mode_takes_precedence_over_allow_hardcoded_fallback_true(self):
         with pytest.warns(DeprecationWarning, match="allow_hardcoded_fallback is deprecated"):

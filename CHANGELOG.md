@@ -30,6 +30,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Provider integrations now own their metadata and gateway implementations.**
+  Chainlink, CoinGecko, Binance, DexScreener, Pyth, Moralis, OKX, Zerion,
+  TheGraph, and Hypercore are registered through import-light manifests under
+  `almanak/integrations/`; generic gateway services consume their declared
+  capabilities instead of importing concrete providers. Existing Chainlink
+  measured-price provenance remains wire-compatible: direct feeds report
+  `onchain_chainlink`, composed feeds report `onchain_derived`, and the
+  synthetic stablecoin shortcut remains distinguishable as `onchain`.
+
+- **BREAKING (Python API): chain descriptors require typed external IDs.**
+  `ChainDescriptor.external_ids` is now a mandatory `ExternalChainIds` value;
+  the former Chainlink field is removed because feed coverage belongs to the
+  Chainlink integration catalogue. Provider-specific chain maps derive from
+  descriptors, and legacy maps exported from `almanak.core.chainlink` are
+  read-only compatibility views rather than mutable configuration surfaces.
+
+- **Chainlink backtesting is gateway-only.** The legacy
+  `ChainlinkDataProvider(rpc_url=...)` argument remains accepted for source
+  compatibility but is deprecated and ignored; gateway configuration owns
+  transport and archive access. Iteration metadata now distinguishes measured
+  gateway history (`chainlink_historical`) from a preloaded local cache
+  (`chainlink_cache`) and reports real hit counts. Persistent-fork valuation
+  now raises a typed configuration error before session boot until the gateway
+  can prove an oracle reader is explicitly bound to that fork, instead of
+  comparing a live value against itself. The legacy non-resetting flag is
+  refused by the same validation, and the ineffective
+  `oracle_divergence_threshold` config field is removed.
+
+- **Stablecoin peg shortcuts fail closed on measured de-pegs.** Periodic
+  on-chain verification forces the measured Chainlink path, preserves its
+  source/timestamp/confidence, and latches any measured off-peg evidence even
+  when it is stale or low-confidence; only a fresh, high-confidence on-peg
+  observation clears the latch. Verifier signature mismatches fail at wiring
+  time, while runtime source errors remain fail-soft.
+
 - **Connector intent declarations are statically typed.** Connector manifests
   now declare canonical `IntentType` members from
   `almanak.core.intent_types` in `strategy_intents`,

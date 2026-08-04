@@ -7,12 +7,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from almanak.framework.data.interfaces import DataSourceUnavailable, PriceResult
-from almanak.gateway.data.price.pyth import PYTH_FEED_IDS, PythPriceSource, _CacheEntry
-
+from almanak.gateway.data.price.pyth import PYTH_FEED_IDS, PythPriceSource
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def pyth_source():
@@ -36,6 +36,7 @@ def _make_price_result(price: Decimal = Decimal("84.175101"), confidence: float 
 # Tests: source metadata
 # ---------------------------------------------------------------------------
 
+
 class TestPythSourceMetadata:
     def test_source_name(self, pyth_source):
         assert pyth_source.source_name == "pyth"
@@ -54,6 +55,7 @@ class TestPythSourceMetadata:
 # ---------------------------------------------------------------------------
 # Tests: get_price success (mocking _fetch_price)
 # ---------------------------------------------------------------------------
+
 
 class TestPythGetPrice:
     @pytest.mark.asyncio
@@ -89,6 +91,7 @@ class TestPythGetPrice:
 # ---------------------------------------------------------------------------
 # Tests: caching
 # ---------------------------------------------------------------------------
+
 
 class TestPythCaching:
     @pytest.mark.asyncio
@@ -131,6 +134,7 @@ class TestPythCaching:
 # Tests: error handling
 # ---------------------------------------------------------------------------
 
+
 class TestPythErrors:
     @pytest.mark.asyncio
     async def test_unsupported_token_raises(self, pyth_source):
@@ -149,15 +153,16 @@ class TestPythErrors:
     @pytest.mark.asyncio
     async def test_data_source_unavailable_not_caught(self, pyth_source):
         """DataSourceUnavailable from _fetch_price re-raised directly."""
-        mock_fetch = AsyncMock(side_effect=DataSourceUnavailable("pyth", "Zero price"))
+        mock_fetch = AsyncMock(side_effect=DataSourceUnavailable("pyth", "Non-positive price"))
         with patch.object(pyth_source, "_fetch_price", mock_fetch):
-            with pytest.raises(DataSourceUnavailable, match="Zero price"):
+            with pytest.raises(DataSourceUnavailable, match="Non-positive price"):
                 await pyth_source.get_price("SOL")
 
 
 # ---------------------------------------------------------------------------
 # Tests: _fetch_price parsing (unit test the parser logic)
 # ---------------------------------------------------------------------------
+
 
 class TestPythFetchPriceParsing:
     @pytest.mark.asyncio
@@ -225,7 +230,7 @@ class TestPythFetchPriceParsing:
         mock_session.get = MagicMock(return_value=mock_cm)
 
         with patch.object(pyth_source, "_get_session", new_callable=AsyncMock, return_value=mock_session):
-            with pytest.raises(DataSourceUnavailable, match="Zero price"):
+            with pytest.raises(DataSourceUnavailable, match="Non-positive price"):
                 await pyth_source._fetch_price(PYTH_FEED_IDS["SOL"], "SOL")
 
     @pytest.mark.asyncio
@@ -271,27 +276,25 @@ class TestPythFetchPriceParsing:
 # Tests: confidence calculation
 # ---------------------------------------------------------------------------
 
+
 class TestPythConfidence:
     def test_tight_spread_high_confidence(self, pyth_source):
         """Tight confidence interval -> high confidence."""
         # 0.06% spread
-        conf = pyth_source._calculate_confidence(
-            price_int=8417510100, conf_int=5455971, publish_time=int(time.time())
-        )
+        conf = pyth_source._calculate_confidence(price_int=8417510100, conf_int=5455971, publish_time=int(time.time()))
         assert conf >= 0.9
 
     def test_wide_spread_lower_confidence(self, pyth_source):
         """Wide confidence interval -> lower confidence."""
         # >1% spread
-        conf = pyth_source._calculate_confidence(
-            price_int=100000, conf_int=2000, publish_time=int(time.time())
-        )
+        conf = pyth_source._calculate_confidence(price_int=100000, conf_int=2000, publish_time=int(time.time()))
         assert conf == 0.8
 
     def test_stale_publish_time_reduces_confidence(self, pyth_source):
         """Old publish_time reduces confidence."""
         conf = pyth_source._calculate_confidence(
-            price_int=8417510100, conf_int=5455971,
+            price_int=8417510100,
+            conf_int=5455971,
             publish_time=int(time.time()) - 120,  # 2 minutes old
         )
         assert conf == 0.85
@@ -299,7 +302,8 @@ class TestPythConfidence:
     def test_very_stale_publish_time(self, pyth_source):
         """Very old publish_time reduces confidence further."""
         conf = pyth_source._calculate_confidence(
-            price_int=8417510100, conf_int=5455971,
+            price_int=8417510100,
+            conf_int=5455971,
             publish_time=int(time.time()) - 400,  # >5 minutes old
         )
         assert conf == 0.5
@@ -308,6 +312,7 @@ class TestPythConfidence:
 # ---------------------------------------------------------------------------
 # Tests: feed ID coverage
 # ---------------------------------------------------------------------------
+
 
 class TestPythFeedIDs:
     def test_all_solana_tokens_have_feeds(self):
@@ -325,6 +330,7 @@ class TestPythFeedIDs:
 # ---------------------------------------------------------------------------
 # Tests: health check
 # ---------------------------------------------------------------------------
+
 
 class TestPythHealthCheck:
     @pytest.mark.asyncio

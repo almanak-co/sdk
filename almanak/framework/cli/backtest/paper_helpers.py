@@ -20,6 +20,7 @@ from ...backtesting.paper.background import (
     PaperTraderState,
     PIDFile,
 )
+from ...backtesting.paper.config import PersistentForkOracleUnavailableError
 from .helpers import (
     _parse_duration,
     is_process_running,
@@ -263,22 +264,18 @@ def merge_funding(
 
 
 def apply_preset(paper_config: PaperTraderConfig, preset: str | None) -> None:
-    """Mutate `paper_config` in place to apply preset overrides (VIB-2636)."""
-    if preset == "yield-validation":
-        from ...backtesting.paper.config import ForkLifecycle
+    """Mutate `paper_config` in place to apply preset overrides (VIB-2636).
 
-        paper_config.fork_lifecycle = ForkLifecycle.PERSISTENT
-        paper_config.reset_fork_every_tick = False
-        paper_config.yield_poker_enabled = True
-        paper_config.use_rich_valuation = True
-        paper_config.position_reconciler_enabled = True
-        click.echo(
-            click.style(
-                "Preset: yield-validation (persistent fork, interest accrual enabled)",
-                fg="cyan",
-            )
+    Raises:
+        PersistentForkOracleUnavailableError: If ``preset`` is
+            ``yield-validation``, which requires the currently unsupported
+            persistent fork lifecycle.
+    """
+    if preset == "yield-validation":
+        raise PersistentForkOracleUnavailableError(
+            "The yield-validation preset is unavailable because persistent paper trading has no "
+            "explicitly fork-bound gateway oracle reader. Use --preset execution-validation."
         )
-        return
 
     label = preset or "execution-validation"
     click.echo(
@@ -461,14 +458,14 @@ def build_resume_config(
         kwargs["initial_eth"] = Decimal(str(kwargs["initial_eth"]))
     if "initial_tokens" in kwargs and isinstance(kwargs["initial_tokens"], dict):
         kwargs["initial_tokens"] = {k: Decimal(str(v)) for k, v in kwargs["initial_tokens"].items()}
-    if "oracle_divergence_threshold" in kwargs:
-        kwargs["oracle_divergence_threshold"] = Decimal(str(kwargs["oracle_divergence_threshold"]))
     if "bootstrap" in kwargs and isinstance(kwargs["bootstrap"], dict):
         kwargs["bootstrap"] = {
             chain_key: {tok: Decimal(str(amt)) for tok, amt in toks.items()}
             for chain_key, toks in kwargs["bootstrap"].items()
             if isinstance(toks, dict)
         }
+    if "position_reconciler_tolerance_pct" in kwargs:
+        kwargs["position_reconciler_tolerance_pct"] = Decimal(str(kwargs["position_reconciler_tolerance_pct"]))
 
     kwargs.update(
         chain=chain,
@@ -477,7 +474,14 @@ def build_resume_config(
         tick_interval_seconds=tick_interval,
         max_ticks=new_max_ticks,
     )
-    return PaperTraderConfig(**kwargs)
+    try:
+        return PaperTraderConfig(**kwargs)
+    except PersistentForkOracleUnavailableError as exc:
+        raise PersistentForkOracleUnavailableError(
+            "Cannot resume saved paper session: its saved fork lifecycle requires a non-resetting "
+            "fork, but paper trading has no fork-bound gateway oracle reader. Start a new session "
+            "with the rolling-reset execution-validation preset."
+        ) from exc
 
 
 # =============================================================================

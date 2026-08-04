@@ -24,7 +24,6 @@ for the byte-for-byte pinning tests.
 from __future__ import annotations
 
 import asyncio
-import functools
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
@@ -671,86 +670,6 @@ async def cache_run_loop_teardown_valuation(trader: PaperTrader) -> CachedTeardo
         final_value_usd=final_value,
         valuation_source=valuation_source,
         pnl_usd=pnl,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Oracle divergence helpers (CC reduction for PaperTrader._check_oracle_divergence)
-# ---------------------------------------------------------------------------
-
-
-@functools.cache
-def _chainlink_divergence_chains() -> frozenset[str]:
-    """Chains where the on-fork Chainlink-vs-TWAP divergence check runs.
-
-    The check compares a Chainlink feed against a DEX TWAP pool, so
-    membership is exactly "chains that have BOTH" — the same intersection
-    the engine's ``_PRICE_SOURCE_CHAINS`` uses (VIB-4851 CS-7; replaces a
-    hand-kept 6-chain identity map). Deferred imports: dex_twap and
-    paper.engine have a known order-dependent import cycle.
-    """
-    from almanak.core.chains._helpers import chainlink_usd_feeds_map
-    from almanak.framework.data.price.dex_twap import UNISWAP_V3_POOLS
-
-    return frozenset(chainlink_usd_feeds_map()) & frozenset(UNISWAP_V3_POOLS)
-
-
-# Per-token info logging threshold: any individual divergence above this gets
-# a per-token info line (separate from the hard threshold gate which raises).
-_DIVERGENCE_INFO_LOG_THRESHOLD = Decimal("0.02")
-
-
-def resolve_chainlink_divergence_chain(chain: str) -> str | None:
-    """Return the Chainlink chain key for ``chain``, or ``None`` if unsupported."""
-    return chain if chain in _chainlink_divergence_chains() else None
-
-
-async def compute_max_oracle_divergence(
-    chainlink_provider: Any,
-    cached_prices: dict[str, Decimal],
-    backtest_id: str | None,
-) -> tuple[Decimal, str]:
-    """Walk cached live prices, compare to fork-bound Chainlink, return ``(max, token)``.
-
-    Per-token failures are logged at debug and skipped; the loop never raises.
-    """
-    max_divergence = Decimal("0")
-    worst_token = ""
-    for token, live_price in cached_prices.items():
-        if live_price <= 0:
-            continue
-        try:
-            fork_price = await chainlink_provider.get_price(token, timestamp=None)
-        except Exception as e:
-            logger.debug(f"[{backtest_id}] Failed to get on-fork price for {token} from Chainlink: {e}")
-            continue
-        if not fork_price or fork_price <= 0:
-            continue
-        divergence = abs(live_price - fork_price) / live_price
-        if divergence > max_divergence:
-            max_divergence = divergence
-            worst_token = token
-        if divergence > _DIVERGENCE_INFO_LOG_THRESHOLD:
-            logger.info(
-                f"[{backtest_id}] Oracle divergence for {token}: "
-                f"live=${live_price:.2f} vs fork=${fork_price:.2f} "
-                f"({divergence * 100:.1f}%)"
-            )
-    return max_divergence, worst_token
-
-
-def build_divergence_error_message(
-    worst_token: str,
-    max_divergence: Decimal,
-    threshold: Decimal,
-) -> str:
-    """Build the ``RuntimeError`` message raised when divergence exceeds threshold."""
-    return (
-        f"Oracle divergence exceeds threshold for {worst_token}: "
-        f"{max_divergence * 100:.1f}% > {threshold * 100:.0f}%. "
-        f"The persistent fork's on-chain prices have drifted too far from reality. "
-        f"Paper trading results would be unreliable. "
-        f"Increase oracle_divergence_threshold or reduce session duration."
     )
 
 

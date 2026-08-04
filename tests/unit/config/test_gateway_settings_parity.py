@@ -223,9 +223,7 @@ def test_price_timeout_nan_rejected(field_name: str, gateway_env_scrub: pytest.M
     ["price_source_timeout_seconds", "price_aggregator_timeout_seconds"],
 )
 @pytest.mark.parametrize("value", [math.inf, -math.inf])
-def test_price_timeout_inf_rejected(
-    field_name: str, value: float, gateway_env_scrub: pytest.MonkeyPatch
-) -> None:
+def test_price_timeout_inf_rejected(field_name: str, value: float, gateway_env_scrub: pytest.MonkeyPatch) -> None:
     from pydantic import ValidationError
 
     with pytest.raises(ValidationError, match="must be a finite number"):
@@ -250,9 +248,7 @@ def test_price_timeout_non_positive_disable_sentinel_accepted(
     "field_name",
     ["price_source_timeout_seconds", "price_aggregator_timeout_seconds"],
 )
-def test_price_timeout_finite_positive_accepted(
-    field_name: str, gateway_env_scrub: pytest.MonkeyPatch
-) -> None:
+def test_price_timeout_finite_positive_accepted(field_name: str, gateway_env_scrub: pytest.MonkeyPatch) -> None:
     settings = GatewaySettings(**{field_name: 12.5})
     assert getattr(settings, field_name) == 12.5
 
@@ -272,3 +268,16 @@ def test_price_timeout_nan_via_env_rejected(gateway_env_scrub: pytest.MonkeyPatc
     gateway_env_scrub.setenv("ALMANAK_GATEWAY_PRICE_SOURCE_TIMEOUT_SECONDS", "nan")
     with pytest.raises(ValidationError, match="must be a finite number"):
         GatewaySettings()
+
+
+def test_stablecoin_verifier_warning_threshold_loads_from_env(
+    gateway_env_scrub: pytest.MonkeyPatch,
+) -> None:
+    gateway_env_scrub.setenv(
+        "ALMANAK_GATEWAY_STABLECOIN_VERIFIER_FAILURE_WARNING_THRESHOLD",
+        "7",
+    )
+
+    settings = GatewaySettings()
+
+    assert settings.stablecoin_verifier_failure_warning_threshold == 7

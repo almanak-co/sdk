@@ -15,6 +15,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from types import MappingProxyType
 
+from almanak.core.chains._descriptor import ExternalIdProvider
 from almanak.core.chains._registry import ChainRegistry
 from almanak.core.enums import ChainFamily
 
@@ -89,64 +90,47 @@ def native_symbols_for(chain: str) -> frozenset[str]:
     return frozenset({native.symbol.upper(), *(s.upper() for s in native.accepted_symbols)})
 
 
-def external_id_for(chain: str, vendor: str) -> str | None:
-    """Return ``chain``'s identifier for third-party ``vendor``, or ``None``.
-
-    Derived from the single source of truth ``ChainDescriptor.external_ids``
-    (a sparse, vendor-keyed mapping; see
-    :data:`almanak.core.chains._descriptor.KNOWN_VENDORS`). This is the
-    registry-derived replacement for the standalone per-vendor maps
-    (``COINGECKO_PLATFORM_IDS``, ``CHAIN_TO_DEXSCREENER_PLATFORM``,
-    ``_CHAIN_TO_NETWORK``, ``_CHAIN_TO_LLAMA``, Zerion / Moralis / OKX
-    ``_CHAIN_IDS`` …) folded onto the descriptor in VIB-4851 (B1).
-
-    Fail-closed and sparse, mirroring the legacy ``map.get(chain)`` → ``None``
-    miss: an unregistered chain, a chain whose descriptor declares no
-    ``external_ids`` at all, or a chain whose ``external_ids`` simply lacks
-    ``vendor`` all return ``None``. The value is returned **verbatim** —
-    e.g. ``external_id_for("arbitrum", "coingecko") == "arbitrum-one"`` and
-    ``external_id_for("ethereum", "coingecko_onchain") == "eth"`` — case included.
-
-    Alias-normalises the chain via ``ChainRegistry.try_resolve`` so an alias
-    resolves to its canonical descriptor (e.g.
-    ``external_id_for("bnb", "okx") == "56"`` because ``bnb`` resolves to
-    ``bsc``). The ``vendor`` key is matched case-insensitively, consistent
-    with the lower-cased storage in ``ChainDescriptor.__post_init__``.
-    """
-    if not chain or not vendor:
+def external_chain_id_for(chain: str, provider: ExternalIdProvider | str) -> str | None:
+    """Return one chain-owned provider identifier, or ``None`` on a miss."""
+    if not chain:
         return None
     descriptor = ChainRegistry.try_resolve(chain)
-    if descriptor is None or descriptor.external_ids is None:
+    if descriptor is None:
         return None
-    return descriptor.external_ids.get(vendor.lower())
+    return descriptor.external_ids.get(provider)
 
 
-def vendor_chain_map(vendor: str) -> dict[str, str]:
-    """Return ``{canonical_chain_name: vendor_id}`` for ``vendor``.
-
-    Inverts ``ChainDescriptor.external_ids`` back into the per-vendor shape the
-    legacy standalone maps had, but built **only** from the chains whose
-    descriptor actually declares ``vendor``. It is never widened to every
-    registered chain — a chain absent from the result is genuinely unsupported
-    by that vendor (the anti-widening invariant the B1 equivalence test pins).
-
-    Keys are canonical chain names only; aliases are excluded (each descriptor
-    contributes its canonical ``name`` exactly once, never its aliases). The
-    ``vendor`` key is matched case-insensitively. An unknown / never-declared
-    vendor yields an empty dict.
-    """
-    if not vendor:
+def external_chain_id_map(provider: ExternalIdProvider | str) -> dict[str, str]:
+    """Return the sparse canonical ``chain -> provider id`` projection."""
+    parsed = ExternalIdProvider.try_parse(provider)
+    if parsed is None:
         return {}
-    vendor_key = vendor.lower()
+    return {
+        descriptor.name: value
+        for descriptor in ChainRegistry.all()
+        if (value := descriptor.external_ids.get(parsed)) is not None
+    }
+
+
+def native_coingecko_ids() -> Mapping[str, str]:
+    """Project chain-owned native and wrapped-native CoinGecko coin ids."""
     result: dict[str, str] = {}
+    normalized: dict[str, str] = {}
     for descriptor in ChainRegistry.all():
-        external_ids = descriptor.external_ids
-        if external_ids is None:
-            continue
-        vendor_id = external_ids.get(vendor_key)
-        if vendor_id is not None:
-            result[descriptor.name] = vendor_id
-    return result
+        native = descriptor.native
+        pairs: list[tuple[str, str]] = []
+        if native.coingecko_id is not None:
+            pairs.extend((symbol, native.coingecko_id) for symbol in (native.symbol, *native.accepted_symbols))
+        if native.wrapped_symbol is not None and native.wrapped_coingecko_id is not None:
+            pairs.append((native.wrapped_symbol, native.wrapped_coingecko_id))
+        for symbol, coin_id in pairs:
+            key = symbol.upper()
+            existing = normalized.get(key)
+            if existing is not None and existing != coin_id:
+                raise ValueError(f"native_coingecko_ids: symbol {symbol!r} maps to both {existing!r} and {coin_id!r}")
+            normalized[key] = coin_id
+            result[symbol] = coin_id
+    return MappingProxyType(result)
 
 
 def chain_name_for_id(chain_id: int) -> str | None:
@@ -314,45 +298,6 @@ def rpc_rate_limit_map() -> Mapping[str, int]:
     )
 
 
-def native_coingecko_ids() -> Mapping[str, str]:
-    """Symbol → CoinGecko COIN id projection over every chain's native asset.
-
-    Covers, per registered chain: the native ``symbol`` and every
-    ``accepted_symbols`` entry (→ ``native.coingecko_id``), plus the
-    ``wrapped_symbol`` (→ ``native.wrapped_coingecko_id``). Chains with
-    ``None`` ids contribute nothing (legacy miss semantics). Keys are
-    verbatim case ("wS"); price-map consumers uppercase at merge to match
-    their symbol normalization. Replaces the hand-maintained native rows
-    of the per-chain ``*_TOKEN_IDS`` maps (VIB-4851 CS-3b; drift
-    precedent VIB-3805 — plasma gas priced as ETH).
-
-    A symbol claimed by two chains with DIFFERENT ids (e.g. a future
-    chain reusing "ETH" with a non-"ethereum" id) raises at derive time
-    rather than silently letting registration order pick a winner.
-    """
-    out: dict[str, str] = {}
-    upper_seen: dict[str, str] = {}
-    for d in ChainRegistry.all():
-        native = d.native
-        pairs: list[tuple[str, str]] = []
-        if native.coingecko_id is not None:
-            pairs.extend((s, native.coingecko_id) for s in (native.symbol, *native.accepted_symbols))
-        if native.wrapped_symbol is not None and native.wrapped_coingecko_id is not None:
-            pairs.append((native.wrapped_symbol, native.wrapped_coingecko_id))
-        for symbol, cg_id in pairs:
-            # Case-insensitive check: price-map consumers uppercase keys at
-            # merge, so "wS" and a hypothetical "WS" with a different id
-            # would silently overwrite each other there.
-            existing = upper_seen.get(symbol.upper())
-            if existing is not None and existing != cg_id:
-                raise ValueError(
-                    f"native_coingecko_ids: symbol {symbol!r} maps to both {existing!r} and {cg_id!r} across chains (case-insensitive)"
-                )
-            upper_seen[symbol.upper()] = cg_id
-            out[symbol] = cg_id
-    return MappingProxyType(out)
-
-
 def explorer_tx_prefix_map() -> Mapping[str, str]:
     """Read-only ``{chain: "<browse_url>/tx/"}`` for chains with a web explorer.
 
@@ -372,46 +317,10 @@ def explorer_tx_prefix_map() -> Mapping[str, str]:
     )
 
 
-def chainlink_usd_feeds_map() -> Mapping[str, Mapping[str, str]]:
-    """Read-only ``{chain: {"TOKEN/USD": aggregator}}`` view (VIB-4851 CS-5).
-
-    Membership == chains declaring ``ChainDescriptor.chainlink`` — the
-    legacy ``CHAINLINK_PRICE_FEEDS`` nine, byte-for-byte.
-    """
-    return MappingProxyType({d.name: d.chainlink.usd_feeds for d in ChainRegistry.all() if d.chainlink is not None})
-
-
-def chainlink_eth_denominated_map() -> Mapping[str, Mapping[str, str]]:
-    """Read-only ``{chain: {"TOKEN/ETH": aggregator}}`` view (VIB-4851 CS-5).
-
-    Membership == chains with a non-empty ``chainlink.eth_denominated`` —
-    the legacy ``ETH_DENOMINATED_FEEDS`` three; consumers keep their
-    ``.get(chain, {})`` miss semantics.
-    """
-    return MappingProxyType(
-        {
-            d.name: d.chainlink.eth_denominated
-            for d in ChainRegistry.all()
-            if d.chainlink is not None and d.chainlink.eth_denominated
-        }
-    )
-
-
-def chainlink_chain_ids_map() -> Mapping[str, int]:
-    """Read-only ``{chain: chain_id}`` for Chainlink-supported chains.
-
-    The legacy ``CHAINLINK_CHAIN_IDS`` dict duplicated
-    ``ChainDescriptor.chain_id`` for exactly the chains with feeds; this
-    derives the same membership from ``chainlink`` presence so the id can
-    never drift from the descriptor again (VIB-4851 CS-5).
-    """
-    return MappingProxyType({d.name: d.chain_id for d in ChainRegistry.all() if d.chainlink is not None})
-
-
 def contract_address_map(key: str) -> Mapping[str, str]:
     """Read-only ``{chain: address}`` for one ``ChainDescriptor.contracts`` key.
 
-    Membership == chains declaring *key* (sparse, like ``vendor_chain_map``).
+    Membership == chains declaring *key* (sparse by construction).
     VIB-4851 CS-5.
     """
     return MappingProxyType(

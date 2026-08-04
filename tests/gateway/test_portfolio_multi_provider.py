@@ -28,7 +28,6 @@ from almanak.gateway.integrations.portfolio_chain import (
     get_portfolio_provider_configs,
 )
 
-
 # =============================================================================
 # CircuitBreaker tests
 # =============================================================================
@@ -293,6 +292,55 @@ class TestBuildPortfolioChain:
         names = [p.name for p in chain.providers]
         assert names == ["zerion", "moralis"]
 
+    def test_factory_contract_does_not_require_provider_is_configured_attribute(self):
+        class FutureProvider:
+            name = "future_provider"
+
+            def supports_portfolio(self):
+                return True
+
+        provider = FutureProvider()
+
+        class Factory:
+            requires_api_key = False
+
+            def build(self, **_kwargs):
+                return provider
+
+        with patch(
+            "almanak.integrations._base.gateway.portfolio_chain.INTEGRATION_REGISTRY."
+            "gateway_portfolio_provider_factory",
+            return_value=Factory(),
+        ):
+            chain = build_portfolio_chain(
+                portfolio_providers_csv="future_provider",
+                portfolio_api_key=None,
+            )
+        assert chain is not None
+        assert chain.providers == [provider]
+
+    def test_skips_provider_that_rejects_its_complete_credential_set(self):
+        provider = _mock_provider("okx")
+        provider.is_configured = False
+
+        class Factory:
+            requires_api_key = False
+
+            def build(self, **_kwargs):
+                return provider
+
+        with patch(
+            "almanak.integrations._base.gateway.portfolio_chain.INTEGRATION_REGISTRY."
+            "gateway_portfolio_provider_factory",
+            return_value=Factory(),
+        ):
+            chain = build_portfolio_chain(
+                portfolio_providers_csv="okx",
+                portfolio_api_key=None,
+            )
+
+        assert chain is None
+
 
 # =============================================================================
 # MoralisIntegration normalization tests
@@ -366,6 +414,32 @@ class TestMoralisNormalization:
 
         assert len(snapshot.positions) == 1
         assert Decimal(snapshot.positions[0].value_usd) == Decimal("1")
+
+    def test_invalid_decimals_do_not_abort_evm_or_solana_normalization(self, caplog):
+        moralis = MoralisIntegration.__new__(MoralisIntegration)
+        moralis.name = "moralis"
+        evm_data = {
+            "result": [
+                {"token_address": "0xbad", "symbol": "BAD", "decimals": "nope", "balance": "1"},
+                {"token_address": "0xgood", "symbol": "GOOD", "decimals": "0", "balance": "2", "usd_price": "3"},
+            ]
+        }
+        solana_data = [
+            {"mint": "bad-mint", "symbol": "BAD", "decimals": {}, "amount": "1"},
+            {"mint": "good-mint", "symbol": "GOOD", "decimals": "0", "amount": "2", "usd_price": "3"},
+        ]
+
+        evm = moralis._normalize_evm_response("0xwallet", "arbitrum", evm_data)
+        solana = moralis._normalize_solana_response("wallet", "solana", solana_data)
+
+        assert [position.value_usd for position in evm.positions] == ["0", "6"]
+        assert [position.value_usd for position in solana.positions] == ["0", "6"]
+        assert "invalid decimals" in caplog.text
+
+    @pytest.mark.parametrize("raw_decimals", [-1, True, False])
+    def test_parse_decimals_rejects_negative_values_and_booleans(self, raw_decimals, caplog):
+        assert MoralisIntegration._parse_decimals(raw_decimals, "BAD", "0xbad") is None
+        assert "invalid decimals" in caplog.text
 
     def test_normalize_evm_filters_spam(self):
         """Spam tokens are filtered out."""
@@ -490,6 +564,46 @@ class TestMoralisNormalization:
         assert _m._get_chain_slug("solana") is None
         assert _m._is_solana("solana") is True
         assert _m._is_solana("ethereum") is False
+
+    @pytest.mark.asyncio
+    async def test_solana_portfolio_uses_solana_gateway_origin(self):
+        moralis = MoralisIntegration(api_key="test")
+        with patch.object(moralis, "_fetch", AsyncMock(return_value=[])) as fetch:
+            snapshot = await moralis._fetch_solana_portfolio("SolWallet123", "solana")
+
+        fetch.assert_awaited_once_with(
+            "/account/mainnet/SolWallet123/tokens",
+        )
+        assert (
+            moralis._url_for_path("/account/mainnet/SolWallet123/tokens")
+            == "https://solana-gateway.moralis.io/account/mainnet/SolWallet123/tokens"
+        )
+        assert snapshot.chain == "solana"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("method_name", "cache_key"),
+        [
+            ("get_wallet_portfolio", "moralis:portfolio:0xwallet:arbitrum"),
+            ("get_wallet_positions", "moralis:positions:0xwallet:arbitrum"),
+            ("get_defi_positions", "moralis:defi:0xwallet:arbitrum"),
+        ],
+    )
+    async def test_cached_snapshots_are_copied_before_marking_cache_hit(self, method_name, cache_key):
+        moralis = MoralisIntegration(api_key="test")
+        stored = WalletPortfolioSnapshot(
+            provider="moralis",
+            wallet_address="0xwallet",
+            chain="arbitrum",
+            total_value_usd="10",
+        )
+        moralis._update_cache(cache_key, stored)
+
+        result = await getattr(moralis, method_name)("0xwallet", "arbitrum")
+
+        assert result is not stored
+        assert result.cache_hit is True
+        assert stored.cache_hit is False
 
     def test_normalize_net_worth_response(self):
         moralis = MoralisIntegration.__new__(MoralisIntegration)
@@ -797,7 +911,7 @@ class TestGenericModels:
         assert snapshot.fetched_at is not None
 
     def test_backward_compatible_aliases(self):
-        from almanak.gateway.integrations.zerion import ZerionPosition, ZerionPortfolioSnapshot
+        from almanak.gateway.integrations.zerion import ZerionPortfolioSnapshot, ZerionPosition
 
         assert ZerionPosition is WalletPosition
         assert ZerionPortfolioSnapshot is WalletPortfolioSnapshot

@@ -6764,6 +6764,31 @@ class GasPricePoint(_message.Message):
 Global___GasPricePoint: _TypeAlias = GasPricePoint  # noqa: Y015
 
 @_typing.final
+class OraclePricePoint(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    TIMESTAMP_FIELD_NUMBER: _builtins.int
+    PRICE_FIELD_NUMBER: _builtins.int
+    OBSERVATION_ID_FIELD_NUMBER: _builtins.int
+    timestamp: _builtins.int
+    """Feed observation timestamp (updatedAt), Unix seconds UTC."""
+    price: _builtins.str
+    """Decimal-as-string price in the requested quote currency."""
+    observation_id: _builtins.str
+    """Provider-native observation id. Chainlink uses the uint80 round id."""
+    def __init__(
+        self,
+        *,
+        timestamp: _builtins.int = ...,
+        price: _builtins.str = ...,
+        observation_id: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["observation_id", b"observation_id", "price", b"price", "timestamp", b"timestamp"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___OraclePricePoint: _TypeAlias = OraclePricePoint  # noqa: Y015
+
+@_typing.final
 class GetLendingRateCurrentRequest(_message.Message):
     """-----------------------------------------------------------------------------
     Request / response envelopes
@@ -7104,6 +7129,143 @@ class GasPricePointResponse(_message.Message):
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___GasPricePointResponse: _TypeAlias = GasPricePointResponse  # noqa: Y015
+
+@_typing.final
+class GetOraclePriceHistoryRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    PROVIDER_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    TOKEN_FIELD_NUMBER: _builtins.int
+    START_TS_FIELD_NUMBER: _builtins.int
+    END_TS_FIELD_NUMBER: _builtins.int
+    MAX_POINTS_FIELD_NUMBER: _builtins.int
+    provider: _builtins.str
+    """Required integration slug (currently "chainlink")."""
+    chain: _builtins.str
+    """Required canonical chain name."""
+    token: _builtins.str
+    """Required token symbol."""
+    start_ts: _builtins.int
+    """Required half-open UTC interval [start_ts, end_ts)."""
+    end_ts: _builtins.int
+    max_points: _builtins.int
+    """Required caller bound. Gateway rejects values outside [1, 10000]."""
+    def __init__(
+        self,
+        *,
+        provider: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        token: _builtins.str = ...,
+        start_ts: _builtins.int = ...,
+        end_ts: _builtins.int = ...,
+        max_points: _builtins.int = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "end_ts", b"end_ts", "max_points", b"max_points", "provider", b"provider", "start_ts", b"start_ts", "token", b"token"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetOraclePriceHistoryRequest: _TypeAlias = GetOraclePriceHistoryRequest  # noqa: Y015
+
+@_typing.final
+class GetOraclePriceRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    PROVIDER_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    TOKEN_FIELD_NUMBER: _builtins.int
+    provider: _builtins.str
+    """Required integration slug (currently "chainlink")."""
+    chain: _builtins.str
+    """Required canonical chain name."""
+    token: _builtins.str
+    """Required token symbol."""
+    def __init__(
+        self,
+        *,
+        provider: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        token: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "provider", b"provider", "token", b"token"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetOraclePriceRequest: _TypeAlias = GetOraclePriceRequest  # noqa: Y015
+
+@_typing.final
+class OraclePriceResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    PROVIDER_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    TOKEN_FIELD_NUMBER: _builtins.int
+    POINT_FIELD_NUMBER: _builtins.int
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    provider: _builtins.str
+    chain: _builtins.str
+    token: _builtins.str
+    success: _builtins.bool
+    error: _builtins.str
+    @_builtins.property
+    def point(self) -> Global___OraclePricePoint: ...
+    def __init__(
+        self,
+        *,
+        provider: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        token: _builtins.str = ...,
+        point: Global___OraclePricePoint | None = ...,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _HasFieldArgType: _TypeAlias = _typing.Literal["point", b"point"]  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "error", b"error", "point", b"point", "provider", b"provider", "success", b"success", "token", b"token"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___OraclePriceResponse: _TypeAlias = OraclePriceResponse  # noqa: Y015
+
+@_typing.final
+class OraclePriceHistoryResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    PROVIDER_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    TOKEN_FIELD_NUMBER: _builtins.int
+    POINTS_FIELD_NUMBER: _builtins.int
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    TRUNCATED_FIELD_NUMBER: _builtins.int
+    RECOMMENDED_SPLIT_TS_FIELD_NUMBER: _builtins.int
+    provider: _builtins.str
+    chain: _builtins.str
+    token: _builtins.str
+    success: _builtins.bool
+    error: _builtins.str
+    truncated: _builtins.bool
+    """True when the requested interval contains more observations than
+    max_points. Callers must split/page instead of treating points as complete.
+    """
+    recommended_split_ts: _builtins.int
+    """Suggested exclusive split point in Unix seconds when truncated=true."""
+    @_builtins.property
+    def points(self) -> _containers.RepeatedCompositeFieldContainer[Global___OraclePricePoint]: ...
+    def __init__(
+        self,
+        *,
+        provider: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        token: _builtins.str = ...,
+        points: _abc.Iterable[Global___OraclePricePoint] | None = ...,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+        truncated: _builtins.bool = ...,
+        recommended_split_ts: _builtins.int = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "error", b"error", "points", b"points", "provider", b"provider", "recommended_split_ts", b"recommended_split_ts", "success", b"success", "token", b"token", "truncated", b"truncated"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___OraclePriceHistoryResponse: _TypeAlias = OraclePriceHistoryResponse  # noqa: Y015
 
 @_typing.final
 class GetDexTwapRequest(_message.Message):

@@ -1,1013 +1,395 @@
-"""Unit tests for Chainlink historical accuracy validation.
+"""Gateway-owned Chainlink round-reader accuracy and work-bound tests."""
 
-This module validates that the Chainlink provider correctly returns different prices
-for different timestamps when archive node access is available, proving the
-implementation from US-081a works correctly.
+from __future__ import annotations
 
-Key tests:
-- iterate() returns different prices at different timestamps via getRoundData()
-- Prices match expected values from historical Chainlink rounds
-- Round traversal handles gaps correctly (some round IDs don't exist)
-- No PRE_CACHE warning when using native round traversal
-- data_source metadata and warnings populated correctly
-"""
-
-import logging
-from datetime import UTC, datetime
+import asyncio
 from decimal import Decimal
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from almanak.framework.backtesting.pnl.data_provider import (
-    HistoricalDataCapability,
-    HistoricalDataConfig,
+from almanak.integrations.chainlink.catalog import CATALOG
+from almanak.integrations.chainlink.codec import RoundData
+from almanak.integrations.chainlink.gateway.history import (
+    ChainlinkHistoryReader,
+    ChainlinkHistoryUnavailable,
+    HistoricalPricePoint,
 )
-from almanak.framework.backtesting.pnl.providers.chainlink import (
-    ChainlinkDataProvider,
-    ChainlinkRoundData,
-)
-
-# =============================================================================
-# Test Fixtures - Known Historical Chainlink Rounds
-# =============================================================================
-
-# Simulated Chainlink round data for ETH/USD on Ethereum mainnet
-# Real Chainlink rounds have large round IDs (e.g., 110680464442257320123)
-# These are realistic values that would come from getRoundData()
-KNOWN_ETH_ROUND_DATA: list[ChainlinkRoundData] = [
-    # Round data: round_id, answer (8 decimals), started_at, updated_at, answered_in_round
-    ChainlinkRoundData(
-        round_id=110680464442257320100,
-        answer=325000000000,  # $3250.00
-        started_at=1733011200,  # Dec 1, 2024 00:00 UTC
-        updated_at=1733011200,
-        answered_in_round=110680464442257320100,
-    ),
-    ChainlinkRoundData(
-        round_id=110680464442257320101,
-        answer=325550000000,  # $3255.50
-        started_at=1733014800,  # Dec 1, 2024 01:00 UTC
-        updated_at=1733014800,
-        answered_in_round=110680464442257320101,
-    ),
-    ChainlinkRoundData(
-        round_id=110680464442257320102,
-        answer=324825000000,  # $3248.25
-        started_at=1733018400,  # Dec 1, 2024 02:00 UTC
-        updated_at=1733018400,
-        answered_in_round=110680464442257320102,
-    ),
-    ChainlinkRoundData(
-        round_id=110680464442257320103,
-        answer=326000000000,  # $3260.00
-        started_at=1733022000,  # Dec 1, 2024 03:00 UTC
-        updated_at=1733022000,
-        answered_in_round=110680464442257320103,
-    ),
-    ChainlinkRoundData(
-        round_id=110680464442257320104,
-        answer=327575000000,  # $3275.75
-        started_at=1733025600,  # Dec 1, 2024 04:00 UTC
-        updated_at=1733025600,
-        answered_in_round=110680464442257320104,
-    ),
-    ChainlinkRoundData(
-        round_id=110680464442257320105,
-        answer=329000000000,  # $3290.00
-        started_at=1733029200,  # Dec 1, 2024 05:00 UTC
-        updated_at=1733029200,
-        answered_in_round=110680464442257320105,
-    ),
-]
-
-# Expected prices at each timestamp (derived from round data)
-KNOWN_ETH_PRICE_SERIES: dict[datetime, Decimal] = {
-    datetime(2024, 12, 1, 0, 0, tzinfo=UTC): Decimal("3250.00"),
-    datetime(2024, 12, 1, 1, 0, tzinfo=UTC): Decimal("3255.50"),
-    datetime(2024, 12, 1, 2, 0, tzinfo=UTC): Decimal("3248.25"),
-    datetime(2024, 12, 1, 3, 0, tzinfo=UTC): Decimal("3260.00"),
-    datetime(2024, 12, 1, 4, 0, tzinfo=UTC): Decimal("3275.75"),
-    datetime(2024, 12, 1, 5, 0, tzinfo=UTC): Decimal("3290.00"),
-}
 
 
-def create_mock_fetch_historical_rounds(
-    rounds: list[ChainlinkRoundData],
-    decimals: int = 8,
-) -> AsyncMock:
-    """Create a mock for _fetch_historical_rounds that returns prices from known rounds.
-
-    Args:
-        rounds: List of known round data
-        decimals: Number of decimals (default 8 for Chainlink)
-
-    Returns:
-        AsyncMock that returns list of (timestamp, price) tuples
-    """
-
-    async def mock_fetch(
-        token: str, start_time: datetime, end_time: datetime
-    ) -> list[tuple[datetime, Decimal]]:
-        # Convert to timestamps
-        start_ts = start_time.timestamp()
-        end_ts = end_time.timestamp()
-
-        # Filter and convert rounds within time range
-        prices = []
-        for round_data in rounds:
-            round_ts = round_data.updated_at
-            if start_ts <= round_ts <= end_ts:
-                price = Decimal(round_data.answer) / Decimal(10**decimals)
-                timestamp = datetime.fromtimestamp(round_ts, tz=UTC)
-                prices.append((timestamp, price))
-
-        # Sort by timestamp ascending
-        prices.sort(key=lambda x: x[0])
-        return prices
-
-    return AsyncMock(side_effect=mock_fetch)
+def _round(round_id: int, timestamp: int, answer: int | None = None) -> RoundData:
+    return RoundData(
+        round_id=round_id,
+        answer=answer if answer is not None else timestamp * 100_000_000,
+        started_at=timestamp,
+        updated_at=timestamp,
+        answered_in_round=round_id,
+    )
 
 
-def create_mock_query_round_data(
-    rounds: list[ChainlinkRoundData],
-    gaps: set[int] | None = None,
-) -> AsyncMock:
-    """Create a mock for _query_round_data that returns data from known rounds.
-
-    Args:
-        rounds: List of known round data to return
-        gaps: Set of round IDs that should return None (simulating gaps)
-
-    Returns:
-        AsyncMock that behaves like _query_round_data
-    """
-    gaps = gaps or set()
-
-    # Build lookup by round_id
-    round_lookup: dict[int, ChainlinkRoundData] = {r.round_id: r for r in rounds}
-
-    async def mock_query(feed_address: str, round_id: int) -> ChainlinkRoundData | None:
-        if round_id in gaps:
-            return None
-        return round_lookup.get(round_id)
-
-    return AsyncMock(side_effect=mock_query)
-
-
-def create_mock_query_latest_round_data(
-    latest_round: ChainlinkRoundData,
-) -> AsyncMock:
-    """Create an async mock for _query_latest_round_data."""
-    return AsyncMock(return_value=latest_round)
-
-
-# =============================================================================
-# Test Class: Historical Round Data Fixture
-# =============================================================================
-
-
-class TestHistoricalRoundDataFixture:
-    """Tests for the known historical round data fixture."""
-
-    def test_fixture_has_required_rounds(self):
-        """Test fixture contains multiple rounds spanning time range."""
-        assert len(KNOWN_ETH_ROUND_DATA) >= 6
-        # Verify rounds are in ascending order by round_id
-        round_ids = [r.round_id for r in KNOWN_ETH_ROUND_DATA]
-        assert round_ids == sorted(round_ids)
-
-    def test_fixture_prices_are_different(self):
-        """Test fixture prices vary across rounds (not constant)."""
-        prices = [r.answer for r in KNOWN_ETH_ROUND_DATA]
-        unique_prices = set(prices)
-        # At least half should be unique
-        assert len(unique_prices) >= len(prices) // 2
-
-    def test_fixture_prices_realistic_range(self):
-        """Test fixture prices are in realistic ETH range (8 decimals)."""
-        for round_data in KNOWN_ETH_ROUND_DATA:
-            # Price should be between $1000 and $10000 (in 8 decimal format)
-            assert 100000000000 < round_data.answer < 1000000000000
-
-    def test_fixture_timestamps_are_sequential(self):
-        """Test fixture timestamps are sequential and reasonable."""
-        timestamps = [r.updated_at for r in KNOWN_ETH_ROUND_DATA]
-        for i in range(1, len(timestamps)):
-            # Each timestamp should be after the previous
-            assert timestamps[i] > timestamps[i - 1]
-            # Gap should be reasonable (< 24 hours)
-            gap = timestamps[i] - timestamps[i - 1]
-            assert gap < 86400
-
-    def test_price_series_matches_round_data(self):
-        """Test KNOWN_ETH_PRICE_SERIES matches KNOWN_ETH_ROUND_DATA."""
-        for round_data in KNOWN_ETH_ROUND_DATA:
-            timestamp = datetime.fromtimestamp(round_data.updated_at, tz=UTC)
-            expected_price = Decimal(round_data.answer) / Decimal(10**8)
-            assert timestamp in KNOWN_ETH_PRICE_SERIES
-            assert KNOWN_ETH_PRICE_SERIES[timestamp] == expected_price
-
-
-# =============================================================================
-# Test Class: iterate() Returns Different Prices
-# =============================================================================
-
-
-class TestIterateDifferentPrices:
-    """Tests verifying iterate() returns different prices at different timestamps."""
-
-    @pytest.mark.asyncio
-    async def test_iterate_returns_varying_prices_with_archive(self):
-        """Test that iterate() returns different prices when archive available."""
-        provider = ChainlinkDataProvider(
-            chain="ethereum", rpc_url="https://mock-archive.example.com"
+def _encoded_round(round_data: RoundData) -> bytes:
+    return b"".join(
+        (
+            round_data.round_id.to_bytes(32, "big"),
+            round_data.answer.to_bytes(32, "big", signed=True),
+            round_data.started_at.to_bytes(32, "big"),
+            round_data.updated_at.to_bytes(32, "big"),
+            round_data.answered_in_round.to_bytes(32, "big"),
         )
-
-        # Mock archive access verification and _fetch_historical_rounds
-        with (
-            patch.object(provider, "_verify_archive_access", return_value=True),
-            patch.object(
-                provider,
-                "_fetch_historical_rounds",
-                create_mock_fetch_historical_rounds(KNOWN_ETH_ROUND_DATA),
-            ),
-        ):
-            provider._archive_access_verified = True
-            provider._has_archive_access = True
-
-            config = HistoricalDataConfig(
-                start_time=datetime(2024, 12, 1, 0, 0, tzinfo=UTC),
-                end_time=datetime(2024, 12, 1, 5, 0, tzinfo=UTC),
-                interval_seconds=3600,  # 1 hour
-                tokens=["ETH"],
-                chains=["ethereum"],
-            )
-
-            collected_prices: list[Decimal] = []
-            async for _timestamp, market_state in provider.iterate(config):
-                if "ETH" in market_state.prices:
-                    collected_prices.append(market_state.prices["ETH"])
-
-            # Should have collected 6 data points (0-5 hours inclusive)
-            assert len(collected_prices) == 6
-
-            # Prices should NOT all be the same (historical data varies)
-            unique_prices = set(collected_prices)
-            assert len(unique_prices) > 1, "All prices are identical - historical iteration not working"
-
-    @pytest.mark.asyncio
-    async def test_iterate_prices_match_expected_series(self):
-        """Test that iterate() returns prices matching our expected series."""
-        provider = ChainlinkDataProvider(
-            chain="ethereum", rpc_url="https://mock-archive.example.com"
-        )
-
-        with (
-            patch.object(provider, "_verify_archive_access", return_value=True),
-            patch.object(
-                provider,
-                "_fetch_historical_rounds",
-                create_mock_fetch_historical_rounds(KNOWN_ETH_ROUND_DATA),
-            ),
-        ):
-            provider._archive_access_verified = True
-            provider._has_archive_access = True
-
-            config = HistoricalDataConfig(
-                start_time=datetime(2024, 12, 1, 0, 0, tzinfo=UTC),
-                end_time=datetime(2024, 12, 1, 3, 0, tzinfo=UTC),
-                interval_seconds=3600,
-                tokens=["ETH"],
-                chains=["ethereum"],
-            )
-
-            results: list[tuple[datetime, Decimal]] = []
-            async for timestamp, market_state in provider.iterate(config):
-                if "ETH" in market_state.prices:
-                    results.append((timestamp, market_state.prices["ETH"]))
-
-            # Verify prices match expected values
-            assert len(results) == 4
-            for timestamp, actual_price in results:
-                expected = KNOWN_ETH_PRICE_SERIES.get(timestamp)
-                if expected:
-                    assert actual_price == expected, f"Price mismatch at {timestamp}"
-
-    @pytest.mark.asyncio
-    async def test_iterate_detects_upward_trend(self):
-        """Test that iterate() correctly reflects upward price trend."""
-        provider = ChainlinkDataProvider(
-            chain="ethereum", rpc_url="https://mock-archive.example.com"
-        )
-
-        # Create upward trending round data
-        upward_rounds = [
-            ChainlinkRoundData(
-                round_id=110680464442257320100 + i,
-                answer=int((3000 + i * 50) * 10**8),
-                started_at=1733011200 + i * 3600,
-                updated_at=1733011200 + i * 3600,
-                answered_in_round=110680464442257320100 + i,
-            )
-            for i in range(6)
-        ]
-
-        with (
-            patch.object(provider, "_verify_archive_access", return_value=True),
-            patch.object(
-                provider,
-                "_fetch_historical_rounds",
-                create_mock_fetch_historical_rounds(upward_rounds),
-            ),
-        ):
-            provider._archive_access_verified = True
-            provider._has_archive_access = True
-
-            config = HistoricalDataConfig(
-                start_time=datetime(2024, 12, 1, 0, 0, tzinfo=UTC),
-                end_time=datetime(2024, 12, 1, 5, 0, tzinfo=UTC),
-                interval_seconds=3600,
-                tokens=["ETH"],
-                chains=["ethereum"],
-            )
-
-            prices: list[Decimal] = []
-            async for _, market_state in provider.iterate(config):
-                if "ETH" in market_state.prices:
-                    prices.append(market_state.prices["ETH"])
-
-            # Verify upward trend
-            assert len(prices) == 6
-            for i in range(1, len(prices)):
-                assert prices[i] > prices[i - 1], f"Expected upward trend at index {i}"
-
-
-# =============================================================================
-# Test Class: Round Gap Handling
-# =============================================================================
-
-
-class TestRoundGapHandling:
-    """Tests for correct handling of round ID gaps during traversal."""
-
-    @pytest.mark.asyncio
-    async def test_traverse_skips_missing_rounds(self):
-        """Test that round traversal correctly skips missing round IDs.
-
-        This test verifies that the internal _fetch_historical_rounds method
-        handles gaps gracefully by testing the iteration with partial data.
-        """
-        provider = ChainlinkDataProvider(
-            chain="ethereum", rpc_url="https://mock-archive.example.com"
-        )
-
-        # Create rounds with gaps (round IDs 102 and 104 are missing)
-        # The _fetch_historical_rounds is mocked to return only available rounds
-        rounds_with_gaps = [
-            KNOWN_ETH_ROUND_DATA[0],  # timestamp 0:00
-            KNOWN_ETH_ROUND_DATA[1],  # timestamp 1:00
-            # 2:00 missing
-            KNOWN_ETH_ROUND_DATA[3],  # timestamp 3:00
-            # 4:00 missing
-            KNOWN_ETH_ROUND_DATA[5],  # timestamp 5:00
-        ]
-
-        with (
-            patch.object(provider, "_verify_archive_access", return_value=True),
-            patch.object(
-                provider,
-                "_fetch_historical_rounds",
-                create_mock_fetch_historical_rounds(rounds_with_gaps),
-            ),
-        ):
-            provider._archive_access_verified = True
-            provider._has_archive_access = True
-
-            config = HistoricalDataConfig(
-                start_time=datetime(2024, 12, 1, 0, 0, tzinfo=UTC),
-                end_time=datetime(2024, 12, 1, 5, 0, tzinfo=UTC),
-                interval_seconds=3600,
-                tokens=["ETH"],
-                chains=["ethereum"],
-            )
-
-            results: list[tuple[datetime, Decimal]] = []
-            async for timestamp, market_state in provider.iterate(config):
-                if "ETH" in market_state.prices:
-                    results.append((timestamp, market_state.prices["ETH"]))
-
-            # Should get data for available timestamps
-            assert len(results) >= 4, "Should return data for available rounds"
-
-    @pytest.mark.asyncio
-    async def test_gap_counter_resets_on_valid_round(self):
-        """Test that consecutive gap counter resets after finding valid round.
-
-        This verifies the behavior at the _fetch_historical_rounds level,
-        mocking it to return sparse data simulating gap handling.
-        """
-        provider = ChainlinkDataProvider(
-            chain="ethereum", rpc_url="https://mock-archive.example.com"
-        )
-
-        # Create scenario with only two rounds (large gap between them)
-        sparse_rounds = [
-            ChainlinkRoundData(
-                round_id=100,
-                answer=325000000000,
-                started_at=1733011200,  # Dec 1, 00:00
-                updated_at=1733011200,
-                answered_in_round=100,
-            ),
-            ChainlinkRoundData(
-                round_id=150,
-                answer=326000000000,
-                started_at=1733022000,  # Dec 1, 03:00
-                updated_at=1733022000,
-                answered_in_round=150,
-            ),
-        ]
-
-        with (
-            patch.object(provider, "_verify_archive_access", return_value=True),
-            patch.object(
-                provider,
-                "_fetch_historical_rounds",
-                create_mock_fetch_historical_rounds(sparse_rounds),
-            ),
-        ):
-            provider._archive_access_verified = True
-            provider._has_archive_access = True
-
-            config = HistoricalDataConfig(
-                start_time=datetime(2024, 12, 1, 0, 0, tzinfo=UTC),
-                end_time=datetime(2024, 12, 1, 3, 0, tzinfo=UTC),
-                interval_seconds=3600,
-                tokens=["ETH"],
-                chains=["ethereum"],
-            )
-
-            # Should not raise despite many gaps
-            results = []
-            async for _timestamp, market_state in provider.iterate(config):
-                if "ETH" in market_state.prices:
-                    results.append(market_state.prices["ETH"])
-
-            # Should get at least some data
-            assert len(results) >= 2, "Should return data for available rounds"
-
-
-# =============================================================================
-# Test Class: Graceful Fallback Behavior
-# =============================================================================
-
-
-class TestGracefulFallback:
-    """Tests for graceful fallback when archive node unavailable."""
-
-    @pytest.mark.asyncio
-    async def test_fallback_to_cached_data_without_archive(self):
-        """Test iterate() uses pre-loaded cache when no archive access."""
-        provider = ChainlinkDataProvider(
-            chain="ethereum", rpc_url="https://non-archive.example.com"
-        )
-
-        # Pre-load cache
-        provider.set_historical_prices(
-            "ETH",
-            [
-                (datetime(2024, 12, 1, 0, 0, tzinfo=UTC), Decimal("3250.00")),
-                (datetime(2024, 12, 1, 1, 0, tzinfo=UTC), Decimal("3255.50")),
-            ],
-        )
-
-        with patch.object(provider, "_verify_archive_access", return_value=False):
-            provider._archive_access_verified = True
-            provider._has_archive_access = False
-
-            config = HistoricalDataConfig(
-                start_time=datetime(2024, 12, 1, 0, 0, tzinfo=UTC),
-                end_time=datetime(2024, 12, 1, 1, 0, tzinfo=UTC),
-                interval_seconds=3600,
-                tokens=["ETH"],
-                chains=["ethereum"],
-            )
-
-            prices: list[Decimal] = []
-            async for _, market_state in provider.iterate(config):
-                if "ETH" in market_state.prices:
-                    prices.append(market_state.prices["ETH"])
-
-            # Should get prices from pre-loaded cache
-            assert len(prices) == 2
-            assert prices[0] == Decimal("3250.00")
-            assert prices[1] == Decimal("3255.50")
-
-    @pytest.mark.asyncio
-    async def test_fallback_logs_warning(self, caplog):
-        """Test iterate() logs warning when falling back to cache."""
-        provider = ChainlinkDataProvider(
-            chain="ethereum", rpc_url="https://non-archive.example.com"
-        )
-
-        # Pre-load cache
-        provider.set_historical_prices(
-            "ETH", [(datetime(2024, 12, 1, 0, 0, tzinfo=UTC), Decimal("3250.00"))]
-        )
-
-        with caplog.at_level(logging.WARNING):
-            # Set archive as verified but no access (simulates non-archive node)
-            provider._archive_access_verified = True
-            provider._has_archive_access = False
-
-            config = HistoricalDataConfig(
-                start_time=datetime(2024, 12, 1, 0, 0, tzinfo=UTC),
-                end_time=datetime(2024, 12, 1, 1, 0, tzinfo=UTC),  # 1 hour later
-                interval_seconds=3600,
-                tokens=["ETH"],
-                chains=["ethereum"],
-            )
-
-            async for _ in provider.iterate(config):
-                pass
-
-            # Check warning was logged about archive access
-            warning_logged = any(
-                "archive" in record.message.lower()
-                or "pre-loaded cache" in record.message.lower()
-                for record in caplog.records
-            )
-            assert warning_logged, "Should log warning about archive access"
-
-    @pytest.mark.asyncio
-    async def test_fallback_without_rpc_url(self):
-        """Test iterate() handles missing RPC URL gracefully."""
-        provider = ChainlinkDataProvider(chain="ethereum", rpc_url="")
-
-        # Pre-load cache
-        provider.set_historical_prices(
-            "ETH", [(datetime(2024, 12, 1, 0, 0, tzinfo=UTC), Decimal("3250.00"))]
-        )
-
-        # Set archive as verified but no access (simulates no RPC)
-        provider._archive_access_verified = True
-        provider._has_archive_access = False
-
-        config = HistoricalDataConfig(
-            start_time=datetime(2024, 12, 1, 0, 0, tzinfo=UTC),
-            end_time=datetime(2024, 12, 1, 1, 0, tzinfo=UTC),  # 1 hour later
-            interval_seconds=3600,
-            tokens=["ETH"],
-            chains=["ethereum"],
-        )
-
-        prices = []
-        async for _, market_state in provider.iterate(config):
-            if "ETH" in market_state.prices:
-                prices.append(market_state.prices["ETH"])
-
-        # Should yield at least one data point using fallback
-        assert len(prices) >= 1
-
-
-# =============================================================================
-# Test Class: Data Source Metadata
-# =============================================================================
-
-
-class TestDataSourceMetadata:
-    """Tests for data_source metadata in market states."""
-
-    @pytest.mark.asyncio
-    async def test_data_source_is_chainlink_historical_with_archive(self):
-        """Test data_source is 'chainlink_historical' when archive available."""
-        provider = ChainlinkDataProvider(
-            chain="ethereum", rpc_url="https://mock-archive.example.com"
-        )
-
-        latest_round = KNOWN_ETH_ROUND_DATA[-1]
-        with (
-            patch.object(provider, "_verify_archive_access", return_value=True),
-            patch.object(
-                provider,
-                "_query_round_data",
-                create_mock_query_round_data(KNOWN_ETH_ROUND_DATA),
-            ),
-            patch.object(
-                provider,
-                "_query_latest_round_data",
-                create_mock_query_latest_round_data(latest_round),
-            ),
-            patch.object(provider, "_get_decimals_cached", return_value=8),
-        ):
-            provider._archive_access_verified = True
-            provider._has_archive_access = True
-
-            config = HistoricalDataConfig(
-                start_time=datetime(2024, 12, 1, 0, 0, tzinfo=UTC),
-                end_time=datetime(2024, 12, 1, 1, 0, tzinfo=UTC),
-                interval_seconds=3600,
-                tokens=["ETH"],
-                chains=["ethereum"],
-            )
-
-            found_historical = False
-            async for _, market_state in provider.iterate(config):
-                assert market_state.metadata.get("data_source") == "chainlink_historical"
-                found_historical = True
-            assert found_historical, "No data points returned"
-
-    @pytest.mark.asyncio
-    async def test_data_source_is_chainlink_cache_without_archive(self):
-        """Test data_source is 'chainlink_cache' when no archive available."""
-        provider = ChainlinkDataProvider(
-            chain="ethereum", rpc_url="https://non-archive.example.com"
-        )
-
-        # Pre-load cache
-        provider.set_historical_prices(
-            "ETH", [(datetime(2024, 12, 1, 0, 0, tzinfo=UTC), Decimal("3250.00"))]
-        )
-
-        # Set archive as verified but no access
-        provider._archive_access_verified = True
-        provider._has_archive_access = False
-
-        config = HistoricalDataConfig(
-            start_time=datetime(2024, 12, 1, 0, 0, tzinfo=UTC),
-            end_time=datetime(2024, 12, 1, 1, 0, tzinfo=UTC),  # 1 hour later
-            interval_seconds=3600,
-            tokens=["ETH"],
-            chains=["ethereum"],
-        )
-
-        found_cache = False
-        async for _, market_state in provider.iterate(config):
-            assert market_state.metadata.get("data_source") == "chainlink_cache"
-            found_cache = True
-        assert found_cache, "No data points returned"
-
-    @pytest.mark.asyncio
-    async def test_historical_price_hits_tracked(self):
-        """Test historical_price_hits is tracked in metadata."""
-        provider = ChainlinkDataProvider(
-            chain="ethereum", rpc_url="https://mock-archive.example.com"
-        )
-
-        with (
-            patch.object(provider, "_verify_archive_access", return_value=True),
-            patch.object(
-                provider,
-                "_fetch_historical_rounds",
-                create_mock_fetch_historical_rounds(KNOWN_ETH_ROUND_DATA),
-            ),
-        ):
-            provider._archive_access_verified = True
-            provider._has_archive_access = True
-
-            config = HistoricalDataConfig(
-                start_time=datetime(2024, 12, 1, 0, 0, tzinfo=UTC),
-                end_time=datetime(2024, 12, 1, 2, 0, tzinfo=UTC),
-                interval_seconds=3600,
-                tokens=["ETH"],
-                chains=["ethereum"],
-            )
-
-            last_state = None
-            async for _, market_state in provider.iterate(config):
-                last_state = market_state
-
-            assert last_state is not None
-            assert "historical_price_hits" in last_state.metadata
-            assert last_state.metadata["historical_price_hits"] > 0
-
-
-# =============================================================================
-# Test Class: Historical Capability
-# =============================================================================
-
-
-class TestHistoricalCapability:
-    """Tests for historical_capability property."""
-
-    def test_capability_is_pre_cache_before_verification(self):
-        """Test capability is PRE_CACHE before archive access verified."""
-        provider = ChainlinkDataProvider(chain="ethereum", rpc_url="https://example.com")
-        # Before verification, should return PRE_CACHE
-        assert provider.historical_capability == HistoricalDataCapability.PRE_CACHE
-
-    def test_capability_is_full_after_archive_verified(self):
-        """Test capability is FULL after archive access verified."""
-        provider = ChainlinkDataProvider(chain="ethereum", rpc_url="https://example.com")
-        provider._archive_access_verified = True
-        provider._has_archive_access = True
-        assert provider.historical_capability == HistoricalDataCapability.FULL
-
-    def test_capability_is_pre_cache_after_non_archive_verified(self):
-        """Test capability is PRE_CACHE when verified as non-archive."""
-        provider = ChainlinkDataProvider(chain="ethereum", rpc_url="https://example.com")
-        provider._archive_access_verified = True
-        provider._has_archive_access = False
-        assert provider.historical_capability == HistoricalDataCapability.PRE_CACHE
-
-    def test_capability_is_pre_cache_without_rpc_url(self):
-        """Test capability is PRE_CACHE without RPC URL."""
-        provider = ChainlinkDataProvider(chain="ethereum", rpc_url="")
-        assert provider.historical_capability == HistoricalDataCapability.PRE_CACHE
-
-
-# =============================================================================
-# Test Class: No PRE_CACHE Warning with Native Traversal
-# =============================================================================
-
-
-class TestNoPrecacheWarning:
-    """Tests verifying no PRE_CACHE warning when using native round traversal."""
-
-    @pytest.mark.asyncio
-    async def test_no_precache_warning_with_archive(self, caplog):
-        """Test no PRE_CACHE warning is logged when archive is available."""
-        provider = ChainlinkDataProvider(
-            chain="ethereum", rpc_url="https://mock-archive.example.com"
-        )
-
-        with (
-            caplog.at_level(logging.WARNING),
-            patch.object(provider, "_verify_archive_access", return_value=True),
-            patch.object(
-                provider,
-                "_fetch_historical_rounds",
-                create_mock_fetch_historical_rounds(KNOWN_ETH_ROUND_DATA),
-            ),
-        ):
-            provider._archive_access_verified = True
-            provider._has_archive_access = True
-
-            config = HistoricalDataConfig(
-                start_time=datetime(2024, 12, 1, 0, 0, tzinfo=UTC),
-                end_time=datetime(2024, 12, 1, 2, 0, tzinfo=UTC),
-                interval_seconds=3600,
-                tokens=["ETH"],
-                chains=["ethereum"],
-            )
-
-            async for _ in provider.iterate(config):
-                pass
-
-            # Check NO PRE_CACHE warning was logged
-            precache_warnings = [
-                record
-                for record in caplog.records
-                if "pre_cache" in record.message.lower()
-                or "pre-cache" in record.message.lower()
-                or "requires preloaded" in record.message.lower()
-            ]
-            assert len(precache_warnings) == 0, (
-                f"Should not log PRE_CACHE warning with archive access, "
-                f"but found: {[r.message for r in precache_warnings]}"
-            )
-
-
-# =============================================================================
-# Test Class: Archive Access Verification
-# =============================================================================
-
-
-class TestArchiveAccessVerification:
-    """Tests for archive access verification logic."""
-
-    @pytest.mark.asyncio
-    async def test_verify_archive_access_caches_result(self):
-        """Test _verify_archive_access caches result after first call."""
-        provider = ChainlinkDataProvider(
-            chain="ethereum", rpc_url="https://example.com"
-        )
-
-        mock_block = {"number": 12345678, "timestamp": 1704067200}
-
-        with patch("web3.AsyncWeb3") as mock_web3_class, patch("web3.AsyncHTTPProvider"):
-            mock_web3 = MagicMock()
-            mock_web3.eth.get_block = AsyncMock(return_value=mock_block)
-            mock_web3_class.return_value = mock_web3
-
-            # First call should query
-            result1 = await provider._verify_archive_access()
-            assert result1 is True
-            assert provider._archive_access_verified is True
-            assert provider._has_archive_access is True
-
-            # Second call should use cached result
-            result2 = await provider._verify_archive_access()
-            assert result2 is True
-
-            # get_block should only be called on first verification
-            assert mock_web3.eth.get_block.call_count == 2
-
-    @pytest.mark.asyncio
-    async def test_verify_archive_access_detects_non_archive(self):
-        """Test _verify_archive_access detects non-archive node."""
-        provider = ChainlinkDataProvider(
-            chain="ethereum", rpc_url="https://example.com"
-        )
-
-        with patch("web3.AsyncWeb3") as mock_web3_class, patch("web3.AsyncHTTPProvider"):
-            mock_web3 = MagicMock()
-            mock_web3.eth.get_block = AsyncMock(
-                side_effect=Exception("missing trie node for data")
-            )
-            mock_web3_class.return_value = mock_web3
-
-            result = await provider._verify_archive_access()
-            assert result is False
-            assert provider._archive_access_verified is True
-            assert provider._has_archive_access is False
-
-    @pytest.mark.asyncio
-    async def test_verify_archive_access_without_rpc_url(self):
-        """Test _verify_archive_access returns False without RPC URL."""
-        provider = ChainlinkDataProvider(chain="ethereum", rpc_url="")
-
-        result = await provider._verify_archive_access()
-        assert result is False
-        assert provider._archive_access_verified is True
-        assert provider._has_archive_access is False
-
-
-# =============================================================================
-# Test Class: Price Accuracy Validation
-# =============================================================================
-
-
-class TestPriceAccuracyValidation:
-    """Tests validating price accuracy within tolerance."""
-
-    @pytest.mark.asyncio
-    async def test_historical_prices_within_tolerance(self):
-        """Test historical prices are within acceptable tolerance of expected values."""
-        provider = ChainlinkDataProvider(
-            chain="ethereum", rpc_url="https://mock-archive.example.com"
-        )
-
-        # Expected prices with small variations
-        expected_prices = {
-            datetime(2024, 12, 1, 0, 0, tzinfo=UTC): Decimal("3250.00"),
-            datetime(2024, 12, 1, 1, 0, tzinfo=UTC): Decimal("3255.50"),
+    )
+
+
+class FixtureReader(ChainlinkHistoryReader):
+    def __init__(self, rounds: dict[int, RoundData], **kwargs) -> None:
+        super().__init__(chain="ethereum", rpc_url="http://gateway-owned.invalid", **kwargs)
+        self.rounds = rounds
+        feed = CATALOG.feed_for_token("ethereum", "ETH")
+        assert feed is not None
+        self._feed_decimals[feed.address.lower()] = feed.decimals
+
+    async def _latest_round(self, address: str) -> RoundData:
+        return self.rounds[max(self.rounds)]
+
+    async def _round(
+        self,
+        address: str,
+        round_id: int,
+        *,
+        confirm_absence: bool = False,
+    ) -> RoundData | None:
+        return self.rounds.get(round_id)
+
+
+@pytest.mark.asyncio
+async def test_history_returns_interval_plus_one_prior_observation() -> None:
+    reader = FixtureReader({index: _round(index, index * 100) for index in range(1, 7)})
+    points = await reader.get_history(token="ETH", start_ts=250, end_ts=551, max_points=20)
+    assert [point.timestamp for point in points] == [200, 300, 400, 500]
+    assert [point.observation_id for point in points] == [2, 3, 4, 5]
+    assert points[-1].price == Decimal("500")
+
+
+@pytest.mark.asyncio
+async def test_history_downsamples_deterministically_to_caller_bound() -> None:
+    reader = FixtureReader({index: _round(index, index * 100) for index in range(1, 11)})
+    points = await reader.get_history(token="ETH", start_ts=150, end_ts=1_001, max_points=3)
+    assert len(points) == 3
+    assert points[0].timestamp == 100
+    assert points[-1].timestamp == 1_000
+
+
+@pytest.mark.asyncio
+async def test_large_window_is_binary_searched_and_materialization_bounded() -> None:
+    reader = FixtureReader(
+        {index: _round(index, index * 100) for index in range(1, 101)},
+        max_scanned_rounds=5,
+        batch_size=5,
+    )
+    page = await reader.get_history_page(token="ETH", start_ts=100, end_ts=20_000, max_points=100)
+    assert len(page.points) == 5
+    assert page.points[0].timestamp == 100
+    assert page.points[-1].timestamp == 10_000
+    assert page.truncated is True
+    assert page.recommended_split_ts == 10_050
+
+
+@pytest.mark.asyncio
+async def test_history_crosses_proxy_phase_without_scanning_uint80_gap() -> None:
+    def round_id(phase: int, sequence: int) -> int:
+        return (phase << 64) | sequence
+
+    rounds = {
+        round_id(1, 1): _round(round_id(1, 1), 100),
+        round_id(1, 2): _round(round_id(1, 2), 200),
+        round_id(1, 3): _round(round_id(1, 3), 300),
+        round_id(2, 1): _round(round_id(2, 1), 400),
+        round_id(2, 2): _round(round_id(2, 2), 500),
+        round_id(2, 3): _round(round_id(2, 3), 600),
+    }
+    points = await FixtureReader(rounds).get_history(token="ETH", start_ts=250, end_ts=550, max_points=10)
+    assert [point.timestamp for point in points] == [200, 300, 400, 500]
+
+
+@pytest.mark.asyncio
+async def test_quiet_window_uses_prior_observation_from_current_phase() -> None:
+    def round_id(phase: int, sequence: int) -> int:
+        return (phase << 64) | sequence
+
+    rounds = {
+        round_id(1, 1): _round(round_id(1, 1), 100),
+        round_id(1, 2): _round(round_id(1, 2), 200),
+        round_id(2, 1): _round(round_id(2, 1), 1_000),
+        round_id(2, 2): _round(round_id(2, 2), 2_000),
+        round_id(2, 3): _round(round_id(2, 3), 3_000),
+    }
+
+    page = await FixtureReader(rounds).get_history_page(
+        token="ETH",
+        start_ts=2_100,
+        end_ts=2_900,
+        max_points=10,
+    )
+
+    assert [(point.timestamp, point.observation_id) for point in page.points] == [(2_000, round_id(2, 2))]
+    assert page.truncated is False
+
+
+@pytest.mark.asyncio
+async def test_quiet_window_skips_carried_immediate_predecessor() -> None:
+    carried = RoundData(
+        round_id=2,
+        answer=2_000 * 100_000_000,
+        started_at=2_000,
+        updated_at=2_000,
+        answered_in_round=1,
+    )
+    reader = FixtureReader(
+        {
+            1: _round(1, 1_000),
+            2: carried,
+            3: _round(3, 3_000),
         }
+    )
 
-        # Simulated actual prices (with minor timing variations)
-        actual_rounds = [
-            ChainlinkRoundData(
-                round_id=110680464442257320100,
-                answer=325050000000,  # $3250.50 (+0.015%)
-                started_at=1733011200,
-                updated_at=1733011200,
-                answered_in_round=110680464442257320100,
-            ),
-            ChainlinkRoundData(
-                round_id=110680464442257320101,
-                answer=325500000000,  # $3255.00 (-0.015%)
-                started_at=1733014800,
-                updated_at=1733014800,
-                answered_in_round=110680464442257320101,
-            ),
-        ]
+    page = await reader.get_history_page(token="ETH", start_ts=2_100, end_ts=2_900, max_points=10)
 
-        with (
-            patch.object(provider, "_verify_archive_access", return_value=True),
-            patch.object(
-                provider,
-                "_fetch_historical_rounds",
-                create_mock_fetch_historical_rounds(actual_rounds),
-            ),
-        ):
-            provider._archive_access_verified = True
-            provider._has_archive_access = True
-
-            config = HistoricalDataConfig(
-                start_time=datetime(2024, 12, 1, 0, 0, tzinfo=UTC),
-                end_time=datetime(2024, 12, 1, 1, 0, tzinfo=UTC),
-                interval_seconds=3600,
-                tokens=["ETH"],
-                chains=["ethereum"],
-            )
-
-            results: dict[datetime, Decimal] = {}
-            async for timestamp, market_state in provider.iterate(config):
-                if "ETH" in market_state.prices:
-                    results[timestamp] = market_state.prices["ETH"]
-
-            # Verify prices are within 1% tolerance
-            tolerance = Decimal("0.01")  # 1%
-            for timestamp, expected in expected_prices.items():
-                actual = results.get(timestamp)
-                assert actual is not None, f"Missing price at {timestamp}"
-                diff_pct = abs(actual - expected) / expected
-                assert diff_pct <= tolerance, (
-                    f"Price at {timestamp} differs by {diff_pct:.4%}, expected within {tolerance:.0%}"
-                )
+    assert [(point.timestamp, point.observation_id) for point in page.points] == [(1_000, 1)]
+    assert page.truncated is False
 
 
-# =============================================================================
-# Test Class: Multi-Token Support
-# =============================================================================
+@pytest.mark.asyncio
+async def test_prior_point_does_not_consume_range_materialization_capacity() -> None:
+    reader = FixtureReader(
+        {index: _round(index, index * 100) for index in range(1, 7)},
+        max_scanned_rounds=5,
+        batch_size=5,
+    )
+
+    page = await reader.get_history_page(token="ETH", start_ts=150, end_ts=700, max_points=100)
+
+    assert [point.timestamp for point in page.points] == [100, 200, 300, 400, 500, 600]
+    assert page.truncated is False
+    assert page.recommended_split_ts == 0
 
 
-class TestMultiTokenSupport:
-    """Tests for multiple token support in historical iteration."""
+@pytest.mark.asyncio
+async def test_unreadable_search_gap_fails_closed_instead_of_claiming_complete_history() -> None:
+    rounds = {index: _round(index, index * 100) for index in range(1, 201)}
+    for index in range(60, 141):
+        del rounds[index]
 
-    @pytest.mark.asyncio
-    async def test_iterate_multiple_tokens(self):
-        """Test iterate() handles multiple tokens with different prices."""
-        provider = ChainlinkDataProvider(
-            chain="ethereum", rpc_url="https://mock-archive.example.com"
+    with pytest.raises(ChainlinkHistoryUnavailable, match="no readable evidence"):
+        await FixtureReader(rounds).get_history_page(
+            token="ETH",
+            start_ts=5_000,
+            end_ts=19_000,
+            max_points=200,
         )
 
-        # Pre-load cache for this test
-        provider.set_historical_prices(
-            "ETH",
-            [(datetime(2024, 12, 1, 0, 0, tzinfo=UTC), Decimal("3500.00"))],
-        )
-        provider.set_historical_prices(
-            "BTC",
-            [(datetime(2024, 12, 1, 0, 0, tzinfo=UTC), Decimal("60000.00"))],
-        )
-        provider.set_historical_prices(
-            "LINK",
-            [(datetime(2024, 12, 1, 0, 0, tzinfo=UTC), Decimal("14.50"))],
-        )
 
-        # Set archive as verified but no access to use pre-loaded cache
-        provider._archive_access_verified = True
-        provider._has_archive_access = False
-
-        config = HistoricalDataConfig(
-            start_time=datetime(2024, 12, 1, 0, 0, tzinfo=UTC),
-            end_time=datetime(2024, 12, 1, 1, 0, tzinfo=UTC),  # 1 hour later
-            interval_seconds=3600,
-            tokens=["ETH", "BTC", "LINK"],
-            chains=["ethereum"],
-        )
-
-        found_data = False
-        async for _, market_state in provider.iterate(config):
-            if "ETH" in market_state.prices:
-                assert market_state.prices["ETH"] == Decimal("3500.00")
-            if "BTC" in market_state.prices:
-                assert market_state.prices["BTC"] == Decimal("60000.00")
-            if "LINK" in market_state.prices:
-                assert market_state.prices["LINK"] == Decimal("14.50")
-            # At least one token should be present
-            if market_state.prices:
-                found_data = True
-        assert found_data, "No data points returned"
+@pytest.mark.asyncio
+async def test_latest_is_provider_exact_and_decimal_scaled() -> None:
+    reader = FixtureReader({1: _round(1, 100, 312_345_000_000)})
+    point = await reader.get_latest(token="ETH")
+    assert point == HistoricalPricePoint(timestamp=100, price=Decimal("3123.45"), observation_id=1)
 
 
-# =============================================================================
-# Test Class: Summary and Documentation
-# =============================================================================
+@pytest.mark.asyncio
+async def test_unknown_feed_is_an_honest_miss() -> None:
+    reader = FixtureReader({1: _round(1, 100)})
+    with pytest.raises(ChainlinkHistoryUnavailable, match="no direct Chainlink USD feed"):
+        await reader.get_history(token="NOPE", start_ts=1, end_ts=2, max_points=1)
 
 
-class TestChainlinkHistoricalAccuracySummary:
-    """Summary tests documenting Chainlink historical implementation correctness."""
+def test_downsample_preserves_endpoints() -> None:
+    points = [HistoricalPricePoint(index, Decimal(index), index) for index in range(10)]
+    sampled = ChainlinkHistoryReader._downsample(points, 4)
+    assert sampled[0] is points[0]
+    assert sampled[-1] is points[-1]
+    assert len(sampled) == 4
 
-    def test_implementation_follows_acceptance_criteria(self):
-        """Document that implementation follows US-081a acceptance criteria."""
-        # US-081a Acceptance Criteria:
-        # 1. Update ChainlinkDataProvider.iterate() to traverse rounds using getRoundData()
-        # 2. Start from latestRound and walk backwards to find rounds within time range
-        # 3. Cache rounds as they are fetched for efficient lookups
-        # 4. Remove ValueError for historical queries without pre-fetch
-        # 5. Handle round gaps gracefully (some round IDs may not exist)
-        # 6. Change HistoricalDataCapability from PRE_CACHE to FULL when archive available
 
-        # Test 1: iterate() traverses rounds (tested in TestIterateDifferentPrices)
-        assert True, "iterate() calls _fetch_historical_rounds() for each token"
+@pytest.mark.asyncio
+async def test_round_absence_confirmation_is_opt_in_and_transport_failure_retries() -> None:
+    reader = ChainlinkHistoryReader(
+        chain="ethereum",
+        rpc_url="http://gateway-owned.invalid",
+        rpc_retries=2,
+    )
 
-        # Test 2: Walk backwards from latestRound (tested in implementation)
-        assert True, "_fetch_historical_rounds() starts from latest and walks backwards"
+    class ContractLogicError(Exception):
+        pass
 
-        # Test 3: Cache rounds (tested in implementation)
-        assert True, "Prices stored in _historical_cache and main cache"
+    with patch.object(reader, "_eth_call", new_callable=AsyncMock, side_effect=ContractLogicError("revert")) as call:
+        assert await reader._round("0xfeed", 1) is None
+        assert call.await_count == 1
 
-        # Test 4: No ValueError (tested in TestGracefulFallback)
-        assert True, "Historical queries use archive traversal instead of raising"
+    with patch.object(reader, "_eth_call", new_callable=AsyncMock, side_effect=ContractLogicError("revert")) as call:
+        assert await reader._round("0xfeed", 1, confirm_absence=True) is None
+        assert call.await_count == 2
 
-        # Test 5: Gap handling (tested in TestRoundGapHandling)
-        assert True, "test_traverse_skips_missing_rounds verifies gap handling"
+    recovered = _round(1, 100)
+    with patch.object(
+        reader,
+        "_eth_call",
+        new_callable=AsyncMock,
+        side_effect=[ContractLogicError("revert"), _encoded_round(recovered)],
+    ) as call:
+        assert await reader._round("0xfeed", 1, confirm_absence=True) == recovered
+        assert call.await_count == 2
 
-        # Test 6: FULL capability (tested in TestHistoricalCapability)
-        assert True, "historical_capability returns FULL when archive verified"
+    with patch.object(reader, "_eth_call", new_callable=AsyncMock, side_effect=TimeoutError("slow")) as call:
+        with pytest.raises(ChainlinkHistoryUnavailable, match="bounded retries"):
+            await reader._round("0xfeed", 1)
+        assert call.await_count == 3
 
-    def test_tests_cover_all_acceptance_criteria(self):
-        """Verify all acceptance criteria have corresponding tests."""
-        criteria_coverage = {
-            "Create test with known historical Chainlink rounds": "TestHistoricalRoundDataFixture",
-            "Test iterate() returns prices from actual historical rounds": "TestIterateDifferentPrices",
-            "Test prices match known historical values within tolerance": "TestPriceAccuracyValidation",
-            "Test round traversal handles gaps correctly": "TestRoundGapHandling",
-            "Verify no PRE_CACHE warning when using native traversal": "TestNoPrecacheWarning",
+
+@pytest.mark.asyncio
+async def test_present_carried_round_is_not_misclassified_as_absent() -> None:
+    reader = ChainlinkHistoryReader(chain="ethereum", rpc_url="http://gateway-owned.invalid", rpc_retries=0)
+    carried = RoundData(round_id=5, answer=100_000_000, started_at=100, updated_at=100, answered_in_round=4)
+    with patch.object(reader, "_eth_call", new_callable=AsyncMock, return_value=_encoded_round(carried)):
+        assert await reader._round("0xfeed", 5) == carried
+    assert reader._price_points([carried], prior=None, start_ts=1, end_ts=200, decimals=8) == []
+
+
+@pytest.mark.asyncio
+async def test_carried_latest_round_is_searchable_but_not_publishable() -> None:
+    reader = ChainlinkHistoryReader(chain="ethereum", rpc_url="http://gateway-owned.invalid", rpc_retries=0)
+    carried = RoundData(round_id=5, answer=100_000_000, started_at=100, updated_at=100, answered_in_round=4)
+    with patch.object(reader, "_required_call", new_callable=AsyncMock, return_value=_encoded_round(carried)):
+        assert await reader._latest_round("0xfeed") == carried
+        with pytest.raises(ChainlinkHistoryUnavailable, match="latest round is invalid"):
+            await reader.get_latest(token="ETH")
+
+
+@pytest.mark.asyncio
+async def test_carried_latest_round_anchors_history_without_entering_series() -> None:
+    carried = RoundData(round_id=4, answer=300_000_000, started_at=300, updated_at=300, answered_in_round=3)
+    reader = FixtureReader(
+        {
+            1: _round(1, 100),
+            2: _round(2, 200),
+            3: _round(3, 300),
+            4: carried,
         }
+    )
+    points = await reader.get_history(token="ETH", start_ts=1, end_ts=400, max_points=10)
+    assert [point.observation_id for point in points] == [1, 2, 3]
 
-        for criterion, test_class in criteria_coverage.items():
-            assert test_class, f"Missing test coverage for: {criterion}"
+
+@pytest.mark.parametrize("answer", [0, -1])
+def test_non_positive_rounds_never_enter_history(answer: int) -> None:
+    invalid = _round(1, 100, answer)
+    assert (
+        ChainlinkHistoryReader._price_points(
+            [invalid],
+            prior=None,
+            start_ts=1,
+            end_ts=200,
+            decimals=8,
+        )
+        == []
+    )
+
+
+@pytest.mark.asyncio
+async def test_history_wall_clock_budget_fails_closed() -> None:
+    reader = FixtureReader({1: _round(1, 100)}, history_timeout_seconds=0.001)
+
+    async def slow_latest(_address: str) -> RoundData:
+        await asyncio.sleep(1)
+        return _round(1, 100)
+
+    with patch.object(reader, "_latest_round", side_effect=slow_latest):
+        with pytest.raises(ChainlinkHistoryUnavailable, match="wall-clock budget"):
+            await reader.get_history(token="ETH", start_ts=1, end_ts=200, max_points=10)
+
+
+@pytest.mark.asyncio
+async def test_history_decimals_mismatch_fails_closed() -> None:
+    reader = ChainlinkHistoryReader(chain="ethereum", rpc_url="http://gateway-owned.invalid", rpc_retries=0)
+    encoded = (18).to_bytes(32, "big")
+    with patch.object(reader, "_eth_call", new_callable=AsyncMock, return_value=encoded):
+        with pytest.raises(ChainlinkHistoryUnavailable, match="decimals mismatch"):
+            await reader._verified_decimals("0xfeed", 8)
+
+
+@pytest.mark.asyncio
+async def test_probe_near_sequence_never_escapes_current_search_window() -> None:
+    reader = FixtureReader({})
+    observed: list[int] = []
+
+    async def recording_round(_address: str, round_id: int) -> RoundData | None:
+        observed.append(round_id)
+        return None
+
+    with patch.object(reader, "_round", side_effect=recording_round):
+        assert (
+            await reader._probe_near_sequence(
+                "0xfeed",
+                phase=0,
+                sequence=9,
+                minimum=8,
+                maximum=9,
+                phased=False,
+            )
+            is None
+        )
+    assert observed and set(observed) <= {8, 9}
+
+
+@pytest.mark.asyncio
+async def test_timestamp_search_clamps_probes_below_shrinking_high() -> None:
+    reader = FixtureReader({index: _round(index, index * 100) for index in range(1, 17)})
+    probed_rounds: list[int] = []
+    windows: list[tuple[int, int, list[int]]] = []
+    original_probe = reader._probe_near_sequence
+
+    async def recording_round(_address: str, round_id: int) -> RoundData | None:
+        probed_rounds.append(round_id)
+        return reader.rounds.get(round_id)
+
+    async def recording_probe(*args, **kwargs):
+        before = len(probed_rounds)
+        result = await original_probe(*args, **kwargs)
+        windows.append((kwargs["minimum"], kwargs["maximum"], probed_rounds[before:]))
+        return result
+
+    with (
+        patch.object(reader, "_round", side_effect=recording_round),
+        patch.object(
+            reader,
+            "_probe_near_sequence",
+            side_effect=recording_probe,
+        ),
+    ):
+        sequence = await reader._first_sequence_at_or_after(
+            "0xfeed",
+            phase=0,
+            maximum=16,
+            timestamp=550,
+            phased=False,
+        )
+
+    assert sequence == 6
+    assert windows
+    assert min(maximum for _minimum, maximum, _calls in windows) < 16
+    for minimum, maximum, calls in windows:
+        assert calls
+        assert all(minimum <= round_id <= maximum for round_id in calls)
+
+
+@pytest.mark.asyncio
+async def test_timestamp_search_rejects_probe_without_bounded_progress() -> None:
+    reader = FixtureReader({index: _round(index, index * 100) for index in range(1, 9)})
+    outside_window = (9, _round(9, 900))
+    with patch.object(reader, "_probe_near_sequence", new_callable=AsyncMock, return_value=outside_window):
+        with pytest.raises(ChainlinkHistoryUnavailable, match="made no bounded progress"):
+            await reader._first_sequence_at_or_after(
+                "0xfeed",
+                phase=0,
+                maximum=8,
+                timestamp=500,
+                phased=False,
+            )

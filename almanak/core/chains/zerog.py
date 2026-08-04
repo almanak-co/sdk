@@ -2,7 +2,7 @@
 
 from almanak.core.enums import ChainFamily
 
-from ._descriptor import ChainDescriptor, GasProfile, NativeToken, RpcProfile, Timeouts
+from ._descriptor import ChainDescriptor, ExternalChainIds, GasProfile, NativeToken, RpcProfile, Timeouts
 from ._registry import register_chain
 
 DESCRIPTOR = register_chain(
@@ -22,6 +22,7 @@ DESCRIPTOR = register_chain(
             # No verified 0G / A0GI SLIP-44 entry; native CAIP-19 stays fail-loud.
             slip44=None,
         ),
+        external_ids=ExternalChainIds(coingecko="zerog", dexscreener="zerog"),
         gas=GasProfile(
             buffer=1.1,
             simulation_buffer=0.1,
@@ -39,13 +40,6 @@ DESCRIPTOR = register_chain(
             fork_requires_archive=True,
             fork_cold_start_slow=True,
         ),
-        # VIB-4851 (B1): per-vendor external ids, transposed from the legacy
-        # standalone vendor maps (CoinGecko / DexScreener / CoinGecko Onchain /
-        # DeFiLlama / Zerion / Moralis / OKX). Values verbatim incl. case.
-        external_ids={
-            "coingecko": "zerog",
-            "dexscreener": "zerog",
-        },
         aliases=("0g",),
     )
 )

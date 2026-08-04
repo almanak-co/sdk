@@ -6,13 +6,13 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-from almanak.framework.data.models import CEX_SYMBOL_MAP
+from almanak.gateway.data.ohlcv.binance_provider import BINANCE_SYMBOL_MAP
 from almanak.gateway.data.price.binance import (
-    BinancePriceSource,
     _NEGATIVE_CACHE_TTL,
     _TOKEN_TO_BINANCE_SYMBOL,
-    _curated_binance_symbol,
+    BinancePriceSource,
 )
+from almanak.integrations.binance.integration import BINANCE_UNSAFE_MARKET_BASES, INTEGRATION
 
 
 class TestBinanceDynamicResolution:
@@ -150,17 +150,13 @@ class TestBinanceDynamicResolution:
 
         assert result.confidence == 1.0
 
-    # NOTE: on the PRICE path only CBBTC routes through the new CEX_SYMBOL_MAP
-    # lookup — DAI short-circuits as a stablecoin, and GMX/PENDLE/BTCB are
-    # already in the local static table. (The OHLCV provider, where all 5 were
-    # missing, is covered token-by-token in test_gateway_provider_tokens.py.)
-    # This parametrization asserts each non-stablecoin BTC/proxy token resolves
-    # to its expected pair at full confidence WITHOUT dynamic probing.
+    # The execution-grade spot-price catalogue is deliberately independent of
+    # the broader OHLCV/instrument map. Approved proxies never probe dynamically.
     @pytest.mark.asyncio()
     @pytest.mark.parametrize(
         ("token", "expected_pair"),
         [
-            ("CBBTC", "BTCUSDT"),  # NOT in static table -> resolved via CEX_SYMBOL_MAP (the fix)
+            ("CBBTC", "BTCUSDT"),
             ("BTCB", "BTCUSDT"),  # static table BTC proxy
             ("GMX", "GMXUSDT"),  # static table
             ("PENDLE", "PENDLEUSDT"),  # static table
@@ -168,9 +164,7 @@ class TestBinanceDynamicResolution:
     )
     async def test_proxy_tokens_resolve_full_confidence_not_dynamic(self, source, token, expected_pair):
         """Curated tokens resolve to their Binance pair at full confidence via the
-        static table or CEX_SYMBOL_MAP — never via dynamic probing. CBBTC in
-        particular (absent from the static table, no CBBTCUSDT pair) proves the
-        CEX_SYMBOL_MAP fix, since dynamic resolution is asserted unreachable."""
+        reviewed spot-price table — never via dynamic probing."""
         mock_resp = AsyncMock()
         mock_resp.status = 200
         mock_resp.json = AsyncMock(return_value={"price": "64000.0"})
@@ -180,7 +174,9 @@ class TestBinanceDynamicResolution:
         mock_session.get = MagicMock(return_value=mock_resp)
 
         # Dynamic resolution must NOT be reached — static/CEX resolves first.
-        source._resolve_binance_symbol = AsyncMock(side_effect=AssertionError(f"dynamic resolution should not run for {token}"))
+        source._resolve_binance_symbol = AsyncMock(
+            side_effect=AssertionError(f"dynamic resolution should not run for {token}")
+        )
 
         with patch.object(source, "_get_session", return_value=mock_session):
             result = await source.get_price(token)
@@ -194,10 +190,8 @@ class TestBinanceDynamicResolution:
         assert symbol_param == expected_pair
 
     @pytest.mark.asyncio()
-    async def test_cbbtc_absent_from_local_static_table(self):
-        """Guards the exact gap the fix closes: CBBTC must be resolved via the
-        canonical CEX_SYMBOL_MAP, not the local table (which lacks it)."""
-        assert "CBBTC" not in _TOKEN_TO_BINANCE_SYMBOL
+    async def test_cbbtc_is_explicitly_curated(self):
+        assert _TOKEN_TO_BINANCE_SYMBOL["CBBTC"] == "BTCUSDT"
 
     @pytest.mark.asyncio()
     async def test_evict_dynamic_cache_on_api_error(self, source):
@@ -222,44 +216,69 @@ class TestBinanceDynamicResolution:
         assert "DELISTED" not in source._dynamic_symbol_cache
 
 
-class TestPriceCanonicalParity:
-    """``_curated_binance_symbol`` (the spot-price resolver) consults the
-    canonical ``CEX_SYMBOL_MAP`` first, mirroring the OHLCV providers. These
-    guards keep the price path from drifting from the canonical source and
-    ensure it can never resolve a token to a different pair than the OHLCV
-    path does."""
-
-    @staticmethod
-    def _cex_binance_bases() -> set[str]:
-        return {base for (exch, base, _quote) in CEX_SYMBOL_MAP if exch == "binance"}
-
-    @staticmethod
-    def _cex_resolve(base: str) -> str | None:
-        for quote in ("USDT", "USDC"):
-            mapped = CEX_SYMBOL_MAP.get(("binance", base, quote))
-            if mapped:
-                return mapped
-        return None
-
-    def test_every_canonical_binance_base_is_resolvable(self):
-        """Drift guard: every Binance base in ``CEX_SYMBOL_MAP`` must resolve via
-        the price path too (the price-path analogue of the OHLCV drift guard)."""
-        unresolved = sorted(b for b in self._cex_binance_bases() if _curated_binance_symbol(b) is None)
-        assert unresolved == [], f"price-path Binance bases not resolvable: {unresolved}"
-
-    def test_local_table_does_not_disagree_with_canonical(self):
-        """Ordering-safety: the price local table may not map any token to a
-        different pair than ``CEX_SYMBOL_MAP``, so canonical-first (price + OHLCV
-        now share the ordering) is provably equivalent and the paths can't
-        diverge."""
-        conflicts = {
-            base: (local, self._cex_resolve(base))
-            for base, local in _TOKEN_TO_BINANCE_SYMBOL.items()
-            if self._cex_resolve(base) is not None and self._cex_resolve(base) != local
+class TestPriceCatalogueIsolation:
+    def test_execution_grade_catalogue_is_exact_and_independent(self):
+        expected = {
+            "ETH",
+            "WETH",
+            "BTC",
+            "WBTC",
+            "BTCB",
+            "CBBTC",
+            "SOL",
+            "ARB",
+            "AVAX",
+            "WAVAX",
+            "POL",
+            "MATIC",
+            "WMATIC",
+            "WPOL",
+            "BNB",
+            "WBNB",
+            "LINK",
+            "UNI",
+            "AAVE",
+            "OP",
+            "GMX",
+            "CRV",
+            "PENDLE",
+            "LDO",
+            "S",
+            "WS",
+            "DOGE",
+            "CAKE",
+            "JOE",
+            "OKB",
+            "WOKB",
+            "XETH",
+            "XBTC",
         }
-        assert conflicts == {}, f"price local table disagrees with CEX_SYMBOL_MAP: {conflicts}"
+        assert set(_TOKEN_TO_BINANCE_SYMBOL) == expected
+        assert "FTM" not in _TOKEN_TO_BINANCE_SYMBOL
+        assert "RNDR" not in _TOKEN_TO_BINANCE_SYMBOL
 
-    def test_cbbtc_resolves_via_canonical(self):
-        """CBBTC (absent from the local table, no CBBTCUSDT pair) resolves to the
-        BTC proxy via the canonical map — the exact gap the fix closes."""
-        assert _curated_binance_symbol("CBBTC") == "BTCUSDT"
+    def test_price_and_ohlcv_catalogues_share_safe_pairs_only(self):
+        manifest_usdt = {
+            base: symbol
+            for (base, quote), symbol in (INTEGRATION.market_symbols or {}).items()
+            if quote == "USDT" and base not in BINANCE_UNSAFE_MARKET_BASES
+        }
+        overlap = set(_TOKEN_TO_BINANCE_SYMBOL) & set(BINANCE_SYMBOL_MAP)
+
+        assert BINANCE_UNSAFE_MARKET_BASES.isdisjoint(_TOKEN_TO_BINANCE_SYMBOL)
+        assert BINANCE_UNSAFE_MARKET_BASES.isdisjoint(BINANCE_SYMBOL_MAP)
+        assert {base: _TOKEN_TO_BINANCE_SYMBOL[base] for base in overlap} == {
+            base: BINANCE_SYMBOL_MAP[base] for base in overlap
+        }
+        assert BINANCE_SYMBOL_MAP == manifest_usdt
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("token", ["FTM", "RNDR"])
+    async def test_retired_symbols_never_probe_ghost_tickers(self, token):
+        source = BinancePriceSource()
+        source._resolve_binance_symbol = AsyncMock(side_effect=AssertionError("must not probe"))
+        from almanak.framework.data.interfaces import DataSourceUnavailable
+
+        with pytest.raises(DataSourceUnavailable, match="not approved"):
+            await source.get_price(token)
+        source._resolve_binance_symbol.assert_not_awaited()

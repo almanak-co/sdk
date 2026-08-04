@@ -13,8 +13,8 @@ from almanak.core.enums import ChainFamily
 from ._descriptor import (
     AnvilProfile,
     ChainDescriptor,
-    ChainlinkFeeds,
     Explorer,
+    ExternalChainIds,
     GasProfile,
     NativeToken,
     RpcProfile,
@@ -38,6 +38,16 @@ DESCRIPTOR = register_chain(
             wrapped_symbol="wS",
             wrapped_coingecko_id="sonic-3",
             slip44=10007,  # SLIP-44 "SONIC" — S (CAIP-19)
+        ),
+        external_ids=ExternalChainIds(
+            coingecko="sonic",
+            dexscreener="sonic",
+            coingecko_onchain="sonic",
+            defillama="sonic",
+            defillama_display="Sonic",
+            zerion="sonic",
+            moralis="sonic",
+            okx="146",
         ),
         gas=GasProfile(
             buffer=None,  # legacy: not in CHAIN_GAS_BUFFERS (falls back to DEFAULT_GAS_BUFFER)
@@ -68,29 +78,6 @@ DESCRIPTOR = register_chain(
             "ws": "0x039e2fB66102314Ce7b64Ce5Ce3E5183bc94aD38",
         },
         simulation=SimulationProfile(tenderly_supported=True),
-        # VIB-4851 (B1): per-vendor external ids, transposed from the legacy
-        # standalone vendor maps (CoinGecko / DexScreener / CoinGecko Onchain /
-        # DeFiLlama / Zerion / Moralis / OKX). Values verbatim incl. case.
-        external_ids={
-            "coingecko": "sonic",
-            "dexscreener": "sonic",
-            "coingecko_onchain": "sonic",
-            "defillama": "sonic",
-            "defillama_display": "Sonic",
-            "zerion": "sonic",
-            "moralis": "sonic",
-            "okx": "146",
-        },
-        # Chainlink aggregator addresses (VIB-4851 CS-5) — moved verbatim
-        # from the legacy almanak/core/chainlink.py per-chain dicts.
-        # Reference: https://docs.chain.link/data-feeds/price-feeds/addresses
-        chainlink=ChainlinkFeeds(
-            usd_feeds={
-                "ETH/USD": "0x824364077993847f71293B24ccA8567c00c2de11",
-                "USDC/USD": "0x7A8443a2a5D772db7f1E40DeFe32db485108F128",
-                "S/USD": "0xc76dFb89fF298145b417d221B2c747d84952e01d",
-            },
-        ),
         # Managed-Anvil fork-test funding facts (VIB-4851 CS-6) — moved
         # verbatim from framework/anvil/fork_manager.py (display-case keys).
         anvil=AnvilProfile(

@@ -7,6 +7,7 @@ from ._descriptor import (
     AnvilProfile,
     ChainDescriptor,
     Explorer,
+    ExternalChainIds,
     GasProfile,
     NativeToken,
     RpcProfile,
@@ -27,9 +28,14 @@ DESCRIPTOR = register_chain(
             wrapped_address="0x78c1b0C915c4FAA5FffA6CAbf0219DA63d7f4cb8",
             coingecko_id="mantle",
             wrapped_symbol="WMNT",
-            wrapped_coingecko_id="mantle",
+            wrapped_coingecko_id="wrapped-mantle",
             # No verified Mantle SLIP-44 entry; native CAIP-19 stays fail-loud.
             slip44=None,
+        ),
+        external_ids=ExternalChainIds(
+            coingecko="mantle",
+            dexscreener="mantle",
+            coingecko_onchain="mantle",
         ),
         gas=GasProfile(
             buffer=1.5,
@@ -120,14 +126,6 @@ DESCRIPTOR = register_chain(
             "wmnt": "0x78c1b0C915c4FAA5FffA6CAbf0219DA63d7f4cb8",
         },
         simulation=SimulationProfile(tenderly_supported=True),
-        # VIB-4851 (B1): per-vendor external ids, transposed from the legacy
-        # standalone vendor maps (CoinGecko / DexScreener / CoinGecko Onchain /
-        # DeFiLlama / Zerion / Moralis / OKX). Values verbatim incl. case.
-        external_ids={
-            "coingecko": "mantle",
-            "dexscreener": "mantle",
-            "coingecko_onchain": "mantle",
-        },
         # Safe MultiSendCallOnly v1.4.1 — CREATE2, same address on every
         # chain Safe deploys to; presence here == deployment-verified
         # (legacy MULTISEND_ADDRESSES membership, VIB-4851 CS-5).
