@@ -7,6 +7,13 @@ The two rules under test:
   assignment arbitrary (VIB-6045).
 * :func:`currencies_for_amounts` binds identity to the venue's own slot order by
   VALUE and FAILS CLOSED (``None``) rather than guessing.
+
+And the predicate pair that reads that output correctly (VIB-6471 / VIB-6476):
+:func:`slot_moved_money` / :func:`identity_is_complete` separate "this slot moved
+nothing, so its identity is moot" from "this slot moved money and we could not
+identify it" — two states the ``None`` return collapses together, and which every
+consumer used to conflate by testing ``currency0 and currency1``. The banner for
+that class: **an observation's presence is being treated as its success.**
 """
 
 from __future__ import annotations
@@ -16,6 +23,8 @@ import pytest
 from almanak.connectors._strategy_base.lp_leg_identity import (
     TRANSFER_TOPIC,
     currencies_for_amounts,
+    identity_is_complete,
+    slot_moved_money,
     transfers_by_token,
 )
 
@@ -137,6 +146,81 @@ class TestCurrenciesForAmounts:
 
     def test_a_token_is_never_bound_to_both_slots(self):
         assert currencies_for_amounts({USDC: 100}, 100, 100) == (USDC, None)
+
+
+class TestSlotMovedMoney:
+    """VIB-6471 — "did this slot move money?" is the question that makes a ``None``
+    currency readable. A slot that moved nothing needs no identity (0 scales to 0
+    under any decimals); a slot that DID move and has none is the defect."""
+
+    @pytest.mark.parametrize("amount", [None, 0, "0", "  0  ", 0.0])
+    def test_unmeasured_or_zero_did_not_move(self, amount):
+        assert slot_moved_money(amount) is False
+
+    @pytest.mark.parametrize("amount", [1, -1, 49644145, 26524078519924184, "55056478"])
+    def test_nonzero_moved(self, amount):
+        assert slot_moved_money(amount) is True
+
+    @pytest.mark.parametrize("amount", ["", "abc", "1.5", [], {}, object()])
+    def test_unparseable_counts_as_did_not_move_and_never_raises(self, amount):
+        """This runs on the accounting write path, so a garbage amount must not
+        raise. "Did not move" is the permissive reading, which is safe only
+        because ``lp_handler._to_human_from_raw`` fails the same conversion and
+        books the slot unmeasured rather than mis-scaled."""
+        assert slot_moved_money(amount) is False
+
+    @pytest.mark.parametrize("amount", [float("inf"), float("-inf")])
+    def test_infinity_is_caught_not_raised(self, amount):
+        """``int(float("inf"))`` raises OverflowError, NOT ValueError, so it
+        escaped the original except clause and would have propagated out of a
+        function whose contract is that it never raises — on the accounting
+        write path, where an exception aborts the write. Found by CodeRabbit on
+        the PR #3586 panel."""
+        assert slot_moved_money(amount) is False
+
+
+class TestIdentityIsComplete:
+    """VIB-6471 / VIB-6476 — every slot that MOVED money carries its own identity.
+
+    The predicate the consumers should have been testing all along. ``currency0 and
+    currency1`` answers "are both present?", which is a different question and gives
+    the wrong answer in BOTH directions: it reads a routine single-sided close as a
+    failed observation, and a present-but-unresolvable pair as a successful one.
+    """
+
+    def test_both_slots_moved_and_both_bound(self):
+        assert identity_is_complete(USDC, WETH, 49644145, 26524078519924184) is True
+
+    def test_moot_slot_needs_no_identity(self):
+        """THE VIB-6471 CASE. A single-sided close: slot 0 moved and is identified,
+        slot 1 moved nothing so ``currencies_for_amounts`` left it ``None``. That is
+        a COMPLETE observation — a presence test calls it a failure and suppresses
+        the realignment that keeps the row's decimals paired with its amounts."""
+        assert identity_is_complete(USDC, None, 100, 0) is True
+        assert identity_is_complete(None, USDC, 0, 100) is True
+
+    def test_slot_that_moved_without_identity_fails_closed(self):
+        """Identity undeterminable — the value-join found no unambiguous match.
+        Same ``None`` as the moot slot above, opposite meaning."""
+        assert identity_is_complete(None, WETH, 49644145, 26524078519924184) is False
+        assert identity_is_complete(USDC, None, 49644145, 26524078519924184) is False
+        assert identity_is_complete(None, None, 49644145, 26524078519924184) is False
+
+    def test_neither_slot_moved_is_vacuously_complete(self):
+        """Nothing moved, so nothing can be mis-scaled. Callers that need a USABLE
+        pair must additionally require at least one bound currency — which is why
+        the handler's gate is ``(currency0 or currency1) and identity_is_complete``
+        rather than ``identity_is_complete`` alone."""
+        assert identity_is_complete(None, None, 0, 0) is True
+        assert identity_is_complete(None, None, None, None) is True
+
+    def test_empty_string_is_not_an_identity(self):
+        """``""`` is the parser-did-not-emit sentinel (Empty != Zero), not an
+        address. A slot that moved money and carries it is unidentified."""
+        assert identity_is_complete("", WETH, 100, 200) is False
+        assert identity_is_complete(USDC, "", 100, 200) is False
+        # ...but an empty identity on a slot that moved nothing is still moot.
+        assert identity_is_complete(USDC, "", 100, 0) is True
 
 
 class TestV3SplitTxCloseBindsIdentity:

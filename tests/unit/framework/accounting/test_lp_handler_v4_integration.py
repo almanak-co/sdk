@@ -375,40 +375,222 @@ class TestV4RealignTokenPair:
 
         return _v4_realign_token_pair
 
+    # VIB-6476 — the third element is "did this function actually establish the pair?".
+    # It exists because the caller used to infer that from currency PRESENCE, so a
+    # present-but-unresolvable pair read as a success and suppressed the caller's own
+    # address sort, shipping label-ordered decimals against PoolKey-ordered amounts.
+    # Every case below therefore pins the flag, not just the symbols.
+
     def test_object_input_reorders_to_canonical(self, monkeypatch):
         """Typed LPOpenData with currency0/currency1 → resolved symbols, uppercased."""
         self._patch_resolver(monkeypatch, {self.WETH: "weth", self.USDC: "usdc"})
         lp_data = LPOpenData(position_id=0, currency0=self.WETH, currency1=self.USDC)
         # user-intent order was USDC/WETH; canonical currency0=WETH wins.
-        assert self._realign()(lp_data, "optimism", "USDC", "WETH") == ("WETH", "USDC")
+        assert self._realign()(lp_data, "optimism", "USDC", "WETH") == ("WETH", "USDC", True)
 
     def test_dict_fallback_input_reorders(self, monkeypatch):
         """Dict fallback (reconstruction failure) reads keys, not getattr→None."""
         self._patch_resolver(monkeypatch, {self.WETH: "WETH", self.USDC: "USDC"})
         lp_data = {"currency0": self.WETH, "currency1": self.USDC}
-        assert self._realign()(lp_data, "polygon", "USDC", "WETH") == ("WETH", "USDC")
+        assert self._realign()(lp_data, "polygon", "USDC", "WETH") == ("WETH", "USDC", True)
 
     def test_missing_currency_returns_inputs_unchanged(self, monkeypatch):
-        """V3 / single-sided opens carry no currency pair → pass through."""
+        """V3 / single-sided opens carry no currency pair → pass through, NOT realigned."""
         self._patch_resolver(monkeypatch, {})
-        assert self._realign()(LPOpenData(position_id=0), "ethereum", "WETH", "USDC") == ("WETH", "USDC")
-        assert self._realign()(None, "ethereum", "WETH", "USDC") == ("WETH", "USDC")
-        assert self._realign()({"currency0": self.WETH}, "ethereum", "WETH", "USDC") == ("WETH", "USDC")
+        realign = self._realign()
+        assert realign(LPOpenData(position_id=0), "ethereum", "WETH", "USDC") == (
+            "WETH",
+            "USDC",
+            False,
+        )
+        assert realign(None, "ethereum", "WETH", "USDC") == ("WETH", "USDC", False)
+        # A single observed currency is NOT a realignment — the caller must still act.
+        assert realign({"currency0": self.WETH}, "ethereum", "WETH", "USDC") == (
+            "WETH",
+            "USDC",
+            False,
+        )
 
     def test_resolver_exception_fails_open(self, monkeypatch):
-        """Resolver raising must not block the write — fall back to inputs."""
+        """Resolver raising must not block the write — fall back to inputs, flag False.
+
+        VIB-6476: the symbols are unchanged either way, so the flag is the ONLY thing
+        that tells the caller this pair was never established.
+        """
         self._patch_resolver(monkeypatch, raises=True)
         lp_data = LPOpenData(position_id=0, currency0=self.WETH, currency1=self.USDC)
-        assert self._realign()(lp_data, "optimism", "USDC", "WETH") == ("USDC", "WETH")
+        assert self._realign()(lp_data, "optimism", "USDC", "WETH") == ("USDC", "WETH", False)
 
     def test_resolver_returns_none_fails_open(self, monkeypatch):
-        """Unresolvable currency (None) → fall back to user-intent order."""
+        """Unresolvable currency (None) → fall back to user-intent order, flag False."""
         self._patch_resolver(monkeypatch, {self.WETH: "WETH"})  # USDC missing -> None
         lp_data = {"currency0": self.WETH, "currency1": self.USDC}
-        assert self._realign()(lp_data, "optimism", "USDC", "WETH") == ("USDC", "WETH")
+        assert self._realign()(lp_data, "optimism", "USDC", "WETH") == ("USDC", "WETH", False)
 
     def test_blank_symbol_falls_back_to_address(self, monkeypatch):
-        """When the resolver yields an empty symbol, use the currency address."""
+        """When the resolver yields an empty symbol, use the currency address.
+
+        Both currencies RESOLVED here — an empty display symbol is not a resolution
+        failure — so this is a genuine realignment and the flag is True.
+        """
         self._patch_resolver(monkeypatch, {self.WETH: "", self.USDC: "USDC"})
         lp_data = {"currency0": self.WETH, "currency1": self.USDC}
-        assert self._realign()(lp_data, "optimism", "x", "y") == (self.WETH.upper(), "USDC")
+        assert self._realign()(lp_data, "optimism", "x", "y") == (self.WETH.upper(), "USDC", True)
+
+
+# =============================================================================
+# 6. VIB-6476 — a V4 pair that is PRESENT but UNRESOLVABLE must not be waved
+#    through as if V4 had established it
+# =============================================================================
+
+
+class TestV4ResolverFailureNoLongerShipsLabelOrder:
+    """VIB-6476 — the caller-side half of the flag added above.
+
+    Shape: the receipt carries BOTH currencies and BOTH amounts are non-zero, but
+    the token resolver cannot turn the currency ADDRESSES into symbols (a static
+    registry that knows ``"WETH"`` but not ``0xcc…``, or an outright failure). So
+    ``_v4_realign_token_pair`` gives up and hands back the label order.
+
+    Pre-fix, ``_v3_realign_token_pair``'s gate read ``currency0 and currency1`` —
+    a PRESENCE test standing in for "V4 already established the pair" — so it
+    short-circuited on the strength of currencies that had resolved to nothing.
+    Neither realignment ran, and the handler paired PoolKey-ordered amounts with
+    label-ordered decimals: the VIB-5851 mis-scaling, reached by a different door.
+
+    Post-fix the gate reads the explicit ``v4_realigned`` flag, and the presence of
+    an observation is instead consumed by positional placement, which resolves the
+    LABEL symbols (a lookup direction the failing resolver still serves).
+
+    The fixture pair is deliberately Ethereum-like — USDC ``0x11…`` below WETH
+    ``0xcc…`` — so the label order (WETH, USDC) is the INVERSE of the receipt's
+    slot order and "unchanged" is distinguishable from "corrected".
+    """
+
+    USDC_ADDR = "0x" + "11" * 20
+    WETH_ADDR = "0x" + "cc" * 20
+    DECIMALS = {"USDC": 6, "WETH": 18}
+
+    # The G6-sweep magnitudes, in the receipt's own slot order (slot 0 = USDC).
+    USDC_RAW = 2_185_779  # 6 dp -> 2.185779 USDC
+    WETH_RAW = 1_032_114_889_479_681  # 18 dp -> 0.001032… WETH
+
+    def _patch_resolver(self, monkeypatch, *, address_lookup: str) -> None:
+        """Resolver that serves SYMBOL lookups but fails ADDRESS lookups.
+
+        Two independent call sites share ``get_token_resolver``, and they resolve
+        in opposite directions:
+
+        * ``_v4_realign_token_pair`` resolves the receipt's currency ADDRESSES to
+          symbols — this is what fails here;
+        * ``place_token_pair_by_observed_identity`` and ``_resolve_lp_amounts``
+          resolve the label SYMBOLS to addresses / decimals — these still work.
+
+        ``address_lookup`` selects how the first direction fails: ``"none"``
+        (registry miss) or ``"raise"`` (resolver down). Both must land on
+        ``v4_realigned=False``.
+        """
+        from types import SimpleNamespace
+
+        book = {"USDC": self.USDC_ADDR, "WETH": self.WETH_ADDR}
+        addresses = {v.lower() for v in book.values()}
+
+        class _FakeResolver:
+            def resolve(self, key, **_kwargs):  # noqa: ANN001
+                text = str(key)
+                if text.lower() in addresses:
+                    if address_lookup == "raise":
+                        raise RuntimeError("resolver down for address lookups")
+                    return None
+                up = text.upper()
+                if up in book:
+                    return SimpleNamespace(
+                        symbol=up,
+                        address=book[up],
+                        decimals=TestV4ResolverFailureNoLongerShipsLabelOrder.DECIMALS[up],
+                    )
+                return None
+
+        monkeypatch.setattr(
+            "almanak.framework.data.tokens.resolver.get_token_resolver",
+            lambda: _FakeResolver(),
+        )
+
+    def _lp_open(self):
+        return LPOpenData(
+            position_id=7,
+            tick_lower=-60000,
+            tick_upper=60000,
+            liquidity=500_000,
+            amount0=self.USDC_RAW,  # slot 0 held USDC, per the receipt
+            amount1=self.WETH_RAW,
+            pool_address=POOL_ID_32_BYTE,
+            currency0=self.USDC_ADDR,
+            currency1=self.WETH_ADDR,
+        )
+
+    @pytest.mark.parametrize("address_lookup", ["none", "raise"])
+    def test_v3_realign_corrects_the_pair_instead_of_returning_label_order(
+        self, monkeypatch, address_lookup: str
+    ):
+        """The helper-level contract. ``v4_realigned`` is what
+        ``_v4_realign_token_pair`` actually reports for this shape — assert that
+        first, so the test cannot silently drift into testing a hypothetical."""
+        from almanak.framework.accounting.category_handlers.lp_handler import (
+            _v3_realign_token_pair,
+            _v4_realign_token_pair,
+        )
+
+        self._patch_resolver(monkeypatch, address_lookup=address_lookup)
+        lp_data = self._lp_open()
+
+        t0, t1, v4_realigned = _v4_realign_token_pair(lp_data, "ethereum", "WETH", "USDC")
+        assert (t0, t1) == ("WETH", "USDC"), "V4 fails open on the symbols — unchanged"
+        assert v4_realigned is False, "an unresolvable pair was never established"
+
+        out = _v3_realign_token_pair(
+            lp_data=lp_data,
+            intent_type_str="LP_OPEN",
+            extracted={"lp_open_data": lp_data},
+            chain="ethereum",
+            token0=t0,
+            token1=t1,
+            v4_realigned=v4_realigned,
+        )
+        assert out != ("WETH", "USDC"), (
+            "label order shipped against PoolKey-ordered amounts — VIB-6476 regression"
+        )
+        assert out == ("USDC", "WETH"), (
+            "the receipt observed USDC in slot 0; placement must put it there"
+        )
+
+    @pytest.mark.parametrize("address_lookup", ["none", "raise"])
+    def test_handle_lp_end_to_end_basis_is_not_phantom(self, monkeypatch, address_lookup: str):
+        """The money consequence, through the real handler.
+
+        With the pair uncorrected, ``amount1`` (a WETH raw int) is scaled by USDC's
+        6 decimals — ~1,032,114,889 "USDC" at $1 — so the basis lands around
+        $1.03bn on a ~$4.17 position. That is the VIB-5851 signature, and it is
+        what the presence gate let through.
+        """
+        from almanak.framework.observability.ledger import serialize_extracted_data
+
+        self._patch_resolver(monkeypatch, address_lookup=address_lookup)
+
+        ledger = _ledger_row_open(protocol="uniswap_v4", extracted_data={})
+        ledger["chain"] = "ethereum"
+        ledger["extracted_data_json"] = serialize_extracted_data({"lp_open_data": self._lp_open()})
+        ledger["price_inputs_json"] = json.dumps({"WETH": "1917.0", "USDC": "1.0"})
+        outbox = _outbox_row(position_key=f"lp:uniswap_v4:ethereum:{WALLET}:{POOL_ID_32_BYTE}")
+
+        event = handle_lp(outbox, ledger)
+        assert event is not None
+        assert (event.token0 or "").upper() == "USDC"
+        assert (event.token1 or "").upper() == "WETH"
+
+        assert event.cost_basis_usd is not None, "basis must be measured, not None"
+        basis = float(event.cost_basis_usd)
+        assert 3.0 < basis < 6.0, (
+            f"phantom basis {basis} (expected ~$4.17) — decimals paired with the "
+            f"wrong slot because the pair was never corrected"
+        )

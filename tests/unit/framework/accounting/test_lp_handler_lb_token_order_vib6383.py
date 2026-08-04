@@ -407,25 +407,22 @@ class TestLBCloseSingleLegPartialObservation:
     too strong before the fix: it held for two-leg closes only.
     """
 
-    @pytest.mark.xfail(
-        reason=(
-            "VIB-6471 — KNOWN, DOCUMENTED, NOT FIXED HERE. A single-sided LB close "
-            "stamps one currency; the handler's gate requires both, so the V3 address "
-            "sort still runs on an LB pair. The obvious fix (relax the gate to 'or') "
-            "was implemented, then REVERTED: it reopened the identical defect for "
-            "uniswap_v3/sushiswap_v3/pancakeswap_v3/aerodrome, which stamp a partial "
-            "pair on every out-of-range single-sided close via "
-            "lp_leg_identity.currencies_for_amounts. The correct fix is POSITIONAL — "
-            "place the observed currency in its own slot — and is deferred to VIB-6471 "
-            "with its own panel. This test is kept xfail rather than deleted so the "
-            "residual stays executable and flips to XPASS the moment it is fixed."
-        ),
-        strict=True,
-    )
     def test_single_leg_close_does_not_reach_the_address_sort(self, _patched_resolver) -> None:
         """One WAVAX-only withdrawal on a pool whose order is the INVERSE of address
-        order. Currently XFAIL: token0 flips to USDT and amount0 is scaled 1e12 too
-        large, the same signature as the original $228bn defect — see VIB-6471.
+        order. Was XFAIL(strict) as the executable record of VIB-6471; FIXED by the
+        positional placement this test now pins.
+
+        The defect: a single-sided LB close stamps one currency, and both realign gates
+        keyed on BOTH being present, so the V3 address sort ran on a Liquidity Book pair
+        and reproduced the ``228032393198.21591`` signature. Relaxing that gate to ``or``
+        was tried and reverted — it reopened the identical defect for the whole V3 family,
+        which stamps a partial pair on every ordinary out-of-range single-sided close.
+
+        The fix is neither polarity of that boolean. ``lp_leg_identity.identity_is_complete``
+        distinguishes "slot moved nothing, identity moot" from "identity undeterminable",
+        so a partial-but-trustworthy observation is placed POSITIONALLY by
+        ``place_token_pair_by_observed_identity`` — matching addresses, never sorting them,
+        which is why it holds for LB and Curve as well as the address-sorted families.
         """
         parser = TraderJoeV2ReceiptParser(chain="avalanche")
         receipt = {

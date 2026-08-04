@@ -336,18 +336,75 @@ class TestV3RealignHelperGatesAndFailOpen:
         assert out == ("WETH", "USDC")
 
     def test_v4_currency_pair_skipped(self, monkeypatch):
-        """V4 (currency0/currency1 present) is owned by _v4_realign_token_pair."""
+        """A pair the V4 path ESTABLISHED is left alone — but only when it says so.
+
+        VIB-6476 — this used to be gated on ``currency0 and currency1`` being present,
+        which conflated "V4 realigned this" with "V4 saw currencies and gave up". The
+        gate now reads the explicit ``v4_realigned`` flag instead.
+        """
         _patch_resolver(monkeypatch, "eth_like")
         lp_data = self._open_data(currency0=_addr("11"), currency1=_addr("cc"))
+        kwargs = {
+            "lp_data": lp_data,
+            "intent_type_str": "LP_OPEN",
+            "extracted": {"lp_open_data": lp_data},
+            "chain": "ethereum",
+            "token0": "WETH",
+            "token1": "USDC",
+        }
+
+        # V4 established the pair -> untouched, regardless of what the addresses say.
+        assert self._realign()(**kwargs, v4_realigned=True) == ("WETH", "USDC")
+
+        # V4 did NOT establish it, so the gate no longer short-circuits. In ``eth_like``
+        # USDC IS _addr("11") and WETH IS _addr("cc"), so the observed currencies match
+        # the labels and positional PLACEMENT succeeds: slot 0 -> USDC, slot 1 -> WETH.
+        # The value coincides with what the address sort would give on this chain, so it
+        # does NOT exercise the fallthrough — TestBothObservedButUnplaceable covers the
+        # case where placement fails and the two mechanisms diverge.
+        assert self._realign()(**kwargs, v4_realigned=False) == ("USDC", "WETH")
+
+    def test_both_observed_but_unplaceable_keeps_label_order(self, monkeypatch):
+        """VIB-6484 / delta review — both slots observed but the addresses match
+        NEITHER label: keep label order, do NOT fall through to the address sort.
+
+        This path is the one the ``and`` -> ``or`` widening opened. The old gate was
+        ``if currency0 and currency1: return token0, token1``, which made the address
+        sort **unreachable** once both currencies were stamped. Widening it to reach
+        positional placement also exposed that fallthrough, and on a venue whose slots
+        are not address-sorted — TraderJoe Liquidity Book stamps both currencies and
+        emits no ``coin_symbols``, so the N-coin early return does not catch it — the
+        sort transposes the row. That is the VIB-6383 $322bn class, on a path this
+        function had previously closed.
+
+        Trigger: a stale or bridged pool label, e.g. one written ``USDC`` for a pool
+        that actually holds ``USDC.e``. The observed currency then matches no label.
+        """
+        _patch_resolver(monkeypatch, "eth_like")
+        # Neither 0x99… nor 0x77… is in the eth_like book, so placement must refuse.
+        lp_data = {
+            "amount0_collected": USDC_RAW,
+            "amount1_collected": WETH_RAW,
+            "currency0": _addr("99"),
+            "currency1": _addr("77"),
+        }
         out = self._realign()(
             lp_data=lp_data,
-            intent_type_str="LP_OPEN",
-            extracted={"lp_open_data": lp_data},
+            intent_type_str="LP_CLOSE",
+            extracted={"lp_close_data": lp_data},
             chain="ethereum",
             token0="WETH",
             token1="USDC",
+            v4_realigned=False,
         )
-        assert out == ("WETH", "USDC")
+        assert out == ("WETH", "USDC"), "unplaceable observation must keep label order"
+
+        # And it must genuinely DIVERGE from the address sort — otherwise this test
+        # would pass even if the fallthrough were still live.
+        from almanak.framework.data.tokens.pair_order import realign_token_pair_by_address
+
+        assert realign_token_pair_by_address("WETH", "USDC", "ethereum") == ("USDC", "WETH")
+        assert out != realign_token_pair_by_address("WETH", "USDC", "ethereum")
 
     def test_fungible_coin_symbols_skipped(self, monkeypatch):
         """N-coin fungible pools order coins by pool index, not address."""
@@ -407,12 +464,18 @@ class TestV3RealignHelperGatesAndFailOpen:
         _patch_resolver(monkeypatch, "eth_like")
         lp_data = {"amount0_collected": USDC_RAW, "amount1_collected": WETH_RAW,
                    "currency0": _addr("11"), "currency1": _addr("cc")}
-        out = self._realign()(
-            lp_data=lp_data,
-            intent_type_str="LP_CLOSE",
-            extracted={"lp_close_data": lp_data},
-            chain="ethereum",
-            token0="WETH",
-            token1="USDC",
-        )
-        assert out == ("WETH", "USDC")
+        kwargs = {
+            "lp_data": lp_data,
+            "intent_type_str": "LP_CLOSE",
+            "extracted": {"lp_close_data": lp_data},
+            "chain": "ethereum",
+            "token0": "WETH",
+            "token1": "USDC",
+        }
+        # The dict shape must still be READ (the point of this test): both currency
+        # keys are seen, so a V4-established pair is skipped...
+        assert self._realign()(**kwargs, v4_realigned=True) == ("WETH", "USDC")
+        # ...and an unestablished one is no longer waved through on presence alone
+        # (VIB-6476): the dict-read currencies match the ``eth_like`` labels, so
+        # positional placement binds slot 0 -> USDC, slot 1 -> WETH.
+        assert self._realign()(**kwargs, v4_realigned=False) == ("USDC", "WETH")

@@ -196,3 +196,66 @@ def currencies_for_amounts(
     currency0 = _bind(amount0, taken=None)
     currency1 = _bind(amount1, taken=currency0)
     return currency0, currency1
+
+
+def slot_moved_money(amount: Any) -> bool:
+    """True when a slot carries a measured, non-zero amount.
+
+    A slot that moved nothing needs no identity: ``0`` scales to ``0`` under any
+    decimals, so mis-attributing it is arithmetically harmless. A slot that DID
+    move money and has no identity is the defect class this module exists to end.
+
+    Unparseable input counts as "did not move" rather than raising — this runs on
+    the accounting write path, where an exception would abort the write. Note this
+    is *permissive*, not fail-closed: a malformed amount makes
+    :func:`identity_is_complete` treat the slot as needing no identity. That is
+    safe only because the same ``int(raw)`` conversion in
+    ``lp_handler._to_human_from_raw`` yields ``None`` for the identical input, so a
+    slot this predicate waves through is still booked unmeasured rather than
+    mis-scaled.
+
+    ``OverflowError`` is caught alongside the parse errors: ``int(float("inf"))``
+    raises it rather than ``ValueError``, and it would otherwise escape a function
+    whose contract is that it never raises.
+    """
+    if amount is None:
+        return False
+    try:
+        return int(amount) != 0
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def identity_is_complete(
+    currency0: str | None,
+    currency1: str | None,
+    amount0: Any,
+    amount1: Any,
+) -> bool:
+    """True when every slot that MOVED money carries its own identity.
+
+    :func:`currencies_for_amounts` returns ``None`` for a slot in three different
+    situations — the amount was unmeasured, the amount was ``0`` (identity moot),
+    or the value-join was ambiguous (identity undeterminable). Consumers that test
+    ``currency0 and currency1`` cannot tell those apart, so they read a routine
+    single-sided close (one real leg + one zero leg) as a *failed* observation and
+    a genuinely failed observation as a *successful* one. That conflation is
+    VIB-6471 (partial stamp suppresses realignment) and VIB-6476 (present-but-
+    unresolvable stamp suppresses realignment) — one root cause, two symptoms:
+
+        **an observation's presence is being treated as its success.**
+
+    This predicate restores the distinction WITHOUT changing how ``currency0`` /
+    ``currency1`` are stored or serialized: the amounts already sit beside the
+    currencies at every consumer, so the third state is *derived* rather than
+    persisted. That matters — the stored fields are also read by the runner's
+    native-leg stamp (``strategy_runner._receipt_token_legs`` and the V4 native
+    top-off), where changing their meaning would re-break VIB-5117 / VIB-5121.
+
+    Vacuously ``True`` when neither slot moved money; callers that need a usable
+    pair must additionally require at least one bound currency.
+    """
+    for currency, amount in ((currency0, amount0), (currency1, amount1)):
+        if slot_moved_money(amount) and not currency:
+            return False
+    return True

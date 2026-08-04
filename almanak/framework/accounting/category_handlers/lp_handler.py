@@ -367,7 +367,7 @@ def _v4_realign_token_pair(
     chain: str,
     token0: str,
     token1: str,
-) -> tuple[str, str]:
+) -> tuple[str, str, bool]:
     """VIB-4636 (sibling) — return ``(token0, token1)`` re-paired by canonical V4 PoolKey order.
 
     The V4 receipt parser emits ``amount0`` / ``amount1`` in PoolKey-sorted
@@ -380,10 +380,20 @@ def _v4_realign_token_pair(
     (which is part of the unused ``build_lp_accounting_event`` ladder); kept
     inline here so the production handler is the single source of truth.
 
-    Returns the inputs unchanged when ``currency0`` / ``currency1`` are
-    absent (V3 callers, single-sided V4 opens that did not surface both
-    legs, or token-resolver failures — fail-open so a missing resolver
-    cannot block the write).
+    Returns ``(token0, token1, realigned)``. ``realigned`` is ``True`` only when
+    this function actually established the pair from the receipt currencies —
+    i.e. both were present AND both resolved. It is ``False`` for V3 callers,
+    for single-sided V4 opens that did not surface both legs, and for
+    token-resolver failures.
+
+    VIB-6476 — that boolean is the whole point. The amounts are still returned
+    unchanged on failure (fail-open, so a missing resolver cannot block the
+    write), but the caller must be able to tell "V4 established this pair" from
+    "V4 gave up and handed back the label order". Reporting only the tuple made
+    those indistinguishable, so ``_v3_realign_token_pair`` skipped its own
+    address sort on the strength of currencies that had in fact resolved to
+    nothing — pairing PoolKey-ordered amounts with label-ordered decimals, which
+    is the very misattribution this function exists to prevent.
     """
     # ``deserialize_extracted_data`` falls back to a plain dict when typed
     # reconstruction fails — read both shapes so the realign is not silently
@@ -395,7 +405,7 @@ def _v4_realign_token_pair(
         c0 = getattr(lp_data, "currency0", None)
         c1 = getattr(lp_data, "currency1", None)
     if not c0 or not c1:
-        return token0, token1
+        return token0, token1, False
     try:
         from almanak.framework.data.tokens.resolver import get_token_resolver
 
@@ -410,7 +420,7 @@ def _v4_realign_token_pair(
             c1,
             chain,
         )
-        return token0, token1
+        return token0, token1, False
     if ti0 is None or ti1 is None:
         logger.warning(
             "V4 LP accounting: token resolver returned None for currency pair (%s, %s) on %s; "
@@ -419,8 +429,8 @@ def _v4_realign_token_pair(
             c1,
             chain,
         )
-        return token0, token1
-    return (ti0.symbol or c0).upper(), (ti1.symbol or c1).upper()
+        return token0, token1, False
+    return (ti0.symbol or c0).upper(), (ti1.symbol or c1).upper(), True
 
 
 def _lp_data_field(lp_data: Any, name: str) -> Any:
@@ -437,6 +447,22 @@ def _lp_data_field(lp_data: Any, name: str) -> Any:
     return getattr(lp_data, name, None)
 
 
+def _lp_slot_amount(lp_data: Any, index: int) -> Any:
+    """Raw amount in venue slot ``index``, across the open and close field names.
+
+    ``LPOpenData`` names them ``amount0`` / ``amount1``; ``LPCloseData`` names them
+    ``amount0_collected`` / ``amount1_collected``. Both are the SAME carrier — the
+    venue's own slot order — so a caller reasoning about slot identity must read
+    whichever one this payload carries. (The other carrier, ``primitive_money_legs``,
+    is declaration-ordered and must never be crossed with this one.)
+    """
+    for name in (f"amount{index}", f"amount{index}_collected"):
+        value = _lp_data_field(lp_data, name)
+        if value is not None:
+            return value
+    return None
+
+
 def _v3_realign_token_pair(
     *,
     lp_data: Any,
@@ -445,6 +471,7 @@ def _v3_realign_token_pair(
     chain: str,
     token0: str,
     token1: str,
+    v4_realigned: bool = False,
 ) -> tuple[str, str]:
     """VIB-5851 — re-pair ``(token0, token1)`` by on-chain ``token0()``/``token1()``
     (address-sorted) order for the V3-family concentrated-liquidity / Solidly path.
@@ -477,8 +504,12 @@ def _v3_realign_token_pair(
         ``lp_open_data`` — the amounts are aligned to ``token_in``/``token_out``,
         NOT address order, so reordering would BREAK them;
       * a close with no typed ``lp_close_data`` (string-fallback amounts);
-      * V4 (``currency0``/``currency1`` present) — already handled by
-        ``_v4_realign_token_pair``;
+      * a pair ``_v4_realign_token_pair`` already established (``v4_realigned``);
+        note this is its SUCCESS, not the mere presence of ``currency0`` /
+        ``currency1`` — see VIB-6476;
+      * a pair placed positionally from the observed currencies, which happens
+        instead of the sort whenever every slot that moved money carries its own
+        identity (VIB-6471);
       * fungible N-coin pools (``coin_symbols`` present) — coin ordering is
         pool-index, not address-sorted; valued via the ``coin_symbols`` path;
       * the token resolver failing / returning no address — cannot prove order,
@@ -502,35 +533,85 @@ def _v3_realign_token_pair(
         if lp_data is None:
             return token0, token1  # string-fallback close
 
-    # V4 pairs are re-aligned by ``_v4_realign_token_pair`` via the receipt
-    # currency addresses — never double-process here.
+    # VIB-6383 / VIB-6471 / VIB-6476 — act on whether the observation SUCCEEDED,
+    # not on whether it is present.
     #
-    # VIB-6383 / VIB-6471 — this gate requires BOTH currencies, deliberately.
+    # This gate used to read ``currency0 and currency1`` — a PRESENCE test standing in
+    # for "V4 already established the pair". An earlier revision tried relaxing it to
+    # ``or`` and had to be reverted, because ``currencies_for_amounts`` returns ``None``
+    # both for "identity undeterminable" and for "amount was 0, identity moot", so a
+    # routine single-sided V3-family close stamps a partial ``(addr, None)`` pair and
+    # ``or`` suppressed BOTH realignments. Neither polarity of that boolean is right,
+    # because the boolean cannot express the thing the gate needs to know. Widening or
+    # narrowing it again would be the sixth instance of this class.
     #
-    # A previous revision of THIS PR changed it to ``or``, to close a hole where a
-    # single-sided Liquidity Book close stamps only one currency and the address sort
-    # still ran on an LB pair (Grok M1). That change was REVERTED: it reopened the
-    # identical defect class for the entire V3 family.
+    # The three states are now distinguished properly:
     #
-    # Why: ``_strategy_base/lp_leg_identity.currencies_for_amounts`` (VIB-6053, already
-    # shipped) binds each slot by VALUE and returns ``None`` for "a slot whose amount is
-    # None (unmeasured) or 0" — so uniswap_v3, sushiswap_v3, pancakeswap_v3 and
-    # aerodrome all stamp a PARTIAL ``(addr, None)`` pair on an ordinary out-of-range
-    # single-sided close, which is a routine lifecycle event, not an edge case. Under
-    # ``or`` that partial stamp short-circuits this gate, ``_v4_realign_token_pair``
-    # no-ops (it needs both), so NEITHER realignment runs and the label order ships —
-    # reproduced: label WETH/USDC with a 6-dec USDC raw in slot 0 returned
-    # ('WETH','USDC') under ``or`` where the address sort correctly gives
-    # ('USDC','WETH'). That is the VIB-5851 mis-scaling defect, re-introduced.
-    #
-    # So: BOTH present means the pair is already established (V4 realigned it, or
-    # there is nothing to do) and the sort must be skipped. Exactly ONE present is an
-    # observation this gate cannot act on — it suppresses nothing, and the partial
-    # case is tracked as VIB-6471, whose fix is POSITIONAL (place the observed
-    # currency in its own slot) rather than another adjustment to this boolean.
-    # A blanket ``or`` trades one connector family's correctness for four others'.
-    if _lp_data_field(lp_data, "currency0") and _lp_data_field(lp_data, "currency1"):
+    #   1. ``v4_realigned`` — the V4 path resolved both currencies and set the pair.
+    #      Nothing left to do. (Previously inferred from currency presence, which is
+    #      why a present-but-UNRESOLVABLE pair silently shipped label order: VIB-6476.)
+    #   2. identity complete + at least one observation — place the labels positionally
+    #      into the slots their observed addresses name. No sort, so this is correct for
+    #      Liquidity Book and Curve as well as the address-sorted families (VIB-6471).
+    #   3. otherwise — a slot moved money with no identity. Fall through to the address
+    #      sort, which is the pre-existing behaviour and remains correct-by-assumption
+    #      for the V3 family.
+    if v4_realigned:
         return token0, token1
+
+    currency0 = _lp_data_field(lp_data, "currency0")
+    currency1 = _lp_data_field(lp_data, "currency1")
+    if currency0 or currency1:
+        from almanak.connectors._strategy_base.lp_leg_identity import identity_is_complete
+        from almanak.framework.data.tokens.pair_order import (
+            place_token_pair_by_observed_identity,
+        )
+
+        # LP_OPEN carries ``amount{0,1}``; LP_CLOSE carries ``amount{0,1}_collected``.
+        amount0 = _lp_slot_amount(lp_data, 0)
+        amount1 = _lp_slot_amount(lp_data, 1)
+        if identity_is_complete(currency0, currency1, amount0, amount1):
+            placed = place_token_pair_by_observed_identity(token0, token1, chain, currency0, currency1)
+            if placed is not None:
+                return placed
+
+        if currency0 and currency1:
+            # BOTH slots were observed, and placement still could not prove an
+            # assignment — the observed addresses match neither label symbol
+            # (a stale or bridged label, e.g. a pool labelled USDC that holds
+            # USDC.e). Keep the label order rather than falling through to the
+            # address sort below.
+            #
+            # This preserves the pre-change contract exactly. The old gate was
+            # ``if currency0 and currency1: return token0, token1``, which made
+            # the address sort UNREACHABLE once both currencies were stamped.
+            # Widening it to ``or`` to reach the positional placement also opened
+            # that fallthrough, and on a venue whose slots are not address-sorted
+            # (TraderJoe Liquidity Book stamps both currencies and emits no
+            # ``coin_symbols``, so the N-coin early return below does not catch
+            # it) the sort transposes the row — the VIB-6383 $322bn class, on a
+            # path this function had previously closed.
+            #
+            # Sorting is a guess licensed by an assumption we have just seen
+            # fail. Two observations that name tokens outside this pair are
+            # evidence the receipt and the label disagree, which is precisely
+            # when guessing is least defensible.
+            return token0, token1
+
+    # KNOWN LIMITATION of the success-not-presence rule above — VIB-6484.
+    #
+    # Lane asymmetry. ``position_events._pair_tokens_from_parser_currencies``
+    # still gates on PRESENCE (``if not (cur0 and cur1)``), so the two producers
+    # can bind one transaction differently. Note what that lane actually does on
+    # a PARTIAL stamp: ``parser_pair`` is ``None`` -> ``currencies_observed`` is
+    # False -> it reaches ``realign_token_pair_by_address``. It address-sorts;
+    # it does not merely keep label order.
+    #
+    # Not fixed here. ``position_events.py`` is byte-identical to base, so this
+    # PR introduces no new misreport on that lane — it improves this one and
+    # leaves that one exactly as it was. The ladder is already allowlisted for
+    # deletion by VIB-6104 Move C (VIB-6475); patching presence->success there
+    # would be the sixth instance of the class Move C exists to remove.
 
     # Fungible N-coin pools order coins by pool index, not address.
     if _lp_data_field(lp_data, "coin_symbols"):
@@ -1702,7 +1783,7 @@ def handle_lp(
     # and fungible-LP callers fall through unchanged.
     lp_field = "lp_open_data" if intent_type_str == "LP_OPEN" else "lp_close_data"
     lp_data = extracted.get(lp_field) if isinstance(extracted, dict) else None
-    token0, token1 = _v4_realign_token_pair(lp_data, chain, token0, token1)
+    token0, token1, v4_realigned = _v4_realign_token_pair(lp_data, chain, token0, token1)
 
     # VIB-5851 — V3-family concentrated-liquidity / Solidly amounts also ship in
     # on-chain ``token0()``/``token1()`` (address-sorted) order, but V3 receipts
@@ -1719,6 +1800,7 @@ def handle_lp(
         chain=chain,
         token0=token0,
         token1=token1,
+        v4_realigned=v4_realigned,
     )
 
     amount0, amount1, fees0, fees1, assumed_decimals = _resolve_lp_amounts(

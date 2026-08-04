@@ -589,10 +589,19 @@ class TraderJoeV2ReceiptParser:
 
         * ``_v4_realign_token_pair`` runs FIRST and is capability-gated, not
           protocol-name-gated (its call site says so). It resolves the two
-          addresses to symbols, which re-pairs the labels onto the amounts.
-        * ``_v3_realign_token_pair`` then short-circuits on its existing
-          ``currency0 and currency1`` gate, so the V3 address sort no longer
-          reaches a Liquidity Book pair.
+          addresses to symbols, which re-pairs the labels onto the amounts, and
+          reports whether it succeeded.
+        * ``_v3_realign_token_pair`` then short-circuits on that success signal,
+          so the V3 address sort no longer reaches a Liquidity Book pair.
+
+        VIB-6471 / VIB-6476 — that second bullet originally read "short-circuits
+        on its existing ``currency0 and currency1`` gate". A presence test was
+        the wrong instrument twice over: a single-sided LB close stamps only ONE
+        currency (so the gate missed, and the address sort ran on an LB pair
+        anyway), and a two-sided pair whose addresses fail to RESOLVE satisfied
+        the gate while establishing nothing. Both are now handled by testing
+        success — and, when V4 did not establish the pair, by placing the labels
+        positionally from the observed addresses instead of sorting them.
 
         No framework change is needed, and no other connector's behaviour moves:
         a parser that does not populate these fields sees the identical code path
