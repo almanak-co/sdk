@@ -552,7 +552,46 @@ class _ReplayProbe:
 
     def describe(self) -> str:
         detail = self.reason or "no decodable reason"
-        return f"{detail} (raw={self.raw[:74]})" if self.raw else detail
+        return f"{detail} (raw={_format_raw_payload(self.raw)})" if self.raw else detail
+
+
+# The cap is in WHOLE 32-byte words, and a cut is always announced (VIB-6483).
+# The previous bound was a flat ``raw[:74]`` — ``0x`` + 4-byte selector + exactly
+# ONE word — so every custom error with more than one argument was silently cut
+# to its first operand, with no ellipsis and no length: a truncated payload read
+# as a complete one. That cost the answer to VIB-6437 on this diagnostic's first
+# real-fork use: ``InsufficientGasForCancellation(uint256,uint256)`` surfaced with
+# the measured gas and without the threshold it failed against.
+#
+# ``raw`` is the ONLY place an operand ever reaches the operator —
+# ``decode_revert_data`` reports a custom error as its selector alone — so a cut
+# here is a lost measurement, not a shorter message.
+#
+# 16 words covers every custom error GMX defines many times over; the cap exists
+# only so a pathological ``Error(string)`` cannot flood a log line. Cutting on a
+# word boundary keeps whatever is shown ABI-decodable.
+_RAW_MAX_WORDS = 16
+_RAW_HEX_CAP = 8 + _RAW_MAX_WORDS * 64  # 4-byte selector + N whole 32-byte words
+
+
+def _format_raw_payload(raw: str) -> str:
+    """``raw``, cut only on a 32-byte-word boundary and never silently.
+
+    Best-effort like every function in this section: pure string arithmetic, so
+    it cannot raise on a malformed or odd-length payload.
+    """
+    blob = raw[2:] if raw[:2].lower() == "0x" else raw
+    if len(blob) <= _RAW_HEX_CAP:
+        return raw
+    # Announce the cut AND the true size, so a reader can tell a truncated
+    # payload from a complete one and knows how much was dropped.
+    #
+    # Known limitation (VIB-6485): on an ODD-length blob this floors, so the
+    # reported total can equal the shown size and stop conveying how much was
+    # dropped — the `…` still does. Not reachable from production: _replay_once
+    # sets `raw` only from `0x`-prefixed RPC data, and ABI revert data is
+    # even-length.
+    return f"0x{blob[:_RAW_HEX_CAP]}… truncated, {len(blob) // 2} bytes total"
 
 
 # Gas exhaustion is a MEASURED execution outcome, but it does not look like one:
