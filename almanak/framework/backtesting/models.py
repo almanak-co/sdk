@@ -2357,6 +2357,28 @@ class BacktestResult:
             print(f"Data coverage: {result.data_coverage_metrics.data_coverage_pct:.1f}%")
             print(f"LP HIGH: {result.data_coverage_metrics.lp_metrics.high_confidence_pct:.1f}%")
     """
+    decision_summary: dict[str, Any] | None = None
+    """Aggregated per-tick decision telemetry (``DecisionLog.summary()``).
+
+    ``{"schema_version", "ticks", "intent_ticks", "hold_ticks", "intent_types",
+    "hold_reasons", "executions"}`` — the backtest counterpart of the live
+    runner's ``iteration_summary`` records, condensed. ``hold_reasons`` rows
+    group holds by digit-normalized reason template with tick counts and
+    first/last tick markers, so a 100%-hold run explains itself in the
+    artifact instead of rendering as a silent flat line. ``None`` for paper
+    results and pre-telemetry artifacts.
+    """
+    decision_events: list[dict[str, Any]] | None = None
+    """Per-tick decision records (``DecisionLog.events()``), in tick order.
+
+    One JSON-safe record per simulation tick: ``{"event": "decision", "tick",
+    "timestamp", "source", "decision", ...}`` with ``hold_reason`` /
+    ``hold_reason_code`` for holds and serialized ``intents`` for actionable
+    decisions. Deliberately NOT included in the ``result.json`` payload
+    (``serialize_result``) — the platform runner writes it as a sidecar
+    ``decisions.jsonl`` artifact instead. ``None`` for paper results and
+    pre-telemetry artifacts.
+    """
 
     @property
     def success(self) -> bool:
@@ -2713,6 +2735,13 @@ class BacktestResult:
         # no manifest, so their payloads are unchanged.
         if self.data_manifest is not None:
             result["data_manifest"] = self.data_manifest
+        # Emit-when-set: local --output files stay self-contained — the
+        # aggregate AND the per-tick stream round-trip through to_dict/from_dict
+        # (the platform path instead ships events as the decisions.jsonl sidecar).
+        if self.decision_summary is not None:
+            result["decision_summary"] = self.decision_summary
+        if self.decision_events is not None:
+            result["decision_events"] = self.decision_events
         # Emit-when-set, like the numeraire keys: paper results and legacy
         # artifacts carry no price series, so their payloads are unchanged.
         if self.price_series:
@@ -3056,6 +3085,8 @@ class BacktestResult:
                 AccuracyEstimate.from_dict(data["accuracy_estimate"]) if data.get("accuracy_estimate") else None
             ),
             data_manifest=data.get("data_manifest"),
+            decision_summary=data.get("decision_summary"),
+            decision_events=data.get("decision_events"),
             data_coverage_metrics=(
                 DataCoverageMetrics.from_dict(data["data_coverage_metrics"])
                 if data.get("data_coverage_metrics")

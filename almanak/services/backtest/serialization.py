@@ -74,4 +74,8 @@ def serialize_result(result: BacktestResult) -> dict[str, Any]:
         payload["price_series_display_labels"] = dict(result.price_series_display_labels)
     if result.data_manifest is not None:
         payload["data_manifest"] = result.data_manifest
+    if result.decision_summary is not None:
+        # Aggregate only — the per-tick decision_events ship as the sidecar
+        # decisions.jsonl artifact, never inline in result.json.
+        payload["decision_summary"] = result.decision_summary
     return payload

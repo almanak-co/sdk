@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -881,3 +882,157 @@ def test_main_does_not_post_failed_when_only_completed_callback_fails(
     # Non-zero exit signals the platform to retry, but no FAILED verdict is posted.
     assert runner.main() == 1
     assert posted == []
+
+
+# ---------------------------------------------------------------------------
+# decisions.jsonl sidecar (decision telemetry)
+# ---------------------------------------------------------------------------
+
+
+def test_build_decisions_jsonl_interleaves_decisions_and_executions() -> None:
+    result = SimpleNamespace(
+        decision_events=[
+            {
+                "event": "decision",
+                "tick": 1,
+                "timestamp": "2026-06-01T00:00:00+00:00",
+                "source": "strategy",
+                "decision": "SWAP",
+                "intents": [{"intent_type": "SWAP"}],
+            },
+            {
+                "event": "decision",
+                "tick": 2,
+                "timestamp": "2026-06-01T01:00:00+00:00",
+                "source": "strategy",
+                "decision": "HOLD",
+                "hold_reason": "cooldown",
+                "hold_reason_code": None,
+            },
+        ]
+    )
+    serialized = {
+        "trades": [
+            {
+                "timestamp": "2026-06-01 00:00:00+00:00",
+                "intent_type": "SWAP",
+                "status": "filled",
+                "amount_usd": "10",
+                "fee_usd": "0",
+                "rejection_reason": None,
+            }
+        ]
+    }
+
+    ndjson = runner.build_decisions_jsonl(result, serialized)
+
+    assert ndjson.endswith("\n")
+    lines = [json.loads(line) for line in ndjson.strip().splitlines()]
+    # Chronological interleave despite the "T"-vs-space timestamp forms, with
+    # the decision preceding its same-instant execution event.
+    assert [(line["event"], line.get("tick")) for line in lines] == [
+        ("decision", 1),
+        ("execution", None),
+        ("decision", 2),
+    ]
+    assert lines[1]["status"] == "filled"
+
+
+def test_build_decisions_jsonl_empty_without_telemetry() -> None:
+    assert runner.build_decisions_jsonl(object(), {"trades": []}) == ""
+    # A pre-telemetry result WITH trades must not produce an execution-only
+    # file that misrepresents the run as "decided nothing, filled things".
+    trades = {"trades": [{"timestamp": "2026-06-01 00:00:00+00:00", "intent_type": "SWAP", "status": "filled"}]}
+    assert runner.build_decisions_jsonl(SimpleNamespace(decision_events=None), trades) == ""
+    assert runner.build_decisions_jsonl(SimpleNamespace(decision_events=[]), trades) == ""
+
+
+def test_run_platform_backtest_uploads_decisions_sidecar_before_result(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    env = _env(STRATEGY_WORKDIR=str(tmp_path / "strategy"))
+    order = _patch_successful_run(monkeypatch, tmp_path)
+
+    result = SimpleNamespace(
+        decision_events=[
+            {
+                "event": "decision",
+                "tick": 1,
+                "timestamp": "2026-06-01T00:00:00+00:00",
+                "source": "strategy",
+                "decision": "HOLD",
+                "hold_reason": "r",
+                "hold_reason_code": None,
+            }
+        ]
+    )
+
+    class Backtester:
+        async def backtest(self, strategy: object, config: object) -> object:
+            return result
+
+        async def close(self) -> None:
+            return None
+
+    uploaded: dict[str, str] = {}
+
+    def record_sidecar(bucket: str, object_path: str, ndjson: str) -> None:
+        order.append("decisions")
+        uploaded.update(path=object_path, body=ndjson)
+
+    monkeypatch.setattr(runner, "create_backtester", lambda **kwargs: Backtester())
+    monkeypatch.setattr(runner, "upload_decisions_to_gcs", record_sidecar)
+    monkeypatch.setattr(runner, "post_callback", lambda current_env, payload: order.append(payload["status"]))
+
+    asyncio.run(runner.run_platform_backtest(env))
+
+    # Sidecar lands before result.json (the completion marker), then COMPLETED.
+    assert order == ["start", "decisions", "upload", "COMPLETED"]
+    assert uploaded["path"] == env.gcs_decisions_path
+    assert json.loads(uploaded["body"].strip())["hold_reason"] == "r"
+
+
+def test_build_result_summary_echoes_compact_decision_summary() -> None:
+    serialized = {
+        "metrics": {"total_trades": 0},
+        "trades": [],
+        "duration_seconds": 12.5,
+        "decision_summary": {
+            "schema_version": 1,
+            "ticks": 2160,
+            "intent_ticks": 0,
+            "hold_ticks": 2160,
+            "intent_types": {},
+            "hold_reasons": [
+                {
+                    "source": "strategy",
+                    "reason_code": None,
+                    "reason_template": "Allocation data unavailable: X",
+                    "example": "Allocation data unavailable: X",
+                    "ticks": 2160,
+                    "first_tick": 1,
+                    "last_tick": 2160,
+                }
+            ],
+            "executions": {"fills": 0, "rejected": 0},
+        },
+    }
+
+    summary = runner.build_result_summary(serialized, elapsed_seconds=1.0)
+
+    assert summary["decision_summary"] == {
+        "ticks": 2160,
+        "hold_ticks": 2160,
+        "intent_ticks": 0,
+        "top_hold_reason": {
+            "source": "strategy",
+            "reason_code": None,
+            "example": "Allocation data unavailable: X",
+            "ticks": 2160,
+        },
+    }
+
+
+def test_build_result_summary_omits_decision_block_when_absent() -> None:
+    summary = runner.build_result_summary({"metrics": {}, "trades": []}, elapsed_seconds=1.0)
+    assert "decision_summary" not in summary

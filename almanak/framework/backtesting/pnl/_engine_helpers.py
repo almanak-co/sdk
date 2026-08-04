@@ -75,6 +75,7 @@ from almanak.framework.backtesting.pnl.data_provider import (
     token_ref_display,
 )
 from almanak.framework.backtesting.pnl.data_quality import DataQualityTracker
+from almanak.framework.backtesting.pnl.decision_log import DecisionLog
 from almanak.framework.backtesting.pnl.error_handling import (
     BacktestErrorConfig,
     BacktestErrorHandler,
@@ -269,6 +270,10 @@ class BacktestState:
     # (source, key) -> {"ticks": n, "detail": first message}.
     decision_input_failures: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
     no_intent_ticks: int = 0
+    # Per-tick decision telemetry — the backtest counterpart of the live
+    # runner's iteration_summary. Purely observational: hold reasons and
+    # decided intents, aggregated into result.decision_summary at finalize.
+    decision_log: DecisionLog = field(default_factory=DecisionLog)
 
 
 def _failure_pattern(entry: dict[str, Any], total_ticks: int) -> str:
@@ -992,10 +997,23 @@ async def execute_iteration_loop(
                 indicator_engine=state.indicator_engine,
                 strategy_config=state.strategy_config,
                 bt_logger=bt_logger,
+                decision_log=state.decision_log,
             )
 
             # Extract intent from decide result
             intent = backtester._extract_intent(decide_result)
+
+            # Per-tick decision telemetry (iteration_summary counterpart):
+            # exactly one record per tick — the engine-side warm-up / error
+            # branches inside _invoke_strategy_decide record first with their
+            # cause, making this call a no-op for those ticks (first write
+            # wins). Explicit holds land here with reason + reason_code.
+            state.decision_log.record(
+                tick=state.tick_count,
+                timestamp=timestamp,
+                intent=intent,
+                source="strategy",
+            )
 
             # Queue intent for execution (with inclusion delay)
             if intent is not None and not backtester._is_hold_intent(intent):
@@ -1052,12 +1070,15 @@ def _invoke_strategy_decide(
     indicator_engine: BacktestIndicatorEngine,
     strategy_config: dict[str, Any],
     bt_logger: BacktestLogger,
+    decision_log: DecisionLog | None = None,
 ) -> Any:
     """Call ``strategy.decide(snapshot)`` with warm-up / error-handler logic.
 
     Returns the ``decide_result`` (or ``None`` on non-fatal errors / warm-up).
     Raises ``RuntimeError`` if the error handler classifies the error as
-    fatal (``should_stop`` True).
+    fatal (``should_stop`` True). Engine-side holds (warm-up, handled decide()
+    errors) are recorded into ``decision_log`` with their cause so the run's
+    decision telemetry can tell them from a strategy's explicit hold.
     """
     try:
         return strategy.decide(snapshot)
@@ -1076,6 +1097,8 @@ def _invoke_strategy_decide(
             # Expected: not enough data points yet for indicators.
             # Log at debug (not warning) to avoid alarming users.
             bt_logger.debug(f"Tick {tick_count}: indicator warm-up ({e}) - holding")
+            if decision_log is not None:
+                decision_log.record(tick=tick_count, timestamp=timestamp, intent=None, source="warm_up", detail=str(e))
         elif backtester._error_handler:
             # Use error handler for consistent classification
             result = backtester._error_handler.handle_error(
@@ -1086,8 +1109,16 @@ def _invoke_strategy_decide(
                 raise RuntimeError(f"Fatal error in strategy.decide() at tick {tick_count}: {e}") from e
             # Non-fatal: log warning and continue with hold
             bt_logger.warning(f"Strategy decide() error at tick {tick_count}: {e} - continuing with hold")
+            if decision_log is not None:
+                decision_log.record(
+                    tick=tick_count, timestamp=timestamp, intent=None, source="decide_error", detail=str(e)
+                )
         else:
             bt_logger.warning(f"Strategy decide() raised exception at {timestamp}: {e}")
+            if decision_log is not None:
+                decision_log.record(
+                    tick=tick_count, timestamp=timestamp, intent=None, source="decide_error", detail=str(e)
+                )
         return None
 
 
@@ -1268,6 +1299,10 @@ def build_error_result(
         gas_price_summary=None,  # No trades on error
         parameter_sources=state.parameter_sources,
         data_manifest=state.data_broker.manifest.to_dict() if state.data_broker is not None else None,
+        # Partial telemetry up to the failing tick — often exactly the
+        # evidence needed to diagnose the failure.
+        decision_summary=state.decision_log.summary(trades=state.portfolio.trades),
+        decision_events=state.decision_log.events(),
     )
 
 
@@ -1455,6 +1490,21 @@ def finalize_backtest_result(
                 f"Starved: {top}"
             )
 
+    # Decision telemetry aggregate (iteration_summary counterpart): one block
+    # that answers "what did the strategy decide, and why did it hold" — the
+    # per-tick records themselves ship as a separate artifact, not result.json.
+    decision_summary = state.decision_log.summary(trades=state.portfolio.trades)
+    bt_logger.info(
+        f"Decision summary: {decision_summary['ticks']} ticks — "
+        f"{decision_summary['intent_ticks']} intent(s), {decision_summary['hold_ticks']} hold(s); "
+        f"fills={decision_summary['executions']['fills']}, rejected={decision_summary['executions']['rejected']}"
+    )
+    for reason in decision_summary["hold_reasons"][:3]:
+        bt_logger.info(
+            f'  Hold reason [{reason["source"]}] "{reason["example"]}" — '
+            f"{reason['ticks']} tick(s), first={reason['first_tick']}, last={reason['last_tick']}"
+        )
+
     return BacktestResult(
         engine=BacktestEngine.PNL,
         deployment_id=strategy.deployment_id,
@@ -1494,6 +1544,8 @@ def finalize_backtest_result(
         parameter_sources=state.parameter_sources,
         data_coverage_metrics=state.portfolio.calculate_data_coverage_metrics(),
         data_manifest=state.data_broker.manifest.to_dict() if state.data_broker is not None else None,
+        decision_summary=decision_summary,
+        decision_events=state.decision_log.events(),
     )
 
 
