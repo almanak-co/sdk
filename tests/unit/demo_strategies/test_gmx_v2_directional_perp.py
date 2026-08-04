@@ -132,6 +132,146 @@ class TestFullCloseSemantics:
         assert intents[0].size_usd is None
 
 
+class TestForcedOpenLatch:
+    """VIB-5513: ``force_action="open_long"/"open_short"`` opens ONCE, then holds.
+
+    Pre-fix, the forced branch never consulted state: a continuous runner
+    re-attempted the open every iteration, and once collateral was spent every
+    retry reverted ``ERC20: transfer amount exceeds balance``.
+
+    Both directions are pinned:
+
+    * LIVENESS — the latch must still OPEN on the first iteration, including
+      when the venue probe is UNMEASURED (a flaky read is a production shape;
+      an open gate that refuses on UNMEASURED refuses forever).
+    * LATCH — after one confirmed open, every subsequent iteration HOLDs.
+    """
+
+    ETH_USD_MARKET = "0x70d95587d40A2caf56bd97485aB3Eec10Bee6336"
+    USDC_ARBITRUM = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
+
+    def _snapshot(self, *, positions=(), ok=True, price="3000"):
+        from almanak.connectors._strategy_base.perps_read_base import PerpsReadResult
+
+        snapshot = MagicMock()
+        snapshot.perp_positions.return_value = PerpsReadResult(positions=tuple(positions), ok=ok)
+        snapshot.price.return_value = Decimal(price)
+        return snapshot
+
+    def _venue_position(self, *, is_long=True):
+        from almanak.connectors._strategy_base.perps_read_base import PerpsPositionOnChain
+
+        return PerpsPositionOnChain(
+            account="0x" + "1" * 40,
+            market=self.ETH_USD_MARKET,
+            collateral_token=self.USDC_ARBITRUM,
+            size_in_usd=100 * 10**30,
+            size_in_tokens=10**17,
+            collateral_amount=50 * 10**6,
+            is_long=is_long,
+            borrowing_factor=0,
+            funding_fee_amount_per_size=0,
+            increased_at_time=0,
+            decreased_at_time=0,
+        )
+
+    @staticmethod
+    def _confirm_open(strat, *, is_long=True):
+        """Drive the production commit path: create-order tx confirmed."""
+        intent = MagicMock()
+        intent.intent_type.value = "PERP_OPEN"
+        intent.is_long = is_long
+        strat.on_intent_executed(intent, True, None)
+
+    # ------------------------------------------------------------- liveness
+
+    def test_first_iteration_opens_on_measured_flat_venue(self, gmx):
+        _, strat = gmx
+        strat.force_action = "open_long"
+        intent = strat.decide(self._snapshot())
+        assert intent.intent_type.value == "PERP_OPEN"
+        assert intent.is_long is True
+
+    def test_first_iteration_opens_short(self, gmx):
+        _, strat = gmx
+        strat.force_action = "open_short"
+        intent = strat.decide(self._snapshot())
+        assert intent.intent_type.value == "PERP_OPEN"
+        assert intent.is_long is False
+
+    def test_first_iteration_opens_when_probe_is_unmeasured(self, gmx):
+        """An unreadable venue (ok=False -> UNMEASURED) must NOT brick the open."""
+        _, strat = gmx
+        strat.force_action = "open_long"
+        intent = strat.decide(self._snapshot(ok=False))
+        assert intent.intent_type.value == "PERP_OPEN"
+
+    def test_failed_submission_does_not_latch(self, gmx):
+        """A failed create-order tx leaves the latch clear: the open is retried."""
+        _, strat = gmx
+        strat.force_action = "open_long"
+        assert strat.decide(self._snapshot()).intent_type.value == "PERP_OPEN"
+
+        intent = MagicMock()
+        intent.intent_type.value = "PERP_OPEN"
+        intent.is_long = True
+        strat.on_intent_executed(intent, False, None)
+
+        assert strat.decide(self._snapshot()).intent_type.value == "PERP_OPEN"
+
+    # ---------------------------------------------------------------- latch
+
+    def test_latch_holds_after_confirmed_open(self, gmx):
+        """NEGATIVE CONTROL for the fix: pre-fix this re-emits PERP_OPEN forever."""
+        _, strat = gmx
+        strat.force_action = "open_long"
+
+        first = strat.decide(self._snapshot())
+        assert first.intent_type.value == "PERP_OPEN"
+        self._confirm_open(strat)
+
+        for _ in range(5):
+            held = strat.decide(self._snapshot())
+            assert held.intent_type.value == "HOLD"
+            assert "already executed" in held.reason
+
+    def test_exactly_one_open_across_continuous_iterations(self, gmx):
+        """The revert-loop shape in miniature: N iterations, exactly 1 open."""
+        _, strat = gmx
+        strat.force_action = "open_long"
+        opens = 0
+        for _ in range(10):
+            intent = strat.decide(self._snapshot())
+            if intent.intent_type.value == "PERP_OPEN":
+                opens += 1
+                self._confirm_open(strat)
+        assert opens == 1
+
+    def test_venue_open_position_holds_even_when_cache_is_wiped(self, gmx):
+        """Belt: positive venue evidence latches when the state DB was lost."""
+        _, strat = gmx
+        strat.force_action = "open_long"
+        strat._position_side = None
+        intent = strat.decide(self._snapshot(positions=[self._venue_position()]))
+        assert intent.intent_type.value == "HOLD"
+        assert "venue already holds" in intent.reason
+
+    def test_latch_survives_restart_via_persisted_state(self, gmx):
+        _, strat = gmx
+        strat.force_action = "open_long"
+        assert strat.decide(self._snapshot()).intent_type.value == "PERP_OPEN"
+        self._confirm_open(strat)
+        persisted = strat.get_persistent_state()
+
+        strat._position_side = None  # simulate a fresh process pre-restore
+        strat._entry_price = None
+        strat.load_persistent_state(persisted)
+
+        held = strat.decide(self._snapshot())
+        assert held.intent_type.value == "HOLD"
+        assert "already executed" in held.reason
+
+
 class TestTeardownReadsTheVenueNotTheCache:
     """ALM-3109 / VIB-6159 / VIB-6497.
 

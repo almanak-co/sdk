@@ -307,8 +307,52 @@ class GmxV2DirectionalPerp(IntentStrategy):
             return None
 
     def _forced_intent(self, market: MarketSnapshot) -> Intent:
-        """force_action hook for deterministic lifecycle testing."""
+        """force_action hook for deterministic lifecycle testing.
+
+        The forced open LATCHES (VIB-5513): "open_long"/"open_short" means
+        "ensure one open, then hold" — never "open again every tick". Without
+        the latch a continuous runner re-attempts the open each iteration, and
+        once the collateral is spent every retry reverts
+        ``ERC20: transfer amount exceeds balance`` (~34 reverts observed on
+        mainnet). ``gmx_perp_lifecycle`` is the reference behaviour
+        ("Force action 'open' already executed" -> HOLD).
+
+        What the latch keys on, and why (the polarity is inverted vs teardown):
+
+        * PRIMARY: ``_position_side`` — this strategy's own persisted execution
+          state, committed in ``on_intent_executed`` when the create-order
+          transaction confirms. It is the only signal that stays truthful during
+          GMX's asynchronous keeper window, where the venue HONESTLY reads FLAT
+          after a successful submission — a venue-probe-gated open would re-open
+          (stack) inside exactly that window.
+        * BELT: the venue probe, consulted only when the cache is clear and only
+          for its POSITIVE answer. ``OPEN`` is sound evidence in any state of
+          the world ("presence is never weakened"), and holds when a wiped
+          state DB meets a live venue position. ``FLAT`` and ``UNMEASURED``
+          both fall through to the open: FLAT because it cannot distinguish
+          "never opened" from "submitted, keeper pending" (the cache already
+          answered that), and UNMEASURED because refusing to open on a flaky
+          read would let the probe brick the strategy's one job — a fail-closed
+          open gate that refuses 100% of the time is indistinguishable from the
+          latch this fixes.
+
+        Known limit (VIB-6527): the latch keys on the USER-FACING callback
+        verdict, which can diverge from chain truth in both directions — a
+        landed order reported ``success=False`` re-arms the retry, and a
+        keeper-cancelled fill after ``success=True`` leaves the latch holding
+        on a flat venue. Both directions are pre-existing, shared with
+        ``gmx_perp_lifecycle``, and tracked there.
+        """
         if self.force_action in ("open_long", "open_short"):
+            if self._position_side is not None:
+                return Intent.hold(
+                    reason=f"Force action '{self.force_action}' already executed (side={self._position_side})"
+                )
+            probe = self._venue_probe(market)
+            if probe.is_open:
+                return Intent.hold(
+                    reason=f"Force action '{self.force_action}': venue already holds a position — holding"
+                )
             is_long = self.force_action == "open_long"
             # Capture the decide-time price as the entry-price fallback, exactly
             # as _enter() does, so a forced open also commits a sensible entry on
