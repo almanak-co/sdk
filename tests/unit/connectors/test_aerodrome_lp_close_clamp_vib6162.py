@@ -85,14 +85,27 @@ def test_the_foreign_remainder_is_exactly_what_is_left_behind():
 
 
 def test_an_unbounded_close_still_withdraws_everything():
-    """`ax lp-close` and the iteration lane attach no bound and must be unchanged.
+    """`ax lp-close` attaches no bound and must be unchanged.
 
     Contract (b), settled in the UAT card: `ax lp-close` says "fully withdraw" in its
-    own help text and its operator IS the wallet owner. The teardown lane never reaches
-    here unbounded — it refuses before compiling.
+    own help text and its operator IS the wallet owner. Since VIB-6517 it is the ONLY
+    lane that reaches here unbounded — teardown refuses before compiling, and the
+    iteration lane attaches a bound or the refusal sentinel in
+    ``StrategyRunner._step_attach_lp_outstanding``.
     """
     _result, liquidity = _compile(_intent(None))
     assert liquidity == Decimal(1)
+
+
+def test_the_iteration_lane_refusal_sentinel_refuses_with_the_reason():
+    """VIB-6517: the runner stamps ``"unmeasured: <reason>"`` when the ledger cannot
+    bound a decide()-emitted close; this branch is that sentinel's enforcement — a
+    safety refusal that carries the reason, never a fallback to the full balance."""
+    result, liquidity = _compile(_intent("unmeasured: no position_events rows for deployment"))
+    assert result.status == CompilationStatus.FAILED
+    assert result.is_safety_refusal is True
+    assert liquidity is None, "adapter was called despite the refusal"
+    assert "unmeasured: no position_events rows" in (result.error or "")
 
 
 def test_tracked_over_live_refuses_instead_of_burning_the_difference():

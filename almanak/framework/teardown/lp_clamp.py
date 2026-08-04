@@ -179,6 +179,10 @@ async def read_outstanding_liquidity(
             # An unmeasured leg makes the whole fold unmeasured. Skipping it would
             # understate outstanding, and understating is not "safe" here -- it is a
             # different wrong number presented with the same confidence.
+            #
+            # BOTH close lanes consume this fold since VIB-6517 (teardown attach and
+            # the runner's iteration-lane attach), so a VIB-6488 fix that changes what
+            # CLOSE rows carry changes the bound on every strategy-decided close too.
             raise LpClampUnresolved(
                 f"position_events row {row.get('id')!r} for pool {key} has no measured "
                 f"liquidity; outstanding cannot be derived (VIB-6488)"

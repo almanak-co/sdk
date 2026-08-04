@@ -663,17 +663,14 @@ def _clamp_lp_close_to_own_liquidity(
 
     **An absent bound means full withdrawal.** For ``almanak ax lp-close`` that is
     correct and deliberate: its help says "fully withdraw" and its operator IS the wallet
-    owner acting on their own position. The teardown lane never arrives here unbounded —
-    it refuses before compiling.
-
-    **For the ITERATION lane it is a GAP, not a decision** (VIB-6517). A strategy closing
-    its own LP mid-lifecycle has no more right to burn a user's pre-existing liquidity
-    than teardown does, and the bound is attached in exactly one place —
-    ``TeardownManager._attach_lp_outstanding`` — so a lifecycle or rebalance ``LP_CLOSE``
-    still withdraws ``balanceOf(wallet)``. This docstring previously claimed the
-    iteration lane "legitimately wants" the full burn; that was asserted, never argued,
-    and it is wrong. ``aerodrome_stable_pool_lp`` ships ``force_action="lifecycle"``,
-    which closes on its second iteration through exactly this path.
+    owner acting on their own position. Neither runner lane arrives here unbounded: the
+    teardown lane refuses before compiling, and the iteration lane
+    (``StrategyRunner._step_attach_lp_outstanding``, VIB-6517) attaches either the
+    ledger figure or a non-numeric ``"unmeasured: ..."`` sentinel that the validation
+    branch below rejects as a safety refusal — so a lifecycle / rebalance / depeg
+    ``LP_CLOSE`` is clamped or refused, never a whole-balance burn. That sentinel is a
+    deliberate consumer of this branch: keep the non-numeric path a refusal
+    (``is_safety_refusal=True``), never a fallback to the full balance.
 
     Returns:
         * :class:`CompilationResult` — the caller returns it verbatim. Either a refusal,

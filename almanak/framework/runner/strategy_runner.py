@@ -1473,6 +1473,13 @@ class StrategyRunner:
             if early is not None:
                 return early
 
+            # Step 4.5: Bound clamped-venue LP_CLOSE intents to this
+            # deployment's own outstanding liquidity (VIB-6517). Runs before
+            # logging so the logged intent carries the attached bound. Never
+            # early-exits: an unboundable close is refused per-intent at its
+            # own compile step, not by vetoing the whole iteration.
+            await self._step_attach_lp_outstanding(state)
+
             # Step 5 + 5.5: Log intents and run the late circuit-breaker gate
             # now that a real intent exists.
             self._step_log_intents(state)
@@ -2181,6 +2188,143 @@ class StrategyRunner:
                 duration_ms=self._calculate_duration_ms(state.start_time),
             )
         return None
+
+    async def _step_attach_lp_outstanding(self, state: RunIterationState) -> None:
+        """Attach the deployment's outstanding fungible-LP bound to LP_CLOSE intents (VIB-6517).
+
+        The connector-side clamp (VIB-6162) enforces
+        ``protocol_params["deployment_outstanding_lp"]`` against the live wallet balance,
+        but the bound previously had exactly one writer —
+        ``TeardownManager._attach_lp_outstanding`` — so a close emitted from ``decide()``
+        (lifecycle, rebalance, depeg exit) compiled unbounded and withdrew
+        ``balanceOf(wallet)``, burning LP this deployment never minted. This step is the
+        iteration lane's writer. It runs after intent extraction and before both dispatch
+        paths (single- and multi-chain), so every close the strategy decides carries the
+        ledger figure into compilation; the multi-chain resume path re-executes intents
+        persisted AFTER this step, so resumed closes stay bounded too.
+
+        Contract differences from the teardown attach, chosen deliberately:
+
+        * **A measurable bound rides the shipped connector contract** — clamp to
+          outstanding, no-op at measured zero, refuse on ledger/chain disagreement
+          (option 3 of VIB-6517: closes what we own, leaves the rest, never blocks
+          progress on a measurable position).
+        * **An unmeasurable bound refuses that close only, at its own compile step.**
+          Teardown skips the intent and moves on; the iteration lane instead stamps a
+          non-numeric sentinel (``"unmeasured: <reason>"``) that the connector's
+          existing bound-validation branch rejects with ``is_safety_refusal=True`` →
+          ``FailureKind.GUARD_REFUSED`` — breaker-neutral with cadence backoff
+          (VIB-5746) **on the single-chain lane only**: the multi-chain lane has no
+          ``is_safety_refusal`` classification anywhere, so a refusal there records as
+          a real failure on the breaker (pre-existing gap, now reachable for a future
+          multi-chain clamped-venue close — none exists today; VIB-6528). Riding that
+          single refusal path avoids a second hand-built GUARD_REFUSED construction
+          site, and preserves the sequential loop's stop-at-the-failed-step
+          disposition: prior independent intents in the sequence still execute.
+        * **Never overwrites** a caller-supplied ``deployment_outstanding_lp`` (the
+          teardown lane's attach, or a manual value) — same contract as the VIB-3742
+          injection pass above.
+
+        Known limitations, both in the safe (strand, never burn) direction:
+
+        * A same-iteration ``[LP_OPEN, LP_CLOSE]`` sequence on a clamped venue reads
+          the ledger before the OPEN executes, so the close under-bounds or refuses.
+          No clamped-venue strategy emits that shape today, and the VIB-5346 chained
+          form cannot reach a clamped venue (Pendle-only allowlist).
+        * ``position_events.CLOSE`` rows do not record the measured burn (VIB-6488):
+          the teardown writer carries the MINTED quantity forward (fold nets to zero →
+          next same-pool close no-ops), and the iteration-lane writer was measured on a
+          Base fork leaving ``liquidity`` EMPTY (fold unmeasured → next same-pool close
+          REFUSES). Either way the error direction is strand, never over-burn.
+
+        ``almanak ax lp-close`` never passes through ``run_iteration`` and stays
+        deliberately unclamped (the operator IS the wallet owner; documented in its
+        ``--help``).
+        """
+        from ..teardown.lp_clamp import LpClampUnresolved
+        from ..teardown.runner_helpers import lp_outstanding
+
+        strategy = state.strategy
+        attached: list[AnyIntent] = []
+        for intent in state.intents:
+            if getattr(intent, "intent_type", None) != IntentType.LP_CLOSE:
+                attached.append(intent)
+                continue
+
+            def _with_params(updated_params: dict, *, intent: AnyIntent = intent) -> AnyIntent:
+                # Same except-tuple as the teardown writer, OPPOSITE disposition:
+                # teardown logs and skips the intent; this lane raises and fails the
+                # iteration — never falls through to an unbounded compile. The
+                # fail-closed guarantee rests on run_iteration's outer except-handler
+                # NOT dispatching (state.intents still holds the unbounded list when
+                # this raises), so never wrap this step in a local try/except-continue.
+                try:
+                    return intent.model_copy(update={"protocol_params": updated_params})
+                except (AttributeError, TypeError, ValueError) as copy_exc:
+                    raise RuntimeError(
+                        f"VIB-6517: could not attach the outstanding bound to "
+                        f"{type(intent).__name__}; failing the iteration rather than "
+                        f"compiling the close unbounded"
+                    ) from copy_exc
+
+            params = dict(getattr(intent, "protocol_params", None) or {})
+            if params.get("deployment_outstanding_lp") is not None:
+                # Honoured, but never silently: a caller-supplied bound is the one
+                # remaining way a decide()-emitted close can widen its burn, so the
+                # decision to trust it must be visible in the run log.
+                logger.info(
+                    "VIB-6517: honouring caller-supplied deployment_outstanding_lp=%r "
+                    "on LP_CLOSE (position_id=%r) — the runner did not compute this "
+                    "bound",
+                    params.get("deployment_outstanding_lp"),
+                    getattr(intent, "position_id", None),
+                )
+                attached.append(intent)
+                continue
+            protocol = str(getattr(intent, "protocol", "") or "")
+            position_id = getattr(intent, "position_id", None)
+            pool = getattr(intent, "pool", None)
+            try:
+                outstanding = await lp_outstanding(self, strategy, protocol, position_id, pool)
+            except LpClampUnresolved as exc:
+                logger.error(
+                    "VIB-6517: cannot bound LP_CLOSE on %s (position_id=%r) to this "
+                    "deployment's own liquidity — %s. Stamping the refusal sentinel; the "
+                    "connector will refuse this close rather than burning the wallet's "
+                    "whole balance.",
+                    protocol,
+                    position_id,
+                    exc,
+                )
+                params["deployment_outstanding_lp"] = f"unmeasured: {exc}"[:500]
+                attached.append(_with_params(params))
+                continue
+            except Exception as exc:  # noqa: BLE001 — fail closed, never unbounded
+                logger.exception(
+                    "VIB-6517: outstanding-liquidity read raised unexpectedly for %s "
+                    "(position_id=%r); refusing this close rather than compiling it "
+                    "unbounded.",
+                    protocol,
+                    position_id,
+                )
+                params["deployment_outstanding_lp"] = f"unmeasured: internal error: {exc}"[:500]
+                attached.append(_with_params(params))
+                continue
+            # None = the venue declares no clamp on its connector manifest (Curve today,
+            # pending VIB-6489). The manifest's decision — pass through unchanged.
+            if outstanding is None:
+                attached.append(intent)
+                continue
+            params["deployment_outstanding_lp"] = str(outstanding)
+            attached.append(_with_params(params))
+            logger.info(
+                "VIB-6517: bounded iteration-lane LP_CLOSE on %s (position_id=%r) to "
+                "this deployment's outstanding %s LP",
+                protocol,
+                position_id,
+                outstanding,
+            )
+        state.intents = attached
 
     def _step_log_intents(self, state: RunIterationState) -> None:
         """Log the intent or intent sequence with human-readable formatting."""

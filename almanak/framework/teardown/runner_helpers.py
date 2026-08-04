@@ -867,7 +867,7 @@ def build_runner_helpers(runner: Any) -> TeardownRunnerHelpers:
         get_token_universe=_get_token_universe,
         discover_lp_positions=partial(_discover_lp_for_teardown, runner),
         get_deployment_lp_ownership=partial(_deployment_lp_ownership, runner),
-        get_lp_outstanding=partial(_lp_outstanding, runner),
+        get_lp_outstanding=partial(lp_outstanding, runner),
         get_accounting_events=_get_accounting_events,
         get_tracked_swap_inventory=_get_tracked_swap_inventory,
         prepare_intent_settlement=partial(_prepare_teardown_intent_settlement, runner),
@@ -1055,12 +1055,17 @@ async def _deployment_lp_ownership(runner: Any, strategy: Any, chain: str) -> An
     return await read_deployment_lp_ownership(sm, deployment_id, chain)
 
 
-async def _lp_outstanding(runner: Any, strategy: Any, protocol: str, position_id: Any, pool: Any = None) -> Any:
+async def lp_outstanding(runner: Any, strategy: Any, protocol: str, position_id: Any, pool: Any = None) -> Any:
     """This deployment's outstanding fungible-LP liquidity for a pool (VIB-6162).
 
     Scoped to the deployment for the same fund-safety reason as
     :func:`_deployment_lp_ownership`: a wallet can be shared, and unscoped history
     would attribute a sibling deployment's liquidity to this one and then burn it.
+
+    Public because BOTH close lanes read it: the teardown lane via the
+    ``get_lp_outstanding`` helper binding below, and the iteration lane directly in
+    ``StrategyRunner._step_attach_lp_outstanding`` (VIB-6517) — one fold, two writers
+    of the same ``deployment_outstanding_lp`` bound.
 
     Bound to the runner via :func:`functools.partial` so the consumer calls
     ``(strategy, protocol, position_id, pool) -> Decimal | None``. Propagates
@@ -1070,8 +1075,8 @@ async def _lp_outstanding(runner: Any, strategy: Any, protocol: str, position_id
     """
     deployment_id = (getattr(strategy, "deployment_id", "") or "").strip()
     sm = getattr(runner, "state_manager", None)
-    # `build_runner_helpers` wires this only when a state manager exists, but it closes
-    # over the RUNNER, so a manager that is torn down or swapped later reads None here.
+    # `build_runner_helpers` wires this unconditionally, and it closes over the
+    # RUNNER, so a manager that is absent, torn down, or swapped later reads None here.
     # Without this guard that surfaces as an AttributeError from inside the fold — an
     # exception type the caller does not treat as a clamp refusal, so it would take the
     # generic failure path instead of the typed one. Raise the typed error the contract
@@ -1161,4 +1166,5 @@ __all__ = [
     "SettlementPreparation",
     "WarnSweepNonStrategyBalance",
     "build_runner_helpers",
+    "lp_outstanding",
 ]
