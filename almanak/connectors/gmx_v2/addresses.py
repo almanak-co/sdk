@@ -165,6 +165,52 @@ GMX_V2_INDEX_TOKEN_DECIMALS: dict[str, dict[str, int]] = {
 }
 
 
+def _build_market_address_to_label() -> dict[str, dict[str, str]]:
+    """Reverse ``GMX_V2_MARKETS`` to ``chain -> lowercase address -> label``.
+
+    Fails fast on a within-chain address collision. A reverse map built by
+    comprehension silently keeps the LAST label for a duplicated address, which
+    would hand :func:`index_price_symbol` the wrong symbol for the other market
+    and price an oracle seed off the wrong feed — a silent wrong number, not a
+    loud miss.
+    """
+    reversed_map: dict[str, dict[str, str]] = {}
+    for chain, markets in GMX_V2_MARKETS.items():
+        by_address: dict[str, str] = {}
+        for label, address in markets.items():
+            key = address.lower()
+            if key in by_address:
+                raise ValueError(f"GMX_V2_MARKETS[{chain!r}] maps {address} to both {by_address[key]!r} and {label!r}")
+            by_address[key] = label
+        reversed_map[chain] = by_address
+    return reversed_map
+
+
+_MARKET_ADDRESS_TO_LABEL: dict[str, dict[str, str]] = _build_market_address_to_label()
+
+
+def index_price_symbol(chain: str | None, market_address: str | None) -> str | None:
+    """Base symbol of a listed GMX V2 market, or ``None`` when unlisted (ALM-3108).
+
+    ``0x47c031236e19d024b42f8AE6780E44A573170703`` on Arbitrum -> ``"BTC"``.
+
+    Exists because a GMX market's index token cannot be priced by its own
+    address. GMX *synthetic* index tokens (BTC, DOGE, LTC, XRP, ATOM, NEAR on
+    Arbitrum) are identifier addresses with **no deployed contract**: no token
+    registry knows them and nothing answers ``decimals()`` there. The market
+    label already carries the base symbol, and the symbol resolves through the
+    ordinary gateway price route, so the MARKET — not the index address — is the
+    correct key for an index price.
+
+    ``None`` for an unlisted market rather than a guess: the caller must fail
+    closed, because a wrong symbol prices the oracle off the wrong feed.
+    """
+    if not chain or not market_address:
+        return None
+    label = _MARKET_ADDRESS_TO_LABEL.get(str(chain).lower(), {}).get(str(market_address).lower())
+    return label.split("/")[0] if label else None
+
+
 def index_token_decimals(chain: str | None, market_address: str | None) -> int | None:
     """Index-token decimals for a GMX V2 market, or ``None`` when unresolved (VIB-6110).
 
@@ -230,5 +276,6 @@ __all__ = [
     "GMX_V2_INDEX_TOKEN_DECIMALS",
     "GMX_V2_MARKETS",
     "GMX_V2_TOKENS",
+    "index_price_symbol",
     "index_token_decimals",
 ]

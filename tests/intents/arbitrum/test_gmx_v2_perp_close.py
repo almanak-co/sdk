@@ -36,6 +36,7 @@ from almanak.framework.intents.compiler import IntentCompiler
 from almanak.framework.intents.perp_intents import PerpCloseIntent, PerpOpenIntent
 from almanak.framework.intents.vocabulary import IntentType
 from almanak.gateway.proto import gateway_pb2
+from tests.intents._gmx_v2_perp_support import gmx_oracle_price_map
 from tests.intents.conftest import fund_native_token, get_token_balance
 
 CHAIN_NAME = "arbitrum"
@@ -87,12 +88,11 @@ class _AnvilGateway:
     config = None
 
     def __init__(self, web3: Web3, prices: dict[str, Decimal]) -> None:
-        prices_by_token = {
-            address.lower(): prices[symbol] for symbol, address in GMX_V2_TOKENS[CHAIN_NAME].items() if symbol in prices
-        }
         self.web3 = web3
         self.rpc = _RpcService(web3)
-        self.market = _PriceService(prices_by_token)
+        # Address AND symbol keyed: the executor prices collateral by address
+        # and a market's index token by base symbol (ALM-3108).
+        self.market = _PriceService(gmx_oracle_price_map(CHAIN_NAME, prices))
 
     def eth_call(
         self,

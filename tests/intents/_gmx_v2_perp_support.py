@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
@@ -14,6 +15,53 @@ from almanak.connectors.gmx_v2.addresses import GMX_V2_TOKENS
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents.compiler import IntentCompiler
 from almanak.gateway.proto import gateway_pb2
+
+# The wrapped / bridged spellings of one asset. The GMX market label names the
+# UNWRAPPED base symbol ("ETH/USD" -> "ETH") while the price fixture is keyed by
+# the chain's own token symbols ("WETH" on Arbitrum, "WETH.e" on Avalanche), so
+# the two have to be reconciled somewhere. Ordered most-canonical first.
+_ASSET_SPELLINGS: dict[str, tuple[str, ...]] = {
+    "ETH": ("ETH", "WETH", "WETH.e"),
+    "BTC": ("BTC", "WBTC", "BTC.b"),
+    "AVAX": ("AVAX", "WAVAX"),
+}
+_SPELLING_TO_BASE: dict[str, str] = {
+    spelling.upper(): base for base, spellings in _ASSET_SPELLINGS.items() for spelling in spellings
+}
+
+
+def gmx_oracle_price_map(chain: str, prices: Mapping[str, Decimal]) -> dict[str, Decimal]:
+    """Price map keyed by BOTH address and symbol, as the gateway resolves both.
+
+    The managed-Anvil executor prices a market's COLLATERAL tokens by address
+    and its INDEX token by the market's base symbol — a GMX synthetic index
+    token has no contract to answer for itself (ALM-3108). A stub keyed only by
+    address answers the first leg and fails the second, which is not a shape the
+    real gateway has: ``MarketService.GetPrice`` accepts either.
+
+    Every key is lowercased so the caller can look up whatever it was handed.
+    """
+    by_key: dict[str, Decimal] = {}
+    for symbol, price in prices.items():
+        by_key.setdefault(symbol.lower(), price)
+        base = _SPELLING_TO_BASE.get(symbol.upper())
+        if base is not None:
+            by_key.setdefault(base.lower(), price)
+    for symbol, address in GMX_V2_TOKENS[chain].items():
+        price = _price_for_symbol(prices, symbol)
+        if price is not None:
+            by_key[address.lower()] = price
+    return by_key
+
+
+def _price_for_symbol(prices: Mapping[str, Decimal], symbol: str) -> Decimal | None:
+    """This token's price under any spelling the fixture may have used."""
+    if symbol in prices:
+        return prices[symbol]
+    base = _SPELLING_TO_BASE.get(symbol.upper())
+    if base is None:
+        return None
+    return next((prices[spelling] for spelling in _ASSET_SPELLINGS[base] if spelling in prices), None)
 
 
 @dataclass(frozen=True)
@@ -46,15 +94,10 @@ class AnvilGateway:
     config = None
 
     def __init__(self, web3: Web3, chain: str, prices: dict[str, Decimal]) -> None:
-        prices_by_token = {
-            address.lower(): prices["WETH" if symbol == "WETH.e" else symbol]
-            for symbol, address in GMX_V2_TOKENS[chain].items()
-            if ("WETH" if symbol == "WETH.e" else symbol) in prices
-        }
         self.chain = chain
         self.web3 = web3
         self.rpc = RpcService(web3)
-        self.market = PriceService(prices_by_token)
+        self.market = PriceService(gmx_oracle_price_map(chain, prices))
 
     def eth_call(self, *, chain: str, to: str, data: str, block: int | str | None = None) -> str:
         assert chain == self.chain
@@ -106,6 +149,7 @@ def advance_past_cancel_age(web3: Web3) -> None:
 
 __all__ = [
     "AnvilGateway",
+    "gmx_oracle_price_map",
     "advance_past_cancel_age",
     "assert_recent_fork",
     "build_compiler",

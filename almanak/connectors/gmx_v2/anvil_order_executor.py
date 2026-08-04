@@ -9,8 +9,11 @@ entrypoint without weakening production behavior:
 * the caller must explicitly name the ``anvil`` network;
 * the exact submitted order key must still belong to the strategy wallet;
 * controller and keeper authority are verified against the forked RoleStore;
-* prices come from the gateway price service and are scaled using measured
-  on-chain token decimals;
+* prices come from the gateway price service. Collateral tokens are keyed by
+  address and scaled by measured on-chain decimals; a market's INDEX token is
+  keyed by the MARKET instead — base symbol plus declared decimals — because a
+  GMX synthetic index token has no contract to answer either question
+  (ALM-3108);
 * Oracle state, impersonation, and temporary balances are cleaned up.
 
 The gateway rejects all Anvil mutation methods on mainnet, providing a second
@@ -40,6 +43,7 @@ from almanak.connectors._strategy_base.rpc import (
     looks_like_revert,
 )
 from almanak.connectors.gmx_v2.adapter import GMX_V2_ADDRESSES
+from almanak.connectors.gmx_v2.addresses import index_price_symbol, index_token_decimals
 from almanak.connectors.gmx_v2.receipt_parser import (
     _EVENT_LOG_DATA_ABI_TYPE,
     GMXv2EventType,
@@ -302,7 +306,39 @@ def _find_order_keeper(provider: GatewayWeb3Provider, role_store: str) -> str:
     return keeper
 
 
-def _read_market_tokens(provider: GatewayWeb3Provider, dependencies: _GmxDependencies, market: str) -> tuple[str, ...]:
+@dataclass(frozen=True)
+class _MarketOracleTokens:
+    """One market's oracle tokens, split by how each can be PRICED (ALM-3108).
+
+    ``Reader.getMarket`` already returns ``indexToken`` and the two collateral
+    tokens as separate fields; an earlier revision collapsed all three into one
+    set and priced every member by its raw on-chain address. That works only
+    while every index token happens to be a real ERC-20. GMX *synthetic* index
+    tokens — BTC, DOGE, LTC, XRP, ATOM and NEAR on Arbitrum, LTC on Avalanche —
+    are identifier addresses with **no deployed contract**: ``decimals()``
+    returns nothing and no token registry maps the address to a price. Six of
+    fifteen Arbitrum markets could not settle on a managed fork as a result.
+
+    The distinction is therefore load-bearing, not cosmetic:
+
+    * ``index_token`` is an ORACLE KEY only. Its price and decimals come from
+      the market (symbol + ``GMX_V2_INDEX_TOKEN_DECIMALS``), never from a call
+      to the address itself.
+    * ``collateral_tokens`` are real ERC-20s and keep the address route —
+      address price lookup plus a measured on-chain ``decimals()``.
+
+    A collateral equal to the index token is dropped from ``collateral_tokens``:
+    it is one oracle key with one price, and the index route is the one that
+    holds for every market.
+    """
+
+    index_token: str
+    collateral_tokens: tuple[str, ...]
+
+
+def _read_market_tokens(
+    provider: GatewayWeb3Provider, dependencies: _GmxDependencies, market: str
+) -> _MarketOracleTokens:
     raw = _eth_call(
         provider,
         dependencies.reader,
@@ -320,14 +356,20 @@ def _read_market_tokens(provider: GatewayWeb3Provider, dependencies: _GmxDepende
     except Exception as exc:
         raise GmxAnvilOrderExecutionError(f"Could not decode GMX market {market}") from exc
 
-    tokens = {
-        to_checksum_address(token)
-        for token in (index_token, long_token, short_token)
-        if str(token).lower() != _ZERO_ADDRESS
+    if str(index_token).lower() == _ZERO_ADDRESS:
+        # A zero index token means this address is a SWAP pool, not a perp
+        # market (VIB-6155 found exactly such an address mislabelled as
+        # arbitrum:OP/USD). Executing a position order against it cannot fill,
+        # so say which market is wrong rather than seeding a partial oracle.
+        raise GmxAnvilOrderExecutionError(
+            f"GMX market {market} reports no index token (indexToken == 0); it is not a position market"
+        )
+    index = to_checksum_address(index_token)
+    collaterals = {
+        to_checksum_address(token) for token in (long_token, short_token) if str(token).lower() != _ZERO_ADDRESS
     }
-    if not tokens:
-        raise GmxAnvilOrderExecutionError(f"GMX market {market} returned no oracle tokens")
-    return tuple(sorted(tokens))
+    collaterals.discard(index)
+    return _MarketOracleTokens(index_token=index, collateral_tokens=tuple(sorted(collaterals)))
 
 
 def _read_token_decimals(provider: GatewayWeb3Provider, token: str) -> int:
@@ -342,24 +384,77 @@ def _read_token_decimals(provider: GatewayWeb3Provider, token: str) -> int:
     return decimals
 
 
-def _read_price_bounds(gateway_client: Any, provider: GatewayWeb3Provider, chain: str, token: str) -> tuple[int, int]:
+def _gateway_usd_price(gateway_client: Any, chain: str, token: str, label: str) -> Decimal:
+    """One measured USD price from the gateway, or raise. Never substitutes."""
     response = gateway_client.market.GetPrice(gateway_pb2.PriceRequest(token=token, quote="USD", chain=chain.lower()))
     if bool(getattr(response, "stale", False)):
-        raise GmxAnvilOrderExecutionError(f"Gateway price for GMX oracle token {token} is stale")
+        raise GmxAnvilOrderExecutionError(f"Gateway price for GMX oracle token {label} is stale")
     try:
         price = Decimal(str(response.price))
     except (InvalidOperation, ValueError) as exc:
-        raise GmxAnvilOrderExecutionError(f"Gateway returned an invalid price for GMX oracle token {token}") from exc
+        raise GmxAnvilOrderExecutionError(f"Gateway returned an invalid price for GMX oracle token {label}") from exc
     if not price.is_finite() or price <= 0:
-        raise GmxAnvilOrderExecutionError(f"Gateway returned a non-positive price for GMX oracle token {token}")
+        raise GmxAnvilOrderExecutionError(f"Gateway returned a non-positive price for GMX oracle token {label}")
+    return price
 
-    decimals = _read_token_decimals(provider, token)
+
+def _scale_price_bounds(price: Decimal, decimals: int, label: str) -> tuple[int, int]:
+    """Scale a USD price to GMX's 30-decimal oracle bounds."""
+    if decimals < 0 or decimals > _GMX_USD_DECIMALS:
+        raise GmxAnvilOrderExecutionError(
+            f"GMX oracle token {label} has {decimals} decimals, outside GMX's {_GMX_USD_DECIMALS}-decimal USD scale"
+        )
     scaled = price * (Decimal(10) ** (_GMX_USD_DECIMALS - decimals))
     minimum = int(scaled.to_integral_value(rounding=ROUND_FLOOR))
     maximum = int(scaled.to_integral_value(rounding=ROUND_CEILING))
     if minimum <= 0 or maximum <= 0:
-        raise GmxAnvilOrderExecutionError(f"Scaled GMX oracle price for {token} is non-positive")
+        raise GmxAnvilOrderExecutionError(f"Scaled GMX oracle price for {label} is non-positive")
     return minimum, maximum
+
+
+def _read_price_bounds(gateway_client: Any, provider: GatewayWeb3Provider, chain: str, token: str) -> tuple[int, int]:
+    """Oracle bounds for a real ERC-20 oracle token, by address (collateral path).
+
+    Unchanged behaviour: the long/short tokens of every GMX market are deployed
+    ERC-20s, so both their price and their decimals are readable from the
+    address itself. Only the INDEX token needs the market-keyed route below.
+    """
+    price = _gateway_usd_price(gateway_client, chain, token, token)
+    return _scale_price_bounds(price, _read_token_decimals(provider, token), token)
+
+
+def _index_price_bounds(gateway_client: Any, chain: str, market: str) -> tuple[int, int]:
+    """Oracle bounds for a market's INDEX token, without touching its address (ALM-3108).
+
+    Both inputs are keyed by the MARKET, which is metadata this SDK already
+    ships and trusts elsewhere: the base symbol from ``GMX_V2_MARKETS`` (the
+    same route ``acceptable_price`` uses) and the decimals from
+    ``GMX_V2_INDEX_TOKEN_DECIMALS``. A synthetic index token therefore never has
+    to answer for itself.
+
+    Known limitation (ALM-3119): for a market whose index token *is* a real
+    ERC-20, this trades a chain-sourced datum (the ``indexToken`` address
+    ``Reader.getMarket`` returned) for a table-sourced one (the market's label).
+    A mislabelled ``GMX_V2_MARKETS`` row — the VIB-6155 class — would therefore
+    seed the label's asset rather than the market's. Bounded to fork tests: this
+    module refuses any network but ``anvil``, and catalogue identity is asserted
+    by ``tests/audit/test_gmx_v2_market_identity.py``.
+
+    Every failure raises. An index price that cannot be resolved is *unmeasured*
+    (``Empty ≠ Zero``): seeding a guessed or zero price onto a fork's oracle
+    would let an order fill at a fabricated price and certify a lifecycle that
+    never really happened, which is strictly worse than a failed run.
+    """
+    symbol = index_price_symbol(chain, market)
+    if symbol is None:
+        raise GmxAnvilOrderExecutionError(
+            f"GMX market {market} is not listed for {chain}; its index token has no price symbol"
+        )
+    decimals = index_token_decimals(chain, market)
+    if decimals is None:
+        raise GmxAnvilOrderExecutionError(f"GMX market {market} on {chain} has no declared index-token decimals")
+    label = f"{symbol} (index of market {market})"
+    return _scale_price_bounds(_gateway_usd_price(gateway_client, chain, symbol, label), decimals, label)
 
 
 def _latest_block_timestamp(provider: GatewayWeb3Provider) -> int:
@@ -777,6 +872,36 @@ def _undo_impersonation(
         raise first_error
 
 
+def _measure_oracle_bounds(
+    *,
+    gateway_client: Any,
+    provider: GatewayWeb3Provider,
+    dependencies: _GmxDependencies,
+    chain: str,
+    markets: tuple[str, ...],
+) -> dict[str, tuple[int, int]]:
+    """Measure every oracle token's price bounds, index tokens by market (ALM-3108).
+
+    Index tokens are resolved first and win the dedup: a token that is the index
+    of one market and the collateral of another is one oracle key with one
+    price, and the market-keyed route is the one that holds even when the token
+    is a synthetic identifier.
+
+    Every price is measured BEFORE any ``setPrimaryPrice`` is sent, so a market
+    the fork cannot price leaves the Oracle untouched instead of half-seeded.
+    """
+    bounds_by_token: dict[str, tuple[int, int]] = {}
+    collateral_tokens: set[str] = set()
+    for market in markets:
+        tokens = _read_market_tokens(provider, dependencies, market)
+        bounds_by_token[tokens.index_token] = _index_price_bounds(gateway_client, chain, market)
+        collateral_tokens.update(tokens.collateral_tokens)
+
+    for token in sorted(collateral_tokens - set(bounds_by_token)):
+        bounds_by_token[token] = _read_price_bounds(gateway_client, provider, chain, token)
+    return bounds_by_token
+
+
 def _seed_oracle_prices(
     *,
     gateway_client: Any,
@@ -798,13 +923,17 @@ def _seed_oracle_prices(
             f"GMX Oracle already has {count} transient price token(s); refusing to overwrite execution state"
         )
 
-    oracle_tokens: set[str] = set()
-    for market in markets:
-        oracle_tokens.update(_read_market_tokens(provider, dependencies, market))
+    bounds_by_token = _measure_oracle_bounds(
+        gateway_client=gateway_client,
+        provider=provider,
+        dependencies=dependencies,
+        chain=chain,
+        markets=markets,
+    )
 
     hashes: list[str] = []
-    for token in sorted(oracle_tokens):
-        minimum, maximum = _read_price_bounds(gateway_client, provider, chain, token)
+    for token in sorted(bounds_by_token):
+        minimum, maximum = bounds_by_token[token]
         hashes.append(
             _send_transaction(
                 provider,
