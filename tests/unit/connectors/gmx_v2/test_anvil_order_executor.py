@@ -239,14 +239,16 @@ def test_keeper_is_enumerated_from_the_forked_role_store() -> None:
     assert keeper.lower() == _KEEPER.lower()
 
 
-def test_impersonated_transaction_uses_measured_gas_limit() -> None:
+def test_impersonated_transaction_submits_estimate_plus_bounded_headroom() -> None:
     provider = MagicMock()
     web3 = MagicMock()
     web3.eth.wait_for_transaction_receipt.return_value = {"status": 1, "gasUsed": 20_000}
     with (
         patch(
             "almanak.connectors.gmx_v2.anvil_order_executor._rpc",
-            side_effect=("0x7530", "0x1", "0x186a0", "0xtx"),
+            # estimate, gasPrice, balance (100,000 — BELOW the floored 130,000
+            # submitted limit, so a top-up fires), setBalance ack, send.
+            side_effect=("0x7530", "0x1", "0x186a0", None, "0xtx"),
         ) as rpc,
         patch("almanak.connectors.gmx_v2.anvil_order_executor.Web3", return_value=web3),
     ):
@@ -265,11 +267,35 @@ def test_impersonated_transaction_uses_measured_gas_limit() -> None:
             }
         ],
     )
-    assert rpc.call_args_list[3].args[2][0]["gas"] == "0x7530"
-    assert rpc.call_args_list[3].args[2][0]["gasPrice"] == "0x1"
+    # Submitted limit = estimate (0x7530 = 30,000) + the VIB-6450 headroom,
+    # FLOORED at 100,000 for small transactions. A bare-estimate submission is
+    # the zero-margin defect R16 measured killing the VIB-6437 partial close —
+    # this assertion fails on that behaviour.
+    assert rpc.call_args_list[3] == call(provider, "anvil_setBalance", [_ORDER_HANDLER, hex(130_000)])
+    assert rpc.call_args_list[4].args[2][0]["gas"] == hex(130_000)
+    assert rpc.call_args_list[4].args[2][0]["gasPrice"] == "0x1"
 
 
-def test_impersonated_transaction_tops_up_only_measured_gas_cost() -> None:
+def test_submitted_gas_limit_carries_bounded_headroom() -> None:
+    """VIB-6450 requires a floor and a ceiling, not an unbounded multiplier."""
+    from almanak.connectors.gmx_v2.anvil_order_executor import _submitted_gas_limit
+
+    # R17-validated case preserved bit-for-bit: estimate 4,108,084 → +410,808
+    # (proportional band) → 4,518,892 — the exact run that filled the 7/7
+    # reproducer. The +410,808 covers the measured ~50k drift several times over.
+    assert _submitted_gas_limit(4_108_084) == 4_518_892
+    # FLOOR: small estimates get an absolute 100k headroom, not 10%.
+    assert _submitted_gas_limit(30_000) == 130_000
+    assert _submitted_gas_limit(999_999) == 1_099_999
+    # Proportional band begins where 10% exceeds the floor.
+    assert _submitted_gas_limit(1_000_000) == 1_100_000
+    # CEILING: the margin never exceeds 1M no matter the estimate.
+    assert _submitted_gas_limit(30_000_000) == 31_000_000
+    # Never negative or shrinking.
+    assert _submitted_gas_limit(1) == 100_001
+
+
+def test_impersonated_transaction_tops_up_the_submitted_gas_cost() -> None:
     provider = MagicMock()
     web3 = MagicMock()
     web3.eth.wait_for_transaction_receipt.return_value = {"status": 1, "gasUsed": 20_000}
@@ -282,10 +308,12 @@ def test_impersonated_transaction_tops_up_only_measured_gas_cost() -> None:
     ):
         _send_transaction(provider, _ORDER_HANDLER, _ORACLE, "0x1234", kind="order")
 
+    # The top-up funds the SUBMITTED (headroom-carrying) limit, not the bare
+    # estimate — funding less than the limit would fail the send on balance.
     assert rpc.call_args_list[3] == call(
         provider,
         "anvil_setBalance",
-        [_ORDER_HANDLER, hex(30_000 * 2)],
+        [_ORDER_HANDLER, hex(130_000 * 2)],
     )
 
 

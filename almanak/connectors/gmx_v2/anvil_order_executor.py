@@ -715,7 +715,8 @@ def _replay_revert_reason(
     reports only what that probe measured. An earlier revision also ran a second
     ``eth_call`` with unbounded gas and reported ``GAS-BOUND`` when the outcome
     flipped. That is removed: the executor tops the sender's balance to exactly
-    ``gas_estimate * gas_price``, so a probe omitting ``gas`` is billed against
+    ``submitted_gas_limit * gas_price`` (the estimate plus the bounded VIB-6450
+    headroom), so a probe omitting ``gas`` is billed against
     the block gas limit and always fails ``Insufficient funds`` — the verdict
     could never fire, and dead code on an error path is a place for defects to
     live rather than a diagnostic. Rebuilding it correctly (``eth_call`` state
@@ -988,6 +989,40 @@ def _log_mined_block_timing(
     )
 
 
+# Headroom applied to eth_estimateGas before SUBMITTING a keeper transaction
+# (VIB-6450). A limit equal to the bare estimate encodes the assumption that the
+# estimator's simulation and the mined execution cost exactly the same — and R16
+# measured that assumption failing by ~50k gas (<1.6%) on a partial decrease,
+# which the EIP-150 63/64 cascade turned into an out-of-gas at the FINAL
+# EventEmitter emission and GMX's error handler turned into a whole-transaction
+# InsufficientGasForCancellation revert (the VIB-6437 user strand). Proportional
+# because the drift scales with the work, ×1.10 because the measured drift is
+# <2% and R14's attempt 4 already demonstrated a far larger margin (+1.5M)
+# filling safely. Raising the limit raises the OUTER allowance one-for-one
+# (R17 measured: +477,307 submitted appeared as +477,307 root-frame allowance);
+# what reaches the inner execution call passes through GMX's execution-gas
+# computation and EIP-150 forwarding, and R17 shows it suffices with wide
+# spare. No venue validation is weakened and a real revert still reverts —
+# this clears only the knife-edge OOG class.
+#
+# The headroom is BOUNDED, per VIB-6450's own requirement ("a floor and a
+# ceiling, not an unbounded multiplier" — VIB-6427: cost guards key off the
+# limit and nodes can reject on admission). The floor keeps small harness
+# transactions from carrying a headroom too thin to absorb any drift at all;
+# the ceiling keeps a pathological estimate from growing without bound. The
+# R17-validated case is preserved bit-for-bit: estimate 4,108,084 → margin
+# 410,808 → submitted 4,518,892, exactly the run that filled the 7/7 reproducer.
+_SUBMIT_HEADROOM_FRACTION = 10  # margin = estimate // 10 within the bounds below
+_SUBMIT_HEADROOM_FLOOR = 100_000
+_SUBMIT_HEADROOM_CEILING = 1_000_000
+
+
+def _submitted_gas_limit(gas_estimate: int) -> int:
+    """The limit actually submitted: the estimate plus bounded drift headroom."""
+    margin = min(max(gas_estimate // _SUBMIT_HEADROOM_FRACTION, _SUBMIT_HEADROOM_FLOOR), _SUBMIT_HEADROOM_CEILING)
+    return gas_estimate + margin
+
+
 def _send_transaction(
     provider: GatewayWeb3Provider,
     sender: str,
@@ -1018,6 +1053,7 @@ def _send_transaction(
         ) from exc
     if gas_estimate <= 0:
         raise GmxAnvilOrderExecutionError(f"Anvil eth_estimateGas returned a non-positive result: {gas_estimate}")
+    gas_limit = _submitted_gas_limit(gas_estimate)
 
     gas_price_raw = _rpc(provider, "eth_gasPrice", [])
     balance_raw = _rpc(provider, "eth_getBalance", [sender, "latest"])
@@ -1026,13 +1062,15 @@ def _send_transaction(
         balance = int(balance_raw, 16) if isinstance(balance_raw, str) else int(balance_raw)
     except (TypeError, ValueError) as exc:
         raise GmxAnvilOrderExecutionError("Anvil returned an invalid gas price or sender balance") from exc
-    required_balance = gas_estimate * gas_price
+    # The top-up moves WITH the submitted limit: funding only the bare estimate
+    # while submitting more would fail the send on sender balance.
+    required_balance = gas_limit * gas_price
     if balance < required_balance:
         _rpc(provider, "anvil_setBalance", [sender, hex(required_balance)])
 
     transaction_with_gas = {
         **transaction,
-        "gas": hex(gas_estimate),
+        "gas": hex(gas_limit),
         "gasPrice": hex(gas_price),
     }
 
@@ -1065,7 +1103,7 @@ def _send_transaction(
         error_type = GmxAnvilTransactionRevertedError if kind == "order" else GmxAnvilHarnessTransactionRevertedError
         raise error_type(
             f"GMX managed-Anvil {kind} transaction reverted: {tx_hash} "
-            f"(gas_used={gas_used}, measured_gas_limit={gas_estimate}) — {diagnosis}"
+            f"(gas_used={gas_used}, submitted_gas_limit={gas_limit}, measured_gas_limit={gas_estimate}) — {diagnosis}"
         )
     return tx_hash
 

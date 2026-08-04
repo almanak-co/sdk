@@ -153,7 +153,14 @@ def test_replay_carries_the_transactions_own_gas_limit() -> None:
     _run_reverted(provider)
 
     first_call = provider.make_request.call_args_list[0].args[1][0]
-    assert first_call["gas"] == "0x3e17de", "the faithful replay must reuse the submitted gas limit"
+    # The submitted limit is the estimate (0x3e17de) plus the VIB-6450 drift
+    # headroom — the replay must carry what was actually SUBMITTED, which is
+    # exactly what this invariant protects.
+    from almanak.connectors.gmx_v2.anvil_order_executor import _submitted_gas_limit
+
+    assert first_call["gas"] == hex(_submitted_gas_limit(0x3E17DE)), (
+        "the faithful replay must reuse the submitted gas limit"
+    )
 
 
 def test_a_returned_transport_error_is_inconclusive_not_a_measured_revert() -> None:
@@ -550,7 +557,8 @@ def test_a_malformed_error_object_reads_as_unmeasured_not_as_a_successful_replay
     """
     provider = MagicMock()
     # The single surviving probe always carries ``gas`` (_send_transaction submits
-    # hex(gas_estimate)), so this is the shape it really receives.
+    # hex(_submitted_gas_limit(gas_estimate)) — estimate plus the bounded
+    # VIB-6450 headroom), so this is the shape it really receives.
     provider.make_request.return_value = {"error": "upstream exploded"}
 
     message = str(_run_reverted(provider))
