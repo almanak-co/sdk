@@ -708,6 +708,13 @@ def cost_stack_to_proto(cs: Any) -> gateway_pb2.CostStackInfo:
         fees_earned_partial=(cs.fees_earned_applicable and not cs.fees_earned_measured),
         il_partial=(cs.il_applicable and not cs.il_measured),
         inventory_unrealized_usd=("" if cs.inventory_unrealized_usd is None else str(cs.inventory_unrealized_usd)),
+        # VIB-6061 — gated on ``any_measured``, matching fees_earned / il above and
+        # NOT on the all-or-nothing ``measured`` meter. That distinction is the one
+        # this function's docstring records a real money loss over: a strategy with
+        # two settlements, one carrying a priced fee and one not, must still send
+        # the fee it DID measure. Sending "" there would delete real cost.
+        cost_venue_execution_fee_usd=(str(cs.venue_execution_fee_usd) if cs.venue_execution_fee_any_measured else ""),
+        venue_execution_fee_partial=(cs.venue_execution_fee_applicable and not cs.venue_execution_fee_measured),
     )
 
 

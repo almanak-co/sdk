@@ -76,6 +76,30 @@ class PerpSettlementCommitOutcome:
     degraded_reason: str | None = None
 
 
+def _submission_price_oracle(submission_ledger: Any) -> dict[str, Any] | None:
+    """The submission row's own ``price_inputs_json``, decoded (VIB-6061).
+
+    Prices the keeper execution fee at the moment the ORDER was submitted rather
+    than at the moment the keeper settled. That is the deliberate choice: the same
+    dict already priced that row's ``gas_usd``, so the two native-denominated costs
+    of one order are converted at one price. The native-lane reconciliation
+    invariant compares their sum against a wallet balance delta, and mixing two
+    price vintages inside that sum would show up as a reconciliation gap that no
+    money actually caused.
+
+    Returns ``None`` for a missing / malformed / non-object payload, which leaves
+    the fee's USD unmeasured rather than fabricating a zero.
+    """
+    raw = getattr(submission_ledger, "price_inputs_json", None)
+    if not raw:
+        return None
+    try:
+        decoded = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError):
+        return None
+    return decoded if isinstance(decoded, dict) else None
+
+
 async def commit_perp_settlement(
     runner: StrategyRunner,
     strategy: StrategyProtocol,
@@ -109,6 +133,7 @@ async def commit_perp_settlement(
         protocol=protocol,
         wallet_address=wallet_address,
         is_open=is_open,
+        native_price_oracle=_submission_price_oracle(submission_ledger),
     )
 
     degraded_reasons: list[str] = []

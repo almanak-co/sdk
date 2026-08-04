@@ -2,7 +2,7 @@
 
 An UNMEASURED fee / slippage bucket (None — no contributing event carried the
 term, e.g. a GMX perp whose receipt parser is pending, the VIB-5941 payload gap)
-must render "— unmeasured", NEVER a fabricated "−$0.00". A MEASURED zero
+must render as NOT MEASURED, NEVER a fabricated "−$0.00". A MEASURED zero
 (Decimal("0")) renders "$0.00". Gas is always measured and uses the precise-small
 formatter so a real sub-cent gas cost no longer collapses to "−$0.00".
 """
@@ -42,8 +42,11 @@ def _cost(**overrides) -> CostStackInfo:
 
 def test_unmeasured_fees_and_slippage_render_dash_not_zero() -> None:
     html = _render(_cost(cost_protocol_fees_usd=None, cost_slippage_usd=None))
-    assert "Fees — unmeasured" in html
-    assert "Slip — unmeasured" in html
+    # VIB-6061 reworded these: "unmeasured" read to users as "checked, and
+    # negligible", so an unknown bucket was silently taken as a small one. The
+    # Empty!=Zero contract this test guards is unchanged -- only the phrasing is.
+    assert "Fees — not measured (not in this total)" in html
+    assert "Slip — not measured (not in this total)" in html
     # The fabricated measured-zero must NOT appear for these unmeasured buckets.
     assert "Fees −$0.00" not in html
     assert "Slip −$0.00" not in html
@@ -53,7 +56,10 @@ def test_measured_zero_fee_renders_dollar_zero() -> None:
     html = _render(_cost(cost_protocol_fees_usd=Decimal("0"), cost_slippage_usd=Decimal("0")))
     assert "Fees −$0.00" in html
     assert "Slip −$0.00" in html
-    assert "unmeasured" not in html
+    # Scoped to the ROW markers, not a bare substring: the tooltip explains what a
+    # "not measured" line means and legitimately carries the phrase on every render.
+    assert "Fees — not measured" not in html
+    assert "Slip — not measured" not in html
 
 
 def test_measured_subcent_gas_is_not_rounded_to_zero() -> None:

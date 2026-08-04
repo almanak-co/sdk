@@ -157,6 +157,7 @@ def resolve_perp_settlements(
                 pending_cache=pending_cache,
                 entry=entry,
                 timeout_seconds=timeout_seconds,
+                wallet_address=wallet_address,
             )
         )
     return tuple(verdicts)
@@ -201,6 +202,7 @@ def _resolve_one(
     pending_cache: _PendingOrdersCache,
     entry: PerpSettlementWatchEntry,
     timeout_seconds: int,
+    wallet_address: str,
 ) -> PerpSettlementVerdict:
     order_key = _normalize_order_key(entry.order_key)
     if order_key is None:
@@ -234,6 +236,7 @@ def _resolve_one(
             order_key=order_key,
             outcome=outcome_log,
             timeout_seconds=timeout_seconds,
+            wallet_address=wallet_address,
         )
 
     # 2. No terminal outcome yet — distinguish still-pending vs gone-uncorrelated
@@ -270,6 +273,7 @@ def _verdict_from_outcome(
     order_key: str,
     outcome: tuple[str, Any],
     timeout_seconds: int,
+    wallet_address: str,
 ) -> PerpSettlementVerdict:
     name, log = outcome
     state = _ORDER_OUTCOME_EVENTS[name]
@@ -296,7 +300,10 @@ def _verdict_from_outcome(
     # VIB-6110: correlate to the WATCHED order. A keeper tx may batch several
     # orders across markets; an uncorrelated extract would return a sibling
     # order's market, direction and execution price for this settlement.
-    fill = parser.extract_perp_fill(cast("dict[str, Any]", receipt), order_key=order_key)
+    # VIB-6061: ``account`` additionally measures the keeper execution fee off the
+    # same receipt. It is required, not optional — the refund's receiver is what
+    # proves the escrow being split was ours (see ``_select_execution_fee_events``).
+    fill = parser.extract_perp_fill(cast("dict[str, Any]", receipt), order_key=order_key, account=wallet_address)
 
     if state is PerpSettlementState.EXECUTED:
         if fill is None:

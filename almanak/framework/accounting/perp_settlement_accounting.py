@@ -36,6 +36,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
+from almanak.framework.accounting.gas_pricing import compute_gas_usd
 from almanak.framework.accounting.ids import make_accounting_event_id
 from almanak.framework.accounting.measured import encode_money_payload
 from almanak.framework.accounting.models import AccountingConfidence, AccountingIdentity, PerpEventType
@@ -76,6 +77,9 @@ class PerpSettlementAccountingEvent:
         block_number: int | None,
         unavailable_reason: str | None,
         confidence: AccountingConfidence,
+        keeper_execution_fee_wei: int | None = None,
+        execution_fee_refund_wei: int | None = None,
+        keeper_execution_fee_usd: Decimal | None = None,
     ) -> None:
         self.identity = identity
         self.event_type = PerpEventType.PERP_SETTLEMENT.value
@@ -101,6 +105,11 @@ class PerpSettlementAccountingEvent:
         self.borrowing_fee_usd = borrowing_fee_usd
         self.block_number = block_number
         self.unavailable_reason = unavailable_reason
+        # VIB-6061 — venue keeper execution fee (native wei + USD). See
+        # PerpSettlementEventPayload for why the wei figure is the durable one.
+        self.keeper_execution_fee_wei = keeper_execution_fee_wei
+        self.execution_fee_refund_wei = execution_fee_refund_wei
+        self.keeper_execution_fee_usd = keeper_execution_fee_usd
 
     def to_payload_json(self) -> str:
         def _enc(v: Any) -> Any:
@@ -131,6 +140,9 @@ class PerpSettlementAccountingEvent:
                 "funding_fee_usd": _enc(self.funding_fee_usd),
                 "borrowing_fee_usd": _enc(self.borrowing_fee_usd),
                 "block_number": self.block_number,
+                "keeper_execution_fee_wei": self.keeper_execution_fee_wei,
+                "execution_fee_refund_wei": self.execution_fee_refund_wei,
+                "keeper_execution_fee_usd": _enc(self.keeper_execution_fee_usd),
                 "unavailable_reason": self.unavailable_reason,
                 "confidence": str(self.confidence),
                 "schema_version": self.schema_version,
@@ -163,6 +175,7 @@ def build_perp_settlement_event(
     wallet_address: str,
     is_open: bool | None,
     timestamp: datetime | None = None,
+    native_price_oracle: dict[str, Any] | None = None,
 ) -> PerpSettlementAccountingEvent:
     """Build the typed ``PERP_SETTLEMENT`` event from a WI-2 verdict — a pure function.
 
@@ -174,6 +187,15 @@ def build_perp_settlement_event(
     NOT the per-tick ``cycle_id`` — so a re-book on a later tick / restart mints the
     SAME id (restart-idempotent append-only backstop). ``cycle_id`` is carried as
     identity metadata only.
+
+    ``native_price_oracle`` (VIB-6061) prices the keeper execution fee. Pass the
+    SUBMISSION ledger row's ``price_inputs_json``, not a live quote: that is what
+    makes ``keeper_execution_fee_usd`` commensurable with the same row's
+    ``gas_usd``, which is the pairing the native-lane reconciliation invariant
+    checks. Omitted or unresolvable leaves the USD field ``None`` (Empty != Zero)
+    while the wei figure — chain truth, never restated — is carried regardless.
+    The function stays pure: ``compute_gas_usd`` does arithmetic on the dict and
+    performs no egress.
     """
     state = str(getattr(verdict.state, "value", verdict.state))
     fill = getattr(verdict, "fill_data", None)
@@ -215,6 +237,17 @@ def build_perp_settlement_event(
     )
 
     block_number = _f("block_number")
+    keeper_fee_wei = _f("keeper_execution_fee_wei")
+    refund_wei = _f("execution_fee_refund_wei")
+    keeper_fee_wei = (
+        keeper_fee_wei if isinstance(keeper_fee_wei, int) and not isinstance(keeper_fee_wei, bool) else None
+    )
+    refund_wei = refund_wei if isinstance(refund_wei, int) and not isinstance(refund_wei, bool) else None
+    keeper_fee_usd = (
+        compute_gas_usd(gas_cost_wei=keeper_fee_wei, chain=chain, price_oracle=native_price_oracle)
+        if keeper_fee_wei is not None
+        else None
+    )
     return PerpSettlementAccountingEvent(
         identity,
         protocol=protocol,
@@ -236,6 +269,9 @@ def build_perp_settlement_event(
         position_fee_usd=_dec(_f("position_fee_usd")),
         funding_fee_usd=_dec(_f("funding_fee_usd")),
         borrowing_fee_usd=_dec(_f("borrowing_fee_usd")),
+        keeper_execution_fee_wei=keeper_fee_wei,
+        execution_fee_refund_wei=refund_wei,
+        keeper_execution_fee_usd=keeper_fee_usd,
         block_number=int(block_number)
         if isinstance(block_number, int) and not isinstance(block_number, bool)
         else None,

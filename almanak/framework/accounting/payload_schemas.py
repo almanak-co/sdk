@@ -634,6 +634,23 @@ class PerpSettlementEventPayload(_Versioned):
     funding_fee_usd: Decimal | None = None
     borrowing_fee_usd: Decimal | None = None
     block_number: int | None = None
+    # VIB-6061 — the venue's keeper execution fee, in NATIVE wei and in USD.
+    #
+    # This is not a protocol fee and not transaction gas: GMX escrows our
+    # ``msg.value`` at createOrder and splits it on execution between the keeper
+    # and a refund to us. ``keeper_execution_fee_wei`` is the keeper's cut, i.e.
+    # what we actually consumed; the refund rides along so the pair can be checked
+    # against the escrow. It lands ONLY here and never on the Phase-1 submission
+    # payload, because it is not knowable until the keeper settles.
+    #
+    # The wei figure is the durable one — it is chain truth and never restates.
+    # ``keeper_execution_fee_usd`` is that figure priced at the SUBMISSION row's
+    # own ``price_inputs_json``, which is what keeps it commensurable with that
+    # row's ``gas_usd``; it is ``None`` when no native price was resolvable
+    # (Empty ≠ Zero — an unpriced fee is unmeasured, never $0).
+    keeper_execution_fee_wei: int | None = None
+    execution_fee_refund_wei: int | None = None
+    keeper_execution_fee_usd: Decimal | None = None
     unavailable_reason: str | None = None
 
     @model_validator(mode="after")

@@ -117,6 +117,16 @@ EVENT_TOPICS: dict[str, str] = {
     # Funding events
     "ClaimableFundingUpdated": "0x915eebf8297cc3f559ded968b9b253a3f043b1e6da5075ac2111083dc2c456fe",
     "FundingFeesClaimed": "0x7e7d869368a1c2fca23506342a50d40fcc45d39d44486d9319780252e3b66b2e",
+    # Keeper execution-fee settlement. Emitted by the KEEPER transaction, not by
+    # ours: GMX escrows ``executionFee`` (our ``msg.value``) in the OrderVault at
+    # createOrder, then on execution ``GasUtils.payExecutionFee`` pays the keeper
+    # and refunds the unspent remainder to the order's account. The escrow splits
+    # EXACTLY — ``KeeperExecutionFee.executionFeeAmount`` is the portion we
+    # actually consumed, and it is what the Cost Stack books as the venue
+    # execution fee. Verified on Arbitrum mainnet keeper receipts:
+    # 117808422544000 + 39858593456000 = 157667016000000 wei escrowed (open leg).
+    "KeeperExecutionFee": "0x57f0018c9e19829fa2f55e53969d49e96f7bc3936cd7453806b7cd0eaf5593ca",
+    "ExecutionFeeRefund": "0xe6db92bfa9c5428bfb1001511cc8b0376a77baf28e4b374949b9770bbbb799a0",
 }
 
 # Reverse lookup: topic -> event name
@@ -193,6 +203,10 @@ class GMXv2EventType(Enum):
     CLAIMABLE_FUNDING_UPDATED = "CLAIMABLE_FUNDING_UPDATED"
     FUNDING_FEES_CLAIMED = "FUNDING_FEES_CLAIMED"
 
+    # Keeper execution-fee settlement events (keeper transaction)
+    KEEPER_EXECUTION_FEE = "KEEPER_EXECUTION_FEE"
+    EXECUTION_FEE_REFUND = "EXECUTION_FEE_REFUND"
+
     # Unknown
     UNKNOWN = "UNKNOWN"
 
@@ -219,6 +233,18 @@ EVENT_NAME_TO_TYPE: dict[str, GMXv2EventType] = {
     "OraclePriceUpdated": GMXv2EventType.ORACLE_PRICE_UPDATED,
     "ClaimableFundingUpdated": GMXv2EventType.CLAIMABLE_FUNDING_UPDATED,
     "FundingFeesClaimed": GMXv2EventType.FUNDING_FEES_CLAIMED,
+    "KeeperExecutionFee": GMXv2EventType.KEEPER_EXECUTION_FEE,
+    "ExecutionFeeRefund": GMXv2EventType.EXECUTION_FEE_REFUND,
+}
+
+# VIB-6061 — the three keeper-receipt events the execution-fee settlement is read
+# from, mapped to the EventUtils payload name each decodes under. A dict rather
+# than a branch chain keeps the decode loop one shape per event kind, which is
+# what took ``_select_execution_fee_events`` back under the complexity gate.
+_EXECUTION_FEE_EVENT_NAMES: dict[GMXv2EventType, str] = {
+    GMXv2EventType.ORDER_EXECUTED: "OrderExecuted",
+    GMXv2EventType.KEEPER_EXECUTION_FEE: "KeeperExecutionFee",
+    GMXv2EventType.EXECUTION_FEE_REFUND: "ExecutionFeeRefund",
 }
 
 
@@ -689,6 +715,13 @@ class PerpFillData:
     - ``collateral_delta_amount`` is the raw collateral-token smallest-unit
       integer (matches ``extract_collateral_returned`` semantics — no guessed
       decimal scale).
+    - ``keeper_execution_fee_wei`` / ``execution_fee_refund_wei`` are NATIVE-token
+      wei integers, not USD (VIB-6061). They are the two halves of the escrow we
+      posted as ``msg.value`` at createOrder: the keeper's cut and our refund.
+      Kept in wei rather than converted here because the parser is a pure function
+      of the receipt and holds no price oracle — the USD conversion happens at the
+      settlement-commit seam against the SUBMISSION row's own ``price_inputs_json``,
+      so the booked USD is priced at the same moment as that row's ``gas_usd``.
     """
 
     is_open: bool | None = None
@@ -709,6 +742,9 @@ class PerpFillData:
     borrowing_fee_usd: Decimal | None = None
     keeper_tx_hash: str | None = None
     block_number: int | None = None
+    # VIB-6061 — native-wei execution-fee settlement (see class docstring).
+    keeper_execution_fee_wei: int | None = None
+    execution_fee_refund_wei: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to a stable machine-readable dictionary (Empty != Zero preserved)."""
@@ -735,6 +771,8 @@ class PerpFillData:
             "borrowing_fee_usd": _dec(self.borrowing_fee_usd),
             "keeper_tx_hash": self.keeper_tx_hash,
             "block_number": self.block_number,
+            "keeper_execution_fee_wei": self.keeper_execution_fee_wei,
+            "execution_fee_refund_wei": self.execution_fee_refund_wei,
         }
 
 
@@ -2308,17 +2346,180 @@ class GMXv2ReceiptParser:
             found.get(GMXv2EventType.POSITION_FEES_COLLECTED),
         )
 
+    def _collect_execution_fee_events(
+        self,
+        events: list[Any],
+        emitter: str | None,
+    ) -> tuple[list[int], list[tuple[int, str | None]], list[str]]:
+        """Decode the three execution-fee-settlement event kinds from a keeper receipt.
+
+        Returns ``(keeper_fee_amounts, (refund_amount, receiver) pairs,
+        OrderExecuted accounts)`` — every authentic occurrence, undeduplicated and
+        unjudged. Split out from :meth:`_select_execution_fee_events` so the
+        DECISION (how many of each is attributable, and to whom) reads as the small
+        set of rules it is, rather than being buried in decode plumbing.
+
+        ``emitter`` authentication is applied here, per-event, on the parsed
+        ``contract_address`` — never by pre-filtering the receipt's logs, for the
+        parse-cache reason spelled out in :meth:`_select_fill_events`.
+        """
+        fees: list[int] = []
+        refunds: list[tuple[int, str | None]] = []
+        executed_accounts: list[str] = []
+        for event in events:
+            if emitter is not None and str(getattr(event, "contract_address", "") or "").lower() != emitter:
+                continue  # not the canonical EventEmitter — unattributable is not authentic
+            name = _EXECUTION_FEE_EVENT_NAMES.get(event.event_type)
+            if name is None:
+                continue
+            items = self._decode_event_utils_data(str(event.raw_data or "").removeprefix("0x"), name)
+            if items is None:
+                continue
+            uints = items.get("uints") or {}
+            addresses = items.get("addresses") or {}
+            if event.event_type is GMXv2EventType.ORDER_EXECUTED:
+                account = addresses.get("account")
+                if account:
+                    executed_accounts.append(str(account).lower())
+            elif event.event_type is GMXv2EventType.KEEPER_EXECUTION_FEE:
+                amount = uints.get("executionFeeAmount")
+                if isinstance(amount, int) and not isinstance(amount, bool):
+                    fees.append(amount)
+            else:
+                amount = uints.get("refundFeeAmount")
+                if isinstance(amount, int) and not isinstance(amount, bool):
+                    receiver = addresses.get("receiver")
+                    refunds.append((amount, str(receiver).lower() if receiver else None))
+        return fees, refunds, executed_accounts
+
+    def _select_execution_fee_events(
+        self,
+        events: list[Any],
+        emitter: str | None,
+        account: str | None,
+    ) -> tuple[int | None, int | None]:
+        """Pick ``(keeper_execution_fee_wei, execution_fee_refund_wei)`` (VIB-6061).
+
+        Both are read from the KEEPER transaction. GMX escrows our ``msg.value``
+        at ``createOrder`` and ``GasUtils.payExecutionFee`` splits it on execution:
+        ``KeeperExecutionFee.executionFeeAmount`` to the keeper, the remainder back
+        to the order's account as ``ExecutionFeeRefund.refundFeeAmount``. The keeper's
+        cut IS what we consumed, so no subtraction is needed — the refund is carried
+        alongside purely so the pair can be checked against the escrow.
+
+        **Why this fails closed on a batched receipt.** Unlike the position and fee
+        events, ``KeeperExecutionFee`` carries no ``orderKey`` — nothing in it names
+        the order it settles. When a keeper transaction executes several orders it
+        emits one such event per order, and there is no field to correlate them by.
+        Attributing an arbitrary one to the watched settlement would book another
+        trader's fee against this strategy, so the ONLY safe reading is the
+        unambiguous one: exactly one event of each kind in the receipt. Anything
+        else returns ``(None, None)`` — unmeasured, which the Cost Stack renders as
+        "—" rather than as a fabricated zero (Empty ≠ Zero).
+
+        ``account`` is the strategy wallet and is REQUIRED — a blank one yields
+        ``(None, None)``. The refund's ``receiver`` must equal it, which is what
+        proves the escrow being split was OURS. Without that check a single-order
+        keeper transaction settling somebody else's order would book their fee
+        against us, and every such receipt is single-order by definition — the count
+        guard above cannot see it. Fail-closed rather than "accept any account when
+        none is given", because ownership is not something a default can assert:
+        there is no owner to compare against, so there is no measurement. When the
+        refund event is absent or names a different receiver the keeper fee is
+        dropped too, since the pair is what carries the proof of ownership.
+
+        ``emitter`` authenticates the SOURCE, applied post-parse to each event's
+        ``contract_address`` for exactly the reason spelled out in
+        :meth:`_select_fill_events` — a pre-filtered receipt keeps its
+        ``transactionHash`` and is defeatable through ``ResultEnricher``'s parse
+        cache.
+        """
+        wanted_account = str(account or "").strip().lower() or None
+        if wanted_account is None:
+            return (None, None)
+        fees, refunds, executed_accounts = self._collect_execution_fee_events(events, emitter)
+
+        # Exactly one fee, always. See the batching argument above.
+        if len(fees) != 1:
+            return (None, None)
+
+        # A FULLY CONSUMED ESCROW EMITS NO REFUND EVENT — and that is the LARGEST
+        # fee there is. ``GasUtils.payExecutionFee`` emits ``KeeperExecutionFee``,
+        # then computes ``refundFeeAmount = executionFee - executionFeeForKeeper``
+        # and RETURNS EARLY when it is zero, before ``emitExecutionFeeRefund``.
+        # Requiring the refund event would therefore drop precisely the worst-case
+        # cost and render it "not measured" — this ticket's own defect, inverted.
+        #
+        # Ownership still has to be proven, and without a refund receiver the anchor
+        # is ``OrderExecuted.account``, which names the order's owner directly (on
+        # the standard path it IS the refund receiver; verified equal on both
+        # mainnet fixture legs). Still exactly-one, for the same batching reason.
+        #
+        # The returned zero is a MEASURED zero — the chain proved the whole escrow
+        # was consumed — not an unmeasured ``None``.
+        if not refunds:
+            if len(executed_accounts) != 1 or executed_accounts[0] != wanted_account:
+                return (None, None)
+            return (fees[0], 0)
+
+        if len(refunds) != 1:
+            return (None, None)
+        refund_amount, refund_receiver = refunds[0]
+        if refund_receiver != wanted_account:
+            return (None, None)
+        return (fees[0], refund_amount)
+
+    def extract_keeper_execution_fee(
+        self,
+        receipt: dict[str, Any],
+        *,
+        account: str | None = None,
+    ) -> tuple[int | None, int | None]:
+        """Native-wei ``(keeper_fee, refund)`` from a keeper receipt (VIB-6061).
+
+        Returns ``(None, None)`` when the receipt carries no unambiguous, authentic,
+        account-owned pair — see :meth:`_select_execution_fee_events`. Never raises:
+        a malformed receipt is unmeasured, not an error, because this rides alongside
+        the fill economics and must never take a settlement write down with it.
+        """
+        emitter = self._event_emitter_address()
+        if emitter is None:
+            # An unknown chain cannot authenticate the emitter, and an unauthenticated
+            # fee is a number an arbitrary contract can write. Refuse it.
+            logger.warning(
+                "gmx_v2_execution_fee_emitter_unresolved: no known EventEmitter for chain %r — "
+                "keeper execution fee unmeasured",
+                self.chain,
+            )
+            return (None, None)
+        try:
+            result = self.parse_receipt(receipt)
+        except Exception as exc:  # noqa: BLE001 — malformed receipt ⇒ unmeasured
+            logger.debug("GMX keeper execution-fee parse failed: %s", exc, exc_info=True)
+            return (None, None)
+        if not result.success:
+            return (None, None)
+        return self._select_execution_fee_events(result.events, emitter, account)
+
     def extract_perp_fill_result(
         self,
         receipt: dict[str, Any],
         order_key: str | None = None,
+        account: str | None = None,
     ) -> ExtractResult[PerpFillData]:
-        """Fail-closed variant of :meth:`extract_perp_fill` — see VIB-3159."""
+        """Fail-closed variant of :meth:`extract_perp_fill` — see VIB-3159.
+
+        ``account`` is threaded through (VIB-6061) so this wrapper measures the same
+        fields as the method it wraps. Dropping it here would leave the keeper
+        execution fee unmeasured BY CONSTRUCTION for every caller of the fail-closed
+        variant — a silent divergence between two functions whose whole contract is
+        that they differ only in error handling.
+        """
         missing = "no PositionIncrease/PositionDecrease event to build fill economics"
         if self._normalized_order_key_filter(order_key) is not None:
             missing = f"no PositionIncrease/PositionDecrease event for order {order_key} to build fill economics"
         return self._wrap_extract(
-            lambda parsed_receipt: self.extract_perp_fill(parsed_receipt, order_key=order_key),
+            lambda parsed_receipt: self.extract_perp_fill(parsed_receipt, order_key=order_key, account=account),
             receipt,
             missing,
         )
@@ -2327,6 +2528,7 @@ class GMXv2ReceiptParser:
         self,
         receipt: dict[str, Any],
         order_key: str | None = None,
+        account: str | None = None,
     ) -> PerpFillData | None:
         """Build typed fill economics from a GMX keeper receipt (VIB-3872 WI-1).
 
@@ -2373,6 +2575,12 @@ class GMXv2ReceiptParser:
         logs — a filtered receipt keeps its ``transactionHash``, which is the
         key ``ResultEnricher``'s parse cache uses, so pre-filtering is
         defeatable by a warmed cache.
+
+        ``account`` (VIB-6061) is the strategy wallet. Supplying it additionally
+        measures the keeper execution fee — the native-token cost of the fill that
+        is NOT transaction gas and that the Cost Stack previously showed nowhere.
+        Omitting it leaves ``keeper_execution_fee_wei`` unmeasured; it never
+        affects the fill economics above.
         """
         wanted = self._normalized_order_key_filter(order_key)
         if wanted is None and order_key is not None:
@@ -2403,6 +2611,18 @@ class GMXv2ReceiptParser:
         if position is None:
             return None
         is_open = increase_raw is not None
+
+        # VIB-6061 — the keeper execution fee rides on the same receipt. Scoped to
+        # the canonical emitter even on the uncorrelated (``order_key=None``) path:
+        # unlike the fill events there is no order key to correlate on, so the
+        # emitter is the ONLY authentication available and dropping it here would
+        # let any contract in the transaction write this number.
+        fee_emitter = emitter if emitter is not None else self._event_emitter_address()
+        keeper_fee_wei, refund_wei = (
+            self._select_execution_fee_events(result.events, fee_emitter, account)
+            if fee_emitter is not None
+            else (None, None)
+        )
 
         # collateralDeltaAmount lives in intItems (increase) vs uintItems (decrease).
         collateral_delta = position.get("collateral_delta_amount_raw")
@@ -2440,6 +2660,8 @@ class GMXv2ReceiptParser:
             borrowing_fee_usd=fees.get("borrowing_fee_usd") if fees else None,
             keeper_tx_hash=result.transaction_hash or None,
             block_number=result.block_number or None,
+            keeper_execution_fee_wei=keeper_fee_wei,
+            execution_fee_refund_wei=refund_wei,
         )
 
     # =============================================================================

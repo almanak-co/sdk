@@ -571,16 +571,39 @@ def render_cost_stack(cost: CostStackInfo) -> None:
     # (incl. a measured zero) uses the precise-small formatter. Gas is always
     # measured (every tx pays it) and can be legitimately sub-cent, so it too uses
     # precise_small — a real $0.0008 gas cost no longer collapses to "−$0.00".
+    #
+    # VIB-6061 — the wording, not just the number. "Fees — unmeasured" reads to a
+    # user as "a fee we checked and found negligible", so an unmeasured bucket is
+    # silently taken as a small one. On the sealed 20260726-0035-gmxdca run the
+    # unmeasured bucket was ~7x the measured one. Half of that defect is the
+    # missing venue-fee row below; the other half is this caption, so it now says
+    # plainly that the amount is unknown AND excluded rather than merely absent.
     fees_html = (
-        "<span style='color:#888;'>Fees — unmeasured</span>"
+        "<span style='color:#888;'>Fees — not measured (not in this total)</span>"
         if cost.cost_protocol_fees_usd is None
         else f"<span style='color:#f44336;'>Fees −{format_usd(cost.cost_protocol_fees_usd, precise_small=True)}</span>"
     )
     slip_html = (
-        "<span style='color:#888;'>Slip — unmeasured</span>"
+        "<span style='color:#888;'>Slip — not measured (not in this total)</span>"
         if cost.cost_slippage_usd is None
         else f"<span style='color:#f44336;'>Slip −{format_usd(cost.cost_slippage_usd, precise_small=True)}</span>"
     )
+    # VIB-6061 — venue keeper execution fee. Three states, exactly like the LP
+    # buckets: INAPPLICABLE (no perp settlement — a swap / LP strategy) prints
+    # nothing at all rather than a row of dashes about a fee that cannot apply;
+    # applicable-but-unmeasured names itself; a measured value renders as a cost.
+    if cost.cost_venue_execution_fee_usd is None and not cost.venue_execution_fee_partial:
+        venue_fee_html = ""  # inapplicable — say nothing
+    elif cost.cost_venue_execution_fee_usd is None:
+        venue_fee_html = "<span style='color:#888;'>Venue exec fee — not measured (not in this total)</span><br>"
+    else:
+        venue_suffix = (
+            " <span style='color:#888;'>(partially measured)</span>" if cost.venue_execution_fee_partial else ""
+        )
+        venue_fee_html = (
+            f"<span style='color:#f44336;'>Venue exec fee "
+            f"−{format_usd(cost.cost_venue_execution_fee_usd, precise_small=True)}</span>{venue_suffix}<br>"
+        )
     # VIB-6283: Earn = LP fees + lending interest. LP fees are presence-aware
     # (None until a close / collect lands); interest is a non-optional Decimal,
     # so its zero is always a MEASURED zero. Previously this summed an
@@ -621,6 +644,7 @@ def render_cost_stack(cost: CostStackInfo) -> None:
         # sub-cent; render with adaptive precision so a real $0.0023 fee no longer
         # reads as "$0.00", and honour Empty≠Zero for the unmeasured fee/slip case.
         f"{fees_html}<br>"
+        f"{venue_fee_html}"
         f"{slip_html}<br>"
         f"{earn_html}<br>"
         # VIB-4984: swap-inventory unrealized as its own line.
@@ -635,8 +659,12 @@ def render_cost_stack(cost: CostStackInfo) -> None:
         "Life-to-date cost & earn breakdown. "
         "Gas: native ETH × USD at TX time, every tx. "
         "Fees: Uniswap pool fee + bridge / aggregator fees on swaps. "
+        "Venue exec fee: native paid to a protocol keeper to execute an order "
+        "(GMX escrows this as msg.value and refunds the unused part) — not gas, "
+        "and on small perp positions often larger than gas. "
         "Slip: realised slippage vs quote. "
-        "Earn: LP fees + lending interest accrued."
+        "Earn: LP fees + lending interest accrued. "
+        "A line marked 'not measured' is unknown and excluded — not zero."
     )
     st.markdown(
         f"<div title='{cost_tooltip}' style='background:#1e1e1e;border:1px solid #333;"

@@ -710,8 +710,8 @@ def test_cell22_does_not_break_existing_21_cells(tmp_path: Path) -> None:
     report = _run(db, primitive="lp")
     cell_ids = [c.cell_id for c in report.cells]
     assert "L5_22" in cell_ids
-    # 15 generic + 6 LP + 1 cell-22 = 22 total.
-    assert len(cell_ids) == 22, f"expected 22 cells, got {len(cell_ids)}: {cell_ids}"
+    # 15 generic + 6 LP + 1 native-lane (G16) + 1 cell-22 = 23 total.
+    assert len(cell_ids) == 23, f"expected 23 cells, got {len(cell_ids)}: {cell_ids}"
     # Generic cell ordering preserved.
     expected_generic_prefix = [
         "G1",
@@ -731,6 +731,10 @@ def test_cell22_does_not_break_existing_21_cells(tmp_path: Path) -> None:
         "G15",
     ]
     assert cell_ids[:15] == expected_generic_prefix
+    # VIB-6061: G16 is appended with the informational cells, NOT into the generic
+    # block -- that is what keeps the 15-cell prefix above stable.
+    assert "G16" in cell_ids
+    assert cell_ids.index("G16") >= 15
 
 
 def test_cell22_gating_line_excludes_l5_22(tmp_path: Path) -> None:
@@ -753,10 +757,12 @@ def test_cell22_gating_line_excludes_l5_22(tmp_path: Path) -> None:
     md = report.format_markdown()
     # Cell #22 should be PASS in this fixture.
     assert "**PASS**" in md
-    # Gating line shape: explicit /21 denominator (NOT /22) and L5_22 status.
+    # Gating line shape: explicit /21 denominator (NOT /22, and NOT /23 once
+    # VIB-6061 added G16) plus each informational cell's status.
     assert "Gating: " in md
     assert "/21 PASS" in md
     assert "cell L5_22 informational only this cycle" in md
+    assert "cell G16 informational only this cycle" in md
     # PASS status flagged on the gating line.
     assert "(status: PASS)" in md
 

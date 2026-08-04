@@ -9005,6 +9005,8 @@ class CostStackInfo(_message.Message):
     INVENTORY_UNREALIZED_USD_FIELD_NUMBER: _builtins.int
     FEES_EARNED_PARTIAL_FIELD_NUMBER: _builtins.int
     IL_PARTIAL_FIELD_NUMBER: _builtins.int
+    COST_VENUE_EXECUTION_FEE_USD_FIELD_NUMBER: _builtins.int
+    VENUE_EXECUTION_FEE_PARTIAL_FIELD_NUMBER: _builtins.int
     cost_gas_usd: _builtins.str
     cost_protocol_fees_usd: _builtins.str
     cost_slippage_usd: _builtins.str
@@ -9057,6 +9059,23 @@ class CostStackInfo(_message.Message):
     deliberate ``false``.
     """
     il_partial: _builtins.bool
+    cost_venue_execution_fee_usd: _builtins.str
+    """VIB-6061: the venue's keeper execution fee — native-token cost paid to a
+    protocol keeper to execute an order (GMX: escrowed as our msg.value at
+    createOrder, split on execution between the keeper and a refund to us).
+
+    Neither gas nor a protocol fee, so it gets its own row rather than being
+    summed into either. On the sealed 20260726-0035-gmxdca-arb run this was ~86%
+    of all native spend while the Cost Stack displayed transaction gas only —
+    a 7.3x understatement of the true cost of trading.
+
+    Same two orthogonal signals as the LP buckets above: "" => INAPPLICABLE (no
+    perp settlement exists — a swap / LP strategy says nothing about venue fees),
+    and `partial` => applicable but some settlement withheld its term. An old
+    gateway omits both, the client reads None + false, and the row is simply
+    absent — which is the pre-VIB-6061 rendering, so the default is harmless.
+    """
+    venue_execution_fee_partial: _builtins.bool
     def __init__(
         self,
         *,
@@ -9073,8 +9092,10 @@ class CostStackInfo(_message.Message):
         inventory_unrealized_usd: _builtins.str = ...,
         fees_earned_partial: _builtins.bool = ...,
         il_partial: _builtins.bool = ...,
+        cost_venue_execution_fee_usd: _builtins.str = ...,
+        venue_execution_fee_partial: _builtins.bool = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["cost_gas_usd", b"cost_gas_usd", "cost_protocol_fees_usd", b"cost_protocol_fees_usd", "cost_slippage_usd", b"cost_slippage_usd", "fees_earned_partial", b"fees_earned_partial", "fees_earned_usd", b"fees_earned_usd", "funding_earned_usd", b"funding_earned_usd", "funding_paid_usd", b"funding_paid_usd", "il_partial", b"il_partial", "il_usd", b"il_usd", "interest_earned_usd", b"interest_earned_usd", "interest_paid_usd", b"interest_paid_usd", "inventory_unrealized_usd", b"inventory_unrealized_usd", "realized_pnl_usd", b"realized_pnl_usd"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["cost_gas_usd", b"cost_gas_usd", "cost_protocol_fees_usd", b"cost_protocol_fees_usd", "cost_slippage_usd", b"cost_slippage_usd", "cost_venue_execution_fee_usd", b"cost_venue_execution_fee_usd", "fees_earned_partial", b"fees_earned_partial", "fees_earned_usd", b"fees_earned_usd", "funding_earned_usd", b"funding_earned_usd", "funding_paid_usd", b"funding_paid_usd", "il_partial", b"il_partial", "il_usd", b"il_usd", "interest_earned_usd", b"interest_earned_usd", "interest_paid_usd", b"interest_paid_usd", "inventory_unrealized_usd", b"inventory_unrealized_usd", "realized_pnl_usd", b"realized_pnl_usd", "venue_execution_fee_partial", b"venue_execution_fee_partial"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___CostStackInfo: _TypeAlias = CostStackInfo  # noqa: Y015

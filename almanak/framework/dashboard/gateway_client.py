@@ -314,6 +314,14 @@ class CostStackInfo:
     # that never sends the field should mean. Money is never gated on these.
     fees_earned_partial: bool = False
     il_partial: bool = False
+    # VIB-6061: the venue's keeper execution fee — a native-token cost that is
+    # neither gas nor a protocol fee, and that the Cost Stack previously showed
+    # nowhere at all. Same four-state reading as the LP pair above; on a GMX perp
+    # strategy this is typically the LARGEST native cost, so rendering an
+    # unmeasured bucket as "$0.00" here is a materially misleading number rather
+    # than a cosmetic one.
+    cost_venue_execution_fee_usd: Decimal | None = None
+    venue_execution_fee_partial: bool = False
 
 
 @dataclass
@@ -493,6 +501,9 @@ def _convert_cost_stack(proto: gateway_pb2.CostStackInfo) -> CostStackInfo:
         # VIB-6283: coverage flags, carried beside the values above.
         fees_earned_partial=bool(proto.fees_earned_partial),
         il_partial=bool(proto.il_partial),
+        # VIB-6061: presence-aware — "" => None (unmeasured), never Decimal("0").
+        cost_venue_execution_fee_usd=_safe_optional_decimal(proto.cost_venue_execution_fee_usd),
+        venue_execution_fee_partial=bool(proto.venue_execution_fee_partial),
     )
 
 

@@ -3583,6 +3583,22 @@ message CostStackInfo {
   // deliberate ``false``.
   bool fees_earned_partial = 12;
   bool il_partial = 13;
+  // VIB-6061: the venue's keeper execution fee — native-token cost paid to a
+  // protocol keeper to execute an order (GMX: escrowed as our msg.value at
+  // createOrder, split on execution between the keeper and a refund to us).
+  //
+  // Neither gas nor a protocol fee, so it gets its own row rather than being
+  // summed into either. On the sealed 20260726-0035-gmxdca-arb run this was ~86%
+  // of all native spend while the Cost Stack displayed transaction gas only —
+  // a 7.3x understatement of the true cost of trading.
+  //
+  // Same two orthogonal signals as the LP buckets above: "" => INAPPLICABLE (no
+  // perp settlement exists — a swap / LP strategy says nothing about venue fees),
+  // and `partial` => applicable but some settlement withheld its term. An old
+  // gateway omits both, the client reads None + false, and the row is simply
+  // absent — which is the pre-VIB-6061 rendering, so the default is harmless.
+  string cost_venue_execution_fee_usd = 14;
+  bool venue_execution_fee_partial = 15;
 }
 
 // AuditPosture — Reconciliation (G6) + audit-trail completeness +

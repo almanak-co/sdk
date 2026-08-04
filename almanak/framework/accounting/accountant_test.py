@@ -32,6 +32,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Literal
 
+from almanak.framework.accounting.gas_pricing import native_token_for_chain
 from almanak.framework.accounting.inventory_revaluation import (
     compute_inventory_revaluation,
 )
@@ -162,6 +163,15 @@ def _assert_fixture_lifecycle(
         )
 
 
+# Cells that render in the report but are EXCLUDED from the >=16/21 gating
+# denominator. A cell lands here when it is newly introduced: the bar was set
+# against the cells that existed when it was set, so silently folding a new cell
+# into the denominator moves the bar for every prior run and makes scores
+# non-comparable. Being informational is about GATING ARITHMETIC only -- these
+# cells still evaluate, still render, and still report FAIL loudly.
+_INFORMATIONAL_CELL_IDS = frozenset({"L5_22", "G16"})
+
+
 @dataclass
 class CellResult:
     """One row in the audit report."""
@@ -282,8 +292,9 @@ class AccountantReport:
             lines.append(f"- DB: `{self.db_dump_path}`")
         lines.append("")
         # Score
-        generic = [c for c in self.cells if c.cell_id.startswith("G")]
-        prim = [c for c in self.cells if not c.cell_id.startswith("G")]
+        generic = [c for c in self.cells if c.cell_id.startswith("G") and c.cell_id not in _INFORMATIONAL_CELL_IDS]
+        prim = [c for c in self.cells if not c.cell_id.startswith("G") and c.cell_id not in _INFORMATIONAL_CELL_IDS]
+        informational = [c for c in self.cells if c.cell_id in _INFORMATIONAL_CELL_IDS]
 
         def _score(rs: list[CellResult]) -> str:
             p = sum(1 for r in rs if r.status == "PASS")
@@ -293,8 +304,10 @@ class AccountantReport:
             return f"{p} PASS, {f} FAIL, {x} XFAIL, {s} SKIP (of {len(rs)})"
 
         lines.append("## Score")
-        lines.append(f"- Generic 15: {_score(generic)}")
+        lines.append(f"- Generic {len(generic)}: {_score(generic)}")
         lines.append(f"- Primitive {len(prim)}: {_score(prim)}")
+        if informational:
+            lines.append(f"- Informational {len(informational)}: {_score(informational)}")
         lines.append(f"- Total: {self.passed}/{self.total_cells} PASS, {self.failed} FAIL, {self.xfailed} XFAIL")
         # VIB-4201 (T15): cell L5_22 is informational only — not in the
         # ≥16/21 gating sum. The gating line below partitions the original
@@ -303,13 +316,23 @@ class AccountantReport:
         # any reason (legacy back-compat caller, primitive that does not
         # produce a 22nd cell), the gating line still renders against the
         # 21 cells with status="absent".
-        gated_cells = [c for c in self.cells if c.cell_id != "L5_22"]
+        #
+        # VIB-6061: G16 (native lane) joins L5_22 as informational-only for the
+        # same reason and on the same precedent — a newly-introduced cell must not
+        # silently move the ≥16/21 bar it was never scored against. It is excluded
+        # from the denominator, not from the report: it renders as a normal row and
+        # its status is called out below, so a FAIL is impossible to miss while the
+        # gating arithmetic stays comparable with every prior run.
+        gated_cells = [c for c in self.cells if c.cell_id not in _INFORMATIONAL_CELL_IDS]
         cell22 = next((c for c in self.cells if c.cell_id == "L5_22"), None)
+        g16 = next((c for c in self.cells if c.cell_id == "G16"), None)
         gated_pass = sum(1 for c in gated_cells if c.status == "PASS")
         cell22_status = cell22.status if cell22 is not None else "absent"
+        g16_status = g16.status if g16 is not None else "absent"
         lines.append(
             f"- Gating: {gated_pass}/{len(gated_cells)} PASS (≥16/21 required); "
-            f"cell L5_22 informational only this cycle (status: {cell22_status})"
+            f"cell L5_22 informational only this cycle (status: {cell22_status}); "
+            f"cell G16 informational only this cycle (status: {g16_status})"
         )
         lines.append("")
         lines.append("## Cells")
@@ -1008,6 +1031,367 @@ def _cell_g1_money_trail(
         "PASS",
         f"{len(rows)} ledger rows ({len(successful)} successful, {swap_count} SWAP); "
         "all tx_hashes present; SWAP/PT rows carry token amounts AND USD valuations",
+    )
+
+
+# ── G16: native-lane reconciliation (VIB-6061) ───────────────────────────────
+#
+# Absolute floor on the residual, in native token units. Sized well below one
+# order's keeper fee (~0.000118 ETH on Arbitrum) so the cell can still SEE the
+# defect it exists for, but above the Decimal round-trip noise of recovering a
+# native amount from ``gas_usd / native_price``.
+_G16_ABS_EPSILON_NATIVE = Decimal("0.000005")
+# Relative floor: a residual under this fraction of the attributed cost is
+# rounding, not a missing cost line. The motivating defect was 86% unattributed.
+_G16_REL_TOLERANCE = Decimal("0.05")
+
+
+def _g16_native_balance(snapshot: dict[str, Any], symbol: str) -> Decimal | None:
+    """The wallet's native-token balance at one snapshot, or None if unmeasured."""
+    for wb in _json_list(snapshot.get("wallet_balances_json")):
+        if not isinstance(wb, dict):
+            continue
+        if str(wb.get("symbol") or "").upper() != symbol.upper():
+            continue
+        raw = wb.get("balance")
+        if raw is None:
+            return None
+        try:
+            parsed = Decimal(str(raw))
+        except (InvalidOperation, ValueError, TypeError):
+            return None
+        return parsed if parsed.is_finite() else None
+    return None
+
+
+@dataclass(frozen=True)
+class _G16SettlementFee:
+    """One settled order's native execution-fee economics (VIB-6061)."""
+
+    submitted_at: str
+    settled_at: str
+    fee_native: Decimal | None
+    escrow_native: Decimal | None
+
+
+def _g16_settlement_fees(
+    acct_events: list[dict[str, Any]],
+    ledger: list[dict[str, Any]],
+) -> list[_G16SettlementFee]:
+    """Per-settlement native fee + escrow, with the window each escrow was in flight.
+
+    ``submitted_at`` is the SUBMISSION ledger row's timestamp, recovered by joining
+    ``submission_ledger_entry_id`` against ``transaction_ledger.id`` — not the
+    settlement's own timestamp, and not an accounting-event id (that join looks
+    plausible and silently matches nothing, collapsing every in-flight window to
+    zero). The escrow leaves the wallet at submission and returns at settlement, so
+    those are the two edges of the window; using the settlement timestamp for both
+    would reintroduce the endpoint contamination this exists to remove.
+    """
+    by_ledger_id = {
+        str(r.get("id") or ""): str(r.get("timestamp") or "") for r in ledger if isinstance(r, dict) and r.get("id")
+    }
+    out: list[_G16SettlementFee] = []
+    for event in acct_events:
+        if not isinstance(event, dict):
+            continue
+        if str(event.get("event_type") or "").upper() != "PERP_SETTLEMENT":
+            continue
+        payload = _json(event.get("payload_json")) or {}
+        fee_wei = payload.get("keeper_execution_fee_wei")
+        refund_wei = payload.get("execution_fee_refund_wei")
+        if not isinstance(fee_wei, int) or isinstance(fee_wei, bool):
+            continue
+        fee_native = Decimal(fee_wei) / Decimal(10**18)
+        escrow_native = (
+            (Decimal(fee_wei) + Decimal(refund_wei)) / Decimal(10**18)
+            if isinstance(refund_wei, int) and not isinstance(refund_wei, bool)
+            else None
+        )
+        settled_at = str(event.get("timestamp") or "")
+        submitted_at = by_ledger_id.get(str(payload.get("submission_ledger_entry_id") or ""), settled_at)
+        out.append(_G16SettlementFee(submitted_at, settled_at, fee_native, escrow_native))
+    return out
+
+
+def _g16_escrow_outstanding(fees: list[_G16SettlementFee], at: str) -> Decimal:
+    """Native escrowed with the venue but not yet settled at instant ``at``.
+
+    Escrowed native is out of the wallet without being a cost, so a snapshot taken
+    mid-flight understates the balance by exactly this amount. Adding it back makes
+    the two endpoints comparable. An escrow we could not measure contributes
+    nothing — it cannot be conjured — which is why an unmeasured settlement shows up
+    as residual rather than being silently smoothed away.
+    """
+    total = Decimal("0")
+    for fee in fees:
+        if fee.escrow_native is None:
+            continue
+        if fee.submitted_at <= at < fee.settled_at:
+            total += fee.escrow_native
+    return total
+
+
+# KNOWN LIMITATION — ``settled_at`` IS A BOOKING TIME, NOT AN ON-CHAIN TIME.
+#
+# ``_g16_settlement_fees`` reads ``settled_at`` off the PERP_SETTLEMENT accounting
+# row, which the reconciler writes on a LATER tick than the keeper's transaction.
+# Between the keeper settling on-chain and that row being booked, the refund is
+# already back in the wallet while ``_g16_escrow_outstanding`` still counts the
+# whole escrow as in flight — so a snapshot landing in that gap has its balance
+# over-adjusted by exactly the refund, and G16 reports a spurious residual.
+#
+# Measured, not theorised: on a managed-Anvil round trip (2026-08-04, PERP_OPEN +
+# teardown) the first snapshot sat 59s after the keeper settled and 1s after the
+# ledger write, and G16 reported UNATTRIBUTED 0.005358973 ETH — precisely that
+# leg's ``execution_fee_refund_wei``. Nothing was actually unattributed; the
+# Cost Stack booked both legs correctly on that same run (venue fee 86.6% of
+# native cost).
+#
+# The fix is to key the window on the keeper transaction's own block time rather
+# than the booking tick, which needs a settlement timestamp the payload does not
+# carry today (it has ``block_number``). Deliberately NOT bodged here: widening
+# the tolerance to swallow a refund would blind the cell to exactly the magnitude
+# of cost it exists to catch. Tracked as a follow-up; until then G16 is sound
+# whenever snapshots do not fall inside the settle-to-book gap, which is the
+# normal case at production snapshot cadence (the two sealed 20260726-0035-gmxdca
+# runs both score, and both correctly FAIL).
+
+
+def _g16_gas_native(row: dict[str, Any], symbol: str) -> Decimal | None:
+    """Recover one ledger row's gas cost in NATIVE units (Empty != Zero).
+
+    ``gas_usd`` was written as ``gas_cost_wei / 1e18 * native_price``, and the
+    price that produced it is persisted on the SAME row as ``price_inputs_json``.
+    Dividing it back out therefore recovers the native amount exactly rather than
+    approximately, and — crucially — it cannot drift with the market: valuing the
+    whole run at one late price would inject a price move into a residual that is
+    supposed to contain only unattributed COST.
+
+    ``None`` when the row carries no gas_usd or no usable native price; the caller
+    treats that as unmeasured and refuses to score, never as a zero-cost row.
+    """
+    gas_usd = _dec(row.get("gas_usd"))
+    if gas_usd is None:
+        return None
+    prices = _json(row.get("price_inputs_json")) or {}
+    entry = prices.get(symbol) or prices.get(symbol.upper()) or prices.get(symbol.lower())
+    price = _dec(entry.get("price_usd")) if isinstance(entry, dict) else _dec(entry)
+    if price is None or price <= 0:
+        return None
+    return gas_usd / price
+
+
+def _cell_g16_native_lane(
+    snapshots: list[dict[str, Any]],
+    ledger: list[dict[str, Any]],
+    acct_events: list[dict[str, Any]],
+) -> CellResult:
+    """G16 — every native token that left the wallet is on a Cost Stack line.
+
+    THE INVARIANT VIB-6061 EXISTS FOR. The Cost Stack counted transaction gas and
+    nothing else, so the GMX keeper execution fee — 86% of native spend on the
+    sealed ``20260726-0035-gmxdca-arb`` run — was invisible in every bucket. A
+    number can be fixed and silently regress; this cell is what makes the regression
+    loud, by refusing to let any native outflow go unnamed.
+
+    The identity, in NATIVE units (never USD — see ``_g16_gas_native``):
+
+        native(t0) - native(t1) == gas + venue_execution_fee   (+/- epsilon)
+
+    ESCROW IS THE SUBTLETY. A GMX order posts its execution fee as ``msg.value`` at
+    submission and the unused part comes back only when the keeper settles. A
+    snapshot taken between those two moments sees the whole escrow gone from the
+    wallet, and on the arb bundle above the very first snapshot lands ONE SECOND
+    after a submission — so a naive endpoint difference reads a ~0.001 ETH escrow as
+    if it were a cost, and the cell would fail forever on runs that are perfectly
+    reconciled. ``_g16_escrow_outstanding`` adds back the escrow in flight at each
+    endpoint, which is what makes a green here achievable and therefore meaningful.
+
+    Scoring is deliberately two-sided. An UNDER-attributed residual is the VIB-6061
+    defect (native left and no line claims it). An OVER-attributed one is the
+    mirror defect that booking the escrow rather than the keeper's cut would have
+    produced. Both FAIL, and the diagnostic reports the signed residual so the
+    direction is legible.
+
+    NA, never a silent pass, when the run cannot support the check: fewer than two
+    snapshots carrying a native balance, or any ledger row whose native gas cannot
+    be recovered. "We could not measure this" must never render as "this passed" —
+    a cell that greens on missing data is the vacuity this suite has been bitten by.
+    """
+    chain = (ledger[0].get("chain") if ledger else "") or ""
+    symbol = native_token_for_chain(chain)
+
+    # Endpoints must be chosen by TIME, not by SQLite row order (``_table_rows``
+    # issues no ORDER BY). Reversing two otherwise-valid snapshots inverts the
+    # window and can turn a correct PASS into an OVER-ATTRIBUTED FAIL. Reuse G5's
+    # helper, which also refuses when any timestamp is unparseable — the same
+    # "refuse rather than guess" direction the rest of this cell takes.
+    ordered = _snapshots_in_time_order(snapshots)
+    if ordered is None:
+        return CellResult(
+            "G16",
+            "Native lane (cost stack == native balance delta)",
+            "SKIP",
+            "snapshots cannot be ordered by time (a timestamp is unmeasured or unparseable), "
+            "so the window endpoints would be chosen by SQLite row order",
+        )
+    priced = [s for s in ordered if _g16_native_balance(s, symbol) is not None]
+    if len(priced) < 2:
+        return CellResult(
+            "G16",
+            "Native lane (cost stack == native balance delta)",
+            "SKIP",
+            f"need >=2 snapshots carrying a {symbol} wallet balance (have {len(priced)} of {len(snapshots)})",
+        )
+
+    # LANDED, not ``success``. ``transaction_ledger.success`` is the framework's
+    # BOOKS verdict: the slippage breaker, the reconciliation finalizer and the
+    # Empty != Zero guard all write success=False on transactions that landed and
+    # burned real gas. This cell asks "what native left the wallet on-chain?", so
+    # per ``_row_landed``'s contract it must use that helper -- filtering on
+    # ``success`` drops a degraded row's gas from ``attributed`` while the balance
+    # delta still contains it, manufacturing an UNATTRIBUTED residual exactly when
+    # accounting is already degraded (and SKIPping outright when every row is).
+    settled = [r for r in ledger if _row_landed(r)]
+    if not settled:
+        return CellResult(
+            "G16",
+            "Native lane (cost stack == native balance delta)",
+            "SKIP",
+            "no successful on-chain ledger rows — no native cost to attribute",
+        )
+
+    unrecoverable = [r for r in settled if _g16_gas_native(r, symbol) is None]
+    if unrecoverable:
+        return CellResult(
+            "G16",
+            "Native lane (cost stack == native balance delta)",
+            "SKIP",
+            f"{len(unrecoverable)}/{len(settled)} successful ledger rows carry no recoverable native gas "
+            f"(missing gas_usd or no {symbol} price in price_inputs_json) — the native lane is unmeasured, "
+            "which is NOT the same as reconciled",
+        )
+
+    first, last = priced[0], priced[-1]
+    t0 = str(first.get("timestamp") or "")
+    t1 = str(last.get("timestamp") or "")
+
+    fees = _g16_settlement_fees(acct_events, ledger)
+    # Endpoints are the wallet balance PLUS escrow still in flight at that instant —
+    # escrowed native is out of the wallet but is not yet a cost.
+    #
+    # ``priced`` and the ``unrecoverable`` gate above already established that these
+    # reads are measured, but that is a cross-statement fact the type checker cannot
+    # follow. Re-derive locally rather than asserting it: an ``or Decimal(0)`` here
+    # would substitute a measured zero for an unmeasured read, which is the exact
+    # Empty != Zero violation those gates exist to prevent.
+    start_balance = _g16_native_balance(first, symbol)
+    end_balance = _g16_native_balance(last, symbol)
+    if start_balance is None or end_balance is None:  # pragma: no cover — gated above
+        return CellResult(
+            "G16",
+            "Native lane (cost stack == native balance delta)",
+            "SKIP",
+            f"the window endpoints stopped carrying a measured {symbol} balance",
+        )
+    # AN ESCROW AT AN ENDPOINT IS UNRESOLVABLE, SO REFUSE TO SCORE (VIB-6061).
+    #
+    # ``settled_at`` is when the PERP_SETTLEMENT row was BOOKED, not when the keeper
+    # settled on-chain -- the reconciler books on a later tick. Between those two
+    # moments the refund is already back in the wallet while this cell still counts
+    # the whole escrow as outstanding, so the endpoint is over-adjusted by exactly
+    # the refund and the cell reports a residual that no missing money caused.
+    #
+    # Measured on this PR's own fork proof: G16 returned FAIL with a 0.005358973 ETH
+    # residual identical to that leg's ``execution_fee_refund_wei``, on a run whose
+    # Cost Stack was provably correct. An invariant that cannot tell correct
+    # accounting from missing money is worse than one that admits it does not know,
+    # because the first gets muted and the second gets fixed.
+    #
+    # Scoped to the ambiguity and no wider: when no escrow is outstanding at either
+    # endpoint the identity is exact and the cell still scores. That keeps every
+    # discriminating case -- the sealed pre-fix runs (whose payloads carry no fee at
+    # all, so no escrow is in flight) still FAIL, and the ratchet fixtures still PASS.
+    #
+    # The sound fix is the keeper transaction's own block timestamp on the payload,
+    # which it does not carry today (it has ``block_number``). Deferred rather than
+    # bodged: widening the tolerance to absorb a refund would blind the cell to
+    # exactly the magnitude of cost it exists to catch.
+    escrow_t0 = _g16_escrow_outstanding(fees, t0)
+    escrow_t1 = _g16_escrow_outstanding(fees, t1)
+    if escrow_t0 or escrow_t1:
+        return CellResult(
+            "G16",
+            "Native lane (cost stack == native balance delta)",
+            "SKIP",
+            f"a venue execution-fee escrow is outstanding at a window endpoint "
+            f"(t0={escrow_t0}, t1={escrow_t1} {symbol}) as of the settlement BOOKING time, which "
+            "is not when the keeper settled on-chain; the endpoint balance cannot be corrected "
+            "without the keeper block timestamp, so this window is unscoreable",
+        )
+    start = start_balance
+    end = end_balance
+    observed_outflow = start - end
+
+    in_window_gas: list[Decimal] = []
+    for r in settled:
+        if not (t0 < str(r.get("timestamp") or "") <= t1):
+            continue
+        gas = _g16_gas_native(r, symbol)
+        if gas is not None:  # gated by ``unrecoverable`` above; re-checked for the type
+            in_window_gas.append(gas)
+    gas_native = sum(in_window_gas, Decimal("0"))
+    fee_native = sum(
+        (f.fee_native for f in fees if f.fee_native is not None and t0 < f.settled_at <= t1),
+        Decimal("0"),
+    )
+    attributed = gas_native + fee_native
+    residual = observed_outflow - attributed
+    tolerance = max(_G16_ABS_EPSILON_NATIVE, abs(attributed) * _G16_REL_TOLERANCE)
+
+    decomposition = {
+        "native_symbol": symbol,
+        "window": f"{t0} .. {t1}",
+        "observed_outflow_native": str(observed_outflow),
+        "attributed_native": str(attributed),
+        "gas_native": str(gas_native),
+        "venue_execution_fee_native": str(fee_native),
+        "residual_native": str(residual),
+        "tolerance_native": str(tolerance),
+    }
+
+    if abs(residual) <= tolerance:
+        return CellResult(
+            "G16",
+            "Native lane (cost stack == native balance delta)",
+            "PASS",
+            f"{symbol} outflow {observed_outflow} == gas {gas_native} + venue fee {fee_native} "
+            f"(residual {residual}, tolerance {tolerance})",
+            decomposition=decomposition,
+        )
+
+    if residual > 0:
+        headline = (
+            f"UNATTRIBUTED {symbol}: the wallet gave up {observed_outflow} but the Cost Stack accounts "
+            f"for only {attributed} (gas {gas_native} + venue execution fee {fee_native}). "
+            f"{residual} of native left the wallet with no cost line naming it — this is the VIB-6061 shape."
+        )
+    else:
+        headline = (
+            f"OVER-ATTRIBUTED {symbol}: the Cost Stack claims {attributed} of native cost "
+            f"(gas {gas_native} + venue execution fee {fee_native}) but the wallet only gave up "
+            f"{observed_outflow}, leaving {-residual} of native unexplained INTO the wallet. "
+            "Booking an escrow rather than the keeper's cut of it produces exactly this; so does an "
+            "unbooked refund or an external top-up mid-run, which this cell cannot tell apart — "
+            "check for a native transfer before treating it as a booking defect."
+        )
+    return CellResult(
+        "G16",
+        "Native lane (cost stack == native balance delta)",
+        "FAIL",
+        f"{headline} Residual {residual} exceeds tolerance {tolerance}.",
+        decomposition=decomposition,
     )
 
 
@@ -5119,6 +5503,12 @@ def evaluate_cells(
                 )
             )
         )
+
+    # VIB-6061: G16 — native lane. Appended here rather than beside G15 so the
+    # 15-cell generic block keeps its identity and ordering; the check itself is
+    # primitive-agnostic (it catches any venue charging native outside transaction
+    # gas), but it is informational for now, exactly like cell #22 below.
+    cells.append(_cell_g16_native_lane(snapshots, ledger, acct_events))
 
     # VIB-4201 (T15): cell #22 — registry coherence. Appended after the
     # 15 generic + 6 primitive-specific cells. NOT in the ≥16/21 gating
