@@ -69,6 +69,7 @@ from .interfaces import (
     ExecutionError,
     GasEstimationError,
     InsufficientFundsError,
+    NativeFundingRequirement,
     NonceError,
     SignedTransaction,
     Signer,
@@ -95,6 +96,8 @@ from .session import (
 from .session_store import ExecutionSessionStore
 
 logger = logging.getLogger(__name__)
+
+_NATIVE_FUNDING_PREFLIGHT_KEY = "native_funding_preflight"
 
 
 # =============================================================================
@@ -1526,8 +1529,9 @@ class ExecutionOrchestrator:
         2. Simulates transactions (if enabled)
         3. Assigns sequential nonces
         4. Signs all transactions
-        5. Submits transactions
-        6. Polls for and parses receipts
+        5. Validates opted-in final native-funding liabilities
+        6. Submits transactions
+        7. Polls for and parses receipts
 
         Args:
             action_bundle: The ActionBundle to execute
@@ -1546,6 +1550,7 @@ class ExecutionOrchestrator:
                 self._phase_simulate,
                 self._phase_gas,
                 self._phase_sign,
+                self._phase_native_funding,
                 self._phase_submit_and_confirm,
                 self._phase_enrich,
             )
@@ -1968,8 +1973,10 @@ class ExecutionOrchestrator:
 
         result.phase = ExecutionPhase.SUBMISSION
 
-        # Step 6: Dry run check
-        if context.dry_run:
+        # Step 6: Dry run check. Opted-in bundles first run the final native-
+        # funding phase below, using the same signed liability as live execution.
+        funding_config = (state.action_bundle.metadata or {}).get(_NATIVE_FUNDING_PREFLIGHT_KEY)
+        if context.dry_run and not isinstance(funding_config, dict):
             result.success = True
             result.phase = ExecutionPhase.COMPLETE
             result.completed_at = datetime.now(UTC)
@@ -1982,6 +1989,138 @@ class ExecutionOrchestrator:
             return result
 
         return None
+
+    async def _phase_native_funding(self, state: ExecutionPipelineState) -> ExecutionResult | None:
+        """Validate final node-admission liabilities before sending an opted-in bundle.
+
+        This phase runs after live gas estimation, fee selection, nonce assignment,
+        and Safe-wrapper construction, so it checks the values the node will
+        actually use. Sequential EOA bundles reserve only the transactions in the
+        current action: their liabilities are summed per payer so an approval
+        cannot consume funds needed by the following protocol call. This is not a
+        reservation for a future action such as closing a position.
+        Atomic Safe bundles additionally require the Safe to hold the sum of their
+        inner ``msg.value`` transfers, while the EOA funds the wrapper gas.
+
+        Balance reads are best-effort. A read gap cannot safely prove a shortfall,
+        so submission remains allowed and the node is the authoritative backstop.
+        """
+        config = (state.action_bundle.metadata or {}).get(_NATIVE_FUNDING_PREFLIGHT_KEY)
+        if not isinstance(config, dict):
+            return self._complete_opted_in_dry_run(state)
+
+        assert state.signed_txs is not None
+        requirements = self._collect_native_funding_requirements(state)
+        if not requirements or not self.rpc_url:
+            return self._complete_opted_in_dry_run(state)
+
+        try:
+            web3 = await self._get_web3()
+        except Exception as exc:  # noqa: BLE001 - inability to prove a shortfall must fail open
+            logger.warning("Final native-funding preflight unavailable; deferring to node admission: %s", exc)
+            return self._complete_opted_in_dry_run(state)
+
+        requirements_by_payer: dict[str, list[NativeFundingRequirement]] = {}
+        for requirement in requirements:
+            requirements_by_payer.setdefault(requirement.payer.lower(), []).append(requirement)
+
+        shortfalls: list[str] = []
+        for payer_requirements in requirements_by_payer.values():
+            payer = payer_requirements[0].payer
+            required_wei = sum(requirement.required_wei for requirement in payer_requirements)
+            try:
+                balance = await asyncio.wait_for(
+                    web3.eth.get_balance(web3.to_checksum_address(payer), "pending"),
+                    timeout=10.0,
+                )
+            except Exception as exc:  # noqa: BLE001 - inability to prove a shortfall must fail open
+                logger.warning(
+                    "Final native-funding preflight could not read payer %s; deferring to node admission: %s",
+                    payer,
+                    exc,
+                )
+                continue
+
+            if balance < required_wei:
+                shortfalls.append(
+                    f"payer {payer} has {balance} wei but needs {required_wei} wei "
+                    f"for {len(payer_requirements)} current-bundle submission(s)"
+                )
+
+        if not shortfalls:
+            return self._complete_opted_in_dry_run(state)
+
+        error_prefix = config.get("error_prefix")
+        prefix = f"{error_prefix}: " if isinstance(error_prefix, str) and error_prefix else ""
+        error = f"{prefix}insufficient funds for native submission: {'; '.join(shortfalls)}. No transactions submitted."
+        state.result.error = error
+        state.result.error_phase = ExecutionPhase.VALIDATION
+        self._complete_session(state.session, success=False, error=error)
+        self._emit_event(
+            ExecutionEventType.RISK_BLOCKED,
+            state.context,
+            {"violations": [error]},
+        )
+        logger.warning(error)
+        return state.result
+
+    def _complete_opted_in_dry_run(self, state: ExecutionPipelineState) -> ExecutionResult | None:
+        """Finish an opted-in dry run after its final funding check."""
+        if not state.context.dry_run:
+            return None
+        assert state.signed_txs is not None
+        state.result.success = True
+        state.result.phase = ExecutionPhase.COMPLETE
+        state.result.completed_at = datetime.now(UTC)
+        self._complete_session(state.session, success=True)
+        self._emit_event(
+            ExecutionEventType.EXECUTION_SUCCESS,
+            state.context,
+            {"message": "Dry run completed", "tx_count": len(state.signed_txs)},
+        )
+        return state.result
+
+    def _collect_native_funding_requirements(
+        self,
+        state: ExecutionPipelineState,
+    ) -> list[NativeFundingRequirement]:
+        """Return the minimum current-balance requirements for the next submission."""
+        assert state.unsigned_txs is not None
+        assert state.signed_txs is not None
+
+        requirements: list[NativeFundingRequirement] = []
+        if isinstance(self.signer, SafeSigner):
+            requirements.extend(
+                requirement
+                for signed in state.signed_txs
+                if (requirement := signed.submission_native_funding) is not None
+            )
+            inner_value = sum(tx.value for tx in state.unsigned_txs)
+            if inner_value:
+                requirements.append(
+                    NativeFundingRequirement(
+                        payer=self.signer.address,
+                        value=inner_value,
+                        gas_limit=0,
+                        fee_per_gas=0,
+                    )
+                )
+        else:
+            for signed in state.signed_txs:
+                tx = signed.unsigned_tx
+                fee_per_gas = tx.max_fee_per_gas if tx.max_fee_per_gas is not None else tx.gas_price
+                if fee_per_gas is None:
+                    continue
+                requirements.append(
+                    NativeFundingRequirement(
+                        payer=tx.from_address or state.context.wallet_address or self.signer.address,
+                        value=tx.value,
+                        gas_limit=tx.gas_limit,
+                        fee_per_gas=fee_per_gas,
+                    )
+                )
+
+        return requirements
 
     async def _phase_submit_and_confirm(self, state: ExecutionPipelineState) -> ExecutionResult | None:
         """Step 7 and 8: submit (sequential or parallel), gather receipts, emit TX_SENT."""

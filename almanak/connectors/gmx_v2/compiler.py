@@ -43,10 +43,6 @@ class GMXV2Compiler(BasePerpCompiler):
 
     #: Stable prefix strategies + the retry-classification keyword table match on.
     NATIVE_FEE_ERROR_PREFIX: ClassVar[str] = "GMX_INSUFFICIENT_NATIVE_FEE"
-    #: Native-token headroom (wei) reserved for the order tx's own gas, on top of
-    #: the keeper execution fee. GMX keeper fees dominate; this is a conservative
-    #: floor so the comparison isn't off-by-gas. Kept small relative to exec fee.
-    _GAS_RESERVE_WEI: ClassVar[int] = 2_000_000_000_000_000  # 0.002 native
 
     def preflight(self, ctx: PerpCompilerContext, intent: Any) -> PreflightVerdict:
         """Reject a GMX order the wallet cannot fund the keeper execution fee for (VIB-5374 / 2303).
@@ -54,9 +50,9 @@ class GMXV2Compiler(BasePerpCompiler):
         GMX V2 orders pay a native keeper execution fee as ``msg.value`` (consumed
         even if the order later fails). Before VIB-5374 the compiler only emitted a
         ``logger.warning`` (adapter.py) — the order compiled and reverted on-chain,
-        burning gas. This compares the REAL keeper fee + a gas reserve against the
-        wallet's ACTUAL native balance, so on a VIB-5068 inflated managed-Anvil
-        fork the order correctly passes while a true mainnet shortfall is caught.
+        burning gas. This compiler owns only the REAL keeper fee. The execution
+        pipeline checks the final estimated gas limit and network fee cap after
+        they are known; reserving a fixed amount here can reject affordable orders.
         """
         if getattr(intent, "intent_type", None) not in (IntentType.PERP_OPEN, IntentType.PERP_CLOSE):
             return PreflightVerdict.feasible()
@@ -82,14 +78,14 @@ class GMXV2Compiler(BasePerpCompiler):
             logger.debug("GMX exec-fee preflight: native balance unavailable on %s; deferring", ctx.chain)
             return PreflightVerdict.feasible()
 
-        required_wei = execution_fee_wei + self._GAS_RESERVE_WEI
+        required_wei = execution_fee_wei
         if native_balance_wei < required_wei:
             return PreflightVerdict(
                 outcome=PreflightOutcome.INFEASIBLE,
                 error_prefix=self.NATIVE_FEE_ERROR_PREFIX,
                 reason=(
                     f"native {native_balance_wei} wei < required {required_wei} wei "
-                    f"(keeper execution fee {execution_fee_wei} + gas reserve {self._GAS_RESERVE_WEI}) "
+                    f"(keeper execution fee {execution_fee_wei}) "
                     f"on {ctx.chain}; the GMX keeper fee would not be covered"
                 ),
             )
@@ -260,6 +256,7 @@ class GMXV2Compiler(BasePerpCompiler):
                     "trigger_price_usd": str(intent.trigger_price) if intent.trigger_price is not None else None,
                     "order_key": order_result.order_key,
                     "chain": ctx.chain,
+                    "native_funding_preflight": {"error_prefix": self.NATIVE_FEE_ERROR_PREFIX},
                 },
             )
             result.transactions = transactions
@@ -391,6 +388,7 @@ class GMXV2Compiler(BasePerpCompiler):
                     "acceptable_price_usd": str(acceptable_price_usd),
                     "order_key": order_result.order_key,
                     "chain": ctx.chain,
+                    "native_funding_preflight": {"error_prefix": self.NATIVE_FEE_ERROR_PREFIX},
                 },
             )
             result.transactions = transactions

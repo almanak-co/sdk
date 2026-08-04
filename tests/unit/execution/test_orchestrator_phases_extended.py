@@ -20,11 +20,15 @@ from almanak.framework.execution.interfaces import (
     ExecutionError,
     GasEstimationError,
     InsufficientFundsError,
+    NativeFundingRequirement,
     NonceError,
+    SignedTransaction,
     SimulationResult,
     SubmissionError,
     TransactionReceipt,
     TransactionRevertedError,
+    TransactionType,
+    UnsignedTransaction,
 )
 
 
@@ -726,6 +730,205 @@ class TestPhaseSignExtended:
         assert early is not None and early.success is True
         # Submit path was never reached (it lives in _phase_submit_and_confirm)
         orchestrator.submitter.submit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_opted_in_dry_run_continues_to_native_funding(self, orchestrator):
+        state = _make_state(orchestrator, metadata={"native_funding_preflight": {}})
+        state.context.dry_run = True
+        state.unsigned_txs = [MagicMock()]
+        orchestrator._assign_nonces = AsyncMock(return_value=state.unsigned_txs)
+        orchestrator.signer.sign_batch = AsyncMock(return_value=[MagicMock()])
+
+        early = await orchestrator._phase_sign(state)
+
+        assert early is None
+        assert state.result.success is False
+
+
+# =============================================================================
+# _phase_native_funding
+# =============================================================================
+
+
+def _funding_tx(
+    *,
+    payer: str,
+    value: int,
+    gas_limit: int,
+    max_fee_per_gas: int,
+) -> UnsignedTransaction:
+    return UnsignedTransaction(
+        to="0x" + "2" * 40,
+        value=value,
+        data="0x",
+        chain_id=42161,
+        gas_limit=gas_limit,
+        max_fee_per_gas=max_fee_per_gas,
+        max_priority_fee_per_gas=1,
+        tx_type=TransactionType.EIP_1559,
+        from_address=payer,
+    )
+
+
+def _signed(tx: UnsignedTransaction, requirement: NativeFundingRequirement | None = None) -> SignedTransaction:
+    return SignedTransaction(
+        raw_tx="0x01",
+        tx_hash="0x" + "3" * 64,
+        unsigned_tx=tx,
+        submission_native_funding=requirement,
+    )
+
+
+class TestPhaseNativeFunding:
+    @staticmethod
+    def _install_balance(orchestrator, balance):
+        web3 = MagicMock()
+        web3.to_checksum_address.side_effect = lambda address: address
+        web3.eth.get_balance = AsyncMock(
+            side_effect=balance if callable(balance) or isinstance(balance, Exception) else None
+        )
+        if not callable(balance) and not isinstance(balance, Exception):
+            web3.eth.get_balance.return_value = balance
+        orchestrator.rpc_url = "http://localhost:8545"
+        orchestrator._get_web3 = AsyncMock(return_value=web3)
+        return web3
+
+    @pytest.mark.asyncio
+    async def test_current_bundle_liabilities_are_summed_without_reserving_a_future_action(self, orchestrator):
+        payer = orchestrator.signer.address
+        first = _funding_tx(payer=payer, value=10, gas_limit=10, max_fee_per_gas=10)  # 110
+        second = _funding_tx(payer=payer, value=20, gas_limit=10, max_fee_per_gas=10)  # 120
+        state = _make_state(
+            orchestrator,
+            metadata={"native_funding_preflight": {"error_prefix": "GMX_INSUFFICIENT_NATIVE_FEE"}},
+        )
+        state.unsigned_txs = [first, second]
+        state.signed_txs = [_signed(first), _signed(second)]
+        web3 = self._install_balance(orchestrator, 230)
+
+        assert await orchestrator._phase_native_funding(state) is None
+        web3.eth.get_balance.assert_awaited_once_with(payer, "pending")
+
+    @pytest.mark.asyncio
+    async def test_current_bundle_one_wei_short_blocks_before_first_submission(self, orchestrator):
+        payer = orchestrator.signer.address
+        first = _funding_tx(payer=payer, value=10, gas_limit=10, max_fee_per_gas=10)  # 110
+        second = _funding_tx(payer=payer, value=20, gas_limit=10, max_fee_per_gas=10)  # 120
+        state = _make_state(
+            orchestrator,
+            metadata={"native_funding_preflight": {"error_prefix": "GMX_INSUFFICIENT_NATIVE_FEE"}},
+        )
+        state.unsigned_txs = [first, second]
+        state.signed_txs = [_signed(first), _signed(second)]
+        self._install_balance(orchestrator, 229)
+        orchestrator.submitter.submit = AsyncMock()
+
+        result = await orchestrator._phase_native_funding(state)
+
+        assert result is state.result
+        assert result.error is not None and "needs 230 wei" in result.error
+        assert result.transaction_results == []
+        orchestrator.submitter.submit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_opted_in_dry_run_checks_funding_before_reporting_success(self, orchestrator):
+        payer = orchestrator.signer.address
+        tx = _funding_tx(payer=payer, value=100, gas_limit=10, max_fee_per_gas=2)
+        state = _make_state(
+            orchestrator,
+            metadata={"native_funding_preflight": {"error_prefix": "GMX_INSUFFICIENT_NATIVE_FEE"}},
+        )
+        state.context.dry_run = True
+        state.unsigned_txs = [tx]
+        state.signed_txs = [_signed(tx)]
+        self._install_balance(orchestrator, 119)
+
+        result = await orchestrator._phase_native_funding(state)
+
+        assert result is state.result
+        assert result.success is False
+        assert result.error is not None and result.error.startswith("GMX_INSUFFICIENT_NATIVE_FEE:")
+
+    @pytest.mark.asyncio
+    async def test_one_wei_short_blocks_before_submit_with_stable_error(self, orchestrator):
+        payer = orchestrator.signer.address
+        tx = _funding_tx(payer=payer, value=100, gas_limit=10, max_fee_per_gas=2)
+        state = _make_state(
+            orchestrator,
+            metadata={"native_funding_preflight": {"error_prefix": "GMX_INSUFFICIENT_NATIVE_FEE"}},
+        )
+        state.unsigned_txs = [tx]
+        state.signed_txs = [_signed(tx)]
+        self._install_balance(orchestrator, 119)
+        events = _install_capture(orchestrator)
+        orchestrator.submitter.submit = AsyncMock()
+
+        result = await orchestrator._phase_native_funding(state)
+
+        assert result is state.result
+        assert result.error is not None and result.error.startswith("GMX_INSUFFICIENT_NATIVE_FEE:")
+        assert "insufficient funds" in result.error
+        assert "No transactions submitted" in result.error
+        assert result.error_phase is ExecutionPhase.VALIDATION
+        assert result.transaction_results == []
+        assert any(event_type is ExecutionEventType.RISK_BLOCKED for event_type, _ in events)
+        orchestrator.submitter.submit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_balance_read_gap_defers_to_node_admission(self, orchestrator):
+        payer = orchestrator.signer.address
+        tx = _funding_tx(payer=payer, value=1, gas_limit=1, max_fee_per_gas=1)
+        state = _make_state(orchestrator, metadata={"native_funding_preflight": {}})
+        state.unsigned_txs = [tx]
+        state.signed_txs = [_signed(tx)]
+        self._install_balance(orchestrator, RuntimeError("rpc unavailable"))
+
+        assert await orchestrator._phase_native_funding(state) is None
+
+    @pytest.mark.asyncio
+    async def test_safe_checks_wrapper_payer_and_atomic_inner_value_separately(self, orchestrator):
+        class _FakeSafeSigner:
+            address = "0x" + "4" * 40
+            eoa_address = "0x" + "5" * 40
+
+        signer = _FakeSafeSigner()
+        orchestrator.signer = signer
+        inner_a = _funding_tx(payer=signer.address, value=30, gas_limit=50, max_fee_per_gas=2)
+        inner_b = _funding_tx(payer=signer.address, value=40, gas_limit=50, max_fee_per_gas=2)
+        outer = NativeFundingRequirement(
+            payer=signer.eoa_address,
+            value=0,
+            gas_limit=100,
+            fee_per_gas=3,
+        )
+        state = _make_state(orchestrator, metadata={"native_funding_preflight": {}})
+        state.unsigned_txs = [inner_a, inner_b]
+        state.signed_txs = [_signed(inner_a, outer)]
+
+        balances = {signer.eoa_address.lower(): 300, signer.address.lower(): 70}
+
+        async def get_balance(address, _block):
+            return balances[address.lower()]
+
+        web3 = self._install_balance(orchestrator, get_balance)
+        with patch("almanak.framework.execution.orchestrator.SafeSigner", _FakeSafeSigner):
+            assert await orchestrator._phase_native_funding(state) is None
+
+        assert web3.eth.get_balance.await_count == 2
+
+    def test_safe_submission_requirement_round_trips_through_serialization(self):
+        tx = _funding_tx(payer="0x" + "6" * 40, value=1, gas_limit=2, max_fee_per_gas=3)
+        requirement = NativeFundingRequirement(
+            payer="0x" + "7" * 40,
+            value=0,
+            gas_limit=4,
+            fee_per_gas=5,
+        )
+
+        restored = SignedTransaction.from_dict(_signed(tx, requirement).to_dict())
+
+        assert restored.submission_native_funding == requirement
+        assert restored.submission_native_funding.required_wei == 20
 
 
 # =============================================================================

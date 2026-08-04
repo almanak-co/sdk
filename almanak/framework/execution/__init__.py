@@ -114,6 +114,7 @@ from almanak.framework.execution.interfaces import (
     ExecutionError,
     GasEstimationError,
     InsufficientFundsError,
+    NativeFundingRequirement,
     NonceError,
     SignedTransaction,
     # Abstract base classes
@@ -334,6 +335,7 @@ __all__ = [
     "SubmissionError",
     "TransactionRevertedError",
     "InsufficientFundsError",
+    "NativeFundingRequirement",
     "NonceError",
     "GasEstimationError",
     # Plan structures

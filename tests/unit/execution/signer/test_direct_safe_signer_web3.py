@@ -250,6 +250,11 @@ async def test_happy_path_eip1559():
     assert wrapper["nonce"] == 9
     assert wrapper["value"] == 0
     assert wrapper["gas"] == int(400_000 * 1.3)
+    assert result.submission_native_funding is not None
+    assert result.submission_native_funding.payer == EOA
+    assert result.submission_native_funding.gas_limit == wrapper["gas"]
+    assert result.submission_native_funding.fee_per_gas == tx.max_fee_per_gas
+    assert result.submission_native_funding.required_wei == wrapper["gas"] * tx.max_fee_per_gas
 
 
 @pytest.mark.asyncio
@@ -425,6 +430,10 @@ async def test_bundle_happy_path_eip1559():
     assert wrapper["type"] == 2
     assert wrapper["value"] == 0
     assert wrapper["gas"] == int(500_000 * 1.3)
+    assert result.submission_native_funding is not None
+    assert result.submission_native_funding.payer == EOA
+    assert result.submission_native_funding.gas_limit == wrapper["gas"]
+    assert result.submission_native_funding.fee_per_gas == tx1.max_fee_per_gas
 
 
 @pytest.mark.asyncio

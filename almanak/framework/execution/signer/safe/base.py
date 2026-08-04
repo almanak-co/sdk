@@ -30,6 +30,7 @@ from web3 import AsyncWeb3
 from web3.types import TxParams, Wei
 
 from almanak.framework.execution.interfaces import (
+    NativeFundingRequirement,
     SignedTransaction,
     Signer,
     SigningError,
@@ -125,6 +126,24 @@ class SafeSigner(Signer):
     # =========================================================================
     # Properties
     # =========================================================================
+
+    @staticmethod
+    def _submission_native_funding(
+        tx: UnsignedTransaction,
+        *,
+        payer: str,
+        gas_limit: int,
+    ) -> NativeFundingRequirement:
+        """Describe the actual EOA wrapper liability for node admission."""
+        fee_per_gas = tx.max_fee_per_gas if tx.max_fee_per_gas is not None else tx.gas_price
+        if fee_per_gas is None:
+            raise SigningError(reason="Safe wrapper has no gas price or EIP-1559 fee cap")
+        return NativeFundingRequirement(
+            payer=payer,
+            value=0,
+            gas_limit=gas_limit,
+            fee_per_gas=fee_per_gas,
+        )
 
     @property
     def address(self) -> str:

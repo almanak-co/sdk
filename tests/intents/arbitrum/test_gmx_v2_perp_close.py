@@ -24,6 +24,7 @@ from typing import Any
 
 import pytest
 from web3 import Web3
+from web3.eth import AsyncEth, Eth
 
 from almanak.connectors.gmx_v2 import GMXv2ReceiptParser
 from almanak.connectors.gmx_v2.addresses import GMX_V2, GMX_V2_TOKENS
@@ -43,6 +44,9 @@ CHAIN_NAME = "arbitrum"
 USDC_ADDRESS = GMX_V2_TOKENS[CHAIN_NAME]["USDC"]
 EXCHANGE_ROUTER_ADDRESS = GMX_V2[CHAIN_NAME]["exchange_router"]
 _GMX_USD_SCALE = Decimal(10**30)
+_HISTORICAL_CLOSE_GAS_PRICE_WEI = 20_076_000
+_HISTORICAL_FAILURE_WINDOW_START_WEI = 3_000_000_000_000_000
+_HISTORICAL_FAILURE_WINDOW_END_WEI = 3_137_572_000_000_000
 
 
 @dataclass(frozen=True)
@@ -141,6 +145,7 @@ def _receipt_dict(execution: Any, transaction_index: int = -1) -> dict[str, Any]
 @pytest.mark.asyncio
 class TestGmxV2PerpCloseIntent:
     @pytest.mark.intent(IntentType.PERP_CLOSE)
+    @pytest.mark.no_zodiac(reason="historical regression must make the funded wallet the actual gas payer")
     async def test_recent_fork_close_eth_long_returns_collateral(
         self,
         web3: Web3,
@@ -148,6 +153,7 @@ class TestGmxV2PerpCloseIntent:
         orchestrator: ExecutionOrchestrator,
         anvil_rpc_url: str,
         price_oracle_arbitrum: dict[str, Decimal],
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         fork_age_seconds = int(time.time()) - int(web3.eth.get_block("latest")["timestamp"])
         assert abs(fork_age_seconds) <= 7 * 24 * 60 * 60, (
@@ -161,6 +167,28 @@ class TestGmxV2PerpCloseIntent:
         )
         gateway = _AnvilGateway(web3, price_oracle_arbitrum)
 
+        # Reproduce the incident's Arbitrum fee suggestion for both the sync
+        # compiler SDK and the async EIP-1559 execution path. The fork still
+        # estimates and executes every transaction against real GMX state.
+        async def historical_priority_fee(_eth: AsyncEth) -> int:
+            return _HISTORICAL_CLOSE_GAS_PRICE_WEI
+
+        monkeypatch.setattr(Eth, "gas_price", property(lambda _eth: _HISTORICAL_CLOSE_GAS_PRICE_WEI))
+        monkeypatch.setattr(Eth, "max_priority_fee", property(lambda _eth: _HISTORICAL_CLOSE_GAS_PRICE_WEI))
+        monkeypatch.setattr(AsyncEth, "max_priority_fee", property(historical_priority_fee))
+
+        # Pin the real gas payer inside the historical failure window. The old
+        # 0.001 ETH keeper fee + 0.002 ETH fixed reserve admitted this open at
+        # equality, then refused the still-affordable close after open gas.
+        funding_response = web3.provider.make_request(
+            "anvil_setBalance",
+            [funded_wallet, hex(_HISTORICAL_FAILURE_WINDOW_START_WEI)],
+        )
+        assert funding_response.get("error") is None, funding_response
+        opening_native_balance = web3.eth.get_balance(funded_wallet)
+        assert _HISTORICAL_FAILURE_WINDOW_START_WEI <= opening_native_balance
+        assert opening_native_balance < _HISTORICAL_FAILURE_WINDOW_END_WEI
+
         # Establish the real position that the PERP_CLOSE intent will consume.
         open_intent = PerpOpenIntent(
             market="ETH/USD",
@@ -173,6 +201,7 @@ class TestGmxV2PerpCloseIntent:
             leverage=Decimal("3"),
         )
         open_compilation = compiler.compile(open_intent)
+        assert open_compilation.status.value == "SUCCESS", open_compilation.error
         assert open_compilation.action_bundle is not None, open_compilation.error
         open_execution = await orchestrator.execute(open_compilation.action_bundle)
         assert open_execution.success, open_execution.error
@@ -208,6 +237,8 @@ class TestGmxV2PerpCloseIntent:
         # larger balance is valid and must not be overwritten.
         fund_native_token(funded_wallet, native_balance_after_submission, anvil_rpc_url)
         assert web3.eth.get_balance(funded_wallet) >= native_balance_after_submission
+        native_balance_before_close = web3.eth.get_balance(funded_wallet)
+        assert native_balance_before_close < _HISTORICAL_FAILURE_WINDOW_START_WEI
 
         # Layer 1: compile the measured full position size into a decrease order.
         close_intent = PerpCloseIntent(
@@ -219,16 +250,20 @@ class TestGmxV2PerpCloseIntent:
             protocol="gmx_v2",
         )
         close_compilation = compiler.compile(close_intent)
+        assert close_compilation.status.value == "SUCCESS", close_compilation.error
         assert close_compilation.action_bundle is not None, close_compilation.error
         close_transactions = close_compilation.action_bundle.transactions
         assert len(close_transactions) == 1
         assert close_transactions[0]["to"].lower() == EXCHANGE_ROUTER_ADDRESS.lower()
         assert int(close_transactions[0]["value"]) > 0
         assert close_compilation.action_bundle.metadata["protocol"] == "gmx_v2"
+        old_fixed_requirement = int(close_transactions[0]["value"]) + 2_000_000_000_000_000
+        assert native_balance_before_close < old_fixed_requirement
 
         # Layer 2: submit the decrease order, then execute its exact key as keeper.
         close_execution = await orchestrator.execute(close_compilation.action_bundle)
         assert close_execution.success, close_execution.error
+        assert len(close_execution.transaction_results) == 1
         close_submission_receipt = _receipt_dict(close_execution)
         close_orders = parser.extract_async_orders(
             close_submission_receipt,

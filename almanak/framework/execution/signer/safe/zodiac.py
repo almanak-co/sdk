@@ -301,6 +301,11 @@ class ZodiacSigner(SafeSigner):
             raw_tx=signed_tx_hex,
             tx_hash=tx_hash,
             unsigned_tx=tx,
+            submission_native_funding=self._submission_native_funding(
+                tx,
+                payer=eoa_address,
+                gas_limit=estimated_gas,
+            ),
         )
 
     async def sign_bundle_with_web3(
@@ -456,6 +461,11 @@ class ZodiacSigner(SafeSigner):
             raw_tx=signed_tx_hex,
             tx_hash=tx_hash,
             unsigned_tx=tx,
+            submission_native_funding=self._submission_native_funding(
+                tx,
+                payer=eoa_address,
+                gas_limit=estimated_gas,
+            ),
         )
 
 

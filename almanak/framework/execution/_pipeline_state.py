@@ -1,7 +1,7 @@
 """Mutable state passed through ``ExecutionOrchestrator.execute`` phases.
 
 Phase 3a of the coverage-improvement plan extracts the 9-step pipeline that
-was previously inlined in ``ExecutionOrchestrator.execute`` into seven phase
+was previously inlined in ``ExecutionOrchestrator.execute`` into phase
 helpers. This dataclass carries the values the helpers would otherwise need
 to thread through each other as positional arguments.
 
@@ -43,6 +43,8 @@ class ExecutionPipelineState:
       short-circuit ``result``.
     - ``_phase_sign``: reads/mutates ``unsigned_txs`` (nonces),
       sets ``signed_txs``.
+    - ``_phase_native_funding``: reads the final signed submission liability
+      and may short-circuit before any transaction is sent.
     - ``_phase_submit_and_confirm``: reads ``signed_txs``, sets
       ``submission_results``, ``receipts``, ``use_sequential``.
     - ``_phase_enrich``: reads ``receipts``, mutates ``result``.

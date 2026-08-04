@@ -462,6 +462,42 @@ class UnsignedTransaction:
         )
 
 
+@dataclass(frozen=True)
+class NativeFundingRequirement:
+    """Native-token liability used by node admission for one submission.
+
+    ``required_wei`` deliberately uses the transaction gas *limit* and fee cap,
+    not an expected gas-used estimate. Ethereum nodes admit a transaction only
+    when its payer can cover that maximum liability plus ``value``.
+    """
+
+    payer: str
+    value: int
+    gas_limit: int
+    fee_per_gas: int
+
+    @property
+    def required_wei(self) -> int:
+        return self.value + self.gas_limit * self.fee_per_gas
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "payer": self.payer,
+            "value": str(self.value),
+            "gas_limit": self.gas_limit,
+            "fee_per_gas": str(self.fee_per_gas),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "NativeFundingRequirement":
+        return cls(
+            payer=data["payer"],
+            value=int(data["value"]),
+            gas_limit=int(data["gas_limit"]),
+            fee_per_gas=int(data["fee_per_gas"]),
+        )
+
+
 @dataclass
 class SignedTransaction:
     """A signed EVM transaction ready for submission.
@@ -473,6 +509,8 @@ class SignedTransaction:
         raw_tx: RLP-encoded signed transaction (hex string with 0x prefix)
         tx_hash: Transaction hash derived from the signed tx
         unsigned_tx: The original unsigned transaction (for reference)
+        submission_native_funding: Actual outer transaction liability when it
+            differs from ``unsigned_tx`` (for example a Safe wrapper).
         signed_at: Timestamp when the transaction was signed
 
     Example:
@@ -487,15 +525,19 @@ class SignedTransaction:
     tx_hash: str
     unsigned_tx: UnsignedTransaction
     signed_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    submission_native_funding: NativeFundingRequirement | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
-        return {
+        result = {
             "raw_tx": self.raw_tx,
             "tx_hash": self.tx_hash,
             "unsigned_tx": self.unsigned_tx.to_dict(),
             "signed_at": self.signed_at.isoformat(),
         }
+        if self.submission_native_funding is not None:
+            result["submission_native_funding"] = self.submission_native_funding.to_dict()
+        return result
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "SignedTransaction":
@@ -504,6 +546,11 @@ class SignedTransaction:
             raw_tx=data["raw_tx"],
             tx_hash=data["tx_hash"],
             unsigned_tx=UnsignedTransaction.from_dict(data["unsigned_tx"]),
+            submission_native_funding=(
+                NativeFundingRequirement.from_dict(data["submission_native_funding"])
+                if data.get("submission_native_funding")
+                else None
+            ),
             signed_at=datetime.fromisoformat(data["signed_at"]),
         )
 
@@ -1107,6 +1154,7 @@ __all__ = [
     "TransactionType",
     # Data classes
     "UnsignedTransaction",
+    "NativeFundingRequirement",
     "SignedTransaction",
     "SimulationResult",
     "SubmissionResult",

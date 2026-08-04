@@ -202,6 +202,19 @@ def test_gmx_sufficient_native_balance_is_feasible():
     assert verdict.outcome is PreflightOutcome.FEASIBLE
 
 
+def test_gmx_compiler_does_not_reserve_a_fixed_gas_amount():
+    """Gas is checked from final execution values, so the compiler owns only keeper value."""
+    compiler = GMXV2Compiler()
+    sdk = MagicMock()
+    sdk.get_execution_fee.return_value = 1_000_000_000_000_000
+    with patch.object(GMXV2Compiler, "_build_sdk", return_value=sdk):
+        verdict = compiler.preflight(
+            _gmx_ctx(native_balance_wei=1_000_000_000_000_000),
+            _perp_open_intent(),
+        )
+    assert verdict.outcome is PreflightOutcome.FEASIBLE
+
+
 def test_gmx_balance_read_gap_fails_open():
     compiler = GMXV2Compiler()
     sdk = MagicMock()

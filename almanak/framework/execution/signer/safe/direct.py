@@ -392,6 +392,11 @@ class DirectSafeSigner(SafeSigner):
                 raw_tx=raw_tx,
                 tx_hash=tx_hash,
                 unsigned_tx=tx,
+                submission_native_funding=self._submission_native_funding(
+                    tx,
+                    payer=eoa_address,
+                    gas_limit=int(wrapper_tx["gas"]),
+                ),
             )
 
         except Exception as e:
@@ -593,6 +598,11 @@ class DirectSafeSigner(SafeSigner):
                 raw_tx=raw_tx,
                 tx_hash=tx_hash,
                 unsigned_tx=tx,
+                submission_native_funding=self._submission_native_funding(
+                    tx,
+                    payer=eoa_address,
+                    gas_limit=buffered_gas,
+                ),
             )
 
         except Exception as e:
