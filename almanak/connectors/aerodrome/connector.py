@@ -8,6 +8,7 @@ from almanak.connectors._connector import (
     Connector,
     DexVolumeDecl,
     FeeModelDecl,
+    FungibleLpCloseDecl,
     ImportRef,
     MetadataAmountEncoding,
     SupportedChainsSpec,
@@ -25,6 +26,31 @@ CONNECTOR = Connector(
     # namespace (yields projects are aerodrome-v1 / aerodrome-slipstream, and
     # api.llama.fi/protocol/aerodrome-v2 is Protocol-not-found).
     external_ids={"defillama": "aerodrome-v1"},
+    # VIB-6162. Classic Solidly pools are fungible: the POOL CONTRACT IS THE LP TOKEN,
+    # so a close that withdraws `balanceOf(wallet)` burns any LP the wallet already
+    # held -- a user's own position, or another deployment's -- and books the proceeds
+    # as this strategy's PnL. Clamping bounds the close to this deployment's own
+    # outstanding liquidity.
+    #
+    # `raw`/18: Aerodrome writes BASE UNITS into position_events.liquidity where Curve
+    # writes token units. Same column, different units per connector -- verified on
+    # captured rows, and not inferable from the JSON shape, which is why it is declared
+    # here rather than guessed by the framework.
+    #
+    # Clamped even though `fungible_lp` is False. The two flags are independent: that
+    # one auto-registers the framework-default teardown post-condition, whose closure
+    # rule is `balanceOf <= 10 wei` and would report a CORRECT clamped close as FAILED.
+    # Aerodrome has no such post-condition registered (VIB-6487), so the clamp is safe
+    # here and is NOT yet safe on Curve (VIB-6489).
+    fungible_lp_close=FungibleLpCloseDecl(
+        units="raw",
+        decimals=18,
+        clamp=True,
+        identity=ImportRef(
+            module="almanak.connectors._strategy_base.fungible_lp_identity",
+            attribute="canonical_pool_key",
+        ),
+    ),
     dex_volume=DexVolumeDecl(
         chains=("base",),
         amm_family="solidly_v2",

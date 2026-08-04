@@ -1343,6 +1343,17 @@ def lp_close(ctx, position_id, protocol, pool, no_collect_fees, sub_yes, sub_dry
     unavailable.
 
     \b
+    NOTE - this command does NOT respect strategy-tracked ownership (VIB-6162).
+    On a venue with FUNGIBLE LP (a pool-share ERC-20 in the wallet, e.g.
+    Aerodrome V1), a strategy teardown withdraws only the liquidity that
+    deployment itself added, leaving anything the wallet already held. This
+    command withdraws the FULL wallet balance in the position, including
+    liquidity the strategy never added -- a position you opened yourself, or a
+    sibling deployment's. That is deliberate: the operator running this IS the
+    wallet owner acting on their own position. Use the strategy teardown lane,
+    not this command, when the distinction matters.
+
+    \b
     Examples:
         almanak ax lp-close 123456                          # Close V3 LP #123456
         almanak ax lp-close 123456 --dry-run                # Simulate only

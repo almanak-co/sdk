@@ -8,6 +8,7 @@ from almanak.connectors._connector import (
     Connector,
     DexVolumeDecl,
     FeeModelDecl,
+    FungibleLpCloseDecl,
     ImportRef,
     MetadataAmountEncoding,
     PositionReadDecl,
@@ -91,6 +92,26 @@ CONNECTOR = Connector(
     # Curve LP positions are fungible ERC20 LP tokens: LPCloseIntent.position_id
     # is overloaded as the burn AMOUNT, never an NFT discriminator (VIB-4968).
     fungible_lp=True,
+    # VIB-6162 / VIB-6489. Curve's units are DECLARED but the clamp is deliberately
+    # OFF, and the two are not the same statement: being readable is not being safe to
+    # clamp.
+    #
+    # `fungible_lp=True` above auto-registers the framework-default teardown
+    # post-condition, whose closure rule is `balanceOf(wallet) <= 10 wei` -- exactly
+    # zero. A clamped close leaves the user's own LP behind BY DESIGN, that
+    # post-condition measures precisely that residual, and so a CORRECT close would
+    # report FAILED. The defect is load-bearing for its own verification, so enabling
+    # the clamp here and redesigning the post-condition must land together (VIB-6489)
+    # with its own Curve fork proof.
+    #
+    # `token`: Curve writes TOKEN units into position_events.liquidity where Aerodrome
+    # writes raw base units.
+    #
+    # No identity resolver, which the declaration's own validation requires whenever
+    # clamp is True -- so this cannot be flipped to True without also supplying one.
+    # That is intentional: it makes the unsafe half-migration fail at import time
+    # rather than ship as a clamp that silently never engages.
+    fungible_lp_close=FungibleLpCloseDecl(units="token", clamp=False),
     # On-chain LP repricing is framework-owned (CurveLpPositionReader:
     # lp_balance × live virtual_price × numeraire). Declaring the curve_lp kind
     # routes the valuer's capability dispatch through PositionReadRegistry instead

@@ -70,6 +70,8 @@ from almanak.framework.teardown.slippage_manager import (
 )
 from almanak.framework.teardown.swap_clamp import SwapClampDecision, decide_swap_clamp
 
+from .lp_clamp import LpClampUnresolved
+
 logger = logging.getLogger(__name__)
 
 _ACCEPTED_ASYNC_SUBMISSION_KEY = "_teardown_async_submission_accepted"
@@ -2294,6 +2296,29 @@ class TeardownManager:
                                 float(getattr(intent_to_exec, "max_slippage", Decimal("0")) * 100),
                             )
 
+                    # Bound a fungible-LP close to THIS deployment's own liquidity
+                    # (VIB-6162), before compilation, so the connector receives the
+                    # ledger-side figure it cannot derive itself. Without this a close
+                    # withdraws balanceOf(wallet) and burns LP the strategy never
+                    # minted — a user's own position, or a sibling deployment's.
+                    #
+                    # A refusal here does NOT abort the teardown. Per AGENTS.md
+                    # §Teardown the lane's first job is removing on-chain risk, so an
+                    # unbounded LP close is skipped loudly while every other
+                    # risk-reducing intent still fires.
+                    intent_with_slippage, clamp_refusal = await self._attach_lp_outstanding(
+                        strategy, intent_with_slippage
+                    )
+                    if clamp_refusal is not None:
+                        return ExecutionAttempt(
+                            success=False,
+                            slippage_used=slippage,
+                            actual_slippage=Decimal("0"),
+                            error=clamp_refusal,
+                            retryable=False,
+                            disposition=Disposition.NON_RETRYABLE.value,
+                        )
+
                     # Resolve amount="all" to actual wallet balance before compilation
                     # Support both object intents and dict intents (resume path)
                     _is_dict = isinstance(intent_with_slippage, dict)
@@ -3885,6 +3910,84 @@ class TeardownManager:
             "health_factor": float(position.health_factor) if position.health_factor else None,
             "details": position.details,
         }
+
+    async def _attach_lp_outstanding(self, strategy: Any, intent: Any) -> tuple[Any, str | None]:
+        """Attach this deployment's outstanding fungible-LP liquidity to an LP close.
+
+        Returns ``(intent, None)`` when the close may proceed — either bounded, or
+        untouched because the venue declares no clamp on its connector manifest — and
+        ``(intent, reason)`` when it must be refused.
+
+        The framework supplies only the LEDGER figure. Enforcing it against the live
+        wallet balance is the connector's job, because only the connector knows what
+        this venue's identifiers denote and it already reads ``balanceOf`` because it
+        must. Resolving that here would mean a framework-side chain read, which is what
+        broke the earlier attempt at this ticket: the read went through
+        ``market.balance()``, a Solidly pool is not a registry-resolvable token, and the
+        clamp refused 100% of closes and stranded every position.
+
+        A refusal is deliberately NON_RETRYABLE: retrying cannot make an unresolvable
+        identifier resolvable, and a retry loop here would delay the remaining
+        risk-reducing intents for no possible gain.
+        """
+        # `intent_type` is an IntentType ENUM on a real intent, and str() on it yields
+        # "INTENTTYPE.LP_CLOSE" -- not "LP_CLOSE". Comparing str(...) directly made this
+        # guard reject every production intent while passing a stub that set the field to
+        # a plain string, which is exactly how the previous attempt at this ticket
+        # shipped inert. Unwrap .value first.
+        raw_type = intent.get("intent_type") if isinstance(intent, dict) else getattr(intent, "intent_type", "")
+        intent_type = str(getattr(raw_type, "value", raw_type) or "").upper()
+        if intent_type != "LP_CLOSE":
+            return intent, None
+        if not self.runner_helpers.has_lp_clamp:
+            return intent, None
+
+        get_outstanding = self.runner_helpers.get_lp_outstanding
+        assert get_outstanding is not None  # noqa: S101 — narrowed by has_lp_clamp
+
+        def _field(name: str) -> Any:
+            return intent.get(name) if isinstance(intent, dict) else getattr(intent, name, None)
+
+        protocol = str(_field("protocol") or "")
+        position_id = _field("position_id")
+        pool = _field("pool")
+
+        try:
+            outstanding = await get_outstanding(strategy, protocol, position_id, pool)
+        except LpClampUnresolved as exc:
+            logger.error(
+                "VIB-6162: refusing LP_CLOSE on %s (position_id=%r) — %s. The close is "
+                "SKIPPED rather than executed unbounded; remaining teardown intents "
+                "continue.",
+                protocol,
+                position_id,
+                exc,
+            )
+            return intent, f"LP close refused: cannot bound to this deployment's own liquidity ({exc})"
+
+        # None means the venue declares no clamp (Curve today, pending VIB-6489). That
+        # is the manifest's decision and leaves behaviour exactly as before -- it is
+        # NOT a silent skip of a clamp that should have applied, because an eligible
+        # venue raises instead of returning None.
+        if outstanding is None:
+            return intent, None
+
+        params = dict(_field("protocol_params") or {})
+        params["deployment_outstanding_lp"] = str(outstanding)
+        if isinstance(intent, dict):
+            updated = dict(intent)
+            updated["protocol_params"] = params
+            return updated, None
+        try:
+            # Intents are frozen pydantic models; model_copy is the supported mutation.
+            return intent.model_copy(update={"protocol_params": params}), None
+        except (AttributeError, TypeError, ValueError):
+            logger.error(
+                "VIB-6162: could not attach the outstanding bound to %s — refusing the "
+                "close rather than letting it compile unbounded",
+                type(intent).__name__,
+            )
+            return intent, "LP close refused: could not attach the deployment's outstanding-liquidity bound"
 
     def _describe_intent(self, intent: Any) -> str:
         """Generate human-readable description of an intent."""

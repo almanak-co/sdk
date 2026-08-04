@@ -25,6 +25,7 @@ from almanak.framework.intents.compiler_models import CompilationResult, Compila
 from almanak.framework.intents.min_out_guard import UnprotectedTradeError
 from almanak.framework.intents.vocabulary import IntentType, lp_range_bounds, lp_range_is_ticks
 from almanak.framework.models.reproduction_bundle import ActionBundle
+from almanak.framework.teardown.lp_clamp import LpClampUnresolved, bound_close_amount
 
 if TYPE_CHECKING:
     from almanak.framework.intents.vocabulary import CollectFeesIntent, LPCloseIntent, LPOpenIntent, SwapIntent
@@ -644,6 +645,108 @@ def compile_lp_open_aerodrome(compiler, intent: LPOpenIntent) -> CompilationResu
     return result
 
 
+def _clamp_lp_close_to_own_liquidity(
+    intent: Any,
+    lp_balance: Decimal,
+    pool_address: str,
+    warnings: list[str],
+    result: CompilationResult,
+) -> CompilationResult | tuple[Decimal, int]:
+    """Bound an Aerodrome LP_CLOSE to THIS deployment's own liquidity (VIB-6162).
+
+    ``lp_balance`` as passed in is the wallet's ENTIRE balance in this pool, and on a
+    Solidly fork the pool contract IS the LP token, so handing it to ``removeLiquidity``
+    burns any LP the strategy never minted: a user's own position, or a sibling
+    deployment's. The teardown lane attaches the ledger-side figure; enforcement lands
+    in the connector because only the connector has the live balance, and the framework
+    deliberately never reads the chain.
+
+    **An absent bound means full withdrawal.** For ``almanak ax lp-close`` that is
+    correct and deliberate: its help says "fully withdraw" and its operator IS the wallet
+    owner acting on their own position. The teardown lane never arrives here unbounded —
+    it refuses before compiling.
+
+    **For the ITERATION lane it is a GAP, not a decision** (VIB-6517). A strategy closing
+    its own LP mid-lifecycle has no more right to burn a user's pre-existing liquidity
+    than teardown does, and the bound is attached in exactly one place —
+    ``TeardownManager._attach_lp_outstanding`` — so a lifecycle or rebalance ``LP_CLOSE``
+    still withdraws ``balanceOf(wallet)``. This docstring previously claimed the
+    iteration lane "legitimately wants" the full burn; that was asserted, never argued,
+    and it is wrong. ``aerodrome_stable_pool_lp`` ships ``force_action="lifecycle"``,
+    which closes on its second iteration through exactly this path.
+
+    Returns:
+        * :class:`CompilationResult` — the caller returns it verbatim. Either a refusal,
+          or the no-op close for a deployment holding no outstanding LP. **A no-op is not
+          a failure**: it means there is nothing of ours left to withdraw, and burning the
+          wallet's balance instead is the defect this exists to prevent.
+        * ``(lp_balance, lp_balance_wei)`` — the bounded amount to withdraw.
+
+    Extracted from ``compile_lp_close_aerodrome`` for the CRAP gate. Pure move: every
+    branch, message and return value is unchanged from the inline form.
+    """
+    outstanding_raw = (getattr(intent, "protocol_params", None) or {}).get("deployment_outstanding_lp")
+    if outstanding_raw is None:
+        return lp_balance, int(lp_balance * Decimal(10**18))
+    try:
+        outstanding = Decimal(str(outstanding_raw))
+    except (ArithmeticError, ValueError):
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=(
+                f"VIB-6162: deployment_outstanding_lp={outstanding_raw!r} is not a "
+                f"number; refusing to close rather than burning the wallet's whole "
+                f"LP balance in pool {pool_address}"
+            ),
+            intent_id=intent.intent_id,
+            is_safety_refusal=True,
+        )
+    try:
+        lp_balance = bound_close_amount(outstanding, lp_balance, pool_key=pool_address)
+    except LpClampUnresolved as exc:
+        # Refusal, never min(): with outstanding=100, foreign=50 and 60 of the
+        # strategy's own LP moved out, min(100, 90) would burn 90 -- including all 50
+        # foreign shares, which is this very defect.
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=f"VIB-6162: refusing LP_CLOSE on pool {pool_address} — {exc}",
+            intent_id=intent.intent_id,
+            is_safety_refusal=True,
+        )
+    lp_balance_wei = int(lp_balance * Decimal(10**18))
+    logger.info(
+        "VIB-6162: clamped Aerodrome LP_CLOSE to this deployment's own %s LP "
+        "(%s wei); the rest of the wallet's balance in pool %s is left untouched",
+        lp_balance,
+        lp_balance_wei,
+        pool_address,
+    )
+    if lp_balance_wei == 0:
+        warning = (
+            f"VIB-6162: this deployment has no outstanding LP in pool {pool_address} "
+            f"— treating LP_CLOSE as a no-op rather than burning the wallet's balance"
+        )
+        warnings.append(warning)
+        logger.info(warning)
+        result.action_bundle = ActionBundle(
+            intent_type=IntentType.LP_CLOSE.value,
+            transactions=[],
+            metadata={
+                "pool": intent.position_id,
+                "pool_address": pool_address,
+                "protocol": "aerodrome",
+                "collect_fees": intent.collect_fees,
+                "no_op": True,
+                "reason": "Deployment holds no outstanding LP; LP_CLOSE no-op (VIB-6162)",
+            },
+        )
+        result.transactions = []
+        result.total_gas_estimate = 0
+        result.warnings = warnings
+        return result
+    return lp_balance, lp_balance_wei
+
+
 def compile_lp_close_aerodrome(compiler, intent: LPCloseIntent) -> CompilationResult:  # noqa: C901
     """Compile LP_CLOSE intent for Aerodrome Finance.
 
@@ -841,6 +944,15 @@ def compile_lp_close_aerodrome(compiler, intent: LPCloseIntent) -> CompilationRe
         # Convert wei to decimal (LP tokens have 18 decimals)
         lp_balance = Decimal(lp_balance_wei) / Decimal(10**18)
         logger.info(f"Found {lp_balance} LP tokens ({lp_balance_wei} wei) for Aerodrome pool")
+
+        # VIB-6162 — bound the burn to THIS deployment's own liquidity. Extracted so the
+        # parent stays under the CRAP gate; the guard itself is unchanged. The helper has
+        # ONE exit shape: a CompilationResult the caller returns verbatim (refusal, or the
+        # no-op close), or the bounded amounts to withdraw.
+        clamped = _clamp_lp_close_to_own_liquidity(intent, lp_balance, pool_address, warnings, result)
+        if isinstance(clamped, CompilationResult):
+            return clamped
+        lp_balance, lp_balance_wei = clamped
 
         # Build removeLiquidity transaction using the adapter
         # Pass pre-resolved pool_address so the adapter doesn't make

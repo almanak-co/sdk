@@ -1160,6 +1160,32 @@ def _apply_lp_open(event: PositionEvent, ctx: IntentEventContext) -> None:
     semantic) ``in_range`` stays None — readers degrade gracefully.
     """
     lp_open = ctx.extracted.get("lp_open_data")
+
+    # VIB-6162 — minted liquidity, from whichever field the connector populated.
+    # This is deliberately OUTSIDE the ``lp_open_data`` guard below, because the
+    # column was empty for every LP connector in the corpus and each missed it a
+    # different way:
+    #
+    #   * Aerodrome emits NO ``lp_open_data`` at all, so the early return fired
+    #     and the assignment was never reached.
+    #   * Curve emits ``lp_open_data`` but with ``liquidity=None``, so the
+    #     assignment ran and wrote "".
+    #
+    # The TOP-LEVEL ``extracted["liquidity"]`` is populated on both (Curve: a
+    # ``{"_type": "Decimal"}`` envelope in token units; Aerodrome: a bare int in
+    # raw units — see each connector's ``fungible_lp_close`` manifest entry,
+    # which is why the reader declares units per connector rather than
+    # inferring them from the JSON shape). The
+    # nested field stays authoritative where it carries a value; this only fills
+    # the gap. Empty ≠ Zero is preserved: an absent quantity stays "".
+    minted = getattr(lp_open, "liquidity", None) if lp_open is not None else None
+    if minted in (None, ""):
+        minted = ctx.extracted.get("liquidity")
+    if isinstance(minted, dict):  # {"_type": "Decimal", "value": "3.91"}
+        minted = minted.get("value")
+    if minted not in (None, ""):
+        event.liquidity = str(minted)
+
     if not (lp_open and hasattr(lp_open, "position_id")):
         return
 
@@ -1168,7 +1194,6 @@ def _apply_lp_open(event: PositionEvent, ctx: IntentEventContext) -> None:
     # hex market address) remains authoritative via _seed_event.
     if lp_open.position_id:
         event.position_id = str(lp_open.position_id)
-    event.liquidity = str(getattr(lp_open, "liquidity", "") or "")
     event.tick_lower = getattr(lp_open, "tick_lower", None)
     event.tick_upper = getattr(lp_open, "tick_upper", None)
     # VIB-3887 — in_range derivation from gateway-supplied current_tick.

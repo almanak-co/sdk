@@ -36,6 +36,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
+from .lp_clamp import LpClampUnresolved, read_outstanding_liquidity
+
 if TYPE_CHECKING:  # pragma: no cover
     from ..runner._run_loop_helpers import TeardownSnapshotOutcome
     from ..runner.teardown_commit import TeardownCommitOutcome
@@ -251,6 +253,21 @@ could not enumerate every NPM-reported / verify every candidate position — str
 mode raised ``DiscoveryIncomplete``). Never raises: discovery failure degrades the
 teardown loudly but must never block the next risk-reducing intent."""
 
+GetLpOutstanding = Callable[..., Awaitable[Any]]
+"""Async ``(protocol, position_id, pool) -> Decimal | None``. Returns THIS
+deployment's outstanding fungible-LP liquidity for the pool (VIB-6162), folded
+from ``position_events`` as opens minus closes.
+
+``None`` means the venue declares no clamp on its connector manifest. It does
+NOT mean "no limit applies" — callers must not read it as permission to close
+the wallet's whole balance, which is the defect VIB-6162 exists to fix.
+
+Raises :class:`~almanak.framework.teardown.lp_clamp.LpClampUnresolved` when the
+venue IS clamped but the amount cannot be established (unresolvable identifier,
+unmeasured mint, no history). That is a refusal, and the caller must not execute
+an unbounded close — but per teardown's inverted failure semantics it must still
+proceed to the next risk-reducing intent."""
+
 GetDeploymentLpOwnership = Callable[..., Awaitable[Any]]
 """Async ``(strategy, chain) -> DeploymentLpOwnership``. Returns the LP NFT
 token ids attributable to THIS deployment on ``chain`` (VIB-5138 / VIB-4976
@@ -328,6 +345,7 @@ class TeardownRunnerHelpers:
     get_tracked_swap_inventory: GetTrackedSwapInventory | None = None
     discover_lp_positions: DiscoverLpPositions | None = None
     get_deployment_lp_ownership: GetDeploymentLpOwnership | None = None
+    get_lp_outstanding: GetLpOutstanding | None = None
     prepare_intent_settlement: PrepareIntentSettlement | None = None
     await_intent_settlement: AwaitIntentSettlement | None = None
     reconcile_intent_settlement: ReconcileIntentSettlement | None = None
@@ -389,6 +407,11 @@ class TeardownRunnerHelpers:
     def has_lp_discovery(self) -> bool:
         """True iff the on-chain LP discovery fallback is wired (VIB-5138)."""
         return self.discover_lp_positions is not None and self.get_deployment_lp_ownership is not None
+
+    @property
+    def has_lp_clamp(self) -> bool:
+        """True iff the fungible-LP outstanding read is wired (VIB-6162)."""
+        return self.get_lp_outstanding is not None
 
     @property
     def has_async_settlement(self) -> bool:
@@ -844,6 +867,7 @@ def build_runner_helpers(runner: Any) -> TeardownRunnerHelpers:
         get_token_universe=_get_token_universe,
         discover_lp_positions=partial(_discover_lp_for_teardown, runner),
         get_deployment_lp_ownership=partial(_deployment_lp_ownership, runner),
+        get_lp_outstanding=partial(_lp_outstanding, runner),
         get_accounting_events=_get_accounting_events,
         get_tracked_swap_inventory=_get_tracked_swap_inventory,
         prepare_intent_settlement=partial(_prepare_teardown_intent_settlement, runner),
@@ -1031,6 +1055,35 @@ async def _deployment_lp_ownership(runner: Any, strategy: Any, chain: str) -> An
     return await read_deployment_lp_ownership(sm, deployment_id, chain)
 
 
+async def _lp_outstanding(runner: Any, strategy: Any, protocol: str, position_id: Any, pool: Any = None) -> Any:
+    """This deployment's outstanding fungible-LP liquidity for a pool (VIB-6162).
+
+    Scoped to the deployment for the same fund-safety reason as
+    :func:`_deployment_lp_ownership`: a wallet can be shared, and unscoped history
+    would attribute a sibling deployment's liquidity to this one and then burn it.
+
+    Bound to the runner via :func:`functools.partial` so the consumer calls
+    ``(strategy, protocol, position_id, pool) -> Decimal | None``. Propagates
+    ``LpClampUnresolved`` deliberately — the caller must distinguish "this venue is
+    not clamped" (``None``) from "this venue is clamped and the bound is unknown"
+    (raise), because collapsing the two is how an unbounded close ships.
+    """
+    deployment_id = (getattr(strategy, "deployment_id", "") or "").strip()
+    sm = getattr(runner, "state_manager", None)
+    # `build_runner_helpers` wires this only when a state manager exists, but it closes
+    # over the RUNNER, so a manager that is torn down or swapped later reads None here.
+    # Without this guard that surfaces as an AttributeError from inside the fold — an
+    # exception type the caller does not treat as a clamp refusal, so it would take the
+    # generic failure path instead of the typed one. Raise the typed error the contract
+    # is built on: an unreadable history refuses, it never widens.
+    if sm is None:
+        raise LpClampUnresolved(
+            f"no state manager available to read position history for deployment={deployment_id!r}; "
+            f"outstanding is unmeasured, not zero"
+        )
+    return await read_outstanding_liquidity(sm, deployment_id, protocol=protocol, position_id=position_id, pool=pool)
+
+
 async def _discover_lp_for_teardown(runner: Any, strategy: Any, candidate_token_ids: Any = None) -> Any:
     """Bounded on-chain LP discovery fallback for teardown recovery (VIB-5138).
 
@@ -1093,6 +1146,7 @@ __all__ = [
     "DiscoverLpPositions",
     "GetAccountingEvents",
     "GetDeploymentLpOwnership",
+    "GetLpOutstanding",
     "GetTokenUniverse",
     "GetTrackedSwapInventory",
     "ReconcilePostBalances",

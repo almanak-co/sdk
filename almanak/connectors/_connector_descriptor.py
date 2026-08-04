@@ -407,6 +407,112 @@ class PositionReadDecl:
         _validate_decl_aliases("PositionReadDecl", self.aliases)
 
 
+#: Units the connector records in ``position_events.liquidity`` for a fungible-LP
+#: position. ``token`` is a human-decimal quantity; ``raw`` is base units and needs
+#: ``decimals`` to interpret. The same column carries different units per connector —
+#: Curve writes token units where Aerodrome writes raw — so this is a real declaration,
+#: not a formality.
+FUNGIBLE_LP_UNITS: frozenset[str] = frozenset({"token", "raw"})
+
+
+@dataclass(frozen=True)
+class FungibleLpCloseDecl:
+    """Connector-owned fungible-LP close-clamp declaration (VIB-6162).
+
+    A fungible-LP close names its position with a ``position_id`` whose meaning is
+    **connector-specific**, and an address-shaped id refers to a different contract on
+    each venue: the pool on Aerodrome, the LP token on Curve (where pool != LP token),
+    the wrapper on Fluid. Aerodrome also accepts a purely symbolic
+    ``TOKEN0/TOKEN1/pool_type``, and Curve additionally accepts a decimal string that is
+    an *amount*, not a name at all.
+
+    The framework therefore cannot decide "which pool is this?" without connector
+    knowledge, and the attempt to do so is what defeated the first fix for this ticket:
+    a resolver keyed on address-shaped ids was inert for every strategy emitting the
+    symbolic form, while a wei-exact fork proof on the address form appeared to
+    establish the invariant. **Framework knows the ledger, connector knows the chain.**
+
+    ``units`` / ``decimals`` describe what this connector writes into
+    ``position_events.liquidity``. ``clamp`` is the eligibility flag: a venue is clamped
+    only when its close can be safely bounded to the strategy's own outstanding
+    liquidity AND its teardown post-condition tolerates the residual that leaves behind
+    (see :mod:`almanak.connectors._strategy_base.fungible_lp_post_condition` — a
+    post-condition whose closure rule is ``balanceOf <= 10 wei`` reports a *correct*
+    clamped close as FAILED, so the two must move together). ``identity`` names a
+    connector-side callable that maps whatever the strategy emitted to this connector's
+    canonical pool key; it is REQUIRED whenever ``clamp`` is true, because a clamp that
+    cannot resolve identity is a clamp that silently does not engage.
+
+    ``protocols`` scopes the declaration, and its default is the load-bearing part. One
+    connector routinely owns protocol slugs with **different LP models**: the aerodrome
+    connector owns both ``aerodrome`` (Solidly-fork fungible LP) and its alias
+    ``aerodrome_slipstream`` (NFT-based concentrated liquidity). Resolving this
+    declaration through the whole alias namespace handed a fungible-LP clamp to
+    Slipstream, whose ``position_id`` is an NFT tokenId — a decimal string, which
+    ``canonical_pool_key`` correctly refuses to read as a name — so **every Slipstream
+    close was refused and every Slipstream position stranded on teardown**. That is the
+    "guard that can never succeed" failure this module's own docstring warns about, and
+    a V1-only liveness test cannot see it.
+
+    So the default (``None``) means **the connector's canonical name only**. An alias is
+    exactly where the LP model diverges, so an alias must opt in by being listed here.
+    """
+
+    units: str
+    decimals: int | None = None
+    clamp: bool = False
+    identity: ImportRef | None = None
+    protocols: tuple[str, ...] | None = None
+
+    def __post_init__(self) -> None:
+        """Validate units, the units/decimals pairing, and the clamp/identity pairing."""
+        if not isinstance(self.units, str) or self.units not in FUNGIBLE_LP_UNITS:
+            raise ValueError(
+                f"FungibleLpCloseDecl.units must be one of {sorted(FUNGIBLE_LP_UNITS)}, got {self.units!r}"
+            )
+        # `raw` is uninterpretable without decimals, and `token` is already scaled --
+        # carrying decimals there would invite a second, contradictory scaling.
+        # `protocols` decides which slugs this declaration APPLIES to, so a malformed
+        # value does not error at use -- it silently matches nothing and the venue reads
+        # as unclamped. "Declared clamped" must never be able to mean "unclamped", so
+        # both shapes that would do that are rejected at construction: an empty tuple,
+        # and a bare string (which would iterate character-by-character and match no slug).
+        if self.protocols is not None:
+            if isinstance(self.protocols, str) or not isinstance(self.protocols, tuple):
+                raise ValueError(
+                    "FungibleLpCloseDecl.protocols must be a tuple of slugs, got "
+                    f"{type(self.protocols).__name__}; a bare string would iterate per character "
+                    "and silently match nothing"
+                )
+            if not self.protocols:
+                raise ValueError(
+                    "FungibleLpCloseDecl.protocols is empty, which applies the declaration to no "
+                    "slug at all; omit it to default to the connector's canonical name"
+                )
+            if any(not isinstance(p, str) or not p.strip() for p in self.protocols):
+                raise ValueError(
+                    f"FungibleLpCloseDecl.protocols entries must be non-empty strings, got {self.protocols!r}"
+                )
+        if self.units == "raw":
+            if not isinstance(self.decimals, int) or isinstance(self.decimals, bool) or self.decimals < 0:
+                raise ValueError(
+                    f"FungibleLpCloseDecl.units='raw' requires a non-negative int decimals, got {self.decimals!r}"
+                )
+        elif self.decimals is not None:
+            raise ValueError(
+                f"FungibleLpCloseDecl.units={self.units!r} is already scaled and must not declare decimals"
+            )
+        if not isinstance(self.clamp, bool):
+            raise ValueError(f"FungibleLpCloseDecl.clamp must be a bool, got {self.clamp!r}")
+        if self.identity is not None and not isinstance(self.identity, ImportRef):
+            raise ValueError(f"FungibleLpCloseDecl.identity must be None or an ImportRef, got {self.identity!r}")
+        # The load-bearing pairing. Without it a connector could declare clamp=True and
+        # no resolver, which reads as "protected" and behaves as "unprotected" -- the
+        # exact inert-guard shape this ticket exists to remove.
+        if self.clamp and self.identity is None:
+            raise ValueError("FungibleLpCloseDecl.clamp=True requires an identity ImportRef")
+
+
 @dataclass(frozen=True)
 class FundingHistoryDecl:
     """Connector-owned perp funding-rate-history declaration (VIB-4851 Phase D).
@@ -977,6 +1083,13 @@ class Connector:
     # never the pool — or publish its own manifest ``teardown_post_condition``
     # (connector-owned hooks win over the default).
     fungible_lp: bool = False
+    # Fungible-LP close-clamp declaration (VIB-6162). Distinct from ``fungible_lp``
+    # above, which gates the framework-default teardown POST-CONDITION. This declares
+    # how a close is BOUNDED to the strategy's own liquidity, and the two are
+    # deliberately separate: Aerodrome needs the clamp and does not declare
+    # ``fungible_lp``, while Curve declares ``fungible_lp`` and cannot be clamped until
+    # its post-condition stops reading a residual as failure.
+    fungible_lp_close: FungibleLpCloseDecl | None = None
     prediction_read: ImportRef | None = None
     prediction_execute: ImportRef | None = None
     gateway_stub: ImportRef | None = None
@@ -1372,9 +1485,13 @@ class Connector:
             raise ValueError(f"Connector.backtest_risk must be None or a BacktestRiskDecl, got {self.backtest_risk!r}")
 
     def _validate_fungible_lp(self) -> None:
-        """Validate the fungible-LP (ERC20 LP token, no NFT discriminator) flag."""
+        """Validate the fungible-LP flag and the close-clamp declaration (VIB-6162)."""
         if not isinstance(self.fungible_lp, bool):
             raise ValueError(f"Connector.fungible_lp must be a bool, got {self.fungible_lp!r}")
+        if self.fungible_lp_close is not None and not isinstance(self.fungible_lp_close, FungibleLpCloseDecl):
+            raise ValueError(
+                f"Connector.fungible_lp_close must be None or a FungibleLpCloseDecl, got {self.fungible_lp_close!r}"
+            )
 
     def _validate_receipt_parser_kwargs(self) -> None:
         """Validate the optional enrichment kwargs the receipt parser accepts."""
@@ -1945,6 +2062,32 @@ class ConnectorRegistry:
     def with_fungible_lp(self) -> tuple[Connector, ...]:
         """Return connectors whose LP positions are fungible (ERC20 LP tokens)."""
         return tuple(d for d in self.all() if d.fungible_lp)
+
+    def fungible_lp_close_for(self, protocol: str) -> FungibleLpCloseDecl | None:
+        """Return the fungible-LP close-clamp declaration for ``protocol`` (VIB-6162).
+
+        Discovery still resolves through the alias namespace, but the declaration only
+        APPLIES to the slugs named by :attr:`FungibleLpCloseDecl.protocols`, defaulting
+        to the connector's canonical name. One connector owns slugs with different LP
+        models — ``aerodrome`` is fungible, its alias ``aerodrome_slipstream`` is
+        NFT-based concentrated liquidity — and handing the fungible clamp to the latter
+        refused every Slipstream close. See :class:`FungibleLpCloseDecl`.
+
+        Returns ``None`` when the connector is unknown, declares none, or declares one
+        that does not cover this slug — all meaning "this venue is not clamped", which
+        callers must treat as a decision, never as permission to close unbounded.
+        """
+        if not protocol:
+            return None
+        key = str(protocol).strip().lower().replace("-", "_")
+        descriptor = self.get(key)
+        if descriptor is None or descriptor.fungible_lp_close is None:
+            return None
+        decl = descriptor.fungible_lp_close
+        applies = decl.protocols if decl.protocols is not None else (descriptor.name,)
+        if key not in {str(p).strip().lower().replace("-", "_") for p in applies}:
+            return None
+        return decl
 
     def with_prediction_read(self) -> tuple[Connector, ...]:
         """Return connectors that publish prediction-read specs."""
