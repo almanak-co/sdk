@@ -2175,3 +2175,45 @@ class TestReconciliationSignalReset:
 
         assert result.status == IterationStatus.TEARDOWN
         assert runner._teardown_reconciliation is None
+
+    @pytest.mark.asyncio
+    @patch("almanak.framework.teardown.get_teardown_state_manager_for_runtime")
+    async def test_stale_closure_verdict_cannot_leak_into_a_later_teardown(self, mock_get_manager):
+        """ALM-3109: the composed closure verdict gets the same reset discipline.
+
+        It is the ONLY signal that can turn a `strat test` teardown FAIL into a
+        PASS (it lets a measured chain closure override a contradicting strategy
+        cache), so a value surviving from a PRIOR teardown on a reused runner
+        would certify a teardown it never examined — a false success, the severe
+        direction. Only the verify lane writes it; every early-exit lane must
+        leave it None.
+        """
+        from almanak.framework.runner.runner_teardown import execute_teardown
+
+        manager = MagicMock()
+        manager.get_active_request.return_value = None
+        mock_get_manager.return_value = manager
+
+        runner = _make_runner()
+        runner._get_gateway_client = MagicMock(return_value=None)
+        runner._lifecycle_write_state = MagicMock()
+        runner.request_shutdown = MagicMock()
+        runner._record_success = MagicMock()
+        # A prior teardown's PASSING verdict, left on the reused runner.
+        runner._teardown_closure_verification = {
+            "all_closed": True,
+            "closure_unknown": False,
+            "has_position_breakdown": True,
+            "positions_total": 1,
+            "positions_closed": 1,
+            "protocols_to_prove": ["gmx_v2"],
+        }
+
+        # No positions to close → early exit BEFORE the verify lane runs; only the
+        # top-of-function reset can clear the stale verdict.
+        strategy = _make_strategy(deployment_id="reuse_strat", teardown_intents=[])
+
+        result = await execute_teardown(runner, strategy, TeardownMode.SOFT, datetime.now(UTC))
+
+        assert result.status == IterationStatus.TEARDOWN
+        assert runner._teardown_closure_verification is None

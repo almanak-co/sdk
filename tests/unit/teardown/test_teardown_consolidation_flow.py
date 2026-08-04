@@ -425,6 +425,106 @@ class TestRunnerLaneHook:
         assert teardown_result.consolidation_succeeded == 1
 
     @pytest.mark.asyncio
+    async def test_runner_lane_stashes_the_composed_closure_verdict(self):
+        """ALM-3109: the real ``execute_and_verify`` must publish the chain verdict.
+
+        The `strat test` verdict consumes ``runner._teardown_closure_verification``
+        to stop a stale strategy-position cache failing a teardown the chain
+        measured closed. Without this assertion the consumer-side fix is provable
+        only against injected evidence — i.e. inert on the real lane. The stash
+        must happen AFTER the TD-15 chain re-read and the TD-11 coverage fold, so
+        it reflects the FINAL verification a later gate cannot silently downgrade.
+        """
+        from almanak.framework.cli._run_modes import _chain_certified_closure
+        from almanak.framework.runner import _teardown_helpers as _h
+
+        mgr = _mgr_mock_for_runner_lane(closure_result=_result(success=True))
+        # The chain measured this uniswap_v3 LP closed: a real pre-execution
+        # breakdown, nothing measured open, and the VIB-6285 ratchet satisfied.
+        mgr._verify_closure_detailed = AsyncMock(
+            return_value=ClosureVerification(
+                all_closed=True,
+                positions_total=1,
+                positions_closed=1,
+                has_position_breakdown=True,
+                verification_status=VerificationStatus.CHAIN_VERIFIED,
+                protocols_to_prove=("uniswap_v3",),
+                measured_closed_protocols=("uniswap_v3",),
+            )
+        )
+        runner = MagicMock()
+
+        await _h.execute_and_verify(
+            runner,
+            mgr,
+            MagicMock(),
+            _make_state(pending=[{"intent_type": "LP_CLOSE"}], completed=0),
+            _make_strategy(),
+            [{"intent_type": "LP_CLOSE"}],
+            _make_positions(),
+            TeardownMode.SOFT,
+            None,
+            True,
+            None,
+            MagicMock(),
+            MagicMock(),
+        )
+
+        evidence = runner._teardown_closure_verification
+        assert isinstance(evidence, dict)
+        assert evidence["all_closed"] is True
+        assert evidence["closure_unknown"] is False
+        assert evidence["measured_closed_protocols"] == ["uniswap_v3"]
+        # End-to-end: what this lane produces is what the CLI gate accepts.
+        assert _chain_certified_closure({"teardown_closure": evidence}) is True
+
+    @pytest.mark.asyncio
+    async def test_runner_lane_stash_never_certifies_an_unproven_closure(self):
+        """The same producer, on a closure the chain could NOT prove.
+
+        ``closure_unknown`` already sets ``success=False`` upstream, but the
+        stashed evidence must independently refuse to certify — the consumer is
+        not allowed to depend on some other gate having fired first.
+        """
+        from almanak.framework.cli._run_modes import _chain_certified_closure
+        from almanak.framework.runner import _teardown_helpers as _h
+
+        mgr = _mgr_mock_for_runner_lane(closure_result=_result(success=True))
+        mgr._verify_closure_detailed = AsyncMock(
+            return_value=ClosureVerification(
+                all_closed=True,
+                positions_total=1,
+                positions_closed=1,
+                has_position_breakdown=True,
+                verification_status=VerificationStatus.UNVERIFIED,
+                protocols_to_prove=("uniswap_v3",),
+                measured_closed_protocols=(),  # nothing measured closed
+            )
+        )
+        runner = MagicMock()
+
+        await _h.execute_and_verify(
+            runner,
+            mgr,
+            MagicMock(),
+            _make_state(pending=[{"intent_type": "LP_CLOSE"}], completed=0),
+            _make_strategy(),
+            [{"intent_type": "LP_CLOSE"}],
+            _make_positions(),
+            TeardownMode.SOFT,
+            None,
+            True,
+            None,
+            MagicMock(),
+            MagicMock(),
+        )
+
+        evidence = runner._teardown_closure_verification
+        assert evidence["closure_unknown"] is True
+        assert evidence["unproven_protocols"] == ["uniswap_v3"]
+        assert _chain_certified_closure({"teardown_closure": evidence}) is False
+
+    @pytest.mark.asyncio
     async def test_no_consolidation_when_closure_failed(self):
         from almanak.framework.runner import _teardown_helpers as _h
 

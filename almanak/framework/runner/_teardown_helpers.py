@@ -580,6 +580,38 @@ def _resolve_closure_refusal(
     return verify_error_msg, (not verification.all_closed or verification.closure_unknown)
 
 
+def closure_chain_evidence(verification: Any) -> dict[str, Any]:
+    """Serialize what the CHAIN measured about closure, for consumers outside this lane (ALM-3109).
+
+    ``ClosureVerification`` is composed here from three independent chain signals
+    (TD-14 post-condition hooks, the TD-15 POST-teardown Plan-A re-read, the TD-08
+    PRE-teardown report) and then discarded — only ``verification_status`` and the
+    two counters survive onto ``TeardownResult``, and the POST-teardown
+    ``ReconciliationReport`` itself is a local inside
+    ``TeardownManager.verify_closure_against_chain``. Callers that need to know
+    whether the chain PROVED closure — as opposed to whether the teardown merely
+    finished — had nothing to read, which is how ``strat test`` came to publish
+    the strategy's own position cache as if it were a chain measurement
+    (ALM-3109).
+
+    Emitted as a plain JSON-serializable dict rather than the dataclass so it can
+    ride the ``strat test --json`` artifact unchanged. ``closure_unknown`` and
+    ``unproven_protocols`` are derived properties, materialized here so a consumer
+    never has to re-derive the VIB-6285 rule (and get it subtly wrong).
+    """
+    return {
+        "verification_status": verification.verification_status.value,
+        "all_closed": bool(verification.all_closed),
+        "closure_unknown": bool(verification.closure_unknown),
+        "has_position_breakdown": bool(verification.has_position_breakdown),
+        "positions_total": int(verification.positions_total),
+        "positions_closed": int(verification.positions_closed),
+        "protocols_to_prove": list(verification.protocols_to_prove),
+        "measured_closed_protocols": list(verification.measured_closed_protocols),
+        "unproven_protocols": list(verification.unproven_protocols),
+    }
+
+
 async def execute_and_verify(
     runner: Any,
     teardown_mgr: Any,
@@ -801,6 +833,17 @@ async def execute_and_verify(
             has_position_breakdown=verification.has_position_breakdown,
             verification_status=verification.verification_status,
         )
+
+        # ALM-3109: stash the FULL composed chain verdict for lanes that need to
+        # distinguish "the chain proved closure" from "the teardown finished".
+        # Written here — AFTER the TD-15 chain re-read AND the TD-11 coverage fold
+        # — so it reflects the final verification, never an intermediate one that
+        # a later gate would have downgraded. Reset to None at the top of every
+        # teardown (``runner_teardown``), mirroring ``_teardown_reconciliation``,
+        # so a REUSED runner can never let a prior teardown's proof certify this
+        # one. The FAILURE lanes deliberately leave it None: absence of evidence
+        # must never read as evidence of closure.
+        runner._teardown_closure_verification = closure_chain_evidence(verification)
 
         # VIB-5478: structured VERIFY decision entry (runner signal-driven lane).
         # Mirrors the CLI lane's entry in TeardownManager.execute so both lanes

@@ -755,19 +755,114 @@ def _measure_open_positions_after_teardown(strategy_instance: Any) -> tuple[list
         return [], repr(exc)
 
 
+def _chain_certified_closure(step: dict) -> bool:
+    """True iff the CHAIN positively measured this teardown's position set closed (ALM-3109).
+
+    Reads ``step["teardown_closure"]`` — the serialized ``ClosureVerification``
+    the runner's teardown lane stashed on the runner (see
+    ``_teardown_helpers.closure_chain_evidence``). Every clause is a POSITIVE
+    assertion that a measurement happened; anything missing, mistyped, absent or
+    merely-not-contradicted returns ``False``. That polarity is the whole point:
+    this predicate can only ever turn a FAIL into a PASS, so it must be
+    impossible to satisfy by omission (Empty ≠ Zero).
+
+    The clauses, and why each is load-bearing:
+
+    * ``all_closed is True`` — nothing was MEASURED open. TD-15 flips this to
+      ``False`` on a chain-CONFIRMED_OPEN residual and TD-11 flips it on an
+      uncovered known position, so this is what keeps the dangerous direction
+      (cache says flat, chain says open) out of the override.
+    * ``closure_unknown is False`` — the VIB-6285 (W0.1) ratchet: EVERY protocol
+      in the teardown set has at least one position a chain read MEASURED closed
+      (a Plan-A ``DIVERGED_CLOSED`` re-read or a TD-14 hook proof). Without it an
+      abstaining chain lane would "certify" off zero evidence.
+    * ``protocols_to_prove`` non-empty — ``closure_unknown`` is derived from two
+      tuples that default to empty, and empty-minus-empty is vacuously False. A
+      never-armed ratchet must not read as a passed one.
+    * ``has_position_breakdown is True`` and ``positions_total >= 1`` — the
+      verifier ran against a REAL pre-execution position snapshot. On the
+      in-memory fallback the counts are ``0/0`` and carry no information.
+    * ``positions_closed == positions_total`` — every position in that snapshot
+      was counted closed, not just the ones that happened to be measurable.
+
+    Deliberately NOT gated on ``verification_status == CHAIN_VERIFIED``. That
+    status requires a registered TD-14 post-condition for EVERY position, which
+    only the V3-family LP connectors have; gating on it would make this fix inert
+    for exactly the GMX perp lifecycle ALM-3109 reproduces on. The VIB-6285
+    measured-evidence signal above is the authority that actually covers perps
+    (``plan_a_reconciliation._reconcile_one`` has a PERP arm gated on the
+    connector's ``supports_open_state_reconciliation`` capability).
+
+    **Known limitation, inherited not introduced.** This is an AGGREGATE signal:
+    it says the teardown's known set was measured closed, not that the specific
+    cached row it overrides was one of them. Matching per position would need the
+    POST-teardown ``ReconciliationReport``, which
+    ``TeardownManager.verify_closure_against_chain`` builds as a local and
+    discards — it is not reachable from this lane. The residual exposure is the
+    same per-protocol existential hole VIB-6285 documents and W2.2 closes;
+    tracked for this call site as ALM-3116.
+    """
+    evidence = step.get("teardown_closure")
+    if not isinstance(evidence, dict):
+        return False
+    try:
+        positions_total = int(evidence["positions_total"])
+        positions_closed = int(evidence["positions_closed"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return (
+        evidence.get("all_closed") is True
+        and evidence.get("closure_unknown") is False
+        and evidence.get("has_position_breakdown") is True
+        and bool(evidence.get("protocols_to_prove"))
+        and positions_total >= 1
+        and positions_closed == positions_total
+    )
+
+
 def _teardown_step_ok(step: dict) -> bool:
-    """Pass criterion for a teardown step (ALM-2900, VIB-6285).
+    """Pass criterion for a teardown step (ALM-2900, VIB-6285, ALM-3109).
 
-    Passes iff the iteration completed as TEARDOWN, no residual was MEASURED
-    (``open_positions_after_teardown``), **and** the residual check actually
-    produced a measurement (``open_positions_check`` absent).
+    Passes iff the iteration completed as TEARDOWN, the residual check actually
+    produced a measurement (``open_positions_check`` absent), **and** either no
+    residual was reported (``open_positions_after_teardown``) or the CHAIN
+    positively measured the position set closed (``_chain_certified_closure``).
 
-    The third clause is VIB-6285 (W0.1). ``_measure_open_positions_after_teardown``
-    honours Empty ≠ Zero and returns ``([], "<reason>")`` when the read itself
-    failed, and the caller routes that reason into ``open_positions_check`` — but
-    the pass criterion used to read only ``open_positions_after_teardown``, so an
-    UNMEASURED post-teardown read yielded ``teardown_passed = True``. That is the
-    same false-success class as certifying a teardown nothing measured.
+    The SECOND DISJUNCT OF THE THIRD CLAUSE — ``_chain_certified_closure`` — is
+    ALM-3109. ``open_positions_after_teardown`` is sourced from
+    ``strategy_instance.get_open_positions()`` — the strategy's own bookkeeping,
+    which perp strategies maintain from *requested* sizes because the SDK exposes
+    no strategy-side chain read of a perp position. After any
+    fill divergence that cache is wrong, and publishing it as a residual
+    measurement produced a teardown artifact that said ``chain-confirmed CLOSED
+    ... 0 still open`` and ``teardown_passed: false`` with a $406.35 phantom
+    position in the same file. A strategy cache is not a chain read, so when a
+    STRICTLY STRONGER authority — an on-chain measurement of the same position
+    set — says closed, the cache does not get to fail the run. It is recorded as
+    a disagreement instead (``open_positions_chain_disagreement``), never
+    silently dropped.
+
+    The direction of that override is the risk, and it is bounded three ways.
+    (a) ``_chain_certified_closure`` fails closed on every unmeasured / partial /
+    absent chain read, so an ABSENCE of chain evidence still lets the cache fail
+    the run — the pre-ALM-3109 behaviour. (b) The dangerous disagreement (cache
+    flat, chain OPEN) cannot reach here at all: TD-15 flips such a teardown to
+    ``all_closed=False``, ``_resolve_closure_refusal`` sets ``success=False``, and
+    ``map_teardown_result`` returns ``STRATEGY_ERROR`` — clause (1) fails, and the
+    override is ANDed with it. (c) The override is ANDed OUTSIDE the
+    ``open_positions_check`` clause on purpose, so it can never rescue an
+    UNMEASURED cache read.
+
+    The second clause is VIB-6285 (W0.1) and is UNCHANGED.
+    ``_measure_open_positions_after_teardown`` honours Empty ≠ Zero and returns
+    ``([], "<reason>")`` when the read itself failed, and the caller routes that
+    reason into ``open_positions_check`` — but the pass criterion used to read
+    only ``open_positions_after_teardown``, so an UNMEASURED post-teardown read
+    yielded ``teardown_passed = True``. That is the same false-success class as
+    certifying a teardown nothing measured. Chain certification deliberately does
+    NOT excuse it: "the chain proved closure" and "the harness could not run its
+    own check" are different facts, and weakening a guard while fixing a
+    neighbouring one is how a regression ships as an improvement.
 
     The two failure states stay DISTINCT in the output dict — ``open_positions_check``
     means "could not measure", ``open_positions_after_teardown`` means "residual
@@ -778,8 +873,8 @@ def _teardown_step_ok(step: dict) -> bool:
 
     return (
         step["status"] == IterationStatus.TEARDOWN.value
-        and not step.get("open_positions_after_teardown")
         and not step.get("open_positions_check")
+        and (not step.get("open_positions_after_teardown") or _chain_certified_closure(step))
     )
 
 
@@ -1076,6 +1171,17 @@ def _run_test_lifecycle(  # noqa: C901
                         click.echo(f"  teardown raised: {exc!r}", err=True)
                 else:
                     teardown_result_dict = {"action": "teardown", **td_result.to_dict()}
+                    # ALM-3109: publish what the CHAIN measured alongside what the
+                    # strategy cache believes, so the verdict has both authorities
+                    # in hand and the artifact can never again assert
+                    # "chain-confirmed CLOSED" and "teardown_passed: false" without
+                    # showing why. Stashed by the runner's teardown lane
+                    # (``_teardown_helpers.execute_and_verify``) and reset at the
+                    # top of every teardown, so a missing key means "this lane
+                    # produced no chain measurement", never a stale one.
+                    closure_evidence = getattr(runner, "_teardown_closure_verification", None)
+                    if isinstance(closure_evidence, dict):
+                        teardown_result_dict["teardown_closure"] = closure_evidence
                     # A TEARDOWN-status iteration can still leave positions open
                     # (repay-only teardown, ALM-2900) — verify independently.
                     residuals, residual_check_error = _measure_open_positions_after_teardown(strategy_instance)
@@ -1083,6 +1189,37 @@ def _run_test_lifecycle(  # noqa: C901
                         teardown_result_dict["open_positions_check"] = f"unmeasured: {residual_check_error}"
                     elif residuals:
                         teardown_result_dict["open_positions_after_teardown"] = residuals
+                        # ALM-3109 ask 3(b): a cached residual that the chain
+                        # contradicts is NEVER emitted without an explicit
+                        # disagreement marker. The cached rows stay in the
+                        # artifact — dropping them would hide the strategy-side
+                        # bookkeeping bug that produced them — but they are
+                        # labelled as what they are: not a chain measurement.
+                        if _chain_certified_closure(teardown_result_dict):
+                            # Read the evidence back from the artifact, not from the
+                            # pre-narrowing `getattr` local: `_chain_certified_closure`
+                            # returning True is the proof that this key is present, is
+                            # a dict, and carries int-able counters. It asserts nothing
+                            # about `measured_closed_protocols` — the gate never reads
+                            # that key — so this formatter must not subscript it. This
+                            # is a MESSAGE, not a verdict, so it degrades to "none" on an
+                            # absent or empty list rather than raising into the outer
+                            # handler and emitting a false FAILED run. It guards presence,
+                            # NOT element type: a non-str member would still raise. That
+                            # is unreachable — `measured_closed_protocols` is typed
+                            # `tuple[str, ...]` and built from protocol slugs — and is
+                            # deliberately not defended against here.
+                            measured = teardown_result_dict["teardown_closure"]
+                            proven = ", ".join(measured.get("measured_closed_protocols") or ()) or "none"
+                            teardown_result_dict["open_positions_chain_disagreement"] = (
+                                f"{len(residuals)} strategy-CACHED open position(s) contradict the chain: the "
+                                f"teardown lane MEASURED {measured['positions_closed']}/"
+                                f"{measured['positions_total']} known position(s) closed on-chain "
+                                f"(protocols proven: {proven}). "
+                                "get_open_positions() is the strategy's own bookkeeping, not a chain read, so it "
+                                "did NOT fail this teardown. The cache is stale — fix the strategy's position "
+                                "tracking (ALM-3109)."
+                            )
                     teardown_passed = _teardown_step_ok(teardown_result_dict)
                     if not teardown_passed:
                         teardown_result_dict["failure_logs"] = log_buffer.slice_since(logs_before)
@@ -1111,6 +1248,16 @@ def _run_test_lifecycle(  # noqa: C901
                                     "it means closure was not proven. Verify on-chain.",
                                     err=True,
                                 )
+                    elif "open_positions_chain_disagreement" in teardown_result_dict and not json_output:
+                        # ALM-3109: the run PASSED, but on chain evidence that
+                        # overrode a contradicting strategy cache. Never silent —
+                        # the stale cache is a real strategy-side defect and the
+                        # operator must see that the pass was not unanimous.
+                        click.echo(
+                            "  teardown passed on CHAIN evidence over a contradicting strategy cache: "
+                            + teardown_result_dict["open_positions_chain_disagreement"],
+                            err=True,
+                        )
 
             # Persist copy trading cursor state (mirrors _run_once).
             if activity_provider is not None:

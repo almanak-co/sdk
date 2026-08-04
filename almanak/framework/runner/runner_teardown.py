@@ -1029,6 +1029,13 @@ async def execute_teardown(  # noqa: C901
     # divergence report leak into this one. The post-enumeration CHECK below
     # overwrites it on the lanes that reach it.
     runner._teardown_reconciliation = None
+    # ALM-3109: same reset discipline for the composed closure verdict
+    # (``_teardown_helpers.closure_chain_evidence``). It is the ONLY signal that
+    # can turn a `strat test` teardown FAIL into a PASS, so a stale one leaking
+    # across teardowns on a reused runner would be a false success. Only the
+    # verify lane writes it; every early-exit and failure lane leaves it None,
+    # and None is refused by the consumer.
+    runner._teardown_closure_verification = None
     # Both modes have a real cross-process teardown channel: SQLite locally,
     # gateway-backed in hosted mode. Any error here is a genuine
     # misconfiguration and should propagate.
