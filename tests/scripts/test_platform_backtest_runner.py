@@ -1,20 +1,27 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
+import sys
 from collections.abc import AsyncIterator
 from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
 
+from almanak._version import __version__
 from almanak.core.models.quote_asset import QuoteAsset
 from almanak.framework.backtesting.pnl.data_provider import HistoricalDataConfig, MarketState
 from almanak.framework.data.tokens.defaults import NATIVE_SENTINEL
 from almanak.framework.intents.vocabulary import SwapIntent
+from almanak.services.backtest.platform_artifacts import (
+    PLATFORM_BACKTEST_TERMINAL_KIND,
+    PLATFORM_BACKTEST_TERMINAL_SCHEMA_VERSION,
+)
 from scripts import platform_backtest_runner as runner
 
 BASE_CBBTC = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
@@ -118,6 +125,28 @@ def _env(**overrides: str) -> runner.PlatformRunnerEnv:
     }
     values.update(overrides)
     return runner.PlatformRunnerEnv.from_env(values)
+
+
+def test_from_env_honors_platform_result_uri_and_derives_siblings() -> None:
+    env = _env(GCS_RESULT_PATH="gs://bucket/backtests/test-123/result.json")
+
+    assert env.gcs_result_path == "backtests/test-123/result.json"
+    assert env.gcs_result_uri == "gs://bucket/backtests/test-123/result.json"
+    assert env.gcs_decisions_path == "backtests/test-123/decisions.jsonl"
+    assert env.gcs_terminal_path == "backtests/test-123/terminal.json"
+
+
+@pytest.mark.parametrize(
+    "configured_path",
+    [
+        "gs://other-bucket/backtests/test-123/result.json",
+        "gs://bucket/backtests/other-run/result.json",
+        "gs://bucket/backtests/test-123/../result.json",
+    ],
+)
+def test_from_env_rejects_unsafe_platform_result_uri(configured_path: str) -> None:
+    with pytest.raises(runner.PlatformRunnerError, match="GCS_RESULT_PATH"):
+        _env(GCS_RESULT_PATH=configured_path)
 
 
 def test_build_platform_backtest_config_parses_platform_payload() -> None:
@@ -539,6 +568,23 @@ def test_redact_masks_general_url_credentials() -> None:
     assert "https://***@host/repo.git" in redacted
 
 
+def test_redact_json_value_preserves_tuple_shape_and_redacts_nested_values() -> None:
+    env = _env()
+    value = (
+        "https://user:password@example.test/top",
+        {"nested": (env.github_clone_url, env.platform_callback_secret)},
+    )
+
+    redacted = runner._redact_json_value(value, env)
+
+    assert isinstance(redacted, tuple)
+    assert isinstance(redacted[1]["nested"], tuple)
+    assert redacted == (
+        "https://***@example.test/top",
+        {"nested": ("GITHUB_CLONE_URL", "PLATFORM_CALLBACK_SECRET")},
+    )
+
+
 def test_instantiate_strategy_does_not_swallow_internal_type_error() -> None:
     class BrokenStrategy:
         def __init__(self, config: dict[str, Any]) -> None:
@@ -640,14 +686,17 @@ def test_run_platform_backtest_posts_start_before_clone(monkeypatch: pytest.Monk
     )
     monkeypatch.setattr(runner, "instantiate_strategy", lambda strategy_class, strategy_config, chain: object())
     monkeypatch.setattr(runner, "create_backtester", lambda **kwargs: Backtester())
+    monkeypatch.setattr(runner, "load_terminal_manifest_from_gcs", lambda current_env: None)
     monkeypatch.setattr(runner, "serialize_result", lambda result: {"metrics": {}, "trades": []})
-    monkeypatch.setattr(runner, "upload_result_to_gcs", lambda bucket, object_path, payload: order.append("upload"))
+    monkeypatch.setattr(
+        runner, "upload_result_to_gcs", lambda bucket, object_path, payload: order.append("upload") or "42"
+    )
     monkeypatch.setattr(runner, "post_callback", lambda current_env, payload: order.append(payload["status"]))
 
     asyncio.run(runner.run_platform_backtest(env))
 
     assert order[:2] == ["start", "clone"]
-    assert order[-2:] == ["upload", "COMPLETED"]
+    assert order[-3:] == ["upload", "upload", "COMPLETED"]
 
 
 def test_run_platform_backtest_threads_token_addresses(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -701,8 +750,9 @@ def test_run_platform_backtest_threads_token_addresses(monkeypatch: pytest.Monke
     )
     monkeypatch.setattr(runner, "instantiate_strategy", lambda strategy_class, current_config, chain: object())
     monkeypatch.setattr(runner, "create_backtester", fake_create_backtester)
+    monkeypatch.setattr(runner, "load_terminal_manifest_from_gcs", lambda current_env: None)
     monkeypatch.setattr(runner, "serialize_result", lambda result: {"metrics": {}, "trades": []})
-    monkeypatch.setattr(runner, "upload_result_to_gcs", lambda bucket, object_path, payload: None)
+    monkeypatch.setattr(runner, "upload_result_to_gcs", lambda bucket, object_path, payload: "42")
     monkeypatch.setattr(runner, "post_callback", lambda current_env, payload: None)
 
     asyncio.run(runner.run_platform_backtest(env))
@@ -828,8 +878,11 @@ def _patch_successful_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> li
     )
     monkeypatch.setattr(runner, "instantiate_strategy", lambda strategy_class, strategy_config, chain: object())
     monkeypatch.setattr(runner, "create_backtester", lambda **kwargs: Backtester())
+    monkeypatch.setattr(runner, "load_terminal_manifest_from_gcs", lambda current_env: None)
     monkeypatch.setattr(runner, "serialize_result", lambda result: {"metrics": {}, "trades": []})
-    monkeypatch.setattr(runner, "upload_result_to_gcs", lambda bucket, object_path, payload: order.append("upload"))
+    monkeypatch.setattr(
+        runner, "upload_result_to_gcs", lambda bucket, object_path, payload: order.append("upload") or "42"
+    )
     return order
 
 
@@ -851,10 +904,290 @@ def test_run_platform_backtest_raises_distinct_error_when_completed_callback_fai
         asyncio.run(runner.run_platform_backtest(env))
 
     # The result must have been uploaded before the callback was even attempted.
-    assert order == ["start", "upload", "COMPLETED"]
-    assert exc_info.value.gcs_result_path == env.gcs_result_path
+    assert order == ["start", "upload", "upload", "COMPLETED"]
+    assert exc_info.value.gcs_result_path == env.gcs_result_uri
     assert exc_info.value.__cause__ is original
     assert not isinstance(exc_info.value, runner.PlatformRunnerError)
+
+
+def test_run_platform_backtest_does_not_post_callback_when_terminal_upload_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    env = _env(STRATEGY_WORKDIR=str(tmp_path / "strategy"))
+    order = _patch_successful_run(monkeypatch, tmp_path)
+    original = ConnectionError("terminal upload unavailable")
+
+    def fail_terminal_upload(bucket: str, object_path: str, payload: dict[str, Any]) -> str:
+        order.append("upload")
+        if object_path == env.gcs_terminal_path:
+            raise original
+        return "42"
+
+    monkeypatch.setattr(runner, "upload_result_to_gcs", fail_terminal_upload)
+    monkeypatch.setattr(runner, "post_callback", lambda *args: pytest.fail("must not post a terminal callback"))
+
+    with pytest.raises(runner.TerminalArtifactPublicationError) as exc_info:
+        asyncio.run(runner.run_platform_backtest(env))
+
+    assert order == ["start", "upload", "upload"]
+    assert exc_info.value.gcs_result_path == env.gcs_result_uri
+    assert exc_info.value.outcome is runner.PlatformBacktestOutcome.COMPLETED
+    assert exc_info.value.__cause__ is original
+    assert not isinstance(exc_info.value, runner.PlatformRunnerError)
+
+
+def test_run_platform_backtest_certifies_failed_engine_result(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    env = _env(
+        STRATEGY_WORKDIR=str(tmp_path / "strategy"),
+        GCS_RESULT_PATH="gs://bucket/backtests/test-123/result.json",
+    )
+    _patch_successful_run(monkeypatch, tmp_path)
+    result = SimpleNamespace(
+        success=False,
+        error="engine failed at https://user:password@example.test and secret",
+        decision_events=None,
+    )
+
+    class Backtester:
+        async def backtest(self, strategy: object, config: object) -> object:
+            return result
+
+        async def close(self) -> None:
+            return None
+
+    uploads: list[tuple[str, dict[str, Any]]] = []
+    callbacks: list[dict[str, Any]] = []
+
+    def fake_upload(bucket: str, object_path: str, payload: dict[str, Any]) -> str:
+        uploads.append((object_path, payload))
+        return "42" if object_path.endswith("result.json") else "43"
+
+    monkeypatch.setattr(runner, "create_backtester", lambda **kwargs: Backtester())
+    monkeypatch.setattr(runner, "load_terminal_manifest_from_gcs", lambda current_env: None)
+    monkeypatch.setattr(
+        runner,
+        "serialize_result",
+        lambda current_result: {
+            "success": False,
+            "error": current_result.error,
+            "errors": [{"error_message": current_result.error}],
+            "metrics": {},
+            "trades": [],
+        },
+    )
+    monkeypatch.setattr(runner, "upload_result_to_gcs", fake_upload)
+    monkeypatch.setattr(runner, "post_callback", lambda current_env, payload: callbacks.append(payload))
+
+    payload = asyncio.run(runner.run_platform_backtest(env))
+
+    assert [path for path, _ in uploads] == [
+        "backtests/test-123/result.json",
+        "backtests/test-123/terminal.json",
+    ]
+    result_artifact = uploads[0][1]
+    assert result_artifact["result"]["success"] is False
+    assert "password" not in result_artifact["result"]["error"]
+    assert "secret" not in result_artifact["result"]["error"]
+
+    terminal = uploads[1][1]
+    assert terminal["schema_version"] == 1
+    assert terminal["backtest_id"] == "test-123"
+    assert terminal["backtest_outcome"] == "FAILED"
+    assert terminal["result_uri"] == "gs://bucket/backtests/test-123/result.json"
+    assert terminal["result_generation"] == "42"
+    assert terminal["error_message"] == result_artifact["result"]["error"]
+
+    assert payload == callbacks[0]
+    assert payload == {
+        "status": "FAILED",
+        "artifact_contract_version": 1,
+        "gcs_result_path": "gs://bucket/backtests/test-123/result.json",
+        "error_message": result_artifact["result"]["error"],
+    }
+
+
+def test_run_platform_backtest_uses_fallback_for_whitespace_engine_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    env = _env(
+        STRATEGY_WORKDIR=str(tmp_path / "strategy"),
+        GCS_RESULT_PATH="gs://bucket/backtests/test-123/result.json",
+    )
+    _patch_successful_run(monkeypatch, tmp_path)
+    result = SimpleNamespace(success=False, error="   ", decision_events=None)
+
+    class Backtester:
+        async def backtest(self, strategy: object, config: object) -> object:
+            return result
+
+        async def close(self) -> None:
+            return None
+
+    uploads: list[tuple[str, dict[str, Any]]] = []
+
+    def record_upload(bucket: str, object_path: str, payload: dict[str, Any]) -> str:
+        uploads.append((object_path, payload))
+        return "42"
+
+    monkeypatch.setattr(runner, "create_backtester", lambda **kwargs: Backtester())
+    monkeypatch.setattr(
+        runner,
+        "serialize_result",
+        lambda current_result: {"success": False, "error": current_result.error, "metrics": {}, "trades": []},
+    )
+    monkeypatch.setattr(runner, "upload_result_to_gcs", record_upload)
+    monkeypatch.setattr(runner, "post_callback", lambda current_env, payload: None)
+
+    payload = asyncio.run(runner.run_platform_backtest(env))
+
+    assert uploads[1][1]["error_message"] == "Backtest engine returned a failed result."
+    assert payload["error_message"] == "Backtest engine returned a failed result."
+
+
+def _patch_terminal_blob(monkeypatch: pytest.MonkeyPatch, download: bytes | Exception) -> None:
+    class Blob:
+        def exists(self) -> bool:
+            return True
+
+        def download_as_bytes(self) -> bytes:
+            if isinstance(download, Exception):
+                raise download
+            return download
+
+    class Bucket:
+        def blob(self, object_path: str) -> Blob:
+            return Blob()
+
+    class Client:
+        def bucket(self, bucket_name: str) -> Bucket:
+            return Bucket()
+
+    storage_module = ModuleType("google.cloud.storage")
+    storage_module.Client = Client
+    cloud_module = importlib.import_module("google.cloud")
+    monkeypatch.setitem(sys.modules, "google.cloud.storage", storage_module)
+    monkeypatch.setattr(cloud_module, "storage", storage_module, raising=False)
+
+
+@pytest.mark.parametrize(
+    "download",
+    [TimeoutError("GCS read timed out"), b"{truncated"],
+)
+def test_load_terminal_manifest_classifies_read_and_decode_failures_as_transient(
+    monkeypatch: pytest.MonkeyPatch,
+    download: bytes | Exception,
+) -> None:
+    env = _env(GCS_RESULT_PATH="gs://bucket/backtests/test-123/result.json")
+    _patch_terminal_blob(monkeypatch, download)
+
+    with pytest.raises(runner.TerminalArtifactInspectionError):
+        runner.load_terminal_manifest_from_gcs(env)
+
+
+def test_load_terminal_manifest_classifies_contract_failure_as_permanent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env = _env(GCS_RESULT_PATH="gs://bucket/backtests/test-123/result.json")
+    invalid_terminal = _existing_terminal(env, runner.PlatformBacktestOutcome.COMPLETED)
+    invalid_terminal["result_uri"] = "gs://bucket/backtests/other-run/result.json"
+    _patch_terminal_blob(monkeypatch, json.dumps(invalid_terminal).encode())
+
+    with pytest.raises(runner.TerminalArtifactContractError, match="result URI does not match"):
+        runner.load_terminal_manifest_from_gcs(env)
+
+
+def _existing_terminal(
+    env: runner.PlatformRunnerEnv,
+    outcome: runner.PlatformBacktestOutcome,
+    *,
+    error_message: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "schema_version": PLATFORM_BACKTEST_TERMINAL_SCHEMA_VERSION,
+        "kind": PLATFORM_BACKTEST_TERMINAL_KIND,
+        "backtest_id": env.backtest_id,
+        "backtest_outcome": outcome.value,
+        "result_uri": env.gcs_result_uri,
+        "result_generation": "42",
+        "sdk_version": __version__,
+        "commit_sha": env.commit_sha,
+        "error_message": error_message,
+        "created_at": "2026-08-06T00:00:00+00:00",
+    }
+
+
+def test_cloud_run_retry_redelivers_existing_certificate_without_rerunning(monkeypatch: pytest.MonkeyPatch) -> None:
+    env = _env(GCS_RESULT_PATH="gs://bucket/backtests/test-123/result.json")
+    order: list[str] = []
+    existing_terminal = _existing_terminal(env, runner.PlatformBacktestOutcome.COMPLETED)
+
+    monkeypatch.setattr(runner, "post_start_callback", lambda current_env: order.append("start"))
+    monkeypatch.setattr(runner, "load_terminal_manifest_from_gcs", lambda current_env: existing_terminal)
+    monkeypatch.setattr(runner, "clone_strategy_repo", lambda current_env: pytest.fail("strategy must not rerun"))
+    monkeypatch.setattr(runner, "upload_result_to_gcs", lambda *args: pytest.fail("evidence must not be overwritten"))
+    monkeypatch.setattr(runner, "post_callback", lambda current_env, payload: order.append(payload["status"]))
+
+    payload = asyncio.run(runner.run_platform_backtest(env))
+
+    assert order == ["COMPLETED"]
+    assert payload == {
+        "status": "COMPLETED",
+        "artifact_contract_version": 1,
+        "gcs_result_path": env.gcs_result_uri,
+    }
+
+
+def test_cloud_run_retry_reads_legacy_prefix_certificate_without_rerunning(monkeypatch: pytest.MonkeyPatch) -> None:
+    env = _env()
+    inspected_paths: list[str] = []
+    callbacks: list[dict[str, Any]] = []
+    existing_terminal = _existing_terminal(env, runner.PlatformBacktestOutcome.COMPLETED)
+
+    def fake_load(current_env: runner.PlatformRunnerEnv) -> dict[str, Any]:
+        inspected_paths.append(current_env.gcs_terminal_path)
+        return existing_terminal
+
+    monkeypatch.setattr(runner, "load_terminal_manifest_from_gcs", fake_load)
+    monkeypatch.setattr(runner, "post_start_callback", lambda current_env: pytest.fail("must not post STARTED"))
+    monkeypatch.setattr(runner, "clone_strategy_repo", lambda current_env: pytest.fail("strategy must not rerun"))
+    monkeypatch.setattr(runner, "upload_result_to_gcs", lambda *args: pytest.fail("evidence must not be overwritten"))
+    monkeypatch.setattr(runner, "post_callback", lambda current_env, payload: callbacks.append(payload))
+
+    payload = asyncio.run(runner.run_platform_backtest(env))
+
+    assert inspected_paths == ["backtest-results/test-123/terminal.json"]
+    assert payload["gcs_result_path"] == "gs://bucket/backtest-results/test-123/result.json"
+    assert callbacks == [payload]
+
+
+def test_cloud_run_retry_redelivers_failed_certificate_with_its_error_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env = _env(GCS_RESULT_PATH="gs://bucket/backtests/test-123/result.json")
+    existing_terminal = _existing_terminal(
+        env,
+        runner.PlatformBacktestOutcome.FAILED,
+        error_message="historical price provider failed",
+    )
+    callbacks: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(runner, "load_terminal_manifest_from_gcs", lambda current_env: existing_terminal)
+    monkeypatch.setattr(runner, "post_start_callback", lambda current_env: pytest.fail("must not post STARTED"))
+    monkeypatch.setattr(runner, "clone_strategy_repo", lambda current_env: pytest.fail("strategy must not rerun"))
+    monkeypatch.setattr(runner, "upload_result_to_gcs", lambda *args: pytest.fail("evidence must not be overwritten"))
+    monkeypatch.setattr(runner, "post_callback", lambda current_env, payload: callbacks.append(payload))
+
+    payload = asyncio.run(runner.run_platform_backtest(env))
+
+    assert payload == {
+        "status": "FAILED",
+        "artifact_contract_version": 1,
+        "gcs_result_path": env.gcs_result_uri,
+        "error_message": "historical price provider failed",
+    }
+    assert callbacks == [payload]
 
 
 def test_main_does_not_post_failed_when_only_completed_callback_fails(
@@ -882,6 +1215,90 @@ def test_main_does_not_post_failed_when_only_completed_callback_fails(
     # Non-zero exit signals the platform to retry, but no FAILED verdict is posted.
     assert runner.main() == 1
     assert posted == []
+
+
+def test_main_does_not_post_failed_when_terminal_certificate_inspection_is_ambiguous(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    posted: list[dict[str, Any]] = []
+
+    monkeypatch.setenv("BACKTEST_ID", "test-123")
+    monkeypatch.setenv("COMMIT_SHA", "a" * 40)
+    monkeypatch.setenv("GITHUB_CLONE_URL", "https://x-access-token:token@example/repo.git")
+    monkeypatch.setenv("STRATEGY_CONFIG", "{}")
+    monkeypatch.setenv("BACKTEST_CONFIG", "{}")
+    monkeypatch.setenv("GCS_BUCKET", "bucket")
+    monkeypatch.setenv("GCS_RESULT_PATH", "gs://bucket/backtests/test-123/result.json")
+    monkeypatch.setenv("PLATFORM_CALLBACK_URL", "https://api.example")
+    monkeypatch.setenv("PLATFORM_CALLBACK_SECRET", "secret")
+
+    async def fake_run_platform_backtest(env: runner.PlatformRunnerEnv) -> dict[str, Any]:
+        raise runner.TerminalArtifactInspectionError("GCS read timed out")
+
+    monkeypatch.setattr(runner, "run_platform_backtest", fake_run_platform_backtest)
+    monkeypatch.setattr(runner, "post_callback", lambda env, payload: posted.append(payload))
+    monkeypatch.setattr(runner, "post_callback_values", lambda **kwargs: posted.append(kwargs))
+
+    assert runner.main() == 1
+    assert posted == []
+
+
+def test_main_does_not_post_failed_when_terminal_certificate_publication_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    posted: list[dict[str, Any]] = []
+
+    monkeypatch.setenv("BACKTEST_ID", "test-123")
+    monkeypatch.setenv("COMMIT_SHA", "a" * 40)
+    monkeypatch.setenv("GITHUB_CLONE_URL", "https://x-access-token:token@example/repo.git")
+    monkeypatch.setenv("STRATEGY_CONFIG", "{}")
+    monkeypatch.setenv("BACKTEST_CONFIG", "{}")
+    monkeypatch.setenv("GCS_BUCKET", "bucket")
+    monkeypatch.setenv("GCS_RESULT_PATH", "gs://bucket/backtests/test-123/result.json")
+    monkeypatch.setenv("PLATFORM_CALLBACK_URL", "https://api.example")
+    monkeypatch.setenv("PLATFORM_CALLBACK_SECRET", "secret")
+
+    async def fake_run_platform_backtest(env: runner.PlatformRunnerEnv) -> dict[str, Any]:
+        raise runner.TerminalArtifactPublicationError(env.gcs_result_uri, runner.PlatformBacktestOutcome.COMPLETED)
+
+    monkeypatch.setattr(runner, "run_platform_backtest", fake_run_platform_backtest)
+    monkeypatch.setattr(runner, "post_callback", lambda env, payload: posted.append(payload))
+    monkeypatch.setattr(runner, "post_callback_values", lambda **kwargs: posted.append(kwargs))
+
+    assert runner.main() == 1
+    assert posted == []
+
+
+def test_main_posts_failed_for_permanent_terminal_certificate_contract_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    posted: list[dict[str, Any]] = []
+
+    monkeypatch.setenv("BACKTEST_ID", "test-123")
+    monkeypatch.setenv("COMMIT_SHA", "a" * 40)
+    monkeypatch.setenv("GITHUB_CLONE_URL", "https://x-access-token:token@example/repo.git")
+    monkeypatch.setenv("STRATEGY_CONFIG", "{}")
+    monkeypatch.setenv("BACKTEST_CONFIG", "{}")
+    monkeypatch.setenv("GCS_BUCKET", "bucket")
+    monkeypatch.setenv("GCS_RESULT_PATH", "gs://bucket/backtests/test-123/result.json")
+    monkeypatch.setenv("PLATFORM_CALLBACK_URL", "https://api.example")
+    monkeypatch.setenv("PLATFORM_CALLBACK_SECRET", "secret")
+
+    async def fake_run_platform_backtest(env: runner.PlatformRunnerEnv) -> dict[str, Any]:
+        raise runner.TerminalArtifactContractError("Existing terminal certificate is invalid: wrong result URI")
+
+    monkeypatch.setattr(runner, "run_platform_backtest", fake_run_platform_backtest)
+    monkeypatch.setattr(runner, "post_callback", lambda env, payload: posted.append(payload))
+
+    assert runner.main() == 1
+    assert posted == [
+        {
+            "status": "FAILED",
+            "error_message": (
+                "TerminalArtifactContractError: Existing terminal certificate is invalid: wrong result URI"
+            ),
+        }
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -986,8 +1403,8 @@ def test_run_platform_backtest_uploads_decisions_sidecar_before_result(
 
     asyncio.run(runner.run_platform_backtest(env))
 
-    # Sidecar lands before result.json (the completion marker), then COMPLETED.
-    assert order == ["start", "decisions", "upload", "COMPLETED"]
+    # Sidecar lands before result.json, then terminal.json certifies completion.
+    assert order == ["start", "decisions", "upload", "upload", "COMPLETED"]
     assert uploaded["path"] == env.gcs_decisions_path
     assert json.loads(uploaded["body"].strip())["hold_reason"] == "r"
 

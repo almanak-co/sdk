@@ -773,6 +773,21 @@ class TestBuildResultResponse:
         assert serialized[0]["pnl_usd"] is None  # opening trade -> JSON null, not "None"
         assert serialized[1]["pnl_usd"] == "1250"  # closing trade -> realized gain
 
+    def test_platform_artifact_preserves_failed_outcome_and_diagnostics(self):
+        result = self._result([])
+        result.error = "historical price provider failed"
+        result.errors = [{"error_type": "DataUnavailable", "error_message": result.error}]
+        result.institutional_compliance = False
+        result.compliance_violations = ["Backtest failed"]
+
+        serialized = serialize_result(result)
+
+        assert serialized["success"] is False
+        assert serialized["error"] == "historical price provider failed"
+        assert serialized["errors"] == result.errors
+        assert serialized["institutional_compliance"] is False
+        assert serialized["compliance_violations"] == ["Backtest failed"]
+
     def test_rejected_trades_carry_status_and_reason(self):
         """Rejected intents serialize as status=rejected with the portfolio's reason (ALM-2936)."""
         from datetime import UTC, datetime

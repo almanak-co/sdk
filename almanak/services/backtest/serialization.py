@@ -39,6 +39,11 @@ def _serialize_equity_point(point: Any) -> dict[str, Any]:
 def serialize_result(result: BacktestResult) -> dict[str, Any]:
     """Serialize the established full result schema for GCS/callback JSON."""
     payload: dict[str, Any] = {
+        "success": result.success,
+        "error": result.error,
+        "errors": result.errors or [],
+        "institutional_compliance": result.institutional_compliance,
+        "compliance_violations": result.compliance_violations or [],
         "metrics": result.metrics.to_dict(),
         "decision_input_failures": result.decision_input_failures or [],
         "equity_curve": [_serialize_equity_point(point) for point in (result.equity_curve or [])],

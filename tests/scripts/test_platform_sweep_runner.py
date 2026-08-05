@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -181,12 +182,71 @@ class _BacktestConfigStub:
         return {"chain": self.chain}
 
 
+def test_single_combo_treats_failed_backtest_result_as_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Backtester:
+        async def backtest(self, strategy: object, config: object) -> object:
+            return type(
+                "FailedResult",
+                (),
+                {"success": False, "error": "engine returned partial data at https://user:password@example.test"},
+            )()
+
+    monkeypatch.setattr(
+        sweep_runner,
+        "instantiate_strategy",
+        lambda strategy_class, config, chain: type("Strategy", (), {"config": config, "deployment_id": ""})(),
+    )
+    monkeypatch.setattr(
+        sweep_runner,
+        "serialize_result",
+        lambda result: {
+            "success": False,
+            "error": result.error,
+            "errors": [
+                {
+                    "diagnostics": [
+                        result.error,
+                        {"source": "https://nested-user:nested-password@nested.example.test/data"},
+                    ]
+                }
+            ],
+            "metrics": {"sharpe_ratio": "99"},
+        },
+    )
+
+    entry = asyncio.run(
+        sweep_runner._run_single_combo(
+            _env(),
+            combo_index=0,
+            params={"threshold": 0.1},
+            strategy_class=_StrategyStub,
+            base_strategy_config={},
+            backtest_config=_BacktestConfigStub(),
+            backtester=Backtester(),
+        )
+    )
+
+    assert entry["result_summary"] is None
+    assert entry["error"] == "engine returned partial data at https://***@example.test"
+    assert entry["result"]["error"] == entry["error"]
+    assert entry["result"]["errors"] == [
+        {
+            "diagnostics": [
+                "engine returned partial data at https://***@example.test",
+                {"source": "https://***@nested.example.test/data"},
+            ]
+        }
+    ]
+    assert entry["result"]["metrics"]["sharpe_ratio"] == "99"
+
+
 def _patch_sweep_pipeline(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     *,
     sharpe_by_threshold: dict[Any, str],
     failing_thresholds: set[Any] = frozenset(),
+    failed_result_thresholds: set[Any] = frozenset(),
 ) -> dict[str, Any]:
     """Wire run_platform_sweep dependencies; per-combo Sharpe keyed by 'threshold'."""
     observed: dict[str, Any] = {
@@ -204,6 +264,12 @@ def _patch_sweep_pipeline(
             threshold = getattr(strategy, "config", {}).get("threshold")
             if threshold in failing_thresholds:
                 raise RuntimeError(f"combo blew up at threshold={threshold}")
+            if threshold in failed_result_thresholds:
+                return SimpleNamespace(
+                    success=False,
+                    error=f"engine failed at https://failed-user:failed-password@example.test/{threshold}",
+                    threshold=threshold,
+                )
             return {"threshold": threshold}
 
         async def close(self) -> None:
@@ -219,12 +285,29 @@ def _patch_sweep_pipeline(
         observed["close_providers_on_finish"] = close_providers_on_finish
         return Backtester()
 
-    def fake_serialize(result: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "metrics": {"sharpe_ratio": sharpe_by_threshold[result["threshold"]]},
+    def fake_serialize(result: Any) -> dict[str, Any]:
+        threshold = result["threshold"] if isinstance(result, dict) else result.threshold
+        serialized = {
+            "metrics": {"sharpe_ratio": sharpe_by_threshold[threshold]},
             "trades": [],
             "duration_seconds": 1.0,
         }
+        if getattr(result, "success", True) is False:
+            serialized.update(
+                {
+                    "success": False,
+                    "error": result.error,
+                    "errors": [
+                        {
+                            "diagnostics": [
+                                result.error,
+                                {"source": "https://nested-user:nested-password@nested.example.test/data"},
+                            ]
+                        }
+                    ],
+                }
+            )
+        return serialized
 
     def fake_post_sweep_callback(env: object, payload: Any = None, *, action: str = "complete") -> None:
         observed["callbacks"].append({"action": action, "payload": payload})
@@ -315,6 +398,41 @@ def test_run_platform_sweep_isolates_failing_combo(monkeypatch: pytest.MonkeyPat
     failed_entry = uploaded["results"][-1]
     assert failed_entry["params"] == {"threshold": 0.2}
     assert "combo blew up" in failed_entry["error"]
+
+
+def test_run_platform_sweep_persists_redacted_failed_result_without_ranking_it_as_best(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    env = _env(SWEEP_CONFIG=json.dumps({"params": {"threshold": [0.1, 0.2]}}))
+    observed = _patch_sweep_pipeline(
+        monkeypatch,
+        tmp_path,
+        sharpe_by_threshold={0.1: "0.4", 0.2: "99"},
+        failed_result_thresholds={0.2},
+    )
+
+    payload = asyncio.run(sweep_runner.run_platform_sweep(env))
+
+    uploaded = observed["uploaded"]
+    successful_entry, failed_entry = uploaded["results"]
+    assert successful_entry["params"] == {"threshold": 0.1}
+    assert successful_entry["rank"] == 1
+    assert "result" not in successful_entry
+    assert failed_entry["params"] == {"threshold": 0.2}
+    assert failed_entry["rank"] == 2
+    assert failed_entry["error"] == "engine failed at https://***@example.test/0.2"
+    assert failed_entry["result"]["metrics"]["sharpe_ratio"] == "99"
+    assert failed_entry["result"]["errors"] == [
+        {
+            "diagnostics": [
+                "engine failed at https://***@example.test/0.2",
+                {"source": "https://***@nested.example.test/data"},
+            ]
+        }
+    ]
+    assert uploaded["best_result"]["metrics"]["sharpe_ratio"] == "0.4"
+    assert payload["result_summary"]["best_params"] == {"threshold": 0.1}
 
 
 def test_run_platform_sweep_fails_when_every_combo_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
