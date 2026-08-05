@@ -6,25 +6,31 @@ Tests verify that when inclusion_delay_blocks > 0:
 3. The execution_delayed_at_end counter accurately tracks these executions
 4. TradeRecord.delayed_at_end flag is set correctly for such trades
 """
-from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from almanak.framework.backtesting.models import IntentType
+from almanak.framework.backtesting.exceptions import NoAcceptableDataSourceError
+from almanak.framework.backtesting.models import IntentType, TradeRecord
+from almanak.framework.backtesting.pnl._engine_helpers import _drain_pending_intents_at_end
 from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 from almanak.framework.backtesting.pnl.data_provider import MarketState
 from almanak.framework.backtesting.pnl.engine import (
-
-
     DefaultFeeModel,
     DefaultSlippageModel,
     PnLBacktester,
 )
+from almanak.framework.backtesting.pnl.error_handling import BacktestErrorHandler
+from almanak.framework.backtesting.pnl.logging_utils import BacktestLogger
+from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+from almanak.framework.market.errors import PriceUnavailableError
+from almanak.services.backtest.serialization import serialize_result
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 
 
 class MockDataProviderWithTicks:
@@ -788,6 +794,66 @@ async def test_rejected_fill_notifies_strategy_with_failure():
 
 
 @pytest.mark.asyncio
+async def test_nonfatal_execution_error_records_one_rejected_trade(monkeypatch):
+    """A raised execution error is terminally rejected, never dropped.
+
+    This is the normal pending-intent lane from ALM-3141. ``PriceUnavailableError``
+    is recoverable under the backtest error policy, so the run may continue,
+    but the attempted intent must still produce exactly one failed ledger row.
+    """
+    from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+
+    backtester = _make_backtester()
+    backtester._error_handler = BacktestErrorHandler()
+    portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("10000"))
+    now = datetime.now(UTC)
+    config = PnLBacktestConfig(
+        start_time=now,
+        end_time=now + timedelta(hours=1),
+        token_funding=_pnl_token_funding(Decimal("10000")),
+        tokens=["WETH", "USDC"],
+        include_gas_costs=False,
+    )
+    strategy = RecordingStrategy()
+    intent = MockSwapIntent(from_token="USDC", to_token="WETH", amount=Decimal("100"))
+    execution_error = PriceUnavailableError(
+        token="WETH(arbitrum:unresolved)",
+        reason="no market price in swap.to_leg — refusing to size token units from USD",
+    )
+
+    async def raise_price_error(*args: Any, **kwargs: Any) -> Any:
+        raise execution_error
+
+    monkeypatch.setattr(backtester, "_execute_intent", raise_price_error)
+
+    await backtester._execute_ready_pending_intent(
+        intent=intent,
+        decision_time=now,
+        portfolio=portfolio,
+        market_state=_market_state(now),
+        config=config,
+        data_quality_tracker=None,
+        strategy=strategy,
+    )
+
+    assert len(portfolio.trades) == 1
+    rejected = portfolio.trades[0]
+    assert rejected.success is False
+    assert rejected.intent_type == IntentType.SWAP
+    assert rejected.error == str(execution_error)
+    assert rejected.metadata["failure_reason"] == str(execution_error)
+    assert rejected.metadata["rejection_code"] == "execution_error"
+    assert rejected.fee_usd == Decimal("0")
+    assert rejected.slippage_usd == Decimal("0")
+    assert rejected.gas_cost_usd == Decimal("0")
+    assert portfolio.cash_usd == Decimal("10000")
+    assert portfolio.tokens == {}
+    assert len(strategy.executed_callbacks) == 1
+    assert strategy.executed_callbacks[0][1] is False
+    assert strategy.executed_callbacks[0][2].trade_record is rejected
+
+
+@pytest.mark.asyncio
 async def test_applied_fill_notifies_strategy_with_success():
     """The happy path still reports success=True with the trade record."""
     from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
@@ -896,3 +962,142 @@ async def test_drain_at_end_execution_error_notifies_failure(monkeypatch):
     _, _, callback_result = failures[0]
     assert callback_result.success is False
     assert "simulated execution failure" in (callback_result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_nonfatal_drain_error_is_rejected_and_serialized(monkeypatch):
+    """The simulation-end drain obeys the same terminal-ledger contract."""
+    start_time = datetime.now(UTC)
+    data_provider = MockDataProviderWithTicks(num_ticks=2, start_time=start_time)
+    backtester = PnLBacktester(
+        data_provider=data_provider,
+        fee_models={"default": DefaultFeeModel()},
+        slippage_models={"default": DefaultSlippageModel()},
+    )
+    config = PnLBacktestConfig(
+        start_time=start_time,
+        end_time=start_time + timedelta(hours=2),
+        token_funding=_pnl_token_funding(Decimal("10000")),
+        tokens=["WETH", "USDC"],
+        include_gas_costs=False,
+        inclusion_delay_blocks=10,
+    )
+    intent = MockSwapIntent(from_token="USDC", to_token="WETH", amount=Decimal("100"))
+    strategy = RecordingStrategy(intents_to_return=[intent])
+    execution_error = PriceUnavailableError(token="WETH", reason="no market price in swap.to_leg")
+
+    async def raise_price_error(*args: Any, **kwargs: Any) -> Any:
+        raise execution_error
+
+    monkeypatch.setattr(backtester, "_execute_intent", raise_price_error)
+
+    result = await backtester.backtest(strategy, config)
+
+    assert result.error is None
+    assert len(result.trades) == 1
+    assert result.trades[0].success is False
+    assert result.trades[0].delayed_at_end is True
+    assert result.metrics.total_trades == 0
+    assert result.metrics.failed_trades == 1
+    assert result.execution_delayed_at_end == 1
+    assert result.decision_summary is not None
+    assert result.decision_summary["executions"] == {"fills": 0, "rejected": 1}
+    serialized = serialize_result(result)
+    assert serialized["trades"][0]["status"] == "rejected"
+    assert serialized["trades"][0]["rejection_reason"] == str(execution_error)
+
+
+@pytest.mark.asyncio
+async def test_drain_missing_data_without_handler_remains_fail_loud(monkeypatch):
+    """The final drain preserves the normal lane's no-fabrication contract."""
+    now = datetime.now(UTC)
+    backtester = _make_backtester()
+    backtester._error_handler = None
+    portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("10000"))
+    intent = MockSwapIntent(from_token="USDC", to_token="WETH", amount=Decimal("100"))
+    strategy = RecordingStrategy()
+    missing_data = NoAcceptableDataSourceError(
+        data_type="price",
+        identifier="WETH",
+        remediation="provide a measured WETH price",
+    )
+    state = SimpleNamespace(
+        pending_intents=[(intent, now, 1)],
+        last_market_state=_market_state(now),
+        portfolio=portfolio,
+        data_quality_tracker=None,
+        execution_delayed_at_end=0,
+    )
+    config = PnLBacktestConfig(
+        start_time=now,
+        end_time=now + timedelta(hours=1),
+        token_funding=_pnl_token_funding(Decimal("10000")),
+        tokens=["WETH", "USDC"],
+        include_gas_costs=False,
+    )
+
+    async def raise_missing_data(*args: Any, **kwargs: Any) -> Any:
+        raise missing_data
+
+    monkeypatch.setattr(backtester, "_execute_intent", raise_missing_data)
+
+    with pytest.raises(NoAcceptableDataSourceError) as raised:
+        await _drain_pending_intents_at_end(
+            backtester=backtester,
+            strategy=strategy,
+            config=config,
+            bt_logger=BacktestLogger(backtest_id="missing-data-drain"),
+            state=state,
+        )
+
+    assert raised.value is missing_data
+    assert portfolio.trades == []
+    assert state.execution_delayed_at_end == 0
+    assert len(strategy.executed_callbacks) == 1
+    assert strategy.executed_callbacks[0][1] is False
+    assert strategy.executed_callbacks[0][2].error == str(missing_data)
+
+
+@pytest.mark.asyncio
+async def test_hollow_guard_warns_when_emitted_intent_has_no_terminal_record(monkeypatch, caplog):
+    """Future ledger drops are visible even without decision-input failures."""
+    start_time = datetime.now(UTC)
+    data_provider = MockDataProviderWithTicks(num_ticks=2, start_time=start_time)
+    backtester = PnLBacktester(
+        data_provider=data_provider,
+        fee_models={"default": DefaultFeeModel()},
+        slippage_models={"default": DefaultSlippageModel()},
+    )
+    config = PnLBacktestConfig(
+        start_time=start_time,
+        end_time=start_time + timedelta(hours=2),
+        token_funding=_pnl_token_funding(Decimal("10000")),
+        tokens=["WETH", "USDC"],
+        include_gas_costs=False,
+        inclusion_delay_blocks=10,
+    )
+    intent = MockSwapIntent(from_token="USDC", to_token="WETH", amount=Decimal("100"))
+    strategy = MockStrategy(intents_to_return=[intent])
+
+    async def return_uncommitted_rejection(*args: Any, **kwargs: Any) -> TradeRecord:
+        return TradeRecord(
+            timestamp=start_time,
+            intent_type=IntentType.SWAP,
+            executed_price=Decimal("0"),
+            fee_usd=Decimal("0"),
+            slippage_usd=Decimal("0"),
+            gas_cost_usd=Decimal("0"),
+            pnl_usd=Decimal("0"),
+            success=False,
+            error="synthetic uncommitted rejection",
+        )
+
+    monkeypatch.setattr(backtester, "_execute_intent", return_uncommitted_rejection)
+
+    result = await backtester.backtest(strategy, config)
+
+    assert result.error is None
+    assert result.decision_summary is not None
+    assert result.decision_summary["intent_ticks"] == 1
+    assert result.decision_summary["executions"] == {"fills": 0, "rejected": 0}
+    assert "0 reached a terminal fill-or-rejection outcome" in caplog.text

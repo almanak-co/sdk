@@ -70,6 +70,7 @@ INVARIANT_ROWS: tuple[str, ...] = (
     "funding_fallback_provenance",
     "funding_lane_coherence",
     "rejection_no_state_change",
+    "execution_error_terminality",
     "cost_accounting",
     "gas_native_asset_pricing",
     "yield_tie_out",
@@ -145,6 +146,12 @@ CELLS: tuple[TrustCell, ...] = (
         "rejection_no_state_change",
         "swap",
         "A SWAP overspend fill is recorded as a failed trade with zeroed costs and zero state mutation.",
+    ),
+    _cell(
+        "execution_error_terminality",
+        "swap",
+        "A non-fatal exception raised during intent execution records exactly one rejected trade, "
+        "increments failed_trades, and leaves portfolio value unchanged (ALM-3141).",
     ),
     _cell(
         "cost_accounting",
@@ -580,6 +587,28 @@ class SyntheticPriceProvider:
     def max_timestamp(self) -> datetime:
         n_points = max((len(s) for s in self._series.values()), default=1)
         return START + timedelta(seconds=(n_points - 1) * TICK_SECONDS)
+
+
+class ExecutionPriceGapProvider(SyntheticPriceProvider):
+    """Advertise a token at preflight but omit its price during execution.
+
+    This reproduces ALM-3141 through the real pricing/sizing lane: the swap
+    target is accepted by preflight, then ``_execute_intent`` raises the same
+    recoverable ``PriceUnavailableError`` observed on staging.
+    """
+
+    def __init__(self, price_series: dict[TokenRef, list[Decimal]], missing_token: str) -> None:
+        super().__init__(price_series)
+        self._missing_token = missing_token.upper()
+
+    async def iterate(self, config: HistoricalDataConfig) -> AsyncIterator[tuple[datetime, MarketState]]:
+        async for timestamp, market_state in super().iterate(config):
+            market_state.prices = {
+                token: price
+                for token, price in market_state.prices.items()
+                if token_ref_display(token).upper() != self._missing_token
+            }
+            yield timestamp, market_state
 
 
 class ScriptedStrategy:

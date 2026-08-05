@@ -30,6 +30,7 @@ Candidate stop-the-line findings encoded as strict xfails by this module
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import math
 import sys
@@ -59,6 +60,7 @@ from almanak.framework.backtesting.pnl.data_manifest import (
     OUTCOME_DEGRADED,
 )
 from almanak.framework.backtesting.pnl.data_provider import MarketState
+from almanak.framework.backtesting.pnl.engine import DefaultFeeModel, DefaultSlippageModel, PnLBacktester
 from almanak.framework.backtesting.pnl.metrics_calculator import (
     calculate_max_drawdown,
     calculate_metrics,
@@ -82,6 +84,7 @@ from tests.validation.backtesting.trust_matrix import (
     START,
     TICK_SECONDS,
     USDC_ARBITRUM,
+    ExecutionPriceGapProvider,
     FundingCoherenceProbeStrategy,
     FundingGatedPerpStrategy,
     LPOpenDuck,
@@ -456,6 +459,50 @@ def test_swap_overspend_is_rejected_without_state_change() -> None:
     assert trade.metadata.get("fee_usd_unapplied") is not None
     assert result.metrics.total_fees_usd == Decimal("0")
     assert result.metrics.total_slippage_usd == Decimal("0")
+    assert result.final_capital_usd == INITIAL_CAPITAL
+    assert all(point.value_usd == INITIAL_CAPITAL for point in result.equity_curve)
+
+
+@pytest.mark.trust_cell("swap:execution_error_terminality")
+def test_swap_execution_error_records_terminal_rejection() -> None:
+    """A recoverable execution exception cannot disappear from the ledger."""
+    series = flat_series(8)
+    provider = ExecutionPriceGapProvider(series, missing_token="WETH")
+    config = PnLBacktestConfig(
+        start_time=START,
+        end_time=START + timedelta(hours=6),
+        interval_seconds=TICK_SECONDS,
+        token_funding=[
+            {
+                "symbol": "USDC",
+                "address": USDC_ARBITRUM,
+                "chain": "arbitrum",
+                "amount": str(INITIAL_CAPITAL),
+                "amount_type": "token",
+            }
+        ],
+        tokens=list(series),
+        include_gas_costs=False,
+        inclusion_delay_blocks=0,
+    )
+    backtester = PnLBacktester(
+        data_provider=provider,
+        fee_models={"default": DefaultFeeModel()},
+        slippage_models={"default": DefaultSlippageModel()},
+    )
+
+    result = asyncio.run(backtester.backtest(ScriptedStrategy([SwapDuck()]), config))
+
+    assert result.success
+    assert len(result.trades) == 1
+    rejected = result.trades[0]
+    assert rejected.success is False
+    assert rejected.metadata["rejection_code"] == "execution_error"
+    assert "PriceUnavailableError" in (rejected.error or "")
+    assert result.metrics.total_trades == 0
+    assert result.metrics.failed_trades == 1
+    assert result.decision_summary is not None
+    assert result.decision_summary["executions"] == {"fills": 0, "rejected": 1}
     assert result.final_capital_usd == INITIAL_CAPITAL
     assert all(point.value_usd == INITIAL_CAPITAL for point in result.equity_curve)
 

@@ -4414,6 +4414,7 @@ class PnLBacktester:
         data_quality_tracker: DataQualityTracker | None,
         strategy: Any,
     ) -> None:
+        trades_before_execution = len(portfolio.trades)
         try:
             trade_record = await self._execute_intent(
                 intent=intent,
@@ -4427,7 +4428,14 @@ class PnLBacktester:
             self._handle_pending_missing_data(intent, strategy, market_state.timestamp, exc)
             return
         except Exception as exc:
-            self._handle_pending_execution_error(intent, strategy, market_state.timestamp, exc)
+            self._handle_pending_execution_error(
+                intent,
+                strategy,
+                portfolio,
+                market_state.timestamp,
+                exc,
+                trades_before_execution=trades_before_execution,
+            )
             return
 
         self._log_pending_trade_outcome(trade_record, decision_time, market_state.timestamp)
@@ -4495,11 +4503,21 @@ class PnLBacktester:
         self,
         intent: Any,
         strategy: Any,
+        portfolio: SimulatedPortfolio,
         timestamp: datetime,
         exc: Exception,
+        *,
+        trades_before_execution: int,
     ) -> None:
-        self._notify_intent_failure(strategy, intent, exc)
         if self._error_handler is None:
+            trade_record = self._record_intent_execution_rejection(
+                intent,
+                portfolio,
+                timestamp,
+                exc,
+                trades_before_execution=trades_before_execution,
+            )
+            _engine_helpers.notify_intent_outcome(self, strategy, intent, trade_record, logger)
             logger.warning(f"Failed to execute intent at {timestamp}: {exc}")
             return
         result = self._error_handler.handle_error(
@@ -4507,9 +4525,68 @@ class PnLBacktester:
             context=self._execute_intent_context(timestamp, intent),
         )
         if result.should_stop:
+            self._notify_intent_failure(strategy, intent, exc)
             logger.error(f"Fatal error executing intent at {timestamp}: {exc}")
             raise exc
+        trade_record = self._record_intent_execution_rejection(
+            intent,
+            portfolio,
+            timestamp,
+            exc,
+            trades_before_execution=trades_before_execution,
+        )
+        _engine_helpers.notify_intent_outcome(self, strategy, intent, trade_record, logger)
         logger.warning(f"Failed to execute intent at {timestamp}: {exc} - skipping")
+
+    def _record_intent_execution_rejection(
+        self,
+        intent: Any,
+        portfolio: SimulatedPortfolio,
+        timestamp: datetime,
+        exc: Exception,
+        *,
+        trades_before_execution: int,
+        delayed_at_end: bool = False,
+    ) -> TradeRecord:
+        """Record one terminal rejection for a non-fatal execution exception.
+
+        ``_execute_intent`` normally appends exactly one canonical trade via
+        ``SimulatedPortfolio.apply_fill``. If a producer raises before that
+        point, the attempted intent still needs a terminal ledger outcome.
+        Reuse the portfolio's failed-fill path so costs and state mutation are
+        guaranteed to stay zero. The pre-call trade count prevents a second
+        row if an exception ever escapes after a producer already committed a
+        terminal record.
+        """
+        if len(portfolio.trades) > trades_before_execution:
+            return portfolio.trades[-1]
+
+        from .intent_extraction import get_intent_protocol, get_intent_tokens, get_intent_type
+
+        failure_reason = str(exc)
+        tokens: list[TokenRef] = list(get_intent_tokens(intent))
+        rejected_fill = SimulatedFill(
+            timestamp=timestamp,
+            intent_type=get_intent_type(intent),
+            protocol=get_intent_protocol(intent),
+            tokens=tokens,
+            executed_price=Decimal("0"),
+            amount_usd=Decimal("0"),
+            fee_usd=Decimal("0"),
+            slippage_usd=Decimal("0"),
+            gas_cost_usd=Decimal("0"),
+            tokens_in={},
+            tokens_out={},
+            success=False,
+            metadata={
+                "intent": str(intent),
+                "failure_reason": failure_reason,
+                "rejection_code": "execution_error",
+            },
+            delayed_at_end=delayed_at_end,
+        )
+        portfolio.apply_fill(rejected_fill)
+        return portfolio.trades[-1]
 
     @staticmethod
     def _execute_intent_context(timestamp: datetime, intent: Any) -> str:

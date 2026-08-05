@@ -46,6 +46,7 @@ from typing import TYPE_CHECKING, Any
 from almanak.core.chains import DEFAULT_CHAIN, ChainRegistry
 from almanak.core.chains._helpers import native_symbols_for
 from almanak.core.intent_types import IntentType
+from almanak.framework.backtesting.exceptions import NoAcceptableDataSourceError
 from almanak.framework.backtesting.models import (
     BacktestEngine,
     BacktestMetrics,
@@ -1167,6 +1168,7 @@ async def _drain_pending_intents_at_end(
             f"(delayed execution using last market state from {state.last_market_state.timestamp})"
         )
         for intent, decision_time, _ in state.pending_intents:
+            trades_before_execution = len(state.portfolio.trades)
             try:
                 trade_record = await backtester._execute_intent(
                     intent=intent,
@@ -1198,14 +1200,15 @@ async def _drain_pending_intents_at_end(
                         f"reason={trade_record.metadata.get('failure_reason', 'fill rejected')}"
                     )
                 notify_intent_outcome(backtester, strategy, intent, trade_record, bt_logger)
+            except NoAcceptableDataSourceError as exc:
+                backtester._handle_pending_missing_data(
+                    intent,
+                    strategy,
+                    state.last_market_state.timestamp,
+                    exc,
+                )
+                continue
             except Exception as e:
-                # Notify strategy of execution failure
-                if hasattr(strategy, "on_intent_executed"):
-                    try:
-                        callback_result = backtester._build_callback_result(intent, None, success=False, error=str(e))
-                        strategy.on_intent_executed(intent, False, callback_result)
-                    except Exception as notify_err:
-                        bt_logger.debug(f"on_intent_executed (failure) raised: {notify_err}")
                 # Use error handler for intent execution errors
                 if backtester._error_handler:
                     result = backtester._error_handler.handle_error(
@@ -1213,12 +1216,21 @@ async def _drain_pending_intents_at_end(
                         context=f"execute_pending_intent:end:{type(intent).__name__}",
                     )
                     if result.should_stop:
+                        backtester._notify_intent_failure(strategy, intent, e)
                         bt_logger.error(f"Fatal error executing pending intent at simulation end: {e}")
                         raise
-                    # Non-fatal: log warning and skip this intent
-                    bt_logger.warning(f"Failed to execute pending intent at simulation end: {e} - skipping")
-                else:
-                    bt_logger.warning(f"Failed to execute pending intent at simulation end: {e}")
+                trade_record = backtester._record_intent_execution_rejection(
+                    intent,
+                    state.portfolio,
+                    state.last_market_state.timestamp,
+                    e,
+                    trades_before_execution=trades_before_execution,
+                    delayed_at_end=True,
+                )
+                state.execution_delayed_at_end += 1
+                notify_intent_outcome(backtester, strategy, intent, trade_record, bt_logger)
+                suffix = " - skipping" if backtester._error_handler else ""
+                bt_logger.warning(f"Failed to execute pending intent at simulation end: {e}{suffix}")
     elif state.pending_intents:
         bt_logger.warning(
             f"Cannot execute {len(state.pending_intents)} remaining pending intents: no valid market state available"
@@ -1461,7 +1473,13 @@ def finalize_backtest_result(
     # Compliance is True only if there are no violations
     institutional_compliance = len(state.compliance_violations) == 0
 
-    # decide()-time data-failure report + hollow-run detection (ALM-2951).
+    # Decision telemetry aggregate (iteration_summary counterpart): one block
+    # that answers "what did the strategy decide, and why did it hold" — the
+    # per-tick records themselves ship as a separate artifact, not result.json.
+    decision_summary = state.decision_log.summary(trades=state.portfolio.trades)
+
+    # decide()-time data-failure report + hollow-run detection (ALM-2951,
+    # ALM-3141).
     decision_input_failures = _decision_input_failure_report(state)
     # Attribution rules (each shape observed on real staging runs):
     # - executed fills, not the trades list — a rejections-only run is hollow
@@ -1472,7 +1490,13 @@ def finalize_backtest_result(
     #   warning (a dead strategy leg hides behind a busy one).
     executed_fills = [t for t in state.portfolio.trades if t.success]
     non_warm_up = [f for f in decision_input_failures if f["pattern"] != "warm_up"]
-    if non_warm_up and not executed_fills:
+    terminal_execution_count = sum(decision_summary["executions"].values())
+    if decision_summary["intent_ticks"] > 0 and terminal_execution_count == 0:
+        bt_logger.warning(
+            f"HOLLOW BACKTEST: {decision_summary['intent_ticks']} intent(s) emitted but 0 reached a terminal "
+            f"fill-or-rejection outcome; the execution ledger is incomplete and performance metrics are not trustworthy"
+        )
+    elif non_warm_up and not executed_fills:
         top = "; ".join(f"{f['source']}:{f['key']} ({f['ticks']} ticks, {f['pattern']})" for f in non_warm_up[:3])
         bt_logger.warning(
             f"HOLLOW BACKTEST: 0 executed fills, {state.no_intent_ticks}/{state.tick_count} no-intent ticks, "
@@ -1490,10 +1514,6 @@ def finalize_backtest_result(
                 f"Starved: {top}"
             )
 
-    # Decision telemetry aggregate (iteration_summary counterpart): one block
-    # that answers "what did the strategy decide, and why did it hold" — the
-    # per-tick records themselves ship as a separate artifact, not result.json.
-    decision_summary = state.decision_log.summary(trades=state.portfolio.trades)
     bt_logger.info(
         f"Decision summary: {decision_summary['ticks']} ticks — "
         f"{decision_summary['intent_ticks']} intent(s), {decision_summary['hold_ticks']} hold(s); "
