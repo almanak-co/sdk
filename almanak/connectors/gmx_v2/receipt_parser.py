@@ -899,6 +899,16 @@ class GMXv2ReceiptParser:
         self.chain = str(chain).lower() if chain else None
         self.registry = EventRegistry(EVENT_TOPICS, EVENT_NAME_TO_TYPE)
 
+    @staticmethod
+    def build_extract_kwargs(*, field: str, bundle_metadata: dict[str, Any]) -> dict[str, Any]:
+        """Thread compiler-verified index decimals into perp fill scaling."""
+        if field != "perp_fill":
+            return {}
+        raw = bundle_metadata.get("index_token_decimals")
+        if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0 or raw > 30:
+            return {}
+        return {"index_token_decimals_override": raw}
+
     def parse_receipt(self, receipt: dict[str, Any]) -> ParseResult:  # noqa: C901
         """Parse a transaction receipt.
 
@@ -1247,7 +1257,12 @@ class GMXv2ReceiptParser:
             return None
         return Decimal(raw) / Decimal(10**30)
 
-    def _execution_price_usd(self, raw: Any, market: str | None) -> Decimal | None:
+    def _execution_price_usd(
+        self,
+        raw: Any,
+        market: str | None,
+        index_token_decimals_override: int | None = None,
+    ) -> Decimal | None:
         """Scale GMX ``executionPrice`` to USD-per-token (VIB-6110).
 
         GMX stores ``executionPrice`` as a 30-decimal ratio over the index token's
@@ -1260,10 +1275,12 @@ class GMXv2ReceiptParser:
         """
         if raw is None or isinstance(raw, bool) or not isinstance(raw, int):
             return None
-        decimals = index_token_decimals(self.chain, market)
+        decimals = index_token_decimals_override
+        if decimals is None:
+            decimals = index_token_decimals(self.chain, market)
         if decimals is None:
             return None
-        return Decimal(raw) * Decimal(10**decimals) / Decimal(10**30)
+        return Decimal(raw).scaleb(decimals - 30)
 
     @staticmethod
     def _fee_amount_to_usd(amount_raw: Any, price_min_raw: Any, price_max_raw: Any) -> Decimal | None:
@@ -2506,6 +2523,7 @@ class GMXv2ReceiptParser:
         receipt: dict[str, Any],
         order_key: str | None = None,
         account: str | None = None,
+        index_token_decimals_override: int | None = None,
     ) -> ExtractResult[PerpFillData]:
         """Fail-closed variant of :meth:`extract_perp_fill` — see VIB-3159.
 
@@ -2519,7 +2537,12 @@ class GMXv2ReceiptParser:
         if self._normalized_order_key_filter(order_key) is not None:
             missing = f"no PositionIncrease/PositionDecrease event for order {order_key} to build fill economics"
         return self._wrap_extract(
-            lambda parsed_receipt: self.extract_perp_fill(parsed_receipt, order_key=order_key, account=account),
+            lambda parsed_receipt: self.extract_perp_fill(
+                parsed_receipt,
+                order_key=order_key,
+                account=account,
+                index_token_decimals_override=index_token_decimals_override,
+            ),
             receipt,
             missing,
         )
@@ -2529,6 +2552,7 @@ class GMXv2ReceiptParser:
         receipt: dict[str, Any],
         order_key: str | None = None,
         account: str | None = None,
+        index_token_decimals_override: int | None = None,
     ) -> PerpFillData | None:
         """Build typed fill economics from a GMX keeper receipt (VIB-3872 WI-1).
 
@@ -2637,12 +2661,20 @@ class GMXv2ReceiptParser:
             position_key=position.get("position_key") or None,
             order_key=position.get("order_key") or None,
             entry_price=(
-                self._execution_price_usd(position.get("execution_price_raw"), position.get("market"))
+                self._execution_price_usd(
+                    position.get("execution_price_raw"),
+                    position.get("market"),
+                    index_token_decimals_override,
+                )
                 if is_open
                 else None
             ),
             exit_price=(
-                self._execution_price_usd(position.get("execution_price_raw"), position.get("market"))
+                self._execution_price_usd(
+                    position.get("execution_price_raw"),
+                    position.get("market"),
+                    index_token_decimals_override,
+                )
                 if not is_open
                 else None
             ),

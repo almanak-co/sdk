@@ -14,6 +14,7 @@ import json
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -245,6 +246,38 @@ class TestGmxCorrelation:
         assert filt["fromBlock"] == _entry().submission_block
         assert filt["toBlock"] == "latest"
         assert filt["topics"][2] == _OPEN_ORDER_KEY
+
+    def test_unlisted_market_fill_uses_gateway_verified_decimals(self, monkeypatch, receipts) -> None:
+        parsed = ps.GMXv2ReceiptParser(chain="arbitrum").extract_perp_fill(receipts["close"])
+        assert parsed is not None and parsed.order_key and parsed.exit_price is None
+        tx = "0x" + receipts["_provenance"]["close_tx"]
+        eth = _FakeEth(
+            logs_result=[_order_log("OrderExecuted", parsed.order_key, tx)],
+            receipts_by_tx={tx: receipts["close"]},
+        )
+        _patch(monkeypatch, eth=eth)
+        resolve_market = Mock(return_value=SimpleNamespace(index_token_decimals=18))
+        monkeypatch.setattr(ps, "resolve_market_via_gateway", resolve_market)
+
+        gateway_client = object()
+        verdict = ps.resolve_perp_settlements(
+            gateway_client=gateway_client,
+            chain="arbitrum",
+            wallet_address="0xwallet",
+            watch_entries=(
+                PerpSettlementWatchEntry(
+                    order_key=parsed.order_key,
+                    submission_block=1,
+                    is_open=False,
+                    seconds_since_submission=10,
+                ),
+            ),
+        )[0]
+
+        assert verdict.state is PerpSettlementState.EXECUTED
+        assert verdict.fill_data is not None
+        assert verdict.fill_data.exit_price == Decimal("0.144104694440")
+        resolve_market.assert_called_once_with(gateway_client, chain="arbitrum", market=parsed.market)
 
     def test_cancelled_without_position_event_has_no_fill(self, monkeypatch, receipts) -> None:
         tx = "0xcancel"

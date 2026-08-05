@@ -7,7 +7,7 @@ This document describes the gRPC API exposed by the Almanak Gateway.
 | Service | Methods | Description |
 |---------|---------|-------------|
 | Health | 3 | Standard gRPC health checks and chain registration |
-| MarketService | 8 | Price data, Pendle PT/YT-USD price, balances, batch balances, technical indicators, Uniswap V4 pool key lookup, and verified lending-market resolution |
+| MarketService | 9 | Price data, Pendle PT/YT-USD price, balances, batch balances, technical indicators, Uniswap V4 pool key lookup, and verified lending/perpetual-market resolution |
 | StateService | 30 | Strategy state persistence, portfolio snapshots/metrics, transaction ledger, accounting events, position events, accounting outbox, atomic ledger+registry writes, and cutover migration state |
 | ExecutionService | 3 | Intent compilation and transaction execution |
 | ObserveService | 4 | Logging, alerts, metrics, and timeline events |
@@ -324,6 +324,50 @@ message LendingMarket {
   string irm = 11;
   bool verified = 12;            // true only after on-chain recompute+compare
   LendingMarketSource source = 13;
+}
+```
+
+### GetPerpMarket
+
+Resolves one perpetual market through the connector-owned discovery capability and
+verifies its market/index/long/short token tuple on-chain before returning it. Exact
+market addresses and connector-defined labels are accepted. An unknown market returns
+`NOT_FOUND`; unsupported routing or ambiguous/unverified metadata fails closed.
+
+```protobuf
+rpc GetPerpMarket(GetPerpMarketRequest) returns (PerpMarketResponse)
+```
+
+**Request:**
+```protobuf
+message GetPerpMarketRequest {
+  string protocol = 1;  // connector slug (for example, "gmx_v2")
+  string chain = 2;
+  string market = 3;    // canonical label, full venue name, or exact address
+}
+```
+
+**Response:**
+```protobuf
+message PerpMarketResponse {
+  PerpMarket market = 1;  // populated only after on-chain tuple verification
+  bool success = 2;
+  string error = 3;
+}
+
+message PerpMarket {
+  string protocol = 1;
+  string chain = 2;
+  string label = 3;
+  string market_token = 4;
+  string index_token = 5;
+  string index_symbol = 6;
+  int32 index_token_decimals = 7;
+  string long_token = 8;
+  string long_token_symbol = 9;
+  string short_token = 10;
+  string short_token_symbol = 11;
+  bool verified = 12;
 }
 ```
 

@@ -118,6 +118,11 @@ service MarketService {
   // or a non-existent market is a hard error, never a fabricated record. This
   // is the ONLY surface that may promote a market_id into a config.
   rpc GetLendingMarket(GetLendingMarketRequest) returns (LendingMarketResponse);
+
+  // VIB-6561 — resolve a venue market label/address through connector-owned
+  // discovery, then verify its immutable address tuple on-chain. API metadata
+  // alone is never promoted into a tradable market.
+  rpc GetPerpMarket(GetPerpMarketRequest) returns (PerpMarketResponse);
 }
 
 message PriceRequest {
@@ -370,6 +375,35 @@ message GetLendingMarketRequest {
 
 message LendingMarketResponse {
   LendingMarket market = 1;  // populated only when success && verified
+  bool success = 2;
+  string error = 3;
+}
+
+// VIB-6561 — verified perpetual-market identity. Decimals are explicit venue
+// metadata: synthetic index-token addresses may have no ERC-20 contract.
+message PerpMarket {
+  string protocol = 1;
+  string chain = 2;
+  string label = 3;
+  string market_token = 4;
+  string index_token = 5;
+  string index_symbol = 6;
+  int32 index_token_decimals = 7;
+  string long_token = 8;
+  string long_token_symbol = 9;
+  string short_token = 10;
+  string short_token_symbol = 11;
+  bool verified = 12;
+}
+
+message GetPerpMarketRequest {
+  string protocol = 1;
+  string chain = 2;
+  string market = 3;  // canonical label (HYPE/USD) or exact market address
+}
+
+message PerpMarketResponse {
+  PerpMarket market = 1;
   bool success = 2;
   string error = 3;
 }

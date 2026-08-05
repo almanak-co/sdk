@@ -1276,6 +1276,107 @@ class LendingMarketResponse(_message.Message):
 Global___LendingMarketResponse: _TypeAlias = LendingMarketResponse  # noqa: Y015
 
 @_typing.final
+class PerpMarket(_message.Message):
+    """VIB-6561 — verified perpetual-market identity. Decimals are explicit venue
+    metadata: synthetic index-token addresses may have no ERC-20 contract.
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    PROTOCOL_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    LABEL_FIELD_NUMBER: _builtins.int
+    MARKET_TOKEN_FIELD_NUMBER: _builtins.int
+    INDEX_TOKEN_FIELD_NUMBER: _builtins.int
+    INDEX_SYMBOL_FIELD_NUMBER: _builtins.int
+    INDEX_TOKEN_DECIMALS_FIELD_NUMBER: _builtins.int
+    LONG_TOKEN_FIELD_NUMBER: _builtins.int
+    LONG_TOKEN_SYMBOL_FIELD_NUMBER: _builtins.int
+    SHORT_TOKEN_FIELD_NUMBER: _builtins.int
+    SHORT_TOKEN_SYMBOL_FIELD_NUMBER: _builtins.int
+    VERIFIED_FIELD_NUMBER: _builtins.int
+    protocol: _builtins.str
+    chain: _builtins.str
+    label: _builtins.str
+    market_token: _builtins.str
+    index_token: _builtins.str
+    index_symbol: _builtins.str
+    index_token_decimals: _builtins.int
+    long_token: _builtins.str
+    long_token_symbol: _builtins.str
+    short_token: _builtins.str
+    short_token_symbol: _builtins.str
+    verified: _builtins.bool
+    def __init__(
+        self,
+        *,
+        protocol: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        label: _builtins.str = ...,
+        market_token: _builtins.str = ...,
+        index_token: _builtins.str = ...,
+        index_symbol: _builtins.str = ...,
+        index_token_decimals: _builtins.int = ...,
+        long_token: _builtins.str = ...,
+        long_token_symbol: _builtins.str = ...,
+        short_token: _builtins.str = ...,
+        short_token_symbol: _builtins.str = ...,
+        verified: _builtins.bool = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "index_symbol", b"index_symbol", "index_token", b"index_token", "index_token_decimals", b"index_token_decimals", "label", b"label", "long_token", b"long_token", "long_token_symbol", b"long_token_symbol", "market_token", b"market_token", "protocol", b"protocol", "short_token", b"short_token", "short_token_symbol", b"short_token_symbol", "verified", b"verified"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___PerpMarket: _TypeAlias = PerpMarket  # noqa: Y015
+
+@_typing.final
+class GetPerpMarketRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    PROTOCOL_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    MARKET_FIELD_NUMBER: _builtins.int
+    protocol: _builtins.str
+    chain: _builtins.str
+    market: _builtins.str
+    """canonical label (HYPE/USD) or exact market address"""
+    def __init__(
+        self,
+        *,
+        protocol: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        market: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "market", b"market", "protocol", b"protocol"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetPerpMarketRequest: _TypeAlias = GetPerpMarketRequest  # noqa: Y015
+
+@_typing.final
+class PerpMarketResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    MARKET_FIELD_NUMBER: _builtins.int
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    success: _builtins.bool
+    error: _builtins.str
+    @_builtins.property
+    def market(self) -> Global___PerpMarket: ...
+    def __init__(
+        self,
+        *,
+        market: Global___PerpMarket | None = ...,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _HasFieldArgType: _TypeAlias = _typing.Literal["market", b"market"]  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "market", b"market", "success", b"success"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___PerpMarketResponse: _TypeAlias = PerpMarketResponse  # noqa: Y015
+
+@_typing.final
 class LoadStateRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 

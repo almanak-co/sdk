@@ -257,6 +257,11 @@ class MarketServiceStub(object):
                 request_serializer=gateway__pb2.GetLendingMarketRequest.SerializeToString,
                 response_deserializer=gateway__pb2.LendingMarketResponse.FromString,
                 _registered_method=True)
+        self.GetPerpMarket = channel.unary_unary(
+                '/almanak.gateway.proto.MarketService/GetPerpMarket',
+                request_serializer=gateway__pb2.GetPerpMarketRequest.SerializeToString,
+                response_deserializer=gateway__pb2.PerpMarketResponse.FromString,
+                _registered_method=True)
 
 
 class MarketServiceServicer(object):
@@ -359,6 +364,15 @@ class MarketServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetPerpMarket(self, request, context):
+        """VIB-6561 — resolve a venue market label/address through connector-owned
+        discovery, then verify its immutable address tuple on-chain. API metadata
+        alone is never promoted into a tradable market.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_MarketServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -401,6 +415,11 @@ def add_MarketServiceServicer_to_server(servicer, server):
                     servicer.GetLendingMarket,
                     request_deserializer=gateway__pb2.GetLendingMarketRequest.FromString,
                     response_serializer=gateway__pb2.LendingMarketResponse.SerializeToString,
+            ),
+            'GetPerpMarket': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetPerpMarket,
+                    request_deserializer=gateway__pb2.GetPerpMarketRequest.FromString,
+                    response_serializer=gateway__pb2.PerpMarketResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -623,6 +642,33 @@ class MarketService(object):
             '/almanak.gateway.proto.MarketService/GetLendingMarket',
             gateway__pb2.GetLendingMarketRequest.SerializeToString,
             gateway__pb2.LendingMarketResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetPerpMarket(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.MarketService/GetPerpMarket',
+            gateway__pb2.GetPerpMarketRequest.SerializeToString,
+            gateway__pb2.PerpMarketResponse.FromString,
             options,
             channel_credentials,
             insecure,

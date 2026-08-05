@@ -23,9 +23,13 @@ from almanak.connectors._base.gateway_capabilities import (
     LENDING_MARKET_SOURCE_CURATED_CATALOG,
     LENDING_MARKET_SOURCE_ONCHAIN_VERIFY,
     GatewayLendingMarketDiscoveryCapability,
+    GatewayPerpMarketDiscoveryCapability,
     GatewayPoolKeyCacheCapability,
     LendingMarketRecord,
     LendingMarketVerificationError,
+    PerpMarketCatalogueUnavailable,
+    PerpMarketRecord,
+    PerpMarketVerificationError,
     PoolKeyCacheError,
     PoolKeyCacheProtocol,
 )
@@ -463,6 +467,24 @@ def _lending_market_to_proto(record: LendingMarketRecord) -> gateway_pb2.Lending
     )
 
 
+def _perp_market_to_proto(record: PerpMarketRecord) -> gateway_pb2.PerpMarket:
+    """Map verified connector metadata to the venue-neutral wire message."""
+    return gateway_pb2.PerpMarket(
+        protocol=record.protocol,
+        chain=record.chain,
+        label=record.label,
+        market_token=record.market_token,
+        index_token=record.index_token,
+        index_symbol=record.index_symbol,
+        index_token_decimals=record.index_token_decimals,
+        long_token=record.long_token,
+        long_token_symbol=record.long_token_symbol,
+        short_token=record.short_token,
+        short_token_symbol=record.short_token_symbol,
+        verified=record.verified,
+    )
+
+
 class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
     """Implements MarketService gRPC interface.
 
@@ -526,6 +548,8 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         # here). ``None`` until first use so construction order vs. connector
         # registration cannot matter.
         self._lending_market_discovery_providers: dict[str, GatewayLendingMarketDiscoveryCapability] | None = None
+        # VIB-6561 — connector-owned, verified perpetual-market discovery.
+        self._perp_market_discovery_providers: dict[str, GatewayPerpMarketDiscoveryCapability] | None = None
 
     # Class-level default so a servicer built via ``__new__`` (some unit tests
     # skip ``__init__`` and inject ``_price_aggregator`` directly to mock the
@@ -2414,3 +2438,82 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             market=_lending_market_to_proto(record),
             success=True,
         )
+
+    def _perp_discovery_providers(self) -> dict[str, GatewayPerpMarketDiscoveryCapability]:
+        providers = getattr(self, "_perp_market_discovery_providers", None)
+        if providers is None:
+            providers = {}
+            for conn in GATEWAY_REGISTRY.capability_providers(GatewayPerpMarketDiscoveryCapability):  # type: ignore[type-abstract]
+                slug = str(getattr(conn, "protocol", "")).lower()
+                existing = providers.get(slug)
+                if existing is not None and existing is not conn:
+                    raise RuntimeError(
+                        f"Duplicate perp-market-discovery provider for protocol {slug!r}: "
+                        f"{type(existing).__qualname__} vs {type(conn).__qualname__}"
+                    )
+                providers[slug] = conn
+            self._perp_market_discovery_providers = providers
+        return providers
+
+    async def GetPerpMarket(
+        self,
+        request: gateway_pb2.GetPerpMarketRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.PerpMarketResponse:
+        """Resolve one perpetual market and verify its identity on-chain (VIB-6561)."""
+        from almanak.gateway.services.pt_rpc_adapter import build_gateway_eth_call
+
+        protocol = (request.protocol or "").strip().lower()
+        chain = (request.chain or "").strip().lower()
+        market = (request.market or "").strip()
+        if not protocol or not chain or not market:
+            msg = "protocol, chain, and market are required"
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(msg)
+            return gateway_pb2.PerpMarketResponse(success=False, error=msg)
+
+        provider = self._perp_discovery_providers().get(protocol)
+        if provider is None:
+            msg = f"unsupported protocol: {protocol!r} (known: {sorted(self._perp_discovery_providers())})"
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(msg)
+            return gateway_pb2.PerpMarketResponse(success=False, error=msg)
+        if chain not in provider.perp_market_discovery_chains():
+            msg = f"protocol {protocol!r} does not support perp-market discovery on {chain!r}"
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(msg)
+            return gateway_pb2.PerpMarketResponse(success=False, error=msg)
+
+        try:
+            record = await provider.resolve_perp_market(
+                chain=chain,
+                market=market,
+                eth_call=build_gateway_eth_call(chain=chain, network=self.settings.network),
+            )
+        except PerpMarketCatalogueUnavailable as exc:
+            logger.warning("GetPerpMarket catalogue unavailable for %s/%s/%s: %s", protocol, chain, market, exc)
+            context.set_code(grpc.StatusCode.UNAVAILABLE)
+            context.set_details(str(exc))
+            return gateway_pb2.PerpMarketResponse(success=False, error=str(exc))
+        except (ValueError, PerpMarketVerificationError) as exc:
+            logger.warning("GetPerpMarket rejected %s/%s/%s: %s", protocol, chain, market, exc)
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(exc))
+            return gateway_pb2.PerpMarketResponse(success=False, error=str(exc))
+        except Exception:
+            logger.exception("GetPerpMarket failed for %s/%s/%s", protocol, chain, market)
+            msg = "perp-market discovery unavailable; see gateway logs"
+            context.set_code(grpc.StatusCode.UNAVAILABLE)
+            context.set_details(msg)
+            return gateway_pb2.PerpMarketResponse(success=False, error=msg)
+        if record is None:
+            msg = f"market {market!r} does not exist on {protocol}/{chain}"
+            context.set_code(grpc.StatusCode.NOT_FOUND)
+            context.set_details(msg)
+            return gateway_pb2.PerpMarketResponse(success=False, error=msg)
+        if not record.verified:
+            msg = f"market {market!r} was returned without on-chain verification"
+            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            context.set_details(msg)
+            return gateway_pb2.PerpMarketResponse(success=False, error=msg)
+        return gateway_pb2.PerpMarketResponse(market=_perp_market_to_proto(record), success=True)

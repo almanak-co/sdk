@@ -1,7 +1,9 @@
 """GMX V2 market collateral rules.
 
-Single source of truth for the valid ``(market, collateral_token)`` pairs on
-GMX V2 across supported chains.
+Offline fallback for valid ``(market, collateral_token)`` pairs on GMX V2.
+Live compilation uses the VIB-6561 gateway registry's on-chain-verified
+``longToken`` / ``shortToken`` addresses; this table preserves deterministic
+permission discovery and operation when the dynamic surface is unavailable.
 
 Why this module exists
 ----------------------

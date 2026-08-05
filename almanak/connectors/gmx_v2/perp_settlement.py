@@ -35,6 +35,7 @@ from almanak.connectors._strategy_base.runner_hook_registry import (
     PerpSettlementWatchEntry,
 )
 from almanak.connectors.gmx_v2.addresses import GMX_V2
+from almanak.connectors.gmx_v2.market_metadata import resolve_market_via_gateway
 from almanak.connectors.gmx_v2.receipt_parser import TOPIC_TO_EVENT, GMXv2ReceiptParser
 from almanak.connectors.gmx_v2.teardown_reads import read_pending_orders
 from almanak.framework.web3.gateway_provider import get_gateway_web3
@@ -151,6 +152,7 @@ def resolve_perp_settlements(
             continue
         verdicts.append(
             _resolve_one(
+                gateway_client=gateway_client,
                 web3=web3,
                 emitter=emitter,
                 parser=parser,
@@ -196,6 +198,7 @@ def _setup_unmeasured(entry: PerpSettlementWatchEntry, reason: str, timeout_seco
 
 def _resolve_one(
     *,
+    gateway_client: Any,
     web3: Web3,
     emitter: str,
     parser: GMXv2ReceiptParser,
@@ -230,6 +233,7 @@ def _resolve_one(
     outcome_log = _first_outcome_log(logs)
     if outcome_log is not None:
         return _verdict_from_outcome(
+            gateway_client=gateway_client,
             web3=web3,
             parser=parser,
             entry=entry,
@@ -267,6 +271,7 @@ def _first_outcome_log(logs: Any) -> tuple[str, Any] | None:
 
 def _verdict_from_outcome(
     *,
+    gateway_client: Any,
     web3: Web3,
     parser: GMXv2ReceiptParser,
     entry: PerpSettlementWatchEntry,
@@ -303,7 +308,25 @@ def _verdict_from_outcome(
     # VIB-6061: ``account`` additionally measures the keeper execution fee off the
     # same receipt. It is required, not optional — the refund's receiver is what
     # proves the escrow being split was ours (see ``_select_execution_fee_events``).
-    fill = parser.extract_perp_fill(cast("dict[str, Any]", receipt), order_key=order_key, account=wallet_address)
+    receipt_dict = cast("dict[str, Any]", receipt)
+    fill = parser.extract_perp_fill(receipt_dict, order_key=order_key, account=wallet_address)
+    if fill is not None and fill.market and fill.entry_price is None and fill.exit_price is None:
+        try:
+            metadata = resolve_market_via_gateway(gateway_client, chain=parser.chain or "", market=fill.market)
+        except Exception as exc:  # noqa: BLE001 — settlement stays measured; only price remains unmeasured
+            logger.warning(
+                "GMX settlement index decimals unavailable for market %s on %s: %s",
+                fill.market,
+                parser.chain,
+                exc,
+            )
+        else:
+            fill = parser.extract_perp_fill(
+                receipt_dict,
+                order_key=order_key,
+                account=wallet_address,
+                index_token_decimals_override=metadata.index_token_decimals,
+            )
 
     if state is PerpSettlementState.EXECUTED:
         if fill is None:

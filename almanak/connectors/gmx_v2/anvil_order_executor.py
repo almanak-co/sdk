@@ -49,6 +49,11 @@ from almanak.connectors._strategy_base.rpc import (
 )
 from almanak.connectors.gmx_v2.adapter import GMX_V2_ADDRESSES
 from almanak.connectors.gmx_v2.addresses import index_price_symbol, index_token_decimals
+from almanak.connectors.gmx_v2.market_metadata import (
+    GmxMarketDiscoveryUnavailable,
+    GmxMarketNotFound,
+    resolve_market_via_gateway,
+)
 from almanak.connectors.gmx_v2.receipt_parser import (
     _EVENT_LOG_DATA_ABI_TYPE,
     GMXv2EventType,
@@ -459,11 +464,12 @@ def _read_price_bounds(gateway_client: Any, provider: GatewayWeb3Provider, chain
 def _index_price_bounds(gateway_client: Any, chain: str, market: str) -> tuple[int, int]:
     """Oracle bounds for a market's INDEX token, without touching its address (ALM-3108).
 
-    Both inputs are keyed by the MARKET, which is metadata this SDK already
-    ships and trusts elsewhere: the base symbol from ``GMX_V2_MARKETS`` (the
-    same route ``acceptable_price`` uses) and the decimals from
-    ``GMX_V2_INDEX_TOKEN_DECIMALS``. A synthetic index token therefore never has
-    to answer for itself.
+    Live managed-Anvil runs resolve the exact market address through the same
+    gateway registry used by the compiler.  That registry sources symbol and
+    decimals from GMX's official API and accepts them only after
+    ``Reader.getMarket`` confirms the market/index/collateral tuple.  The static
+    tables remain the offline/unavailable-gateway fallback.  A synthetic index
+    token therefore never has to answer ERC-20 ``decimals()`` for itself.
 
     Known limitation (ALM-3119): for a market whose index token *is* a real
     ERC-20, this trades a chain-sourced datum (the ``indexToken`` address
@@ -478,14 +484,38 @@ def _index_price_bounds(gateway_client: Any, chain: str, market: str) -> tuple[i
     would let an order fill at a fabricated price and certify a lifecycle that
     never really happened, which is strictly worse than a failed run.
     """
-    symbol = index_price_symbol(chain, market)
-    if symbol is None:
-        raise GmxAnvilOrderExecutionError(
-            f"GMX market {market} is not listed for {chain}; its index token has no price symbol"
+    symbol: str | None = None
+    decimals: int | None = None
+    try:
+        metadata = resolve_market_via_gateway(gateway_client, chain=chain, market=market)
+    except (GmxMarketDiscoveryUnavailable, GmxMarketNotFound) as exc:
+        logger.warning(
+            "GMX dynamic market metadata unavailable while seeding %s on %s; using static fallback: %s",
+            market,
+            chain,
+            exc,
         )
-    decimals = index_token_decimals(chain, market)
+    except Exception as exc:
+        raise GmxAnvilOrderExecutionError(
+            f"GMX market {market} on {chain} failed dynamic verification during oracle seeding: {exc}"
+        ) from exc
+    else:
+        symbol = metadata.index_symbol
+        decimals = metadata.index_token_decimals
+
+    if not symbol:
+        symbol = index_price_symbol(chain, market)
+    if not symbol:
+        raise GmxAnvilOrderExecutionError(
+            f"GMX market {market} is not listed in verified metadata or the static fallback for {chain}; "
+            "its index token has no price symbol"
+        )
     if decimals is None:
-        raise GmxAnvilOrderExecutionError(f"GMX market {market} on {chain} has no declared index-token decimals")
+        decimals = index_token_decimals(chain, market)
+    if decimals is None:
+        raise GmxAnvilOrderExecutionError(
+            f"GMX market {market} on {chain} has no verified or statically declared index-token decimals"
+        )
     label = f"{symbol} (index of market {market})"
     return _scale_price_bounds(_gateway_usd_price(gateway_client, chain, symbol, label), decimals, label)
 

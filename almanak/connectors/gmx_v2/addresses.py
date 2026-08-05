@@ -15,9 +15,9 @@ Three surfaces live here:
   consumed by the strategy-side adapter (long/short tokens for each
   market — WETH/WBTC/USDC/USDT on Arbitrum, WAVAX/BTC.b/WETH.e/USDC/USDT
   on Avalanche).
-* ``GMX_V2_MARKETS`` / ``GMX_V2_INDEX_TOKEN_DECIMALS`` — market-address
-  catalogue and index-token decimals used by compiler, adapter, perps read,
-  and paper-position readers.
+* ``GMX_V2_MARKETS`` / ``GMX_V2_INDEX_TOKEN_DECIMALS`` — bounded offline
+  fallback catalogue used when the VIB-6561 gateway-backed verified market
+  registry is unavailable (including Safe/Zodiac permission discovery).
 
 The contract-kind vocabulary (``exchange_router`` / ``router`` /
 ``data_store`` / ``order_vault`` / ``reader`` / ``<pair>_market``) is
@@ -214,7 +214,10 @@ def index_price_symbol(chain: str | None, market_address: str | None) -> str | N
 def index_token_decimals(chain: str | None, market_address: str | None) -> int | None:
     """Index-token decimals for a GMX V2 market, or ``None`` when unresolved (VIB-6110).
 
-    Keyed ``chain → lowercase market address → decimals`` via ``GMX_V2_INDEX_TOKEN_DECIMALS``.
+    Static fallback keyed ``chain → lowercase market address → decimals`` via
+    ``GMX_V2_INDEX_TOKEN_DECIMALS``. Live compilation first uses VIB-6561's
+    verified gateway metadata; this function remains authoritative only for
+    offline compilation and historical callers that cannot carry dynamic data.
     Unlike ``adapter._get_index_token_decimals`` (which defaults to 18 for size scaling),
     this returns ``None`` on an unknown chain/market so PRICE scaling can fail closed
     (Empty≠Zero) — a wrongly-scaled ``entry_price``/``exit_price`` is worse than an
@@ -238,10 +241,9 @@ def _assert_gmx_v2_decimal_coverage() -> None:
     decimals. Weaken it and prices silently become unmeasured (Empty≠Zero keeps
     them from becoming *wrong*, but a settlement stops being measurable).
 
-    It does NOT cover markets we did not open — a third party's market seen in a
-    shared keeper tx may be absent from the table, which is why the price path
-    still fails closed rather than trusting a default. Replacing this table with
-    a chain-backed resolver is VIB-6156.
+    It does NOT cover markets absent from the fallback catalogue. VIB-6561
+    resolves those from GMX metadata and verifies their identity on-chain;
+    callers without that verified metadata still fail closed rather than guess.
 
     It also does NOT check that a listed address IS the market it claims to be —
     it only checks the two local tables agree with each other, so it stays green

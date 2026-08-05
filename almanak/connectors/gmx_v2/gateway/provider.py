@@ -49,7 +49,9 @@ from almanak.connectors._base.gateway_capabilities import (
     GatewayAddressCapability,
     GatewayFundingHistoryCapability,
     GatewayFundingRateCapability,
+    GatewayPerpMarketDiscoveryCapability,
     GatewayPriceIdCapability,
+    PerpMarketRecord,
 )
 from almanak.connectors._base.gateway_connector import GatewayConnector
 from almanak.connectors._base.types import ProtocolKind, ProtocolName
@@ -83,11 +85,31 @@ class GmxV2GatewayConnector(
     GatewayFundingRateCapability,
     GatewayFundingHistoryCapability,
     GatewayPriceIdCapability,
+    GatewayPerpMarketDiscoveryCapability,
 ):
     """Gateway-side connector for GMX V2 perp venue."""
 
     protocol: ClassVar[ProtocolName] = ProtocolName("gmx_v2")
     kind: ClassVar[ProtocolKind] = ProtocolKind.PERP
+
+    def __init__(self) -> None:
+        from .market_registry import GmxV2MarketRegistry
+
+        self._market_registry = GmxV2MarketRegistry()
+
+    def perp_market_discovery_chains(self) -> frozenset[str]:
+        """Chains backed by GMX's official metadata API and Reader contracts."""
+        return frozenset(GMX_V2)
+
+    async def resolve_perp_market(
+        self,
+        *,
+        chain: str,
+        market: str,
+        eth_call: Any,
+    ) -> PerpMarketRecord | None:
+        """Resolve API metadata and require an exact on-chain identity match."""
+        return await self._market_registry.resolve(chain=chain, market=market, eth_call=eth_call)
 
     def addresses_for(self, chain: str) -> Mapping[str, str]:
         """Return the GMX V2 contract addresses for ``chain`` (or empty)."""
@@ -146,6 +168,7 @@ class GmxV2GatewayConnector(
         """
         return {
             "GMX": "gmx",
+            "HYPE": "hyperliquid",
             # Perp index symbols — see docstring. Ordered as in GMX_V2_MARKETS.
             "AAVE": "aave",
             "ARB": "arbitrum",

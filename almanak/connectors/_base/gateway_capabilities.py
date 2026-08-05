@@ -951,6 +951,64 @@ class GatewayLendingMarketDiscoveryCapability(Protocol):
     ) -> LendingMarketRecord | None: ...
 
 
+# =============================================================================
+# VIB-6561 — GatewayPerpMarketDiscoveryCapability
+# =============================================================================
+
+
+class PerpMarketVerificationError(Exception):
+    """A perp-market candidate disagrees with the venue's on-chain registry."""
+
+
+class PerpMarketCatalogueUnavailable(Exception):
+    """The venue catalogue cannot supply trustworthy market metadata."""
+
+
+@dataclass(frozen=True)
+class PerpMarketRecord:
+    """Verified, immutable identity metadata for one perpetual market.
+
+    ``index_token_decimals`` is metadata supplied by the venue API because
+    synthetic index-token addresses need not contain deployed ERC-20 code.
+    The remaining address tuple is accepted only after an exact on-chain
+    ``Reader.getMarket`` match.
+    """
+
+    protocol: str
+    chain: str
+    label: str
+    market_token: str
+    index_token: str
+    index_symbol: str
+    index_token_decimals: int
+    long_token: str
+    long_token_symbol: str
+    short_token: str
+    short_token_symbol: str
+    verified: bool
+
+
+@runtime_checkable
+class GatewayPerpMarketDiscoveryCapability(Protocol):
+    """Perp connector resolves API metadata and verifies identity on-chain.
+
+    ``resolve_perp_market`` returns ``None`` only when the catalogue has no row
+    for the query. Invalid queries raise ``ValueError``; identity mismatches
+    raise :class:`PerpMarketVerificationError`; unusable upstream metadata
+    raises :class:`PerpMarketCatalogueUnavailable`.
+    """
+
+    def perp_market_discovery_chains(self) -> frozenset[str]: ...
+
+    async def resolve_perp_market(
+        self,
+        *,
+        chain: str,
+        market: str,
+        eth_call: Any,
+    ) -> PerpMarketRecord | None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class FundingHistorySource:
     """Upstream identity and request budget for funding history.
