@@ -22,9 +22,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 
-from almanak.connectors._strategy_base.concentrated_liquidity_math import price_to_tick
+from almanak.connectors._strategy_base.concentrated_liquidity_math import (
+    price_to_tick,
+    require_tick_spacing,
+)
 
-__all__ = ["PriceBandToTicksError", "TickRange", "price_band_to_ticks"]
+__all__ = [
+    "LpToleranceOutOfRangeError",
+    "PriceBandToTicksError",
+    "TickRange",
+    "price_band_to_ticks",
+    "require_lp_tolerance_fits_range",
+]
 
 
 class PriceBandToTicksError(ValueError):
@@ -34,6 +43,15 @@ class PriceBandToTicksError(ValueError):
     as ``ValueError`` keep working, while callers that want to distinguish a
     seam-level rejection (collapse / straddle / non-invertible band) from an
     arbitrary error can catch this specific type.
+    """
+
+
+class LpToleranceOutOfRangeError(PriceBandToTicksError):
+    """Raised when an LP price-band tolerance cannot fit inside its own range.
+
+    Distinct from a generic band failure so a caller can tell "your tolerance and
+    your range are incompatible" (actionable: change one of two numbers) from
+    "this band is unusable" (collapse / straddle / non-invertible).
     """
 
 
@@ -145,3 +163,161 @@ def price_band_to_ticks(
             )
 
     return TickRange(tick_lower=tick_lower, tick_upper=tick_upper)
+
+
+_TICK_BASE_LN = Decimal("1.0001").ln()
+
+
+def _pool_tick_spacing(pool: str, *, pool_encodes_tick_spacing: bool) -> int:
+    """Resolve a pool string's tick spacing OFFLINE, with no chain read.
+
+    The third component is a tick spacing for spacing-addressed pools
+    (``aerodrome_slipstream``: ``WETH/USDC/200``) and a FEE TIER for the V3
+    family (``WETH/USDC/3000``), where spacing comes from
+    :data:`concentrated_liquidity_math.V3_TICK_SPACING`. Reading a fee tier as a
+    spacing is not a small error -- 3000 would be read as a 3000-tick spacing
+    rather than 60 -- so the caller states which encoding its protocol uses
+    rather than the shape being guessed here.
+    """
+    parts = pool.split("/")
+    if len(parts) < 3:
+        raise LpToleranceOutOfRangeError(
+            f"cannot resolve tick spacing from pool {pool!r}: expected "
+            f"TOKEN0/TOKEN1/<fee-tier-or-tick-spacing>. Without the spacing the "
+            f"protective-minimum check below cannot run, and it fails closed "
+            f"rather than assuming a spacing."
+        )
+    try:
+        third = int(parts[2])
+    except ValueError as exc:
+        raise LpToleranceOutOfRangeError(
+            f"pool {pool!r} third component {parts[2]!r} is not an integer fee tier or tick spacing"
+        ) from exc
+    if pool_encodes_tick_spacing:
+        if third <= 0:
+            raise LpToleranceOutOfRangeError(f"pool {pool!r} declares a non-positive tick spacing {third}")
+        return third
+    try:
+        return require_tick_spacing(third)
+    except ValueError as exc:
+        # `require_tick_spacing` fails closed on an unknown tier (it never
+        # substitutes a default), which is the behaviour we want -- but it raises a
+        # bare ValueError. Re-raise as the documented type so a caller catching
+        # LpToleranceOutOfRangeError sees every refusal this function can produce.
+        raise LpToleranceOutOfRangeError(
+            f"pool {pool!r} declares fee tier {third}, which has no known tick "
+            f"spacing ({exc}). Refusing rather than assuming a spacing, because a "
+            f"wrong spacing silently changes whether the tolerance fits."
+        ) from exc
+
+
+def require_lp_tolerance_fits_range(
+    *,
+    max_slippage: Decimal | float | int | str | None,
+    range_half_width_frac: Decimal | float | int | str,
+    pool: str,
+    pool_encodes_tick_spacing: bool,
+) -> None:
+    """Refuse an LP price-band tolerance the position's own range cannot floor.
+
+    Since VIB-6269 a CL mint's ``max_slippage`` is a PRICE band: the compiler
+    emits its image in ``amount0Min``/``amount1Min``. That instrument is only
+    protective while the band stays strictly inside the realised range. When the
+    band reaches a range bound, the leg on that side is worth zero at the band
+    edge and ships with **no minimum at all**; when it reaches both bounds the
+    construction degenerates and ``compute_lp_slippage_mins`` falls back to a
+    flat haircut tight enough to revert an ordinary mint.
+
+    **Spacing is the part a requested-width comparison misses.**
+    :func:`price_band_to_ticks` FLOORS both bounds to the pool's tick spacing, so
+    the realised bound sits up to ``tick_spacing - 1`` ticks below the requested
+    one. Flooring moves ``tick_upper`` TOWARD spot, which is why the leg that
+    loses its floor is ``amount0Min``. Comparing the tolerance against the
+    *requested* half-width therefore admits configurations that still ship an
+    unfloored leg -- measured on ``WETH/USDC/3000`` (spacing 60) at a ±1% range,
+    and on ``WETH/USDC/200`` (spacing 200) at ±2%.
+
+    Working in ticks rather than prices is what makes the check exact: spacing is
+    a tick quantity, and a fixed tick budget is a different price width at every
+    range. The predicate is
+
+    .. code-block:: text
+
+        tolerance_ticks + (tick_spacing - 1)  <  half_width_ticks
+
+    where ``x_ticks = ln(1 + x) / ln(1.0001)``. The ``tick_spacing - 1`` term is
+    the worst case over spot's unknown position inside its spacing bucket, which
+    is the right posture for a boot-time guard that cannot read the live tick.
+
+    ``range_half_width_frac`` is a FRACTION of spot (``0.05`` = ±5%),
+    deliberately not the ``range_width_pct`` config key: that key means a percent
+    half-width in the scaffold and a fractional TOTAL width in the demos, and a
+    shared helper must not inherit that ambiguity. Callers convert.
+
+    Refuses rather than clamps. VIB-6217 established the rule for this class:
+    silently repairing an out-of-range tolerance hides the misconfiguration that
+    produced it, which is maximum harm with no signal.
+
+    Args:
+        max_slippage: Declared tolerance as a fraction (``0.005`` = 0.5%).
+            ``None`` means no tolerance was declared, so the price-band
+            instrument is never selected and there is nothing to check.
+        range_half_width_frac: Half-width of the intended symmetric range as a
+            fraction of spot. Must be finite and in ``(0, 1)`` so its lower
+            price remains positive.
+        pool: Pool string, ``TOKEN0/TOKEN1/<fee-tier-or-tick-spacing>``.
+        pool_encodes_tick_spacing: ``True`` when the third component is a tick
+            spacing (Slipstream), ``False`` when it is a V3 fee tier.
+
+    Raises:
+        LpToleranceOutOfRangeError: the tolerance or half-width is malformed,
+            non-finite, or outside ``(0, 1)``, the spacing cannot be resolved,
+            or the band does not fit inside the realised range.
+    """
+    if max_slippage is None:
+        return
+
+    try:
+        tolerance = _as_decimal(max_slippage)
+    except (ArithmeticError, TypeError, ValueError) as exc:
+        raise LpToleranceOutOfRangeError(
+            f"max_slippage must be a numeric fraction in (0, 1), got {max_slippage!r}. "
+            "Set max_slippage to a positive fraction below 1, such as 0.005."
+        ) from exc
+    if not tolerance.is_finite() or not (Decimal(0) < tolerance < Decimal(1)):
+        raise LpToleranceOutOfRangeError(
+            f"max_slippage must be in (0, 1) as a fraction, got {tolerance}. "
+            f"A tolerance of 0 floors every mint at its exact desired amounts; "
+            f"1 or more sizes both minimums at zero and accepts any outcome. "
+            f"Set max_slippage to a positive fraction below 1, such as 0.005."
+        )
+
+    try:
+        half_width = _as_decimal(range_half_width_frac)
+    except (ArithmeticError, TypeError, ValueError) as exc:
+        raise LpToleranceOutOfRangeError(
+            f"range half-width must be a numeric fraction in (0, 1), got {range_half_width_frac!r}. "
+            "Set range_width_pct between 0 and 100."
+        ) from exc
+    if not half_width.is_finite() or not (Decimal(0) < half_width < Decimal(1)):
+        raise LpToleranceOutOfRangeError(
+            f"range half-width must be in (0, 1), got {half_width}. A zero, "
+            "negative, or 100%-plus half-width cannot form a positive symmetric "
+            "price range. Set range_width_pct between 0 and 100."
+        )
+
+    spacing = _pool_tick_spacing(pool, pool_encodes_tick_spacing=pool_encodes_tick_spacing)
+    half_width_ticks = (Decimal(1) + half_width).ln() / _TICK_BASE_LN
+    tolerance_ticks = (Decimal(1) + tolerance).ln() / _TICK_BASE_LN
+    headroom_ticks = half_width_ticks - Decimal(spacing - 1)
+
+    if tolerance_ticks >= headroom_ticks:
+        raise LpToleranceOutOfRangeError(
+            f"LP tolerance {tolerance} does not fit inside the range it is meant to "
+            f"protect: it spans {tolerance_ticks.quantize(Decimal('1'))} ticks, but the "
+            f"range half-width is only {half_width_ticks.quantize(Decimal('1'))} ticks and "
+            f"pool {pool!r} floors bounds to a {spacing}-tick spacing, leaving "
+            f"{headroom_ticks.quantize(Decimal('1'))} usable ticks. At or beyond that the "
+            f"price band reaches a range bound and that leg is submitted with NO minimum. "
+            f"Widen the range, tighten max_slippage, or choose a pool with finer spacing."
+        )

@@ -138,13 +138,32 @@ def validate_lending_loop_template(supply_protocol: str, borrow_protocol: str | 
     return warnings
 
 
+def _scaffold_v3_lp_protocols() -> frozenset[str]:
+    """V3-shaped protocol keys that have an LP_OPEN-capable compiler manifest."""
+    from almanak.connectors._connector import CONNECTOR_REGISTRY
+    from almanak.connectors._strategy_protocol_family_registry import (
+        PROTOCOL_FAMILY_REGISTRY,
+        ProtocolFamily,
+    )
+    from almanak.core.intent_types import IntentType
+
+    grouping_protocols = PROTOCOL_FAMILY_REGISTRY.members(ProtocolFamily.UNIV3_LP_GROUPING)
+    executable_protocols = {
+        protocol_key
+        for connector in CONNECTOR_REGISTRY.all()
+        if connector.compiler is not None and IntentType.LP_OPEN in (connector.strategy_intents or ())
+        for protocol_key in connector.compiler_keys
+    }
+    return grouping_protocols & executable_protocols
+
+
 def _normalize_and_validate_scaffold_protocol(template_enum: StrategyTemplate, protocol: str | None) -> str | None:
     """Normalize the ``--protocol`` choice and reject incompatible combinations.
 
     Returns the normalized (``strip().lower()``) protocol slug, or ``None`` when
     the caller passed nothing. Raises ``click.Abort`` (after echoing to stderr)
-    for a malformed slug, or for a ``multi_step`` scaffold paired with a
-    tick-spacing protocol.
+    for a malformed slug, for an LP template outside the V3-shaped protocol
+    family, or for a ``multi_step`` scaffold paired with a tick-spacing protocol.
 
     ``multi_step`` still opens LPs with price-denominated ``range_lower`` /
     ``range_upper``; only ``dynamic_lp`` emits spacing-aligned integer ticks
@@ -178,6 +197,18 @@ def _normalize_and_validate_scaffold_protocol(template_enum: StrategyTemplate, p
     # price-band path and fail Slipstream tick validation at compile time —
     # the exact failure this scaffold batch exists to prevent.
     protocol = _normalize_protocol_key(protocol)
+
+    if template_enum in (StrategyTemplate.DYNAMIC_LP, StrategyTemplate.MULTI_STEP):
+        v3_lp_protocols = _scaffold_v3_lp_protocols()
+        if protocol not in v3_lp_protocols:
+            click.echo(
+                f"Error: the {template_enum.value} template requires a V3-family LP protocol "
+                f"({', '.join(sorted(v3_lp_protocols))}); {protocol} has different range or "
+                "minimum-amount semantics, so this scaffold cannot promise its two-sided "
+                "LP protection contract.",
+                err=True,
+            )
+            raise click.Abort()
 
     if template_enum == StrategyTemplate.MULTI_STEP:
         from almanak.connectors._strategy_protocol_family_registry import (
@@ -744,30 +775,25 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
             logger.info(f"Opening LP: {lower_price:.2f} - {upper_price:.2f}")
             amount_base = base_balance.balance * Decimal("0.95")
             amount_quote = quote_balance.balance * Decimal("0.95")
-            # NOTE ON SLIPPAGE -- the swaps above set `max_slippage`; the lp_open
-            # calls below do not. The asymmetry is about SHAPE, not about LP being
-            # safe, so read this before copying it:
+            # NOTE ON SLIPPAGE -- the lp_open calls below DECLARE `max_slippage`,
+            # and the declaration is what selects the instrument. Since VIB-6269 a
+            # CL mint's tolerance is a PRICE band: the compiler emits that band's
+            # image in the amount0Min/amount1Min the ABI actually has, so 0.005
+            # means "revert if price moved more than 0.5%" on every range width.
             #
-            #   * A swap's floor bounds a quoted VALUE and the counterparty picks
-            #     the execution price -- so it must be tight (0.005-0.01).
-            #   * A balanced LP mint's floor (amount0Min/amount1Min) bounds the
-            #     token SPLIT, not a quoted output: the pool derives liquidity from
-            #     the live price and consumes whatever split that implies. A floor
-            #     tight enough to demand a specific split reverts honest mints when
-            #     price drifts toward a range edge.
+            # Omitting it does NOT inherit a looser version of the same thing. An
+            # undeclared tolerance is not a declared one, so the compiler falls back
+            # to the permissive flat haircut `default_lp_slippage` -- a floor of 1%
+            # of desired, a DIFFERENT instrument (VIB-6524). Declaring the tolerance
+            # is what reaches the band, which is why it is set here.
             #
-            # LIMIT OF THAT ARGUMENT: "split, not value" holds only while the price
-            # is HONEST. Under a MANIPULATED price the split shift IS a value
-            # transfer, and these minimums are the only on-chain defence. The
-            # inherited default is permissive and its magnitude is contested
-            # (VIB-6225), so setting `max_slippage` explicitly here is a legitimate
-            # hardening step -- pick a tolerance wide enough not to fight your own
-            # range (a few percent), not a swap-grade one.
-            #
-            # Set it ALWAYS when the deposit embeds an implicit swap -- imbalanced
-            # StableSwap add_liquidity, single-sided deposits, zaps -- because there
-            # execution price DIRECTLY determines value received. Full rationale:
-            # "LP slippage doctrine" in docs/internal/blueprints/03-intent-system.md.
+            # Pick it SMALLER than the range half-width above: a band that reaches a
+            # live range bound would leave that leg unfloored, so this scaffold opts
+            # into a compiler safety refusal. Swap floors are a different quantity --
+            # they bound a quoted VALUE against a counterparty-chosen price, so they
+            # stay tight. Full
+            # rationale: "LP slippage doctrine" in
+            # docs/internal/blueprints/03-intent-system.md.
             if self._uses_tick_ranges():
                 # Slipstream's compiler consumes RAW INTEGER TICKS aligned to
                 # the pool's tick spacing (pool format
@@ -788,6 +814,8 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                     amount1=amount1,
                     range_spec=TickBand(lower=tick_lower, upper=tick_upper),
                     protocol=self.protocol,
+                    max_slippage=self.max_slippage,
+                    require_two_sided_minimums=True,
                 )
             return Intent.lp_open(
                 pool=self.pool,
@@ -796,6 +824,8 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                 range_lower=lower_price,
                 range_upper=upper_price,
                 protocol=self.protocol,
+                max_slippage=self.max_slippage,
+                require_two_sided_minimums=True,
             )"""
 
     elif template == StrategyTemplate.LENDING_LOOP:
@@ -1363,23 +1393,25 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
             logger.info(f"Opening LP via IntentSequence: {lower_price:.2f} - {upper_price:.2f}")
             return Intent.sequence(
                 [
-                    # The swap sets `max_slippage`; the lp_open below does not. The
-                    # asymmetry is about SHAPE: a swap's floor bounds a quoted VALUE
-                    # against a counterparty-chosen price so it must be tight, while
-                    # a balanced LP mint's floor bounds the token SPLIT the pool
-                    # chooses, so a swap-grade value reverts honest mints. It is NOT
-                    # that an LP mint is riskless -- under a MANIPULATED price the
-                    # split shift is a value transfer, and the permissive inherited
-                    # default is contested (VIB-6225). Setting `max_slippage` here
-                    # (a few percent, wide enough not to fight your range) is a
-                    # legitimate hardening step, and is REQUIRED when the deposit
-                    # embeds an implicit swap (imbalanced/single-sided/zap). See
-                    # "LP slippage doctrine" in
-                    # docs/internal/blueprints/03-intent-system.md.
+                    # BOTH legs declare `max_slippage`. Since VIB-6269 a CL mint's
+                    # tolerance is a PRICE band, and the compiler reaches that band
+                    # only when the caller DECLARES one -- omitting it falls back to
+                    # the permissive flat haircut `default_lp_slippage` (VIB-6524),
+                    # a different instrument rather than a looser setting of this
+                    # one. It matters most here: this sequence swaps first, so the
+                    # deposit embeds an implicit swap and execution price directly
+                    # determines value received. Keep the LP tolerance below the
+                    # range half-width; this scaffold asks the live compiler to refuse
+                    # rather than emit an unfloored leg. See "LP slippage
+                    # doctrine" in docs/internal/blueprints/03-intent-system.md.
                     Intent.swap(
                         from_token=self.quote_token,
                         to_token=self.base_token,
                         amount=half_quote,
+                        # Deliberately its OWN literal, not self.max_slippage: a
+                        # swap floor bounds a quoted VALUE, the LP field bounds a
+                        # PRICE band. One knob for both would silently retune the
+                        # swap whenever the LP range is retuned.
                         max_slippage=Decimal("0.005"),
                     ),
                     Intent.lp_open(
@@ -1389,6 +1421,8 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                         range_lower=lower_price,
                         range_upper=upper_price,
                         protocol=self.protocol,
+                        max_slippage=self.max_slippage,
+                        require_two_sided_minimums=True,
                     ),
                 ],
                 description=f"Swap {self.quote_token} -> {self.base_token} and open LP",
@@ -2866,14 +2900,49 @@ def _get_template_init_params(
 
     elif template == StrategyTemplate.DYNAMIC_LP:
         default_pool = _default_lp_pool(protocol)
+        supported_lp_protocols = repr(tuple(sorted(_scaffold_v3_lp_protocols())))
+        # dynamic_lp supports BOTH pool encodings, so the emitted guard asks the
+        # strategy which one it is on. multi_step below is V3-family only.
+        pool_encodes_spacing_expr = "self._uses_tick_ranges()"
         return f"""
         # LP parameters. For aerodrome_slipstream the pool's 3rd component is
         # the TICK SPACING (e.g. WETH/USDC/200), not a fee tier.
         self.pool = get_config("pool", "{default_pool}")
         self.protocol = get_config("protocol", "{protocol}")
-        self.range_width_pct = float(get_config("range_width_pct", 5))
+        if self.protocol not in {supported_lp_protocols}:
+            raise ValueError(
+                f"dynamic_lp requires a V3-family LP protocol; {{self.protocol!r}} has "
+                "different range or minimum-amount semantics, so this strategy cannot "
+                "promise its two-sided LP protection contract."
+            )
+        try:
+            self.range_width_pct = float(get_config("range_width_pct", 5))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("range_width_pct must be a number between 0 and 100") from exc
         self.rebalance_threshold_pct = float(get_config("rebalance_threshold_pct", 80))
         self.min_position_usd = Decimal(str(get_config("min_position_usd", "500")))
+        # LP price-band tolerance, declared on every lp_open (see decide()).
+        try:
+            self.max_slippage = Decimal(str(get_config("max_slippage", "0.005")))
+        except (ArithmeticError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "max_slippage must be a positive fraction below 1, such as 0.005"
+            ) from exc
+        # It is a PRICE band (VIB-6269), so it must fit INSIDE the range: where the
+        # band reaches a bound, that leg is worth zero at the band edge and ships
+        # with NO minimum at all. Tick spacing is the part a naive half-width
+        # comparison misses -- the compiler FLOORS both bounds, so the realised
+        # bound sits up to one spacing below the requested one. The SDK helper owns
+        # that arithmetic (and the fee-tier-vs-spacing distinction) so it is written
+        # and tested once rather than copied into every strategy. It REFUSES rather
+        # than clamps: VIB-6217's lesson is that silently repairing an out-of-range
+        # tolerance hides the misconfiguration that produced it.
+        require_lp_tolerance_fits_range(
+            max_slippage=self.max_slippage,
+            range_half_width_frac=Decimal(str(self.range_width_pct)) / Decimal("100"),
+            pool=self.pool,
+            pool_encodes_tick_spacing={pool_encodes_spacing_expr},
+        )
 
         # Token configuration
         self.base_token = get_config("base_token", "WETH")
@@ -3042,16 +3111,51 @@ def _get_template_init_params(
 
     elif template == StrategyTemplate.MULTI_STEP:
         default_pool = _default_lp_pool(protocol)
+        supported_lp_protocols = repr(tuple(sorted(_scaffold_v3_lp_protocols())))
+        # multi_step scaffolds V3-family protocols only (tick-spacing protocols are
+        # rejected at scaffold time), so the pool's 3rd component is always a fee tier.
+        pool_encodes_spacing_expr = "False"
         return f"""
         # Multi-step LP parameters. For aerodrome_slipstream the pool's 3rd
         # component is the TICK SPACING (e.g. WETH/USDC/200), not a fee tier.
         self.pool = get_config("pool", "{default_pool}")
         self.protocol = get_config("protocol", "{protocol}")
-        self.range_width_pct = float(get_config("range_width_pct", 5))
+        if self.protocol not in {supported_lp_protocols}:
+            raise ValueError(
+                f"multi_step requires a V3-family LP protocol; {{self.protocol!r}} has "
+                "different range or minimum-amount semantics, so this strategy cannot "
+                "promise its two-sided LP protection contract."
+            )
+        try:
+            self.range_width_pct = float(get_config("range_width_pct", 5))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("range_width_pct must be a number between 0 and 100") from exc
         # rebalance_drift_pct is configured as a percentage (e.g. 3 = 3% price drift)
         # and divided by 100 here to convert to a decimal fraction for comparison
         self.rebalance_drift_pct = Decimal(str(get_config("rebalance_drift_pct", "3"))) / Decimal("100")
         self.min_position_usd = Decimal(str(get_config("min_position_usd", "500")))
+        # LP price-band tolerance, declared on every lp_open (see decide()).
+        try:
+            self.max_slippage = Decimal(str(get_config("max_slippage", "0.005")))
+        except (ArithmeticError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "max_slippage must be a positive fraction below 1, such as 0.005"
+            ) from exc
+        # It is a PRICE band (VIB-6269), so it must fit INSIDE the range: where the
+        # band reaches a bound, that leg is worth zero at the band edge and ships
+        # with NO minimum at all. Tick spacing is the part a naive half-width
+        # comparison misses -- the compiler FLOORS both bounds, so the realised
+        # bound sits up to one spacing below the requested one. The SDK helper owns
+        # that arithmetic (and the fee-tier-vs-spacing distinction) so it is written
+        # and tested once rather than copied into every strategy. It REFUSES rather
+        # than clamps: VIB-6217's lesson is that silently repairing an out-of-range
+        # tolerance hides the misconfiguration that produced it.
+        require_lp_tolerance_fits_range(
+            max_slippage=self.max_slippage,
+            range_half_width_frac=Decimal(str(self.range_width_pct)) / Decimal("100"),
+            pool=self.pool,
+            pool_encodes_tick_spacing={pool_encodes_spacing_expr},
+        )
 
         # Token configuration
         self.base_token = get_config("base_token", "WETH")
@@ -3940,6 +4044,13 @@ def _build_strategy_content(
     # separate ``from enum import ...`` lines trigger I001 in the scaffolded
     # file). The non-StrEnum path keeps ``from enum import Enum`` on its own.
     enum_import = "from enum import Enum, StrEnum\n" if state_enum_block else "from enum import Enum\n"
+    # Only the two LP templates emit the boot-time tolerance guard, so only they
+    # import it — an unused import would be an F401 in every other scaffold.
+    lp_range_guard_import = (
+        "from almanak.connectors._strategy_base.cl_range import require_lp_tolerance_fits_range\n"
+        if template in (StrategyTemplate.DYNAMIC_LP, StrategyTemplate.MULTI_STEP)
+        else ""
+    )
     # Blank line + block when we have an enum; empty string otherwise so the
     # resulting file has no awkward trailing blank lines.
     state_enum_section = f"\n\n{state_enum_block}" if state_enum_block else ""
@@ -3989,7 +4100,7 @@ from decimal import ROUND_DOWN, Decimal  # noqa: F401 - ROUND_DOWN used by lendi
 {enum_import}from typing import Any
 
 # Core strategy framework imports
-from almanak.framework.intents import AnyIntent, Intent
+{lp_range_guard_import}from almanak.framework.intents import AnyIntent, Intent
 from almanak.framework.market import MarketSnapshot
 from almanak.framework.strategies import (
     DecideResult,
@@ -4192,6 +4303,7 @@ def generate_config_json(
                 "range_width_pct": 5,
                 "rebalance_threshold_pct": 80,
                 "min_position_usd": 500,
+                "max_slippage": "0.005",
             }
         )
     elif template == StrategyTemplate.LENDING_LOOP:
@@ -4272,6 +4384,7 @@ def generate_config_json(
                 "range_width_pct": 5,
                 "rebalance_drift_pct": 3,
                 "min_position_usd": 500,
+                "max_slippage": "0.005",
             }
         )
     elif template == StrategyTemplate.STAKING:

@@ -2958,6 +2958,9 @@ def _make_slipstream_lp_strategy():
     strat.range_width_pct = 5.0
     strat.rebalance_threshold_pct = 80.0
     strat.min_position_usd = Decimal("500")
+    # Mirrors __init__: lp_open declares this tolerance, so the price-band
+    # instrument is selected rather than the permissive flat haircut.
+    strat.max_slippage = Decimal("0.005")
     strat.base_token = "WETH"
     strat.quote_token = "USDC"
     strat._position_id = None
@@ -3050,6 +3053,9 @@ def test_dynamic_lp_default_protocol_still_emits_price_band() -> None:
     strat.range_width_pct = 5.0
     strat.rebalance_threshold_pct = 80.0
     strat.min_position_usd = Decimal("500")
+    # Mirrors __init__: lp_open declares this tolerance, so the price-band
+    # instrument is selected rather than the permissive flat haircut.
+    strat.max_slippage = Decimal("0.005")
     strat.base_token = "WETH"
     strat.quote_token = "USDC"
     strat._position_id = None
@@ -3061,6 +3067,156 @@ def test_dynamic_lp_default_protocol_still_emits_price_band() -> None:
     assert isinstance(intent.range_spec, PriceBand)
     assert intent.range_lower == Decimal("3000") * Decimal("0.95")
     assert intent.range_upper == Decimal("3000") * Decimal("1.05")
+
+
+def test_scaffolded_lp_open_declares_max_slippage() -> None:
+    """Every scaffolded LP_OPEN must DECLARE a tolerance, not inherit the default.
+
+    Since VIB-6269 a CL mint's tolerance is a price band, but
+    ``cl_math.compute_lp_slippage_mins`` selects that instrument on PROVENANCE:
+    it is reached only when the caller set ``max_slippage`` (or
+    ``protocol_params["lp_slippage"]``). An intent that declares nothing falls
+    back to the permissive flat haircut ``default_lp_slippage`` -- 1% of desired
+    on a different instrument (VIB-6524).
+
+    So "the scaffold omits max_slippage" is not a cosmetic gap: it routes every
+    scaffolded and every generated LP strategy AWAY from the protection that
+    shipped. Asserting the value is non-None is the whole contract -- a
+    regression here is a silently-dropped kwarg, which is exactly what this
+    change fixed and what nothing else would catch.
+
+    ``config.json`` must carry the key too: an emitted default the config never
+    names is one edit away from being unreachable.
+
+    ``dynamic_lp`` has TWO emit sites -- the tick-band branch taken by
+    ``aerodrome_slipstream`` and the price-band branch taken by the V3 family --
+    and the slipstream one is covered separately below. An earlier revision of
+    this test only drove the V3 branch and stayed GREEN when the kwarg was
+    stripped from the slipstream site; mutation testing caught that.
+    """
+    import json
+    from decimal import Decimal
+
+    # dynamic_lp's tick-band branch (aerodrome_slipstream) is a SEPARATE emit site.
+    slipstream = _make_slipstream_lp_strategy()
+    slipstream.max_slippage = Decimal("0.005")
+    tick_open = slipstream.decide(_LpMarket())
+    assert tick_open.intent_type.value == "LP_OPEN"
+    assert tick_open.max_slippage is not None, (
+        "dynamic_lp tick-band branch (slipstream): LP_OPEN declares no max_slippage"
+    )
+    assert tick_open.require_two_sided_minimums is True
+
+    for template in (StrategyTemplate.DYNAMIC_LP, StrategyTemplate.MULTI_STEP):
+        assert "max_slippage" in json.loads(generate_config_json("Probe", template, "arbitrum")), (
+            f"{template.value}: config.json omits max_slippage"
+        )
+
+        code = generate_strategy_file(name="Probe", template=template, chain="arbitrum", output_dir=Path("/tmp"))
+        cls = _exec_scaffold_class(code)
+        strat = cls.__new__(cls)
+        strat._chain = "arbitrum"
+        strat.pool = "WETH/USDC/3000"
+        strat.protocol = "uniswap_v3"
+        strat.range_width_pct = 5.0
+        strat.rebalance_threshold_pct = 80.0
+        strat.rebalance_drift_pct = Decimal("0.03")
+        strat.min_position_usd = Decimal("500")
+        strat.max_slippage = Decimal("0.005")
+        strat.base_token = "WETH"
+        strat.quote_token = "USDC"
+        strat._position_id = None
+        strat._range_lower = None
+        strat._range_upper = None
+
+        result = strat.decide(_LpMarket())
+        # multi_step opens through an IntentSequence; dynamic_lp returns the intent.
+        emitted = list(getattr(result, "intents", None) or [result])
+        opens = [i for i in emitted if i.intent_type.value == "LP_OPEN"]
+        assert opens, f"{template.value}: decide() emitted no LP_OPEN ({result})"
+        for intent in opens:
+            assert intent.max_slippage is not None, (
+                f"{template.value}: LP_OPEN declares no max_slippage, so the compiler "
+                f"falls back to default_lp_slippage (flat 1%-of-desired haircut) "
+                f"instead of the VIB-6269 price band."
+            )
+            assert intent.require_two_sided_minimums is True, (
+                f"{template.value}: LP_OPEN does not require both minimums, so price "
+                "movement between decide() and compilation can still zero one leg"
+            )
+
+
+def test_scaffolded_lp_refuses_a_tolerance_wider_than_its_range() -> None:
+    """A declared band at/above the range half-width must REFUSE, not ship.
+
+    Declaring a tolerance (the change above) selects the VIB-6269 price-band
+    instrument, and that instrument is only safe INSIDE the range. Measured on
+    the shared seam at spot-mid with a +-5%-shaped position:
+
+        range_width_pct  undeclared (before)   declared 0.005 (after)
+                    5.0    1.00% /  1.00%       87.92% / 75.01%
+                    0.5    1.00% /  1.00%        0.13% /  0.00%  <- leg UNFLOORED
+                    0.2    1.00% /  1.00%       99.50% / 99.50%  <- always reverts
+
+    At 0.5 the band reaches a bound and a leg ships with no minimum; at 0.2 it
+    reaches both, falls back to the flat haircut, and demands 99.5% of desired --
+    which is the exact shape of the mint that reverted on Arbitrum and motivated
+    VIB-6269. Both are REGRESSIONS against the undeclared 1% floor, and both are
+    reachable by editing range_width_pct alone, so the scaffold refuses at boot.
+
+    Refuse, not clamp: VIB-6217 established that silently repairing an
+    out-of-range tolerance hides the misconfiguration that produced it.
+
+    The guard is SPACING-AWARE (VIB-6567): the compiler floors both bounds to the
+    pool's tick spacing, so the realised bound sits up to `spacing - 1` ticks
+    inside the requested one. A requested-half-width comparison misses that and
+    admits configurations that still ship an unfloored leg. The arithmetic lives
+    in `cl_range.require_lp_tolerance_fits_range` -- written and tested once,
+    against MEASURED emitted minimums -- and this test pins that the scaffold
+    actually calls it at boot for both templates.
+    """
+    from decimal import Decimal
+
+    for template in (StrategyTemplate.DYNAMIC_LP, StrategyTemplate.MULTI_STEP):
+        code = generate_strategy_file(name="Guard Probe", template=template, chain="arbitrum", output_dir=Path("/tmp"))
+        cls = _exec_scaffold_class(code)
+        base = json.loads(generate_config_json("Guard Probe", template, "arbitrum"))
+
+        # Safe: default geometry (+-5% range, 0.5% band) constructs cleanly.
+        cls(config=base, chain="arbitrum", wallet_address="0x" + "1" * 40)
+
+        # Unsafe: band at or beyond the half-width must refuse.
+        for rwp in (0.5, 0.2):
+            cfg = {**base, "range_width_pct": rwp}
+            with pytest.raises(ValueError, match="does not fit inside the range"):
+                cls(config=cfg, chain="arbitrum", wallet_address="0x" + "1" * 40)
+            assert Decimal(str(cfg["max_slippage"])) >= Decimal(str(rwp)) / Decimal("100"), (
+                f"{template.value}: fixture no longer exercises the unsafe case"
+            )
+
+        for rwp in (100, 101, "NaN", "Infinity"):
+            cfg = {**base, "range_width_pct": rwp}
+            with pytest.raises(ValueError, match="range half-width.*between 0 and 100"):
+                cls(config=cfg, chain="arbitrum", wallet_address="0x" + "1" * 40)
+
+        for tolerance in ("not-a-number", "NaN", "Infinity"):
+            cfg = {**base, "max_slippage": tolerance}
+            with pytest.raises(ValueError, match="max_slippage.*positive fraction below 1"):
+                cls(config=cfg, chain="arbitrum", wallet_address="0x" + "1" * 40)
+
+
+def test_scaffolded_lp_refuses_runtime_protocol_with_different_minimum_semantics() -> None:
+    """Editing config after scaffolding cannot silently route the V3 policy into V4."""
+    for template in (StrategyTemplate.DYNAMIC_LP, StrategyTemplate.MULTI_STEP):
+        code = generate_strategy_file(
+            name="Protocol Guard Probe", template=template, chain="base", output_dir=Path("/tmp")
+        )
+        cls = _exec_scaffold_class(code)
+        cfg = json.loads(generate_config_json("Protocol Guard Probe", template, "base"))
+        for protocol in ("uniswap_v4", "aerodrome", "velodrome_slipstream"):
+            changed = {**cfg, "protocol": protocol}
+            with pytest.raises(ValueError, match="requires a V3-family LP protocol"):
+                cls(config=changed, chain="base", wallet_address="0x" + "1" * 40)
 
 
 # ---------------------------------------------------------------------------
@@ -3537,3 +3693,45 @@ def test_new_strategy_cli_allows_multi_step_fee_tier_protocol(tmp_path: Path) ->
     )
     assert result.exit_code == 0, result.output
     assert (target / "strategy.py").exists()
+
+
+@pytest.mark.parametrize("template", ["dynamic_lp", "multi_step"])
+@pytest.mark.parametrize("protocol", ["uniswap_v4", "aerodrome", "velodrome_slipstream"])
+def test_new_strategy_cli_rejects_lp_protocol_with_different_minimum_semantics(
+    tmp_path: Path, template: str, protocol: str
+) -> None:
+    """A non-executable/different connector cannot inherit the V3 scaffold contract."""
+    from click.testing import CliRunner
+
+    from almanak.framework.cli.new_strategy import new_strategy
+
+    target = tmp_path / f"{template}_{protocol}_probe"
+    result = CliRunner().invoke(
+        new_strategy,
+        [
+            "--template",
+            template,
+            "--name",
+            f"{template}_{protocol}_probe",
+            "--chain",
+            "base",
+            "--protocol",
+            protocol,
+            "--output-dir",
+            str(target),
+        ],
+        env={"CI": ""},
+    )
+    assert result.exit_code != 0
+    assert "requires a V3-family LP protocol" in result.output
+    assert "two-sided LP protection contract" in result.output
+    assert not (target / "strategy.py").exists()
+
+
+def test_scaffold_v3_lp_protocol_allowlist_is_executable_manifest_intersection() -> None:
+    """Grouping-only Velodrome metadata must not become scaffold compiler support."""
+    from almanak.framework.cli.new_strategy import _scaffold_v3_lp_protocols
+
+    assert _scaffold_v3_lp_protocols() == frozenset(
+        {"aerodrome_slipstream", "pancakeswap_v3", "sushiswap_v3", "uniswap_v3"}
+    )

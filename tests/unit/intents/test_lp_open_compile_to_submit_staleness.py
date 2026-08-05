@@ -37,6 +37,7 @@ from almanak.framework.intents.compiler import (
     IntentCompilerConfig,
 )
 from almanak.framework.intents.lp_math import recompute_lp_amounts, tick_to_sqrt_ratio_x96
+from almanak.framework.intents.min_out_guard import UnprotectedTradeError
 from almanak.framework.intents.vocabulary import Intent
 
 LP_ADAPTER_CLS = "almanak.connectors.uniswap_v3.adapter.UniswapV3LPAdapter"
@@ -61,9 +62,13 @@ INCIDENT_AMOUNT1_DESIRED = 1_424_999  # 1.424999 USDC
 INCIDENT_TOLERANCE = Decimal("0.005")  # the demo's explicit max_slippage
 
 
-def _intent_with(tolerance: Decimal | None) -> SimpleNamespace:
+def _intent_with(tolerance: Decimal | None, *, require_two_sided_minimums: bool = False) -> SimpleNamespace:
     """Minimal stand-in for the fields ``compute_lp_slippage_mins`` reads."""
-    return SimpleNamespace(protocol_params=None, max_slippage=tolerance)
+    return SimpleNamespace(
+        protocol_params=None,
+        max_slippage=tolerance,
+        require_two_sided_minimums=require_two_sided_minimums,
+    )
 
 
 def _price_move_sqrt(sqrt_price_x96: int, fraction: Decimal) -> int:
@@ -274,6 +279,23 @@ class TestBothZeroFallback:
             f"a zero minimum shipped with no WARNING naming it. warnings={warnings_seen}"
         )
 
+    def test_two_sided_policy_refuses_live_band_reaching_a_range_bound(self):
+        """The scaffold opt-in is enforced at the live compiler seam, not only at boot."""
+        tick_lower, tick_upper = -50, 50
+        sqrt_compile = tick_to_sqrt_ratio_x96(0)
+        a0d, a1d = recompute_lp_amounts(sqrt_compile, tick_lower, tick_upper, 10**18, 10**18)
+
+        with pytest.raises(UnprotectedTradeError, match="both token minimums remain positive"):
+            compute_lp_slippage_mins(
+                intent=_intent_with(Decimal("0.005"), require_two_sided_minimums=True),
+                amount0_desired=a0d,
+                amount1_desired=a1d,
+                default_lp_slippage=Decimal("0.99"),
+                sqrt_price_x96=sqrt_compile,
+                tick_lower=tick_lower,
+                tick_upper=tick_upper,
+            )
+
     @pytest.mark.parametrize(
         "half_width_ticks",
         [500, 1000, 5000, 10000, 20000, 50000, 100000],
@@ -331,7 +353,7 @@ class TestThroughTheCompiler:
     """End-to-end: compile a real LP_OPEN, then move the pool under it."""
 
     @staticmethod
-    def _compile(compiler, mock_slot0, sqrt_price_x96: int | None):
+    def _compile(compiler, mock_slot0, sqrt_price_x96: int | None, *, require_two_sided_minimums: bool = False):
         intent = Intent.lp_open(
             pool="WETH/USDC/3000",
             amount0=Decimal("1"),
@@ -340,6 +362,7 @@ class TestThroughTheCompiler:
             range_upper=Decimal("2200"),
             protocol="uniswap_v3",
             max_slippage=Decimal("0.005"),
+            require_two_sided_minimums=require_two_sided_minimums,
         )
         mock_slot0.return_value = None if sqrt_price_x96 is None else (sqrt_price_x96, 0)
         return compiler.compile(intent)
@@ -395,3 +418,42 @@ class TestThroughTheCompiler:
             f"mint would revert 'Price slippage check' after a -0.03% move: "
             f"consumed=({consumed0}, {consumed1}) mins=({a0_min}, {a1_min})"
         )
+
+    @patch(FETCH_SQRT)
+    @patch(VALIDATE_POOL)
+    @patch(LP_ADAPTER_CLS)
+    def test_two_sided_policy_is_a_compiler_safety_refusal_at_live_range_edge(
+        self, mock_adapter_cls, mock_validate, mock_slot0
+    ):
+        adapter = MagicMock(name="MockUniV3LPAdapter")
+        adapter.get_position_manager_address.return_value = "0xC36442b4a4522E871399CD717aBDD847Ab11FE88"
+        adapter.get_mint_calldata.return_value = b"\xa1\xb2"
+        adapter.estimate_mint_gas.return_value = 500_000
+        mock_adapter_cls.return_value = adapter
+
+        pool = MagicMock(name="PoolValidationResult")
+        pool.exists, pool.is_skipped, pool.error, pool.warning = True, False, None, None
+        pool.pool_address = "0x1111111111111111111111111111111111111111"
+        mock_validate.return_value = pool
+
+        compiler = IntentCompiler(
+            chain="ethereum",
+            wallet_address="0x1111111111111111111111111111111111111111",
+            config=IntentCompilerConfig(),
+            price_oracle={"WETH": Decimal("2000"), "USDC": Decimal("1")},
+        )
+        compiler.rpc_url = "http://localhost:8545"
+
+        probe = self._compile(compiler, mock_slot0, None)
+        assert probe.status == CompilationStatus.SUCCESS, probe.error
+        tick_upper = int(probe.action_bundle.metadata["tick_upper"])
+
+        result = self._compile(
+            compiler,
+            mock_slot0,
+            tick_to_sqrt_ratio_x96(tick_upper - 1),
+            require_two_sided_minimums=True,
+        )
+        assert result.status == CompilationStatus.FAILED
+        assert result.is_safety_refusal is True
+        assert "both token minimums remain positive" in str(result.error)

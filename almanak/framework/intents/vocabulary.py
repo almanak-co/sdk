@@ -662,6 +662,12 @@ class LPOpenIntent(BaseIntent):
             execution price directly determines value received. See the LP SLIPPAGE
             DOCTRINE in ``framework/intents/compiler.py``. Connectors that do not
             consume it ignore it entirely.
+        require_two_sided_minimums: When true, V3-family / Slipstream compilers
+            refuse the mint unless the live pool price and realised tick range
+            produce strictly positive ``amount0Min`` AND ``amount1Min``. This is
+            an opt-in invariant for balanced-liquidity strategies. The default is
+            false, preserving VIB-6269's supported single-zero-leg semantics for
+            existing callers and intentionally single-sided LPs.
         intent_id: Unique identifier for this intent
         created_at: Timestamp when the intent was created
     """
@@ -677,6 +683,7 @@ class LPOpenIntent(BaseIntent):
     protocol_params: dict[str, Any] | None = None
     coin_amounts: list[SafeDecimal] | None = None
     max_slippage: OptionalSafeDecimal = None
+    require_two_sided_minimums: bool = False
     intent_id: str = Field(default_factory=default_intent_id)
     created_at: datetime = Field(default_factory=default_timestamp)
 
@@ -1429,6 +1436,7 @@ class Intent:
         protocol_params: dict[str, Any] | None = None,
         coin_amounts: list[Decimal] | None = None,
         max_slippage: Decimal | None = None,
+        require_two_sided_minimums: bool = False,
         registry_handle: str | None = None,
     ) -> LPOpenIntent:
         """Create an LP open intent.
@@ -1489,6 +1497,12 @@ class Intent:
                 swap (imbalanced, single-sided, or zap deposits). See the LP
                 SLIPPAGE DOCTRINE in ``framework/intents/compiler.py``.
 
+            require_two_sided_minimums: Refuse a V3-family / Slipstream mint if
+                its live-price band reaches either realised range bound and
+                therefore makes either token minimum zero. Defaults to false so
+                existing and deliberately single-sided LP intents retain their
+                supported VIB-6269 behaviour.
+
         Returns:
             LPOpenIntent: The created LP open intent
 
@@ -1531,6 +1545,7 @@ class Intent:
             "protocol_params": protocol_params,
             "coin_amounts": coin_amounts,
             "max_slippage": max_slippage,
+            "require_two_sided_minimums": require_two_sided_minimums,
             "registry_handle": registry_handle,
         }
         if range_lower is not None:

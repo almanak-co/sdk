@@ -265,3 +265,197 @@ class TestStraddleInvariant:
         ref = self._band()
         result = self._band(current_tick=ref.tick_upper + 600, require_straddle=False)
         assert result == ref
+
+
+# ---------------------------------------------------------------------------
+# require_lp_tolerance_fits_range (VIB-6567)
+# ---------------------------------------------------------------------------
+
+
+class TestRequireLpToleranceFitsRange:
+    """An LP price band must fit inside the range it is meant to protect.
+
+    The predicate these tests pin was DERIVED FROM MEASUREMENT, not from algebra:
+    a sweep over 4 tick spacings x 11 range widths drove the real
+    ``price_band_to_ticks`` -> ``compute_lp_slippage_mins`` path at 400 spot
+    offsets each and recorded where a leg's minimum came out zero. The guard
+    refuses every measured-unsafe cell and admits every measured-safe one, with
+    three conservative cells (it refuses slightly earlier than reality requires,
+    which is the correct direction for a boot-time check that cannot read spot).
+
+    Mutation matrix, so the coverage claim is checkable rather than asserted:
+    dropping the ``- (spacing - 1)`` term, reading a fee tier as a raw spacing,
+    and removing the scaffold's call all turn this suite RED.
+
+    ONE MUTANT SURVIVES AND IS ACCEPTED: weakening ``>=`` to ``>``. It is
+    equivalent for every reachable input -- both sides are ratios of logarithms,
+    so exact ``Decimal`` equality does not occur. (The previous price-domain guard
+    DID have a reachable equality at ``range_width_pct=0.5`` / ``max_slippage
+    =0.005``, which is why that one was pinned.) ``>=`` is still the correct
+    comparison: at equality the band edge lands exactly on the realised bound and
+    the leg is worth zero there. Recorded rather than papered over with a test
+    that cannot actually discriminate.
+    """
+
+    @staticmethod
+    def _call(**kw):
+        from almanak.connectors._strategy_base.cl_range import require_lp_tolerance_fits_range
+
+        base = {
+            "max_slippage": Decimal("0.005"),
+            "range_half_width_frac": Decimal("0.05"),
+            "pool": "WETH/USDC/3000",
+            "pool_encodes_tick_spacing": False,
+        }
+        return require_lp_tolerance_fits_range(**{**base, **kw})
+
+    def test_undeclared_tolerance_is_not_checked(self):
+        """None means the price-band instrument is never selected — nothing to check.
+
+        This must NOT refuse: it is the pre-existing default path, and turning it
+        into a boot failure would break every strategy that omits the field.
+        """
+        self._call(max_slippage=None)
+
+    def test_scaffold_defaults_are_accepted(self):
+        """+-5% range at 0.5% tolerance on both default pools."""
+        self._call()
+        self._call(pool="WETH/USDC/200", pool_encodes_tick_spacing=True)
+
+    def test_spacing_is_what_makes_the_check_exact(self):
+        """Same range, same tolerance, different spacing -> different verdict.
+
+        This is the whole point of VIB-6567 and the one behaviour a
+        requested-half-width comparison cannot produce. A +-1% range at 0.5%
+        tolerance is SAFE on a 10-tick spacing and UNSAFE on a 60-tick one,
+        because flooring eats up to `spacing - 1` ticks of the realised bound.
+        """
+        from almanak.connectors._strategy_base.cl_range import LpToleranceOutOfRangeError
+
+        self._call(pool="WETH/USDC/500", range_half_width_frac=Decimal("0.01"))
+        with pytest.raises(LpToleranceOutOfRangeError, match="does not fit inside the range"):
+            self._call(pool="WETH/USDC/3000", range_half_width_frac=Decimal("0.01"))
+
+    def test_fee_tier_is_not_read_as_a_tick_spacing(self):
+        """`3000` is a fee tier (spacing 60), not a 3000-tick spacing.
+
+        Reading it as a spacing would demand ~3000 ticks of headroom and refuse
+        the scaffold's own default. The caller states the encoding; it is never
+        guessed from the number.
+        """
+        self._call(pool="WETH/USDC/3000", pool_encodes_tick_spacing=False)
+
+    @pytest.mark.parametrize("bad", [Decimal("0"), Decimal("1"), Decimal("1.5"), Decimal("-0.01")])
+    def test_tolerance_outside_open_unit_interval_is_refused(self, bad):
+        """Closes the gap `cl_math`'s `[0, 1)` refusal leaves on `intent.max_slippage`."""
+        from almanak.connectors._strategy_base.cl_range import LpToleranceOutOfRangeError
+
+        with pytest.raises(LpToleranceOutOfRangeError, match=r"positive fraction below 1"):
+            self._call(max_slippage=bad)
+
+    @pytest.mark.parametrize("bad", ["not-a-number", "NaN", "Infinity"])
+    def test_malformed_or_non_finite_tolerance_is_actionable(self, bad):
+        from almanak.connectors._strategy_base.cl_range import LpToleranceOutOfRangeError
+
+        with pytest.raises(LpToleranceOutOfRangeError, match="max_slippage.*positive fraction below 1"):
+            self._call(max_slippage=bad)
+
+    @pytest.mark.parametrize(
+        "bad",
+        [Decimal("0"), Decimal("-0.05"), Decimal("1"), Decimal("1.01"), "NaN", "Infinity", "not-a-number"],
+    )
+    def test_non_positive_range_names_the_range_not_the_tolerance(self, bad):
+        """A non-finite or non-positive-lower-bound range is its own defect."""
+        from almanak.connectors._strategy_base.cl_range import LpToleranceOutOfRangeError
+
+        with pytest.raises(LpToleranceOutOfRangeError, match="range half-width.*between 0 and 100"):
+            self._call(range_half_width_frac=bad)
+
+    @pytest.mark.parametrize("pool", ["WETHUSDC", "WETH/USDC", "WETH/USDC/wide"])
+    def test_unresolvable_spacing_fails_closed(self, pool):
+        """If spacing cannot be resolved the check cannot run — refuse, never assume."""
+        from almanak.connectors._strategy_base.cl_range import LpToleranceOutOfRangeError
+
+        with pytest.raises(LpToleranceOutOfRangeError):
+            self._call(pool=pool)
+
+    def test_message_names_both_numbers_and_all_three_remedies(self):
+        """A refusal a user cannot act on is a stall, not a guard."""
+        from almanak.connectors._strategy_base.cl_range import LpToleranceOutOfRangeError
+
+        with pytest.raises(LpToleranceOutOfRangeError) as exc:
+            self._call(pool="WETH/USDC/10000", range_half_width_frac=Decimal("0.02"))
+        msg = str(exc.value)
+        assert "ticks" in msg and "200-tick spacing" in msg
+        assert "Widen the range" in msg and "tighten max_slippage" in msg and "finer spacing" in msg
+
+    def test_guard_admits_nothing_that_measurably_zeroes_a_leg(self):
+        """Negative control against the REAL path, not against the predicate.
+
+        Drives price_band_to_ticks -> compute_lp_slippage_mins across spot offsets
+        and asserts: every configuration the guard ADMITS produces a positive
+        minimum on both legs at every offset. A guard that agrees with its own
+        formula proves nothing; this compares it to emitted calldata.
+        """
+        from almanak.connectors._strategy_base.base.cl_math import compute_lp_slippage_mins
+        from almanak.connectors._strategy_base.cl_range import (
+            LpToleranceOutOfRangeError,
+            price_band_to_ticks,
+        )
+        from almanak.connectors._strategy_base.concentrated_liquidity_math import price_to_tick
+        from almanak.framework.intents.compiler import LP_SLIPPAGE_PERMISSIVE_DEFAULT
+        from almanak.framework.intents.lp_math import tick_to_sqrt_ratio_x96
+
+        class _Intent:
+            protocol_params = None
+
+            def __init__(self, ms):
+                self.max_slippage = ms
+
+        tol = Decimal("0.005")
+        a0, a1 = 500 * 10**15, 1000 * 10**6
+        admitted = 0
+        for spacing in (10, 60, 200):
+            for rwp in ("5.0", "2.0", "1.5", "1.0", "0.6"):
+                half = Decimal(rwp) / Decimal("100")
+                try:
+                    self._call(
+                        max_slippage=tol,
+                        range_half_width_frac=half,
+                        pool=f"WETH/USDC/{spacing}",
+                        pool_encodes_tick_spacing=True,
+                    )
+                except LpToleranceOutOfRangeError:
+                    continue  # refused: not this test's subject
+                admitted += 1
+                for k in range(60):
+                    p = Decimal("3000") * (Decimal(1) + Decimal(k) / Decimal(9000))
+                    band = price_band_to_ticks(
+                        range_lower=p * (1 - half),
+                        range_upper=p * (1 + half),
+                        token0_decimals=18,
+                        token1_decimals=6,
+                        tokens_swapped=True,
+                        tick_spacing=spacing,
+                        current_tick=None,
+                        require_straddle=False,
+                    )
+                    spot = price_to_tick(Decimal(1) / p, decimals0=18, decimals1=6)
+                    if not (band.tick_lower <= spot < band.tick_upper):
+                        continue
+                    m0, m1 = compute_lp_slippage_mins(
+                        intent=_Intent(tol),
+                        amount0_desired=a0,
+                        amount1_desired=a1,
+                        default_lp_slippage=LP_SLIPPAGE_PERMISSIVE_DEFAULT,
+                        sqrt_price_x96=tick_to_sqrt_ratio_x96(spot),
+                        tick_lower=band.tick_lower,
+                        tick_upper=band.tick_upper,
+                    )
+                    assert m0 > 0 and m1 > 0, (
+                        f"guard ADMITTED spacing={spacing} half={half} but the emitted "
+                        f"minimums were ({m0}, {m1}) at spot tick {spot} — an admitted "
+                        f"configuration shipped an unfloored leg, which is the hole "
+                        f"VIB-6567 exists to close."
+                    )
+        assert admitted >= 8, f"sweep degenerate: only {admitted} configurations admitted"

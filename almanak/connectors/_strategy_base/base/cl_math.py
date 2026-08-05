@@ -189,9 +189,13 @@ def compute_lp_slippage_mins(
     including a token1 floor of literally ``0`` at ticks [-10000, 10000]. See the
     inline comment at the guard below.
 
-    A SINGLE zero leg from a DECLARED tolerance is kept: that is the legitimate
-    band-aware case VIB-6269 (Defect B) measured and which its Q5
+    A SINGLE zero leg from a DECLARED tolerance is kept by default: that is the
+    legitimate band-aware case VIB-6269 (Defect B) measured and which its Q5
     ``max(amount0_min, amount1_min)``-shaped reasoning explicitly endorses.
+    Callers may opt into ``intent.require_two_sided_minimums`` when their strategy
+    contract instead requires both legs to stay protected. That check happens
+    here, after the compiler has read live slot0 and realised the tick range, so
+    oracle drift between strategy decision and compilation cannot bypass it.
 
     ``protocol_params["lp_slippage"]`` FAILS CLOSED (VIB-6217). It used to be
     clamped with ``min(max(x, 0), 1)``, which turned every out-of-range value into
@@ -247,6 +251,14 @@ def compute_lp_slippage_mins(
             amount1_desired,
             lp_slippage,
         )
+        if getattr(intent, "require_two_sided_minimums", False) and (band0 <= 0 or band1 <= 0):
+            raise UnprotectedTradeError(
+                "LP mint (two-sided minimums)",
+                f"the declared {lp_slippage:.3%} price tolerance reaches a live range bound "
+                f"at ticks [{tick_lower}, {tick_upper}], producing amount0Min={band0} and "
+                f"amount1Min={band1}. Narrow max_slippage or widen/recenter the LP range "
+                "so both token minimums remain positive.",
+            )
         if band0 > 0 or band1 > 0:
             # NEVER TIGHTER THAN THE LEGACY HAIRCUT. Analytically redundant --
             # the amplification A >= 1 always, so the band-aware minimum is

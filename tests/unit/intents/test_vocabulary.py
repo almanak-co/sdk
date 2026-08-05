@@ -106,9 +106,7 @@ class TestSwapIntentValidators:
 
     # Decimal("1") is the VIB-6217 case: 100% tolerance derives a zero minimum
     # from any expected output, so the bound is exclusive at 1.
-    @pytest.mark.parametrize(
-        "bad_slippage", [Decimal("-0.01"), Decimal("1"), Decimal("1.5")]
-    )
+    @pytest.mark.parametrize("bad_slippage", [Decimal("-0.01"), Decimal("1"), Decimal("1.5")])
     def test_slippage_out_of_bounds(self, bad_slippage):
         with pytest.raises(ValidationError, match=r"max_slippage must be in \[0, 1\)"):
             SwapIntent(
@@ -282,6 +280,7 @@ class TestLPOpenIntent:
         assert intent.protocol == "uniswap_v3"
         assert intent.intent_type == IntentType.LP_OPEN
         assert intent.protocol_params is None
+        assert intent.require_two_sided_minimums is False
 
     def test_factory_matches_direct(self):
         a = LPOpenIntent(**self._kwargs())
@@ -294,6 +293,19 @@ class TestLPOpenIntent:
         )
         assert a.pool == b.pool
         assert a.amount0 == b.amount0
+
+    def test_two_sided_minimum_policy_factory_and_roundtrip(self):
+        intent = Intent.lp_open(
+            **self._kwargs(),
+            require_two_sided_minimums=True,
+        )
+        assert intent.require_two_sided_minimums is True
+        rebuilt = LPOpenIntent.deserialize(intent.serialize())
+        assert rebuilt.require_two_sided_minimums is True
+
+    def test_two_sided_minimum_policy_is_strict_boolean(self):
+        with pytest.raises(ValidationError):
+            LPOpenIntent(**self._kwargs(require_two_sided_minimums="true"))
 
     def test_negative_amount0_raises(self):
         with pytest.raises(ValidationError, match="amount0 must be non-negative"):
