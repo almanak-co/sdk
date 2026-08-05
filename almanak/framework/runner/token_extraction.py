@@ -58,6 +58,25 @@ def _is_symbol(value: Any) -> TypeGuard[str]:
     return bool(stripped) and len(stripped) < MAX_SYMBOL_LENGTH and not stripped.lower().startswith("0x")
 
 
+def _resolve_address_value(value: Any, chain: str | None) -> str | None:
+    """Resolve an address-shaped token field to its canonical UPPER symbol.
+
+    Post symbol-deprecation, strategies stamp contract addresses into intent
+    token fields. ``_is_symbol`` (correctly) rejects those, which used to mean
+    the leg was silently dropped from price pre-fetching and the compiler
+    failed closed on a missing symbol price ("Price for 'CBBTC' is missing in
+    the price oracle"). Resolution is offline-only (static registry / caches,
+    ``skip_gateway=True``) and best-effort: an unresolvable address returns
+    ``None`` and the caller keeps the previous drop behaviour — Empty ≠ Zero,
+    never guess a symbol.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    from almanak.framework.data.tokens.address_resolution import resolve_token_symbol
+
+    return resolve_token_symbol(value, chain)
+
+
 def parse_pool_tokens(pool: str) -> list[str]:
     """Extract token symbols from a slash-separated pool descriptor.
 
@@ -112,12 +131,17 @@ def parse_pool_tokens(pool: str) -> list[str]:
     return tokens
 
 
-def extract_token_symbols(intent: Any, *, _depth: int = 0) -> list[str]:
+def extract_token_symbols(intent: Any, *, default_chain: str | None = None, _depth: int = 0) -> list[str]:
     """Extract token symbols from an intent for price pre-fetching.
 
     Works with both Intent objects (attribute access) and plain dicts
     (key access), and recurses into ``callback_intents`` for FlashLoanIntent
     with a depth guard to prevent infinite loops.
+
+    ``default_chain`` supplies the chain context for address→symbol resolution
+    when the intent itself declares none (single-chain strategies routinely
+    rely on the documented default chain and leave ``intent.chain`` unset —
+    without this, their address-form legs would silently skip resolution).
 
     Returns a deduplicated list of token symbols preserving first-seen order.
     """
@@ -129,15 +153,41 @@ def extract_token_symbols(intent: Any, *, _depth: int = 0) -> list[str]:
     # Attribute access (Intent objects) or key access (dicts)
     _get = intent.get if isinstance(intent, dict) else lambda k, d=None: getattr(intent, k, d)
 
+    # Chain context for address→symbol resolution. ``to_token`` on a bridge
+    # intent lives on the destination chain (mirrors
+    # ``intents.base._token_reference_chain``); everything else uses the
+    # intent's own chain.
+    chain_val = _get("chain")
+    intent_chain = chain_val.strip() if isinstance(chain_val, str) and chain_val.strip() else default_chain
+    dest_val = _get("destination_chain")
+    dest_chain = dest_val.strip() if isinstance(dest_val, str) and dest_val.strip() else intent_chain
+
     for field in TOKEN_FIELDS:
         val = _get(field)
         if _is_symbol(val) and not is_fiat_quote_symbol(val):
             symbols.append(val.strip())
+            continue
+        # Address-shaped legs: resolve to the canonical symbol (offline,
+        # best-effort) so they participate in price pre-fetching like symbol
+        # legs always have. Unresolvable addresses stay dropped (previous
+        # behaviour) rather than guessed.
+        resolved = _resolve_address_value(val, dest_chain if field == "to_token" else intent_chain)
+        if resolved and not is_fiat_quote_symbol(resolved):
+            symbols.append(resolved)
 
     # Parse pool name (e.g., "WETH/USDC/500") for LP intents
     pool = _get("pool")
     if isinstance(pool, str):
         symbols.extend(parse_pool_tokens(pool))
+        # Address-based pool descriptors ("0xA.../0xB.../500") yield nothing
+        # from ``parse_pool_tokens`` — resolve those segments the same way.
+        if "/" in pool:
+            for raw_part in pool.split("/"):
+                part = raw_part.strip().split("(")[0].split(" ")[0].strip()
+                if part.lower().startswith("0x"):
+                    resolved = _resolve_address_value(part, intent_chain)
+                    if resolved and not is_fiat_quote_symbol(resolved):
+                        symbols.append(resolved)
 
     # Parse the perp market descriptor (e.g. "ETH/USD", "BTC/USD", or the bare
     # index alias "ETH"). VIB-6219: the GMX V2 compiler now REQUIRES the index
@@ -158,7 +208,7 @@ def extract_token_symbols(intent: Any, *, _depth: int = 0) -> list[str]:
     callbacks = _get("callback_intents")
     if callbacks and isinstance(callbacks, list):
         for cb in callbacks:
-            symbols.extend(extract_token_symbols(cb, _depth=_depth + 1))
+            symbols.extend(extract_token_symbols(cb, default_chain=intent_chain, _depth=_depth + 1))
 
     # Deduplicate preserving order
     return list(dict.fromkeys(symbols))

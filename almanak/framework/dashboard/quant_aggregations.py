@@ -413,7 +413,7 @@ def _wallet_value_at_first_action(ledger_entries: list[Any]) -> Decimal | None:
             balance = _to_decimal(balance_raw)
             if balance == 0:
                 continue
-            price_entry = prices.get(token)
+            price_entry = _price_entry_for_token(prices, token)
             if not isinstance(price_entry, dict):
                 continue
             price = _to_decimal(price_entry.get("price_usd"))
@@ -422,6 +422,43 @@ def _wallet_value_at_first_action(ledger_entries: list[Any]) -> Decimal | None:
             total += balance * price
         if total > 0:
             return total
+    return None
+
+
+def _price_entry_for_token(prices: dict, token: Any) -> Any:
+    """Find the ``price_inputs_json`` entry for a wallet-balance key.
+
+    Balance snapshots stamp the intent's token string VERBATIM (address-form
+    post symbol-deprecation), while ``price_inputs_json`` is symbol-keyed —
+    an exact-string join silently excluded those holdings from the
+    "Deployed" anchor and understated the baseline. Probe order: exact
+    (previous behaviour) → case-insensitive → the snapshot's
+    ``chain:0xaddr`` composite keys by address → offline address→symbol
+    resolution using chains named by the composite keys. Misses stay
+    excluded, as before.
+    """
+    entry = prices.get(token)
+    if isinstance(entry, dict):
+        return entry
+    if not isinstance(token, str):
+        return None
+    token_lower = token.strip().lower()
+    for key, value in prices.items():
+        if isinstance(key, str) and key.lower() == token_lower and isinstance(value, dict):
+            return value
+    if token_lower.startswith("0x"):
+        for key, value in prices.items():
+            if isinstance(key, str) and key.lower().endswith(":" + token_lower) and isinstance(value, dict):
+                return value
+        from almanak.framework.data.tokens.address_resolution import resolve_token_symbol
+
+        chains = {key.split(":", 1)[0].lower() for key in prices if isinstance(key, str) and ":" in key}
+        for chain_guess in sorted(chains):
+            symbol = resolve_token_symbol(token_lower, chain_guess)
+            if symbol:
+                value = prices.get(symbol)
+                if isinstance(value, dict):
+                    return value
     return None
 
 

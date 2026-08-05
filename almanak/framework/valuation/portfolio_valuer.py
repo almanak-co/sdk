@@ -324,6 +324,13 @@ def _token_overlaps_wallet_index(
     asset_symbol = details.get("asset")
     if isinstance(asset_symbol, str) and asset_symbol and asset_symbol.casefold() in index.symbols:
         return True
+    # Address-form ``details["asset"]`` (post symbol-deprecation strategies
+    # stamp contract addresses) with no separate ``details["address"]`` key:
+    # match it against the wallet's address index too, so the dedup doesn't
+    # silently miss and double-count the holding.
+    if isinstance(asset_symbol, str) and _is_evm_address_shape(asset_symbol):
+        if asset_symbol.casefold() in index.evm_addresses:
+            return True
 
     asset_addr = details.get("address")
     if isinstance(asset_addr, str) and asset_addr:

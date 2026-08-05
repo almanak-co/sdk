@@ -242,6 +242,19 @@ def verify_lending_closure(
             ),
         )
     asset = asset.strip()
+    if asset.lower().startswith("0x") and len(asset) == 42:
+        # Address-form ``details["asset"]`` (post symbol-deprecation
+        # strategies stamp contract addresses): resolve to the canonical
+        # symbol via the connector-layer helper so the (chain, symbol)-keyed
+        # adapter catalogues can find the market. Symbol-form input is
+        # untouched (catalogues are case-sensitive on symbols). A resolver
+        # miss keeps the address and degrades to unmeasured exactly as
+        # before — never a guess, never a false-green.
+        from almanak.connectors._strategy_base.base.receipt_parser import resolve_swap_token_symbol
+
+        resolved = resolve_swap_token_symbol(asset, chain)
+        if resolved and not resolved.lower().startswith("0x"):
+            asset = resolved
 
     # PositionType is a StrEnum, so plain string comparison is exact; the
     # string form also keeps this connector-layer module free of framework

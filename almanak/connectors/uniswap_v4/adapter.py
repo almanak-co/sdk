@@ -575,7 +575,14 @@ class UniswapV4Adapter:
                 )
             amount_in: Decimal = intent.amount  # type: ignore[assignment]
         elif intent.amount_usd is not None:
-            from_price = price_oracle.get(intent.from_token.upper())
+            # Lenient lookup (VIB token-identity PR): the raw ``dict.get`` here
+            # broke for address-form legs and skipped the stablecoin fallback
+            # every funnel-path compiler has. Direct symbol keys still win.
+            from almanak.framework.intents.compiler_queries import lenient_oracle_price
+
+            from_price = lenient_oracle_price(
+                price_oracle, intent.from_token, getattr(intent, "chain", None) or self.chain
+            )
             if not from_price:
                 raise ValueError(
                     f"Price unavailable for '{intent.from_token}' -- cannot convert amount_usd "
@@ -588,9 +595,11 @@ class UniswapV4Adapter:
         slippage_bps = int(intent.max_slippage * 10000)
 
         # Compute price ratio for cross-decimal quote accuracy
+        from almanak.framework.intents.compiler_queries import lenient_oracle_price
+
         computed_price_ratio = None
-        from_price = price_oracle.get(intent.from_token.upper())
-        to_price = price_oracle.get(intent.to_token.upper())
+        from_price = lenient_oracle_price(price_oracle, intent.from_token, getattr(intent, "chain", None) or self.chain)
+        to_price = lenient_oracle_price(price_oracle, intent.to_token, getattr(intent, "chain", None) or self.chain)
         if from_price and to_price and to_price > 0:
             computed_price_ratio = Decimal(str(from_price)) / Decimal(str(to_price))
 
@@ -823,9 +832,11 @@ class UniswapV4Adapter:
 
             # Fallback: estimate from oracle prices
             if sqrt_price_x96 is None:
+                from almanak.framework.intents.compiler_queries import lenient_oracle_price
+
                 mid_price = None
-                price0 = price_oracle.get(token0_symbol.upper())
-                price1 = price_oracle.get(token1_symbol.upper())
+                price0 = lenient_oracle_price(price_oracle, token0_symbol, getattr(intent, "chain", None) or self.chain)
+                price1 = lenient_oracle_price(price_oracle, token1_symbol, getattr(intent, "chain", None) or self.chain)
                 if price0 and price1 and price1 > 0:
                     mid_price = Decimal(str(price0)) / Decimal(str(price1))
                     price_source = "oracle_estimate"

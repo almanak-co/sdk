@@ -657,7 +657,10 @@ class UniswapV3PoolPriceReader:
         Returns:
             Lowercase address, or None if unresolvable.
         """
-        if token.startswith("0x") and len(token) == 42:
+        if token.lower().startswith("0x") and len(token) == 42:
+            # Case-insensitive prefix: the instrument canonicalization path
+            # (twap/lwap) uppercases addresses to "0X..." before they reach
+            # this resolver — those are still addresses.
             return token.lower()
 
         if self._token_resolver is not None:

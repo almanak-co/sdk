@@ -37,7 +37,7 @@ class CriticalCallbackError(Exception):
 # =============================================================================
 
 
-def _extract_tokens_from_intent(intent: "AnyIntent") -> list[str]:
+def _extract_tokens_from_intent(intent: "AnyIntent", *, default_chain: str | None = None) -> list[str]:
     """Extract token symbols from an intent for price pre-fetching.
 
     Returns a list of token symbols mentioned in the intent. Used to
@@ -45,10 +45,12 @@ def _extract_tokens_from_intent(intent: "AnyIntent") -> list[str]:
 
     Delegates to the shared ``extract_token_symbols`` utility which handles
     all token fields and recurses into ``callback_intents`` for FlashLoanIntent.
+    ``default_chain`` supplies address→symbol resolution context for intents
+    that rely on the strategy's default chain and declare none themselves.
     """
     from almanak.framework.runner.token_extraction import extract_token_symbols
 
-    return extract_token_symbols(intent)
+    return extract_token_symbols(intent, default_chain=default_chain)
 
 
 # crap-allowlist: VIB-4835 — pre-existing complexity (cc=38, cov=63%) touched only by ``almanak.connectors._strategy_base.protocol_aliases`` import rewrite (legacy ``almanak.framework.connectors.protocol_aliases`` → new ``_strategy_base`` path). Refactor tracked in VIB-4139.

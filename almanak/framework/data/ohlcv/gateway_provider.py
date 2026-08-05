@@ -153,6 +153,19 @@ class GatewayOHLCVProvider:
             Binance trading pair (e.g., "ETHUSDT") or None if not found
         """
         token_upper = token.upper()
+        if "0X" in token_upper:
+            # Address-native instrument base (``CHAIN:0XADDR`` composite from
+            # resolve_instrument, or a raw address). The CEX maps are keyed by
+            # symbol only, so without resolution the Binance fallback in the
+            # defi_primary provider chain was dead on arrival for address
+            # inputs — the address lane had exactly one provider and no
+            # redundancy. Resolution is offline and best-effort; an
+            # unresolvable address keeps the previous "Unknown token" outcome.
+            from almanak.framework.data.tokens.address_resolution import resolve_token_symbol
+
+            resolved = resolve_token_symbol(token, None)
+            if resolved:
+                token_upper = resolved
         for quote in ("USDT", "USDC"):
             mapped = integration_market_symbol("binance", token_upper, quote)
             if mapped:

@@ -2411,7 +2411,9 @@ class StrategyRunner:
         intent_tokens: list[str] = []
         try:
             for _intent in intents:
-                intent_tokens.extend(_extract_tokens_from_intent(_intent))
+                intent_tokens.extend(
+                    _extract_tokens_from_intent(_intent, default_chain=getattr(self.config, "chain", None))
+                )
             intent_tokens = list(set(intent_tokens))  # dedupe
             if intent_tokens:
                 for token in intent_tokens:
@@ -8226,7 +8228,7 @@ class StrategyRunner:
         if market is None or not hasattr(market, "get_price_oracle_dict"):
             return None
         try:
-            tokens = _extract_tokens_from_intent(intent)
+            tokens = _extract_tokens_from_intent(intent, default_chain=getattr(market, "chain", None))
             if hasattr(market, "price"):
                 for token in tokens:
                     try:
@@ -8716,7 +8718,9 @@ class StrategyRunner:
         #    accounting.gas_pricing.compute_gas_usd returns None and the ledger
         #    writes gas_usd="" on every non-native-leg swap (VIB-3804).
         if hasattr(market, "price"):
-            intent_tokens: set[str] = set(_extract_tokens_from_intent(intent))
+            intent_tokens: set[str] = set(
+                _extract_tokens_from_intent(intent, default_chain=getattr(market, "chain", None))
+            )
             missing_tokens = [t for t in intent_tokens if not price_oracle or t not in price_oracle]
             if missing_tokens:
                 for token in missing_tokens:
@@ -10261,13 +10265,29 @@ class StrategyRunner:
                 fetched_any = False
                 for i in intents:
                     intent_chain = getattr(i, "chain", None) or orchestrator.primary_chain
-                    for token in _extract_tokens_from_intent(i):
+                    for token in _extract_tokens_from_intent(i, default_chain=intent_chain):
                         if not price_oracle or token not in price_oracle:
                             try:
                                 market.price(token, chain=intent_chain)
                                 fetched_any = True
                             except Exception as e:
                                 logger.warning(f"Failed to pre-fetch price for {token} on {intent_chain}: {e}")
+                    # Bridge destination leg: ``to_token`` lives on
+                    # ``destination_chain``, not the intent's source chain the
+                    # loop above prices with. Fetch it explicitly on its own
+                    # chain — ``market.price`` accepts both identity forms, so
+                    # this holds for symbol- and address-form bridge legs alike
+                    # (CodeRabbit review, PR #3612).
+                    dest_chain = getattr(i, "destination_chain", None)
+                    dest_token = getattr(i, "to_token", None)
+                    if dest_chain and dest_token and dest_chain != intent_chain:
+                        try:
+                            market.price(dest_token, chain=dest_chain)
+                            fetched_any = True
+                        except Exception as e:
+                            logger.warning(
+                                f"Failed to pre-fetch bridge-leg price for {dest_token} on {dest_chain}: {e}"
+                            )
                 if fetched_any:
                     price_oracle = market.get_price_oracle_dict()
             if price_oracle:

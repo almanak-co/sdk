@@ -363,6 +363,31 @@ def _resolve_oracle_price(price_oracle: dict | None, asset: str) -> Decimal | No
             (v for k, v in price_oracle.items() if isinstance(k, str) and k.lower() == asset_lower),
             None,
         )
+    if candidate is None and asset.strip().lower().startswith("0x"):
+        # Address-form asset (post symbol-deprecation intents): join against
+        # the snapshot's address-composite oracle keys ("chain:0xaddr") by
+        # exact address, or resolve the address to its canonical symbol and
+        # retry. Empty ≠ Zero: an unresolvable address stays unpriced.
+        asset_addr = asset.strip().lower()
+        candidate = next(
+            (v for k, v in price_oracle.items() if isinstance(k, str) and k.lower().endswith(":" + asset_addr)),
+            None,
+        )
+        if candidate is None:
+            from almanak.framework.data.tokens.address_resolution import resolve_token_symbol
+
+            # Composite oracle keys carry their own chain — probe them for a
+            # chain to resolve this bare address against.
+            chains = {
+                k.split(":", 1)[0].lower()
+                for k in price_oracle
+                if isinstance(k, str) and ":" in k and k.lower().partition(":")[2].startswith("0x")
+            }
+            for chain_guess in sorted(chains):
+                resolved = resolve_token_symbol(asset_addr, chain_guess)
+                if resolved and resolved in price_oracle:
+                    candidate = price_oracle[resolved]
+                    break
     if candidate is None:
         return None
     if isinstance(candidate, dict):

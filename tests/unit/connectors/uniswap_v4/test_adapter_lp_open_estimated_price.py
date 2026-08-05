@@ -144,9 +144,12 @@ def test_range_midpoint_estimate_label():
         protocol_params={"allow_estimated_price": True},
     )
 
-    # Oracle missing USDC → oracle branch cannot compute mid_price, falls back to
-    # the range-midpoint branch.
-    price_oracle = {"WETH": Decimal("2000")}
+    # Oracle missing WETH → oracle branch cannot compute mid_price, falls back
+    # to the range-midpoint branch. (USDC can no longer play the missing-token
+    # role here: the lenient oracle lookup — token-identity PR — serves known
+    # stablecoins at $1 exactly like every funnel-path compiler, so a missing
+    # USDC price no longer starves the oracle branch.)
+    price_oracle = {"USDC": Decimal("1")}
     bundle = adapter.compile_lp_open_intent(intent, price_oracle)
 
     assert bundle.intent_type == "LP_OPEN"

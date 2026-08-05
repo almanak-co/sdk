@@ -675,7 +675,18 @@ def test_collision_guard_symbol_is_wired_post_t14() -> None:
     repo_root = Path(__file__).resolve().parents[3]
     almanak_dir = repo_root / "almanak"
     result = subprocess.run(
-        ["grep", "-rEn", "RegistryAutoCollisionError", str(almanak_dir)],
+        # ``timeline.py`` writes its ``.dashboard_events.json`` cache (plus an
+        # atomic ``.tmp`` sibling) INSIDE the package tree; a concurrently
+        # running timeline test can delete the tmp file mid-scan and grep then
+        # exits 2 (ENOENT) — a benign race, not a failed scan. Excluding the
+        # cache files keeps this guard's exit-code contract honest under xdist.
+        [
+            "grep",
+            "-rEn",
+            "--exclude=.dashboard_events*",
+            "RegistryAutoCollisionError",
+            str(almanak_dir),
+        ],
         capture_output=True, text=True, check=False,
     )
     assert result.returncode != 2, (

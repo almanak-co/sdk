@@ -261,6 +261,70 @@ class CompilerQueryHost(Protocol):
 # =============================================================================
 
 
+def lenient_oracle_price(price_oracle: dict | None, token: str, chain: str | None = None) -> Decimal | None:
+    """Best-effort price for ``token`` from a plain oracle dict.
+
+    Mirrors :meth:`CompilerQueries.require_token_price` leniency — direct /
+    case-insensitive match, wrapped↔native alias, known-stablecoin $1
+    fallback, and address↔symbol bridging — for call sites that hold a plain
+    ``{key: price}`` dict rather than a compiler host (the uniswap_v4 and
+    jupiter adapters keyed the oracle by the RAW intent field, which broke
+    even for stablecoins and for symbols that WERE warmed). Returns ``None``
+    instead of raising so adapters keep their own error shapes.
+    """
+    token_str = str(token or "").strip()
+    if not token_str:
+        return None
+    oracle = price_oracle or {}
+    token_upper = token_str.upper()
+
+    def _direct(sym_upper: str) -> Decimal | None:
+        for key, val in oracle.items():
+            if isinstance(key, str) and key.upper() == sym_upper and val:
+                return val
+        return None
+
+    # 1. Direct / case-insensitive on the raw value (previous behaviour first).
+    found = _direct(token_upper)
+    if found is not None:
+        return found
+
+    # 2. Address-form input: resolve to the canonical symbol and retry.
+    from almanak.framework.data.tokens.address_resolution import resolve_token_symbol
+
+    resolved = resolve_token_symbol(token_str, chain)
+    if resolved:
+        found = _direct(resolved)
+        if found is not None:
+            return found
+    symbol_upper = resolved or token_upper
+
+    # 3. Wrapped↔native alias (both directions, matching the compiler).
+    from almanak.framework.intents.compiler import IntentCompiler
+
+    aliases: set[str] = set()
+    native = IntentCompiler._WRAPPED_TO_NATIVE.get(symbol_upper)
+    if native:
+        aliases.add(native.upper())
+    aliases.update(w.upper() for w, n in IntentCompiler._WRAPPED_TO_NATIVE.items() if n.upper() == symbol_upper)
+    for alias in aliases:
+        found = _direct(alias)
+        if found is not None:
+            return found
+
+    # 4. Known stablecoins are ~$1.
+    if symbol_upper in IntentCompiler._get_known_stablecoins():
+        return Decimal("1")
+
+    # 5. Address-keyed oracle entries resolving to this symbol.
+    for key, val in oracle.items():
+        if not val or not isinstance(key, str) or "0x" not in key.lower():
+            continue
+        if resolve_token_symbol(key, chain) == symbol_upper:
+            return val
+    return None
+
+
 class CompilerQueries:
     """Read-only query collaborator for ``IntentCompiler``.
 
@@ -528,11 +592,47 @@ class CompilerQueries:
                 else:
                     logger.debug(f"Reusing stablecoin fallback price for '{symbol}'")
                 return Decimal("1")
+            # Address-keyed fallback: post symbol-deprecation, strategies warm
+            # prices by contract address, which the snapshot caches under
+            # ``chain:0xaddr`` keys. When such a key resolves (offline) to the
+            # requested symbol, its price is the same asset's price — use it
+            # instead of failing closed on a price that IS in the oracle,
+            # just under the other identity form. Miss-path only: symbol-keyed
+            # lookups above are untouched.
+            address_keyed = self._address_keyed_price(symbol)
+            if address_keyed is not None:
+                logger.debug(f"Resolved '{symbol}' price via address-keyed oracle entry")
+                return address_keyed
             raise ValueError(
                 f"Price for '{symbol}' is {'zero' if price == 0 else 'missing'} in the price oracle. "
                 "Compilation requires a valid price to calculate amounts and slippage."
             )
         return price
+
+    def _address_keyed_price(self, symbol: str) -> Decimal | None:
+        """Price from an address-keyed oracle entry resolving to ``symbol``.
+
+        Scans the oracle for ``chain:0xaddr`` / ``0xaddr``-shaped keys and
+        resolves each (offline, lru-cached) to its canonical symbol. Runs only
+        on the miss path, right before the fail-closed raise — the common
+        symbol-keyed path never pays for it. Returns ``None`` when no
+        address-keyed entry names this symbol (the raise proceeds unchanged).
+        """
+        oracle = self._host.price_oracle
+        if not oracle:
+            return None
+        from almanak.framework.data.tokens.address_resolution import resolve_token_symbol
+
+        target = symbol.strip().upper()
+        chain = getattr(self._host, "chain", None)
+        for key, val in oracle.items():
+            if val is None or val == 0 or not isinstance(key, str):
+                continue
+            if "0x" not in key.lower():
+                continue
+            if resolve_token_symbol(key, chain) == target:
+                return val
+        return None
 
     # ------------------------------------------------------------------
     # Pool parsing

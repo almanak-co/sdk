@@ -108,12 +108,30 @@ def _morpho_blue_markets_for_asset(chain: str, asset_symbol: str) -> list[tuple[
     """
     from almanak.gateway.services.rate_history_service import RateHistoryUnavailable
 
+    lookup_symbol = asset_symbol
     chain_markets = MORPHO_MARKETS.get(chain, {})
     matches = [
         (market_id, params)
         for market_id, params in chain_markets.items()
-        if str(params.get("loan_token", "")).upper() == asset_symbol.upper()
+        if str(params.get("loan_token", "")).upper() == lookup_symbol.upper()
     ]
+    if not matches:
+        # Address-form asset: resolve to the canonical symbol and retry the
+        # symbol-keyed catalogue. Symbol-form misses are unchanged.
+        from almanak.framework.data.tokens.address_resolution import (
+            looks_like_address,
+            resolve_token_symbol,
+        )
+
+        if looks_like_address(asset_symbol, chain):
+            resolved = resolve_token_symbol(asset_symbol, chain)
+            if resolved:
+                lookup_symbol = resolved
+                matches = [
+                    (market_id, params)
+                    for market_id, params in chain_markets.items()
+                    if str(params.get("loan_token", "")).upper() == resolved
+                ]
     if not matches:
         raise RateHistoryUnavailable(
             "morpho_blue",

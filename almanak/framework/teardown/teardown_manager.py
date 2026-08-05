@@ -2127,6 +2127,7 @@ class TeardownManager:
                         live_balance=live_balance,
                         tracked_map=tracked_map,
                         from_token=clamp_token,
+                        chain=(intent.get("chain") if isinstance(intent, dict) else getattr(intent, "chain", None)),
                     )
                 if decision.degraded:
                     accounting_degraded_records.append(

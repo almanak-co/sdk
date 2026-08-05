@@ -85,6 +85,16 @@ class GatewayOHLCVDataProvider:
         timeframe = parse_ohlcv_timeframe(kwargs.get("timeframe", OHLCVTimeframe.ONE_HOUR))
         limit = int(kwargs.get("limit", 100))  # type: ignore[call-overload]
 
+        # Address-form token base: composite the router-supplied chain into the
+        # token key so ``_resolve_binance_symbol`` can resolve the address to a
+        # CEX-mapped symbol. A bare address carries no chain, and resolution
+        # deliberately refuses to guess one — without this, the defi_primary
+        # chain's Binance fallback stayed dead for address inputs whenever
+        # CoinGecko Onchain missed (Codex review, PR #3612).
+        chain = str(kwargs.get("chain", "") or "")
+        if chain and token.lower().startswith("0x") and ":" not in token:
+            token = f"{chain}:{token}"
+
         start = time.monotonic()
 
         # Async-to-sync wrapping (same 3-tier pattern as CoinGeckoOnchainOHLCVProvider)

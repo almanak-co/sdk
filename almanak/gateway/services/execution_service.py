@@ -175,7 +175,7 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
         return prices
 
     @staticmethod
-    def _extract_token_symbols_from_intent(intent: object) -> list[str]:
+    def _extract_token_symbols_from_intent(intent: object, *, default_chain: str | None = None) -> list[str]:
         """Extract token symbols from an intent object for price fetching.
 
         Delegates to the canonical ``extract_token_symbols`` helper in
@@ -188,7 +188,7 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
         """
         from almanak.framework.runner.token_extraction import extract_token_symbols
 
-        return extract_token_symbols(intent)
+        return extract_token_symbols(intent, default_chain=default_chain)
 
     async def _ensure_initialized(self) -> None:
         """Lazy initialization of execution components."""
@@ -642,7 +642,7 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
         with incorrect slippage calculations. First try self-serving prices
         from the gateway's own market service.
         """
-        intent_tokens = self._extract_token_symbols_from_intent(intent)
+        intent_tokens = self._extract_token_symbols_from_intent(intent, default_chain=getattr(compiler, "chain", None))
         self_served = await self._fetch_prices_for_tokens(intent_tokens) if intent_tokens else {}
         # Require prices for ALL extracted tokens to prevent partial placeholder usage
         all_covered = intent_tokens and all(t.upper() in self_served for t in intent_tokens)

@@ -2327,6 +2327,11 @@ def _apply_inline_swap_clamp(
     except (InvalidOperation, TypeError, ValueError):
         live = None
 
+    # Multi-chain teardown: the intent's own chain wins over the strategy's
+    # default so inventory lookup and identity resolution key the SAME chain
+    # the balance was read on (CodeRabbit review, PR #3612).
+    effective_chain = getattr(intent, "chain", None) or chain
+
     if live is None:
         decision = SwapClampDecision(None, True, True, "live_balance_unmeasured")
     else:
@@ -2335,10 +2340,11 @@ def _apply_inline_swap_clamp(
             tracked_map=read_tracked_swap_inventory(
                 state_manager=getattr(runner, "state_manager", None),
                 deployment_id=deployment_id,
-                chain=chain,
+                chain=effective_chain,
                 wallet_address=wallet_address,
             ),
             from_token=balance_token,
+            chain=effective_chain,
         )
 
     if not decision.skip:

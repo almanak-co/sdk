@@ -234,7 +234,14 @@ class JupiterAdapter:
                     decimals = self.get_token_decimals(intent.from_token)
                     amount_in_smallest = int(amount_decimal * Decimal(10**decimals))
             elif intent.amount_usd is not None:
-                from_price = price_oracle.get(intent.from_token.upper())
+                # Lenient lookup (VIB token-identity PR): the raw ``dict.get``
+                # keyed by the intent field broke for base58 mints and skipped
+                # the stablecoin fallback. Direct symbol keys still win.
+                from almanak.framework.intents.compiler_queries import lenient_oracle_price
+
+                from_price = lenient_oracle_price(
+                    price_oracle, intent.from_token, getattr(intent, "chain", None) or "solana"
+                )
                 if not from_price:
                     return self._error_bundle(
                         intent,

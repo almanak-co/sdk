@@ -23,7 +23,12 @@ from .exceptions import SymbolTokenResolutionError
 SYMBOL_TOKEN_REMOVAL_VERSION = "3.0.0"
 _SYMBOL_TOKEN_REMOVAL_RELEASE = (3, 0, 0)
 
-_EVM_ADDRESS_PATTERN = re.compile(r"^0x[a-fA-F0-9]{40}$")
+# Case-insensitive 0x prefix: Instrument canonicalization uppercases tokens
+# ("0X..." reaches this classifier via twap/lwap), and a valid address must
+# never be reclassified as a deprecated *symbol* because of casing — that
+# turns into a spurious warning today and a hard SymbolTokenResolutionError
+# for a correctly-supplied address in 3.0.
+_EVM_ADDRESS_PATTERN = re.compile(r"^0[xX][a-fA-F0-9]{40}$")
 _SOLANA_ADDRESS_PATTERN = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 _RELEASE_PATTERN = re.compile(r"^\s*(\d+)\.(\d+)\.(\d+)")
 _INTERNAL_MODULE_PREFIXES = ("almanak.", "pydantic.")
@@ -92,6 +97,40 @@ def _is_internal_frame(frame: FrameType) -> bool:
     return module_name.startswith(_INTERNAL_MODULE_PREFIXES)
 
 
+def _is_infrastructure_frame(frame: FrameType) -> bool:
+    """True for stdlib / dispatch-machinery frames that carry no caller identity.
+
+    An SDK-internal symbol read dispatched through a thread pool (the runner's
+    native-gas pre-fetch via ``asyncio.to_thread``) or through a CLI framework
+    (``almanak strat new`` scaffolding under ``click``) bottoms out on frames
+    like ``concurrent/futures/thread.py`` or ``click/core.py``. Those are not
+    external callsites — attributing the warning there told users that
+    *something* in their code used a deprecated symbol when nothing did
+    (observed: ``MarketSnapshot received symbol-based token reference 'ETH'``
+    at ``thread.py:59`` on a fully address-form strategy). Frames here are
+    skipped like internal ones; a stack with no genuine external frame left
+    is an internal origin and must not warn at all.
+    """
+    module_name = str(frame.f_globals.get("__name__", ""))
+    if not module_name:
+        return False
+    top_level = module_name.partition(".")[0]
+    if top_level in sys.stdlib_module_names:
+        return True
+    return module_name.startswith("click.")
+
+
+# Sentinel filename meaning "internal origin — do not warn".
+#
+# Deliberately NOT cached by route: the same (start, parent) code pair is
+# reachable from both internal-origin stacks (thread-pool dispatch) and
+# genuine external callers, and unlike the depth cache below there is no
+# frame identity left to re-validate a suppression against — a cached
+# suppression would leak onto real user callsites. The walk below is the
+# price of correctness on this path.
+_INTERNAL_ORIGIN = "<sdk-internal>"
+
+
 def _external_callsite() -> tuple[str, int, str]:
     """Return the external warning location without repeatedly walking the stack."""
     start = sys._getframe(2)
@@ -114,12 +153,13 @@ def _external_callsite() -> tuple[str, int, str]:
 
     frame: FrameType | None = start
     depth = 0
-    while frame is not None and _is_internal_frame(frame):
+    while frame is not None and (_is_internal_frame(frame) or _is_infrastructure_frame(frame)):
         frame = frame.f_back
         depth += 1
 
     if frame is None:
-        return ("<unknown>", 1, "")
+        # Every frame was SDK-internal or dispatch machinery: internal origin.
+        return (_INTERNAL_ORIGIN, 0, "")
 
     if len(_CALLER_DEPTH_CACHE) >= _MAX_CALLER_DEPTH_CACHE_SIZE:
         _CALLER_DEPTH_CACHE.clear()
@@ -177,6 +217,18 @@ def warn_or_reject_symbol_token_reference(
     if _is_address_based_token_reference(token, chain):
         return
     filename, lineno, module_name = _external_callsite()
+    if filename == _INTERNAL_ORIGIN:
+        # No genuine external caller in the stack (SDK-internal read reached
+        # through thread-pool / CLI dispatch machinery). The deprecation
+        # policy targets USER symbol references; warning here misattributes
+        # the SDK's own internals to the user — suppress the WARNING only.
+        # The 3.0 removal still applies: internal reads must be migrated
+        # before the removal release, so on 3.0.0+ the hard rejection fires
+        # regardless of origin (CodeRabbit review, PR #3612).
+        release = _release_tuple(SDK_VERSION)
+        if release is not None and release >= _SYMBOL_TOKEN_REMOVAL_RELEASE:
+            raise SymbolTokenResolutionError(token=token, chain=chain or "the active chain", api=api)
+        return
     _apply_symbol_token_policy(
         token,
         chain,

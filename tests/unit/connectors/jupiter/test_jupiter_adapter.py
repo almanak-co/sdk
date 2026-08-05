@@ -314,13 +314,16 @@ class TestJupiterAdapterCompileSwap:
     ):
         adapter = JupiterAdapter(
             config=jupiter_config,
-            price_provider={"SOL": Decimal("150")},  # No USDC price
+            price_provider={},  # no prices at all
             token_resolver=mock_token_resolver,
         )
 
+        # A non-stablecoin with no oracle entry: the lenient oracle lookup
+        # (token-identity PR) serves known stablecoins at $1, so USDC can no
+        # longer represent the genuinely-unpriceable case this test guards.
         intent = SwapIntent(
-            from_token="USDC",
-            to_token="SOL",
+            from_token="SOL",
+            to_token="USDC",
             amount_usd=Decimal("100"),
             max_slippage=Decimal("0.005"),
         )

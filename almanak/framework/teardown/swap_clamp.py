@@ -65,11 +65,53 @@ class SwapClampDecision:
     reason: str
 
 
+def _bridge_identity_key(
+    from_token: str,
+    canonical_key: str,
+    tracked_map: dict[str, Decimal | None],
+    chain: str | None,
+) -> str | None:
+    """Find the tracked-map key naming the same asset as ``from_token``.
+
+    Handles both mismatch directions between the disposal identity (teardown
+    intent ``from_token``) and the FIFO tracked-inventory keys:
+
+    * address disposal vs symbol-keyed map — resolve ``from_token`` to its
+      canonical symbol and probe that key;
+    * symbol (or unresolvable-address) disposal vs address-keyed map entries —
+      resolve each address-shaped map key and compare canonical symbols.
+
+    Offline-only, best-effort: returns ``None`` when no key provably names
+    the same asset (caller keeps the ``untracked_token`` skip — never sweep
+    on a guess).
+    """
+    from almanak.framework.data.tokens.address_resolution import (
+        looks_like_address,
+        resolve_token_symbol,
+    )
+
+    resolved_from = resolve_token_symbol(from_token, chain)
+    if resolved_from:
+        candidate = canonical_pt_symbol(resolved_from)
+        if candidate in tracked_map:
+            return candidate
+
+    target = canonical_pt_symbol(resolved_from) if resolved_from else canonical_key
+    for map_key in tracked_map:
+        if not isinstance(map_key, str) or not looks_like_address(map_key, chain):
+            continue
+        resolved_key = resolve_token_symbol(map_key, chain)
+        if resolved_key and canonical_pt_symbol(resolved_key) == target:
+            return map_key
+    return None
+
+
 def decide_swap_clamp(
     *,
     live_balance: Decimal,
     tracked_map: dict[str, Decimal | None] | None,
     from_token: str,
+    chain: str | None = None,
 ) -> SwapClampDecision:
     """Decide how to resolve an ``amount='all'`` teardown swap-back (ALM-2766).
 
@@ -107,7 +149,17 @@ def decide_swap_clamp(
     if not _is_finite_decimal(live_balance):
         return SwapClampDecision(None, True, True, "live_balance_unmeasured")
     if key not in tracked_map:
-        return SwapClampDecision(None, True, False, "untracked_token")
+        # Identity-form bridge: post symbol-deprecation the teardown intent's
+        # ``from_token`` is a contract address while FIFO lots are keyed by
+        # canonical symbol (or, for address-stamped ledger rows, vice versa).
+        # A pure string mismatch here stranded genuinely-tracked inventory as
+        # ``untracked_token``. Resolve (offline, best-effort) across the two
+        # forms before concluding untracked; an unresolvable mismatch keeps
+        # the fail-closed skip.
+        bridged = _bridge_identity_key(from_token, key, tracked_map, chain)
+        if bridged is None:
+            return SwapClampDecision(None, True, False, "untracked_token")
+        key = bridged
     tracked_qty = tracked_map[key]
     # Empty ≠ Zero (None) AND non-finite both fail closed for THIS token.
     if tracked_qty is None or not _is_finite_decimal(tracked_qty):

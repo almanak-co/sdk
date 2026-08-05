@@ -352,14 +352,27 @@ def _intent_fallback_token_in(intent: Any) -> str:
     token symbol WITHOUT triggering the fallback's WARN+metric observability
     (VIB-5218): when the lending lane resolves the row, the intent-fallback
     guesser did NOT produce it, so it must not be counted against the fallback.
+
+    Address-form intent fields are canonicalized to their symbol (offline,
+    best-effort) so the stamped ``transaction_ledger.token_in`` joins the
+    symbol-keyed accounting read side the same way parser-stamped rows do.
+    Unresolvable addresses are stamped verbatim (previous behaviour) so the
+    read-side "missing prices: <address>" diagnostic stays honest.
     """
-    return (
+    raw = (
         getattr(intent, "from_token", "")
         or getattr(intent, "borrow_token", "")
         or getattr(intent, "supply_token", "")
         or getattr(intent, "token", "")
         or ""
     )
+    if isinstance(raw, str) and raw.strip().lower().startswith("0x"):
+        from almanak.framework.data.tokens.address_resolution import resolve_token_symbol
+
+        resolved = resolve_token_symbol(raw, getattr(intent, "chain", None))
+        if resolved:
+            return resolved
+    return raw
 
 
 def _record_intent_fallback_money_row(intent_type: str, token_in: str, amount_in: str) -> None:

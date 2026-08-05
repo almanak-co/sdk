@@ -20,7 +20,7 @@ import concurrent.futures
 import inspect
 import logging
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -158,6 +158,24 @@ def _token_cache_key(token: str, chain: str) -> str:
     if _is_evm_address(stripped):
         return f"{chain.lower()}:{stripped.lower()}"
     return token
+
+
+def _address_key_symbol_alias(token_key: str, chain: str | None) -> str | None:
+    """Canonical UPPER symbol for an address-form oracle key, or ``None``.
+
+    ``price(<address>)`` caches under ``chain:0xaddr`` keys that no
+    symbol-keyed consumer (compiler, gas pricing, ledger writers) can join.
+    This resolves such keys to their canonical symbol for an ADDITIVE alias
+    export in :meth:`MarketSnapshot.get_price_oracle_dict`. Offline-only and
+    best-effort — an unresolvable key yields ``None`` and stays exported
+    under its address form only. Symbol-shaped keys return ``None`` (cheap
+    pre-filter, no resolver import on the common path).
+    """
+    if not isinstance(token_key, str) or "0x" not in token_key.lower():
+        return None
+    from almanak.framework.data.tokens.address_resolution import resolve_token_symbol
+
+    return resolve_token_symbol(token_key, chain)
 
 
 def _alias_target_display_key(key: str) -> str | None:
@@ -3633,6 +3651,23 @@ class MarketSnapshot:
                 return_exceptions=True,
             )
             all_rates = [r for r in settled if not isinstance(r, BaseException)]
+            # A partially-failed fan-out silently narrows the comparison —
+            # e.g. an address-form token excluded every protocol whose
+            # catalogue is symbol-keyed, and the "best" rate was then best of
+            # a subset. Name the excluded protocols so the narrowing is
+            # operator-visible; the comparison itself proceeds unchanged.
+            failed = [
+                (proto, r) for proto, r in zip(target_protocols, settled, strict=True) if isinstance(r, BaseException)
+            ]
+            if failed and all_rates:
+                logger.warning(
+                    "best_lending_rate(%s/%s): %d/%d protocol(s) excluded from comparison: %s",
+                    token,
+                    side_str,
+                    len(failed),
+                    len(target_protocols),
+                    "; ".join(f"{proto} ({type(err).__name__}: {err})" for proto, err in failed)[:400],
+                )
             if not all_rates:
                 first_error = next(
                     (r for r in settled if isinstance(r, BaseException)),
@@ -4341,6 +4376,13 @@ class MarketSnapshot:
                 if "/" in cache_key:
                     token = cache_key.split("/")[0].upper()
                     prices[token] = price_data.price
+            # Address-keyed entries (``chain:0xaddr`` — how ``price(<address>)``
+            # caches) additionally export under their canonical SYMBOL so
+            # symbol-keyed consumers (compiler ``require_token_price``, gas
+            # pricing, ledger price_inputs_json) can join. Direct keys win on
+            # collision — an explicitly symbol-fetched price is never
+            # overwritten by an alias.
+            self._merge_address_key_aliases(prices, lambda val: val, lambda pd: pd.price)
             return prices
 
         # VIB-3889 nested shape: {symbol: {price_usd, oracle_source, ...}}
@@ -4366,7 +4408,46 @@ class MarketSnapshot:
                 "fetched_at": ts.isoformat() if ts is not None else "",
                 "confidence": "HIGH",
             }
+
+        # Symbol aliases for address-keyed entries — same rule as the flat
+        # branch above: additive, direct keys win on collision.
+        def _nested_from_preloaded(val: Any) -> dict[str, Any]:
+            return {"price_usd": str(val), "oracle_source": "preloaded", "fetched_at": "", "confidence": "HIGH"}
+
+        def _nested_from_cached(price_data: Any) -> dict[str, Any]:
+            ts = getattr(price_data, "timestamp", None)
+            return {
+                "price_usd": str(price_data.price),
+                "oracle_source": getattr(price_data, "source", "") or "unknown",
+                "fetched_at": ts.isoformat() if ts is not None else "",
+                "confidence": "HIGH",
+            }
+
+        self._merge_address_key_aliases(nested, _nested_from_preloaded, _nested_from_cached)
         return nested
+
+    def _merge_address_key_aliases(
+        self,
+        out: dict[str, Any],
+        from_preloaded: Callable[[Any], Any],
+        from_cached: Callable[[Any], Any],
+    ) -> None:
+        """Merge symbol aliases for address-keyed price entries into ``out``.
+
+        Shared by both ``get_price_oracle_dict`` shapes; ``from_preloaded`` /
+        ``from_cached`` produce the shape-specific value. Additive only —
+        existing (direct) keys always win.
+        """
+        for key, val in self._prices.items():
+            alias = _address_key_symbol_alias(key, self._chain)
+            if alias and alias not in out:
+                out[alias] = from_preloaded(val)
+        for cache_key, price_data in self._price_cache.items():
+            if "/" not in cache_key:
+                continue
+            alias = _address_key_symbol_alias(cache_key.split("/")[0], self._chain)
+            if alias and alias not in out:
+                out[alias] = from_cached(price_data)
 
     # =========================================================================
     # VIB-4062 — Methods ported from the data-layer copy.
@@ -5954,6 +6035,7 @@ class MarketSnapshot:
         gap_strategy: GapStrategy = "nan",
         *,
         pool_address: str | None = None,
+        data_source: str | None = None,
     ) -> pd.DataFrame:
         """Get OHLCV (candlestick) data for a token.
 
@@ -5966,20 +6048,39 @@ class MarketSnapshot:
             quote: Quote currency. Default "USD".
             gap_strategy: "nan" / "ffill" / "drop". Default "nan".
             pool_address: Explicit pool address for DEX providers.
+            data_source: Explicit provider override (e.g. ``"binance"``,
+                ``"coingecko_onchain"``, ``"coingecko"``) bypassing the
+                default routing. The default routing is FORM-DEPENDENT for
+                proxy-mapped tokens: a symbol like ``"CBBTC"`` classifies
+                CEX-primary and serves Binance BTC *proxy* candles, while its
+                contract address classifies DeFi-primary and serves the
+                actual pool's candles — this parameter is the explicit way to
+                pin the market you mean, independent of which identity form
+                you pass. Router-backed snapshots only; the legacy module
+                path rejects it loudly rather than silently ignoring it.
 
         Returns:
             pandas DataFrame with columns timestamp, open, high, low, close, volume.
 
         Raises:
-            ValueError: If no OHLCV module/router is configured.
+            ValueError: If no OHLCV module/router is configured, or
+                ``data_source`` is requested on the legacy module path.
             OHLCVUnavailableError: If OHLCV data cannot be retrieved.
         """
         timeframe = parse_ohlcv_timeframe(timeframe)
         token_str = token if isinstance(token, str) else token.pair
 
         if self._ohlcv_router is not None:
-            envelope = self._fetch_ohlcv_via_router(token, timeframe, limit, pool_address, quote, token_str)
+            envelope = self._fetch_ohlcv_via_router(
+                token, timeframe, limit, pool_address, quote, token_str, data_source=data_source
+            )
             return self._envelope_to_ohlcv_df(envelope, token, token_str, quote, timeframe, gap_strategy)
+
+        if data_source is not None:
+            # Legacy module path has no provider routing — dropping the
+            # override silently would serve a market the caller explicitly
+            # did not ask for.
+            raise ValueError("data_source= requires the router-backed OHLCV path; this snapshot has no ohlcv_router")
 
         if self._ohlcv_module is None:
             self._record_critical_data_failure("ohlcv", "unconfigured", "ohlcv unavailable: no provider configured")
@@ -6031,6 +6132,8 @@ class MarketSnapshot:
         pool_address: str | None,
         quote: str,
         token_str: str,
+        *,
+        data_source: str | None = None,
     ) -> Any:
         """Router-backed OHLCV fetch with the documented error contract.
 
@@ -6049,6 +6152,7 @@ class MarketSnapshot:
                 limit=limit,
                 pool_address=pool_address,
                 quote=quote,
+                force_provider=data_source,
             )
         except DataSourceError as e:
             raise OHLCVUnavailableError(token_str, str(e)) from e

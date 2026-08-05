@@ -117,10 +117,13 @@ def _try_record_metric(func_name: str, *args: Any, **kwargs: Any) -> None:
 STATIC_ONLY_SYMBOL_CHAINS: frozenset[str] = frozenset({"hyperevm"})
 
 
-# Address validation patterns
-ADDRESS_PATTERN = re.compile(r"^0x[a-fA-F0-9]{40}$")
+# Address validation patterns. Case-insensitive 0x prefix: instrument
+# canonicalization uppercases tokens ("0X..."), and a valid address must not
+# fall through to the symbol path because of prefix casing (spurious
+# deprecation warning now, hard error in 3.0).
+ADDRESS_PATTERN = re.compile(r"^0[xX][a-fA-F0-9]{40}$")
 # Pattern to detect strings that look like addresses (start with 0x and are ~42 chars)
-ADDRESS_LIKE_PATTERN = re.compile(r"^0x[a-zA-Z0-9]{38,42}$")
+ADDRESS_LIKE_PATTERN = re.compile(r"^0[xX][a-zA-Z0-9]{38,42}$")
 # Solana base58 address pattern (32-44 chars, base58 alphabet: no 0, O, I, l)
 SOLANA_ADDRESS_PATTERN = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 
@@ -189,8 +192,10 @@ def _validate_address(address: str, chain: str) -> None:
             )
         return
 
-    # EVM validation
-    if not address.startswith("0x"):
+    # EVM validation. Case-insensitive prefix: instrument canonicalization
+    # uppercases addresses to "0X..." — those must reach the hex validation
+    # below, not be rejected on prefix casing (CodeRabbit review, PR #3612).
+    if not address.lower().startswith("0x"):
         raise InvalidTokenAddressError(
             token=address,
             chain=chain,

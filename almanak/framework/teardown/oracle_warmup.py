@@ -44,6 +44,7 @@ Design notes:
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from decimal import Decimal
 from typing import Any
 
@@ -105,6 +106,24 @@ def _looks_like_symbol(value: Any) -> bool:
     if candidate.startswith("0x"):
         return False
     return True
+
+
+def _resolve_address_field(value: Any, chain: str | None) -> str | None:
+    """Canonical UPPER symbol for an address-shaped intent field, or ``None``.
+
+    Post symbol-deprecation, teardown plans carry contract addresses in their
+    intent token fields. ``_looks_like_symbol`` (correctly) rejects those,
+    which used to collapse the required-token set to native gas only — the
+    VIB-4842 pre-flight then passed vacuously and the compile failed three
+    layers down with the exact generic error this module exists to prevent.
+    Offline-only and best-effort: an unresolvable address returns ``None``
+    and stays un-warmed (previous behaviour) rather than guessed.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    from almanak.framework.data.tokens.address_resolution import resolve_token_symbol
+
+    return resolve_token_symbol(value, chain)
 
 
 def _is_pt_yt_symbol(symbol: str) -> bool:
@@ -175,6 +194,39 @@ def _intent_field(intent: Any, name: str) -> Any:
     return getattr(intent, name, None)
 
 
+def _record_intent_token_fields(
+    intent: Any, intent_chain: str | None, record: Callable[[str, str | None], None]
+) -> None:
+    """Record every priceable token an intent names, in either identity form.
+
+    Symbol-shaped fields record verbatim; address-shaped fields (and
+    address-based pool descriptor segments) resolve to their canonical symbol
+    first — so address-form teardown plans get a real required set instead of
+    a vacuous native-gas-only pre-flight. Extracted from
+    :func:`extract_required_token_chains` to keep its complexity bounded.
+    """
+    for field in _TOKEN_SYMBOL_FIELDS:
+        value = _intent_field(intent, field)
+        if _looks_like_symbol(value):
+            record(value, intent_chain)
+        else:
+            resolved = _resolve_address_field(value, intent_chain)
+            if resolved:
+                record(resolved, intent_chain)
+    pool_value = _intent_field(intent, "pool")
+    for symbol in _symbols_from_pool_string(pool_value):
+        record(symbol, intent_chain)
+    # Address-based pool descriptors ("0xA.../0xB.../500") yield nothing
+    # from the symbol parser — resolve those segments the same way.
+    if isinstance(pool_value, str) and "/" in pool_value:
+        for raw_part in pool_value.split("/"):
+            part = raw_part.strip()
+            if part.lower().startswith("0x"):
+                resolved = _resolve_address_field(part, intent_chain)
+                if resolved:
+                    record(resolved, intent_chain)
+
+
 def extract_required_token_chains(intents: list[Any], fallback_chain: str | None) -> dict[str, str | None]:
     """Map every token symbol a teardown plan needs priced to its chain.
 
@@ -213,12 +265,7 @@ def extract_required_token_chains(intents: list[Any], fallback_chain: str | None
         if isinstance(intent_chain, str) and intent_chain.strip():
             chains_in_plan.add(intent_chain.strip())
 
-        for field in _TOKEN_SYMBOL_FIELDS:
-            value = _intent_field(intent, field)
-            if _looks_like_symbol(value):
-                _record(value, intent_chain)
-        for symbol in _symbols_from_pool_string(_intent_field(intent, "pool")):
-            _record(symbol, intent_chain)
+        _record_intent_token_fields(intent, intent_chain, _record)
 
     # Native gas token(s) for EVERY chain in the plan — ledger gas pricing
     # needs each one. A multi-chain teardown that only warmed one chain's gas

@@ -221,7 +221,18 @@ class EulerV2Compiler(BaseLendingCompiler):
             collateral_price = ctx.services.require_token_price(collateral_token.symbol)
             borrow_price = ctx.services.require_token_price(borrow_token.symbol)
         except Exception as exc:  # noqa: BLE001 - missing price → can't size capacity, fail-open
-            logger.debug("Euler capacity preflight: price unavailable (%s); deferring", exc)
+            # Fail-open is deliberate (the on-chain EVC solvency check still
+            # guards the borrow), but it must not be silent: a skipped capacity
+            # preflight is an operator-visible degradation, and with address→
+            # symbol price bridging in place this branch now only fires for
+            # genuinely unpriceable tokens.
+            logger.warning(
+                "Euler capacity preflight SKIPPED — price unavailable for %s/%s (%s); "
+                "deferring to the on-chain EVC solvency check",
+                collateral_token.symbol,
+                borrow_token.symbol,
+                exc,
+            )
             return PreflightVerdict.feasible()
         if collateral_price <= 0 or borrow_price <= 0:
             return PreflightVerdict.feasible()

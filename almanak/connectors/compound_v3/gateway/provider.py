@@ -90,6 +90,22 @@ def _compound_v3_resolve_comet_address(chain: str, asset_symbol: str) -> str:
 
     market_key = _COMPOUND_V3_TOKEN_TO_MARKET.get(asset_symbol)
     if not market_key:
+        # Address-form asset: resolve to the canonical symbol and probe the
+        # (exact-case) map case-insensitively. Symbol-form misses keep the
+        # previous exact-case behaviour untouched.
+        from almanak.framework.data.tokens.address_resolution import (
+            looks_like_address,
+            resolve_token_symbol,
+        )
+
+        if looks_like_address(asset_symbol, chain):
+            resolved = resolve_token_symbol(asset_symbol, chain)
+            if resolved:
+                market_key = next(
+                    (v for k, v in _COMPOUND_V3_TOKEN_TO_MARKET.items() if k.upper() == resolved),
+                    None,
+                )
+    if not market_key:
         raise RateHistoryUnavailable(
             "compound_v3",
             f"Token {asset_symbol!r} has no Comet market mapping on {chain!r}",
