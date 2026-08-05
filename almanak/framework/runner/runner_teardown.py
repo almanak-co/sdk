@@ -1042,6 +1042,72 @@ async def execute_teardown(  # noqa: C901
     manager: Any = get_teardown_state_manager_for_runtime(gateway_client=runner._get_gateway_client())
     request: Any = manager.get_active_request(deployment_id)
 
+    # Step T0.5 (VIB-6522): book any keeper-settled perp order BEFORE intent
+    # generation / enumeration / the completeness gate read the registry. The
+    # iteration lane's PERP_CLOSE cannot key the registry at submission time —
+    # the venue positionKey is MEASURED at keeper fill (two-phase design,
+    # VIB-3872 §3 D2) — so the registry open→closed transition is owned by the
+    # settlement reconciler's registry-completion write. That reconciler runs
+    # pre-decide (Step 1.7), and teardown routing (Step 0a) early-exits BEFORE
+    # it: a teardown requested inside the close-to-next-tick window finds the
+    # row still 'open', the fail-closed completeness gate refuses (correctly,
+    # on its own evidence), and the FAILED-teardown entry latch (VIB-5572)
+    # then starves Step 1.7 forever — permanently blocking teardown of a
+    # venue-flat deployment. One correlated reconcile tick here completes the
+    # designed Phase-2 write at the moment it matters (never parses
+    # uncorrelated keeper receipts — VIB-6152). Warn-only: on any failure the
+    # registry stays stale and the completeness gate stays fail-closed, which
+    # is exactly the pre-existing behaviour.
+    pre_gate_cycle_id = str(getattr(runner, "_last_cycle_id", None) or deployment_id)
+    pre_gate_degraded: str | None = None
+    try:
+        from .perp_settlement_reconciler import reconcile_perp_settlements
+
+        pre_gate_reconciliation = await reconcile_perp_settlements(
+            runner,
+            strategy,
+            deployment_id=deployment_id,
+            cycle_id=pre_gate_cycle_id,
+            gateway_client=runner._get_gateway_client(),
+        )
+        if pre_gate_reconciliation.accounting_degraded:
+            pre_gate_degraded = (
+                "; ".join(pre_gate_reconciliation.degraded_reasons) or "pre-gate settlement reconciliation degraded"
+            )
+    except Exception as exc:  # noqa: BLE001 — settlement accounting must never block risk reduction
+        pre_gate_degraded = f"pre-gate settlement reconciliation raised: {exc.__class__.__name__}: {exc}"
+        logger.warning(
+            "Teardown pre-enumeration perp settlement reconciliation failed (non-blocking)",
+            exc_info=True,
+        )
+    if pre_gate_degraded:
+        # Inverted failure semantics (blueprint 14): degradation is LOUD and
+        # DURABLE but never blocks risk reduction. The reconciler reports most
+        # failures through its OUTCOME, not by raising (its internal
+        # AccountingPersistenceError catch boundary returns per-order degraded
+        # reasons), so the outcome must be read rather than discarded — an
+        # unbooked settlement that reaches a clean "no positions" completion
+        # would otherwise leave no ERROR, no deferred-write record, and no
+        # degradation signal anywhere (Codex review, PR #3608).
+        logger.error(
+            "🛑 Teardown pre-gate perp settlement reconciliation degraded for %s "
+            "(teardown continues; the durable watch set retries on any later tick): %s",
+            deployment_id,
+            pre_gate_degraded,
+        )
+        from ..accounting.deferred_log import DeferredWrite
+        from ..accounting.deferred_log import append as deferred_append
+
+        deferred_append(
+            DeferredWrite.now(
+                kind="perp_settlement",
+                deployment_id=deployment_id,
+                cycle_id=pre_gate_cycle_id,
+                intent_type="PERP_SETTLEMENT",
+                error=pre_gate_degraded,
+            )
+        )
+
     # Step T1: Create market snapshot (SAME as normal decide() path)
     teardown_market = None
     try:
@@ -1216,7 +1282,15 @@ async def execute_teardown(  # noqa: C901
             return runner._create_error_result(deployment_id, IterationStatus.STRATEGY_ERROR, err, start_time)
         logger.info(f"🛑 {deployment_id} teardown complete (no positions to close)")
         if request:
-            _safe_mark(manager, "mark_completed", deployment_id, result={"reason": "no_positions"})
+            # Fold the pre-gate settlement degradation into the persisted
+            # completion record: a "no positions" success reached with an
+            # unbookable settlement (e.g. unmeasured watch set with no
+            # registered row) must not read as a clean exit (VIB-6522).
+            completion_result: dict[str, Any] = {"reason": "no_positions"}
+            if pre_gate_degraded:
+                completion_result["accounting_degraded"] = True
+                completion_result["accounting_degraded_reason"] = pre_gate_degraded
+            _safe_mark(manager, "mark_completed", deployment_id, result=completion_result)
         runner.request_shutdown()
         # Match the adjacent all-balances-zero + TeardownManager-success paths —
         # the lifecycle supervisor must see TERMINATED so it doesn't treat a
