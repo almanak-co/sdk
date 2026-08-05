@@ -17,6 +17,7 @@ from almanak.services.backtest.models import (
     QuickBacktestResponse,
     StrategyListResponse,
 )
+from almanak.services.backtest.outcomes import backtest_failure_message
 from almanak.services.backtest.services.backtest_runner import (
     build_backtest_token_address_map,
     create_backtester,
@@ -122,6 +123,11 @@ async def quick_backtest(request: QuickBacktestRequest) -> QuickBacktestResponse
         finally:
             await backtester.close()
 
+        failure_message = backtest_failure_message(result)
+        if failure_message is not None:
+            logger.error("Quick backtest returned a failed result: %s", failure_message)
+            raise HTTPException(status_code=500, detail=failure_message)
+
         metrics = result.metrics
         duration = time.monotonic() - start_time
 
@@ -131,6 +137,8 @@ async def quick_backtest(request: QuickBacktestRequest) -> QuickBacktestResponse
             duration_seconds=round(duration, 2),
         )
 
+    except HTTPException:
+        raise
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e)) from None
     except Exception:

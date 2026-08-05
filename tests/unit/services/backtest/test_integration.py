@@ -43,6 +43,7 @@ def _make_backtest_result(
     net_pnl: str = "234.56",
     sharpe: str = "1.82",
     trades_count: int = 12,
+    error: str | None = None,
 ) -> BacktestResult:
     """Create a realistic BacktestResult for test assertions."""
     metrics = BacktestMetrics(
@@ -113,6 +114,7 @@ def _make_backtest_result(
         final_capital_usd=Decimal("10234.56"),
         chain="arbitrum",
         config={},
+        error=error,
         data_quality=None,
         preflight_report=None,
         config_hash=None,
@@ -430,6 +432,32 @@ async def test_quick_backtest_with_custom_timeframe(client):
         assert resp.json()["eligible"] is True
 
 
+@pytest.mark.asyncio
+async def test_quick_backtest_returned_failure_is_not_an_eligibility_result(client):
+    """A fatal returned result must not render as an ordinary ineligible run."""
+    result = _make_backtest_result(error="provider failed at https://user:password@example.test")
+
+    with patch(
+        "almanak.services.backtest.routers.backtest.create_backtester",
+        return_value=_mock_backtester(result),
+    ):
+        resp = await client.post(
+            "/api/v1/backtest/quick",
+            json={
+                "strategy_spec": {
+                    "protocol": "uniswap_v3",
+                    "chain": "arbitrum",
+                    "action": "swap",
+                    "parameters": {},
+                },
+                "token_funding": _pnl_token_funding("10000", chain="arbitrum"),
+            },
+        )
+
+    assert resp.status_code == 500
+    assert resp.json()["detail"] == "provider failed at https://***@example.test"
+
+
 # ---------------------------------------------------------------------------
 # Error handling in lifecycle
 # ---------------------------------------------------------------------------
@@ -456,6 +484,32 @@ async def test_backtest_failure_propagates(client):
         assert data["status"] == "failed"
         assert data["error"] is not None
         assert "failed" in data["error"].lower()
+
+
+@pytest.mark.asyncio
+async def test_backtest_returned_failure_propagates(client):
+    """A fatal result returned normally must mark the background job failed."""
+    result = _make_backtest_result(error="historical price provider failed")
+
+    with patch(
+        "almanak.services.backtest.services.backtest_runner.create_backtester",
+        return_value=_mock_backtester(result),
+    ):
+        submit_resp = await client.post("/api/v1/backtest", json=VALID_SWAP_REQUEST)
+        job_id = submit_resp.json()["job_id"]
+
+        for _ in range(100):
+            poll_resp = await client.get(f"/api/v1/backtest/{job_id}")
+            if poll_resp.json()["status"] == "failed":
+                break
+            await asyncio.sleep(0.05)
+        else:
+            pytest.fail("Backtest did not reach failed status before timeout")
+
+    data = poll_resp.json()
+    assert data["status"] == "failed"
+    assert data["error"] == "historical price provider failed"
+    assert data["result"] is None
 
 
 # ---------------------------------------------------------------------------

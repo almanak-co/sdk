@@ -55,6 +55,7 @@ from almanak.services.backtest.models import (
     StrategySpec,
     TimeframeSpec,
 )
+from almanak.services.backtest.outcomes import backtest_failure_message
 from almanak.services.backtest.serialization import intent_type_wire_value
 from almanak.services.backtest.services.job_manager import JobManager
 
@@ -905,6 +906,12 @@ async def run_backtest_job(
             result = await backtester.backtest(strategy, config)
         finally:
             await backtester.close()
+
+        failure_message = backtest_failure_message(result)
+        if failure_message is not None:
+            logger.error("Backtest job %s returned a failed result: %s", job_id, failure_message)
+            job_manager.fail_job(job_id, failure_message)
+            return
 
         job_manager.complete_job(job_id, build_result_response(result))
 

@@ -42,6 +42,7 @@ def serialize_result(result: BacktestResult) -> dict[str, Any]:
         "success": result.success,
         "error": result.error,
         "errors": result.errors or [],
+        "data_quality": result.data_quality.to_dict() if result.data_quality is not None else None,
         "institutional_compliance": result.institutional_compliance,
         "compliance_violations": result.compliance_violations or [],
         "metrics": result.metrics.to_dict(),

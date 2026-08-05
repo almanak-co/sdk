@@ -22,6 +22,12 @@ from almanak.services.backtest.models import (
     StrategySpec,
     TimeframeSpec,
 )
+from almanak.services.backtest.outcomes import (
+    DEFAULT_BACKTEST_FAILURE_MESSAGE,
+    MAX_BACKTEST_FAILURE_MESSAGE_LENGTH,
+    backtest_failure_message,
+    redact_backtest_error_message,
+)
 from almanak.services.backtest.serialization import intent_type_wire_value, serialize_result
 from almanak.services.backtest.services.backtest_runner import (
     SpecBacktestStrategy,
@@ -438,7 +444,7 @@ class TestBacktestTokenRefs:
 
         class Backtester:
             async def backtest(self, strategy: object, config: PnLBacktestConfig) -> object:
-                return object()
+                return SimpleNamespace(success=True)
 
             async def close(self) -> None:
                 return None
@@ -774,9 +780,18 @@ class TestBuildResultResponse:
         assert serialized[1]["pnl_usd"] == "1250"  # closing trade -> realized gain
 
     def test_platform_artifact_preserves_failed_outcome_and_diagnostics(self):
+        """Failed artifacts retain every durable diagnostic required by ALM-3050."""
+        from almanak.framework.backtesting.models import DataQualityReport
+
         result = self._result([])
         result.error = "historical price provider failed"
         result.errors = [{"error_type": "DataUnavailable", "error_message": result.error}]
+        result.data_quality = DataQualityReport(
+            coverage_ratio=Decimal("0.75"),
+            source_breakdown={"chainlink": 3},
+            missing_price_count=1,
+            missing_price_tokens=["base:CBBTC"],
+        )
         result.institutional_compliance = False
         result.compliance_violations = ["Backtest failed"]
 
@@ -785,8 +800,59 @@ class TestBuildResultResponse:
         assert serialized["success"] is False
         assert serialized["error"] == "historical price provider failed"
         assert serialized["errors"] == result.errors
+        assert serialized["data_quality"] == {
+            "coverage_ratio": "0.75",
+            "source_breakdown": {"chainlink": 3},
+            "stale_data_count": 0,
+            "interpolation_count": 0,
+            "unresolved_token_count": 0,
+            "gas_price_source_counts": {},
+            "missing_price_count": 1,
+            "missing_price_tokens": ["base:CBBTC"],
+        }
         assert serialized["institutional_compliance"] is False
         assert serialized["compliance_violations"] == ["Backtest failed"]
+
+    def test_platform_artifact_emits_null_data_quality_when_unavailable(self):
+        """Unavailable data-quality telemetry remains explicit JSON null."""
+        assert serialize_result(self._result([]))["data_quality"] is None
+
+    def test_empty_error_string_remains_a_failed_result(self):
+        """An empty error string gets a public fallback without becoming success."""
+        result = self._result([])
+        result.error = ""
+
+        assert result.success is False
+        assert backtest_failure_message(result) == DEFAULT_BACKTEST_FAILURE_MESSAGE
+
+    def test_public_failure_message_is_bounded(self):
+        """Public failure details respect the platform's maximum message length."""
+        result = self._result([])
+        result.error = "x" * (MAX_BACKTEST_FAILURE_MESSAGE_LENGTH + 1)
+
+        message = backtest_failure_message(result)
+
+        assert message is not None
+        assert len(message) == MAX_BACKTEST_FAILURE_MESSAGE_LENGTH
+
+    @pytest.mark.parametrize(
+        ("message", "expected"),
+        [
+            (
+                "provider failed at https://example.test/prices?api_key=secret&asset=ETH",
+                "provider failed at https://example.test/prices?api_key=***&asset=ETH",
+            ),
+            (
+                "provider failed at https://example.test/prices?asset=ETH&ACCESS_TOKEN=secret#response",
+                "provider failed at https://example.test/prices?asset=ETH&ACCESS_TOKEN=***#response",
+            ),
+            ("Authorization: Bearer secret-token", "Authorization: Bearer ***"),
+            ("authorization: bearer secret-token", "authorization: bearer ***"),
+        ],
+    )
+    def test_public_failure_message_redacts_query_and_bearer_credentials(self, message, expected):
+        """Public failure details mask case-insensitive query and bearer secrets."""
+        assert redact_backtest_error_message(message) == expected
 
     def test_rejected_trades_carry_status_and_reason(self):
         """Rejected intents serialize as status=rejected with the portfolio's reason (ALM-2936)."""
