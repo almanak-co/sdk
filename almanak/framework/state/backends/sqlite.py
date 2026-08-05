@@ -33,9 +33,11 @@ Usage:
 """
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
+import os
 import sqlite3
 import threading
 from collections.abc import Callable
@@ -121,6 +123,179 @@ def _extract_position_reference_column(payload_json: str) -> str | None:
     if pr is None:
         return None
     return _json.dumps(pr, sort_keys=True)
+
+
+@dataclass
+class FrozenBookRepairSkip:
+    """One registry row the frozen-book repair declined to touch (VIB-6552).
+
+    ``reason`` is a stable string — ``"integrity_anomaly"`` (an anchored
+    accounting row's ``position_reference`` column is malformed or disagrees
+    with ``payload_json``; the book shows signs of an unknown writer) or
+    ``"repair_error"`` (the per-row repair raised; downgraded to a skip so one
+    row's failure cannot abort the rest of the book).
+    """
+
+    physical_identity_hash: str
+    deployment_id: str
+    chain: str
+    reason: str
+    detail: str
+
+
+@dataclass
+class FrozenBookRepairResult:
+    """Aggregate outcome of :meth:`SQLiteStore.repair_frozen_position_references`."""
+
+    db_path: str
+    dry_run: bool
+    deployment_id: str | None = None
+    registry_absent: bool = False
+    registry_rows: int = 0
+    repaired_events: int = 0
+    written: bool = False
+    backup_path: str | None = None
+    skips: list[FrozenBookRepairSkip] = field(default_factory=list)
+    anomalies: list[str] = field(default_factory=list)
+
+    @property
+    def skipped_rows(self) -> int:
+        return len(self.skips)
+
+
+def _frozen_row_integrity_anomaly(row: sqlite3.Row) -> str | None:
+    """Classify an ``accounting_events`` row's position-reference integrity.
+
+    Offline-repair precondition (VIB-6552). The ``position_reference`` column
+    is declared a denormalized copy of ``payload_json``'s
+    ``position_reference`` key; every writer in this module writes both in
+    lock-step. A frozen book where they diverge — or where either is
+    unparseable — was touched by something other than these writers, and a
+    repair that overwrites it would destroy the evidence of that. Returns a
+    human-readable anomaly description, or ``None`` for a healthy row.
+
+    An empty/NULL column is NOT an anomaly: rows predating the column, and
+    non-OPEN/CLOSE rows, legitimately carry none.
+    """
+    payload_raw = row["payload_json"]
+    payload: Any = None
+    if payload_raw:
+        try:
+            payload = json.loads(payload_raw)
+        except (json.JSONDecodeError, TypeError):
+            return "payload_json is not valid JSON"
+        if not isinstance(payload, dict):
+            return "payload_json is not a JSON object"
+
+    column_raw = row["position_reference"]
+    if column_raw in (None, ""):
+        return None
+    try:
+        column = json.loads(column_raw)
+    except (json.JSONDecodeError, TypeError):
+        return "position_reference column is not valid JSON"
+    payload_reference = payload.get("position_reference") if isinstance(payload, dict) else None
+    if payload_reference is None:
+        # `_extract_position_reference_column` only ever populates the column
+        # FROM the payload key, so a populated column over a payload without
+        # the key cannot have been written by this module — same unknown-writer
+        # drift as a value mismatch, and overwriting it would launder the
+        # evidence (PR #3615 review).
+        return "position_reference column carries a reference but payload_json lacks the position_reference key"
+    if column != payload_reference:
+        return "position_reference column disagrees with payload_json's position_reference key"
+    return None
+
+
+def _wal_sidecar_nonempty(db_path: Path) -> bool:
+    """Heuristic: does this DB carry a non-empty ``-wal`` sidecar?
+
+    Mirrors ``lp_close_repair._looks_actively_written``. Advisory signal for
+    the offline frozen-book repair (VIB-6552): the flock is the hard guard;
+    a non-empty WAL with the lock free usually means an unclean stop.
+    """
+    wal = db_path.with_name(db_path.name + "-wal")
+    try:
+        return wal.is_file() and wal.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def _claim_backup_path(db_path: str, stamp: str) -> str:
+    """Claim a collision-proof backup path ``<db>.bak-<stamp>[-N]``.
+
+    ``O_CREAT | O_EXCL`` claims the name atomically, so a second repair in the
+    same second (the timestamp's resolution) gets ``-2``, ``-3``, … instead of
+    silently truncating the first run's recovery point (PR #3615 review).
+    """
+    for attempt in range(1, 1000):
+        candidate = f"{db_path}.bak-{stamp}" if attempt == 1 else f"{db_path}.bak-{stamp}-{attempt}"
+        try:
+            os.close(os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+        except FileExistsError:
+            continue
+        return candidate
+    raise RuntimeError(f"could not claim a backup path for {db_path} (1000 collisions at stamp {stamp})")
+
+
+def _acquire_frozen_repair_lock(db_path: str) -> int | None:
+    """Take the 1-strategy:1-DB flock for the whole frozen-book repair (VIB-6552).
+
+    Held across the counting pass, the backup, and the committed pass so all
+    three observe one writer-free snapshot. Single-attempt (``timeout=0.0``): a
+    running gateway must fail this loudly, never be waited out (PR #3615
+    review — the repair previously wrote while another process held the
+    gateway lock). Both modes take it: a dry-run's counts are a promise about
+    a subsequent write, and a concurrent writer would invalidate them the
+    same way. Returns the lock fd (caller closes), or ``None`` for
+    ``:memory:``. Raises ``LocalDbLockError`` when the DB is owned.
+    """
+    if db_path == ":memory:":
+        return None
+    from almanak.framework.local_paths import acquire_local_db_lock
+
+    lock_fd = acquire_local_db_lock(Path(db_path))
+    if _wal_sidecar_nonempty(Path(db_path)):
+        # Advisory only (mirrors repair_teardown_lp_close): the flock above is
+        # the hard guarantee; a non-empty WAL with the lock free usually means
+        # an unclean stop, which sqlite recovers.
+        logger.warning(
+            "frozen-book repair: %s has a non-empty WAL sidecar. No live "
+            "writer holds the lock, so proceeding — but if a strategy is "
+            "supposed to be running here, stop it and investigate first.",
+            db_path,
+        )
+    return lock_fd
+
+
+def _scan_frozen_book_anomalies(
+    conn: sqlite3.Connection,
+    scope_sql: str,
+    scope_params: tuple,
+    anomalies: list[str],
+) -> dict[tuple[str, str, str], str]:
+    """Integrity pre-scan for the frozen-book repair (VIB-6552).
+
+    Maps each anomalous accounting row's ``(deployment_id, chain, tx)`` to its
+    anomaly so anchored registry rows can be skipped loudly. Keyed exactly
+    like the repair's own join — a bare tx key would let one deployment's
+    corrupt row block a healthy same-hash row on another deployment or chain
+    (PR #3615 review). Appends a human-readable line per anomaly to
+    ``anomalies``.
+    """
+    poisoned_txs: dict[tuple[str, str, str], str] = {}
+    for row in conn.execute(
+        f"SELECT id, deployment_id, chain, tx_hash, payload_json, position_reference FROM accounting_events{scope_sql}",
+        scope_params,
+    ):
+        anomaly = _frozen_row_integrity_anomaly(row)
+        if anomaly is None:
+            continue
+        anomalies.append(f"accounting_events id={row['id']}: {anomaly}")
+        tx = str(row["tx_hash"] or "").strip().lower()
+        if tx:
+            poisoned_txs[(str(row["deployment_id"]), str(row["chain"] or "").lower(), tx)] = anomaly
+    return poisoned_txs
 
 
 def _backfill_position_reference_legacy(conn: sqlite3.Connection) -> None:
@@ -4437,6 +4612,7 @@ class SQLiteStore:
         deployment_id: str,
         chain: str,
         tx_hash: str,
+        conn: sqlite3.Connection | None = None,
     ) -> "Callable[[str, str, str], dict | None] | None":
         """Build a ``RegistryLookup`` callable for an accounting event (VIB-4278).
 
@@ -4467,6 +4643,12 @@ class SQLiteStore:
         The returned callable assumes the caller already holds ``_db_lock``
         (it does — both callers — the chokepoint and the INSERT — run inside
         the ``with self._db_lock:`` block in :meth:`save_accounting_event`).
+
+        ``conn`` selects the connection the lookup reads from. The runtime
+        callers omit it (→ ``self._conn``); the offline frozen-book repair
+        (:meth:`repair_frozen_position_references`, VIB-6552) passes its own
+        connection so the lookup runs against a stopped strategy's DB without
+        the store ever being initialized (no boot migrations).
         """
         if not tx_hash:
             # No tx_hash → no match possible. Legacy path keeps emitting
@@ -4487,7 +4669,7 @@ class SQLiteStore:
         # are built on ``LOWER(opened_tx)`` / ``LOWER(closed_tx)``, so
         # the WHERE remains indexable.
         normalized_tx_hash = tx_hash.lower()
-        conn = self._conn
+        conn = conn if conn is not None else self._conn
         if conn is None:
             return None
 
@@ -4719,6 +4901,7 @@ class SQLiteStore:
                 deployment_id=deployment_id,
                 chain=chain,
                 tx_hash=anchor_tx,
+                conn=conn,
             )
             if lookup is None:
                 continue
@@ -4804,6 +4987,254 @@ class SQLiteStore:
                 repaired += 1
 
         return repaired
+
+    def _repair_frozen_registry_row(
+        self,
+        conn: sqlite3.Connection,
+        row: dict,
+        poisoned_txs: dict[tuple[str, str, str], str],
+        skips: "list[FrozenBookRepairSkip]",
+    ) -> int:
+        """One registry row of the frozen-book repair: guard, repair, contain (VIB-6552).
+
+        Skips the row loudly when an anchor tx is poisoned by the integrity
+        pre-scan. Otherwise runs the shared per-row repair inside a SAVEPOINT:
+        a repair that dies mid-row (e.g. after the OPEN anchor's UPDATE,
+        before the CLOSE anchor's) must not leave a half-stamped position in
+        the committed book — the skip log below promises "its events stay
+        legacy", and without the rollback that promise was false (PR #3615
+        review). Returns the number of events re-pointed for this row.
+        """
+        row_deployment = str(row["deployment_id"])
+        row_chain = str(row["chain"] or "")
+        phid = str(row["physical_identity_hash"])
+        anchor_keys = [
+            (row_deployment, row_chain.lower(), str(t).strip().lower())
+            for t in (row["opened_tx"], row["closed_tx"])
+            if isinstance(t, str) and t.strip()
+        ]
+        hit = next((k for k in anchor_keys if k in poisoned_txs), None)
+        if hit is not None:
+            skips.append(
+                FrozenBookRepairSkip(
+                    physical_identity_hash=phid,
+                    deployment_id=row_deployment,
+                    chain=row_chain,
+                    reason="integrity_anomaly",
+                    detail=f"anchor tx {hit[2]}: {poisoned_txs[hit]}",
+                )
+            )
+            return 0
+        conn.execute("SAVEPOINT frozen_row_repair")
+        try:
+            repaired = self._repair_position_references_for_registry_row(
+                conn,
+                deployment_id=row_deployment,
+                chain=row_chain,
+                primitive=str(row["primitive"]),
+                accounting_category=str(row["accounting_category"]),
+                physical_identity_hash=phid,
+            )
+        except Exception as exc:  # noqa: BLE001 — one row's failure must not abort the book
+            # Guarded teardown: an error class that already aborted the
+            # ENCLOSING transaction (e.g. SQLITE_FULL) destroys the savepoint,
+            # and an unguarded ROLLBACK TO here would raise a NEW exception
+            # that replaces `exc` and escapes the per-row containment. Swallow
+            # only the teardown failure — the dead transaction itself still
+            # fails loudly at the outer COMMIT (CodeRabbit, PR #3615).
+            with contextlib.suppress(sqlite3.Error):
+                conn.execute("ROLLBACK TO frozen_row_repair")
+                conn.execute("RELEASE frozen_row_repair")
+            logger.error(
+                "frozen-book repair: registry row phid=%s failed (%s: %s); "
+                "rolled its writes back and continuing — its events stay "
+                "legacy and L5_22 keeps reporting them honestly (VIB-6552)",
+                phid,
+                type(exc).__name__,
+                exc,
+            )
+            skips.append(
+                FrozenBookRepairSkip(
+                    physical_identity_hash=phid,
+                    deployment_id=row_deployment,
+                    chain=row_chain,
+                    reason="repair_error",
+                    detail=f"{type(exc).__name__}: {exc}",
+                )
+            )
+            return 0
+        conn.execute("RELEASE frozen_row_repair")
+        return repaired
+
+    def repair_frozen_position_references(
+        self,
+        *,
+        deployment_id: str | None = None,
+        dry_run: bool = False,
+    ) -> "FrozenBookRepairResult":
+        """Re-point ``position_reference`` in a FROZEN book (VIB-6552, operator-invoked).
+
+        :meth:`_repair_position_references_for_registry_row` fires only on a
+        registry write, and the registry UPSERT's monotone status guard makes
+        ``closed`` terminal — so a position that settled before VIB-6346
+        shipped never receives another registry write and its Phase-1
+        ``source="legacy"`` rows are never revisited. This method is the
+        offline half: it walks every persisted ``position_registry`` row of a
+        stopped strategy's DB and runs the SAME per-row repair — same
+        :meth:`_build_registry_lookup_for_event` join predicate, same
+        event-side ambiguity safeguard, same
+        :func:`~almanak.framework.accounting.writer.restamp_position_reference`
+        single-key writer — so the two halves cannot drift.
+
+        Deliberately NOT a boot-time migration. The natural hook next to
+        ``_backfill_position_reference_legacy`` runs on every
+        ``initialize()``, which would silently rewrite already-audited
+        ``payload_json`` on upgrade — VIB-6548 shows that boot path already
+        mutates committed evidence fixtures. This method never calls
+        :meth:`initialize`; it opens its own connection so no boot migration
+        runs against the book being repaired.
+
+        Offline-only integrity precondition (stricter than in-process, on
+        purpose): in-process, the candidate rows were just written by this
+        same code, so column/payload agreement is guaranteed. A frozen book
+        has unknown provenance. Any ``accounting_events`` row whose
+        ``position_reference`` column is malformed JSON, or disagrees with
+        ``payload_json``'s ``position_reference`` key, is evidence of
+        tampering or an unknown writer — the repair must surface that, not
+        overwrite it. Every registry row anchored (by ``opened_tx`` /
+        ``closed_tx``) to such a row's tx is skipped loudly and reported;
+        nothing about it is touched. Skipping is a reported outcome, never a
+        crash: the operator exit code stays 0 so audit harnesses can tell
+        "repair declined" from "repair crashed" (the card's D3.F1/F4 bind
+        exit 0 for exactly this reason).
+
+        Per-row failures (e.g. a live-mode ``AccountingPersistenceError``
+        from a shape-check on one row) are likewise downgraded to loud skips
+        — mirroring the write-path call site's rule that a bookkeeping repair
+        must never take down more than the row it was about. Only
+        environmental errors (missing file, not a strategy DB) raise.
+
+        ``dry_run`` executes the REAL repair inside a transaction and rolls
+        it back, so the reported counts are exactly what a live run would
+        write — not a parallel estimate that can drift. In write mode the
+        repair runs once to completion and commits atomically; a backup of
+        the DB (``<db>.bak-<UTC-ts>``, taken with the SQLite backup API so
+        WAL content is captured) is created first, and only when there is
+        something to write.
+
+        Local SQLite only, per CLAUDE.md "Database schema ownership" — same
+        scope as the write-path half. Idempotent: a second run repairs 0 rows.
+        """
+        db_path = self._config.db_path
+        if db_path != ":memory:" and not Path(db_path).is_file():
+            raise FileNotFoundError(f"state DB not found: {db_path}")
+
+        if self._conn is not None:
+            # The flock below is per-PROCESS: it cannot fence out this same
+            # process's own initialized store connection, which could then
+            # write between the counting pass and the committed pass and
+            # invalidate the integrity pre-scan. The repair is offline-only —
+            # construct a fresh, uninitialized store for it, as the CLI does
+            # (CodeRabbit, PR #3615).
+            raise ValueError(
+                "repair_frozen_position_references requires an OFFLINE store: this "
+                "SQLiteStore already holds an active connection. Construct a fresh "
+                "SQLiteStore(SQLiteConfig(db_path=...)) for the repair."
+            )
+        lock_fd = _acquire_frozen_repair_lock(db_path)
+        result = FrozenBookRepairResult(db_path=db_path, dry_run=dry_run, deployment_id=deployment_id)
+        conn = sqlite3.connect(db_path, isolation_level=None)
+        conn.row_factory = sqlite3.Row
+        try:
+            tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if "accounting_events" not in tables:
+                raise ValueError(f"not a strategy state DB (no accounting_events table): {db_path}")
+            if "position_registry" not in tables:
+                # Nothing to join against — a legacy book, not an error. The
+                # honest answer is "0 repairs", not a crash (card D3.F5).
+                result.registry_absent = True
+                return result
+
+            scope_sql, scope_params = (
+                ("", ()) if deployment_id is None else (" WHERE deployment_id = ?", (deployment_id,))
+            )
+            poisoned_txs = _scan_frozen_book_anomalies(conn, scope_sql, scope_params, result.anomalies)
+
+            registry_rows = [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT deployment_id, chain, primitive, accounting_category, "
+                    f"physical_identity_hash, opened_tx, closed_tx FROM position_registry{scope_sql}"
+                    " ORDER BY deployment_id, chain, primitive, physical_identity_hash",
+                    scope_params,
+                )
+            ]
+            result.registry_rows = len(registry_rows)
+
+            def _run_pass() -> tuple[int, list[FrozenBookRepairSkip]]:
+                repaired_total = 0
+                skips: list[FrozenBookRepairSkip] = []
+                for row in registry_rows:
+                    repaired_total += self._repair_frozen_registry_row(conn, row, poisoned_txs, skips)
+                return repaired_total, skips
+
+            # Counting pass — real repair, rolled back. In dry-run mode this
+            # IS the result; in write mode it decides whether a backup (and a
+            # second, committed pass) is needed at all.
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                repaired, skips = _run_pass()
+            finally:
+                conn.execute("ROLLBACK")
+            result.repaired_events = repaired
+            result.skips = skips
+            if dry_run or repaired == 0:
+                return result
+
+            backup_path = _claim_backup_path(db_path, datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ"))
+            try:
+                backup_conn = sqlite3.connect(backup_path)
+                try:
+                    conn.backup(backup_conn)
+                finally:
+                    backup_conn.close()
+            except BaseException:
+                # Remove the claimed placeholder so a failed backup (e.g. disk
+                # full) does not leave a 0-byte .bak- file that reads as a
+                # valid recovery point (CodeRabbit, PR #3615).
+                with contextlib.suppress(OSError):
+                    os.unlink(backup_path)
+                raise
+            result.backup_path = backup_path
+
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                repaired, skips = _run_pass()
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+            conn.execute("COMMIT")
+            result.repaired_events = repaired
+            result.skips = skips
+            result.written = repaired > 0
+            if repaired == 0:
+                # Cannot happen while the flock serializes writers (the
+                # counting pass just found work), so surface it rather than
+                # silently reporting a no-op with a fresh backup on disk.
+                logger.warning(
+                    "frozen-book repair: counting pass found work but the "
+                    "committed pass re-pointed 0 events on %s; backup %s kept",
+                    db_path,
+                    backup_path,
+                )
+            return result
+        finally:
+            conn.close()
+            if lock_fd is not None:
+                try:
+                    os.close(lock_fd)
+                except OSError:
+                    pass
 
     async def get_accounting_events(
         self,
