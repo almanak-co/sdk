@@ -1,0 +1,36 @@
+{
+  "accounting_events_row_count": 4,
+  "cell_metrics": {
+    "G6": {
+      "gap_usd": "0.870019674172075086000000000",
+      "gas_usd_before_initial_endpoint": "0"
+    }
+  },
+  "cells": {
+    "G1": "PASS",
+    "G10": "PASS",
+    "G11": "SKIP",
+    "G12": "PASS",
+    "G13": "PASS",
+    "G14": "XFAIL",
+    "G15": "XFAIL",
+    "G16": "SKIP",
+    "G2": "PASS",
+    "G3": "PASS",
+    "G4": "PASS",
+    "G5": "PASS",
+    "G6": "FAIL",
+    "G7": "PASS",
+    "G8": "PASS",
+    "G9": "PASS",
+    "L1": "XFAIL",
+    "L2": "XFAIL",
+    "L3": "XFAIL",
+    "L4": "PASS",
+    "L5": "XFAIL",
+    "L5_22": "XFAIL",
+    "L6": "FAIL"
+  },
+  "ledger_row_count": 4,
+  "matching_policy_version": 3
+}

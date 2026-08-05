@@ -1,0 +1,47 @@
+{
+  "_comment": "VIB-6560 provenance for tests/fixtures/accounting/looping_debt_open/expected_baseline.sqlite. This fixture is CODE-GENERATED (tests/fixtures/accounting/_generate_baselines.py::generate_looping_debt_open_fixture) and regenerates byte-identically. It is NOT a copy of the source capture. What is derived from the capture is the SHAPE and the ENDPOINT MONEY: the positions_json envelope form, the SUPPLY/BORROW leg field sets (including every key inside `details`), the convention that ERC-20 holdings are TOKEN positions while wallet_balances_json/available_cash_usd carry only the native gas token, the health_factor, and the two endpoint USD marks quoted verbatim below. Nothing about the leg schema was authored from intuition.",
+
+  "source_run": "docs/internal/quant-user-runs/20260803-0430-noneth8-pcs-carry-bsc/db.pre-teardown.sqlite",
+  "source_db_sha256": "152b4ba0c0a1161cf87989c1e09f798c16b377c0b5306f1f15cbecdddd5af070",
+  "source_commit": "587f1af3d6",
+  "source_commit_note": "The run's card.md records CODE_UNDER_TEST: origin/main @ 587f1af3d6. The run directory itself is local evidence and is NOT tracked in git, so `git log` cannot resolve it — source_db_sha256 is the binding identity. The sha256 is over the main DB file; the capture is WAL-mode, so it was read via `file:...?mode=ro` and copied with Connection.backup, and a live-vs-copy row count was asserted equal (a plain `cp` truncates a WAL DB to its last checkpoint).",
+  "source_strategy": "almanak/demo_strategies/pancakeswap_aave_carry_bsc",
+  "source_chain": "bsc",
+  "source_protocol": "aave_v3",
+  "source_wallet": "0x6461179daf3B088f2f7811c55ED0cBA6e51661E8 (scrubbed — the fixture uses _WALLET)",
+  "source_deployment_id": "deployment:81b812bf5b74 (scrubbed — the fixture uses _DEPLOYMENT_ID)",
+
+  "selected_snapshot_ids": [59],
+  "selected_snapshot_note": "Snapshot id 59 is the capture's FINAL pre-teardown snapshot and the only row this fixture sources money from. It is the one shape the 193-DB corpus sweep found to be load-bearing: 59 of 59 snapshots carry a distinct positions_json, 57 distinct cash values, BORROW=1 REPAY=0, and — the property that matters — a live signed-negative BORROW leg AT THE LAST SNAPSHOT. Every completed run tears down, so its open debt lives mid-run and its endpoint is flat; only a pre-teardown capture has debt open where the wallet method brackets.",
+
+  "endpoint_values_carried_verbatim": {
+    "supply_leg_value_usd": "2.923350182028013944740031133",
+    "borrow_leg_value_usd": "-0.87001967417207508600",
+    "health_factor": "2.519169603883311198",
+    "native_gas_funding_bnb": "0.002"
+  },
+
+  "scrubbed": [
+    "wallet address -> _WALLET",
+    "deployment_id -> _DEPLOYMENT_ID",
+    "tx hashes -> 0xldo1..0xldo4",
+    "cycle_id UUID -> cycle-loop-debt-open-001",
+    "ledger/event/position-event UUIDs -> _stable_id(prefix, n)",
+    "timestamps -> _ts(offset) from the fixed _BASE_TIMESTAMP"
+  ],
+
+  "deliberate_deviations_from_the_capture": [
+    "REPAY + WITHDRAW legs ADDED. The capture has BORROW=1 REPAY=0 SUPPLY=1 SWAP=1, which the `looping` ScorecardProfile's required_lifecycle guard (SUPPLY, BORROW, REPAY, WITHDRAW — _assert_fixture_lifecycle) rejects with FixtureLifecycleError BEFORE any cell scores. The fixture therefore performs a PARTIAL deleverage ($0.50 principal repaid, $1.00 collateral withdrawn) and is still leveraged at the endpoint. This keeps the load-bearing property (debt open at the endpoint) while satisfying the guard, and a partial deleverage is itself a real lending shape.",
+    "Cost bases equal marks, so unrealized_pnl_usd is a measured zero on every leg. The capture's debt leg carries 0.0000196741720750860 of accrued-but-unpaid interest (cost_basis 0.8700 vs mark 0.87001967...). That accrual sits in NAV but in NO component bucket (G6 books borrow interest at REPAY, not as it accrues), so carrying it would leave a residual and break the exact identity this fixture is built to demonstrate. Pinning it to zero keeps ONE defect (VIB-5857) isolated instead of confounding it with an accrual term.",
+    "The capture's SWAP of the borrowed USDC into USDT is NOT reproduced. It would create open FIFO lots and an open-lot MTM term in G6's ambient inventory revaluation, competing with the debt term under test. Consequence: L6 (loop-leg attribution) FAILs honestly — 'borrow asset USDC never appeared as SWAP.token_in'. The plain `looping` fixture also scores L6 FAIL.",
+    "Token prices are flat across the whole run, which collapses G6's ambient inventory-revaluation term to a measured exact zero (Σ_inventory_reval_usd = 0E-9, confidence=measured).",
+    "details.* token balances are DERIVED from the USD marks at the flat price and quantised to 18dp, rather than carried from the capture. The USD marks are authoritative; nothing the Accountant Test reads depends on the balances. Production is not exactly reciprocal here either — the capture's display price is 584.67 while its valuer used a higher-precision mark."
+  ],
+
+  "why_the_books_tie_exactly": "Every flow is NAV-conservative (SUPPLY moves cash into collateral; BORROW mints a debt leg AND the matching token leg; REPAY/WITHDRAW reverse them), interest is a measured zero on both carry legs, and prices are flat. So the only thing that moves true NAV is gas, and the component method sums exactly that. Under NET equity: wallet_pnl = -Sigma_gas = component_pnl, gap = 0. Under today's GROSS equity (VIB-5857): wallet_pnl = -Sigma_gas + debt_mark, so gap = debt_mark EXACTLY. That identity is asserted independently — not read back from the stamped manifest — in tests/unit/accounting/test_looping_debt_open_vib6560.py.",
+
+  "disjoint_reserves": "Collateral is WBNB, debt is USDC — deliberately DISJOINT, matching the capture. Same-reserve SUPPLY+BORROW is the VIB-5857 landmine and belongs in a later, explicit second fixture; putting an invented same-reserve payload in the first 'can fail' corpus would risk freezing the landmine as truth.",
+
+  "scored_under_profile": "looping",
+  "profile_note": "Registered in check_accounting_ratchet._FIXTURE_SCORING_PROFILE. NOT a new ScorecardProfile: the lending cell pack and its epsilon are correct here, only the stimulus changes. NOT an in-place edit of the `looping` fixture either — test_no_scoring_drift asserts STATUS_RANK[post] >= STATUS_RANK[pre] over [lp, looping, perp], and flipping a vacuously-green cell is the GOAL while that test classifies it as a regression; re-freezing baseline_pre_T2.json to admit it would destroy a precursor anchor. Precedent: pendle_pt_held, which locked a held-position term the same way (post-T2, ratchet-only, no new profile, no baseline_pre_T2.json)."
+}

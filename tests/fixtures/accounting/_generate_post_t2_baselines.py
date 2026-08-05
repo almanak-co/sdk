@@ -31,7 +31,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from almanak.framework.accounting.accountant_test import run_against_sqlite  # noqa: E402
 from almanak.framework.accounting.payload_schemas import MATCHING_POLICY_VERSIONS  # noqa: E402
 from almanak.framework.primitives.types import Primitive  # noqa: E402
+from scripts.ci.check_accounting_ratchet import _FIXTURE_SCORING_PROFILE  # noqa: E402
 from tests.fixtures.accounting._generate_baselines import (  # noqa: E402
+    generate_looping_debt_open_fixture,
     generate_looping_fixture,
     generate_lp_fixture,
     generate_perp_fixture,
@@ -42,14 +44,27 @@ from tests.fixtures.accounting._stamp_cell_metrics import extract_cell_metrics  
 _PRIMITIVE_VERSION_MAP = {
     "lp": Primitive.LP,
     "looping": Primitive.LENDING,
+    "looping_debt_open": Primitive.LENDING,
     "perp": Primitive.PERP,
     "settlement": Primitive.SETTLEMENT,
 }
 
-_LEDGER_ROW_COUNT = {"lp": 4, "looping": 6, "perp": 4, "settlement": 4}
+_LEDGER_ROW_COUNT = {"lp": 4, "looping": 6, "looping_debt_open": 4, "perp": 4, "settlement": 4}
 
 
 def _emit(primitive: str, generator) -> None:
+    """Regenerate one fixture directory + its manifest.
+
+    A fixture DIRECTORY is not always its scoring profile: ``looping_debt_open``
+    (VIB-6560) is a second lending STIMULUS, not a second scorecard, so it reuses
+    the ``looping`` cell pack and epsilon. That mapping is READ from
+    ``check_accounting_ratchet._FIXTURE_SCORING_PROFILE`` rather than duplicated
+    here, so this script and the ratchet gate cannot disagree about which profile
+    a fixture is scored under — a disagreement would mean the manifest was frozen
+    against a different cell pack than the gate later checks it with. Same import
+    and same ``.get(primitive, primitive)`` default as ``_stamp_cell_metrics.py``.
+    """
+    profile = _FIXTURE_SCORING_PROFILE.get(primitive, primitive)
     base = Path(__file__).parent
     out_dir = base / primitive
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -63,7 +78,7 @@ def _emit(primitive: str, generator) -> None:
     finally:
         conn.close()
 
-    report = run_against_sqlite(db_path, primitive=primitive, strict_lifecycle=True)  # type: ignore[arg-type]
+    report = run_against_sqlite(db_path, primitive=profile, strict_lifecycle=True)  # type: ignore[arg-type]
     cells = {c.cell_id: c.status for c in report.cells}
 
     expected = {
@@ -91,6 +106,7 @@ def _emit(primitive: str, generator) -> None:
 def main() -> None:
     _emit("lp", generate_lp_fixture)
     _emit("looping", generate_looping_fixture)
+    _emit("looping_debt_open", generate_looping_debt_open_fixture)
     _emit("perp", generate_perp_fixture)
     _emit("settlement", generate_settlement_fixture)
 

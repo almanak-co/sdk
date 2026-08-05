@@ -55,8 +55,15 @@ _FIXTURE_BASE = Path(__file__).resolve().parents[2] / "fixtures" / "accounting"
 
 # Fixture dir -> scoring profile, mirroring scripts/ci/check_accounting_ratchet.py.
 _PROFILES = {
+    # KNOWN LIMITATION (VIB-6569): this map MIRRORS
+    # `check_accounting_ratchet._FIXTURE_SCORING_PROFILE` by hand. Nothing
+    # enforces parity — a wrong entry scores a fixture under the wrong cell
+    # pack and this test still passes, measuring something else. The durable
+    # fix is to import the canonical map (as `_generate_post_t2_baselines.py`
+    # now does); tracked in VIB-6569.
     "lp": "lp",
     "looping": "looping",
+    "looping_debt_open": "looping",  # VIB-6560
     "perp": "perp",
     "pendle_pt": "pendle_pt",
     "pendle_lp": "pendle_lp",
@@ -68,7 +75,8 @@ _PROFILES = {
 
 # Measured, not assumed: the only three fixtures carrying Track C ROWS. Each has
 # exactly 2 rows and every delta is NULL, so each scored a vacuous G14 PASS
-# before this change. The other six have zero rows and already XFAILed.
+# before this change. Every OTHER fixture in ``_PROFILES`` has zero rows and
+# already XFAILed.
 _ROWFUL_FIXTURES = ("pendle_lp", "lp_curve", "lp_curve_tricrypto")
 
 
@@ -193,10 +201,11 @@ def test_partial_coverage_passes_but_says_how_partial() -> None:
 def test_row_absent_branch_is_untouched() -> None:
     """Zero rows keeps the original XFAIL, worded for Track C absence.
 
-    Not cosmetic. Six of the nine frozen fixtures sit on this branch at XFAIL.
-    Returning SKIP here instead would regress all six on the status ratchet
-    (SKIP ranks below XFAIL) — nine fixtures moved to fix a defect present in
-    three.
+    Not cosmetic. Seven of the ten frozen fixtures sit on this branch at XFAIL
+    (measured 2026-08-05: every fixture with zero ``position_state_snapshots``
+    rows). Returning SKIP here instead would regress all seven on the status
+    ratchet (SKIP ranks below XFAIL) — ten fixtures moved to fix a defect
+    present in three.
     """
     result = _cell_g14_sdk_eq_onchain([], [])
 
@@ -234,7 +243,7 @@ def test_rowful_fixtures_xfail_naming_the_uncompared_rows(fixture: str) -> None:
     "fixture", [f for f in _PROFILES if f not in _ROWFUL_FIXTURES]
 )
 def test_zero_row_fixtures_take_the_absent_branch(fixture: str) -> None:
-    """The other six carry no Track C rows and must stay on the untouched branch."""
+    """The remaining fixtures carry no Track C rows and must stay on the untouched branch."""
     cell = _cell(fixture, "G14")
 
     assert cell.status == "XFAIL", cell.diagnostic

@@ -8,9 +8,9 @@ attribution.
 Two things these tests are deliberately built to catch:
 
 * **The inert version.** A guard that fires on nothing proves nothing, so the
-  frozen corpus is used as a *discriminating* control: exactly one of the nine
-  fixtures (``pendle_lp``, baseline 2s late) must flip, and the other eight must
-  not move. A change that greened all nine, or none, would pass a weaker test.
+  frozen corpus is used as a *discriminating* control: exactly one of the ten
+  fixtures (``pendle_lp``, baseline 2s late) must flip, and the other nine must
+  not move. A change that greened all ten, or none, would pass a weaker test.
 * **The harmful version.** The tempting repair — window ``Σ_gas`` to the wallet
   bracket — makes the two numbers agree by dropping real spend from the
   component side too. ``test_gap_is_unchanged_by_the_guard`` pins that the
@@ -36,8 +36,15 @@ _FIXTURE_BASE = Path(__file__).resolve().parents[2] / "fixtures" / "accounting"
 
 # Fixture dir -> scoring profile, mirroring scripts/ci/check_accounting_ratchet.py.
 _PROFILES = {
+    # KNOWN LIMITATION (VIB-6569): this map MIRRORS
+    # `check_accounting_ratchet._FIXTURE_SCORING_PROFILE` by hand. Nothing
+    # enforces parity — a wrong entry scores a fixture under the wrong cell
+    # pack and this test still passes, measuring something else. The durable
+    # fix is to import the canonical map (as `_generate_post_t2_baselines.py`
+    # now does); tracked in VIB-6569.
     "lp": "lp",
     "looping": "looping",
+    "looping_debt_open": "looping",  # VIB-6560
     "perp": "perp",
     "pendle_pt": "pendle_pt",
     "pendle_lp": "pendle_lp",
@@ -183,8 +190,9 @@ def test_fully_measured_pre_window_gas_is_a_real_aggregate() -> None:
 def test_exactly_one_fixture_has_a_late_baseline() -> None:
     """The discriminating control.
 
-    If this ever reports zero, the guard has gone inert. If it reports all nine,
-    the guard has become a blanket XFAIL and the cell stops meaning anything.
+    If this ever reports zero, the guard has gone inert. If it reports every
+    fixture in ``_PROFILES``, the guard has become a blanket XFAIL and the cell
+    stops meaning anything.
     """
     late = [p for p in _PROFILES if _g6(p).status == "XFAIL" and "does not cover" in _g6(p).diagnostic]
     assert late == [_LATE_BASELINE_FIXTURE]
