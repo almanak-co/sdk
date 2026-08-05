@@ -1500,7 +1500,23 @@ def _cell_g4_capital_deployed(snapshots: list[dict[str, Any]]) -> CellResult:
     """
     if not snapshots:
         return CellResult("G4", "Capital deployed right now", "FAIL", "no portfolio_snapshots")
-    last = snapshots[-1]
+    # "Right now" is the CHRONOLOGICALLY last snapshot, established through the
+    # shared ordering authority — never positional access (VIB-6545: a restart
+    # resets iteration_number, and the legacy shared sort filed the teardown
+    # snapshot mid-series, so this cell reported deployed capital on a
+    # torn-down wallet). Refusing to order is a FAIL, same direction as G5:
+    # an endpoint elected by row order is a wrong answer wearing a green.
+    ordered = _snapshots_in_time_order(snapshots)
+    if ordered is None:
+        return CellResult(
+            "G4",
+            "Capital deployed right now",
+            "FAIL",
+            "cannot order snapshots by time — at least one timestamp is unmeasured or "
+            "unparseable, so the terminal ('right now') snapshot cannot be identified "
+            "and row order must not elect it (VIB-6545)",
+        )
+    last = ordered[-1]
     deployed = _dec(last.get("total_value_usd"))
     cash = _dec(last.get("available_cash_usd"))
     if deployed is None or cash is None:
@@ -1748,7 +1764,15 @@ _G5_REFUSED_CONFIDENCES = frozenset({"UNAVAILABLE"})
 
 
 def _snapshots_in_time_order(snapshots: list[dict[str, Any]]) -> list[dict[str, Any]] | None:
-    """Snapshots oldest-first by timestamp, or ``None`` when that is impossible.
+    """Snapshots oldest-first by ``(timestamp, id)``, or ``None`` when that is impossible.
+
+    This is the ONE ordering authority for ``portfolio_snapshots`` rows
+    (VIB-6545). ``iteration_number`` must never participate in ordering: it is
+    process-local and a mid-run restart resets it to 1, so a
+    ``(iteration_number, timestamp)`` key files the terminal teardown snapshot
+    in the MIDDLE of the series — on the sealed bundle ``20260804-2310-gmxrt``
+    that made every cell reading ``snapshots[-1]`` measure a window ending
+    before the close, and G6 reported ``+$0.0149`` on a run that lost $0.52.
 
     Returns ``None`` if ANY row's timestamp is unmeasured or unparseable. The
     earlier revision fell back to the caller's order in that case, which was
@@ -1757,17 +1781,31 @@ def _snapshots_in_time_order(snapshots: list[dict[str, Any]]) -> list[dict[str, 
     is to stop a green wrong PnL would have gone on to PASS with endpoints
     chosen by accident. Refusing to order is information the caller must act
     on, not a detail to swallow.
+
+    The ``id`` tie-break makes the order a function of the DATA rather than of
+    the caller's row order: both snapshot writers stamp whole seconds, so two
+    rows can carry an equal timestamp, and a bare stable sort would then keep
+    whatever order the rows arrived in — deterministic per call, but different
+    for two callers passing the same rows differently ordered. ``id`` is the
+    SQLite ``INTEGER PRIMARY KEY AUTOINCREMENT``, i.e. persistence order — the
+    best same-second approximation of event order the schema records. A row
+    without an integer-coercible ``id`` falls back to input position, ranked
+    after every id-bearing row so the two key shapes never interleave.
     """
     # Build the narrowed pairs explicitly rather than relying on the `any(...)`
     # guard above: that guard proves None is absent to a reader but not to the
     # type checker, and a `# type: ignore` here would suppress exactly the
     # None-in-a-sort-key error worth keeping.
-    pairs: list[tuple[datetime, dict[str, Any]]] = []
-    for snapshot in snapshots:
+    pairs: list[tuple[tuple[datetime, tuple[int, int]], dict[str, Any]]] = []
+    for index, snapshot in enumerate(snapshots):
         parsed = _parse_ts(snapshot.get("timestamp"))
         if parsed is None:
             return None
-        pairs.append((parsed, snapshot))
+        try:
+            tiebreak = (0, int(snapshot.get("id")))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            tiebreak = (1, index)
+        pairs.append(((parsed, tiebreak), snapshot))
     return [s for _, s in sorted(pairs, key=lambda pair: pair[0])]
 
 
@@ -2030,11 +2068,32 @@ def _cell_g6_reconciliation(  # noqa: C901
     )
     if blocked is not None:
         return blocked, {}
+    # The wallet-method endpoints are CHRONOLOGICAL first/last, established
+    # through the shared ordering authority (VIB-6545). This cell used to
+    # inherit evaluate_cells' (iteration_number, timestamp) sort, which broke
+    # on any restarted run: the terminal teardown snapshot filed mid-series
+    # and the bracket ended before the close — bundle 20260804-2310 read
+    # wallet_pnl = +$0.0149 on a run that lost $0.52, a mis-window that HIDES
+    # a loss. Unorderable timestamps refuse, same direction as G5 — never a
+    # fall-through to row order.
+    ordered_by_time = _snapshots_in_time_order(snapshots)
+    if ordered_by_time is None:
+        return (
+            CellResult(
+                "G6",
+                "Reconciliation (wallet ≡ component)",
+                "FAIL",
+                "cannot order snapshots by time — at least one timestamp is unmeasured or "
+                "unparseable, so the wallet-method endpoints would be row order rather "
+                "than chronological first/last (VIB-6545)",
+            ),
+            {},
+        )
     # Wallet method: equity_final − equity_initial across all priced
     # snapshots. ``_snapshot_equity`` sums total_value_usd (deployed) +
     # available_cash_usd (uninvested wallet) — a post-teardown snapshot
     # with all-cash equity is a valid endpoint, not a measurement gap.
-    priced = [s for s in snapshots if _snapshot_equity(s) is not None]
+    priced = [s for s in ordered_by_time if _snapshot_equity(s) is not None]
     if len(priced) < 2:
         return (
             CellResult(
@@ -4616,8 +4675,8 @@ def _cells_perp(
     return out
 
 
-def _open_pt_inventory_rows(snapshots: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], bool]:
-    """Open held-PT inventory rows across all snapshots, iteration-ordered.
+def _open_pt_inventory_rows(snapshots: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], bool, bool]:
+    """Open held-PT inventory rows across all snapshots, time-ordered.
 
     The portfolio valuer surfaces an open Pendle PT as a synthetic
     ``positions_json`` row tagged ``details.source == "pt_inventory_lots"``
@@ -4625,12 +4684,18 @@ def _open_pt_inventory_rows(snapshots: list[dict[str, Any]]) -> tuple[list[dict[
     those rows to score open-PT mark-to-market — a real measurement now that the
     gateway PT implied-price path is wired (VIB-5276), not a hardcoded XFAIL.
 
-    Returns ``(rows, any_unreadable)``. ``rows`` are the matching position dicts
-    ordered oldest→newest (by ``iteration_number`` then ``timestamp``) so the
-    caller can take the LATEST snapshot's mark with ``rows[-1]``. ``any_unreadable``
-    is True when ≥1 snapshot's ``positions_json`` is malformed — surfaced as a
-    diagnostic note (Empty ≠ Zero / VIB-3891: unreadable JSON is NOT "no PT", it is
-    simply unknown here; the hard coverage failure for it lives in G15, not PEN3).
+    Returns ``(rows, any_unreadable, unorderable)``. ``rows`` are the matching
+    position dicts ordered oldest→newest through the shared chronological
+    authority ``_snapshots_in_time_order`` (VIB-6545: the former
+    ``(iteration_number, timestamp)`` key mis-elects "latest" on any restarted
+    run, because a restart resets ``iteration_number``) so the caller can take
+    the LATEST snapshot's mark with ``rows[-1]``. ``any_unreadable`` is True when
+    ≥1 snapshot's ``positions_json`` is malformed — surfaced as a diagnostic note
+    (Empty ≠ Zero / VIB-3891: unreadable JSON is NOT "no PT", it is simply
+    unknown here; the hard coverage failure for it lives in G15, not PEN3).
+    ``unorderable`` is True when the snapshots cannot be time-ordered at all —
+    then ``rows`` is empty and the caller must refuse to claim a "latest" mark
+    rather than electing one by row order.
 
     Parses ``positions_json`` with the same accept-two-shapes discipline as the
     Track-C cells (legacy plain list OR versioned envelope ``{"positions": [...]}``).
@@ -4643,7 +4708,13 @@ def _open_pt_inventory_rows(snapshots: list[dict[str, Any]]) -> tuple[list[dict[
     """
     out: list[dict[str, Any]] = []
     any_unreadable = False
-    ordered = sorted(snapshots, key=lambda r: (r.get("iteration_number") or 0, r.get("timestamp") or ""))
+    ordered = _snapshots_in_time_order(snapshots)
+    if ordered is None:
+        # Known limitation (VIB-6578): `any_unreadable` is returned as False
+        # here although no positions_json was parsed — the flag is undefined,
+        # not measured, on the unorderable path. Harmless today because the
+        # sole caller branches on `unorderable` first and never reads it.
+        return [], False, True
     for s in ordered:
         positions_json = s.get("positions_json")
         if not positions_json or positions_json == "[]":
@@ -4666,7 +4737,7 @@ def _open_pt_inventory_rows(snapshots: list[dict[str, Any]]) -> tuple[list[dict[
             details = p.get("details")
             if isinstance(details, dict) and details.get("source") == "pt_inventory_lots":
                 out.append(p)
-    return out, any_unreadable
+    return out, any_unreadable, False
 
 
 def _pen3_open_pt_cell(snapshots: list[dict[str, Any]]) -> CellResult:
@@ -4701,11 +4772,24 @@ def _pen3_open_pt_cell(snapshots: list[dict[str, Any]]) -> CellResult:
 
     There is NO FAIL branch: an unmeasured / absent mark is Empty ≠ Zero, never a
     failure. The decision is taken on the LATEST snapshot bearing a PT row (rows
-    are iteration-ordered) — PT inventory exists only while a lot is open, so the
-    most recent such row is the freshest unrealised-discount mark.
+    are time-ordered, VIB-6545) — PT inventory exists only while a lot is open, so
+    the most recent such row is the freshest unrealised-discount mark.
     """
     name = "Open-PT mark-to-market (unrealised discount accretion)"
-    pt_rows, pt_unreadable = _open_pt_inventory_rows(snapshots)
+    pt_rows, pt_unreadable, pt_unorderable = _open_pt_inventory_rows(snapshots)
+    if pt_unorderable:
+        # VIB-6545: this cell's claim is taken on the LATEST PT-bearing
+        # snapshot, and "latest" is a chronological claim. When time order
+        # cannot be established the claim is unmeasurable — XFAIL (this cell
+        # has no FAIL branch by design; an unestablishable mark is Empty ≠
+        # Zero, not a books error), never an election by row order.
+        return CellResult(
+            "PEN3",
+            name,
+            "XFAIL",
+            "snapshots cannot be ordered by time (a timestamp is unmeasured or "
+            "unparseable), so the latest open-PT mark cannot be identified (VIB-6545)",
+        )
     if not pt_rows:
         note = "; NOTE: malformed positions_json on ≥1 snapshot" if pt_unreadable else ""
         return CellResult(
@@ -5636,11 +5720,26 @@ def evaluate_cells(
     (VIB-3870) can pass pre-filtered rows (by deployment_id, cycle_ids, time
     window, …) without rewriting the cell predicates.
 
-    Sorts the input lists in-place by timestamp / iteration_number — cells
-    assume time-ordered rows for running aggregations (see the BORROW →
-    REPAY tracker in G6).
+    Sorts the input lists in-place by timestamp — cells assume time-ordered
+    rows for running aggregations (see the BORROW → REPAY tracker in G6).
     """
-    snapshots.sort(key=lambda r: (r.get("iteration_number") or 0, r.get("timestamp") or ""))
+    # VIB-6545: snapshots are canonicalized chronologically through the ONE
+    # shared ordering authority. The old (iteration_number, timestamp) key
+    # broke on any restarted run — iteration_number is process-local and
+    # resets to 1 — filing the terminal teardown snapshot in the middle, so
+    # every cell reading snapshots[-1] measured a pre-close endpoint.
+    _ordered_snapshots = _snapshots_in_time_order(snapshots)
+    if _ordered_snapshots is not None:
+        snapshots[:] = _ordered_snapshots
+    else:
+        # Chronology cannot be established: some timestamp is unmeasured or
+        # unparseable. Keep the legacy deterministic key so iterating cells
+        # see a stable order, but do NOT let endpoint semantics ride on it —
+        # the endpoint-reading cells (G4, G5, G6, PEN3) each re-derive order
+        # through _snapshots_in_time_order and refuse when it returns None,
+        # rather than electing "first"/"last" by this accident-adjacent key.
+        # Empty ≠ Zero: an unknown time is not "earliest".
+        snapshots.sort(key=lambda r: (r.get("iteration_number") or 0, r.get("timestamp") or ""))
     ledger.sort(key=lambda r: r.get("timestamp") or "")
     pos_events.sort(key=lambda r: r.get("timestamp") or "")
     acct_events.sort(key=lambda r: r.get("timestamp") or "")

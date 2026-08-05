@@ -85,9 +85,18 @@ def _pt_inventory_position(
     }
 
 
-def _snapshot(positions: list[dict[str, Any]], *, iteration: int, sid: str) -> dict[str, Any]:
+def _snapshot(positions: list[dict[str, Any]], *, iteration: int, sid: str, ts: str | None = None) -> dict[str, Any]:
+    """Synthetic snapshot row. The default timestamp tracks ``iteration`` so
+    pre-VIB-6545 tests keep their intended order under the chronological sort
+    (real rows always carry a timestamp; a row without one is unorderable and
+    the cell refuses — covered explicitly below)."""
     envelope = {"schema_version": 1, "positions": positions, "metadata": {}}
-    return {"id": sid, "iteration_number": iteration, "positions_json": json.dumps(envelope)}
+    return {
+        "id": sid,
+        "iteration_number": iteration,
+        "timestamp": ts or f"2026-05-09T{iteration:02d}:00:00+00:00",
+        "positions_json": json.dumps(envelope),
+    }
 
 
 def _pen3(snapshots: list[dict[str, Any]]) -> Any:
@@ -97,27 +106,69 @@ def _pen3(snapshots: list[dict[str, Any]]) -> Any:
 
 
 class TestOpenPtInventoryRows:
-    def test_extracts_pt_rows_iteration_ordered(self) -> None:
+    def test_extracts_pt_rows_time_ordered(self) -> None:
         snaps = [
             _snapshot([_pt_inventory_position(value_usd="20.0")], iteration=4, sid="s4"),
             _snapshot([_pt_inventory_position(value_usd="10.0")], iteration=1, sid="s1"),
         ]
-        rows, unreadable = _open_pt_inventory_rows(snaps)
+        rows, unreadable, unorderable = _open_pt_inventory_rows(snaps)
         assert not unreadable
+        assert not unorderable
         assert [r["value_usd"] for r in rows] == ["10.0", "20.0"]  # oldest→newest
 
+    def test_a_restart_does_not_demote_the_terminal_snapshot(self) -> None:
+        """VIB-6545: iteration_number resets to 1 on a restart, so the row with
+        the SMALLEST iteration can be the chronologically LAST. Time must win."""
+        snaps = [
+            _snapshot(
+                [_pt_inventory_position(value_usd="10.0")],
+                iteration=4,
+                sid="s4",
+                ts="2026-05-09T04:00:00+00:00",
+            ),
+            _snapshot(
+                [_pt_inventory_position(value_usd="99.0")],
+                iteration=1,  # post-restart process, chronologically last
+                sid="s5",
+                ts="2026-05-09T05:00:00+00:00",
+            ),
+        ]
+        rows, _, _ = _open_pt_inventory_rows(snaps)
+        assert [r["value_usd"] for r in rows] == ["10.0", "99.0"]
+
+    def test_unorderable_snapshots_refuse_instead_of_electing_row_order(self) -> None:
+        """A snapshot without a parseable timestamp makes 'latest' unknowable —
+        the helper must say so, never fall back to input order (VIB-6545)."""
+        snaps = [
+            _snapshot([_pt_inventory_position()], iteration=1, sid="s1"),
+            {"id": "s2", "iteration_number": 2, "positions_json": "[]"},  # no timestamp
+        ]
+        rows, unreadable, unorderable = _open_pt_inventory_rows(snaps)
+        assert rows == []
+        assert unreadable is False
+        assert unorderable is True
+
     def test_malformed_json_flags_unreadable_not_crash(self) -> None:
-        snaps = [{"id": "s1", "iteration_number": 1, "positions_json": "{not json"}]
-        rows, unreadable = _open_pt_inventory_rows(snaps)
+        snaps = [
+            {
+                "id": "s1",
+                "iteration_number": 1,
+                "timestamp": "2026-05-09T01:00:00+00:00",
+                "positions_json": "{not json",
+            }
+        ]
+        rows, unreadable, unorderable = _open_pt_inventory_rows(snaps)
         assert rows == []
         assert unreadable is True
+        assert not unorderable
 
     def test_ignores_non_pt_positions(self) -> None:
         non_pt = {"position_type": "LP", "details": {"source": "uniswap_v3"}, "value_usd": "5"}
         snaps = [_snapshot([non_pt], iteration=1, sid="s1")]
-        rows, unreadable = _open_pt_inventory_rows(snaps)
+        rows, unreadable, unorderable = _open_pt_inventory_rows(snaps)
         assert rows == []
         assert not unreadable
+        assert not unorderable
 
 
 class TestPen3Cell:
@@ -178,17 +229,36 @@ class TestPen3Cell:
         assert "nothing to mark-to-market" in cell.diagnostic
 
     def test_malformed_positions_json_does_not_fail(self) -> None:
-        snaps = [{"id": "s1", "iteration_number": 1, "positions_json": "{not json"}]
+        snaps = [
+            {
+                "id": "s1",
+                "iteration_number": 1,
+                "timestamp": "2026-05-09T01:00:00+00:00",
+                "positions_json": "{not json",
+            }
+        ]
         cell = _pen3(snaps)
         assert cell.status == "XFAIL"
         assert cell.status != "FAIL"
         assert "malformed positions_json" in cell.diagnostic
 
+    def test_unorderable_snapshots_xfail_never_fail_never_elect(self) -> None:
+        """VIB-6545: 'latest' is a chronological claim. With an unparseable
+        timestamp in the series the cell must refuse — XFAIL (PEN3 has no FAIL
+        branch), and it must NOT read a mark elected by row order: the last row
+        here carries a measured mark that would PASS if row order were used."""
+        snaps = [
+            {"id": "s0", "iteration_number": 1, "positions_json": "[]"},  # no timestamp
+            _snapshot([_pt_inventory_position()], iteration=2, sid="s2"),
+        ]
+        cell = _pen3(snaps)
+        assert cell.status == "XFAIL"
+        assert cell.status != "FAIL"
+        assert "cannot be ordered by time" in cell.diagnostic
+
     def test_latest_snapshot_wins(self) -> None:
         """An earlier unmeasured row + a later measured row → PASS (reads newest)."""
-        early = _pt_inventory_position(
-            value_usd="0", mark_unmeasured=True, unavailable_reason="price_unmeasured"
-        )
+        early = _pt_inventory_position(value_usd="0", mark_unmeasured=True, unavailable_reason="price_unmeasured")
         late = _pt_inventory_position(value_usd="26.51", confidence="STALE")
         snaps = [
             _snapshot([late], iteration=4, sid="s4"),
