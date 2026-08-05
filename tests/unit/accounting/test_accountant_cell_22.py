@@ -803,3 +803,152 @@ def test_cell22_xfail_renders_in_cells_table(tmp_path: Path) -> None:
     md = report.format_markdown()
     assert "(status: XFAIL)" in md
     assert "/21 PASS" in md
+
+
+# =============================================================================
+# VIB-6346 — deferred-identity join repair, proven on the audited mainnet bundle
+# =============================================================================
+#
+# Every test above hand-authors its DB. These two score the FROZEN AUDITED
+# MAINNET BUNDLE `20260804-2310-gmxrt-vib6522-5513` (AUDIT_CONFIRMED), which is
+# the run that re-evidenced L5_22 FAIL for VIB-6346. A GMX V2 perp round-trip
+# writes its Phase-1 PERP_OPEN / PERP_CLOSE accounting rows at submission — when
+# the venue positionKey is not yet knowable — and its `position_registry` row
+# only when the keeper settles (VIB-3872 two-phase design; the bundle's registry
+# payload carries `source="settlement_reconciler"`). Nothing revisited the
+# Phase-1 rows, so they stayed `source="legacy"` with a NULL
+# `physical_identity_hash` and the cell reported an inverse orphan.
+#
+# The pair below is deliberately structured as control-first: the negative
+# control pins that the committed fixture STILL REPRODUCES THE DEFECT, so the
+# positive test can never silently decay into a tautology.
+
+_VIB6346_FIXTURE = (
+    Path(__file__).resolve().parents[2]
+    / "fixtures"
+    / "accounting"
+    / "perp"
+    / "vib6346_gmx_arb_mainnet_prefix_unrepaired.sqlite"
+)
+_VIB6346_PHID = "0x4aa383f59c6dd6ceacf3180ffe3b7574d852af5ce0d329e6bb2b1fc1d1f3a715"
+
+
+def _copy_vib6346_fixture(tmp_path: Path) -> Path:
+    """Copy the frozen bundle so nothing can mutate the committed fixture."""
+    import shutil
+
+    assert _VIB6346_FIXTURE.is_file(), f"VIB-6346 fixture missing: {_VIB6346_FIXTURE}"
+    target = tmp_path / "vib6346.sqlite"
+    shutil.copyfile(_VIB6346_FIXTURE, target)
+    return target
+
+
+def test_cell22_negative_control_bundle_reproduces_the_inverse_orphan(tmp_path: Path) -> None:
+    """NEGATIVE CONTROL (VIB-6346): the committed bundle, unrepaired, MUST FAIL L5_22.
+
+    This is the liveness guard for the test below. If this ever passes, the
+    fixture stopped carrying the disease and
+    ``test_cell22_bundle_flips_to_pass_after_the_registry_write_repair`` became
+    vacuous — a cell that greens on data which never exercised it.
+
+    The asserted diagnostic is the verbatim shape measured on the audited run.
+    """
+    db = _copy_vib6346_fixture(tmp_path)
+    cell = _cell22(_run(db, primitive="perp"))
+    assert cell.status == "FAIL", f"fixture no longer reproduces the defect: {cell.diagnostic}"
+    assert "inverse orphan" in cell.diagnostic
+    assert _VIB6346_PHID in cell.diagnostic
+
+
+def test_cell22_bundle_flips_to_pass_after_the_registry_write_repair(tmp_path: Path) -> None:
+    """VIB-6346: replaying the settlement-time registry write closes the join.
+
+    Drives the REAL production writer
+    (:meth:`SQLiteStore.save_ledger_and_registry_atomic`) with the registry row
+    ``perp_settlement_commit._complete_registry`` builds, over a DB whose
+    accounting rows are already persisted with legacy pointers — i.e. the exact
+    ordering that produced the defect on mainnet. Post-fix the repair fires and
+    both directions of L5_22 reconcile.
+
+    On pre-fix code this test FAILS: no repair runs, the Phase-1 rows keep
+    ``source="legacy"``, ``close_event_phids`` stays empty and the cell returns
+    the same ``1 inverse orphan(s)`` the negative control above pins.
+    """
+    import asyncio
+
+    from almanak.framework.accounting.commit import RegistryRow
+    from almanak.framework.primitives.types import AccountingCategory
+    from almanak.framework.primitives.types import Primitive as _Primitive
+    from almanak.framework.state.backends.sqlite import SQLiteConfig, SQLiteStore
+    from almanak.framework.state.ledger_registry_mode import LedgerRegistrySaveMode
+
+    db = _copy_vib6346_fixture(tmp_path)
+
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    try:
+        registry = dict(conn.execute("SELECT * FROM position_registry").fetchone())
+    finally:
+        conn.close()
+
+    class _StubLedger:
+        id = "replay"
+
+    async def _replay() -> None:
+        store = SQLiteStore(SQLiteConfig(db_path=str(db)))
+        await store.initialize()
+        await store.save_ledger_and_registry_atomic(
+            _StubLedger(),
+            RegistryRow(
+                deployment_id=registry["deployment_id"],
+                chain=registry["chain"],
+                primitive=_Primitive.PERP,
+                accounting_category=AccountingCategory.PERP,
+                physical_identity_hash=registry["physical_identity_hash"],
+                semantic_grouping_key=registry["semantic_grouping_key"],
+                grouping_policy_version=registry["grouping_policy_version"],
+                status="closed",
+                payload=json.loads(registry["payload"]),
+                matching_policy_version=registry["matching_policy_version"],
+                opened_at_block=registry["opened_at_block"],
+                opened_tx=registry["opened_tx"],
+                closed_at_block=registry["closed_at_block"],
+                closed_tx=registry["closed_tx"],
+                last_reconciled_at_block=registry["last_reconciled_at_block"],
+            ),
+            None,
+            mode=LedgerRegistrySaveMode.REGISTRY_RECONCILIATION,
+        )
+        await store.close()
+
+    asyncio.run(_replay())
+
+    cell = _cell22(_run(db, primitive="perp"))
+    assert cell.status == "PASS", cell.diagnostic
+    assert "zero orphans on either side" in cell.diagnostic
+
+    # The join the ticket asks for, asserted directly rather than via the cell:
+    # every CLOSE accounting event resolves to EXACTLY ONE position_registry row.
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    try:
+        closes = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT id, event_type, position_reference FROM accounting_events WHERE event_type IN "
+                f"({','.join('?' * len(CLOSE_EVENT_TYPES))})",
+                tuple(CLOSE_EVENT_TYPES),
+            )
+        ]
+        assert closes, "fixture must contain at least one CLOSE accounting event"
+        for row in closes:
+            reference = json.loads(row["position_reference"] or "{}")
+            phid = reference.get("physical_identity_hash")
+            assert phid, f"CLOSE event {row['id']} carries no join key"
+            matches = conn.execute(
+                "SELECT COUNT(*) FROM position_registry WHERE physical_identity_hash = ?",
+                (phid,),
+            ).fetchone()[0]
+            assert matches == 1, f"CLOSE event {row['id']} joins to {matches} registry rows, expected exactly 1"
+    finally:
+        conn.close()

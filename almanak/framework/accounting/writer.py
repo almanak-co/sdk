@@ -387,6 +387,118 @@ def _resolve_position_reference(
         return build_legacy_position_reference(record)
 
 
+def restamp_position_reference(
+    payload_json: str,
+    *,
+    is_live: bool,
+    registry_lookup: RegistryLookup,
+) -> str | None:
+    """Re-resolve ONLY the ``position_reference`` of an already-augmented payload (VIB-6346).
+
+    Deferred-identity repair. Blueprint 27 §10.6a claims the registry-lookup
+    hook closes L5_22 because "registry rows and augmented accounting events
+    now reconcile by construction **at write time**". That holds only when the
+    registry row already exists when the accounting event is written. On a
+    two-phase (async-keeper) venue it does not: GMX V2 does not surface the
+    venue ``positionKey`` at order submission, so the Phase-1 ``PERP_OPEN`` /
+    ``PERP_CLOSE`` row is written with ``source="legacy"`` and the registry row
+    only lands when the keeper settles (VIB-3872 two-phase design;
+    :func:`almanak.framework.runner.perp_settlement_commit._complete_registry`).
+    Nothing revisited those rows, so they stayed legacy for the life of the
+    deployment and L5_22 reported an inverse orphan — measured on the audited
+    mainnet bundle ``20260804-2310-gmxrt-vib6522-5513``.
+
+    This is the writer-side half of the repair: the state backend calls it once
+    the registry row is durable, and it re-runs :func:`_resolve_position_reference`
+    — the SAME resolver the write-time chokepoint uses — over the persisted
+    payload.
+
+    Why this and NOT re-running :func:`augment_accounting_payload`
+    -------------------------------------------------------------
+    The full chokepoint also re-stamps ``schema_version`` / ``formula_version``
+    / ``matching_policy_version`` / ``primitive_version`` and re-projects the
+    L1/L4 lending aliases. Those are idempotent *within* a code version but not
+    *across* one. The repair can legitimately fire after an SDK upgrade — a
+    restart with a pending unsettled GMX order is a real sequence on the keeper
+    lane — and re-augmenting would silently restamp a Phase-1 row's version
+    fields from the NEW tables while the registry row still carries the old
+    integers. That is exactly the quiet audit-trail mutation the version-stamp
+    design exists to prevent. This function mutates one key and nothing else.
+
+    Returns
+    -------
+    str | None
+        The re-serialized payload when the reference actually CHANGED to a
+        JOINED one, or ``None`` when it is already correct, when the resolver
+        could only produce a legacy reference (a repair never downgrades), when
+        the payload is not a position-bearing OPEN/CLOSE row, or when
+        ``event_type`` is unknown / unparseable. ``None`` means "no write
+        needed" — the caller must not UPDATE. This is load-bearing: every
+        primitive that already
+        stamps ``source="registry"`` at Phase-1 write time (LP, lending,
+        Pendle) returns ``None`` here, so the repair costs them zero writes.
+
+    Raises
+    ------
+    AccountingPersistenceError
+        In live mode only, propagated from :func:`_resolve_position_reference`
+        when the lookup raises or the registry row fails the ``Empty ≠ Zero``
+        shape check. The caller decides whether that is fatal; the state
+        backend's repair call site deliberately downgrades it so a bookkeeping
+        repair can never roll back the registry row (see that call site).
+    """
+    try:
+        d = json.loads(payload_json)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if not isinstance(d, dict):
+        return None
+
+    event_type = d.get("event_type")
+    if not isinstance(event_type, str) or not event_type:
+        return None
+    try:
+        record = record_for(event_type)
+    except UnknownIntentTypeError:
+        # An unknown event_type cannot be proven to belong to this registry
+        # row. Empty ≠ Zero: leave it unmeasured rather than guessing.
+        return None
+    if record.event_kind not in (EventKind.OPEN, EventKind.CLOSE):
+        return None
+
+    new_reference = _resolve_position_reference(
+        record,
+        registry_lookup=registry_lookup,
+        is_live=is_live,
+    ).to_dict()
+    # A repair may only CLOSE a join, never open one. If the resolver fell back
+    # to legacy (lookup returned None), there is nothing to learn and writing it
+    # would be a DOWNGRADE: a row correctly stamped when the first registry row
+    # landed would be un-joined when a second row for the same tx makes
+    # ``_build_registry_lookup_for_event`` return ``None`` on its ambiguity
+    # safeguard. The write-time chokepoint legitimately emits legacy; this
+    # repair never does.
+    #
+    # Honest reachability (delta review of PR #3609): the two-positions-in-one-tx
+    # shape is not structurally excluded — ``accounting_events`` has no
+    # uniqueness on ``(tx_hash, event_type, position_key)`` — and the codebase
+    # already ships a guard on the same premise (the registry-side safeguard,
+    # CodeRabbit on PR #2236). But no live producer was found: every accounting
+    # writer traced is one-event-per-ledger-row. So this is "not proven
+    # reachable, not proven dead", NOT "demonstrated in production". It is kept
+    # because the cost asymmetry is decisive — never firing is free and leaves
+    # behaviour byte-identical, while firing once prevents a wrong hash that the
+    # no-downgrade rule would otherwise make permanent.
+    if new_reference.get("physical_identity_hash") is None:
+        return None
+    if d.get("position_reference") == new_reference:
+        return None
+    d["position_reference"] = new_reference
+    # ``sort_keys=True`` matches the write-time chokepoint so a repaired row is
+    # byte-comparable with a natively-written one.
+    return json.dumps(d, sort_keys=True)
+
+
 def _project_lending_aliases(d: dict[str, Any]) -> None:
     """Project lending payload fields onto Accounting-AttemptNo17 spec names
     so L1 / L4 cells can read them.

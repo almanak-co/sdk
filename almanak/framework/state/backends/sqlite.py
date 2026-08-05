@@ -220,6 +220,51 @@ def _backfill_position_reference_legacy(conn: sqlite3.Connection) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# Deferred-identity join repair (VIB-6346)
+# ---------------------------------------------------------------------------
+#
+# Blueprint 27 §10.6a claims the registry-lookup augmentation closes L5_22
+# because "registry rows and augmented accounting events now reconcile BY
+# CONSTRUCTION AT WRITE TIME". That claim silently assumes the registry row
+# already exists when the accounting event is written. For a two-phase
+# (async-keeper) venue it does not:
+#
+#   t0  PERP_OPEN / PERP_CLOSE submitted. The venue position key is NOT yet
+#       knowable, so `StrategyRunner._maybe_save_ledger_with_registry_perp`
+#       logs "Registry-mode skip: perp … has no venue position key" and NO
+#       registry row is written.
+#   t1  The outbox drains and the Phase-1 accounting event is persisted. The
+#       registry lookup finds nothing -> source="legacy", phid=NULL.
+#   t2  The keeper settles. `perp_settlement_commit._complete_registry`
+#       performs "the perp registry write the submission path skipped"
+#       (VIB-3872 two-phase design) and the identity finally becomes
+#       measurable.
+#
+# Nothing ever revisited the t1 rows, so they stayed `source="legacy"` for the
+# life of the deployment and L5_22 reported an inverse orphan: a closed
+# registry row with no CLOSE accounting event carrying its hash. Measured on
+# the audited mainnet bundle 20260804-2310-gmxrt-vib6522-5513.
+#
+# The repair below closes the join from the OTHER side: whichever write learns
+# the identity LAST is the one that owns closing it. It runs inside the single
+# registry-writer transaction (blueprint 28 §4.1), so it covers every producer
+# — including ones nobody has enumerated. VIB-6287's ground-truth section is
+# explicit that producer censuses for exactly this row have been wrong twice,
+# and asks for "a check that fails when an unenumerated producer appears"
+# rather than a per-producer patch; a chokepoint repair is the write-side form
+# of that.
+#
+# It adds NO third key. The pointer it populates is the ratified
+# `position_reference` shape (blueprint 27 §3.6 / blueprint 28 §3.1), it is
+# resolved by the SAME resolver the write-time chokepoint uses
+# (`writer.restamp_position_reference` -> `_resolve_position_reference`), and it
+# is joined by the SAME predicate (`_build_registry_lookup_for_event`) — never a
+# hand-maintained translation table.
+#
+# The store-side half is `SQLiteStore._repair_position_references_for_registry_row`.
+
+
 def _backfill_pendle_registry_category(conn: sqlite3.Connection) -> None:
     """Migrate legacy ``pendle_lp`` / ``pendle_pt`` ``position_registry`` categories (VIB-4931).
 
@@ -683,6 +728,16 @@ ON accounting_events (cycle_id);
 
 CREATE INDEX IF NOT EXISTS idx_ae_ledger
 ON accounting_events (ledger_entry_id);
+
+-- VIB-6346: the deferred-identity join repair looks accounting events up by
+-- the registry row's tx anchors. Partial + LOWER() so it matches the repair's
+-- `tx_hash IS NOT NULL AND LOWER(tx_hash) = ?` predicate, mirroring
+-- ix_registry_{opened,closed}_tx_lookup on the registry side. Without it the
+-- repair table-scans accounting_events on every registry write, which on a
+-- long-running strategy is the difference between a lookup and a sweep.
+CREATE INDEX IF NOT EXISTS idx_ae_deployment_tx
+ON accounting_events (deployment_id, LOWER(tx_hash))
+WHERE tx_hash IS NOT NULL;
 
 -- Durable accounting outbox (VIB-3480).
 -- Written synchronously on the execution hot path; drained asynchronously by
@@ -3496,6 +3551,18 @@ class SQLiteStore:
         inside a single ``BEGIN IMMEDIATE`` ... ``COMMIT``; failure of any
         write rolls the entire transaction back so neither row lands on disk.
 
+        **Exception — step 3) is deliberately non-fatal (VIB-6346).**
+        After the writes above, and still inside the same transaction, the
+        deferred-identity join repair (``# 3)`` in the transaction body)
+        (:meth:`_repair_position_references_for_registry_row`) re-points
+        ``accounting_events.position_reference`` at the row that just landed. A
+        failure there is caught, logged at ERROR, and the transaction still
+        COMMITs — because that repair is bookkeeping, and rolling the registry
+        row back over it would recreate bug #2130 (a landed on-chain position
+        with no durable row) for a reason unrelated to #2130. The repair is
+        idempotent, so a later registry write retries it. The rollback sentence
+        above governs the ledger / registry / handle writes only.
+
         Mode contract (T24 / VIB-4210 / VIB-4221 ADR §8.1 — ratified Option (c)):
 
         - ``mode='commit'`` (default; backward-compatible): the original
@@ -3544,11 +3611,16 @@ class SQLiteStore:
         the standalone ``HandleMapping`` is the legacy path and stays for
         forward-compat with the Postgres RPC shape).
 
-        Failure contract: any ``sqlite3.Error`` (IntegrityError on CHECK
-        violation, OperationalError on disk full, etc.) propagates with
-        the connection rolled back. The caller (StateManager) wraps the
-        exception in :class:`AccountingPersistenceError` so the runner's
-        existing fail-closed pipeline (VIB-3157 / VIB-3762) handles it.
+        Failure contract: any ``sqlite3.Error`` **raised by the ledger /
+        registry / handle writes** (IntegrityError on CHECK violation,
+        OperationalError on disk full, etc.) propagates with the connection
+        rolled back. The caller (StateManager) wraps the exception in
+        :class:`AccountingPersistenceError` so the runner's existing
+        fail-closed pipeline (VIB-3157 / VIB-3762) handles it. The join
+        repair added by VIB-6346 is the documented exception above: its
+        failures — including the disk-full ``OperationalError`` named here as
+        an example — are caught, logged at ERROR, and the transaction still
+        COMMITs.
         """
         if not self._initialized:
             await self.initialize()
@@ -3778,6 +3850,81 @@ class SQLiteStore:
                                 primitive_str,
                                 registry.physical_identity_hash,
                             ),
+                        )
+                    # 3) Deferred-identity join repair (VIB-6346).
+                    #
+                    # Blueprint 27 §10.6a's "reconcile by construction at write
+                    # time" only holds when the registry row exists BEFORE the
+                    # accounting event is written. On a two-phase (async-keeper)
+                    # venue it does not: the venue position key is unknowable at
+                    # submission, so the Phase-1 PERP_OPEN / PERP_CLOSE rows land
+                    # with source="legacy" and the registry row arrives only when
+                    # the keeper settles. This step closes the join from the side
+                    # that learned the identity LAST.
+                    #
+                    # Deliberately NOT inside the try/except that rolls back:
+                    # this is a bookkeeping repair, and a failure here must never
+                    # cost us the registry row — that row is the durable record of
+                    # on-chain risk, and losing it is strictly worse than leaving a
+                    # legacy pointer. Same inversion the teardown lane ratified
+                    # (blueprint 14): accounting failures are loud, never blocking.
+                    # The repair is idempotent, so the next registry write for this
+                    # row (or an operator `ax positions reconcile --apply`) retries
+                    # it for free.
+                    try:
+                        repaired = self._repair_position_references_for_registry_row(
+                            conn,
+                            deployment_id=registry.deployment_id,
+                            chain=registry.chain,
+                            primitive=primitive_str,
+                            accounting_category=category_str,
+                            physical_identity_hash=registry.physical_identity_hash,
+                        )
+                        if repaired:
+                            logger.info(
+                                "position_reference repair: re-pointed %d accounting_events row(s) "
+                                "at registry row phid=%s (deployment_id=%s chain=%s primitive=%s) — "
+                                "deferred-identity write ordering closed (VIB-6346)",
+                                repaired,
+                                registry.physical_identity_hash,
+                                registry.deployment_id,
+                                registry.chain,
+                                primitive_str,
+                            )
+                    except Exception:  # noqa: BLE001 — a join repair must never block the registry write
+                        # Deliberate, named inversion of the VIB-3863 live-raises
+                        # rule. VIB-3863 governs the accounting WRITE ITSELF — a
+                        # dropped event is unrecoverable, so live must halt. This
+                        # is a retroactive pointer fix on an ALREADY-DURABLE row,
+                        # and its failure IS recoverable: the repair is idempotent,
+                        # so the next registry write for this position (or an
+                        # operator `ax positions reconcile --apply`, which re-enters
+                        # this same writer) retries it for free. Letting it raise
+                        # would roll the whole transaction back and lose the
+                        # registry row — recreating bug #2130 (blueprint 28 §1: a
+                        # landed on-chain position with no durable row) for a reason
+                        # that has nothing to do with #2130. The perp settlement
+                        # lane already ratified this inversion for its own registry
+                        # completion: "Registry completion + position_events
+                        # backfill are BEST-EFFORT (wrapped, never block the
+                        # settlement write)" (perp_settlement_commit module
+                        # docstring, VIB-3872 design §3 D2).
+                        #
+                        # ERROR, never WARNING: an unrepaired join is precisely the
+                        # L5_22 FAIL this code exists to prevent, and the message
+                        # carries deployment_id + phid so it is greppable in a
+                        # mainnet bundle.
+                        logger.error(
+                            "position_reference repair FAILED for registry row "
+                            "(deployment_id=%s chain=%s primitive=%s phid=%s); the registry row "
+                            "still commits, but the accounting rows keep their previous reference "
+                            "and L5_22 will report an inverse orphan for this position until a "
+                            "later registry write retries the repair (VIB-6346)",
+                            registry.deployment_id,
+                            registry.chain,
+                            primitive_str,
+                            registry.physical_identity_hash,
+                            exc_info=True,
                         )
                     conn.commit()
                 except sqlite3.IntegrityError as ie:
@@ -4451,6 +4598,212 @@ class SQLiteStore:
             return dict(rows[0])
 
         return _lookup
+
+    def _repair_position_references_for_registry_row(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        deployment_id: str,
+        chain: str,
+        primitive: str,
+        accounting_category: str,
+        physical_identity_hash: str,
+    ) -> int:
+        """Re-point accounting events at a registry row that just became durable (VIB-6346).
+
+        The store-side half of the deferred-identity join repair described in the
+        module-level note above :func:`_backfill_pendle_registry_category`. Called
+        from inside :meth:`save_ledger_and_registry_atomic`'s ``BEGIN IMMEDIATE``
+        transaction, after the registry UPSERT and before the ``COMMIT``, so the
+        lookup it builds already sees the row that was just written.
+
+        The tx anchors are read back from the PERSISTED row, never taken from the
+        caller's :class:`RegistryRow`. Two reasons, both load-bearing:
+
+        * The UPSERT ``COALESCE``-s the anchors, and the settlement lane writes
+          them one at a time — ``perp_settlement_commit._complete_registry``
+          passes ``opened_tx`` only on the open fill and ``closed_tx`` only on
+          the close fill. Reading the caller's row would repair the CLOSE event
+          and leave the OPEN event legacy forever, closing half the join.
+        * The strict monotone-status guard (blueprint 28 §4.3) can reject the
+          incoming row. Stamping the *attempted* row rather than the *persisted*
+          one would put a pointer in the books the registry does not agree with —
+          the class of defect this repair exists to close.
+
+        For each non-NULL anchor, finds the already-persisted ``accounting_events``
+        rows for the same ``(deployment_id, chain, tx_hash)`` whose ``event_type``
+        resolves through the canonical taxonomy to this row's
+        ``(primitive, accounting_category)`` and to the anchor's event kind
+        (``opened_tx`` ⇒ OPEN, ``closed_tx`` ⇒ CLOSE), and asks
+        :func:`~almanak.framework.accounting.writer.restamp_position_reference`
+        whether their pointer changed.
+
+        The join predicate is :meth:`_build_registry_lookup_for_event` **verbatim**
+        — not a fork. That matters for two properties this repair inherits rather
+        than re-derives: the ``accounting_category`` disambiguation (one tx can
+        open positions in two categories), and the ``len(rows) > 1 → None``
+        ambiguity safeguard (a tx that touches two positions of the SAME category
+        stamps neither, because stamping one position's identity onto both events
+        would silently lose the join). A forked predicate here would widen exactly
+        the hole that safeguard closes.
+
+        Both ``payload_json`` and the denormalized ``position_reference`` column
+        are written. The column's own schema comment declares it "a denormalized
+        query-convenience copy of the payload's ``position_reference`` key" with
+        ``payload_json`` canonical; updating one without the other manufactures
+        the drift that comment forbids.
+
+        Idempotent: ``restamp_position_reference`` returns ``None`` when the
+        pointer is unchanged, so a re-run issues zero UPDATEs. That early-exit is
+        also what keeps the cost at one indexed SELECT for every primitive that
+        already stamps ``source="registry"`` at Phase-1 write time (LP, lending,
+        Pendle) — they never reach an UPDATE.
+
+        Runs for every ``status``, including ``reorg_invalidated``: the pointer
+        should describe whatever the registry now holds, and L5_22 only scores
+        ``status='closed'`` rows, so repairing an invalidated row costs nothing
+        and leaves the audit trail complete.
+
+        Local SQLite only, per CLAUDE.md "Database schema ownership". The hosted
+        Postgres ``accounting_events`` has no ``position_reference`` column to
+        repair and its ``SaveAccountingEvent`` branch never ran the augment
+        chokepoint in the first place — that half is T19 / VIB-4205 and is
+        untouched here. No Postgres DDL or DML.
+
+        Returns the number of accounting rows re-pointed.
+        """
+        from almanak.framework.accounting.writer import restamp_position_reference
+        from almanak.framework.primitives.taxonomy import (
+            UnknownIntentTypeError,
+            record_for,
+        )
+
+        def _belongs(event_type: Any, event_kind: str) -> bool:
+            """Does this accounting row's event_type belong to THIS registry row?
+
+            Resolved through the canonical taxonomy only — never a protocol
+            string or a parallel naming convention (blueprint 28 §6 rule 7).
+            An unknown event_type cannot be *proven* to belong, so it is left
+            unmeasured rather than guessed (CLAUDE.md "Empty ≠ Zero").
+            """
+            if not isinstance(event_type, str) or not event_type:
+                return False
+            try:
+                record = record_for(event_type)
+            except UnknownIntentTypeError:
+                return False
+            return (
+                record.primitive.value == primitive
+                and record.accounting_category.value == accounting_category
+                and record.event_kind.value == event_kind
+            )
+
+        persisted = conn.execute(
+            """
+            SELECT opened_tx, closed_tx FROM position_registry
+            WHERE deployment_id = ? AND chain = ? AND primitive = ? AND physical_identity_hash = ?
+            """,
+            (deployment_id, chain, primitive, physical_identity_hash),
+        ).fetchone()
+        if persisted is None:
+            # The INSERT raises before we get here if it was rejected outright,
+            # so this is defensive only.
+            return 0
+        anchors = dict(persisted)
+
+        repaired = 0
+        for anchor_tx, event_kind in ((anchors.get("opened_tx"), "open"), (anchors.get("closed_tx"), "close")):
+            if not isinstance(anchor_tx, str) or not anchor_tx.strip():
+                continue
+            lookup = self._build_registry_lookup_for_event(
+                deployment_id=deployment_id,
+                chain=chain,
+                tx_hash=anchor_tx,
+            )
+            if lookup is None:
+                continue
+
+            candidates = conn.execute(
+                """
+                SELECT id, event_type, execution_mode, payload_json
+                FROM accounting_events
+                WHERE deployment_id = ?
+                  AND LOWER(chain) = LOWER(?)
+                  AND tx_hash IS NOT NULL
+                  AND LOWER(tx_hash) = ?
+                """,
+                (deployment_id, chain, anchor_tx.strip().lower()),
+            ).fetchall()
+
+            matching = [dict(c) for c in candidates if _belongs(dict(c).get("event_type"), event_kind)]
+            if len(matching) > 1:
+                # Event-side ambiguity safeguard — the mirror of the registry-side
+                # one in `_build_registry_lookup_for_event`, and it closes a window
+                # that one cannot see.
+                #
+                # When ONE tx touches two positions of the same
+                # (primitive, accounting_category), their two registry rows are
+                # written by two separate calls to this writer. After the FIRST
+                # write only one row exists, so the registry-side lookup finds
+                # exactly one match and reports no ambiguity — yet there are two
+                # accounting events for that tx and nothing here says which event
+                # belongs to which position. Stamping both with the first row's
+                # identity would substitute a GUESS for an unmeasured value, and
+                # the no-downgrade rule in `restamp_position_reference` would then
+                # make that guess permanent: when the second registry row lands the
+                # registry-side safeguard returns None, so the wrong pointer is
+                # never revisited. (Codex, panel review of PR #3609.)
+                #
+                # Refuse instead. Per CLAUDE.md "Empty ≠ Zero" — and the identical
+                # reasoning already recorded on the registry-side safeguard — it is
+                # better to admit "unmeasured" than to stamp a wrong hash. Both
+                # events keep source="legacy", L5_22 reports them honestly as
+                # orphans, and the durable fix is the same one that safeguard
+                # names: thread `registry_handle` into the join so each leg
+                # resolves to its own row (VIB-6553).
+                #
+                # KNOWN over-refusal, deliberate: this also declines when both
+                # matching events belong to the SAME position, where stamping
+                # would have been correct. Reachability is low — event ids are
+                # deterministic over (deployment, cycle, event_type, tx, position_key)
+                # and the INSERT is OR REPLACE on id, so a same-cycle retry
+                # collapses to one row; only a cross-cycle re-book of one tx could
+                # produce two. Even then the trade is correct -> unmeasured, never
+                # correct -> wrong, which is the safe direction. `position_key`
+                # would discriminate that case, but it cannot discriminate the case
+                # this guard exists for (two positions, two keys, one tx), so it is
+                # not a substitute for the registry_handle fix.
+                logger.warning(
+                    "position_reference repair: %d accounting events match "
+                    "(deployment_id=%s chain=%s tx=%s primitive=%s category=%s kind=%s) but "
+                    "registry row phid=%s identifies only one position; refusing to stamp any of "
+                    "them rather than guess which event belongs to which position (VIB-6346)",
+                    len(matching),
+                    deployment_id,
+                    chain,
+                    anchor_tx,
+                    primitive,
+                    accounting_category,
+                    event_kind,
+                    physical_identity_hash,
+                )
+                continue
+
+            for row in matching:
+                augmented = restamp_position_reference(
+                    str(row.get("payload_json") or "{}"),
+                    is_live=str(row.get("execution_mode") or "") == "live",
+                    registry_lookup=lookup,
+                )
+                if augmented is None:
+                    continue
+                conn.execute(
+                    "UPDATE accounting_events SET payload_json = ?, position_reference = ? WHERE id = ?",
+                    (augmented, _extract_position_reference_column(augmented), row.get("id")),
+                )
+                repaired += 1
+
+        return repaired
 
     async def get_accounting_events(
         self,

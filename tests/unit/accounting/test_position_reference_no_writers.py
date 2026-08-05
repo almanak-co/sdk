@@ -19,6 +19,17 @@ the OPEN/CLOSE position-reference shape. Two layers:
 Cross-reference: UAT card ``docs/internal/uat-cards/VIB-4196.md`` D3.F3.
 The runtime backstop is the writer's exclusive augment chokepoint;
 this test prevents the static-analysis bypass.
+
+**VIB-6346 — a SECOND writer to the column, named here so the next reader is
+not misled.** ``SQLiteStore._repair_position_references_for_registry_row``
+UPDATEs ``accounting_events.payload_json`` + ``position_reference`` outside
+``save_accounting_event``, to close the deferred-identity ordering gap on
+async-keeper venues (the registry row lands after the Phase-1 event). It is
+NOT a second *construction* site: it resolves the reference through
+``writer.restamp_position_reference`` -> ``_resolve_position_reference``, the
+same resolver the augment chokepoint uses. ``sqlite.py`` is allowlisted below
+for the migration backfill anyway, so Layer A would not have caught it — hence
+this note rather than a new assertion.
 """
 
 from __future__ import annotations
