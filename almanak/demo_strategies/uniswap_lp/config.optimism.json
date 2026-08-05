@@ -1,0 +1,30 @@
+{
+    "chain": "optimism",
+    "network": "anvil",
+    "token_funding": [
+        {
+            "symbol": "WETH",
+            "address": "0x4200000000000000000000000000000000000006",
+            "chain": "optimism",
+            "amount": "0.05",
+            "amount_type": "token"
+        },
+        {
+            "symbol": "USDC",
+            "address": "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85",
+            "chain": "optimism",
+            "amount": "50",
+            "amount_type": "usd"
+        }
+    ],
+    "pool": "WETH/USDC/500",
+    "range_width_pct": 0.2,
+    "amount0": "0.001",
+    "amount1": "3",
+    "max_slippage": "0.005",
+    "anvil_funding": {
+        "ETH": 100,
+        "WETH": 1,
+        "USDC": 10000
+    }
+}
