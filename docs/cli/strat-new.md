@@ -59,7 +59,7 @@ Usage: almanak strat new [OPTIONS]
 
 
 * `chain`:
-    * Type: <almanak.framework.cli.chain_params.ChainChoice object at 0x7f875f78fb30>
+    * Type: <almanak.framework.cli.chain_params.ChainChoice object at 0x7f2318197bf0>
     * Default: `arbitrum`
     * Usage: `--chain
 -c`
