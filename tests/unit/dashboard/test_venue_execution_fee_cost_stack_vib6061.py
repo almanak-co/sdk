@@ -161,13 +161,22 @@ def test_a_non_executed_settlement_is_applicable_but_carries_no_fee():
     assert stack.venue_execution_fee_any_measured is False
 
 
-def test_the_fee_does_not_reach_the_g6_reconciliation_fold():
-    """Scope guard for the deferred limb (trigger d).
+def test_the_fee_reaches_the_g6_fold_through_sum_fees_and_never_through_sum_gas():
+    """The deferred limb, now landed — VIB-6541.
 
-    G6 is the drawdown-reachable portfolio fold; widening it is a separate change
-    under its own real-fork proof. This test exists so that widening is a DELIBERATE
-    act with a failing test attached, not something that happens by accident because
-    someone summed the dataclass.
+    VIB-6061 kept this fee OUT of the G6 fold on purpose and this test was its
+    scope guard, so that widening the fold would be a DELIBERATE act rather than
+    something that happened because someone summed the dataclass. VIB-6541 is that
+    deliberate act: the keeper consumes the fee out of an escrow the wallet posted,
+    so the wallet method sees the money go, and a component method that does not
+    book it reports the omission as an unexplained gap. On the sealed mainnet
+    bundle 20260804-2310-gmxrt that omission was $0.4563 of a $0.52 run.
+
+    What the guard protected is KEPT, and is the second assertion: the fee must
+    never be summed into ``sum_gas``. That bucket has to stay reconcilable against
+    ``transaction_ledger``'s own ``gas_usd`` sum, which is exactly the check a user
+    runs when a number surprises them — and the strategy's transaction did not pay
+    this fee, a keeper's did.
     """
     from almanak.framework.dashboard.quant_aggregations import compute_reconciliation
 
@@ -185,7 +194,8 @@ def test_the_fee_does_not_reach_the_g6_reconciliation_fold():
     )
 
     assert stack.venue_execution_fee_usd == Decimal("0.2216")
-    assert recon.sum_gas == Decimal("0")  # gas only, fee excluded
+    assert recon.sum_fees == Decimal("-0.2216")  # a COST: fees paid reduce PnL
+    assert recon.sum_gas == Decimal("0")  # gas bucket still gas-only
 
 
 class TestWireEncoding:

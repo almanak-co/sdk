@@ -3599,6 +3599,29 @@ message CostStackInfo {
   // absent — which is the pre-VIB-6061 rendering, so the default is harmless.
   string cost_venue_execution_fee_usd = 14;
   bool venue_execution_fee_partial = 15;
+  // VIB-6541: the perp lane's share of trading fees (position + borrowing),
+  // read off EXECUTED PERP_SETTLEMENT rows.
+  //
+  // Deliberately a SECOND carrier for money that `cost_protocol_fees_usd`
+  // already displays, and the duplication is the point. The Strategy PnL
+  // roll-up must subtract a fee bucket that is provably NOT already inside
+  // `realized_pnl_usd`, and `cost_protocol_fees_usd` is lane-MIXED: a SWAP's
+  // realized PnL is FIFO proceeds-minus-basis where the proceeds are the
+  // post-fee amount actually received, so subtracting that bucket wholesale
+  // would double-count the swap lane. A perp's `realized_pnl_usd` is the raw
+  // price PnL with the position fee taken separately out of collateral
+  // (Accountant cell P3 exists because the two are separable), so this bucket
+  // — and only this bucket — is safe to subtract.
+  //
+  // Not rendered as its own Cost Stack row; `cost_protocol_fees_usd` remains
+  // the display bucket. This exists solely so the roll-up can be honest.
+  //
+  // Same two orthogonal signals as every bucket above: "" => INAPPLICABLE (no
+  // perp settlement exists at all), `partial` => applicable but some settlement
+  // withheld its term. An old gateway omits both, the client reads None + false,
+  // and the roll-up contributes zero — which is exactly pre-VIB-6541 behaviour.
+  string cost_perp_settlement_fee_usd = 16;
+  bool perp_settlement_fee_partial = 17;
 }
 
 // AuditPosture — Reconciliation (G6) + audit-trail completeness +

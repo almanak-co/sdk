@@ -9007,6 +9007,8 @@ class CostStackInfo(_message.Message):
     IL_PARTIAL_FIELD_NUMBER: _builtins.int
     COST_VENUE_EXECUTION_FEE_USD_FIELD_NUMBER: _builtins.int
     VENUE_EXECUTION_FEE_PARTIAL_FIELD_NUMBER: _builtins.int
+    COST_PERP_SETTLEMENT_FEE_USD_FIELD_NUMBER: _builtins.int
+    PERP_SETTLEMENT_FEE_PARTIAL_FIELD_NUMBER: _builtins.int
     cost_gas_usd: _builtins.str
     cost_protocol_fees_usd: _builtins.str
     cost_slippage_usd: _builtins.str
@@ -9076,6 +9078,30 @@ class CostStackInfo(_message.Message):
     absent — which is the pre-VIB-6061 rendering, so the default is harmless.
     """
     venue_execution_fee_partial: _builtins.bool
+    cost_perp_settlement_fee_usd: _builtins.str
+    """VIB-6541: the perp lane's share of trading fees (position + borrowing),
+    read off EXECUTED PERP_SETTLEMENT rows.
+
+    Deliberately a SECOND carrier for money that `cost_protocol_fees_usd`
+    already displays, and the duplication is the point. The Strategy PnL
+    roll-up must subtract a fee bucket that is provably NOT already inside
+    `realized_pnl_usd`, and `cost_protocol_fees_usd` is lane-MIXED: a SWAP's
+    realized PnL is FIFO proceeds-minus-basis where the proceeds are the
+    post-fee amount actually received, so subtracting that bucket wholesale
+    would double-count the swap lane. A perp's `realized_pnl_usd` is the raw
+    price PnL with the position fee taken separately out of collateral
+    (Accountant cell P3 exists because the two are separable), so this bucket
+    — and only this bucket — is safe to subtract.
+
+    Not rendered as its own Cost Stack row; `cost_protocol_fees_usd` remains
+    the display bucket. This exists solely so the roll-up can be honest.
+
+    Same two orthogonal signals as every bucket above: "" => INAPPLICABLE (no
+    perp settlement exists at all), `partial` => applicable but some settlement
+    withheld its term. An old gateway omits both, the client reads None + false,
+    and the roll-up contributes zero — which is exactly pre-VIB-6541 behaviour.
+    """
+    perp_settlement_fee_partial: _builtins.bool
     def __init__(
         self,
         *,
@@ -9094,8 +9120,10 @@ class CostStackInfo(_message.Message):
         il_partial: _builtins.bool = ...,
         cost_venue_execution_fee_usd: _builtins.str = ...,
         venue_execution_fee_partial: _builtins.bool = ...,
+        cost_perp_settlement_fee_usd: _builtins.str = ...,
+        perp_settlement_fee_partial: _builtins.bool = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["cost_gas_usd", b"cost_gas_usd", "cost_protocol_fees_usd", b"cost_protocol_fees_usd", "cost_slippage_usd", b"cost_slippage_usd", "cost_venue_execution_fee_usd", b"cost_venue_execution_fee_usd", "fees_earned_partial", b"fees_earned_partial", "fees_earned_usd", b"fees_earned_usd", "funding_earned_usd", b"funding_earned_usd", "funding_paid_usd", b"funding_paid_usd", "il_partial", b"il_partial", "il_usd", b"il_usd", "interest_earned_usd", b"interest_earned_usd", "interest_paid_usd", b"interest_paid_usd", "inventory_unrealized_usd", b"inventory_unrealized_usd", "realized_pnl_usd", b"realized_pnl_usd", "venue_execution_fee_partial", b"venue_execution_fee_partial"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["cost_gas_usd", b"cost_gas_usd", "cost_perp_settlement_fee_usd", b"cost_perp_settlement_fee_usd", "cost_protocol_fees_usd", b"cost_protocol_fees_usd", "cost_slippage_usd", b"cost_slippage_usd", "cost_venue_execution_fee_usd", b"cost_venue_execution_fee_usd", "fees_earned_partial", b"fees_earned_partial", "fees_earned_usd", b"fees_earned_usd", "funding_earned_usd", b"funding_earned_usd", "funding_paid_usd", b"funding_paid_usd", "il_partial", b"il_partial", "il_usd", b"il_usd", "interest_earned_usd", b"interest_earned_usd", "interest_paid_usd", b"interest_paid_usd", "inventory_unrealized_usd", b"inventory_unrealized_usd", "perp_settlement_fee_partial", b"perp_settlement_fee_partial", "realized_pnl_usd", b"realized_pnl_usd", "venue_execution_fee_partial", b"venue_execution_fee_partial"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___CostStackInfo: _TypeAlias = CostStackInfo  # noqa: Y015

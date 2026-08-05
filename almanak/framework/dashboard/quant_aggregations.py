@@ -296,6 +296,32 @@ class CostStack:
     venue_execution_fee_applicable: bool = False
     venue_execution_fee_any_measured: bool = False
     venue_execution_fee_measured: bool = False
+    # VIB-6541 — the perp lane's share of trading fees (position + borrowing),
+    # summed off ``PERP_SETTLEMENT`` rows.
+    #
+    # The same money ``protocol_fees_usd`` already carries for the perp lane, held
+    # a SECOND time under a lane-scoped name. That is deliberate. The Strategy PnL
+    # roll-up (``pages/_detail_header._net_realized_pnl_usd``) has to subtract a fee
+    # bucket that is provably NOT already netted inside ``realized_pnl_usd``, and
+    # ``protocol_fees_usd`` is lane-MIXED, so it cannot be that bucket:
+    #
+    #   * SWAP — ``realized_pnl_usd`` is FIFO proceeds − basis, and the proceeds are
+    #     the post-fee ``amount_out`` the wallet actually received. The protocol fee
+    #     is ALREADY inside it; subtracting the bucket would book it twice.
+    #   * PERP — ``realized_pnl_usd`` is the raw price PnL. The position fee is taken
+    #     separately out of collateral (measured on the settlement row: on the
+    #     20260804-2310-gmxrt bundle the 3 USDC deposit became 2.9976 of collateral,
+    #     the 0.0024 delta being exactly ``position_fee_usd``). Accountant cell P3
+    #     ("Open + close fees + price impact, separable") exists because they are.
+    #
+    # So the fold is scoped to the rows whose fee is provably separable, rather than
+    # to a bucket that happens to contain them. NOT rendered as its own Cost Stack
+    # row — ``protocol_fees_usd`` stays the display bucket and nothing about the
+    # rendered cost stack changes.
+    perp_settlement_fee_usd: Decimal = Decimal("0")
+    perp_settlement_fee_applicable: bool = False
+    perp_settlement_fee_any_measured: bool = False
+    perp_settlement_fee_measured: bool = False
 
 
 @dataclass
@@ -864,6 +890,55 @@ def _fold_venue_execution_fee(
     meter[1] += 1
 
 
+def _fold_perp_settlement_fee(
+    stack: CostStack,
+    payload: dict[str, Any],
+    meter: list[int],
+) -> None:
+    """Fold one settlement's TRADING fee (position + borrowing) into ``stack`` (VIB-6541).
+
+    Sibling of :func:`_fold_venue_execution_fee`, and called from the same place for
+    the same reason: these terms are carried by the keeper receipt alone, so the
+    estimate-supersession dance that guards ``protocol_fees_usd`` has nothing to
+    guard here and the fold is a plain sum over settlement rows.
+
+    Why a second bucket for money ``protocol_fees_usd`` already holds: see
+    :class:`CostStack`. Short version — the roll-up may only subtract fees that are
+    not already inside ``realized_pnl_usd``, and that is a per-LANE fact, not a
+    per-bucket one.
+
+    Applicability is keyed on the settlement row existing, not on the fee being
+    present, so a strategy whose settlements predate the measured-fee writer reads
+    "applicable but unmeasured" (contributes nothing) rather than a measured zero.
+    ``_settlement_fee_usd`` is Empty≠Zero on BOTH components: a settlement carrying a
+    position fee but no borrowing fee is unmeasured in total, because a partial that
+    silently drops a component is a wrong number, not a smaller one.
+
+    Scoped to EXECUTED settlements, matching ``_cell_g6_reconciliation`` — the two are
+    a documented lockstep pair and this is the one term where they could disagree. A
+    CANCELLED / FROZEN order was never filled and owes no trading fee, so its absent
+    fee is a correct absence rather than a measurement gap; counting it as applicable
+    would report a cancelled-only run as "applicable but unmeasured" and mark a mixed
+    run partial while every executed fill was in fact fully measured. The KEEPER fee
+    is deliberately NOT scoped this way (see :func:`_fold_venue_execution_fee`): the
+    keeper consumed the escrow whatever the order did.
+
+    This is not merely a coverage-accounting nicety. A CANCELLED / FROZEN verdict does
+    carry ``fill_data`` when the venue tx yielded measurable money movement — a
+    collateral-returning ``PositionDecrease`` — and the GMX receipt parser populates
+    ``position_fee_usd`` from exactly that event, so an ungated fold would subtract a
+    cost the Accountant's G6 excludes and the two sites would disagree on real money.
+    """
+    if payload.get("settlement_state") != "EXECUTED":
+        return
+    meter[0] += 1
+    fee = _settlement_fee_usd(payload)
+    if fee is None:
+        return
+    stack.perp_settlement_fee_usd += fee
+    meter[1] += 1
+
+
 def _fold_perp_event(
     stack: CostStack,
     event: Any,
@@ -874,6 +949,7 @@ def _fold_perp_event(
     fee_meter: list[int],
     slip_meter: list[int],
     venue_fee_meter: list[int],
+    perp_fee_meter: list[int],
 ) -> bool:
     """Fold one PERP_OPEN / PERP_CLOSE / PERP_SETTLEMENT event into ``stack``.
 
@@ -909,6 +985,11 @@ def _fold_perp_event(
         # double-counting terms that appear on BOTH the submission and settlement
         # rows) would silently drop it for the common non-orphan case.
         _fold_venue_execution_fee(stack, payload, venue_fee_meter)
+        # VIB-6541 — folded here, beside the keeper fee and ahead of the same early
+        # returns, for the same reason: the position / borrowing fees are carried by
+        # the settlement row alone, so a gate that exists to prevent double-counting
+        # a term present on BOTH rows would only ever drop them.
+        _fold_perp_settlement_fee(stack, payload, perp_fee_meter)
         # An EXECUTED settlement whose submission estimate is PRESENT was already
         # merged by the estimate branch (per component) — folding here double-counts.
         # Only an ORPHAN settlement (no PERP_OPEN/PERP_CLOSE row for its link) folds
@@ -955,6 +1036,8 @@ def compute_cost_stack(
     il_meter = [0, 0]
     # VIB-6061: same shape again for the venue execution fee, keyed on settlements.
     venue_fee_meter = [0, 0]
+    # VIB-6541: and again for the perp lane's settlement-carried trading fee.
+    perp_fee_meter = [0, 0]
     # VIB-3872 WI-4: per-component supersession. The estimate branch merges each
     # economic field (settlement-measured-else-estimate); the settlement branch folds
     # only ORPHAN settlements (no submission estimate present). Together: exactly one
@@ -1058,6 +1141,7 @@ def compute_cost_stack(
             fee_meter,
             slip_meter,
             venue_fee_meter,
+            perp_fee_meter,
         ):
             continue
 
@@ -1103,6 +1187,15 @@ def compute_cost_stack(
     stack.venue_execution_fee_applicable = venue_fee_meter[0] > 0
     stack.venue_execution_fee_any_measured = venue_fee_meter[1] > 0
     stack.venue_execution_fee_measured = venue_fee_meter[0] > 0 and venue_fee_meter[1] == venue_fee_meter[0]
+    # VIB-6541 — same three states once more. This bucket is the one the Strategy PnL
+    # roll-up subtracts, so the distinction is load-bearing rather than cosmetic:
+    # "no perp settlement at all" must contribute nothing to a swap / LP strategy's
+    # headline, and "settlements landed but none carried a priced fee" must also
+    # contribute nothing — a fabricated zero and an unmeasured fee are the same
+    # number here, but only one of them is a claim.
+    stack.perp_settlement_fee_applicable = perp_fee_meter[0] > 0
+    stack.perp_settlement_fee_any_measured = perp_fee_meter[1] > 0
+    stack.perp_settlement_fee_measured = perp_fee_meter[0] > 0 and perp_fee_meter[1] == perp_fee_meter[0]
     return stack
 
 
@@ -1390,6 +1483,24 @@ def compute_reconciliation(
             sum_interest -= _payload_decimal(payload, "interest_paid_usd", "interest_delta_usd")
 
     sum_gas = -cost_stack.gas_usd  # gas is a cost (negative contribution)
+
+    # VIB-6541 — the perp lane's settlement-carried costs. ``sum_fees`` is a NET fee
+    # contribution to PnL, so income (LP fees collected, above) is positive and fees
+    # PAID are negative; these two are paid.
+    #
+    # Read off ``cost_stack`` rather than re-walked from the events, because
+    # ``compute_cost_stack`` already resolved them measured-only and this function is
+    # documented as its lockstep partner — a second walk is a second chance to drift.
+    #
+    # VIB-6061 deliberately kept the keeper fee OUT of this fold and said so in its
+    # own scope note ("G6 is the drawdown-reachable portfolio-level fold, so widening
+    # it is a separate change under its own real-fork proof"). VIB-6541 IS that
+    # change: the fee is real money leaving the wallet (GMX consumes it out of the
+    # ``msg.value`` escrow we posted), the wallet method sees it go, so the component
+    # method must book it or G6 reports the omission as an unexplained gap. On the
+    # sealed 20260804-2310-gmxrt bundle that omission was $0.4563 of a $0.52 run.
+    sum_fees -= cost_stack.perp_settlement_fee_usd
+    sum_fees -= cost_stack.venue_execution_fee_usd
 
     # Ambient inventory revaluation (blueprint 27 §11.5). Folds in ONLY when the
     # caller supplied the endpoint snapshots — same lane, same marks, same number

@@ -265,7 +265,9 @@ def _maybe_render_beta_banner(p: PnLSummary) -> None:
 
 _STRATEGY_PNL_HELP = (
     "Strategy-scoped PnL = realized (closed positions + swaps, net of LP fees, "
-    "funding, interest and gas — from accounting) + unrealized (open position "
+    "funding, interest, gas, and the perp lane's settlement-carried costs — the "
+    "venue keeper execution fee and position/borrowing fees — from accounting) "
+    "+ unrealized (open position "
     "NAV − open cost basis) + swap-inventory unrealized (mark-to-market of held "
     "directional swap inventory, e.g. a net-long token a swap strategy holds in "
     "the wallet — its FIFO held cost vs current mark). Excludes idle wallet "
@@ -314,12 +316,64 @@ def _net_realized_pnl_usd(cost: CostStackInfo) -> Decimal:
     # booked real measured fee income as zero — understating the headline by the
     # full amount. Coverage now travels as ``cost.fees_earned_measured``; read
     # THAT to caveat a tile, never the absence of the number.
+    # VIB-6541 — the two settlement-carried perp costs. Until this landed the
+    # formula subtracted exactly one cost, gas, so a GMX run whose dominant expense
+    # is the keeper execution fee reported the fee as if it were free: on the sealed
+    # mainnet bundle 20260804-2310-gmxrt the tile rendered −$0.0661 (perp realized
+    # +$0.0042 less gas $0.0703) on a run that truly lost $0.5191 — 87% of the loss
+    # invisible on the headline number, with the truth sitting measured in the same
+    # DB, in ``accounting_events`` rows of type ``PERP_SETTLEMENT``.
+    #
+    # WHY THESE TWO AND NOT ``cost_protocol_fees_usd`` / ``cost_slippage_usd``.
+    # A fee may be subtracted here only if it is not ALREADY inside
+    # ``realized_pnl_usd``, and that is a per-LANE fact:
+    #
+    #   * A SWAP's realized PnL is a mark-to-mark FIFO difference, and the swap
+    #     writer emits no fee field at all (``SwapEventPayload`` carries
+    #     ``slippage_bps``, trade-quality metadata, not a money leg). Its execution
+    #     cost is measured NOWHERE today (VIB-6547) — a real gap, but not this
+    #     one, and subtracting a bucket for it here would invent a number.
+    #   * A PERP's realized PnL is the raw price PnL; the position fee comes out of
+    #     collateral separately (Accountant cell P3 asserts they are separable) and
+    #     the keeper fee comes out of a native escrow the wallet posted.
+    #
+    # ``cost_protocol_fees_usd`` is lane-MIXED and so can never be the right bucket
+    # to subtract wholesale; ``test_net_realized_excludes_protocol_fees_and_slippage_and_il``
+    # keeps that exclusion pinned, and it stays green.
+    #
+    # NOT folded: perp price impact (``cost_slippage_usd``). On the bundle above the
+    # settlement's ``realized_pnl_usd`` exceeds the naive size×Δprice PnL by
+    # +$0.0014641 against a net measured impact of −$0.0014636 — i.e. the impact is
+    # already inside the venue's realized figure with the opposite sign, so folding
+    # it would double-count. Ticketed as VIB-6547 rather than guessed at.
+    #
+    # ``None`` (no perp settlement, or an old gateway that never sends the field)
+    # contributes zero, which is byte-identical to the pre-VIB-6541 headline for
+    # every non-perp strategy.
+    #
+    # KNOWN LIMITATION (VIB-6557) — the PARTIAL case is subtracted without a caveat.
+    # ``None`` here means "nothing measured at all"; a partially-measured bucket
+    # instead arrives as a real Decimal carrying only the settlements that WERE
+    # measured, with ``*_partial=True`` alongside it. This formula subtracts that
+    # partial sum and returns an exact-looking Decimal, so a run with one measured and
+    # one unmeasured settlement understates its loss with no partial-data marker —
+    # ``render_money_trail`` never sees the coverage flags. That is the pre-existing
+    # contract of every bucket in this formula (``fees_earned_usd`` behaves the same,
+    # and coverage travels separately on ``*_measured``), not something VIB-6541
+    # introduced; what VIB-6541 changes is that the keeper fee now REACHES the
+    # headline, so the gap finally has a term large enough to matter. Fixing it means
+    # propagating coverage into the renderer for every bucket at once — a design
+    # change, not a correction — so it is ticketed rather than bolted on here.
+    settlement_costs = (cost.cost_perp_settlement_fee_usd or Decimal("0")) + (
+        cost.cost_venue_execution_fee_usd or Decimal("0")
+    )
     return (
         cost.realized_pnl_usd
         + (cost.fees_earned_usd or Decimal("0"))
         + (cost.funding_earned_usd - cost.funding_paid_usd)
         + (cost.interest_earned_usd - cost.interest_paid_usd)
         - cost.cost_gas_usd
+        - settlement_costs
     )
 
 

@@ -1921,6 +1921,72 @@ def _baseline_window_coverage(
     )
 
 
+# ── VIB-6541: PERP_SETTLEMENT terms for the G6 fold ──────────────────────────
+#
+# The dashboard's ``compute_reconciliation`` has done per-component settlement
+# supersession since VIB-3872 WI-4, and its own docstring names this cell as the
+# thing it mirrors ("If the formula upstream changes, both sites move together").
+# The mirror was one-way: this cell never learned about PERP_SETTLEMENT at all, so
+# on a GMX run it read ``realized_pnl_usd`` and the funding pair off the ESTIMATED
+# PERP_CLOSE row — where the perp receipt parser leaves them null — and failed G6
+# with two unmeasured buckets while the measured values sat one row away. Both
+# helpers below are the accountant-side halves of functions that already exist in
+# ``almanak/framework/dashboard/quant_aggregations.py``; keep them in lockstep.
+
+
+def _g6_settlement_by_link(
+    acct_events: list[dict[str, Any]], acct_payloads: dict[Any, dict[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    """Map submission ledger id → EXECUTED ``PERP_SETTLEMENT`` payload.
+
+    Only ``EXECUTED`` settlements carry measured fill economics — ``CANCELLED`` /
+    ``FROZEN`` / ``NOT_FOUND_UNCORRELATED`` / ``UNMEASURED`` must NOT supersede the
+    submission estimate, or an unfilled order would overwrite a measured estimate
+    with a fabricated zero. Mirrors ``_executed_settlements_by_link``.
+    """
+    by_link: dict[str, dict[str, Any]] = {}
+    for r in acct_events:
+        if str(r.get("event_type") or "").upper() != "PERP_SETTLEMENT":
+            continue
+        p = acct_payloads.get(r.get("id"), {})
+        if p.get("settlement_state") != "EXECUTED":
+            continue
+        link = str(p.get("submission_ledger_entry_id") or r.get("ledger_entry_id") or "")
+        if link:
+            by_link[link] = p
+    return by_link
+
+
+def _g6_perp_estimate_links(acct_events: list[dict[str, Any]]) -> set[str]:
+    """Ledger ids of the ESTIMATED ``PERP_OPEN`` / ``PERP_CLOSE`` submission rows.
+
+    A settlement whose link is in this set was already merged by the PERP_CLOSE
+    branch; only an ORPHAN settlement folds its own economics. Mirrors
+    ``_perp_estimate_links``.
+    """
+    links: set[str] = set()
+    for r in acct_events:
+        if str(r.get("event_type") or "").upper() in ("PERP_OPEN", "PERP_CLOSE"):
+            link = str(r.get("ledger_entry_id") or "")
+            if link:
+                links.add(link)
+    return links
+
+
+def _g6_settlement_cost_usd(p: dict[str, Any]) -> tuple[Decimal | None, Decimal | None]:
+    """``(trading_fee, keeper_execution_fee)`` for one settlement payload, in USD.
+
+    ``trading_fee`` is ``position_fee + borrowing_fee``. Empty≠Zero on BOTH
+    components: ``None`` when either is unmeasured, because a partial that silently
+    drops a component is a wrong number rather than a smaller one. Mirrors
+    ``_settlement_fee_usd`` + ``_fold_venue_execution_fee``.
+    """
+    position_fee = _dec(p.get("position_fee_usd"))
+    borrowing_fee = _dec(p.get("borrowing_fee_usd"))
+    trading = None if (position_fee is None or borrowing_fee is None) else position_fee + borrowing_fee
+    return trading, _dec(p.get("keeper_execution_fee_usd"))
+
+
 def _cell_g6_reconciliation(  # noqa: C901
     snapshots: list[dict[str, Any]],
     ledger: list[dict[str, Any]],
@@ -2054,6 +2120,19 @@ def _cell_g6_reconciliation(  # noqa: C901
     max_debt = Decimal(0)  # Looping scaling base
     max_perp_notional = Decimal(0)  # Perp scaling base
 
+    # VIB-6541 — the perp lane's settlement-carried costs, summed for the
+    # decomposition (they land in ``sum_fees``, which is a NET fee contribution:
+    # income positive, fees paid negative). ``*_unmeasured`` are FORENSIC counters,
+    # deliberately kept OUT of ``null_breakdown`` — see the note where they are
+    # emitted below.
+    sum_perp_trading_fee = Decimal(0)
+    sum_perp_keeper_fee = Decimal(0)
+    perp_settlement_fee_unmeasured = 0
+    perp_keeper_fee_unmeasured = 0
+    # VIB-3872 WI-4 per-component supersession, mirroring the dashboard fold.
+    settlement_by_link = _g6_settlement_by_link(acct_events, acct_payloads)
+    estimate_links = _g6_perp_estimate_links(acct_events)
+
     for r in ledger:
         gas = _dec(r.get("gas_usd"))
         if gas is not None:
@@ -2164,18 +2243,36 @@ def _cell_g6_reconciliation(  # noqa: C901
             if amt_usd is not None:
                 notional_traded += abs(amt_usd)
         if et == "PERP_CLOSE":
-            funding_p = _dec(p.get("funding_paid_usd"))
-            funding_r = _dec(p.get("funding_received_usd"))
-            # Funding is "all-or-nothing" per row: a payload that emitted
-            # neither is unmeasured. Both being zero is a measured zero
-            # (no funding accrued) and is fine.
-            if funding_p is None and funding_r is None:
-                null_perp_funding += 1
-            if funding_p is not None:
-                sum_funding -= funding_p
-            if funding_r is not None:
-                sum_funding += funding_r
-            if rpnl is None:
+            # VIB-6541 — the MEASURED settlement supersedes the ESTIMATED submission
+            # row, per component. The perp receipt parser leaves ``realized_pnl_usd``
+            # and the funding pair null on the PERP_CLOSE payload (it says so in its
+            # own ``unavailable_reason``), so without this the cell fails on two
+            # unmeasured buckets while the keeper receipt one row away carries both.
+            # Precedence is settlement-measured → estimate → unmeasured; a settlement
+            # field that is itself ``None`` never overwrites a measured estimate with
+            # a fabricated zero (Empty≠Zero, the FIX-1 property of WI-4).
+            s = settlement_by_link.get(str(r.get("ledger_entry_id") or ""))
+            s_funding = _dec(s.get("funding_fee_usd")) if s else None
+            if s_funding is not None:
+                # ``funding_fee_usd`` is SIGNED, paid-positive; ``sum_funding`` is a
+                # PnL contribution, so paid funding subtracts.
+                sum_funding -= s_funding
+            else:
+                funding_p = _dec(p.get("funding_paid_usd"))
+                funding_r = _dec(p.get("funding_received_usd"))
+                # Funding is "all-or-nothing" per row: a payload that emitted
+                # neither is unmeasured. Both being zero is a measured zero
+                # (no funding accrued) and is fine.
+                if funding_p is None and funding_r is None:
+                    null_perp_funding += 1
+                if funding_p is not None:
+                    sum_funding -= funding_p
+                if funding_r is not None:
+                    sum_funding += funding_r
+            s_rpnl = _dec(s.get("realized_pnl_usd")) if s else None
+            if s_rpnl is not None:
+                sum_perp += s_rpnl
+            elif rpnl is None:
                 null_perp_rpnl += 1
             else:
                 sum_perp += rpnl
@@ -2192,6 +2289,50 @@ def _cell_g6_reconciliation(  # noqa: C901
                 notional = abs(size) * abs(entry_price)
                 if notional > max_perp_notional:
                     max_perp_notional = notional
+        if et == "PERP_SETTLEMENT":
+            # VIB-6541 — the perp lane's real costs, measured on the keeper receipt
+            # and, until this change, in NO reconciliation bucket at all. Both are
+            # money that left the wallet inside the window the wallet method
+            # measures, so the component method has to book them or G6 reports the
+            # omission as an unexplained gap. On the sealed mainnet bundle
+            # 20260804-2310-gmxrt this was $0.4563 (keeper) + $0.0060 (position) of
+            # a $0.52 run, i.e. 89% of the loss.
+            #
+            # VIB-6061 measured the keeper fee and deliberately stopped short of this
+            # fold, naming the residual it left behind rather than absorbing it
+            # silently. This is the other half.
+            #
+            # Folded from the settlement row ALONE, with no supersession dance: these
+            # terms exist on exactly one row per settlement (only the keeper receipt
+            # carries them; the Phase-1 submission payload never does), so the guards
+            # that stop a double-count of terms present on BOTH rows have nothing to
+            # guard and would only drop them.
+            trading_fee, keeper_fee = _g6_settlement_cost_usd(p)
+            # The trading fee is scoped to EXECUTED settlements: a cancelled or frozen
+            # order was never filled and owes no position fee, so its absent fee is a
+            # correct absence, not a measurement gap. The KEEPER fee is not scoped
+            # that way — the keeper consumed the escrow whatever the order did.
+            if p.get("settlement_state") == "EXECUTED":
+                if trading_fee is None:
+                    perp_settlement_fee_unmeasured += 1
+                else:
+                    sum_perp_trading_fee += trading_fee
+            if keeper_fee is None:
+                perp_keeper_fee_unmeasured += 1
+            else:
+                sum_perp_keeper_fee += keeper_fee
+            # An ORPHAN EXECUTED settlement (no PERP_OPEN/PERP_CLOSE row for its link)
+            # carries economics nothing else booked; a linked one was already merged
+            # by the PERP_CLOSE branch above and must not fold again. Mirrors
+            # ``_perp_reconciliation_terms``.
+            link = str(p.get("submission_ledger_entry_id") or r.get("ledger_entry_id") or "")
+            if p.get("settlement_state") == "EXECUTED" and link not in estimate_links:
+                orphan_rpnl = _dec(p.get("realized_pnl_usd"))
+                if orphan_rpnl is not None:
+                    sum_perp += orphan_rpnl
+                orphan_funding = _dec(p.get("funding_fee_usd"))
+                if orphan_funding is not None:
+                    sum_funding -= orphan_funding
         # VIB-5403: Pendle PT registry rows (blueprint 27 §11.3 — a contribution
         # row per event_type; PT rides Primitive.SWAP, so its disposal leg obeys
         # the SWAP SELL-leg registry: it books REALIZED PnL, a delta — NOT gross
@@ -2281,6 +2422,31 @@ def _cell_g6_reconciliation(  # noqa: C901
     # FAILs with a diagnostic instead of folding an unmeasured term in as zero.
     sum_inventory_reval = inv.total_usd if inv.total_usd is not None else Decimal(0)
     null_inventory_reval = 0 if inv.total_usd is not None else 1
+
+    # VIB-6541 — the settlement-carried perp costs land in ``sum_fees``, the NET fee
+    # contribution to PnL (LP income above is positive; these are paid, so they
+    # subtract). Kept in the same bucket rather than given their own so the
+    # decomposition's arithmetic identity — component = Σ buckets — stays readable,
+    # with the two sub-totals emitted separately below for forensics.
+    sum_fees -= sum_perp_trading_fee
+    sum_fees -= sum_perp_keeper_fee
+    # KNOWN LIMITATION, stated because this fold makes it BIGGER (VIB-6546).
+    #
+    # The component method is now right about the keeper fee; the WALLET method
+    # can still be wrong about it, because a GMX order escrows native as
+    # ``msg.value`` and the keeper refunds the remainder at settlement. While that
+    # escrow is in flight it is out of the wallet without being a cost, so a
+    # snapshot endpoint landing inside the flight window measures a balance that
+    # is short by the escrow. G16 detects exactly this and REFUSES to score
+    # (``_g16_escrow_outstanding``); G6 has no such guard and bills the residue to
+    # the books. On the 20260804-2310-gmxrt bundle both endpoints straddle an
+    # escrow, so G6 sees ~$0.22 of escrow effect against the ~$0.46 of keeper fee
+    # booked here. Giving G6 G16's guard is VIB-6546; it is a different defect
+    # from this one and is deliberately not fixed here.
+    #
+    # Not a reason to withhold the fold. The fee is real money the wallet loses,
+    # and an omitted cost is a silently WRONG component sum, whereas a straddled
+    # endpoint is a loudly wrong one.
 
     component_pnl = sum_swap + sum_lp + sum_perp + sum_fees + sum_funding + sum_interest - sum_gas
     component_pnl += sum_inventory_reval
@@ -2468,6 +2634,32 @@ def _cell_g6_reconciliation(  # noqa: C901
         "Σ_lp_usd": str(sum_lp),
         "Σ_perp_usd": str(sum_perp),
         "Σ_fees_usd": str(sum_fees),
+        # VIB-6541 — the two perp sub-totals inside Σ_fees_usd, emitted separately so
+        # a reader can see WHICH cost moved the bucket (LP fee income and perp fees
+        # paid net against each other inside one number otherwise). Both are stated
+        # as POSITIVE costs; Σ_fees_usd carries them negated.
+        "Σ_perp_trading_fee_usd": str(sum_perp_trading_fee),
+        "Σ_perp_keeper_fee_usd": str(sum_perp_keeper_fee),
+        # FORENSIC, NOT FAILING — deliberately outside ``null_breakdown``.
+        #
+        # Empty≠Zero argues these should fail the cell: an unmeasured cost is not a
+        # zero cost. They do not, for one reason and one only — a settlement that
+        # predates the VIB-6061 measured-fee writer carries no fee field at all, so
+        # promoting this to a failing bucket would flip G6 on every historical perp
+        # DB for a gap this ticket did not introduce and does not fix. The magnitude
+        # is not lost: the count is printed here, and the omitted cost also shows up
+        # as gap. Promote to a failing bucket once every perp DB in the corpus is
+        # post-VIB-6061 — that is a corpus question, not a code question, so it is
+        # deliberately not decided here.
+        #
+        # Tracked as VIB-6558, which also covers the mirrored half: the dashboard's
+        # ``compute_reconciliation`` subtracts these same buckets without consulting
+        # their ``*_measured`` flags, so it never sets ``has_unmeasured`` either. Both
+        # sites move together when the corpus question is answered. Raised by Codex in
+        # the VIB-6541 panel; the consequence is that an EXECUTED settlement with a
+        # missing fee can leave G6 PASSING when the omission lands inside epsilon.
+        "Σ_perp_trading_fee_unmeasured_count": str(perp_settlement_fee_unmeasured),
+        "Σ_perp_keeper_fee_unmeasured_count": str(perp_keeper_fee_unmeasured),
         "Σ_funding_usd": str(sum_funding),
         "Σ_interest_usd": str(sum_interest),
         "Σ_gas_usd": str(-sum_gas),

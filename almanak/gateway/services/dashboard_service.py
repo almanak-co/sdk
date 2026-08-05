@@ -715,6 +715,12 @@ def cost_stack_to_proto(cs: Any) -> gateway_pb2.CostStackInfo:
         # the fee it DID measure. Sending "" there would delete real cost.
         cost_venue_execution_fee_usd=(str(cs.venue_execution_fee_usd) if cs.venue_execution_fee_any_measured else ""),
         venue_execution_fee_partial=(cs.venue_execution_fee_applicable and not cs.venue_execution_fee_measured),
+        # VIB-6541 — gated on ``any_measured`` for the same reason as the two above:
+        # this bucket feeds the Strategy PnL headline, so sending "" for a strategy
+        # that measured SOME of its settlement fees would delete real cost from the
+        # headline, which is the exact failure mode this ticket exists to remove.
+        cost_perp_settlement_fee_usd=(str(cs.perp_settlement_fee_usd) if cs.perp_settlement_fee_any_measured else ""),
+        perp_settlement_fee_partial=(cs.perp_settlement_fee_applicable and not cs.perp_settlement_fee_measured),
     )
 
 

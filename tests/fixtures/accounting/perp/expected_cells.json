@@ -2,7 +2,7 @@
   "accounting_events_row_count": 5,
   "cell_metrics": {
     "G6": {
-      "gap_usd": "0.05",
+      "gap_usd": "0.00",
       "gas_usd_before_initial_endpoint": "0"
     }
   },

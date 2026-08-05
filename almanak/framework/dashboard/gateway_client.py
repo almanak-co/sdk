@@ -322,6 +322,15 @@ class CostStackInfo:
     # than a cosmetic one.
     cost_venue_execution_fee_usd: Decimal | None = None
     venue_execution_fee_partial: bool = False
+    # VIB-6541: the perp lane's settlement-carried trading fee (position +
+    # borrowing). Read the four-state pair exactly as above. This one is not
+    # rendered as its own Cost Stack row — ``cost_protocol_fees_usd`` stays the
+    # display bucket — it exists so ``_net_realized_pnl_usd`` can subtract a fee
+    # bucket that is provably not already inside ``realized_pnl_usd``. ``None``
+    # (old gateway, or no perp settlement) contributes zero to the headline, which
+    # is the pre-VIB-6541 behaviour.
+    cost_perp_settlement_fee_usd: Decimal | None = None
+    perp_settlement_fee_partial: bool = False
 
 
 @dataclass
@@ -504,6 +513,9 @@ def _convert_cost_stack(proto: gateway_pb2.CostStackInfo) -> CostStackInfo:
         # VIB-6061: presence-aware — "" => None (unmeasured), never Decimal("0").
         cost_venue_execution_fee_usd=_safe_optional_decimal(proto.cost_venue_execution_fee_usd),
         venue_execution_fee_partial=bool(proto.venue_execution_fee_partial),
+        # VIB-6541: presence-aware — "" => None (unmeasured), never Decimal("0").
+        cost_perp_settlement_fee_usd=_safe_optional_decimal(proto.cost_perp_settlement_fee_usd),
+        perp_settlement_fee_partial=bool(proto.perp_settlement_fee_partial),
     )
 
 
