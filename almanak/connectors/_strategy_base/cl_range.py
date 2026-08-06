@@ -254,6 +254,27 @@ def require_lp_tolerance_fits_range(
     half-width in the scaffold and a fractional TOTAL width in the demos, and a
     shared helper must not inherit that ambiguity. Callers convert.
 
+    **Which instrument this models, and what a pass does NOT certify.** The
+    construction here is the V3-family / Slipstream one that routes through
+    ``cl_math.compute_lp_slippage_mins`` -- a price band mapped into per-leg
+    minimums. Two neighbouring cases are NOT that instrument:
+
+    * **Uniswap V4** consumes ``max_slippage`` by a DIFFERENT mechanism (a
+      liquidity haircut on ``amount*Max``). A pass here is therefore
+      CONSERVATIVE for V4, never a proof about it: it may refuse a V4
+      configuration that V4's own construction would have floored adequately.
+    * **Fungible-LP venues** (constant-product / Solidly / stableswap) have no
+      range for a band to sit inside, and plain ``aerodrome`` DISCARDS the
+      tolerance and mints with ``amount_a_min = amount_b_min = 0`` (see
+      ``framework/intents/vocabulary.py``). A pass there would assert protection
+      the connector never applies.
+
+    ``almanak strat new`` gates on ``ProtocolFamily.UNIV3_LP_GROUPING`` before
+    calling this, so neither reaches it from the scaffold. This paragraph is for
+    the OTHER callers: the function name says "LP tolerance fits range", which is
+    broader than what it actually decides, and someone reaching for it on V4 or a
+    Solidly fork would get a confident answer about the wrong instrument.
+
     Refuses rather than clamps. VIB-6217 established the rule for this class:
     silently repairing an out-of-range tolerance hides the misconfiguration that
     produced it, which is maximum harm with no signal.
@@ -284,6 +305,14 @@ def require_lp_tolerance_fits_range(
             f"max_slippage must be a numeric fraction in (0, 1), got {max_slippage!r}. "
             "Set max_slippage to a positive fraction below 1, such as 0.005."
         ) from exc
+    # This domain is (0, 1) -- NARROWER than the intent vocabulary's [0, 1)
+    # (``min_out_guard.validate_max_slippage_fraction``). Excluding exactly 0 is a
+    # deliberate EXTRA refusal, not a restatement of that contract: a zero-width
+    # price band floors a mint at its exact desired amounts, so it reverts on any
+    # movement at all -- a guaranteed-revert configuration rather than a tight
+    # one. Named because a guard that silently narrows a published contract is the
+    # divergence this module exists to prevent, and a caller who validated against
+    # the vocabulary first would otherwise be surprised here.
     if not tolerance.is_finite() or not (Decimal(0) < tolerance < Decimal(1)):
         raise LpToleranceOutOfRangeError(
             f"max_slippage must be in (0, 1) as a fraction, got {tolerance}. "

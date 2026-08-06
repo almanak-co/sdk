@@ -276,12 +276,14 @@ class TestRequireLpToleranceFitsRange:
     """An LP price band must fit inside the range it is meant to protect.
 
     The predicate these tests pin was DERIVED FROM MEASUREMENT, not from algebra:
-    a sweep over 4 tick spacings x 11 range widths drove the real
-    ``price_band_to_ticks`` -> ``compute_lp_slippage_mins`` path at 400 spot
-    offsets each and recorded where a leg's minimum came out zero. The guard
-    refuses every measured-unsafe cell and admits every measured-safe one, with
-    three conservative cells (it refuses slightly earlier than reality requires,
-    which is the correct direction for a boot-time check that cannot read spot).
+    the original sweep drove the real ``price_band_to_ticks`` ->
+    ``compute_lp_slippage_mins`` path at 400 spot offsets per cell and recorded
+    where a leg's minimum came out zero. The committed regression sweep below
+    covers all 5 canonical V3 tick spacings x 11 range widths x 120 offsets per
+    admitted cell. It proves the one-way safety guarantee: every admitted
+    configuration produces a positive minimum on both legs. It deliberately does
+    not claim completeness for refused cells; a boot-time guard that cannot read
+    spot may refuse earlier than live geometry requires.
 
     Mutation matrix, so the coverage claim is checkable rather than asserted:
     dropping the ``- (spacing - 1)`` term, reading a fee tier as a raw spacing,
@@ -402,7 +404,10 @@ class TestRequireLpToleranceFitsRange:
             LpToleranceOutOfRangeError,
             price_band_to_ticks,
         )
-        from almanak.connectors._strategy_base.concentrated_liquidity_math import price_to_tick
+        from almanak.connectors._strategy_base.concentrated_liquidity_math import (
+            V3_TICK_SPACING,
+            price_to_tick,
+        )
         from almanak.framework.intents.compiler import LP_SLIPPAGE_PERMISSIVE_DEFAULT
         from almanak.framework.intents.lp_math import tick_to_sqrt_ratio_x96
 
@@ -414,9 +419,22 @@ class TestRequireLpToleranceFitsRange:
 
         tol = Decimal("0.005")
         a0, a1 = 500 * 10**15, 1000 * 10**6
+        spacings = tuple(sorted(set(V3_TICK_SPACING.values())))
         admitted = 0
-        for spacing in (10, 60, 200):
-            for rwp in ("5.0", "2.0", "1.5", "1.0", "0.6"):
+        for spacing in spacings:
+            for rwp in (
+                "10.0",
+                "5.0",
+                "3.0",
+                "2.5",
+                "2.0",
+                "1.5",
+                "1.2",
+                "1.0",
+                "0.8",
+                "0.6",
+                "0.4",
+            ):
                 half = Decimal(rwp) / Decimal("100")
                 try:
                     self._call(
@@ -428,7 +446,8 @@ class TestRequireLpToleranceFitsRange:
                 except LpToleranceOutOfRangeError:
                     continue  # refused: not this test's subject
                 admitted += 1
-                for k in range(60):
+                evaluated_offsets = 0
+                for k in range(120):
                     p = Decimal("3000") * (Decimal(1) + Decimal(k) / Decimal(9000))
                     band = price_band_to_ticks(
                         range_lower=p * (1 - half),
@@ -443,6 +462,7 @@ class TestRequireLpToleranceFitsRange:
                     spot = price_to_tick(Decimal(1) / p, decimals0=18, decimals1=6)
                     if not (band.tick_lower <= spot < band.tick_upper):
                         continue
+                    evaluated_offsets += 1
                     m0, m1 = compute_lp_slippage_mins(
                         intent=_Intent(tol),
                         amount0_desired=a0,
@@ -458,4 +478,13 @@ class TestRequireLpToleranceFitsRange:
                         f"configuration shipped an unfloored leg, which is the hole "
                         f"VIB-6567 exists to close."
                     )
-        assert admitted >= 8, f"sweep degenerate: only {admitted} configurations admitted"
+                assert evaluated_offsets > 0, (
+                    f"sweep degenerate: admitted spacing={spacing} half={half}, but "
+                    f"none of its spot offsets exercised the minimum-amount assertion"
+                )
+        assert admitted >= 25, (
+            f"sweep degenerate: only {admitted} configurations admitted out of "
+            f"{len(spacings) * 11} — "
+            f"a guard that refuses nearly everything would vacuously satisfy the "
+            f"assertion above, since it is only checked on ADMITTED cells"
+        )
