@@ -7318,6 +7318,115 @@ class GetOraclePriceHistoryRequest(_message.Message):
 Global___GetOraclePriceHistoryRequest: _TypeAlias = GetOraclePriceHistoryRequest  # noqa: Y015
 
 @_typing.final
+class GetPerpPriceCandlesRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    VENUE_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    MARKET_FIELD_NUMBER: _builtins.int
+    TIMEFRAME_FIELD_NUMBER: _builtins.int
+    BEFORE_TS_FIELD_NUMBER: _builtins.int
+    LIMIT_FIELD_NUMBER: _builtins.int
+    venue: _builtins.str
+    """Connector-owned venue slug (for example "gmx_v2")."""
+    chain: _builtins.str
+    """Required canonical chain name."""
+    market: _builtins.str
+    """Venue market label or exact market-token address."""
+    timeframe: _builtins.str
+    """Exact venue-native timeframe. The gateway never silently downgrades it."""
+    before_ts: _builtins.int
+    """Exclusive upper timestamp for backward pagination."""
+    limit: _builtins.int
+    """Required caller bound. Gateway rejects values outside [1, 10000]."""
+    def __init__(
+        self,
+        *,
+        venue: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        market: _builtins.str = ...,
+        timeframe: _builtins.str = ...,
+        before_ts: _builtins.int = ...,
+        limit: _builtins.int = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["before_ts", b"before_ts", "chain", b"chain", "limit", b"limit", "market", b"market", "timeframe", b"timeframe", "venue", b"venue"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetPerpPriceCandlesRequest: _TypeAlias = GetPerpPriceCandlesRequest  # noqa: Y015
+
+@_typing.final
+class PerpPriceCandle(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    TIMESTAMP_FIELD_NUMBER: _builtins.int
+    OPEN_FIELD_NUMBER: _builtins.int
+    HIGH_FIELD_NUMBER: _builtins.int
+    LOW_FIELD_NUMBER: _builtins.int
+    CLOSE_FIELD_NUMBER: _builtins.int
+    timestamp: _builtins.int
+    open: _builtins.str
+    high: _builtins.str
+    low: _builtins.str
+    close: _builtins.str
+    def __init__(
+        self,
+        *,
+        timestamp: _builtins.int = ...,
+        open: _builtins.str = ...,
+        high: _builtins.str = ...,
+        low: _builtins.str = ...,
+        close: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["close", b"close", "high", b"high", "low", b"low", "open", b"open", "timestamp", b"timestamp"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___PerpPriceCandle: _TypeAlias = PerpPriceCandle  # noqa: Y015
+
+@_typing.final
+class PerpPriceCandlePageResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    VENUE_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    MARKET_FIELD_NUMBER: _builtins.int
+    MARKET_TOKEN_FIELD_NUMBER: _builtins.int
+    INDEX_TOKEN_FIELD_NUMBER: _builtins.int
+    INDEX_SYMBOL_FIELD_NUMBER: _builtins.int
+    TIMEFRAME_FIELD_NUMBER: _builtins.int
+    CANDLES_FIELD_NUMBER: _builtins.int
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    venue: _builtins.str
+    chain: _builtins.str
+    market: _builtins.str
+    market_token: _builtins.str
+    index_token: _builtins.str
+    index_symbol: _builtins.str
+    timeframe: _builtins.str
+    success: _builtins.bool
+    error: _builtins.str
+    @_builtins.property
+    def candles(self) -> _containers.RepeatedCompositeFieldContainer[Global___PerpPriceCandle]: ...
+    def __init__(
+        self,
+        *,
+        venue: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        market: _builtins.str = ...,
+        market_token: _builtins.str = ...,
+        index_token: _builtins.str = ...,
+        index_symbol: _builtins.str = ...,
+        timeframe: _builtins.str = ...,
+        candles: _abc.Iterable[Global___PerpPriceCandle] | None = ...,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["candles", b"candles", "chain", b"chain", "error", b"error", "index_symbol", b"index_symbol", "index_token", b"index_token", "market", b"market", "market_token", b"market_token", "success", b"success", "timeframe", b"timeframe", "venue", b"venue"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___PerpPriceCandlePageResponse: _TypeAlias = PerpPriceCandlePageResponse  # noqa: Y015
+
+@_typing.final
 class GetOraclePriceRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 

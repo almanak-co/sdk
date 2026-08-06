@@ -4357,6 +4357,11 @@ class RateHistoryServiceStub(object):
                 request_serializer=gateway__pb2.GetOraclePriceHistoryRequest.SerializeToString,
                 response_deserializer=gateway__pb2.OraclePriceHistoryResponse.FromString,
                 _registered_method=True)
+        self.GetPerpPriceCandles = channel.unary_unary(
+                '/almanak.gateway.proto.RateHistoryService/GetPerpPriceCandles',
+                request_serializer=gateway__pb2.GetPerpPriceCandlesRequest.SerializeToString,
+                response_deserializer=gateway__pb2.PerpPriceCandlePageResponse.FromString,
+                _registered_method=True)
 
 
 class RateHistoryServiceServicer(object):
@@ -4495,6 +4500,15 @@ class RateHistoryServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetPerpPriceCandles(self, request, context):
+        """One bounded page of venue-native perpetual index-price candles. Market
+        identity is connector-resolved and on-chain verified before provider
+        egress; callers never supply or guess a vendor symbol.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_RateHistoryServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -4547,6 +4561,11 @@ def add_RateHistoryServiceServicer_to_server(servicer, server):
                     servicer.GetOraclePriceHistory,
                     request_deserializer=gateway__pb2.GetOraclePriceHistoryRequest.FromString,
                     response_serializer=gateway__pb2.OraclePriceHistoryResponse.SerializeToString,
+            ),
+            'GetPerpPriceCandles': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetPerpPriceCandles,
+                    request_deserializer=gateway__pb2.GetPerpPriceCandlesRequest.FromString,
+                    response_serializer=gateway__pb2.PerpPriceCandlePageResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -4859,6 +4878,33 @@ class RateHistoryService(object):
             '/almanak.gateway.proto.RateHistoryService/GetOraclePriceHistory',
             gateway__pb2.GetOraclePriceHistoryRequest.SerializeToString,
             gateway__pb2.OraclePriceHistoryResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetPerpPriceCandles(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.RateHistoryService/GetPerpPriceCandles',
+            gateway__pb2.GetPerpPriceCandlesRequest.SerializeToString,
+            gateway__pb2.PerpPriceCandlePageResponse.FromString,
             options,
             channel_credentials,
             insecure,

@@ -40,6 +40,8 @@ JsonNormalizedDecimal = Annotated[
     PlainSerializer(decimal_str, return_type=str, when_used="json"),
 ]
 
+PriceTimeframe = Literal["auto", "1m", "5m", "15m", "1h", "4h", "1d"]
+
 # ---------------------------------------------------------------------------
 # Shared models
 # ---------------------------------------------------------------------------
@@ -132,6 +134,14 @@ class BacktestRequest(BaseModel):
     chain: str | None = Field(None, description="Override chain (required when using strategy_name)")
     tokens: list[str] | None = Field(None, description="Tokens to track (required when using strategy_name)")
     token_funding: list[dict[str, Any]] | None = Field(None, description="Starting wallet token funding")
+    price_timeframe: PriceTimeframe | None = Field(
+        None,
+        description=(
+            "Provider-native price cadence, independent from the simulation tick. "
+            "Runs with one discoverable connector-native perp market default to auto; "
+            "an explicit value is never silently downgraded."
+        ),
+    )
     mode: Literal["full", "quick"] = "full"
 
     @model_validator(mode="after")
@@ -285,6 +295,7 @@ class QuickBacktestRequest(BaseModel):
     chain: str | None = None
     tokens: list[str] | None = None
     token_funding: list[dict[str, Any]] | None = None
+    price_timeframe: PriceTimeframe | None = None
 
     @model_validator(mode="after")
     def _require_strategy(self) -> QuickBacktestRequest:

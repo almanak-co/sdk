@@ -9,6 +9,7 @@ from almanak.connectors._connector import (
     FeeModelDecl,
     FundingHistoryDecl,
     ImportRef,
+    PerpPriceHistoryDecl,
     PerpsReadDecl,
     SupportedChainsSpec,
 )
@@ -118,6 +119,15 @@ CONNECTOR = Connector(
         backtest_provider=ImportRef(
             module="almanak.connectors.gmx_v2.backtest_funding",
             attribute="GMXFundingProvider",
+        ),
+    ),
+    perp_price_history=PerpPriceHistoryDecl(
+        venue="gmx_v2",
+        chains=(ARBITRUM, AVALANCHE),
+        aliases=("gmx",),
+        backtest_provider=ImportRef(
+            module="almanak.connectors.gmx_v2.backtest_prices",
+            attribute="GMXOracleDataProvider",
         ),
     ),
     backtest_risk=_BACKTEST_RISK,

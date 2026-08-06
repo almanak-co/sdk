@@ -32,6 +32,7 @@ from almanak.services.backtest.serialization import intent_type_wire_value, seri
 from almanak.services.backtest.services.backtest_runner import (
     SpecBacktestStrategy,
     _extract_tokens,
+    _service_price_timeframe,
     build_backtest_config,
     build_backtest_token_address_map,
     build_quick_timeframe,
@@ -39,6 +40,7 @@ from almanak.services.backtest.services.backtest_runner import (
     collect_backtest_token_refs,
     create_backtester,
     normalize_backtest_token_refs,
+    resolve_strategy,
     run_backtest_job,
 )
 from almanak.services.backtest.services.job_manager import JobManager
@@ -296,6 +298,74 @@ class TestBuildBacktestConfig:
 
         assert config.interval_seconds == 86400  # quick mode = 1d
         assert config.include_gas_costs is False
+
+    def test_connector_native_price_timeframe_is_threaded(self):
+        spec = StrategySpec(protocol="gmx_v2", chain="arbitrum", action="swap")
+        timeframe = TimeframeSpec(start="2025-01-01", end="2025-08-01")
+        config = build_backtest_config(
+            spec,
+            timeframe,
+            price_timeframe="auto",
+            token_funding=_pnl_token_funding(Decimal("5000")),
+        )
+
+        assert config.timeframe == "auto"
+
+
+class TestServicePriceTimeframe:
+    def test_gmx_protocol_without_declared_market_does_not_default_auto(self):
+        metadata = SimpleNamespace(supported_protocols=("gmx_v2",))
+        strategy = SimpleNamespace(STRATEGY_METADATA=metadata)
+
+        assert _service_price_timeframe(strategy=strategy, spec=None, requested=None, quick=False) is None
+
+    def test_full_gmx_market_run_defaults_to_coverage_aware_auto(self):
+        metadata = SimpleNamespace(supported_protocols=("gmx_v2",))
+        strategy = SimpleNamespace(STRATEGY_METADATA=metadata, market="DOGE/USD")
+
+        assert _service_price_timeframe(strategy=strategy, spec=None, requested=None, quick=False) == "auto"
+
+    def test_gmx_strategy_spec_without_market_does_not_default_auto(self):
+        spec = StrategySpec(protocol="gmx_v2", chain="arbitrum", action="swap")
+        strategy = SpecBacktestStrategy(spec)
+
+        assert _service_price_timeframe(strategy=strategy, spec=spec, requested=None, quick=False) is None
+
+    def test_quick_gmx_run_keeps_daily_cadence_by_default(self):
+        metadata = SimpleNamespace(supported_protocols=("gmx_v2",))
+        strategy = SimpleNamespace(STRATEGY_METADATA=metadata)
+
+        assert _service_price_timeframe(strategy=strategy, spec=None, requested=None, quick=True) is None
+
+    def test_explicit_native_timeframe_is_never_replaced(self):
+        metadata = SimpleNamespace(supported_protocols=("gmx_v2",))
+        strategy = SimpleNamespace(STRATEGY_METADATA=metadata)
+
+        assert _service_price_timeframe(strategy=strategy, spec=None, requested="1h", quick=False) == "1h"
+
+    def test_named_gmx_service_request_reaches_engine_as_auto(self):
+        metadata = SimpleNamespace(supported_protocols=("gmx_v2",))
+        strategy = SimpleNamespace(
+            STRATEGY_METADATA=metadata,
+            market="DOGE/USD",
+            deployment_id="test-gmx",
+        )
+        request = BacktestRequest(
+            strategy_name="test_gmx",
+            timeframe=TimeframeSpec(start="2025-01-01", end="2025-08-01"),
+            chain="arbitrum",
+            tokens=["DOGE", "USDC"],
+            token_funding=_pnl_token_funding(Decimal("5000")),
+        )
+
+        with patch(
+            "almanak.services.backtest.services.backtest_runner.load_named_strategy",
+            return_value=strategy,
+        ):
+            resolved_strategy, config = resolve_strategy(request)
+
+        assert resolved_strategy is strategy
+        assert config.timeframe == "auto"
 
 
 class TestBuildBacktestConfigNamedStrategy:

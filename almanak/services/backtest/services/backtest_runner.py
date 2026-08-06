@@ -694,6 +694,7 @@ def build_backtest_config(
     timeframe: TimeframeSpec,
     *,
     quick: bool = False,
+    price_timeframe: str | None = None,
     chain: str | None = None,
     token_funding: list[dict[str, Any]] | None = None,
     tokens: list[str] | None = None,
@@ -753,6 +754,7 @@ def build_backtest_config(
         start_time=start,
         end_time=end,
         interval_seconds=interval,
+        timeframe=price_timeframe,
         token_funding=resolved_token_funding,
         chain=resolved_chain,
         tokens=resolved_tokens,
@@ -764,6 +766,34 @@ def build_backtest_config(
         allow_hardcoded_fallback=True,
         allow_degraded_data=True,
     )
+
+
+def _service_price_timeframe(
+    *,
+    strategy: Any,
+    spec: StrategySpec | None,
+    requested: str | None,
+    quick: bool,
+) -> str | None:
+    """Default connector-native perp runs to coverage-aware price cadence.
+
+    The HTTP service historically exposed only the date range, so platform
+    callers could not opt into a native price plane. Full runs now default to
+    ``auto`` only when the strategy declares a connector with that capability.
+    Quick runs retain their daily cadence unless the caller explicitly asks
+    for another price timeframe.
+    """
+    if requested is not None or quick:
+        return requested
+
+    from almanak.connectors._strategy_base.perp_price_history_registry import PerpPriceHistoryRegistry
+    from almanak.framework.backtesting.pnl._engine_helpers import declared_perp_price_history_targets
+
+    strategy_config = getattr(strategy, "config", None)
+    if not isinstance(strategy_config, Mapping):
+        strategy_config = {}
+    targets = declared_perp_price_history_targets(strategy, strategy_config)
+    return "auto" if any(PerpPriceHistoryRegistry.has(protocol) for protocol, _market in targets) else None
 
 
 def _build_equity_point_response(
@@ -852,10 +882,17 @@ def resolve_strategy(
         if not tokens:
             raise ValueError('tokens is required when using strategy_name (e.g. ["WETH", "USDC"])')
         strategy = load_named_strategy(request.strategy_name, chain)
+        price_timeframe = _service_price_timeframe(
+            strategy=strategy,
+            spec=None,
+            requested=getattr(request, "price_timeframe", None),
+            quick=is_quick,
+        )
         config = build_backtest_config(
             spec=None,
             timeframe=timeframe,
             quick=is_quick,
+            price_timeframe=price_timeframe,
             chain=chain,
             token_funding=token_funding,
             tokens=tokens,
@@ -864,10 +901,17 @@ def resolve_strategy(
 
     if request.strategy_spec:
         strategy = SpecBacktestStrategy(request.strategy_spec)
+        price_timeframe = _service_price_timeframe(
+            strategy=strategy,
+            spec=request.strategy_spec,
+            requested=getattr(request, "price_timeframe", None),
+            quick=is_quick,
+        )
         config = build_backtest_config(
             spec=request.strategy_spec,
             timeframe=timeframe,
             quick=is_quick,
+            price_timeframe=price_timeframe,
             chain=chain,
             token_funding=token_funding,
         )

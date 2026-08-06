@@ -46,6 +46,7 @@ cluster, DEX cluster) per the plan PR #2473 migration plan.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import random
 import time
@@ -63,6 +64,10 @@ from almanak.connectors._base.gateway_capabilities import (
     GatewayDexVolumeCapability,
     GatewayFundingHistoryCapability,
     GatewayLendingRateHistoryCapability,
+    GatewayPerpPriceHistoryCapability,
+    PerpMarketCatalogueUnavailable,
+    PerpMarketVerificationError,
+    PerpPriceCandlePage,
 )
 from almanak.connectors._gateway_registry import GATEWAY_REGISTRY
 from almanak.core.finality import CacheFinality
@@ -86,6 +91,73 @@ if TYPE_CHECKING:
     from web3 import AsyncWeb3
 
 logger = logging.getLogger(__name__)
+
+
+def _build_perp_price_provider_dispatch() -> dict[str, GatewayPerpPriceHistoryCapability]:
+    """Build the unique venue -> connector price-history dispatch map."""
+    providers: dict[str, GatewayPerpPriceHistoryCapability] = {}
+    for connector in GATEWAY_REGISTRY.capability_providers(GatewayPerpPriceHistoryCapability):  # type: ignore[type-abstract]
+        venue = connector.price_history_venue().lower()
+        existing = providers.get(venue)
+        if existing is not None and existing is not connector:
+            raise RuntimeError(
+                f"Duplicate perp-price-history provider for venue {venue!r}: "
+                f"{type(existing).__qualname__} vs {type(connector).__qualname__}"
+            )
+        providers[venue] = connector
+    return providers
+
+
+@dataclass(frozen=True)
+class _PerpPriceCandleQuery:
+    """Normalized request fields plus the manifest-dispatched provider."""
+
+    venue: str
+    chain: str
+    market: str
+    timeframe: str
+    provider: GatewayPerpPriceHistoryCapability | None
+
+
+def _perp_price_error_response(
+    query: _PerpPriceCandleQuery,
+    error: str,
+) -> gateway_pb2.PerpPriceCandlePageResponse:
+    return gateway_pb2.PerpPriceCandlePageResponse(
+        venue=query.venue,
+        chain=query.chain,
+        market=query.market,
+        timeframe=query.timeframe,
+        success=False,
+        error=error,
+    )
+
+
+def _perp_price_success_response(
+    query: _PerpPriceCandleQuery,
+    page: PerpPriceCandlePage,
+) -> gateway_pb2.PerpPriceCandlePageResponse:
+    return gateway_pb2.PerpPriceCandlePageResponse(
+        venue=query.venue,
+        chain=query.chain,
+        market=page.market,
+        market_token=page.market_token,
+        index_token=page.index_token,
+        index_symbol=page.index_symbol,
+        timeframe=page.timeframe,
+        candles=[
+            gateway_pb2.PerpPriceCandle(
+                timestamp=candle.timestamp,
+                open=str(candle.open),
+                high=str(candle.high),
+                low=str(candle.low),
+                close=str(candle.close),
+            )
+            for candle in page.candles
+        ],
+        success=True,
+    )
+
 
 FundingHistoryCacheKey = tuple[str, str, str, int, int]
 #                                  source scope market start end
@@ -463,6 +535,8 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
                 )
             self._funding_providers[venue] = funding_conn
 
+        self._perp_price_providers = _build_perp_price_provider_dispatch()
+
         self._twap_providers: dict[str, GatewayDexTwapCapability] = {}
         for twap_conn in GATEWAY_REGISTRY.capability_providers(GatewayDexTwapCapability):  # type: ignore[type-abstract]
             # ``dex_name()`` is declared on ``GatewayDexTwapCapability`` so the
@@ -504,9 +578,10 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
                 self._volume_providers[key] = volume_conn
 
         logger.debug(
-            "Initialized RateHistoryService (lending=%s, funding=%s, twap=%s, lwap=%s, volume=%s)",
+            "Initialized RateHistoryService (lending=%s, funding=%s, perp_price=%s, twap=%s, lwap=%s, volume=%s)",
             sorted(self._lending_providers.keys()),
             sorted(self._funding_providers.keys()),
+            sorted(self._perp_price_providers.keys()),
             sorted(self._twap_providers.keys()),
             sorted(self._lwap_providers.keys()),
             sorted(self._volume_providers.keys()),
@@ -1694,6 +1769,105 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
             truncated=truncated,
             recommended_split_ts=recommended_split_ts,
         )
+
+    async def GetPerpPriceCandles(
+        self,
+        request: gateway_pb2.GetPerpPriceCandlesRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.PerpPriceCandlePageResponse:
+        """Return one verified, connector-owned page of perp price candles."""
+        query = self._perp_price_query(request)
+        validation_error = self._validate_perp_price_query(query, request)
+        if validation_error is not None:
+            _invalid_argument(context, validation_error)
+            return _perp_price_error_response(query, validation_error)
+        return await self._fetch_perp_price_candles(query, request, context)
+
+    def _perp_price_query(self, request: gateway_pb2.GetPerpPriceCandlesRequest) -> _PerpPriceCandleQuery:
+        venue = _normalize_key(request.venue)
+        return _PerpPriceCandleQuery(
+            venue=venue,
+            chain=_normalize_key(request.chain),
+            market=request.market.strip(),
+            timeframe=request.timeframe.strip().lower(),
+            provider=self._perp_price_providers.get(venue),
+        )
+
+    @staticmethod
+    def _validate_perp_price_query(
+        query: _PerpPriceCandleQuery,
+        request: gateway_pb2.GetPerpPriceCandlesRequest,
+    ) -> str | None:
+        provider = query.provider
+        if not query.venue or not query.chain or not query.market or not query.timeframe:
+            return "venue, chain, market, and timeframe are required"
+        if provider is None:
+            return f"unknown perp price-history venue {query.venue!r}"
+        if query.chain not in provider.price_history_chains():
+            return f"{query.venue} has no perp price history on {query.chain}"
+        if query.timeframe not in provider.price_history_timeframes():
+            return f"{query.venue} does not support timeframe {query.timeframe!r}"
+        if request.before_ts <= 0:
+            return "before_ts must be positive"
+        if request.limit < 1 or request.limit > 10_000:
+            return "limit must be between 1 and 10000"
+        return None
+
+    async def _fetch_perp_price_candles(
+        self,
+        query: _PerpPriceCandleQuery,
+        request: gateway_pb2.GetPerpPriceCandlesRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.PerpPriceCandlePageResponse:
+        provider = query.provider
+        assert provider is not None
+        try:
+            page = await provider.fetch_price_candles(
+                self,
+                market=query.market,
+                chain=query.chain,
+                timeframe=query.timeframe,
+                before_ts=request.before_ts,
+                limit=request.limit,
+            )
+        except PerpMarketCatalogueUnavailable as exc:
+            logger.warning(
+                "GetPerpPriceCandles catalogue unavailable venue=%s chain=%s market=%s: %s",
+                query.venue,
+                query.chain,
+                query.market,
+                exc,
+            )
+            context.set_code(grpc.StatusCode.UNAVAILABLE)
+            context.set_details(str(exc))
+            return _perp_price_error_response(query, str(exc))
+        except json.JSONDecodeError:
+            logger.exception(
+                "GetPerpPriceCandles received invalid upstream JSON venue=%s chain=%s market=%s timeframe=%s",
+                query.venue,
+                query.chain,
+                query.market,
+                query.timeframe,
+            )
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(_INTERNAL_ERROR_DETAIL)
+            return _perp_price_error_response(query, _INTERNAL_ERROR_DETAIL)
+        except (ValueError, PerpMarketVerificationError) as exc:
+            _invalid_argument(context, str(exc))
+            return _perp_price_error_response(query, str(exc))
+        except Exception:
+            logger.exception(
+                "GetPerpPriceCandles failed venue=%s chain=%s market=%s timeframe=%s",
+                query.venue,
+                query.chain,
+                query.market,
+                query.timeframe,
+            )
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(_INTERNAL_ERROR_DETAIL)
+            return _perp_price_error_response(query, _INTERNAL_ERROR_DETAIL)
+
+        return _perp_price_success_response(query, page)
 
     async def GetOraclePrice(
         self,

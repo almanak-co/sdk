@@ -69,6 +69,7 @@ INVARIANT_ROWS: tuple[str, ...] = (
     "funding_gated_entry",
     "funding_fallback_provenance",
     "funding_lane_coherence",
+    "venue_native_price_plane",
     "rejection_no_state_change",
     "execution_error_terminality",
     "cost_accounting",
@@ -384,6 +385,13 @@ CELLS: tuple[TrustCell, ...] = (
         # measured history - so a strategy could enter on the measured rate
         # while its position accrued the fallback. The adapter now bridges
         # through the same worker-thread path.
+    ),
+    _cell(
+        "venue_native_price_plane",
+        "perp",
+        "A dynamically resolved GMX synthetic market uses one verified venue-native index-price plane; "
+        "auto selects the finest complete native cadence, timestamps closes only when observable, and never "
+        "stitches the market to a symbol-guess fallback (ALM-3149).",
     ),
     _cell(
         "round_trip_conservation",

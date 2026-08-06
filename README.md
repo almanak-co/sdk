@@ -223,11 +223,22 @@ print(f"Sharpe Ratio: {result.metrics.sharpe_ratio:.2f}")
 print(f"Max Drawdown: {result.metrics.max_drawdown_pct:.2f}%")
 ```
 
+For a connector-native perp strategy, pass `timeframe="auto"` to choose the
+finest native cadence with complete coverage. The result artifact records the
+resolved value; an explicit canonical timeframe never silently downgrades. Price
+cadence is independent from `interval_seconds`, which remains the strategy's
+decision/simulation tick. Full BacktestService runs default eligible strategies
+with an explicit connector-native perp market to this policy; callers can pin
+`price_timeframe` when an exact cadence is needed.
+
 ### CLI Usage
 
 ```bash
 # Historical PnL backtest
 almanak strat backtest pnl -s my_strategy --start 2024-01-01 --end 2024-06-01
+
+# Coverage-aware native cadence (an explicit timeframe never downgrades)
+almanak strat backtest pnl -s my_gmx_strategy --start 2024-01-01 --end 2024-08-01 --timeframe auto
 
 # Parameter sweep optimization
 almanak strat backtest sweep -s my_strategy --param "window:10,20,30"

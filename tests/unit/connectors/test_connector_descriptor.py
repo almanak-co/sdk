@@ -7,6 +7,7 @@ import importlib
 import re
 import sys
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -25,6 +26,7 @@ from almanak.connectors._connector import (
     DexVolumeDecl,
     ImportRef,
     LendingReadDecl,
+    PerpPriceHistoryDecl,
     PerpsReadDecl,
     StrategyMatrixEntry,
     SupportedChainsSpec,
@@ -92,6 +94,7 @@ from almanak.connectors._strategy_base.vault_representatives import VaultReprese
 from almanak.connectors._strategy_base.vault_tool_registry import (
     VaultToolConnector,
 )
+from almanak.core.chains.arbitrum import DESCRIPTOR as ARBITRUM
 from almanak.core.chains.ethereum import DESCRIPTOR as ETHEREUM
 from almanak.core.intent_types import IntentType
 from almanak.framework.permissions.models import ContractPermission
@@ -2792,6 +2795,30 @@ class TestDeclarationReachabilityGuards:
                 spec=ImportRef(module="almanak.connectors.gmx_v2.perps_read", attribute="PERPS_READ_SPEC"),
                 aliases=("gmx-v2",),
             )
+
+
+class TestPerpPriceHistoryDeclChains:
+    """Price-history manifests use registered chain descriptors, never strings."""
+
+    def test_registered_descriptors_project_canonical_names(self):
+        decl = PerpPriceHistoryDecl(venue="example", chains=(ARBITRUM, ETHEREUM))
+
+        assert decl.chains == ("arbitrum", "ethereum")
+
+    def test_raw_chain_strings_are_rejected(self):
+        with pytest.raises(TypeError, match="registered ChainDescriptor"):
+            PerpPriceHistoryDecl(venue="example", chains=("arbitrum",))  # type: ignore[arg-type]
+
+    def test_unregistered_descriptor_is_rejected(self):
+        with pytest.raises(ValueError, match="unregistered ChainDescriptor"):
+            PerpPriceHistoryDecl(
+                venue="example",
+                chains=(replace(ARBITRUM, name="arbitrum_typo"),),
+            )
+
+    def test_duplicate_descriptors_are_rejected(self):
+        with pytest.raises(ValueError, match="duplicate canonical chains"):
+            PerpPriceHistoryDecl(venue="example", chains=(ARBITRUM, ARBITRUM))
 
 
 class TestDexVolumeDeclValidation:

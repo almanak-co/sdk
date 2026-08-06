@@ -326,7 +326,14 @@ class MarketState:
             chain, address = normalize_token_key(entry[0], entry[1])
             if chain != run_chain:
                 continue
-            self.symbol_aliases[str(symbol).upper()] = (chain, address)
+            symbol_upper = str(symbol).upper()
+            existing = self.symbol_aliases.get(symbol_upper)
+            if existing is not None and existing != (chain, address):
+                raise ValueError(
+                    f"Ambiguous market-data identity for {symbol_upper}: "
+                    f"{token_ref_display(existing)} != {token_ref_display((chain, address))}"
+                )
+            self.symbol_aliases[symbol_upper] = (chain, address)
 
     def _lookup_keys(self, token: TokenRef) -> list[TokenRef]:
         """Return direct and address-native lookup candidates for ``token``."""

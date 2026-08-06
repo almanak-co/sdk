@@ -25,9 +25,14 @@ from typing import Any
 from almanak.connectors._base.types import ProtocolKind, ProtocolName
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
 from almanak.connectors._strategy_base.position_read_base import BUILDER_REQUIRED_KINDS, POSITION_READ_KINDS
-from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec, SupportedChainsSpec
+from almanak.connectors._strategy_base.protocol_ownership import (
+    CapabilitiesSpec,
+    SupportedChainsSpec,
+    canonical_chain_names_from_refs,
+)
 from almanak.connectors._strategy_base.solana_program import SolanaProgramSpec
 from almanak.connectors._strategy_base.vault_representatives import VaultRepresentativeSpec
+from almanak.core.chains import ChainDescriptor
 from almanak.core.intent_types import IntentType
 
 # Recognised vendor keys for ``Connector.external_ids`` (VIB-4851 B1, plan 024).
@@ -574,6 +579,61 @@ class FundingHistoryDecl:
             )
 
 
+@dataclass(frozen=True, init=False)
+class PerpPriceHistoryDecl:
+    """Connector-owned venue index-price-history declaration (ALM-3149).
+
+    Unlike :class:`FundingHistoryDecl`, this declaration intentionally has no
+    market list.  Supported markets are discovered from the venue at runtime;
+    adding or removing a GMX synthetic market must not require an SDK release.
+
+    Connector manifests pass registered :class:`ChainDescriptor` singletons.
+    Construction projects them to canonical names so registry and wire-format
+    consumers retain their existing string boundary without accepting
+    stringly-typed connector declarations.
+    """
+
+    venue: str
+    chains: tuple[str, ...] = ()
+    aliases: tuple[str, ...] = ()
+    backtest_provider: ImportRef | None = None
+
+    def __init__(
+        self,
+        *,
+        venue: str,
+        chains: tuple[ChainDescriptor, ...] = (),
+        aliases: tuple[str, ...] = (),
+        backtest_provider: ImportRef | None = None,
+    ) -> None:
+        """Validate descriptor inputs and freeze their canonical names."""
+        canonical_names = canonical_chain_names_from_refs(
+            "PerpPriceHistoryDecl",
+            "chains",
+            chains,
+            allow_none=False,
+            allow_empty=True,
+        )
+        assert canonical_names is not None
+
+        object.__setattr__(self, "venue", venue)
+        object.__setattr__(self, "chains", canonical_names)
+        object.__setattr__(self, "aliases", aliases)
+        object.__setattr__(self, "backtest_provider", backtest_provider)
+        self.__post_init__()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.venue, str) or not self.venue.strip():
+            raise ValueError(f"PerpPriceHistoryDecl.venue must be a non-empty string, got {self.venue!r}")
+        if self.venue != self.venue.lower() or "-" in self.venue:
+            raise ValueError(f"PerpPriceHistoryDecl.venue must be lowercase and hyphen-free, got {self.venue!r}")
+        _validate_decl_aliases("PerpPriceHistoryDecl", self.aliases)
+        if self.backtest_provider is not None and not isinstance(self.backtest_provider, ImportRef):
+            raise ValueError(
+                f"PerpPriceHistoryDecl.backtest_provider must be None or an ImportRef, got {self.backtest_provider!r}"
+            )
+
+
 _DEX_AMM_FAMILIES = ("v3_concentrated", "solidly_v2", "liquidity_book", "weighted", "stableswap")
 # Query-schema families that are not AMM shapes: valid for
 # ``liquidity_query_family`` (subgraph SCHEMA dispatch) but never for
@@ -1060,6 +1120,7 @@ class Connector:
     perps_read: PerpsReadDecl | None = None
     position_read: PositionReadDecl | None = None
     funding_history: FundingHistoryDecl | None = None
+    perp_price_history: PerpPriceHistoryDecl | None = None
     fee_model: FeeModelDecl | None = None
     yield_poke: YieldPokeDecl | None = None
     dex_volume: DexVolumeDecl | None = None
@@ -1159,6 +1220,7 @@ class Connector:
         self._validate_perps_read()
         self._validate_position_read()
         self._validate_funding_history()
+        self._validate_perp_price_history()
         self._validate_fee_model()
         self._validate_yield_poke()
         self._validate_dex_volume()
@@ -1420,6 +1482,13 @@ class Connector:
         if self.funding_history is not None and not isinstance(self.funding_history, FundingHistoryDecl):
             raise ValueError(
                 f"Connector.funding_history must be None or a FundingHistoryDecl, got {self.funding_history!r}"
+            )
+
+    def _validate_perp_price_history(self) -> None:
+        """Validate the optional venue price-history declaration."""
+        if self.perp_price_history is not None and not isinstance(self.perp_price_history, PerpPriceHistoryDecl):
+            raise ValueError(
+                f"Connector.perp_price_history must be None or a PerpPriceHistoryDecl, got {self.perp_price_history!r}"
             )
 
     def _validate_fee_model(self) -> None:
@@ -2035,6 +2104,10 @@ class ConnectorRegistry:
         """Connectors declaring a perp funding-rate-history venue."""
         return tuple(d for d in self.all() if d.funding_history is not None)
 
+    def with_perp_price_history(self) -> tuple[Connector, ...]:
+        """Connectors declaring venue-native perp index-price history."""
+        return tuple(d for d in self.all() if d.perp_price_history is not None)
+
     def with_fee_model(self) -> tuple[Connector, ...]:
         """Connectors declaring a backtesting fee model."""
         return tuple(d for d in self.all() if d.fee_model is not None)
@@ -2182,6 +2255,7 @@ class ConnectorRegistry:
         seen_lending_read_keys: dict[str, str] = {}
         seen_perps_read_keys: dict[str, str] = {}
         seen_funding_history_keys: dict[str, str] = {}
+        seen_perp_price_history_keys: dict[str, str] = {}
         seen_fee_model_keys: dict[str, str] = {}
         seen_dex_volume_keys: dict[str, str] = {}
         seen_backtest_strategy_type_keys: dict[str, str] = {}
@@ -2267,6 +2341,14 @@ class ConnectorRegistry:
                 capability="Funding-history",
                 keys=() if connector.funding_history is None else (connector.name, *connector.funding_history.aliases),
                 seen_keys=seen_funding_history_keys,
+            )
+            self._validate_unique_ownership_keys(
+                connector_name=connector.name,
+                capability="Perp-price-history",
+                keys=()
+                if connector.perp_price_history is None
+                else (connector.name, *connector.perp_price_history.aliases),
+                seen_keys=seen_perp_price_history_keys,
             )
             self._validate_unique_ownership_keys(
                 connector_name=connector.name,

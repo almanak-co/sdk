@@ -37,9 +37,11 @@ import sys
 from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
+from almanak.connectors.gmx_v2.backtest_prices import _GMXOracleMarketSource
 from almanak.core.models.quote_asset import QuoteAsset
 from almanak.framework.backtesting.adapters.lp_adapter import (
     LPBacktestAdapter,
@@ -1524,6 +1526,70 @@ def test_perp_open_beyond_cash_is_rejected() -> None:
     assert "insufficient" in trade.metadata.get("failure_reason", "")
     assert result.final_capital_usd == INITIAL_CAPITAL
     assert all(point.value_usd == INITIAL_CAPITAL for point in result.equity_curve)
+
+
+@pytest.mark.trust_cell("perp:venue_native_price_plane")
+def test_perp_venue_native_price_plane_is_dynamic_complete_and_no_lookahead() -> None:
+    """Dynamic market identity + coverage negotiation form one honest plane."""
+
+    async def scenario() -> None:
+        start = START
+        end = start + timedelta(days=200)
+        source = _GMXOracleMarketSource(chain="arbitrum", market="NEWMARKET/USD", venue="gmx_v2")
+        calls: list[str] = []
+        cursors: list[tuple[str, int]] = []
+        counts: dict[str, int] = {}
+
+        def page(timeframe: str, opens: list) -> SimpleNamespace:
+            return SimpleNamespace(
+                success=True,
+                error="",
+                market="NEWMARKET/USD",
+                market_token="0x" + "1" * 40,
+                index_token="0x" + "2" * 40,
+                index_symbol="NEWMARKET",
+                timeframe=timeframe,
+                candles=[
+                    SimpleNamespace(timestamp=int(opened.timestamp()), open="10", high="10", low="10", close="10")
+                    for opened in opens
+                ],
+            )
+
+        async def fetch_page(*, timeframe: str, before_ts: int) -> SimpleNamespace:
+            calls.append(timeframe)
+            cursors.append((timeframe, before_ts))
+            counts[timeframe] = counts.get(timeframe, 0) + 1
+            if timeframe == "4h":
+                count = int((end - start).total_seconds() // (4 * 3600)) + 1
+                opens = [start - timedelta(hours=4) + timedelta(hours=4 * index) for index in range(count)]
+                split = len(opens) // 2
+                if counts[timeframe] == 1:
+                    return page(timeframe, opens[split:])
+                return page(timeframe, opens[:split])
+            if counts[timeframe] == 1:
+                return page(timeframe, [start + timedelta(days=1), end - timedelta(hours=1)])
+            return page(timeframe, [])
+
+        source._fetch_page = fetch_page  # type: ignore[method-assign]
+        resolved = await source.prepare(requested="auto", start=start, end=end)
+
+        assert resolved == "4h"
+        assert calls[-2:] == ["4h", "4h"]
+        count = int((end - start).total_seconds() // (4 * 3600)) + 1
+        opens = [start - timedelta(hours=4) + timedelta(hours=4 * index) for index in range(count)]
+        split = len(opens) // 2
+        assert cursors[-1] == ("4h", int(opens[split].timestamp()))
+        assert source.index_symbol == "NEWMARKET"  # discovered response, absent from SDK tables
+        assert source.index_token == ("0x" + "2" * 40)
+        # First raw open is start-4h; its close becomes observable exactly at
+        # start, never at the raw candle-open timestamp.
+        assert source._series[0].timestamp == start
+        assert all(
+            right.timestamp - left.timestamp == timedelta(hours=4)
+            for left, right in zip(source._series, source._series[1:], strict=False)
+        )
+
+    asyncio.run(scenario())
 
 
 # =============================================================================

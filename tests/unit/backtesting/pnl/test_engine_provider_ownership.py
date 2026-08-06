@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from almanak.framework.backtesting.models import BacktestResult
+from almanak.framework.backtesting.models import BacktestResult, ParameterSource
 from almanak.framework.backtesting.pnl.engine import PnLBacktester
 from almanak.framework.cli.backtest.run_helpers import build_pnl_config
 from tests.backtesting_funding import pnl_token_funding
@@ -72,3 +72,39 @@ async def test_backtest_leaves_caller_owned_provider_open_on_failure() -> None:
         with pytest.raises(ValueError, match="boom"):
             await backtester.backtest(_strategy_stub(), _pnl_config())
     backtester.data_provider.close.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_backtest_uses_run_local_config_for_provider_resolution() -> None:
+    """Concurrent sweep templates cannot be pinned by a completed peer run."""
+    backtester = _backtester(close_providers_on_finish=False)
+    caller_config = _pnl_config()
+    caller_config.timeframe = "auto"
+    observed_run_config = None
+
+    async def resolve_for_run(_strategy, run_config, *_args):
+        nonlocal observed_run_config
+        observed_run_config = run_config
+        run_config.apply_resolved_timeframe("4h", 14_400)
+        return MagicMock(spec=BacktestResult)
+
+    with patch.object(backtester, "_run_backtest", side_effect=resolve_for_run):
+        await backtester.backtest(_strategy_stub(), caller_config)
+
+    assert observed_run_config is not caller_config
+    assert observed_run_config.resolved_timeframe == "4h"
+    assert observed_run_config.interval_seconds == 3600
+    assert caller_config.resolved_timeframe is None
+    assert caller_config.interval_seconds == 3600
+
+
+def test_resolved_timeframe_parameter_source_is_provider() -> None:
+    config = _pnl_config()
+    config.timeframe = "auto"
+    config.apply_resolved_timeframe("4h", 14_400)
+
+    tracker = _backtester()._create_parameter_source_tracker(config)
+    sources = {record.parameter_name: record.source for record in tracker.records}
+
+    assert sources["timeframe"] is ParameterSource.EXPLICIT
+    assert sources["resolved_timeframe"] is ParameterSource.PROVIDER

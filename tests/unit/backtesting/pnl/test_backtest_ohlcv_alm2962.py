@@ -15,7 +15,11 @@ from typing import Any
 
 import pytest
 
-from almanak.framework.backtesting.pnl.engine import BacktestOHLCVView, create_market_snapshot_from_state
+from almanak.framework.backtesting.pnl.engine import (
+    BacktestOHLCVView,
+    _snapshot_token_address_map,
+    create_market_snapshot_from_state,
+)
 from almanak.framework.backtesting.pnl.indicator_engine import BacktestIndicatorEngine
 
 BOUND_TS = datetime(2026, 4, 20, 12, tzinfo=UTC)
@@ -163,6 +167,16 @@ class TestSnapshotIntegration:
         with pytest.raises(ValueError, match="not a registry-known pool"):
             snapshot.ohlcv("WETH", pool_address="0x" + "d" * 40)
         assert snapshot._critical_data_failures
+
+    def test_provider_alias_conflict_uses_snapshot_fail_closed_policy(self):
+        from almanak.framework.backtesting.pnl.data_provider import MarketState
+
+        static_address = ("base", "0x" + "1" * 40)
+        provider_address = ("base", "0x" + "2" * 40)
+        state = MarketState(timestamp=BOUND_TS, chain="base", symbol_aliases={"WETH": provider_address})
+
+        with pytest.raises(ValueError, match="Ambiguous snapshot identity for WETH"):
+            _snapshot_token_address_map(state, {"WETH": static_address})
 
 
 class TestReviewRound:

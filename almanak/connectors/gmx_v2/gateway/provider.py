@@ -44,14 +44,20 @@ from collections.abc import Mapping
 from decimal import Decimal
 from typing import Any, ClassVar
 
+import aiohttp
+
 from almanak.connectors._base.gateway_capabilities import (
     FundingHistorySource,
     GatewayAddressCapability,
     GatewayFundingHistoryCapability,
     GatewayFundingRateCapability,
     GatewayPerpMarketDiscoveryCapability,
+    GatewayPerpPriceHistoryCapability,
     GatewayPriceIdCapability,
+    PerpMarketCatalogueUnavailable,
     PerpMarketRecord,
+    PerpPriceCandle,
+    PerpPriceCandlePage,
 )
 from almanak.connectors._base.gateway_connector import GatewayConnector
 from almanak.connectors._base.types import ProtocolKind, ProtocolName
@@ -86,6 +92,7 @@ class GmxV2GatewayConnector(
     GatewayFundingHistoryCapability,
     GatewayPriceIdCapability,
     GatewayPerpMarketDiscoveryCapability,
+    GatewayPerpPriceHistoryCapability,
 ):
     """Gateway-side connector for GMX V2 perp venue."""
 
@@ -110,6 +117,107 @@ class GmxV2GatewayConnector(
     ) -> PerpMarketRecord | None:
         """Resolve API metadata and require an exact on-chain identity match."""
         return await self._market_registry.resolve(chain=chain, market=market, eth_call=eth_call)
+
+    # ---------------------------------------------------------------------
+    # GatewayPerpPriceHistoryCapability (ALM-3149)
+    # ---------------------------------------------------------------------
+
+    def price_history_venue(self) -> str:
+        return "gmx_v2"
+
+    def price_history_chains(self) -> frozenset[str]:
+        from .market_registry import GMX_API_BASE_URLS
+
+        return frozenset(GMX_API_BASE_URLS)
+
+    def price_history_timeframes(self) -> tuple[str, ...]:
+        # Finest to coarsest.  The backtester probes actual coverage in this
+        # order; the order is not a duration threshold table.
+        from almanak.framework.data.timeframes import CANONICAL_OHLCV_TIMEFRAME_VALUES
+
+        return CANONICAL_OHLCV_TIMEFRAME_VALUES
+
+    async def fetch_price_candles(
+        self,
+        servicer: Any,
+        *,
+        market: str,
+        chain: str,
+        timeframe: str,
+        before_ts: int,
+        limit: int,
+    ) -> PerpPriceCandlePage:
+        """Resolve a listed GMX market, verify it on-chain, then read candles."""
+        from almanak.gateway.services.pt_rpc_adapter import build_gateway_eth_call
+
+        from .market_registry import GMX_API_BASE_URLS
+
+        record = await self._market_registry.resolve(
+            chain=chain,
+            market=market,
+            eth_call=build_gateway_eth_call(chain=chain, network=servicer.settings.network),
+            # Historical backtests must not silently keep trading a market the
+            # venue has disabled.  Exact-address delisted resolution remains
+            # available to the compiler's risk-reducing close path.
+            allow_delisted_address=False,
+        )
+        if record is None:
+            raise ValueError(f"listed GMX market {market!r} does not exist on {chain}")
+
+        session = await servicer._get_http_session()
+        url = f"{GMX_API_BASE_URLS[chain]}/prices/candles"
+        try:
+            async with session.get(
+                url,
+                params={
+                    "tokenSymbol": record.index_symbol,
+                    "period": timeframe,
+                    "before": str(before_ts),
+                    "limit": str(limit),
+                },
+                headers={"Accept": "application/json"},
+            ) as response:
+                response.raise_for_status()
+                payload = await response.json()
+        except (TimeoutError, aiohttp.ClientError) as exc:
+            raise PerpMarketCatalogueUnavailable("GMX price-candle catalogue is temporarily unavailable") from exc
+
+        if not isinstance(payload, dict) or payload.get("period") != timeframe:
+            raise ValueError("GMX candle response did not preserve the requested timeframe")
+        rows = payload.get("candles")
+        if not isinstance(rows, list):
+            raise ValueError("GMX candle response does not contain a candles list")
+
+        candles: list[PerpPriceCandle] = []
+        for row in rows:
+            if not isinstance(row, list | tuple) or len(row) < 5:
+                raise ValueError("GMX candle response contains a malformed row")
+            try:
+                candle = PerpPriceCandle(
+                    timestamp=int(row[0]),
+                    open=Decimal(str(row[1])),
+                    high=Decimal(str(row[2])),
+                    low=Decimal(str(row[3])),
+                    close=Decimal(str(row[4])),
+                )
+            except (ArithmeticError, TypeError, ValueError) as exc:
+                raise ValueError("GMX candle response contains a malformed numeric value") from exc
+            values = (candle.open, candle.high, candle.low, candle.close)
+            if candle.timestamp <= 0 or any(not value.is_finite() or value <= 0 for value in values):
+                raise ValueError("GMX candle response contains an invalid observation")
+            if candle.low > min(candle.open, candle.close) or candle.high < max(candle.open, candle.close):
+                raise ValueError("GMX candle response violates OHLC bounds")
+            candles.append(candle)
+
+        candles.sort(key=lambda item: item.timestamp, reverse=True)
+        return PerpPriceCandlePage(
+            market=record.label,
+            market_token=record.market_token,
+            index_token=record.index_token,
+            index_symbol=record.index_symbol,
+            timeframe=timeframe,
+            candles=tuple(candles),
+        )
 
     def addresses_for(self, chain: str) -> Mapping[str, str]:
         """Return the GMX V2 contract addresses for ``chain`` (or empty)."""

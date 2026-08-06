@@ -18,7 +18,7 @@ This document describes the gRPC API exposed by the Almanak Gateway.
 | SimulationService | 1 | Transaction bundle simulation (Tenderly/Alchemy) |
 | PoolAnalyticsService | 2 | DEX pool analytics (TVL, volume, fees) + product-distinct token-pool listing |
 | PoolHistoryService | 1 | Historical pool snapshots (TVL, volume, fees over time). Disabled by default; hosted rollout enables via `ALMANAK_GATEWAY_POOL_HISTORY_ENABLED=true` deployment config |
-| RateHistoryService | 10 | Lending APY (live + historical), perp funding history, DEX TWAP (single + series), DEX LWAP (liquidity-weighted spot), DEX volume history, gas prices, and provider-exact oracle prices (current + historical). Strategy-side `RateMonitor` / backtesting rate providers are thin gRPC clients of this service. |
+| RateHistoryService | 11 | Lending APY (live + historical), perp funding and venue-native index-price history, DEX TWAP (single + series), DEX LWAP (liquidity-weighted spot), DEX volume history, gas prices, and provider-exact oracle prices (current + historical). Strategy-side `RateMonitor` / backtesting rate providers are thin gRPC clients of this service. |
 | PolymarketService | 20 | Polymarket CLOB API proxy (market data, orders, positions, price history, trade tape) |
 | EnsoService | 4 | Enso Finance routing and bundling |
 | TokenService | 4 | Token resolution and on-chain metadata |
@@ -1674,6 +1674,7 @@ servicer resolves `(protocol, venue, dex)` → capability provider at
 construction time (O(1) lookup per request), validates the request shape, and
 delegates to the connector. Connectors implement
 `GatewayLendingRateHistoryCapability` / `GatewayFundingHistoryCapability` /
+`GatewayPerpPriceHistoryCapability` /
 `GatewayDexTwapCapability` / `GatewayDexVolumeCapability`. Adding a new
 implementer is a connector-folder change with zero gateway-service edits.
 
@@ -1725,6 +1726,24 @@ Historical funding-rate series for a perp `(venue, market)`. Sibling of
 ```protobuf
 rpc GetFundingRateHistory(GetFundingRateHistoryRequest) returns (FundingRateHistoryResponse)
 ```
+
+### GetPerpPriceCandles
+
+Return one bounded page of venue-native perpetual index-price candles. The
+gateway resolves the caller's market label/address through the connector's live
+catalogue and verifies its address tuple on-chain before deriving the vendor
+symbol. The request timeframe is exact; the gateway never substitutes a
+coarser value. Backtest `auto` negotiation is framework-side and probes this RPC
+finest-to-coarsest for complete coverage.
+
+```protobuf
+rpc GetPerpPriceCandles(GetPerpPriceCandlesRequest) returns (PerpPriceCandlePageResponse)
+```
+
+Every successful page repeats `market_token`, `index_token`, `index_symbol`,
+and `timeframe` so pagination can reject identity drift. OHLC decimals are
+strings. Volume is intentionally absent: this is the index/mark price plane,
+not venue execution volume.
 
 ### GetDexTwap
 

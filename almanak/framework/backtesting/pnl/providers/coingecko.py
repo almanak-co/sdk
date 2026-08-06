@@ -1575,6 +1575,15 @@ class CoinGeckoDataProvider:
 
         return OHLCVCache(data=data, fetched_at=datetime.now(UTC), default_chain=default_chain)
 
+    async def prefetch_ohlcv_data(self, config: HistoricalDataConfig) -> OHLCVCache:
+        """Public composition hook preserving CoinGecko's full cache policy.
+
+        Routed providers use this method for the assets they do not own so
+        per-token failure isolation and the 24-hour prior-candle seed remain
+        identical to a direct CoinGecko run.
+        """
+        return await self._prefetch_ohlcv_data(config)
+
     @staticmethod
     def _measure_granularity(data: dict[TokenRef, list[OHLCV]]) -> int | None:
         """Coarsest per-token median candle spacing, in seconds (ALM-2957)."""
@@ -1644,7 +1653,7 @@ class CoinGeckoDataProvider:
         )
 
         # Prefetch all OHLCV data to minimize API calls
-        self._cache = await self._prefetch_ohlcv_data(config)
+        self._cache = await self.prefetch_ohlcv_data(config)
 
         # Generate timestamps at the specified interval
         current_time = config.start_time

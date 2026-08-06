@@ -17,6 +17,7 @@ from almanak.core.intent_types import IntentType
 __all__ = [
     "CapabilitiesSpec",
     "SupportedChainsSpec",
+    "canonical_chain_names_from_refs",
 ]
 
 _EMPTY_INTENT_CHAIN_OVERRIDES: Mapping[IntentType, tuple[ChainDescriptor, ...]] = MappingProxyType({})
@@ -41,6 +42,45 @@ def _validate_keys_and_module(spec_name: str, keys: tuple[str, ...], module: str
         raise ValueError(f"{spec_name}.module must be a non-empty module path, got {module!r}")
     if module.startswith("."):
         raise ValueError(f"{spec_name}.module must be an absolute module path, got {module!r}")
+
+
+def canonical_chain_names_from_refs(
+    spec_name: str,
+    field_name: str,
+    chains: tuple[ChainDescriptor, ...] | None,
+    *,
+    allow_none: bool,
+    allow_empty: bool = False,
+) -> tuple[str, ...] | None:
+    """Validate registered descriptor references and project canonical names.
+
+    Connector declarations use descriptor singletons for type-safe authorship,
+    then call this helper at the metadata boundary where canonical strings are
+    required for serialization and runtime lookup.
+    """
+    qualified_name = f"{spec_name}.{field_name}"
+    if chains is None:
+        if allow_none:
+            return None
+        raise ValueError(f"{qualified_name} must be a non-empty tuple[ChainDescriptor, ...]")
+    if not isinstance(chains, tuple) or (not chains and not allow_empty):
+        emptiness = "non-empty " if not allow_empty else ""
+        raise ValueError(f"{qualified_name} must be a {emptiness}tuple[ChainDescriptor, ...], got {chains!r}")
+    bad = [chain for chain in chains if not isinstance(chain, ChainDescriptor)]
+    if bad:
+        raise TypeError(f"{qualified_name} must contain registered ChainDescriptor references, got {bad!r}")
+    canonical_names: list[str] = []
+    for chain in chains:
+        registered = ChainRegistry.try_resolve(chain.name)
+        if registered is not chain:
+            raise ValueError(
+                f"{qualified_name} contains unregistered ChainDescriptor {chain.name!r}; "
+                f"import the descriptor singleton from almanak.core.chains.{chain.name}"
+            )
+        canonical_names.append(chain.name)
+    if len(set(canonical_names)) != len(canonical_names):
+        raise ValueError(f"{qualified_name} contains duplicate canonical chains: {canonical_names!r}")
+    return tuple(canonical_names)
 
 
 @dataclass(frozen=True)
@@ -104,34 +144,12 @@ class SupportedChainsSpec:
         *,
         allow_none: bool,
     ) -> tuple[str, ...] | None:
-        if chains is None:
-            if allow_none:
-                return None
-            raise ValueError(f"SupportedChainsSpec.{field_name} must be a non-empty tuple[ChainDescriptor, ...]")
-        if not isinstance(chains, tuple) or not chains:
-            raise ValueError(
-                f"SupportedChainsSpec.{field_name} must be a non-empty tuple[ChainDescriptor, ...], got {chains!r}"
-            )
-        bad = [chain for chain in chains if not isinstance(chain, ChainDescriptor)]
-        if bad:
-            raise TypeError(
-                f"SupportedChainsSpec.{field_name} must contain registered ChainDescriptor references, got {bad!r}"
-            )
-        canonical_names: list[str] = []
-        for chain in chains:
-            registered = ChainRegistry.try_resolve(chain.name)
-            if registered is not chain:
-                raise ValueError(
-                    f"SupportedChainsSpec.{field_name} contains unregistered "
-                    f"ChainDescriptor {chain.name!r}; import the descriptor singleton "
-                    f"from almanak.core.chains.{chain.name}"
-                )
-            canonical_names.append(chain.name)
-        if len(set(canonical_names)) != len(canonical_names):
-            raise ValueError(
-                f"SupportedChainsSpec.{field_name} contains duplicate canonical chains: {canonical_names!r}"
-            )
-        return tuple(canonical_names)
+        return canonical_chain_names_from_refs(
+            "SupportedChainsSpec",
+            field_name,
+            chains,
+            allow_none=allow_none,
+        )
 
     @classmethod
     def _validate_intent_overrides(

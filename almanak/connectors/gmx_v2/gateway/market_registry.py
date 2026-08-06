@@ -23,7 +23,7 @@ from almanak.gateway.utils.ssl_context import build_ssl_context
 
 logger = logging.getLogger(__name__)
 
-_API_BASE_URLS = {
+GMX_API_BASE_URLS = {
     "arbitrum": "https://arbitrum-api.gmxinfra.io",
     "avalanche": "https://avalanche-api.gmxinfra.io",
 }
@@ -69,14 +69,21 @@ class GmxV2MarketRegistry:
         self._catalog_cache: dict[str, tuple[float, Any, Any]] = {}
         self._locks: dict[str, asyncio.Lock] = {}
 
-    async def resolve(self, *, chain: str, market: str, eth_call: Any) -> PerpMarketRecord | None:
+    async def resolve(
+        self,
+        *,
+        chain: str,
+        market: str,
+        eth_call: Any,
+        allow_delisted_address: bool = True,
+    ) -> PerpMarketRecord | None:
         chain_key = chain.strip().lower()
-        if chain_key not in _API_BASE_URLS:
+        if chain_key not in GMX_API_BASE_URLS:
             raise ValueError(f"GMX V2 market discovery is unsupported on chain {chain!r}")
         query = market.strip()
         if not query:
             raise ValueError("market is required")
-        cache_key = (chain_key, query.lower())
+        cache_key = (chain_key, f"{int(allow_delisted_address)}:{query.lower()}")
         cached = self._cache.get(cache_key)
         now = time.monotonic()
         if cached is not None and cached[0] > now:
@@ -105,7 +112,11 @@ class GmxV2MarketRegistry:
                     markets_payload,
                     tokens_payload,
                 )
-            candidate = self._select_market(markets_payload, query)
+            candidate = self._select_market(
+                markets_payload,
+                query,
+                allow_delisted_address=allow_delisted_address,
+            )
             if candidate is None:
                 return None
             record = await self._verify_and_build(chain_key, candidate, tokens_payload, eth_call)
@@ -114,7 +125,7 @@ class GmxV2MarketRegistry:
             # lookup. Otherwise resolving one ETH collateral variant would make a
             # later ETH/USD query silently order-dependent for the cache TTL.
             for alias in (query, candidate.name, candidate.market_token):
-                self._cache[(chain_key, alias.lower())] = (expiry, record)
+                self._cache[(chain_key, f"{int(allow_delisted_address)}:{alias.lower()}")] = (expiry, record)
             return record
 
     async def _get_json(self, chain: str, path: str) -> Any:
@@ -125,7 +136,7 @@ class GmxV2MarketRegistry:
         chain-wide raw catalogue cache limits this to two short-lived sessions
         per TTL refresh instead of two sessions per market compile.
         """
-        url = f"{_API_BASE_URLS[chain]}{path}"
+        url = f"{GMX_API_BASE_URLS[chain]}{path}"
         timeout = aiohttp.ClientTimeout(total=_REQUEST_TIMEOUT_SECONDS)
         connector = aiohttp.TCPConnector(ssl=build_ssl_context())
         try:
@@ -137,7 +148,12 @@ class GmxV2MarketRegistry:
             raise RuntimeError(f"GMX metadata request failed for {chain}{path}") from exc
 
     @staticmethod
-    def _select_market(payload: Any, query: str) -> _ApiMarket | None:
+    def _select_market(
+        payload: Any,
+        query: str,
+        *,
+        allow_delisted_address: bool = True,
+    ) -> _ApiMarket | None:
         rows = payload.get("markets") if isinstance(payload, dict) else None
         if not isinstance(rows, list):
             raise ValueError("GMX /markets response does not contain a markets list")
@@ -150,7 +166,7 @@ class GmxV2MarketRegistry:
             # Risk-reducing closes can address a delisted market by its exact
             # market token. Label discovery excludes delisted rows so new opens
             # cannot select them. The exact tuple is still verified on-chain.
-            if raw.get("isListed") is False and not query_is_address:
+            if raw.get("isListed") is False and (not query_is_address or not allow_delisted_address):
                 continue
             name = str(raw.get("name") or "").strip()
             label = _normalise_label(name.split("[", 1)[0].strip()) if name else ""
@@ -250,4 +266,4 @@ class GmxV2MarketRegistry:
         )
 
 
-__all__ = ["GmxV2MarketRegistry"]
+__all__ = ["GMX_API_BASE_URLS", "GmxV2MarketRegistry"]

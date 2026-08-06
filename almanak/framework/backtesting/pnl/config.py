@@ -73,6 +73,7 @@ from decimal import Decimal
 from typing import Any
 
 from almanak.core.chains import DEFAULT_CHAIN, LEGACY_SERIALIZED_CHAIN, ChainRegistry
+from almanak.framework.data.timeframes import parse_ohlcv_timeframe
 
 
 def default_gas_price_gwei_for_chain(chain: str) -> Decimal:
@@ -148,6 +149,13 @@ class PnLBacktestConfig:
         start_time: Start of the backtest period (inclusive)
         end_time: End of the backtest period (inclusive)
         interval_seconds: Time between simulation ticks in seconds (default: 3600 = 1 hour)
+        timeframe: Exact provider-native price-candle cadence, ``"auto"`` for
+            the finest complete native cadence, or ``None`` to derive the
+            provider request from ``interval_seconds``. This never changes the
+            strategy's simulation tick cadence.
+        resolved_timeframe: Provider-validated effective cadence. Normally
+            populated during preflight and persisted for deterministic replay;
+            independent from ``interval_seconds``
         token_funding: Strategy funding basket used to seed the starting wallet
         fee_model: Fee model to use - 'realistic', 'zero', or protocol-specific
             (e.g., 'uniswap_v3', 'aave_v3', 'gmx')
@@ -185,6 +193,17 @@ class PnLBacktestConfig:
     start_time: datetime
     end_time: datetime
     interval_seconds: int = 3600  # 1 hour default
+    timeframe: str | None = field(default=None, kw_only=True)
+    """Requested native candle timeframe, ``"auto"``, or ``None``.
+
+    ``None`` preserves the historical API: ``interval_seconds`` is an explicit
+    cadence and providers must serve it exactly. ``"auto"`` lets a
+    coverage-aware provider choose the finest native cadence that covers the
+    complete window. A canonical explicit value (``"5m"``, ``"1h"``, ...)
+    never silently downgrades.
+    """
+    resolved_timeframe: str | None = field(default=None, kw_only=True)
+    """Effective native timeframe recorded after provider negotiation."""
 
     # Startup wallet configuration. Historical PnL backtests seed the wallet
     # exclusively from token_funding.
@@ -518,6 +537,31 @@ class PnLBacktestConfig:
             raise ValueError("end_time must be after start_time")
         if self.interval_seconds <= 0:
             raise ValueError("interval_seconds must be positive")
+        if self.timeframe is not None and self.timeframe != "auto":
+            requested = parse_ohlcv_timeframe(self.timeframe, field_name="PnLBacktestConfig.timeframe")
+            self.timeframe = requested.value
+        if self.resolved_timeframe is not None:
+            resolved = parse_ohlcv_timeframe(
+                self.resolved_timeframe,
+                field_name="PnLBacktestConfig.resolved_timeframe",
+            )
+            if self.timeframe not in (None, "auto", resolved.value):
+                raise ValueError(
+                    f"resolved_timeframe {resolved.value!r} conflicts with explicit timeframe {self.timeframe!r}"
+                )
+            self.resolved_timeframe = resolved.value
+
+    def apply_resolved_timeframe(self, timeframe: str, interval_seconds: int) -> None:
+        """Record the provider-validated price cadence without changing ticks."""
+        resolved = parse_ohlcv_timeframe(timeframe, field_name="resolved timeframe")
+        if interval_seconds != resolved.seconds:
+            raise ValueError(f"Resolved timeframe {resolved.value!r} is {resolved.seconds}s, got {interval_seconds}s")
+        if self.timeframe not in (None, "auto", resolved.value):
+            raise ValueError(
+                f"Provider resolved {resolved.value!r} for explicit timeframe {self.timeframe!r}; "
+                "silent timeframe downgrade is forbidden"
+            )
+        self.resolved_timeframe = resolved.value
 
     def _validate_token_funding_config(self) -> None:
         if self.token_funding is not None and not isinstance(self.token_funding, list):
@@ -633,6 +677,8 @@ class PnLBacktestConfig:
             "start_time": self.start_time.isoformat(),
             "end_time": self.end_time.isoformat(),
             "interval_seconds": self.interval_seconds,
+            "timeframe": self.timeframe,
+            "resolved_timeframe": self.resolved_timeframe,
             "token_funding": _token_funding_for_hash(self.token_funding),
             "fee_model": self.fee_model,
             "slippage_model": self.slippage_model,
@@ -745,6 +791,8 @@ class PnLBacktestConfig:
             "start_time": self.start_time.isoformat(),
             "end_time": self.end_time.isoformat(),
             "interval_seconds": self.interval_seconds,
+            "timeframe": self.timeframe,
+            "resolved_timeframe": self.resolved_timeframe,
             "token_funding": _token_funding_for_hash(self.token_funding),
             "fee_model": self.fee_model,
             "slippage_model": self.slippage_model,
@@ -870,6 +918,8 @@ class PnLBacktestConfig:
             start_time=start_time,
             end_time=end_time,
             interval_seconds=data.get("interval_seconds", 3600),
+            timeframe=data.get("timeframe"),
+            resolved_timeframe=data.get("resolved_timeframe"),
             token_funding=data.get("token_funding"),
             fee_model=data.get("fee_model", "realistic"),
             slippage_model=data.get("slippage_model", "realistic"),

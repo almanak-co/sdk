@@ -48,6 +48,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any, Protocol, runtime_checkable
 
 
@@ -1007,6 +1008,74 @@ class GatewayPerpMarketDiscoveryCapability(Protocol):
         market: str,
         eth_call: Any,
     ) -> PerpMarketRecord | None: ...
+
+
+# =============================================================================
+# ALM-3149 — GatewayPerpPriceHistoryCapability
+# =============================================================================
+
+
+@dataclass(frozen=True, slots=True)
+class PerpPriceCandle:
+    """One venue-native perpetual index-price candle.
+
+    Volume is deliberately absent: GMX's public oracle-candle endpoint measures
+    the index/mark plane, not venue trading volume.  Callers must not infer an
+    execution-volume observation from this series.
+    """
+
+    timestamp: int
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class PerpPriceCandlePage:
+    """One bounded page from a connector-owned perp price-history source.
+
+    ``market_token`` and ``index_token`` are the verified venue identities used
+    to resolve ``index_symbol``.  They travel with every page so framework-side
+    caches can prove that a symbol series belongs to the requested market rather
+    than trusting the symbol alone.
+    """
+
+    market: str
+    market_token: str
+    index_token: str
+    index_symbol: str
+    timeframe: str
+    candles: tuple[PerpPriceCandle, ...]
+
+
+@runtime_checkable
+class GatewayPerpPriceHistoryCapability(Protocol):
+    """Perp connector publishes venue-native historical index-price candles.
+
+    The gateway dispatches by ``price_history_venue`` and delegates all market
+    identity resolution and provider HTTP to the owning connector.  Market
+    symbols are not an allowlist: the connector resolves the requested market
+    through its live catalogue and verifies the immutable address tuple before
+    requesting candles.
+    """
+
+    def price_history_venue(self) -> str: ...
+
+    def price_history_chains(self) -> frozenset[str]: ...
+
+    def price_history_timeframes(self) -> tuple[str, ...]: ...
+
+    async def fetch_price_candles(
+        self,
+        servicer: Any,
+        *,
+        market: str,
+        chain: str,
+        timeframe: str,
+        before_ts: int,
+        limit: int,
+    ) -> PerpPriceCandlePage: ...
 
 
 @dataclass(frozen=True, slots=True)

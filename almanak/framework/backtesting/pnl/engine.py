@@ -58,6 +58,7 @@ Examples:
             print(f"Sources used: {result.data_quality.source_breakdown}")
 """
 
+import copy
 import functools
 import inspect as _inspect
 import logging
@@ -831,7 +832,7 @@ def create_market_snapshot_from_state(
     # in _registered_key_held) must see the same casing — a mixed-case map
     # would otherwise register the alias but miss the guard, letting the
     # cash face value clobber a tracked balance.
-    token_addresses = _normalized_token_address_map(token_addresses)
+    token_addresses = _snapshot_token_address_map(market_state, token_addresses)
     # Register aliases BEFORE seeding so setters and getters resolve through
     # the same keys (the cash lane's symbol writes land on address keys).
     _register_snapshot_symbol_aliases(snapshot, token_addresses, chain)
@@ -1012,7 +1013,8 @@ class BacktestOHLCVView:
     ) -> None:
         self._engine = indicator_engine
         self._tick_seconds = int(tick_interval_seconds)
-        self._token_addresses = dict(token_addresses or {})
+        self._token_addresses: dict[str, tuple[str, str]] = {}
+        self.register_token_addresses(token_addresses or {})
         # Run data manifest (ALM-2943): engine-owned lane, so the handle is
         # threaded explicitly instead of via the ambient broker contextvar.
         self._manifest = manifest
@@ -1020,6 +1022,21 @@ class BacktestOHLCVView:
         self._timestamp: datetime | None = None
         self._truncation_warned: set[tuple[str, OHLCVTimeframe]] = set()
         self._pool_proxy_warned: set[tuple[str, str]] = set()
+
+    def register_token_addresses(self, token_addresses: Mapping[str, tuple[str, str]]) -> None:
+        """Add verified symbol aliases discovered before or during the run."""
+        for symbol, entry in token_addresses.items():
+            if not is_token_key(entry):
+                continue
+            normalized = normalize_token_key(entry[0], entry[1])
+            symbol_upper = str(symbol).upper()
+            existing = self._token_addresses.get(symbol_upper)
+            if existing is not None and existing != normalized:
+                raise ValueError(
+                    f"Ambiguous OHLCV identity for {symbol_upper}: "
+                    f"{token_ref_display(existing)} != {token_ref_display(normalized)}"
+                )
+            self._token_addresses[symbol_upper] = normalized
 
     def _record_serve(self, key: str, source: str, outcome: str, detail: str = "") -> None:
         if self._manifest is None:
@@ -2450,6 +2467,25 @@ def _normalized_token_address_map(
     return {str(symbol).upper(): entry for symbol, entry in token_addresses.items()}
 
 
+def _snapshot_token_address_map(
+    market_state: MarketState,
+    token_addresses: Mapping[str, tuple[str, str]] | None,
+) -> dict[str, tuple[str, str]] | None:
+    """Merge static registrations with provider-verified per-state aliases."""
+    merged = _normalized_token_address_map(token_addresses) or {}
+    for symbol, entry in market_state.symbol_aliases.items():
+        normalized = normalize_token_key(entry[0], entry[1])
+        symbol_upper = str(symbol).upper()
+        existing = merged.get(symbol_upper)
+        if existing is not None and normalize_token_key(existing[0], existing[1]) != normalized:
+            raise ValueError(
+                f"Ambiguous snapshot identity for {symbol_upper}: "
+                f"{token_ref_display(existing)} != {token_ref_display(normalized)}"
+            )
+        merged[symbol_upper] = normalized
+    return merged or None
+
+
 def _register_snapshot_symbol_aliases(
     snapshot: MarketSnapshot,
     token_addresses: Mapping[str, tuple[str, str]] | None,
@@ -3294,6 +3330,15 @@ class PnLBacktester:
                 self._parameter_source_for_value(value, default_value),
                 category="config",
             )
+        if config.resolved_timeframe is not None:
+            # Provider negotiation owns this effective cadence even when the
+            # value was restored from a persisted run for deterministic replay.
+            tracker.record_parameter(
+                "resolved_timeframe",
+                config.resolved_timeframe,
+                ParameterSource.PROVIDER,
+                category="config",
+            )
         self._record_gas_price_gwei_source(tracker, config)
 
     @staticmethod
@@ -3304,6 +3349,7 @@ class PnLBacktester:
         return [
             ("token_funding", config.token_funding, default_config.token_funding),
             ("interval_seconds", config.interval_seconds, default_config.interval_seconds),
+            ("timeframe", config.timeframe, default_config.timeframe),
             ("fee_model", config.fee_model, default_config.fee_model),
             ("slippage_model", config.slippage_model, default_config.slippage_model),
             ("include_gas_costs", config.include_gas_costs, default_config.include_gas_costs),
@@ -3601,6 +3647,10 @@ class PnLBacktester:
 
         # Try to get provider version if available
         info["version"] = safe_get_attr("version", None)
+
+        price_provenance = safe_get_attr("price_provenance", None)
+        if price_provenance:
+            info["price_provenance"] = price_provenance
 
         # Try to get min/max timestamps if available
         min_ts = safe_get_attr("min_timestamp", None)
@@ -4043,6 +4093,12 @@ class PnLBacktester:
         Raises:
             ValueError: If strategy is not compatible with backtesting
         """
+        # Resolution-aware providers may stamp run metadata such as
+        # ``resolved_timeframe`` during preflight.  Treat the caller's config
+        # as an immutable template: sweeps intentionally share it across
+        # concurrent combinations, and one run must never pin another run's
+        # provider negotiation (or mutate a caller-visible object).
+        config = copy.deepcopy(config)
         run_started_at = datetime.now(UTC)
 
         # Generate unique backtest_id for correlation across all log messages
@@ -4111,6 +4167,12 @@ class PnLBacktester:
         # Run preflight validation if enabled (no BacktestState yet, so a
         # PreflightValidationError propagates straight to the caller -- matches
         # pre-extraction behavior).
+        await _engine_helpers.prepare_perp_price_history(
+            backtester=self,
+            strategy=strategy,
+            config=config,
+            bt_logger=bt_logger,
+        )
         preflight_report, preflight_passed = await _engine_helpers.run_preflight(
             backtester=self,
             config=config,

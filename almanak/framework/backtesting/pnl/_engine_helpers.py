@@ -149,6 +149,27 @@ def _token_address_registrations(
     return token_addresses
 
 
+def _append_provider_required_price_tokens(
+    backtester: PnLBacktester,
+    data_tokens: list[TokenRef],
+    data_token_identities: set[TokenRef],
+    data_token_labels: set[str],
+    *,
+    chain: str,
+    bt_logger: BacktestLogger,
+) -> None:
+    """Add dynamically verified provider assets without mutating public config."""
+    for provider_token in getattr(backtester.data_provider, "required_price_tokens", ()):
+        provider_identity = normalize_token_ref(provider_token, chain)
+        if provider_identity in data_token_identities:
+            continue
+        provider_label = token_ref_display(provider_token).upper()
+        data_tokens.append(provider_token)
+        data_token_identities.add(provider_identity)
+        data_token_labels.add(provider_label)
+        bt_logger.debug(f"Added provider-verified index token {provider_label} to the data-fetch token set")
+
+
 def _expected_price_lookup_label(
     token: TokenRef,
     *,
@@ -166,11 +187,11 @@ def _expected_price_lookup_label(
     return token_ref_display(normalized).upper()
 
 
-def _declared_funding_prewarm_targets(
+def declared_perp_price_history_targets(
     strategy: BacktestableStrategy,
     strategy_config: Mapping[str, Any],
 ) -> tuple[tuple[str, str], ...]:
-    """Discover explicit funding targets that are safe to load before tick 1.
+    """Discover explicit perp targets that are safe to load before tick 1.
 
     Funding access remains dynamic, so unknown targets still materialize on
     first use. The standard perp strategy contract declares the market via
@@ -180,6 +201,11 @@ def _declared_funding_prewarm_targets(
     raw_market = strategy_config.get("funding_market") or strategy_config.get("market")
     if not isinstance(raw_market, str) or not raw_market.strip():
         raw_market = getattr(strategy, "funding_market", None) or getattr(strategy, "market", None)
+    spec = getattr(strategy, "_spec", None)
+    spec_parameters = getattr(spec, "parameters", None)
+    if not isinstance(raw_market, str) or not raw_market.strip():
+        if isinstance(spec_parameters, Mapping):
+            raw_market = spec_parameters.get("funding_market") or spec_parameters.get("market")
     if not isinstance(raw_market, str) or not raw_market.strip():
         return ()
     market = raw_market.strip()
@@ -193,15 +219,138 @@ def _declared_funding_prewarm_targets(
         if normalized not in protocols:
             protocols.append(normalized)
 
-    explicit_protocol = strategy_config.get("protocol") or getattr(strategy, "protocol", None)
+    explicit_protocol = (
+        strategy_config.get("protocol") or getattr(strategy, "protocol", None) or getattr(spec, "protocol", None)
+    )
     if explicit_protocol:
         add_protocol(explicit_protocol)
     else:
         metadata = getattr(strategy, "STRATEGY_METADATA", None)
+        if metadata is None:
+            get_metadata = getattr(strategy, "get_metadata", None)
+            metadata = get_metadata() if callable(get_metadata) else None
         for protocol in getattr(metadata, "supported_protocols", None) or ():
             add_protocol(protocol)
 
     return tuple((protocol, market) for protocol in protocols)
+
+
+async def prepare_perp_price_history(
+    backtester: PnLBacktester,
+    strategy: BacktestableStrategy,
+    config: PnLBacktestConfig,
+    bt_logger: BacktestLogger,
+) -> None:
+    """Install and prepare a connector-declared venue price-history route.
+
+    The engine names no venue. Connector manifests decide whether a protocol
+    owns a native historical price plane and lazily publish the provider class.
+    """
+    from almanak.connectors._strategy_base.perp_price_history_registry import (
+        PerpPriceHistoryProvider,
+        PerpPriceHistoryRegistry,
+    )
+
+    strategy_config = backtester._get_strategy_config_dict(strategy)
+    targets = [
+        (protocol, market)
+        for protocol, market in declared_perp_price_history_targets(strategy, strategy_config)
+        if PerpPriceHistoryRegistry.has(protocol)
+    ]
+    if not targets:
+        if config.timeframe == "auto":
+            raise PreflightValidationError(
+                message=(
+                    "timeframe='auto' requires a strategy with one declared connector-native "
+                    "perp market; no eligible price-history route was discovered"
+                ),
+                failed_checks=["perp_price_history"],
+                recommendations=[
+                    "Declare the strategy protocol and market, choose an explicit timeframe, "
+                    "or provide a coverage-aware historical data provider."
+                ],
+                error_count=1,
+                warning_count=0,
+            )
+        return
+    unique_targets = list(dict.fromkeys(targets))
+    if len(unique_targets) > 1:
+        raise PreflightValidationError(
+            message=(
+                "Automatic venue-native price routing currently requires one declared perp market per "
+                f"backtest; got {unique_targets!r}"
+            ),
+            failed_checks=["perp_price_history"],
+            recommendations=["Split the run or provide an explicit multi-market data provider."],
+            error_count=1,
+            warning_count=0,
+        )
+
+    protocol, market = unique_targets[0]
+    canonical = PerpPriceHistoryRegistry.canonical(protocol)
+    assert canonical is not None
+    chain_descriptor = ChainRegistry.try_resolve(config.chain)
+    chain = chain_descriptor.name if chain_descriptor is not None else config.chain.lower()
+    declared_chains: set[str] = set()
+    for value in PerpPriceHistoryRegistry.declared_chains(canonical):
+        declared_chains.add(ChainRegistry.resolve(value).name)
+    if declared_chains and chain not in declared_chains:
+        raise PreflightValidationError(
+            message=f"{canonical} declares venue-native price history on {sorted(declared_chains)}, not {chain!r}",
+            failed_checks=["perp_price_history"],
+            recommendations=["Choose a connector-declared chain for this market."],
+            error_count=1,
+            warning_count=0,
+        )
+    provider_cls = PerpPriceHistoryRegistry.backtest_provider(canonical)
+    if provider_cls is None:
+        raise PreflightValidationError(
+            message=f"{canonical} declares perp price history without a backtest provider",
+            failed_checks=["perp_price_history"],
+            recommendations=["Install or configure the connector's historical backtest provider."],
+            error_count=1,
+            warning_count=0,
+        )
+    venue = PerpPriceHistoryRegistry.venue_for(canonical)
+    target = (venue, chain, market)
+    current_provider = backtester.data_provider
+    provider: PerpPriceHistoryProvider
+    if getattr(current_provider, "price_history_target", None) != target:
+        provider = provider_cls.for_backtest(
+            fallback=current_provider,
+            chain=chain,
+            market=market,
+            venue=venue,
+        )
+        backtester.data_provider = provider
+    elif isinstance(current_provider, PerpPriceHistoryProvider):
+        provider = current_provider
+    else:
+        raise PreflightValidationError(
+            message=f"Provider claiming price-history target {target!r} does not implement the preparation contract",
+            failed_checks=["perp_price_history"],
+            recommendations=["Install a connector-declared historical backtest provider."],
+            error_count=1,
+            warning_count=0,
+        )
+    try:
+        resolved = await provider.prepare_backtest(config)
+    except (DataSourceError, ValueError) as exc:
+        requested = config.resolved_timeframe or config.timeframe or f"{config.interval_seconds}s"
+        raise PreflightValidationError(
+            message=(f"{venue} price-history preflight failed for {market!r} at {requested!r}: {exc}"),
+            failed_checks=["perp_price_history"],
+            recommendations=[
+                "Use timeframe='auto' to select the finest complete native cadence, shorten the window, "
+                "or choose an explicitly supported market/timeframe."
+            ],
+            error_count=1,
+            warning_count=0,
+        ) from exc
+    bt_logger.info(
+        f"Resolved {venue} {market} to native {resolved} price candles "
+        f"for the complete {config.duration_days:.1f}-day window"
+    )
 
 
 async def _prewarm_declared_funding_history(
@@ -212,7 +361,7 @@ async def _prewarm_declared_funding_history(
     """Materialize declared snapshot funding series before data iteration."""
     if not source.history_capable:
         return
-    for venue, market in _declared_funding_prewarm_targets(strategy, strategy_config):
+    for venue, market in declared_perp_price_history_targets(strategy, strategy_config):
         try:
             point_count = await source.materialize_history(venue, market)
         except DataSourceError as exc:
@@ -526,6 +675,14 @@ def initialize_backtest(
         data_tokens: list[TokenRef] = list(config.tokens)
         data_token_labels = {token_ref_display(token).upper() for token in data_tokens}
         data_token_identities = {normalize_token_ref(token, config.chain) for token in data_tokens}
+        _append_provider_required_price_tokens(
+            backtester,
+            data_tokens,
+            data_token_identities,
+            data_token_labels,
+            chain=config.chain,
+            bt_logger=bt_logger,
+        )
         for funded_token in funded_token_refs(canonical_funding, chain=config.chain):
             funded_identity = normalize_token_ref(funded_token, config.chain)
             if funded_identity not in data_token_identities:
@@ -771,6 +928,7 @@ async def execute_iteration_loop(
         SimulatedGasView,
         SimulatedPositionView,
         SimulatedSlippageView,
+        _snapshot_token_address_map,
         build_backtest_lending_rates,
         sync_il_calculator_positions,
     )
@@ -869,8 +1027,10 @@ async def execute_iteration_loop(
             # adapter valuation, health-factor collateral) onto the
             # address-native state keys through the run's registered map —
             # the MarketState analogue of the snapshot alias bridge below.
+            tick_token_addresses = _snapshot_token_address_map(market_state, token_addresses) or {}
             if token_addresses:
                 market_state.register_symbol_aliases(token_addresses)
+            ohlcv_view.register_token_addresses(tick_token_addresses)
 
             # Log progress periodically
             if state.tick_count % 100 == 0 or state.tick_count == 1:
@@ -902,7 +1062,7 @@ async def execute_iteration_loop(
                 market_state=market_state,
                 chain=config.chain,
                 portfolio=state.portfolio,
-                token_addresses=token_addresses,
+                token_addresses=tick_token_addresses,
                 funding_rate_source=funding_rate_source,
                 rsi_provider=rsi_provider,
                 indicator_provider=indicator_provider,
@@ -928,7 +1088,6 @@ async def execute_iteration_loop(
             # inside the expected_tokens loop is O(1) instead of O(N) per
             # expected token (see #1781).
             available_tokens = market_state.available_tokens
-            available_tokens_upper = {t.upper() for t in available_tokens}
 
             # Append prices to indicator engine and populate snapshot
             tick_tokens: set[str] = set()
@@ -961,7 +1120,7 @@ async def execute_iteration_loop(
                     token_addresses=expected_token_addresses,
                     chain=config.chain,
                 )
-                if expected_token_label in available_tokens_upper:
+                if market_state.has_token(token):
                     state.data_quality_tracker.record_lookup(
                         success=True,
                         source=provider_name,

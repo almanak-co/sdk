@@ -197,6 +197,7 @@ def _validate_and_build_context(
     output: str | None,
     loaded_from_result: bool,
     pnl_config: PnLBacktestConfig | None,
+    timeframe: str | None = None,
 ) -> PnLBacktestContext:
     """Phases 3+4: validate required args and produce a `PnLBacktestContext`.
 
@@ -239,6 +240,7 @@ def _validate_and_build_context(
             start_time=start,  # type: ignore[arg-type]
             end_time=end,  # type: ignore[arg-type]
             interval_seconds=interval,
+            timeframe=timeframe,
             chain=chain,
             tokens=token_list,
             # None = chain-aware default resolved by PnLBacktestConfig from
@@ -297,6 +299,12 @@ def _print_pnl_configuration(
         f"Period: {pnl_config.start_time.date()} -> {pnl_config.end_time.date()} ({pnl_config.duration_days:.1f} days)"
     )
     click.echo(f"Interval: {pnl_config.interval_seconds}s ({pnl_config.interval_seconds / 3600:.1f} hours)")
+    if pnl_config.timeframe == "auto" and pnl_config.resolved_timeframe is None:
+        click.echo("Price Timeframe: auto (finest provider-native cadence covering the full window)")
+    elif pnl_config.resolved_timeframe is not None:
+        click.echo(f"Price Timeframe: {pnl_config.resolved_timeframe} (provider-validated)")
+    elif pnl_config.timeframe is not None:
+        click.echo(f"Price Timeframe: {pnl_config.timeframe} (explicit)")
     if pnl_config.token_funding:
         click.echo(f"Token Funding Entries: {len(pnl_config.token_funding)}")
     click.echo(f"Tokens: {', '.join(ctx.token_list)}")
@@ -1188,6 +1196,16 @@ def _generate_html_report(
     help="Interval between ticks in seconds (default: 3600 = 1 hour)",
 )
 @click.option(
+    "--timeframe",
+    type=click.Choice(["auto", "1m", "5m", "15m", "1h", "4h", "1d"], case_sensitive=False),
+    default=None,
+    help=(
+        "Provider-native candle cadence. 'auto' selects the finest cadence with complete coverage; "
+        "an explicit value never falls back to a coarser cadence. This never changes --interval, "
+        "which controls strategy simulation ticks."
+    ),
+)
+@click.option(
     "--output",
     "-o",
     type=click.Path(exists=False),
@@ -1345,6 +1363,7 @@ def pnl_backtest(
     start: datetime | None,
     end: datetime | None,
     interval: int,
+    timeframe: str | None,
     output: str | None,
     chain: str | None,
     tokens: str,
@@ -1441,6 +1460,7 @@ def pnl_backtest(
         start=start,
         end=end,
         interval=interval,
+        timeframe=timeframe.lower() if timeframe is not None else None,
         chain=chain,
         tokens=tokens,
         gas_price=gas_price,

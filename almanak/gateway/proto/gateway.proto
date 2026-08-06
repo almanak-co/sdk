@@ -2623,6 +2623,12 @@ service RateHistoryService {
   // round traversal, decoding and feed metadata remain gateway-owned.
   rpc GetOraclePriceHistory(GetOraclePriceHistoryRequest)
       returns (OraclePriceHistoryResponse);
+
+  // One bounded page of venue-native perpetual index-price candles. Market
+  // identity is connector-resolved and on-chain verified before provider
+  // egress; callers never supply or guess a vendor symbol.
+  rpc GetPerpPriceCandles(GetPerpPriceCandlesRequest)
+      returns (PerpPriceCandlePageResponse);
 }
 
 // -----------------------------------------------------------------------------
@@ -2902,6 +2908,42 @@ message GetOraclePriceHistoryRequest {
   int64 end_ts = 5;
   // Required caller bound. Gateway rejects values outside [1, 10000].
   int32 max_points = 6;
+}
+
+message GetPerpPriceCandlesRequest {
+  // Connector-owned venue slug (for example "gmx_v2").
+  string venue = 1;
+  // Required canonical chain name.
+  string chain = 2;
+  // Venue market label or exact market-token address.
+  string market = 3;
+  // Exact venue-native timeframe. The gateway never silently downgrades it.
+  string timeframe = 4;
+  // Exclusive upper timestamp for backward pagination.
+  int64 before_ts = 5;
+  // Required caller bound. Gateway rejects values outside [1, 10000].
+  int32 limit = 6;
+}
+
+message PerpPriceCandle {
+  int64 timestamp = 1;
+  string open = 2;
+  string high = 3;
+  string low = 4;
+  string close = 5;
+}
+
+message PerpPriceCandlePageResponse {
+  string venue = 1;
+  string chain = 2;
+  string market = 3;
+  string market_token = 4;
+  string index_token = 5;
+  string index_symbol = 6;
+  string timeframe = 7;
+  repeated PerpPriceCandle candles = 8;
+  bool success = 9;
+  string error = 10;
 }
 
 message GetOraclePriceRequest {
