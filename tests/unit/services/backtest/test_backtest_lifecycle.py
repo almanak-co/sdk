@@ -261,6 +261,32 @@ class TestBuildBacktestConfig:
         assert config.interval_seconds == 3600  # full mode = 1h
         assert config.include_gas_costs is True
 
+    @pytest.mark.parametrize("chain", ["base", "arbitrum"])
+    def test_platform_native_funding_alias_enters_service_plan_as_sdk_native(self, chain: str):
+        spec = StrategySpec(
+            protocol="aave_v3",
+            chain=chain,
+            action="lend",
+            parameters={"token": "USDC"},
+        )
+        timeframe = TimeframeSpec(start="2025-01-01", end="2025-01-08")
+        token_funding = [
+            {
+                "symbol": "ETH",
+                "address": "0x0000000000000000000000000000000000000000",
+                "chain": chain,
+                "amount": "100",
+                "amount_type": "usd",
+            }
+        ]
+
+        config = build_backtest_config(spec, timeframe, token_funding=token_funding)
+        token_addresses = build_backtest_token_address_map(config)
+
+        assert config.tokens == ["USDC", "ETH"]
+        assert "0x0000000000000000000000000000000000000000" not in config.tokens
+        assert token_addresses["ETH"] == (chain, NATIVE_SENTINEL.lower())
+
     def test_quick_mode_daily_interval(self):
         from almanak.services.backtest.models import StrategySpec, TimeframeSpec
 

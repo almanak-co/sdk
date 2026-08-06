@@ -1,3 +1,4 @@
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -8,10 +9,12 @@ import pytest
 from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 from almanak.framework.backtesting.pnl.data_provider import normalize_token_key
 from almanak.framework.backtesting.pnl.engine import DefaultFeeModel, DefaultSlippageModel, PnLBacktester
+from almanak.framework.data.tokens.defaults import NATIVE_SENTINEL
 from tests.unit.backtesting.pnl._mocks import MockDataProvider
 
 BASE_CBBTC = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
 BASE_USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+PLATFORM_NATIVE_ALIAS = "0x0000000000000000000000000000000000000000"
 
 
 def _token_funding() -> list[dict[str, str]]:
@@ -75,6 +78,18 @@ class RecordingHoldStrategy:
         return None
 
 
+class RecordingNativeHoldStrategy:
+    deployment_id = "recording_native_hold"
+
+    def __init__(self) -> None:
+        self.first_native_balance: Decimal | None = None
+
+    def decide(self, market: Any) -> None:
+        if self.first_native_balance is None:
+            self.first_native_balance = market.balance("ETH").balance
+        return None
+
+
 @dataclass
 class _SwapIntent:
     intent_type: str = "SWAP"
@@ -120,3 +135,57 @@ async def test_funded_address_native_token_can_be_sold_without_insufficient_bala
     assert result.trades
     assert result.trades[0].success
     assert "insufficient" not in str(result.trades[0].metadata).lower()
+
+
+@pytest.mark.parametrize("chain", ["base", "arbitrum"])
+@pytest.mark.asyncio
+async def test_platform_zero_address_native_funding_reaches_simulation_loop(chain: str) -> None:
+    """Base/Aave and Arbitrum/GMX input shape no longer dies before decide()."""
+    start = datetime(2026, 6, 1)
+    native = normalize_token_key(chain, NATIVE_SENTINEL)
+    other_chain = "arbitrum" if chain == "base" else "base"
+    declared_funding = [
+        {
+            "symbol": "ETH",
+            "address": PLATFORM_NATIVE_ALIAS,
+            "amount": "300",
+            "amount_type": "usd",
+        },
+        {
+            "symbol": "USDC",
+            "address": BASE_USDC,
+            "chain": other_chain,
+            "amount": "1",
+            "amount_type": "usd",
+        },
+    ]
+    config = PnLBacktestConfig(
+        start_time=start,
+        end_time=start + timedelta(hours=1),
+        interval_seconds=3600,
+        token_funding=deepcopy(declared_funding),
+        chain=chain,
+        tokens=[native],  # type: ignore[list-item]  # engine-native TokenRef input
+        include_gas_costs=False,
+        inclusion_delay_blocks=0,
+        preflight_validation=False,
+    )
+    provider = MockDataProvider(base_prices={native: Decimal("3000")})
+    backtester = PnLBacktester(
+        data_provider=provider,
+        fee_models={"default": DefaultFeeModel(fee_pct=Decimal("0"))},
+        slippage_models={"default": DefaultSlippageModel(slippage_pct=Decimal("0"))},
+        token_addresses={"ETH": native},
+    )
+    strategy = RecordingNativeHoldStrategy()
+    declared_hash = config.calculate_config_hash()
+
+    result = await backtester.backtest(strategy, config)
+
+    assert result.success
+    assert result.initial_portfolio_value_usd == Decimal("300")
+    assert strategy.first_native_balance == Decimal("0.1")
+    assert config.token_funding == declared_funding
+    assert config.calculate_config_hash() == declared_hash
+    assert result.config_hash == declared_hash
+    assert result.config["token_funding"] == declared_funding

@@ -182,6 +182,32 @@ class TestBuildTokenAddressMap:
 
         assert result["USDC"] == ("arbitrum", "0xaf88d065e77c8cC2239327C5EDb3A432268e5831")
 
+    @pytest.mark.parametrize("chain", ["base", "arbitrum"])
+    def test_platform_native_funding_alias_seeds_map_at_sdk_sentinel(self, monkeypatch, chain: str) -> None:
+        from almanak.framework.backtesting.pnl import data_provider
+        from almanak.framework.cli.backtest import run_helpers
+        from almanak.framework.data.tokens.defaults import NATIVE_SENTINEL
+
+        self._patch_resolver(monkeypatch, {})
+        # Isolate source 1: this assertion must be supplied by token_funding
+        # canonicalization, not source 3's unconditional native fallback.
+        monkeypatch.setattr(data_provider, "native_token_map_entry", lambda _chain: None)
+        cfg = {
+            "token_funding": [
+                {
+                    "symbol": "ETH",
+                    "address": "0x0000000000000000000000000000000000000000",
+                    "chain": chain,
+                    "amount": "1",
+                    "amount_type": "token",
+                }
+            ]
+        }
+
+        result = run_helpers.build_token_address_map(cfg, ["ETH"], chain)
+
+        assert result["ETH"] == (chain, NATIVE_SENTINEL)
+
     def test_token_funding_ignores_other_chain_entries(self, monkeypatch) -> None:
         from almanak.framework.cli.backtest import run_helpers
 

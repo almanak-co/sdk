@@ -25,14 +25,12 @@ logger = logging.getLogger(__name__)
 
 
 def _funding_token_address_map(
-    strategy_config: dict[str, Any], chain: str, parse_token_funding: Any
+    strategy_config: dict[str, Any], chain: str, canonical_token_funding_entries: Any
 ) -> dict[str, tuple[str, str]]:
     funding_map: dict[str, tuple[str, str]] = {}
-    funding = parse_token_funding(strategy_config.get("token_funding"), strategy_chain=chain)
-    for entry in funding or []:
+    funding = canonical_token_funding_entries(strategy_config.get("token_funding"), chain=chain)
+    for entry in funding:
         entry_chain = entry.chain or chain
-        if entry_chain.lower() != chain.lower():
-            continue
         funding_map[entry.symbol.upper()] = (entry_chain, entry.address)
     return funding_map
 
@@ -95,9 +93,10 @@ def build_token_address_map(
 
     Sources, in order:
 
-    1. ``token_funding`` entries from ``strategy_config`` (parsed via
-       :func:`parse_token_funding`) supply ``{symbol: (chain, address)}`` for
-       funded tokens.
+    1. ``token_funding`` entries from ``strategy_config`` (normalized through
+       the PnL funding canonicalization boundary) supply
+       ``{symbol: (chain, address)}`` for funded tokens. This includes mapping
+       the platform's EVM zero-address native alias to the SDK sentinel.
     2. Every tracked symbol (``--tokens`` / ``config.tokens``) that is NOT native
        and NOT already covered is resolved symbol -> address on ``chain`` through
        the SDK token registry (:func:`get_token_resolver`). Natives skip the
@@ -128,16 +127,16 @@ def build_token_address_map(
     # Lazy imports keep the lazy CLI group's zero-import contract intact: this
     # helper only runs inside a real backtest body, never at module import.
     from almanak.core.chains._helpers import native_coingecko_ids
+    from almanak.framework.backtesting.pnl.initial_portfolio import canonical_token_funding_entries
     from almanak.framework.data.tokens import get_token_resolver
     from almanak.framework.data.tokens.exceptions import TokenResolutionError
-    from almanak.framework.models.token_funding import parse_token_funding
 
     # Source 1: explicit token_funding entries for the ACTIVE chain only. A
     # multi-chain funding config can list the same symbol on several chains;
     # only the entry matching the run chain is relevant, and accepting others
     # would let a different chain's address overwrite the active one (the map is
     # symbol-keyed).
-    address_map = _funding_token_address_map(strategy_config, chain, parse_token_funding)
+    address_map = _funding_token_address_map(strategy_config, chain, canonical_token_funding_entries)
 
     # Source 2: registry-resolve any remaining non-native tracked symbol.
     # The skip-set is exactly the provider's native projection

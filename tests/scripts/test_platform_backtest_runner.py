@@ -175,6 +175,34 @@ def test_build_platform_backtest_config_parses_platform_payload() -> None:
     assert config.allow_hardcoded_fallback is True
 
 
+def test_platform_funding_only_non_native_token_is_registered_in_address_map() -> None:
+    class Strategy:
+        STRATEGY_METADATA = type("Meta", (), {"default_chain": "base", "supported_chains": ["base"]})()
+
+    strategy_config = {
+        "token": "USDC",
+        "token_funding": [
+            {
+                "symbol": "cbBTC",
+                "address": BASE_CBBTC,
+                "chain": "base",
+                "amount": "100",
+                "amount_type": "usd",
+            }
+        ],
+    }
+    config = runner.build_platform_backtest_config(
+        json.dumps({"start_time": "2024-01-01", "end_time": "2024-03-01"}),
+        strategy_config,
+        Strategy,
+    )
+
+    token_addresses = runner.build_backtest_token_address_map(config, strategy_config=strategy_config)
+
+    assert config.tokens == ["USDC"]
+    assert token_addresses["CBBTC"] == ("base", BASE_CBBTC)
+
+
 def test_build_platform_backtest_config_resolves_address_token_fields() -> None:
     class Strategy:
         STRATEGY_METADATA = type("Meta", (), {"default_chain": "base", "supported_chains": ["base"]})()

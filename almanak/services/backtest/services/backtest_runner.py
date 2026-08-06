@@ -31,6 +31,7 @@ from almanak.framework.backtesting.pnl.engine import (
     DefaultSlippageModel,
     PnLBacktester,
 )
+from almanak.framework.backtesting.pnl.initial_portfolio import canonical_token_funding_entries
 from almanak.framework.backtesting.pnl.providers.coingecko import CoinGeckoDataProvider
 from almanak.framework.data.tokens import get_token_resolver
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
@@ -194,17 +195,12 @@ def collect_backtest_token_refs(
     return refs
 
 
-def _token_funding_refs(raw_funding: Any) -> list[str]:
-    """Extract token refs from a token_funding basket without resolving them."""
-    if not isinstance(raw_funding, Iterable) or isinstance(raw_funding, bytes | bytearray | str | Mapping):
-        return []
-
+def _token_funding_refs(raw_funding: Any, chain: str) -> list[str]:
+    """Extract canonical active-chain refs from a token_funding basket."""
     refs: list[str] = []
-    for entry in raw_funding:
-        if not isinstance(entry, Mapping):
-            continue
-        refs.extend(_string_token_values(entry.get("address")))
-        refs.extend(_string_token_values(entry.get("symbol")))
+    for entry in canonical_token_funding_entries(raw_funding, chain=chain):
+        refs.append(entry.address)
+        refs.append(entry.symbol)
     return refs
 
 
@@ -266,6 +262,7 @@ def build_backtest_token_address_map(
     still resolves with zero I/O and never reaches the contract endpoint.
     """
     refs = list(config.tokens)
+    refs.extend(_token_funding_refs(getattr(config, "token_funding", None), config.chain))
     refs.extend(
         collect_backtest_token_refs(
             chain=config.chain,
@@ -718,7 +715,7 @@ def build_backtest_config(
         raw_tokens = list(tokens or _extract_tokens(spec))
         funding_params = {**params, "token_funding": resolved_token_funding}
         raw_tokens.extend(collect_backtest_token_refs(chain=resolved_chain, strategy_config=funding_params))
-        raw_tokens.extend(_token_funding_refs(resolved_token_funding))
+        raw_tokens.extend(_token_funding_refs(resolved_token_funding, resolved_chain))
         resolved_tokens = normalize_backtest_token_refs(raw_tokens, resolved_chain)
         fee_model = spec.protocol.replace("-", "_")
     else:
@@ -731,7 +728,7 @@ def build_backtest_config(
         resolved_token_funding = token_funding
         resolved_chain = chain
         raw_tokens = list(tokens)
-        raw_tokens.extend(_token_funding_refs(resolved_token_funding))
+        raw_tokens.extend(_token_funding_refs(resolved_token_funding, resolved_chain))
         resolved_tokens = normalize_backtest_token_refs(raw_tokens, resolved_chain)
         fee_model = "realistic"
 

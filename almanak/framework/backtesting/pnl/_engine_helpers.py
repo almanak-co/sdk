@@ -84,6 +84,7 @@ from almanak.framework.backtesting.pnl.error_handling import (
 )
 from almanak.framework.backtesting.pnl.initial_portfolio import (
     TokenFundingInitializationError,
+    active_token_funding_entries,
     funded_token_refs,
     seed_portfolio_from_token_funding,
 )
@@ -253,6 +254,7 @@ class BacktestState:
     data_quality_tracker: DataQualityTracker
     indicator_engine: BacktestIndicatorEngine
     strategy_config: dict[str, Any]
+    token_funding: list[dict[str, Any]]
     parameter_sources: ParameterSourceTracker
     total_ticks: int
     run_context: BacktestRunContext | None = None
@@ -469,7 +471,19 @@ def initialize_backtest(
             raise TokenFundingInitializationError(
                 "Historical PnL backtests require token_funding in the strategy config."
             )
-        config.token_funding = token_funding
+        # Preserve the effective declared basket on config for hashing and the
+        # reproducibility artifact. This conditional assignment is the legacy
+        # strategy-config fallback; a caller-supplied config basket is never
+        # rewritten, filtered, or canonicalized in place.
+        if config.token_funding is None:
+            config.token_funding = token_funding
+
+        # Carry a run-local canonical basket through startup consumers. The
+        # declared config remains untouched while prefetch, preflight, seeding,
+        # coverage, and balance lanes share the SDK-native token identity.
+        canonical_funding = [
+            entry.model_dump(mode="json") for entry in active_token_funding_entries(token_funding, chain=config.chain)
+        ]
 
         # Create parameter source tracker for audit trail
         # This must be created after _init_adapter so we can track adapter-specific params
@@ -512,7 +526,7 @@ def initialize_backtest(
         data_tokens: list[TokenRef] = list(config.tokens)
         data_token_labels = {token_ref_display(token).upper() for token in data_tokens}
         data_token_identities = {normalize_token_ref(token, config.chain) for token in data_tokens}
-        for funded_token in funded_token_refs(token_funding, chain=config.chain):
+        for funded_token in funded_token_refs(canonical_funding, chain=config.chain):
             funded_identity = normalize_token_ref(funded_token, config.chain)
             if funded_identity not in data_token_identities:
                 funded_label = token_ref_display(funded_token).upper()
@@ -602,6 +616,7 @@ def initialize_backtest(
         data_quality_tracker=data_quality_tracker,
         indicator_engine=indicator_engine,
         strategy_config=strategy_config,
+        token_funding=canonical_funding,
         parameter_sources=parameter_sources,
         total_ticks=total_ticks,
         run_context=run_context,
@@ -867,7 +882,7 @@ async def execute_iteration_loop(
             if not state.initial_portfolio_seeded:
                 initial_value = seed_portfolio_from_token_funding(
                     state.portfolio,
-                    raw_funding=config.token_funding,
+                    raw_funding=state.token_funding,
                     chain=config.chain,
                     market_state=market_state,
                 )

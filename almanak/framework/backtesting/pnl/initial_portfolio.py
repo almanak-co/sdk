@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from almanak.core.chains import ChainRegistry
+from almanak.core.enums import ChainFamily
 from almanak.framework.backtesting.pnl.data_provider import (
     MarketState,
     TokenRef,
@@ -18,6 +20,8 @@ from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
 from almanak.framework.models.token_funding import AmountType, TokenFunding, parse_token_funding
 
 logger = logging.getLogger(__name__)
+
+_PLATFORM_EVM_NATIVE_ALIAS = "0x0000000000000000000000000000000000000000"
 
 
 class TokenFundingInitializationError(ValueError):
@@ -41,12 +45,38 @@ def active_token_funding_entries(
     chain: str,
 ) -> list[TokenFunding]:
     """Parse and return token_funding entries for the active chain."""
+    return canonical_token_funding_entries(raw_funding, chain=chain, require_active=True)
+
+
+def canonical_token_funding_entries(
+    raw_funding: Any,
+    *,
+    chain: str,
+    require_active: bool = False,
+) -> list[TokenFunding]:
+    """Return active-chain funding entries on the canonical token identity plane.
+
+    The platform serializes an EVM native gas asset as the zero address, while
+    the SDK's price, balance, and portfolio planes use the ERC-7528 sentinel.
+    This is the single backtesting ingestion boundary for that compatibility
+    alias: every downstream consumer receives the registered chain's canonical
+    native symbol and sentinel address. The alias is refused for unknown and
+    non-EVM chains rather than being treated as an unpriceable token.
+
+    Unless ``require_active`` is set, an absent or invalid basket returns an
+    empty list so token-map builders can use this boundary before a backtest
+    config is required. A present zero-address alias that cannot be
+    canonicalized, or a basket whose entries collapse to one canonical token
+    identity, always raises.
+    """
     _reject_negative_active_funding(raw_funding, chain=chain)
     funding = parse_token_funding(raw_funding, strategy_chain=chain)
     if not funding:
-        raise TokenFundingInitializationError(
-            "Historical PnL backtests require strategy config token_funding for the active chain."
-        )
+        if require_active:
+            raise TokenFundingInitializationError(
+                "Historical PnL backtests require strategy config token_funding for the active chain."
+            )
+        return []
 
     normalized_chain = chain.lower()
     defaulted = [(entry if entry.chain else entry.model_copy(update={"chain": normalized_chain})) for entry in funding]
@@ -61,11 +91,58 @@ def active_token_funding_entries(
                 entry.chain,
                 normalized_chain,
             )
-    if not active:
+    if not active and require_active:
         raise TokenFundingInitializationError(
             f"Historical PnL backtests require token_funding entries for active chain '{normalized_chain}'."
         )
-    return active
+
+    canonical = [_canonicalize_funding_entry(entry, default_chain=normalized_chain) for entry in active]
+    _reject_duplicate_funding_identities(canonical, default_chain=normalized_chain)
+    return canonical
+
+
+def _canonicalize_funding_entry(entry: TokenFunding, *, default_chain: str) -> TokenFunding:
+    """Canonicalize the platform's EVM-native alias, leaving ERC-20s unchanged."""
+    if entry.address.lower() != _PLATFORM_EVM_NATIVE_ALIAS:
+        return entry
+
+    entry_chain = entry.chain or default_chain
+    descriptor = ChainRegistry.try_resolve(entry_chain)
+    if descriptor is None:
+        raise TokenFundingInitializationError(
+            "token_funding zero-address native alias requires a registered EVM chain; "
+            f"chain '{entry_chain}' is unknown."
+        )
+    if descriptor.family is not ChainFamily.EVM:
+        raise TokenFundingInitializationError(
+            "token_funding zero-address native alias is only valid on registered EVM chains; "
+            f"chain '{descriptor.name}' uses family '{descriptor.family.value}'."
+        )
+
+    from almanak.framework.data.tokens.defaults import NATIVE_SENTINEL
+
+    return entry.model_copy(
+        update={
+            "address": NATIVE_SENTINEL,
+            "chain": descriptor.name,
+            "symbol": descriptor.native.symbol.upper(),
+        }
+    )
+
+
+def _reject_duplicate_funding_identities(entries: list[TokenFunding], *, default_chain: str) -> None:
+    """Refuse baskets that canonicalize more than one entry to the same asset."""
+    seen: dict[TokenRef, TokenFunding] = {}
+    for entry in entries:
+        identity = normalize_token_key(entry.chain or default_chain, entry.address)
+        previous = seen.get(identity)
+        if previous is not None:
+            raise TokenFundingInitializationError(
+                "token_funding contains duplicate canonical token identity "
+                f"{token_ref_display(identity)} ({previous.symbol} and {entry.symbol}); "
+                "declare each funded asset exactly once."
+            )
+        seen[identity] = entry
 
 
 def _reject_negative_active_funding(raw_funding: Any, *, chain: str) -> None:
@@ -220,6 +297,7 @@ __all__ = [
     "TokenFundingInitializationError",
     "active_token_funding_entries",
     "build_initial_portfolio_from_token_funding",
+    "canonical_token_funding_entries",
     "funded_token_refs",
     "resolve_funding_seeds",
     "seed_portfolio_from_token_funding",

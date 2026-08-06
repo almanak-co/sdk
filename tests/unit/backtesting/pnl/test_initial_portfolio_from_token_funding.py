@@ -8,14 +8,17 @@ from almanak.framework.backtesting.pnl.initial_portfolio import (
     TokenFundingInitializationError,
     active_token_funding_entries,
     build_initial_portfolio_from_token_funding,
+    funded_token_refs,
     resolve_funding_seeds,
     seed_portfolio_from_token_funding,
 )
 from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+from almanak.framework.data.tokens.defaults import NATIVE_SENTINEL
 
 BASE_CBBTC = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
 BASE_USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
 ARB_USDC = "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
+PLATFORM_NATIVE_ALIAS = "0x0000000000000000000000000000000000000000"
 
 
 def _funding_entry(
@@ -37,10 +40,10 @@ def _funding_entry(
     return entry
 
 
-def _market_state(prices: dict[object, Decimal]) -> MarketState:
+def _market_state(prices: dict[object, Decimal], *, chain: str = "base") -> MarketState:
     return MarketState(
         timestamp=datetime(2026, 6, 1, tzinfo=UTC),
-        chain="base",
+        chain=chain,
         prices=prices,
     )
 
@@ -90,6 +93,58 @@ def test_usd_amount_converts_to_explicit_token_units_at_first_tick_price() -> No
     assert seeds[0].amount_tokens == Decimal("0.002")
     assert seeds[0].value_usd == Decimal("200")
     assert seeds[0].price_usd == Decimal("100000")
+
+
+@pytest.mark.parametrize("chain", ["base", "arbitrum"])
+def test_platform_zero_address_native_funding_uses_canonical_sentinel_everywhere(chain: str) -> None:
+    """The shipped platform alias reaches prefetch and seeding as one key."""
+    native = normalize_token_key(chain, NATIVE_SENTINEL)
+    funding = [
+        _funding_entry(
+            symbol="ETH",
+            address=PLATFORM_NATIVE_ALIAS,
+            chain=chain,
+            amount="300",
+            amount_type="usd",
+        )
+    ]
+
+    assert funded_token_refs(funding, chain=chain) == [native]
+
+    seeds = resolve_funding_seeds(
+        raw_funding=funding,
+        chain=chain,
+        market_state=_market_state({native: Decimal("3000")}, chain=chain),
+    )
+
+    assert seeds[0].entry.address == NATIVE_SENTINEL
+    assert seeds[0].entry.symbol == "ETH"
+    assert seeds[0].token == native
+    assert seeds[0].amount_tokens == Decimal("0.1")
+    assert seeds[0].value_usd == Decimal("300")
+
+
+def test_native_alias_and_sentinel_duplicate_fails_closed() -> None:
+    funding = [
+        _funding_entry(symbol="ETH", address=PLATFORM_NATIVE_ALIAS, amount="300", amount_type="usd"),
+        _funding_entry(symbol="ETH", address=NATIVE_SENTINEL, amount="300", amount_type="usd"),
+    ]
+
+    with pytest.raises(TokenFundingInitializationError, match="duplicate canonical token identity"):
+        resolve_funding_seeds(
+            raw_funding=funding,
+            chain="base",
+            market_state=_market_state({normalize_token_key("base", NATIVE_SENTINEL): Decimal("3000")}),
+        )
+
+
+@pytest.mark.parametrize("chain", ["nosuchchain", "solana"])
+def test_platform_zero_address_native_alias_fails_closed_off_registered_evm(chain: str) -> None:
+    with pytest.raises(TokenFundingInitializationError, match="zero-address native alias"):
+        funded_token_refs(
+            [_funding_entry(symbol="NATIVE", address=PLATFORM_NATIVE_ALIAS, chain=chain)],
+            chain=chain,
+        )
 
 
 def test_usdc_funding_remains_explicit_token_balance_not_cash() -> None:
@@ -201,6 +256,11 @@ def test_zero_amount_does_not_require_first_tick_price() -> None:
 def test_missing_active_chain_funding_fails_loud() -> None:
     with pytest.raises(TokenFundingInitializationError, match="active chain"):
         active_token_funding_entries([_funding_entry(chain="arbitrum", address=ARB_USDC)], chain="base")
+
+
+def test_absent_funding_points_to_missing_strategy_config() -> None:
+    with pytest.raises(TokenFundingInitializationError, match="require strategy config token_funding"):
+        active_token_funding_entries(None, chain="base")
 
 
 def test_cross_chain_drop_is_loud(caplog) -> None:
