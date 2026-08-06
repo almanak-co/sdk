@@ -2919,6 +2919,11 @@ class IntegrationServiceStub(object):
                 request_serializer=gateway__pb2.CoinGeckoMarketChartRangeRequest.SerializeToString,
                 response_deserializer=gateway__pb2.CoinGeckoMarketChartRangeResponse.FromString,
                 _registered_method=True)
+        self.CoinGeckoResolveContract = channel.unary_unary(
+                '/almanak.gateway.proto.IntegrationService/CoinGeckoResolveContract',
+                request_serializer=gateway__pb2.CoinGeckoResolveContractRequest.SerializeToString,
+                response_deserializer=gateway__pb2.CoinGeckoResolveContractResponse.FromString,
+                _registered_method=True)
         self.CoinGeckoGetOHLCV = channel.unary_unary(
                 '/almanak.gateway.proto.IntegrationService/CoinGeckoGetOHLCV',
                 request_serializer=gateway__pb2.CoinGeckoOHLCVRequest.SerializeToString,
@@ -3003,6 +3008,15 @@ class IntegrationServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def CoinGeckoResolveContract(self, request, context):
+        """Resolve a chain-scoped contract through CoinGecko's asset-platform API.
+        This closes the hosted backtest egress gap: the runner never needs a
+        CoinGecko key or a direct vendor HTTP fallback for address resolution.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def CoinGeckoGetOHLCV(self, request, context):
         """CoinGecko CEX-reference OHLCV (second CEX provider for the cex_primary
         failover chain — VIB-4847). Price-only candles (no volume).
@@ -3082,6 +3096,11 @@ def add_IntegrationServiceServicer_to_server(servicer, server):
                     servicer.CoinGeckoGetMarketChartRange,
                     request_deserializer=gateway__pb2.CoinGeckoMarketChartRangeRequest.FromString,
                     response_serializer=gateway__pb2.CoinGeckoMarketChartRangeResponse.SerializeToString,
+            ),
+            'CoinGeckoResolveContract': grpc.unary_unary_rpc_method_handler(
+                    servicer.CoinGeckoResolveContract,
+                    request_deserializer=gateway__pb2.CoinGeckoResolveContractRequest.FromString,
+                    response_serializer=gateway__pb2.CoinGeckoResolveContractResponse.SerializeToString,
             ),
             'CoinGeckoGetOHLCV': grpc.unary_unary_rpc_method_handler(
                     servicer.CoinGeckoGetOHLCV,
@@ -3329,6 +3348,33 @@ class IntegrationService(object):
             '/almanak.gateway.proto.IntegrationService/CoinGeckoGetMarketChartRange',
             gateway__pb2.CoinGeckoMarketChartRangeRequest.SerializeToString,
             gateway__pb2.CoinGeckoMarketChartRangeResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def CoinGeckoResolveContract(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.IntegrationService/CoinGeckoResolveContract',
+            gateway__pb2.CoinGeckoResolveContractRequest.SerializeToString,
+            gateway__pb2.CoinGeckoResolveContractResponse.FromString,
             options,
             channel_credentials,
             insecure,

@@ -1708,6 +1708,10 @@ service IntegrationService {
   rpc CoinGeckoGetMarkets(CoinGeckoGetMarketsRequest) returns (CoinGeckoGetMarketsResponse);
   rpc CoinGeckoGetHistoricalPrice(CoinGeckoHistoricalPriceRequest) returns (CoinGeckoHistoricalPriceResponse);
   rpc CoinGeckoGetMarketChartRange(CoinGeckoMarketChartRangeRequest) returns (CoinGeckoMarketChartRangeResponse);
+  // Resolve a chain-scoped contract through CoinGecko's asset-platform API.
+  // This closes the hosted backtest egress gap: the runner never needs a
+  // CoinGecko key or a direct vendor HTTP fallback for address resolution.
+  rpc CoinGeckoResolveContract(CoinGeckoResolveContractRequest) returns (CoinGeckoResolveContractResponse);
   // CoinGecko CEX-reference OHLCV (second CEX provider for the cex_primary
   // failover chain — VIB-4847). Price-only candles (no volume).
   rpc CoinGeckoGetOHLCV(CoinGeckoOHLCVRequest) returns (CoinGeckoOHLCVResponse);
@@ -1873,6 +1877,24 @@ message CoinGeckoMarketChartRangeResponse {
   repeated CoinGeckoMarketChartDataPoint total_volumes = 3;
   bool success = 4;
   string error = 5;
+}
+
+message CoinGeckoResolveContractRequest {
+  // CoinGecko asset-platform id (e.g. "base", "arbitrum-one"). The gateway
+  // validates this against the provider manifest before issuing HTTP.
+  string asset_platform = 1;
+  // Lowercase EVM contract address. The gateway validates the 20-byte shape.
+  string contract_address = 2;
+}
+
+message CoinGeckoResolveContractResponse {
+  // Empty iff found=false. A successful upstream response with a malformed or
+  // missing id is a typed RPC error, never an honest miss.
+  string coin_id = 1;
+  // False only for CoinGecko's explicit contract-not-found response.
+  bool found = 2;
+  // Gateway provenance: "coingecko_api" or "gateway_cache".
+  string source = 3;
 }
 
 // CoinGecko CEX-reference OHLCV (VIB-4847). Second CEX-capable provider in the

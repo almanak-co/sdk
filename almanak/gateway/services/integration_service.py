@@ -20,6 +20,7 @@ from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
 from almanak.gateway.services._grpc_errors import set_error_from_upstream
 from almanak.gateway.validation import (
     ValidationError,
+    validate_address,
     validate_address_for_chain,
     validate_chain,
     validate_graphql_query,
@@ -30,6 +31,7 @@ from almanak.integrations._base import INTEGRATION_REGISTRY
 from almanak.integrations._base.gateway.base import BaseIntegration, IntegrationError
 from almanak.integrations._base.gateway.models import WalletPortfolioSnapshot
 from almanak.integrations._base.gateway.portfolio_chain import PortfolioProviderChain, build_portfolio_chain
+from almanak.integrations.chains import integration_chain_map
 
 if TYPE_CHECKING:
     from almanak.integrations.binance.gateway.client import BinanceIntegration
@@ -38,6 +40,9 @@ if TYPE_CHECKING:
     from almanak.integrations.zerion.gateway.client import ZerionIntegration
 
 logger = logging.getLogger(__name__)
+
+_COINGECKO_ASSET_PLATFORMS = frozenset(integration_chain_map("coingecko").values())
+_COINGECKO_CONTRACT_SOURCES = frozenset({"coingecko_api", "gateway_cache"})
 
 
 class IntegrationServiceServicer(gateway_pb2_grpc.IntegrationServiceServicer):
@@ -513,6 +518,83 @@ class IntegrationServiceServicer(gateway_pb2_grpc.IntegrationServiceServicer):
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return gateway_pb2.CoinGeckoHistoricalPriceResponse(success=False, error=str(e))
+
+    async def CoinGeckoResolveContract(
+        self,
+        request: gateway_pb2.CoinGeckoResolveContractRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.CoinGeckoResolveContractResponse:
+        """Resolve a contract address through the gateway-owned CoinGecko lane."""
+        await self._ensure_initialized()
+
+        try:
+            asset_platform = validate_token_id(request.asset_platform, field="asset_platform")
+            if asset_platform not in _COINGECKO_ASSET_PLATFORMS:
+                raise ValidationError("asset_platform", f"'{asset_platform}' is not declared by CoinGecko")
+            contract_address = validate_address(request.contract_address, field="contract_address").lower()
+        except ValidationError as exc:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(exc))
+            return gateway_pb2.CoinGeckoResolveContractResponse()
+
+        try:
+            assert self._coingecko is not None
+            start_time_metric = time.time()
+            result = await self._coingecko.resolve_contract(
+                asset_platform=asset_platform,
+                contract_address=contract_address,
+            )
+            latency = time.time() - start_time_metric
+
+            found = bool(result.get("found", False))
+            raw_coin_id = str(result.get("coin_id", ""))
+            if found:
+                try:
+                    coin_id = validate_token_id(raw_coin_id, field="coin_id")
+                except ValidationError as exc:
+                    raise IntegrationError(
+                        "coingecko",
+                        "Contract resolution returned an invalid coin id",
+                        code="INVALID_RESPONSE",
+                    ) from exc
+            else:
+                if raw_coin_id:
+                    raise IntegrationError(
+                        "coingecko",
+                        "Contract resolution returned coin_id with found=false",
+                        code="INVALID_RESPONSE",
+                    )
+                coin_id = ""
+
+            source = str(result.get("source", ""))
+            if source not in _COINGECKO_CONTRACT_SOURCES:
+                raise IntegrationError(
+                    "coingecko",
+                    "Contract resolution returned invalid provenance",
+                    code="INVALID_RESPONSE",
+                )
+
+            record_integration_request("coingecko", "resolve_contract")
+            record_integration_latency("coingecko", "resolve_contract", latency)
+            logger.info(
+                "coingecko_contract_resolution lane=gateway asset_platform=%s source=%s found=%s",
+                asset_platform,
+                source,
+                found,
+            )
+
+            return gateway_pb2.CoinGeckoResolveContractResponse(
+                coin_id=coin_id,
+                found=found,
+                source=source,
+            )
+        except Exception as exc:
+            logger.exception(
+                "CoinGeckoResolveContract failed for asset_platform=%s",
+                asset_platform,
+            )
+            set_error_from_upstream(context, exc, upstream="coingecko")
+            return gateway_pb2.CoinGeckoResolveContractResponse()
 
     async def CoinGeckoGetMarketChartRange(
         self,

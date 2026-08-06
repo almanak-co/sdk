@@ -371,6 +371,102 @@ class TestCoinGeckoGetMarkets:
 
 
 # =============================================================================
+# CoinGeckoResolveContract
+# =============================================================================
+
+
+class TestCoinGeckoResolveContract:
+    @pytest.mark.asyncio
+    async def test_base_usdc_cold_resolution_maps_typed_response(self, service, caplog):
+        ctx = _make_context()
+        service._coingecko.resolve_contract = AsyncMock(
+            return_value={
+                "coin_id": "usd-coin",
+                "found": True,
+                "source": "coingecko_api",
+            }
+        )
+        request = gateway_pb2.CoinGeckoResolveContractRequest(
+            asset_platform="BASE",
+            contract_address="0x833589FcD6eDb6E08f4c7C32D4f71b54bDa02913",
+        )
+
+        with caplog.at_level("INFO"):
+            response = await service.CoinGeckoResolveContract(request, ctx)
+
+        service._coingecko.resolve_contract.assert_awaited_once_with(
+            asset_platform="base",
+            contract_address="0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+        )
+        assert response.coin_id == "usd-coin"
+        assert response.found is True
+        assert response.source == "coingecko_api"
+        assert "coingecko_contract_resolution lane=gateway" in caplog.text
+        ctx.set_code.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_explicit_contract_miss_is_not_an_rpc_failure(self, service):
+        ctx = _make_context()
+        service._coingecko.resolve_contract = AsyncMock(
+            return_value={"coin_id": "", "found": False, "source": "gateway_cache"}
+        )
+        request = gateway_pb2.CoinGeckoResolveContractRequest(
+            asset_platform="base",
+            contract_address="0x0000000000000000000000000000000000000001",
+        )
+
+        response = await service.CoinGeckoResolveContract(request, ctx)
+
+        assert response.coin_id == ""
+        assert response.found is False
+        assert response.source == "gateway_cache"
+        ctx.set_code.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("asset_platform", "contract_address"),
+        [
+            ("unknown-platform", "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"),
+            ("base", "not-an-address"),
+        ],
+    )
+    async def test_invalid_request_is_rejected_before_vendor_call(
+        self,
+        service,
+        asset_platform,
+        contract_address,
+    ):
+        ctx = _make_context()
+        request = gateway_pb2.CoinGeckoResolveContractRequest(
+            asset_platform=asset_platform,
+            contract_address=contract_address,
+        )
+
+        response = await service.CoinGeckoResolveContract(request, ctx)
+
+        assert response.found is False
+        ctx.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
+        service._coingecko.resolve_contract.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_upstream_rate_limit_is_explicitly_retryable(self, service):
+        ctx = _make_context()
+        service._coingecko.resolve_contract = AsyncMock(
+            side_effect=IntegrationRateLimitError(integration="coingecko", retry_after=4.0)
+        )
+        request = gateway_pb2.CoinGeckoResolveContractRequest(
+            asset_platform="base",
+            contract_address="0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+        )
+
+        response = await service.CoinGeckoResolveContract(request, ctx)
+
+        assert response.found is False
+        ctx.set_code.assert_called_once_with(grpc.StatusCode.RESOURCE_EXHAUSTED)
+        ctx.set_trailing_metadata.assert_called_once()
+
+
+# =============================================================================
 # CoinGeckoGetMarketChartRange
 # =============================================================================
 

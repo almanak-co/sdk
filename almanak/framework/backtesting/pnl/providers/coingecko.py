@@ -766,9 +766,11 @@ class CoinGeckoDataProvider:
                             chain registry and need no entry here; a symbol that is
                             neither native nor in this map is an honest miss (no
                             fabricated price).
-            use_gateway: Route market_chart/range and /history through the
-                            gateway's CoinGecko RPCs (ALM-2952). None
-                            auto-detects from ALMANAK_GATEWAY_HOST.
+            use_gateway: Route market_chart/range, /history, and contract
+                            resolution through the gateway's CoinGecko RPCs.
+                            Contract resolution fails closed instead of using
+                            direct HTTP (ALM-3153). None auto-detects from
+                            ALMANAK_GATEWAY_HOST.
         """
         # Phase 5c: env reads for backtest creds live in
         # almanak.config.backtest. The factory is called only when no
@@ -1096,6 +1098,9 @@ class CoinGeckoDataProvider:
 
         Raises:
             CoinGeckoRateLimitError: A transient 429 propagates (not a miss).
+            CoinGeckoGatewayResolutionError: The configured gateway could not
+                resolve the contract. This is transient/data-unavailable, not
+                an honest contract miss, and direct HTTP is forbidden.
         """
         chain, address = normalize_token_key(chain, address)
         cache_key = (chain, address)

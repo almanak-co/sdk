@@ -14,6 +14,8 @@ import pytest
 
 from almanak.framework.backtesting.pnl.providers.coingecko import CoinGeckoDataProvider
 from almanak.framework.backtesting.pnl.providers.coingecko_gateway import (
+    CoinGeckoGatewayResolutionError,
+    CoinGeckoGatewayUnavailableError,
     GatewayCoinGeckoTransport,
     gateway_coingecko_configured,
     shared_gateway_transport,
@@ -28,7 +30,7 @@ def _point(timestamp: int, value: str) -> gateway_pb2.CoinGeckoMarketChartDataPo
 def _transport_with_stub(stub: MagicMock) -> GatewayCoinGeckoTransport:
     transport = GatewayCoinGeckoTransport()
 
-    async def _fake_ensure():
+    async def _fake_ensure(*, allow_direct_fallback: bool = True):
         return SimpleNamespace(integration=stub), gateway_pb2
 
     transport._ensure = _fake_ensure  # type: ignore[method-assign]
@@ -92,6 +94,39 @@ class TestEndpointMapping:
         assert data == {}
 
     @pytest.mark.asyncio
+    async def test_contract_resolution_maps_and_preserves_provenance(self, caplog):
+        stub = MagicMock()
+        stub.CoinGeckoResolveContract.return_value = gateway_pb2.CoinGeckoResolveContractResponse(
+            coin_id="usd-coin",
+            found=True,
+            source="coingecko_api",
+        )
+        transport = _transport_with_stub(stub)
+
+        with caplog.at_level("INFO"):
+            data = await transport.request(
+                "/coins/base/contract/0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                {},
+            )
+
+        request = stub.CoinGeckoResolveContract.call_args.args[0]
+        assert request.asset_platform == "base"
+        assert request.contract_address == "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+        assert data == {"id": "usd-coin"}
+        assert "transport=gateway_coingecko_contract source=coingecko_api" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_contract_not_found_is_served_empty_without_direct_fallback(self):
+        stub = MagicMock()
+        stub.CoinGeckoResolveContract.return_value = gateway_pb2.CoinGeckoResolveContractResponse(
+            found=False,
+            source="coingecko_api",
+        )
+        transport = _transport_with_stub(stub)
+
+        assert await transport.request("/coins/base/contract/0x0000000000000000000000000000000000000001", {}) == {}
+
+    @pytest.mark.asyncio
     async def test_unmapped_endpoint_returns_none_without_dialing(self):
         transport = GatewayCoinGeckoTransport()
 
@@ -100,7 +135,6 @@ class TestEndpointMapping:
 
         transport._ensure = _explode  # type: ignore[method-assign]
 
-        assert await transport.request("/coins/base/contract/0xcbb7", {}) is None
         assert await transport.request("/coins/list", {}) is None
 
     @pytest.mark.asyncio
@@ -147,6 +181,24 @@ class TestRpcErrorClassification:
 
         assert await transport.request("/coins/bitcoin/market_chart/range", {"from": "1", "to": "2"}) is None
         assert transport._dead is True
+
+    @pytest.mark.asyncio
+    async def test_contract_unavailable_fails_closed(self, caplog):
+        stub = MagicMock()
+        stub.CoinGeckoResolveContract.side_effect = _FakeRpcError(grpc.StatusCode.UNAVAILABLE, "sidecar gone")
+        transport = _transport_with_stub(stub)
+
+        with (
+            caplog.at_level("WARNING"),
+            pytest.raises(CoinGeckoGatewayUnavailableError, match="direct HTTP fallback is disabled"),
+        ):
+            await transport.request(
+                "/coins/base/contract/0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                {},
+            )
+
+        assert transport._dead is True
+        assert "fail_closed=true direct HTTP fallback disabled" in caplog.text
 
     @pytest.mark.asyncio
     async def test_rpc_called_with_deadline(self):
@@ -224,6 +276,48 @@ class TestProviderIntegration:
         provider._get_session = _http_sentinel  # type: ignore[method-assign]
         with pytest.raises(RuntimeError, match="http path reached"):
             await provider._make_request("/coins/arbitrum/market_chart/range", {"from": "1", "to": "2"})
+
+    @pytest.mark.asyncio
+    async def test_contract_resolution_never_falls_back_to_http(self):
+        provider = CoinGeckoDataProvider(use_gateway=True)
+        stub = MagicMock()
+        stub.CoinGeckoResolveContract.side_effect = _FakeRpcError(grpc.StatusCode.UNAVAILABLE, "sidecar gone")
+        provider._gateway_transport = _transport_with_stub(stub)
+
+        async def _http_sentinel():
+            raise AssertionError("direct CoinGecko HTTP must not be reached")
+
+        provider._get_session = _http_sentinel  # type: ignore[method-assign]
+        with pytest.raises(CoinGeckoGatewayUnavailableError):
+            await provider._resolve_coin_id_by_address(
+                "base",
+                "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+            )
+
+        assert provider._session is None
+
+    @pytest.mark.asyncio
+    async def test_contract_rate_limit_propagates_instead_of_becoming_honest_miss(self):
+        provider = CoinGeckoDataProvider(use_gateway=True)
+        stub = MagicMock()
+        stub.CoinGeckoResolveContract.side_effect = _FakeRpcError(
+            grpc.StatusCode.RESOURCE_EXHAUSTED,
+            "upstream rate limited",
+        )
+        provider._gateway_transport = _transport_with_stub(stub)
+
+        async def _http_sentinel():
+            raise AssertionError("direct CoinGecko HTTP must not be reached")
+
+        provider._get_session = _http_sentinel  # type: ignore[method-assign]
+        with pytest.raises(CoinGeckoGatewayResolutionError, match="rate limited"):
+            await provider._resolve_coin_id_by_address(
+                "base",
+                "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+            )
+
+        assert provider._gateway_transport._dead is False
+        assert provider._session is None
 
     def test_auto_detect_from_env(self, monkeypatch):
         monkeypatch.setenv("ALMANAK_GATEWAY_HOST", "127.0.0.1")

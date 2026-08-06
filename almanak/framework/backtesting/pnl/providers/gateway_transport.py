@@ -58,7 +58,7 @@ class GatewayTransportBase:
         self._announced = False
         self._timeout = _DEFAULT_RPC_TIMEOUT
 
-    async def _ensure(self) -> tuple[Any, Any] | None:
+    async def _ensure(self, *, allow_direct_fallback: bool = True) -> tuple[Any, Any] | None:
         """Return ``(client, gateway_pb2)`` connected, or None (marks dead)."""
         if self._dead:
             return None
@@ -71,20 +71,27 @@ class GatewayTransportBase:
                 from almanak.framework.gateway_client import get_gateway_client
                 from almanak.gateway.proto import gateway_pb2
             except ImportError as exc:
-                self._mark_dead(f"gateway client unavailable: {exc}")
+                self._mark_dead(f"gateway client unavailable: {exc}", allow_direct_fallback=allow_direct_fallback)
                 return None
             client = get_gateway_client()
             if not client.is_connected:
                 try:
                     await asyncio.to_thread(client.connect)
                 except Exception as exc:
-                    self._mark_dead(f"gateway connect failed: {exc}")
+                    self._mark_dead(f"gateway connect failed: {exc}", allow_direct_fallback=allow_direct_fallback)
                     return None
             self._timeout = float(getattr(getattr(client, "config", None), "timeout", None) or _DEFAULT_RPC_TIMEOUT)
             self._handles = (client, gateway_pb2)
             return self._handles
 
-    async def _call_unary(self, method: Any, request: Any, *, rpc_name: str) -> tuple[Any | None, str | None]:
+    async def _call_unary(
+        self,
+        method: Any,
+        request: Any,
+        *,
+        rpc_name: str,
+        allow_direct_fallback: bool = True,
+    ) -> tuple[Any | None, str | None]:
         """Invoke a unary RPC with a deadline and classified failure handling.
 
         Returns ``(response, None)`` on success and ``(None, detail)`` when a
@@ -98,11 +105,14 @@ class GatewayTransportBase:
             code = exc.code() if callable(getattr(exc, "code", None)) else None
             details = exc.details() if callable(getattr(exc, "details", None)) else str(exc)
             if code is None or code in _TRANSPORT_DEAD_CODES:
-                self._mark_dead(f"{rpc_name} RPC failed ({code}): {details}")
+                self._mark_dead(
+                    f"{rpc_name} RPC failed ({code}): {details}",
+                    allow_direct_fallback=allow_direct_fallback,
+                )
                 return None, None
             return None, details or str(code)
         except Exception as exc:
-            self._mark_dead(f"{rpc_name} RPC failed: {exc}")
+            self._mark_dead(f"{rpc_name} RPC failed: {exc}", allow_direct_fallback=allow_direct_fallback)
             return None, None
         return response, None
 
@@ -116,14 +126,21 @@ class GatewayTransportBase:
         """
         return self._dead
 
-    def _mark_dead(self, reason: str) -> None:
+    def _mark_dead(self, reason: str, *, allow_direct_fallback: bool = True) -> None:
         self._dead = True
         self._handles = None
-        logger.warning(
-            "%s gateway transport unavailable — falling back to direct HTTP: %s",
-            self.lane_label,
-            reason,
-        )
+        if allow_direct_fallback:
+            logger.warning(
+                "%s gateway transport unavailable — falling back to direct HTTP: %s",
+                self.lane_label,
+                reason,
+            )
+        else:
+            logger.warning(
+                "%s gateway transport unavailable — fail_closed=true direct HTTP fallback disabled: %s",
+                self.lane_label,
+                reason,
+            )
 
     def _announce_serving(self) -> None:
         if not self._announced:

@@ -5449,6 +5449,56 @@ class CoinGeckoMarketChartRangeResponse(_message.Message):
 Global___CoinGeckoMarketChartRangeResponse: _TypeAlias = CoinGeckoMarketChartRangeResponse  # noqa: Y015
 
 @_typing.final
+class CoinGeckoResolveContractRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    ASSET_PLATFORM_FIELD_NUMBER: _builtins.int
+    CONTRACT_ADDRESS_FIELD_NUMBER: _builtins.int
+    asset_platform: _builtins.str
+    """CoinGecko asset-platform id (e.g. "base", "arbitrum-one"). The gateway
+    validates this against the provider manifest before issuing HTTP.
+    """
+    contract_address: _builtins.str
+    """Lowercase EVM contract address. The gateway validates the 20-byte shape."""
+    def __init__(
+        self,
+        *,
+        asset_platform: _builtins.str = ...,
+        contract_address: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["asset_platform", b"asset_platform", "contract_address", b"contract_address"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___CoinGeckoResolveContractRequest: _TypeAlias = CoinGeckoResolveContractRequest  # noqa: Y015
+
+@_typing.final
+class CoinGeckoResolveContractResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    COIN_ID_FIELD_NUMBER: _builtins.int
+    FOUND_FIELD_NUMBER: _builtins.int
+    SOURCE_FIELD_NUMBER: _builtins.int
+    coin_id: _builtins.str
+    """Empty iff found=false. A successful upstream response with a malformed or
+    missing id is a typed RPC error, never an honest miss.
+    """
+    found: _builtins.bool
+    """False only for CoinGecko's explicit contract-not-found response."""
+    source: _builtins.str
+    """Gateway provenance: "coingecko_api" or "gateway_cache"."""
+    def __init__(
+        self,
+        *,
+        coin_id: _builtins.str = ...,
+        found: _builtins.bool = ...,
+        source: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["coin_id", b"coin_id", "found", b"found", "source", b"source"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___CoinGeckoResolveContractResponse: _TypeAlias = CoinGeckoResolveContractResponse  # noqa: Y015
+
+@_typing.final
 class CoinGeckoOHLCVRequest(_message.Message):
     """CoinGecko CEX-reference OHLCV (VIB-4847). Second CEX-capable provider in the
     router's cex_primary failover chain. Candles are price-only (no volume).

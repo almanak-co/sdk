@@ -12,7 +12,7 @@ This document describes the gRPC API exposed by the Almanak Gateway.
 | ExecutionService | 3 | Intent compilation and transaction execution |
 | ObserveService | 4 | Logging, alerts, metrics, and timeline events |
 | RpcService | 7 | JSON-RPC proxy to blockchains with typed queries |
-| IntegrationService | 13 | Third-party data (Binance, CoinGecko, TheGraph, CoinGecko Onchain, Zerion) |
+| IntegrationService | 14 | Third-party data (Binance, CoinGecko, TheGraph, CoinGecko Onchain, Zerion) |
 | DashboardService | 22 | Operator dashboard data, actions, transaction ledger, PnL/cost stack, audit posture, trade tape, activity feed, positions, reconciliation report, and operator reconciliation actions |
 | FundingRateService | 2 | Perpetual funding rates and spreads |
 | SimulationService | 1 | Transaction bundle simulation (Tenderly/Alchemy) |
@@ -1138,6 +1138,36 @@ Get price chart data for a date range.
 ```protobuf
 rpc CoinGeckoGetMarketChartRange(CoinGeckoMarketChartRangeRequest) returns (CoinGeckoMarketChartRangeResponse)
 ```
+
+### CoinGeckoResolveContract
+
+Resolve a chain-scoped contract address to its CoinGecko coin ID. The gateway
+owns the vendor request, API key, caching, and rate-limit handling; a configured
+backtest sidecar never falls back to direct CoinGecko HTTP for this lookup.
+
+```protobuf
+rpc CoinGeckoResolveContract(CoinGeckoResolveContractRequest) returns (CoinGeckoResolveContractResponse)
+```
+
+**Request:**
+```protobuf
+message CoinGeckoResolveContractRequest {
+  string asset_platform = 1;   // CoinGecko platform ID, e.g. "base"
+  string contract_address = 2; // EVM contract address
+}
+```
+
+**Response:**
+```protobuf
+message CoinGeckoResolveContractResponse {
+  string coin_id = 1; // Empty when found=false
+  bool found = 2;     // False only for an explicit contract miss
+  string source = 3;  // "coingecko_api" or "gateway_cache"
+}
+```
+
+Gateway transport, authentication, rate-limit, and malformed-upstream failures
+are returned as typed gRPC errors rather than being reported as contract misses.
 
 ### CoinGeckoGetOHLCV
 

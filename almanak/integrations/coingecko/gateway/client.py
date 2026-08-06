@@ -9,14 +9,19 @@ Supports both free and pro API endpoints based on API key availability.
 """
 
 import logging
+import re
 from typing import Any
 
 from pydantic import BaseModel, Field
 
 from almanak.gateway.utils.rpc_provider import _get_gateway_api_key
-from almanak.integrations._base.gateway.base import BaseIntegration
+from almanak.integrations._base.gateway.base import BaseIntegration, IntegrationError
 
 logger = logging.getLogger(__name__)
+
+_COIN_ID_PATTERN = re.compile(r"^[a-z0-9-]{1,64}$")
+_CONTRACT_RESOLUTION_TTL_SECONDS = 30 * 24 * 60 * 60
+_CONTRACT_NOT_FOUND_TTL_SECONDS = 5 * 60
 
 
 # =============================================================================
@@ -328,6 +333,62 @@ class CoinGeckoIntegration(BaseIntegration):
         self._update_cache(cache_key, coins, ttl=300)
 
         return coins
+
+    async def resolve_contract(
+        self,
+        *,
+        asset_platform: str,
+        contract_address: str,
+    ) -> dict[str, str | bool]:
+        """Resolve a contract address to its chain-specific CoinGecko id.
+
+        Positive mappings are effectively immutable, so they receive a
+        long-lived gateway cache entry. Explicit 400/404 misses are cached
+        briefly to avoid repeatedly burning vendor quota while still allowing
+        a newly indexed contract to appear. Transport, authentication,
+        rate-limit, and malformed-upstream failures propagate and are never
+        converted into a not-found result.
+        """
+        platform = asset_platform.strip().lower()
+        address = contract_address.strip().lower()
+        cache_key = f"contract_resolution:{platform}:{address}"
+
+        cached = self._get_cached(cache_key)
+        if isinstance(cached, dict):
+            return {
+                "coin_id": str(cached.get("coin_id", "")),
+                "found": bool(cached.get("found", False)),
+                "source": "gateway_cache",
+            }
+
+        try:
+            data = await self._fetch(f"/coins/{platform}/contract/{address}")
+        except IntegrationError as exc:
+            if exc.code.upper() not in {"HTTP_400", "HTTP_404"}:
+                raise
+            miss: dict[str, str | bool] = {"coin_id": "", "found": False}
+            self._update_cache(cache_key, miss, ttl=_CONTRACT_NOT_FOUND_TTL_SECONDS)
+            return {**miss, "source": "coingecko_api"}
+
+        if not isinstance(data, dict):
+            raise IntegrationError(
+                self.name,
+                "Contract resolution returned a non-object response",
+                code="INVALID_RESPONSE",
+            )
+
+        raw_coin_id = data.get("id")
+        coin_id = raw_coin_id.strip().lower() if isinstance(raw_coin_id, str) else ""
+        if not _COIN_ID_PATTERN.fullmatch(coin_id):
+            raise IntegrationError(
+                self.name,
+                "Contract resolution returned a missing or invalid coin id",
+                code="INVALID_RESPONSE",
+            )
+
+        resolved: dict[str, str | bool] = {"coin_id": coin_id, "found": True}
+        self._update_cache(cache_key, resolved, ttl=_CONTRACT_RESOLUTION_TTL_SECONDS)
+        return {**resolved, "source": "coingecko_api"}
 
     async def get_historical_price(
         self,
