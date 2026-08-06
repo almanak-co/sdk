@@ -29,7 +29,7 @@ Reference: ``docs/internal/zodiac-permission-onchain-coverage-plan.md``.
 
 from __future__ import annotations
 
-import secrets
+import os
 
 from eth_abi import encode as abi_encode
 from eth_account import Account
@@ -67,6 +67,44 @@ _PROXY_CREATION_TOPIC = Web3.keccak(text="ProxyCreation(address,address)").hex()
 
 # ModuleProxyFactory emits ModuleProxyCreation(address indexed proxy, address indexed masterCopy)
 _MODULE_PROXY_CREATION_TOPIC = Web3.keccak(text="ModuleProxyCreation(address,address)").hex()
+
+
+# =============================================================================
+# CREATE2 salts
+# =============================================================================
+
+# Both proxy factories deploy via CREATE2, so the salt fixes the deployed
+# address. The original salt was ``secrets.randbits(256)`` with the comment
+# "random salt so parallel tests don't collide". Random does prevent
+# collisions, but it also hands every test a brand-new Safe/Roles address on
+# every CI run — and the intent-test RPC proxy caches fork reads keyed by
+# address. A fresh address costs an account triple (balance/nonce/code) plus a
+# fresh set of mapping slots on real contracts (``balanceOf[safe]`` lives at
+# ``keccak(safe . slot)``), and none of it can ever be served from cache.
+# Measured 2026-08-06 across the 9-chain matrix, that was 6,140 of the 6,319
+# remaining upstream calls per run.
+#
+# Hashing the pytest node id keeps exactly the property the random salt existed
+# for — node ids are unique by construction, which is strictly stronger than a
+# birthday bound — while making each test's addresses stable run to run so the
+# proxy cache can actually serve them.
+_SALT_COLLISION_RETRIES = 3
+
+
+def _deterministic_salt(kind: str, attempt: int = 0) -> int:
+    """CREATE2 salt: unique per (test, kind), identical across runs."""
+    node_id = os.environ.get("PYTEST_CURRENT_TEST", "no-pytest-context")
+    return int.from_bytes(Web3.keccak(text=f"{node_id}|{kind}|{attempt}"), "big")
+
+
+def _is_salt_collision(error: Exception) -> bool:
+    """True when a deploy failed because that CREATE2 address is already taken.
+
+    Only a revert is retryable — an RPC or connectivity failure must surface
+    immediately rather than being retried under a different salt, which would
+    turn a clear error into a confusing one.
+    """
+    return "reverted" in str(error).lower()
 
 
 # =============================================================================
@@ -212,23 +250,31 @@ def deploy_test_safe(web3: Web3, owner_eoa: str, owner_private_key: str) -> str:
         ],
     )
 
-    deploy_calldata = factory.encode_abi(
-        "createProxyWithNonce",
-        args=[
-            Web3.to_checksum_address(SAFE_L2_SINGLETON_V1_4_1),
-            bytes.fromhex(setup_calldata[2:]) if isinstance(setup_calldata, str) else setup_calldata,
-            secrets.randbits(256),  # random salt so parallel tests don't collide
-        ],
-    )
+    initializer = bytes.fromhex(setup_calldata[2:]) if isinstance(setup_calldata, str) else setup_calldata
 
-    receipt = _send_eoa_tx(
-        web3,
-        SAFE_PROXY_FACTORY_V1_4_1,
-        bytes.fromhex(deploy_calldata[2:]) if isinstance(deploy_calldata, str) else deploy_calldata,
-        owner_eoa,
-        owner_private_key,
-    )
-    return _extract_proxy_from_receipt(receipt, _PROXY_CREATION_TOPIC)
+    for attempt in range(_SALT_COLLISION_RETRIES):
+        deploy_calldata = factory.encode_abi(
+            "createProxyWithNonce",
+            args=[
+                Web3.to_checksum_address(SAFE_L2_SINGLETON_V1_4_1),
+                initializer,
+                _deterministic_salt("safe", attempt),
+            ],
+        )
+        try:
+            receipt = _send_eoa_tx(
+                web3,
+                SAFE_PROXY_FACTORY_V1_4_1,
+                bytes.fromhex(deploy_calldata[2:]) if isinstance(deploy_calldata, str) else deploy_calldata,
+                owner_eoa,
+                owner_private_key,
+            )
+        except Exception as error:
+            if attempt == _SALT_COLLISION_RETRIES - 1 or not _is_salt_collision(error):
+                raise
+            continue
+        return _extract_proxy_from_receipt(receipt, _PROXY_CREATION_TOPIC)
+    raise RuntimeError("unreachable: Safe deploy loop exhausted without raising")
 
 
 # =============================================================================
@@ -267,19 +313,29 @@ def deploy_test_zodiac_roles(
         address=Web3.to_checksum_address(MODULE_PROXY_FACTORY),
         abi=MODULE_PROXY_FACTORY_DEPLOY_MODULE_ABI,
     )
-    deploy_calldata_hex = factory.encode_abi(
-        "deployModule",
-        args=[
-            Web3.to_checksum_address(ROLES_MODIFIER_SINGLETON),
-            setup_calldata,
-            secrets.randbits(256),
-        ],
-    )
-    deploy_calldata = (
-        bytes.fromhex(deploy_calldata_hex[2:]) if isinstance(deploy_calldata_hex, str) else deploy_calldata_hex
-    )
-    receipt = _send_eoa_tx(web3, MODULE_PROXY_FACTORY, deploy_calldata, owner_eoa, owner_private_key)
-    roles_address = _extract_proxy_from_receipt(receipt, _MODULE_PROXY_CREATION_TOPIC)
+    roles_address = None
+    for attempt in range(_SALT_COLLISION_RETRIES):
+        deploy_calldata_hex = factory.encode_abi(
+            "deployModule",
+            args=[
+                Web3.to_checksum_address(ROLES_MODIFIER_SINGLETON),
+                setup_calldata,
+                _deterministic_salt("roles", attempt),
+            ],
+        )
+        deploy_calldata = (
+            bytes.fromhex(deploy_calldata_hex[2:]) if isinstance(deploy_calldata_hex, str) else deploy_calldata_hex
+        )
+        try:
+            receipt = _send_eoa_tx(web3, MODULE_PROXY_FACTORY, deploy_calldata, owner_eoa, owner_private_key)
+        except Exception as error:
+            if attempt == _SALT_COLLISION_RETRIES - 1 or not _is_salt_collision(error):
+                raise
+            continue
+        roles_address = _extract_proxy_from_receipt(receipt, _MODULE_PROXY_CREATION_TOPIC)
+        break
+    if roles_address is None:  # pragma: no cover - the loop always breaks or raises
+        raise RuntimeError("unreachable: Roles deploy loop exhausted without raising")
 
     # 3. Enable the module on the Safe (authorized → must go through Safe.execTransaction).
     safe_c = web3.eth.contract(abi=SAFE_ENABLE_MODULE_ABI)
