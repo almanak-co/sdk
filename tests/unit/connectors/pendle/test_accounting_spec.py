@@ -86,12 +86,18 @@ def _ledger(
 # --- categorization (replaces taxonomy.classify's pendle branches) ----------
 
 
-@pytest.mark.parametrize("intent_type", ["LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"])
+@pytest.mark.parametrize("intent_type", ["LP_OPEN", "LP_CLOSE"])
 def test_categorize_pendle_lp_to_generic_lp(intent_type: str):
     decision = ACCOUNTING_TREATMENT_SPEC.categorize(intent_type, "pendle_v2", "")
     assert decision is not None
     assert decision.category is AccountingCategory.LP  # generic, not a protocol-named member
     assert decision.treatment_key == "pendle_lp"
+
+
+def test_categorize_pendle_collect_fees_declined_until_typed_treatment() -> None:
+    """VIB-5275: fee collection stays generic until Pendle emits a typed event."""
+    assert ACCOUNTING_TREATMENT_SPEC.categorize("LP_COLLECT_FEES", "pendle_v2", "") is None
+    assert "LP_COLLECT_FEES" not in ACCOUNTING_TREATMENT_SPEC.claims_event_types
 
 
 def test_categorize_pendle_pt_buy_to_generic_swap():

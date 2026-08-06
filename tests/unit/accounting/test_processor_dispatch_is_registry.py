@@ -17,7 +17,6 @@ import ast
 import inspect
 import logging
 from pathlib import Path
-from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -25,9 +24,8 @@ import pytest
 from almanak.framework.accounting import category_handlers as ch
 from almanak.framework.accounting.basis import FIFOBasisStore
 from almanak.framework.accounting.category_handlers import HandlerContext
-from almanak.framework.accounting.processor import AccountingProcessor
+from almanak.framework.accounting.processor import AccountingDispatchOutcome, AccountingProcessor
 from almanak.framework.primitives.types import AccountingCategory
-
 
 # ─── D1.S4 — static AST gate ─────────────────────────────────────────────────
 
@@ -198,8 +196,8 @@ def test_dispatch_calls_registered_handler_for_every_registered_category(
     assert ctx.ledger_row is ledger
 
 
-def test_dispatch_returns_none_for_no_accounting(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``NO_ACCOUNTING`` short-circuits without consulting the registry."""
+def test_dispatch_returns_explicit_outcome_for_no_accounting(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``NO_ACCOUNTING`` is explicit and cannot alias a dropped event."""
     handler_mock = MagicMock()
     monkeypatch.setattr(
         "almanak.framework.accounting.processor.HANDLERS",
@@ -212,8 +210,22 @@ def test_dispatch_returns_none_for_no_accounting(monkeypatch: pytest.MonkeyPatch
 
     processor = _build_processor()
     result = processor._dispatch({"id": "ob"}, {"id": "led", "intent_type": "HOLD"})
-    assert result is None
+    assert result is AccountingDispatchOutcome.NO_ACCOUNTING
     assert handler_mock.call_count == 0
+
+
+def test_dispatch_unknown_soft_fallback_is_not_successful_no_accounting(caplog: pytest.LogCaptureFixture) -> None:
+    """Only an explicit taxonomy row may authorize a successful non-event."""
+    processor = _build_processor()
+
+    with caplog.at_level(logging.ERROR):
+        result = processor._dispatch(
+            {"id": "ob"},
+            {"id": "led", "intent_type": "TOTALLY_UNKNOWN_INTENT"},
+        )
+
+    assert result is None
+    assert "soft NO_ACCOUNTING fallback" in caplog.text
 
 
 def test_dispatch_invokes_handler_exactly_once(monkeypatch: pytest.MonkeyPatch) -> None:

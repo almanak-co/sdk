@@ -711,9 +711,73 @@ def invoke_pre_iteration_callback(
 # current unit's outbox drains to land before reading accounting_events. The
 # drain is local SQLite I/O (sub-ms typically); 5s is a generous ceiling that
 # never stalls the loop. On timeout we degrade (stamp inventory unmeasured),
-# never halt — the outbox row persists and drains later (on-chain risk already
-# removed).
+# never halt by themselves — the outbox row persists and drains later. A typed
+# mandatory live write failure is handled separately by the iteration lane;
+# teardown still degrades and continues because on-chain risk reduction wins.
 _DRAIN_BARRIER_TIMEOUT_S = 5.0
+
+
+def _consume_completed_drain_tasks(
+    runner: StrategyRunner,
+) -> tuple[bool, AccountingPersistenceError | None]:
+    """Observe and release completed runner-level drain tasks without waiting.
+
+    Snapshot-disabled runners still write ledger/outbox rows, so their async
+    drains can complete even though the snapshot wrappers skip the normal
+    barrier. This non-blocking sweep prevents one completed ``Task`` reference
+    per execution from accumulating until shutdown. Pending tasks remain
+    strongly referenced for a later sweep/shutdown.
+
+    Returns ``(all_succeeded, first_typed_failure)`` for the tasks observed in
+    this call. Every observed exception is retrieved before its task is removed.
+    """
+    pending_refs: set[asyncio.Task] | None = getattr(runner, "_pending_drain_tasks", None)
+    if not pending_refs:
+        return True, None
+
+    completed = [task for task in pending_refs if task.done()]
+    if not completed:
+        return True, None
+
+    all_succeeded = True
+    accounting_failure: AccountingPersistenceError | None = None
+    for task in completed:
+        try:
+            if task.result() is False:
+                all_succeeded = False
+                logger.error(
+                    "_consume_completed_drain_tasks: accounting drain reported persistent failure "
+                    "(event not persisted) for %s",
+                    getattr(runner, "deployment_id", "") or "",
+                )
+        except asyncio.CancelledError:
+            all_succeeded = False
+        except AccountingPersistenceError as exc:
+            all_succeeded = False
+            logger.error(
+                "_consume_completed_drain_tasks: accounting drain failed mandatory persistence for %s "
+                "(write_kind=%s) — event not persisted",
+                getattr(runner, "deployment_id", "") or "",
+                exc.write_kind,
+                exc_info=True,
+            )
+            if accounting_failure is None:
+                accounting_failure = exc
+        except Exception:
+            all_succeeded = False
+            logger.error(
+                "_consume_completed_drain_tasks: accounting drain raised for %s (event not persisted)",
+                getattr(runner, "deployment_id", "") or "",
+                exc_info=True,
+            )
+        finally:
+            pending_refs.discard(task)
+
+    batch = getattr(runner, "_drain_batch", None)
+    if isinstance(batch, list):
+        completed_set = set(completed)
+        batch[:] = [task for task in batch if task not in completed_set]
+    return all_succeeded, accounting_failure
 
 
 async def await_drain_barrier(
@@ -721,6 +785,7 @@ async def await_drain_barrier(
     tasks: list[asyncio.Task],
     *,
     timeout: float = _DRAIN_BARRIER_TIMEOUT_S,
+    propagate_accounting_failure: bool = False,
 ) -> bool:
     """Await the current unit's accounting-drain batch before a snapshot (VIB-5406).
 
@@ -732,26 +797,44 @@ async def await_drain_barrier(
     stream that still shows the just-sold lot as held → phantom inventory / NAV
     overstatement (the race this fix closes).
 
-    Awaits ``tasks`` (this unit's drain batch) up to ``timeout`` seconds.
+    Awaits ``tasks`` (this unit's drain batch) plus every unconsumed runner-level
+    pending task up to ``timeout`` seconds. This runner-level sweep is
+    intentional: a control-flow jump may reset the per-unit batch before its
+    barrier (notably teardown PRE), but no accounting result may be orphaned.
     Stragglers are **not** cancelled — unlike the shutdown drain, they must still
-    complete and persist their event (the outbox row is durable; the event lands
-    on a later snapshot or at shutdown). On timeout we ERROR-log with the
-    deployment id + undrained count and return ``False`` (degraded) so the caller
-    can stamp inventory ``unmeasured``; we never raise and never block the loop.
+    complete and persist their event. They remain in the runner's pending set so
+    the next barrier consumes their result even if the per-unit batch is reset. On
+    timeout we ERROR-log with the deployment id + undrained count and return
+    ``False`` (degraded) so the caller can stamp inventory ``unmeasured``. When
+    ``propagate_accounting_failure=True``, a completed drain's typed
+    :class:`AccountingPersistenceError` is re-raised *after* every completed
+    task result has been consumed and the batch has been cleared. The iteration
+    lane enables this so mandatory live accounting drops reach its
+    ``ACCOUNTING_FAILED`` guard; teardown catches the same typed error, records
+    degradation, and continues so risk reduction never halts.
 
     Returns ``True`` only when every task both COMPLETED within the timeout AND
     reported success (``drain_one`` returns ``bool`` — ``False`` is a persistent
     write failure it catches internally). A timed-out OR failed/raised drain
     returns ``False`` (degraded) so the caller stamps inventory ``unmeasured``;
-    an empty batch (the common no-disposal-this-unit case) returns ``True``. We
-    never raise and never block the loop. Clears the batch after awaiting
-    regardless of outcome (its job for THIS snapshot is done).
+    an empty batch (the common no-disposal-this-unit case) returns ``True``.
+    Plain failures and timeouts never raise. Clears the current unit's batch
+    after awaiting regardless of outcome; timed-out tasks remain carried by the
+    runner until a later barrier or shutdown consumes them.
     """
-    pending = [t for t in tasks if not t.done()]
+    pending_refs: set[asyncio.Task] | None = getattr(runner, "_pending_drain_tasks", None)
+    if pending_refs is None:
+        pending_refs = set()
+        runner._pending_drain_tasks = pending_refs
+    # De-duplicate a task present in more than one tracking collection.
+    barrier_tasks = list(dict.fromkeys([*pending_refs, *tasks]))
+    pending = [t for t in barrier_tasks if not t.done()]
     all_done = True
+    accounting_failure: AccountingPersistenceError | None = None
+    still_pending: set[asyncio.Task] = set()
     # Tasks already finished before we awaited still need their RESULT inspected
     # (see the loop below) — completion alone is not success.
-    completed: list[asyncio.Task] = [t for t in tasks if t.done()]
+    completed: list[asyncio.Task] = [t for t in barrier_tasks if t.done()]
     if pending:
         _done, still_pending = await asyncio.wait(pending, timeout=timeout)
         completed.extend(_done)
@@ -788,6 +871,17 @@ async def await_drain_barrier(
                 )
         except asyncio.CancelledError:
             all_done = False
+        except AccountingPersistenceError as exc:
+            all_done = False
+            logger.error(
+                "await_drain_barrier: an accounting drain task failed mandatory persistence for %s "
+                "(write_kind=%s) — event not persisted",
+                getattr(runner, "deployment_id", "") or "",
+                exc.write_kind,
+                exc_info=True,
+            )
+            if propagate_accounting_failure and accounting_failure is None:
+                accounting_failure = exc
         except Exception:
             all_done = False
             logger.error(
@@ -796,10 +890,20 @@ async def await_drain_barrier(
                 getattr(runner, "deployment_id", "") or "",
                 exc_info=True,
             )
+        finally:
+            # Result (success or failure) has now been observed. Release the
+            # runner-level lifetime reference so completed tasks cannot accumulate.
+            pending_refs.discard(t)
+    # A timed-out task must survive a per-iteration or teardown-PRE batch reset.
+    # Carry it explicitly into the next barrier, where its eventual result (and
+    # especially a typed live failure) will be observed and propagated.
+    pending_refs.update(still_pending)
     # The batch's purpose for this snapshot is fulfilled; clear it so the next
-    # unit starts clean. Stragglers remain referenced by ``_pending_drain_tasks``
-    # (awaited at shutdown), so clearing here cannot drop them.
+    # unit starts clean. Stragglers remain referenced by the runner-level set,
+    # so clearing here cannot drop their eventual result.
     tasks.clear()
+    if accounting_failure is not None:
+        raise accounting_failure
     return all_done
 
 
@@ -842,18 +946,33 @@ async def capture_snapshot_with_accounting(
     # Local import to avoid circular dependency at module load time.
     from .runner_models import IterationResult, IterationStatus
 
-    if not runner.config.enable_state_persistence:
-        return result
-
-    # VIB-5406: await THIS iteration's disposal drains before the snapshot reads
-    # accounting_events, so event-replay-derived inventory (PT, swap) reflects
-    # this iteration's disposals instead of racing a not-yet-drained event. On
-    # timeout the valuer stamps inventory unmeasured (drain_incomplete) rather
-    # than emit a phantom lot; the loop never halts.
-    drain_ok = await await_drain_barrier(runner, getattr(runner, "_drain_batch", []))
-    valuer = getattr(runner, "_portfolio_valuer", None)
-    if valuer is not None and hasattr(valuer, "set_drain_barrier_incomplete"):
-        valuer.set_drain_barrier_incomplete(not drain_ok)
+    persistence_enabled = runner.config.enable_state_persistence
+    drain_failure: AccountingPersistenceError | None = None
+    if persistence_enabled:
+        # VIB-5406: await THIS iteration's disposal drains before the snapshot
+        # reads accounting_events, so event-replay-derived inventory (PT, swap)
+        # reflects this iteration's disposals instead of racing a not-yet-drained
+        # event. On timeout the valuer stamps inventory unmeasured rather than
+        # emit a phantom lot. A typed live failure enters ACCOUNTING_FAILED below.
+        try:
+            drain_ok = await await_drain_barrier(
+                runner,
+                getattr(runner, "_drain_batch", []),
+                propagate_accounting_failure=True,
+            )
+        except AccountingPersistenceError as exc:
+            drain_failure = exc
+            drain_ok = False
+        valuer = getattr(runner, "_portfolio_valuer", None)
+        if valuer is not None and hasattr(valuer, "set_drain_barrier_incomplete"):
+            valuer.set_drain_barrier_incomplete(not drain_ok)
+    else:
+        # No snapshot means no barrier. Still consume every task that has
+        # already completed so its result/exception cannot accumulate until
+        # shutdown. A typed live failure uses the same ACCOUNTING_FAILED path.
+        _drain_ok, drain_failure = _consume_completed_drain_tasks(runner)
+        if drain_failure is None or not runner._is_live_mode():
+            return result
 
     # VIB-4926: on trade iterations, re-open the per-iteration MarketSnapshot
     # scope with a FRESH token before the post-execution snapshot capture so
@@ -892,7 +1011,7 @@ async def capture_snapshot_with_accounting(
     # iteration to bust the gateway's server-side balance cache. That ordering
     # is structural today (reconcile during execution precedes this snapshot);
     # if a refactor moves or guards it, the double-count can silently return.
-    if getattr(runner, "_iteration_had_trade", False):
+    if persistence_enabled and getattr(runner, "_iteration_had_trade", False):
         try:
             # _last_cycle_id is set every iteration (strategy_runner.py:871)
             # before execution, so it is always present when the trade flag is
@@ -912,6 +1031,18 @@ async def capture_snapshot_with_accounting(
             )
 
     try:
+        if drain_failure is not None and runner._is_live_mode():
+            raise drain_failure
+        if drain_failure is not None:
+            logger.error(
+                "capture_snapshot_with_accounting: accounting drain persistence failed in "
+                "non-live mode for %s (write_kind=%s); capturing degraded snapshot: %s",
+                deployment_id,
+                drain_failure.write_kind,
+                drain_failure,
+            )
+        if not persistence_enabled:
+            return result
         await runner._capture_portfolio_snapshot(
             strategy=strategy,
             iteration_number=runner._total_iterations,
@@ -1602,6 +1733,25 @@ class TeardownSnapshotOutcome:
     phase: str
 
 
+def _disabled_teardown_snapshot_outcome(runner: StrategyRunner, phase: str) -> TeardownSnapshotOutcome:
+    """Consume completed drains when teardown snapshot persistence is off."""
+    drain_ok, drain_failure = _consume_completed_drain_tasks(runner)
+    if drain_failure is not None:
+        degraded_reason = (
+            f"outbox/{phase}: AccountingPersistenceError (write_kind={drain_failure.write_kind}): {drain_failure}"
+        )
+    elif not drain_ok:
+        degraded_reason = f"outbox/{phase}: completed accounting drain failed"
+    else:
+        degraded_reason = None
+    return TeardownSnapshotOutcome(
+        snapshot_captured=False,
+        accounting_degraded=not drain_ok,
+        degraded_reason=degraded_reason,
+        phase=phase,
+    )
+
+
 async def capture_teardown_snapshot_with_accounting(
     runner: StrategyRunner,
     strategy: StrategyProtocol,
@@ -1655,13 +1805,11 @@ async def capture_teardown_snapshot_with_accounting(
     phase = "pre" if pre_teardown else "post"
 
     if not runner.config.enable_state_persistence:
-        # Persistence disabled — nothing to write, nothing to degrade.
-        return TeardownSnapshotOutcome(
-            snapshot_captured=False,
-            accounting_degraded=False,
-            degraded_reason=None,
-            phase=phase,
-        )
+        # Snapshot persistence is disabled, but ledger/outbox drains may still
+        # have been scheduled. Observe completed results without waiting so the
+        # teardown lane retains its never-halt contract and task references do
+        # not accumulate until shutdown.
+        return _disabled_teardown_snapshot_outcome(runner, phase)
 
     saved_ctx_cycle_id = get_cycle_id()
     saved_last_cycle_id = getattr(runner, "_last_cycle_id", "") or ""
@@ -1675,7 +1823,7 @@ async def capture_teardown_snapshot_with_accounting(
 
     deployment_id = strategy.deployment_id
 
-    def _append_deferred_safely(*, error: str, extra: dict[str, str]) -> None:
+    def _append_deferred_safely(*, error: str, extra: dict[str, str], kind: str = "snapshot") -> None:
         """Wrap the deferred-log append so even *its* failure cannot raise.
 
         VIB-3773 contract: teardown's snapshot bracket is degraded-but-
@@ -1689,7 +1837,7 @@ async def capture_teardown_snapshot_with_accounting(
         """
         try:
             _deferred_append_now(
-                kind="snapshot",
+                kind=kind,
                 deployment_id=deployment_id,
                 cycle_id=teardown_cycle_id,
                 error=error,
@@ -1753,10 +1901,39 @@ async def capture_teardown_snapshot_with_accounting(
     if pre_teardown:
         runner._drain_batch = []
     else:
-        drain_ok = await await_drain_barrier(runner, getattr(runner, "_drain_batch", []))
+        drain_failure: AccountingPersistenceError | None = None
+        try:
+            drain_ok = await await_drain_barrier(
+                runner,
+                getattr(runner, "_drain_batch", []),
+                propagate_accounting_failure=True,
+            )
+        except AccountingPersistenceError as exc:
+            # Teardown deliberately catches the typed failure: surface the
+            # accounting gap, but never strand a partially-unwound position.
+            drain_failure = exc
+            drain_ok = False
         valuer = getattr(runner, "_portfolio_valuer", None)
         if valuer is not None and hasattr(valuer, "set_drain_barrier_incomplete"):
             valuer.set_drain_barrier_incomplete(not drain_ok)
+        if drain_failure is not None:
+            accounting_degraded = True
+            degraded_reason = (
+                f"outbox/post: AccountingPersistenceError (write_kind={drain_failure.write_kind}): {drain_failure}"
+            )
+            logger.error(
+                "capture_teardown_snapshot_with_accounting[%s]: accounting drain persistence failed for %s "
+                "(write_kind=%s) — recording deferred + continuing teardown: %s",
+                phase,
+                deployment_id,
+                drain_failure.write_kind,
+                drain_failure,
+            )
+            _append_deferred_safely(
+                error=degraded_reason,
+                extra={"phase": phase, "write_kind": str(drain_failure.write_kind)},
+                kind="outbox",
+            )
 
     try:
         try:
@@ -2021,6 +2198,73 @@ async def handle_lifecycle_command(
 # =============================================================================
 
 
+def _log_shutdown_drain_result(
+    result: bool | BaseException | None,
+    deployment_id: str,
+    *,
+    while_cancelling: bool = False,
+) -> None:
+    """Record a consumed accounting-task result during runner shutdown."""
+    suffix = " while cancelling" if while_cancelling else ""
+    if isinstance(result, asyncio.CancelledError) or result is True or result is None:
+        return
+    if isinstance(result, AccountingPersistenceError):
+        logger.error(
+            "Shutdown: accounting drain task failed mandatory persistence%s for %s (write_kind=%s): %s",
+            suffix,
+            deployment_id,
+            result.write_kind,
+            result,
+        )
+    elif isinstance(result, BaseException):
+        logger.error(
+            "Shutdown: accounting drain task raised%s for %s (event not persisted): %s",
+            suffix,
+            deployment_id,
+            result,
+        )
+    elif result is False:
+        logger.error(
+            "Shutdown: accounting drain task reported persistent failure%s (event not persisted) for %s",
+            suffix,
+            deployment_id,
+        )
+
+
+async def _drain_accounting_tasks_on_shutdown(runner: StrategyRunner, deployment_id: str) -> None:
+    """Consume, or cancel+consume, every outstanding accounting drain task."""
+    pending_tasks: set[asyncio.Task[bool]] = getattr(runner, "_pending_drain_tasks", set())
+    try:
+        if not pending_tasks:
+            return
+        done, pending = await asyncio.wait(list(pending_tasks), timeout=5.0)
+        for task in done:
+            try:
+                result: bool | BaseException | None = task.result()
+            except asyncio.CancelledError as exc:
+                result = exc
+            except Exception as exc:  # noqa: BLE001 — result must be observed
+                result = exc
+            _log_shutdown_drain_result(result, deployment_id)
+            pending_tasks.discard(task)
+
+        if pending:
+            logger.warning(
+                "Shutdown: %d accounting drain task(s) did not complete in 5 s, cancelling",
+                len(pending),
+            )
+            for task in pending:
+                task.cancel()
+            # Cancellation is asynchronous. Await every task so neither a late
+            # exception nor CancelledError remains unobserved before close().
+            cancelled_results = await asyncio.gather(*pending, return_exceptions=True)
+            for result in cancelled_results:
+                _log_shutdown_drain_result(result, deployment_id, while_cancelling=True)
+            pending_tasks.difference_update(pending)
+    except Exception as exc:  # noqa: BLE001 — shutdown continues to close state
+        logger.warning("Error waiting for accounting drain tasks: %s", exc)
+
+
 async def finalize_run_loop(
     runner: StrategyRunner,
     strategy: StrategyProtocol,
@@ -2073,19 +2317,7 @@ async def finalize_run_loop(
     # must complete before state_manager.close() so drain_one doesn't write to a
     # closed backend.  5 s timeout: if tasks are still running after that, cancel
     # them and log a warning rather than blocking shutdown indefinitely.
-    pending_tasks: set[asyncio.Task[bool]] = getattr(runner, "_pending_drain_tasks", set())
-    if pending_tasks:
-        try:
-            done, pending = await asyncio.wait(list(pending_tasks), timeout=5.0)
-            if pending:
-                logger.warning(
-                    "Shutdown: %d accounting drain task(s) did not complete in 5 s, cancelling",
-                    len(pending),
-                )
-                for task in pending:
-                    task.cancel()
-        except Exception as e:
-            logger.warning("Error waiting for accounting drain tasks: %s", e)
+    await _drain_accounting_tasks_on_shutdown(runner, deployment_id)
 
     # Cleanup
     if runner.config.enable_state_persistence:

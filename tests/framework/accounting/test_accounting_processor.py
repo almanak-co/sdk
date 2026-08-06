@@ -6,11 +6,9 @@ Uses in-process mocks — no SQLite, no gateway, no network.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import uuid
 from datetime import UTC, datetime
-from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -18,7 +16,8 @@ import pytest
 
 from almanak.framework.accounting.basis import FIFOBasisStore
 from almanak.framework.accounting.processor import AccountingProcessor, write_outbox_entry
-
+from almanak.framework.models.run_mode import RunMode
+from almanak.framework.state.exceptions import AccountingPersistenceError, AccountingWriteKind
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -60,12 +59,13 @@ def _make_ledger_row(
     price_inputs_json: str = "",
     post_state_json: str = "",
     tx_hash: str = "0xdeadbeef",
+    execution_mode: str = "live",
 ) -> dict[str, Any]:
     return {
         "id": ledger_entry_id,
         "deployment_id": "dep-1",
         "cycle_id": "cycle-1",
-        "execution_mode": "live",
+        "execution_mode": execution_mode,
         "timestamp": datetime.now(UTC).isoformat(),
         "intent_type": intent_type,
         "token_in": "USDC",
@@ -151,7 +151,7 @@ async def test_drain_one_idempotent_when_event_already_written() -> None:
 
 
 @pytest.mark.asyncio
-async def test_drain_one_no_accounting_intent() -> None:
+async def test_drain_one_explicit_no_accounting_marks_processed() -> None:
     """HOLD intent → no_accounting → no accounting_events row written, but outbox marked processed.
 
     Uses HOLD as the canonical NO_ACCOUNTING intent. VIB-4164 (T4) reclassified
@@ -170,7 +170,7 @@ async def test_drain_one_no_accounting_intent() -> None:
     assert result is True
     store.save_accounting_event.assert_not_called()
     calls = [c.args for c in store.update_outbox_entry.call_args_list]
-    assert any(c[1] == "processed" for c in calls)
+    assert [c[1] for c in calls] == ["processing", "processed"]
 
 
 @pytest.mark.asyncio
@@ -187,28 +187,225 @@ async def test_drain_one_failed_row_too_many_retries() -> None:
 
 
 @pytest.mark.asyncio
-async def test_drain_one_handler_exception_marks_failed() -> None:
+async def test_drain_one_live_writer_exception_marks_failed_and_raises() -> None:
     led_id = str(uuid.uuid4())
     outbox_row = _make_outbox_row(led_id, intent_type="SUPPLY")
     ledger_row = _make_ledger_row(led_id, intent_type="SUPPLY")
     store = _make_mock_store(outbox_row=outbox_row, ledger_row=ledger_row, already_written=False)
     proc = AccountingProcessor(state_manager=store, basis_store=FIFOBasisStore(), deployment_id="dep-1")
 
-    # Make the writer raise to simulate a failure
+    # Make the durable store raise after dispatch produced a valid live event.
     store.save_accounting_event = AsyncMock(side_effect=RuntimeError("db down"))
+    event = MagicMock(identity=MagicMock(execution_mode="live", deployment_id="dep-1"))
+    proc._dispatch = MagicMock(return_value=event)
 
-    with patch(
-        "almanak.framework.accounting.category_handlers.lending_handler.handle_lending",
-        return_value=MagicMock(
-            identity=MagicMock(execution_mode="live"),
-            event_type="SUPPLY",
+    with pytest.raises(AccountingPersistenceError, match="db down"):
+        await proc.drain_one(led_id)
+
+    calls = [c.args for c in store.update_outbox_entry.call_args_list]
+    assert any(c[1] == "failed" for c in calls)
+    assert not any(c[1] == "processed" for c in calls)
+
+
+@pytest.mark.asyncio
+async def test_drain_one_live_dispatch_none_marks_failed_and_raises(caplog: pytest.LogCaptureFixture) -> None:
+    """A claimed live accounting path may not silently book ``None`` as processed."""
+    led_id = str(uuid.uuid4())
+    outbox_row = _make_outbox_row(led_id, intent_type="LP_COLLECT_FEES")
+    ledger_row = _make_ledger_row(led_id, intent_type="LP_COLLECT_FEES", protocol="curve")
+    store = _make_mock_store(outbox_row=outbox_row, ledger_row=ledger_row)
+    proc = AccountingProcessor(state_manager=store, basis_store=FIFOBasisStore(), deployment_id="dep-1")
+    proc._dispatch = MagicMock(return_value=None)
+
+    with (
+        caplog.at_level("ERROR"),
+        pytest.raises(
+            AccountingPersistenceError,
+            match="classified accounting dispatch produced no event",
         ),
     ):
+        await proc.drain_one(led_id)
+
+    store.save_accounting_event.assert_not_called()
+    calls = [c.args for c in store.update_outbox_entry.call_args_list]
+    assert [c[1] for c in calls] == ["processing", "failed"]
+    assert "produced no event" in calls[-1][2]
+    assert calls[-1][3] == 1
+    assert "produced no event" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_drain_one_live_dispatch_exception_marks_failed_and_raises() -> None:
+    """A handler crash is the same mandatory-event failure class as bare ``None``."""
+    led_id = str(uuid.uuid4())
+    outbox_row = _make_outbox_row(led_id, intent_type="LP_COLLECT_FEES")
+    ledger_row = _make_ledger_row(led_id, intent_type="LP_COLLECT_FEES", protocol="curve")
+    store = _make_mock_store(outbox_row=outbox_row, ledger_row=ledger_row)
+    proc = AccountingProcessor(state_manager=store, basis_store=FIFOBasisStore(), deployment_id="dep-1")
+    proc._dispatch = MagicMock(side_effect=RuntimeError("handler broke"))
+
+    with pytest.raises(AccountingPersistenceError, match="accounting dispatch raised") as raised:
+        await proc.drain_one(led_id)
+
+    assert isinstance(raised.value.cause, RuntimeError)
+    calls = [c.args for c in store.update_outbox_entry.call_args_list]
+    assert [c[1] for c in calls] == ["processing", "failed"]
+
+
+@pytest.mark.asyncio
+async def test_drain_one_paper_dispatch_none_marks_failed_and_returns_false(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Non-live drops remain retryable and visible without halting the loop."""
+    led_id = str(uuid.uuid4())
+    outbox_row = _make_outbox_row(led_id, intent_type="LP_COLLECT_FEES")
+    ledger_row = _make_ledger_row(
+        led_id,
+        intent_type="LP_COLLECT_FEES",
+        protocol="curve",
+        execution_mode="paper",
+    )
+    store = _make_mock_store(outbox_row=outbox_row, ledger_row=ledger_row)
+    proc = AccountingProcessor(state_manager=store, basis_store=FIFOBasisStore(), deployment_id="dep-1")
+    proc._dispatch = MagicMock(return_value=None)
+
+    with caplog.at_level("ERROR"):
         result = await proc.drain_one(led_id)
 
     assert result is False
+    store.save_accounting_event.assert_not_called()
     calls = [c.args for c in store.update_outbox_entry.call_args_list]
-    assert any(c[1] == "failed" for c in calls)
+    assert [c[1] for c in calls] == ["processing", "failed"]
+    assert "produced no event" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_drain_one_real_lp_handler_missing_pool_fails_closed_in_live() -> None:
+    """The real LP handler's pool-resolution ``None`` is a mandatory live drop."""
+    led_id = str(uuid.uuid4())
+    outbox_row = _make_outbox_row(
+        led_id,
+        intent_type="LP_COLLECT_FEES",
+        position_key="",
+        market_id="",
+    )
+    ledger_row = _make_ledger_row(led_id, intent_type="LP_COLLECT_FEES", protocol="curve")
+    store = _make_mock_store(outbox_row=outbox_row, ledger_row=ledger_row)
+    proc = AccountingProcessor(state_manager=store, basis_store=FIFOBasisStore(), deployment_id="dep-1")
+
+    with pytest.raises(AccountingPersistenceError, match="classified accounting dispatch produced no event"):
+        await proc.drain_one(led_id)
+
+    store.save_accounting_event.assert_not_called()
+    assert [c.args[1] for c in store.update_outbox_entry.call_args_list] == ["processing", "failed"]
+
+
+@pytest.mark.asyncio
+async def test_drain_one_real_lp_handler_missing_pool_degrades_in_paper() -> None:
+    """The same real-handler drop remains failed/retryable without halting paper."""
+    led_id = str(uuid.uuid4())
+    outbox_row = _make_outbox_row(
+        led_id,
+        intent_type="LP_COLLECT_FEES",
+        position_key="",
+        market_id="",
+    )
+    ledger_row = _make_ledger_row(
+        led_id,
+        intent_type="LP_COLLECT_FEES",
+        protocol="curve",
+        execution_mode="paper",
+    )
+    store = _make_mock_store(outbox_row=outbox_row, ledger_row=ledger_row)
+    proc = AccountingProcessor(state_manager=store, basis_store=FIFOBasisStore(), deployment_id="dep-1")
+
+    assert await proc.drain_one(led_id) is False
+
+    store.save_accounting_event.assert_not_called()
+    assert [c.args[1] for c in store.update_outbox_entry.call_args_list] == ["processing", "failed"]
+
+
+@pytest.mark.asyncio
+async def test_drain_one_unstamped_row_uses_fail_closed_live_processor_mode() -> None:
+    """A legacy empty stamp cannot downgrade a live runner's mandatory drop."""
+    led_id = str(uuid.uuid4())
+    outbox_row = _make_outbox_row(led_id, intent_type="LP_COLLECT_FEES")
+    ledger_row = _make_ledger_row(
+        led_id,
+        intent_type="LP_COLLECT_FEES",
+        protocol="curve",
+        execution_mode="",
+    )
+    store = _make_mock_store(outbox_row=outbox_row, ledger_row=ledger_row)
+    proc = AccountingProcessor(state_manager=store, basis_store=FIFOBasisStore(), deployment_id="dep-1")
+    proc._dispatch = MagicMock(return_value=None)
+
+    with pytest.raises(AccountingPersistenceError, match="classified accounting dispatch produced no event"):
+        await proc.drain_one(led_id)
+
+    assert proc._dispatch.call_args.args[1]["execution_mode"] is RunMode.LIVE
+
+
+@pytest.mark.asyncio
+async def test_drain_one_unstamped_row_uses_configured_paper_processor_mode() -> None:
+    """Legacy rows inherit a known paper runner mode rather than assuming live."""
+    led_id = str(uuid.uuid4())
+    outbox_row = _make_outbox_row(led_id, intent_type="LP_COLLECT_FEES")
+    ledger_row = _make_ledger_row(
+        led_id,
+        intent_type="LP_COLLECT_FEES",
+        protocol="curve",
+        execution_mode="",
+    )
+    store = _make_mock_store(outbox_row=outbox_row, ledger_row=ledger_row)
+    proc = AccountingProcessor(
+        state_manager=store,
+        basis_store=FIFOBasisStore(),
+        deployment_id="dep-1",
+        run_mode=RunMode.PAPER,
+    )
+    proc._dispatch = MagicMock(return_value=None)
+
+    assert await proc.drain_one(led_id) is False
+    assert proc._dispatch.call_args.args[1]["execution_mode"] is RunMode.PAPER
+
+
+@pytest.mark.asyncio
+async def test_drain_one_invalid_mode_does_not_inherit_configured_processor_mode() -> None:
+    """An explicit corrupt stamp fails its row instead of being reinterpreted."""
+    led_id = str(uuid.uuid4())
+    outbox_row = _make_outbox_row(led_id, intent_type="SUPPLY")
+    ledger_row = _make_ledger_row(led_id, intent_type="SUPPLY", execution_mode="livve")
+    store = _make_mock_store(outbox_row=outbox_row, ledger_row=ledger_row)
+    proc = AccountingProcessor(
+        state_manager=store,
+        basis_store=FIFOBasisStore(),
+        deployment_id="dep-1",
+        run_mode=RunMode.PAPER,
+    )
+    proc._dispatch = MagicMock()
+
+    assert await proc.drain_one(led_id) is False
+    proc._dispatch.assert_not_called()
+    assert store.update_outbox_entry.call_args_list[-1].args[1] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_drain_one_paper_writer_false_marks_failed_not_processed() -> None:
+    """A non-live writer decline is a failed write, never processed success."""
+    led_id = str(uuid.uuid4())
+    outbox_row = _make_outbox_row(led_id, intent_type="SUPPLY")
+    ledger_row = _make_ledger_row(led_id, intent_type="SUPPLY", execution_mode="paper")
+    store = _make_mock_store(outbox_row=outbox_row, ledger_row=ledger_row)
+    proc = AccountingProcessor(state_manager=store, basis_store=FIFOBasisStore(), deployment_id="dep-1")
+    proc._dispatch = MagicMock(return_value=MagicMock())
+    proc._writer.write = AsyncMock(return_value=False)
+
+    result = await proc.drain_one(led_id)
+
+    assert result is False
+    calls = [c.args for c in store.update_outbox_entry.call_args_list]
+    assert [c[1] for c in calls] == ["processing", "failed"]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -250,6 +447,46 @@ async def test_drain_pending_skips_rows_without_ledger_entry_id() -> None:
     count = await proc.drain_pending()
 
     assert count == 0
+
+
+@pytest.mark.asyncio
+async def test_drain_pending_propagates_live_accounting_failure() -> None:
+    """Startup must not turn a typed live accounting failure into successful boot."""
+    led_id = str(uuid.uuid4())
+    outbox_row = _make_outbox_row(led_id)
+    store = _make_mock_store(outbox_row=outbox_row)
+    proc = AccountingProcessor(state_manager=store, basis_store=FIFOBasisStore(), deployment_id="dep-1")
+    failure = AccountingPersistenceError(
+        AccountingWriteKind.ACCOUNTING,
+        deployment_id="dep-1",
+        message="mandatory event missing",
+    )
+    proc.drain_one = AsyncMock(side_effect=failure)
+
+    with pytest.raises(AccountingPersistenceError, match="mandatory event missing"):
+        await proc.drain_pending()
+
+
+@pytest.mark.asyncio
+async def test_drain_pending_continues_after_live_failure_then_reraises() -> None:
+    """One poisoned startup row must not block recovery of independent rows."""
+    failed_id = str(uuid.uuid4())
+    healthy_id = str(uuid.uuid4())
+    rows = [_make_outbox_row(failed_id), _make_outbox_row(healthy_id)]
+    store = _make_mock_store()
+    store.get_outbox_pending = MagicMock(return_value=rows)
+    proc = AccountingProcessor(state_manager=store, basis_store=FIFOBasisStore(), deployment_id="dep-1")
+    failure = AccountingPersistenceError(
+        AccountingWriteKind.ACCOUNTING,
+        deployment_id="dep-1",
+        message="first row poisoned",
+    )
+    proc.drain_one = AsyncMock(side_effect=[failure, True])
+
+    with pytest.raises(AccountingPersistenceError, match="first row poisoned"):
+        await proc.drain_pending()
+
+    assert [call.args[0] for call in proc.drain_one.await_args_list] == [failed_id, healthy_id]
 
 
 # ──────────────────────────────────────────────────────────────────────────────

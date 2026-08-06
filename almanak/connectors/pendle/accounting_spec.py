@@ -67,9 +67,12 @@ _MONTH_MAP: dict[str, int] = {
     "DEC": 12,
 }
 
-# Intent types this connector claims for special accounting treatment: the Pendle
-# LP family (the generic LP handler must not see them) and the PT-buy swap.
-_PENDLE_LP_INTENTS = frozenset({"LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"})
+# Intent types this connector claims for special accounting treatment. Pendle's
+# compiler and manifest do not expose standalone LP_COLLECT_FEES because market
+# LP value accrues into the LP token. The accounting spec still declines that
+# type deliberately: an external/legacy replay row represents money movement
+# and must use the generic LP event/key path, never a successful no-event outcome.
+_PENDLE_LP_INTENTS = frozenset({"LP_OPEN", "LP_CLOSE"})
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -879,11 +882,14 @@ def _categorize(
     Mirrors (and extends) the ``classify()`` branches this connector removes from
     the framework taxonomy:
 
-    * Pendle LP (``LP_OPEN`` / ``LP_CLOSE`` / ``LP_COLLECT_FEES``) → generic
+    * Pendle LP ``LP_OPEN`` / ``LP_CLOSE`` → generic
       ``AccountingCategory.LP`` with treatment ``"pendle_lp"`` (so the generic LP
-      handler never sees a Pendle LP event — it is routed to the connector
+      handler never sees these Pendle LP events — they route to the connector
       treatment, which builds a ``PENDLE_LP_OPEN`` / ``PENDLE_LP_CLOSE`` event for
-      OPEN/CLOSE and ``None`` for COLLECT_FEES, exactly as today).
+      OPEN/CLOSE). Pendle cannot originate standalone ``LP_COLLECT_FEES`` via its
+      compiler/manifest. If an external or legacy row is replayed, it is
+      deliberately declined here and uses the generic LP handler so the returned
+      assets are recorded rather than treated as ``NO_ACCOUNTING``.
     * Pendle PT trade (``SWAP`` with a ``PT-`` ``token_out`` *or* a ``PT-``
       ``token_in``) → generic ``AccountingCategory.SWAP`` with treatment
       ``"pendle_pt"``. A ``PT-`` ``token_out`` is a PT *buy*; a ``PT-`` ``token_in``
@@ -1027,6 +1033,6 @@ def _position_key(
 ACCOUNTING_TREATMENT_SPEC = AccountingTreatmentSpec(
     categorize=_categorize,
     treatments={"pendle_lp": treat_pendle_lp, "pendle_pt": treat_pendle_pt},
-    claims_event_types=frozenset({"LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES", "SWAP", "WITHDRAW"}),
+    claims_event_types=frozenset({"LP_OPEN", "LP_CLOSE", "SWAP", "WITHDRAW"}),
     position_key=_position_key,
 )

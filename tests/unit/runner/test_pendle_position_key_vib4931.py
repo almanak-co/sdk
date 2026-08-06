@@ -55,7 +55,9 @@ def test_pendle_non_pt_swap_falls_through_to_generic():
     # A Pendle SWAP with NO PT leg (a YT/SY swap) is not a PT position action —
     # the connector declines it (returns None), so the runner's generic SWAP
     # branch produces the swap: key (VIB-4988).
-    intent = SimpleNamespace(protocol="pendle_v2", from_token="WSTETH", to_token="YT-wstETH-25JUN2026", pool="0xMarketAddr")
+    intent = SimpleNamespace(
+        protocol="pendle_v2", from_token="WSTETH", to_token="YT-wstETH-25JUN2026", pool="0xMarketAddr"
+    )
     position_key, market_id = _call(intent, "SWAP")
     assert position_key == "swap:arbitrum:0xwallet"
     assert market_id == ""
@@ -67,12 +69,14 @@ def test_pendle_lp_no_market_returns_empty():
     assert position_key == "" and market_id == ""
 
 
-def test_pendle_lp_collect_fees_stays_connector_owned_without_generic_fallback():
-    # The connector claims Pendle LP_COLLECT_FEES accounting but intentionally emits
-    # no event/key today; the runner must not synthesize a generic lp: key.
+def test_pendle_lp_collect_fees_falls_through_to_generic_lp_key():
+    # Pendle cannot originate standalone LP_COLLECT_FEES via its compiler or
+    # manifest. An external/legacy replay row is deliberately unclaimed and uses
+    # the generic LP accounting/key path so returned assets remain bookable.
     intent = SimpleNamespace(protocol="pendle_v2", pool="0xMarketAddr")
     position_key, market_id = _call(intent, "LP_COLLECT_FEES")
-    assert position_key == "" and market_id == ""
+    assert position_key == "lp:pendle_v2:arbitrum:0xwallet:0xmarketaddr"
+    assert market_id == "0xmarketaddr"
 
 
 def test_non_pendle_swap_falls_through_to_generic():

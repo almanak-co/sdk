@@ -33,13 +33,17 @@ import logging
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any
+from enum import Enum
+from typing import TYPE_CHECKING, Any, Never
 
 from almanak.connectors._strategy_accounting_treatment_registry import AccountingTreatmentRegistry
 from almanak.framework.accounting.category_handlers import HANDLERS, HandlerContext
 from almanak.framework.accounting.classifier import AccountingCategory, classify
 from almanak.framework.accounting.models import LendingAccountingEvent
 from almanak.framework.accounting.writer import AccountingWriter
+from almanak.framework.models.run_mode import RunMode
+from almanak.framework.primitives.taxonomy import UnknownIntentTypeError, record_for
+from almanak.framework.state.exceptions import AccountingPersistenceError, AccountingWriteKind
 
 if TYPE_CHECKING:
     from almanak.framework.accounting.basis import FIFOBasisStore
@@ -47,6 +51,42 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _MAX_RETRIES = 3
+
+
+class AccountingDispatchOutcome(Enum):
+    """Non-event outcomes returned by :meth:`AccountingProcessor._dispatch`.
+
+    A dedicated value is required because ``None`` means a claimed accounting
+    handler failed to construct its mandatory event.  Only taxonomy-level
+    ``NO_ACCOUNTING`` is a successful drain with no event to persist.
+    """
+
+    NO_ACCOUNTING = "no_accounting"
+
+
+class _AccountingEventNotProduced(RuntimeError):
+    """A classified accounting path produced no durable event."""
+
+
+def _raise_event_not_produced(
+    message: str,
+    *,
+    is_live: bool,
+    deployment_id: str,
+    cause: BaseException | None = None,
+) -> Never:
+    """Raise a mode-aware error for a mandatory event that was not persisted."""
+    dropped_event = _AccountingEventNotProduced(message)
+    if is_live:
+        raise AccountingPersistenceError(
+            AccountingWriteKind.ACCOUNTING,
+            deployment_id=deployment_id,
+            message=str(dropped_event),
+            cause=cause or dropped_event,
+        ) from (cause or dropped_event)
+    if cause is not None:
+        raise dropped_event from cause
+    raise dropped_event
 
 
 def _is_lending_event(event: Any) -> bool:
@@ -123,10 +163,15 @@ class AccountingProcessor:
         state_manager: Any,
         basis_store: FIFOBasisStore,
         deployment_id: str = "",
+        run_mode: RunMode | str = RunMode.LIVE,
     ) -> None:
         self._state_manager = state_manager
         self._basis_store = basis_store
         self._deployment_id = deployment_id
+        # Current rows always carry their own execution_mode stamp.  The runner
+        # mode is the authority only for legacy unstamped rows; default
+        # to LIVE so standalone processor construction remains fail-closed.
+        self._run_mode = RunMode.parse(run_mode)
         self._writer = AccountingWriter(state_manager)
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -147,12 +192,17 @@ class AccountingProcessor:
              ledger_entry_id, mark processed and return (dual-write safe).
           5. Read ledger row.
           6. Classify intent.
-          7. Dispatch to category handler → event (or None).
-          8. Write event (if any).
-          9. Mark outbox processed.
+          7. Dispatch to category handler → event, explicit NO_ACCOUNTING, or
+             None (a dropped mandatory event).
+          8. Write the event when accounting is required.
+          9. Mark outbox processed only after a durable write (or explicit
+             NO_ACCOUNTING).
 
-        Exceptions from category handlers or writer are caught; the row is
-        marked 'failed' and retried up to _MAX_RETRIES times.
+        Exceptions from category handlers or writer mark the row ``failed``.
+        Mandatory live-mode event drops are then re-raised as
+        :class:`AccountingPersistenceError` so the iteration/startup guard can
+        halt; ordinary and non-live failures return ``False`` and remain
+        retryable up to ``_MAX_RETRIES``.
         """
         if not self._state_manager:
             return False
@@ -192,31 +242,67 @@ class AccountingProcessor:
             if ledger_row is None:
                 raise ValueError(f"ledger row not found: {ledger_entry_id}")
 
-            event = self._dispatch(outbox_row, ledger_row)
+            raw_execution_mode = ledger_row.get("execution_mode")
+            # Only a genuinely absent/blank legacy stamp inherits the runner
+            # mode. An explicit malformed value is corrupt persisted data and
+            # must fail this row rather than silently changing its semantics.
+            execution_mode = RunMode.parse_optional(raw_execution_mode)
+            if not execution_mode:
+                execution_mode = self._run_mode
+                # Handlers construct AccountingIdentity from the ledger dict.
+                # Stamp a copy so the writer/backend observes the same effective
+                # mode as this processor's failure contract.
+                ledger_row = {**ledger_row, "execution_mode": execution_mode}
+                logger.warning(
+                    "drain_one: unstamped execution_mode for ledger_entry_id=%s; using runner mode=%s",
+                    ledger_entry_id,
+                    execution_mode.value,
+                )
+            is_live = execution_mode is RunMode.LIVE
+            dispatch_result = self._dispatch_with_failure_contract(
+                outbox_row,
+                ledger_row,
+                is_live=is_live,
+            )
 
-            if event is not None:
-                ok = await self._writer.write(event)
-                if not ok:
-                    logger.debug(
-                        "drain_one: writer.write returned False for %s (backend may not support write)",
-                        ledger_entry_id,
-                    )
-                elif _is_lending_event(event):
-                    # VIB-4977: back-fill the matching lending PositionEvent's
-                    # attribution_json with the signed realized net_pnl_usd
-                    # (the FIFO interest split this drain just computed). The
-                    # position event was saved by the runner BEFORE this drain
-                    # task fired, so the row exists. Best-effort: a failure
-                    # degrades win-rate attribution but never blocks the books
-                    # (mirrors run_attribution_on_close for LP/perp).
-                    await self._backfill_lending_position_pnl(event)
+            if dispatch_result is AccountingDispatchOutcome.NO_ACCOUNTING:
+                await self._update_outbox(outbox_id, "processed")
+                return True
+
+            ok = await self._writer.write(dispatch_result)
+            if not ok:
+                # AccountingWriter returns False only for non-live degradation,
+                # but the outbox must remain retryable/observable.  A failed
+                # durable write is never a successfully processed row.
+                _raise_event_not_produced(
+                    "AccountingWriter declined the accounting event "
+                    f"(ledger_entry_id={ledger_entry_id}, "
+                    f"intent_type={ledger_row.get('intent_type') or ''})",
+                    is_live=is_live,
+                    deployment_id=ledger_row.get("deployment_id") or self._deployment_id,
+                )
+
+            if _is_lending_event(dispatch_result):
+                # VIB-4977: back-fill the matching lending PositionEvent's
+                # attribution_json with the signed realized net_pnl_usd
+                # (the FIFO interest split this drain just computed). The
+                # position event was saved by the runner BEFORE this drain
+                # task fired, so the row exists. Best-effort: a failure
+                # degrades win-rate attribution but never blocks the books
+                # (mirrors run_attribution_on_close for LP/perp).
+                await self._backfill_lending_position_pnl(dispatch_result)
 
             await self._update_outbox(outbox_id, "processed")
             return True
 
         except Exception as exc:
             new_attempts = attempts + 1
-            logger.warning(
+            log_failure = (
+                logger.error
+                if isinstance(exc, _AccountingEventNotProduced | AccountingPersistenceError)
+                else logger.warning
+            )
+            log_failure(
                 "drain_one: error processing outbox row %s (attempt %d/%d): %s",
                 outbox_id,
                 new_attempts,
@@ -225,6 +311,10 @@ class AccountingProcessor:
                 exc_info=True,
             )
             await self._update_outbox(outbox_id, "failed", error=str(exc), attempts=new_attempts)
+            if isinstance(exc, AccountingPersistenceError):
+                # The row is durably retryable before the live-mode failure is
+                # propagated to the iteration barrier / startup guard.
+                raise
             return False
 
     async def drain_pending(self) -> int:
@@ -247,6 +337,7 @@ class AccountingProcessor:
 
         logger.info("drain_pending: found %d pending/failed outbox rows", len(rows))
         drained = 0
+        first_accounting_failure: AccountingPersistenceError | None = None
         for row in rows:
             ledger_entry_id = row.get("ledger_entry_id", "")
             if not ledger_entry_id:
@@ -255,15 +346,56 @@ class AccountingProcessor:
                 ok = await self.drain_one(ledger_entry_id)
                 if ok:
                     drained += 1
+            except AccountingPersistenceError as exc:
+                # Keep draining independent rows so one poison row cannot block
+                # recovery of the rest of the FIFO.  Startup still fails closed:
+                # preserve the first typed error and raise it after the batch.
+                if first_accounting_failure is None:
+                    first_accounting_failure = exc
             except Exception:
                 logger.warning("drain_pending: uncaught error for ledger_entry_id=%s", ledger_entry_id, exc_info=True)
         if drained:
             logger.info("drain_pending: drained %d/%d rows", drained, len(rows))
+        if first_accounting_failure is not None:
+            raise first_accounting_failure
         return drained
 
     # ──────────────────────────────────────────────────────────────────────────
     # Intent dispatch
     # ──────────────────────────────────────────────────────────────────────────
+
+    def _dispatch_with_failure_contract(
+        self,
+        outbox_row: dict[str, Any],
+        ledger_row: dict[str, Any],
+        *,
+        is_live: bool,
+    ) -> Any:
+        """Dispatch one mandatory event and apply the mode-aware drop contract."""
+        ledger_entry_id = ledger_row.get("id") or outbox_row.get("ledger_entry_id") or ""
+        intent_type = ledger_row.get("intent_type") or ""
+        protocol = ledger_row.get("protocol") or ""
+        deployment_id = ledger_row.get("deployment_id") or self._deployment_id
+        try:
+            result = self._dispatch(outbox_row, ledger_row)
+        except AccountingPersistenceError:
+            raise
+        except Exception as exc:
+            _raise_event_not_produced(
+                "accounting dispatch raised before producing an event "
+                f"(ledger_entry_id={ledger_entry_id}, intent_type={intent_type}, protocol={protocol}): {exc}",
+                is_live=is_live,
+                deployment_id=deployment_id,
+                cause=exc,
+            )
+        if result is None:
+            _raise_event_not_produced(
+                "classified accounting dispatch produced no event "
+                f"(ledger_entry_id={ledger_entry_id}, intent_type={intent_type}, protocol={protocol})",
+                is_live=is_live,
+                deployment_id=deployment_id,
+            )
+        return result
 
     def _dispatch(self, outbox_row: dict[str, Any], ledger_row: dict[str, Any]) -> Any:
         """Classify the intent and dispatch to the registered category handler.
@@ -281,10 +413,11 @@ class AccountingProcessor:
         Pendle's LP / PT mechanics) in the connector rather than as protocol-named
         ``AccountingCategory`` members in the framework.
 
-        Behaviour for ``NO_ACCOUNTING`` and for any (future) category whose
-        handler is missing from the registry: return ``None`` (no event
-        written). Missing-handler-for-classified-category emits an ERROR log
-        line so the silent-degradation case is loud.
+        ``NO_ACCOUNTING`` returns the explicit
+        :attr:`AccountingDispatchOutcome.NO_ACCOUNTING` sentinel.  A missing
+        handler or a handler/treatment that cannot construct its claimed event
+        returns ``None``; :meth:`drain_one` treats that as a failed accounting
+        write, never as a processed outbox row.
         """
         intent_type = ledger_row.get("intent_type") or ""
         protocol = ledger_row.get("protocol") or ""
@@ -333,7 +466,21 @@ class AccountingProcessor:
         )
 
         if category == AccountingCategory.NO_ACCOUNTING:
-            return None
+            # ``classify`` intentionally has a soft unknown-intent fallback to
+            # NO_ACCOUNTING for non-persistence consumers. The outbox drain is
+            # a financial persistence boundary: only an explicit TAXONOMY row
+            # may authorize the successful no-event outcome.
+            try:
+                record_for(intent_type)
+            except UnknownIntentTypeError:
+                logger.error(
+                    "_dispatch: unknown intent_type=%s resolved through the soft NO_ACCOUNTING fallback "
+                    "(ledger_entry_id=%s) — accounting event NOT written",
+                    intent_type,
+                    ledger_row.get("id") or "",
+                )
+                return None
+            return AccountingDispatchOutcome.NO_ACCOUNTING
 
         handler = HANDLERS.get(category)
         if handler is None:

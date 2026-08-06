@@ -21,8 +21,11 @@ from almanak.connectors._strategy_accounting_treatment_registry import (
     AccountingTreatmentRegistry,
 )
 from almanak.connectors._strategy_base.accounting_treatment_base import AccountingCategoryDecision
+from almanak.connectors.pendle.compiler import PendleCompiler
+from almanak.connectors.pendle.connector import CONNECTOR as PENDLE_CONNECTOR
+from almanak.core.intent_types import IntentType
 from almanak.framework.accounting.basis import FIFOBasisStore
-from almanak.framework.accounting.models import PendleEventType
+from almanak.framework.accounting.models import LPEventType, PendleEventType
 from almanak.framework.accounting.processor import AccountingProcessor
 from almanak.framework.primitives.types import AccountingCategory
 
@@ -123,6 +126,31 @@ def test_pendle_lp_routes_through_stage1_end_to_end():
     event = _processor()._dispatch(*_rows("LP_OPEN", "pendle_v2", "PT-WETH"))
     assert event is not None
     assert event.event_type == PendleEventType.PENDLE_LP_OPEN
+
+
+def test_pendle_collect_fees_falls_through_to_real_generic_lp_handler():
+    """A replayed Pendle fee row produces a real generic LP event.
+
+    Pendle's compiler/manifest cannot originate LP_COLLECT_FEES, but persisted
+    external or legacy rows still need money-movement accounting.  This pins the
+    deliberate generic position-key/handler path without mocking HANDLERS.
+    """
+    market = "0x1111111111111111111111111111111111111111"
+    outbox, ledger = _rows("LP_COLLECT_FEES", "pendle_v2", "")
+    outbox["market_id"] = market
+    outbox["position_key"] = f"lp:pendle_v2:arbitrum:0xwallet:{market}"
+    event = _processor()._dispatch(outbox, ledger)
+
+    assert event is not None
+    assert event.event_type == LPEventType.LP_COLLECT_FEES
+    assert event.pool_address == market
+    assert event.position_key == outbox["position_key"]
+
+
+def test_pendle_collect_fees_is_replay_only_not_executable():
+    """The compiler and public connector manifest both reject this primitive."""
+    assert IntentType.LP_COLLECT_FEES not in PendleCompiler.intents
+    assert IntentType.LP_COLLECT_FEES not in PENDLE_CONNECTOR.strategy_intents
 
 
 def test_pendle_pt_routes_through_stage1_end_to_end():

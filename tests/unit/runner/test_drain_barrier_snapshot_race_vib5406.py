@@ -23,14 +23,19 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from almanak.framework.market.models import PtPriceData
 from almanak.framework.portfolio.models import ValueConfidence
 from almanak.framework.runner import _run_loop_helpers as H
+from almanak.framework.runner.runner_models import IterationStatus
+from almanak.framework.state.exceptions import AccountingPersistenceError, AccountingWriteKind
 from almanak.framework.teardown.models import PositionType, TeardownPositionSummary
 from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
 
@@ -176,6 +181,116 @@ def test_await_drain_barrier_timeout_returns_false_without_cancelling():
     asyncio.run(scenario())
 
 
+def test_await_drain_barrier_rechecks_late_straggler_failure():
+    """A task that raises after timing out is carried into the next barrier.
+
+    This covers both per-iteration batch resets and teardown PRE rebinding: the
+    typed failure lives in the runner-level pending set until its result is
+    consumed, so it cannot become an orphaned ``Task exception was never
+    retrieved`` warning or evade the live ACCOUNTING_FAILED path.
+    """
+
+    async def scenario():
+        runner = SimpleNamespace(
+            deployment_id=DEP,
+            _pending_drain_tasks=set(),
+        )
+        gate = asyncio.Event()
+        failure = AccountingPersistenceError(
+            AccountingWriteKind.ACCOUNTING,
+            deployment_id=DEP,
+            message="late mandatory failure",
+        )
+
+        async def _late_failure():
+            await gate.wait()
+            raise failure
+
+        task = asyncio.create_task(_late_failure())
+        runner._pending_drain_tasks.add(task)
+        batch = [task]
+
+        assert await H.await_drain_barrier(runner, batch, timeout=0.01) is False
+        assert batch == []
+        assert task in runner._pending_drain_tasks
+
+        # Simulate run_iteration / teardown PRE opening an unrelated fresh batch.
+        gate.set()
+        await asyncio.sleep(0)
+        fresh_batch: list[asyncio.Task] = []
+        with pytest.raises(AccountingPersistenceError, match="late mandatory failure"):
+            await H.await_drain_barrier(
+                runner,
+                fresh_batch,
+                propagate_accounting_failure=True,
+            )
+
+        assert task not in runner._pending_drain_tasks
+
+    asyncio.run(scenario())
+
+
+def test_await_drain_barrier_recovers_task_after_batch_reset():
+    """Runner-level tracking survives teardown PRE/per-iteration batch rebinding."""
+
+    async def scenario():
+        runner = SimpleNamespace(
+            deployment_id=DEP,
+            _pending_drain_tasks=set(),
+        )
+        failure = AccountingPersistenceError(
+            AccountingWriteKind.ACCOUNTING,
+            deployment_id=DEP,
+            message="failure from discarded batch",
+        )
+
+        async def _failure():
+            await asyncio.sleep(0)
+            raise failure
+
+        task = asyncio.create_task(_failure())
+        runner._pending_drain_tasks.add(task)
+
+        # The task's original _drain_batch was rebound before a barrier ran.
+        fresh_batch: list[asyncio.Task] = []
+        with pytest.raises(AccountingPersistenceError, match="discarded batch"):
+            await H.await_drain_barrier(
+                runner,
+                fresh_batch,
+                propagate_accounting_failure=True,
+            )
+
+        assert task not in runner._pending_drain_tasks
+
+    asyncio.run(scenario())
+
+
+def test_shutdown_consumes_completed_accounting_failure(caplog):
+    """Shutdown retrieves and records a task failure before releasing its ref."""
+
+    async def scenario():
+        runner = SimpleNamespace(_pending_drain_tasks=set())
+        failure = AccountingPersistenceError(
+            AccountingWriteKind.ACCOUNTING,
+            deployment_id=DEP,
+            message="late shutdown failure",
+        )
+
+        async def _failure():
+            raise failure
+
+        task = asyncio.create_task(_failure())
+        runner._pending_drain_tasks.add(task)
+        await asyncio.sleep(0)
+
+        await H._drain_accounting_tasks_on_shutdown(runner, DEP)
+
+        assert runner._pending_drain_tasks == set()
+        assert "late shutdown failure" in caplog.text
+
+    asyncio.run(scenario())
+
+
 def test_await_drain_barrier_false_result_is_incomplete():
     """A drain that COMPLETES but returns False (drain_one persistent-write
     failure) must mark the barrier incomplete — completion alone is not success
@@ -210,6 +325,29 @@ def test_await_drain_barrier_raised_result_is_incomplete():
         batch = [asyncio.create_task(_raising_drain())]
         ok = await H.await_drain_barrier(runner, batch)
         assert ok is False  # raised drain ⇒ degraded
+
+    asyncio.run(scenario())
+
+
+def test_await_drain_barrier_can_propagate_typed_accounting_failure():
+    """The iteration lane can engage ACCOUNTING_FAILED without leaking task results."""
+
+    async def scenario():
+        runner = SimpleNamespace(deployment_id=DEP)
+        failure = AccountingPersistenceError(
+            AccountingWriteKind.ACCOUNTING,
+            deployment_id=DEP,
+            message="classified dispatch produced no event",
+        )
+
+        async def _raising_drain():
+            await asyncio.sleep(0)
+            raise failure
+
+        batch = [asyncio.create_task(_raising_drain())]
+        with pytest.raises(AccountingPersistenceError, match="produced no event"):
+            await H.await_drain_barrier(runner, batch, propagate_accounting_failure=True)
+        assert batch == []
 
     asyncio.run(scenario())
 
@@ -410,6 +548,155 @@ def test_iteration_capture_flag_false_when_drain_completes():
     asyncio.run(scenario())
 
 
+def test_iteration_capture_without_snapshot_persistence_releases_completed_task():
+    """The disabled-snapshot fast path still consumes completed drain results."""
+
+    async def scenario():
+        valuer = _valuer_reading([dict(PT_BUY)])
+
+        async def _drain():
+            return True
+
+        task = asyncio.create_task(_drain())
+        runner = _fake_runner_for_capture(valuer, [task])
+        runner.config.enable_state_persistence = False
+        runner._pending_drain_tasks = {task}
+        await asyncio.sleep(0)
+
+        result_in = SimpleNamespace(status="x")
+        out = await H.capture_snapshot_with_accounting(runner, _strategy(), DEP, result_in)
+
+        assert out is result_in
+        assert runner._pending_drain_tasks == set()
+        assert runner._drain_batch == []
+        assert runner._captured["capture_called"] is False
+
+    asyncio.run(scenario())
+
+
+def test_iteration_capture_without_snapshot_persistence_escalates_completed_live_failure():
+    """Disabling snapshots cannot hide a completed typed live drain failure."""
+
+    async def scenario():
+        valuer = _valuer_reading([dict(PT_BUY)])
+        failure = AccountingPersistenceError(
+            AccountingWriteKind.ACCOUNTING,
+            deployment_id=DEP,
+            message="disabled-snapshot live failure",
+        )
+
+        async def _failed_drain():
+            raise failure
+
+        task = asyncio.create_task(_failed_drain())
+        runner = _fake_runner_for_capture(valuer, [task])
+        runner.config.enable_state_persistence = False
+        runner._pending_drain_tasks = {task}
+        runner._is_live_mode = lambda: True
+        runner._alert_accounting_failure = AsyncMock()
+        await asyncio.sleep(0)
+        result_in = SimpleNamespace(
+            status=IterationStatus.SUCCESS,
+            duration_ms=12.5,
+            intent=MagicMock(),
+            execution_result=MagicMock(),
+            balance_reconciliation=MagicMock(),
+            timestamp=datetime.now(UTC),
+        )
+        strategy = _strategy()
+
+        out = await H.capture_snapshot_with_accounting(runner, strategy, DEP, result_in)
+
+        assert out.status is IterationStatus.ACCOUNTING_FAILED
+        assert "disabled-snapshot live failure" in (out.error or "")
+        assert runner._pending_drain_tasks == set()
+        assert runner._drain_batch == []
+        runner._alert_accounting_failure.assert_awaited_once_with(strategy, failure)
+
+    asyncio.run(scenario())
+
+
+def test_iteration_capture_converts_live_drain_drop_to_accounting_failed():
+    """A dropped live event reaches the existing mode-aware iteration halt contract."""
+
+    async def scenario():
+        valuer = _valuer_reading([dict(PT_BUY)])
+        failure = AccountingPersistenceError(
+            AccountingWriteKind.ACCOUNTING,
+            deployment_id=DEP,
+            message="classified accounting dispatch produced no event",
+        )
+
+        async def _failed_drain():
+            raise failure
+
+        runner = _fake_runner_for_capture(valuer, [asyncio.create_task(_failed_drain())])
+        runner._is_live_mode = lambda: True
+        runner._alert_accounting_failure = AsyncMock()
+        strategy = _strategy()
+        result_in = SimpleNamespace(
+            status=IterationStatus.SUCCESS,
+            duration_ms=12.5,
+            intent=MagicMock(),
+            execution_result=MagicMock(),
+            balance_reconciliation=MagicMock(),
+            timestamp=datetime.now(UTC),
+        )
+
+        out = await H.capture_snapshot_with_accounting(runner, strategy, DEP, result_in)
+
+        assert out.status is IterationStatus.ACCOUNTING_FAILED
+        assert "produced no event" in (out.error or "")
+        assert out.intent is result_in.intent
+        assert out.execution_result is result_in.execution_result
+        assert out.balance_reconciliation is result_in.balance_reconciliation
+        assert runner._captured["capture_called"] is False
+        assert runner._drain_batch == []
+        runner._alert_accounting_failure.assert_awaited_once_with(strategy, failure)
+
+    asyncio.run(scenario())
+
+
+def test_iteration_capture_non_live_drain_drop_still_captures_degraded_snapshot(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Paper/dry-run log the drain failure and preserve the snapshot time series."""
+
+    async def scenario():
+        valuer = _valuer_reading([dict(PT_BUY)])
+        failure = AccountingPersistenceError(
+            AccountingWriteKind.ACCOUNTING,
+            deployment_id=DEP,
+            message="classified accounting dispatch produced no event",
+        )
+
+        async def _failed_drain():
+            raise failure
+
+        runner = _fake_runner_for_capture(valuer, [asyncio.create_task(_failed_drain())])
+        result_in = SimpleNamespace(
+            status=IterationStatus.SUCCESS,
+            duration_ms=12.5,
+            intent=MagicMock(),
+            execution_result=MagicMock(),
+            balance_reconciliation=MagicMock(),
+            timestamp=datetime.now(UTC),
+        )
+
+        out = await H.capture_snapshot_with_accounting(runner, _strategy(), DEP, result_in)
+
+        assert out is result_in
+        assert runner._captured["capture_called"] is True
+        assert runner._captured["flag_at_capture"] is True
+        assert runner._drain_batch == []
+
+    with caplog.at_level(logging.ERROR, logger="almanak.framework.runner._run_loop_helpers"):
+        asyncio.run(scenario())
+
+    assert "capturing degraded snapshot" in caplog.text
+    assert "classified accounting dispatch produced no event" in caplog.text
+
+
 # --------------------------------------------------------------------------- #
 # 5. Teardown lane wiring — PRE resets the batch, POST runs the barrier
 # --------------------------------------------------------------------------- #
@@ -454,8 +741,45 @@ def test_teardown_pre_bracket_resets_drain_batch(monkeypatch):
     asyncio.run(scenario())
 
 
+def test_teardown_without_snapshot_persistence_releases_and_degrades_completed_failure(monkeypatch):
+    """Teardown observes disabled-snapshot failures without halting risk reduction."""
+
+    async def scenario():
+        valuer = _valuer_reading([dict(PT_BUY)])
+        failure = AccountingPersistenceError(
+            AccountingWriteKind.ACCOUNTING,
+            deployment_id=DEP,
+            message="disabled teardown snapshot failure",
+        )
+
+        async def _failed_drain():
+            raise failure
+
+        task = asyncio.create_task(_failed_drain())
+        runner = _fake_runner_for_teardown(valuer, [task], monkeypatch)
+        runner.config.enable_state_persistence = False
+        runner._pending_drain_tasks = {task}
+        await asyncio.sleep(0)
+
+        outcome = await H.capture_teardown_snapshot_with_accounting(
+            runner,
+            _strategy(),
+            teardown_cycle_id="teardown-1",
+            pre_teardown=False,
+        )
+
+        assert outcome.snapshot_captured is False
+        assert outcome.accounting_degraded is True
+        assert "disabled teardown snapshot failure" in (outcome.degraded_reason or "")
+        assert runner._pending_drain_tasks == set()
+        assert runner._drain_batch == []
+
+    asyncio.run(scenario())
+
+
 def test_teardown_post_bracket_runs_barrier_and_threads_flag(monkeypatch):
     async def scenario():
+        monkeypatch.setattr("almanak.framework.accounting.deferred_log.append_now", MagicMock())
         valuer = _valuer_reading([dict(PT_BUY)])
         gate = asyncio.Event()
 
@@ -477,7 +801,47 @@ def test_teardown_post_bracket_runs_barrier_and_threads_flag(monkeypatch):
         assert runner._captured["flag_at_capture"] is True
         assert runner._drain_batch == []
         assert outcome.snapshot_captured is True
+        assert outcome.accounting_degraded is False
         gate.set()
         await task
+
+    asyncio.run(scenario())
+
+
+def test_teardown_post_bracket_degrades_typed_drain_failure_without_halting(monkeypatch):
+    """Teardown consumes a live drain failure and continues the unwind snapshot lane."""
+
+    async def scenario():
+        deferred = MagicMock()
+        monkeypatch.setattr("almanak.framework.accounting.deferred_log.append_now", deferred)
+        valuer = _valuer_reading([dict(PT_BUY)])
+        failure = AccountingPersistenceError(
+            AccountingWriteKind.ACCOUNTING,
+            deployment_id=DEP,
+            message="classified accounting dispatch produced no event",
+        )
+
+        async def _failed_drain():
+            raise failure
+
+        runner = _fake_runner_for_teardown(
+            valuer,
+            [asyncio.create_task(_failed_drain())],
+            monkeypatch,
+        )
+        outcome = await H.capture_teardown_snapshot_with_accounting(
+            runner,
+            _strategy(),
+            teardown_cycle_id="teardown-1",
+            pre_teardown=False,
+        )
+
+        assert outcome.snapshot_captured is True
+        assert outcome.accounting_degraded is True
+        assert "outbox/post: AccountingPersistenceError" in (outcome.degraded_reason or "")
+        assert "produced no event" in (outcome.degraded_reason or "")
+        assert runner._drain_batch == []
+        deferred.assert_called_once()
+        assert deferred.call_args.kwargs["kind"] == "outbox"
 
     asyncio.run(scenario())

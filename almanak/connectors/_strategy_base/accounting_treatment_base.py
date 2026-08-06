@@ -61,8 +61,11 @@ __all__ = [
 ]
 
 # A connector treatment: receives the same ``HandlerContext`` the generic
-# category handlers get and returns a typed accounting event (or ``None``). Typed
-# loosely (``Any``) so this ``_strategy_base`` module need not import the
+# category handlers get and returns a typed accounting event. Once a connector
+# categorizer claims an event, ``None`` is a treatment-contract failure (the
+# accounting outbox remains failed/retryable); intentional non-accounting is
+# expressed only by the framework taxonomy's explicit NO_ACCOUNTING outcome.
+# Typed loosely (``Any``) so this ``_strategy_base`` module need not import the
 # framework ``HandlerContext`` / accounting-event types.
 TreatmentFn = Callable[..., Any]
 
@@ -119,8 +122,10 @@ class AccountingTreatmentSpec:
             ``""``); a connector that does not need it keeps a 3-arg signature.
         treatments: ``treatment_key -> treatment fn``. Each fn takes the same
             ``HandlerContext`` the generic category handlers receive and returns a
-            typed accounting event (or ``None``). The connector-owned logic the
-            generic dispatcher reaches via the decision's ``treatment_key``.
+            typed accounting event. Returning ``None`` after the categorizer
+            claimed the event is a failed accounting dispatch, not a successful
+            no-op. The connector-owned logic the generic dispatcher reaches via
+            the decision's ``treatment_key``.
         claims_event_types: The generic ``intent_type`` / event-type strings this
             connector may re-treat (e.g. ``{"LP_OPEN", "LP_CLOSE", "SWAP"}``).
             Lets tooling build a cheap pre-filter and assert no two connectors

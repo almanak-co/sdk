@@ -971,17 +971,19 @@ class StrategyRunner:
         self._accounting_processor = AccountingProcessor(
             state_manager=self.state_manager,
             basis_store=self._lending_basis_store,
+            run_mode=derive_run_mode_from_config(self.config),
         )
-        # Strong-ref set for drain tasks so they cannot be GC'd before completion.
+        # Outstanding drain tasks whose result has not yet been consumed.  Keeping
+        # the strong reference prevents a late exception from becoming an
+        # unobserved asyncio task failure.
         self._pending_drain_tasks: set[asyncio.Task] = set()
         # VIB-5406: per-unit (iteration / teardown) drain-task batch. A snapshot
-        # awaits exactly THIS unit's disposal drains before reading
-        # accounting_events, so event-replay-derived inventory (PT, swap) reflects
-        # this unit's disposals (closes the held-PT/swap NAV race). Reset at the
-        # top of run_iteration and at the teardown pre-bracket; awaited+cleared by
-        # ``await_drain_barrier`` at each snapshot site. Distinct from
-        # ``_pending_drain_tasks`` (the lifetime strong-ref set awaited only at
-        # shutdown) — the batch is per-unit and never cancels stragglers.
+        # awaits this unit's disposals plus any runner-level unconsumed drains
+        # before reading accounting_events, so event-replay-derived inventory
+        # (PT, swap) cannot race a prior batch reset. Reset at run_iteration top
+        # and teardown PRE; awaited+cleared at each snapshot site. Distinct from
+        # ``_pending_drain_tasks``, which owns strong refs until a barrier or
+        # shutdown consumes each result.
         self._drain_batch: list[asyncio.Task] = []
 
         mode = "multi-chain" if self._is_multi_chain else "single-chain"
@@ -6400,7 +6402,6 @@ class StrategyRunner:
                     name=f"accounting_drain_{ledger_entry_id[:8]}",
                 )
                 self._pending_drain_tasks.add(task)
-                task.add_done_callback(self._pending_drain_tasks.discard)
                 # VIB-5406: also record on the per-unit batch so the next snapshot
                 # (iteration or teardown POST bracket) awaits THIS disposal's drain
                 # before reading accounting_events. Append-only; the barrier clears
