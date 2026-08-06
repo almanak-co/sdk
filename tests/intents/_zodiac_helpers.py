@@ -84,27 +84,65 @@ _MODULE_PROXY_CREATION_TOPIC = Web3.keccak(text="ModuleProxyCreation(address,add
 # Measured 2026-08-06 across the 9-chain matrix, that was 6,140 of the 6,319
 # remaining upstream calls per run.
 #
-# Hashing the pytest node id keeps exactly the property the random salt existed
-# for — node ids are unique by construction, which is strictly stronger than a
-# birthday bound — while making each test's addresses stable run to run so the
-# proxy cache can actually serve them.
+# Hashing the pytest node id makes each test's addresses stable within a fork
+# pin so the proxy cache can serve them. The CI namespace includes chain + pin:
+# addresses remain reusable for the cache's lifetime, while a published salt
+# cannot be preoccupied on the live chain before an already-selected fork.
 _SALT_COLLISION_RETRIES = 3
+_SALT_NAMESPACE_ENV = "ALMANAK_TEST_CREATE2_SALT_NAMESPACE"
+_SALT_DOMAIN = "almanak-intent-zodiac-create2-v2"
+_CREATE2_COLLISION_MARKERS = ("create2 call failed",)
+# ModuleProxyFactory v1.1+ reverts with TakenAddress(address) when CREATE2
+# returns address(0). web3's raw estimate_gas path exposes the selector rather
+# than decoding the custom error because the transaction is not contract-bound.
+_MODULE_PROXY_TAKEN_ADDRESS_SELECTOR = Web3.keccak(text="TakenAddress(address)")[:4].hex().lower()
 
 
-def _deterministic_salt(kind: str, attempt: int = 0) -> int:
-    """CREATE2 salt: unique per (test, kind), identical across runs."""
-    node_id = os.environ.get("PYTEST_CURRENT_TEST", "no-pytest-context")
-    return int.from_bytes(Web3.keccak(text=f"{node_id}|{kind}|{attempt}"), "big")
+def _current_pytest_node_id() -> str:
+    """Return the current node id without pytest's incidental phase suffix."""
+    current = os.environ.get("PYTEST_CURRENT_TEST", "").strip()
+    node_id, separator, phase = current.rpartition(" (")
+    if separator and phase in {"setup)", "call)", "teardown)"}:
+        current = node_id
+    if not current:
+        raise RuntimeError("deterministic CREATE2 deployment requires PYTEST_CURRENT_TEST")
+    return current
+
+
+def _deterministic_salt(
+    kind: str,
+    attempt: int = 0,
+    *,
+    node_id: str | None = None,
+    namespace: str | None = None,
+) -> int:
+    """CREATE2 salt stable for ``(namespace, test, kind, attempt)``."""
+    if not kind:
+        raise ValueError("CREATE2 salt kind must be non-empty")
+    if attempt < 0:
+        raise ValueError("CREATE2 salt attempt must be non-negative")
+    resolved_node_id = node_id or _current_pytest_node_id()
+    resolved_namespace = namespace or os.environ.get(_SALT_NAMESPACE_ENV, "").strip()
+    if not resolved_namespace:
+        if os.environ.get("CI"):
+            raise RuntimeError(f"CI must set {_SALT_NAMESPACE_ENV} to '<chain>:<fork-pin>'")
+        resolved_namespace = "local-unpinned"
+    material = "|".join((_SALT_DOMAIN, resolved_namespace, resolved_node_id, kind, str(attempt)))
+    return int.from_bytes(Web3.keccak(text=material), "big")
 
 
 def _is_salt_collision(error: Exception) -> bool:
     """True when a deploy failed because that CREATE2 address is already taken.
 
-    Only a revert is retryable — an RPC or connectivity failure must surface
-    immediately rather than being retried under a different salt, which would
-    turn a clear error into a confusing one.
+    Generic reverts are not collisions: retrying them under another salt masks
+    broken setup calldata and protocol failures. Only factory-specific CREATE2
+    collision messages are retryable; RPC/connectivity errors surface directly.
     """
-    return "reverted" in str(error).lower()
+    message = f"{error!r} {error}".lower()
+    return (
+        any(marker in message for marker in _CREATE2_COLLISION_MARKERS)
+        or _MODULE_PROXY_TAKEN_ADDRESS_SELECTOR in message
+    )
 
 
 # =============================================================================
@@ -199,7 +237,9 @@ def _send_eoa_tx(
     tx_hash = web3.eth.send_raw_transaction(signed.raw_transaction)
     receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
     if receipt["status"] != 1:
-        raise RuntimeError(f"EOA tx reverted: to={to}, tx={tx_hash.hex()}")
+        raise RuntimeError(
+            f"EOA transaction mined with status=0 and no classifiable revert reason: to={to}, tx={tx_hash.hex()}"
+        )
     return receipt
 
 
