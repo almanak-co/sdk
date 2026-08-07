@@ -48,6 +48,14 @@ PRICE_SENSITIVE_INTENT_TYPES = frozenset(
         "WITHDRAW",
         "PERPOPEN",
         "PERPCLOSE",
+        # ALM-3183: FLASH_LOAN was absent, so a flash loan with an empty
+        # price_map skipped the gate entirely and its nested swap callbacks
+        # sized amountOutMinimum against placeholder prices. The callbacks are
+        # covered without extra recursion here because
+        # ``_extract_token_symbols_from_intent`` delegates to the shared
+        # ``extract_token_symbols``, which already walks ``callback_intents`` --
+        # so the gate self-serves (or fails closed on) the callback legs too.
+        "FLASHLOAN",
     }
 )
 
@@ -207,8 +215,22 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
 
         Compilers are cached with a TTL to avoid expensive re-initialization (RPC
         setup, chain config). Real prices are applied per-request in CompileIntent()
-        via the price_map field, so allow_placeholder_prices=True is safe here --
-        the cached compiler is just a container for chain/wallet/rpc state.
+        via the price_map field.
+
+        ALM-3183: this used to construct with ``allow_placeholder_prices=True`` and
+        no oracle, on the reasoning quoted above -- "real prices are applied
+        per-request, so placeholders are safe here". That reasoning holds only when
+        a per-request price actually arrives. It does not arrive when ``price_map``
+        is empty AND ``_apply_compile_prices`` does not reach the mainnet gate,
+        which happens for any intent type outside PRICE_SENSITIVE_INTENT_TYPES and
+        for every intent on a non-mainnet network. FLASH_LOAN was exactly that hole:
+        its nested swap callbacks call ``compiler.compile(...)`` and would size
+        ``amountOutMinimum`` against the hardcoded table (ETH=$2000, unknown=$1).
+
+        The compiler now starts with a REAL-BUT-EMPTY oracle, so the fallback is a
+        loud per-intent compile failure instead of a fabricated price. The supported
+        path is unchanged: ``update_prices(price_map)`` still installs real prices,
+        and the mainnet gate still self-serves or fails closed.
 
         Args:
             chain: Chain name (e.g., "arbitrum", "base")
@@ -237,8 +259,7 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
         rpc_url = get_rpc_url(chain, network=network)
         self._warn_if_resolved_to_public_rpc(chain, rpc_url)
 
-        # Create compiler with allow_placeholder_prices=True. Real prices are
-        # injected per-request in CompileIntent() via price_map field.
+        # ALM-3183: real-but-empty oracle, placeholders DISALLOWED (see docstring).
         # gateway_internal_preflight: this compiler runs INSIDE the gateway, so
         # it has no gateway_client to lend to the connector risk-parameter
         # pre-flights. Without the flag those pre-flights fail open on the one
@@ -246,10 +267,11 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
         # execution.CompileIntent, not in-process. Measured on Aave V3 Mantle
         # after governance zeroed ltv: the collateral-eligibility guard never
         # ran and the emitted bundle reverted on-chain (VIB-6111).
-        config = IntentCompilerConfig(allow_placeholder_prices=True, gateway_internal_preflight=True)
+        config = IntentCompilerConfig(allow_placeholder_prices=False, gateway_internal_preflight=True)
         compiler = IntentCompiler(
             chain=chain,
             wallet_address=wallet_address,
+            price_oracle={},
             rpc_url=rpc_url,
             config=config,
             chain_wallets=self._registered_chain_wallets,
@@ -797,7 +819,11 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
             # prevent concurrent requests from seeing each other's prices.
             async with compiler_lock:
                 original_oracle = getattr(compiler, "price_oracle", None)
-                original_placeholders = getattr(compiler, "_using_placeholders", True)
+                # ALM-3183: default False, not True. The old default restored a
+                # compiler whose attribute was somehow missing INTO placeholder
+                # mode -- a fail-open in the restore path of the very lock that
+                # exists to stop requests seeing each other's prices.
+                original_placeholders = getattr(compiler, "_using_placeholders", False)
 
                 gate_error = await self._apply_compile_prices(compiler, intent, intent_type, parsed_prices)
                 if gate_error is not None:

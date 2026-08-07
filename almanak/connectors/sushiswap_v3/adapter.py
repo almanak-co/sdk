@@ -1170,32 +1170,25 @@ class SushiSwapV3Adapter:
         return token.lower() == native_placeholder
 
     def _get_placeholder_prices(self) -> dict[str, Decimal]:
-        """Get placeholder price data for testing only."""
-        logger.warning(
-            "PLACEHOLDER PRICES being used - NOT SAFE FOR PRODUCTION. "
-            "ETH=$2000 (real ~$3400), BTC=$45000 (real ~$105000)"
+        """Delegate to the single canonical placeholder table (ALM-3183).
+
+        This connector used to carry its OWN copy, and it had drifted: BNB/WBNB
+        were $300 here and $600 in the framework table, so the same BNB swap was
+        priced two different ways depending on which layer answered. The copy is
+        gone; the canonical table (which absorbed this one's ``.e`` bridged
+        variants and SUSHI) is the only table left. Its BNB value, $600, is what
+        this now returns. ``scripts/ci/check_placeholder_prices.py`` fails CI on
+        any new connector-local price table.
+        """
+        # Function-scoped import, matching the existing connector -> compiler_queries
+        # precedent (jupiter/adapter.py, uniswap_v4/adapter.py): compiler_queries
+        # imports _strategy_base, so a module-level import here would close a cycle.
+        from almanak.framework.intents.compiler_queries import (
+            PlaceholderPriceUse,
+            get_placeholder_prices,
         )
-        return {
-            "ETH": Decimal("2000"),
-            "WETH": Decimal("2000"),
-            "WETH.e": Decimal("2000"),
-            "USDC": Decimal("1"),
-            "USDC.e": Decimal("1"),
-            "USDT": Decimal("1"),
-            "DAI": Decimal("1"),
-            "DAI.e": Decimal("1"),
-            "WBTC": Decimal("45000"),
-            "WBTC.e": Decimal("45000"),
-            "ARB": Decimal("1.20"),
-            "OP": Decimal("2.50"),
-            "MATIC": Decimal("0.80"),
-            "WMATIC": Decimal("0.80"),
-            "AVAX": Decimal("35"),
-            "WAVAX": Decimal("35"),
-            "BNB": Decimal("300"),
-            "WBNB": Decimal("300"),
-            "SUSHI": Decimal("1"),
-        }
+
+        return get_placeholder_prices(use=PlaceholderPriceUse.UNIT_TEST)
 
     def _get_default_price_oracle(self) -> dict[str, Decimal]:
         """Get price oracle data (uses instance price provider)."""

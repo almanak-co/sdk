@@ -92,6 +92,16 @@ class IntentCompilerConfig:
     """
 
     allow_placeholder_prices: bool = False
+    #: ALM-3183. Optional explicit declaration of WHY this compiler may fabricate
+    #: prices, as a ``PlaceholderPriceUse`` member (typed ``Any`` only to keep
+    #: this module import-light). When set it wins over the inference in
+    #: ``IntentCompiler._get_placeholder_prices``; a caller that enables
+    #: ``allow_placeholder_prices`` on a non-test lane should set it so the
+    #: production log names the real reason instead of defaulting to "unit_test".
+    #: Making this MANDATORY whenever allow_placeholder_prices is True is the
+    #: intended end state; it is optional for now because ~20 existing test
+    #: construction sites would need updating in the same change.
+    placeholder_price_use: Any = None
     polymarket_config: Any = None  # PolymarketConfig (typed Any to avoid a framework->connector import, VIB-4989)
     swap_pool_selection_mode: Literal["auto", "fixed"] = "auto"
     fixed_swap_fee_tier: int | None = None

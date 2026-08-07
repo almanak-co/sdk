@@ -48,9 +48,14 @@ TEST_WALLET = "0x1234567890123456789012345678901234567890"
 
 # Wire-form spellings of every member of PRICE_SENSITIVE_INTENT_TYPES, paired
 # with whether the gate is expected to let an EMPTY extraction through.
-# 2 bypass, 7 fail closed. Widening the bypass to a third type turns this red.
+# 2 bypass, 8 fail closed. Widening the bypass to a third type turns this red.
 PRICE_SENSITIVE_MATRIX = [
     ("borrow", False),
+    # ALM-3183 added FLASH_LOAN to the gate. It is NOT a bypass: a flash loan
+    # whose tokens cannot be extracted must fail closed, because its nested swap
+    # callbacks compile through the same compiler and would otherwise size
+    # amountOutMinimum against fabricated prices.
+    ("flash_loan", False),
     ("lp_close", True),
     ("lp_open", False),
     ("perp_close", True),
@@ -292,3 +297,79 @@ async def test_close_with_extractable_tokens_but_no_prices_still_fails_closed():
     assert result.error_code == "NO_PRICES_AVAILABLE"
     compiler.compile.assert_not_called()
     compiler.update_prices.assert_not_called()
+
+
+# =============================================================================
+# ALM-3183: the gateway compiler itself must never be built placeholder-enabled
+# =============================================================================
+
+
+def test_gateway_compiler_is_built_fail_closed_not_placeholder_enabled(monkeypatch):
+    """ALM-3183 (lars0x P1 on PR #3640) negative control.
+
+    ``_get_compiler`` used to construct with ``allow_placeholder_prices=True``
+    and no oracle, justified by "real prices are applied per-request via
+    price_map". That holds only when a per-request price actually arrives, and
+    it does not when ``price_map`` is empty AND ``_apply_compile_prices`` never
+    reaches the mainnet gate — true for any intent type outside
+    PRICE_SENSITIVE_INTENT_TYPES and for every intent on a non-mainnet network.
+    FLASH_LOAN was that hole: its nested swap callbacks compile through this
+    compiler and would size ``amountOutMinimum`` off ETH=$2000 / unknown=$1.
+
+    Revert to ``allow_placeholder_prices=True`` and this fails on both counts.
+    """
+    from almanak.framework.intents.compiler import IntentCompiler
+
+    captured = {}
+
+    class _Spy(IntentCompiler):
+        def __init__(self, *args, **kwargs):
+            captured.update(kwargs)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr("almanak.framework.intents.compiler.IntentCompiler", _Spy)
+    monkeypatch.setattr(
+        "almanak.gateway.utils.get_rpc_url",
+        lambda chain, network=None: "http://127.0.0.1:8545",
+    )
+
+    service = _service()
+    compiler = service._get_compiler("arbitrum", TEST_WALLET)
+
+    assert captured["config"].allow_placeholder_prices is False
+    assert captured["price_oracle"] == {}
+    # The gateway pre-flight flag (VIB-6111) must survive the change.
+    assert captured["config"].gateway_internal_preflight is True
+    # And the built compiler is genuinely not in placeholder mode.
+    assert compiler._using_placeholders is False
+    assert compiler.price_oracle == {}
+
+
+def test_flash_loan_is_price_gated():
+    """ALM-3183: FLASH_LOAN must be inside the mainnet price gate.
+
+    Its callbacks are covered without extra recursion because
+    ``_extract_token_symbols_from_intent`` delegates to the shared
+    ``extract_token_symbols``, which already walks ``callback_intents``.
+    Remove "FLASHLOAN" from the set and this fails.
+    """
+    service = _service()
+    assert service._normalize_intent_type("flash_loan").upper() in PRICE_SENSITIVE_INTENT_TYPES
+    # Not a close-type bypass: an empty extraction must fail closed, not proceed.
+    assert "FLASHLOAN" not in PRICE_OPTIONAL_CLOSE_INTENT_TYPES
+
+
+@pytest.mark.asyncio
+async def test_flash_loan_without_prices_fails_closed_on_mainnet():
+    """End-to-end through the real gate: no prices ⇒ no compile."""
+    service = _service()
+    compiler = _mock_compiler()
+    service._get_compiler = MagicMock(return_value=compiler)
+    service._extract_token_symbols_from_intent = MagicMock(return_value=["WETH", "USDC"])
+    service._fetch_prices_for_tokens = AsyncMock(return_value={})
+
+    result = await service.CompileIntent(_request(intent_type="flash_loan"), MagicMock())
+
+    assert result.success is False
+    assert result.error_code == "NO_PRICES_AVAILABLE"
+    compiler.compile.assert_not_called()

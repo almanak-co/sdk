@@ -294,6 +294,16 @@ class FrameworkConfig(BaseModel):
     transaction submission.
     """
 
+    allow_placeholder_prices_enabled: bool = False
+    """ALM-3183 escape hatch (``ALMANAK_ALLOW_PLACEHOLDER_PRICES``).
+
+    Default ``False``. When enabled, an empty price oracle on the in-process
+    ``StrategyRunner`` compile path falls back to hardcoded placeholder prices
+    instead of failing that intent's compilation. NOT SAFE FOR PRODUCTION —
+    slated for removal one release after ALM-3183. See
+    ``almanak.framework.intents.compiler_queries.placeholder_escape_hatch_enabled``.
+    """
+
     force_production_enabled: bool = False
     """Whether production mode was explicitly confirmed
     (``ALMANAK_FORCE_PRODUCTION``).
@@ -368,6 +378,8 @@ def framework_config_from_env(
     * ``ALMANAK_TOKEN_NEGATIVE_CACHE_MAX`` → ``token_negative_cache_max``
       (positive int or ``None``).
     * ``ALMANAK_DEMO_MODE`` → ``demo_mode_enabled``.
+    * ``ALMANAK_ALLOW_PLACEHOLDER_PRICES`` →
+      ``allow_placeholder_prices_enabled``.
     * ``ALMANAK_FORCE_PRODUCTION`` → ``force_production_enabled``.
     * ``RUGCHECK_API_KEY`` → ``rugcheck_api_key``.
     * ``ALMANAK_REDACT_SECRETS`` → ``redact_secrets_enabled``.
@@ -412,6 +424,7 @@ def framework_config_from_env(
         token_negative_cache_ttl_s=_parse_positive_float(os.environ.get("ALMANAK_TOKEN_NEGATIVE_CACHE_TTL_S")),
         token_negative_cache_max=_parse_positive_int(os.environ.get("ALMANAK_TOKEN_NEGATIVE_CACHE_MAX")),
         demo_mode_enabled=_parse_truthy_flag(os.environ.get("ALMANAK_DEMO_MODE")),
+        allow_placeholder_prices_enabled=_parse_truthy_flag(os.environ.get("ALMANAK_ALLOW_PLACEHOLDER_PRICES")),
         force_production_enabled=_parse_truthy_flag(os.environ.get("ALMANAK_FORCE_PRODUCTION")),
         rugcheck_api_key=os.environ.get("RUGCHECK_API_KEY") or None,
         redact_secrets_enabled=_parse_log_emojis(os.environ.get("ALMANAK_REDACT_SECRETS")),

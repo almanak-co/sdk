@@ -486,12 +486,25 @@ class MultiChainOrchestrator:
             effective_wallet = self._config.execution_address
             if self._gw_chain_wallets and chain_lower in self._gw_chain_wallets:
                 effective_wallet = self._gw_chain_wallets[chain_lower]
+            # ALM-3183: this used to hardcode ``allow_placeholder_prices=True``,
+            # so every intent compiled through this executor without an explicit
+            # ``price_oracle=`` argument was sized off the hardcoded (40-60%
+            # wrong) table. The compiler now starts with a REAL-BUT-EMPTY oracle:
+            # ``_compile_and_execute_intent`` still installs the caller's real
+            # prices via ``update_prices()`` when one is supplied, and a caller
+            # that supplies none now gets a loud per-intent compile failure on
+            # any money-bearing leg instead of a fabricated price.
+            #
+            # The ALMANAK_ALLOW_PLACEHOLDER_PRICES escape hatch is deliberately
+            # NOT honoured here — this lane stays fail-closed. The hatch covers
+            # only the in-process StrategyRunner path; see docs/environment-variables.md.
             self._compilers[chain_lower] = IntentCompiler(
                 chain=chain_lower,
                 wallet_address=effective_wallet,
                 default_protocol=default_protocol,
+                price_oracle={},
                 rpc_url=rpc_url,
-                config=IntentCompilerConfig(allow_placeholder_prices=True),
+                config=IntentCompilerConfig(allow_placeholder_prices=False),
                 chain_wallets=self._gw_chain_wallets,
             )
             logger.debug(f"Created IntentCompiler for {chain_lower} (wallet={self._config.execution_address[:10]}...)")

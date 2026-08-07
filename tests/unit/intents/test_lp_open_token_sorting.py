@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.intents.compiler import IntentCompiler
+from almanak.framework.intents.compiler import IntentCompiler, IntentCompilerConfig
 from almanak.framework.intents.vocabulary import IntentType
 
 # ---------------------------------------------------------------------------
@@ -185,6 +185,12 @@ class TestCompileLPOpenInversion:
         c.default_deadline_seconds = 600
         c.wallet_address = "0x" + "11" * 20
         c._gateway_client = None
+        # ALM-3183: a __new__-built compiler must declare its config explicitly.
+        # This used to be defaulted for it -- to allow_placeholder_prices=True,
+        # silently, by a getattr fallback in the context builders. Stating it
+        # here preserves this fixture's effective behaviour exactly, and makes
+        # the "these are offline unit tests" claim visible instead of implied.
+        c._config = IntentCompilerConfig(allow_placeholder_prices=True)
         return c
 
     def _make_lp_intent(self, *, range_lower, range_upper, amount0, amount1, pool="WBNB/USDT/500"):

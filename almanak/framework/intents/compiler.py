@@ -273,7 +273,9 @@ from .compiler_models import (  # noqa: F401
 from .compiler_queries import (  # noqa: F401
     _CHAIN_NATIVE_SYMBOLS,
     CompilerQueries,
+    PlaceholderPriceUse,
     _is_solana_mint,
+    placeholder_escape_hatch_enabled,
 )
 from .compiler_queries import (
     format_amount as _qformat_amount,
@@ -715,9 +717,40 @@ class IntentCompiler:
 
         return normalize_protocol(self.chain, intent_protocol)
 
+    def _require_config(self) -> IntentCompilerConfig:
+        """Return this compiler's config, failing loudly when it was never set.
+
+        ALM-3183. The three connector-context builders used to read the config
+        as ``getattr(self, "_config", IntentCompilerConfig(allow_placeholder_prices=True))``.
+        That default is a fail-OPEN: a compiler whose ``__init__`` did not run
+        (``IntentCompiler.__new__(IntentCompiler)`` — a shape used by ~10 unit
+        test helpers) silently manufactured a config that ENABLES placeholder
+        pricing, and handed ``allow_placeholder_prices=True`` down to every
+        connector compiler context. The safety decision "may this compile
+        fabricate a price?" must be made by whoever built the compiler, never
+        defaulted to yes by an attribute lookup.
+
+        A missing ``_config`` is a construction bug in the caller, so it raises
+        rather than substituting ``IntentCompilerConfig()``: a silent safe
+        default would hide the same bug in the other direction, and the fix
+        (set ``_config`` on the ``__new__``-built compiler) is one line.
+
+        Raises:
+            RuntimeError: ``_config`` was never assigned.
+        """
+        config = getattr(self, "_config", None)
+        if config is None:
+            raise RuntimeError(
+                "IntentCompiler._config is unset -- this compiler was built without running "
+                "__init__ (e.g. IntentCompiler.__new__) and never had a config assigned. "
+                "Set `compiler._config = IntentCompilerConfig(...)` explicitly; the compiler "
+                "will not assume placeholder prices are acceptable (ALM-3183)."
+            )
+        return config
+
     def _base_compiler_context_kwargs(self, *, resolve_rpc_url: bool = True) -> dict[str, Any]:
         """Build common connector compiler context fields."""
-        config = getattr(self, "_config", IntentCompilerConfig(allow_placeholder_prices=True))
+        config = self._require_config()
 
         return {
             "chain": self.chain,
@@ -747,7 +780,7 @@ class IntentCompiler:
         construction. Lending/perp/bridge compilers that don't compile swaps
         should NOT call this — they construct ``BaseCompilerContext`` directly.
         """
-        config = getattr(self, "_config", IntentCompilerConfig(allow_placeholder_prices=True))
+        config = self._require_config()
         return {
             **self._base_compiler_context_kwargs(),
             "max_price_impact_pct": config.max_price_impact_pct,
@@ -803,7 +836,7 @@ class IntentCompiler:
         connector_compiler: BaseConcentratedLiquidityCompiler,
     ) -> CLCompilerContext:
         """Build the connector compiler context for concentrated-liquidity protocols."""
-        config = getattr(self, "_config", IntentCompilerConfig(allow_placeholder_prices=True))
+        config = self._require_config()
         factory_context = CLAdapterFactoryContext(
             chain=self.chain,
             rpc_url=self._get_chain_rpc_url(),
@@ -2738,8 +2771,33 @@ class IntentCompiler:
         return self.wallet_address
 
     def _get_placeholder_prices(self) -> dict[str, Decimal]:
-        """Delegates to compiler_queries.get_placeholder_prices (see compiler_queries.py)."""
-        return _qget_placeholder_prices()
+        """Delegates to compiler_queries.get_placeholder_prices (see compiler_queries.py).
+
+        ALM-3183: the canonical table requires an explicit ``use=``. Only a
+        compiler constructed with ``allow_placeholder_prices=True`` reaches here
+        (``__init__`` raises otherwise), so the job is to name WHICH sanctioned
+        use this is, for anyone reading a production log after the fact.
+
+        ``IntentCompilerConfig.placeholder_price_use`` wins when a caller
+        declared one. The inference below is the fallback, and the ``UNIT_TEST``
+        arm is deliberately LAST: it is a description of the only lanes that can
+        still land there — a test or a connector adapter constructing directly —
+        not a default granted to production code. The gateway's
+        ``ExecutionServiceServicer._get_compiler`` used to land on that arm while
+        serving mainnet compiles (lars0x P1 on PR #3640); it now constructs with
+        a real-but-empty oracle and never enables placeholders at all.
+        """
+        config = self._require_config()
+        declared = getattr(config, "placeholder_price_use", None)
+        if isinstance(declared, PlaceholderPriceUse):
+            use = declared
+        elif config.permission_discovery:
+            use = PlaceholderPriceUse.PERMISSION_DISCOVERY
+        elif placeholder_escape_hatch_enabled():
+            use = PlaceholderPriceUse.LEGACY_ESCAPE_HATCH
+        else:
+            use = PlaceholderPriceUse.UNIT_TEST
+        return _qget_placeholder_prices(use=use)
 
     @staticmethod
     def _format_amount(amount: int, decimals: int) -> str:

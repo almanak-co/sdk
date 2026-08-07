@@ -1,4 +1,4 @@
-.PHONY: all help clean test test-unit test-acceptance-pack test-connectors test-intents test-integration test-all test-ci test-coverage crap crap-fresh crap-diff crap-diff-fresh test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single test-accounting-matrix test-accounting-matrix-quick list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build-platform-runner build publish lint lint-check format format-check security docs docs-cli docs-generated docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene check-xfail-liveness check-config-boundary check-connector-registry check-strategy-taxonomy check-teardown-state-persistence check-connector-chains check-chain-truth check-demos check-intent-coverage check-orphan-scripts check-import-provenance check-deployment-scoped-tables check-deployment-id-proto-surface check-gateway-isolation check-decimal-policy check-decimal-policy-baseline regen-contract-baselines check-accounting-ratchet check-accounting-merge-gate scan-coupling scan-coupling-report scan-coupling-baseline check-hardcoded-addresses check-hardcoded-addresses-baseline check-permission-coverage check-ci-status
+.PHONY: all help clean test test-unit test-acceptance-pack test-connectors test-intents test-integration test-all test-ci test-coverage crap crap-fresh crap-diff crap-diff-fresh test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single test-accounting-matrix test-accounting-matrix-quick list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build-platform-runner build publish lint lint-check format format-check security docs docs-cli docs-generated docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene check-xfail-liveness check-config-boundary check-connector-registry check-strategy-taxonomy check-teardown-state-persistence check-connector-chains check-chain-truth check-demos check-intent-coverage check-orphan-scripts check-import-provenance check-deployment-scoped-tables check-deployment-id-proto-surface check-gateway-isolation check-decimal-policy check-decimal-policy-baseline regen-contract-baselines check-accounting-ratchet check-accounting-merge-gate scan-coupling scan-coupling-report scan-coupling-baseline check-hardcoded-addresses check-hardcoded-addresses-baseline check-placeholder-prices check-permission-coverage check-ci-status
 
 # Load .env file if it exists
 -include .env
@@ -211,6 +211,17 @@ check-hardcoded-addresses:
 
 check-hardcoded-addresses-baseline:
 	uv run python scripts/ci/check_hardcoded_addresses.py --baseline
+
+# Placeholder-price gate (ALM-3183). Fails CI on any NEW connector-local
+# token->USD price table. There is exactly one canonical table
+# (almanak/framework/intents/compiler_queries.py:get_placeholder_prices), and it
+# requires an explicit use=PlaceholderPriceUse.<...> at every call. Copies drift:
+# BNB was $300 in pancakeswap_v3/sushiswap_v3 and $600 in the framework, so the
+# same swap was sized two different ways. Audited pre-existing tables live in
+# scripts/ci/placeholder-price-allowlist.yml -- delegate, do not allowlist.
+#   make check-placeholder-prices
+check-placeholder-prices:
+	uv run python scripts/ci/check_placeholder_prices.py --check
 
 # Content-keyed contract-gate baselines (bifurcation / private-cache /
 # direct-constructor). Regenerate after legitimately adding or removing a

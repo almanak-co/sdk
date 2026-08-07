@@ -31,6 +31,11 @@ def _make_compiler(chain: str = "base") -> IntentCompiler:
     compiler.rpc_url = None
     compiler.default_deadline_seconds = 300
     compiler.default_lp_slippage = Decimal("0.99")
+    # ALM-3183: a __new__-built compiler must declare its config explicitly. This
+    # used to be defaulted for it -- to allow_placeholder_prices=True, silently,
+    # by a getattr fallback in the context builders. Stating it here preserves
+    # this helper's effective behaviour exactly.
+    compiler._config = IntentCompilerConfig(allow_placeholder_prices=True)
     return compiler
 
 

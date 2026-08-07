@@ -603,30 +603,22 @@ class PancakeSwapV3Adapter:
         return int(max_input * Decimal(10**decimals_in))
 
     def _get_placeholder_prices(self) -> dict[str, Decimal]:
-        """Get placeholder price data for testing only.
+        """Delegate to the single canonical placeholder table (ALM-3183).
 
-        WARNING: These prices are HARDCODED and OUTDATED.
-        DO NOT USE IN PRODUCTION - they will cause:
-        - Incorrect slippage calculations
-        - Swap reverts (amountOutMinimum too high)
-
-        Real prices as of 2026-01: BNB ~$700, ETH ~$3400, BTC ~$105,000
-        These placeholders show BNB at $300, ETH at $2000 - significantly wrong!
+        This connector used to carry its OWN copy, and it had drifted: BNB/WBNB
+        were $300 here and $600 in the framework table, so the same BNB swap was
+        priced two different ways depending on which layer answered. The copy is
+        gone; the canonical table (which absorbed this one's BUSD / BTCB / CAKE
+        entries) is the only table left. Its BNB value, $600, is what this now
+        returns. ``scripts/ci/check_placeholder_prices.py`` fails CI on any new
+        connector-local price table.
         """
-        logger.warning(
-            "PLACEHOLDER PRICES being used - NOT SAFE FOR PRODUCTION. BNB=$300 (real ~$700), ETH=$2000 (real ~$3400)"
+        # Function-scoped import, matching the existing connector -> compiler_queries
+        # precedent (jupiter/adapter.py, uniswap_v4/adapter.py): compiler_queries
+        # imports _strategy_base, so a module-level import here would close a cycle.
+        from almanak.framework.intents.compiler_queries import (
+            PlaceholderPriceUse,
+            get_placeholder_prices,
         )
-        return {
-            "WBNB": Decimal("300"),
-            "BNB": Decimal("300"),
-            "ETH": Decimal("2000"),
-            "WETH": Decimal("2000"),
-            "USDT": Decimal("1"),
-            "USDC": Decimal("1"),
-            "BUSD": Decimal("1"),
-            "BTCB": Decimal("45000"),
-            "WBTC": Decimal("45000"),
-            "CAKE": Decimal("2.50"),
-            "DAI": Decimal("1"),
-            "ARB": Decimal("1.20"),
-        }
+
+        return get_placeholder_prices(use=PlaceholderPriceUse.UNIT_TEST)

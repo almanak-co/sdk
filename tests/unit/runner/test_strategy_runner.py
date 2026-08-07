@@ -43,6 +43,23 @@ class MockMarketSnapshot:
     eth_price: Decimal = Decimal("2000")
     usdc_balance: Decimal = Decimal("10000")
 
+    def get_price_oracle_dict(self) -> dict[str, Decimal]:
+        """Real prices for the swap legs these tests compile.
+
+        ALM-3183: this mock previously had no ``get_price_oracle_dict`` at all,
+        so the runner saw "no oracle" and the compiler silently substituted the
+        hardcoded placeholder table — which is how a SWAP test passed without
+        any price ever being supplied. The runner now compiles against a
+        real-but-empty oracle instead, so a swap needs real prices here. The
+        values match the placeholders these tests used to receive implicitly, so
+        every assertion downstream is unchanged.
+        """
+        return {
+            "ETH": self.eth_price,
+            "WETH": self.eth_price,
+            "USDC": Decimal("1"),
+        }
+
 
 class MockStrategy:
     """Mock strategy for testing."""
@@ -1175,3 +1192,127 @@ class TestRunnerConfig:
         assert config.enable_state_persistence is False
         assert config.enable_alerting is False
         assert config.dry_run is True
+
+
+# =============================================================================
+# Tests: ALM-3183 -- an empty price oracle must never buy placeholder prices
+# =============================================================================
+
+
+class TestEmptyOracleFailsClosed:
+    """The runner must not turn "no prices" into "made-up prices".
+
+    Before ALM-3183 ``_init_single_chain_state`` derived
+    ``allow_placeholder_prices`` from oracle emptiness. Because the price
+    pre-fetch swallowed every exception, a price-service outage was *exactly*
+    what emptied the oracle -- so an outage silently switched the compiler onto
+    a hardcoded table its own docstring calls 40-60%% wrong (ETH=$2000,
+    WBTC=$45000, unknown symbol=$1) and, as a side effect, disabled the
+    price-impact guard, which is skipped whenever ``_using_placeholders`` is set.
+
+    These are the negative controls for that change: revert the runner to
+    ``allow_placeholder_prices=state.price_oracle is None`` and the first test
+    goes green-on-a-fabricated-price (the swap executes) instead of failing.
+    """
+
+    @pytest.mark.asyncio
+    async def test_money_bearing_intent_fails_loudly_on_empty_oracle(
+        self,
+        runner: StrategyRunner,
+        execution_orchestrator: MockExecutionOrchestrator,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A SWAP with no prices fails compilation and reaches no chain."""
+        monkeypatch.setattr(MockMarketSnapshot, "get_price_oracle_dict", lambda self: {})
+        strategy = MockStrategy(
+            decide_returns=Intent.swap(
+                from_token="USDC",
+                to_token="ETH",
+                amount_usd=Decimal("1000"),
+            )
+        )
+
+        result = await runner.run_iteration(strategy)
+
+        assert result.success is False
+        assert result.error is not None
+        # The error must name the missing price, not some downstream symptom.
+        assert "price" in result.error.lower()
+        assert "ETH" in result.error
+        # Load-bearing: nothing was submitted. A fabricated price would have
+        # produced a bundle and executed it against a wrong slippage floor.
+        assert execution_orchestrator.execute_called is False
+
+    @pytest.mark.asyncio
+    async def test_price_irrelevant_intent_still_compiles_on_empty_oracle(
+        self,
+        runner: StrategyRunner,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """HOLD does not need a price, so an empty oracle must not block it.
+
+        This is why the fix hands the compiler a real-but-EMPTY oracle rather
+        than refusing to construct one: the refusal has to be per-intent. A
+        compiler-construction failure would take the whole iteration down,
+        including the intents that never touch a price.
+        """
+        monkeypatch.setattr(MockMarketSnapshot, "get_price_oracle_dict", lambda self: {})
+        strategy = MockStrategy(decide_returns=Intent.hold(reason="no signal"))
+
+        result = await runner.run_iteration(strategy)
+
+        assert result.success is True
+
+    @pytest.mark.asyncio
+    async def test_escape_hatch_restores_legacy_placeholder_behaviour(
+        self,
+        runner: StrategyRunner,
+        execution_orchestrator: MockExecutionOrchestrator,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``ALMANAK_ALLOW_PLACEHOLDER_PRICES=1`` re-enables the old path.
+
+        The escape hatch exists so an operator who discovers a strategy they
+        cannot otherwise run has a documented, loudly-logged way to keep running
+        for one release. It must genuinely restore the old behaviour -- a hatch
+        that does not work is worse than no hatch, because it is discovered
+        during an incident.
+        """
+        monkeypatch.setattr(MockMarketSnapshot, "get_price_oracle_dict", lambda self: {})
+        monkeypatch.setenv("ALMANAK_ALLOW_PLACEHOLDER_PRICES", "1")
+        strategy = MockStrategy(
+            decide_returns=Intent.swap(
+                from_token="USDC",
+                to_token="ETH",
+                amount_usd=Decimal("1000"),
+            )
+        )
+
+        result = await runner.run_iteration(strategy)
+
+        assert result.success is True
+        assert execution_orchestrator.execute_called is True
+
+    @pytest.mark.asyncio
+    async def test_escape_hatch_is_off_by_default(
+        self,
+        runner: StrategyRunner,
+        execution_orchestrator: MockExecutionOrchestrator,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An unset -- or falsey -- env var must not enable the hatch."""
+        monkeypatch.setattr(MockMarketSnapshot, "get_price_oracle_dict", lambda self: {})
+        monkeypatch.delenv("ALMANAK_ALLOW_PLACEHOLDER_PRICES", raising=False)
+        strategy = MockStrategy(
+            decide_returns=Intent.swap(
+                from_token="USDC",
+                to_token="ETH",
+                amount_usd=Decimal("1000"),
+            )
+        )
+
+        assert (await runner.run_iteration(strategy)).success is False
+
+        monkeypatch.setenv("ALMANAK_ALLOW_PLACEHOLDER_PRICES", "0")
+        assert (await runner.run_iteration(strategy)).success is False
+        assert execution_orchestrator.execute_called is False

@@ -46,6 +46,7 @@ from __future__ import annotations
 import logging
 import re
 from decimal import Decimal
+from enum import Enum
 from types import MappingProxyType
 from typing import TYPE_CHECKING, ClassVar, Protocol
 
@@ -99,42 +100,155 @@ def format_amount(amount: int, decimals: int) -> str:
     return f"{decimal_amount:,.4f}"
 
 
-def get_placeholder_prices() -> dict[str, Decimal]:
-    """Get placeholder price data for testing only.
+class PlaceholderPriceUse(str, Enum):
+    """Why a caller is reaching for the placeholder price table (ALM-3183).
 
-    WARNING: These prices are HARDCODED and OUTDATED.
-    DO NOT USE IN PRODUCTION - they will cause:
-    - Incorrect slippage calculations
-    - Swap reverts (amountOutMinimum too high)
-    - Position sizing errors
-    - Health factor miscalculations
-
-    Real prices as of 2026-01: ETH ~$3400, BTC ~$105,000
-    These placeholders show ETH at $2000, BTC at $45,000 - 40-60% wrong!
+    ``get_placeholder_prices`` takes this as a REQUIRED keyword so that no call
+    site can reach a fabricated price by accident — an omitted argument is a
+    ``TypeError`` at the call, not a silently-wrong slippage floor at the DEX.
+    Each member is a claim the caller is making about its own context, and the
+    claim is what a reviewer reads in the diff.
     """
-    logger.debug(
-        "PLACEHOLDER PRICES being used - NOT SAFE FOR PRODUCTION. ETH=$2000 (real ~$3400), BTC=$45000 (real ~$105000)"
+
+    #: A unit / offline test that never signs or submits. The prices are
+    #: arbitrary; the test only needs *a* number so compilation proceeds.
+    UNIT_TEST = "unit_test"
+
+    #: Safe / Zodiac permission discovery. Synthetic intents are compiled purely
+    #: to enumerate the ``(target, selector)`` pairs a Safe must authorise; that
+    #: calldata is never signed or submitted, and discovery runs with no oracle
+    #: by construction. Refusing here yields an EMPTY manifest, which makes every
+    #: Safe call revert at ``execTransactionWithRole`` (AGENTS.md §Connector
+    #: additions names this exact trap).
+    PERMISSION_DISCOVERY = "permission_discovery"
+
+    #: The ALM-3183 escape hatch: an operator has explicitly re-enabled the old
+    #: lenient behaviour via ``ALMANAK_ALLOW_PLACEHOLDER_PRICES``. Refused unless
+    #: that env var is actually set, so the enum member alone cannot buy a
+    #: fabricated price on a production path.
+    LEGACY_ESCAPE_HATCH = "legacy_escape_hatch"
+
+
+#: Env var for the ALM-3183 escape hatch. Default OFF. See
+#: :func:`placeholder_escape_hatch_enabled`.
+PLACEHOLDER_ESCAPE_HATCH_ENV = "ALMANAK_ALLOW_PLACEHOLDER_PRICES"
+
+
+def placeholder_escape_hatch_enabled() -> bool:
+    """True when the operator has explicitly re-enabled placeholder pricing.
+
+    ALM-3183 made an empty price oracle a loud, per-intent compile failure
+    instead of a silent switch to a hardcoded price table. This env var restores
+    the old lenient behaviour for ONE release, for an operator who discovers a
+    strategy they cannot otherwise run. It is deliberately:
+
+    * **default OFF** — unset / empty / unrecognised is False;
+    * **loud** — every read that returns True logs at ERROR, on every call, so
+      the condition cannot sit unnoticed in a long-running deployment;
+    * **temporary** — slated for removal one release after ALM-3183 ships.
+
+    Reading an env var is configuration within a deployment mode, not an egress
+    path, so this stays inside the gateway boundary (AGENTS.md §Two Deployment
+    Surfaces: ``ALMANAK_IS_HOSTED`` remains the only *mode* signal). The read
+    goes through the typed config service rather than ``os.environ`` directly —
+    ``almanak/config/`` is the only permitted env parser
+    (``scripts/ci/check_config_boundary.py``), and routing through it also gets
+    the standard truthy ladder for free instead of a fourth local copy.
+    """
+    # Function-scoped: ``almanak.config`` pulls in the gateway/connector config
+    # slices, and the compiler is imported early enough that a module-level
+    # import would widen this module's import graph considerably.
+    from almanak.config.framework import framework_config_from_env
+
+    if not framework_config_from_env().allow_placeholder_prices_enabled:
+        return False
+    logger.error(
+        "%s is ENABLED: placeholder (HARDCODED, ~40-60%% wrong) prices may be used for "
+        "slippage, position sizing and health-factor math. This is the ALM-3183 escape "
+        "hatch and is NOT SAFE FOR PRODUCTION -- unset it and supply a real price oracle.",
+        PLACEHOLDER_ESCAPE_HATCH_ENV,
+    )
+    return True
+
+
+def get_placeholder_prices(*, use: PlaceholderPriceUse) -> dict[str, Decimal]:
+    """The single canonical placeholder price table (ALM-3183).
+
+    WARNING: These prices are HARDCODED and OUTDATED. They must never reach a
+    money-bearing compile — they cause incorrect slippage calculations, swap
+    reverts (``amountOutMinimum`` too high), position-sizing errors and health-
+    factor miscalculations.
+
+    Real prices as of 2026-01: ETH ~$3400, BTC ~$105,000. These placeholders
+    show ETH at $2000 and BTC at $45,000 - 40-60%% wrong.
+
+    This is the ONLY placeholder table in the framework and connector tree that
+    a compile path may read. Connector-local copies drifted from it (BNB was
+    $600 here and $300 in pancakeswap_v3 / sushiswap_v3, so the *same* swap
+    priced two different ways depending on venue), so they were deleted in
+    favour of delegating here. ``scripts/ci/check_placeholder_prices.py`` fails
+    CI on any new connector-local price table.
+
+    Args:
+        use: REQUIRED keyword naming why the caller may fabricate a price. See
+            :class:`PlaceholderPriceUse`. ``LEGACY_ESCAPE_HATCH`` is refused
+            unless ``ALMANAK_ALLOW_PLACEHOLDER_PRICES`` is set.
+
+    Raises:
+        TypeError: ``use`` is not a :class:`PlaceholderPriceUse`.
+        RuntimeError: ``use`` is ``LEGACY_ESCAPE_HATCH`` but the escape-hatch
+            env var is not enabled.
+    """
+    if not isinstance(use, PlaceholderPriceUse):
+        raise TypeError(
+            "get_placeholder_prices() requires an explicit use=PlaceholderPriceUse.<...> "
+            f"declaring why a fabricated price is acceptable here; got {use!r}."
+        )
+    if use is PlaceholderPriceUse.LEGACY_ESCAPE_HATCH and not placeholder_escape_hatch_enabled():
+        raise RuntimeError(
+            "Refusing to serve placeholder prices under "
+            f"PlaceholderPriceUse.LEGACY_ESCAPE_HATCH: {PLACEHOLDER_ESCAPE_HATCH_ENV} is not set. "
+            "Supply a real price oracle instead."
+        )
+    logger.warning(
+        "PLACEHOLDER PRICES served (use=%s) - NOT SAFE FOR PRODUCTION. "
+        "ETH=$2000 (real ~$3400), BTC=$45000 (real ~$105000)",
+        use.value,
     )
     return {
         "ETH": Decimal("2000"),
         "WETH": Decimal("2000"),
+        # ``.e`` bridged variants (avalanche); folded in from the deleted
+        # sushiswap_v3 copy so delegating loses no symbol coverage.
+        "WETH.e": Decimal("2000"),
         "USDC": Decimal("1"),
         "USDC.e": Decimal("1"),
         "USDT": Decimal("1"),
         "DAI": Decimal("1"),
+        "DAI.e": Decimal("1"),
+        "BUSD": Decimal("1"),
         "WBTC": Decimal("45000"),
+        "WBTC.e": Decimal("45000"),
+        # BSC-wrapped BTC; folded in from the deleted pancakeswap_v3 copy.
+        "BTCB": Decimal("45000"),
         "MATIC": Decimal("0.80"),
         "WMATIC": Decimal("0.80"),
         "ARB": Decimal("1.20"),
         "OP": Decimal("2.50"),
         "AVAX": Decimal("35"),
         "WAVAX": Decimal("35"),
+        # NOTE: the deleted connector copies carried BNB/WBNB at $300 while this
+        # table has carried $600 since it was written. $600 is the value kept
+        # (real ~$700): the drift is the defect, not the higher number.
         "BNB": Decimal("600"),
         "WBNB": Decimal("600"),
         "S": Decimal("0.50"),
         "WS": Decimal("0.50"),
         "MNT": Decimal("0.80"),
         "WMNT": Decimal("0.80"),
+        # Protocol tokens from the deleted connector copies.
+        "CAKE": Decimal("2.50"),
+        "SUSHI": Decimal("1"),
     }
 
 

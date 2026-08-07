@@ -80,6 +80,7 @@ from ..execution.result_enricher import ResultEnricher
 from ..execution.revert_diagnostics import diagnose_revert
 from ..execution.session_store import ExecutionSessionStore
 from ..intents.compiler import IntentCompiler, IntentCompilerConfig
+from ..intents.compiler_queries import placeholder_escape_hatch_enabled
 from ..intents.state_machine import (
     IntentStateMachine,
     RetryConfig,
@@ -7309,18 +7310,47 @@ class StrategyRunner:
                 if handler is not None:
                     state.clob_handler = handler
 
-        # Build compiler config
-        # Allow placeholder prices when no real prices are available (empty oracle).
-        # This happens legitimately when the strategy uses indicators (RSI, BB)
-        # instead of calling market.price() directly.  Placeholder prices are only
-        # used as fallback for tokens not in the oracle dict, so an empty oracle
-        # with placeholders enabled is safe -- the compiler will use conservative
-        # hardcoded estimates for slippage calculations.
-        if state.price_oracle is None:
-            logger.debug(
-                "No prices in market snapshot -- compiler will use placeholder prices. "
-                "This is normal for strategies that use indicators instead of market.price()."
-            )
+        # Build compiler config.
+        #
+        # ALM-3183: an empty price oracle NO LONGER enables placeholder pricing.
+        # The old rule ("no prices => use the hardcoded table") made a price-service
+        # outage indistinguishable from an indicator-only strategy: the outage
+        # emptied the oracle, the empty oracle flipped this flag, and the compiler
+        # silently sized slippage, positions and health factors off a table its own
+        # docstring calls 40-60% wrong (ETH=$2000, WBTC=$45000, anything unknown=$1).
+        # It also disabled the price-impact guard, because that guard is skipped
+        # whenever ``_using_placeholders`` is set.
+        #
+        # The compiler now gets a REAL-BUT-EMPTY oracle instead. That keeps the
+        # failure PER-INTENT and correctly scoped, which is why the oracle is
+        # emptied rather than the compiler refusing to construct:
+        #   * price-irrelevant intents (HOLD / STAKE / UNSTAKE / UNWRAP_NATIVE /
+        #     VAULT_DEPOSIT / VAULT_REDEEM) still compile, as they must;
+        #   * any money-bearing leg that needs a USD price fails ITS OWN
+        #     compilation loudly with "no usable USD price for token(s): ...".
+        # Same shape as the VIB-6301 fix on the gateway's price-gate bypass.
+        if not state.price_oracle:
+            if placeholder_escape_hatch_enabled():
+                # Escape hatch: restore the pre-ALM-3183 lenient behaviour verbatim
+                # by collapsing an empty oracle back to ``None``, which is what
+                # selects placeholder mode below.
+                # ``placeholder_escape_hatch_enabled()`` logs at ERROR on every read.
+                logger.error(
+                    "Placeholder-price escape hatch active: empty price oracle falls back to "
+                    "HARDCODED prices for this compile (chain=%s). Slippage, position sizing and "
+                    "health-factor math will be wrong.",
+                    strategy.chain,
+                )
+                state.price_oracle = None
+            else:
+                logger.warning(
+                    "No prices in the market snapshot for %s -- compiling against a real-but-EMPTY "
+                    "price oracle. Price-irrelevant intents (HOLD/STAKE/VAULT_*) still compile; any "
+                    "money-bearing leg will fail compilation with a 'no usable USD price' error "
+                    "rather than silently using a placeholder price (ALM-3183).",
+                    strategy.chain,
+                )
+                state.price_oracle = {}
         compiler_config = IntentCompilerConfig(
             allow_placeholder_prices=state.price_oracle is None,
         )
@@ -8701,9 +8731,17 @@ class StrategyRunner:
         """Extract and normalize the price oracle dict from a market snapshot.
 
         Pre-fetches prices for tokens named by the intent that aren't already
-        in the oracle. Returns ``None`` when no oracle is available or the
-        oracle is empty after pre-fetch (so the compiler falls back to
-        placeholder prices).
+        in the oracle.
+
+        Returns ``None`` only when there is no market snapshot to read at all.
+        An oracle that is *present but empty* is returned as ``{}`` — ALM-3183:
+        "the price service told us nothing" and "there is no price service" are
+        different facts, and collapsing the first into ``None`` is what used to
+        buy a compile a full table of hardcoded prices. ``{}`` is a real-but-
+        empty oracle: price-irrelevant intents still compile, money-bearing legs
+        fail loudly. Pre-fetch failures are logged at ERROR (they are the usual
+        cause of an empty oracle) and leave the token absent, so the failure the
+        operator sees names the token that could not be priced.
         """
         if market is None or not hasattr(market, "get_price_oracle_dict"):
             return None
@@ -8724,20 +8762,52 @@ class StrategyRunner:
             )
             missing_tokens = [t for t in intent_tokens if not price_oracle or t not in price_oracle]
             if missing_tokens:
+                # ALM-3183: this loop used to be ``except Exception: pass``. A
+                # price-service outage therefore emptied the oracle SILENTLY, and
+                # the empty oracle was itself the signal that turned on placeholder
+                # pricing -- the outage and its cover-up were the same line. The
+                # failure is now loud at its source; the token stays absent, so the
+                # money-bearing compile that needs it fails naming that token.
+                failed: list[str] = []
                 for token in missing_tokens:
                     try:
                         market.price(token)
-                    except Exception:
-                        pass  # Token price unavailable, compiler will use placeholder
+                    except Exception as exc:
+                        failed.append(token)
+                        logger.error(
+                            "Price pre-fetch FAILED for %s on chain=%s: %s: %s. The token stays "
+                            "absent from the price oracle; any money-bearing intent leg that "
+                            "needs it will fail compilation (ALM-3183).",
+                            token,
+                            getattr(market, "chain", None) or getattr(intent, "chain", None),
+                            type(exc).__name__,
+                            exc,
+                        )
                 price_oracle = market.get_price_oracle_dict()
+                if failed:
+                    logger.error(
+                        "Price pre-fetch failed for %d/%d intent token(s) on intent_id=%s: %s. "
+                        "Compilation will fail closed rather than substitute placeholder prices.",
+                        len(failed),
+                        len(missing_tokens),
+                        getattr(intent, "intent_id", None),
+                        ", ".join(sorted(failed)),
+                    )
 
             # Native gas-token pre-fetch (case 3 above): ONLY runs when the
             # oracle already carries at least one real intent-token price.
-            # Skipping it on an empty oracle preserves the indicator-strategy
-            # placeholder path — adding only MATIC there would flip the
-            # ``allow_placeholder_prices`` signal in ``_init_single_chain_state``
-            # and the compiler would raise on the unresolved swap leg
-            # (Codex audit P2 on the original VIB-3804 patch).
+            #
+            # ALM-3183 note: the original reason for this guard was to avoid
+            # flipping the ``allow_placeholder_prices`` signal in
+            # ``_init_single_chain_state`` by adding a native-only price to an
+            # otherwise-empty oracle (Codex audit P2 on the VIB-3804 patch).
+            # That signal no longer exists — emptiness no longer selects
+            # placeholder mode — so the guard is now only a cheap "don't issue a
+            # gas-token price call when every intent leg already failed to
+            # price" short-circuit. Behaviour is deliberately left UNCHANGED
+            # here: lifting it would start writing ``gas_usd`` on runs that
+            # previously wrote it empty, which is an accounting-surface change
+            # and belongs in its own PR.
             if price_oracle:
                 chain = getattr(market, "chain", None) or getattr(intent, "chain", None)
                 if chain:
@@ -8765,10 +8835,21 @@ class StrategyRunner:
             if price_oracle:
                 logger.debug(f"Pre-fetched prices for intent tokens: {list(price_oracle.keys())}")
         if price_oracle is None:
+            # The snapshot carries no oracle object at all.
             return None
         if not price_oracle:
-            # Oracle exists but empty after pre-fetch -- no usable prices
-            return None
+            # ALM-3183: the oracle EXISTS and priced nothing. That is a measured
+            # "no prices", not an absent price service, and it is returned as
+            # such -- ``{}``. Collapsing it to ``None`` here is what previously
+            # handed the compiler a full table of hardcoded prices. The caller
+            # (``_init_single_chain_state``) decides what an empty oracle means;
+            # this helper does not throw the distinction away.
+            logger.warning(
+                "Price oracle is EMPTY after pre-fetch for intent_id=%s -- no token could be "
+                "priced. Money-bearing legs will fail compilation (ALM-3183).",
+                getattr(intent, "intent_id", None),
+            )
+            return {}
         logger.debug(f"Using real prices from market snapshot: {list(price_oracle.keys())}")
         return price_oracle
 

@@ -187,10 +187,43 @@ class TestAdapterInit:
         )
         adapter = PancakeSwapV3Adapter(cfg, token_resolver=MagicMock())
         assert adapter._using_placeholders is True
-        # Spot-check the placeholder table
-        assert adapter._price_provider["WBNB"] == Decimal("300")
+        # ALM-3183: the adapter now delegates to the single canonical table
+        # instead of carrying its own copy. WBNB was the drift: $300 here,
+        # $600 in the framework table, so the same BNB swap was sized two
+        # different ways depending on which layer answered. $600 (real ~$700)
+        # is the surviving value. CAKE was folded into the canonical table so
+        # delegating loses no symbol coverage.
+        assert adapter._price_provider["WBNB"] == Decimal("600")
         assert adapter._price_provider["USDT"] == Decimal("1")
         assert adapter._price_provider["CAKE"] == Decimal("2.50")
+
+    def test_placeholder_table_is_delegated_not_a_local_copy(self, monkeypatch):
+        """ALM-3183 negative control: the adapter must DELEGATE, not own a table.
+
+        Asserts delegation, not value equality. Value equality was the weaker
+        test CodeRabbit caught on PR #3640: a reinstated connector-local dict
+        holding the same numbers would have passed it, which is the one case the
+        test exists to catch — the copies start identical and drift later (BNB
+        went $600 → $300 that way, invisibly).
+
+        The patch targets ``compiler_queries``, the DEFINING module, because the
+        adapter resolves ``get_placeholder_prices`` through a function-scoped
+        import — patching the adapter's namespace would bind nothing.
+        """
+        from almanak.framework.intents import compiler_queries
+
+        sentinel = {"WBNB": Decimal("600")}
+        uses: list[object] = []
+
+        def fake_get_placeholder_prices(*, use):
+            uses.append(use)
+            return sentinel
+
+        monkeypatch.setattr(compiler_queries, "get_placeholder_prices", fake_get_placeholder_prices)
+        adapter = PancakeSwapV3Adapter.__new__(PancakeSwapV3Adapter)
+
+        assert adapter._get_placeholder_prices() is sentinel
+        assert uses == [compiler_queries.PlaceholderPriceUse.UNIT_TEST]
 
     def test_addresses_loaded_for_chain(self):
         cfg = PancakeSwapV3Config(

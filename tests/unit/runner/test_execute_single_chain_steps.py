@@ -18,6 +18,7 @@ regressions in the early-exit / mutation contract surface at unit level.
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
@@ -121,13 +122,48 @@ class TestBuildSingleChainPriceOracle:
         result = StrategyRunner._build_single_chain_price_oracle(market, intent)
         assert result == {"USDC": Decimal("1"), "ETH": Decimal("2000")}
 
-    def test_empty_oracle_after_prefetch_returns_none(self) -> None:
-        """Regression: an empty oracle dict is coerced to None so the compiler uses placeholders."""
+    def test_empty_oracle_after_prefetch_returns_empty_dict_not_none(self) -> None:
+        """ALM-3183 negative control. An oracle that EXISTS and priced nothing is
+        returned as ``{}``, never ``None``.
+
+        This assertion is the whole fix in one line. Before ALM-3183 the helper
+        collapsed empty to ``None``, and ``_init_single_chain_state`` read that
+        ``None`` as "placeholder prices are fine" — so a price-service outage
+        (which is what empties an oracle) silently bought every swap a slippage
+        floor computed from ETH=$2000/WBTC=$45000 and disabled the price-impact
+        guard. Revert the fix and this test fails: ``{} != None``.
+        """
         intent = SwapIntent(from_token="USDC", to_token="ETH", amount=Decimal("1"))
         market = MagicMock()
         market.get_price_oracle_dict.return_value = {}
         result = StrategyRunner._build_single_chain_price_oracle(market, intent)
-        assert result is None
+        assert result == {}
+        assert result is not None
+
+    def test_prefetch_failure_is_logged_at_error_not_swallowed(self, caplog) -> None:
+        """ALM-3183 (b) negative control: a failing ``market.price()`` is loud.
+
+        The pre-fetch loop was ``except Exception: pass``. A price-service outage
+        and its cover-up were therefore the same line: the outage emptied the
+        oracle, and the empty oracle was itself the signal that turned on
+        placeholder pricing. Revert to ``pass`` and this test fails — no ERROR
+        record is emitted and the token never appears in the log.
+        """
+        intent = SwapIntent(from_token="USDC", to_token="ETH", amount=Decimal("1"))
+        market = MagicMock()
+        market.chain = "arbitrum"
+        market.get_price_oracle_dict.return_value = {}
+        market.price.side_effect = RuntimeError("price service unreachable")
+
+        with caplog.at_level(logging.ERROR, logger="almanak.framework.runner.strategy_runner"):
+            result = StrategyRunner._build_single_chain_price_oracle(market, intent)
+
+        assert result == {}
+        errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert errors, "a failing price pre-fetch must be logged at ERROR"
+        joined = "\n".join(r.getMessage() for r in errors)
+        assert "price service unreachable" in joined, "the underlying exception must be surfaced"
+        assert "ETH" in joined, "the token that could not be priced must be named"
 
     def test_prefetches_missing_tokens(self) -> None:
         """Tokens missing from the oracle trigger ``market.price(token)`` pre-fetch calls."""
@@ -185,20 +221,20 @@ class TestBuildSingleChainPriceOracle:
         # No price() calls — both swap legs already in oracle and no native added.
         market.price.assert_not_called()
 
-    def test_native_prefetch_skipped_on_empty_oracle_preserves_placeholder_mode(
+    def test_native_prefetch_skipped_on_empty_oracle(
         self,
     ) -> None:
-        """Codex audit P2 (VIB-3804 follow-up): an indicator-only strategy
-        that didn't fetch intent-leg prices in ``decide()`` must still see
-        an empty oracle so ``_init_single_chain_state`` keeps
-        ``allow_placeholder_prices=True``. Pre-fix to this guard, the
-        native-gas pre-fetch could populate MATIC into an otherwise-empty
-        oracle, flipping the signal and making the compiler raise on the
-        unresolved USDC/WETH legs.
+        """The native-gas pre-fetch is not attempted on an all-failed oracle.
 
-        Contract: when intent-token pre-fetches all fail (oracle stays
-        empty), the native pre-fetch is NOT attempted; ``gas_usd`` stays
-        empty in the indicator path (consistent with placeholder mode).
+        Originally this guard existed to stop the native pre-fetch from
+        flipping the ``allow_placeholder_prices`` signal by turning an empty
+        oracle into a native-only one (Codex audit P2 on the VIB-3804 patch).
+        ALM-3183 removed that signal — emptiness no longer selects placeholder
+        mode — so the guard now only short-circuits a pointless price call when
+        every intent leg already failed to price. The behaviour is asserted
+        UNCHANGED here on purpose: lifting the guard would start writing
+        ``gas_usd`` on runs that previously wrote it empty, which is an
+        accounting-surface change and belongs in its own PR.
         """
         intent = SwapIntent(from_token="USDC", to_token="WETH", amount=Decimal("1"))
         market = MagicMock()
@@ -207,11 +243,11 @@ class TestBuildSingleChainPriceOracle:
         # this simulates an indicator-only strategy with no upstream price feed.
         market.get_price_oracle_dict.return_value = {}
         result = StrategyRunner._build_single_chain_price_oracle(market, intent)
-        # Empty oracle is coerced to None so the compiler enables placeholder mode.
-        assert result is None
-        # Crucial: MATIC pre-fetch was NOT attempted. If it had been, the
-        # oracle would carry only MATIC and the placeholder-mode signal
-        # would silently flip (Codex audit P2).
+        # Real-but-empty (ALM-3183), not None: the oracle existed and priced nothing.
+        assert result == {}
+        # Crucial: MATIC pre-fetch was NOT attempted -- an oracle carrying only
+        # MATIC is not more useful to a USDC->WETH swap than an empty one, and
+        # it would change what gets written to gas_usd.
         called = {call.args[0] for call in market.price.call_args_list}
         assert "MATIC" not in called
 
