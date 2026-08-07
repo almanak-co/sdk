@@ -50,8 +50,8 @@ class TestMarketServiceReinitialize:
 
         assert servicer._initialized is True
         assert settings.chains[0] == "arbitrum"
-        # Full EVM stack: Chainlink + Binance + DexScreener + CoinGecko
-        assert len(servicer._price_aggregator._sources) == 4
+        # Full EVM stack: Chainlink + GMX ticker + Binance + DexScreener + CoinGecko
+        assert len(servicer._price_aggregator._sources) == 5
         # Override still off (setting wasn't changed)
         assert servicer._manual_price_override is None
 
@@ -103,7 +103,7 @@ class TestMarketServiceReinitialize:
         assert len(settings.chains) == 2  # no duplicates
         # Arbitrum is served by its own chain-correct aggregator (full EVM stack).
         assert "arbitrum" in servicer._price_aggregators
-        assert len(servicer._price_aggregators["arbitrum"].sources) == 4
+        assert len(servicer._price_aggregators["arbitrum"].sources) == 5
 
     @pytest.mark.asyncio
     async def test_reinit_never_exposes_empty_aggregator_map(self):
@@ -189,7 +189,7 @@ class TestGetBalanceAutoReinit:
 
         # After GetBalance, should have upgraded to full EVM stack (override still separate)
         assert settings.chains[0] == "arbitrum"
-        assert len(servicer._price_aggregator._sources) == 4
+        assert len(servicer._price_aggregator._sources) == 5
 
     @pytest.mark.asyncio
     async def test_no_reinit_when_chain_already_configured(self):

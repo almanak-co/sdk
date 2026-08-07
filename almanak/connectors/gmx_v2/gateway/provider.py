@@ -54,10 +54,12 @@ from almanak.connectors._base.gateway_capabilities import (
     GatewayPerpMarketDiscoveryCapability,
     GatewayPerpPriceHistoryCapability,
     GatewayPriceIdCapability,
+    GatewayVenueTickerPriceCapability,
     PerpMarketCatalogueUnavailable,
     PerpMarketRecord,
     PerpPriceCandle,
     PerpPriceCandlePage,
+    VenueTickerPrice,
 )
 from almanak.connectors._base.gateway_connector import GatewayConnector
 from almanak.connectors._base.types import ProtocolKind, ProtocolName
@@ -93,6 +95,7 @@ class GmxV2GatewayConnector(
     GatewayPriceIdCapability,
     GatewayPerpMarketDiscoveryCapability,
     GatewayPerpPriceHistoryCapability,
+    GatewayVenueTickerPriceCapability,
 ):
     """Gateway-side connector for GMX V2 perp venue."""
 
@@ -101,8 +104,10 @@ class GmxV2GatewayConnector(
 
     def __init__(self) -> None:
         from .market_registry import GmxV2MarketRegistry
+        from .ticker_prices import GmxV2TickerPriceReader
 
         self._market_registry = GmxV2MarketRegistry()
+        self._ticker_price_reader = GmxV2TickerPriceReader()
 
     def perp_market_discovery_chains(self) -> frozenset[str]:
         """Chains backed by GMX's official metadata API and Reader contracts."""
@@ -224,6 +229,31 @@ class GmxV2GatewayConnector(
             timeframe=timeframe,
             candles=tuple(candles),
         )
+
+    # ---------------------------------------------------------------------
+    # GatewayVenueTickerPriceCapability (ALM-3177)
+    # ---------------------------------------------------------------------
+
+    def ticker_price_venue(self) -> str:
+        return "gmx_v2"
+
+    def ticker_price_integration(self) -> str:
+        """The ``almanak.integrations`` package fronting this feed (dispatch identity)."""
+        return "gmx"
+
+    def ticker_price_chains(self) -> frozenset[str]:
+        return self._ticker_price_reader.chains()
+
+    async def fetch_ticker_prices(self, *, chain: str) -> Mapping[str, VenueTickerPrice]:
+        """Synthetic-index USD mids from the venue's signed oracle ticker feed.
+
+        Serves the symbols no address-based source can price (synthetic index
+        tokens have no deployed contract anywhere), so `PERP_OPEN` acceptable
+        price derivation works for every market the venue lists — not just the
+        curated ones with hand-declared CoinGecko slugs in
+        :meth:`coingecko_ids`.
+        """
+        return await self._ticker_price_reader.fetch(chain=chain)
 
     def addresses_for(self, chain: str) -> Mapping[str, str]:
         """Return the GMX V2 contract addresses for ``chain`` (or empty)."""

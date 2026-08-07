@@ -346,9 +346,9 @@ class TestSharedSourceDedupAndClose:
 
 class TestSingleChainCompat:
     @pytest.mark.asyncio
-    async def test_single_chain_builds_identical_four_source_evm_stack(self):
+    async def test_single_chain_builds_identical_five_source_evm_stack(self):
         """A single-chain gateway yields a one-entry map whose aggregator holds the
-        exact pre-change 4-source EVM stack (Chainlink + Binance + DexScreener +
+        exact 5-source EVM stack (Chainlink + GMX ticker + Binance + DexScreener +
         CoinGecko)."""
         servicer = MarketServiceServicer(_settings(["arbitrum"]))
         await servicer._ensure_initialized()
@@ -358,8 +358,8 @@ class TestSingleChainCompat:
         assert _NO_CHAIN_KEY not in servicer._price_aggregators
 
         names = _source_names(servicer._price_aggregators["arbitrum"])
-        assert set(names) == {"onchain", "binance", "dexscreener", "coingecko"}
-        assert len(names) == 4
+        assert set(names) == {"onchain", "gmx_ticker", "binance", "dexscreener", "coingecko"}
+        assert len(names) == 5
         # Back-compat property still returns the primary aggregator.
         assert servicer._price_aggregator is servicer._price_aggregators["arbitrum"]
 

@@ -1464,3 +1464,83 @@ class GatewayPrincipalTokenPriceCapability(Protocol):
         — the gateway never instantiates a raw provider on the hosted perimeter.
         """
         ...
+
+
+# =============================================================================
+# ALM-3177 — GatewayVenueTickerPriceCapability
+# =============================================================================
+
+
+@dataclass(frozen=True, slots=True)
+class VenueTickerPrice:
+    """One venue-native spot observation for a synthetic perp index symbol.
+
+    ``price_usd`` is the USD mid of the venue's signed oracle bounds, already
+    descaled to USD per whole token by the owning connector. ``updated_at`` is
+    the venue's own observation timestamp (unix seconds) so consumers can apply
+    their own freshness policy instead of trusting fetch time.
+    """
+
+    symbol: str
+    price_usd: Decimal
+    updated_at: int
+
+
+@runtime_checkable
+class GatewayVenueTickerPriceCapability(Protocol):
+    """Perp connector publishes venue-native spot prices for synthetic indices.
+
+    Exists because synthetic perp index tokens (GMX's DOGE / XMR / ZEC / gold /
+    oil on Arbitrum, …) have **no deployed contract on any chain**, so no
+    address-based price source can ever serve them, and hand-curating
+    symbol→provider-id maps for a venue that lists new synthetic markets weekly
+    is a treadmill (the ALM-3177 failure: XMR listed 2025-06-02, still
+    unpriceable in 2026-08). The venue's own ticker feed is the only source
+    that by construction covers every market the venue lists — and it is the
+    same signed oracle plane the venue's keeper settles orders against.
+
+    Scope contract: implementations MUST return synthetic index symbols only.
+    Tokens the venue itself lists as deployed (WETH, USDC, ARB, …) are
+    excluded here. Note this is necessary but NOT sufficient to keep the feed
+    off deployed-token pricing: the venue's synthetic flag describes its index
+    identifier address, not the symbol — CRV / DOT / LDO have synthetic GMX
+    rows and real deployed contracts. The consuming price source applies the
+    second gate against the SDK token registry.
+
+    The gateway price source (``almanak.integrations.gmx``) resolves providers
+    from ``GATEWAY_REGISTRY.capability_providers`` and dispatches by
+    ``ticker_price_chains()`` — never by importing a concrete connector
+    (gateway↔connector isolation, VIB-4121). Unlike
+    :class:`GatewayOraclePriceCapability` (an eth_call spec the gateway
+    executes), the venue catalogue read is an HTTP API owned end-to-end by the
+    connector's gateway package, matching
+    :class:`GatewayPerpMarketDiscoveryCapability`'s egress model.
+
+    Contract:
+
+    * ``ticker_price_venue() -> str`` — venue identifier (e.g. ``"gmx_v2"``).
+    * ``ticker_price_integration() -> str`` — manifest name of the
+      ``almanak.integrations`` package that publishes this venue's ticker
+      source (e.g. ``"gmx"``). The typed dispatch identity: that integration's
+      factory and source match it together with the chain, so a second venue
+      on the same chain can never be selected by registry order or served
+      under another integration's source name. Connector-owned by design —
+      the connector declares who fronts its feed, and neither side needs the
+      other's protocol literal.
+    * ``ticker_price_chains() -> frozenset[str]`` — chains the venue feed serves.
+    * ``fetch_ticker_prices(*, chain) -> Mapping[str, VenueTickerPrice]`` —
+      the full synthetic-symbol page for one chain, keyed by uppercase symbol.
+      Implementations own caching (the feed enumerates the whole chain, so
+      per-symbol fetches would scale traffic with strategy breadth — same
+      rationale as the VIB-6561 catalogue cache). Malformed rows are skipped,
+      never fabricated (Empty≠Zero); transport failure raises
+      :class:`PerpMarketCatalogueUnavailable`.
+    """
+
+    def ticker_price_venue(self) -> str: ...
+
+    def ticker_price_integration(self) -> str: ...
+
+    def ticker_price_chains(self) -> frozenset[str]: ...
+
+    async def fetch_ticker_prices(self, *, chain: str) -> Mapping[str, VenueTickerPrice]: ...

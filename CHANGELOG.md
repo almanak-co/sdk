@@ -8,6 +8,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **GMX venue-native spot prices for synthetic perp indices (ALM-3177).** The
+  gateway price aggregator on Arbitrum/Avalanche now includes a `gmx_ticker`
+  source that serves USD mids straight from GMX's signed oracle ticker feed
+  (`/prices/tickers`) — the same price plane the venue's keeper settles orders
+  against. It answers **only** for symbols that are synthetic on the venue AND
+  carry no deployed identity in the SDK token registry on that chain (DOGE,
+  XMR, ZEC, gold, oil, …), so every market the venue lists is now compilable:
+  `PERP_OPEN` acceptable-price derivation no longer depends on a hand-curated
+  symbol→CoinGecko-slug row existing for each newly listed market (the
+  ALM-3177 failure: XMR listed 2025-06-02, still unpriceable in 2026-08).
+  Registry-deployed tokens (WETH, USDC, ARB — and CRV/DOT/LDO/… whose GMX
+  index rows are synthetic but whose tokens are real) are deliberately out of
+  scope — the address-based sources keep their existing votes. Venue
+  specifics are published through a
+  new `GatewayVenueTickerPriceCapability` on the GMX gateway connector; the
+  `almanak.integrations.gmx` source owns only freshness policy (venue
+  observations older than 60s are served stale, older than 5min are a miss)
+  and Empty≠Zero miss semantics.
+
 - **`almanak info matrix --json` schema v2 — per-intent chain coverage.** Each
   protocol row now carries `chainsByIntent` (`{INTENT: [chain, …]}`, derived from
   `Connector.supported_chains_for`) and `intentsKnown`, plus a provenance

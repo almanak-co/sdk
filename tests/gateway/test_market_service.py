@@ -292,8 +292,8 @@ class TestMarketServiceInitialization:
     """Tests for MarketService price source initialization."""
 
     @pytest.mark.asyncio
-    async def test_evm_chain_has_four_sources(self):
-        """EVM chain gets 4-source pricing: Chainlink + Binance + DexScreener + CoinGecko."""
+    async def test_evm_chain_has_five_sources(self):
+        """EVM chain gets 5-source pricing: Chainlink + GMX ticker + Binance + DexScreener + CoinGecko."""
         env = os.environ.copy()
         env.pop("COINGECKO_API_KEY", None)
         env.pop("ALMANAK_GATEWAY_COINGECKO_API_KEY", None)
@@ -309,14 +309,14 @@ class TestMarketServiceInitialization:
 
             assert service._price_aggregator is not None
             sources = service._price_aggregator.sources
-            # 4 real data sources in the median-voting aggregator. The
+            # 5 real data sources in the median-voting aggregator. The
             # manual_override source is kept OUT of this list (held as
             # service._manual_price_override) so a low-confidence override
             # never corrupts the median of real feeds — see GetPrice's
             # AllDataSourcesFailed fallback path. Off by default.
-            assert len(sources) == 4
+            assert len(sources) == 5
             source_names = [s.source_name for s in sources]
-            assert source_names == ["onchain", "binance", "dexscreener", "coingecko"]
+            assert source_names == ["onchain", "gmx_ticker", "binance", "dexscreener", "coingecko"]
             assert service._manual_price_override is None  # opt-in
 
             coingecko_sources = [source for source in sources if source.source_name == "coingecko"]
@@ -326,8 +326,8 @@ class TestMarketServiceInitialization:
             await service.close()
 
     @pytest.mark.asyncio
-    async def test_evm_chain_with_cg_key_has_four_sources(self):
-        """EVM chain with CG key still gets 4-source pricing; override off by default."""
+    async def test_evm_chain_with_cg_key_has_five_sources(self):
+        """EVM chain with CG key still gets 5-source pricing; override off by default."""
         settings = GatewaySettings(coingecko_api_key="test-key-123", chains=["arbitrum"])
         service = MarketServiceServicer(settings)
 
@@ -336,9 +336,9 @@ class TestMarketServiceInitialization:
                 await service._ensure_initialized()
 
             sources = service._price_aggregator.sources
-            assert len(sources) == 4
+            assert len(sources) == 5
             source_names = [s.source_name for s in sources]
-            assert source_names == ["onchain", "binance", "dexscreener", "coingecko"]
+            assert source_names == ["onchain", "gmx_ticker", "binance", "dexscreener", "coingecko"]
             cg = [s for s in sources if s.source_name == "coingecko"][0]
             assert cg._api_key == "test-key-123"
             assert service._manual_price_override is None
@@ -349,7 +349,7 @@ class TestMarketServiceInitialization:
     @pytest.mark.parametrize(
         ("chain", "expected_sources"),
         [
-            ("arbitrum", ["onchain", "binance", "dexscreener", "coingecko"]),
+            ("arbitrum", ["onchain", "gmx_ticker", "binance", "dexscreener", "coingecko"]),
             ("mantle", ["binance", "dexscreener", "coingecko"]),
         ],
     )
@@ -382,7 +382,7 @@ class TestMarketServiceInitialization:
                 await service._ensure_initialized()
 
             # Override still stays OUT of the median aggregator
-            assert len(service._price_aggregator.sources) == 4
+            assert len(service._price_aggregator.sources) == 5
             # But it's available as a last-resort fallback
             assert service._manual_price_override is not None
             assert service._manual_price_override.source_name == "manual_override"
