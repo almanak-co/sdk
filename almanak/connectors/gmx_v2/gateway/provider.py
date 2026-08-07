@@ -8,12 +8,17 @@ boundary. GMX V2 contributes:
   lived as a venue branch in
   ``almanak.gateway.services.funding_rate_service``.
 
-The live fetch delegates to the gateway servicer's existing
-``_fetch_gmx_v2_rate(market, chain)`` method so the venue-specific
-web3 + ABI plumbing stays in one place (alongside the GMX V2 ABI
-constants and reader addresses) and the existing unit tests for that
-method (``tests/unit/gateway/test_funding_rate_service.py``) continue
-to pass.
+The live fetch is implemented here, on the connector's audited address
+catalogue (``..addresses``): the gateway servicer contributes only the
+venue-agnostic pieces (its shared web3 cache and default mark prices).
+It originally delegated back to a servicer-side ``_fetch_gmx_v2_rate``
+whose hand-copied reader/market dicts sat outside the
+``tests/audit/test_gmx_v2_market_identity.py`` audit — and whose
+``getMarketInfo`` ABI declared a 9-word ``MarketInfo`` no deployed
+reader returns (both readers answer the 29-word struct), so every live
+fetch failed decode and silently served the default rates. Moving the
+fetch behind the connector boundary removes the copies; the ABI here is
+pinned on-chain by ``tests/audit/test_gmx_v2_funding_reader_abi.py``.
 
 W1 (VIB-4853) adds:
 
@@ -40,7 +45,10 @@ W7 (VIB-4859) adds:
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import asyncio
+import logging
+from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, ClassVar
 
@@ -66,6 +74,8 @@ from almanak.connectors._base.types import ProtocolKind, ProtocolName
 
 from ..addresses import GMX_V2
 
+logger = logging.getLogger(__name__)
+
 # Default per-market hourly funding rates — fallback when the on-chain
 # fetch fails / times out. Moved verbatim from
 # ``funding_rate_service.DEFAULT_RATES["gmx_v2"]``.
@@ -85,6 +95,127 @@ _UNKNOWN_MARKET_DEFAULT = Decimal("0.00001")
 # Equal to the intersection of the pre-W7 funding fallback chain
 # (history.py:L878–L894) and Hyperliquid's coverage.
 _GMX_HISTORICAL_MARKETS = frozenset({"ETH-USD", "BTC-USD", "ARB-USD", "LINK-USD", "SOL-USD"})
+
+# ``Reader.getMarketInfo`` ABI. The output struct must be declared in FULL:
+# eth-abi decodes strictly, so a partial ``MarketInfo`` (the pre-consolidation
+# gateway copy declared 9 words; every deployed reader returns 29) raises
+# ``BadFunctionCallOutput`` on each call — which the fetch's broad exception
+# handler converts into a permanent, silent default-rate fallback. Layout is
+# pinned against the live readers by
+# ``tests/audit/test_gmx_v2_funding_reader_abi.py``.
+_GMX_COLLATERAL_TYPE = [
+    {"name": "longToken", "type": "uint256"},
+    {"name": "shortToken", "type": "uint256"},
+]
+_GMX_POSITION_TYPE = [
+    {"name": "long", "type": "tuple", "components": _GMX_COLLATERAL_TYPE},
+    {"name": "short", "type": "tuple", "components": _GMX_COLLATERAL_TYPE},
+]
+_GMX_PRICE_PROPS = [
+    {"name": "min", "type": "uint256"},
+    {"name": "max", "type": "uint256"},
+]
+GMX_V2_READER_GET_MARKET_INFO_ABI = [
+    {
+        "inputs": [
+            {"name": "dataStore", "type": "address"},
+            {
+                "name": "prices",
+                "type": "tuple",
+                "components": [
+                    {"name": "indexTokenPrice", "type": "tuple", "components": _GMX_PRICE_PROPS},
+                    {"name": "longTokenPrice", "type": "tuple", "components": _GMX_PRICE_PROPS},
+                    {"name": "shortTokenPrice", "type": "tuple", "components": _GMX_PRICE_PROPS},
+                ],
+            },
+            {"name": "marketKey", "type": "address"},
+        ],
+        "name": "getMarketInfo",
+        "outputs": [
+            {
+                "name": "",
+                "type": "tuple",
+                "components": [
+                    {
+                        "name": "market",
+                        "type": "tuple",
+                        "components": [
+                            {"name": "marketToken", "type": "address"},
+                            {"name": "indexToken", "type": "address"},
+                            {"name": "longToken", "type": "address"},
+                            {"name": "shortToken", "type": "address"},
+                        ],
+                    },
+                    {"name": "borrowingFactorPerSecondForLongs", "type": "uint256"},
+                    {"name": "borrowingFactorPerSecondForShorts", "type": "uint256"},
+                    {
+                        "name": "baseFunding",
+                        "type": "tuple",
+                        "components": [
+                            {"name": "fundingFeeAmountPerSize", "type": "tuple", "components": _GMX_POSITION_TYPE},
+                            {
+                                "name": "claimableFundingAmountPerSize",
+                                "type": "tuple",
+                                "components": _GMX_POSITION_TYPE,
+                            },
+                        ],
+                    },
+                    {
+                        "name": "nextFunding",
+                        "type": "tuple",
+                        "components": [
+                            {"name": "longsPayShorts", "type": "bool"},
+                            {"name": "fundingFactorPerSecond", "type": "uint256"},
+                            {"name": "nextSavedFundingFactorPerSecond", "type": "int256"},
+                            {
+                                "name": "fundingFeeAmountPerSizeDelta",
+                                "type": "tuple",
+                                "components": _GMX_POSITION_TYPE,
+                            },
+                            {
+                                "name": "claimableFundingAmountPerSizeDelta",
+                                "type": "tuple",
+                                "components": _GMX_POSITION_TYPE,
+                            },
+                        ],
+                    },
+                    {
+                        "name": "virtualInventory",
+                        "type": "tuple",
+                        "components": [
+                            {"name": "virtualPoolAmountForLongToken", "type": "uint256"},
+                            {"name": "virtualPoolAmountForShortToken", "type": "uint256"},
+                            {"name": "virtualInventoryForPositions", "type": "int256"},
+                        ],
+                    },
+                    {"name": "isDisabled", "type": "bool"},
+                ],
+            },
+        ],
+        "stateMutability": "view",
+        "type": "function",
+    },
+]
+
+# ``MarketInfo`` field positions consumed by the funding fetch.
+_MARKET_INFO_NEXT_FUNDING = 4
+_NEXT_FUNDING_LONGS_PAY_SHORTS = 0
+_NEXT_FUNDING_FACTOR_PER_SECOND = 1
+
+# GMX fixed-point precision for funding factors.
+_GMX_FUNDING_PRECISION = Decimal(10) ** 30
+
+
+def _signed_funding_factor_per_second(market_info: Sequence[Any]) -> Decimal:
+    """Signed per-second funding rate from a decoded ``MarketInfo`` tuple.
+
+    ``nextFunding.fundingFactorPerSecond`` is an unsigned magnitude;
+    ``nextFunding.longsPayShorts`` carries the direction. The service-wide
+    sign convention is positive = longs pay shorts.
+    """
+    next_funding = market_info[_MARKET_INFO_NEXT_FUNDING]
+    magnitude = Decimal(int(next_funding[_NEXT_FUNDING_FACTOR_PER_SECOND])) / _GMX_FUNDING_PRECISION
+    return magnitude if next_funding[_NEXT_FUNDING_LONGS_PAY_SHORTS] else -magnitude
 
 
 class GmxV2GatewayConnector(
@@ -277,13 +408,120 @@ class GmxV2GatewayConnector(
         market: str,
         chain: str,
     ) -> Any:
-        """Delegate to the servicer's existing on-chain fetch helper.
+        """Fetch the live GMX V2 funding rate via ``Reader.getMarketInfo``.
 
-        The venue-specific web3 ABI + reader address plumbing stays on
-        the servicer where it shares the gateway's web3 cache and SSL
-        context. The capability layer only owns dispatch.
+        Reader / DataStore come from ``GMX_V2`` and the market token from
+        the dynamic market registry — venue-catalogue discovery whose address
+        tuple is verified on-chain via ``Reader.getMarket`` before use
+        (``GmxV2MarketRegistry``); the servicer contributes its shared web3
+        cache (``_get_web3``) and default mark prices. Any chain/market the
+        registry cannot resolve, and any RPC or decode failure, falls back to
+        the connector's default rate with ``is_live_data=False``.
+
+        Live funding requires an unambiguous market — an exact market
+        address, a full market name, or a pair label listing exactly one
+        market. GMX funding factors are per market token, so an ambiguous
+        pair label is never guessed at: it gets the default rate.
         """
-        return await servicer._fetch_gmx_v2_rate(market, chain)
+        from almanak.core.perp_markets import perp_market_funding_key, perp_market_pair_key
+        from almanak.gateway.services.funding_rate_service import FundingRateData
+
+        # Canonicalize defensively (the RPC ingress already does): the
+        # default-rate table is keyed by the dash form, the market
+        # catalogue by the slash form.
+        market = perp_market_funding_key(market) or market
+        rate_hourly = self.default_funding_rate(market)
+        open_interest_long = Decimal("125000000")
+        open_interest_short = Decimal("118000000")
+        mark_price = servicer._get_default_mark_price(market)
+        is_live_data = False
+
+        contracts = GMX_V2.get(chain, {})
+        reader_address = contracts.get("reader")
+        data_store_address = contracts.get("data_store")
+
+        web3 = await servicer._get_web3(chain) if reader_address and data_store_address else None
+        market_address: str | None = None
+        if web3 is not None:
+            try:
+                from almanak.gateway.services.pt_rpc_adapter import build_gateway_eth_call
+
+                record = await self._market_registry.resolve(
+                    chain=chain,
+                    market=perp_market_pair_key(market) or market,
+                    eth_call=build_gateway_eth_call(chain=chain, network=servicer.settings.network),
+                    # No index-equivalence: GMX funding factors are scoped to
+                    # the individual market token, so two collateral variants
+                    # of one pair label carry different rates. An ambiguous
+                    # label raises inside this guarded block and falls through
+                    # to the default rate — refuse to guess rather than serve
+                    # an arbitrary variant's live rate under the pair's name.
+                    # Exact addresses and full market names resolve precisely.
+                )
+                market_address = record.market_token if record is not None else None
+                if market_address is None:
+                    logger.debug("GMX V2 market %s is not in the venue catalogue for %s", market, chain)
+            except Exception as e:
+                # Fail open to the default rate: resolution errors (catalogue
+                # outage, ambiguous/unknown market, verification failure) must
+                # degrade exactly like an RPC failure, never propagate.
+                logger.warning("Failed to resolve GMX V2 market %s on %s: %s", market, chain, e)
+                market_address = None
+
+        if web3 is not None and market_address is not None:
+            try:
+                reader = web3.eth.contract(
+                    address=web3.to_checksum_address(reader_address),
+                    abi=GMX_V2_READER_GET_MARKET_INFO_ABI,
+                )
+
+                # Approximate 30-decimal prices: getMarketInfo needs a price
+                # triple to value the pool for its borrowing-factor fields,
+                # but the funding factor this fetch consumes derives from USD
+                # open interest, so coarse prices do not distort it.
+                eth_price = 3000 * 10**30
+                btc_price = 60000 * 10**30
+                price = btc_price if "BTC" in market else eth_price
+                market_prices = (
+                    (price, price),  # indexTokenPrice (min, max)
+                    (price, price),  # longTokenPrice
+                    (1 * 10**30, 1 * 10**30),  # shortTokenPrice (USDC = $1)
+                )
+
+                market_info = await asyncio.wait_for(
+                    reader.functions.getMarketInfo(
+                        web3.to_checksum_address(data_store_address),
+                        market_prices,
+                        web3.to_checksum_address(market_address),
+                    ).call(),
+                    timeout=10.0,
+                )
+
+                funding_per_second = _signed_funding_factor_per_second(market_info)
+                rate_hourly = funding_per_second * Decimal("3600")
+                is_live_data = True
+                logger.debug("Fetched GMX V2 rate for %s: %s/hour (live)", market, rate_hourly)
+
+            except TimeoutError:
+                logger.warning("Timeout fetching GMX V2 rate for %s", market)
+            except Exception as e:
+                logger.warning("Failed to fetch GMX V2 rate for %s: %s", market, e)
+
+        # GMX V2 settles funding hourly.
+        now = datetime.now(UTC)
+        next_hour = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+
+        return FundingRateData(
+            venue="gmx_v2",
+            market=market,
+            rate_hourly=rate_hourly,
+            open_interest_long=open_interest_long,
+            open_interest_short=open_interest_short,
+            mark_price=mark_price,
+            index_price=mark_price,
+            next_funding_time=next_hour,
+            is_live_data=is_live_data,
+        )
 
     def coingecko_ids(self) -> dict[str, str]:
         """CoinGecko slugs for the GMX token AND every perp index symbol (VIB-6219).
@@ -401,4 +639,4 @@ class GmxV2GatewayConnector(
         )
 
 
-__all__ = ["GmxV2GatewayConnector"]
+__all__ = ["GMX_V2_READER_GET_MARKET_INFO_ABI", "GmxV2GatewayConnector"]

@@ -61,91 +61,11 @@ HOURS_PER_YEAR = 8760
 # Hyperliquid API endpoint
 HYPERLIQUID_API_URL = "https://api.hyperliquid.xyz/info"
 
-# GMX V2 contract addresses
-GMX_V2_READER_ADDRESSES = {
-    "arbitrum": "0x5Ca84c34a381434786738735265b9f3FD814b824",
-}
-
-GMX_V2_DATA_STORE_ADDRESSES = {
-    "arbitrum": "0xFD70de6b91282D8017aA4E741e9Ae325CAb992d8",
-}
-
-# GMX V2 market addresses (Arbitrum)
-GMX_V2_MARKETS = {
-    "arbitrum": {
-        "ETH-USD": "0x70d95587d40A2caf56bd97485aB3Eec10Bee6336",
-        "BTC-USD": "0x47c031236e19d024b42f8AE6780E44A573170703",
-        "ARB-USD": "0xC25cEf6061Cf5dE5eb761b50E4743c1F5D7E5407",
-        "LINK-USD": "0x7f1fa204bb700853D36994DA19F830b6Ad18455C",
-        "SOL-USD": "0x09400D9DB990D5ed3f35D7be61DfAEB900Af03C9",
-    },
-}
-
-# GMX V2 Reader ABI (minimal for getMarketInfo)
-GMX_V2_READER_ABI = [
-    {
-        "inputs": [
-            {"name": "dataStore", "type": "address"},
-            {
-                "name": "marketPrices",
-                "type": "tuple",
-                "components": [
-                    {
-                        "name": "indexTokenPrice",
-                        "type": "tuple",
-                        "components": [
-                            {"name": "min", "type": "uint256"},
-                            {"name": "max", "type": "uint256"},
-                        ],
-                    },
-                    {
-                        "name": "longTokenPrice",
-                        "type": "tuple",
-                        "components": [
-                            {"name": "min", "type": "uint256"},
-                            {"name": "max", "type": "uint256"},
-                        ],
-                    },
-                    {
-                        "name": "shortTokenPrice",
-                        "type": "tuple",
-                        "components": [
-                            {"name": "min", "type": "uint256"},
-                            {"name": "max", "type": "uint256"},
-                        ],
-                    },
-                ],
-            },
-            {"name": "market", "type": "address"},
-        ],
-        "name": "getMarketInfo",
-        "outputs": [
-            {
-                "name": "",
-                "type": "tuple",
-                "components": [
-                    {
-                        "name": "market",
-                        "type": "tuple",
-                        "components": [
-                            {"name": "marketToken", "type": "address"},
-                            {"name": "indexToken", "type": "address"},
-                            {"name": "longToken", "type": "address"},
-                            {"name": "shortToken", "type": "address"},
-                        ],
-                    },
-                    {"name": "borrowingFactorPerSecondForLongs", "type": "uint256"},
-                    {"name": "borrowingFactorPerSecondForShorts", "type": "uint256"},
-                    {"name": "baseFundingFactorPerSecond", "type": "int256"},
-                    {"name": "longsPayShorts", "type": "bool"},
-                    {"name": "nextFundingFactorPerSecond", "type": "int256"},
-                ],
-            },
-        ],
-        "stateMutability": "view",
-        "type": "function",
-    },
-]
+# GMX V2 plumbing (reader/DataStore/market addresses + the getMarketInfo
+# ABI) lives on the GMX connector's gateway provider
+# (``almanak.connectors.gmx_v2.gateway.provider``), sourced from the
+# connector's audited address catalogue. This module previously carried
+# hand-copied duplicates that drifted outside that audit.
 
 # Default funding rates — registry-driven (VIB-4811 / Phase 3).
 #
@@ -408,91 +328,6 @@ class FundingRateServiceServicer(gateway_pb2_grpc.FundingRateServiceServicer):
             mark_price=mark_price,
             index_price=mark_price,
             next_funding_time=_compute_hyperliquid_next_funding_time(datetime.now(UTC)),
-            is_live_data=is_live_data,
-        )
-
-    # crap-allowlist: pre-existing complexity (cc=8, low direct coverage); this PR only routed its market-symbol parsing through core.perp_markets, which is pinned by tests/gateway/services/test_funding_market_canon.py
-    async def _fetch_gmx_v2_rate(self, market: str, chain: str) -> FundingRateData:
-        """Fetch GMX V2 funding rate from on-chain contract."""
-        # Canonicalize defensively (the RPC ingress already does): the GMX
-        # market-address table is keyed by the dash form.
-        market = perp_market_funding_key(market) or market
-        rate_hourly = self._get_default_rate("gmx_v2", market)
-        open_interest_long = Decimal("125000000")
-        open_interest_short = Decimal("118000000")
-        mark_price = self._get_default_mark_price(market)
-        is_live_data = False
-
-        web3 = await self._get_web3(chain)
-        if web3 and chain in GMX_V2_READER_ADDRESSES:
-            market_address = GMX_V2_MARKETS.get(chain, {}).get(market)
-            if market_address:
-                try:
-                    reader_address = GMX_V2_READER_ADDRESSES[chain]
-                    data_store_address = GMX_V2_DATA_STORE_ADDRESSES[chain]
-
-                    reader = web3.eth.contract(
-                        address=web3.to_checksum_address(reader_address),
-                        abi=GMX_V2_READER_ABI,
-                    )
-
-                    # Use approximate prices (GMX uses 30 decimals)
-                    eth_price = 3000 * 10**30
-                    btc_price = 60000 * 10**30
-
-                    if "BTC" in market:
-                        price = btc_price
-                    else:
-                        price = eth_price
-
-                    market_prices = (
-                        (price, price),  # indexTokenPrice (min, max)
-                        (price, price),  # longTokenPrice
-                        (1 * 10**30, 1 * 10**30),  # shortTokenPrice (USDC = $1)
-                    )
-
-                    market_info = await asyncio.wait_for(
-                        reader.functions.getMarketInfo(
-                            web3.to_checksum_address(data_store_address),
-                            market_prices,
-                            web3.to_checksum_address(market_address),
-                        ).call(),
-                        timeout=10.0,
-                    )
-
-                    # Extract funding factor from market info
-                    next_funding_factor_per_second = market_info[5]  # int256
-
-                    # Convert from per-second (30 decimals) to hourly rate
-                    # Preserve sign: positive = longs pay shorts, negative = shorts pay longs
-                    funding_per_second = Decimal(str(next_funding_factor_per_second)) / Decimal(10**30)
-                    rate_hourly = funding_per_second * Decimal("3600")
-
-                    is_live_data = True
-                    logger.debug(
-                        "Fetched GMX V2 rate for %s: %s/hour (live)",
-                        market,
-                        rate_hourly,
-                    )
-
-                except TimeoutError:
-                    logger.warning("Timeout fetching GMX V2 rate for %s", market)
-                except Exception as e:
-                    logger.warning("Failed to fetch GMX V2 rate for %s: %s", market, e)
-
-        # Calculate next funding time (GMX V2 settles hourly)
-        now = datetime.now(UTC)
-        next_hour = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
-
-        return FundingRateData(
-            venue="gmx_v2",
-            market=market,
-            rate_hourly=rate_hourly,
-            open_interest_long=open_interest_long,
-            open_interest_short=open_interest_short,
-            mark_price=mark_price,
-            index_price=mark_price,
-            next_funding_time=next_hour,
             is_live_data=is_live_data,
         )
 

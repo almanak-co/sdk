@@ -135,10 +135,12 @@ def test_servicer_dispatch_is_byte_identical_to_legacy() -> None:
 async def test_capability_dispatch_routes_to_correct_connector() -> None:
     """``fetch_funding_rate`` is dispatched through the capability instance.
 
-    Mocks both venue connectors' ``_fetch_*`` methods on the servicer and
-    confirms the registry-driven dispatch routes ``venue="hyperliquid"``
-    to ``_fetch_hyperliquid_rate`` and ``venue="gmx_v2"`` to
-    ``_fetch_gmx_v2_rate``.
+    Hyperliquid still delegates to the servicer's ``_fetch_hyperliquid_rate``
+    (mocked here). GMX V2 owns its on-chain fetch connector-side, consuming
+    only the servicer's ``_get_web3`` / ``_get_default_mark_price``; with
+    ``_get_web3`` stubbed to ``None`` (no RPC in unit tests) the dispatch
+    must land on the GMX provider and return its offline default-rate
+    ``FundingRateData``.
     """
     from unittest.mock import AsyncMock
 
@@ -148,11 +150,16 @@ async def test_capability_dispatch_routes_to_correct_connector() -> None:
 
     servicer = FundingRateServiceServicer(settings=SimpleNamespace(network="mainnet"))
     servicer._fetch_hyperliquid_rate = AsyncMock(return_value="hyperliquid-result")  # type: ignore[method-assign]
-    servicer._fetch_gmx_v2_rate = AsyncMock(return_value="gmx-result")  # type: ignore[method-assign]
+    servicer._get_web3 = AsyncMock(return_value=None)  # type: ignore[method-assign]
 
     hl = servicer._funding_rate_providers["hyperliquid"]
     gmx = servicer._funding_rate_providers["gmx_v2"]
     assert await hl.fetch_funding_rate(servicer, "ETH-USD", "arbitrum") == "hyperliquid-result"
-    assert await gmx.fetch_funding_rate(servicer, "ETH-USD", "arbitrum") == "gmx-result"
     servicer._fetch_hyperliquid_rate.assert_awaited_once_with("ETH-USD")
-    servicer._fetch_gmx_v2_rate.assert_awaited_once_with("ETH-USD", "arbitrum")
+
+    gmx_result = await gmx.fetch_funding_rate(servicer, "ETH-USD", "arbitrum")
+    servicer._get_web3.assert_awaited_once_with("arbitrum")
+    assert gmx_result.venue == "gmx_v2"
+    assert gmx_result.market == "ETH-USD"
+    assert gmx_result.rate_hourly == Decimal("0.000012")
+    assert gmx_result.is_live_data is False
