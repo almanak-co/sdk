@@ -76,6 +76,7 @@ class GmxV2MarketRegistry:
         market: str,
         eth_call: Any,
         allow_delisted_address: bool = True,
+        allow_index_equivalent: bool = False,
     ) -> PerpMarketRecord | None:
         chain_key = chain.strip().lower()
         if chain_key not in GMX_API_BASE_URLS:
@@ -83,7 +84,8 @@ class GmxV2MarketRegistry:
         query = market.strip()
         if not query:
             raise ValueError("market is required")
-        cache_key = (chain_key, f"{int(allow_delisted_address)}:{query.lower()}")
+        cache_scope = f"{int(allow_delisted_address)}:{int(allow_index_equivalent)}"
+        cache_key = (chain_key, f"{cache_scope}:{query.lower()}")
         cached = self._cache.get(cache_key)
         now = time.monotonic()
         if cached is not None and cached[0] > now:
@@ -112,20 +114,49 @@ class GmxV2MarketRegistry:
                     markets_payload,
                     tokens_payload,
                 )
-            candidate = self._select_market(
+            candidates = self._matching_markets(
                 markets_payload,
                 query,
                 allow_delisted_address=allow_delisted_address,
             )
-            if candidate is None:
+            if not candidates:
                 return None
-            record = await self._verify_and_build(chain_key, candidate, tokens_payload, eth_call)
+            if len(candidates) > 1 and not allow_index_equivalent:
+                choices = ", ".join(f"{item.name} ({item.market_token})" for item in candidates)
+                raise ValueError(f"GMX market {query!r} is ambiguous; pass the exact full name or address: {choices}")
+
+            verified_candidates = [
+                (candidate, await self._verify_and_build(chain_key, candidate, tokens_payload, eth_call))
+                for candidate in candidates
+            ]
+            records = [record for _, record in verified_candidates]
+            if len(records) > 1:
+                price_identities = {
+                    (record.index_token.lower(), record.index_symbol.upper(), record.index_token_decimals)
+                    for record in records
+                }
+                if len(price_identities) != 1:
+                    choices = ", ".join(
+                        f"{record.label} ({record.market_token}, index={record.index_token}/{record.index_symbol})"
+                        for record in records
+                    )
+                    raise ValueError(
+                        f"GMX market {query!r} is ambiguous across distinct index-price identities: {choices}"
+                    )
+            # Price history is index-scoped, not collateral-market-scoped. If
+            # every matching market was independently verified on-chain and all
+            # carry one index identity, any member names the same candle plane.
+            # Pick by address so API row order cannot affect replay provenance.
+            selected_candidate, record = min(
+                verified_candidates,
+                key=lambda item: item[1].market_token.lower(),
+            )
             expiry = time.monotonic() + _CACHE_TTL_SECONDS
             # Never seed the non-unique short label from a full-name or address
             # lookup. Otherwise resolving one ETH collateral variant would make a
             # later ETH/USD query silently order-dependent for the cache TTL.
-            for alias in (query, candidate.name, candidate.market_token):
-                self._cache[(chain_key, f"{int(allow_delisted_address)}:{alias.lower()}")] = (expiry, record)
+            for alias in (query, selected_candidate.name, selected_candidate.market_token):
+                self._cache[(chain_key, f"{cache_scope}:{alias.lower()}")] = (expiry, record)
             return record
 
     async def _get_json(self, chain: str, path: str) -> Any:
@@ -148,12 +179,12 @@ class GmxV2MarketRegistry:
             raise RuntimeError(f"GMX metadata request failed for {chain}{path}") from exc
 
     @staticmethod
-    def _select_market(
+    def _matching_markets(
         payload: Any,
         query: str,
         *,
         allow_delisted_address: bool = True,
-    ) -> _ApiMarket | None:
+    ) -> list[_ApiMarket]:
         rows = payload.get("markets") if isinstance(payload, dict) else None
         if not isinstance(rows, list):
             raise ValueError("GMX /markets response does not contain a markets list")
@@ -186,6 +217,22 @@ class GmxV2MarketRegistry:
                 selected = query.strip().upper() == name.upper() or normalized == label
             if selected:
                 matches.append(candidate)
+        return matches
+
+    @classmethod
+    def _select_market(
+        cls,
+        payload: Any,
+        query: str,
+        *,
+        allow_delisted_address: bool = True,
+    ) -> _ApiMarket | None:
+        """Resolve exactly one execution market; ambiguous labels fail closed."""
+        matches = cls._matching_markets(
+            payload,
+            query,
+            allow_delisted_address=allow_delisted_address,
+        )
         if not matches:
             return None
         if len(matches) > 1:

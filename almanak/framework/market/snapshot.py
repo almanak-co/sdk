@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 from almanak.core.finality import DataFinality
 
+from ..data.interfaces import VolumeUnavailableError
 from ..data.timeframes import OHLCVTimeframe, parse_ohlcv_timeframe
 from ..data.tokens.deprecation import warn_or_reject_symbol_token_reference
 from ..data.tokens.exceptions import SymbolTokenResolutionError
@@ -1879,6 +1880,15 @@ class MarketSnapshot:
                 self._obv_cache[cache_key] = obv_data
                 self._critical_data_failures.pop(("obv", str(cache_key)), None)
                 return obv_data
+            except VolumeUnavailableError:
+                # ALM-3148: this one names the indicator, counts the unmeasured
+                # candles, and tells the strategist which config key fixes it.
+                # Collapsing it into "OBV data not available" would throw away
+                # the only actionable part and leave the reader looking for an
+                # outage that is not happening — the source simply publishes no
+                # volume, which is a configuration answer, not a failure.
+                self._record_critical_data_failure("obv", str(cache_key), "volume unmeasured")
+                raise
             except Exception as e:  # noqa: BLE001
                 self._record_critical_data_failure("obv", str(cache_key), e)
                 logger.warning(f"OBV provider failed for {cache_key}: {e}")

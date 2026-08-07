@@ -51,12 +51,12 @@ TOKENS = {
 }
 
 
-def _reader_result(*, market: str = HYPE_MARKET) -> str:
+def _reader_result(*, market: str = HYPE_MARKET, index: str = HYPE_INDEX) -> str:
     return (
         "0x"
         + encode(
             ["(address,address,address,address)"],
-            [(market, HYPE_INDEX, WBTC, USDC)],
+            [(market, index, WBTC, USDC)],
         ).hex()
     )
 
@@ -154,6 +154,82 @@ async def test_full_name_lookup_does_not_poison_ambiguous_short_label_cache() ->
     assert ("arbitrum", "hype/usd") not in registry._cache
     with pytest.raises(ValueError, match="ambiguous"):
         registry._select_market(markets, "HYPE/USD")
+
+
+@pytest.mark.asyncio
+async def test_price_history_resolves_index_equivalent_markets_without_a_static_catalogue() -> None:
+    """Collateral variants may share one candle plane after independent verification."""
+    second_market = "0x" + "7" * 40
+    markets = {
+        "markets": [
+            MARKETS["markets"][0],
+            {
+                **MARKETS["markets"][0],
+                "name": "HYPE/USD [HYPE-USDC]",
+                "marketToken": second_market,
+            },
+        ]
+    }
+    eth_call = AsyncMock(
+        side_effect=[
+            _reader_result(),
+            _reader_result(market=second_market),
+        ]
+    )
+    registry = GmxV2MarketRegistry()
+    with patch.object(registry, "_get_json", AsyncMock(side_effect=[markets, TOKENS])):
+        record = await registry.resolve(
+            chain="arbitrum",
+            market="HYPE/USD",
+            eth_call=eth_call,
+            allow_delisted_address=False,
+            allow_index_equivalent=True,
+        )
+
+    assert record is not None
+    assert record.market_token == min(HYPE_MARKET, second_market).lower()
+    assert record.index_token == HYPE_INDEX.lower()
+    assert eth_call.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_price_history_refuses_ambiguous_distinct_index_identities() -> None:
+    """A short label may never collapse two different price planes."""
+    second_market = "0x" + "7" * 40
+    second_index = "0x" + "6" * 40
+    markets = {
+        "markets": [
+            MARKETS["markets"][0],
+            {
+                **MARKETS["markets"][0],
+                "name": "HYPE/USD [ALT-USDC]",
+                "marketToken": second_market,
+                "indexToken": second_index,
+            },
+        ]
+    }
+    tokens = {
+        "tokens": [
+            *TOKENS["tokens"],
+            {"symbol": "ALT", "address": second_index, "decimals": 8, "synthetic": True},
+        ]
+    }
+    eth_call = AsyncMock(
+        side_effect=[
+            _reader_result(),
+            _reader_result(market=second_market, index=second_index),
+        ]
+    )
+    registry = GmxV2MarketRegistry()
+    with patch.object(registry, "_get_json", AsyncMock(side_effect=[markets, tokens])):
+        with pytest.raises(ValueError, match="distinct index-price identities"):
+            await registry.resolve(
+                chain="arbitrum",
+                market="HYPE/USD",
+                eth_call=eth_call,
+                allow_delisted_address=False,
+                allow_index_equivalent=True,
+            )
 
 
 @pytest.mark.asyncio

@@ -160,6 +160,12 @@ class GmxV2GatewayConnector(
             # venue has disabled.  Exact-address delisted resolution remains
             # available to the compiler's risk-reducing close path.
             allow_delisted_address=False,
+            # A short label may name multiple collateral-specific markets.
+            # Candles are index-scoped, so the registry may accept that label
+            # only after every matching market is verified on-chain and proven
+            # to carry one identical index-price identity. No SDK market table
+            # participates in discovery or selection.
+            allow_index_equivalent=True,
         )
         if record is None:
             raise ValueError(f"listed GMX market {market!r} does not exist on {chain}")

@@ -42,6 +42,10 @@ from almanak.framework.data.ohlcv.ohlcv_router import (
     provider_names_in_chains,
 )
 from almanak.framework.data.ohlcv.routing_provider import RoutingOHLCVProvider
+from almanak.framework.data.ohlcv.venue_context import (
+    VENUE_NATIVE_PROVIDER,
+    OHLCVSourcePolicy,
+)
 
 
 @dataclass(frozen=True)
@@ -72,6 +76,7 @@ def create_ohlcv_stack(
     gateway_client: Any,
     chain: str,
     pool_address: str | None = None,
+    source_policy: OHLCVSourcePolicy | None = None,
 ) -> OHLCVStack:
     """Build the standard OHLCV stack (router + gateway-backed providers).
 
@@ -87,6 +92,10 @@ def create_ohlcv_stack(
             signature still routes correctly.
         pool_address: Optional pool address for DEX-pool lookups. ``None`` is
             valid for CEX-only lookups (Binance is symbol-only).
+        source_policy: Resolved OHLCV source policy for the strategy this stack
+            serves (ALM-3148). ``None`` — the default for callers with no
+            strategy context — composes exactly the stack this factory composed
+            before venue-native routing existed.
 
     Returns:
         :class:`OHLCVStack` with ``router`` and ``provider`` populated.
@@ -118,10 +127,18 @@ def create_ohlcv_stack(
     coingecko_provider = GatewayCoinGeckoOHLCVProvider(gateway_client=gateway_client)
     coingecko_adapter = CoinGeckoGatewayDataProvider(coingecko_provider)
 
-    router = OHLCVRouter(default_chain=chain)
+    router = OHLCVRouter(default_chain=chain, source_policy=source_policy)
     router.register_provider(cg_onchain_adapter)
     router.register_provider(binance_adapter)
     router.register_provider(coingecko_adapter)
+
+    # ALM-3148: the venue-native lane is registered only when a policy can
+    # actually reach it, so strategies that trade no such venue compose exactly
+    # the stack they compose today.
+    if source_policy is not None and source_policy.venue and source_policy.markets:
+        from almanak.framework.data.ohlcv.venue_native_provider import VenueNativeOHLCVProvider
+
+        router.register_provider(VenueNativeOHLCVProvider(gateway_client=gateway_client, policy=source_policy))
 
     # Provider-chain ↔ registry invariant (VIB-4847): fail loud at build time
     # if any advertised provider name was never registered. This is the durable
@@ -160,6 +177,14 @@ def assert_provider_chains_registered(router: OHLCVRouter) -> None:
             obvious: either register the provider, or remove it from the chain.
     """
     advertised = provider_names_in_chains()
+    # ALM-3148: ``provider_names_in_chains`` omits the venue-native lane because
+    # it is unreachable without a policy. When a policy CAN reach it, the same
+    # phantom-tier rule applies with full force — a claimed instrument whose
+    # provider was never registered would walk the chain, find nothing, and
+    # dead-end, which is the exact failure shape this guard exists to prevent.
+    policy = router.source_policy
+    if policy is not None and policy.claims_any():
+        advertised = advertised | {VENUE_NATIVE_PROVIDER}
     registered = set(router._providers.keys())
     missing = advertised - registered
     if missing:
@@ -175,6 +200,7 @@ def create_routing_ohlcv_provider(
     gateway_client: Any,
     chain: str,
     pool_address: str | None = None,
+    source_policy: OHLCVSourcePolicy | None = None,
 ) -> RoutingOHLCVProvider:
     """Build the standard OHLCV routing provider (convenience wrapper).
 
@@ -189,6 +215,7 @@ def create_routing_ohlcv_provider(
         gateway_client: Connected ``GatewayClient`` instance.
         chain: Chain name (e.g. ``"base"``, ``"arbitrum"``).
         pool_address: Optional pool address for DEX-pool lookups.
+        source_policy: Optional resolved OHLCV source policy (ALM-3148).
 
     Returns:
         :class:`RoutingOHLCVProvider` wrapping a freshly built
@@ -198,6 +225,7 @@ def create_routing_ohlcv_provider(
         gateway_client=gateway_client,
         chain=chain,
         pool_address=pool_address,
+        source_policy=source_policy,
     ).provider
 
 

@@ -7,6 +7,7 @@ from ..interfaces import (
     InsufficientDataError,
     OHLCVCandle,
     OHLCVProvider,
+    VolumeUnavailableError,
 )
 from ..timeframes import OHLCVTimeframe, parse_ohlcv_timeframe
 from .base import OBVResult
@@ -43,13 +44,25 @@ class OBVCalculator:
                 indicator="OBV",
             )
 
+        # ALM-3148 §8.2: refuse rather than substitute. `volume is None` means
+        # the source did not measure volume — a perp venue's index candles carry
+        # none at all — and the previous `else 0.0` silently turned that into a
+        # measured zero. OBV then accumulated nothing and returned a flat 0.0
+        # with a 0.0 signal line: a structurally valid number meaning "no
+        # accumulation pressure" when the truth was "no volume data exists".
+        # Latent until now because only volume-less sources reached it; making
+        # a volume-less source the default for perp strategies is exactly what
+        # would have converted it into a certain, silent wrong answer.
+        unmeasured = sum(1 for candle in candles[1:] if candle.volume is None)
+        if unmeasured:
+            raise VolumeUnavailableError(indicator="OBV", observed=unmeasured, inspected=len(candles) - 1)
+
         obv_values: list[float] = [0.0]
 
         for i in range(1, len(candles)):
             prev_close = float(candles[i - 1].close)
             curr_close = float(candles[i].close)
-            raw_vol = candles[i].volume
-            volume = float(raw_vol) if raw_vol is not None else 0.0
+            volume = float(candles[i].volume)  # type: ignore[arg-type]  # guarded above
 
             obv = obv_values[-1]
             if curr_close > prev_close:

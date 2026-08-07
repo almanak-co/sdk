@@ -57,6 +57,13 @@ from almanak.framework.data.ohlcv.ohlcv_router import (
 from almanak.framework.data.ohlcv.routing_provider import (
     RoutingOHLCVProvider,
 )
+from almanak.framework.data.ohlcv.venue_context import (
+    SOURCE_AUTO,
+    SOURCE_VENUE_NATIVE,
+    VENUE_NATIVE_PROVIDER,
+    OHLCVSourcePolicy,
+    resolve_ohlcv_source,
+)
 
 if TYPE_CHECKING:
     from almanak.framework.data.ohlcv.module import GapStrategy, OHLCVModule
@@ -74,12 +81,17 @@ __all__ = [
     "GapStrategy",
     "OHLCVModule",
     "OHLCVRouter",
+    "OHLCVSourcePolicy",
     "RoutingOHLCVProvider",
+    "SOURCE_AUTO",
+    "SOURCE_VENUE_NATIVE",
+    "VENUE_NATIVE_PROVIDER",
     "assert_provider_chains_registered",
     "classify_instrument",
     "create_ohlcv_stack",
     "create_routing_ohlcv_provider",
     "provider_names_in_chains",
+    "resolve_ohlcv_source",
 ]
 
 

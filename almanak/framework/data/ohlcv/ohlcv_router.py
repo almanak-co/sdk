@@ -65,6 +65,10 @@ from almanak.framework.data.models import (
     Instrument,
     resolve_instrument,
 )
+from almanak.framework.data.ohlcv.venue_context import (
+    VENUE_NATIVE_PROVIDER,
+    OHLCVSourcePolicy,
+)
 from almanak.framework.data.routing.config import DataProvider
 from almanak.framework.data.timeframes import (
     OHLCVTimeframe,
@@ -217,22 +221,78 @@ def _error_text(exc: Exception | None) -> str:
 _CEX_KNOWN_BASES: frozenset[str] = frozenset(base for (_exchange, base, _quote) in CEX_SYMBOL_MAP)
 
 
-def classify_instrument(instrument: Instrument) -> str:
-    """Classify an instrument as "cex_primary" or "defi_primary".
+def classify_instrument(
+    instrument: Instrument,
+    source_policy: OHLCVSourcePolicy | None = None,
+    pool_address: str | None = None,
+) -> str:
+    """Classify an instrument as "venue_native", "cex_primary" or "defi_primary".
 
-    If the instrument's base token has a known CEX symbol mapping in
-    CEX_SYMBOL_MAP, it's classified as CEX-primary (major token).
-    Otherwise, it's DeFi-native.
+    ``venue_native`` ranks first and is keyed on **(base, venue)**, never on the
+    base alone: "XRP" is venue-native for a strategy trading GMX's XRP market
+    and is not venue-native for a spot strategy that merely holds XRP. Keying on
+    the symbol would give every XRP request in the codebase a GMX dependency.
+
+    Falling through to the static ``CEX_SYMBOL_MAP`` check is what stranded
+    ALM-3148: XRP has no CEX-map row, so it classified DeFi-native and routed to
+    a pool search that has no XRP pool — while the venue the strategy was
+    trading published XRP candles the whole time.
 
     Args:
         instrument: Canonical Instrument to classify.
+        source_policy: The strategy's resolved OHLCV source policy, or ``None``
+            for callers with no strategy context (dashboard, ad-hoc tools),
+            which keeps today's behaviour exactly.
 
     Returns:
-        "cex_primary" or "defi_primary".
+        "venue_native", "cex_primary" or "defi_primary".
     """
+    if venue_native_owns(instrument, source_policy, pool_address):
+        return VENUE_NATIVE_PROVIDER
     if instrument.base in _CEX_KNOWN_BASES:
         return "cex_primary"
     return "defi_primary"
+
+
+# Quotes the venue index is denominated in. A perp venue publishes one plane per
+# market, quoted in USD; `resolve_instrument` may spell that USD, USDC, or a
+# bridged stablecoin depending on how the caller asked.
+_VENUE_NATIVE_QUOTES = frozenset({"USD", "USDC", "USDT", "DAI", "USDC.E", "USDT.E", "DAI.E"})
+
+
+def venue_native_owns(
+    instrument: Instrument,
+    source_policy: OHLCVSourcePolicy | None,
+    pool_address: str | None = None,
+) -> bool:
+    """True when the venue-native lane owns this exact request.
+
+    **Called from both classification and the disk-cache key, deliberately.**
+    Those two must never disagree: a request routed venue-native but keyed as
+    default files the venue's index candles under the key every other consumer
+    reads, which is a silent basis swap in the cache rather than the router.
+    Every condition here therefore has to live in one function.
+
+    Beyond the policy's own claim, two request-scope conditions disown it:
+
+    - **An explicit ``pool_address``** names one specific DEX pool. The venue
+      index is not that pool. Serving it anyway returns a plausible wrong number
+      at confidence 1.0 for a caller who could not have been more explicit —
+      ``MarketSnapshot.ohlcv`` documents the argument publicly.
+    - **A non-USD quote.** The venue publishes ``ETH/USD``; a request for
+      ``ETH/BTC`` is a different instrument, and answering it with the USD index
+      is the same basis swap one axis over. Classification previously read only
+      ``(base, chain)`` and could not see the quote at all.
+
+    Both conditions only ever *remove* a claim, so the worst case is today's
+    pre-ALM-3148 routing rather than a wrong plane.
+    """
+    if source_policy is None or not source_policy.claims(instrument.base, instrument.chain):
+        return False
+    if pool_address:
+        return False
+    quote = (instrument.quote or "").strip().upper()
+    return not quote or quote in _VENUE_NATIVE_QUOTES
 
 
 # Provider chain ordering per classification.
@@ -249,19 +309,39 @@ def classify_instrument(instrument: Instrument) -> str:
 # Llama OHLCV provider exists yet (tracked on VIB-3448). When that provider
 # ships, re-add it to both chains AND register it in the factory in the same
 # change so the invariant stays satisfied.
+# ``venue_native`` deliberately has NO fallback tier. Falling GMX -> Binance on
+# a miss would silently swap the basis: the strategy would decide on a CEX price
+# while its position is marked and liquidated against the venue index. That is
+# "two answers to one question" re-created inside the fix for it, and it is
+# invisible in the result — the call still returns a plausible number.
+#
+# The correct resilience for this lane is host failover *within* the venue
+# (several API hosts on separate failure domains), which belongs gateway-side
+# where the egress lives. Until that ships, this lane fails loudly, and a
+# strategist who prefers availability over basis integrity says so explicitly
+# with ``ohlcv_source`` (see ``venue_context``).
 _PROVIDER_CHAINS: dict[str, list[str]] = {
+    VENUE_NATIVE_PROVIDER: [VENUE_NATIVE_PROVIDER],
     "cex_primary": ["binance", "coingecko"],
     "defi_primary": ["coingecko_onchain", "binance"],
 }
 
 
 def provider_names_in_chains() -> set[str]:
-    """Return the set of distinct provider names referenced by any chain.
+    """Return the provider names every composed router must have registered.
 
     Single source of truth for the provider-chain ↔ registry invariant guard
     (VIB-4847). The factory asserts every name returned here is registered.
+
+    ``venue_native`` is excluded: unlike the other tiers it is reachable only
+    when a strategy supplies a source policy that claims an instrument, so it is
+    legitimately unregistered for the many strategies that trade no such venue.
+    Requiring it unconditionally would fail every non-perp strategy at boot. It
+    keeps a guard of its own — :func:`assert_provider_chains_registered` demands
+    it whenever a policy that can reach it *is* present — so the phantom-tier
+    class VIB-4847 closed stays closed on this lane too.
     """
-    return {name for chain in _PROVIDER_CHAINS.values() for name in chain}
+    return {name for label, chain in _PROVIDER_CHAINS.items() if label != VENUE_NATIVE_PROVIDER for name in chain}
 
 
 # ---------------------------------------------------------------------------
@@ -469,6 +549,10 @@ class OHLCVRouter:
 
     default_chain: str = DEFAULT_CHAIN
     disk_cache_dir: Path | None = None
+    # The strategy's resolved OHLCV source policy (ALM-3148). ``None`` for
+    # callers with no strategy context — dashboard, ad-hoc tooling, tests —
+    # which keeps classification and routing exactly as they were.
+    source_policy: OHLCVSourcePolicy | None = None
     _providers: dict[str, DataProvider] = field(default_factory=dict, init=False, repr=False)
     _disk_cache: _OHLCVDiskCache = field(init=False, repr=False)
     _proxy_warned: set[str] = field(default_factory=set, init=False, repr=False)
@@ -484,6 +568,74 @@ class OHLCVRouter:
         """
         self._providers[provider.name] = provider
         logger.debug("ohlcv_router_registered provider=%s", provider.name)
+
+    def _disk_cache_key(
+        self,
+        instrument: Instrument,
+        target_chain: str,
+        timeframe: OHLCVTimeframe,
+        limit: int,
+        pool_address: str | None,
+        force_provider: str | None,
+        pinned: str | None,
+    ) -> str:
+        """Build the disk-cache key, which must name the PLANE, not just the instrument.
+
+        ALM-3148. Before this change every instrument had exactly one series, so
+        (base, quote, chain, timeframe, limit, pool) identified it completely.
+        Venue-native routing makes two different answers to "ETH/USD 4h on
+        arbitrum" simultaneously valid — the venue index and a CEX tape — and a
+        key that cannot tell them apart lets one be served for the other. That is
+        the silent basis swap the whole lane exists to prevent, re-created in the
+        cache layer, and it returns a plausible number while doing it.
+
+        `force_provider` is included because an explicit per-call override is
+        also a distinct plane.
+
+        Two details are load-bearing and easy to "tidy" back into defects:
+
+        - `instrument.chain`, NOT `target_chain`, decides the claim. Routing
+          picks the lane from `instrument.chain` (via `classify_instrument`), and
+          the two diverge whenever a caller passes an `Instrument` directly —
+          that path skips `resolve_instrument`, which is the only thing that
+          rewrites `.chain` to the target. `MarketSnapshot.ohlcv` accepts an
+          `Instrument` publicly, so this is reachable, and a key computed from
+          the other chain would file candles under a plane the request was never
+          routed to: Binance candles under the venue-native key, or venue index
+          candles under the default key where every other consumer reads them.
+
+        - The suffix is appended ONLY for a non-default plane, so the default key
+          stays byte-identical to the pre-ALM-3148 one. Appending ":auto"
+          unconditionally reads as harmless and is not: it orphans every entry
+          written before the upgrade, including poisoned ones that the ALM-2697
+          staleness guard can only evict while it can still find them. (Caught by
+          `test_stale_cache_evicted_and_upstream_refetched`, which pre-poisons a
+          legacy key and expects eviction.) A legacy key has six segments and
+          never a seventh, so a suffixed key cannot collide with one.
+        """
+        addr = (pool_address or "auto").lower()
+        cache_source = force_provider or pinned
+        if cache_source is None:
+            # Not pinned: the plane is venue-native only for an instrument this
+            # policy actually claims. An unclaimed leg of a perp strategy routes
+            # exactly as it did before.
+            claimed = venue_native_owns(instrument, self.source_policy, pool_address)
+            if claimed:
+                # Name the VENUE and the MARKET, not just the lane. Keying on the
+                # literal "venue_native" would make GMX's ETH and a future
+                # Hyperliquid ETH share one entry on the same chain — one venue's
+                # index served for another's, which is the same basis swap one
+                # level down, and it would silently ignore the `ohlcv_venue` the
+                # strategist chose. The market is included because two markets on
+                # one venue can quote the same base.
+                assert self.source_policy is not None  # narrowed by `claimed`
+                policy = self.source_policy
+                market = policy.market_for(instrument.base, instrument.chain) or "?"
+                cache_source = f"{VENUE_NATIVE_PROVIDER}:{policy.venue}:{market}"
+        disk_key = f"{instrument.base}:{instrument.quote}:{target_chain}:{timeframe}:{limit}:{addr}"
+        if cache_source is not None:
+            disk_key = f"{disk_key}:{cache_source}"
+        return disk_key
 
     def _consume_disk_cache(
         self,
@@ -867,11 +1019,25 @@ class OHLCVRouter:
             resolve_instrument(token, target_chain, quote=quote) if not isinstance(token, Instrument) else token
         )
 
-        # Determine provider chain
+        # Determine provider chain. Resolution order mirrors the timeframe
+        # ladder (MarketSnapshot._resolve_timeframe): explicit call argument >
+        # strategy config > framework default.
+        pinned = self.source_policy.pinned_provider() if self.source_policy is not None else None
         if force_provider:
             provider_chain = [force_provider]
+        elif pinned:
+            # The strategist pinned a source for this strategy (e.g. "use
+            # Binance for my GMX strategy"). That has to apply to every
+            # instrument to be worth having — honouring it only for
+            # CEX-classified bases would silently serve two different planes.
+            provider_chain = [pinned]
+            logger.debug(
+                "ohlcv_source_pinned instrument=%s provider=%s",
+                instrument.pair,
+                pinned,
+            )
         else:
-            classification = classify_instrument(instrument)
+            classification = classify_instrument(instrument, self.source_policy, pool_address)
             provider_chain = _PROVIDER_CHAINS.get(classification, ["binance"])
             logger.debug(
                 "ohlcv_classified instrument=%s classification=%s providers=%s",
@@ -883,9 +1049,11 @@ class OHLCVRouter:
         # Disk cache lookup, with the ALM-2697 staleness guard baked in. Returns
         # a DataEnvelope on a fresh cache hit; otherwise the cache is missing,
         # too short, or stale (and has been evicted) and we fall through to the
-        # provider chain.
-        addr = (pool_address or "auto").lower()
-        disk_key = f"{instrument.base}:{instrument.quote}:{target_chain}:{timeframe}:{limit}:{addr}"
+        # provider chain. The key names the routed *plane*, not just the
+        # instrument — see `_disk_cache_key` for why that is load-bearing.
+        disk_key = self._disk_cache_key(
+            instrument, target_chain, timeframe, limit, pool_address, force_provider, pinned
+        )
         now = datetime.now(UTC)
         if (cache_hit := self._consume_disk_cache(disk_key, limit, timeframe, now)) is not None:
             return cache_hit
@@ -1034,8 +1202,30 @@ class OHLCVRouter:
 
         # Wrapped token proxy fallback: if all providers failed and the
         # token has a known unwrapped equivalent, retry with the proxy.
+        #
+        # ALM-3148: NOT from the venue-native lane. The retry re-enters
+        # classification from scratch with the unwrapped base, and if the policy
+        # does not also claim that spelling the request lands on Binance — which
+        # is precisely the CEX fallback `_PROVIDER_CHAINS` refuses to give this
+        # lane, arriving through the back door and without the DeFi confidence
+        # haircut. The trigger is not an outage: this lane runs the strict
+        # staleness budget, so ordinary upstream lag is recorded as a provider
+        # miss, the single-entry chain exhausts, and the proxy retry serves a CEX
+        # tape while the position marks and liquidates against the venue index.
+        #
+        # Scoped to the classification-derived chain, which is the only one the
+        # recursion can lose: `force_provider` is threaded through the retry and
+        # `pinned` is a strategy-level policy read that resolves identically for
+        # the proxy symbol, so neither retry can land anywhere the first attempt
+        # would not have. Blocking those refused a fallback that was never able
+        # to leave the lane — a guard is not free, and one that fires outside
+        # the case it reasons about just breaks a working path.
+        lane_is_claims_derived = (
+            not force_provider and not pinned and venue_native_owns(instrument, self.source_policy, pool_address)
+        )
         if (
             not _is_proxy_retry
+            and not lane_is_claims_derived
             and (
                 proxy_envelope := self._try_proxy_fallback(
                     instrument, target_chain, timeframe, limit, pool_address, force_provider, quote

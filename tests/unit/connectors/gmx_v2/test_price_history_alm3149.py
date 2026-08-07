@@ -763,3 +763,43 @@ def test_gmx_candle_close_is_not_visible_at_its_open_time() -> None:
     opened_at = datetime(2025, 1, 1, tzinfo=UTC)
     candle = _GMXOracleMarketSource._decode_candle(_candle(opened_at), "4h")
     assert candle.timestamp == opened_at + timedelta(hours=4)
+
+
+# ---------------------------------------------------------------------------
+# ALM-3148 — fully dynamic index-plane disambiguation on the candle path
+# ---------------------------------------------------------------------------
+
+
+async def _candle_resolution_for(market: str, chain: str) -> dict[str, object]:
+    """Return the dynamic-registry request made by the candle path."""
+    record = SimpleNamespace(
+        label=market,
+        market_token=MARKET_TOKEN,
+        index_token=INDEX_TOKEN,
+        index_symbol="ETH",
+    )
+    connector = GmxV2GatewayConnector()
+    connector._market_registry.resolve = AsyncMock(return_value=record)
+    session = SimpleNamespace(
+        get=Mock(return_value=_Response({"period": "5m", "candles": [[1_700_000_000, "12", "13", "11", "12.5"]]}))
+    )
+    servicer = SimpleNamespace(
+        settings=SimpleNamespace(network="mainnet"),
+        _get_http_session=AsyncMock(return_value=session),
+    )
+    with patch("almanak.gateway.services.pt_rpc_adapter.build_gateway_eth_call", return_value=AsyncMock()):
+        await connector.fetch_price_candles(
+            servicer, market=market, chain=chain, timeframe="5m", before_ts=1_800_000_000, limit=3
+        )
+    return connector._market_registry.resolve.await_args.kwargs
+
+
+@pytest.mark.asyncio
+async def test_candle_path_always_uses_dynamic_index_resolution() -> None:
+    """Labels and addresses reach the venue registry unchanged; no SDK market table participates."""
+    for market in ("ETH/USD", "ETH-USD", "HYPE/USD", MARKET_TOKEN):
+        request = await _candle_resolution_for(market, "arbitrum")
+        assert request["market"] == market
+        assert request["chain"] == "arbitrum"
+        assert request["allow_delisted_address"] is False
+        assert request["allow_index_equivalent"] is True

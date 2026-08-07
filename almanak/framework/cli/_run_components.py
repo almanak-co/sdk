@@ -535,6 +535,36 @@ def _get_data_requirements(strategy_instance: Any) -> StrategyDataRequirements:
     return dr
 
 
+def _build_ohlcv_source_policy(
+    strategy_instance: Any,
+    strategy_config: Any,
+    chain: str,
+) -> Any:
+    """Resolve which candle series this strategy's indicators should read (ALM-3148).
+
+    Defaults to the venue's own index candles when the strategy trades a venue
+    that publishes them, and to today's classification otherwise. The strategist
+    overrides with ``ohlcv_source`` in strategy config.
+
+    A bad ``ohlcv_source`` / ``ohlcv_venue`` value aborts the run here rather
+    than degrading to a default. Degrading would serve a different price plane
+    than the one the strategist asked for, and would do it invisibly — the
+    strategy would keep trading on numbers it never chose.
+    """
+    from ..data.ohlcv import provider_names_in_chains
+    from ..data.ohlcv.venue_context import build_source_policy
+
+    try:
+        return build_source_policy(
+            strategy=strategy_instance,
+            strategy_config=strategy_config if isinstance(strategy_config, dict) else None,
+            chain=chain,
+            known_providers=frozenset(provider_names_in_chains()),
+        )
+    except ValueError as exc:
+        raise click.ClickException(f"Invalid OHLCV source configuration: {exc}") from exc
+
+
 # crap-allowlist: #2097 replaces direct os.environ.get reads with the typed
 # cli_runtime_config_from_env() — no new branches, no new behaviour. Function refactor
 # is tracked separately; allowlist matches the documented escape hatch for this
@@ -636,10 +666,21 @@ def _build_orchestrator_and_providers(  # noqa: C901
             # For DeFi-native tokens on secondary chains, CoinGecko Onchain pool search
             # may resolve to the wrong network. Per-chain providers would require
             # passing chain context through the indicator callables, which is a larger change.
+            #
+            # ALM-3148 inherits that binding, with one consequence worth naming
+            # (ALM-3166): venue eligibility is resolved for `strategy_chains[0]`
+            # only. A multi-chain strategy that trades a native-candle venue on a
+            # SECONDARY chain resolves no venue, falls back to `auto`, and its
+            # perp symbols keep the pre-ALM-3148 routing — i.e. the bug this
+            # change fixes stays unfixed for that shape. It is not made worse:
+            # `auto` is exactly what those strategies get today. Fixing it means
+            # per-chain policies, which is the same larger change the note above
+            # defers, so it is tracked rather than attempted here.
             ohlcv_stack = create_ohlcv_stack(
                 gateway_client=gateway_client,
                 chain=strategy_chains[0],
                 pool_address=strategy_config.get("pool_address") if strategy_config else None,
+                source_policy=_build_ohlcv_source_policy(strategy_instance, strategy_config, strategy_chains[0]),
             )
             ohlcv_provider = ohlcv_stack.provider
             # VIB-4347: stamp the sync OHLCVRouter on the strategy so
@@ -804,6 +845,7 @@ def _build_orchestrator_and_providers(  # noqa: C901
                 gateway_client=gateway_client,
                 chain=runtime_config.chain,
                 pool_address=strategy_config.get("pool_address") if strategy_config else None,
+                source_policy=_build_ohlcv_source_policy(strategy_instance, strategy_config, runtime_config.chain),
             )
             ohlcv_provider = ohlcv_stack.provider
             # VIB-4347: stamp the sync OHLCVRouter on the strategy so

@@ -230,6 +230,47 @@ class InsufficientDataError(DataSourceError):
         super().__init__(msg)
 
 
+class VolumeUnavailableError(DataSourceError, ValueError):
+    """Raised when an indicator needs volume and the series does not measure it.
+
+    ALM-3148 §8.2. A perpetual venue's index/mark candles are a price plane, not
+    a trade tape: they carry no volume at all. ``OHLCVCandle.volume is None``
+    therefore means *unmeasured*, and substituting ``0.0`` turns that into the
+    materially different claim "measured, and there was none" — a structurally
+    valid number that reads as "no accumulation pressure" when the truth is "no
+    volume data exists" (``Empty != Zero``).
+
+    Refusing is the only honest answer, and the message names the way out: pick
+    a source that measures volume.
+
+    Also a ``ValueError`` because every indicator on ``MarketSnapshot``
+    documents ``Raises: ValueError`` for "this indicator is not available", and
+    strategies guard on that contract (``strategies/internal/tests/
+    obv_divergence/strategy.py``). A ``DataSourceError``-only subclass turns a
+    handled "hold this iteration" into an unhandled raise out of ``decide()``,
+    which is a harder failure than the fabricated ``0.0`` it replaced. Nothing
+    between the raise site (``indicators/obv.py``) and the strategy catches
+    ``ValueError``, so widening the base cannot re-swallow it into a fallback:
+    ``snapshot.obv`` names this class in a clause that precedes its
+    ``except Exception``.
+
+    Attributes:
+        indicator: Indicator that required volume (e.g. ``"OBV"``).
+        observed: How many of the inspected candles carried no volume.
+        inspected: How many candles were inspected.
+    """
+
+    def __init__(self, indicator: str, observed: int, inspected: int) -> None:
+        self.indicator = indicator
+        self.observed = observed
+        self.inspected = inspected
+        super().__init__(
+            f"{indicator} requires trading volume, but {observed} of {inspected} candles report volume as "
+            "unmeasured. A perpetual venue's index-price candles carry no volume. Set ohlcv_source to a "
+            "source that measures it (e.g. 'binance') in strategy config, or use a price-only indicator."
+        )
+
+
 class StaleData(DataSourceError):
     """Raised when data is stale beyond acceptable thresholds.
 
@@ -1084,6 +1125,7 @@ __all__ = [
     "DataSourceRateLimited",
     "AllDataSourcesFailed",
     "InsufficientDataError",
+    "VolumeUnavailableError",
     "StaleData",
     "StaleDataWarning",
     "StaleDataError",
