@@ -154,13 +154,16 @@ class TestManifestCoverage:
         config = load_strategy_config(config_path)
 
         for chain in chains:
-            # Generate manifest
+            # Generate manifest. strict=False: multichain demo sweep over
+            # symbol-form configs with per-chain registry gaps (ALM-3175);
+            # see test_manifest_includes_token_approvals for the full note.
             manifest = generate_manifest(
                 strategy_name=metadata.name or cls.__name__,
                 chain=chain,
                 supported_protocols=protocols,
                 intent_types=intent_types,
                 config=config,
+                strict=False,
             )
 
             # Build lookup set from manifest: {(target, selector)}
@@ -314,12 +317,15 @@ class TestManifestCoverage:
                 # Chain doesn't have a known MultiSend - skip
                 continue
 
+            # strict=False: multichain demo sweep (ALM-3175); see
+            # test_manifest_includes_token_approvals for the full note.
             manifest = generate_manifest(
                 strategy_name=metadata.name or cls.__name__,
                 chain=chain,
                 supported_protocols=protocols,
                 intent_types=intent_types,
                 config=config,
+                strict=False,
             )
 
             manifest_targets = {p.target.lower() for p in manifest.permissions}
@@ -387,12 +393,19 @@ class TestManifestCoverage:
         resolver = get_token_resolver()
 
         for chain in chains:
+            # strict=False: this sweep spans every declared chain of every
+            # demo, and one shared symbol-form config legitimately has
+            # static-registry gaps on some chains (ALM-3175). Deploy-grade
+            # callers keep the strict default; here the omission surfaces as
+            # a manifest warning, which is what this test tolerates below by
+            # skipping tokens it cannot resolve itself.
             manifest = generate_manifest(
                 strategy_name=metadata.name or cls.__name__,
                 chain=chain,
                 supported_protocols=protocols,
                 intent_types=intent_types,
                 config=config,
+                strict=False,
             )
 
             # Build lookup: target -> set of selectors

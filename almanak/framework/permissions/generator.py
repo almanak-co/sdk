@@ -30,6 +30,20 @@ logger = logging.getLogger(__name__)
 
 InfrastructurePermissionBuilder = Callable[[str], list[ContractPermission]]
 
+
+class PermissionGenerationError(RuntimeError):
+    """Manifest generation cannot produce a required permission (ALM-3175).
+
+    Raised instead of silently omitting an approve target: a Zodiac manifest
+    missing one reverts unauthorized at ``execTransactionWithRole`` at
+    runtime — potentially on the teardown (risk-reducing) path. Deploy-time
+    failure with a named remedy beats a runtime brick.
+    """
+
+
+# Native-asset sentinel address — not an ERC-20, needs no approve permission.
+_NATIVE_SENTINEL = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+
 # Config field names that contain token symbols or addresses
 _TOKEN_CONFIG_FIELDS = frozenset(
     {
@@ -140,6 +154,7 @@ def generate_manifest(
     intent_types: list[str],
     config: dict[str, Any] | None = None,
     rpc_url: str | None = None,
+    strict: bool = True,
 ) -> PermissionManifest:
     """Generate a Zodiac Roles permission manifest for a strategy.
 
@@ -161,6 +176,15 @@ def generate_manifest(
         rpc_url: Optional RPC URL for on-chain queries during discovery.
             Enables protocols like Aerodrome to resolve dynamic contract
             addresses (e.g. LP pool addresses from factory).
+        strict: Fail-closed policy for config token approvals (ALM-3175).
+            ``True`` (default, deploy-grade): a symbol-form config token the
+            static registry cannot name raises ``PermissionGenerationError``
+            — an omitted approve target reverts unauthorized at
+            ``execTransactionWithRole`` at runtime. ``False`` (sweep-grade,
+            e.g. multichain coverage scans where one shared symbol-form
+            config legitimately has registry gaps on some chains): the
+            omission is recorded as a manifest warning instead. Never
+            silent either way.
 
     Returns:
         Complete permission manifest
@@ -185,7 +209,8 @@ def generate_manifest(
     all_warnings.extend(discovery_warnings)
 
     # 2. Token approval permissions from config
-    token_permissions = _extract_token_permissions(chain, config or {})
+    token_permissions, token_warnings = _extract_token_permissions(chain, config or {}, strict=strict)
+    all_warnings.extend(token_warnings)
 
     # 3. Infrastructure permissions
     infra_permissions = _build_infrastructure_permissions(chain, supported_protocols)
@@ -206,65 +231,144 @@ def generate_manifest(
     )
 
 
+def _approve_permission(address: str, label: str) -> ContractPermission:
+    """Build the ERC-20 ``approve`` permission for one token address."""
+    return ContractPermission(
+        target=address.lower(),
+        label=label,
+        operation=SafeOperation.CALL,
+        send_allowed=False,
+        function_selectors=[
+            FunctionPermission(
+                selector=ERC20_APPROVE_SELECTOR,
+                label="approve(address,uint256)",
+            ),
+        ],
+    )
+
+
+def _address_form_entry(
+    resolver: Any,
+    ref: str,
+    chain: str,
+    warnings: list[str],
+) -> ContractPermission | None:
+    """Approve permission for an address-form config reference.
+
+    Emits without any registry dependency — the approve target IS the
+    address; resolution only decorates the label (offline, best-effort).
+    Returns ``None`` for the native sentinel (skipped with a warning).
+    """
+    address = ref.lower()
+    if address == _NATIVE_SENTINEL:
+        warnings.append(f"Config token '{ref}' is the native asset on {chain}: no ERC-20 approve permission emitted")
+        return None
+    label_symbol: str | None = None
+    try:
+        resolved = resolver.resolve(ref, chain, log_errors=False, skip_gateway=True)
+        label_symbol = getattr(resolved, "symbol", None)
+    except Exception:
+        label_symbol = None  # label-only lookup; the permission never depends on it
+    label = f"ERC-20: {label_symbol.upper()}" if label_symbol else f"ERC-20 ({ref[:6]}...{ref[-4:]})"
+    return _approve_permission(address, label)
+
+
 def _extract_token_permissions(
     chain: str,
     config: dict[str, Any],
-) -> list[ContractPermission]:
-    """Extract ERC-20 approve permissions for tokens in config.
+    *,
+    strict: bool = True,
+) -> tuple[list[ContractPermission], list[str]]:
+    """Extract ERC-20 approve permissions for tokens referenced in config.
 
-    Scans config for known token field names and anvil_funding keys,
-    resolves their addresses, and generates approve permissions.
+    Scans known token config fields and ``anvil_funding`` keys. Fail-closed
+    contract (ALM-3175): every referenced token either yields an approve
+    permission, is skipped with a manifest warning (native asset), or fails
+    generation with ``PermissionGenerationError`` — never a silent drop,
+    because a manifest missing an approve target reverts unauthorized at
+    ``execTransactionWithRole`` at runtime.
+
+    Address-form references emit directly: the approve target IS the
+    address, so no registry entry is required (dynamically-resolved tokens
+    included) and resolution only decorates the label. Symbol-form
+    references resolve through the static registry only
+    (``skip_gateway=True``): the manifest must be deterministic, and a
+    market-search-resolved address must never be baked into a Safe grant.
+
+    Returns:
+        Tuple of (permissions, warnings).
     """
-    token_symbols: set[str] = set()
+    token_refs: set[str] = set()
 
     # Scan known config fields
     for key, value in config.items():
         if key in _TOKEN_CONFIG_FIELDS and isinstance(value, str) and value:
-            token_symbols.add(value)
+            token_refs.add(value)
 
-    # Scan anvil_funding keys (these are token symbols)
+    # Scan anvil_funding keys (token symbols or addresses)
     anvil_funding = config.get("anvil_funding", {})
     if isinstance(anvil_funding, dict):
         for token_key in anvil_funding:
             if isinstance(token_key, str):
-                token_symbols.add(token_key)
+                token_refs.add(token_key)
 
-    if not token_symbols:
-        return []
+    if not token_refs:
+        return [], []
 
-    # Native ETH sentinel - not an ERC-20, skip approve permissions
-    _NATIVE_SENTINEL = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    from ..data.tokens import get_token_resolver
+    from ..data.tokens.address_resolution import looks_like_evm_address
 
-    # Resolve token addresses
-    permissions = []
-    try:
-        from ..data.tokens import get_token_resolver
+    # Resolver construction failure propagates: it would drop EVERY token
+    # approval at once, the worst case of the fail-open this function bans.
+    resolver = get_token_resolver()
 
-        resolver = get_token_resolver()
-        for symbol in sorted(token_symbols):
-            try:
-                resolved = resolver.resolve(symbol, chain)
-                if resolved and resolved.address and resolved.address.lower() != _NATIVE_SENTINEL:
-                    permissions.append(
-                        ContractPermission(
-                            target=resolved.address.lower(),
-                            label=f"ERC-20: {symbol.upper()}",
-                            operation=SafeOperation.CALL,
-                            send_allowed=False,
-                            function_selectors=[
-                                FunctionPermission(
-                                    selector=ERC20_APPROVE_SELECTOR,
-                                    label="approve(address,uint256)",
-                                ),
-                            ],
-                        )
-                    )
-            except Exception:
-                logger.debug(f"Could not resolve token '{symbol}' on {chain}")
-    except Exception:
-        logger.debug("Token resolver not available, skipping token permissions")
+    permissions: list[ContractPermission] = []
+    warnings: list[str] = []
+    unresolved: list[str] = []
 
-    return permissions
+    for ref in sorted(token_refs):
+        stripped = ref.strip()
+
+        if looks_like_evm_address(stripped):
+            entry = _address_form_entry(resolver, stripped, chain, warnings)
+            if entry is not None:
+                permissions.append(entry)
+            continue
+
+        # Symbol-form reference (legacy input shape; SDK 3.0 rejects bare
+        # symbols) — the static registry is the only trustworthy source of
+        # its address during permission generation.
+        try:
+            resolved = resolver.resolve(stripped, chain, log_errors=False, skip_gateway=True)
+        except Exception:
+            unresolved.append(ref)
+            continue
+        address = (getattr(resolved, "address", None) or "").lower()
+        if not address:
+            unresolved.append(ref)
+            continue
+        if address == _NATIVE_SENTINEL:
+            warnings.append(
+                f"Config token '{ref}' is the native asset on {chain}: no ERC-20 approve permission emitted"
+            )
+            continue
+        permissions.append(_approve_permission(address, f"ERC-20: {stripped.upper()}"))
+
+    if unresolved:
+        unresolved_names = ", ".join(sorted(set(unresolved)))
+        message = (
+            f"Cannot resolve config token(s) {unresolved_names} on {chain} to an address "
+            "for the ERC-20 approve permission. An omitted approve target reverts unauthorized at "
+            "execTransactionWithRole at runtime. Reference the token by its contract address in config "
+            "(symbols resolve through the static registry only during permission generation), or register "
+            "the token in the static registry."
+        )
+        if strict:
+            raise PermissionGenerationError(f"{message} Generation fails instead of emitting an incomplete manifest.")
+        logger.warning("permission_token_unresolved chain=%s tokens=%s", chain, unresolved_names)
+        warnings.append(f"OMITTED approve permission(s): {message}")
+
+    return permissions, warnings
 
 
 def _build_infrastructure_permissions(

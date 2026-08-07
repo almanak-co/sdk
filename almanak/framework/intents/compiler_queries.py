@@ -479,7 +479,7 @@ class CompilerQueries:
         Returns:
             Token amount in smallest units (wei)
         """
-        price = self._host._require_token_price(token.symbol)
+        price = self.require_token_price_for(token)
         token_amount = usd_amount / price
         return int(token_amount * Decimal(10**token.decimals))
 
@@ -503,8 +503,8 @@ class CompilerQueries:
             Expected output amount in wei
         """
         # Get prices
-        from_price = self._host._require_token_price(from_token.symbol)
-        to_price = self._host._require_token_price(to_token.symbol)
+        from_price = self.require_token_price_for(from_token)
+        to_price = self.require_token_price_for(to_token)
 
         # Convert input to USD
         from_amount_decimal = Decimal(str(amount_in)) / Decimal(10**from_token.decimals)
@@ -521,6 +521,59 @@ class CompilerQueries:
     # ------------------------------------------------------------------
     # Price lookups
     # ------------------------------------------------------------------
+
+    def require_token_price_for(self, token: TokenInfo) -> Decimal:
+        """Address-first price lookup for a resolved ``TokenInfo`` (ALM-3174).
+
+        Post symbol-deprecation, strategies reference tokens by contract
+        address, so the snapshot warms the oracle under ``chain:0xaddr``
+        keys — and the symbol-keyed miss path can only bridge those keys
+        back through the static registry. A token the registry cannot name
+        (the dynamic-resolution long tail) then failed compilation with the
+        price sitting in the oracle under the address key. The compiler
+        already holds the address on every ``TokenInfo``, so join on it
+        first; the registry stays a fast path, never a gate. The symbol
+        fallback routes through the HOST wrapper so instance-level patches
+        on the compiler keep propagating (see
+        test_compiler_queries_extraction.py seam contract).
+        """
+        price = self._price_from_address_keys(token)
+        if price is not None:
+            return price
+        return self._host._require_token_price(token.symbol)
+
+    def _price_from_address_keys(self, token: TokenInfo) -> Decimal | None:
+        """Oracle price under ``chain:0xaddr`` / bare-address keys, else ``None``.
+
+        Natives are skipped: their ``address`` is a placeholder sentinel,
+        and native prices are warmed under symbol keys. A zero price is
+        treated as a miss so the symbol path keeps ownership of the
+        fail-closed zero/missing error shape.
+        """
+        oracle = self._host.price_oracle
+        address = getattr(token, "address", None)
+        if not oracle or not address or getattr(token, "is_native", False):
+            return None
+        addr_upper = str(address).strip().upper()
+        if not addr_upper:
+            return None
+        # Ordered: the chain-qualified key must beat the bare-address key —
+        # with both present, the active-chain entry is the precise identity.
+        candidates = [addr_upper]
+        chain = getattr(self._host, "chain", None)
+        if chain:
+            candidates.insert(0, f"{str(chain).strip().upper()}:{addr_upper}")
+        # get_price_oracle_dict() uppercases keys — exact lookups first,
+        # case-insensitive scan as backstop for hand-built oracle dicts.
+        for key in candidates:
+            price = oracle.get(key)
+            if price:
+                return price
+        for candidate in candidates:
+            for key, price in oracle.items():
+                if price and isinstance(key, str) and key.strip().upper() == candidate:
+                    return price
+        return None
 
     # crap-allowlist: plan-016 verbatim extraction — function body moved unchanged from compiler.py where it pre-existed at the same cc/CRAP score; the gate sees it as new code only because the host file changed. Coverage backfill tracked in plan-016 maintenance notes.
     def require_token_price(self, symbol: str) -> Decimal:

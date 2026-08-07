@@ -165,7 +165,7 @@ def permissions(  # noqa: C901
     declared_protocols_lower = {p.lower() for p in protocols}
 
     # Generate manifest for each chain
-    from ..permissions.generator import generate_manifest
+    from ..permissions.generator import PermissionGenerationError, generate_manifest
     from ..permissions.hints import PermissionHintsError
 
     # Filter out non-EVM chains for zodiac format (Safe/Zodiac is EVM-only)
@@ -244,6 +244,11 @@ def permissions(  # noqa: C901
                     config=config,
                     rpc_url=chain_rpc_url,
                 )
+            except PermissionGenerationError as exc:
+                # Fail-closed token extraction (ALM-3175): the message already
+                # names the unresolvable token(s) and the remedy — surface it
+                # without a traceback.
+                raise click.ClickException(str(exc)) from exc
             except (PermissionHintsError, ImportError) as exc:
                 # A connector with a broken permission_hints module now fails
                 # closed rather than degrading to an empty manifest — correct,
