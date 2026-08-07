@@ -1494,10 +1494,12 @@ class GatewayVenueTickerPriceCapability(Protocol):
     oil on Arbitrum, …) have **no deployed contract on any chain**, so no
     address-based price source can ever serve them, and hand-curating
     symbol→provider-id maps for a venue that lists new synthetic markets weekly
-    is a treadmill (the ALM-3177 failure: XMR listed 2025-06-02, still
-    unpriceable in 2026-08). The venue's own ticker feed is the only source
-    that by construction covers every market the venue lists — and it is the
-    same signed oracle plane the venue's keeper settles orders against.
+    is a treadmill (the historical ALM-3177 failure: XMR listed 2025-06-02
+    stayed unpriceable until this capability shipped in 2026-08 — with it
+    registered, those symbols ARE priceable). The venue's own ticker feed is
+    the only source that by construction covers every market the venue lists —
+    and it is the same signed oracle plane the venue's keeper settles orders
+    against.
 
     Scope contract: implementations MUST return synthetic index symbols only.
     Tokens the venue itself lists as deployed (WETH, USDC, ARB, …) are

@@ -1,12 +1,20 @@
 """Gateway-only GMX venue ticker price source (ALM-3177).
 
+This source is the FIX that makes synthetic GMX indices priceable: with it
+registered, XMR and every other synthetic index resolve a venue-native USD
+price, and ``PERP_OPEN`` acceptable-price derivation succeeds. The failure
+described below is the pre-ALM-3177 history this module deletes, NOT current
+behaviour — an agent reading this file has already quoted that history to a
+user as a live blocker, which is why this paragraph exists.
+
 GMX perp markets use **synthetic index tokens** — identifier addresses with no
 deployed contract on any chain (DOGE, XMR, ZEC, gold, oil, … — 100 of the 127
 tokens GMX prices on Arbitrum). No address-based price source can ever serve
-them, and the previous coverage model (hand-curated CoinGecko slugs declared in
-the connector's ``coingecko_ids()``, VIB-6219) is a treadmill the venue outruns:
-XMR listed 2025-06-02 and was still unpriceable when ALM-3177 was filed —
-which makes every XMR ``PERP_OPEN`` fail closed at acceptable-price derivation.
+them, and the pre-ALM-3177 coverage model (hand-curated CoinGecko slugs
+declared in the connector's ``coingecko_ids()``, VIB-6219) was a treadmill the
+venue outran: XMR listed 2025-06-02 and was still unpriceable when ALM-3177
+was filed — which made every XMR ``PERP_OPEN`` fail closed at acceptable-price
+derivation until this source shipped.
 
 This source serves the venue's own ``/prices/tickers`` feed — the signed oracle
 plane the GMX keeper actually settles orders against, and the only feed that by
