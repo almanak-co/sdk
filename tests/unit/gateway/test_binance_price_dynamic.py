@@ -1,18 +1,63 @@
-"""Tests for BinancePriceSource dynamic token resolution (VIB-645)."""
+"""Tests for BinancePriceSource dynamic token resolution (VIB-645, ALM-3185)."""
 
 import time
+from dataclasses import dataclass
 from unittest.mock import AsyncMock, MagicMock, patch
 from urllib.parse import parse_qs, urlparse
 
 import pytest
 
+from almanak.framework.data.interfaces import DataSourceUnavailable
 from almanak.gateway.data.ohlcv.binance_provider import BINANCE_SYMBOL_MAP
 from almanak.gateway.data.price.binance import (
     _NEGATIVE_CACHE_TTL,
     _TOKEN_TO_BINANCE_SYMBOL,
     BinancePriceSource,
 )
+from almanak.integrations.binance.gateway import price_source as binance_price_source
 from almanak.integrations.binance.integration import BINANCE_UNSAFE_MARKET_BASES, INTEGRATION
+
+
+@dataclass(frozen=True)
+class _StubIdentity:
+    """Minimal stand-in for ``ResolvedToken`` — the gate reads only the CG id."""
+
+    coingecko_id: str | None
+
+
+def _mock_session(*, status: int = 200, price: str = "42.50") -> MagicMock:
+    """A session whose every ticker request answers with ``price``.
+
+    Deliberately permissive: it answers for ANY symbol, which is what makes the
+    gate tests real. A probe that escapes the gate finds a "listed" pair and
+    returns a confident price — exactly the same-ticker-stranger failure the
+    gate exists to stop.
+    """
+    resp = AsyncMock()
+    resp.status = status
+    resp.json = AsyncMock(return_value={"price": price})
+    resp.text = AsyncMock(return_value="Invalid symbol")
+    resp.__aenter__ = AsyncMock(return_value=resp)
+    resp.__aexit__ = AsyncMock(return_value=False)
+
+    session = MagicMock()
+    session.get = MagicMock(return_value=resp)
+    return session
+
+
+def _probed_symbols(session: MagicMock) -> list[str]:
+    """Return the ``symbol`` query param of every ticker request made."""
+    return [parse_qs(urlparse(call[0][0]).query).get("symbol", [None])[0] for call in session.get.call_args_list]
+
+
+@pytest.fixture()
+def corroborate(monkeypatch):
+    """Install reviewed CoinGecko-id -> Binance-base links for one test."""
+
+    def _install(links: dict[str, str]) -> None:
+        monkeypatch.setattr(binance_price_source, "_COINGECKO_ID_TO_BINANCE_BASE", dict(links))
+
+    return _install
 
 
 class TestBinanceDynamicResolution:
@@ -77,54 +122,47 @@ class TestBinanceDynamicResolution:
         assert result is None
 
     @pytest.mark.asyncio()
-    async def test_negative_cache_prevents_repeated_lookups(self, source):
-        """Negative-cached tokens should not hit the API again."""
+    async def test_negative_cache_prevents_repeated_lookups(self, source, corroborate):
+        """Negative-cached bases should not hit the API again.
+
+        ALM-3185: the negative cache lives *behind* the corroboration gate, so
+        the token needs a reviewed identity link to reach it at all.
+        """
+        corroborate({"bad-token": "BADTOKEN"})
         source._negative_cache["BADTOKEN"] = time.time()
 
-        from almanak.framework.data.interfaces import DataSourceUnavailable
-
         with pytest.raises(DataSourceUnavailable, match="negative-cached"):
-            await source.get_price("BADTOKEN")
+            await source.get_price("BADTOKEN", resolved_token=_StubIdentity("bad-token"))
 
     @pytest.mark.asyncio()
-    async def test_negative_cache_expires(self, source):
+    async def test_negative_cache_expires(self, source, corroborate):
         """Expired negative cache entries should re-probe."""
+        corroborate({"old-token": "OLDTOKEN"})
         source._negative_cache["OLDTOKEN"] = time.time() - _NEGATIVE_CACHE_TTL - 100
 
-        mock_resp = AsyncMock()
-        mock_resp.status = 200
-        mock_resp.json = AsyncMock(return_value={"price": "10.0"})
-        mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
-        mock_resp.__aexit__ = AsyncMock(return_value=False)
-
-        mock_session = MagicMock()
-        mock_session.get = MagicMock(return_value=mock_resp)
+        mock_session = _mock_session(price="10.0")
 
         with patch.object(source, "_get_session", return_value=mock_session):
-            result = await source.get_price("OLDTOKEN")
+            result = await source.get_price("OLDTOKEN", resolved_token=_StubIdentity("old-token"))
 
         assert result.price > 0
         assert source._dynamic_symbol_cache["OLDTOKEN"] == "OLDTOKENUSDT"
 
     @pytest.mark.asyncio()
-    async def test_dynamic_cache_used_on_subsequent_calls(self, source):
+    async def test_dynamic_cache_used_on_subsequent_calls(self, source, corroborate):
         """Dynamically resolved symbols should be cached for future calls."""
+        corroborate({"cached-project": "CACHED"})
         source._dynamic_symbol_cache["CACHED"] = "CACHEDUSDT"
 
-        mock_resp = AsyncMock()
-        mock_resp.status = 200
-        mock_resp.json = AsyncMock(return_value={"price": "5.0"})
-        mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
-        mock_resp.__aexit__ = AsyncMock(return_value=False)
-
-        mock_session = MagicMock()
-        mock_session.get = MagicMock(return_value=mock_resp)
+        mock_session = _mock_session(price="5.0")
 
         with patch.object(source, "_get_session", return_value=mock_session):
-            result = await source.get_price("CACHED")
+            result = await source.get_price("CACHED", resolved_token=_StubIdentity("cached-project"))
 
         assert result.price > 0
         assert result.confidence == 0.9  # Dynamic resolution gets lower confidence
+        # The cached pair was used directly — no probing round-trip.
+        assert _probed_symbols(mock_session) == ["CACHEDUSDT"]
 
     @pytest.mark.asyncio()
     async def test_stablecoins_bypass_dynamic_resolution(self, source):
@@ -194,24 +232,16 @@ class TestBinanceDynamicResolution:
         assert _TOKEN_TO_BINANCE_SYMBOL["CBBTC"] == "BTCUSDT"
 
     @pytest.mark.asyncio()
-    async def test_evict_dynamic_cache_on_api_error(self, source):
+    async def test_evict_dynamic_cache_on_api_error(self, source, corroborate):
         """Dynamic cache entries should be evicted if the API returns errors."""
+        corroborate({"delisted-project": "DELISTED"})
         source._dynamic_symbol_cache["DELISTED"] = "DELISTEDUSDT"
 
-        mock_resp = AsyncMock()
-        mock_resp.status = 400
-        mock_resp.text = AsyncMock(return_value="Invalid symbol")
-        mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
-        mock_resp.__aexit__ = AsyncMock(return_value=False)
-
-        mock_session = MagicMock()
-        mock_session.get = MagicMock(return_value=mock_resp)
-
-        from almanak.framework.data.interfaces import DataSourceUnavailable
+        mock_session = _mock_session(status=400)
 
         with patch.object(source, "_get_session", return_value=mock_session):
             with pytest.raises(DataSourceUnavailable):
-                await source.get_price("DELISTED")
+                await source.get_price("DELISTED", resolved_token=_StubIdentity("delisted-project"))
 
         assert "DELISTED" not in source._dynamic_symbol_cache
 
@@ -277,8 +307,175 @@ class TestPriceCatalogueIsolation:
     async def test_retired_symbols_never_probe_ghost_tickers(self, token):
         source = BinancePriceSource()
         source._resolve_binance_symbol = AsyncMock(side_effect=AssertionError("must not probe"))
-        from almanak.framework.data.interfaces import DataSourceUnavailable
 
         with pytest.raises(DataSourceUnavailable, match="not approved"):
             await source.get_price(token)
         source._resolve_binance_symbol.assert_not_awaited()
+
+
+class TestDynamicProbeCorroborationGate:
+    """ALM-3185 — dynamic ticker probing is gated on a reviewed identity link.
+
+    A ticker probe cannot tell two projects apart when they share a symbol:
+    Velodrome's VELO on Optimism and Velo Labs' VELO on Binance are unrelated
+    assets. Ungated, the collision produced a *confident* (0.9) wrong price, and
+    ``PriceAggregator`` has no confidence-based eligibility filter — a single
+    surviving source is returned as-is (``_fetch_all_sources``) and outlier
+    detection is price-deviation-based — so whenever the address-based sources
+    are rate-limited that invented price IS the returned price.
+
+    Negative control: every test in this class fails if ``_gate_dynamic_base``
+    is removed or made permissive. ``_mock_session`` answers 200 with a price
+    for ANY symbol, so an escaping probe always "finds" a listed pair.
+    """
+
+    @pytest.fixture()
+    def source(self):
+        return BinancePriceSource(cache_ttl=30, request_timeout=5.0)
+
+    @pytest.mark.asyncio()
+    async def test_colliding_ticker_never_reaches_the_probe(self, source, corroborate):
+        """Unknown token, ticker collides with a listed pair -> no price, no probe."""
+        corroborate({})
+        mock_session = _mock_session(price="0.0123")
+
+        with patch.object(source, "_get_session", return_value=mock_session):
+            with pytest.raises(DataSourceUnavailable, match="no corroborated Binance listing"):
+                await source.get_price("VELO")
+
+        mock_session.get.assert_not_called()
+
+    @pytest.mark.asyncio()
+    async def test_resolved_token_without_reviewed_link_is_rejected(self, source, corroborate):
+        """The on-chain VELO (Velodrome) must not borrow Binance's VELO listing."""
+        corroborate({"velo-labs": "VELO"})
+        mock_session = _mock_session(price="0.0123")
+
+        with patch.object(source, "_get_session", return_value=mock_session):
+            with pytest.raises(DataSourceUnavailable, match="no corroborated Binance listing"):
+                await source.get_price("VELO", resolved_token=_StubIdentity("velodrome-finance"))
+
+        mock_session.get.assert_not_called()
+
+    @pytest.mark.asyncio()
+    async def test_corroborated_identity_resolves_through_the_probe(self, source, corroborate):
+        """A token whose identity IS linked still resolves, at dynamic confidence."""
+        corroborate({"velo-labs": "VELO"})
+        mock_session = _mock_session(price="0.0123")
+
+        with patch.object(source, "_get_session", return_value=mock_session):
+            result = await source.get_price("VELO", resolved_token=_StubIdentity("velo-labs"))
+
+        assert result.price > 0
+        assert result.confidence == 0.9
+        assert _probed_symbols(mock_session)[0] == "VELOUSDT"
+        # Cache is keyed by the corroborated base, not by the requested symbol.
+        assert source._dynamic_symbol_cache == {"VELO": "VELOUSDT"}
+
+    @pytest.mark.asyncio()
+    async def test_base_comes_from_the_identity_not_the_requested_symbol(self, source, corroborate):
+        """The probed base is the reviewed venue ticker, never the caller's symbol."""
+        corroborate({"wrapped-thing": "THING"})
+        mock_session = _mock_session(price="7.5")
+
+        with patch.object(source, "_get_session", return_value=mock_session):
+            result = await source.get_price("WTHING", resolved_token=_StubIdentity("wrapped-thing"))
+
+        assert result.price > 0
+        assert _probed_symbols(mock_session)[0] == "THINGUSDT"
+        assert "WTHINGUSDT" not in _probed_symbols(mock_session)
+
+    @pytest.mark.asyncio()
+    @pytest.mark.parametrize("retired", sorted(BINANCE_UNSAFE_MARKET_BASES))
+    async def test_corroborated_base_still_honours_the_retired_denylist(self, source, corroborate, retired):
+        """A link pointing at a ghost ticker is as unsafe as a symbol that resolves to one."""
+        corroborate({"some-project": retired})
+        mock_session = _mock_session()
+
+        with patch.object(source, "_get_session", return_value=mock_session):
+            with pytest.raises(DataSourceUnavailable, match="not approved"):
+                await source.get_price("SOMETOKEN", resolved_token=_StubIdentity("some-project"))
+
+        mock_session.get.assert_not_called()
+
+    @pytest.mark.asyncio()
+    async def test_dynamic_symbol_cache_is_not_a_bypass(self, source, corroborate):
+        """A cache row from a corroborated call must not serve an uncorroborated one."""
+        corroborate({})
+        source._dynamic_symbol_cache["VELO"] = "VELOUSDT"
+        mock_session = _mock_session(price="0.0123")
+
+        with patch.object(source, "_get_session", return_value=mock_session):
+            with pytest.raises(DataSourceUnavailable, match="no corroborated Binance listing"):
+                await source.get_price("VELO")
+
+        mock_session.get.assert_not_called()
+
+    @pytest.mark.asyncio()
+    async def test_price_cache_is_not_a_bypass(self, source, corroborate):
+        """The 30s price cache must not leak one project's price to a same-ticker stranger."""
+        corroborate({"velo-labs": "VELO"})
+        mock_session = _mock_session(price="0.0123")
+
+        with patch.object(source, "_get_session", return_value=mock_session):
+            warmed = await source.get_price("VELO", resolved_token=_StubIdentity("velo-labs"))
+            assert warmed.price > 0
+            calls_after_warm = mock_session.get.call_count
+
+            with pytest.raises(DataSourceUnavailable, match="no corroborated Binance listing"):
+                await source.get_price("VELO", resolved_token=_StubIdentity("velodrome-finance"))
+
+        assert mock_session.get.call_count == calls_after_warm
+
+    @pytest.mark.asyncio()
+    @pytest.mark.parametrize("bogus", [None, {"coingecko_id": "velo-labs"}, "velo-labs", 42])
+    async def test_gate_fails_closed_on_a_non_identity_resolved_token(self, source, corroborate, bogus):
+        """Anything that is not a real identity closes the gate rather than raising."""
+        corroborate({"velo-labs": "VELO"})
+        mock_session = _mock_session()
+
+        with patch.object(source, "_get_session", return_value=mock_session):
+            with pytest.raises(DataSourceUnavailable, match="no corroborated Binance listing"):
+                await source.get_price("VELO", resolved_token=bogus)
+
+        mock_session.get.assert_not_called()
+
+    @pytest.mark.asyncio()
+    async def test_curated_tokens_are_unaffected_by_the_gate(self, source, corroborate):
+        """Curated rows never consult the gate — full confidence, no identity needed."""
+        corroborate({})
+        mock_session = _mock_session(price="3000.0")
+        source._gate_dynamic_base = MagicMock(side_effect=AssertionError("gate must not run for curated rows"))
+
+        with patch.object(source, "_get_session", return_value=mock_session):
+            result = await source.get_price("ETH", resolved_token=_StubIdentity("velodrome-finance"))
+
+        assert result.confidence == 1.0
+        assert _probed_symbols(mock_session) == ["ETHUSDT"]
+
+    @pytest.mark.asyncio()
+    async def test_stablecoin_lane_is_unaffected_by_the_gate(self, source, corroborate):
+        """The $1 stablecoin lane short-circuits before the gate and makes no call."""
+        corroborate({})
+        mock_session = _mock_session()
+
+        with patch.object(source, "_get_session", return_value=mock_session):
+            result = await source.get_price("USDC")
+
+        assert result.price == 1
+        assert result.confidence == 1.0
+        mock_session.get.assert_not_called()
+
+    def test_corroboration_table_shape_is_identity_keyed(self):
+        """Structural guard on future rows: CoinGecko id -> Binance base, never a symbol join."""
+        table = binance_price_source._COINGECKO_ID_TO_BINANCE_BASE
+        for coingecko_id, base in table.items():
+            assert coingecko_id and coingecko_id == coingecko_id.strip().lower(), (
+                f"corroboration key {coingecko_id!r} must be a normalized CoinGecko id"
+            )
+            assert base and base.isalnum() and base == base.upper(), (
+                f"corroboration value {base!r} must be an uppercase Binance base ticker"
+            )
+        assert BINANCE_UNSAFE_MARKET_BASES.isdisjoint(set(table.values()))
+        # Curated rows own their symbols; a link must not shadow the reviewed table.
+        assert set(table.values()).isdisjoint(set(_TOKEN_TO_BINANCE_SYMBOL))
