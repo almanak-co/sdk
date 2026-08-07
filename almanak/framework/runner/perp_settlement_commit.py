@@ -245,12 +245,20 @@ async def _complete_registry(
         settlement_block = getattr(event, "block_number", None)
         if settlement_block is not None:
             settlement_block = int(settlement_block)
+        direction = perp_direction_label(getattr(event, "is_long", None))
         payload: dict[str, Any] = {
             "protocol": protocol,
             "position_id": position_key.lower(),
             "market": getattr(event, "market", None),
             "collateral_token": getattr(event, "collateral_token", None),
-            "direction": perp_direction_label(getattr(event, "is_long", None)),
+            "direction": direction,
+            # The measured boolean alongside the display label: teardown's close
+            # builder consumes ``is_long``, and a payload that discarded it left
+            # the builder unable to build a closing intent — every teardown
+            # FAILED and the strategy entry-blocked (VIB-5572 livelock). Derived
+            # from the normalized label so the two can never disagree; ``None``
+            # stays ``None`` (Empty ≠ Zero: never fabricate a side).
+            "is_long": None if direction is None else direction == "long",
             "source": "settlement_reconciler",
             "keeper_tx_hash": getattr(event, "keeper_tx_hash", None),
         }

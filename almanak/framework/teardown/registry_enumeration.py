@@ -655,8 +655,10 @@ def _position_info_from_perp_registry_row(row: Any) -> PositionInfo | None:
     not its on-chain health factor; the teardown ``PositionType.PERP`` priority
     already closes perps FIRST regardless of the flag, so the registry must not
     fabricate a risk signal it cannot measure. Market / collateral / direction /
-    size ride in ``details`` (best-effort: the runtime write carries all four;
-    a backfill-synthesized row carries only what ``position_events`` persisted).
+    size / is_long ride in ``details`` (best-effort: writers differ — the
+    settlement reconciler carries ``is_long``, the runtime write carries
+    ``size_usd``, a backfill-synthesized row carries only what
+    ``position_events`` persisted).
     """
     if not isinstance(row, dict):
         return None
@@ -672,7 +674,12 @@ def _position_info_from_perp_registry_row(row: Any) -> PositionInfo | None:
     # the registry primitive.
     protocol = str(payload.get("protocol") or row.get("primitive") or "perp").lower()
     details: dict[str, Any] = {"source": "position_registry"}
-    for key in ("market", "collateral_token", "direction", "size_usd"):
+    # ``is_long`` rides along with the descriptive quartet so the teardown close
+    # builder receives the measured boolean when the payload carries one (the
+    # settlement reconciler writes it since VIB-5572; older rows carry only the
+    # ``direction`` label, which the builder also accepts). The filter keeps a
+    # measured ``False`` — a real short — because ``False != ""``.
+    for key in ("market", "collateral_token", "direction", "size_usd", "is_long"):
         value = payload.get(key)
         if value is not None and value != "":
             details[key] = value

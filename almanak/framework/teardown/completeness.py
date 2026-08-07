@@ -450,8 +450,9 @@ def _position_is_long(position: PositionInfo) -> bool | None:
 
     ``None`` when the side is unknown — the lenient case. Reads the typed
     ``direction`` field first, then falls back to ``details`` (``is_long`` bool
-    or a ``side`` / ``direction`` string) so hand-rolled position summaries that
-    only stamp the detail still disambiguate long vs short.
+    or SQLite-round-tripped int 0/1, or a ``side`` / ``direction`` string) so
+    hand-rolled position summaries that only stamp the detail still
+    disambiguate long vs short.
     """
     direction = position.direction
     if not direction:
@@ -459,6 +460,11 @@ def _position_is_long(position: PositionInfo) -> bool | None:
         flag = details.get("is_long")
         if isinstance(flag, bool):
             return flag
+        if type(flag) is int and flag in (0, 1):
+            # SQLite round-trips a persisted boolean as an integer (see
+            # ``perp_direction_label``): a measured 0/1 is a real side, never
+            # an absent one (Empty ≠ Zero). Any other int stays unmeasured.
+            return bool(flag)
         direction = details.get("side") or details.get("direction")
     if not direction:
         return None

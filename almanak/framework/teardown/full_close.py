@@ -52,6 +52,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from almanak.framework.intents import Intent
+from almanak.framework.teardown.completeness import _position_is_long
 from almanak.framework.teardown.models import PositionInfo, PositionType, TeardownPositionSummary
 
 if TYPE_CHECKING:
@@ -122,6 +123,22 @@ def _perp_close_or_cancel_intent(
     market = _first(details, "market") or position.position_id
     collateral = _first(details, "collateral_token", "asset")
     is_long = details.get("is_long")
+    if not isinstance(is_long, bool):
+        # The side vocabulary is producer-dependent: strategy rows write the
+        # ``is_long`` bool, but a registry row written by the settlement
+        # reconciler carries the ``direction`` label ("long"/"short"), and
+        # hand-rolled summaries may write ``side`` or the typed
+        # ``position.direction`` field. EVERY non-boolean value resolves
+        # through the SAME normalizer the completeness gate uses
+        # (``_position_is_long``) so this builder and gate G1 can never
+        # disagree about whether a side is known — a builder that skips a
+        # position the gate enforces is a permanent teardown-FAIL loop that
+        # entry-blocks the strategy (VIB-5572). The normalizer accepts the
+        # SQLite boolean round-trip (int 0/1); anything else — ``""``
+        # (parser-silent), a stray string — is UNMEASURED there, never
+        # coerced: the pre-fix ``bool()`` turned ``is_long="short"`` into a
+        # LONG close, the wrong side.
+        is_long = _position_is_long(position)
     # Direction is not derivable — never guess long vs short.
     if not market or not collateral or is_long is None:
         return None
