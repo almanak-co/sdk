@@ -1,4 +1,4 @@
-"""Offline invariant: every listed GMX market can seed its INDEX price (ALM-3108).
+"""Offline invariant: every verified GMX market can seed its INDEX price (ALM-3108).
 
 The managed-Anvil keeper seeds the GMX Oracle before executing a pending order.
 It used to price every token ``Reader.getMarket`` returns by its raw on-chain
@@ -11,12 +11,21 @@ mattered most — BTC/USD, the second both-sides market — failed while the SDK
 already shipping a BTC/USD Chainlink feed and a static index-decimals table it
 simply never consulted.
 
-Why the seeding path and not a data-only assert. A pure ``GMX_V2_MARKETS`` ×
+Why the seeding path and not a data-only assert. A pure market-snapshot ×
 ``TOKEN_TO_PAIR`` cross-check would be green on both sides of the fix: it never
 touches the executor, so it cannot see whether the executor *uses* the route.
 These tests drive ``_seed_oracle_prices`` against a fake chain whose only
 interesting property is the real one — the synthetic index addresses have no
 code — so the failure they report is the failure a fork reports.
+
+Address-first migration: production ships no market table any more, so the
+markets swept here are the audited fixture snapshot
+(``tests/unit/connectors/gmx_v2/market_fixtures.py``), and an autouse fixture
+primes the process-wide ``market_catalog`` from it before each test — the live
+ordering, in which compile-time dynamic verification remembers a market before
+the keeper ever seeds a price. The fake gateway exposes no ``GetPerpMarket``,
+so seeding always exercises the catalog fallback; a market verified nowhere
+must fail loud, never seed a guess.
 
 Measured before/after on the 11 markets with an offline-provable index route.
 ``test_every_routable_market_seeds_its_index_price`` — the outcome — failed for
@@ -26,7 +35,7 @@ market in that set) and 0 after.
 for all 11 before and 0 after, because the pre-fix executor read ``decimals()``
 off every index address including the ones that answer.
 
-The other 9 listed markets are quarantined in ``QUARANTINED_MARKETS`` below, by
+The other 9 fixture markets are quarantined in ``QUARANTINED_MARKETS`` below, by
 name and with a ticket. They have no Chainlink feed for their base symbol on
 their own chain, so no offline route exists to assert; five of them additionally
 have a synthetic index token and therefore no address route either. That is a
@@ -46,11 +55,8 @@ from eth_abi import encode as abi_encode
 from eth_utils import to_checksum_address
 
 from almanak.connectors.gmx_v2 import anvil_order_executor as executor
-from almanak.connectors.gmx_v2.addresses import (
-    GMX_V2_MARKETS,
-    GMX_V2_TOKENS,
-    index_token_decimals,
-)
+from almanak.connectors.gmx_v2 import market_catalog
+from almanak.connectors.gmx_v2.addresses import GMX_V2_TOKENS
 from almanak.connectors.gmx_v2.anvil_order_executor import (
     GmxAnvilOrderExecutionError,
     _GmxDependencies,
@@ -67,10 +73,16 @@ from tests.audit.test_gmx_v2_market_identity import (
     EXPECTED_INDEX_TOKENS,
     SYNTHETIC_INDEX_MARKETS,
 )
+from tests.unit.connectors.gmx_v2.market_fixtures import (
+    FIXTURE_MARKETS,
+    market_address,
+    market_record,
+    prime_catalog,
+)
 
-ALL_MARKETS = [(chain, market) for chain, markets in GMX_V2_MARKETS.items() for market in markets]
+ALL_MARKETS = [(chain, record.label) for chain, record in FIXTURE_MARKETS]
 
-# Listed markets with no Chainlink feed for their base symbol on their own
+# Fixture markets with no Chainlink feed for their base symbol on their own
 # chain. Named individually and paired with a ticket, never derived: a
 # quarantine computed from the same predicate the test asserts would accept any
 # regression as "expected". ``test_the_quarantine_is_exactly_the_unroutable_set``
@@ -128,8 +140,23 @@ _SELECTORS = {
 _SET_PRIMARY_PRICE_SELECTOR = executor._selector(executor._SET_PRIMARY_PRICE_SIGNATURE).hex()
 
 # One nominal USD price per pair. Values are arbitrary; only the SCALE of the
-# seeded bound is asserted, and that comes from the market's declared decimals.
+# seeded bound is asserted, and that comes from the market's verified decimals.
 _USD_PRICE = Decimal("100")
+
+
+@pytest.fixture(autouse=True)
+def _verified_market_catalog() -> None:
+    """Prime the process catalog with the audited fixture snapshot.
+
+    Mirrors the live ordering: compile-time dynamic verification remembers
+    every market in ``market_catalog`` before the keeper ever seeds a price
+    (VIB-6561). The fake gateway below exposes no ``GetPerpMarket``, so
+    ``_index_price_bounds`` always falls back to this catalog — the path a
+    gateway outage exercises in production. The one test for the miss path
+    clears the catalog again itself; the surrounding conftest fixture clears
+    it around every test either way.
+    """
+    prime_catalog()
 
 
 class _FakeChain:
@@ -146,27 +173,32 @@ class _FakeChain:
     def __init__(self, chain: str) -> None:
         self.chain = chain
         self.deployed: dict[str, int] = {address.lower(): decimals for address, decimals in _COLLATERALS[chain]}
-        for market in GMX_V2_MARKETS[chain]:
-            if (chain, market) in SYNTHETIC_INDEX_MARKETS:
+        for row_chain, record in FIXTURE_MARKETS:
+            if row_chain != chain or (chain, record.label) in SYNTHETIC_INDEX_MARKETS:
                 continue
-            index = EXPECTED_INDEX_TOKENS[chain][market]
-            declared = index_token_decimals(chain, GMX_V2_MARKETS[chain][market])
-            assert declared is not None, f"{chain}:{market} has no declared index decimals"
-            self.deployed[index.lower()] = declared
+            # Deploy the audit-pinned on-chain index token at the fixture's
+            # verified decimals. The fixture record's own ``index_token`` is a
+            # sentinel and is deliberately deployed nowhere.
+            index = EXPECTED_INDEX_TOKENS[chain][record.label]
+            self.deployed[index.lower()] = record.index_token_decimals
         self.eth_call_targets: list[str] = []
 
-    def market_props(self, market_address: str) -> tuple[str, str, str, str]:
+    def market_props(self, market_token: str) -> tuple[str, str, str, str]:
         label = next(
-            (name for name, address in GMX_V2_MARKETS[self.chain].items() if address.lower() == market_address.lower()),
+            (
+                record.label
+                for row_chain, record in FIXTURE_MARKETS
+                if row_chain == self.chain and record.market_token.lower() == market_token.lower()
+            ),
             None,
         )
         long_token, short_token = (address for address, _decimals in _COLLATERALS[self.chain])
-        # An UNLISTED market is a live market this SDK's catalogue does not
-        # know. The chain still answers with a perfectly good index token — a
-        # real one, here — which is precisely why the executor must refuse on
-        # the catalogue miss rather than on a chain read.
+        # An UNVERIFIED market is a live market this process never verified.
+        # The chain still answers with a perfectly good index token — a real
+        # one, here — which is precisely why the executor must refuse on the
+        # catalog miss rather than on a chain read.
         index = EXPECTED_INDEX_TOKENS[self.chain][label] if label else long_token
-        return (market_address, index, long_token, short_token)
+        return (market_token, index, long_token, short_token)
 
     def make_request(self, method: str, params: list[Any]) -> dict[str, Any]:
         if method == "eth_getBlockByNumber":
@@ -201,6 +233,10 @@ class _FakeGatewayPrices:
       address unresolvable in production;
     * a SYMBOL resolves when ``TOKEN_TO_PAIR`` names a pair and this chain
       carries that Chainlink feed. Both tables are the real ones.
+
+    No ``GetPerpMarket`` stub, deliberately: dynamic resolution is then
+    ``GmxMarketDiscoveryUnavailable`` and seeding must survive on what the
+    process catalog already verified.
     """
 
     def __init__(self, fake_chain: _FakeChain) -> None:
@@ -240,7 +276,7 @@ def _seed(chain: str, market: str) -> tuple[dict[str, tuple[int, int]], _FakeCha
             provider=fake_chain,
             dependencies=_DEPENDENCIES,
             chain=chain,
-            markets=(to_checksum_address(GMX_V2_MARKETS[chain][market]),),
+            markets=(to_checksum_address(market_address(chain, market)),),
         )
     return seeded, fake_chain, gateway
 
@@ -248,7 +284,7 @@ def _seed(chain: str, market: str) -> tuple[dict[str, tuple[int, int]], _FakeCha
 def _has_offline_index_route(chain: str, market: str) -> bool:
     pair = TOKEN_TO_PAIR.get(market.split("/")[0].upper())
     has_feed = bool(pair) and pair in CHAINLINK_PRICE_FEEDS.get(chain, {})
-    return has_feed and index_token_decimals(chain, GMX_V2_MARKETS[chain][market]) is not None
+    return has_feed and market_record(chain, market).index_token_decimals is not None
 
 
 @pytest.mark.parametrize(("chain", "market"), ROUTABLE_MARKETS, ids=lambda v: str(v))
@@ -267,10 +303,10 @@ def test_every_routable_market_seeds_its_index_price(chain: str, market: str) ->
     index = to_checksum_address(EXPECTED_INDEX_TOKENS[chain][market])
     assert index in seeded, f"{chain}:{market} seeded no price for its index token"
 
-    # The bound must be scaled by the market's DECLARED decimals, not by
+    # The bound must be scaled by the market's VERIFIED decimals, not by
     # whatever the address happened to answer: a wrong scale is a wrong oracle
     # price, which fills an order at a fabricated level.
-    decimals = index_token_decimals(chain, GMX_V2_MARKETS[chain][market])
+    decimals = market_record(chain, market).index_token_decimals
     expected = int(_USD_PRICE * (Decimal(10) ** (executor._GMX_USD_DECIMALS - decimals)))
     assert seeded[index] == (expected, expected)
 
@@ -350,12 +386,19 @@ def test_every_quarantined_market_cites_a_ticket() -> None:
     assert all(str(ticket).startswith(("ALM-", "VIB-")) for ticket in QUARANTINED_MARKETS.values())
 
 
-def test_an_unlisted_market_fails_closed_rather_than_seeding_a_guess() -> None:
-    """``Empty ≠ Zero``: no symbol means no price, never a fabricated one."""
+def test_an_unverified_market_fails_closed_rather_than_seeding_a_guess() -> None:
+    """``Empty ≠ Zero``: no verified metadata means no price, never a fabricated one.
+
+    The catalog is left unprimed here — this process never verified ANY market
+    — because the miss path is the property: the fake chain still answers
+    ``getMarket`` with a live, priceable index token, and the executor must
+    refuse on the catalog miss rather than seed from that answer.
+    """
+    market_catalog.clear()
     fake_chain = _FakeChain("arbitrum")
     with (
         patch.object(executor, "_send_transaction", return_value="0x" + "ab" * 32),
-        pytest.raises(GmxAnvilOrderExecutionError, match="not listed"),
+        pytest.raises(GmxAnvilOrderExecutionError, match="no verified metadata"),
     ):
         _seed_oracle_prices(
             gateway_client=_FakeGatewayPrices(fake_chain),

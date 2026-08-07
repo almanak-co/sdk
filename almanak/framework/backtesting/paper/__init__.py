@@ -90,8 +90,6 @@ from almanak.framework.backtesting.paper.position_queries import (
     AAVE_V3_TOKEN_DECIMALS,
     AAVE_V3_TOKENS,
     # GMX V2
-    GMX_V2_COLLATERAL_TOKENS,
-    GMX_V2_MARKETS,
     AaveV3LendingPosition,
     GMXv2Position,
     UniswapV3Position,
@@ -156,8 +154,6 @@ __all__ = [
     "GMXv2Position",
     "query_gmx_positions",
     "query_gmx_positions_sync",
-    "GMX_V2_MARKETS",
-    "GMX_V2_COLLATERAL_TOKENS",
     # Position queries - Aave V3
     "AaveV3LendingPosition",
     "query_aave_positions",

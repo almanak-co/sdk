@@ -47,8 +47,8 @@ from almanak.connectors._strategy_base.rpc import (
     extract_revert_reason,
     looks_like_revert,
 )
+from almanak.connectors.gmx_v2 import market_catalog
 from almanak.connectors.gmx_v2.adapter import GMX_V2_ADDRESSES
-from almanak.connectors.gmx_v2.addresses import index_price_symbol, index_token_decimals
 from almanak.connectors.gmx_v2.market_metadata import (
     GmxMarketDiscoveryUnavailable,
     GmxMarketNotFound,
@@ -332,7 +332,7 @@ class _MarketOracleTokens:
     The distinction is therefore load-bearing, not cosmetic:
 
     * ``index_token`` is an ORACLE KEY only. Its price and decimals come from
-      the market (symbol + ``GMX_V2_INDEX_TOKEN_DECIMALS``), never from a call
+      the market (symbol + verified index decimals), never from a call
       to the address itself.
     * ``collateral_tokens`` are real ERC-20s and keep the address route —
       address price lookup plus a measured on-chain ``decimals()``.
@@ -474,7 +474,7 @@ def _index_price_bounds(gateway_client: Any, chain: str, market: str) -> tuple[i
     Known limitation (ALM-3119): for a market whose index token *is* a real
     ERC-20, this trades a chain-sourced datum (the ``indexToken`` address
     ``Reader.getMarket`` returned) for a table-sourced one (the market's label).
-    A mislabelled ``GMX_V2_MARKETS`` row — the VIB-6155 class — would therefore
+    A mislabelled catalogue row — the VIB-6155 class — would therefore
     seed the label's asset rather than the market's. Bounded to fork tests: this
     module refuses any network but ``anvil``, and catalogue identity is asserted
     by ``tests/audit/test_gmx_v2_market_identity.py``.
@@ -504,18 +504,17 @@ def _index_price_bounds(gateway_client: Any, chain: str, market: str) -> tuple[i
         decimals = metadata.index_token_decimals
 
     if not symbol:
-        symbol = index_price_symbol(chain, market)
+        # Address-first: the only fallback is what this process already
+        # verified (compile-time dynamic resolution primes the catalog).
+        symbol = market_catalog.index_symbol(chain, market)
     if not symbol:
         raise GmxAnvilOrderExecutionError(
-            f"GMX market {market} is not listed in verified metadata or the static fallback for {chain}; "
-            "its index token has no price symbol"
+            f"GMX market {market} has no verified metadata for {chain}; its index token has no price symbol"
         )
     if decimals is None:
-        decimals = index_token_decimals(chain, market)
+        decimals = market_catalog.index_decimals(chain, market)
     if decimals is None:
-        raise GmxAnvilOrderExecutionError(
-            f"GMX market {market} on {chain} has no verified or statically declared index-token decimals"
-        )
+        raise GmxAnvilOrderExecutionError(f"GMX market {market} on {chain} has no verified index-token decimals")
     label = f"{symbol} (index of market {market})"
     return _scale_price_bounds(_gateway_usd_price(gateway_client, chain, symbol, label), decimals, label)
 

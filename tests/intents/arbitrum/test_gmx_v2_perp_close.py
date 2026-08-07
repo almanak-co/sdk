@@ -28,6 +28,11 @@ from web3.eth import AsyncEth, Eth
 
 from almanak.connectors.gmx_v2 import GMXv2ReceiptParser
 from almanak.connectors.gmx_v2.addresses import GMX_V2, GMX_V2_TOKENS
+from tests.unit.connectors.gmx_v2.market_fixtures import fake_dynamic_gateway, market_address
+
+# Address-first primary spelling: the strategy-declared market-token address
+# (the label path is covered separately by the core-alias unit tests).
+_ETH_USD_MARKET = market_address("arbitrum", "ETH/USD")
 from almanak.connectors.gmx_v2.anvil_order_executor import execute_pending_orders_on_anvil
 from almanak.connectors.gmx_v2.teardown_reads import read_open_positions
 from almanak.framework.execution.extracted_data import AsyncOrderKind
@@ -124,6 +129,7 @@ def _build_compiler(
     prices: dict[str, Decimal],
 ) -> IntentCompiler:
     return IntentCompiler(
+            gateway_client=fake_dynamic_gateway("arbitrum", rpc_url=orchestrator.rpc_url),
         chain=CHAIN_NAME,
         wallet_address=wallet,
         price_oracle=prices,
@@ -191,7 +197,7 @@ class TestGmxV2PerpCloseIntent:
 
         # Establish the real position that the PERP_CLOSE intent will consume.
         open_intent = PerpOpenIntent(
-            market="ETH/USD",
+            market=_ETH_USD_MARKET,
             collateral_token="USDC",
             collateral_amount=Decimal("100"),
             size_usd=Decimal("300"),
@@ -242,7 +248,7 @@ class TestGmxV2PerpCloseIntent:
 
         # Layer 1: compile the measured full position size into a decrease order.
         close_intent = PerpCloseIntent(
-            market="ETH/USD",
+            market=_ETH_USD_MARKET,
             collateral_token="USDC",
             is_long=True,
             size_usd=Decimal(position_before.size_in_usd) / _GMX_USD_SCALE,

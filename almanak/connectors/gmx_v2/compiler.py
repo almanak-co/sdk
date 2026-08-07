@@ -25,9 +25,9 @@ from almanak.framework.intents.vocabulary import (
 )
 from almanak.framework.models.reproduction_bundle import ActionBundle
 
+from . import market_catalog
 from .acceptable_price import bound_is_maximum, derive_acceptable_price_30dec, price_30dec_to_usd
-from .adapter import GMX_V2_MARKETS, GMXv2Adapter, GMXv2Config
-from .addresses import index_token_decimals
+from .adapter import GMXv2Adapter, GMXv2Config
 from .market_metadata import (
     GmxMarketDiscoveryUnavailable,
     GmxMarketNotFound,
@@ -52,18 +52,15 @@ class GMXV2Compiler(BasePerpCompiler):
     #: Stable prefix strategies + the retry-classification keyword table match on.
     NATIVE_FEE_ERROR_PREFIX: ClassVar[str] = "GMX_INSUFFICIENT_NATIVE_FEE"
 
-    def __init__(self) -> None:
-        self._verified_market_metadata: dict[tuple[str, str], ResolvedGmxMarket] = {}
-
     def _remember_market(self, chain: str, market: ResolvedGmxMarket) -> None:
-        self._verified_market_metadata[(chain, market.market_token.lower())] = market
+        market_catalog.remember(chain, market)
 
     def _market_metadata(self, chain: str, market_address: str) -> ResolvedGmxMarket | None:
-        return self._verified_market_metadata.get((chain, market_address.lower()))
+        return market_catalog.by_address(chain, market_address)
 
     def _index_token_decimals(self, chain: str, market_address: str) -> int | None:
         metadata = self._market_metadata(chain, market_address)
-        return metadata.index_token_decimals if metadata is not None else index_token_decimals(chain, market_address)
+        return metadata.index_token_decimals if metadata is not None else None
 
     def preflight(self, ctx: PerpCompilerContext, intent: Any) -> PreflightVerdict:
         """Reject a GMX order the wallet cannot fund the keeper execution fee for (VIB-5374 / 2303).
@@ -141,7 +138,10 @@ class GMXV2Compiler(BasePerpCompiler):
                 return sdk_or_error
             sdk = sdk_or_error
 
-            market_or_error = self._resolve_market(ctx, sdk, intent.market, intent.intent_id)
+            # Risk-increasing: the market must be CURRENTLY LISTED — a
+            # delisted market's createOrder succeeds on-chain but the keeper
+            # cancels it and keeps the execution fee (silent burn).
+            market_or_error = self._resolve_market(ctx, sdk, intent.market, intent.intent_id, require_listed=True)
             if isinstance(market_or_error, CompilationResult):
                 return market_or_error
             market_address = market_or_error
@@ -490,16 +490,12 @@ class GMXV2Compiler(BasePerpCompiler):
         Keyed off the resolved address rather than ``intent.market`` so that every
         alias the SDK accepts for the same market (``"ETH"``, ``"WETH"``,
         ``"ETH/USD"``) yields one symbol, and so the symbol and the decimals used
-        for price scaling are always read for the *same* market.
+        for price scaling are always read for the *same* market. The only source
+        is the venue-verified catalog — a symbol this process never verified is
+        an absence, not a lookup to fall back on (address-first contract).
         """
         metadata = self._market_metadata(chain, market_address)
-        if metadata is not None:
-            return metadata.index_symbol
-        wanted = market_address.lower()
-        for market_key, address in GMX_V2_MARKETS.get(chain, {}).items():
-            if address.lower() == wanted:
-                return market_key.split("/", 1)[0]
-        return None
+        return metadata.index_symbol if metadata is not None else None
 
     def _derive_acceptable_price(
         self,
@@ -527,11 +523,19 @@ class GMXV2Compiler(BasePerpCompiler):
         context = f"gmx_v2 {leg} {intent.market} on {ctx.chain}"
 
         decimals = self._index_token_decimals(ctx.chain, market_address)
+        if decimals is None and ctx.permission_discovery:
+            # Discovery calldata is never signed or submitted — only its
+            # (target, selector) shape matters, so the price scale is inert.
+            # Without this, an offline discovery run (no gateway, no verified
+            # catalog by construction) would refuse and yield an EMPTY Zodiac
+            # manifest — every Safe GMX call would then revert (AGENTS.md
+            # §Connector additions names this exact trap).
+            decimals = 18  # decimal-policy-exempt: discovery-only calldata, never signed/submitted (Zodiac selector enumeration)
         if decimals is None:
             return CompilationResult(
                 status=CompilationStatus.FAILED,
                 error=(
-                    f"GMX V2 {leg}: no index-token decimals for market {intent.market} "
+                    f"GMX V2 {leg}: no verified index-token decimals for market {intent.market} "
                     f"({market_address}) on {ctx.chain}; cannot scale a price bound. "
                     "Refusing to submit an order with no acceptable-price protection."
                 ),
@@ -540,12 +544,16 @@ class GMXV2Compiler(BasePerpCompiler):
             )
 
         symbol = self._index_symbol_for_market(ctx.chain, market_address)
+        if symbol is None and ctx.permission_discovery:
+            # Same discovery scope as the decimals default above; the oracle
+            # serves a placeholder price for any symbol in discovery mode.
+            symbol = "GMX_DISCOVERY_INDEX"
         if symbol is None:
             return CompilationResult(
                 status=CompilationStatus.FAILED,
                 error=(
-                    f"GMX V2 {leg}: market {intent.market} ({market_address}) is not in the "
-                    f"{ctx.chain} market catalogue, so its index-token price symbol is unknown. "
+                    f"GMX V2 {leg}: market {intent.market} ({market_address}) has no verified "
+                    f"index-token price symbol on {ctx.chain}. "
                     "Refusing to submit an order with no acceptable-price protection."
                 ),
                 intent_id=intent.intent_id,
@@ -710,37 +718,58 @@ class GMXV2Compiler(BasePerpCompiler):
         return GMXV2SDK(rpc_url=rpc_url, chain=ctx.chain, gateway_client=gateway_client)
 
     def _resolve_market(
-        self, ctx: PerpCompilerContext, sdk: GMXV2SDK, market: str, intent_id: str
+        self,
+        ctx: PerpCompilerContext,
+        sdk: GMXV2SDK,
+        market: str,
+        intent_id: str,
+        *,
+        require_listed: bool = False,
     ) -> str | CompilationResult:
+        """Resolve ``intent.market`` to a verified market-token address.
+
+        Address-first contract: the strategy supplies the market-token ADDRESS
+        and this method verifies it — dynamically against the venue catalogue +
+        on-chain ``Reader.getMarket`` when a gateway is connected (VIB-6561),
+        or against this process's already-verified catalog when the dynamic
+        surface is momentarily unreachable (a verified address tuple is
+        immutable, so a remembered verification stays valid — this is what
+        keeps the close path off the venue API's uptime).
+
+        Labels are venue vocabulary, not SDK vocabulary: they resolve ONLY
+        through the dynamic registry (which pins ambiguous multi-collateral
+        labels by API `name` verification), with the SDK core aliases
+        (ETH/BTC/AVAX, ``sdk.get_market_address``) as the sole offline
+        remainder. There is no curated symbol→address table to consult — that
+        table read as a market universe and could not be kept true by hand
+        (VIB-6155, the 2026-08-07 XMR misread).
+        """
         canonical_market = canonicalise_market(market)
-        # VIB-6561: the curated address disambiguates legacy short labels such as
-        # ETH/USD, for which GMX lists several collateral variants. Querying that
-        # exact address keeps dynamic tuple/collateral verification active without
-        # letting API row order redefine the connector's canonical market.
-        curated_market_address = GMX_V2_MARKETS.get(ctx.chain, {}).get(canonical_market)
-        if curated_market_address is None and market[:2].lower() == "0x":
-            wanted_address = market.lower()
-            curated_market_address = next(
-                (
-                    address
-                    for address in GMX_V2_MARKETS.get(ctx.chain, {}).values()
-                    if address.lower() == wanted_address
-                ),
-                None,
-            )
-        discovery_query = curated_market_address or market
+        is_address_input = canonical_market[:2].lower() == "0x"
 
         gateway_client = ctx.gateway_client
-        if (
-            not ctx.permission_discovery
-            and gateway_client is not None
-            and getattr(gateway_client, "is_connected", False)
-        ):
+        # A missing OR disconnected gateway is the same transient condition: the
+        # dynamic surface is momentarily unreachable and a retry can heal it.
+        # Classifying a disconnected client as permanent would let teardown's
+        # retry ladder give up on a close it could complete after reconnect.
+        gateway_usable = gateway_client is not None and getattr(gateway_client, "is_connected", False)
+        dynamic_unavailable: Exception | None = None
+        if not ctx.permission_discovery and gateway_usable:
             try:
-                metadata = resolve_market_via_gateway(gateway_client, chain=ctx.chain, market=discovery_query)
-            except (GmxMarketDiscoveryUnavailable, GmxMarketNotFound) as exc:
+                metadata = resolve_market_via_gateway(
+                    gateway_client, chain=ctx.chain, market=canonical_market, require_listed=require_listed
+                )
+            except GmxMarketDiscoveryUnavailable as exc:
+                dynamic_unavailable = exc
                 logger.warning(
-                    "GMX dynamic market resolution did not yield metadata for %s on %s; trying static fallback: %s",
+                    "GMX dynamic market resolution unavailable for %s on %s: %s",
+                    market,
+                    ctx.chain,
+                    exc,
+                )
+            except GmxMarketNotFound as exc:
+                logger.warning(
+                    "GMX venue catalogue has no row for %s on %s: %s",
                     market,
                     ctx.chain,
                     exc,
@@ -755,18 +784,49 @@ class GMXV2Compiler(BasePerpCompiler):
             else:
                 self._remember_market(ctx.chain, metadata)
                 return to_checksum_address(metadata.market_token)
-        if curated_market_address:
-            return to_checksum_address(curated_market_address)
+
+        if is_address_input:
+            # Already verified in this process (open → close, retry, teardown
+            # of a delisted market): the tuple behind an address cannot change,
+            # so the remembered verification is still good — for CLOSES. A
+            # remembered verification cannot prove CURRENT listing, so a
+            # risk-increasing caller gets no catalog grace (review P1: an
+            # increase on a delisted market burns its keeper fee).
+            if not require_listed and market_catalog.by_address(ctx.chain, canonical_market) is not None:
+                return to_checksum_address(canonical_market)
+            if ctx.permission_discovery:
+                # Discovery calldata enumerates (target, selector) pairs and is
+                # never signed or submitted — the address needs no verification
+                # to serve that purpose.
+                return to_checksum_address(canonical_market)
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"GMX V2 market address {market} on {ctx.chain} is not verified: dynamic "
+                    "resolution is unavailable and this process has not verified it before. "
+                    "Refusing to trade an unverified market tuple."
+                ),
+                intent_id=intent_id,
+                # A gateway/API blip heals on retry; an address the venue truly
+                # does not know keeps failing here, loudly, on every attempt.
+                is_transient=dynamic_unavailable is not None or not gateway_usable,
+            )
+
         try:
             return to_checksum_address(sdk.get_market_address(canonical_market))
         except ValueError:
             return CompilationResult(
                 status=CompilationStatus.FAILED,
                 error=(
-                    f"Unknown market: {market}. Dynamic GMX discovery did not return a verified market, "
-                    "and the offline fallback has no matching entry."
+                    f"Unknown market: {market}. GMX markets are address-first — supply the "
+                    "market-token address (dynamic discovery verifies it); only the core "
+                    "ETH/BTC/AVAX aliases resolve without one."
                 ),
                 intent_id=intent_id,
+                # Same transiency rule as the address branch: a label the
+                # dynamic surface could resolve after reconnect/API recovery
+                # must not be classified permanent while that surface is down.
+                is_transient=dynamic_unavailable is not None or (not ctx.permission_discovery and not gateway_usable),
             )
 
     def _resolve_collateral(

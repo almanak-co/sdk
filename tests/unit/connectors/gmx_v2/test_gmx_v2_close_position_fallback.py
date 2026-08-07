@@ -10,11 +10,19 @@ from decimal import Decimal
 import pytest
 
 from almanak.connectors.gmx_v2.adapter import GMXv2Adapter, GMXv2Config
+from tests.unit.connectors.gmx_v2.market_fixtures import market_record, prime_catalog
 
 
 @pytest.fixture
 def adapter():
-    """Create a GMXv2Adapter for Arbitrum with empty position cache."""
+    """Create a GMXv2Adapter for Arbitrum with empty position cache.
+
+    Address-first: the ``"ETH/USD"`` label these tests close by resolves only
+    through the venue-verified catalog, so it is primed exactly as a live
+    compile's dynamic market resolution would have (the conftest autouse
+    fixture clears it again after each test).
+    """
+    prime_catalog(market_record("arbitrum", "ETH/USD"), chain="arbitrum")
     config = GMXv2Config(
         chain="arbitrum",
         wallet_address="0x" + "ab" * 20,

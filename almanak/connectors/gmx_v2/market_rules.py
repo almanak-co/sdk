@@ -23,17 +23,18 @@ Authoritative source
 
 The authoritative rule is the on-chain ``Reader.getMarket(marketAddress)``
 call, which returns ``(marketToken, indexToken, longToken, shortToken)``
-directly from ``DataStore``. This module mirrors that data for the curated
-set of markets the SDK ships with (see
-``almanak.connectors.gmx_v2.adapter.GMX_V2_MARKETS``) so that
-validation can happen locally in the compile path, without an RPC round
+directly from ``DataStore``. Live compilation validates against the
+venue-verified record (``_validate_market_collateral``); this label-keyed
+mirror covers the compile paths that run before verification (offline
+permission discovery, un-verified label inputs) without an RPC round
 trip.
 
 The market data here was cross-checked against:
   * GMX interface config: https://github.com/gmx-io/gmx-interface/blob/master/sdk/src/configs/markets.ts
   * On-chain ``SyntheticsReader.getMarket()`` on Arbitrum and Avalanche.
 
-If a market is added to ``GMX_V2_MARKETS`` it MUST also be registered here.
+Markets themselves are address-first (no symbol→address table exists);
+rows here are keyed by the venue label purely as collateral vocabulary.
 See :func:`get_allowed_collaterals` for the contract.
 """
 
@@ -168,8 +169,8 @@ def get_allowed_collaterals(chain: str, market: str) -> tuple[str, ...]:
 
     Args:
         chain: Chain name (``"arbitrum"`` or ``"avalanche"``). Case-insensitive.
-        market: Market identifier as used in ``GMX_V2_MARKETS`` (e.g.
-            ``"ETH/USD"``). Case-insensitive.
+        market: Canonical venue market label (e.g. ``"ETH/USD"``).
+            Case-insensitive.
 
     Returns:
         Tuple of allowed collateral symbols. The tuple is non-empty for any

@@ -6,6 +6,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **GMX V2 markets are address-first — the curated symbol→address table is
+  gone.** Strategies declare the market-token ADDRESS (`Intent.perp_open(
+  market="0x…")`); the dynamic registry (VIB-6561) verifies it against the
+  venue catalogue and on-chain `Reader.getMarket`, and a new process-wide
+  verified-market catalog (`almanak.connectors.gmx_v2.market_catalog`) serves
+  every read plane — compiler price scaling, position valuation, teardown
+  display, anvil oracle seeding, receipt price scaling and the paper
+  backtester. `GMX_V2_MARKETS`, `GMX_V2_INDEX_TOKEN_DECIMALS`,
+  `index_price_symbol` and `index_token_decimals` are deleted from
+  `almanak.connectors.gmx_v2.addresses` (a hand-curated table could not be
+  kept true — VIB-6155 found five wrong rows — and its absence rows read as
+  "market unsupported": the 2026-08-07 XMR misread). The SDK core aliases
+  (`ETH/USD`, `BTC/USD`, `AVAX/USD` via `GMX_V2` core addresses) remain the
+  only offline label resolution. The runner's price warm resolves
+  address-shaped perp markets through the gateway `GetPerpMarket` RPC, the
+  gateway market registry serves last-known-good verified records through
+  venue-API outages (an address names an immutable tuple), and the paper
+  backtester reads positions with the production `getAccountPositions` range
+  read instead of enumerating a catalogue. **Migration:** add
+  `market_address` to GMX strategy configs (see the `gmx_perp_lifecycle` /
+  `gmx_v2_directional_perp` demos); legacy state rows holding symbol-shaped
+  market references now over-split loudly at teardown (fail-safe) — migrate
+  them with `almanak/framework/cli/repair_position_references.py` before a
+  live teardown.
+
 ### Added
 
 - **GMX venue-native spot prices for synthetic perp indices (ALM-3177).** The

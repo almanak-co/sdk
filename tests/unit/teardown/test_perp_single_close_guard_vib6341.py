@@ -8,26 +8,34 @@ guard can never merge two genuinely distinct positions and strand one.
 
 The reproduction is the shape VIB-6341 observed on the A3 Anvil run and the shape
 a mainnet run reproduces whenever ``position_registry`` hydration lags: one
-physical GMX perp named twice, once in SYMBOL space (the strategy's own
-enumeration) and once in ADDRESS space (a registry / settlement-derived row).
-``reconcile_lp_with_registry`` early-returns when the registry is empty, so
+physical GMX perp named twice — under address-first, twice in ADDRESS space (the
+strategy's own enumeration and a registry / settlement-derived row, distinct raw
+ids). ``reconcile_lp_with_registry`` early-returns when the registry is empty, so
 VIB-6287's alias union never runs; and even when it DOES run it is additive by
 contract and never drops a strategy row. Either way the duplicate reaches
 ``full_close_intents``, which maps 1 row -> 1 intent with no de-duplication, and
 the lanes then withhold the duplicate from DISPATCH while still showing it to the
 completeness gate.
+
+ADDRESS-FIRST UPDATE: the market axis has no symbol resolution any more, so a
+LEGACY symbol-space row can no longer be collapsed against an address-space row —
+that pair over-splits into TWO dispatched closes by design (loud, and exactly
+why legacy symbol-shaped state must be migrated via
+``almanak/framework/cli/repair_position_references.py`` rather than resolved
+through a curated table — VIB-6155).
 """
 
 from __future__ import annotations
 
 from decimal import Decimal
 
-from almanak.connectors.gmx_v2.addresses import GMX_V2_MARKETS, GMX_V2_TOKENS
+from almanak.connectors.gmx_v2.addresses import GMX_V2_TOKENS
 from almanak.framework.intents import Intent
 from almanak.framework.teardown.completeness import check_intent_coverage
 from almanak.framework.teardown.full_close import full_close_intents
 from almanak.framework.teardown.models import PositionInfo, PositionType
 from almanak.framework.teardown.single_close_guard import collapse_duplicate_perp_closes
+from tests.unit.connectors.gmx_v2.market_fixtures import market_address
 
 
 def _dispatch(intents) -> list:
@@ -35,8 +43,8 @@ def _dispatch(intents) -> list:
 
 
 CHAIN = "arbitrum"
-MARKET = GMX_V2_MARKETS[CHAIN]["ETH/USD"]
-BTC_MARKET = GMX_V2_MARKETS[CHAIN]["BTC/USD"]
+MARKET = market_address(CHAIN, "ETH/USD")
+BTC_MARKET = market_address(CHAIN, "BTC/USD")
 USDC = GMX_V2_TOKENS[CHAIN]["USDC"]
 WALLET = "0xafeB2f5c213b5e7F37c3Fc171dfCb6270d07e21a"
 # The venue position key GMX derives for (WALLET, ETH/USD market, USDC, isLong)
@@ -66,28 +74,49 @@ def _closes(intents) -> list:
 # ---------------------------------------------------------------------------
 
 
-def test_symbol_and_address_rows_for_one_perp_build_one_close():
-    """The VIB-6341 shape: one physical perp, two enumeration rows, ONE close.
+def test_two_address_space_rows_for_one_perp_build_one_close():
+    """The VIB-6341 shape, address-first: one physical perp, two rows, ONE close.
 
-    Row A is the strategy's own stub (``gmx-ETH/USD-arbitrum``, symbol space).
-    Row B carries the venue position key as its id and the market / collateral
-    ADDRESSES (the settlement-reconciler / registry space). GMX's identity hook
-    resolves both to the identical ``sem`` token, so the venue itself says these
-    are one position — and a teardown that submits two full closes against it is
-    the over-close hazard the ticket names.
+    SUCCESSOR of ``test_symbol_and_address_rows_for_one_perp_build_one_close``:
+    producers write addresses now, so the duplicate pair is two ADDRESS-space
+    rows with distinct ids — Row A the strategy's own stub
+    (``gmx-ETH/USD-arbitrum``, raw id), Row B the settlement-reconciler /
+    registry row carrying the venue position key. GMX's identity hook resolves
+    both closes to the identical ``sem`` token, so the venue itself says these
+    are one position — and a teardown that submits two full closes against it
+    is the over-close hazard the ticket names.
+    """
+    rows = [
+        _perp("gmx-ETH/USD-arbitrum"),
+        _perp(VENUE_KEY),
+    ]
+    assert len(_closes(_dispatch(full_close_intents(rows)))) == 1
+
+
+def test_a_legacy_symbol_row_over_splits_into_two_closes():
+    """A LEGACY symbol-space row is over-split BY DESIGN (VIB-6341, address-first).
+
+    Pre-migration this pair collapsed: the hook resolved ``"ETH/USD"`` through
+    the (since-deleted) curated market table into the same ``sem`` token as the
+    address row. That table is deleted — a symbol row now has UNMEASURED venue
+    identity, the guard never collapses on a guess (Empty ≠ Zero), and both
+    closes dispatch. Over-split is the loud, fail-safe direction; the silent
+    alternative is resolving through a table VIB-6155 proved can disagree with
+    the chain. Legacy symbol-shaped state is a repair-CLI migration case
+    (``almanak/framework/cli/repair_position_references.py``).
     """
     rows = [
         _perp("gmx-ETH/USD-arbitrum", market="ETH/USD", collateral_token="USDC"),
         _perp(VENUE_KEY),
     ]
-    assert len(_closes(_dispatch(full_close_intents(rows)))) == 1
+    assert len(_closes(_dispatch(full_close_intents(rows)))) == 2
 
 
 def test_duplicate_full_closes_collapse_regardless_of_row_order():
     """Order-independence: the registry read carries no ``ORDER BY``."""
     rows = [
         _perp(VENUE_KEY),
-        _perp("gmx-ETH/USD-arbitrum", market="ETH/USD", collateral_token="USDC"),
+        _perp("gmx-ETH/USD-arbitrum"),
     ]
     assert len(_closes(_dispatch(full_close_intents(rows)))) == 1
 
@@ -98,10 +127,14 @@ def test_hand_rolled_duplicate_full_closes_collapse():
     ``strategies/accounting/perp`` and every GMX demo build their own
     ``Intent.perp_close`` rather than delegating to ``full_close_intents``, so a
     guard that only lived in the framework builder would be inert for them.
+
+    The two intents deliberately differ in SPELLING — lower-cased vs
+    EIP-55-checksummed market address, symbol vs address collateral — so this
+    also pins that the collapse is identity-based, not string equality.
     """
     plan = [
         Intent.perp_close(
-            market="ETH/USD", collateral_token="USDC", is_long=True, size_usd=None, protocol="gmx_v2", chain=CHAIN
+            market=MARKET.lower(), collateral_token="USDC", is_long=True, size_usd=None, protocol="gmx_v2", chain=CHAIN
         ),
         Intent.perp_close(
             market=MARKET, collateral_token=USDC, is_long=True, size_usd=None, protocol="gmx_v2", chain=CHAIN
@@ -130,7 +163,7 @@ def test_collapsing_never_turns_a_covered_enumeration_into_an_uncovered_one():
     which are the shapes where the difference bites.
     """
     rows = [
-        _perp("gmx-ETH/USD-arbitrum", market="ETH/USD", collateral_token="USDC"),
+        _perp("gmx-ETH/USD-arbitrum"),
         _perp(VENUE_KEY),
     ]
     plan = collapse_duplicate_perp_closes(full_close_intents(rows))
@@ -152,7 +185,7 @@ def test_two_markets_are_two_positions():
 
 def test_two_chains_are_two_positions():
     """Chain-scoped tokens: an Arbitrum perp must never suppress an Avalanche one."""
-    avax_market = GMX_V2_MARKETS["avalanche"]["ETH/USD"]
+    avax_market = market_address("avalanche", "ETH/USD")
     avax_usdc = GMX_V2_TOKENS["avalanche"]["USDC"]
     rows = [
         _perp("arb-row"),
@@ -246,7 +279,7 @@ def test_a_mixed_plan_keeps_every_non_perp_intent_in_order():
     repay = Intent.repay(protocol="aave_v3", token="USDC", amount=Decimal("0"), repay_full=True, chain=CHAIN)
     withdraw = Intent.withdraw(protocol="aave_v3", token="WETH", amount=Decimal("0"), withdraw_all=True, chain=CHAIN)
     close_a = Intent.perp_close(
-        market="ETH/USD", collateral_token="USDC", is_long=True, size_usd=None, protocol="gmx_v2", chain=CHAIN
+        market=MARKET.lower(), collateral_token="USDC", is_long=True, size_usd=None, protocol="gmx_v2", chain=CHAIN
     )
     close_b = Intent.perp_close(
         market=MARKET, collateral_token=USDC, is_long=True, size_usd=None, protocol="gmx_v2", chain=CHAIN
@@ -321,16 +354,21 @@ def test_every_coverage_gate_is_fed_the_precollapse_plan():
 
 
 def test_guard_is_idempotent():
-    """It is applied at several lanes; applying it twice must be a no-op."""
+    """It is applied at several lanes; applying it twice must be a no-op.
+
+    The pair genuinely collapses (address spellings of one position), so the
+    idempotence claim is exercised on a plan the guard actually changed.
+    """
     plan = [
         Intent.perp_close(
-            market="ETH/USD", collateral_token="USDC", is_long=True, size_usd=None, protocol="gmx_v2", chain=CHAIN
+            market=MARKET.lower(), collateral_token="USDC", is_long=True, size_usd=None, protocol="gmx_v2", chain=CHAIN
         ),
         Intent.perp_close(
             market=MARKET, collateral_token=USDC, is_long=True, size_usd=None, protocol="gmx_v2", chain=CHAIN
         ),
     ]
     once = _dispatch(plan)
+    assert len(once) == 1, "precondition: the pair must actually collapse"
     assert _dispatch(once) == once
 
 
@@ -340,13 +378,19 @@ def test_guard_is_idempotent():
 #
 # Both shapes below produce a position whose venue tokens are ``key``-only, with
 # NO ``sem`` token, so it cannot intersect this guard's wallet-free ``sem`` probe.
-# The withheld intent is the ONLY one covering it. These FAIL before the fix
-# (complete=False) and pass after, because coverage is shown ``for_coverage``.
+# The withheld intent must still be shown to the completeness gate
+# (``for_coverage``), which is what the #3574 fix established.
 #
-# The earlier pinning test could not catch either: it uses an agreeing key AND a
-# measured wallet, and in that exact configuration ``reconcile_lp_with_registry``
-# already merges the two rows into one, so it constructs a plan state the union
-# cannot produce.
+# ADDRESS-FIRST NOTE, recorded so the polarity flip below cannot read as an
+# accident: the ORIGINAL reproduction paired a SYMBOL-space strategy row with an
+# ADDRESS-space key row, and the dispatch-fed gate went ``complete=False``
+# because the surviving intent lived in the other value space. That divergence
+# needed the symbol axis, which this migration deleted — in address space every
+# row of the pair carries the same market address, the raw comparison covers the
+# key-only row directly, and even the (still forbidden) dispatch-fed gate can no
+# longer be made to false-FAIL on this shape. The ``for_coverage`` discipline
+# stays load-bearing as the structural rule — the wiring censuses above pin it —
+# and these tests keep the key-only rows covered on both C2 branches.
 
 # A venue key that does NOT derive from (WALLET, market, collateral, side).
 NON_DERIVING_KEY = "0x" + "ab" * 32
@@ -354,7 +398,7 @@ NON_DERIVING_KEY = "0x" + "ab" * 32
 
 def _duplicate_rows(venue_key: str) -> list[PositionInfo]:
     return [
-        _perp("gmx-ETH/USD-arbitrum", market="ETH/USD", collateral_token="USDC"),
+        _perp("gmx-ETH/USD-arbitrum"),
         _perp(venue_key),
     ]
 
@@ -363,7 +407,9 @@ def test_c2b_no_wallet_key_only_row_stays_covered():
     """C2b — wallet UNMEASURED, so DERIVE cannot run and the row emits key-only.
 
     ``wallet is None`` is reachable through three deliberate fallbacks, not
-    misconfiguration (``gmx_v2/perp_identity.py:328``).
+    misconfiguration (``gmx_v2/perp_identity.py:328``). The collapse must still
+    happen (the two INTENTS are sem-measurable without a wallet) and the
+    key-only ROW must stay covered by the plan as built.
     """
     rows = _duplicate_rows(VENUE_KEY)
     plan = collapse_duplicate_perp_closes(full_close_intents(rows))
@@ -371,12 +417,13 @@ def test_c2b_no_wallet_key_only_row_stays_covered():
     report = check_intent_coverage(rows, plan.for_coverage, wallet_for_chain=None)
     assert report.complete, f"withheld intent must still cover {[u.position_id for u in report.uncovered]}"
 
-    # SELF-PROVING: the shipped-then-fixed behaviour (gate fed the COLLAPSED
-    # list) must still be observably broken here. Without this the test could
-    # silently go vacuous if the venue hook ever started emitting a ``sem`` token
-    # for this row, and it would stop guarding the argument the gates pass.
+    # Address-first polarity flip (see the block comment above): the raw address
+    # comparison now covers the key-only row even against the COLLAPSED list, so
+    # the historical dispatch-fed false-FAIL is unreproducible on this shape.
+    # Pinned positively: if this ever fails, a coverage path got STRICTER — the
+    # regression that reads as an improvement.
     naive = check_intent_coverage(rows, plan.dispatch, wallet_for_chain=None)
-    assert not naive.complete, "regression is unreproducible — this test no longer proves anything"
+    assert naive.complete, "the raw address comparison must keep the key-only row covered"
 
 
 def test_c2c_disagreeing_key_row_stays_covered():
@@ -391,12 +438,9 @@ def test_c2c_disagreeing_key_row_stays_covered():
     report = check_intent_coverage(rows, plan.for_coverage, wallet_for_chain=lambda _chain: WALLET)
     assert report.complete, f"withheld intent must still cover {[u.position_id for u in report.uncovered]}"
 
-    # SELF-PROVING: the shipped-then-fixed behaviour (gate fed the COLLAPSED
-    # list) must still be observably broken here. Without this the test could
-    # silently go vacuous if the venue hook ever started emitting a ``sem`` token
-    # for this row, and it would stop guarding the argument the gates pass.
+    # Same address-first polarity flip as C2b — see the block comment above.
     naive = check_intent_coverage(rows, plan.dispatch, wallet_for_chain=lambda _chain: WALLET)
-    assert not naive.complete, "regression is unreproducible — this test no longer proves anything"
+    assert naive.complete, "the raw address comparison must keep the key-only row covered"
 
 
 def test_for_coverage_is_the_plan_as_built():
@@ -460,9 +504,12 @@ def test_the_guard_never_faults_the_teardown_lane(monkeypatch):
     # body this fix newly covers (#3574 delta review).
     monkeypatch.setattr(g, "_describe", _boom)
 
+    # Address-space pair so the drop branch — the only caller of ``_describe`` —
+    # is actually reached; a non-collapsing pair would never fault and the
+    # control would be vacuous.
     rows = [
         _perp(VENUE_KEY),
-        _perp("gmx-ETH/USD-arbitrum", market="ETH/USD", collateral_token="USDC"),
+        _perp("gmx-ETH/USD-arbitrum"),
     ]
     plan = g.collapse_duplicate_perp_closes(full_close_intents(rows))
 

@@ -48,7 +48,6 @@ if TYPE_CHECKING:
         GMXv2Position,
         GMXv2PositionSide,
     )
-    from .addresses import GMX_V2_MARKETS
     from .market_rules import (
         get_allowed_collaterals,
         is_market_registered,
@@ -79,7 +78,6 @@ __all__ = [
     "GMXV2TransactionData",
     "GMX_V2_ADDRESSES",
     "GMX_V2_GAS_ESTIMATES",
-    "GMX_V2_MARKETS",
     "GMX_V2_SDK_ADDRESSES",
     "GMXv2Adapter",
     "GMXv2Config",
@@ -107,7 +105,6 @@ _LAZY: dict[str, tuple[str, str]] = {
     "GMXV2TransactionData": (".sdk", "GMXV2TransactionData"),
     "GMX_V2_ADDRESSES": (".adapter", "GMX_V2_ADDRESSES"),
     "GMX_V2_GAS_ESTIMATES": (".adapter", "GMX_V2_GAS_ESTIMATES"),
-    "GMX_V2_MARKETS": (".addresses", "GMX_V2_MARKETS"),
     "GMX_V2_SDK_ADDRESSES": (".sdk", "GMX_V2_SDK_ADDRESSES"),
     "GMXv2Adapter": (".adapter", "GMXv2Adapter"),
     "GMXv2Config": (".adapter", "GMXv2Config"),

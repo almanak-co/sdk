@@ -1335,18 +1335,28 @@ class GetPerpMarketRequest(_message.Message):
     PROTOCOL_FIELD_NUMBER: _builtins.int
     CHAIN_FIELD_NUMBER: _builtins.int
     MARKET_FIELD_NUMBER: _builtins.int
+    REQUIRE_LISTED_FIELD_NUMBER: _builtins.int
     protocol: _builtins.str
     chain: _builtins.str
     market: _builtins.str
     """canonical label (HYPE/USD) or exact market address"""
+    require_listed: _builtins.bool
+    """Listing policy. Opens (risk-increasing) set true: a delisted market's
+    createOrder still succeeds on-chain but the keeper cancels it and keeps
+    the execution fee, so an increase must prove CURRENT listing, not just
+    tuple identity. Closes (risk-reducing) leave it false so a delisted or
+    stale-record market stays closable. proto3 default false = the historic
+    behavior, so old gateways degrade to it harmlessly.
+    """
     def __init__(
         self,
         *,
         protocol: _builtins.str = ...,
         chain: _builtins.str = ...,
         market: _builtins.str = ...,
+        require_listed: _builtins.bool = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "market", b"market", "protocol", b"protocol"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "market", b"market", "protocol", b"protocol", "require_listed", b"require_listed"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___GetPerpMarketRequest: _TypeAlias = GetPerpMarketRequest  # noqa: Y015

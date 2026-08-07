@@ -23,17 +23,42 @@ gmx_v2 + aster_perps (and any future ``perps_read`` venue) in one place.
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from almanak.connectors._strategy_base.perps_read_base import PerpsReadResult
+from almanak.connectors.gmx_v2 import market_catalog
 from almanak.framework.portfolio.models import ValueConfidence
 from almanak.framework.teardown.models import PositionInfo, PositionType
 from almanak.framework.valuation.perps_position_reader import PerpsPositionOnChain
 from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
 from almanak.framework.valuation.position_discovery import DiscoveryResult
+from tests.unit.connectors.gmx_v2.market_fixtures import prime_catalog
 
 # Real GMX arbitrum ETH/USD market: symbol "ETH", 18-decimal index token — the
-# real PerpsReadRegistry resolves its metadata + valuation.
+# real PerpsReadRegistry resolves its metadata + valuation from the process
+# catalog (address-first), primed below from the audited fixture snapshot.
 _ETH_MARKET = "0x70d95587d40A2caf56bd97485aB3Eec10Bee6336"
 _USDC = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
+
+
+@pytest.fixture(autouse=True)
+def _verified_markets():
+    """Prime the venue-verified market catalog (address-first migration).
+
+    ``_value_matched_perp`` resolves index symbol + decimals through
+    ``PerpsReadRegistry.market_metadata`` — served only from the process
+    catalog. tests/unit/valuation has no catalog-clear conftest — clear on
+    teardown so no verified row leaks to other test files.
+    """
+    # Clear FIRST: a record leaked by an earlier test in the same worker must
+    # not survive underneath the primed snapshot (review pin).
+    market_catalog.clear()
+    prime_catalog()
+    try:
+        yield
+    finally:
+        market_catalog.clear()
+
 
 # At ETH=$2200, _on_chain_eth_long values to: collateral $2000 + uPnL
 # (5 ETH × ($2200 − $2000 entry)) $1000 = $3000 net equity. Gross notional

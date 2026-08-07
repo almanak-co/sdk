@@ -250,9 +250,21 @@ class GmxV2GatewayConnector(
         chain: str,
         market: str,
         eth_call: Any,
+        require_listed: bool = False,
     ) -> PerpMarketRecord | None:
-        """Resolve API metadata and require an exact on-chain identity match."""
-        return await self._market_registry.resolve(chain=chain, market=market, eth_call=eth_call)
+        """Resolve API metadata and require an exact on-chain identity match.
+
+        ``require_listed=True`` (risk-increasing callers) excludes delisted
+        rows AND the registry's serve-stale grace — identity is immutable but
+        listing status is not, and an increase on a disabled market burns its
+        keeper fee.
+        """
+        return await self._market_registry.resolve(
+            chain=chain,
+            market=market,
+            eth_call=eth_call,
+            allow_delisted_address=not require_listed,
+        )
 
     # ---------------------------------------------------------------------
     # GatewayPerpPriceHistoryCapability (ALM-3149)
@@ -551,7 +563,7 @@ class GmxV2GatewayConnector(
         return {
             "GMX": "gmx",
             "HYPE": "hyperliquid",
-            # Perp index symbols — see docstring. Ordered as in GMX_V2_MARKETS.
+            # Perp index symbols — see docstring. Alphabetical.
             "AAVE": "aave",
             "ARB": "arbitrum",
             "ATOM": "cosmos",

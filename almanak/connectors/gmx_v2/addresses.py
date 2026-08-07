@@ -6,18 +6,24 @@ the entries previously held in ``almanak.core.contracts`` (W1 / VIB-4853
 :class:`GatewayAddressCapability` on ``GmxV2GatewayConnector``;
 strategy-side connector code reads the dicts directly.
 
-Three surfaces live here:
+Two surfaces live here:
 
-* ``GMX_V2`` — per-chain core contract + market addresses
-  (ExchangeRouter / Router / DataStore / OrderVault / Reader, plus the
-  long/short market addresses GMX exposes per pair).
+* ``GMX_V2`` — per-chain core contract addresses (ExchangeRouter / Router /
+  DataStore / OrderVault / Reader / EventEmitter) plus the eth/btc/avax
+  market addresses backing the SDK's core label aliases
+  (``sdk.get_market_address``).
 * ``GMX_V2_TOKENS`` — the canonical underlying-token address catalogue
   consumed by the strategy-side adapter (long/short tokens for each
   market — WETH/WBTC/USDC/USDT on Arbitrum, WAVAX/BTC.b/WETH.e/USDC/USDT
   on Avalanche).
-* ``GMX_V2_MARKETS`` / ``GMX_V2_INDEX_TOKEN_DECIMALS`` — bounded offline
-  fallback catalogue used when the VIB-6561 gateway-backed verified market
-  registry is unavailable (including Safe/Zodiac permission discovery).
+
+There is deliberately NO market symbol→address table. Markets are
+address-first: the strategy declares the market-token address, the dynamic
+registry (VIB-6561) verifies it against the venue catalogue and on-chain
+``Reader.getMarket``, and ``market_catalog`` remembers the verified record
+for every read plane. A curated table could not be kept true by hand
+(VIB-6155 found five wrong rows) and its absence rows read as "unsupported"
+(the 2026-08-07 XMR misread).
 
 The contract-kind vocabulary (``exchange_router`` / ``router`` /
 ``data_store`` / ``order_vault`` / ``reader`` / ``<pair>_market``) is
@@ -84,200 +90,7 @@ GMX_V2_TOKENS: dict[str, dict[str, str]] = {
     },
 }
 
-GMX_V2_MARKETS: dict[str, dict[str, str]] = {
-    "arbitrum": {
-        "ETH/USD": "0x70d95587d40A2caf56bd97485aB3Eec10Bee6336",
-        "BTC/USD": "0x47c031236e19d024b42f8AE6780E44A573170703",
-        "LINK/USD": "0x7f1fa204bb700853D36994DA19F830b6Ad18455C",
-        "ARB/USD": "0xC25cEf6061Cf5dE5eb761b50E4743c1F5D7E5407",
-        "SOL/USD": "0x09400D9DB990D5ed3f35D7be61DfAEB900Af03C9",
-        # VIB-6155: was 0xC7aBb2C5F3bf3CEB389df0Ebb3cFE90EcE8A1bAa — a
-        # transcription slip of the address below (identical through
-        # "0xc7Abb2C5f3BF3CEB389dF0E", then divergent). Reader.getMarket()
-        # returns the zero Props for the old value: no such market.
-        # GMX lists two UNI markets; this is the UNI-long one, which is what
-        # the collateral rule ("UNI", "USDC") already declared.
-        "UNI/USD": "0xc7Abb2C5f3BF3CEB389dF0Eecd6120D451170B50",
-        "DOGE/USD": "0x6853EA96FF216fAb11D2d930CE3C508556A4bdc4",
-        "LTC/USD": "0xD9535bB5f58A1a75032416F2dFe7880C30575a41",
-        "XRP/USD": "0x0CCB4fAa6f1F1B30911619f1184082aB4E25813c",
-        "ATOM/USD": "0x248C35760068cE009a13076D573ed3497A47bCD4",
-        "NEAR/USD": "0x63Dc80EE90F26363B3FCD609007CC9e14c8991BE",
-        "AAVE/USD": "0x1CbBa6346F110c8A5ea739ef2d1eb182990e4EB2",
-        # VIB-6155: was 0xB7e69749E3d2EDd90ea59A4932EFEa2D41E245d7 — the
-        # AVALANCHE ETH/USD market, copy-pasted onto an Arbitrum row. GMX V2
-        # market tokens are per-deployment CREATE2 products, so that address
-        # is not a market on Arbitrum at all (zero Props).
-        "AVAX/USD": "0x7BbBf946883a5701350007320F525c5379B8178A",
-        # VIB-6155: was 0xb56E5E2eB50cf5383342914b0C85Fe62DbD861C8 — a REAL
-        # Arbitrum market, but the wstETH/WETH SWAP pool (indexToken == 0x0),
-        # not OP/USD. This is the class a cross-chain uniqueness check cannot
-        # see: the address was unique and live, just not this market. Only
-        # Reader.getMarket() distinguishes them, which is why the audit in
-        # tests/audit/test_gmx_v2_market_identity.py compares against it.
-        "OP/USD": "0x4fDd333FF9cA409df583f306B6F5a7fFdE790739",
-        "GMX/USD": "0x55391D178Ce46e7AC8eaAEa50A72D1A5a8A622Da",
-    },
-    "avalanche": {
-        "AVAX/USD": GMX_V2["avalanche"]["avax_usd_market"],
-        "ETH/USD": "0xB7e69749E3d2EDd90ea59A4932EFEa2D41E245d7",
-        "BTC/USD": "0xFb02132333A79C8B5Bd0b64E3AbccA5f7fAf2937",
-        # VIB-6155: both were addresses that Reader.getMarket() answers with
-        # the zero Props on Avalanche — no such markets. Replaced with the
-        # live SOL/USD and LTC/USD market tokens enumerated from
-        # Reader.getMarkets() on 2026-08-02.
-        "SOL/USD": "0xd2eFd1eA687CD78c41ac262B3Bc9B53889ff1F70",
-        "LTC/USD": "0xA74586743249243D3b77335E15FE768bA8E1Ec5A",
-    },
-}
-
-
-def _market_decimal_key(chain: str, market: str) -> str:
-    """Return the normalized decimal-table key for a listed market."""
-    return GMX_V2_MARKETS[chain][market].lower()
-
-
-GMX_V2_INDEX_TOKEN_DECIMALS: dict[str, dict[str, int]] = {
-    "arbitrum": {
-        _market_decimal_key("arbitrum", "ETH/USD"): 18,
-        _market_decimal_key("arbitrum", "BTC/USD"): 8,
-        _market_decimal_key("arbitrum", "LINK/USD"): 18,
-        _market_decimal_key("arbitrum", "ARB/USD"): 18,
-        _market_decimal_key("arbitrum", "SOL/USD"): 9,
-        _market_decimal_key("arbitrum", "UNI/USD"): 18,
-        _market_decimal_key("arbitrum", "DOGE/USD"): 8,
-        _market_decimal_key("arbitrum", "LTC/USD"): 8,
-        _market_decimal_key("arbitrum", "XRP/USD"): 6,
-        _market_decimal_key("arbitrum", "ATOM/USD"): 6,
-        _market_decimal_key("arbitrum", "NEAR/USD"): 24,
-        _market_decimal_key("arbitrum", "AAVE/USD"): 18,
-        _market_decimal_key("arbitrum", "AVAX/USD"): 18,
-        _market_decimal_key("arbitrum", "OP/USD"): 18,
-        _market_decimal_key("arbitrum", "GMX/USD"): 18,
-    },
-    "avalanche": {
-        _market_decimal_key("avalanche", "AVAX/USD"): 18,
-        _market_decimal_key("avalanche", "ETH/USD"): 18,
-        _market_decimal_key("avalanche", "BTC/USD"): 8,
-        _market_decimal_key("avalanche", "SOL/USD"): 9,
-        _market_decimal_key("avalanche", "LTC/USD"): 8,
-    },
-}
-
-
-def _build_market_address_to_label() -> dict[str, dict[str, str]]:
-    """Reverse ``GMX_V2_MARKETS`` to ``chain -> lowercase address -> label``.
-
-    Fails fast on a within-chain address collision. A reverse map built by
-    comprehension silently keeps the LAST label for a duplicated address, which
-    would hand :func:`index_price_symbol` the wrong symbol for the other market
-    and price an oracle seed off the wrong feed — a silent wrong number, not a
-    loud miss.
-    """
-    reversed_map: dict[str, dict[str, str]] = {}
-    for chain, markets in GMX_V2_MARKETS.items():
-        by_address: dict[str, str] = {}
-        for label, address in markets.items():
-            key = address.lower()
-            if key in by_address:
-                raise ValueError(f"GMX_V2_MARKETS[{chain!r}] maps {address} to both {by_address[key]!r} and {label!r}")
-            by_address[key] = label
-        reversed_map[chain] = by_address
-    return reversed_map
-
-
-_MARKET_ADDRESS_TO_LABEL: dict[str, dict[str, str]] = _build_market_address_to_label()
-
-
-def index_price_symbol(chain: str | None, market_address: str | None) -> str | None:
-    """Base symbol of a listed GMX V2 market, or ``None`` when unlisted (ALM-3108).
-
-    ``0x47c031236e19d024b42f8AE6780E44A573170703`` on Arbitrum -> ``"BTC"``.
-
-    Exists because a GMX market's index token cannot be priced by its own
-    address. GMX *synthetic* index tokens (BTC, DOGE, LTC, XRP, ATOM, NEAR on
-    Arbitrum) are identifier addresses with **no deployed contract**: no token
-    registry knows them and nothing answers ``decimals()`` there. The market
-    label already carries the base symbol, and the symbol resolves through the
-    ordinary gateway price route, so the MARKET — not the index address — is the
-    correct key for an index price.
-
-    ``None`` for an unlisted market rather than a guess: the caller must fail
-    closed, because a wrong symbol prices the oracle off the wrong feed.
-    """
-    if not chain or not market_address:
-        return None
-    label = _MARKET_ADDRESS_TO_LABEL.get(str(chain).lower(), {}).get(str(market_address).lower())
-    return label.split("/")[0] if label else None
-
-
-def index_token_decimals(chain: str | None, market_address: str | None) -> int | None:
-    """Index-token decimals for a GMX V2 market, or ``None`` when unresolved (VIB-6110).
-
-    Static fallback keyed ``chain → lowercase market address → decimals`` via
-    ``GMX_V2_INDEX_TOKEN_DECIMALS``. Live compilation first uses VIB-6561's
-    verified gateway metadata; this function remains authoritative only for
-    offline compilation and historical callers that cannot carry dynamic data.
-    Unlike ``adapter._get_index_token_decimals`` (which defaults to 18 for size scaling),
-    this returns ``None`` on an unknown chain/market so PRICE scaling can fail closed
-    (Empty≠Zero) — a wrongly-scaled ``entry_price``/``exit_price`` is worse than an
-    unmeasured one. Callers must map ``None`` to an unmeasured price, never to the raw
-    GMX-native ratio.
-    """
-    if not chain or not market_address:
-        return None
-    return GMX_V2_INDEX_TOKEN_DECIMALS.get(str(chain).lower(), {}).get(str(market_address).lower())
-
-
-def _assert_gmx_v2_decimal_coverage() -> None:
-    """Fail fast when listed market addresses drift away from decimal metadata.
-
-    LOAD-BEARING for money, not just tidiness (VIB-6110). Since PERP_SETTLEMENT
-    entry/exit prices are scaled by ``index_token_decimals(chain, market)``, this
-    import-time assert is the ONLY thing guaranteeing that a position this SDK
-    opened can always resolve its price scale: ``compiler._resolve_market`` and
-    ``sdk.get_market_address`` resolve markets exclusively from
-    ``GMX_V2_MARKETS``, and this assert guarantees every such market has
-    decimals. Weaken it and prices silently become unmeasured (Empty≠Zero keeps
-    them from becoming *wrong*, but a settlement stops being measurable).
-
-    It does NOT cover markets absent from the fallback catalogue. VIB-6561
-    resolves those from GMX metadata and verifies their identity on-chain;
-    callers without that verified metadata still fail closed rather than guess.
-
-    It also does NOT check that a listed address IS the market it claims to be —
-    it only checks the two local tables agree with each other, so it stays green
-    when both name the same wrong address. VIB-6155 found five such rows. The
-    only authority for identity is on-chain ``Reader.getMarket()``; the audit
-    that compares against it is ``tests/audit/test_gmx_v2_market_identity.py``.
-    Note that a cross-chain uniqueness assert would NOT be that guard: it would
-    have caught only one of the five (identical CREATE2 addresses across chains
-    are legitimately possible, and four of the five rows were unique anyway).
-    """
-    missing: dict[str, list[str]] = {}
-    extra: dict[str, list[str]] = {}
-    for chain, markets in GMX_V2_MARKETS.items():
-        market_addresses = {address.lower() for address in markets.values()}
-        decimal_addresses = set(GMX_V2_INDEX_TOKEN_DECIMALS.get(chain, {}))
-        chain_missing = sorted(market_addresses - decimal_addresses)
-        chain_extra = sorted(decimal_addresses - market_addresses)
-        if chain_missing:
-            missing[chain] = chain_missing
-        if chain_extra:
-            extra[chain] = chain_extra
-    if missing or extra:
-        raise ValueError(
-            f"GMX_V2_INDEX_TOKEN_DECIMALS must exactly cover GMX_V2_MARKETS; missing={missing!r} extra={extra!r}"
-        )
-
-
-_assert_gmx_v2_decimal_coverage()
-
 __all__ = [
     "GMX_V2",
-    "GMX_V2_INDEX_TOKEN_DECIMALS",
-    "GMX_V2_MARKETS",
     "GMX_V2_TOKENS",
-    "index_price_symbol",
-    "index_token_decimals",
 ]

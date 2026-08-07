@@ -2554,10 +2554,20 @@ class PaperTrader:
 
     async def _adopt_onchain_perp_positions(self, w3: Any, wallet: str) -> None:
         """Track active on-chain GMX V2 perp positions the detector has no baseline for."""
-        from almanak.framework.backtesting.paper.position_queries import query_gmx_positions
+        from almanak.framework.backtesting.paper.position_queries import (
+            GmxPositionReadUnavailable,
+            query_gmx_positions,
+        )
 
         recon = self._position_reconciler
-        for perp in await query_gmx_positions(wallet=wallet, web3=w3, chain=self.config.chain):
+        try:
+            positions = await query_gmx_positions(wallet=wallet, web3=w3, chain=self.config.chain)
+        except GmxPositionReadUnavailable as exc:
+            # Adoption is best-effort baseline seeding: an UNMEASURED book skips
+            # it loudly rather than seeding from a false-flat read (Empty≠Zero).
+            logger.warning("[%s] Perp adoption skipped — book unmeasured: %s", self._backtest_id, exc)
+            return
+        for perp in positions:
             if perp.is_active and perp.position_key not in recon.positions:
                 recon.track_perp_open(
                     position_id=perp.position_key,

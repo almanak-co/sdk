@@ -16,7 +16,6 @@ import pytest
 from almanak.connectors.gmx_v2.adapter import (
     DEFAULT_EXECUTION_FEE,
     GMX_V2_ADDRESSES,
-    GMX_V2_MARKETS,
     GMXv2Adapter,
     GMXv2Config,
     GMXv2Order,
@@ -25,6 +24,24 @@ from almanak.connectors.gmx_v2.adapter import (
     GMXv2PositionSide,
 )
 from almanak.connectors.gmx_v2.addresses import GMX_V2_TOKENS
+from tests.unit.connectors.gmx_v2.market_fixtures import market_address, prime_catalog
+
+# Address-first: the adapter no longer ships a symbol→address market table.
+# Labels resolve only through the process's venue-verified catalog, so these
+# tests prime it from the audited fixture rows (the same rows dynamic market
+# resolution would remember on a live run) instead of patching a table.
+ETH_MARKET = market_address("arbitrum", "ETH/USD")
+BTC_MARKET = market_address("arbitrum", "BTC/USD")
+
+
+@pytest.fixture(autouse=True)
+def _verified_markets():
+    """Prime the catalog as this process's dynamic resolution would have.
+
+    The conftest autouse fixture clears the catalog around every test, so each
+    test starts from the audited fixture rows and nothing leaks across tests.
+    """
+    prime_catalog()
 
 # =============================================================================
 # Configuration Tests
@@ -132,6 +149,12 @@ class TestGMXv2AdapterInit:
         removed. Token addresses are resolved on-demand via the shared
         ``TokenResolver`` (still validated against ``GMX_V2_TOKENS`` in the
         registry-driven tests below).
+
+        Address-first: the per-adapter ``self.markets`` symbol→address copy was
+        removed with ``GMX_V2_MARKETS`` on the adapter — market identity lives
+        in the venue-verified catalog, keyed by address. The absence is pinned
+        so the curated table cannot quietly come back (VIB-6155 is why it must
+        not).
         """
         config = GMXv2Config(
             chain="arbitrum",
@@ -142,7 +165,7 @@ class TestGMXv2AdapterInit:
         assert adapter.chain == "arbitrum"
         assert adapter.wallet_address == "0x1234567890123456789012345678901234567890"
         assert adapter.addresses == GMX_V2_ADDRESSES["arbitrum"]
-        assert adapter.markets == GMX_V2_MARKETS["arbitrum"]
+        assert not hasattr(adapter, "markets")
 
     def test_adapter_has_exchange_router(self) -> None:
         """Test adapter has exchange router address."""
@@ -666,7 +689,7 @@ class TestGMXv2AdapterPositions:
         # Set up a test position
         position = GMXv2Position(
             position_key="0x1234",
-            market=GMX_V2_MARKETS["arbitrum"]["ETH/USD"],
+            market=ETH_MARKET,
             collateral_token=GMX_V2_TOKENS["arbitrum"]["USDC"].lower(),
             size_in_usd=Decimal("5000"),
             size_in_tokens=Decimal("2.5"),
@@ -702,7 +725,7 @@ class TestGMXv2AdapterPositions:
         # Set up test positions
         position1 = GMXv2Position(
             position_key="0x1234",
-            market=GMX_V2_MARKETS["arbitrum"]["ETH/USD"],
+            market=ETH_MARKET,
             collateral_token=GMX_V2_TOKENS["arbitrum"]["USDC"],
             size_in_usd=Decimal("5000"),
             size_in_tokens=Decimal("2.5"),
@@ -712,7 +735,7 @@ class TestGMXv2AdapterPositions:
         )
         position2 = GMXv2Position(
             position_key="0x5678",
-            market=GMX_V2_MARKETS["arbitrum"]["BTC/USD"],
+            market=BTC_MARKET,
             collateral_token=GMX_V2_TOKENS["arbitrum"]["USDC"],
             size_in_usd=Decimal("10000"),
             size_in_tokens=Decimal("0.25"),
@@ -841,12 +864,12 @@ class TestGMXv2AdapterHelpers:
         """Test market resolution by symbol."""
         market_address = adapter._resolve_market("ETH/USD")
 
-        assert market_address == GMX_V2_MARKETS["arbitrum"]["ETH/USD"]
+        assert market_address == ETH_MARKET
 
     @pytest.mark.parametrize("market", ["ETH-USD", "eth/usd", "ETH_USD", "ETH:USD"])
     def test_resolve_market_aliases(self, adapter: GMXv2Adapter, market: str) -> None:
         """ALM-3094: every supported spelling reaches the canonical registry row."""
-        assert adapter._resolve_market(market) == GMX_V2_MARKETS["arbitrum"]["ETH/USD"]
+        assert adapter._resolve_market(market) == ETH_MARKET
 
     def test_resolve_market_by_address(self, adapter: GMXv2Adapter) -> None:
         """Test market resolution by address."""
@@ -913,7 +936,7 @@ class TestGMXv2AdapterHelpers:
         # Set up some state
         position = GMXv2Position(
             position_key="0x1234",
-            market=GMX_V2_MARKETS["arbitrum"]["ETH/USD"],
+            market=ETH_MARKET,
             collateral_token=GMX_V2_TOKENS["arbitrum"]["USDC"],
             size_in_usd=Decimal("5000"),
             size_in_tokens=Decimal("2.5"),
@@ -964,7 +987,7 @@ class TestGMXv2OnchainPositionParsing:
         position_dicts = [
             {
                 "account": "0x1234567890123456789012345678901234567890",
-                "market": GMX_V2_MARKETS["arbitrum"]["ETH/USD"],
+                "market": ETH_MARKET,
                 "collateral_token": GMX_V2_TOKENS["arbitrum"]["USDC"],
                 "size_in_usd": 0,
                 "size_in_tokens": 0,
@@ -988,7 +1011,7 @@ class TestGMXv2OnchainPositionParsing:
         position_dicts = [
             {
                 "account": "0x1234567890123456789012345678901234567890",
-                "market": GMX_V2_MARKETS["arbitrum"]["ETH/USD"],
+                "market": ETH_MARKET,
                 "collateral_token": GMX_V2_TOKENS["arbitrum"]["USDC"],
                 "size_in_usd": size_usd_30,
                 "size_in_tokens": size_tokens_18,
@@ -1008,7 +1031,7 @@ class TestGMXv2OnchainPositionParsing:
         assert pos.collateral_amount == Decimal("1000")
         assert pos.entry_price == Decimal("2000")  # 5000 / 2.5
         assert pos.leverage == Decimal("5")  # 5000 / 1000
-        assert pos.market == GMX_V2_MARKETS["arbitrum"]["ETH/USD"]
+        assert pos.market == ETH_MARKET
 
     def test_parse_position_dicts_short_position(self, adapter: GMXv2Adapter) -> None:
         """Test parsing a short BTC position (WBTC has 8 decimals)."""
@@ -1019,7 +1042,7 @@ class TestGMXv2OnchainPositionParsing:
         position_dicts = [
             {
                 "account": "0x1234567890123456789012345678901234567890",
-                "market": GMX_V2_MARKETS["arbitrum"]["BTC/USD"],
+                "market": BTC_MARKET,
                 "collateral_token": GMX_V2_TOKENS["arbitrum"]["USDC"],
                 "size_in_usd": size_usd_30,
                 "size_in_tokens": size_tokens_8,
@@ -1046,7 +1069,7 @@ class TestGMXv2OnchainPositionParsing:
         position_dicts = [
             {
                 "account": "0x1234567890123456789012345678901234567890",
-                "market": GMX_V2_MARKETS["arbitrum"]["ETH/USD"],
+                "market": ETH_MARKET,
                 "collateral_token": GMX_V2_TOKENS["arbitrum"]["USDC"],
                 "size_in_usd": 5000 * 10**30,
                 "size_in_tokens": int(2.5 * 10**18),
@@ -1057,7 +1080,7 @@ class TestGMXv2OnchainPositionParsing:
             },
             {
                 "account": "0x1234567890123456789012345678901234567890",
-                "market": GMX_V2_MARKETS["arbitrum"]["BTC/USD"],
+                "market": BTC_MARKET,
                 "collateral_token": GMX_V2_TOKENS["arbitrum"]["USDC"],
                 "size_in_usd": 10000 * 10**30,
                 "size_in_tokens": int(0.25 * 10**8),  # WBTC has 8 decimals
@@ -1079,7 +1102,7 @@ class TestGMXv2OnchainPositionParsing:
                 # addresses: (account, market, collateralToken)
                 (
                     "0x1234567890123456789012345678901234567890",
-                    GMX_V2_MARKETS["arbitrum"]["ETH/USD"],
+                    ETH_MARKET,
                     GMX_V2_TOKENS["arbitrum"]["USDC"],
                 ),
                 # numbers: current 10-field Position.Numbers (VIB-5289/VIB-5950) —
@@ -1134,13 +1157,19 @@ class TestGMXv2OnchainPositionParsing:
         assert decimals == 8
 
     def test_get_index_token_decimals(self, adapter: GMXv2Adapter) -> None:
-        """Test index token decimal lookup by market address."""
-        from almanak.connectors.gmx_v2.adapter import GMX_V2_MARKETS
+        """Index-token decimals come from the venue-verified catalog (address-first).
 
+        The pre-existing default-18 warning fallback for markets this process
+        never verified is unchanged — this method feeds display/valuation
+        estimates, never an order's price bound (the compiler fails closed on
+        missing decimals instead of defaulting).
+        """
         # ETH/USD market -> WETH -> 18 decimals
-        assert adapter._get_index_token_decimals(GMX_V2_MARKETS["arbitrum"]["ETH/USD"]) == 18
+        assert adapter._get_index_token_decimals(ETH_MARKET) == 18
         # BTC/USD market -> WBTC -> 8 decimals
-        assert adapter._get_index_token_decimals(GMX_V2_MARKETS["arbitrum"]["BTC/USD"]) == 8
+        assert adapter._get_index_token_decimals(BTC_MARKET) == 8
+        # Unverified market -> warned default of 18, never a raise.
+        assert adapter._get_index_token_decimals("0x" + "ab" * 20) == 18
 
     def test_parse_position_weth_collateral_leverage(self, adapter: GMXv2Adapter) -> None:
         """Test leverage calculation with WETH collateral (non-stablecoin)."""
@@ -1152,7 +1181,7 @@ class TestGMXv2OnchainPositionParsing:
         position_dicts = [
             {
                 "account": "0x1234567890123456789012345678901234567890",
-                "market": GMX_V2_MARKETS["arbitrum"]["ETH/USD"],
+                "market": ETH_MARKET,
                 "collateral_token": GMX_V2_TOKENS["arbitrum"]["WETH"],
                 "size_in_usd": size_usd_30,
                 "size_in_tokens": size_tokens_18,
@@ -1198,7 +1227,7 @@ class TestGMXv2OnchainPositionParsing:
         mock_positions = [
             GMXv2Position(
                 position_key="test_key",
-                market=GMX_V2_MARKETS["arbitrum"]["ETH/USD"],
+                market=ETH_MARKET,
                 collateral_token=GMX_V2_TOKENS["arbitrum"]["USDC"],
                 size_in_usd=Decimal("5000"),
                 size_in_tokens=Decimal("2.5"),
@@ -1225,5 +1254,41 @@ class TestGMXv2OnchainPositionParsing:
         assert pos.size_usd == Decimal("5000")
         assert pos.entry_price == Decimal("2000")
         assert pos.leverage == Decimal("5")
+        # Display name is the catalog label when this process verified the
+        # market (primed here); the identity axis is the address either way.
         assert pos.details["market"] == "ETH/USD"
+        assert pos.details["market_address"] == ETH_MARKET
         assert pos.details["is_long"] is True
+
+    def test_positions_as_teardown_summary_unverified_market_displays_address(self, adapter: GMXv2Adapter) -> None:
+        """An unverified market's display name is its address (address-first).
+
+        An unlabelled market is still a fully identified market — the summary
+        must never suppress or mislabel a position just because this process
+        never venue-verified its label.
+        """
+        from unittest.mock import patch
+
+        from almanak.connectors.gmx_v2 import market_catalog
+
+        market_catalog.clear()  # this market is deliberately UNVERIFIED
+        mock_positions = [
+            GMXv2Position(
+                position_key="test_key",
+                market=ETH_MARKET,
+                collateral_token=GMX_V2_TOKENS["arbitrum"]["USDC"],
+                size_in_usd=Decimal("5000"),
+                size_in_tokens=Decimal("2.5"),
+                collateral_amount=Decimal("1000"),
+                entry_price=Decimal("2000"),
+                is_long=True,
+                leverage=Decimal("5"),
+            )
+        ]
+
+        with patch.object(adapter, "get_positions_onchain", return_value=mock_positions):
+            summary = adapter.get_positions_as_teardown_summary(deployment_id="test_strategy")
+
+        pos = summary.positions[0]
+        assert pos.details["market"] == ETH_MARKET
+        assert pos.details["market_address"] == ETH_MARKET

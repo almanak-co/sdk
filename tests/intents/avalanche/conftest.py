@@ -209,3 +209,22 @@ def orchestrator(
         rpc_url=anvil_rpc_url,
         tx_timeout_seconds=TEST_TX_TIMEOUT_SECONDS,
     )
+
+
+@pytest.fixture(autouse=True)
+def _verified_gmx_markets():
+    """Prime the venue-verified market catalog for GMX compiles (address-first).
+
+    The intent harness compiles via RPC only — no gateway, so no dynamic market
+    verification runs, and the GMX compiler correctly refuses to derive a price
+    bound without verified index decimals/symbol. The audited fixture snapshot
+    stands in for the verification a live process performs before compiling
+    (same contract as the unit/teardown/paper suites). Non-GMX tests ignore the
+    catalog entirely.
+    """
+    from almanak.connectors.gmx_v2 import market_catalog
+    from tests.unit.connectors.gmx_v2.market_fixtures import prime_catalog
+
+    prime_catalog()
+    yield
+    market_catalog.clear()

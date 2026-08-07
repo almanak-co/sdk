@@ -37,11 +37,6 @@ CONNECTOR = Connector(
             attribute="GMX_V2",
         ),
         AddressTableSpec(
-            protocol="gmx_v2_markets",
-            module="almanak.connectors.gmx_v2.addresses",
-            attribute="GMX_V2_MARKETS",
-        ),
-        AddressTableSpec(
             protocol="gmx_v2_tokens",
             module="almanak.connectors.gmx_v2.addresses",
             attribute="GMX_V2_TOKENS",

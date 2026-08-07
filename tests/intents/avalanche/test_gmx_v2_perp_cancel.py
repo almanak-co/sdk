@@ -10,6 +10,11 @@ from web3 import Web3
 
 from almanak.connectors.gmx_v2 import GMXv2ReceiptParser
 from almanak.connectors.gmx_v2.addresses import GMX_V2, GMX_V2_TOKENS
+from tests.unit.connectors.gmx_v2.market_fixtures import market_address
+
+# Address-first primary spelling: the strategy-declared market-token address
+# (the label path is covered separately by the core-alias unit tests).
+_ETH_USD_MARKET = market_address("avalanche", "ETH/USD")
 from almanak.connectors.gmx_v2.teardown_reads import read_open_positions, read_pending_orders
 from almanak.framework.execution.extracted_data import AsyncOrderKind
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
@@ -58,7 +63,7 @@ class TestGmxV2PerpCancelIntent:
         vault_usdc_initial = get_token_balance(web3, USDC_ADDRESS, ORDER_VAULT_ADDRESS)
 
         open_intent = PerpOpenIntent(
-            market="ETH/USD",
+            market=_ETH_USD_MARKET,
             collateral_token="USDC",
             collateral_amount=collateral_amount,
             size_usd=Decimal("300"),

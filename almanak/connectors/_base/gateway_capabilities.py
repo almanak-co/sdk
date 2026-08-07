@@ -1007,6 +1007,7 @@ class GatewayPerpMarketDiscoveryCapability(Protocol):
         chain: str,
         market: str,
         eth_call: Any,
+        require_listed: bool = False,
     ) -> PerpMarketRecord | None: ...
 
 

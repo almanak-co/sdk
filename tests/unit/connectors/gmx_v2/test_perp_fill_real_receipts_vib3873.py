@@ -20,6 +20,16 @@ from pathlib import Path
 import pytest
 
 from almanak.connectors.gmx_v2.receipt_parser import GMXv2ReceiptParser
+from tests.unit.connectors.gmx_v2.market_fixtures import prime_catalog
+
+
+# Price scaling reads the venue-verified catalog (address-first); prime the
+# audited fixture snapshot as the stand-in for compile-time verification.
+# Markets deliberately absent from the snapshot (the 0xdab2... close market)
+# keep exercising the unknown-market unmeasured path.
+@pytest.fixture(autouse=True)
+def _verified_markets():
+    prime_catalog()
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "gmx_keeper_receipts_arbitrum.json"
 _USDC_ARBITRUM = "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
@@ -83,7 +93,7 @@ class TestRealCloseReceipt:
         assert _approx(fill.position_fee_usd, "2.8735", "0.001")
         assert _approx(fill.borrowing_fee_usd, "3.0381", "0.001")
         assert _approx(fill.size_delta_usd, "7183.75", "0.01")
-        # This fixture's close market (0xdab2…) is NOT in GMX_V2_INDEX_TOKEN_DECIMALS, so
+        # This fixture's close market (0xdab2…) is not in the primed catalog snapshot, so
         # VIB-6110 fails closed: exit_price is UNMEASURED (None), NEVER the raw GMX ratio.
         # (Close-side scaling on a LISTED market is pinned by
         # test_perp_fill_data_vib3873.TestPerpFillClose.test_close_fill_measures_exit_pnl_and_fees.)

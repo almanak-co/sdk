@@ -26,8 +26,7 @@ from typing import TYPE_CHECKING, Any
 
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
 
-from .addresses import GMX_V2_INDEX_TOKEN_DECIMALS as _GMX_V2_INDEX_TOKEN_DECIMALS
-from .addresses import GMX_V2_MARKETS
+from . import market_catalog
 
 if TYPE_CHECKING:
     from almanak.framework.data.tokens.resolver import TokenResolver as TokenResolverType
@@ -587,9 +586,9 @@ class GMXv2Adapter:
         self.chain = config.chain
         self.wallet_address = config.wallet_address
 
-        # Load contract addresses
+        # Load contract addresses (core protocol contracts only — market
+        # identity is address-first and lives in the verified catalog).
         self.addresses = GMX_V2_ADDRESSES[self.chain]
-        self.markets = GMX_V2_MARKETS.get(self.chain, {})
 
         # TokenResolver integration
         if token_resolver is not None:
@@ -1203,8 +1202,11 @@ class GMXv2Adapter:
         For example, ETH/USD uses 18 (WETH), BTC/USD uses 8 (WBTC),
         SOL/USD uses 9.
 
-        Uses the same mapping as the paper trading position queries to stay
-        consistent across the codebase.
+        Served from the process's venue-verified catalog (address-first).
+        The pre-existing default-18 fallback for unverified markets stays —
+        this method feeds ESTIMATES (position display/valuation helpers),
+        never an order's price bound; the compiler's bound derivation fails
+        closed on missing decimals instead of defaulting.
 
         Args:
             market_address: GMX V2 market address
@@ -1212,8 +1214,7 @@ class GMXv2Adapter:
         Returns:
             Index token decimals for the market
         """
-        chain_markets = _GMX_V2_INDEX_TOKEN_DECIMALS.get(self.chain, {})
-        decimals = chain_markets.get(market_address.lower())
+        decimals = market_catalog.index_decimals(self.chain, market_address)
         if decimals is not None:
             return decimals
         logger.warning(
@@ -1284,12 +1285,13 @@ class GMXv2Adapter:
 
         onchain_positions = self.get_positions_onchain(rpc_url=rpc_url, gateway_client=gateway_client)
 
-        # Reverse-lookup market names
-        market_names = {v: k for k, v in self.markets.items()}
-
         position_infos = []
         for pos in onchain_positions:
-            market_name = market_names.get(pos.market, pos.market)
+            # Display label from the verified catalog when this process has
+            # resolved the market; the address itself otherwise (address-first —
+            # an unlabelled market is still a fully identified market).
+            record = market_catalog.by_address(self.chain, pos.market)
+            market_name = record.label if record is not None else pos.market
 
             position_infos.append(
                 PositionInfo(
@@ -1520,16 +1522,19 @@ class GMXv2Adapter:
     # =========================================================================
 
     def _resolve_market(self, market: str) -> str | None:
-        """Resolve market identifier to address."""
-        # Check if already an address
+        """Resolve a market identifier to an address (address-first).
+
+        Addresses pass through. Labels resolve only through the verified
+        catalog's records (matched on the venue label the dynamic registry
+        stored) — there is no curated symbol→address table, so an unverified
+        label yields ``None`` and the caller's existing unknown-market error.
+        """
         if market.startswith("0x") and len(market) == 42:
             return market
 
-        # Look up by the canonical GMX pair form. Import locally to keep the
-        # adapter's import surface lean and avoid initialization cycles.
         from .market_rules import canonicalise_market
 
-        return self.markets.get(canonicalise_market(market))
+        return market_catalog.address_for_label(self.chain, canonicalise_market(market))
 
     def _resolve_token(self, token: str) -> str:
         """Resolve token identifier to address using TokenResolver."""
@@ -1614,7 +1619,6 @@ __all__ = [
     "OrderResult",
     "TransactionData",
     "GMX_V2_ADDRESSES",
-    "GMX_V2_MARKETS",
     "DEFAULT_EXECUTION_FEE",
     "GMX_V2_GAS_ESTIMATES",
 ]

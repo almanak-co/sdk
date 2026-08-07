@@ -217,6 +217,9 @@ class IntentExecutionService:
         from almanak.gateway.proto import gateway_pb2
 
         symbols = set(extract_token_symbols(intent_params))
+        perp_index_symbol = self._resolve_perp_index_symbol(intent_type, intent_params)
+        if perp_index_symbol:
+            symbols.add(perp_index_symbol)
 
         price_map: dict[str, str] = {}
         for symbol in symbols:
@@ -235,6 +238,40 @@ class IntentExecutionService:
                 "Fetched %d prices for %s compilation: %s", len(price_map), intent_type, list(price_map.keys())
             )
         return price_map
+
+    def _resolve_perp_index_symbol(self, intent_type: str, intent_params: dict[str, Any]) -> str | None:
+        """Resolve an address-shaped perp market to its index price symbol.
+
+        Address-first perp intents carry the market-token ADDRESS in ``market``,
+        which ``extract_token_symbols`` cannot turn into a price symbol — and the
+        perp compiler fails closed on an oracle missing the index price
+        (VIB-6219). The gateway's verified market resolution (``GetPerpMarket``,
+        VIB-6561) is the one place that knows the symbol, so the warm step asks
+        it here, BEFORE compilation. A miss returns ``None`` (no guess): the
+        compiler then refuses with its own precise error rather than trading
+        against an unwarmed oracle.
+        """
+        if not intent_type.lower().startswith("perp"):
+            return None
+        market = intent_params.get("market")
+        if not isinstance(market, str) or market[:2].lower() != "0x":
+            return None
+        protocol = intent_params.get("protocol")
+        if not isinstance(protocol, str) or not protocol:
+            return None
+        from almanak.gateway.proto import gateway_pb2
+
+        try:
+            resp = self._client.market.GetPerpMarket(
+                gateway_pb2.GetPerpMarketRequest(protocol=protocol, chain=self._chain or "", market=market),
+                timeout=10.0,
+            )
+        except Exception as exc:  # noqa: BLE001 - a warm miss is a debug event, never a crash
+            logger.debug("Could not resolve perp market %s for price warm: %s", market, exc)
+            return None
+        if not getattr(resp, "success", False) or not getattr(resp.market, "verified", False):
+            return None
+        return resp.market.index_symbol or None
 
     async def execute_intent(
         self,

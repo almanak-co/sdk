@@ -13,7 +13,6 @@ from decimal import Decimal
 import pytest
 from eth_abi import encode as abi_encode
 
-from almanak.connectors.gmx_v2.addresses import GMX_V2_MARKETS
 from almanak.connectors.gmx_v2.receipt_parser import (
     _EVENT_LOG_DATA_ABI_TYPE,
     EVENT_TOPICS,
@@ -22,13 +21,23 @@ from almanak.connectors.gmx_v2.receipt_parser import (
     GMXv2ReceiptParser,
     PerpFillData,
 )
+from tests.unit.connectors.gmx_v2.market_fixtures import market_address, prime_catalog
+
+
+# VIB-6110 price scaling now reads the process's venue-verified catalog
+# (address-first) — prime it with the audited fixture snapshot, standing in
+# for the dynamic verification a live compile performs before any fill.
+@pytest.fixture(autouse=True)
+def _verified_markets():
+    prime_catalog()
+
 
 _EVENT_LOG1_TOPIC = "0x" + "11" * 32
 _TX_HASH = "0x" + "22" * 32
 # A LISTED market (arbitrum ETH/USD, index-token decimals 18) so VIB-6110 price scaling
 # resolves; lowercase to match the parser's decoded address form. With execution_price_raw
 # = 3000 * 10**12 this scales to exactly $3000 USD-per-token (3000e12 * 10**18 / 10**30).
-_MARKET = GMX_V2_MARKETS["arbitrum"]["ETH/USD"].lower()
+_MARKET = market_address("arbitrum", "ETH/USD").lower()
 _COLLATERAL = "0x" + "44" * 20  # treated as USDC-scaled below
 _ACCOUNT = "0x" + "55" * 20
 _ORDER_KEY = "0x" + "ab" * 32
@@ -37,7 +46,7 @@ _POSITION_KEY = "0x" + "cd" * 32
 # A SECOND listed market with DIFFERENT index-token decimals (arbitrum BTC/USD, 8) so a
 # mis-correlated fill is detectable by market, direction AND price at once. With
 # execution_price_raw = 65000 * 10**22 this scales to exactly $65,000 (65000e22 * 10**8 / 10**30).
-_MARKET_BTC = GMX_V2_MARKETS["arbitrum"]["BTC/USD"].lower()
+_MARKET_BTC = market_address("arbitrum", "BTC/USD").lower()
 _ORDER_KEY_B = "0x" + "be" * 32
 _POSITION_KEY_B = "0x" + "ef" * 32
 

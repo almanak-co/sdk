@@ -565,70 +565,19 @@ def _parse_position_result(result: bytes, token_id: int) -> UniswapV3Position | 
 # GMX V2 reader / data-store addresses resolve through AddressRegistry
 # (roles "reader" / "data_store" on the gmx_v2 connector).
 
-_GMX_V2_POSITION_QUERY_MARKETS: dict[str, tuple[str, ...]] = {
-    "arbitrum": ("ETH/USD", "BTC/USD", "LINK/USD", "ARB/USD", "SOL/USD"),
-}
-
-_GMX_V2_POSITION_QUERY_COLLATERALS: dict[str, tuple[str, ...]] = {
-    "arbitrum": ("WETH", "USDC", "USDC.e", "USDT"),
-}
-
-
-def _build_gmx_v2_markets() -> dict[str, dict[str, str]]:
-    """Filter connector-owned GMX markets to the paper reader's coverage."""
-    markets: dict[str, dict[str, str]] = {}
-    for chain, symbols in _GMX_V2_POSITION_QUERY_MARKETS.items():
-        connector_markets = _address_table("gmx_v2_markets", chain)
-        missing = [symbol for symbol in symbols if symbol not in connector_markets]
-        if missing:
-            raise RuntimeError(f"GMX V2 connector market catalogue missing {missing} on {chain}")
-        markets[chain] = {symbol: connector_markets[symbol] for symbol in symbols}
-    return markets
-
-
-def _build_gmx_v2_collateral_tokens() -> dict[str, dict[str, str]]:
-    """Resolve GMX paper-reader collateral tokens from owned metadata."""
-    collaterals: dict[str, dict[str, str]] = {}
-    for chain, symbols in _GMX_V2_POSITION_QUERY_COLLATERALS.items():
-        connector_tokens = _address_table("gmx_v2_tokens", chain)
-        collaterals[chain] = {
-            symbol: connector_tokens.get(symbol) or _static_token_address(symbol, chain) for symbol in symbols
-        }
-    return collaterals
-
-
-def _build_gmx_v2_index_token_decimals() -> dict[str, dict[str, int]]:
-    """Filter connector-owned GMX market decimals to the paper reader's coverage."""
-    from almanak.connectors._strategy_base.perps_read_registry import PerpsReadRegistry
-
-    decimals_by_chain: dict[str, dict[str, int]] = {}
-    for chain, markets in GMX_V2_MARKETS.items():
-        resolved: dict[str, int] = {}
-        missing: list[str] = []
-        for address in markets.values():
-            meta = PerpsReadRegistry.market_metadata("gmx_v2", address, chain)
-            if meta is None:
-                missing.append(address)
-            else:
-                resolved[address.lower()] = meta.index_token_decimals
-        if missing:
-            raise RuntimeError(f"GMX V2 connector index-decimal catalogue missing {missing} on {chain}")
-        decimals_by_chain[chain] = resolved
-    return decimals_by_chain
-
-
-GMX_V2_MARKETS: dict[str, dict[str, str]] = _build_gmx_v2_markets()
-GMX_V2_COLLATERAL_TOKENS: dict[str, dict[str, str]] = _build_gmx_v2_collateral_tokens()
-GMX_V2_INDEX_TOKEN_DECIMALS: dict[str, dict[str, int]] = _build_gmx_v2_index_token_decimals()
-
 
 def _gmx_v2_index_token_decimals(chain: str, market: str) -> int | None:
-    """Return the GMX index-token decimals for a market address."""
-    chain_decimals = GMX_V2_INDEX_TOKEN_DECIMALS.get(chain, {})
-    market_key = market.lower()
-    if market_key not in chain_decimals:
-        return None
-    return chain_decimals[market_key]
+    """Return the GMX index-token decimals for a verified market address.
+
+    Served from the process's venue-verified catalog (populated by dynamic
+    market resolution during this process's compiles) — there is no static
+    table (address-first). ``None`` means unmeasured — callers already degrade
+    (entry price 0 / strategy-value fallback) rather than guess.
+    """
+    from almanak.connectors._strategy_base.perps_read_registry import PerpsReadRegistry
+
+    meta = PerpsReadRegistry.market_metadata("gmx_v2", market, chain)
+    return meta.index_token_decimals if meta is not None else None
 
 
 # Function selector for getPositionInfo
@@ -770,6 +719,98 @@ def _compute_position_key(account: str, market: str, collateral_token: str, is_l
     return Web3.keccak(encoded).hex()
 
 
+class GmxPositionReadUnavailable(RuntimeError):
+    """The GMX position book could not be MEASURED (RPC or decode failure).
+
+    Empty≠Zero: a wallet with no positions returns an empty list from a
+    successful read; an unavailable read raises this instead. The old
+    per-combination brute-force degraded per key; the single range read is
+    all-or-nothing, so silently returning ``[]`` here would make an outage
+    indistinguishable from a flat book and let the paper reconciler treat
+    tracked positions as gone.
+    """
+
+
+def _gmx_range_read_request(wallet_checksum: str, chain: str) -> tuple[Any, Any]:
+    """Build the single ``Reader.getAccountPositions`` call for ``wallet``.
+
+    Routed through ``PerpsReadRegistry.resolve_plan`` — the same seam the live
+    valuer uses — so the paper plane needs NO market or collateral enumeration
+    (the venue returns the whole book in one range read) and no concrete
+    connector import (framework↔connector ratchet). This replaced the
+    ``market x collateral x direction`` brute-force: a catalogued-market sweep
+    misses every market the catalogue never listed (the XMR class).
+    """
+    from almanak.connectors._strategy_base.perps_read_base import PerpsPositionQuery
+    from almanak.connectors._strategy_base.perps_read_registry import PerpsReadRegistry
+
+    plan = PerpsReadRegistry.resolve_plan("gmx_v2", PerpsPositionQuery(chain=chain, wallet_address=wallet_checksum))
+    if plan is None:
+        raise ValueError(f"Unsupported chain: {chain}. GMX V2 perp reads are not deployed there.")
+    if len(plan.calls) != 1:
+        raise RuntimeError(f"GMX range read planned {len(plan.calls)} calls; expected exactly 1")
+    return plan, plan.calls[0]
+
+
+def _gmx_positions_from_blob(
+    plan: Any,
+    blob: str | None,
+    chain: str,
+    markets: list[str] | None,
+    collateral_tokens: list[str] | None,
+) -> list[GMXv2Position]:
+    """Decode a range-read return and map it onto paper ``GMXv2Position`` rows.
+
+    ``markets`` / ``collateral_tokens`` act as optional POST-filters for
+    callers that scope reconciliation to specific addresses; ``None`` means
+    the whole book (strictly wider coverage than the old catalogued default).
+    """
+    result = plan.reduce(plan.query, [blob])
+    if not result.ok:
+        raise GmxPositionReadUnavailable(
+            "GMX V2 range read returned an undecodable payload; the position book is unmeasured"
+        )
+    if result.truncated:
+        # A full [0, 100) page may have been cut short (the reducer computes
+        # this from the RAW page, pre-filter). Reasoning about ABSENCE from an
+        # incomplete book is how a reconciler deletes live tracked positions —
+        # refuse instead (Empty≠Zero: incomplete is unmeasured, not smaller).
+        raise GmxPositionReadUnavailable(
+            "GMX V2 range read returned a truncated page; the position book is incomplete "
+            "and absence cannot be reasoned about"
+        )
+    market_filter = {m.lower() for m in markets} if markets is not None else None
+    collateral_filter = {c.lower() for c in collateral_tokens} if collateral_tokens is not None else None
+
+    positions: list[GMXv2Position] = []
+    for pos in result.positions:
+        if market_filter is not None and pos.market.lower() not in market_filter:
+            continue
+        if collateral_filter is not None and pos.collateral_token.lower() not in collateral_filter:
+            continue
+        entry_price = 0
+        if pos.size_in_tokens > 0:
+            index_decimals = _gmx_v2_index_token_decimals(chain, pos.market)
+            if index_decimals is not None:
+                entry_price = (pos.size_in_usd * 10**index_decimals) // pos.size_in_tokens
+        positions.append(
+            GMXv2Position(
+                position_key=_compute_position_key(pos.account, pos.market, pos.collateral_token, pos.is_long),
+                account=pos.account,
+                market=pos.market,
+                collateral_token=pos.collateral_token,
+                size_in_usd=pos.size_in_usd,
+                size_in_tokens=pos.size_in_tokens,
+                collateral_amount=pos.collateral_amount,
+                entry_price=entry_price,
+                is_long=pos.is_long,
+                borrowing_factor=pos.borrowing_factor,
+                funding_fee_amount_per_size=pos.funding_fee_amount_per_size,
+            )
+        )
+    return positions
+
+
 async def query_gmx_positions(
     wallet: str,
     web3: Any,
@@ -779,80 +820,38 @@ async def query_gmx_positions(
 ) -> list[GMXv2Position]:
     """Query all GMX V2 perpetual positions for a wallet.
 
-    This function queries the GMX V2 Reader contract to get position information
-    for a wallet across specified markets and collateral tokens.
+    One ``Reader.getAccountPositions`` range read returns the wallet's whole
+    position book — every market the venue lists, catalogued or not
+    (address-first: there is no market catalogue to enumerate).
 
     Args:
         wallet: Wallet address to query positions for
         web3: Web3 instance connected to the target chain
         chain: Chain identifier (currently only arbitrum supported)
-        markets: List of market addresses to check (defaults to all known markets)
-        collateral_tokens: List of collateral token addresses to check (defaults to common tokens)
+        markets: Optional market-address post-filter (``None`` = whole book)
+        collateral_tokens: Optional collateral-address post-filter (``None`` = whole book)
 
     Returns:
         List of GMXv2Position objects for each open position
 
     Raises:
         ValueError: If chain is not supported
-
-    Example:
-        from web3 import Web3
-        web3 = Web3(Web3.HTTPProvider("https://arb1.arbitrum.io/rpc"))
-
-        positions = await query_gmx_positions(
-            wallet="0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
-            web3=web3,
-            chain="arbitrum",
-        )
-
-        for pos in positions:
-            print(f"Position in {pos.market}:")
-            print(f"  Size: ${pos.size_usd_decimal:.2f}")
-            print(f"  Entry Price: ${pos.entry_price_decimal:.2f}")
-            print(f"  Long: {pos.is_long}")
+        GmxPositionReadUnavailable: If the read or its decode fails — an
+            unavailable book is never reported as an empty one (Empty≠Zero)
     """
-    data_store_address = _contract_address("gmx_v2", chain, "data_store")
-
-    # Use default markets if not specified
-    if markets is None:
-        markets = list(GMX_V2_MARKETS.get(chain, {}).values())
-
-    # Use default collateral tokens if not specified
-    if collateral_tokens is None:
-        collateral_tokens = list(GMX_V2_COLLATERAL_TOKENS.get(chain, {}).values())
-
-    positions: list[GMXv2Position] = []
     wallet_checksum = web3.to_checksum_address(wallet)
-    data_store = web3.to_checksum_address(data_store_address)
+    plan, call = _gmx_range_read_request(wallet_checksum, chain)
+    try:
+        raw = await web3.eth.call({"to": web3.to_checksum_address(call.to), "data": call.data})
+        blob = raw.hex() if not isinstance(raw, str) else raw
+        if blob and not blob.startswith("0x"):
+            blob = "0x" + blob
+    except Exception as exc:
+        raise GmxPositionReadUnavailable(f"GMX V2 range read call failed on {chain}: {exc}") from exc
 
-    logger.debug(
-        f"Querying GMX V2 positions for {wallet} on {chain}: "
-        f"{len(markets)} markets x {len(collateral_tokens)} collaterals x 2 directions"
-    )
-
-    # Query each combination of market, collateral, and direction
-    for market in markets:
-        for collateral in collateral_tokens:
-            for is_long in [True, False]:
-                position = await _query_gmx_position(
-                    web3=web3,
-                    data_store=data_store,
-                    account=wallet_checksum,
-                    market=web3.to_checksum_address(market),
-                    collateral_token=web3.to_checksum_address(collateral),
-                    is_long=is_long,
-                )
-                if position is not None and position.is_active:
-                    positions.append(position)
-                    logger.info(
-                        f"Found GMX position: market={market[:10]}..., "
-                        f"size=${position.size_usd_decimal:.2f}, "
-                        f"is_long={is_long}"
-                    )
-
+    positions = _gmx_positions_from_blob(plan, blob, chain, markets, collateral_tokens)
     if not positions:
         logger.debug(f"Wallet {wallet} has no GMX V2 positions on {chain}")
-
     return positions
 
 
@@ -866,59 +865,20 @@ def query_gmx_positions_sync(
     """Synchronous version of query_gmx_positions.
 
     For use in non-async contexts. See query_gmx_positions for full docs.
-
-    Args:
-        wallet: Wallet address to query positions for
-        web3: Web3 instance connected to the target chain
-        chain: Chain identifier
-        markets: List of market addresses to check
-        collateral_tokens: List of collateral token addresses to check
-
-    Returns:
-        List of GMXv2Position objects
     """
-    data_store_address = _contract_address("gmx_v2", chain, "data_store")
-
-    # Use default markets if not specified
-    if markets is None:
-        markets = list(GMX_V2_MARKETS.get(chain, {}).values())
-
-    # Use default collateral tokens if not specified
-    if collateral_tokens is None:
-        collateral_tokens = list(GMX_V2_COLLATERAL_TOKENS.get(chain, {}).values())
-
-    positions: list[GMXv2Position] = []
     wallet_checksum = web3.to_checksum_address(wallet)
-    data_store = web3.to_checksum_address(data_store_address)
+    plan, call = _gmx_range_read_request(wallet_checksum, chain)
+    try:
+        raw = web3.eth.call({"to": web3.to_checksum_address(call.to), "data": call.data})
+        blob = raw.hex() if not isinstance(raw, str) else raw
+        if blob and not blob.startswith("0x"):
+            blob = "0x" + blob
+    except Exception as exc:
+        raise GmxPositionReadUnavailable(f"GMX V2 range read call failed on {chain}: {exc}") from exc
 
-    logger.debug(
-        f"Querying GMX V2 positions for {wallet} on {chain}: "
-        f"{len(markets)} markets x {len(collateral_tokens)} collaterals x 2 directions"
-    )
-
-    # Query each combination of market, collateral, and direction
-    for market in markets:
-        for collateral in collateral_tokens:
-            for is_long in [True, False]:
-                position = _query_gmx_position_sync(
-                    web3=web3,
-                    data_store=data_store,
-                    account=wallet_checksum,
-                    market=web3.to_checksum_address(market),
-                    collateral_token=web3.to_checksum_address(collateral),
-                    is_long=is_long,
-                )
-                if position is not None and position.is_active:
-                    positions.append(position)
-                    logger.info(
-                        f"Found GMX position: market={market[:10]}..., "
-                        f"size=${position.size_usd_decimal:.2f}, "
-                        f"is_long={is_long}"
-                    )
-
+    positions = _gmx_positions_from_blob(plan, blob, chain, markets, collateral_tokens)
     if not positions:
         logger.debug(f"Wallet {wallet} has no GMX V2 positions on {chain}")
-
     return positions
 
 
@@ -1690,9 +1650,6 @@ __all__ = [
     "query_aave_positions",
     "query_aave_positions_sync",
     # Constants
-    "GMX_V2_MARKETS",
-    "GMX_V2_COLLATERAL_TOKENS",
-    "GMX_V2_INDEX_TOKEN_DECIMALS",
     "AAVE_V3_TOKENS",
     "AAVE_V3_TOKEN_DECIMALS",
 ]

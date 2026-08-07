@@ -128,7 +128,7 @@ def test_live_gateway_settlement_returns_executed_with_measured_fill() -> None:
         assert close_v.state is PerpSettlementState.EXECUTED
         assert close_v.fill_data is not None
         assert close_v.fill_data.is_open is False
-        # This fixture's CLOSE market (0xdab2…) is NOT in GMX_V2_INDEX_TOKEN_DECIMALS, so
+        # This fixture's CLOSE market (0xdab2…) is not venue-verified in this process, so
         # VIB-6110 fails closed: exit_price is UNMEASURED (None), never the raw GMX ratio.
         assert close_v.fill_data.exit_price is None
         # Real close of a losing short → signed negative realized PnL.

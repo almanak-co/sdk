@@ -6,7 +6,10 @@ surviving cross-checkable oracles (the framework's own pre-refactor helpers were
 deleted in PR-3) are:
 
 * decode      -> ``GMXV2SDK._parse_raw_positions`` (the web3-decoded tuple mapping)
-* metadata    -> the connector's ``_gmx_market_metadata`` self-consistency
+* metadata    -> ``_gmx_market_metadata`` against the process's venue-verified
+  catalog (address-first: there is no static market table any more, so the
+  tests prime ``market_catalog`` from the audited fixture rows and pin the
+  None-when-unverified contract)
 * valuation   -> frozen known-good vectors (the legacy ``perps_valuer`` fn that
   PR-2 cross-checked against was removed in PR-3, so the math is pinned by literal
   field values computed from the relocated ``value_perps_position``)
@@ -32,11 +35,12 @@ from almanak.connectors._strategy_base.perps_read_base import (
 from almanak.connectors._strategy_base.perps_read_registry import PerpsReadRegistry
 from almanak.connectors.gmx_v2 import perps_read as gmx_perps
 from almanak.connectors.gmx_v2.perps_read import _GMX_USD_DECIMALS, value_perps_position
+from tests.unit.connectors.gmx_v2.market_fixtures import market_record, prime_catalog
 
-# Real GMX arbitrum market addresses (checksummed) the metadata tables key on.
+# Real GMX arbitrum market addresses (checksummed) the verified catalog keys on.
 _ETH_MARKET = "0x70d95587d40A2caf56bd97485aB3Eec10Bee6336"  # ETH/USD, 18 dec
 _BTC_MARKET = "0x47c031236e19d024b42f8AE6780E44A573170703"  # BTC/USD, 8 dec
-_DOGE_MARKET = "0x6853EA96FF216fAb11D2d930CE3C508556A4bdc4"  # DOGE/USD: symbol but NO decimals row
+_DOGE_MARKET = "0x6853EA96FF216fAb11D2d930CE3C508556A4bdc4"  # DOGE/USD, 8 dec (synthetic index)
 _ACCOUNT = to_checksum_address("0x" + "11" * 20)
 _USDC = to_checksum_address("0x" + "cc" * 20)
 
@@ -168,11 +172,14 @@ def test_build_calls_empty_when_a_target_role_is_unresolved():
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.parametrize("market,symbol,decimals", [(_ETH_MARKET, "ETH", 18), (_BTC_MARKET, "BTC", 8)])
-def test_market_metadata_resolves_symbol_and_decimals(market, symbol, decimals):
+@pytest.mark.parametrize(("market", "label", "symbol", "decimals"), [(_ETH_MARKET, "ETH/USD", "ETH", 18), (_BTC_MARKET, "BTC/USD", "BTC", 8)])
+def test_market_metadata_resolves_symbol_and_decimals(market, label, symbol, decimals):
     # The framework's pre-refactor ``_resolve_perps_index_token`` /
-    # ``_get_perps_index_decimals`` helpers (the PR-2 oracle) were deleted in PR-3;
-    # the relocated lookup is pinned directly against the known GMX market values.
+    # ``_get_perps_index_decimals`` helpers (the PR-2 oracle) were deleted in PR-3.
+    # Address-first: metadata is served ONLY from the process's venue-verified
+    # catalog (VIB-6561), so the test primes it exactly as dynamic market
+    # resolution would during a live compile, then pins the known GMX values.
+    prime_catalog(market_record("arbitrum", label), chain="arbitrum")
     meta = gmx_perps._gmx_market_metadata(market, "arbitrum")
     assert meta is not None
     assert meta.index_token_symbol == symbol
@@ -181,8 +188,11 @@ def test_market_metadata_resolves_symbol_and_decimals(market, symbol, decimals):
     assert gmx_perps._gmx_market_metadata(market.lower(), "arbitrum") == meta
 
 
-def test_market_metadata_resolves_previously_uncatalogued_market_decimals():
-    # DOGE is explicitly catalogued now so the adapter never falls back to 18 decimals.
+def test_market_metadata_resolves_any_venue_verified_market():
+    # DOGE (a synthetic-index market with 8 decimals) resolves once venue-verified
+    # in this process — no curated decimals row exists to fall back to, so a
+    # default-18 misread (the 2026-08-07 XMR class) can never come from here.
+    prime_catalog(market_record("arbitrum", "DOGE/USD"), chain="arbitrum")
     meta = gmx_perps._gmx_market_metadata(_DOGE_MARKET, "arbitrum")
     assert meta is not None
     assert meta.index_token_symbol == "DOGE"
@@ -190,9 +200,22 @@ def test_market_metadata_resolves_previously_uncatalogued_market_decimals():
 
 
 def test_market_metadata_none_for_unknown_market_or_chain():
+    prime_catalog(market_record("arbitrum", "ETH/USD"), chain="arbitrum")
     # Unknown market / unknown chain -> None.
     assert gmx_perps._gmx_market_metadata("0x" + "ab" * 20, "arbitrum") is None
     assert gmx_perps._gmx_market_metadata(_ETH_MARKET, "ethereum") is None
+
+
+def test_market_metadata_none_until_venue_verified():
+    """``None`` means "not verified in this process", never "unsupported".
+
+    A real market this process has not verified yields ``None`` — the framework
+    falls back to the strategy-provided value rather than guessing decimals.
+    This is the address-first replacement for the deleted static table: absence
+    is UNMEASURED, not a rejection (the misread that motivated deleting
+    ``GMX_V2_MARKETS``).
+    """
+    assert gmx_perps._gmx_market_metadata(_ETH_MARKET, "arbitrum") is None
 
 
 # --------------------------------------------------------------------------- #
@@ -308,6 +331,7 @@ def test_value_matches_frozen_vectors(is_long, index_dec):
 
 
 def test_registry_routes_to_gmx_spec():
+    prime_catalog(market_record("arbitrum", "ETH/USD"), chain="arbitrum")
     assert "gmx_v2" in PerpsReadRegistry.supported_protocols()
     meta = PerpsReadRegistry.market_metadata("gmx_v2", _ETH_MARKET, "arbitrum")
     assert meta is not None and meta.index_token_symbol == "ETH"

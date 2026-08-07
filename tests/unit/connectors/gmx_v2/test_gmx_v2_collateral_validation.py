@@ -25,7 +25,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from almanak.connectors._strategy_base.base.compiler import PerpCompilerContext
-from almanak.connectors.gmx_v2.addresses import GMX_V2_MARKETS
 from almanak.connectors.gmx_v2.compiler import GMXV2Compiler
 from almanak.connectors.gmx_v2.connector import CONNECTOR
 from almanak.connectors.gmx_v2.market_rules import (
@@ -40,6 +39,13 @@ from almanak.framework.intents.compiler import IntentCompiler, IntentCompilerCon
 from almanak.framework.intents.compiler_models import CompilationStatus
 from almanak.framework.intents.intent_errors import InvalidCollateralForMarketError
 from almanak.framework.intents.vocabulary import PerpCloseIntent, PerpOpenIntent
+from tests.unit.connectors.gmx_v2.market_fixtures import (
+    FIXTURE_MARKETS,
+    fake_dynamic_gateway,
+    market_address,
+    market_record,
+    prime_catalog,
+)
 
 # =============================================================================
 # Fixtures / Helpers
@@ -243,17 +249,24 @@ class TestMarketRulesPureFunctions:
         assert set(get_allowed_collaterals("arbitrum", market)) == {"WETH", "USDC"}
 
     def test_raw_market_address_passes_through_unchanged(self):
-        address = GMX_V2_MARKETS["arbitrum"]["ETH/USD"]
+        address = market_address("arbitrum", "ETH/USD")
         assert canonicalise_market(address) == address
 
     def test_every_declared_funding_market_is_compilable_on_a_supported_chain(self):
-        """Prevent the manifest/compiler split that allowed ALM-3094 through CI."""
+        """Prevent the manifest/compiler split that allowed ALM-3094 through CI.
+
+        The execution universe is address-first now, so the audited fixture
+        snapshot stands in for the deleted curated table: every funding market
+        the connector advertises must have a verified market identity to trade
+        against on at least one supported chain.
+        """
         assert CONNECTOR.funding_history is not None
+        verified_labels = {record.label for _, record in FIXTURE_MARKETS}
         for funding_market in CONNECTOR.funding_history.markets:
             canonical = canonicalise_market(funding_market)
-            assert any(canonical in markets for markets in GMX_V2_MARKETS.values()), (
-                f"Funding manifest advertises {funding_market}, but no GMX execution registry "
-                f"contains its canonical identity {canonical}"
+            assert canonical in verified_labels, (
+                f"Funding manifest advertises {funding_market}, but no verified GMX market "
+                f"carries its canonical identity {canonical}"
             )
 
 
@@ -262,22 +275,32 @@ class TestMarketAliasResolution:
 
     @pytest.mark.parametrize("market", ["ETH/USD", "ETH-USD", "eth/usd", "ETH_USD", "ETH:USD"])
     def test_compiler_resolves_every_alias_to_the_same_market(self, market: str):
+        """With no gateway, a label resolves ONLY through the SDK core aliases.
+
+        Address-first successor of the curated-table alias test: the compiler
+        no longer consults a symbol→address table, but ALM-3094's requirement
+        stands — every funding/execution spelling of the same pair must still
+        collapse to ONE canonical identity before the SDK core-alias lookup.
+        """
         compiler = GMXV2Compiler()
-        sdk = MagicMock()
+        sdk = GMXV2SDK.__new__(GMXV2SDK)
+        sdk.addresses = {
+            "ETH_USD_MARKET": market_address("arbitrum", "ETH/USD"),
+            "BTC_USD_MARKET": market_address("arbitrum", "BTC/USD"),
+        }
         result = compiler._resolve_market(_make_perp_ctx(), sdk, market, "alm-3094")
 
-        assert result == GMX_V2_MARKETS["arbitrum"]["ETH/USD"]
-        sdk.get_market_address.assert_not_called()
+        assert result == market_address("arbitrum", "ETH/USD")
 
     @pytest.mark.parametrize("market", ["ETH/USD", "ETH-USD", "eth/usd", "ETH_USD", "ETH:USD"])
     def test_sdk_resolves_every_alias_to_the_same_market(self, market: str):
         sdk = GMXV2SDK.__new__(GMXV2SDK)
         sdk.addresses = {
-            "ETH_USD_MARKET": GMX_V2_MARKETS["arbitrum"]["ETH/USD"],
-            "BTC_USD_MARKET": GMX_V2_MARKETS["arbitrum"]["BTC/USD"],
+            "ETH_USD_MARKET": market_address("arbitrum", "ETH/USD"),
+            "BTC_USD_MARKET": market_address("arbitrum", "BTC/USD"),
         }
 
-        assert sdk.get_market_address(market) == GMX_V2_MARKETS["arbitrum"]["ETH/USD"]
+        assert sdk.get_market_address(market) == market_address("arbitrum", "ETH/USD")
 
     def test_registered_markets_is_case_insensitive(self):
         """Chain input normalises to its registry key."""
@@ -311,9 +334,15 @@ class TestPerpOpenCompilerCollateralValidation:
         compiler._build_approve_tx = lambda token_address, spender, amount: []
         compiler._get_chain_rpc_url = lambda: "http://localhost:8545"
 
+        # Address-first: the strategy supplies the market-token address and this
+        # process has already verified it (fixture-primed catalog). The OPEN leg
+        # additionally demands CURRENT venue listing, which only the dynamic
+        # gateway can prove — the catalog fallback is close-only.
+        compiler._gateway_client = fake_dynamic_gateway("arbitrum")
+        prime_catalog(market_record("arbitrum", "SOL/USD"), chain="arbitrum")
         mock_adapter_result, mock_sdk = _patch_happy_path()
         intent = _make_perp_open_intent(
-            market="SOL/USD",
+            market=market_address("arbitrum", "SOL/USD"),
             collateral_token="USDC",
             collateral_amount=Decimal("100"),
             is_long=True,
@@ -323,10 +352,6 @@ class TestPerpOpenCompilerCollateralValidation:
             patch("almanak.connectors.gmx_v2.compiler.GMXv2Adapter") as mock_adapter_cls,
             patch("almanak.connectors.gmx_v2.compiler.GMXv2Config"),
             patch("almanak.connectors.gmx_v2.compiler.GMXV2SDK", return_value=mock_sdk),
-            patch(
-                "almanak.connectors.gmx_v2.compiler.GMX_V2_MARKETS",
-                {"arbitrum": {"SOL/USD": "0x09400D9DB990D5ed3f35D7be61DfAEB900Af03C9"}},
-            ),
             patch(
                 "almanak.connectors.gmx_v2.compiler.GMX_V2_TOKENS",
                 {"arbitrum": {"USDC": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"}},
@@ -341,7 +366,9 @@ class TestPerpOpenCompilerCollateralValidation:
         """(SOL/USD, WETH) on GMX V2 Arbitrum must fail compilation.
 
         This is the exact failure mode that burns keeper fees in production
-        (ticket source: PRD-StratPositions §Collateral Validation).
+        (ticket source: PRD-StratPositions §Collateral Validation). Address-first:
+        the market arrives as a catalog-verified address, so the gate compares
+        the collateral against the VERIFIED long/short token tuple.
         """
         compiler = _make_mock_compiler()
         # These two should never be called if the gate is correctly placed.
@@ -349,8 +376,12 @@ class TestPerpOpenCompilerCollateralValidation:
         compiler._build_approve_tx = lambda *args, **kwargs: adapter_calls.append("approve") or []
         compiler._get_chain_rpc_url = lambda: adapter_calls.append("rpc") or "http://localhost:8545"
 
+        # OPEN legs demand CURRENT listing: dynamic resolution must succeed for
+        # the compile to reach the collateral gate under test.
+        compiler._gateway_client = fake_dynamic_gateway("arbitrum")
+        prime_catalog(market_record("arbitrum", "SOL/USD"), chain="arbitrum")
         intent = _make_perp_open_intent(
-            market="SOL/USD",
+            market=market_address("arbitrum", "SOL/USD"),
             collateral_token="WETH",
             collateral_amount=Decimal("0.5"),
             is_long=True,
@@ -390,9 +421,13 @@ class TestPerpOpenCompilerCollateralValidation:
         compiler._build_approve_tx = lambda *a, **kw: []
         compiler._get_chain_rpc_url = lambda: "http://localhost:8545"
 
+        # OPEN legs demand CURRENT listing — the fake dynamic gateway serves the
+        # same fixture record the primed catalog holds.
+        compiler._gateway_client = fake_dynamic_gateway("arbitrum")
+        prime_catalog(market_record("arbitrum", "ETH/USD"), chain="arbitrum")
         mock_adapter_result, mock_sdk = _patch_happy_path()
         intent = _make_perp_open_intent(
-            market="ETH/USD",
+            market=market_address("arbitrum", "ETH/USD"),
             collateral_token="WETH",
             collateral_amount=Decimal("0.5"),
             is_long=True,
@@ -402,10 +437,6 @@ class TestPerpOpenCompilerCollateralValidation:
             patch("almanak.connectors.gmx_v2.compiler.GMXv2Adapter") as mock_adapter_cls,
             patch("almanak.connectors.gmx_v2.compiler.GMXv2Config"),
             patch("almanak.connectors.gmx_v2.compiler.GMXV2SDK", return_value=mock_sdk),
-            patch(
-                "almanak.connectors.gmx_v2.compiler.GMX_V2_MARKETS",
-                {"arbitrum": {"ETH/USD": "0x70d95587d40A2caf56bd97485aB3Eec10Bee6336"}},
-            ),
             patch(
                 "almanak.connectors.gmx_v2.compiler.GMX_V2_TOKENS",
                 {"arbitrum": {"WETH": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"}},
@@ -419,11 +450,26 @@ class TestPerpOpenCompilerCollateralValidation:
     def test_invalid_eth_usd_with_link_rejects(self):
         """(ETH/USD, LINK) must fail — LINK is not long/short token for ETH/USD.
 
+        Deliberately a LABEL input on the un-primed catalog: "ETH/USD" resolves
+        through the SDK's core aliases (the only offline label path left under
+        the address-first contract), and with no verified metadata the static
+        ``market_rules`` gate is what must reject the pair — the label-path
+        counterpart of the verified-tuple gate exercised above.
+
         Downstream adapter / SDK collaborators are patched so the test stays
         unit-scoped even if the validation gate is moved in future refactors:
         if the short-circuit regresses, the mocks stop us making a real RPC /
         adapter call and the final assertions still fail loudly.
         """
+        from almanak.connectors.gmx_v2 import market_catalog
+
+        # Precondition pin (review): the UN-PRIMED catalog is what routes this
+        # compile through the static market_rules gate. If the isolation
+        # fixture is ever removed/re-scoped and a neighbouring test's priming
+        # leaks, this test would silently start exercising
+        # _validate_market_collateral and pass for the wrong reason.
+        assert market_catalog.by_address("arbitrum", market_address("arbitrum", "ETH/USD")) is None
+
         compiler = _make_mock_compiler()
         compiler._build_approve_tx = lambda *a, **kw: []
         compiler._get_chain_rpc_url = lambda: "http://localhost:8545"
@@ -499,11 +545,17 @@ class TestPerpCloseCompilerCollateralValidation:
     """
 
     def test_invalid_close_combo_rejects_before_adapter(self):
-        """(SOL/USD, WETH) close fails before the adapter/SDK are constructed."""
+        """(SOL/USD, WETH) close fails before the adapter is constructed.
+
+        Address-first: the close leg receives the catalog-verified market
+        address (the state an open → close sequence leaves behind), and the
+        gate compares the collateral against the VERIFIED long/short tuple.
+        """
         compiler = GMXV2Compiler()
         ctx = _make_perp_ctx()
+        prime_catalog(market_record("arbitrum", "SOL/USD"), chain="arbitrum")
         intent = PerpCloseIntent(
-            market="SOL/USD",
+            market=market_address("arbitrum", "SOL/USD"),
             collateral_token="WETH",
             is_long=True,
             size_usd=Decimal("1000"),

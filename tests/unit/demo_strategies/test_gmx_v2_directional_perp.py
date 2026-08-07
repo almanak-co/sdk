@@ -17,12 +17,29 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from almanak.connectors.gmx_v2 import market_catalog
+from tests.unit.connectors.gmx_v2.market_fixtures import prime_catalog
+
 _SEED_DIR = (
     Path(__file__).resolve().parents[3]
     / "almanak"
     / "demo_strategies"
     / "gmx_v2_directional_perp"
 )
+
+
+@pytest.fixture(autouse=True)
+def _verified_markets():
+    """Prime the venue-verified market catalog (address-first migration).
+
+    The seed probes the venue by its configured market ADDRESS and the probe
+    prices each matched position's notional through the connector's process
+    catalog (index symbol + decimals). tests/unit/demo_strategies has no
+    catalog-clear conftest — clear on teardown so no verified row leaks.
+    """
+    prime_catalog()
+    yield
+    market_catalog.clear()
 
 
 def _load_module():
@@ -98,12 +115,16 @@ class TestMarketIdentity:
         assert not hasattr(strat, "funding_market")
 
     def test_funding_read_uses_the_execution_market(self, gmx):
+        """Funding is read by the market ADDRESS — the execution market's
+        unambiguous spelling. GMX funding factors are per-market, so a pair
+        label with several collateral variants falls back to the default rate
+        (PR #3648); the declared address never does."""
         _, strat = gmx
         snapshot = MagicMock()
         snapshot.funding_rate.return_value.rate_hourly = "0.000012"
 
         assert strat._funding_hourly(snapshot) == Decimal("0.000012")
-        snapshot.funding_rate.assert_called_once_with("gmx_v2", "ETH/USD")
+        snapshot.funding_rate.assert_called_once_with("gmx_v2", "0x70d95587d40A2caf56bd97485aB3Eec10Bee6336")
 
 
 class TestFullCloseSemantics:

@@ -111,7 +111,13 @@ class AnvilGateway:
 def build_compiler(
     *, chain: str, wallet: str, orchestrator: ExecutionOrchestrator, prices: dict[str, Decimal]
 ) -> IntentCompiler:
+    from tests.unit.connectors.gmx_v2.market_fixtures import fake_dynamic_gateway
+
     return IntentCompiler(
+        # Opens demand CURRENT venue listing (require_listed): resolution is
+        # served by the fixture gateway while every chain read proxies to the
+        # REAL fork rpc — the faithful hybrid for 4-layer intent tests.
+        gateway_client=fake_dynamic_gateway(chain, rpc_url=orchestrator.rpc_url),
         chain=chain,
         wallet_address=wallet,
         price_oracle=prices,

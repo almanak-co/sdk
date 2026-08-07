@@ -2489,6 +2489,7 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
                 chain=chain,
                 market=market,
                 eth_call=build_gateway_eth_call(chain=chain, network=self.settings.network),
+                require_listed=bool(getattr(request, "require_listed", False)),
             )
         except PerpMarketCatalogueUnavailable as exc:
             logger.warning("GetPerpMarket catalogue unavailable for %s/%s/%s: %s", protocol, chain, market, exc)

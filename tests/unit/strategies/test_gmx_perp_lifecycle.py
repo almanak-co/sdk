@@ -37,6 +37,9 @@ def strategy():
         s._deployment_id = "test_gmx_perp_lifecycle"
         s._chain = "arbitrum"
         s.market = "ETH/USD"
+        # Address-first contract: the author-declared market-token address that
+        # __init__ now requires and every intent carries.
+        s.market_address = "0x70d95587d40A2caf56bd97485aB3Eec10Bee6336"
         s.collateral_token = "USDC"
         s.collateral_amount = Decimal("10")
         s.leverage = Decimal("2.0")

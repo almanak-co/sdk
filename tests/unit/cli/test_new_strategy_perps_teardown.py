@@ -27,10 +27,32 @@ from almanak.connectors._strategy_base.perps_read_base import (
     PerpsPositionOnChain,
     PerpsReadResult,
 )
+from almanak.connectors.gmx_v2 import market_catalog
 from almanak.framework.cli.new_strategy import new_strategy
+from tests.unit.connectors.gmx_v2.market_fixtures import prime_catalog
 
 ETH_USD_MARKET = "0x70d95587d40A2caf56bd97485aB3Eec10Bee6336"
 USDC_ARBITRUM = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
+
+
+@pytest.fixture(autouse=True)
+def _verified_markets():
+    """Prime the venue-verified market catalog (address-first migration).
+
+    The emitted strategy probes the venue by its ``perp_market`` label while the
+    fake venue rows are keyed by the audited ETH/USD market-token address, so
+    the probe's match (and its notional pricing) resolves through the
+    connector's process catalog. tests/unit/cli has no catalog-clear conftest —
+    clear on teardown so no verified row leaks to other test files.
+    """
+    # Clear FIRST: a record leaked by an earlier test in the same worker must
+    # not survive underneath the primed snapshot (review pin).
+    market_catalog.clear()
+    prime_catalog()
+    try:
+        yield
+    finally:
+        market_catalog.clear()
 
 
 @pytest.fixture(scope="module")

@@ -20,7 +20,7 @@ from typing import Any
 
 import pytest
 
-from almanak.connectors.gmx_v2.addresses import GMX_V2_MARKETS, GMX_V2_TOKENS
+from almanak.connectors.gmx_v2.addresses import GMX_V2_TOKENS
 from almanak.framework.migration import CutoverStorageNotSupported
 from almanak.framework.teardown import registry_enumeration as registry_enumeration_module
 from almanak.framework.teardown.models import (
@@ -35,6 +35,7 @@ from almanak.framework.teardown.registry_enumeration import (
     reconcile_lp_with_registry,
     resolve_open_positions_with_registry,
 )
+from tests.unit.connectors.gmx_v2.market_fixtures import market_address
 
 DEPLOYMENT_ID = "deployment:abc123def456"
 
@@ -1082,8 +1083,8 @@ def test_reconcile_deduplicates_strategy_and_registry_perp_by_full_economic_iden
 # discriminated on none of the five axes its name claims. Using catalogue
 # addresses puts both rows through the real resolution path, so each axis now
 # has to hold up against the mechanism that is actually shipping.
-_ARB_ETH_MARKET = GMX_V2_MARKETS["arbitrum"]["ETH/USD"]
-_ARB_BTC_MARKET = GMX_V2_MARKETS["arbitrum"]["BTC/USD"]
+_ARB_ETH_MARKET = market_address("arbitrum", "ETH/USD")
+_ARB_BTC_MARKET = market_address("arbitrum", "BTC/USD")
 _ARB_USDC = GMX_V2_TOKENS["arbitrum"]["USDC"]
 _ARB_USDT = GMX_V2_TOKENS["arbitrum"]["USDT"]
 # An account, so the DERIVE path is exercised too and not just the semantic one.

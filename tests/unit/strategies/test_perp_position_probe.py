@@ -22,6 +22,17 @@ from almanak.framework.strategies import PerpProbeState, probe_perp_position
 
 # Real GMX V2 arbitrum catalogue entries — the probe resolves the venue's market
 # key through the connector's own metadata, so these must be genuine.
+# Symbol-keyed probes resolve through the connector's venue-verified catalog
+# (address-first) — prime the audited fixture snapshot, standing in for the
+# dynamic verification a live compile performs before any probe runs.
+from tests.unit.connectors.gmx_v2.market_fixtures import prime_catalog
+
+
+@pytest.fixture(autouse=True)
+def _verified_markets():
+    prime_catalog()
+
+
 ETH_USD_MARKET = "0x70d95587d40A2caf56bd97485aB3Eec10Bee6336"
 BTC_USD_MARKET = "0x47c031236e19d024b42f8AE6780E44A573170703"
 USDC_ARBITRUM = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"

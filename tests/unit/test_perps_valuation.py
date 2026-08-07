@@ -31,18 +31,40 @@ from eth_abi import encode as abi_encode
 from eth_utils import to_checksum_address
 
 from almanak.connectors._strategy_base.perps_read_base import PerpsReadResult
+from almanak.connectors.gmx_v2 import market_catalog
 from almanak.connectors.gmx_v2 import perps_read as gmx_perps
 from almanak.framework.teardown.models import PositionInfo, PositionType
 from almanak.framework.valuation.perps_position_reader import (
     PerpsPositionOnChain,
     PerpsPositionReader,
 )
+from tests.unit.connectors.gmx_v2.market_fixtures import prime_catalog
 
 # Real GMX arbitrum ETH/USD market: symbol "ETH", 18-decimal index token. The
 # real ``PerpsReadRegistry`` resolves its metadata + valuation, so integration
 # tests exercise the genuine connector math, not a mock.
 _ETH_MARKET = "0x70d95587d40A2caf56bd97485aB3Eec10Bee6336"
 _USDC = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
+
+
+@pytest.fixture(autouse=True)
+def _verified_markets():
+    """Prime the venue-verified market catalog (address-first migration).
+
+    ``PerpsReadRegistry.market_metadata`` serves GMX metadata only from the
+    process catalog (there is no static market table), so the reprice tests
+    prime the audited fixture snapshot — standing in for the dynamic
+    verification a live compile performs before any valuation runs.
+    tests/unit has no catalog-clear conftest — clear on teardown.
+    """
+    # Clear FIRST: a record leaked by an earlier test in the same worker must
+    # not survive underneath the primed snapshot (review pin).
+    market_catalog.clear()
+    prime_catalog()
+    try:
+        yield
+    finally:
+        market_catalog.clear()
 
 
 def _on_chain_eth_long() -> PerpsPositionOnChain:

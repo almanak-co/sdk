@@ -7,7 +7,6 @@ Verifies:
 - Non-retryable error detection
 """
 
-import asyncio
 import json
 import logging
 from unittest.mock import MagicMock, patch
@@ -21,7 +20,6 @@ from almanak.framework.runner.inner_runner import (
     SadflowEvent,
     _is_retryable,
 )
-
 
 # =============================================================================
 # Fixtures
@@ -474,7 +472,6 @@ class TestIntentExecutionServiceEnrichment:
         """
         from almanak.framework.execution.extract_result import (
             CriticalAccountingError,
-            ExtractError,
         )
         from almanak.framework.execution.result_enricher import ResultEnricher
 
@@ -750,3 +747,123 @@ class TestDryRunSwapEnrichment:
 
         # Should not crash, swap_amounts stays None
         assert result.swap_amounts is None
+
+
+# =============================================================================
+# Perp index-price warm step (address-first)
+# =============================================================================
+#
+# ``_resolve_perp_index_symbol`` is what keeps an address-first PERP_OPEN /
+# PERP_CLOSE compilable: the market-token address carries no price symbol for
+# ``extract_token_symbols`` to parse, so the warm step asks the gateway's
+# verified market resolution (GetPerpMarket, VIB-6561) BEFORE compilation. A
+# silent miss surfaces later as the compiler's fail-closed oracle refusal
+# (VIB-6219) — these pin every branch so a miss can never regress silently.
+
+from types import SimpleNamespace  # noqa: E402
+
+_PERP_MARKET_ADDRESS = "0x70d95587d40A2caf56bd97485aB3Eec10Bee6336"
+
+
+class _WarmMarketStub:
+    """Records GetPerpMarket/GetPrice calls and serves scripted responses."""
+
+    def __init__(self, response=None, error=None):
+        self.response = response
+        self.error = error
+        self.perp_market_calls = []
+        self.price_calls = []
+
+    def GetPerpMarket(self, request, **kwargs):  # noqa: N802 - gRPC stub surface
+        self.perp_market_calls.append((request, kwargs))
+        if self.error is not None:
+            raise self.error
+        return self.response
+
+    def GetPrice(self, request, **kwargs):  # noqa: N802 - gRPC stub surface
+        self.price_calls.append(request)
+        return SimpleNamespace(price="1917.13")
+
+
+def _warm_service(stub):
+    service = IntentExecutionService.__new__(IntentExecutionService)
+    service._client = SimpleNamespace(market=stub)
+    service._chain = "arbitrum"
+    return service
+
+
+def _verified_perp_response(symbol="ETH"):
+    return SimpleNamespace(success=True, market=SimpleNamespace(verified=True, index_symbol=symbol))
+
+
+class TestResolvePerpIndexSymbol:
+    def test_verified_address_market_resolves_symbol(self):
+        stub = _WarmMarketStub(response=_verified_perp_response("ETH"))
+        service = _warm_service(stub)
+        got = service._resolve_perp_index_symbol("perp_open", {"market": _PERP_MARKET_ADDRESS, "protocol": "gmx_v2"})
+        assert got == "ETH"
+        request, kwargs = stub.perp_market_calls[0]
+        assert request.protocol == "gmx_v2"
+        assert request.market == _PERP_MARKET_ADDRESS
+        # A hung gateway must not hang the warm step (explicit deadline).
+        assert kwargs.get("timeout") == 10.0
+
+    def test_uppercase_intent_type_still_warms(self):
+        """Callers pass uppercase forms (``_infer_protocol`` lowercases for the
+        same reason); a case-sensitive match would silently skip the warm and
+        the compiler would fail closed on the missing index price."""
+        stub = _WarmMarketStub(response=_verified_perp_response("ETH"))
+        service = _warm_service(stub)
+        got = service._resolve_perp_index_symbol("PERP_OPEN", {"market": _PERP_MARKET_ADDRESS, "protocol": "gmx_v2"})
+        assert got == "ETH"
+
+    def test_non_perp_intent_is_ignored(self):
+        stub = _WarmMarketStub(response=_verified_perp_response())
+        service = _warm_service(stub)
+        assert service._resolve_perp_index_symbol("swap", {"market": _PERP_MARKET_ADDRESS, "protocol": "gmx_v2"}) is None
+        assert stub.perp_market_calls == []
+
+    def test_label_market_is_ignored(self):
+        """Labels already parse through ``extract_token_symbols`` — no RPC."""
+        stub = _WarmMarketStub(response=_verified_perp_response())
+        service = _warm_service(stub)
+        assert service._resolve_perp_index_symbol("perp_open", {"market": "ETH/USD", "protocol": "gmx_v2"}) is None
+        assert stub.perp_market_calls == []
+
+    def test_missing_protocol_is_ignored(self):
+        stub = _WarmMarketStub(response=_verified_perp_response())
+        service = _warm_service(stub)
+        assert service._resolve_perp_index_symbol("perp_open", {"market": _PERP_MARKET_ADDRESS}) is None
+        assert stub.perp_market_calls == []
+
+    def test_rpc_error_is_a_miss_never_a_crash(self):
+        stub = _WarmMarketStub(error=RuntimeError("gateway down"))
+        service = _warm_service(stub)
+        assert service._resolve_perp_index_symbol("perp_close", {"market": _PERP_MARKET_ADDRESS, "protocol": "gmx_v2"}) is None
+
+    def test_unverified_or_failed_response_yields_no_symbol(self):
+        for response in (
+            SimpleNamespace(success=False, market=SimpleNamespace(verified=True, index_symbol="ETH")),
+            SimpleNamespace(success=True, market=SimpleNamespace(verified=False, index_symbol="ETH")),
+            SimpleNamespace(success=True, market=SimpleNamespace(verified=True, index_symbol="")),
+        ):
+            stub = _WarmMarketStub(response=response)
+            service = _warm_service(stub)
+            assert (
+                service._resolve_perp_index_symbol("perp_open", {"market": _PERP_MARKET_ADDRESS, "protocol": "gmx_v2"})
+                is None
+            )
+
+
+class TestPerpWarmIntegration:
+    def test_fetch_prices_includes_the_resolved_index_symbol(self):
+        """The warm step's whole point: the index symbol joins the prefetch set
+        so GetPrice warms the oracle the compiler will consult."""
+        stub = _WarmMarketStub(response=_verified_perp_response("ETH"))
+        service = _warm_service(stub)
+        price_map = service._fetch_prices_for_intent(
+            "perp_open", {"market": _PERP_MARKET_ADDRESS, "protocol": "gmx_v2", "collateral_token": "USDC"}
+        )
+        warmed = {request.token for request in stub.price_calls}
+        assert "ETH" in warmed
+        assert price_map.get("ETH") == "1917.13"

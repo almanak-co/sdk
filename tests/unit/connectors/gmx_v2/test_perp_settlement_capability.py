@@ -28,6 +28,16 @@ from almanak.connectors._strategy_base.runner_hook_registry import (
 from almanak.connectors.gmx_v2 import perp_settlement as ps
 from almanak.connectors.gmx_v2.receipt_parser import EVENT_TOPICS, PerpFillData
 from almanak.connectors.gmx_v2.runner_hooks import GmxV2RunnerHookConnector
+from tests.unit.connectors.gmx_v2.market_fixtures import prime_catalog
+
+
+# Settlement price scaling reads the venue-verified catalog (address-first);
+# prime the audited fixture snapshot, standing in for the compile-time dynamic
+# verification that precedes any settlement in a live process.
+@pytest.fixture(autouse=True)
+def _verified_markets():
+    prime_catalog()
+
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "gmx_keeper_receipts_arbitrum.json"
 _OPEN_ORDER_KEY = "0x585d42d95b9a4e84e78d53073d85fa6e67304c119fc000a6052661068200f9cf"

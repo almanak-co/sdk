@@ -91,16 +91,28 @@ def test_compiler_resolves_mixed_case_avalanche_collateral_keys() -> None:
 
     Without case-insensitive lookup logic in compiler.py, this test fails:
     'WETH.e'.upper() == 'WETH.E' which is NOT a literal key of GMX_V2_TOKENS.
+
+    Address-first: the market arrives as the fixture snapshot's verified
+    avalanche ETH/USD address (catalog-primed, and served by the fake dynamic
+    gateway because the risk-increasing OPEN leg demands CURRENT venue
+    listing) — the collateral symbol lookup under test is unchanged.
     """
     from decimal import Decimal
     from unittest.mock import MagicMock
 
-    from almanak.connectors.gmx_v2.addresses import GMX_V2_MARKETS, GMX_V2_TOKENS
+    from almanak.connectors.gmx_v2.addresses import GMX_V2_TOKENS
     from almanak.framework.intents.compiler import IntentCompiler, IntentCompilerConfig
     from almanak.framework.intents.compiler_models import CompilationStatus
     from almanak.framework.intents.vocabulary import PerpOpenIntent
+    from tests.unit.connectors.gmx_v2.market_fixtures import (
+        fake_dynamic_gateway,
+        market_address,
+        market_record,
+        prime_catalog,
+    )
 
     expected_addr = GMX_V2_TOKENS["avalanche"]["WETH.e"]
+    prime_catalog(market_record("avalanche", "ETH/USD"), chain="avalanche")
 
     # Minimal compiler state — bypass __init__ so we don't pull in gateways or
     # token-resolver singletons; the lookup we exercise doesn't need them.
@@ -109,7 +121,9 @@ def test_compiler_resolves_mixed_case_avalanche_collateral_keys() -> None:
     compiler.wallet_address = "0x" + "1" * 40
     compiler.rpc_url = None
     compiler._approve_cache = {}
-    compiler._gateway_client = None
+    # The OPEN leg demands CURRENT venue listing: the fake dynamic gateway is
+    # what resolves the market so the compile reaches the collateral lookup.
+    compiler._gateway_client = fake_dynamic_gateway("avalanche")
     # Resolver-less compile path forces the static decimals fallback we just
     # added, which is exactly the regression surface this test pins.
     compiler._token_resolver = None
@@ -129,7 +143,7 @@ def test_compiler_resolves_mixed_case_avalanche_collateral_keys() -> None:
     compiler._get_chain_rpc_url = lambda: "http://localhost:8545"
 
     intent = PerpOpenIntent(
-        market="ETH/USD",
+        market=market_address("avalanche", "ETH/USD"),
         collateral_token="WETH.e",  # mixed-case as a user would type
         collateral_amount=Decimal("1"),
         size_usd=Decimal("1000"),
@@ -142,7 +156,6 @@ def test_compiler_resolves_mixed_case_avalanche_collateral_keys() -> None:
     from unittest.mock import patch
 
     mock_sdk = MagicMock()
-    mock_sdk.get_market_address.return_value = GMX_V2_MARKETS["avalanche"]["ETH/USD"]
     mock_sdk.ROUTER_ADDRESS = "0xrouter"
     mock_sdk.build_increase_order_multicall.return_value = MagicMock(
         to="0xrouter", value=0, data=b"0x", gas_estimate=300_000
@@ -156,10 +169,6 @@ def test_compiler_resolves_mixed_case_avalanche_collateral_keys() -> None:
         patch("almanak.connectors.gmx_v2.compiler.GMXv2Adapter") as mock_adapter_cls,
         patch("almanak.connectors.gmx_v2.compiler.GMXv2Config"),
         patch("almanak.connectors.gmx_v2.compiler.GMXV2SDK", return_value=mock_sdk),
-        patch(
-            "almanak.connectors.gmx_v2.compiler.GMX_V2_MARKETS",
-            {"avalanche": {"ETH/USD": GMX_V2_MARKETS["avalanche"]["ETH/USD"]}},
-        ),
     ):
         mock_adapter_cls.return_value.open_position.return_value = mock_adapter_result
         result = compiler.compile(intent)

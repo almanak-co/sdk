@@ -16,7 +16,7 @@ connector, as **pure** data + functions (no gateway, no egress):
   empty book (Empty≠Zero).
 * ``_gmx_market_metadata`` — the relocated index-token symbol + decimals lookup
   (from the framework portfolio valuer), reading the connector's own
-  ``GMX_V2_MARKETS`` / ``GMX_V2_INDEX_TOKEN_DECIMALS`` tables.
+  venue-verified market catalog (address-first).
 * ``value_perps_position`` — the relocated GMX mark-to-market formula
   (byte-identical to the framework perp valuer).
 
@@ -45,10 +45,7 @@ from almanak.connectors._strategy_base.perps_read_base import (
     PerpsReadResult,
     PerpsReadSpec,
 )
-from almanak.connectors.gmx_v2.addresses import (
-    GMX_V2_INDEX_TOKEN_DECIMALS,
-    GMX_V2_MARKETS,
-)
+from almanak.connectors.gmx_v2 import market_catalog
 
 logger = logging.getLogger(__name__)
 
@@ -167,28 +164,20 @@ def _reduce_gmx_positions(query: PerpsPositionQuery, results: list[str | None]) 
 def _gmx_market_metadata(market_address: str, chain: str) -> PerpsMarketMeta | None:
     """Resolve a GMX market's index-token symbol + decimals for valuation.
 
-    Combines the relocated framework helpers ``_resolve_perps_index_token`` (name
-    table ``GMX_V2_MARKETS``) and ``_get_perps_index_decimals`` (decimals table
-    ``GMX_V2_INDEX_TOKEN_DECIMALS``). Both lookups are case-insensitive on the
-    market address. Returns ``None`` when the market is unknown **or** its index
-    decimals are not catalogued — valuation needs both, and the framework already
-    fell back to the strategy value whenever either was missing (preserves the
-    ``_get_perps_index_decimals`` ``None`` behaviour, NOT the adapter's default-18).
+    Served from the process's venue-verified catalog (populated by dynamic
+    market resolution, VIB-6561) — there is no static market table to consult
+    (address-first). Returns ``None`` when this process never verified the
+    market; the framework already fell back to the strategy value whenever
+    metadata was missing (preserves the historical ``None`` behaviour, NOT the
+    adapter's default-18). ``None`` is "unmeasured here", never "unsupported".
     """
-    addr_lower = market_address.lower()
-
-    symbol: str | None = None
-    for name, addr in GMX_V2_MARKETS.get(chain, {}).items():
-        if addr.lower() == addr_lower:
-            symbol = name.split("/")[0]  # "ETH/USD" -> "ETH"
-            break
-    if not symbol:
+    record = market_catalog.by_address(chain, market_address)
+    if record is None:
         return None
-
-    for addr, decimals in GMX_V2_INDEX_TOKEN_DECIMALS.get(chain, {}).items():
-        if addr.lower() == addr_lower:
-            return PerpsMarketMeta(index_token_symbol=symbol, index_token_decimals=decimals)
-    return None
+    return PerpsMarketMeta(
+        index_token_symbol=record.index_symbol,
+        index_token_decimals=record.index_token_decimals,
+    )
 
 
 def value_perps_position(

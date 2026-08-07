@@ -44,17 +44,24 @@ from unittest.mock import patch
 import pytest
 from pydantic import ValidationError
 
+from almanak.connectors.gmx_v2 import market_catalog
 from almanak.connectors.gmx_v2.acceptable_price import (
     bound_is_maximum,
     derive_acceptable_price_30dec,
     price_30dec_to_usd,
 )
-from almanak.connectors.gmx_v2.addresses import GMX_V2_MARKETS, index_token_decimals
 from almanak.connectors.gmx_v2.sdk import GMXV2SDK, OrderType
 from almanak.framework.intents.compiler import IntentCompiler, IntentCompilerConfig
 from almanak.framework.intents.compiler_models import CompilationStatus
 from almanak.framework.intents.min_out_guard import UnprotectedTradeError
 from almanak.framework.intents.vocabulary import PerpCloseIntent, PerpOpenIntent
+from tests.unit.connectors.gmx_v2.market_fixtures import (
+    FIXTURE_MARKETS,
+    fake_dynamic_gateway,
+    market_address,
+    market_record,
+    prime_catalog,
+)
 
 # --------------------------------------------------------------------------
 # Scenario constants. ETH/USD on Arbitrum has an 18-decimal index token, so
@@ -76,6 +83,27 @@ SENTINEL_MIN = 0
 
 USDC_ARB = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
 EXECUTION_FEE = 100_000_000_000_000
+
+#: Address-first market inputs (the audited fixture snapshot, not a live table).
+ETH_MARKET_ARB = market_address("arbitrum", "ETH/USD")
+SOL_MARKET_ARB = market_address("arbitrum", "SOL/USD")
+BTC_MARKET_ARB = market_address("arbitrum", "BTC/USD")
+
+
+@pytest.fixture(autouse=True)
+def _verified_markets() -> None:
+    """Prime the process catalog with the audited fixture markets.
+
+    Address-first: the compiler reads index symbol/decimals ONLY from the
+    catalog of venue-verified markets. CLOSE-path compiles here run with no
+    gateway — priming from the fixture snapshot reproduces the state a live
+    process reaches after dynamic resolution verified the market (the
+    catalog fallback is close-only by design). Without it every close compile
+    here would fail closed at the price bound, which is its own (separately
+    pinned) behaviour, not what these tests are about. OPEN-path compiles
+    additionally need the fake dynamic gateway — see ``_make_open_compiler``.
+    """
+    prime_catalog()
 
 
 def _make_compiler(chain: str = "arbitrum", prices: dict[str, Decimal] | None = None) -> IntentCompiler:
@@ -102,7 +130,22 @@ def _make_compiler(chain: str = "arbitrum", prices: dict[str, Decimal] | None = 
     return compiler
 
 
-def _open_intent(*, is_long: bool, market: str = "ETH/USD", **kwargs: Any) -> PerpOpenIntent:
+def _make_open_compiler(chain: str = "arbitrum", prices: dict[str, Decimal] | None = None) -> IntentCompiler:
+    """``_make_compiler`` plus the fake dynamic gateway an OPEN compile requires.
+
+    A risk-increasing PERP_OPEN resolution demands CURRENT venue listing
+    (``require_listed=True``); the primed process catalog serves only the
+    risk-reducing close, so an open with no usable dynamic gateway fails
+    closed (transiently) before ever reaching the price bound under test.
+    Production opens always run with a gateway — this fake models that while
+    keeping the compile path offline.
+    """
+    compiler = _make_compiler(chain, prices)
+    compiler._gateway_client = fake_dynamic_gateway(chain)
+    return compiler
+
+
+def _open_intent(*, is_long: bool, market: str = ETH_MARKET_ARB, **kwargs: Any) -> PerpOpenIntent:
     params: dict[str, Any] = {
         "market": market,
         "collateral_token": "USDC",
@@ -116,7 +159,7 @@ def _open_intent(*, is_long: bool, market: str = "ETH/USD", **kwargs: Any) -> Pe
     return PerpOpenIntent(**params)
 
 
-def _close_intent(*, is_long: bool, market: str = "ETH/USD", **kwargs: Any) -> PerpCloseIntent:
+def _close_intent(*, is_long: bool, market: str = ETH_MARKET_ARB, **kwargs: Any) -> PerpCloseIntent:
     params: dict[str, Any] = {
         "market": market,
         "collateral_token": "USDC",
@@ -176,7 +219,7 @@ class TestEncodedAcceptablePriceAllFourCombos:
 
     def test_open_long_encodes_an_upper_bound(self) -> None:
         """Opening a long BUYS the index → acceptablePrice caps the price paid."""
-        result = _compile(_make_compiler(), _open_intent(is_long=True))
+        result = _compile(_make_open_compiler(), _open_intent(is_long=True))
         assert result.status == CompilationStatus.SUCCESS, result.error
 
         encoded = _decode_acceptable_price(result)
@@ -189,7 +232,7 @@ class TestEncodedAcceptablePriceAllFourCombos:
 
     def test_open_short_encodes_a_lower_bound(self) -> None:
         """Opening a short SELLS the index → acceptablePrice floors the price received."""
-        result = _compile(_make_compiler(), _open_intent(is_long=False))
+        result = _compile(_make_open_compiler(), _open_intent(is_long=False))
         assert result.status == CompilationStatus.SUCCESS, result.error
 
         encoded = _decode_acceptable_price(result)
@@ -236,7 +279,7 @@ class TestEncodedAcceptablePriceAllFourCombos:
         the per-leg expectations are "updated to match".
         """
         intent = _open_intent(is_long=is_long) if is_open else _close_intent(is_long=is_long)
-        result = _compile(_make_compiler(), intent)
+        result = _compile(_make_open_compiler() if is_open else _make_compiler(), intent)
         assert result.status == CompilationStatus.SUCCESS, result.error
 
         encoded = _decode_acceptable_price(result)
@@ -252,10 +295,10 @@ class TestEncodedAcceptablePriceAllFourCombos:
         user tightening ``max_slippage`` changed nothing about the calldata.
         """
         tight = _decode_acceptable_price(
-            _compile(_make_compiler(), _open_intent(is_long=True, max_slippage=Decimal("0.001")))
+            _compile(_make_open_compiler(), _open_intent(is_long=True, max_slippage=Decimal("0.001")))
         )
         loose = _decode_acceptable_price(
-            _compile(_make_compiler(), _open_intent(is_long=True, max_slippage=Decimal("0.05")))
+            _compile(_make_open_compiler(), _open_intent(is_long=True, max_slippage=Decimal("0.05")))
         )
         assert tight == 3_003 * 10**12  # 3000 * 1.001
         assert loose == 3_150 * 10**12  # 3000 * 1.05
@@ -292,7 +335,7 @@ class TestEncodedAcceptablePriceAllFourCombos:
             if is_open
             else _close_intent(is_long=is_long, max_slippage=Decimal("0.05"))
         )
-        result = _compile(_make_compiler(), intent)
+        result = _compile(_make_open_compiler() if is_open else _make_compiler(), intent)
         assert result.status == CompilationStatus.SUCCESS, result.error
         assert _decode_acceptable_price(result) == expected_30dec
 
@@ -302,17 +345,17 @@ class TestEncodedAcceptablePriceAllFourCombos:
         SOL/USD's index token has 9 decimals, not ETH's 18 — encoding a
         3000-style 10**12 scale for SOL would be off by 10**9.
         """
-        compiler = _make_compiler(prices={"SOL": Decimal("150"), "USDC": Decimal("1")})
-        result = _compile(compiler, _open_intent(is_long=True, market="SOL/USD"))
+        compiler = _make_open_compiler(prices={"SOL": Decimal("150"), "USDC": Decimal("1")})
+        result = _compile(compiler, _open_intent(is_long=True, market=SOL_MARKET_ARB))
         assert result.status == CompilationStatus.SUCCESS, result.error
 
-        assert index_token_decimals("arbitrum", GMX_V2_MARKETS["arbitrum"]["SOL/USD"]) == 9
+        assert market_record("arbitrum", "SOL/USD").index_token_decimals == 9
         # 150 * 1.01 == 151.5, at scale 10 ** (30 - 9)
         assert _decode_acceptable_price(result) == int(Decimal("151.5") * 10**21)
 
     def test_bound_is_also_reported_in_bundle_metadata(self) -> None:
         """The encoded bound is observable off-chain, not just inside calldata."""
-        result = _compile(_make_compiler(), _open_intent(is_long=True))
+        result = _compile(_make_open_compiler(), _open_intent(is_long=True))
         metadata = result.action_bundle.metadata
         assert metadata["acceptable_price_30dec"] == str(ETH_UPPER_BOUND_30DEC)
         assert metadata["acceptable_price_usd"] == "3030"
@@ -321,7 +364,7 @@ class TestEncodedAcceptablePriceAllFourCombos:
     def test_trigger_open_encodes_limit_order_with_trigger_anchored_bound(self) -> None:
         """A strategy-authored resting open must remain cancellable on mainnet."""
         result = _compile(
-            _make_compiler(prices={"ETH": Decimal("3000"), "USDC": Decimal("1")}),
+            _make_open_compiler(prices={"ETH": Decimal("3000"), "USDC": Decimal("1")}),
             _open_intent(
                 is_long=True,
                 trigger_price=Decimal("1500"),
@@ -342,7 +385,7 @@ class TestEncodedAcceptablePriceAllFourCombos:
     )
     def test_marketable_trigger_is_a_safety_refusal(self, is_long: bool, trigger_price: Decimal) -> None:
         result = _compile(
-            _make_compiler(prices={"ETH": Decimal("3000"), "USDC": Decimal("1")}),
+            _make_open_compiler(prices={"ETH": Decimal("3000"), "USDC": Decimal("1")}),
             _open_intent(is_long=is_long, trigger_price=trigger_price),
         )
 
@@ -362,7 +405,7 @@ class TestFailsClosedWhenItCannotBoundThePrice:
 
     def test_missing_index_price_is_a_SAFETY_REFUSAL(self) -> None:
         """A fixed-oracle miss cannot be repaired by the slippage ladder."""
-        compiler = _make_compiler(prices={"USDC": Decimal("1")})  # no ETH price
+        compiler = _make_open_compiler(prices={"USDC": Decimal("1")})  # no ETH price
         result = _compile(compiler, _open_intent(is_long=True))
 
         assert result.status == CompilationStatus.FAILED
@@ -416,7 +459,7 @@ class TestFailsClosedWhenItCannotBoundThePrice:
             "mutation is rejected instead"
         )
 
-        result = _compile(_make_compiler(), injected)
+        result = _compile(_make_open_compiler(), injected)
 
         assert result.status == CompilationStatus.FAILED
         assert result.is_safety_refusal is True
@@ -425,7 +468,7 @@ class TestFailsClosedWhenItCannotBoundThePrice:
 
     def test_zero_price_is_a_SAFETY_REFUSAL_not_a_zero_bound(self) -> None:
         """Empty != Zero: a zero price must never become a zero bound."""
-        compiler = _make_compiler(prices={"ETH": Decimal("0"), "USDC": Decimal("1")})
+        compiler = _make_open_compiler(prices={"ETH": Decimal("0"), "USDC": Decimal("1")})
         result = _compile(compiler, _open_intent(is_long=True))
 
         assert result.status == CompilationStatus.FAILED
@@ -435,18 +478,25 @@ class TestFailsClosedWhenItCannotBoundThePrice:
         # defensible is compiling an order.
         assert result.is_transient or result.is_safety_refusal
 
-    def test_market_without_index_decimals_is_a_SAFETY_REFUSAL(self) -> None:
-        """No decimals ⇒ no trustworthy price scale ⇒ refuse rather than misscale."""
+    def test_unverified_market_has_no_index_decimals_and_is_a_SAFETY_REFUSAL(self) -> None:
+        """No verified decimals ⇒ no trustworthy price scale ⇒ refuse rather than misscale.
+
+        Successor of the pre-address-first "market without index decimals" case
+        (which patched the curated table to drop the decimals row). The curated
+        table is gone: index decimals now come ONLY from the process catalog of
+        venue-verified markets. The way a market still reaches price derivation
+        without them is a core-alias LABEL (``sdk.get_market_address``) whose
+        tuple this process never dynamically verified — so the catalog is
+        emptied here rather than primed.
+        """
+        market_catalog.clear()  # this market is deliberately UNVERIFIED
         compiler = _make_compiler()
-        with patch(
-            "almanak.connectors.gmx_v2.compiler.GMX_V2_MARKETS",
-            {"arbitrum": {"ETH/USD": "0x" + "e" * 40}},
-        ):
-            result = _compile(compiler, _open_intent(is_long=True))
+        result = _compile(compiler, _open_intent(is_long=True, market="ETH/USD"))
 
         assert result.status == CompilationStatus.FAILED
         assert result.is_safety_refusal is True
         assert result.transactions == []
+        assert "no verified index-token decimals" in (result.error or "")
 
 
 # =============================================================================
@@ -631,71 +681,73 @@ class TestPriceIsReachableOnTheProductionPath:
         position, so the symbol is already proven-resolvable on the production
         price path. Requiring the *same* symbol at compile time inherits that
         proof instead of inventing a new lookup that might not be populated.
+        The compile side reads the verified catalog (primed from the audited
+        fixture snapshot here), so this also pins fixture/valuation agreement.
         """
         from almanak.connectors.gmx_v2.compiler import GMXV2Compiler
         from almanak.connectors.gmx_v2.perps_read import _gmx_market_metadata
 
         compiler = GMXV2Compiler()
         checked = 0
-        for chain, markets in GMX_V2_MARKETS.items():
-            for market_name, address in markets.items():
-                meta = _gmx_market_metadata(address, chain)
-                assert meta is not None, f"{chain}/{market_name} has no valuation metadata"
-                assert compiler._index_symbol_for_market(chain, address) == meta.index_token_symbol
-                # The decimals used for price scaling must agree too — a
-                # mismatch would bound the order at the wrong magnitude.
-                assert index_token_decimals(chain, address) == meta.index_token_decimals
-                checked += 1
-        assert checked >= 15, "expected the real market catalogue, not a patched stub"
+        for chain, record in FIXTURE_MARKETS:
+            meta = _gmx_market_metadata(record.market_token, chain)
+            assert meta is not None, f"{chain}/{record.label} has no valuation metadata"
+            assert compiler._index_symbol_for_market(chain, record.market_token) == meta.index_token_symbol
+            # The decimals used for price scaling must agree too — a
+            # mismatch would bound the order at the wrong magnitude.
+            assert compiler._index_token_decimals(chain, record.market_token) == meta.index_token_decimals
+            checked += 1
+        assert checked >= 15, "expected the full fixture catalogue, not a patched stub"
 
     def test_symbol_lookup_is_alias_independent(self) -> None:
-        """ "ETH", "WETH" and "ETH/USD" all resolve to one market — and one symbol.
+        """Every input alias for one market yields ONE symbol, keyed off the address.
 
-        Keying off the resolved ADDRESS (not the user-typed ``intent.market``)
-        is what makes that true; keying off the raw string would ask the oracle
-        for a price of "WETH/USD".
+        "ETH", "WETH" and "ETH/USD" all resolve to the same market address, so
+        keying the symbol lookup off the resolved ADDRESS (not the user-typed
+        ``intent.market``) is what makes the symbol unique; keying off the raw
+        string would ask the oracle for a price of "WETH/USD".
         """
         from almanak.connectors.gmx_v2.compiler import GMXV2Compiler
 
-        eth_market = GMX_V2_MARKETS["arbitrum"]["ETH/USD"]
-        assert GMXV2Compiler()._index_symbol_for_market("arbitrum", eth_market) == "ETH"
+        assert GMXV2Compiler()._index_symbol_for_market("arbitrum", ETH_MARKET_ARB) == "ETH"
         # Case-insensitive on the address, as every other GMX address lookup is.
-        assert GMXV2Compiler()._index_symbol_for_market("arbitrum", eth_market.lower()) == "ETH"
+        assert GMXV2Compiler()._index_symbol_for_market("arbitrum", ETH_MARKET_ARB.lower()) == "ETH"
 
     def test_every_catalogued_market_can_produce_a_bound(self) -> None:
-        """No listed market is structurally un-compilable.
+        """No verified market is structurally un-compilable.
 
-        A market present in ``GMX_V2_MARKETS`` but missing decimals would fail
-        closed forever — the import-time coverage assert in ``addresses.py``
-        exists to prevent that, and this pins the consequence for THIS guard.
+        Every fixture row is an audited snapshot of a venue-verified record; a
+        row whose decimals could not scale a bound would fail closed forever on
+        a market the venue really serves — pin the consequence for THIS guard
+        across the full 6..24-decimal range the catalogue spans.
         """
-        for chain, markets in GMX_V2_MARKETS.items():
-            for market_name, address in markets.items():
-                decimals = index_token_decimals(chain, address)
-                assert decimals is not None, f"{chain}/{market_name}"
-                bound = derive_acceptable_price_30dec(
-                    index_price_usd=Decimal("100"),
-                    index_token_decimals=decimals,
-                    slippage_bps=100,
-                    is_long=True,
-                    is_increase=True,
-                    context=f"{chain}/{market_name}",
-                )
-                assert bound > 0
+        for chain, record in FIXTURE_MARKETS:
+            bound = derive_acceptable_price_30dec(
+                index_price_usd=Decimal("100"),
+                index_token_decimals=record.index_token_decimals,
+                slippage_bps=100,
+                is_long=True,
+                is_increase=True,
+                context=f"{chain}/{record.label}",
+            )
+            assert bound > 0
 
     @pytest.mark.parametrize(
         ("chain", "market"),
-        [(chain, market) for chain, markets in GMX_V2_MARKETS.items() for market in markets],
+        [
+            pytest.param(chain, record.label, id=f"{chain}-{record.label}")
+            for chain, record in FIXTURE_MARKETS
+        ],
     )
     def test_every_catalogued_market_compiles_the_CLOSE_leg(self, chain: str, market: str) -> None:
         """Guard the teardown-reachable compile path across the whole catalogue."""
-        index_symbol = market.split("/", 1)[0]
+        record = market_record(chain, market)
         compiler = _make_compiler(
             chain,
-            prices={index_symbol: Decimal("100"), "USDC": Decimal("1")},
+            prices={record.index_symbol: Decimal("100"), "USDC": Decimal("1")},
         )
 
-        result = _compile(compiler, _close_intent(is_long=True, market=market))
+        result = _compile(compiler, _close_intent(is_long=True, market=record.market_token))
 
         assert result.status == CompilationStatus.SUCCESS, f"{chain}/{market}: {result.error}"
         assert _decode_acceptable_price(result) > 0
@@ -795,7 +847,7 @@ class TestSubBasisPointToleranceIsRefusedNotTruncated:
     """
 
     def test_sub_bp_tolerance_is_a_SAFETY_REFUSAL(self) -> None:
-        result = _compile(_make_compiler(), _open_intent(is_long=True, max_slippage=Decimal("0.00005")))
+        result = _compile(_make_open_compiler(), _open_intent(is_long=True, max_slippage=Decimal("0.00005")))
         assert result.status == CompilationStatus.FAILED
         assert result.is_safety_refusal is True
         assert result.transactions == []
@@ -809,13 +861,13 @@ class TestSubBasisPointToleranceIsRefusedNotTruncated:
 
     def test_exactly_zero_is_STILL_ALLOWED(self) -> None:
         """Pinning to spot on purpose is a legitimate request, not a truncation."""
-        result = _compile(_make_compiler(), _open_intent(is_long=True, max_slippage=Decimal("0")))
+        result = _compile(_make_open_compiler(), _open_intent(is_long=True, max_slippage=Decimal("0")))
         assert result.status == CompilationStatus.SUCCESS, result.error
         assert _decode_acceptable_price(result) == ETH_PRICE_30DEC
 
     def test_exactly_one_bp_is_allowed(self) -> None:
         """The boundary the error message tells the user to use must actually work."""
-        result = _compile(_make_compiler(), _open_intent(is_long=True, max_slippage=Decimal("0.0001")))
+        result = _compile(_make_open_compiler(), _open_intent(is_long=True, max_slippage=Decimal("0.0001")))
         assert result.status == CompilationStatus.SUCCESS, result.error
         # 3000 * 1.0001 == 3000.3
         assert _decode_acceptable_price(result) == int(Decimal("3000.3") * 10**12)
@@ -869,7 +921,11 @@ class TestPlaceholderPricesCannotProduceABound:
 
     @pytest.mark.parametrize("is_long", [True, False])
     def test_open_refuses_instead_of_bounding_against_one_dollar(self, is_long: bool) -> None:
-        result = _compile(self._placeholder_mode_compiler(), _open_intent(is_long=is_long, market="BTC/USD"))
+        compiler = self._placeholder_mode_compiler()
+        # The OPEN leg demands CURRENT listing, so it must get past dynamic
+        # resolution to reach the placeholder guard this test pins.
+        compiler._gateway_client = fake_dynamic_gateway("arbitrum")
+        result = _compile(compiler, _open_intent(is_long=is_long, market=BTC_MARKET_ARB))
         assert result.status == CompilationStatus.FAILED, (
             f"placeholder mode must refuse; got {result.status} with "
             f"acceptablePrice={result.action_bundle.metadata.get('acceptable_price_30dec') if result.action_bundle else None}"
@@ -881,7 +937,7 @@ class TestPlaceholderPricesCannotProduceABound:
     @pytest.mark.parametrize("is_long", [True, False])
     def test_close_refuses_too(self, is_long: bool) -> None:
         """The teardown-reachable leg. A fix applied only to open would pass the test above."""
-        result = _compile(self._placeholder_mode_compiler(), _close_intent(is_long=is_long, market="BTC/USD"))
+        result = _compile(self._placeholder_mode_compiler(), _close_intent(is_long=is_long, market=BTC_MARKET_ARB))
         assert result.status == CompilationStatus.FAILED
         assert result.transactions == []
         assert result.is_transient is not True
@@ -901,7 +957,10 @@ class TestPlaceholderPricesCannotProduceABound:
             price_oracle={"BTC": Decimal("65000"), "USDC": Decimal("1")},
         )
         assert compiler._using_placeholders is False
-        result = _compile(compiler, _open_intent(is_long=True, market="BTC/USD"))
+        # Same open-leg listing requirement as above: dynamic resolution must
+        # succeed for the genuine price to reach the encoder.
+        compiler._gateway_client = fake_dynamic_gateway("arbitrum")
+        result = _compile(compiler, _open_intent(is_long=True, market=BTC_MARKET_ARB))
         assert result.status == CompilationStatus.SUCCESS, result.error
         # BTC index token is 8 decimals -> scale 10**22. 65000 * 1.01 == 65650.
         assert _decode_acceptable_price(result) == int(Decimal("65650") * 10**22)
@@ -929,7 +988,7 @@ class TestPlaceholderPricesCannotProduceABound:
             config=IntentCompilerConfig(allow_placeholder_prices=True, permission_discovery=True),
         )
         assert compiler._using_placeholders is True
-        result = _compile(compiler, _open_intent(is_long=True, market="BTC/USD"))
+        result = _compile(compiler, _open_intent(is_long=True, market=BTC_MARKET_ARB))
         assert result.status == CompilationStatus.SUCCESS, (
             f"permission discovery must still compile; got {result.error}"
         )

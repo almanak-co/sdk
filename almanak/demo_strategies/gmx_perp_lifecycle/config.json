@@ -1,5 +1,6 @@
 {
     "market": "ETH/USD",
+    "market_address": "0x70d95587d40A2caf56bd97485aB3Eec10Bee6336",
     "collateral_token": "USDC",
     "collateral_amount": "5",
     "leverage": "2.0",

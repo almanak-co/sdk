@@ -29,11 +29,13 @@ venues have such a formula** — ``aster_perps`` / ``pancakeswap_perps`` assign 
 ``tradeHash`` per open call with no pure function to it at all.
 
 The ``sem`` token is where the symbol-vs-address polysemy is resolved, on BOTH
-axes and chain-scoped. Address-shaped values pass through, symbols resolve
-through ``GMX_V2_MARKETS`` / ``GMX_V2_TOKENS``, and anything that resolves to
-neither yields NO token — never a degraded one, because an under-specified token
-is the only way this design can over-collapse, and over-collapse strands funds
-silently.
+axes and chain-scoped. The MARKET axis is address-first: address-shaped values
+pass through and symbol-shaped market values yield NO token (there is no
+curated market table any more — see the VIB-6155 note below for why one could
+never be trusted). Collateral symbols still resolve through ``GMX_V2_TOKENS``.
+Anything under-specified yields NO token — never a degraded one, because an
+under-specified token is the only way this design can over-collapse, and
+over-collapse strands funds silently.
 
 CATALOGUE DEFECT — FIXED in VIB-6155, and worth keeping as the worked example of
 how this module fails. ``GMX_V2_MARKETS`` used to list
@@ -53,7 +55,7 @@ space, which is precisely not the premise here.
 
 Two things survive the fix. First, the failure SHAPE is generic: any catalogue
 row that disagrees with the chain reproduces it, so nothing here should assume
-``GMX_V2_MARKETS`` is right — that is what the ``sem``-token discipline above is
+any catalogue was right — that is what the ``sem``-token discipline above is
 for. Second, no in-tree assertion can detect the next one. Reproducing the defect
 needs the address the CHAIN reports, which is not in this tree, and the obvious
 symbol-plus-symbol reproduction passes because both sides resolve through the
@@ -82,7 +84,7 @@ import logging
 from typing import Any
 
 from almanak.connectors._strategy_base.perp_identity import is_residual_marked
-from almanak.connectors.gmx_v2.addresses import GMX_V2_MARKETS, GMX_V2_TOKENS
+from almanak.connectors.gmx_v2.addresses import GMX_V2_TOKENS
 
 logger = logging.getLogger(__name__)
 
@@ -120,11 +122,31 @@ def _first_present(details: dict[str, Any], keys: tuple[str, ...]) -> str | None
     return None
 
 
+def _address_only(value: str | None) -> str | None:
+    """Return ``value`` lower-cased when it is address-shaped, else ``None``.
+
+    The market axis is address-first: there is no symbol→address table to
+    resolve through, and an under-specified reference must yield NO token
+    (over-split is fail-safe; over-collapse strands funds — module docstring).
+    """
+    if not value:
+        return None
+    if _is_hex_of_length(value, _ADDRESS_LEN):
+        # The validator strips before checking; the returned token must match,
+        # or a whitespace-padded producer value mints a DIFFERENT sem token
+        # from the canonical address and defeats the identity join.
+        return value.strip().lower()
+    return None
+
+
 def _resolve_address(table: dict[str, dict[str, str]], chain: str, value: str | None) -> str | None:
-    """Resolve a producer-written market / collateral to a lower-cased address.
+    """Resolve a producer-written COLLATERAL reference to a lower-cased address.
 
     Returns ``None`` — never a guess — when the value is neither an address nor
-    a symbol catalogued for ``chain``.
+    a symbol catalogued for ``chain``. Exact symbols only: the pair-alias tail
+    (``<SYM>`` / ``W<SYM>`` → ``<SYM>/USD``) was market vocabulary and left with
+    the market table — the market axis is address-first (``_address_only``), and
+    collateral symbols (``WETH``, ``USDC``, ``BTC.b``) never carry a quote leg.
     """
     if not value:
         return None
@@ -133,41 +155,13 @@ def _resolve_address(table: dict[str, dict[str, str]], chain: str, value: str | 
     entries = table.get(chain)
     if not entries:
         return None
-    # Catalogue symbols carry canonical case ("ETH/USD", "USDC", "BTC.b",
-    # "WETH.e") and producers do not reliably preserve it, so match
-    # case-insensitively. This folds a SYMBOL for lookup; it never folds an
-    # emitted token.
+    # Catalogue symbols carry canonical case ("USDC", "BTC.b", "WETH.e") and
+    # producers do not reliably preserve it, so match case-insensitively. This
+    # folds a SYMBOL for lookup; it never folds an emitted token.
     wanted = value.lower()
     for symbol, address in entries.items():
         if symbol.lower() == wanted:
             return str(address).lower()
-
-    # MARKET ALIASES — the execution path accepts more spellings than the
-    # catalogue keys, and an identity hook that accepts fewer leaves exactly the
-    # positions this ticket is about unnamed (#3534 panel, Codex P1).
-    #
-    # `GMXV2SDK.get_market_address` resolves `ETH`, `WETH`, `BTC`, `WBTC` — and
-    # `AVAX` / `WAVAX` where the market is wired — all case-insensitively. A
-    # strategy that writes `details["market"] = "ETH"` therefore opens a real
-    # position, while this hook emitted NO `sem` token for it: the HOT row went
-    # unnamed, the registry row carried the resolved address, the two never
-    # intersected, and the duplicate enumeration survived. The fix was inert for
-    # every alias-using strategy.
-    #
-    # Derived, NOT enumerated: a catalogue key is `<SYM>/USD`, so `<SYM>` and the
-    # wrapped `W<SYM>` are tried against it. A new market added to the catalogue is
-    # covered automatically, with no list to keep in step — and the census test
-    # asserts exactly that equivalence for every catalogue entry, so it fails if
-    # this ever stops matching the execution path's alias surface.
-    #
-    # Fail-safe either way: an alias that resolves to nothing still yields no
-    # token, which is over-split (loud), never a collapse.
-    for candidate in (f"{wanted}/usd", f"{wanted[1:]}/usd" if wanted.startswith("w") else None):
-        if not candidate:
-            continue
-        for symbol, address in entries.items():
-            if symbol.lower() == candidate:
-                return str(address).lower()
     return None
 
 
@@ -244,7 +238,13 @@ def gmx_v2_perp_identity(position: Any, *, wallet_address: str | None) -> frozen
             adopted_key = str(position_id).strip().lower()
             tokens.add(f"{_SLUG}:key:{chain}:{adopted_key}")
 
-        market = _resolve_address(GMX_V2_MARKETS, chain, _first_present(details, _MARKET_KEYS))
+        # Address-first: a market reference resolves ONLY when it already IS an
+        # address. Symbol-shaped market values yield no token — never a guess —
+        # which over-splits into a loud FAILED (fail-safe, see module docstring)
+        # instead of resolving through a curated table that VIB-6155 proved can
+        # silently disagree with the chain. Collateral symbols still resolve
+        # through the token table (a different, token-registry-backed axis).
+        market = _address_only(_first_present(details, _MARKET_KEYS))
         collateral = _resolve_address(GMX_V2_TOKENS, chain, _first_present(details, _COLLATERAL_KEYS))
         side = _side(position, details)
         if market and collateral and side:

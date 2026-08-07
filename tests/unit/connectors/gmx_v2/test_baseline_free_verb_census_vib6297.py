@@ -166,15 +166,16 @@ def test_the_reducer_reports_truncation_from_the_raw_page_not_the_filtered_one()
     from eth_abi import encode as abi_encode
 
     from almanak.connectors._strategy_base.perps_read_base import PerpsPositionQuery
-    from almanak.connectors.gmx_v2.addresses import GMX_V2_MARKETS, GMX_V2_TOKENS
+    from almanak.connectors.gmx_v2.addresses import GMX_V2_TOKENS
     from almanak.connectors.gmx_v2.perps_read import (
         _GET_ACCOUNT_POSITIONS_OUTPUT,
         _MAX_POSITION_RANGE,
         _reduce_gmx_positions,
     )
+    from tests.unit.connectors.gmx_v2.market_fixtures import market_address
 
     account = "0x" + "aa" * 20
-    market = GMX_V2_MARKETS["arbitrum"]["ETH/USD"]
+    market = market_address("arbitrum", "ETH/USD")
     collateral = GMX_V2_TOKENS["arbitrum"]["USDC"]
 
     def _row(size_in_usd: int):

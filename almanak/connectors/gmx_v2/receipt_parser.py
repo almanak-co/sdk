@@ -40,7 +40,8 @@ from typing import Any
 from eth_abi import decode as abi_decode
 
 from almanak.connectors._strategy_base.base import EventRegistry, HexDecoder
-from almanak.connectors.gmx_v2.addresses import GMX_V2, GMX_V2_TOKENS, index_token_decimals
+from almanak.connectors.gmx_v2 import market_catalog
+from almanak.connectors.gmx_v2.addresses import GMX_V2, GMX_V2_TOKENS
 from almanak.framework.execution.extract_result import (
     ExtractError,
     ExtractMissing,
@@ -708,7 +709,7 @@ class PerpFillData:
     - ``entry_price`` / ``exit_price`` are USD-per-token: GMX ``executionPrice``
       scaled by ``10**(index_token_decimals) / 1e30`` (VIB-6110). The index-token
       decimals are resolved from the parser's ``chain`` + the fill's ``market`` via
-      ``GMX_V2_INDEX_TOKEN_DECIMALS``. Empty≠Zero: ``None`` when the price is absent
+      the venue-verified catalog. Empty≠Zero: ``None`` when the price is absent
       OR the decimals cannot be resolved (parser constructed without a ``chain``, or
       an unlisted market) — NEVER the wrongly-scaled raw GMX-native ratio (the
       ``1.9e-15`` bug this field previously shipped).
@@ -1276,8 +1277,13 @@ class GMXv2ReceiptParser:
         if raw is None or isinstance(raw, bool) or not isinstance(raw, int):
             return None
         decimals = index_token_decimals_override
-        if decimals is None:
-            decimals = index_token_decimals(self.chain, market)
+        if decimals is None and self.chain and market:
+            # Address-first: the bundle-carried override (stamped at compile
+            # time from the verified record) is the primary source; the
+            # process catalog covers fills whose bundle predates the stamp.
+            # No static table — an unknown market (or an absent chain/market
+            # reference) stays unmeasured (None), never wrongly scaled.
+            decimals = market_catalog.index_decimals(self.chain, market)
         if decimals is None:
             return None
         return Decimal(raw).scaleb(decimals - 30)

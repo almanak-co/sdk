@@ -400,6 +400,13 @@ message GetPerpMarketRequest {
   string protocol = 1;
   string chain = 2;
   string market = 3;  // canonical label (HYPE/USD) or exact market address
+  // Listing policy. Opens (risk-increasing) set true: a delisted market's
+  // createOrder still succeeds on-chain but the keeper cancels it and keeps
+  // the execution fee, so an increase must prove CURRENT listing, not just
+  // tuple identity. Closes (risk-reducing) leave it false so a delisted or
+  // stale-record market stays closable. proto3 default false = the historic
+  // behavior, so old gateways degrade to it harmlessly.
+  bool require_listed = 4;
 }
 
 message PerpMarketResponse {

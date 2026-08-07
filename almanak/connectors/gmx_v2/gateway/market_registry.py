@@ -68,6 +68,14 @@ class GmxV2MarketRegistry:
         self._cache: dict[tuple[str, str], tuple[float, PerpMarketRecord]] = {}
         self._catalog_cache: dict[str, tuple[float, Any, Any]] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        # Last-known-good verified records, keyed by market-token address, with
+        # NO TTL. ``Reader.getMarket`` is a pure DataStore read — the tuple
+        # behind an address cannot change — so a verified record only ever goes
+        # stale in its API-derived listing status, never in its identity. This
+        # is what keeps the CLOSE path (address-first, ``allow_delisted_address``)
+        # off the venue API's uptime: an API outage must not strand a position
+        # this process already verified.
+        self._verified_history: dict[tuple[str, str], PerpMarketRecord] = {}
 
     async def resolve(
         self,
@@ -86,34 +94,22 @@ class GmxV2MarketRegistry:
             raise ValueError("market is required")
         cache_scope = f"{int(allow_delisted_address)}:{int(allow_index_equivalent)}"
         cache_key = (chain_key, f"{cache_scope}:{query.lower()}")
-        cached = self._cache.get(cache_key)
-        now = time.monotonic()
-        if cached is not None and cached[0] > now:
-            return cached[1]
+        cached = self._cached_record(cache_key)
+        if cached is not None:
+            return cached
 
         lock = self._locks.setdefault(chain_key, asyncio.Lock())
         async with lock:
-            cached = self._cache.get(cache_key)
-            now = time.monotonic()
-            if cached is not None and cached[0] > now:
-                return cached[1]
-            catalog = self._catalog_cache.get(chain_key)
-            if catalog is not None and catalog[0] > now:
-                _, markets_payload, tokens_payload = catalog
-            else:
-                # Cache the raw venue catalogue as well as verified records. Both
-                # endpoints enumerate the whole chain, so re-downloading them for
-                # each distinct market would scale compile traffic with strategy
-                # breadth. The short TTL bounds listing/delisting staleness.
-                markets_payload, tokens_payload = await asyncio.gather(
-                    self._get_json(chain_key, "/markets"),
-                    self._get_json(chain_key, "/tokens"),
-                )
-                self._catalog_cache[chain_key] = (
-                    time.monotonic() + _CACHE_TTL_SECONDS,
-                    markets_payload,
-                    tokens_payload,
-                )
+            cached = self._cached_record(cache_key)
+            if cached is not None:
+                return cached
+            try:
+                markets_payload, tokens_payload = await self._catalogue(chain_key)
+            except Exception as exc:
+                stale = self._stale_verified_record(chain_key, query, allow_delisted_address, exc)
+                if stale is not None:
+                    return stale
+                raise
             candidates = self._matching_markets(
                 markets_payload,
                 query,
@@ -122,27 +118,14 @@ class GmxV2MarketRegistry:
             if not candidates:
                 return None
             if len(candidates) > 1 and not allow_index_equivalent:
-                choices = ", ".join(f"{item.name} ({item.market_token})" for item in candidates)
-                raise ValueError(f"GMX market {query!r} is ambiguous; pass the exact full name or address: {choices}")
+                raise self._ambiguous(query, candidates)
 
             verified_candidates = [
                 (candidate, await self._verify_and_build(chain_key, candidate, tokens_payload, eth_call))
                 for candidate in candidates
             ]
             records = [record for _, record in verified_candidates]
-            if len(records) > 1:
-                price_identities = {
-                    (record.index_token.lower(), record.index_symbol.upper(), record.index_token_decimals)
-                    for record in records
-                }
-                if len(price_identities) != 1:
-                    choices = ", ".join(
-                        f"{record.label} ({record.market_token}, index={record.index_token}/{record.index_symbol})"
-                        for record in records
-                    )
-                    raise ValueError(
-                        f"GMX market {query!r} is ambiguous across distinct index-price identities: {choices}"
-                    )
+            self._require_single_index_identity(query, records)
             # Price history is index-scoped, not collateral-market-scoped. If
             # every matching market was independently verified on-chain and all
             # carry one index identity, any member names the same candle plane.
@@ -151,13 +134,98 @@ class GmxV2MarketRegistry:
                 verified_candidates,
                 key=lambda item: item[1].market_token.lower(),
             )
-            expiry = time.monotonic() + _CACHE_TTL_SECONDS
-            # Never seed the non-unique short label from a full-name or address
-            # lookup. Otherwise resolving one ETH collateral variant would make a
-            # later ETH/USD query silently order-dependent for the cache TTL.
-            for alias in (query, selected_candidate.name, selected_candidate.market_token):
-                self._cache[(chain_key, f"{cache_scope}:{alias.lower()}")] = (expiry, record)
+            self._remember_verified(chain_key, cache_scope, query, selected_candidate, record)
             return record
+
+    def _cached_record(self, cache_key: tuple[str, str]) -> PerpMarketRecord | None:
+        """Return the unexpired verified record for ``cache_key``, if any."""
+        cached = self._cache.get(cache_key)
+        if cached is not None and cached[0] > time.monotonic():
+            return cached[1]
+        return None
+
+    async def _catalogue(self, chain_key: str) -> tuple[Any, Any]:
+        """Return the TTL-cached raw ``(markets_payload, tokens_payload)``."""
+        catalog = self._catalog_cache.get(chain_key)
+        if catalog is not None and catalog[0] > time.monotonic():
+            return catalog[1], catalog[2]
+        # Cache the raw venue catalogue as well as verified records. Both
+        # endpoints enumerate the whole chain, so re-downloading them for
+        # each distinct market would scale compile traffic with strategy
+        # breadth. The short TTL bounds listing/delisting staleness.
+        markets_payload, tokens_payload = await asyncio.gather(
+            self._get_json(chain_key, "/markets"),
+            self._get_json(chain_key, "/tokens"),
+        )
+        self._catalog_cache[chain_key] = (
+            time.monotonic() + _CACHE_TTL_SECONDS,
+            markets_payload,
+            tokens_payload,
+        )
+        return markets_payload, tokens_payload
+
+    def _stale_verified_record(
+        self,
+        chain_key: str,
+        query: str,
+        allow_delisted_address: bool,
+        exc: Exception,
+    ) -> PerpMarketRecord | None:
+        # Serve-stale: an ADDRESS query this registry has verified
+        # before stays answerable through a catalogue outage — the
+        # address names an immutable tuple. Label queries get no
+        # such grace (labels are catalogue vocabulary), and neither
+        # do ``allow_delisted_address=False`` callers: the tuple is
+        # immutable but the LISTING status is not, and a stale
+        # record cannot prove the market is still listed — the
+        # listing-sensitive caller asked for exactly that proof.
+        stale = self._verified_history.get((chain_key, query.lower())) if allow_delisted_address else None
+        if stale is not None:
+            logger.warning(
+                "GMX catalogue unavailable on %s; serving last verified record for %s: %s",
+                chain_key,
+                query,
+                exc,
+            )
+        return stale
+
+    @staticmethod
+    def _ambiguous(query: str, candidates: list[_ApiMarket]) -> ValueError:
+        """Build the fail-closed ambiguity error for a multi-candidate query."""
+        choices = ", ".join(f"{item.name} ({item.market_token})" for item in candidates)
+        return ValueError(f"GMX market {query!r} is ambiguous; pass the exact full name or address: {choices}")
+
+    @staticmethod
+    def _require_single_index_identity(query: str, records: list[PerpMarketRecord]) -> None:
+        """Fail closed when verified records span distinct index-price identities."""
+        if len(records) > 1:
+            price_identities = {
+                (record.index_token.lower(), record.index_symbol.upper(), record.index_token_decimals)
+                for record in records
+            }
+            if len(price_identities) != 1:
+                choices = ", ".join(
+                    f"{record.label} ({record.market_token}, index={record.index_token}/{record.index_symbol})"
+                    for record in records
+                )
+                raise ValueError(f"GMX market {query!r} is ambiguous across distinct index-price identities: {choices}")
+
+    def _remember_verified(
+        self,
+        chain_key: str,
+        cache_scope: str,
+        query: str,
+        selected: _ApiMarket,
+        record: PerpMarketRecord,
+    ) -> None:
+        """Seed the verified-record cache and the no-TTL verified history."""
+        expiry = time.monotonic() + _CACHE_TTL_SECONDS
+        # Never seed the non-unique short label from a full-name or address
+        # lookup. Otherwise resolving one ETH collateral variant would make a
+        # later ETH/USD query silently order-dependent for the cache TTL.
+        for alias in (query, selected.name, selected.market_token):
+            self._cache[(chain_key, f"{cache_scope}:{alias.lower()}")] = (expiry, record)
+        self._verified_history[(chain_key, record.market_token.lower())] = record
 
     async def _get_json(self, chain: str, path: str) -> Any:
         """Fetch one catalogue endpoint with explicit connection ownership.
@@ -236,8 +304,7 @@ class GmxV2MarketRegistry:
         if not matches:
             return None
         if len(matches) > 1:
-            choices = ", ".join(f"{item.name} ({item.market_token})" for item in matches)
-            raise ValueError(f"GMX market {query!r} is ambiguous; pass the exact full name or address: {choices}")
+            raise cls._ambiguous(query, matches)
         return matches[0]
 
     async def _verify_and_build(

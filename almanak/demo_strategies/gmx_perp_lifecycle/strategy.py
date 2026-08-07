@@ -53,6 +53,16 @@ class GMXPerpLifecycleStrategy(IntentStrategy):
         super().__init__(*args, **kwargs)
 
         self.market = self.get_config("market", "ETH/USD")
+        # Address-first contract: the strategy author declares the GMX
+        # market-token ADDRESS; the SDK verifies it (dynamic registry,
+        # VIB-6561) but never maps a symbol to an address on the author's
+        # behalf. The label above stays as display/signal vocabulary only.
+        self.market_address = self.get_config("market_address", None)
+        if not (isinstance(self.market_address, str) and self.market_address[:2].lower() == "0x"):
+            raise ValueError(
+                "gmx_perp_lifecycle requires config 'market_address' — the GMX market-token "
+                "address for the configured market (address-first market contract)."
+            )
         self.collateral_token = self.get_config("collateral_token", "USDC")
         self.collateral_amount = Decimal(str(self.get_config("collateral_amount", "10")))
         self.leverage = Decimal(str(self.get_config("leverage", "2.0")))
@@ -271,7 +281,7 @@ class GMXPerpLifecycleStrategy(IntentStrategy):
         )
 
         return Intent.perp_open(
-            market=self.market,
+            market=self.market_address,
             collateral_token=self.collateral_token,
             collateral_amount=self.collateral_amount,
             size_usd=position_size_usd,
@@ -285,12 +295,12 @@ class GMXPerpLifecycleStrategy(IntentStrategy):
 
     def _target_position_is_open(self, market: MarketSnapshot) -> bool | None:
         """Return measured target exposure, or ``None`` when the read is incomplete."""
-        from almanak.connectors.gmx_v2.addresses import GMX_V2_MARKETS, GMX_V2_TOKENS
+        from almanak.connectors.gmx_v2.addresses import GMX_V2_TOKENS
 
         result = market.perp_positions("gmx_v2", chain=self.chain)
         if not result.ok or result.truncated:
             return None
-        market_address = GMX_V2_MARKETS.get(self.chain, {}).get(self.market)
+        market_address = self.market_address
         collateral_address = GMX_V2_TOKENS.get(self.chain, {}).get(self.collateral_token)
         if market_address is None or collateral_address is None:
             return None
@@ -310,7 +320,7 @@ class GMXPerpLifecycleStrategy(IntentStrategy):
         logger.info(f"Closing {direction}: {self.market}, size=FULL")
 
         return Intent.perp_close(
-            market=self.market,
+            market=self.market_address,
             collateral_token=self.collateral_token,
             is_long=self.is_long,
             size_usd=None,  # None = close the FULL on-chain position (never a cached notional — VIB-5950/ALM-2976)
@@ -478,7 +488,7 @@ class GMXPerpLifecycleStrategy(IntentStrategy):
     # --- Teardown ---
 
     def get_open_positions(self):
-        from almanak.connectors.gmx_v2.addresses import GMX_V2_MARKETS, GMX_V2_TOKENS
+        from almanak.connectors.gmx_v2.addresses import GMX_V2_TOKENS
         from almanak.framework.teardown import PositionInfo, PositionType, TeardownPositionSummary
 
         positions = []
@@ -496,8 +506,8 @@ class GMXPerpLifecycleStrategy(IntentStrategy):
                     protocol="gmx_v2",
                     value_usd=self._position_size_usd,
                     details={
-                        "market": self.market,
-                        "market_address": GMX_V2_MARKETS.get(self.chain, {}).get(self.market),
+                        "market": self.market_address,
+                        "market_address": self.market_address,
                         "is_long": self.is_long,
                         "leverage": str(self.leverage),
                         "collateral_token": self.collateral_token,
@@ -527,7 +537,7 @@ class GMXPerpLifecycleStrategy(IntentStrategy):
             # (VIB-5950/ALM-2976); size_usd=0 would be a no-op.
             intents.append(
                 Intent.perp_close(
-                    market=self.market,
+                    market=self.market_address,
                     collateral_token=self.collateral_token,
                     is_long=self.is_long,
                     size_usd=None,

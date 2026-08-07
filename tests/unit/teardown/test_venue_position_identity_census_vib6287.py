@@ -22,8 +22,8 @@ from almanak.connectors._strategy_base.perp_identity import (
     has_perp_identity_hook,
     registered_perp_identity_protocols,
 )
-from almanak.connectors.gmx_v2.addresses import GMX_V2_MARKETS, GMX_V2_TOKENS
-from almanak.connectors.gmx_v2.perp_identity import _resolve_address, gmx_v2_perp_identity
+from almanak.connectors.gmx_v2.addresses import GMX_V2_TOKENS
+from almanak.connectors.gmx_v2.perp_identity import _address_only, gmx_v2_perp_identity
 from almanak.framework.teardown.completeness import (
     _covers,
     _perp_carries_identity,
@@ -38,10 +38,11 @@ from almanak.framework.teardown.registry_enumeration import (
     _dedupe_keys,
     reconcile_lp_with_registry,
 )
+from tests.unit.connectors.gmx_v2.market_fixtures import FIXTURE_MARKETS, market_address
 
 CHAIN = "arbitrum"
-MARKET = GMX_V2_MARKETS[CHAIN]["ETH/USD"]
-BTC_MARKET = GMX_V2_MARKETS[CHAIN]["BTC/USD"]
+MARKET = market_address(CHAIN, "ETH/USD")
+BTC_MARKET = market_address(CHAIN, "BTC/USD")
 USDC = GMX_V2_TOKENS[CHAIN]["USDC"]
 USDT = GMX_V2_TOKENS[CHAIN]["USDT"]
 WALLET = "0xafeB2f5c213b5e7F37c3Fc171dfCb6270d07e21a"
@@ -320,7 +321,12 @@ class _CloseIntent:
 
 
 def _registry_row(market=None, collateral=None, position_id=VENUE_KEY) -> PositionInfo:
-    """A row shaped exactly as the perp registry read produces on the restart path."""
+    """A row shaped exactly as the perp registry read produces on the restart path.
+
+    Address-first: the runtime writer persists ``intent.market`` verbatim, and
+    strategies now supply the market-token ADDRESS on the intent, so the stored
+    ``market`` is an address.
+    """
     return PositionInfo(
         position_type=PositionType.PERP,
         position_id=position_id,
@@ -336,25 +342,78 @@ def _registry_row(market=None, collateral=None, position_id=VENUE_KEY) -> Positi
     )
 
 
-def test_c3_identity_layer_now_matches_across_value_spaces():
-    """``_perp_carries_identity`` credits a SYMBOL intent against an ADDRESS
-    position — the widening itself works at its own layer.
+def _adapter_display_row() -> PositionInfo:
+    """The teardown-lane discovery row, built by the REAL adapter producer.
 
-    Was a strict xfail until VIB-6316; the wallet is what it was waiting for.
-    GMX derives its own position key from ``(account, market, collateral, side)``,
-    so without the account the row emits its adopted venue key ALONE and there is
-    nothing for a symbol-space intent to intersect.
+    ``GMXv2Adapter.get_positions_as_teardown_summary`` emits the one remaining
+    cross-representation shape in the address-first world: ``position_id`` is
+    the venue key, ``details["market"]`` holds the catalog LABEL (display only
+    — the catalog is primed here exactly as a live compile's dynamic market
+    resolution would have primed it), and ``details["market_address"]``
+    carries the identity axis. Only the chain read is stubbed.
     """
-    assert _perp_carries_identity(_CloseIntent("ETH/USD"), _registry_row(), WALLET)
+    from datetime import UTC as _UTC
+    from datetime import datetime as _datetime
+
+    from almanak.connectors.gmx_v2.adapter import GMXv2Adapter, GMXv2Config, GMXv2Position
+    from tests.unit.connectors.gmx_v2.market_fixtures import market_record, prime_catalog
+
+    prime_catalog(market_record("arbitrum", "ETH/USD"), chain="arbitrum")
+    adapter = GMXv2Adapter(GMXv2Config(chain=CHAIN, wallet_address=WALLET))
+    onchain = GMXv2Position(
+        position_key=VENUE_KEY,
+        market=MARKET,
+        collateral_token=USDC,
+        size_in_usd=Decimal("6.0"),
+        size_in_tokens=Decimal("0.003218709779491469"),
+        collateral_amount=Decimal("2.9964"),
+        entry_price=Decimal("1864.10"),
+        is_long=True,
+        leverage=Decimal("2"),
+        last_updated=_datetime.now(_UTC),
+    )
+    adapter.get_positions_onchain = lambda **_kwargs: [onchain]  # type: ignore[method-assign]
+    summary = adapter.get_positions_as_teardown_summary(deployment_id="deployment:test")
+    row = summary.positions[0]
+    assert row.details["market"] == "ETH/USD", "fixture precondition: catalog label must be the display name"
+    return row
+
+
+def test_c3_identity_layer_matches_the_regenerated_address_intent():
+    """The C3 restart pairing is address ↔ address now — no wallet required.
+
+    SUCCESSOR of ``test_c3_identity_layer_now_matches_across_value_spaces``
+    (VIB-6316), rewritten for the address-first contract: symbol→address market
+    resolution was deliberately removed ("start with the address"), so the
+    restart pairing this layer was widened for — registry ADDRESS row vs
+    regenerated SYMBOL intent — no longer exists. The regenerated intent
+    carries the address the strategy supplied, and the raw market comparison
+    credits it directly.
+
+    A LEGACY symbol intent is refused even with the wallet: the market axis has
+    no symbol resolution, so the split stays loud/fail-safe. Legacy
+    symbol-shaped state is a repair-CLI migration case
+    (``almanak/framework/cli/repair_position_references.py``).
+    """
+    assert _perp_carries_identity(_CloseIntent(MARKET), _registry_row(), WALLET)
+    assert _perp_carries_identity(_CloseIntent(MARKET), _registry_row()), (
+        "address ↔ address needs no wallet — the raw comparison already agrees"
+    )
+    assert not _perp_carries_identity(_CloseIntent("ETH/USD"), _registry_row(), WALLET), (
+        "a legacy symbol intent must stay uncredited: over-split is loud, "
+        "resolving through a curated table is the silent-disagreement hazard "
+        "VIB-6155 proved"
+    )
 
 
 def test_c3_identity_layer_is_unmeasured_without_a_wallet():
-    """The sibling that proves the wallet is LOAD-BEARING, not decorative.
+    """A legacy SYMBOL intent is refused with or without a wallet (Empty ≠ Zero).
 
-    Kept deliberately: if this ever starts returning True, the test above stops
-    demonstrating anything about the wallet, and VIB-6316 could be reverted with
-    the whole file still green. Empty ≠ Zero — ``None`` is UNMEASURED identity,
-    which correctly falls back to the raw comparison rather than guessing.
+    Historically this pinned that the VIB-6316 wallet threading was
+    load-bearing for the symbol↔address pairing. Address-first removed that
+    pairing entirely: a symbol-shaped intent emits no venue probe token, so
+    nothing credits it regardless of the wallet — the fail-safe over-split
+    direction. Kept as the no-wallet control for the legacy refusal.
     """
     assert not _perp_carries_identity(_CloseIntent("ETH/USD"), _registry_row())
 
@@ -408,34 +467,39 @@ def test_c3_never_credits_an_intent_that_does_not_name_this_position(label, inte
 
 
 def test_c3_restart_path_end_to_end_is_fixed():
-    """The end-to-end restart case C3 was scoped to fix. FIXED by VIB-6316.
+    """The end-to-end restart case C3 was scoped to fix, in address space.
 
-    Was a strict xfail carrying a long "NOT FIXED HERE, DELIBERATELY" rationale:
-    widening ``_covers_perp`` decides whether a teardown reports SUCCESS on a
-    money path, and no real-fork proof of the 2-row split existed. **R5 supplied
-    it** (mainnet arbitrum, 2026-08-02, `docs/internal/gmx-readiness/r5-20260802/`)
-    — the split reproduced on-chain against a shipped demo, with TD-08
-    chain-confirming both rows CLOSED in the same iteration the gate called one
-    stranded.
+    Fixed by VIB-6316 for the symbol↔address pairing (R5, mainnet arbitrum,
+    2026-08-02, `docs/internal/gmx-readiness/r5-20260802/`); rewritten for the
+    address-first contract, under which the restart pairing is address↔address:
+    the regenerated close intent carries the market-token address the strategy
+    supplied, and the gate credits the registry row without needing venue
+    corroboration.
 
-    ONE PREDICTION IN THE OLD REASON WAS WRONG, AND IT IS WORTH KEEPING. It said
-    this test "flips to a FAILURE the moment _covers_perp is widened". It did NOT:
-    every VIB-6316 signature defaults the wallet to ``None``, so widening alone
-    left this call — which passed no resolver — returning False. A tripwire that
-    depends on a default it does not control is not a tripwire. Hence the explicit
-    resolver here and the wallet-less sibling below.
+    The LEGACY half is asserted too: a symbol-shaped regenerated intent — the
+    exact pre-migration shape — now leaves the registry row UNCOVERED even with
+    the wallet resolved. That is deliberate fail-safe over-split (loud FAILED,
+    never a silent strand); legacy symbol state is migrated by the repair CLI
+    (``almanak/framework/cli/repair_position_references.py``), not resolved
+    through a curated table (VIB-6155).
     """
-    report = check_intent_coverage([_registry_row()], [_CloseIntent("ETH/USD")], wallet_for_chain=lambda _chain: WALLET)
+    report = check_intent_coverage([_registry_row()], [_CloseIntent(MARKET)], wallet_for_chain=lambda _chain: WALLET)
     assert report.complete, f"uncovered after a full close: {report.uncovered}"
+    legacy = check_intent_coverage([_registry_row()], [_CloseIntent("ETH/USD")], wallet_for_chain=lambda _chain: WALLET)
+    assert not legacy.complete, (
+        "a legacy symbol-space close must fail the gate LOUDLY — crediting it would "
+        "require the symbol resolution this migration deleted"
+    )
 
 
 def test_c3_restart_path_without_a_wallet_still_reports_uncovered():
-    """The inertness control for the end-to-end lane.
+    """The no-wallet control for the legacy symbol-space lane.
 
     Not a defect: ``None`` is UNMEASURED, and falling back to the raw comparison
     is the fail-SAFE direction (a split reported loudly beats a strand reported
-    as success). It is pinned because it is what makes the test above evidence
-    about the wallet rather than about the fixture.
+    as success). Under address-first the legacy symbol intent stays uncovered
+    with a wallet too (see the end-to-end test above); this pins that removing
+    the resolver never flips the answer.
     """
     assert not check_intent_coverage([_registry_row()], [_CloseIntent("ETH/USD")]).complete
 
@@ -473,8 +537,21 @@ def test_the_identity_layer_agrees_now_that_the_lanes_share_a_wallet():
     disagreement back one level up, which is why the production wiring is
     asserted structurally in
     ``test_completeness_venue_identity_vib6316.py::test_n3_n4_*``.
+
+    Address-first update: the registry restart pairing is address↔address and
+    no longer needs the wallet, so the pairing that still EXERCISES it is the
+    adapter's discovery row — venue key id, catalog LABEL under ``market``
+    (display), address under ``market_address``. Only with the wallet can the
+    venue corroborate (derive == adopt) and emit the ``sem`` token the intent
+    probe intersects; without it the row is key-only and the raw label-vs-
+    address comparison correctly refuses.
     """
-    assert _perp_carries_identity(_CloseIntent("ETH/USD"), _registry_row(), WALLET)
+    row = _adapter_display_row()
+    assert _perp_carries_identity(_CloseIntent(MARKET), row, WALLET)
+    assert not _perp_carries_identity(_CloseIntent(MARKET), row), (
+        "wallet-less must stay unmeasured for the label-display row — the venue "
+        "cannot derive its own key without the account"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -493,9 +570,9 @@ def test_gmx_market_catalogue_is_injective_within_each_chain():
     Whether each address IS the market it claims to be is a different question
     that no uniqueness assert can answer; it is settled on-chain against
     ``Reader.getMarket`` in ``tests/audit/test_gmx_v2_market_identity.py``."""
-    for chain, table in GMX_V2_MARKETS.items():
-        addresses = [a.lower() for a in table.values()]
-        assert len(addresses) == len(set(addresses)), f"{chain} market catalogue is no longer injective"
+    for chain in sorted({c for c, _ in FIXTURE_MARKETS}):
+        addresses = [r.market_token.lower() for c, r in FIXTURE_MARKETS if c == chain]
+        assert len(addresses) == len(set(addresses)), f"{chain} fixture market snapshot is no longer injective"
 
 
 # ---------------------------------------------------------------------------
@@ -560,7 +637,7 @@ def test_a_conforming_hook_is_still_honoured():
         protocol="gmx_v2",
         value_usd=Decimal("0"),
         details={
-            "market": GMX_V2_MARKETS["arbitrum"]["ETH/USD"],
+            "market": market_address("arbitrum", "ETH/USD"),
             "collateral_token": GMX_V2_TOKENS["arbitrum"]["USDC"],
             "is_long": True,
         },
@@ -592,7 +669,7 @@ def test_the_side_key_shipped_demos_actually_write_is_read():
         protocol="gmx_v2",
         value_usd=Decimal("0"),
         details={
-            "market": GMX_V2_MARKETS["arbitrum"]["ETH/USD"],
+            "market": market_address("arbitrum", "ETH/USD"),
             "collateral_token": GMX_V2_TOKENS["arbitrum"]["USDC"],
             "side": "long",
         },
@@ -607,7 +684,7 @@ def test_vib6155_is_fixed_and_its_guard_is_deliberately_not_in_this_module():
     """VIB-6155 is corrected; this test records why no census test replaces it.
 
     The predecessor of this test asserted the defect itself — that
-    ``GMX_V2_MARKETS["arbitrum"]["AVAX/USD"]`` equalled the Avalanche ETH/USD
+    ``market_address("arbitrum", "AVAX/USD")`` equalled the Avalanche ETH/USD
     address — and instructed its own deletion once VIB-6155 landed. It has landed
     (five wrong rows, not one), so the assertion is inverted here rather than
     dropped silently, and the reasoning that made it un-replaceable is kept.
@@ -629,8 +706,8 @@ def test_vib6155_is_fixed_and_its_guard_is_deliberately_not_in_this_module():
     market against that chain's ``Reader.getMarket()``. Its negative control was
     15 failures on the pre-fix tree.
     """
-    assert GMX_V2_MARKETS["arbitrum"]["AVAX/USD"].lower() != GMX_V2_MARKETS["avalanche"]["ETH/USD"].lower(), (
-        "VIB-6155 has regressed: the Arbitrum AVAX/USD row is holding the Avalanche "
+    assert market_address("arbitrum", "AVAX/USD").lower() != market_address("avalanche", "ETH/USD").lower(), (
+        "VIB-6155 has regressed IN THE FIXTURE SNAPSHOT: the Arbitrum AVAX/USD row is holding the Avalanche "
         "ETH/USD address again. Run tests/audit/test_gmx_v2_market_identity.py -m audit "
         "for the full picture — this assertion only sees the one duplicate."
     )
@@ -641,63 +718,50 @@ def test_vib6155_is_fixed_and_its_guard_is_deliberately_not_in_this_module():
 # ---------------------------------------------------------------------------
 
 
-def _usd_market_symbols(chain: str) -> list[str]:
-    """Catalogue keys of the `<SYM>/USD` shape, which is what the aliases target."""
-    return [s for s in GMX_V2_MARKETS[chain] if s.upper().endswith("/USD")]
+def _usd_market_addresses(chain: str) -> list[str]:
+    """Fixture market-token addresses — the only market vocabulary identity accepts."""
+    return [r.market_token for c, r in FIXTURE_MARKETS if c == chain]
 
 
-@pytest.mark.parametrize("chain", sorted(GMX_V2_MARKETS))
-def test_every_market_alias_the_compiler_accepts_also_resolves_for_identity(chain):
-    """An identity hook that accepts FEWER spellings than the execution path is inert.
+@pytest.mark.parametrize("chain", sorted({c for c, _ in FIXTURE_MARKETS}))
+def test_every_address_spelling_resolves_and_no_symbol_spelling_does(chain):
+    """Identity is address-first: address spellings resolve, symbol spellings never do.
 
-    `GMXV2SDK.get_market_address` resolves `ETH`, `WETH`, `BTC`, `WBTC` — and
-    `AVAX`/`WAVAX` where wired — case-insensitively. A strategy writing
-    ``details["market"] = "ETH"`` opens a real position, so if this hook only
-    recognised ``ETH/USD`` the HOT row stayed unnamed while the registry row
-    carried the resolved address: they never intersect and the duplicate
-    enumeration survives. VIB-6287 would be fixed for `ETH/USD` strategies and
-    silently inert for `ETH` ones.
-
-    DERIVED from the catalogue, not enumerated: for every ``<SYM>/USD`` key the
-    bare ``<SYM>`` and wrapped ``W<SYM>`` forms must resolve to the SAME address.
-    A market added to the catalogue is covered automatically — there is no alias
-    list here to fall out of step with the SDK's.
+    SUCCESSOR of ``test_every_market_alias_the_compiler_accepts_also_resolves_for_identity``.
+    The alias census asserted that every label spelling the compiler accepted
+    (``ETH``, ``WETH``, ``ETH/USD``) resolved through the curated market table —
+    a table VIB-6155 proved can silently disagree with the chain, and which is
+    now deleted. Producers write addresses; identity must accept every ADDRESS
+    spelling case-insensitively and must treat EVERY symbol spelling as
+    unmeasured (no token — over-split, loud; legacy symbol state is a
+    repair-CLI migration case).
     """
-    symbols = _usd_market_symbols(chain)
-    assert symbols, f"{chain} has no <SYM>/USD markets — this census would be vacuous"
+    addresses = _usd_market_addresses(chain)
+    assert addresses, f"{chain} has no fixture markets — this census would be vacuous"
 
-    for canonical in symbols:
-        base = canonical.split("/")[0]
-        expected = _resolve_address(GMX_V2_MARKETS, chain, canonical)
-        assert expected, f"{chain}:{canonical} does not resolve at all"
-        for alias in (base, base.lower(), f"W{base}", f"w{base.lower()}"):
-            assert _resolve_address(GMX_V2_MARKETS, chain, alias) == expected, (
-                f"{chain}: alias {alias!r} does not resolve to the same market as "
-                f"{canonical!r}; the compiler accepts it but the identity hook does not, "
-                "so positions opened with that spelling keep the VIB-6287 duplicate"
+    for address in addresses:
+        expected = address.lower()
+        for spelling in (address, address.lower(), "0x" + address[2:].upper()):
+            assert _address_only(spelling) == expected, (
+                f"{chain}: address spelling {spelling!r} does not resolve identically — "
+                "case must never affect identity"
+            )
+
+    for chain_, record in FIXTURE_MARKETS:
+        if chain_ != chain:
+            continue
+        base = record.label.split("/")[0]
+        for symbol in (record.label, base, base.lower(), f"W{base}", f"w{base.lower()}"):
+            assert _address_only(symbol) is None, (
+                f"{chain}: symbol spelling {symbol!r} resolved — the market axis must "
+                "not guess (address-first; VIB-6155)"
             )
 
 
 def test_an_alias_that_names_no_market_still_yields_nothing():
-    """Non-vacuity control: alias resolution must not become a guess.
-
-    The alias fallback appends ``/USD`` and strips a leading ``W``. Neither may
-    turn an unknown symbol into a market — emitting a token for a market the
-    position is not in would violate the emit-only-with-CERTAINTY contract, and an
-    under-specified token is the over-collapse direction.
-    """
-    catalogued = {sym.upper() for sym in GMX_V2_MARKETS["arbitrum"]}
-    absent = ("ZZZZ", "WZZZZ", "NOTAMARKET", "W", "/USD", "")
-    # Guard the guard: these must genuinely not be markets, or the control is vacuous.
-    # (An earlier version used "DOGE", which IS an Arbitrum market — this assertion is
-    # what caught that.)
-    for symbol in absent:
-        assert f"{symbol.upper()}/USD" not in catalogued and symbol.upper() not in catalogued, (
-            f"{symbol!r} is a real market — pick a symbol that is not, or this test proves nothing"
-        )
-
-    for unknown in absent:
-        assert _resolve_address(GMX_V2_MARKETS, "arbitrum", unknown) is None, unknown
+    """Non-vacuity control kept from the alias era: junk never becomes a market."""
+    for unknown in ("ZZZZ", "WZZZZ", "NOTAMARKET", "W", "/USD", ""):
+        assert _address_only(unknown) is None, unknown
 
 
 def test_a_row_whose_id_and_details_name_different_positions_names_nothing():
@@ -723,7 +787,7 @@ def test_a_row_whose_id_and_details_name_different_positions_names_nothing():
         protocol="gmx_v2",
         value_usd=Decimal("0"),
         details={
-            "market": GMX_V2_MARKETS[chain]["ETH/USD"],
+            "market": market_address(chain, "ETH/USD"),
             "collateral_token": GMX_V2_TOKENS[chain]["USDC"],
             "is_long": True,
         },
@@ -753,7 +817,7 @@ def test_a_consistent_row_is_still_named():
         protocol="gmx_v2",
         value_usd=Decimal("0"),
         details={
-            "market": GMX_V2_MARKETS[chain]["ETH/USD"],
+            "market": market_address(chain, "ETH/USD"),
             "collateral_token": GMX_V2_TOKENS[chain]["USDC"],
             "is_long": True,
         },
@@ -763,38 +827,13 @@ def test_a_consistent_row_is_still_named():
     assert any(":sem:" in t for t in tokens), sorted(tokens)
 
 
-@pytest.mark.parametrize("chain", sorted(GMX_V2_MARKETS))
-def test_the_w_prefix_alias_can_never_name_a_different_real_market(chain):
-    """The alias fallback must fail to resolve, never resolve to something WRONG.
-
-    Resolution tries the exact catalogue key, then ``<SYM>/USD``, then — for a
-    ``W``-prefixed input — ``<SYM stripped of W>/USD``. That last step is a guess
-    about wrapped-token spelling, and a guess that lands on a REAL market emits a
-    token with false certainty for a position the row is not in. Under the
-    transitive closure a wrong token is the over-collapse direction: the strand.
-
-    The strip is safe only while no catalogue symbol is another catalogue symbol
-    with a leading ``W``. Today nothing on either chain starts with ``W``, so the
-    step is unreachable for catalogued names and only ever serves ``WETH``/``WBTC``/
-    ``WAVAX``. This asserts that PROPERTY rather than the current symbol list, so
-    adding a market like ``WIF/USD`` alongside ``IF/USD`` fails here instead of
-    silently making ``WIF`` resolve to ``IF``.
-
-    The exact-match-first ordering is a second line of defence — but only for the
-    pair that exists; it does not save the ``WIF`` case if ``WIF/USD`` is absent.
-    """
-    symbols = {s.upper() for s in GMX_V2_MARKETS[chain]}
-    for symbol in symbols:
-        base = symbol.split("/")[0]
-        if not base.startswith("W"):
-            continue
-        stripped = f"{base[1:]}/USD"
-        assert stripped not in symbols, (
-            f"{chain}: {base!r} and {stripped!r} both exist, so stripping the leading "
-            "'W' is ambiguous and can name the wrong market — narrow the alias rule "
-            "before adding this pair"
-        )
-
+# RETIRED: ``test_the_w_prefix_alias_can_never_name_a_different_real_market``.
+# The ``<SYM>``/``W<SYM>`` → ``<SYM>/USD`` alias fallback it guarded was deleted
+# with the market table (address-first): ``_resolve_address`` now serves exact
+# collateral symbols only and ``_address_only`` serves the market axis, so the
+# W-strip ambiguity it defended against is unrepresentable. The successor
+# property — no symbol spelling ever names a market — is
+# ``test_every_address_spelling_resolves_and_no_symbol_spelling_does`` above.
 
 def test_an_unverifiable_keyed_row_emits_only_its_venue_key():
     """A row may emit at most one identity family (#3534 panel blocker).
@@ -823,7 +862,7 @@ def test_an_unverifiable_keyed_row_emits_only_its_venue_key():
         protocol="gmx_v2",
         value_usd=Decimal("0"),
         details={
-            "market": GMX_V2_MARKETS[chain]["ETH/USD"],
+            "market": market_address(chain, "ETH/USD"),
             "collateral_token": GMX_V2_TOKENS[chain]["USDC"],
             "is_long": True,
         },
@@ -836,20 +875,33 @@ def test_a_keyless_row_still_emits_its_semantic_token():
     """Non-vacuity control: the narrowing is scoped to rows that carry a venue key.
 
     A strategy row has no venue key, so there is nothing for its attributes to
-    disagree WITH — it must still emit ``sem``, or the symbol side of the mainnet
-    pair goes unnamed and VIB-6287 is unfixed.
+    disagree WITH — it must still emit ``sem``, or the strategy side of the
+    mainnet pair goes unnamed and VIB-6287 is unfixed.
+
+    Address-first: the MARKET must be an address for the row to be named at all.
+    A legacy symbol-market row emits NOTHING — there is no symbol→address table
+    left to resolve through (VIB-6155 is why there must not be), so it
+    over-splits loudly instead; legacy symbol-shaped state is a repair-CLI
+    migration case (``almanak/framework/cli/repair_position_references.py``).
     """
     chain = "arbitrum"
-    row = PositionInfo(
-        position_type=PositionType.PERP,
-        position_id="eth-long",
-        chain=chain,
-        protocol="gmx_v2",
-        value_usd=Decimal("0"),
-        details={"market": "ETH/USD", "collateral_token": "USDC", "is_long": True},
-    )
-    tokens = gmx_v2_perp_identity(row, wallet_address=None)
+
+    def _keyless(market):
+        return PositionInfo(
+            position_type=PositionType.PERP,
+            position_id="eth-long",
+            chain=chain,
+            protocol="gmx_v2",
+            value_usd=Decimal("0"),
+            details={"market": market, "collateral_token": "USDC", "is_long": True},
+        )
+
+    tokens = gmx_v2_perp_identity(_keyless(MARKET), wallet_address=None)
     assert any(":sem:" in t for t in tokens), sorted(tokens)
+    assert gmx_v2_perp_identity(_keyless("ETH/USD"), wallet_address=None) == frozenset(), (
+        "a symbol-shaped market must yield NO token — never a resolution through a "
+        "curated table"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1240,6 +1292,11 @@ def test_the_multi_alias_proof_gate_is_not_vacuous():
 # mirror anything and cannot rot into a fiction.
 _UNDERDESCRIBED_PERP_DETAILS = {"market": "ETH/USD", "side": "long", "size_usd": "10"}
 
+#: The address-first sibling: the market is the address a migrated strategy
+#: writes, but collateral is still missing — the A2 split is a property of
+#: UNDER-DESCRIPTION, not of the value space, so it must survive the migration.
+_UNDERDESCRIBED_ADDRESS_DETAILS = {"market": MARKET, "side": "long", "size_usd": "10"}
+
 
 def _hot_summary(details: dict) -> TeardownPositionSummary:
     """One strategy-reported (HOT) perp row carrying ``details``."""
@@ -1376,34 +1433,40 @@ def test_the_directional_perp_demo_now_names_its_collateral():
     )
 
 
-def test_a2_union_split_is_covered_by_a_single_symbol_space_close():
-    """END-TO-END for shape A2 — the control that pins the THIRD change.
+def test_a2_union_split_is_covered_by_a_single_address_space_close():
+    """END-TO-END for shape A2, in the address-first world (VIB-6316 successor).
 
-    One physical position enumerated as two rows, closed by one symbol-space
-    ``PERP_CLOSE``. Coverage must credit both. Reverting EITHER the ``_covers_perp``
-    widening OR the ``_perp_carries_identity`` wallet threading must re-break this:
-    the widening alone gets the registry row past ``_covers`` but not past the
-    Item-2 disambiguation guard, and the wallet alone never reaches the widening.
+    SUCCESSOR of ``test_a2_union_split_is_covered_by_a_single_symbol_space_close``:
+    producers write ADDRESSES now, so the under-described HOT row and the close
+    intent both carry the market-token address. One physical position still
+    enumerates as two rows (collateral is missing, so the HOT row emits no venue
+    token and cannot intersect), and ONE address-space ``PERP_CLOSE`` must
+    credit both — the market comparison agrees in address space, no venue
+    corroboration required.
 
-    No other test in this file exercises that interaction, which is why a fix
-    shipped without this one would look green and be half-dead.
-
-    Was a strict xfail reading "VIB-6316 + the _covers_perp widening are a TRIPLE
-    and none of it has landed". All three have now landed together, and this is
-    the shape R5 reproduced on mainnet — see
-    ``test_completeness_venue_identity_vib6316.py`` for the per-leg revert
-    controls and the production call-site assertions.
+    The LEGACY half: a symbol-space close against the same union leaves the
+    registry row uncovered even with the wallet — the loud fail-safe FAILED,
+    by design ("start with the address"). Legacy symbol state is a repair-CLI
+    migration case (``almanak/framework/cli/repair_position_references.py``);
+    this is the shape R5 reproduced on mainnet, retired rather than resolved
+    through a curated table.
     """
     merged = reconcile_lp_with_registry(
-        strategy_summary=_hot_summary(_UNDERDESCRIBED_PERP_DETAILS),
+        strategy_summary=_hot_summary(_UNDERDESCRIBED_ADDRESS_DETAILS),
         registry_positions=[_registry_row()],
         registry_available=True,
         wallet_for_chain=lambda _chain: WALLET,
     )
     assert len(merged.positions) == 2, "precondition: the A2 union must not collapse"
 
-    report = check_intent_coverage(merged.positions, [_CloseIntent("ETH/USD")], wallet_for_chain=lambda _chain: WALLET)
+    report = check_intent_coverage(merged.positions, [_CloseIntent(MARKET)], wallet_for_chain=lambda _chain: WALLET)
     assert report.complete, f"uncovered after a full close: {report.uncovered}"
+
+    legacy = check_intent_coverage(merged.positions, [_CloseIntent("ETH/USD")], wallet_for_chain=lambda _chain: WALLET)
+    assert not legacy.complete, (
+        "a legacy symbol-space close must fail the gate LOUDLY rather than resolve "
+        "through a symbol table the migration deleted"
+    )
 
 
 def test_a2_union_split_without_a_wallet_is_the_r5_mainnet_failure():

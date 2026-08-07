@@ -32,8 +32,16 @@ class GmxMarketNotFound(Exception):
     """The venue catalogue has no row for this query; static fallback is allowed."""
 
 
-def resolve_market_via_gateway(gateway_client: Any, *, chain: str, market: str) -> ResolvedGmxMarket:
-    """Resolve and verify a GMX market through the shared gateway channel."""
+def resolve_market_via_gateway(
+    gateway_client: Any, *, chain: str, market: str, require_listed: bool = False
+) -> ResolvedGmxMarket:
+    """Resolve and verify a GMX market through the shared gateway channel.
+
+    ``require_listed=True`` demands CURRENT venue listing (risk-increasing
+    callers); the default keeps the historic delisted/stale grace for
+    risk-reducing closes. An old gateway ignores the field and degrades to
+    the historic behavior.
+    """
     configured_timeout = getattr(getattr(gateway_client, "config", None), "timeout", 30.0)
     timeout = (
         float(configured_timeout)
@@ -50,7 +58,9 @@ def resolve_market_via_gateway(gateway_client: Any, *, chain: str, market: str) 
         )
     try:
         response = stub(
-            gateway_pb2.GetPerpMarketRequest(protocol="gmx_v2", chain=chain, market=market),
+            gateway_pb2.GetPerpMarketRequest(
+                protocol="gmx_v2", chain=chain, market=market, require_listed=require_listed
+            ),
             timeout=timeout,
         )
     except grpc.RpcError as exc:

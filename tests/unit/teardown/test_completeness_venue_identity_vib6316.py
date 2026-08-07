@@ -37,6 +37,19 @@ THE FIX IS A TRIPLE. Each control below fails on the revert of exactly one leg:
 * **N5** the intent probe stays wallet-FREE. Threading it too is the tempting
   "symmetric" completion and it over-credits.
 * **N6** neither leg alone is sufficient.
+
+ADDRESS-FIRST UPDATE. Symbol→address market resolution was deliberately removed
+("start with the address"), so the symbol↔address pairing these controls were
+written against no longer exists: registry rows and regenerated intents both
+carry the market-token ADDRESS and agree via the RAW comparison, wallet or not.
+The pairing that still EXERCISES the VIB-6316 triple is the adapter discovery
+row — venue key id, catalog LABEL under ``details["market"]`` (display), address
+under ``details["market_address"]`` — which only the wallet-corroborated venue
+``sem`` token can match. Every N-control below runs against that row. A LEGACY
+symbol-shaped row or intent now over-splits loudly (fail-safe); migrating such
+state is the repair CLI's job
+(``almanak/framework/cli/repair_position_references.py``), never a curated
+table's (VIB-6155).
 """
 
 from __future__ import annotations
@@ -86,17 +99,17 @@ CHAIN = CENSUS.CHAIN
 # An UNDER-DESCRIBED perp row: market + side, no ``collateral_token``.
 #
 # This was the shipped demo's literal shape until VIB-6316 also repaired the demo
-# (``gmx_v2_directional_perp.get_open_positions`` now names its collateral, which
-# collapses its own union to 1 — see
-# ``test_the_repaired_demo_now_collapses_its_own_union``). It is retained here as a
-# SYNTHETIC fixture rather than deleted, because the gate's tolerance is not about
-# one demo: any strategy may under-describe its own position, and nothing in the
-# framework forces ``get_open_positions`` to name collateral. Fixing the producer
-# removes this shape from OUR demo; it does not remove it from the world.
+# (``gmx_v2_directional_perp.get_open_positions`` now names its collateral). It is
+# retained here as a SYNTHETIC fixture rather than deleted, because the gate's
+# tolerance is not about one demo: any strategy may under-describe its own
+# position, and nothing in the framework forces ``get_open_positions`` to name
+# collateral. Fixing the producer removes this shape from OUR demo; it does not
+# remove it from the world.
 #
-# Keeping the shipped demo malformed purely to keep this fixture realistic would be
-# the wrong trade — so the demo is correct and the adversarial shape lives here.
-UNDERDESCRIBED_DETAILS = {"market": "ETH/USD", "side": "long", "size_usd": "8"}
+# Address-first: the market is the ADDRESS a migrated strategy writes. The
+# under-description (missing collateral) is what splits the union — a property
+# of the row's incompleteness, not of its value space.
+UNDERDESCRIBED_DETAILS = {"market": CENSUS.MARKET, "side": "long", "size_usd": "8"}
 
 
 def _resolver(_chain: str) -> str:
@@ -120,18 +133,27 @@ def _hot_row(details: dict) -> TeardownPositionSummary:
     )
 
 
-def _union(details: dict):
-    """The production enumeration: HOT strategy row ∪ WARM registry row."""
+def _union(details: dict, warm: PositionInfo | None = None):
+    """The production enumeration: HOT strategy row ∪ one WARM row.
+
+    ``warm`` defaults to the registry read row; the wallet-sensitive controls
+    pass the adapter's catalog-labelled discovery row instead (see the module
+    docstring's address-first update).
+    """
     return reconcile_lp_with_registry(
         strategy_summary=_hot_row(details),
-        registry_positions=[CENSUS._registry_row()],
+        registry_positions=[warm if warm is not None else CENSUS._registry_row()],
         registry_available=True,
         wallet_for_chain=_resolver,
     )
 
 
-def _close_intent(market="ETH/USD", **kw):
-    return CENSUS._CloseIntent(market, **kw)
+_DEFAULT_MARKET = object()  # sentinel: None is a meaningful "market-less intent"
+
+
+def _close_intent(market=_DEFAULT_MARKET, **kw):
+    """A regenerated close intent; defaults to the address-first market."""
+    return CENSUS._CloseIntent(CENSUS.MARKET if market is _DEFAULT_MARKET else market, **kw)
 
 
 # ---------------------------------------------------------------------------
@@ -139,15 +161,23 @@ def _close_intent(market="ETH/USD", **kw):
 # ---------------------------------------------------------------------------
 
 
-def test_the_r5_mainnet_shape_no_longer_false_fails():
-    """THE HEADLINE. The exact enumeration R5 produced on mainnet must pass.
+def test_the_r5_class_split_no_longer_false_fails():
+    """THE HEADLINE — R5's failure class, expressed in the address-first world.
 
-    Union of 2 (one physical position), one closing intent, wallet resolved.
-    Without the resolver this is the mainnet failure verbatim; with it the gate
-    is complete. Both halves are asserted in ONE test so the pair can never be
-    separated into "the fix" and "an unrelated regression".
+    R5 (mainnet arbitrum, 2026-08-02) paired an under-described HOT row with a
+    WARM row for the same physical position; one full close covered one of them
+    and the gate reported the other stranded. Address-first retires R5's literal
+    symbol-vs-address pairing (both sides carry the address now, so the raw
+    comparison agrees), but the CLASS survives: the WARM row here is the
+    adapter's discovery row, whose ``market`` detail is the catalog display
+    LABEL — only the wallet-corroborated venue token can match it.
+
+    Union of 2 (one physical position), one address-space closing intent,
+    wallet resolved. Without the resolver this is the R5 false-FAILED verbatim;
+    with it the gate is complete. Both halves are asserted in ONE test so the
+    pair can never be separated into "the fix" and "an unrelated regression".
     """
-    union = _union(UNDERDESCRIBED_DETAILS)
+    union = _union(UNDERDESCRIBED_DETAILS, warm=CENSUS._adapter_display_row())
     assert len(union.positions) == 2, (
         "the union must still SPLIT — VIB-6316 makes the gate tolerant of the split, "
         "it does not collapse the enumeration. A union of 1 here means the subject "
@@ -156,13 +186,13 @@ def test_the_r5_mainnet_shape_no_longer_false_fails():
 
     intents = [_close_intent()]
     assert not check_intent_coverage(union, intents).complete, (
-        "wallet-less must stay FAILING — this is the R5 mainnet result and the "
+        "wallet-less must stay FAILING — this is the R5-class result and the "
         "inertness control. If this passes, the fix is not what makes the "
         "difference and every other assertion here is meaningless."
     )
     assert check_intent_coverage(union, intents, wallet_for_chain=_resolver).complete, (
-        "VIB-6316: with the owning account resolved, the registry row's venue key and "
-        "the strategy's symbol-shaped close describe the same position"
+        "VIB-6316: with the owning account resolved, the discovery row's venue key "
+        "corroborates its display label against the address-space close"
     )
 
 
@@ -250,18 +280,25 @@ def test_the_shipped_demo_now_names_its_own_position():
     )
 
 
-def test_the_repaired_demo_now_collapses_its_own_union():
+def test_a_collateral_naming_address_row_collapses_its_own_union():
     """The repair's actual effect, measured — not inferred from the source string.
 
-    The test above only proves the demo *mentions* collateral. This proves the
-    consequence: with collateral named, ``gmx_v2_perp_identity`` DERIVEs the venue
-    key (resolving ``ETH/USD`` and ``USDC`` through the connector catalogue) and it
-    equals the bytes32 key the registry row ADOPTs — so the two rows intersect and
-    the union is 1.
+    SUCCESSOR of ``test_the_repaired_demo_now_collapses_its_own_union``: the
+    row shape is the VIB-6316 producer repair carried into the address-first
+    world. With collateral named and the market already an ADDRESS,
+    ``gmx_v2_perp_identity`` DERIVEs the venue key (collateral still resolves
+    through the token table; the market passes through) and it equals the
+    bytes32 key the registry row ADOPTs — so the two rows intersect and the
+    union is 1.
 
     That derived-equals-adopted equality is the whole mechanism. Asserting only
     ``len(union.positions) == 1`` would also pass if the rows collapsed for some
     unrelated reason, so the key identity is asserted directly.
+
+    NOTE the shipped ``gmx_v2_directional_perp`` demo still CONFIGURES a symbol
+    market (``config.json: "market": "ETH/USD"``); until its own address-first
+    migration lands, its rows carry a symbol and over-split loudly — the
+    fail-safe direction, pinned from the legacy side elsewhere in this file.
     """
     from almanak.framework.teardown.registry_enumeration import _dedupe_keys
 
@@ -299,15 +336,23 @@ def test_n1_covers_perp_gained_the_venue_alias_arm():
     """N1 — revert the ``_covers_perp`` widening and this fails.
 
     ``_covers`` is the layer that rejected the pair one step before the identity
-    check could ever run. On ``main`` this returns False WITH a wallet.
+    check could ever run. Address-first, the pairing that still needs the alias
+    arm is the adapter's discovery row: its ``market`` detail is the catalog
+    display LABEL, so the raw comparison refuses the address-space intent and
+    only the wallet-corroborated venue token can credit it. The registry row —
+    address on both sides — must keep matching RAW, wallet or not (``raw OR
+    alias``, never alias alone).
     """
-    registry_row = CENSUS._registry_row()
-    assert _covers(_close_intent(), registry_row, WALLET), (
-        "_covers_perp must accept a venue-corroborated alias match: the registry row "
-        "names the market by ADDRESS, the regenerated intent by SYMBOL"
+    display_row = CENSUS._adapter_display_row()
+    assert _covers(_close_intent(), display_row, WALLET), (
+        "_covers_perp must accept a venue-corroborated alias match: the discovery row "
+        "displays the catalog label, the regenerated intent names the ADDRESS"
     )
-    assert not _covers(_close_intent(), registry_row), (
+    assert not _covers(_close_intent(), display_row), (
         "and must be unchanged without a wallet — raw OR alias, never alias alone"
+    )
+    assert _covers(_close_intent(), CENSUS._registry_row()), (
+        "the address↔address registry pairing must stay covered by the RAW clause alone"
     )
 
 
@@ -316,11 +361,12 @@ def test_n2_perp_carries_identity_receives_the_wallet():
 
     This is the leg the 2-row union needs: ``_position_is_covered`` consults
     ``_intent_carries_position_identity`` whenever ≥2 same-type positions exist
-    (VIB-5494 Item 2), and that routes here.
+    (VIB-5494 Item 2), and that routes here. Address-first, the wallet is
+    load-bearing for the catalog-labelled discovery row (see N1).
     """
-    registry_row = CENSUS._registry_row()
-    assert _perp_carries_identity(_close_intent(), registry_row, WALLET)
-    assert not _perp_carries_identity(_close_intent(), registry_row), (
+    display_row = CENSUS._adapter_display_row()
+    assert _perp_carries_identity(_close_intent(), display_row, WALLET)
+    assert not _perp_carries_identity(_close_intent(), display_row), (
         "wallet-less must stay unmeasured — GMX cannot derive its own key without the account"
     )
 
@@ -328,9 +374,11 @@ def test_n2_perp_carries_identity_receives_the_wallet():
 def test_n6_neither_leg_alone_is_sufficient():
     """N6 — pins the TRIPLE so a future 'simplification' fails loudly.
 
-    Each leg is disabled in turn against the live 2-row union.
+    Each leg is disabled in turn against the live 2-row union. Address-first,
+    the WARM row must be the catalog-labelled discovery row — the registry
+    pairing matches raw and would leave every leg looking optional.
     """
-    union = _union(UNDERDESCRIBED_DETAILS)
+    union = _union(UNDERDESCRIBED_DETAILS, warm=CENSUS._adapter_display_row())
     intents = [_close_intent()]
 
     # Leg A disabled: no wallet reaches the identity lane.
@@ -495,11 +543,12 @@ def test_the_widening_never_gets_stricter(label, details, intent_market):
 def test_a_collateral_writing_strategy_is_completely_unaffected():
     """The control arm of the R3/R5 pair.
 
-    ``strategies/accounting/perp`` writes ``collateral_token``, so its union
-    already collapsed to 1 and its gate already passed. VIB-6316 must not change
+    ``strategies/accounting/perp`` writes ``collateral_token`` (and, migrated,
+    the market ADDRESS), so its union already collapsed to 1 and its gate
+    already passed. Neither VIB-6316 nor the address-first migration may change
     that in either direction.
     """
-    union = _union({"market": "ETH/USD", "collateral_token": "USDC", "side": "long", "size_usd": "8"})
+    union = _union({"market": CENSUS.MARKET, "collateral_token": "USDC", "side": "long", "size_usd": "8"})
     assert len(union.positions) == 1, "collateral-writing strategies must still collapse to one row"
     for resolver in (None, _resolver):
         assert check_intent_coverage(union, [_close_intent()], wallet_for_chain=resolver).complete
@@ -511,9 +560,11 @@ def test_an_unresolvable_wallet_degrades_to_the_old_behaviour():
     A resolver returning ``None`` (three documented GMX fallbacks) means
     UNMEASURED, not "no wallet": every comparison falls back to the raw
     pre-VIB-6316 path. Fail-SAFE, and deliberately not fixed here — the gate
-    still reports the split, which is loud rather than silent.
+    still reports the split, which is loud rather than silent. Address-first,
+    the split that survives an unresolvable wallet is the catalog-labelled
+    discovery row (the registry pairing matches raw regardless).
     """
-    union = _union(UNDERDESCRIBED_DETAILS)
+    union = _union(UNDERDESCRIBED_DETAILS, warm=CENSUS._adapter_display_row())
     assert not check_intent_coverage(union, [_close_intent()], wallet_for_chain=lambda _c: None).complete
 
     # A raising resolver must never break teardown either.

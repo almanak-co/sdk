@@ -12,6 +12,15 @@ from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
 from almanak.framework.intents.compiler import IntentCompiler, IntentCompilerConfig
+from tests.unit.connectors.gmx_v2.market_fixtures import (
+    fake_dynamic_gateway,
+    market_address,
+    market_record,
+    prime_catalog,
+)
+
+#: Address-first market input: the fixture snapshot's verified ETH/USD market.
+ETH_MARKET_ARB = market_address("arbitrum", "ETH/USD")
 
 
 def _make_mock_compiler(chain: str = "arbitrum") -> IntentCompiler:
@@ -22,7 +31,11 @@ def _make_mock_compiler(chain: str = "arbitrum") -> IntentCompiler:
     compiler.rpc_url = "http://localhost:8545"
     compiler._approve_cache = {}
     compiler._allowance_cache = {}
-    compiler._gateway_client = None
+    # Every compile in this file is a PERP_OPEN, and the OPEN leg demands
+    # CURRENT venue listing: dynamic resolution through this fake gateway is
+    # what lets the compile reach the approval-prepend logic under test (the
+    # primed catalog alone serves only risk-reducing closes).
+    compiler._gateway_client = fake_dynamic_gateway(chain)
     compiler._config = IntentCompilerConfig(allow_placeholder_prices=True)
     compiler._using_placeholders = False
     compiler._placeholder_warning_logged = False
@@ -44,7 +57,7 @@ def _make_mock_compiler(chain: str = "arbitrum") -> IntentCompiler:
 def _make_perp_open_intent(
     collateral_token: str = "USDC",
     collateral_amount: Decimal = Decimal("100"),
-    market: str = "ETH/USD",
+    market: str = ETH_MARKET_ARB,
     size_usd: Decimal = Decimal("1000"),
     is_long: bool = False,
 ):
@@ -125,13 +138,14 @@ class TestPerpOpenApproval:
         mock_tx_data.gas_estimate = 500000
         mock_sdk.build_increase_order_multicall.return_value = mock_tx_data
 
+        # Address-first: the intent carries the market-token address, verified
+        # by this process (fixture-primed catalog) — no static market table.
+        prime_catalog(market_record("arbitrum", "ETH/USD"), chain="arbitrum")
+
         with (
             patch("almanak.connectors.gmx_v2.compiler.GMXv2Adapter") as mock_adapter_cls,
             patch("almanak.connectors.gmx_v2.compiler.GMXv2Config"),
             patch("almanak.connectors.gmx_v2.compiler.GMXV2SDK", return_value=mock_sdk),
-            patch("almanak.connectors.gmx_v2.compiler.GMX_V2_MARKETS", {
-                "arbitrum": {"ETH/USD": "0x70d95587d40A2caf56bd97485aB3Eec10Bee6336"},
-            }),
             patch("almanak.connectors.gmx_v2.compiler.GMX_V2_TOKENS", {
                 "arbitrum": {"USDC": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"},
             }),
@@ -194,13 +208,13 @@ class TestPerpOpenApproval:
         mock_tx_data.gas_estimate = 500000
         mock_sdk.build_increase_order_multicall.return_value = mock_tx_data
 
+        # Address-first: same fixture-verified market as the USDC case above.
+        prime_catalog(market_record("arbitrum", "ETH/USD"), chain="arbitrum")
+
         with (
             patch("almanak.connectors.gmx_v2.compiler.GMXv2Adapter") as mock_adapter_cls,
             patch("almanak.connectors.gmx_v2.compiler.GMXv2Config"),
             patch("almanak.connectors.gmx_v2.compiler.GMXV2SDK", return_value=mock_sdk),
-            patch("almanak.connectors.gmx_v2.compiler.GMX_V2_MARKETS", {
-                "arbitrum": {"ETH/USD": "0x70d95587d40A2caf56bd97485aB3Eec10Bee6336"},
-            }),
             patch("almanak.connectors.gmx_v2.compiler.GMX_V2_TOKENS", {
                 "arbitrum": {"WETH": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"},
             }),

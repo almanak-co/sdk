@@ -208,14 +208,19 @@ class TestPerpMarketIndexSymbol:
         assert extract_token_symbols({"market": None}) == []
         assert extract_token_symbols({"market": 123}) == []
 
-    def test_every_gmx_catalogued_market_yields_its_index_symbol(self):
-        """Catalogue-wide, not a spot-check: one missing symbol = one unopenable market."""
-        from almanak.connectors.gmx_v2.addresses import GMX_V2_MARKETS
+    def test_every_fixture_market_label_yields_its_index_symbol(self):
+        """Label-wide, not a spot-check: one missing symbol = one unwarmable label.
 
-        for chain, markets in GMX_V2_MARKETS.items():
-            for market_key in markets:
-                got = extract_token_symbols({"market": market_key})
-                assert got == [market_key.split("/", 1)[0]], f"{chain}/{market_key} -> {got}"
+        Address-first note: address-shaped markets are DELIBERATELY not parsed
+        here (asserted above) — the runner resolves them to their index symbol
+        via the gateway GetPerpMarket warm step instead. Labels stay parseable
+        because they remain legal venue vocabulary on intents.
+        """
+        from tests.unit.connectors.gmx_v2.market_fixtures import FIXTURE_MARKETS
+
+        for chain, record in FIXTURE_MARKETS:
+            got = extract_token_symbols({"market": record.label})
+            assert got == [record.label.split("/", 1)[0]], f"{chain}/{record.label} -> {got}"
 
     def test_pool_intents_are_unaffected(self):
         """Regression guard: adding `market` must not change LP/swap extraction."""

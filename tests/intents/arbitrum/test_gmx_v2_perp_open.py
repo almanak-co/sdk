@@ -25,6 +25,11 @@ from web3 import Web3
 
 from almanak.connectors.gmx_v2 import GMXv2ReceiptParser
 from almanak.connectors.gmx_v2.addresses import GMX_V2, GMX_V2_TOKENS
+from tests.unit.connectors.gmx_v2.market_fixtures import fake_dynamic_gateway, market_address
+
+# Address-first primary spelling: the strategy-declared market-token address
+# (the label path is covered separately by the core-alias unit tests).
+_ETH_USD_MARKET = market_address("arbitrum", "ETH/USD")
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents.compiler import IntentCompiler
 from almanak.framework.intents.perp_intents import PerpOpenIntent
@@ -157,7 +162,7 @@ class TestGmxV2PerpOpenIntent:
         # Layer 1 — Compilation
         # ------------------------------------------------------------------
         intent = PerpOpenIntent(
-            market="ETH/USD",
+            market=_ETH_USD_MARKET,
             collateral_token="USDC",
             collateral_amount=collateral_amount,
             size_usd=size_usd,
@@ -168,6 +173,7 @@ class TestGmxV2PerpOpenIntent:
         )
 
         compiler = IntentCompiler(
+            gateway_client=fake_dynamic_gateway("arbitrum", rpc_url=orchestrator.rpc_url),
             chain=CHAIN_NAME,
             wallet_address=funded_wallet,
             price_oracle=price_oracle_arbitrum,
@@ -205,7 +211,7 @@ class TestGmxV2PerpOpenIntent:
         # Metadata sanity
         meta = compilation.action_bundle.metadata
         assert meta.get("protocol") == "gmx_v2"
-        assert meta.get("market") == "ETH/USD"
+        assert meta.get("market") == _ETH_USD_MARKET
         assert meta.get("is_long") is True
 
         execution_fee_wei = int(multicall_tx.get("value", 0))

@@ -84,6 +84,16 @@ class GmxV2DirectionalPerp(IntentStrategy):
         super().__init__(*args, **kwargs)
 
         self.market = str(self.get_config("market", "ETH/USD"))
+        # Address-first contract: the author declares the GMX market-token
+        # ADDRESS; the SDK verifies it (dynamic registry, VIB-6561) but never
+        # maps a symbol on the author's behalf. The label above remains
+        # display/funding vocabulary only.
+        self.market_address = self.get_config("market_address", None)
+        if not (isinstance(self.market_address, str) and self.market_address[:2].lower() == "0x"):
+            raise ValueError(
+                "gmx_v2_directional_perp requires config 'market_address' — the GMX market-token "
+                "address for the configured market (address-first market contract)."
+            )
         self.base_token = str(self.get_config("base_token", "ETH"))
         self.collateral_token = str(self.get_config("collateral_token", "USDC"))
 
@@ -231,7 +241,7 @@ class GmxV2DirectionalPerp(IntentStrategy):
             self.collateral_token, entry_price, funding,
         )
         return Intent.perp_open(
-            market=self.market,
+            market=self.market_address,
             collateral_token=self.collateral_token,
             collateral_amount=collateral_amount,
             size_usd=self.position_size_usd,
@@ -290,7 +300,7 @@ class GmxV2DirectionalPerp(IntentStrategy):
 
     def _close(self, side: str, *, reason: str) -> Intent:
         return Intent.perp_close(
-            market=self.market,
+            market=self.market_address,
             collateral_token=self.collateral_token,
             is_long=side == LONG,
             size_usd=None,  # None = close the FULL on-chain position (never a cached notional — VIB-5950/ALM-2976)
@@ -299,9 +309,15 @@ class GmxV2DirectionalPerp(IntentStrategy):
         )
 
     def _funding_hourly(self, market: MarketSnapshot) -> Decimal | None:
-        """Current hourly funding rate, or None if unavailable (never fabricated)."""
+        """Current hourly funding rate, or None if unavailable (never fabricated).
+
+        Queried by market ADDRESS: GMX funding factors are per-market, so the
+        gateway serves live funding only for an unambiguous market — a pair
+        label with several collateral variants falls back to the default rate
+        (PR #3648). The declared address is the unambiguous spelling.
+        """
         try:
-            return Decimal(str(market.funding_rate("gmx_v2", self.market).rate_hourly))
+            return Decimal(str(market.funding_rate("gmx_v2", self.market_address).rate_hourly))
         except Exception as exc:  # noqa: BLE001 — funding is advisory; absence must not crash decide()
             logger.warning("Funding rate unavailable for %s: %s", self.market, exc)
             return None
@@ -366,7 +382,7 @@ class GmxV2DirectionalPerp(IntentStrategy):
             # Collateral in token units, not USD (see _enter for the rationale).
             collateral_amount = (self.position_size_usd / self.leverage) / collateral_price
             return Intent.perp_open(
-                market=self.market,
+                market=self.market_address,
                 collateral_token=self.collateral_token,
                 collateral_amount=collateral_amount,
                 size_usd=self.position_size_usd,
@@ -476,7 +492,10 @@ class GmxV2DirectionalPerp(IntentStrategy):
             snapshot,
             protocol="gmx_v2",
             chain=self.chain,
-            market_symbol=self.market,
+            # Address-first: the venue keys GMX positions by market address, so
+            # the address is the exact-match probe key (the label would need
+            # catalog metadata to resolve).
+            market_symbol=self.market_address,
         )
 
     def _position_row(self, *, side: str, value_usd: Decimal, measured: bool) -> "PositionInfo":
@@ -495,7 +514,8 @@ class GmxV2DirectionalPerp(IntentStrategy):
             # ``generate_teardown_intents`` below already supplies it, so
             # omitting it here was an asymmetry between the two halves of
             # one strategy, not a deliberate shape.
-            "market": self.market,
+            "market": self.market_address,
+            "market_address": self.market_address,
             "collateral_token": self.collateral_token,
             "side": side,
             "size_usd": str(value_usd),
@@ -596,7 +616,7 @@ class GmxV2DirectionalPerp(IntentStrategy):
             sides = [] if self._position_side is None else [self._position_side == LONG]
         return [
             Intent.perp_close(
-                market=self.market,
+                market=self.market_address,
                 collateral_token=self.collateral_token,
                 is_long=is_long,
                 size_usd=None,  # None = close the FULL on-chain position (never a cached notional — VIB-5950/ALM-2976)

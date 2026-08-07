@@ -450,14 +450,19 @@ def test_demo_perp_strategy_funding_gate_receives_rate(no_gateway) -> None:
     return the served rate.
     """
     from almanak.demo_strategies.gmx_v2_directional_perp.strategy import GmxV2DirectionalPerp
+    from tests.unit.connectors.gmx_v2.market_fixtures import market_address
 
+    # Address-first market contract: __init__ requires config `market_address`
+    # (the audited arbitrum ETH/USD market-token address); every other knob
+    # keeps its default. `_funding_hourly` reads funding by this address.
+    config = {"market_address": market_address("arbitrum", "ETH/USD")}
     with patch(
         "almanak.framework.strategies.intent_strategy.IntentStrategy.__init__",
         return_value=None,
     ):
         strategy = GmxV2DirectionalPerp.__new__(GmxV2DirectionalPerp)
-        strategy._config = {}
-        strategy.get_config = lambda key, default=None: default
+        strategy._config = config
+        strategy.get_config = lambda key, default=None: config.get(key, default)
         GmxV2DirectionalPerp.__init__(strategy)
 
     snapshot = create_market_snapshot_from_state(

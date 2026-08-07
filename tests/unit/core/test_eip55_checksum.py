@@ -81,17 +81,32 @@ def test_connector_addresses_are_eip55():
 
 
 def test_gmx_v2_adapter_addresses_are_eip55():
-    """GMX V2 adapter hardcoded addresses must be valid EIP-55 checksums."""
-    from almanak.connectors.gmx_v2.adapter import GMX_V2_ADDRESSES, GMX_V2_MARKETS
+    """GMX V2 hardcoded core addresses and fixture markets must be EIP-55 valid.
 
+    The curated market table is gone (address-first); the audited FIXTURE
+    snapshot inherits its checksum obligation because compile paths checksum-
+    compare the addresses tests feed them.
+    """
+    from almanak.connectors.gmx_v2.adapter import GMX_V2_ADDRESSES
+    from tests.unit.connectors.gmx_v2.market_fixtures import FIXTURE_MARKETS
+
+    fixture_market_addresses = {
+        chain: {record.label: record.market_token for chain_, record in FIXTURE_MARKETS if chain_ == chain}
+        for chain in {chain for chain, _ in FIXTURE_MARKETS}
+    }
     failures = []
-    for dict_name, addr_dict in [("GMX_V2_ADDRESSES", GMX_V2_ADDRESSES), ("GMX_V2_MARKETS", GMX_V2_MARKETS)]:
+    for dict_name, addr_dict in [
+        ("GMX_V2_ADDRESSES", GMX_V2_ADDRESSES),
+        ("FIXTURE_MARKETS", fixture_market_addresses),
+    ]:
         for chain, addrs in addr_dict.items():
             for key, addr in addrs.items():
-                if re.match(r"^0x[0-9a-fA-F]{40}$", addr):
-                    expected = Web3.to_checksum_address(addr)
-                    if addr != expected:
-                        failures.append(f"  {dict_name}[{chain}][{key}]: {addr} should be {expected}")
+                if not isinstance(addr, str) or not re.fullmatch(r"0x[0-9a-fA-F]{40}", addr):
+                    failures.append(f"  {dict_name}[{chain}][{key}]: invalid address {addr!r}")
+                    continue
+                expected = Web3.to_checksum_address(addr)
+                if addr != expected:
+                    failures.append(f"  {dict_name}[{chain}][{key}]: {addr} should be {expected}")
 
     if failures:
         msg = f"Found {len(failures)} addresses with invalid EIP-55 checksums:\n" + "\n".join(failures)
