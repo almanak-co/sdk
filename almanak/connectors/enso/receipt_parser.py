@@ -99,9 +99,14 @@ class EnsoReceiptParser:
 
         Args:
             **kwargs: Keyword arguments passed by the receipt_registry.
-                chain: Chain name for token decimal resolution.
+                chain: Chain the receipt came from. REQUIRED for decimal
+                    resolution — see :meth:`_resolve_decimals`. A parser built
+                    without it can still read a receipt's raw Transfer amounts
+                    but cannot scale them, so it reports the swap as unmeasured
+                    instead of guessing a chain (ALM-3186).
         """
-        self._chain: str | None = kwargs.get("chain")
+        chain = kwargs.get("chain")
+        self._chain: str | None = chain.strip() if isinstance(chain, str) and chain.strip() else None
 
     def parse_swap_receipt(
         self,
@@ -367,11 +372,20 @@ class EnsoReceiptParser:
         )
 
     def _resolve_decimals(self, token_address: str) -> int | None:
-        """Resolve token decimals via the token resolver.
+        """Resolve token decimals via the token resolver, on THIS receipt's chain.
 
-        Returns None if the resolver is unavailable or the token is unknown,
-        so callers can decide how to handle missing decimals rather than
-        silently using a wrong default.
+        Returns None if the chain is unknown, the resolver is unavailable, or
+        the token is unknown, so callers can decide how to handle missing
+        decimals rather than silently using a wrong default.
+
+        ALM-3186: the chain used to fall back to ``"ethereum"``. A token address
+        is only meaningful together with its chain — the same address is a
+        different token (or no token) elsewhere, and decimals differ across
+        those (6 vs 18 is a 10^12 error in a money number). Guessing mainnet on
+        an Arbitrum or Base receipt therefore produced a *confidently wrong*
+        amount whenever the guess happened to hit a mainnet token. Failing the
+        extract is the fail-closed answer: the caller reports the swap as
+        unmeasured, which is recoverable, whereas a wrong amount is not.
 
         Args:
             token_address: Checksummed or lowercase token address
@@ -381,14 +395,24 @@ class EnsoReceiptParser:
         """
         if not token_address:
             return None
+        if not self._chain:
+            logger.warning(
+                "Enso receipt parser has no chain; refusing to resolve decimals for %s "
+                "(swap amounts will be reported as unmeasured). Construct the parser with "
+                "chain=<the receipt's chain>.",
+                token_address,
+            )
+            return None
         try:
             from almanak.framework.data.tokens import get_token_resolver
 
             resolver = get_token_resolver()
-            token = resolver.resolve(token_address, self._chain or "ethereum")
+            token = resolver.resolve(token_address, self._chain)
             return token.decimals
         except Exception:
-            logger.warning(f"Could not resolve decimals for {token_address}, swap amounts will be unavailable")
+            logger.warning(
+                f"Could not resolve decimals for {token_address} on {self._chain}, swap amounts will be unavailable"
+            )
             return None
 
     @staticmethod

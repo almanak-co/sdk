@@ -3072,16 +3072,16 @@ def test_dynamic_lp_default_protocol_still_emits_price_band() -> None:
 def test_scaffolded_lp_open_declares_max_slippage() -> None:
     """Every scaffolded LP_OPEN must DECLARE a tolerance, not inherit the default.
 
-    Since VIB-6269 a CL mint's tolerance is a price band, but
-    ``cl_math.compute_lp_slippage_mins`` selects that instrument on PROVENANCE:
-    it is reached only when the caller set ``max_slippage`` (or
-    ``protocol_params["lp_slippage"]``). An intent that declares nothing falls
-    back to the permissive flat haircut ``default_lp_slippage`` -- 1% of desired
-    on a different instrument (VIB-6524).
+    Since VIB-6269 a CL mint's tolerance is a price band. ALM-3186 / VIB-6225
+    made the inherited ``default_lp_slippage`` a real 1% price tolerance on the
+    same instrument, so an undeclared intent is no longer routed away from the
+    protection that shipped — but it inherits a GLOBAL number chosen without
+    knowledge of this position's pair or range half-width, and a tolerance wider
+    than the range half-width zeroes a leg or reverts.
 
-    So "the scaffold omits max_slippage" is not a cosmetic gap: it routes every
-    scaffolded and every generated LP strategy AWAY from the protection that
-    shipped. Asserting the value is non-None is the whole contract -- a
+    So "the scaffold omits max_slippage" is still not a cosmetic gap: a
+    scaffolded strategy must state the tolerance it was designed against.
+    Asserting the value is non-None is the whole contract -- a
     regression here is a silently-dropped kwarg, which is exactly what this
     change fixed and what nothing else would catch.
 
@@ -3137,8 +3137,8 @@ def test_scaffolded_lp_open_declares_max_slippage() -> None:
         for intent in opens:
             assert intent.max_slippage is not None, (
                 f"{template.value}: LP_OPEN declares no max_slippage, so the compiler "
-                f"falls back to default_lp_slippage (flat 1%-of-desired haircut) "
-                f"instead of the VIB-6269 price band."
+                f"falls back to the global default_lp_slippage instead of a tolerance "
+                f"chosen against this position's range half-width."
             )
             assert intent.require_two_sided_minimums is True, (
                 f"{template.value}: LP_OPEN does not require both minimums, so price "

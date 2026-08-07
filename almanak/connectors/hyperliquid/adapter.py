@@ -39,6 +39,8 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any, Protocol
 
+from .markets import resolve_market
+
 logger = logging.getLogger(__name__)
 
 
@@ -80,39 +82,19 @@ HYPERLIQUID_EIP712_DOMAIN: dict[str, dict[str, Any]] = {
     },
 }
 
-# Asset name to index mapping (Hyperliquid uses numeric indices internally)
-HYPERLIQUID_ASSETS: dict[str, int] = {
-    "BTC": 0,
-    "ETH": 1,
-    "SOL": 2,
-    "ARB": 3,
-    "DOGE": 4,
-    "WIF": 5,
-    "OP": 6,
-    "PEPE": 7,
-    "AVAX": 8,
-    "LINK": 9,
-    "MATIC": 10,
-    "NEAR": 11,
-    "ATOM": 12,
-    "APT": 13,
-    "SUI": 14,
-    "TIA": 15,
-    "SEI": 16,
-    "JTO": 17,
-    "INJ": 18,
-    "BLUR": 19,
-    "LDO": 20,
-    "STX": 21,
-    "RUNE": 22,
-    "ORDI": 23,
-    "IMX": 24,
-    "FTM": 25,
-    "MINA": 26,
-    "CRV": 27,
-    "MKR": 28,
-    "AAVE": 29,
-}
+# ALM-3186: the ``HYPERLIQUID_ASSETS`` symbol→index map that used to live here
+# was DELETED, not moved. Every value in it was a from-memory guess and several
+# were wrong on a live venue — ``SOL: 2`` is ATOM, ``ARB: 3`` is the delisted
+# MATIC — and it was read with ``.get(asset, 0)``, so an unknown symbol silently
+# encoded asset index 0 (BTC). Guessing an index and defaulting an unknown one to
+# BTC are the same defect: an order placed against the wrong perp.
+#
+# ``markets.resolve_market()`` is the single source of truth. Its seed is
+# verified live against ``api.hyperliquid.xyz`` (``type=meta``), it carries
+# ``szDecimals``/``maxLeverage`` alongside the index, it normalises quote
+# suffixes, and it FAILS CLOSED on any symbol it cannot resolve. Do not
+# reintroduce a literal map here; extend the seed (or wire the dynamic universe
+# seam) in ``markets.py`` instead.
 
 # Default gas estimates (for compatibility with other connectors)
 HYPERLIQUID_GAS_ESTIMATES: dict[str, int] = {
@@ -755,11 +737,16 @@ class HyperliquidAdapter:
             OrderResult with order details
         """
         try:
-            # Validate asset
-            if asset not in HYPERLIQUID_ASSETS:
+            # Validate asset against the fail-closed market resolver (ALM-3186).
+            # An unresolvable symbol is refused here rather than encoded as index
+            # 0 further down; the caller sees the resolver's own message, which
+            # names the resolvable set.
+            try:
+                resolve_market(asset)
+            except ValueError as exc:
                 return OrderResult(
                     success=False,
-                    error=f"Unknown asset: {asset}. Supported: {list(HYPERLIQUID_ASSETS.keys())}",
+                    error=f"Unknown asset: {asset}. {exc}",
                 )
 
             # Validate size
@@ -1093,8 +1080,13 @@ class HyperliquidAdapter:
             }],
             "grouping": "na"
         }
+
+        Raises:
+            ValueError: If ``asset`` is not resolvable. ALM-3186: this used to
+                default to index 0, i.e. it encoded an order against BTC for
+                every unknown symbol.
         """
-        asset_id = HYPERLIQUID_ASSETS.get(asset, 0)
+        asset_id = resolve_market(asset).asset_index
 
         # Format price and size to required precision
         # Hyperliquid uses string representation with specific decimal places
@@ -1138,8 +1130,12 @@ class HyperliquidAdapter:
                 "o": order_id
             }]
         }
+
+        Raises:
+            ValueError: If ``asset`` is not resolvable (ALM-3186 — previously
+                defaulted to index 0, cancelling against BTC).
         """
-        asset_id = HYPERLIQUID_ASSETS.get(asset, 0)
+        asset_id = resolve_market(asset).asset_index
 
         return {
             "type": "cancel",
@@ -1166,8 +1162,12 @@ class HyperliquidAdapter:
                 "cloid": client_id
             }]
         }
+
+        Raises:
+            ValueError: If ``asset`` is not resolvable (ALM-3186 — previously
+                defaulted to index 0, cancelling against BTC).
         """
-        asset_id = HYPERLIQUID_ASSETS.get(asset, 0)
+        asset_id = resolve_market(asset).asset_index
 
         return {
             "type": "cancelByCloid",
@@ -1243,6 +1243,5 @@ __all__ = [
     "HYPERLIQUID_API_URLS",
     "HYPERLIQUID_WS_URLS",
     "HYPERLIQUID_CHAIN_IDS",
-    "HYPERLIQUID_ASSETS",
     "HYPERLIQUID_GAS_ESTIMATES",
 ]

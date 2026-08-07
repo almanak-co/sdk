@@ -408,7 +408,7 @@ class TestRequireLpToleranceFitsRange:
             V3_TICK_SPACING,
             price_to_tick,
         )
-        from almanak.framework.intents.compiler import LP_SLIPPAGE_PERMISSIVE_DEFAULT
+        from almanak.framework.intents.compiler import LP_SLIPPAGE_DEFAULT
         from almanak.framework.intents.lp_math import tick_to_sqrt_ratio_x96
 
         class _Intent:
@@ -467,7 +467,7 @@ class TestRequireLpToleranceFitsRange:
                         intent=_Intent(tol),
                         amount0_desired=a0,
                         amount1_desired=a1,
-                        default_lp_slippage=LP_SLIPPAGE_PERMISSIVE_DEFAULT,
+                        default_lp_slippage=LP_SLIPPAGE_DEFAULT,
                         sqrt_price_x96=tick_to_sqrt_ratio_x96(spot),
                         tick_lower=band.tick_lower,
                         tick_upper=band.tick_upper,

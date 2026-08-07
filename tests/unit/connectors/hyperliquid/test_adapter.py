@@ -16,7 +16,6 @@ import pytest
 import almanak.connectors.hyperliquid.adapter as adapter_module
 from almanak.connectors.hyperliquid.adapter import (
     HYPERLIQUID_API_URLS,
-    HYPERLIQUID_ASSETS,
     HYPERLIQUID_CHAIN_IDS,
     HYPERLIQUID_WS_URLS,
     ExternalSigner,
@@ -1056,11 +1055,128 @@ class TestConstants:
         assert "mainnet" in HYPERLIQUID_CHAIN_IDS
         assert "testnet" in HYPERLIQUID_CHAIN_IDS
 
-    def test_assets_exist(self) -> None:
-        """Test common assets are defined."""
-        assert "BTC" in HYPERLIQUID_ASSETS
-        assert "ETH" in HYPERLIQUID_ASSETS
-        assert "SOL" in HYPERLIQUID_ASSETS
-        # Asset indices should be unique
-        indices = list(HYPERLIQUID_ASSETS.values())
-        assert len(indices) == len(set(indices))
+    def test_asset_index_map_was_deleted(self) -> None:
+        """ALM-3186: ``HYPERLIQUID_ASSETS`` is gone from every public surface.
+
+        The old test asserted the map merely *existed* and had unique values —
+        which the known-wrong map satisfied (``SOL: 2`` is ATOM on the live
+        venue). Uniqueness was never the property that mattered; correctness
+        was, and only ``markets.resolve_market`` has it.
+        """
+        import almanak.connectors.hyperliquid as hl_pkg
+
+        assert not hasattr(adapter_module, "HYPERLIQUID_ASSETS")
+        assert "HYPERLIQUID_ASSETS" not in adapter_module.__all__
+        assert "HYPERLIQUID_ASSETS" not in hl_pkg.__all__
+        assert "HYPERLIQUID_ASSETS" not in hl_pkg._LAZY
+        # The removed name fails with actionable guidance, not a bare AttributeError.
+        with pytest.raises(AttributeError, match="resolve_market"):
+            _ = hl_pkg.HYPERLIQUID_ASSETS
+
+
+class TestAssetIndexResolutionIsFailClosed:
+    """ALM-3186 negative controls for the deleted ``HYPERLIQUID_ASSETS`` map.
+
+    Each test below FAILS if the fix is reverted:
+
+    * ``test_unknown_asset_never_encodes_index_zero`` — the old
+      ``HYPERLIQUID_ASSETS.get(asset, 0)`` returned ``0`` (BTC) for every
+      unknown symbol, so it would assert-fail on the raise.
+    * ``test_sol_resolves_to_the_venue_index_not_the_wrong_map`` — the old map
+      had ``SOL: 2``; the live venue has SOL at 5 and ATOM at 2.
+    * ``test_cancel_paths_refuse_unknown_asset`` — both cancel builders used the
+      same ``.get(asset, 0)``, i.e. they built a cancel against BTC.
+    """
+
+    @pytest.fixture
+    def adapter(self) -> HyperliquidAdapter:
+        config = HyperliquidConfig(network="mainnet", wallet_address="0x" + "11" * 20)
+        return HyperliquidAdapter(config, signer=_stub_signer())
+
+    def test_unknown_asset_never_encodes_index_zero(self, adapter: HyperliquidAdapter) -> None:
+        """An unresolvable symbol raises instead of silently meaning BTC."""
+        with pytest.raises(ValueError, match="not in the resolvable set"):
+            adapter._build_order_action(
+                asset="NOT_A_REAL_PERP",
+                is_buy=True,
+                size=Decimal("1"),
+                price=Decimal("100"),
+                order_type=HyperliquidOrderType.LIMIT,
+                time_in_force=HyperliquidTimeInForce.GTC,
+                reduce_only=False,
+                client_id="cid",
+            )
+
+    def test_place_order_refuses_unknown_asset_before_signing(self, adapter: HyperliquidAdapter) -> None:
+        """``place_order`` surfaces the refusal as a failed result, not an order."""
+        result = adapter.place_order(
+            asset="NOT_A_REAL_PERP",
+            is_buy=True,
+            size=Decimal("1"),
+            price=Decimal("100"),
+        )
+        assert not result.success
+        assert result.order is None
+        assert "Unknown asset" in (result.error or "")
+
+    def test_sol_resolves_to_the_venue_index_not_the_wrong_map(self, adapter: HyperliquidAdapter) -> None:
+        """SOL encodes 5 (the venue's index), never 2 (which is ATOM)."""
+        action = adapter._build_order_action(
+            asset="SOL",
+            is_buy=True,
+            size=Decimal("1"),
+            price=Decimal("100"),
+            order_type=HyperliquidOrderType.LIMIT,
+            time_in_force=HyperliquidTimeInForce.GTC,
+            reduce_only=False,
+            client_id="cid",
+        )
+        assert action["orders"][0]["a"] == 5
+
+        atom = adapter._build_order_action(
+            asset="ATOM",
+            is_buy=True,
+            size=Decimal("1"),
+            price=Decimal("10"),
+            order_type=HyperliquidOrderType.LIMIT,
+            time_in_force=HyperliquidTimeInForce.GTC,
+            reduce_only=False,
+            client_id="cid",
+        )
+        assert atom["orders"][0]["a"] == 2
+
+    def test_quote_suffixed_symbols_resolve(self, adapter: HyperliquidAdapter) -> None:
+        """``resolve_market`` normalisation reaches the adapter (``BTC-USD`` → 0).
+
+        The deleted literal map had no normalisation at all, so ``"BTC-USD"``
+        missed and fell through to index 0 — right answer, wrong reason.
+        ``"ETH-PERP"`` is the discriminating case: the map would have encoded
+        BTC, the resolver encodes ETH.
+        """
+        action = adapter._build_order_action(
+            asset="ETH-PERP",
+            is_buy=True,
+            size=Decimal("1"),
+            price=Decimal("100"),
+            order_type=HyperliquidOrderType.LIMIT,
+            time_in_force=HyperliquidTimeInForce.GTC,
+            reduce_only=False,
+            client_id="cid",
+        )
+        assert action["orders"][0]["a"] == 1
+
+    def test_cancel_paths_refuse_unknown_asset(self, adapter: HyperliquidAdapter) -> None:
+        """Both cancel builders fail closed rather than cancelling on BTC."""
+        with pytest.raises(ValueError, match="not in the resolvable set"):
+            adapter._build_cancel_action(asset="NOT_A_REAL_PERP", order_id="1")
+        with pytest.raises(ValueError, match="not in the resolvable set"):
+            adapter._build_cancel_by_cloid_action(asset="NOT_A_REAL_PERP", client_id="cid")
+
+    def test_delisted_symbols_from_the_old_map_are_refused(self, adapter: HyperliquidAdapter) -> None:
+        """MATIC/FTM were in the deleted map and are NOT tradeable perps today.
+
+        Under the old map ``MATIC`` encoded index 10 — LTC on the live venue.
+        """
+        for symbol in ("MATIC", "FTM"):
+            with pytest.raises(ValueError, match="not in the resolvable set"):
+                adapter._build_cancel_action(asset=symbol, order_id="1")

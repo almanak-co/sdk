@@ -309,8 +309,18 @@ class TestResolveDecimals:
 
         mock_resolver.resolve.assert_called_once_with("0xUSDC", "arbitrum")
 
-    def test_chain_defaults_to_ethereum(self):
-        """When no chain specified, use 'ethereum' as default."""
+    def test_missing_chain_never_falls_back_to_ethereum(self):
+        """ALM-3186: no chain -> unmeasured, and the resolver is never called.
+
+        This replaces ``test_chain_defaults_to_ethereum``, which pinned the
+        defect: a token address is only meaningful with its chain, so resolving
+        an Arbitrum/Base address against mainnet either fails (best case) or
+        silently returns a DIFFERENT token's decimals (worst case — 6 vs 18 is a
+        10^12 error in a money number).
+
+        Negative control: revert the fix and ``resolve`` is called with
+        ``"ethereum"``, so both assertions below fail.
+        """
         parser = EnsoReceiptParser()  # no chain kwarg
 
         mock_token = MagicMock()
@@ -322,9 +332,23 @@ class TestResolveDecimals:
             "almanak.framework.data.tokens.get_token_resolver",
             return_value=mock_resolver,
         ):
-            assert parser._resolve_decimals("0xWBTC") == 8
+            assert parser._resolve_decimals("0xWBTC") is None
 
-        mock_resolver.resolve.assert_called_once_with("0xWBTC", "ethereum")
+        mock_resolver.resolve.assert_not_called()
+
+    def test_blank_chain_is_treated_as_missing(self):
+        """``chain=""`` / whitespace is not a chain — same fail-closed path."""
+        for blank in ("", "   "):
+            parser = EnsoReceiptParser(chain=blank)
+            assert parser._chain is None
+
+            mock_resolver = MagicMock()
+            with patch(
+                "almanak.framework.data.tokens.get_token_resolver",
+                return_value=mock_resolver,
+            ):
+                assert parser._resolve_decimals("0xWBTC") is None
+            mock_resolver.resolve.assert_not_called()
 
 
 class TestExtractSwapAmountsDecimalResolutionFailure:
@@ -385,3 +409,40 @@ class TestConstructorCapturesChain:
         """Unknown kwargs should not raise."""
         parser = EnsoReceiptParser(chain="arbitrum", foo="bar")
         assert parser._chain == "arbitrum"
+
+
+class TestExtractFailsClosedWithoutChain:
+    """ALM-3186 end-to-end negative control, with the REAL token resolver.
+
+    The receipt below carries genuine Ethereum-mainnet addresses (USDC in, WETH
+    out), so before the fix the hardcoded ``"ethereum"`` fallback resolved both
+    and returned confident amounts for a parser that had no idea which chain the
+    receipt came from. Revert the fix and ``test_no_chain_reports_unmeasured``
+    fails: the extract returns a populated ``SwapAmounts``.
+    """
+
+    # Real mainnet addresses — chosen precisely because the old fallback WOULD
+    # resolve them. A fabricated address would pass either way and prove nothing.
+    ETH_USDC = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+    ETH_WETH = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+
+    def _receipt(self) -> dict:
+        return _make_receipt(
+            logs=[
+                _transfer_log(self.ETH_USDC, WALLET, "0xrouter", 1_000_000_000),
+                _transfer_log(self.ETH_WETH, "0xrouter", WALLET, 500_000_000_000_000_000),
+            ]
+        )
+
+    def test_no_chain_reports_unmeasured(self):
+        parser = EnsoReceiptParser()  # no chain — the fail-closed case
+        assert parser.extract_swap_amounts(self._receipt()) is None
+
+    def test_same_receipt_with_the_chain_is_measured(self):
+        """Control arm: the ONLY difference is the chain kwarg."""
+        parser = EnsoReceiptParser(chain="ethereum")
+        result = parser.extract_swap_amounts(self._receipt())
+        assert result is not None
+        assert isinstance(result, SwapAmounts)
+        assert result.amount_in_decimal == Decimal("1000")  # 6 decimals
+        assert result.amount_out_decimal == Decimal("0.5")  # 18 decimals

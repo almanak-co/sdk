@@ -11431,15 +11431,35 @@ class StrategyRunner:
         source-REQUEST persistence in ``_bridge_wait_process_intent``
         (VIB-5670 Stage 3), with ``_bridge_wait_finalize`` as the fallback.
         """
-        # Register and wait for bridge transfer
-        # expected_amount=0 means accept any positive balance increase
-        deposit_id = state.state_provider.register_bridge_transfer(
-            source_chain=chain,
-            destination_chain=dest_chain,
-            source_tx_hash=tx_hash,
-            token_symbol=token_symbol,
-            expected_amount=0,
-        )
+        # Register and wait for bridge transfer.
+        # expected_amount=0 means accept any positive balance increase, so the
+        # BASELINE read is the whole guard: completion is `current - initial >
+        # dust`. ALM-3186 — an unmeasurable baseline must not become `0`, which
+        # would make the wallet's pre-existing destination funds satisfy that
+        # comparison on the first poll and declare the bridge complete before
+        # anything crossed. The provider now raises instead; surface it as a
+        # failed step so the source-succeeded / bridge-unknown state is recorded
+        # rather than escaping into the iteration loop as an unhandled fault.
+        try:
+            deposit_id = state.state_provider.register_bridge_transfer(
+                source_chain=chain,
+                destination_chain=dest_chain,
+                source_tx_hash=tx_hash,
+                token_symbol=token_symbol,
+                expected_amount=0,
+            )
+        except Exception as exc:
+            logger.error(
+                f"Step {step_num}: cannot establish a destination-chain baseline for "
+                f"{token_symbol} on {dest_chain} ({exc}). The source transaction {tx_hash} "
+                f"has ALREADY been submitted; the bridge is untracked, not reverted."
+            )
+            state.failed_step = f"step-{step_num}"
+            state.error_message = (
+                f"Bridge tracking could not start: destination balance for {token_symbol} "
+                f"on {dest_chain} is unmeasurable ({exc}). Source tx {tx_hash} was submitted."
+            )
+            return True
 
         try:
             bridge_status = await state.state_provider.wait_for_bridge_completion(

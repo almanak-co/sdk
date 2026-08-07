@@ -425,12 +425,22 @@ class TestIntentCompilerDefaultLpSlippageIsValidatedNotClamped:
             self._make(Decimal(bad))
 
     def test_the_shipped_default_still_constructs(self):
-        """Regression guard: 0.99 is a bad default (VIB-6225) but it is LEGAL.
+        """Regression guard: the shipped default is LEGAL under the validator.
 
         If this fails, the validator has broken every LP strategy in the repo
         rather than only rejecting worse-than-default values.
+
+        ALM-3186 changed the value from ``0.99`` (VIB-6225's placeholder) to
+        ``0.01``, a real price tolerance. Asserted against the constant rather
+        than a literal so the two cannot drift, plus an explicit bound that the
+        default is protective — a default back above 10% would be the old defect
+        returning under a new number.
         """
-        assert self._make().default_lp_slippage == Decimal("0.99")
+        from almanak.framework.intents.compiler import LP_SLIPPAGE_DEFAULT
+
+        assert self._make().default_lp_slippage == LP_SLIPPAGE_DEFAULT
+        assert LP_SLIPPAGE_DEFAULT == Decimal("0.01")
+        assert Decimal("0") < LP_SLIPPAGE_DEFAULT <= Decimal("0.1")
 
     def test_a_real_tolerance_is_accepted_unchanged(self):
         """And is NOT silently altered — the old code clamped, this must pass through."""

@@ -775,17 +775,17 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
             logger.info(f"Opening LP: {lower_price:.2f} - {upper_price:.2f}")
             amount_base = base_balance.balance * Decimal("0.95")
             amount_quote = quote_balance.balance * Decimal("0.95")
-            # NOTE ON SLIPPAGE -- the lp_open calls below DECLARE `max_slippage`,
-            # and the declaration is what selects the instrument. Since VIB-6269 a
-            # CL mint's tolerance is a PRICE band: the compiler emits that band's
-            # image in the amount0Min/amount1Min the ABI actually has, so 0.005
-            # means "revert if price moved more than 0.5%" on every range width.
+            # NOTE ON SLIPPAGE -- the lp_open calls below DECLARE `max_slippage`.
+            # Since VIB-6269 a CL mint's tolerance is a PRICE band: the compiler
+            # emits that band's image in the amount0Min/amount1Min the ABI actually
+            # has, so 0.005 means "revert if price moved more than 0.5%" on every
+            # range width.
             #
-            # Omitting it does NOT inherit a looser version of the same thing. An
-            # undeclared tolerance is not a declared one, so the compiler falls back
-            # to the permissive flat haircut `default_lp_slippage` -- a floor of 1%
-            # of desired, a DIFFERENT instrument (VIB-6524). Declaring the tolerance
-            # is what reaches the band, which is why it is set here.
+            # Since ALM-3186 / VIB-6225 omitting it inherits the SAME instrument at
+            # `default_lp_slippage` (1%) rather than the old permissive flat
+            # haircut, so an undeclared mint is no longer unfloored. It is still
+            # declared here because the right tolerance is pair-specific and must be
+            # chosen against THIS position's range half-width, not inherited.
             #
             # Pick it SMALLER than the range half-width above: a band that reaches a
             # live range bound would leave that leg unfloored, so this scaffold opts
@@ -1394,11 +1394,12 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
             return Intent.sequence(
                 [
                     # BOTH legs declare `max_slippage`. Since VIB-6269 a CL mint's
-                    # tolerance is a PRICE band, and the compiler reaches that band
-                    # only when the caller DECLARES one -- omitting it falls back to
-                    # the permissive flat haircut `default_lp_slippage` (VIB-6524),
-                    # a different instrument rather than a looser setting of this
-                    # one. It matters most here: this sequence swaps first, so the
+                    # tolerance is a PRICE band; since ALM-3186 / VIB-6225 an
+                    # undeclared tolerance reaches the same band at
+                    # `default_lp_slippage` (1%) instead of the old permissive flat
+                    # haircut. Declaring it is still right here: the right tolerance
+                    # is pair- and range-specific, and it matters most in this
+                    # shape -- this sequence swaps first, so the
                     # deposit embeds an implicit swap and execution price directly
                     # determines value received. Keep the LP tolerance below the
                     # range half-width; this scaffold asks the live compiler to refuse

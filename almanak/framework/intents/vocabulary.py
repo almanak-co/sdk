@@ -639,24 +639,29 @@ class LPOpenIntent(BaseIntent):
             DIFFERENT mechanism — it haircuts liquidity / ``amount*_max`` rather
             than calling ``cl_math.compute_lp_slippage_mins``). When ``None`` (the
             default), each connector falls back to its OWN built-in default:
-            Curve 50 bps, V3-family / Slipstream the permissive
-            :data:`~almanak.framework.intents.compiler.LP_SLIPPAGE_PERMISSIVE_DEFAULT`,
-            and Uniswap V4 ``0.005`` (0.5%) — V4 does NOT inherit the permissive
-            default, so do not generalise "V3 family" to "all Uniswap LP".
+            Curve 50 bps, V3-family / Slipstream
+            :data:`~almanak.framework.intents.compiler.LP_SLIPPAGE_DEFAULT`
+            (``0.01`` = 1%, read as a PRICE band), and Uniswap V4 ``0.005``
+            (0.5%) — V4 does NOT inherit the V3-family default, so do not
+            generalise "V3 family" to "all Uniswap LP".
 
             NOT consumed by plain ``aerodrome`` (the v2 constant-product AMM),
             which discards it and submits a literal ``amount_a_min=0,
             amount_b_min=0``. Setting this field on ``aerodrome`` yields NO floor
             rather than a tighter one — an unfloored mint, not a protected one, so
             none of the advice below buys you anything there.
-            Omitting it is SUPPORTED and will not revert an honest balanced mint —
-            a swap-grade floor there constrains the token SPLIT rather than a
-            quoted output, so it fails good mints when price drifts toward a range
-            edge. But on the connectors that DO consume it, prefer setting it
-            explicitly: the inherited V3-family default
-            is permissive, its magnitude is contested (VIB-6225), and "split not
-            value" only holds while the price is honest — under a manipulated price
-            the split shift IS a value transfer. On those same consuming
+            Omitting it is SUPPORTED: the V3-family / Slipstream default is a real
+            1% PRICE tolerance (ALM-3186 / VIB-6225 replaced the old ``0.99``
+            placeholder), mapped into the ``amount0Min``/``amount1Min`` pair by
+            ``lp_mint_mins_for_price_band`` so it does not revert an honest
+            balanced mint on ordinary compile-to-submit staleness. Prefer setting
+            it explicitly anyway on the connectors that DO consume it, because the
+            right tolerance is pair-specific (0.005 on stables, 0.02 on volatile
+            pairs) and because a tolerance WIDER than the position's range
+            half-width will zero one leg's minimum (warned) or fall back to the
+            flat haircut and revert. "Split not value" only holds while the price
+            is honest — under a manipulated price the split shift IS a value
+            transfer. On those same consuming
             connectors, set it explicitly ALWAYS when the
             deposit embeds an implicit swap (imbalanced/single-sided/zap), where
             execution price directly determines value received. See the LP SLIPPAGE
@@ -882,7 +887,9 @@ class LPCloseIntent(BaseIntent):
             setting it on those protocols does NOT tighten the exit — an exit
             cannot currently be floored on those connectors AT ALL, even when one
             is explicitly requested. Do not read that as safe. A zero minimum is
-            unprotected in the same way the permissive open default is: a
+            unprotected in a way the OPEN side no longer is (ALM-3186 gave the
+            open default a real price band; the close lane still ships a literal
+            zero — VIB-6220): a
             proportional burn returns the split the live price implies, which is
             equivalent value only while that price is HONEST. Under a manipulated
             price the burn hands back the cheap leg and the minimums are the only
@@ -1473,8 +1480,9 @@ class Intent:
                 ``amount*_max`` instead of computing an ``amount0Min`` /
                 ``amount1Min`` pair). When None (the
                 default), each connector uses its own built-in default: Curve
-                50 bps, V3-family / Slipstream the permissive LP default, and
-                Uniswap V4 ``0.005`` (0.5%). V4 does NOT inherit the permissive
+                50 bps, V3-family / Slipstream ``LP_SLIPPAGE_DEFAULT`` (0.01 = 1%,
+                read as a PRICE band), and
+                Uniswap V4 ``0.005`` (0.5%). V4 does NOT inherit the V3-family
                 LP default -- do not generalise "V3 family" to "all Uniswap LP".
 
                 NOT consumed by plain ``aerodrome`` (the v2 constant-product AMM):
@@ -1485,12 +1493,14 @@ class Intent:
                 read a set ``max_slippage`` as protection there, and read the
                 advice below as scoped to the CONSUMING connectors only.
 
-                Omitting it is SUPPORTED and will not revert an honest
-                balanced mint, because a swap-grade floor there constrains the token
-                SPLIT rather than a quoted output. On the connectors that DO
-                consume it, prefer setting it explicitly
-                anyway: the inherited V3-family default is permissive, its magnitude
-                is contested (VIB-6225), and "split not value" holds only while the
+                Omitting it is SUPPORTED: the V3-family / Slipstream default is a
+                real 1% PRICE tolerance (ALM-3186 / VIB-6225 replaced the ``0.99``
+                placeholder) mapped into the min pair as a price band, so it does
+                not revert an honest balanced mint on ordinary staleness. On the
+                connectors that DO consume it, prefer setting it explicitly
+                anyway: the right tolerance is pair-specific, a tolerance wider
+                than the range half-width zeroes a leg's minimum or reverts, and
+                "split not value" holds only while the
                 price is honest -- under a manipulated price the split shift IS a
                 value transfer. On those same connectors, set it ALWAYS when the
                 deposit embeds an implicit

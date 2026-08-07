@@ -831,3 +831,57 @@ class TestBridgeWaitFinalize:
         await runner._bridge_wait_finalize(state)
 
         strategy.on_intent_executed.assert_not_called()
+
+
+class TestBridgeRegistrationBaselineIsMandatory:
+    """ALM-3186 — an unmeasurable destination baseline must fail the step.
+
+    ``register_bridge_transfer`` is called with ``expected_amount=0``, so
+    completion reduces to ``current - initial > dust``. The baseline read IS the
+    guard. Before ALM-3186 the provider returned ``0`` when the gateway sent no
+    balance fields, so a wallet already holding funds on the destination chain
+    satisfied that comparison on the FIRST poll and the bridge was declared
+    complete before anything crossed.
+
+    The provider now raises. This pins the runner's half of the contract: the
+    raise becomes a failed step, not an unhandled fault escaping into the
+    iteration loop.
+
+    Negative control: drop the ``try/except`` around ``register_bridge_transfer``
+    and this test errors with the provider's exception instead of asserting.
+    """
+
+    @pytest.mark.asyncio
+    async def test_unmeasurable_baseline_fails_the_step_and_never_polls(self) -> None:
+        from almanak.framework.execution.enso_state_provider import (
+            BridgeBalanceUnavailableError,
+        )
+
+        runner = _make_runner()
+        intent = SwapIntent(from_token="USDC", to_token="ETH", amount=Decimal("10"))
+        state = _make_state(intents=[intent])
+        state.current_intent = intent
+        state.state_provider = MagicMock()
+        state.state_provider.register_bridge_transfer = MagicMock(
+            side_effect=BridgeBalanceUnavailableError("Gateway returned no balance for USDC on base")
+        )
+        state.state_provider.wait_for_bridge_completion = AsyncMock()
+
+        result = SimpleNamespace(tx_result=TransactionExecutionResult(success=True, tx_hash="0xabc"))
+
+        should_break = await runner._bridge_wait_poll_completion(
+            state,
+            result=result,
+            tx_hash="0xabc",
+            chain="arbitrum",
+            dest_chain="base",
+            token_symbol="USDC",
+            step_num=1,
+        )
+
+        assert should_break is True
+        assert state.failed_step == "step-1"
+        assert "unmeasurable" in state.error_message
+        # The decisive assertion: we must NOT have gone on to poll for
+        # completion against a baseline we could not establish.
+        state.state_provider.wait_for_bridge_completion.assert_not_awaited()

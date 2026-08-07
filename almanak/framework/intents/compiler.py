@@ -393,7 +393,7 @@ def _raise_if_placeholder_intent(intent_type: IntentType) -> None:
 
 
 # =============================================================================
-# LP SLIPPAGE DOCTRINE — why LP defaults are permissive and swap defaults are not
+# LP SLIPPAGE DOCTRINE — what the LP default protects, and in which units
 # =============================================================================
 # Design rationale lives in docs/internal/blueprints/03-intent-system.md
 # §"LP slippage doctrine". Summarised here because this is where the number is.
@@ -401,21 +401,62 @@ def _raise_if_placeholder_intent(intent_type: IntentType) -> None:
 # A BALANCED concentrated-liquidity mint or burn is not a swap in SHAPE: the pool
 # computes liquidity from the live price and consumes whatever split that implies,
 # so ``amount0Min``/``amount1Min`` constrain the SPLIT rather than a quoted output.
-# A floor tight enough to demand a specific split therefore reverts honest mints
-# whenever price drifts toward a range edge, which is why LP intents default to a
-# permissive floor while ``Intent.swap`` does not (it defaults to 0.005).
+# A per-leg haircut tight enough to demand a specific split therefore reverts
+# honest mints whenever price drifts toward a range edge. That shape argument is
+# settled — and it is an argument about the INSTRUMENT, not about the number.
 #
-# IMPORTANT LIMIT OF THAT ARGUMENT — do not over-read it. "Split, not value" holds
-# only while the price is HONEST. Under a MANIPULATED price the split shift IS a
-# value transfer: an attacker who moves spot before your mint has you supply the
+# IMPORTANT LIMIT OF IT — do not over-read it. "Split, not value" holds only while
+# the price is HONEST. Under a MANIPULATED price the split shift IS a value
+# transfer: an attacker who moves spot before your mint has you supply the
 # expensive leg cheaply, takes the position's other side, and restores the price.
 # The minimums are the only on-chain defence against that, so a permissive floor
-# is a real (bounded) exposure and not a free lunch. **The magnitude of the
-# default below is contested and under active review as VIB-6225 (Urgent)**,
-# which argues 0.99 is a shipped "make it always succeed" placeholder and that a
-# real tolerance of order 0.005–0.02 belongs here. Treat the shape argument above
-# as settled and the NUMBER as open; do not cite this comment as authority for
-# keeping 0.99.
+# is a real exposure, not a free lunch.
+#
+# ALM-3186 / VIB-6225 (open side, carried by VIB-6524) — WHAT CHANGED AND WHY.
+#
+# The default used to be ``0.99``: a 99% tolerance, i.e. an ``amount*Min`` of 1%
+# of desired, on every LP_OPEN that did not set ``max_slippage``. That was a
+# shipped "make it always succeed" placeholder, and it was chosen because the
+# only instrument available at the time was the FLAT per-leg haircut, for which
+# no protective number exists. On a mint the deposit split is an amplified
+# function of price (elasticity A ≈ 5x–400x for ordinary ranges), so a flat
+# haircut of ``s`` really tolerates only ``s / A`` of price movement: a "0.5%"
+# flat floor reverted on a measured −0.03% move, i.e. on ordinary compile-to-
+# submit staleness. Every flat value is therefore either theatre (0.99) or a
+# liveness failure (0.01). The number was never the lever; the instrument was.
+#
+# VIB-6269 built the correct instrument — ``lp_mint_mins_for_price_band`` maps a
+# PRICE tolerance into the two per-leg minimums the ABI actually accepts — but
+# deliberately withheld it from the default path via a provenance gate, on the
+# grounds that ``0.99`` was a placeholder rather than a declared tolerance and
+# feeding a placeholder to a correct instrument yields a correct-but-meaningless
+# answer. Its decision doc says the class "closes when VIB-6225 sets a real
+# default and the fallback stops firing". This is that change: the default below
+# is a real PRICE tolerance, the provenance gate in
+# ``_strategy_base/base/cl_math.py`` is gone, and an LP_OPEN that declares
+# nothing now gets a band-aware floor instead of a 1%-of-desired rubber stamp.
+#
+# WHY 0.01 (1%). It is a price tolerance, so read it as "refuse the mint if spot
+# moved more than 1% from what this bundle was compiled against":
+#   * ABOVE the noise floor. The measured compile-to-submit window is ~23 s /
+#     ~90 Arbitrum blocks (three approvals plus ~18 s of gas estimation). 1% of
+#     price on a major pair comfortably covers that, so honest mints do not
+#     revert on staleness — the failure mode that produced ``0.99``.
+#   * BELOW a meaningful theft. It bounds an attacker's pre-mint price push to
+#     1%, versus the ~0% bound a 99% tolerance gave.
+#   * Mid-range of the 0.005–0.02 band VIB-6225 argued for. 0.005 is defensible
+#     on stables and 0.02 on volatile pairs, which is precisely why the choice
+#     belongs to the strategy: set ``LPOpenIntent.max_slippage`` per intent (or
+#     ``protocol_params["lp_slippage"]``) and the default never applies.
+#
+# KNOWN TRIPWIRE, ACCEPTED. When the declared tolerance is wide relative to the
+# position's range half-width the band reaches a range bound and that leg's
+# minimum is legitimately ``0`` (warned, not refused); when it reaches BOTH
+# bounds ``cl_math`` falls back to the flat haircut rather than ship an unfloored
+# mint — and a 1% flat haircut on a range that narrow WILL revert. That is the
+# intended signal: a 1%-tolerance mint into a sub-1%-wide range is not a mint
+# whose floor should be relaxed, it is a range/tolerance mismatch the strategy
+# must state. Set ``max_slippage`` smaller than the range half-width.
 #
 # The shape argument does NOT extend at all to LP paths that embed an implicit
 # swap: an imbalanced StableSwap ``add_liquidity``, a single-sided deposit, or a
@@ -424,12 +465,9 @@ def _raise_if_placeholder_intent(intent_type: IntentType) -> None:
 # Those connectors set their own swap-grade floor and refuse a zero minimum —
 # Curve is the reference implementation (``connectors/curve/compiler.py``).
 #
-# On the residual 1%: it is not value protection, it is a tripwire — it makes a
-# mint that would consume ~none of one token revert on-chain, the same failure
-# ``cl_math.lp_range_excludes_spot_warning`` reports off-chain. Note that since
-# VIB-6217 a value of exactly ``1`` is REFUSED at construction rather than
-# accepted, so that tripwire can no longer be removed through this door.
-LP_SLIPPAGE_PERMISSIVE_DEFAULT: Decimal = Decimal("0.99")
+# Since VIB-6217 a value of exactly ``1`` is REFUSED at construction rather than
+# clamped, so the floor can no longer be removed entirely through this door.
+LP_SLIPPAGE_DEFAULT: Decimal = Decimal("0.01")
 
 
 class IntentCompiler:
@@ -477,7 +515,7 @@ class IntentCompiler:
         default_deadline_seconds: int = 300,
         rpc_url: str | None = None,
         rpc_timeout: float = 10.0,
-        default_lp_slippage: Decimal = LP_SLIPPAGE_PERMISSIVE_DEFAULT,
+        default_lp_slippage: Decimal = LP_SLIPPAGE_DEFAULT,
         config: IntentCompilerConfig | None = None,
         gateway_client: "GatewayClient | None" = None,
         token_resolver: "TokenResolverType | None" = None,
@@ -495,23 +533,30 @@ class IntentCompiler:
             rpc_url: RPC URL for on-chain queries (needed for LP close).
                 DEPRECATED: Use gateway_client instead for production deployments.
             rpc_timeout: HTTP timeout for direct RPC calls in seconds.
-            default_lp_slippage: Default slippage for BALANCED LP operations
-                (:data:`LP_SLIPPAGE_PERMISSIVE_DEFAULT`, 0.99 = 99%). Controls the
-                minimum acceptable amounts when adding/removing liquidity.
-                LP operations differ from swaps - for concentrated liquidity, the actual
-                deposit ratio depends heavily on where the current price is relative to
-                your tick range. A price near the range edge means most liquidity is in
-                one token, so a tight floor reverts honest mints while constraining
-                only the SPLIT — under an HONEST price it is not buying you value
-                protection. The permissive default allows for that behaviour. Read
-                the LP SLIPPAGE DOCTRINE comment above this class before relying on
-                it: the split-not-value argument holds only while the price is
-                honest, under a MANIPULATED price the split shift IS a value
-                transfer, and the magnitude of this default is contested under
-                VIB-6225. The argument also does NOT extend to swaps or to
-                swap-embedding LP paths (imbalanced/single-sided/zap deposits —
-                those set their own swap-grade floor). Can and often should be
-                lowered for tighter protection.
+            default_lp_slippage: Default tolerance for BALANCED LP operations
+                (:data:`LP_SLIPPAGE_DEFAULT`, ``0.01`` = 1%), applied when the
+                intent declares neither ``max_slippage`` nor
+                ``protocol_params["lp_slippage"]``. It is a **price** tolerance,
+                not a per-leg amount haircut: on the V3-family / Slipstream mint
+                path ``cl_math.compute_lp_slippage_mins`` maps it through
+                ``lp_mint_mins_for_price_band`` into the ``amount0Min`` /
+                ``amount1Min`` pair, so "1%" means "refuse if spot moved more
+                than 1% from what this bundle compiled against" rather than
+                "accept 99% of desired on each leg".
+
+                ALM-3186 / VIB-6225 changed this from ``0.99`` (a placeholder
+                that floored each leg at 1% of desired — effectively unfloored)
+                and removed the provenance gate that kept the default off the
+                price-band instrument. Read the LP SLIPPAGE DOCTRINE comment
+                above this class before changing it: the split-not-value
+                argument holds only while the price is honest, and it does NOT
+                extend to swaps or to swap-embedding LP paths
+                (imbalanced/single-sided/zap deposits, which set their own
+                swap-grade floor). Set ``LPOpenIntent.max_slippage`` per intent
+                rather than moving this global — 0.005 suits stables, 0.02 suits
+                volatile pairs, and a tolerance wider than the position's range
+                half-width will zero a leg's minimum (warned) or fall back to
+                the flat haircut and revert.
             config: Optional configuration. If not provided, defaults to
                 IntentCompilerConfig() which requires price_oracle.
             gateway_client: Optional gateway client for RPC queries. When provided,
@@ -583,13 +628,19 @@ class IntentCompiler:
         # otherwise bypass the compile-time safety-refusal handlers and be billed to
         # the circuit breaker as an ordinary fault.
         #
-        # NOTE: the DEFAULT is still 0.99 (a 1%-of-desired floor), which is its own
-        # defect — see VIB-6225. This only stops a caller making it worse.
+        # ALM-3186: the DEFAULT is now `LP_SLIPPAGE_DEFAULT` (0.01), a real price
+        # tolerance, not the old 0.99 placeholder. `[0, 1)` remains the accepted
+        # RANGE — a caller may still configure a wide default deliberately — but a
+        # value anywhere near the old 0.99 is no longer protective: it will reach
+        # both range bounds on most positions, which `cl_math` handles by falling
+        # back to the flat haircut. Prefer per-intent `max_slippage` over widening
+        # this global.
         #
-        # For WHY the LP default is permissive at all (the split-vs-value mechanism,
-        # and the swap-embedding boundary where that reasoning stops applying), see
-        # the LP SLIPPAGE DOCTRINE comment above this class — which also records that
-        # the magnitude of this default is contested by VIB-6225.
+        # For WHY the LP tolerance is a PRICE band rather than a per-leg amount
+        # haircut (the split-vs-value mechanism, the ~5x-400x elasticity that makes
+        # every flat value either theatre or a liveness failure, and the
+        # swap-embedding boundary where that reasoning stops applying), see the LP
+        # SLIPPAGE DOCTRINE comment above this class.
         validate_max_slippage_fraction(default_lp_slippage, field_name="default_lp_slippage")
         self.default_lp_slippage = default_lp_slippage
 

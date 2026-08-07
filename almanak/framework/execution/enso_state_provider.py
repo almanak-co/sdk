@@ -35,8 +35,21 @@ from web3.exceptions import Web3Exception
 from web3.types import HexStr
 
 from almanak.core.chains import ChainRegistry
+from almanak.core.chains._helpers import native_symbols_for
 
 logger = logging.getLogger(__name__)
+
+
+class BridgeBalanceUnavailableError(RuntimeError):
+    """A destination-chain balance could not be MEASURED (ALM-3186).
+
+    Distinct from "the balance is zero". Bridge completion is decided by
+    differencing two balance reads, so a fabricated zero on either side moves
+    the comparison in the direction of "the funds arrived" — pre-existing
+    destination inventory then reads as bridge arrival and the strategy spends
+    what it does not yet have. Raising keeps the transfer in ``pending`` so the
+    caller's poll/timeout path handles it, which is recoverable.
+    """
 
 
 # Standard ERC20 ABI for balanceOf
@@ -212,6 +225,11 @@ class EnsoStateProvider:
 
         Returns:
             Balance in wei (raw_balance from gateway)
+
+        Raises:
+            BridgeBalanceUnavailableError: If the gateway response carries no
+                balance at all, or a human-readable balance whose decimals
+                cannot be established. ALM-3186 — see below.
         """
         from almanak.gateway.proto import gateway_pb2
 
@@ -225,14 +243,59 @@ class EnsoStateProvider:
             ),
             timeout=15.0,
         )
-        # Use raw_balance (wei) for bridge tracking precision
+        # Use raw_balance (wei) for bridge tracking precision.
+        # NOTE a genuine zero balance arrives as the STRING "0", which is truthy
+        # in Python — only an ABSENT field (proto3 default "") falls through.
+        # That distinction is what makes the raise below "unmeasured", not "zero".
         if response.raw_balance:
             return int(response.raw_balance)
-        # Fallback: convert human-readable balance back to wei
+        # Fallback: convert human-readable balance back to wei.
         if response.balance:
-            decimals = 6 if token_symbol.upper() == "USDC" else 18
-            return int(Decimal(response.balance) * Decimal(10**decimals))
-        return 0
+            return int(Decimal(response.balance) * Decimal(10 ** self._decimals_for(chain, token_symbol, response)))
+        # ALM-3186: this used to `return 0`.
+        #
+        # These balances are differenced to decide whether a bridge landed:
+        # `register_bridge_transfer` snapshots the destination balance and
+        # `get_bridge_transfer_status` calls the transfer complete once
+        # `current - initial >= expected * (1 - tolerance)`. A fabricated 0 on
+        # the SNAPSHOT side therefore reads any pre-existing destination funds
+        # as bridge arrival — the transfer is declared complete before anything
+        # crossed, and the strategy spends inventory it does not have yet.
+        #
+        # An empty response is UNMEASURED, not zero (Empty != Zero). Raising
+        # keeps the transfer pending so the caller's poll/timeout path runs,
+        # which is the recoverable outcome.
+        raise BridgeBalanceUnavailableError(
+            f"Gateway returned no balance for {token_symbol} on {chain} "
+            f"(both raw_balance and balance are empty). Treating this as an unmeasured "
+            f"balance rather than zero: a fabricated zero here reads pre-existing "
+            f"destination funds as a completed bridge transfer."
+        )
+
+    def _decimals_for(self, chain: str, token_symbol: str, response: Any) -> int:
+        """Decimals for a gateway ``balance`` string — resolved, never guessed.
+
+        ALM-3186: this was ``6 if symbol == "USDC" else 18``. Every non-USDC
+        6-decimal token on the bridge path (USDT, USDC.e, USDbC, …) was then
+        scaled by 10^18 — a 10^12 over-statement of the destination balance,
+        which is exactly the direction that declares a bridge complete early.
+
+        Order of preference:
+
+        1. ``response.decimals`` — the same gateway read that produced the
+           balance, so it cannot disagree with it. Proto3 makes ``0`` the unset
+           default; ``0`` is not a plausible decimals value for a bridged ERC-20,
+           so it is treated as "not supplied" rather than accepted.
+        2. :meth:`_token_decimals` — the chain descriptor for a native coin,
+           otherwise the ``TokenResolver`` keyed by the registry-derived address.
+
+        Raises:
+            BridgeBalanceUnavailableError: If neither resolves.
+        """
+        gateway_decimals = int(getattr(response, "decimals", 0) or 0)
+        if gateway_decimals > 0:
+            return gateway_decimals
+        return self._token_decimals(chain, token_symbol)
 
     def _get_token_balance(self, chain: str, token_symbol: str) -> int:
         """Get token balance on a chain.
@@ -463,6 +526,12 @@ class EnsoStateProvider:
 
         Returns:
             Balance as Decimal (in token units, not wei)
+
+        Raises:
+            BridgeBalanceUnavailableError: If the token's decimals cannot be
+                resolved. ALM-3186 — this used to assume ``6 if USDC else 18``,
+                which reported every other 6-decimal token (USDT, USDC.e,
+                USDbC, …) 10^12 times too large.
         """
         # Save current wallet, use provided address
         original_wallet = self._wallet_address
@@ -470,11 +539,61 @@ class EnsoStateProvider:
 
         try:
             balance_wei = self._get_token_balance(chain, token)
-            # Assume 18 decimals for most tokens, 6 for USDC
-            decimals = 6 if token.upper() == "USDC" else 18
+            decimals = self._token_decimals(chain, token)
             return Decimal(balance_wei) / Decimal(10**decimals)
         finally:
             self._wallet_address = original_wallet
+
+    def _token_decimals(self, chain: str, token: str) -> int:
+        """Decimals for ``(chain, token)``, resolved or raised — never guessed.
+
+        ALM-3186. Registry-derived throughout, following the same pattern as
+        :func:`_token_addresses`:
+
+        * the chain descriptor's ``native.decimals`` when ``token`` denotes the
+          chain's native coin (including the ``TOKEN_ADDRESSES`` sentinel);
+        * otherwise the ``TokenResolver``, keyed by an ADDRESS — the caller's own
+          address when one was passed, else the descriptor's ``tokens`` entry for
+          the symbol. Addresses are never hand-typed here, and the deprecated
+          bare-symbol resolution path is deliberately not used.
+
+        Raises:
+            BridgeBalanceUnavailableError: If the token is not in the registry
+                or the resolver cannot resolve it. A wrong exponent misreports
+                the destination balance by orders of magnitude, so an unresolved
+                token is an error, not an occasion for a default.
+        """
+        descriptor = ChainRegistry.try_resolve(chain)
+        if descriptor is not None and token.upper() in native_symbols_for(chain):
+            return int(descriptor.native.decimals)
+
+        token_address: str | None = token if token.startswith("0x") else None
+        if token_address is None and descriptor is not None:
+            token_address = (descriptor.tokens or {}).get(token.lower())
+        if token_address is None:
+            token_address = TOKEN_ADDRESSES.get(chain, {}).get(token.upper())
+        if token_address is None:
+            raise BridgeBalanceUnavailableError(
+                f"Cannot determine decimals for {token} on {chain}: the token is not in the "
+                f"chain registry and no address was supplied. Refusing to guess."
+            )
+
+        if token_address.lower() == NATIVE_TOKEN_SENTINEL.lower():
+            if descriptor is None:
+                raise BridgeBalanceUnavailableError(
+                    f"Cannot determine native decimals on unknown chain {chain!r}: no chain descriptor."
+                )
+            return int(descriptor.native.decimals)
+
+        try:
+            from almanak.framework.data.tokens import get_token_resolver
+
+            return int(get_token_resolver().resolve(token_address, chain).decimals)
+        except Exception as exc:
+            raise BridgeBalanceUnavailableError(
+                f"Cannot determine decimals for {token} ({token_address}) on {chain}: "
+                f"unresolvable ({exc}). Refusing to guess."
+            ) from exc
 
     async def wait_for_bridge_completion(
         self,
@@ -522,6 +641,7 @@ class EnsoStateProvider:
 from almanak.framework.execution.plan_builder import is_cross_chain_intent  # noqa: E402
 
 __all__ = [
+    "BridgeBalanceUnavailableError",
     "EnsoStateProvider",
     "BridgeTransferInfo",
     "is_cross_chain_intent",
