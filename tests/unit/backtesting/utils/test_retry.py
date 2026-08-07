@@ -475,3 +475,101 @@ class TestDefaultRetryConfig:
         assert DEFAULT_RETRY_CONFIG.max_retries == 3
         assert DEFAULT_RETRY_CONFIG.base_delay == 1.0
         assert DEFAULT_RETRY_CONFIG.max_delay == 32.0
+
+
+# =============================================================================
+# Deprecation-shim Tests (ALM-3188)
+# =============================================================================
+
+
+class TestDeprecationShim:
+    """The module is dead inside the SDK but is published public surface.
+
+    ``.syncinclude`` ships ``almanak/`` wholesale, so these five names are
+    importable from the released package. They may only be removed after a
+    deprecation cycle (target: 3.0.0, ALM-3197). These tests are the negative
+    control for that promise: they fail if the shim is dropped or the names
+    stop resolving.
+    """
+
+    DEPRECATED_NAMES = (
+        "DEFAULT_RETRY_CONFIG",
+        "RetryConfig",
+        "RetryContext",
+        "calculate_backoff_delay",
+        "retry_with_backoff",
+    )
+
+    def test_names_resolve_from_package(self) -> None:
+        """Every deprecated name is still reachable via the package."""
+        import almanak.framework.utils as utils_pkg
+
+        for name in self.DEPRECATED_NAMES:
+            assert getattr(utils_pkg, name) is not None, name
+            assert name in utils_pkg.__all__, name
+
+    def test_names_are_listed_by_dir(self) -> None:
+        """``dir()`` advertises the lazily-resolved names."""
+        import almanak.framework.utils as utils_pkg
+
+        listed = dir(utils_pkg)
+        for name in self.DEPRECATED_NAMES:
+            assert name in listed, name
+
+    def test_module_import_emits_deprecation_warning(self) -> None:
+        """Importing the module directly warns exactly once."""
+        import importlib
+
+        import almanak.framework.utils.retry as retry_mod
+
+        with pytest.warns(DeprecationWarning, match="removed in Almanak SDK 3.0.0"):
+            importlib.reload(retry_mod)
+
+    def test_package_attribute_access_emits_deprecation_warning(self) -> None:
+        """Resolving a name through the package warns even if already imported."""
+        import almanak.framework.utils as utils_pkg
+        import almanak.framework.utils.retry as retry_mod
+
+        retry_mod._DEPRECATION_EMITTED = False
+        try:
+            with pytest.warns(DeprecationWarning, match="ALM-3197"):
+                assert utils_pkg.retry_with_backoff is not None
+        finally:
+            retry_mod._DEPRECATION_EMITTED = True
+
+    def test_warning_is_one_shot(self) -> None:
+        """A second resolution does not re-warn."""
+        import warnings as _warnings
+
+        import almanak.framework.utils as utils_pkg
+        import almanak.framework.utils.retry as retry_mod
+
+        retry_mod._DEPRECATION_EMITTED = False
+        try:
+            with pytest.warns(DeprecationWarning):
+                _ = utils_pkg.RetryConfig
+            with _warnings.catch_warnings(record=True) as caught:
+                _warnings.simplefilter("always")
+                _ = utils_pkg.RetryContext
+            assert [w for w in caught if issubclass(w.category, DeprecationWarning)] == []
+        finally:
+            retry_mod._DEPRECATION_EMITTED = True
+
+    def test_logging_exports_do_not_warn(self) -> None:
+        """The live logging exports are eager and must not warn."""
+        import warnings as _warnings
+
+        import almanak.framework.utils as utils_pkg
+
+        with _warnings.catch_warnings(record=True) as caught:
+            _warnings.simplefilter("always")
+            assert utils_pkg.get_logger is not None
+            assert utils_pkg.configure_logging is not None
+        assert [w for w in caught if issubclass(w.category, DeprecationWarning)] == []
+
+    def test_unknown_attribute_still_raises(self) -> None:
+        """``__getattr__`` must not swallow genuine typos."""
+        import almanak.framework.utils as utils_pkg
+
+        with pytest.raises(AttributeError, match="no attribute 'nope'"):
+            _ = utils_pkg.nope

@@ -1,5 +1,21 @@
 """Retry utilities with exponential backoff for external API calls.
 
+.. deprecated:: 2.25.0
+    This module is deprecated and scheduled for removal in Almanak SDK 3.0.0.
+    It has no callers inside the SDK, and R17 (ALM-3197) owns the design of the
+    unified retry home that replaces it. It is retained only so that the five
+    names it exported through ``almanak.framework.utils`` — which ``.syncinclude``
+    publishes to the public mirror — do not disappear without a deprecation
+    cycle. Importing this module, or resolving one of its names through
+    ``almanak.framework.utils``, emits a one-shot :class:`DeprecationWarning`.
+
+    Not to be confused with two live, unrelated things that share names:
+    ``TokenBucketRateLimiter.retry_with_backoff``
+    (``almanak/framework/backtesting/pnl/providers/rate_limiter.py``) and the
+    ``RetryConfig`` classes in ``backtesting/pnl/providers/coingecko.py`` and
+    ``intents/state_machine.py``. None of those are affected by this
+    deprecation.
+
 This module provides reusable retry decorators for handling transient failures
 in external API calls (price providers, RPC endpoints, etc.).
 
@@ -41,11 +57,39 @@ import functools
 import logging
 import random
 import time
+import warnings
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, ParamSpec, TypeVar
 
 logger = logging.getLogger(__name__)
+
+DEPRECATION_MESSAGE = (
+    "almanak.framework.utils.retry is deprecated and will be removed in "
+    "Almanak SDK 3.0.0. It has no callers inside the SDK; the unified retry "
+    "home is designed under ALM-3197. Vendor these helpers into your own code "
+    "if you depend on them."
+)
+
+_DEPRECATION_EMITTED = False
+
+
+def _emit_deprecation(stacklevel: int = 3) -> None:
+    """Emit the one-shot deprecation warning for this module.
+
+    Called once at module import, so both entry points are covered with a
+    single warning: importing ``almanak.framework.utils.retry`` directly, and
+    resolving a name through ``almanak.framework.utils.__getattr__`` (which
+    imports this module lazily on first access).
+    """
+    global _DEPRECATION_EMITTED
+    if _DEPRECATION_EMITTED:
+        return
+    _DEPRECATION_EMITTED = True
+    warnings.warn(DEPRECATION_MESSAGE, DeprecationWarning, stacklevel=stacklevel)
+
+
+_emit_deprecation(stacklevel=2)
 
 # Type variables for generic function signatures
 P = ParamSpec("P")

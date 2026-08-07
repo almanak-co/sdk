@@ -47,6 +47,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `intentsKnown: false` marks compiler-only rows no connector descriptor
   describes, where absence means *unknown*, not unsupported.
 
+### Deprecated
+
+- **`almanak.framework.utils.retry` is deprecated; removal in 3.0.0.** The module
+  has no callers inside the SDK, but its five exported names — `RetryConfig`,
+  `RetryContext`, `retry_with_backoff`, `calculate_backoff_delay` and
+  `DEFAULT_RETRY_CONFIG` — are importable public surface on the released package,
+  so they are **not** removed now. Importing the module, or resolving one of the
+  names through `almanak.framework.utils`, emits a one-shot `DeprecationWarning`;
+  behaviour is otherwise unchanged. Vendor the helpers if you depend on them.
+  R17 (ALM-3197) owns the unified retry home that replaces them.
+
+  Unaffected despite similar names: `TokenBucketRateLimiter.retry_with_backoff`
+  (`almanak/framework/backtesting/pnl/providers/rate_limiter.py`) and the
+  `RetryConfig` classes in `backtesting/pnl/providers/coingecko.py` and
+  `intents/state_machine.py`. All three are live and untouched.
+
 ### Changed
 
 - **Provider integrations now own their metadata and gateway implementations.**

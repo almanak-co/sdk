@@ -394,8 +394,19 @@ class OrcaWhirlpoolSDK:
         if tick_array_upper != tick_array_lower:
             unique_pdas.append(tick_array_upper)
 
-        # GATEWAY_VIOLATION (VIB-3916): direct Solana JSON-RPC from framework
-        # code, mirroring the existing pattern in `get_position_state` above.
+        # GATEWAY-BOUNDARY DEBT (VIB-3916, VIB-2986 family): direct Solana
+        # JSON-RPC from connector code, mirroring the existing pattern in
+        # `get_position_state` above. This is NOT the incubating-strategy
+        # egress marker, which CLAUDE.md §Gateway boundary scopes to
+        # `strategies/incubating/` only and which never applied to connector
+        # code. NOTE: no passing CI gate covers this site — the AST egress guard
+        # does not scan connector sdk.py, and the grep scan that does detect it
+        # (scripts/ci/check_connector_gateway_compliance.sh) is an orphan that
+        # nothing runs (VIB-6210). The prose is a label, not a gate. It also
+        # deliberately carries no vib-2986 exemption marker: that marker is at
+        # its pinned ceiling, and it would delete the session POST below from
+        # the scan's inventory, so whoever wires the scan would never see it
+        # (ALM-3188). VIB-3916 closes this properly by migrating the call.
         # The pre-flight only fires when the caller explicitly plumbs `rpc_url`
         # (local Anvil dev / tests). Hosted strategy containers do not set
         # `rpc_url` — the on-chain ``0xbbf`` revert classification

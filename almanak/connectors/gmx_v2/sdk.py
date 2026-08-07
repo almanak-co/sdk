@@ -375,12 +375,23 @@ class GMXV2SDK:
     def _get_positions_via_api(self, account: str) -> list[dict]:
         """Read positions from GMX REST API (fallback, local/dev only).
 
-        # GATEWAY_VIOLATION: Direct outbound HTTP call to GMX REST API.
-        # Reason: On-chain Reader contract reverts after GMX contract upgrades,
-        # and there is no gateway service for GMX position queries yet.
-        # Ticket: VIB-1947 (add proper gateway support for GMX position queries).
-        # In production containers where outbound HTTP is blocked, this raises
-        # PositionQueryError so callers know the query failed (not "no positions").
+        GATEWAY-BOUNDARY DEBT (VIB-1947, VIB-2986 family): this issues a direct
+        outbound HTTP call to the GMX REST API. This is NOT the
+        incubating-strategy egress marker, which CLAUDE.md §Gateway boundary
+        scopes to ``strategies/incubating/`` only and which never applied to
+        connector code. NOTE: no passing CI gate covers this site — the AST
+        egress guard does not scan connector ``sdk.py``, and the grep scan that
+        does detect it (``scripts/ci/check_connector_gateway_compliance.sh``) is
+        an orphan that nothing runs (VIB-6210). The prose is a label, not a gate.
+        The ``urllib.request`` calls below also deliberately carry no vib-2986
+        exemption marker: that marker is at its pinned ceiling, and it would
+        delete them from the scan's inventory, so whoever wires the scan would
+        never see them (ALM-3188). The egress still
+        exists because the on-chain Reader contract reverts after GMX contract
+        upgrades and there is no gateway service for GMX position queries yet —
+        VIB-1947 tracks adding one. In production containers where outbound HTTP
+        is blocked this raises ``PositionQueryError`` so callers know the query
+        failed (not "no positions").
 
         Fallback when the on-chain Reader contract reverts (stale ABI/address).
         The GMX REST API is the same data source the GMX frontend uses.
