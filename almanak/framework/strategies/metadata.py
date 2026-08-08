@@ -7,15 +7,33 @@ These were extracted from intent_strategy.py for maintainability. All symbols
 remain importable from almanak.framework.strategies.intent_strategy.
 """
 
+import inspect
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, TypeVar
 
 from almanak.core.intent_types import IntentType
 from almanak.core.models.quote_asset import QuoteAsset
 
 logger = logging.getLogger(__name__)
+
+
+def _class_source_file(cls: type) -> str | None:
+    """Best-effort resolved source path for a strategy class; None when unresolvable.
+
+    Re-imports of one file under different module names (cwd lane,
+    strategies-dir scan, demo loader) produce distinct class objects from the
+    same source — those must stay a debug-level skip on re-registration. Only
+    a provably different source file warrants the loud shadow warning, so an
+    unresolvable path (module evicted from sys.modules) reports None rather
+    than guessing.
+    """
+    try:
+        return str(Path(inspect.getfile(cls)).resolve())
+    except (TypeError, OSError):
+        return None
 
 
 def _parse_intent_type_declarations(values: list[object], *, strategy_name: str) -> list[IntentType]:
@@ -299,12 +317,31 @@ def almanak_strategy(
         # The instance methods is_multi_chain() and get_supported_chains() fall back to
         # STRATEGY_METADATA.supported_chains when SUPPORTED_CHAINS is not manually set.
 
-        # Register in the global registry
+        # Register in the global registry (first registration wins)
         if name not in STRATEGY_REGISTRY:
             STRATEGY_REGISTRY[name] = cls
             logger.info(f"Registered strategy: {name} v{version}")
         else:
-            logger.debug(f"Strategy {name} already registered, skipping")
+            existing = STRATEGY_REGISTRY[name]
+            existing_file = _class_source_file(existing)
+            new_file = _class_source_file(cls)
+            if existing_file is not None and new_file is not None and existing_file != new_file:
+                # Two different source files claiming one name is a silent
+                # shadow: the loser never runs, and callers resolving the name
+                # get whichever file happened to import first. This is what
+                # hid a stale strategies/incubating/ twin of a demo strategy.
+                logger.warning(
+                    "Strategy %r: keeping first-registered class %s (%s); ignoring "
+                    "re-registration by a different class %s (%s). Rename one of "
+                    "them if this shadowing is unintentional.",
+                    name,
+                    existing.__qualname__,
+                    existing_file,
+                    cls.__qualname__,
+                    new_file,
+                )
+            else:
+                logger.debug(f"Strategy {name} already registered, skipping")
 
         return cls
 

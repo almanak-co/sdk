@@ -43,6 +43,7 @@ from .helpers import (
     list_strategies_fn,
     load_strategy_config,
     parse_date,
+    resolve_backtest_strategy_name,
 )
 from .run_helpers import (
     build_token_address_map,
@@ -222,8 +223,10 @@ def _validate_and_build_context(
     # raises ValueError when the registry has no matching entry, but we surface the
     # richer discovery guidance here so it isn't shadowed by later failure paths.
     # VIB-2917: previously fell back to a silent mock strategy that produced fake
-    # results; now the strategy must be discoverable via `./strategy.py` in cwd or
-    # via `./strategies/<name>/strategy.py` (optionally $ALMANAK_STRATEGIES_DIR).
+    # results; now the strategy must be discoverable via `./strategy.py` in cwd,
+    # via `./strategies/<name>/strategy.py` (optionally $ALMANAK_STRATEGIES_DIR),
+    # or as a demo name resolved against almanak/demo_strategies/.
+    strategy = resolve_backtest_strategy_name(strategy)
     validate_strategy_is_registered(strategy)
 
     # Create PnL backtest config if not loaded from result

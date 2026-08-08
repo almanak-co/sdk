@@ -272,6 +272,34 @@ class BacktestContext:
     verbose: bool
 
 
+def _demo_source_config_path(strategy_name: str) -> Path | None:
+    """Shipped ``config.json`` next to a registered demo class, else None.
+
+    Returns a path only when ``strategy_name`` resolves in the registry to a
+    class whose source file lives under the packaged demos root — i.e. the
+    class the backtest will actually run IS the shipped demo. Any other
+    registration (user strategy, local copy of a demo, mock) returns None so
+    the caller's existing lanes decide.
+    """
+    import inspect
+
+    from ...strategies import STRATEGY_REGISTRY
+
+    cls = STRATEGY_REGISTRY.get(strategy_name)
+    if cls is None:
+        return None
+    try:
+        source = Path(inspect.getfile(cls)).resolve()
+    except (TypeError, OSError):
+        return None
+
+    from almanak.framework.demos import default_demos_root
+
+    if default_demos_root().resolve() not in source.parents:
+        return None
+    return source.parent / "config.json"
+
+
 def load_strategy_config(strategy_name: str, chain: str) -> dict[str, Any]:
     """Load default configuration for a strategy.
 
@@ -307,6 +335,17 @@ def load_strategy_config(strategy_name: str, chain: str) -> dict[str, Any]:
         Path(f"strategies/incubating/{dir_name}/config.json"),
         Path(f"strategies/incubating/{strategy_name}/config.json"),
     ]
+    # The relative demo paths above only resolve when cwd is the repo root;
+    # the demos root ships inside the installed package, so also try the
+    # shipped config absolutely — keeping the config lane addressable from any
+    # cwd, like the registry lane (resolve_backtest_strategy_name). Applied
+    # only when the registered class actually lives under the demos root: a
+    # user's local copy of a demo (same registered name, resolved via the cwd
+    # lane) must keep loading its own `./config.json` below, not the shipped
+    # demo config.
+    demo_config = _demo_source_config_path(strategy_name)
+    if demo_config is not None:
+        config_paths.append(demo_config)
     # VIB-2917: `./config.json` is only consulted when cwd also contains
     # `./strategy.py` (i.e. we're clearly inside a strategy directory). This
     # matches the cwd auto-discovery flow while avoiding two footguns:
@@ -332,6 +371,32 @@ def load_strategy_config(strategy_name: str, chain: str) -> dict[str, Any]:
 
 # Alias to avoid conflict with --list-strategies option
 list_strategies_fn = list_strategies
+
+
+def resolve_backtest_strategy_name(strategy: str) -> str:
+    """Return the registry key for ``strategy``, resolving demo names on a miss.
+
+    A name already in the registry is returned unchanged — user strategies
+    always shadow demos. Otherwise the name is tried as an
+    ``almanak/demo_strategies/`` directory (bare slug or ``demo_``-prefixed);
+    a match imports the demo so its ``@almanak_strategy`` decorator registers
+    the class, and the decorator name becomes the key. Before this lane,
+    auto-discovery only covered ``./strategy.py`` and ``./strategies/``
+    (VIB-2917), so from the repo root ``load_strategy_config`` found demo
+    configs while the registry lookup failed. Unknown names pass through
+    unchanged so each command's validation keeps its own abort path.
+    """
+    if strategy in list_strategies_fn():
+        return strategy
+
+    from almanak.framework.demos import register_demo_strategy
+
+    canonical = register_demo_strategy(strategy)
+    if canonical is None or canonical not in list_strategies_fn():
+        return strategy
+    if canonical != strategy:
+        click.echo(f"Resolved demo strategy '{strategy}' as '{canonical}' (from almanak/demo_strategies/)")
+    return canonical
 
 
 def parse_date(ctx: Any, param: Any, value: str | None) -> datetime | None:

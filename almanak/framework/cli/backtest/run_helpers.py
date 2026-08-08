@@ -193,6 +193,10 @@ def validate_strategy_is_registered(strategy: str) -> None:
         "  2. Scanning ./strategies/ (or $ALMANAK_STRATEGIES_DIR) for <name>/strategy.py",
         err=True,
     )
+    click.echo(
+        "  3. Matching demo names against almanak/demo_strategies/ (browse: almanak strat demo --list)",
+        err=True,
+    )
     click.echo()
     click.echo("Either cd into the strategy directory or set ALMANAK_STRATEGIES_DIR.", err=True)
     click.echo(

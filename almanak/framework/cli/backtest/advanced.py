@@ -39,6 +39,7 @@ from .helpers import (
     list_strategies_fn,
     load_strategy_config,
     parse_date,
+    resolve_backtest_strategy_name,
 )
 from .run_helpers import build_token_address_map
 from .sweep import load_optimization_config, parse_param_ranges_from_config
@@ -477,6 +478,7 @@ def _build_walk_forward_context(
         gap_days=gap_days,
         min_windows=min_windows,
     )
+    strategy = resolve_backtest_strategy_name(strategy)
     _validate_walk_forward_strategy(strategy)
 
     return _WalkForwardRunContext(
@@ -941,6 +943,7 @@ def _build_monte_carlo_context(
 ) -> _MonteCarloRunContext:
     from ...backtesting.pnl import PathGenerationMethod
 
+    strategy = resolve_backtest_strategy_name(strategy)
     _validate_walk_forward_strategy(strategy)
     return _MonteCarloRunContext(
         strategy=strategy,
@@ -1396,6 +1399,7 @@ def _build_scenario_context(
         name=name,
         description=description,
     )
+    strategy_name = resolve_backtest_strategy_name(strategy_name)
     _validate_walk_forward_strategy(strategy_name)
     resolved_normal_start, normal_end = _normal_period_for_scenario(crisis_scenario, normal_start, compare_normal)
     return _ScenarioRunContext(

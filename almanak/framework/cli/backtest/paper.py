@@ -36,6 +36,7 @@ from .helpers import (
     is_process_running,
     load_paper_session_state,
     load_strategy_config,
+    resolve_backtest_strategy_name,
     save_paper_session_state,
     update_paper_session_status,
 )
@@ -217,6 +218,7 @@ def paper_start(
     # Resolve --duration into max_ticks (mutually exclusive with --max-ticks)
     max_ticks = resolve_max_ticks_from_duration(duration, max_ticks, tick_interval)
 
+    strategy = resolve_backtest_strategy_name(strategy)
     validate_strategy_registered(strategy)
     abort_if_session_running(strategy)
     rpc_url = resolve_rpc_url(rpc_url, chain)
@@ -576,6 +578,10 @@ def paper_stop(strategy: str, force: bool) -> None:
         # Force stop
         almanak strat backtest paper stop -s momentum_v1 --force
     """
+    # Sessions are keyed by the registry name, so demo names must resolve
+    # the same way `paper start` resolved them.
+    strategy = resolve_backtest_strategy_name(strategy)
+
     # Try BackgroundPaperTrader first (engine state dir)
     bg_trader = _background_paper_trader(strategy)
     if _handle_background_stop(strategy=strategy, bg_trader=bg_trader, force=force):
@@ -623,6 +629,10 @@ def paper_resume(strategy: str, duration: str | None, max_ticks: int | None) -> 
     if duration is not None and max_ticks is not None:
         click.echo("Error: --duration and --max-ticks are mutually exclusive.", err=True)
         raise click.Abort()
+
+    # Resolves demo names to their registry key AND re-registers the demo
+    # class in this fresh process (get_strategy below needs it).
+    strategy = resolve_backtest_strategy_name(strategy)
 
     bg_trader, state = load_resume_state(strategy)
     reset_dead_or_abort(state, bg_trader, strategy)
@@ -726,6 +736,10 @@ def paper_status(strategy: str | None, show_all: bool, verbose: bool) -> None:
     if show_all:
         render_all_sessions(verbose)
         return
+
+    if strategy:
+        # Match the session key `paper start` produced for demo names.
+        strategy = resolve_backtest_strategy_name(strategy)
 
     if not strategy:
         click.echo("Error: Please specify --strategy or use --all to list all sessions", err=True)
@@ -837,6 +851,8 @@ def paper_logs(strategy: str, lines: int, follow: bool, show_all: bool) -> None:
         # Follow logs in real-time
         almanak strat backtest paper logs -s momentum_v1 --follow
     """
+    # Match the session key `paper start` produced for demo names.
+    strategy = resolve_backtest_strategy_name(strategy)
     log_file = get_paper_log_file(strategy)
 
     if not log_file.exists():

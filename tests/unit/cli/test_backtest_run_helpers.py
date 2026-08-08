@@ -118,6 +118,8 @@ class TestValidateStrategyIsRegistered:
         assert "The backtest command discovers strategies by:" in captured.err
         assert "Importing ./strategy.py in the current working directory" in captured.err
         assert "$ALMANAK_STRATEGIES_DIR" in captured.err
+        assert "Matching demo names against almanak/demo_strategies/" in captured.err
+        assert "almanak strat demo --list" in captured.err
         assert "almanak strat new --name <name>" in captured.err
 
 

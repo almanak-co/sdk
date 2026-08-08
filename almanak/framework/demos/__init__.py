@@ -28,6 +28,7 @@ from .spec import (
     DemoSpec,
     QaConfig,
     default_demos_root,
+    register_demo_strategy,
 )
 
 __all__ = [
@@ -41,4 +42,5 @@ __all__ = [
     "SidecarEntry",
     "SidecarRegistry",
     "default_demos_root",
+    "register_demo_strategy",
 ]

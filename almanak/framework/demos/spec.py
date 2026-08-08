@@ -17,6 +17,7 @@ import sys
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 from almanak.core.models.quote_asset import QuoteAsset
@@ -392,6 +393,18 @@ def _strategy_module_name(strategy_file: Path) -> str:
     return f"_almanak_demos_spec_{strategy_file.parent.name}_{digest}"
 
 
+def _find_strategy_metadata(module: ModuleType) -> StrategyMetadata | None:
+    """Return the first ``STRATEGY_METADATA`` attached to a class in ``module``."""
+    for attr_name in dir(module):
+        obj = getattr(module, attr_name)
+        if not isinstance(obj, type):
+            continue
+        metadata = getattr(obj, "STRATEGY_METADATA", None)
+        if isinstance(metadata, StrategyMetadata):
+            return metadata
+    return None
+
+
 def _import_strategy_metadata(strategy_file: Path) -> StrategyMetadata | None:
     """Import ``strategy.py`` and return the first ``STRATEGY_METADATA`` found.
 
@@ -414,16 +427,94 @@ def _import_strategy_metadata(strategy_file: Path) -> StrategyMetadata | None:
             raise
 
     try:
-        for attr_name in dir(module):
-            obj = getattr(module, attr_name)
-            if not isinstance(obj, type):
-                continue
-            metadata = getattr(obj, "STRATEGY_METADATA", None)
-            if isinstance(metadata, StrategyMetadata):
-                return metadata
-        return None
+        return _find_strategy_metadata(module)
     finally:
         # Keep the module loaded if a parent import already cached it
         # (e.g. via ``almanak.framework.strategies`` auto-discovery), but
         # don't leak our ad-hoc one across discoveries.
         sys.modules.pop(module_name, None)
+
+
+def register_demo_strategy(name: str, root: Path | None = None) -> str | None:
+    """Import the demo addressed by ``name`` so its strategy class registers.
+
+    ``name`` may be the demo directory slug (``uniswap_rsi``) or the
+    ``demo_``-prefixed decorator form (``demo_uniswap_rsi``) — demo decorator
+    names follow one of those two shapes. Importing ``strategy.py`` fires the
+    ``@almanak_strategy`` decorator, which registers the class in the global
+    strategy registry; the decorator name is returned so callers can key the
+    registry with it.
+
+    Returns ``None`` when no demo directory matches, or when the matched demo
+    fails to import (logged, never raised — mirrors ``DemoCatalog.discover``
+    error tolerance so callers fall through to their normal unknown-strategy
+    path).
+
+    Demos under the shipped package root are imported under their REAL dotted
+    name (``almanak.demo_strategies.<dir>.strategy``): child processes
+    re-import the class by ``strategy_cls.__module__`` — the background paper
+    trader's ``multiprocessing.Process`` (spawn start method on
+    macOS/Windows gets a fresh interpreter) and sweep's
+    ``ProcessPoolExecutor`` workers (VIB-5624) — so the module name must be
+    importable outside this process. A ``spec_from_file_location`` load under
+    a synthetic name only survives fork. The synthetic-name lane is kept for
+    non-default roots (tests), where no importable dotted name exists; either
+    way the module stays in ``sys.modules`` so ``inspect.getfile(cls)``
+    resolves for sweep's ``strategy_module_file`` derivation.
+    """
+    root = root or default_demos_root()
+    # The real package root, derived independently of (monkeypatchable)
+    # default_demos_root: only files under it have an importable dotted name.
+    package_demos_root = Path(__file__).resolve().parent.parent.parent / "demo_strategies"
+    candidates = [name]
+    if name.startswith("demo_"):
+        candidates.append(name[len("demo_") :])
+    for candidate in candidates:
+        # Single path segment only, and not a hidden/underscore dir —
+        # mirrors what DemoCatalog.discover() is willing to surface.
+        if not candidate or Path(candidate).name != candidate or candidate[0] in {".", "_"}:
+            continue
+        strategy_file = root / candidate / "strategy.py"
+        if not strategy_file.is_file():
+            continue
+        module: ModuleType | None
+        try:
+            if strategy_file.resolve().parent.parent == package_demos_root:
+                module = importlib.import_module(f"almanak.demo_strategies.{candidate}.strategy")
+            else:
+                module = _import_module_from_file(candidate, strategy_file)
+        except Exception as exc:  # noqa: BLE001 - importing runs demo code, which can raise anything
+            logger.warning("Demo %r matched %s but failed to import: %s", name, strategy_file, exc)
+            return None
+        if module is None:
+            return None
+        metadata = _find_strategy_metadata(module)
+        if metadata is None:
+            logger.warning("Demo %r at %s defines no @almanak_strategy class", name, strategy_file)
+            return None
+        return metadata.name
+    return None
+
+
+def _import_module_from_file(candidate: str, strategy_file: Path) -> ModuleType | None:
+    """File-location import under a synthetic persistent module name.
+
+    Fallback lane for demo roots outside the installed package (tests):
+    the resulting ``__module__`` is not importable by child processes, but
+    stays cached here so same-process ``inspect.getfile`` keeps working.
+    """
+    digest = hashlib.sha1(str(strategy_file.resolve()).encode()).hexdigest()[:12]
+    module_name = f"_almanak_demo_strategy_{candidate}_{digest}"
+    if module_name in sys.modules:
+        return sys.modules[module_name]
+    spec = importlib.util.spec_from_file_location(module_name, strategy_file)
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(module_name, None)
+        raise
+    return module

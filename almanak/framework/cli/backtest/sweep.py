@@ -236,6 +236,7 @@ from .helpers import (
     list_strategies_fn,
     load_strategy_config,
     parse_date,
+    resolve_backtest_strategy_name,
 )
 from .run_helpers import (
     build_pnl_config,
@@ -1380,6 +1381,7 @@ def _build_sweep_run_context(
     numeric_param_names = _normalize_numeric_param_names(numeric_params)
     multi_period_mode, backtest_periods = _resolve_backtest_periods(periods, start, end)
 
+    strategy = resolve_backtest_strategy_name(strategy)
     _validate_sweep_strategy(strategy)
 
     combinations = generate_combinations(sweep_params)
@@ -2068,6 +2070,7 @@ def _build_optimization_context(
         n_trials=n_trials,
         patience=patience,
     )
+    strategy = resolve_backtest_strategy_name(strategy)
     _validate_optimization_strategy(strategy)
 
     return _OptimizationRunContext(
