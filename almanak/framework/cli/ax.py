@@ -2296,6 +2296,237 @@ def pool(ctx, token_a, token_b, fee_tier, protocol):
 
 
 # ---------------------------------------------------------------------------
+# almanak ax dex-pools <token> [--min-liquidity <usd>]
+#
+# Named by VENUE KIND, matching the family the CLI already has: `lending-*`
+# (lending-reserves), `perp-*` (perp-market, PR #3641), `dex-*` (here). That is
+# the axis that grows — ProtocolKind — so kind-prefixing is what scales, and it
+# puts the scope in the name, which is the cheapest defence against the
+# wrapper-token misread this command's help warns about.
+#
+# NOT `ax markets`: that name belongs to the cross-primitive surface VIB-6601
+# would add, and this returns AMM spot pools only. NOT `ax token-pools`: keyed-
+# by is the wrong axis to name on, and it reads like the generic command next
+# to a future `ax markets <token>`. NOT `ax pools`: one character from the
+# existing `ax pool`.
+#
+# The RPC / agent tool / snapshot method keep `token_pools` — they are keyed by
+# token and that IS their axis; the CLI is named for the operator, who is
+# choosing between venue kinds rather than lookup keys.
+# ---------------------------------------------------------------------------
+
+# Outcome contract, adopted from `ax perp-market` (PR #3641 / ALM-3179) so the
+# two venue-resolution commands answer the same way. The distinction it exists
+# to preserve: an EMPTY venue list is only evidence of absence when the answer
+# was authoritative. A truncated window or an unavailable provider means "could
+# not tell" — and a planner that reads those as "nothing trades here" makes
+# exactly the confident-but-wrong call this command was built to prevent.
+_DEX_POOLS_EXIT_OK = 0  # >=1 venue found
+_DEX_POOLS_EXIT_NOT_FOUND = 1  # authoritative: the provider saw the whole set, it is empty
+_DEX_POOLS_EXIT_INVALID_INPUT = 2  # unresolvable token, unsupported chain
+_DEX_POOLS_EXIT_UNVERIFIED = 4  # provider unavailable or window truncated — NOT evidence of absence
+
+_DEX_POOLS_UNVERIFIED_HINT = (
+    "Inconclusive: venues may exist. Report this as 'could not verify', never as 'this token has no tradeable venue'."
+)
+
+
+@ax.command("dex-pools")
+@click.argument("token")
+@click.option(
+    "--min-liquidity",
+    "min_liquidity",
+    type=float,
+    default=0.0,
+    help="Only show venues with at least this much USD liquidity (venues of unknown depth are dropped).",
+)
+@_chain_option
+@click.pass_context
+def dex_pools(ctx, token, min_liquidity):
+    """List the AMM/DEX spot pools where a token trades, deepest first.
+
+    Read-only. Shows each venue's USD liquidity and 24h volume, so you can
+    answer "is there anywhere to actually trade this?" before writing a
+    strategy — rather than discovering it as an oracle-price refusal at
+    execution time.
+
+    Read BOTH money columns. A pool can hold six figures of liquidity and
+    still be untradeable: BTT on ethereum has no Uniswap V3 pool at all, and
+    its only real venue holds ~$211k against ~$84 of daily volume.
+
+    \b
+    SPOT AMMs ONLY. Perp markets (GMX, Hyperliquid), lending markets (Aave,
+    Morpho) and Pendle PT/YT are not AMM pools and do not appear here — the
+    upstream provider does not index them as DEXs. Use `ax lending-reserves`
+    for lending markets. Note the trap: a GMX GM token or an Aave aToken may
+    still return a couple of dust AMM pools, which is incidental wrapper
+    liquidity and NOT the depth of the underlying perp or lending market.
+
+    \b
+    Examples:
+        almanak ax dex-pools BTT --chain ethereum
+        almanak ax dex-pools 0xc669928185dbce49d2230cc9b0979be6dc797957 --chain ethereum
+        almanak ax --chain base dex-pools USDC --min-liquidity 100000
+        almanak ax --chain base --json dex-pools USDC
+
+    \b
+    Exit codes (mirrors `ax perp-market`):
+        0 -- venues found.
+        1 -- authoritative: the provider returned the COMPLETE set and it is
+             empty. This token has no AMM venue on this chain.
+        2 -- invalid input: unresolvable token, or a chain the provider does
+             not cover.
+        4 -- could not verify: the provider was unavailable, or answered with a
+             TRUNCATED window. NOT evidence of absence.
+    """
+    from almanak.framework.cli.ax_render import render_error, render_result
+
+    json_output = ctx.obj["json_output"]
+    try:
+        response = _run_tool(
+            ctx,
+            "list_token_pools",
+            {
+                "token": token,
+                "chain": ctx.obj["chain"],
+                "min_liquidity_usd": min_liquidity,
+            },
+        )
+        # The generic renderer flattens the venue list into one unreadable
+        # repr; render real columns for humans and leave --json untouched.
+        if json_output or _response_is_error(response):
+            render_result(response, json_output=json_output, title=f"DEX pools: {token} ({ctx.obj['chain']})")
+        else:
+            _render_dex_pools_table(response, token=token, chain=ctx.obj["chain"])
+        # SystemExit derives from BaseException, so it passes the handler below
+        # untouched — the exit code set here is the one the caller sees.
+        sys.exit(_dex_pools_exit_code(response))
+    except click.ClickException:
+        raise
+    except Exception as e:
+        # An unexpected fault is "could not verify", never "no venues exist".
+        render_error(str(e), json_output=json_output)
+        sys.exit(_DEX_POOLS_EXIT_UNVERIFIED)
+
+
+def _dex_pools_exit_code(response) -> int:
+    """Classify a `list_token_pools` response into the outcome contract.
+
+    The load-bearing case is the empty list. Absence is only reportable when
+    the provider saw the WHOLE set: an empty result off a truncated window, or
+    off a provider that failed, means "could not tell". Collapsing those into
+    the same exit code as a real "nothing trades here" is how a planner ends up
+    confidently wrong — the failure ALM-3179 hit from the other direction, when
+    a static table's silence was read as the venue not listing a market.
+    """
+    from almanak.framework.agent_tools.errors import AgentErrorCode
+
+    if _response_is_error(response):
+        error = response.error or {}
+        code = error.get("error_code") if hasattr(error, "get") else getattr(error, "error_code", None)
+        if code == AgentErrorCode.VALIDATION_ERROR:
+            return _DEX_POOLS_EXIT_INVALID_INPUT
+        return _DEX_POOLS_EXIT_UNVERIFIED
+
+    data = response.data or {}
+    if data.get("pools"):
+        # Venues exist. `complete=False` only bounds "is this the DEEPEST one",
+        # which the table and the JSON payload already say; existence itself is
+        # answered, so this is not an unverified outcome.
+        return _DEX_POOLS_EXIT_OK
+    if data.get("unfiltered_count"):
+        # Venues exist, the caller's --min-liquidity floor excluded them all.
+        # That is a successful query with zero matches, NOT absence: reporting
+        # it as NOT_FOUND would let a strict floor masquerade as "this token
+        # has no venue", which is the exact misread this contract prevents.
+        return _DEX_POOLS_EXIT_OK
+    return _DEX_POOLS_EXIT_NOT_FOUND if data.get("complete") else _DEX_POOLS_EXIT_UNVERIFIED
+
+
+def _format_usd_cell(value: str) -> str:
+    """Render a decimal-string USD figure, keeping unmeasured visibly distinct.
+
+    ``""`` means the provider did not measure the figure and renders as ``?``,
+    never ``$0`` — an unreported venue and an idle one are different findings,
+    and collapsing them here would undo the Empty != Zero contract the wire
+    format maintains all the way from the gateway.
+    """
+    if not value:
+        return "?"
+    try:
+        return f"${float(value):,.0f}"
+    except (TypeError, ValueError):
+        return "?"
+
+
+def _render_dex_pools_table(response, *, token: str, chain: str) -> None:
+    """Human-readable column table for `ax dex-pools` (VIB-6599).
+
+    Columns: DEX, PAIR, LIQUIDITY, VOL-24H, POOL. Both caveats that make the
+    list safe to act on — a truncated window and a provider whose dex ids are
+    not product-distinct — print as explicit notes, because neither is visible
+    in the rows themselves and both change what a conclusion may claim.
+    """
+    data = response.data or {}
+    pools = data.get("pools", [])
+    header = click.style(f"DEX pools: {token} ({chain})", bold=True)
+    click.echo(f"\n{header}  —  {data.get('count', len(pools))} venues via {data.get('source') or '?'}")
+
+    if not pools:
+        # A successful empty list is the most decision-relevant answer this
+        # command produces — and the one most easily misread. There are THREE
+        # distinct empties and they must never print the same line: venues that
+        # the caller's own floor excluded, an absence the provider can vouch
+        # for, and a view too truncated to vouch for anything.
+        floor = data.get("min_liquidity_usd") or ""
+        unfiltered = data.get("unfiltered_count") or 0
+        if unfiltered:
+            click.echo(
+                click.style(
+                    f"  {unfiltered} venue(s) found, none with at least ${float(floor or 0):,.0f} liquidity "
+                    f"— lower --min-liquidity to see them",
+                    fg="yellow",
+                )
+            )
+        elif data.get("complete"):
+            click.echo(click.style("  no DEX venues found for this token on this chain", fg="yellow"))
+        else:
+            click.echo(click.style("  COULD NOT VERIFY — the provider returned a truncated view", fg="red"))
+            click.echo(click.style(f"  {_DEX_POOLS_UNVERIFIED_HINT}", fg="red"))
+        return
+
+    if not data.get("complete", False):
+        click.echo(
+            click.style(
+                "  note: provider truncated the venue list — this is the deepest venue SHOWN, "
+                "not necessarily the deepest that exists.",
+                fg="cyan",
+            )
+        )
+    if not data.get("product_distinct_dex_id", False):
+        click.echo(
+            click.style(
+                "  note: dex ids from this provider are not product-distinct (e.g. Aerodrome "
+                "classic and Slipstream both read 'aerodrome') — confirm the venue before "
+                "pinning a protocol in strategy config.",
+                fg="cyan",
+            )
+        )
+
+    click.echo(f"\n  {'DEX':<24} {'PAIR':<22} {'LIQUIDITY':>14} {'VOL-24H':>14}  POOL")
+    click.echo(f"  {'-' * 24} {'-' * 22} {'-' * 14} {'-' * 14}  {'-' * 42}")
+    for pool in pools:
+        click.echo(
+            f"  {(pool.get('dex_id') or '?')[:24]:<24} "
+            f"{(pool.get('name') or '?')[:22]:<22} "
+            f"{_format_usd_cell(pool.get('reserve_usd', '')):>14} "
+            f"{_format_usd_cell(pool.get('volume_24h_usd', '')):>14}  "
+            f"{pool.get('pool_address') or '?'}"
+        )
+    click.echo("")
+
+
+# ---------------------------------------------------------------------------
 # almanak ax bridge <token> <amount> --from-chain <chain> --to-chain <chain>
 # ---------------------------------------------------------------------------
 

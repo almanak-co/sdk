@@ -446,6 +446,81 @@ class ListLendingReservesResponse(BaseModel):
     reserves: list[LendingReserveSummary] = Field(default_factory=list)
 
 
+class ListTokenPoolsRequest(BaseModel):
+    """List the DEX venues where a token trades, with per-venue depth.
+
+    Read-only discovery (VIB-6599). Answers "where can this token actually be
+    traded, and how deep is each venue?" — the viability check that belongs
+    BEFORE a strategy is written. Without it the answer surfaces three layers
+    down as an oracle-divergence refusal that reads like a data-quality bug:
+    the motivating case (BTT on ethereum) had no Uniswap V3 pool at all, and
+    its only real venue held $211k of reserves against $84 of 24h volume.
+    """
+
+    token: str = Field(description="Token symbol or contract address.")
+    chain: str = Field(default=DEFAULT_CHAIN)
+    min_liquidity_usd: float = Field(
+        default=0.0,
+        ge=0.0,
+        description=(
+            "Optional floor on a venue's USD reserves. Venues with UNMEASURED reserves are "
+            "excluded when this is > 0 ('unknown' does not satisfy '>= X') and kept when it is 0."
+        ),
+    )
+
+
+class TokenPoolSummary(BaseModel):
+    pool_address: str = Field(description="Pool / pair contract address (chain-normalized).")
+    dex_id: str = Field(
+        description=(
+            "Venue id. Product-distinct (uniswap_v3 vs aerodrome-slipstream) only when the "
+            "response sets product_distinct_dex_id."
+        )
+    )
+    name: str = Field(default="", description="Human-readable pool name, e.g. 'BTT / WETH'.")
+    reserve_usd: str = Field(
+        default="",
+        description="Pool reserves in USD as a decimal-string; '' = unmeasured (Empty != Zero).",
+    )
+    volume_24h_usd: str = Field(
+        default="",
+        description=(
+            "24h traded volume in USD as a decimal-string; '' = unmeasured. Reserves alone cannot "
+            "tell a live venue from an abandoned one — a $211k pool trading $84/day is not tradeable."
+        ),
+    )
+    base_token_address: str = ""
+    quote_token_address: str = ""
+
+
+class ListTokenPoolsResponse(BaseModel):
+    schema_version: int = 1
+    chain: str
+    token: str = Field(default="", description="Token as requested (symbol or address).")
+    token_address: str = Field(default="", description="Resolved token address the venues were keyed on.")
+    count: int = 0
+    source: str = Field(default="", description="Provider that answered: 'coingecko_onchain' | 'dexscreener'.")
+    complete: bool = Field(
+        default=False,
+        description=(
+            "False when the provider truncated the window. A truncated window supports 'the deepest "
+            "venue I can see', never 'the deepest venue that exists'."
+        ),
+    )
+    product_distinct_dex_id: bool = Field(
+        default=False,
+        description=(
+            "False when dex_id values may collapse distinct products of one venue family (the "
+            "fallback provider reports classic and Slipstream Aerodrome pools identically). Matching "
+            "a dex_id against a connector protocol slug is only sound when this is True."
+        ),
+    )
+    pools: list[TokenPoolSummary] = Field(
+        default_factory=list,
+        description="Venues sorted by reserve_usd descending, unmeasured last. EMPTY = no venues found.",
+    )
+
+
 class GetPortfolioRequest(BaseModel):
     """Summarize a wallet's on-chain positions on a single chain.
 

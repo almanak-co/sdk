@@ -78,6 +78,7 @@ DOCUMENTED_METHODS: tuple[str, ...] = (
     "pool_history",
     "pool_analytics",
     "best_pool",
+    "token_pools",
     # Price aggregation and slippage
     "twap",
     "lwap",
@@ -378,6 +379,7 @@ class TestProviderlessMethodsRaiseValueError:
             ),
             ("pool_analytics", ("0xpool",), {}, "pool analytics reader"),
             ("best_pool", ("WETH", "USDC"), {}, "pool analytics reader"),
+            ("token_pools", ("WETH",), {}, "pool analytics reader"),
             ("yield_opportunities", ("USDC",), {}, "yield aggregator"),
             (
                 "lending_rate_history",

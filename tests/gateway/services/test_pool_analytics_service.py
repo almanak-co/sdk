@@ -19,7 +19,9 @@ import json
 import time
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from collections.abc import Iterator
+from contextlib import contextmanager
+from unittest.mock import AsyncMock, PropertyMock, patch
 
 import aiohttp
 import grpc
@@ -570,7 +572,14 @@ def test_dead_catalog_matcher_lane_removed_from_module():
         assert not hasattr(svc_mod, dead_symbol), f"dead matcher symbol resurfaced: {dead_symbol}"
 
     servicer = _make_servicer()
-    assert set(servicer.health()) == {"coingecko_onchain"}
+    # Exact set, so an ACCIDENTAL provider addition still trips this guard.
+    # "dexscreener" is the deliberate VIB-6599 ListTokenPools fallback: it is
+    # opt-in per request, is never reachable from GetPoolAnalytics, and is not
+    # the resurrected catalog matcher this test exists to keep buried.
+    assert set(servicer.health()) == {"coingecko_onchain", "dexscreener"}
+    # State the anti-matcher intent directly rather than leaving it implied by
+    # the set above, so narrowing that set can never silently drop this guard.
+    assert not any("llama" in source for source in servicer.health())
     assert not hasattr(servicer, "_catalog_cache")
     assert not hasattr(servicer, "_rate_limiter_llama")
 
@@ -1001,3 +1010,261 @@ def test_list_token_pools_single_flight_entry_survives_the_fetch():
     assert response.success is True
     assert observed["registered_during_fetch"] is True  # entry alive across the await
     assert not servicer._token_pools_inflight  # and popped after completion
+
+
+# =============================================================================
+# VIB-6599 — per-venue 24h volume + the OPT-IN DexScreener fallback
+#
+# The load-bearing property here is NEGATIVE: a request that does not opt in
+# must never, by any route (direct fetch OR cache), receive rows from the
+# fallback provider. ``lp_adapter._resolve_product_ambiguous_pool`` resolves
+# money-path pools off these dex ids and is only safe because it fails closed.
+# =============================================================================
+
+
+def _dexscreener_pair(
+    *,
+    pair_address: str = "0x2D0BA902baDAA82592f0E1C04c71d66ceA21D921",
+    chain_id: str = "base",
+    dex_id: str = "aerodrome",
+    labels: Any = None,
+    liquidity_usd: Any = 211503.35,
+    volume_h24: Any = 84.4,
+) -> dict[str, Any]:
+    """One DexScreener ``/token-pairs/v1`` row, shaped from a recorded response."""
+    row: dict[str, Any] = {
+        "chainId": chain_id,
+        "dexId": dex_id,
+        "pairAddress": pair_address,
+        "baseToken": {"address": "0x4200000000000000000000000000000000000006", "symbol": "WETH"},
+        "quoteToken": {"address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", "symbol": "USDC"},
+        "liquidity": {"usd": liquidity_usd},
+        "volume": {"h24": volume_h24},
+    }
+    if labels is not None:
+        row["labels"] = labels
+    return row
+
+
+@contextmanager
+def _keyless_servicer() -> Iterator[PoolAnalyticsServiceServicer]:
+    """A gateway with NO CoinGecko key — the local-SDK case the fallback exists for.
+
+    The key is suppressed at the ``_coingecko_api_key`` property, NOT by passing
+    empty settings: ``GatewaySettings`` falls back to a bare ``COINGECKO_API_KEY``
+    in the environment, so on a developer machine that exports one these tests
+    would quietly reach the LIVE API — and the negative assertions here would
+    then pass or fail for reasons having nothing to do with the code under test.
+    (Observed exactly that while writing them: the "no fallback" test received
+    real Base pool data from CoinGecko.)
+    """
+    servicer = PoolAnalyticsServiceServicer(settings=GatewaySettings())
+    with patch.object(
+        PoolAnalyticsServiceServicer,
+        "_coingecko_api_key",
+        new_callable=PropertyMock,
+        return_value=None,
+    ):
+        yield servicer
+
+
+def _fallback_request(chain: str = "base", page: int = 0) -> gateway_pb2.TokenPoolsRequest:
+    return gateway_pb2.TokenPoolsRequest(
+        chain=chain,
+        token_address="0x4200000000000000000000000000000000000006",
+        page=page,
+        allow_fallback_provider=True,
+    )
+
+
+def test_list_token_pools_carries_24h_volume_with_empty_not_zero():
+    """Volume rides the wire, and an unmeasured volume never becomes a measured zero."""
+    payload = {
+        "data": [
+            {
+                "attributes": {
+                    "address": "0xB2cc224c1c9feE385f8ad6a55b4d94E92359DC59",
+                    "name": "BTT / WETH",
+                    "reserve_in_usd": "211219.19",
+                    "volume_usd": {"h24": "84.35"},
+                },
+                "relationships": {"dex": {"data": {"id": "uniswap_v2"}}},
+            },
+            {
+                "attributes": {
+                    "address": "0xcDAC0d6c6C59727a65F871236188350531885C43",
+                    "name": "BTT / WETH 0.3%",
+                    "reserve_in_usd": "10.76",
+                    "volume_usd": {"h24": 0.0},  # MEASURED zero: a real, idle pool.
+                },
+                "relationships": {"dex": {"data": {"id": "uniswap_v3"}}},
+            },
+            {
+                "attributes": {
+                    "address": "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640",
+                    "name": "BTT / ETH",
+                    "reserve_in_usd": "2274.65",
+                    # No volume_usd block at all: UNMEASURED.
+                },
+                "relationships": {"dex": {"data": {"id": "uniswap-v4-ethereum"}}},
+            },
+        ]
+    }
+    servicer = PoolAnalyticsServiceServicer(settings=GatewaySettings(coingecko_api_key="test-key"))
+
+    with patch.object(servicer, "_get_http_session", new=AsyncMock(return_value=_fake_session_returning(payload))):
+        response = asyncio.run(servicer.ListTokenPools(_token_pools_request(), _MockContext()))
+
+    assert response.success is True
+    # "0.0" is a MEASURED zero and stays distinguishable from "" (unmeasured);
+    # the exact decimal spelling is upstream's, not something we normalize.
+    assert [p.volume_24h_usd for p in response.pools] == ["84.35", "0.0", ""]
+    assert response.product_distinct_dex_id is True
+
+
+def test_list_token_pools_strict_request_never_reaches_the_fallback():
+    """THE anti-regression guard: no opt-in, no fallback — even when the primary is dead.
+
+    A product-exact consumer (the backtesting LP adapter) sends exactly this
+    request shape and MUST keep failing closed rather than silently resolving a
+    money-path pool from non-product-distinct dex ids.
+    """
+    ctx = _MockContext()
+    fallback = AsyncMock(side_effect=AssertionError("fallback must not be reached without opt-in"))
+
+    with _keyless_servicer() as servicer, patch.object(servicer, "_fetch_token_pools_dexscreener", new=fallback):
+        response = asyncio.run(servicer.ListTokenPools(_token_pools_request(), ctx))
+
+    fallback.assert_not_called()
+    assert response.success is False
+    assert response.product_distinct_dex_id is False
+    assert ctx.code == grpc.StatusCode.UNAVAILABLE
+    assert "COINGECKO_API_KEY" in response.error
+
+
+def test_list_token_pools_fallback_answers_only_when_opted_in():
+    """With opt-in a keyless gateway still answers — flagged as NOT product-distinct."""
+    with (
+        _keyless_servicer() as servicer,
+        patch.object(
+            servicer,
+            "_get_http_session",
+            new=AsyncMock(return_value=_fake_session_returning([_dexscreener_pair(labels=["V3"])])),
+        ),
+    ):
+        response = asyncio.run(servicer.ListTokenPools(_fallback_request(), _MockContext()))
+
+    assert response.success is True
+    assert response.source == "dexscreener"
+    # The point of the flag: the caller SEES that dex ids are weaker here,
+    # without string-matching an open-ended set of provider names.
+    assert response.product_distinct_dex_id is False
+    assert len(response.pools) == 1
+    pool = response.pools[0]
+    # DexScreener returns CHECKSUMMED addresses; normalization is load-bearing.
+    assert pool.pool_address == "0x2d0ba902badaa82592f0e1c04c71d66cea21d921"
+    assert pool.base_token_address == "0x4200000000000000000000000000000000000006"
+    assert pool.quote_token_address == "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+    # dexId + labels, both lower-cased ("V3" upstream, "v3" here).
+    assert pool.dex_id == "aerodrome_v3"
+    assert pool.name == "WETH / USDC"
+    assert pool.reserve_usd == "211503.35"
+    assert pool.volume_24h_usd == "84.4"
+
+
+def test_list_token_pools_cache_is_partitioned_by_the_fallback_flag():
+    """A permissive caller must not be able to poison a strict caller's cache entry.
+
+    Without the flag in the cache key this is exactly how the opt-in gate leaks:
+    call once with fallback, and every later strict call is served fallback rows
+    straight from cache without the provider ever being consulted again.
+    """
+    with (
+        _keyless_servicer() as servicer,
+        patch.object(
+            servicer,
+            "_get_http_session",
+            new=AsyncMock(return_value=_fake_session_returning([_dexscreener_pair()])),
+        ),
+    ):
+        warmed = asyncio.run(servicer.ListTokenPools(_fallback_request(), _MockContext()))
+        assert warmed.success is True
+        assert warmed.source == "dexscreener"
+
+        # Same servicer, same token, cache warm — but strict.
+        ctx = _MockContext()
+        strict = asyncio.run(servicer.ListTokenPools(_token_pools_request(), ctx))
+
+    assert strict.success is False
+    assert list(strict.pools) == []
+    assert ctx.code == grpc.StatusCode.UNAVAILABLE
+
+
+def test_list_token_pools_fallback_skipped_for_paged_requests():
+    """The fallback endpoint has no paging, so a paged request has nothing to fall back TO.
+
+    Answering page 3 with page-1 rows is worse than answering "unavailable":
+    the caller would page forever over the same window.
+    """
+    fallback = AsyncMock(side_effect=AssertionError("paged request must not use the unpaged fallback"))
+
+    with _keyless_servicer() as servicer, patch.object(servicer, "_fetch_token_pools_dexscreener", new=fallback):
+        response = asyncio.run(servicer.ListTokenPools(_fallback_request(page=3), _MockContext()))
+
+    fallback.assert_not_called()
+    assert response.success is False
+
+
+def test_dexscreener_fallback_drops_foreign_chain_and_invalid_rows():
+    """Rows for another chain, or with a non-address pair id, are never selectable."""
+    payload = [
+        _dexscreener_pair(chain_id="solana", pair_address="0x1111111111111111111111111111111111111111"),
+        _dexscreener_pair(pair_address="not-an-address"),
+        _dexscreener_pair(pair_address="0x2222222222222222222222222222222222222222", dex_id="uniswap"),
+    ]
+
+    with (
+        _keyless_servicer() as servicer,
+        patch.object(servicer, "_get_http_session", new=AsyncMock(return_value=_fake_session_returning(payload))),
+    ):
+        response = asyncio.run(servicer.ListTokenPools(_fallback_request(), _MockContext()))
+
+    assert response.success is True
+    assert [p.pool_address for p in response.pools] == ["0x2222222222222222222222222222222222222222"]
+    assert response.pools[0].dex_id == "uniswap"
+
+
+def test_dexscreener_fallback_marks_a_capped_window_incomplete():
+    """At the provider's 30-row cap the set is NOT known-complete.
+
+    ``complete`` is what stops a caller claiming "the deepest venue that exists"
+    from a window the provider silently truncated.
+    """
+    capped = [_dexscreener_pair(pair_address=f"0x{index:040x}") for index in range(1, 31)]
+
+    with (
+        _keyless_servicer() as servicer,
+        patch.object(servicer, "_get_http_session", new=AsyncMock(return_value=_fake_session_returning(capped))),
+    ):
+        response = asyncio.run(servicer.ListTokenPools(_fallback_request(), _MockContext()))
+
+    assert response.success is True
+    assert len(response.pools) == 30
+    assert response.complete is False
+
+
+def test_dexscreener_fallback_empty_venue_list_is_a_measured_answer():
+    """"Nothing trades here" is a real finding and must not surface as a failure.
+
+    This is the motivating BTT verdict: the correct answer to "where does this
+    trade?" is sometimes "nowhere", and a caller has to be able to act on it.
+    """
+    with (
+        _keyless_servicer() as servicer,
+        patch.object(servicer, "_get_http_session", new=AsyncMock(return_value=_fake_session_returning([]))),
+    ):
+        response = asyncio.run(servicer.ListTokenPools(_fallback_request(), _MockContext()))
+
+    assert response.success is True
+    assert list(response.pools) == []
+    assert response.complete is True

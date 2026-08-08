@@ -10,7 +10,13 @@ DeFi Llama, and CoinGecko Onchain.
 from __future__ import annotations
 
 from .aggregation import AggregatedPrice, PoolContribution, PriceAggregator
-from .analytics import PoolAnalytics, PoolAnalyticsReader, PoolAnalyticsResult
+from .analytics import (
+    PoolAnalytics,
+    PoolAnalyticsReader,
+    PoolAnalyticsResult,
+    TokenPool,
+    TokenPools,
+)
 from .history import PoolHistoryReader, PoolSnapshot
 from .liquidity import (
     LiquidityDepth,
@@ -45,5 +51,7 @@ __all__ = [
     "SlippageEstimate",
     "SlippageEstimator",
     "TickData",
+    "TokenPool",
+    "TokenPools",
     "UniswapV3PoolPriceReader",
 ]

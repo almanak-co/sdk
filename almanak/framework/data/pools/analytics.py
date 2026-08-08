@@ -113,6 +113,68 @@ class PoolAnalyticsResult:
     metric_name: str
 
 
+@dataclass(frozen=True)
+class TokenPool:
+    """One venue where a token trades (VIB-6599).
+
+    Money fields are ``Decimal | None`` — ``None`` means the provider did not
+    measure the figure, ``Decimal("0")`` means it measured zero. This surface
+    deliberately does NOT follow ``PoolAnalytics``'s unmeasured-collapses-to-
+    ``Decimal(0)`` convention, which exists only for pre-VIB-4727 callers: the
+    whole point of venue discovery is telling a dead pool from an unreported
+    one, and a collapsed zero makes an unmeasured venue look like an idle one.
+
+    Attributes:
+        pool_address: Pool / pair contract address, chain-normalized.
+        dex_id: Venue id. Product-distinct (``uniswap_v3`` vs
+            ``aerodrome-slipstream``) only when the owning ``TokenPools``
+            sets ``product_distinct_dex_id``.
+        name: Human-readable pool name, e.g. ``"BTT / WETH"``.
+        reserve_usd: Pool reserves in USD. ``None`` = unmeasured.
+        volume_24h_usd: 24h traded volume in USD. ``None`` = unmeasured.
+            Reserves alone cannot tell a live venue from an abandoned one.
+        base_token_address: Base token address; ``""`` when not reported.
+        quote_token_address: Quote token address; ``""`` when not reported.
+    """
+
+    pool_address: str
+    dex_id: str
+    name: str
+    reserve_usd: Decimal | None
+    volume_24h_usd: Decimal | None
+    base_token_address: str
+    quote_token_address: str
+
+
+@dataclass(frozen=True)
+class TokenPools:
+    """A token's venue list, with the two caveats that make it safe to use.
+
+    Attributes:
+        chain: Chain the venues live on.
+        token_address: The token whose venues these are, chain-normalized.
+        pools: Venues in UPSTREAM RANK ORDER — not re-sorted. Callers that
+            want depth order sort explicitly (``MarketSnapshot.token_pools``
+            does), because rank order is load-bearing for product-exact pool
+            resolution and a reader that silently re-sorted would break it.
+        source: Provider that answered (``coingecko_onchain`` | ``dexscreener``).
+        complete: False when the provider truncated the window. A truncated
+            window can support "the deepest venue I can see", never "the
+            deepest venue that exists".
+        product_distinct_dex_id: False when ``dex_id`` values may collapse
+            distinct products of one venue family (DexScreener reports classic
+            and Slipstream Aerodrome pools identically). Matching a dex id
+            against a connector protocol slug is only sound when this is True.
+    """
+
+    chain: str
+    token_address: str
+    pools: tuple[TokenPool, ...]
+    source: str
+    complete: bool
+    product_distinct_dex_id: bool
+
+
 # =============================================================================
 # Wire-shape decoding helpers (decimal-as-string → Decimal / float)
 # =============================================================================
@@ -136,6 +198,47 @@ def _decimal_or_zero(value: str) -> Decimal:
     except (InvalidOperation, ValueError, TypeError):
         logger.debug("pool_analytics: dropped unparseable decimal wire value %r", value)
         return Decimal(0)
+
+
+def rank_token_pools(
+    pools: tuple[TokenPool, ...],
+    min_liquidity_usd: Decimal | None = None,
+) -> tuple[TokenPool, ...]:
+    """Filter by a depth floor and sort deepest-first, unmeasured last.
+
+    The single owner of both rules, shared by ``MarketSnapshot.token_pools``
+    and the ``list_token_pools`` agent tool — two surfaces that must not drift
+    on what "deepest" means or on how an unmeasured reserve is treated.
+
+    Unmeasured reserves sort LAST rather than as zero, and are DROPPED when a
+    floor is set: ranking an unknown depth below a measured-empty pool asserts
+    something the data does not say, and "unknown" does not satisfy ">= X"
+    (Empty != Zero, AGENTS.md "Accounting").
+    """
+    kept = (
+        pools
+        if min_liquidity_usd is None
+        else tuple(p for p in pools if p.reserve_usd is not None and p.reserve_usd >= min_liquidity_usd)
+    )
+    return tuple(sorted(kept, key=lambda p: (p.reserve_usd is None, -(p.reserve_usd or Decimal(0)))))
+
+
+def _decimal_or_none(value: str) -> Decimal | None:
+    """Parse a decimal-string wire field, preserving unmeasured as ``None``.
+
+    The strict counterpart to ``_decimal_or_zero``: the gateway's ``""`` means
+    "not measured" and stays ``None`` here, so a caller ranking venues by depth
+    can exclude unmeasured ones instead of sorting them as $0. A wire value
+    that is present but unparseable is also ``None`` — a corrupt reading is not
+    a measurement — and is logged rather than silently zeroed.
+    """
+    if not value:
+        return None
+    try:
+        return Decimal(value)
+    except (InvalidOperation, ValueError, TypeError):
+        logger.debug("pool_analytics: dropped unparseable decimal wire value %r", value)
+        return None
 
 
 def _float_or_zero(value: str) -> float:
@@ -322,6 +425,139 @@ class PoolAnalyticsReader:
             classification=DataClassification.INFORMATIONAL,
         )
 
+    def list_token_pools(
+        self,
+        token_address: str,
+        chain: str,
+        *,
+        page: int = 0,
+        allow_fallback_provider: bool = False,
+    ) -> DataEnvelope[TokenPools]:
+        """List the venues where a token trades, with per-venue depth (VIB-6599).
+
+        Answers "where can this token actually be traded, and how deep is each
+        venue?" — the check that belongs BEFORE a strategy is written, not
+        three layers down as an oracle divergence.
+
+        Args:
+            token_address: Token contract address (not a symbol).
+            chain: Chain name (canonical or a registered alias).
+            page: ``0`` (default) asks the gateway to page upstream itself and
+                return one consistent snapshot. ``>= 1`` requests a single
+                upstream page (diagnostic use; the fallback provider has no
+                paging and is skipped for these).
+            allow_fallback_provider: Opt in to a keyless fallback when the
+                primary lane is unavailable — chiefly a local gateway with no
+                ``COINGECKO_API_KEY``. Fallback rows are NOT product-distinct
+                on ``dex_id``; leave this False when matching dex ids against
+                connector protocol slugs, and check
+                ``TokenPools.product_distinct_dex_id`` before doing so anyway.
+
+        Returns:
+            ``DataEnvelope[TokenPools]`` with INFORMATIONAL classification.
+            An EMPTY ``pools`` tuple with ``success`` is a measured "this token
+            has no venues on this chain" — a real and useful answer — never an
+            error.
+
+        Raises:
+            DataSourceUnavailable: When the gateway returns a non-OK status or
+                every provider fails. Callers that catch this MUST re-raise or
+                return ``Intent.hold(...)`` so the runner's HOLD inference
+                still fires.
+        """
+        from almanak.gateway.proto import gateway_pb2
+
+        chain_norm = chain.lower()
+        # Chain-aware normalize, matching get_pool_analytics: EVM is
+        # case-insensitive hex -> lowercase; Solana base58 is case-sensitive
+        # -> preserve. Not cosmetic — GeckoTerminal answers a CHECKSUMMED EVM
+        # address with an empty list rather than an error, so a missed
+        # lowercase reads as "this token has no venues" (VIB-6599 trap).
+        token_norm = token_address.strip()
+        descriptor = ChainRegistry.try_resolve(chain_norm)
+        if not (descriptor is not None and descriptor.family is ChainFamily.SOLANA):
+            token_norm = token_norm.lower()
+
+        request = gateway_pb2.TokenPoolsRequest(
+            chain=chain_norm,
+            token_address=token_norm,
+            page=page,
+            allow_fallback_provider=allow_fallback_provider,
+        )
+
+        try:
+            response = self._gateway_client.pool_analytics.ListTokenPools(
+                request,
+                timeout=self._timeout_seconds,
+            )
+        except grpc.RpcError as exc:
+            raise DataSourceUnavailable(
+                source="pool_analytics",
+                reason=f"gateway error: {exc}",
+            ) from exc
+        except RuntimeError as exc:
+            # GatewayClient raises RuntimeError("Gateway client not connected")
+            # when the channel is None; map it to the typed exception so HOLD
+            # inference fires through the same path as a real outage.
+            raise DataSourceUnavailable(
+                source="pool_analytics",
+                reason=f"gateway client not connected: {exc}",
+            ) from exc
+
+        if not response.success:
+            raise DataSourceUnavailable(
+                source="pool_analytics",
+                reason=response.error or "token pools returned success=False",
+            )
+
+        token_pools = TokenPools(
+            chain=response.chain or chain_norm,
+            token_address=response.token_address or token_norm,
+            # Upstream rank order preserved — see the TokenPools docstring.
+            pools=tuple(
+                TokenPool(
+                    pool_address=row.pool_address,
+                    dex_id=row.dex_id,
+                    name=row.name,
+                    reserve_usd=_decimal_or_none(row.reserve_usd),
+                    volume_24h_usd=_decimal_or_none(row.volume_24h_usd),
+                    base_token_address=row.base_token_address,
+                    quote_token_address=row.quote_token_address,
+                )
+                for row in response.pools
+            ),
+            source=response.source or "gateway",
+            complete=response.complete,
+            product_distinct_dex_id=response.product_distinct_dex_id,
+        )
+
+        observed_at = (
+            datetime.fromtimestamp(response.observed_at, tz=UTC) if response.observed_at else datetime.now(UTC)
+        )
+        # Confidence carries the two caveats a caller would otherwise have to
+        # read off the dataclass: a truncated window and a provider that lost
+        # product identity are both weaker evidence than a complete primary
+        # read, and neither is visible in the pool rows themselves.
+        confidence = 0.85
+        if not token_pools.product_distinct_dex_id:
+            confidence -= 0.15
+        if not token_pools.complete:
+            confidence -= 0.10
+        meta = DataMeta(
+            source=token_pools.source,
+            observed_at=observed_at,
+            finality=DataFinality.OFF_CHAIN,
+            staleness_ms=0,
+            latency_ms=0,
+            confidence=max(0.10, confidence),
+            cache_hit=False,
+        )
+        return DataEnvelope(
+            value=token_pools,
+            meta=meta,
+            classification=DataClassification.INFORMATIONAL,
+        )
+
     def best_pool(
         self,
         token_a: str,  # noqa: ARG002
@@ -408,6 +644,22 @@ class NullPoolAnalyticsReader:
             reason="backtest",
         )
 
+    def list_token_pools(
+        self,
+        token_address: str,  # noqa: ARG002
+        chain: str,  # noqa: ARG002
+        *,
+        page: int = 0,  # noqa: ARG002
+        allow_fallback_provider: bool = False,  # noqa: ARG002
+    ) -> DataEnvelope[TokenPools]:
+        # Live venue lists change between runs; answering one inside a backtest
+        # would make the run irreproducible. Same contract as the rest of this
+        # stub — raise so the HOLD path is exercised identically to an outage.
+        raise DataSourceUnavailable(
+            source="pool_analytics",
+            reason="backtest",
+        )
+
     def health(self) -> dict[str, dict[str, int]]:
         return {}
 
@@ -417,6 +669,9 @@ __all__ = [
     "PoolAnalytics",
     "PoolAnalyticsReader",
     "PoolAnalyticsResult",
+    "TokenPool",
+    "TokenPools",
+    "rank_token_pools",
 ]
 
 

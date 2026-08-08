@@ -59,6 +59,10 @@ FROZEN_SCHEMA_CHAIN_DEFAULTS: dict[str, str] = {
     "ListLPPositionsRequest": "arbitrum",
     "ListLendingPositionsRequest": "arbitrum",
     "ListLendingReservesRequest": "arbitrum",
+    # VIB-6599 venue discovery. Same DEFAULT_CHAIN as every other read schema —
+    # listed here because the freeze is a whitelist, so a new schema must be
+    # declared rather than inherit silently.
+    "ListTokenPoolsRequest": "arbitrum",
     "OpenLPPositionRequest": "arbitrum",
     "RepayLendingRequest": "arbitrum",
     "ResolveTokenRequest": "arbitrum",

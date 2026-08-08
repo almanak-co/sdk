@@ -262,6 +262,25 @@ _BUILTIN_TOOLS: list[ToolDefinition] = [
         latency_class=LatencyClass.SLOW,
     ),
     ToolDefinition(
+        name="list_token_pools",
+        description=(
+            "List the AMM/DEX spot pools where a token trades, with per-venue USD reserves and 24h "
+            "volume. Use BEFORE committing to a token or protocol: it answers whether a tradeable "
+            "spot venue exists at all, and whether the deepest one is actually live. "
+            "SPOT AMMs ONLY — perp markets (GMX, Hyperliquid), lending markets (Aave, Morpho) and "
+            "Pendle PT/YT are NOT venues here; use get_perp_market / list_lending_reserves instead. "
+            "A GM or aToken receipt token may still return a few dust AMM pools; that is incidental "
+            "wrapper liquidity, NOT the depth of the underlying perp or lending market. "
+            "An EMPTY result means 'no venue' ONLY when complete=true; with complete=false the view "
+            "was truncated — report that as 'could not verify', never as 'this token has no venue'."
+        ),
+        category=ToolCategory.DATA,
+        risk_tier=RiskTier.NONE,
+        request_schema=schemas.ListTokenPoolsRequest,
+        response_schema=schemas.ListTokenPoolsResponse,
+        latency_class=LatencyClass.MEDIUM,
+    ),
+    ToolDefinition(
         name="get_portfolio",
         description="Aggregate a wallet's on-chain state: native + ERC20 balances, LP positions, lending.",
         category=ToolCategory.DATA,

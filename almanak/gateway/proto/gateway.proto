@@ -2309,23 +2309,47 @@ message TokenPoolsRequest {
                              // upstream itself (raw-row-count driven) and returns the full
                              // union as one consistent snapshot with `complete` set.
                              // >=1 = single upstream page (compat/diagnostic use).
+
+  // Opt-in to a KEYLESS FALLBACK provider (DexScreener) when the primary
+  // CoinGecko Onchain lane is unavailable — chiefly a local SDK gateway with
+  // no COINGECKO_API_KEY, where the primary lane cannot answer at all.
+  //
+  // The fallback trades DEX-ID FIDELITY for availability: DexScreener reports
+  // every Aerodrome pool as "aerodrome", classic and Slipstream alike (verified
+  // 2026-08-07: 10 Base USDC pools, all bare "aerodrome"), and its labels are
+  // inconsistently cased ("v3" / "V3"). Product-EXACT pool resolution therefore
+  // MUST leave this false — the default — and keep failing closed, which is
+  // what `lp_adapter._resolve_product_ambiguous_pool` relies on.
+  //
+  // Read `product_distinct_dex_id` on the response for the machine-checkable
+  // guarantee; `source` names the provider that answered. Fallback and strict
+  // results are cached under separate keys, so opting in never contaminates a
+  // strict caller's cache entry.
+  bool allow_fallback_provider = 4;
 }
 
 message TokenPoolRow {
   string pool_address = 1;       // Chain-normalized (EVM lower-cased; Solana case preserved)
                                  // and syntactically validated — invalid rows are dropped.
-  string dex_id = 2;             // Product-distinct dex id (e.g. "aerodrome-slipstream").
+  string dex_id = 2;             // Product-distinct dex id (e.g. "aerodrome-slipstream")
+                                 // when the response sets `product_distinct_dex_id`.
   string name = 3;               // Human-readable pool name (may carry the fee, e.g. "WETH / USDC 0.05%").
   string reserve_usd = 4;        // Decimal-as-string; "" = unmeasured (Empty != Zero; never NaN/Infinity).
   string base_token_address = 5; // Chain-normalized + validated; "" when omitted or invalid.
   string quote_token_address = 6;
+  // 24h traded volume in USD. Decimal-as-string; "" = unmeasured (Empty !=
+  // Zero) — a venue that reports no volume figure is NOT a venue that traded
+  // $0. Reserves alone cannot tell a live venue from an abandoned one: the
+  // motivating case (BTT/Ethereum, VIB-6599) held $211k of reserves and traded
+  // $84 in 24h, and only this field makes that visible.
+  string volume_24h_usd = 7;
 }
 
 message TokenPoolsResponse {
   string chain = 1;          // Echoed-back, canonicalized.
   string token_address = 2;  // Echoed-back, chain-normalized.
   repeated TokenPoolRow pools = 3;
-  string source = 4;         // "coingecko_onchain"
+  string source = 4;         // "coingecko_onchain" | "dexscreener" (fallback; opt-in only)
   int64  observed_at = 5;    // Unix seconds when the gateway fetched the data.
 
   // Dual-channel envelope (see PoolAnalyticsService header comment).
@@ -2339,6 +2363,19 @@ message TokenPoolsResponse {
   // the canonical pool for the pair) — never a deepest-of-all claim over a
   // truncated window; no in-window match fails closed.
   bool   complete = 8;
+
+  // True iff every `dex_id` above is PRODUCT-DISTINCT — i.e. classic and
+  // Slipstream Aerodrome pools carry different ids, so a dex id can be matched
+  // against a connector's protocol slug. Only the primary CoinGecko Onchain
+  // lane guarantees this; the opt-in DexScreener fallback does not.
+  //
+  // Proto3 defaults this to false, which is the SAFE default in both
+  // directions: an older gateway that never sets it reads as "no guarantee",
+  // so a product-exact consumer fails closed rather than matching on ids that
+  // silently lost their product suffix. Assert this field — do not string-
+  // compare `source`, which is an open-ended denylist that grows every time a
+  // provider is added.
+  bool   product_distinct_dex_id = 9;
 }
 
 // =============================================================================

@@ -1016,6 +1016,9 @@ class ToolExecutor:
         if tool_name == "list_lending_reserves":
             return await self._execute_list_lending_reserves(args)
 
+        if tool_name == "list_token_pools":
+            return await self._execute_list_token_pools(args)
+
         if tool_name == "get_portfolio":
             return await self._execute_get_portfolio(args)
 
@@ -2495,6 +2498,118 @@ class ToolExecutor:
             "fee_apr": _sanitize_analytics_field(getattr(response, "fee_apr", "")),
             "tvl_usd": _sanitize_analytics_field(getattr(response, "tvl_usd", "")),
         }
+
+    async def _execute_list_token_pools(self, args: dict) -> ToolResponse:
+        """List a token's DEX venues with per-venue reserves and 24h volume.
+
+        Read-only discovery (VIB-6599). Unlike ``_fetch_pool_analytics``, which
+        is best-effort garnish on a core on-chain read and fails OPEN, this is
+        the whole answer — so every failure is surfaced LOUD. An empty venue
+        list returned SUCCESSFULLY is a real finding ("nothing trades here"),
+        and must stay distinguishable from "the lookup broke".
+
+        Wire decoding, unmeasured-vs-zero handling, and the depth ranking are
+        owned by ``PoolAnalyticsReader`` / ``rank_token_pools`` so this tool and
+        ``MarketSnapshot.token_pools`` cannot drift apart.
+        """
+        from decimal import Decimal
+
+        from almanak.framework.data.interfaces import DataSourceUnavailable
+        from almanak.framework.data.pools.analytics import PoolAnalyticsReader, rank_token_pools
+        from almanak.framework.data.tokens import get_token_resolver
+        from almanak.framework.market.snapshot import _SOLANA_BASE58_TOKEN_RE
+
+        token = str(args.get("token") or "").strip()
+        chain = args.get("chain", self._default_chain)
+        if not token:
+            return ToolResponse(
+                status=ToolResponseStatus.ERROR,
+                error=_error_payload(AgentErrorCode.VALIDATION_ERROR, "list_token_pools: 'token' is required"),
+            )
+
+        # Address-shaped input passes straight through: venue discovery is
+        # address-keyed, and the tail tokens this tool exists for are exactly
+        # the ones no registry lists. Both families, not just EVM — a Solana
+        # mint is base58 and CASE-SENSITIVE, so it must never be lower-cased
+        # (that yields a different address) and must not be sent to the symbol
+        # resolver, which would report a valid address as unresolvable.
+        if token.lower().startswith("0x") and len(token) == 42:
+            token_address = token.lower()
+        elif _SOLANA_BASE58_TOKEN_RE.match(token):
+            token_address = token
+        else:
+            try:
+                token_address = get_token_resolver().resolve(token, chain).address
+            except Exception as e:  # noqa: BLE001 - any resolution failure is the same user-facing answer
+                return ToolResponse(
+                    status=ToolResponseStatus.ERROR,
+                    error=_error_payload(
+                        AgentErrorCode.VALIDATION_ERROR,
+                        f"list_token_pools: cannot resolve '{token}' on {chain} ({e}). Pass a contract address.",
+                    ),
+                )
+
+        try:
+            envelope = PoolAnalyticsReader(
+                self._client,
+                timeout_seconds=_POOL_ANALYTICS_TIMEOUT_S,
+            ).list_token_pools(
+                token_address=token_address,
+                chain=chain,
+                # Operator-facing discovery: prefer an answer from the keyless
+                # fallback over nothing at all on a gateway with no CoinGecko
+                # key. `product_distinct_dex_id` travels with the response so
+                # the caller can see which provider answered.
+                allow_fallback_provider=True,
+            )
+        except DataSourceUnavailable as e:
+            return ToolResponse(
+                status=ToolResponseStatus.ERROR,
+                error=_error_payload(
+                    AgentErrorCode.UPSTREAM_UNAVAILABLE,
+                    f"list_token_pools: venue lookup failed for {token} on {chain}: {e}",
+                ),
+            )
+
+        raw_floor = args.get("min_liquidity_usd") or 0
+        floor = Decimal(str(raw_floor)) if float(raw_floor) > 0 else None
+        result = envelope.value
+        pools = rank_token_pools(result.pools, floor)
+        # Report the count BEFORE the caller's floor as well. Without it, "no
+        # venues exist" and "venues exist, none met your floor" are the same
+        # empty list — and a caller acting on the second as though it were the
+        # first reports a tradeable token as untradeable.
+        unfiltered_count = len(result.pools)
+
+        return ToolResponse(
+            status=ToolResponseStatus.SUCCESS,
+            data={
+                "schema_version": 1,
+                "chain": result.chain,
+                "token": token,
+                "token_address": result.token_address,
+                "count": len(pools),
+                "unfiltered_count": unfiltered_count,
+                "min_liquidity_usd": str(floor) if floor is not None else "",
+                "source": result.source,
+                "complete": result.complete,
+                "product_distinct_dex_id": result.product_distinct_dex_id,
+                "pools": [
+                    {
+                        "pool_address": p.pool_address,
+                        "dex_id": p.dex_id,
+                        "name": p.name,
+                        # Unmeasured stays "" on the wire — never coerced to
+                        # "0", which would read as a measured-empty venue.
+                        "reserve_usd": "" if p.reserve_usd is None else str(p.reserve_usd),
+                        "volume_24h_usd": "" if p.volume_24h_usd is None else str(p.volume_24h_usd),
+                        "base_token_address": p.base_token_address,
+                        "quote_token_address": p.quote_token_address,
+                    }
+                    for p in pools
+                ],
+            },
+        )
 
     # crap-allowlist: pre-existing RPC surface complexity
     async def _execute_get_lp_position(self, args: dict) -> ToolResponse:  # noqa: C901

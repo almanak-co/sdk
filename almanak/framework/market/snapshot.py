@@ -65,7 +65,7 @@ if TYPE_CHECKING:
     from ..data.models import DataEnvelope, Instrument
     from ..data.ohlcv.module import GapStrategy
     from ..data.pools.aggregation import AggregatedPrice
-    from ..data.pools.analytics import PoolAnalytics, PoolAnalyticsResult
+    from ..data.pools.analytics import PoolAnalytics, PoolAnalyticsResult, TokenPools
     from ..data.pools.history import PoolSnapshot
     from ..data.pools.liquidity import LiquidityDepth, SlippageEstimate
     from ..data.pools.reader import PoolPrice
@@ -105,6 +105,12 @@ DEFAULT_TIMEFRAME = OHLCVTimeframe.FOUR_HOURS
 _GATEWAY_RPC_TIMEOUT_SECONDS = 30.0
 
 _EVM_ADDRESS_RE = re.compile(r"^0[xX][a-fA-F0-9]{40}$")
+
+# Solana base58 mint/pool address (alphabet excludes 0, O, I, l). Mirrors the
+# gateway's `_SOLANA_BASE58_RE` — the two must agree, or an address this side
+# accepts is one the gateway rejects. CASE IS SIGNIFICANT: unlike EVM hex, a
+# lower-cased base58 address is a different address, not the same one.
+_SOLANA_BASE58_TOKEN_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 
 
 # Strips "Data source '<name>' unavailable: " boilerplate from str(DataSourceUnavailable)
@@ -5366,6 +5372,154 @@ class MarketSnapshot:
                 f"{token_a}/{token_b}",
                 f"Failed to find best pool on {target_chain}: {e}",
             ) from e
+
+    @staticmethod
+    def _venue_liquidity_floor_static(min_liquidity_usd: Decimal | float | None) -> Decimal | None:
+        """Normalize a caller's depth floor, or raise on one that cannot mean anything.
+
+        Two traps, both reachable from strategy code:
+
+        * ``0`` is the natural way to say "no floor", but as a Decimal it is a
+          real threshold that EXCLUDES unmeasured reserves (``None >= 0`` is
+          false by our own rule), quietly dropping venues the docstring
+          promises to keep. Non-positive floors therefore mean "no floor".
+        * ``NaN`` propagates from an upstream division and makes every Decimal
+          comparison raise ``InvalidOperation`` mid-sort. Reject it at the
+          boundary with a message naming the argument, rather than surfacing a
+          decimal error from inside a sort key.
+        """
+        if min_liquidity_usd is None:
+            return None
+        floor = Decimal(str(min_liquidity_usd))
+        if not floor.is_finite():
+            raise ValueError(f"min_liquidity_usd must be a finite number, got {min_liquidity_usd!r}")
+        return floor if floor > 0 else None
+
+    def _resolve_venue_token_address(self, token: str, chain: str) -> str | None:
+        """Resolve a token for venue discovery, preserving non-EVM address case.
+
+        ``_resolve_token_address`` is documented "orientation only" and
+        lower-cases unconditionally — correct for EVM, WRONG for Solana, where
+        base58 is case-sensitive and lower-casing yields a DIFFERENT address
+        (``EPjFWdd5…`` -> ``epjfwdd5…``). It also routes everything unrecognised
+        through the symbol registry, so an unregistered Solana mint — exactly
+        the tail token this surface exists for — comes back unresolvable even
+        though the caller passed a perfectly good address.
+
+        So: hand a syntactically valid raw address straight through in the
+        chain's own casing, and only consult the registry for symbols.
+        """
+        from almanak.core.chains import ChainRegistry
+        from almanak.core.enums import ChainFamily
+
+        candidate = token.strip()
+        descriptor = ChainRegistry.try_resolve(chain)
+        if descriptor is not None and descriptor.family is ChainFamily.SOLANA:
+            if _SOLANA_BASE58_TOKEN_RE.match(candidate):
+                return candidate  # case-sensitive: pass through untouched
+            resolved = self._resolve_token_address(candidate, chain)
+            # The shared helper lower-cases its result; a Solana symbol that
+            # resolved through it would be corrupted, so refuse rather than
+            # return a subtly wrong address.
+            return None if resolved is None else (resolved if _SOLANA_BASE58_TOKEN_RE.match(resolved) else None)
+        return self._resolve_token_address(candidate, chain)
+
+    def token_pools(
+        self,
+        token: str,
+        chain: str | None = None,
+        *,
+        min_liquidity_usd: Decimal | float | None = None,
+        allow_fallback_provider: bool = True,
+    ) -> DataEnvelope[TokenPools]:
+        """List the venues where ``token`` trades, deepest first (VIB-6599).
+
+        The viability check that belongs BEFORE an intent: a signal whose venue
+        does not exist, or exists with $84 of daily volume, is rejectable in
+        one call. Without it that same fact surfaces three layers down as an
+        oracle-divergence refusal that reads like a data-quality bug.
+
+        Args:
+            token: Token symbol or address. Symbols resolve through the static
+                registry (no egress); pass an address for tail tokens the
+                registry does not carry.
+            chain: Chain name. Defaults to this snapshot's chain.
+            min_liquidity_usd: Optional floor on ``reserve_usd``. Venues whose
+                reserves are UNMEASURED are excluded when a floor is set —
+                "unknown" does not satisfy ">= X" — and kept when it is not.
+                ``None`` or any non-positive value means NO floor (so ``0``
+                keeps unmeasured venues rather than silently dropping them);
+                a non-finite value raises ``ValueError``.
+            allow_fallback_provider: Permit the gateway's keyless fallback when
+                the primary provider is unavailable (default True: without it a
+                gateway with no CoinGecko key returns nothing at all). The
+                fallback engages ONLY after the primary fails, so a configured
+                gateway behaves identically either way.
+
+        Returns:
+            ``DataEnvelope[TokenPools]``, ``pools`` sorted by ``reserve_usd``
+            descending with unmeasured reserves last. An EMPTY tuple is a
+            measured "no venues on this chain", not a failure.
+
+            Do NOT match ``dex_id`` against a connector protocol slug unless
+            ``TokenPools.product_distinct_dex_id`` is True, and do not read the
+            first entry as the deepest venue that EXISTS unless
+            ``TokenPools.complete`` is True — a truncated window only supports
+            "deepest I can see".
+
+        Raises:
+            ValueError: If no pool analytics reader is configured, the token
+                cannot be resolved to an address, or ``min_liquidity_usd`` is
+                not finite.
+            PoolAnalyticsUnavailableError: If the venue list cannot be fetched.
+        """
+        from almanak.framework.data.market_snapshot import PoolAnalyticsUnavailableError
+
+        # Validate the floor BEFORE the round trip: a NaN threshold is a caller
+        # bug, and spending a gateway call to discover it — then failing in a
+        # sort key — is a worse error message and a wasted request.
+        floor = self._venue_liquidity_floor_static(min_liquidity_usd)
+
+        if self._pool_analytics_reader is None:
+            detail = getattr(self, "_pool_analytics_refusal_detail", None)
+            self._record_critical_data_failure(
+                "token_pools",
+                "not_simulated" if detail else "unconfigured",
+                detail or "token_pools unavailable: no provider configured",
+            )
+            raise ValueError(detail or "No pool analytics reader configured for MarketSnapshot")
+
+        target_chain = (chain or self._chain).lower()
+        token_address = self._resolve_venue_token_address(token, target_chain)
+        if token_address is None:
+            raise ValueError(
+                f"Cannot resolve {token!r} to an address on {target_chain}. "
+                f"Venue discovery is address-keyed — pass the token's contract address."
+            )
+
+        try:
+            envelope = self._pool_analytics_reader.list_token_pools(
+                token_address=token_address,
+                chain=target_chain,
+                allow_fallback_provider=allow_fallback_provider,
+            )
+        except Exception as e:  # noqa: BLE001
+            raise PoolAnalyticsUnavailableError(
+                token_address,
+                f"Failed to list venues for {token} on {target_chain}: {e}",
+            ) from e
+
+        from dataclasses import replace
+
+        from almanak.framework.data.pools.analytics import rank_token_pools
+
+        pools = rank_token_pools(envelope.value.pools, floor)
+        # `replace` the envelope rather than construct one: `DataEnvelope` is a
+        # TYPE_CHECKING-only import in this module (every other accessor returns
+        # a reader's envelope untouched and never builds one), so naming the
+        # class here is a runtime NameError. Rebuilding field-by-field would
+        # also silently drop any field added to DataEnvelope later.
+        return replace(envelope, value=replace(envelope.value, pools=pools))
 
     def yield_opportunities(
         self,

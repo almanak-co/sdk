@@ -211,6 +211,7 @@ Commands:
   bridge            Bridge tokens from one chain to another.
   bundle-clear      Remove cached compiled bundles from disk.
   bundle-list       List compiled intent bundles cached on disk.
+  dex-pools         List the AMM/DEX spot pools where a token trades,...
   lending-borrow    Borrow tokens from a lending protocol.
   lending-list      List a wallet's lending positions (account totals +...
   lending-repay     Repay a lending position.

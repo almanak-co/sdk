@@ -329,6 +329,37 @@
       "name": "list_lending_reserves"
     },
     {
+      "description": "List the AMM/DEX spot pools where a token trades, with per-venue USD reserves and 24h volume. Use BEFORE committing to a token or protocol: it answers whether a tradeable spot venue exists at all, and whether the deepest one is actually live. SPOT AMMs ONLY \u2014 perp markets (GMX, Hyperliquid), lending markets (Aave, Morpho) and Pendle PT/YT are NOT venues here; use get_perp_market / list_lending_reserves instead. A GM or aToken receipt token may still return a few dust AMM pools; that is incidental wrapper liquidity, NOT the depth of the underlying perp or lending market. An EMPTY result means 'no venue' ONLY when complete=true; with complete=false the view was truncated \u2014 report that as 'could not verify', never as 'this token has no venue'.",
+      "inputSchema": {
+        "description": "List the DEX venues where a token trades, with per-venue depth.\n\nRead-only discovery (VIB-6599). Answers \"where can this token actually be\ntraded, and how deep is each venue?\" \u2014 the viability check that belongs\nBEFORE a strategy is written. Without it the answer surfaces three layers\ndown as an oracle-divergence refusal that reads like a data-quality bug:\nthe motivating case (BTT on ethereum) had no Uniswap V3 pool at all, and\nits only real venue held $211k of reserves against $84 of 24h volume.",
+        "properties": {
+          "chain": {
+            "default": "arbitrum",
+            "title": "Chain",
+            "type": "string"
+          },
+          "min_liquidity_usd": {
+            "default": 0.0,
+            "description": "Optional floor on a venue's USD reserves. Venues with UNMEASURED reserves are excluded when this is > 0 ('unknown' does not satisfy '>= X') and kept when it is 0.",
+            "minimum": 0.0,
+            "title": "Min Liquidity Usd",
+            "type": "number"
+          },
+          "token": {
+            "description": "Token symbol or contract address.",
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token"
+        ],
+        "title": "ListTokenPoolsRequest",
+        "type": "object"
+      },
+      "name": "list_token_pools"
+    },
+    {
       "description": "Aggregate a wallet's on-chain state: native + ERC20 balances, LP positions, lending.",
       "inputSchema": {
         "description": "Summarize a wallet's on-chain positions on a single chain.\n\nCombines native balance, ERC20 balances (via batch_get_balances for\ncommon symbols or a caller-supplied list), LP positions, and lending\npositions.",
@@ -2075,6 +2106,40 @@
             }
           },
           "title": "ListLendingReservesRequest",
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "List the AMM/DEX spot pools where a token trades, with per-venue USD reserves and 24h volume. Use BEFORE committing to a token or protocol: it answers whether a tradeable spot venue exists at all, and whether the deepest one is actually live. SPOT AMMs ONLY \u2014 perp markets (GMX, Hyperliquid), lending markets (Aave, Morpho) and Pendle PT/YT are NOT venues here; use get_perp_market / list_lending_reserves instead. A GM or aToken receipt token may still return a few dust AMM pools; that is incidental wrapper liquidity, NOT the depth of the underlying perp or lending market. An EMPTY result means 'no venue' ONLY when complete=true; with complete=false the view was truncated \u2014 report that as 'could not verify', never as 'this token has no venue'.",
+        "name": "list_token_pools",
+        "parameters": {
+          "description": "List the DEX venues where a token trades, with per-venue depth.\n\nRead-only discovery (VIB-6599). Answers \"where can this token actually be\ntraded, and how deep is each venue?\" \u2014 the viability check that belongs\nBEFORE a strategy is written. Without it the answer surfaces three layers\ndown as an oracle-divergence refusal that reads like a data-quality bug:\nthe motivating case (BTT on ethereum) had no Uniswap V3 pool at all, and\nits only real venue held $211k of reserves against $84 of 24h volume.",
+          "properties": {
+            "chain": {
+              "default": "arbitrum",
+              "title": "Chain",
+              "type": "string"
+            },
+            "min_liquidity_usd": {
+              "default": 0.0,
+              "description": "Optional floor on a venue's USD reserves. Venues with UNMEASURED reserves are excluded when this is > 0 ('unknown' does not satisfy '>= X') and kept when it is 0.",
+              "minimum": 0.0,
+              "title": "Min Liquidity Usd",
+              "type": "number"
+            },
+            "token": {
+              "description": "Token symbol or contract address.",
+              "title": "Token",
+              "type": "string"
+            }
+          },
+          "required": [
+            "token"
+          ],
+          "title": "ListTokenPoolsRequest",
           "type": "object"
         }
       },

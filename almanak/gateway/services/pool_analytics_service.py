@@ -1,9 +1,18 @@
 """PoolAnalyticsService implementation - off-chain pool analytics (VIB-4727).
 
 Server-side handler that owns the HTTP egress to CoinGecko Onchain — the
-sole external pool-analytics lane. The framework-side ``PoolAnalyticsReader``
-is a thin gRPC client that calls into this service via the gateway sidecar —
-strategies in production containers never see ``aiohttp``.
+primary pool-analytics lane, and the only one ``GetPoolAnalytics`` uses. The
+framework-side ``PoolAnalyticsReader`` is a thin gRPC client that calls into
+this service via the gateway sidecar — strategies in production containers
+never see ``aiohttp``.
+
+``ListTokenPools`` additionally has an OPT-IN keyless DexScreener fallback
+(VIB-6599), reached only when the caller sets ``allow_fallback_provider`` and
+the primary lane fails. It exists because the primary needs a paid key, so a
+local SDK gateway without one cannot enumerate venues at all. It is NOT
+product-distinct on dex ids, which is why it is opt-in and why the response
+reports the guarantee in ``product_distinct_dex_id`` — see
+``_list_token_pools_providers``.
 
 Provider history: the service originally tried a catalog-matching provider
 first with CoinGecko Onchain as fallback. The matcher lane was structurally
@@ -74,6 +83,7 @@ from almanak.gateway.data._history_common import (
     is_solana_family,
 )
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
+from almanak.gateway.services.dexscreener_lookup import DEXSCREENER_BASE_URL, chain_slug_for
 from almanak.gateway.utils.rpc_provider import _get_gateway_api_key
 from almanak.gateway.utils.ssl_context import build_ssl_context
 
@@ -85,6 +95,30 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 _COINGECKO_ONCHAIN_SOURCE = "coingecko_onchain"
+
+# VIB-6599. OPT-IN keyless fallback for ``ListTokenPools`` only. The primary
+# lane needs a paid CoinGecko key, so a local SDK gateway without one cannot
+# enumerate a token's venues at all — which is the audience that most needs
+# "does a tradeable venue even exist?" before a strategy is written.
+#
+# It is a FALLBACK and never a primary: DexScreener's dex ids are not
+# product-distinct (every Aerodrome pool is bare "aerodrome", classic and
+# Slipstream alike), so it cannot serve product-exact pool resolution. Callers
+# opt in per request and read `product_distinct_dex_id` off the response.
+_DEXSCREENER_SOURCE = "dexscreener"
+# Public bucket is 300 req/min; mirror it as the conservative local throttle.
+_DEXSCREENER_RATE_PER_MIN = 300
+# ``/token-pairs/v1`` has no paging and truncates at 30 rows (verified
+# 2026-08-07 against WETH on both ethereum and base, which have far more
+# pools). At exactly the cap the set is NOT known-complete, so `complete`
+# goes false and no deepest-of-all claim can be made from it.
+_DEXSCREENER_MAX_ROWS = 30
+
+# ALLOW-list of sources whose dex ids are product-distinct. Allow-list, not
+# denylist, so a provider added later defaults to "no guarantee" and a
+# product-exact consumer fails closed on it — the loud failure — instead of
+# silently matching ids that lost their product suffix.
+_PRODUCT_DISTINCT_SOURCES: frozenset[str] = frozenset({_COINGECKO_ONCHAIN_SOURCE})
 
 # The chain-name map (``_CHAIN_TO_CG_ONCHAIN_NETWORK``), the CoinGecko Onchain API
 # base / header helpers, and the ``is_solana_family`` helper are imported
@@ -293,17 +327,23 @@ class PoolAnalyticsServiceServicer(gateway_pb2_grpc.PoolAnalyticsServiceServicer
         self.settings = settings
         self._http_session: aiohttp.ClientSession | None = None
         self._rate_limiter_cg = _TokenBucket(rate=_COINGECKO_ONCHAIN_RATE_PER_MIN, period=60.0)
+        # Separate bucket per provider: the fallback must never be able to
+        # drain the paid CoinGecko budget, nor be throttled by it.
+        self._rate_limiter_dexscreener = _TokenBucket(rate=_DEXSCREENER_RATE_PER_MIN, period=60.0)
         self._metrics: dict[str, _ProviderMetrics] = {
             _COINGECKO_ONCHAIN_SOURCE: _ProviderMetrics(),
+            _DEXSCREENER_SOURCE: _ProviderMetrics(),
         }
         self._public_cache: dict[tuple[str, str, str], _CacheEntry] = {}
         self._raw_cache: dict[tuple[str, str, str, str], _CacheEntry] = {}
-        # ListTokenPools TTL cache: (chain, token, page) -> (monotonic_at,
-        # response_snapshot | None, error). None snapshot = negative entry.
-        # page 0 entries are ATOMIC full-fetch snapshots.
-        self._token_pools_cache: dict[tuple[str, str, int], tuple[float, Any, str]] = {}
+        # ListTokenPools TTL cache: (chain, token, page, allow_fallback) ->
+        # (monotonic_at, response_snapshot | None, error). None snapshot =
+        # negative entry. page 0 entries are ATOMIC full-fetch snapshots.
+        # `allow_fallback` partitions the key space so a permissive caller's
+        # non-product-distinct rows can never be served to a strict one.
+        self._token_pools_cache: dict[tuple[str, str, int, bool], tuple[float, Any, str]] = {}
         # Single-flight locks for in-progress token-pools fetches.
-        self._token_pools_inflight: dict[tuple[str, str, int], asyncio.Lock] = {}
+        self._token_pools_inflight: dict[tuple[str, str, int, bool], asyncio.Lock] = {}
         self._cache_lock = threading.Lock()
         logger.debug("Initialized PoolAnalyticsService")
 
@@ -448,6 +488,7 @@ class PoolAnalyticsServiceServicer(gateway_pb2_grpc.PoolAnalyticsServiceServicer
         # itself on RAW row counts and returns one consistent snapshot with
         # `complete` set. page >= 1 = single upstream page (compat).
         page = int(request.page or 0)
+        allow_fallback = bool(request.allow_fallback_provider)
 
         def _fail(code: grpc.StatusCode, error: str) -> gateway_pb2.TokenPoolsResponse:
             context.set_code(code)
@@ -474,7 +515,11 @@ class PoolAnalyticsServiceServicer(gateway_pb2_grpc.PoolAnalyticsServiceServicer
         # retries per open/prewarm, and every uncached call spends the shared
         # 30/min CoinGecko bucket — repeated unresolved lookups must not
         # throttle unrelated consumers.
-        cache_key = (chain, token_address, page)
+        # `allow_fallback` is part of the KEY, not just the fetch: sharing one
+        # entry would let a permissive caller's DexScreener rows be served to a
+        # strict product-exact caller straight from cache, defeating the
+        # request flag entirely on the second call.
+        cache_key = (chain, token_address, page, allow_fallback)
         now = time.monotonic()
         with self._cache_lock:
             cached = self._token_pools_cache.get(cache_key)
@@ -520,25 +565,28 @@ class PoolAnalyticsServiceServicer(gateway_pb2_grpc.PoolAnalyticsServiceServicer
                         return _fail(grpc.StatusCode.UNAVAILABLE, cached[2] or "coingecko_onchain: cached failure")
 
                 try:
-                    pools, complete = await self._fetch_token_pools_upstream(chain, token_address, page)
-                except _RateLimitedError:
+                    pools, complete, source = await self._list_token_pools_providers(
+                        chain, token_address, page, allow_fallback
+                    )
+                except _RateLimitedError as e:
                     # Rate-limit pressure is transient: fail WITHOUT
                     # negative-caching, or one burst would blank the lane for the
-                    # negative-TTL window.
-                    return _fail(grpc.StatusCode.UNAVAILABLE, "coingecko_onchain: rate limited")
-                except (TimeoutError, aiohttp.ClientError, ValueError, TypeError, AttributeError, _ProviderError) as e:
-                    self._metrics[_COINGECKO_ONCHAIN_SOURCE].failures += 1
-                    return _fail_cached(f"{_COINGECKO_ONCHAIN_SOURCE}: {e}")
+                    # negative-TTL window. The provider helper always raises this
+                    # with an aggregated per-lane message, so `str(e)` is never
+                    # empty and needs no fallback string.
+                    return _fail(grpc.StatusCode.UNAVAILABLE, str(e))
+                except _ProviderError as e:
+                    return _fail_cached(str(e))
 
-                self._metrics[_COINGECKO_ONCHAIN_SOURCE].successes += 1
                 response = gateway_pb2.TokenPoolsResponse(
                     chain=chain,
                     token_address=token_address,
                     pools=pools,
-                    source=_COINGECKO_ONCHAIN_SOURCE,
+                    source=source,
                     observed_at=int(time.time()),
                     success=True,
                     complete=complete,
+                    product_distinct_dex_id=source in _PRODUCT_DISTINCT_SOURCES,
                 )
                 with self._cache_lock:
                     self._evict_token_pools_locked(time.monotonic())
@@ -548,6 +596,63 @@ class PoolAnalyticsServiceServicer(gateway_pb2_grpc.PoolAnalyticsServiceServicer
                 return response
             finally:
                 self._token_pools_inflight.pop(cache_key, None)
+
+    async def _list_token_pools_providers(
+        self,
+        chain: str,
+        token_address: str,
+        page: int,
+        allow_fallback: bool,
+    ) -> tuple[list[gateway_pb2.TokenPoolRow], bool, str]:
+        """Primary lane, then the OPT-IN fallback. Returns ``(pools, complete, source)``.
+
+        Preserves the caller's two-way failure taxonomy so the cache stays
+        correct: ``_RateLimitedError`` means transient (never negative-cached —
+        one burst must not blank the lane for the negative-TTL window), and
+        ``_ProviderError`` means a fault worth caching briefly. When BOTH lanes
+        fail, transient wins: a permanent fallback error must not downgrade a
+        transient primary error into a cached failure.
+
+        With ``allow_fallback`` false this is exactly the pre-VIB-6599 path —
+        one lane, same exceptions — which is what keeps product-exact consumers
+        (``lp_adapter._resolve_product_ambiguous_pool``) failing closed.
+        """
+        transient = False
+        errors: list[str] = []
+
+        try:
+            pools, complete = await self._fetch_token_pools_upstream(chain, token_address, page)
+            self._metrics[_COINGECKO_ONCHAIN_SOURCE].successes += 1
+            return pools, complete, _COINGECKO_ONCHAIN_SOURCE
+        except _RateLimitedError:
+            transient = True
+            errors.append(f"{_COINGECKO_ONCHAIN_SOURCE}: rate limited")
+        except (TimeoutError, aiohttp.ClientError, ValueError, TypeError, AttributeError, _ProviderError) as e:
+            self._metrics[_COINGECKO_ONCHAIN_SOURCE].failures += 1
+            errors.append(f"{_COINGECKO_ONCHAIN_SOURCE}: {e}")
+
+        # page >= 1 is a CoinGecko-specific upstream-page passthrough. The
+        # fallback endpoint has no paging, so answering page 3 from it would
+        # return page-1 rows under a page-3 label rather than "unavailable".
+        if not allow_fallback or page >= 1:
+            if transient:
+                raise _RateLimitedError("; ".join(errors))
+            raise _ProviderError("; ".join(errors))
+
+        try:
+            pools, complete = await self._fetch_token_pools_dexscreener(chain, token_address)
+            self._metrics[_DEXSCREENER_SOURCE].successes += 1
+            return pools, complete, _DEXSCREENER_SOURCE
+        except _RateLimitedError:
+            transient = True
+            errors.append(f"{_DEXSCREENER_SOURCE}: rate limited")
+        except (TimeoutError, aiohttp.ClientError, ValueError, TypeError, AttributeError, _ProviderError) as e:
+            self._metrics[_DEXSCREENER_SOURCE].failures += 1
+            errors.append(f"{_DEXSCREENER_SOURCE}: {e}")
+
+        if transient:
+            raise _RateLimitedError("; ".join(errors))
+        raise _ProviderError("; ".join(errors))
 
     async def _fetch_token_pools_upstream(
         self,
@@ -604,6 +709,53 @@ class PoolAnalyticsServiceServicer(gateway_pb2_grpc.PoolAnalyticsServiceServicer
                 return pools, True
         # Bound exhausted without a short page: NOT known-complete.
         return pools, False
+
+    async def _fetch_token_pools_dexscreener(
+        self,
+        chain: str,
+        token_address: str,
+    ) -> tuple[list[gateway_pb2.TokenPoolRow], bool]:
+        """OPT-IN keyless fallback: DexScreener ``/token-pairs/v1``.
+
+        Returns ``(pools, complete)``. The endpoint has no paging and truncates
+        at ``_DEXSCREENER_MAX_ROWS``, so completeness is decided on the RAW row
+        count before filtering — the same rule the primary lane uses, and for
+        the same reason: a dropped junk row must not read as a short page.
+
+        Raises ``_RateLimitedError`` on local bucket exhaustion (transient — the
+        caller must not negative-cache it) and ``_ProviderError`` on transport,
+        status or payload-shape faults, so this lane lands in the same taxonomy
+        as the primary rather than surfacing an UNKNOWN stack trace.
+        """
+        platform = chain_slug_for(chain)
+        if platform is None:
+            raise _ProviderError(f"unsupported chain for dexscreener: {chain}")
+        if not self._rate_limiter_dexscreener.acquire():
+            raise _RateLimitedError()
+
+        url = f"{DEXSCREENER_BASE_URL}/token-pairs/v1/{platform}/{token_address}"
+        session = await self._get_http_session()
+        async with session.get(url) as response:
+            if response.status == 404:
+                return [], True
+            if response.status != 200:
+                text = await response.text()
+                raise _ProviderError(f"HTTP {response.status}: {text[:200]}")
+            payload = await response.json()
+        # The endpoint returns a bare list; tolerate the {"pairs": [...]} shape
+        # the sibling price source also accepts rather than hard-failing on a
+        # documented-elsewhere variant.
+        if isinstance(payload, dict):
+            payload = payload.get("pairs")
+        if not isinstance(payload, list):
+            raise _ProviderError(f"token-pairs returned non-list payload: {str(payload)[:120]}")
+
+        pools = [
+            parsed
+            for parsed in (_parse_dexscreener_pool_row(row, chain, platform) for row in payload)
+            if parsed is not None
+        ]
+        return pools, len(payload) < _DEXSCREENER_MAX_ROWS
 
     def _evict_token_pools_locked(self, now: float) -> None:
         """Sweep expired token-pools entries; hard-cap the key space.
@@ -813,9 +965,11 @@ def _parse_token_pool_row(row: Any, network: str, chain: str) -> gateway_pb2.Tok
 
     Money stays decimal-as-string (Empty != Zero): an absent or non-numeric
     ``reserve_in_usd`` is ``""`` — the CLIENT decides how to rank unmeasured
-    reserves, the wire never invents a zero. Rows whose pool address fails
-    the chain's syntactic validation are skipped: a non-address identity
-    must never become a selectable "product-exact" pool.
+    reserves, the wire never invents a zero. The same rule governs
+    ``volume_usd.h24``: upstream's measured ``0.0`` (a real, idle pool) stays
+    ``"0"``, while an absent or malformed volume block stays ``""``. Rows whose
+    pool address fails the chain's syntactic validation are skipped: a
+    non-address identity must never become a selectable "product-exact" pool.
     """
     if not isinstance(row, dict):
         return None
@@ -825,17 +979,88 @@ def _parse_token_pool_row(row: Any, network: str, chain: str) -> gateway_pb2.Tok
     if not address or not _validate_pool_address(address, chain):
         return None
     dex = ((relationships.get("dex") or {}).get("data") or {}).get("id")
+    volume_block = attributes.get("volume_usd")
     return gateway_pb2.TokenPoolRow(
         pool_address=address,
         dex_id=str(dex or "").lower(),
         name=str(attributes.get("name") or ""),
         reserve_usd=_safe_decimal_str(attributes.get("reserve_in_usd")),
+        volume_24h_usd=(_safe_decimal_str(volume_block.get("h24")) if isinstance(volume_block, dict) else ""),
         base_token_address=_token_address_from_relationship_id(
             ((relationships.get("base_token") or {}).get("data") or {}).get("id"), network, chain
         ),
         quote_token_address=_token_address_from_relationship_id(
             ((relationships.get("quote_token") or {}).get("data") or {}).get("id"), network, chain
         ),
+    )
+
+
+def _dexscreener_dex_id(row: dict[str, Any]) -> str:
+    """Compose a dex id from DexScreener's ``dexId`` + ``labels``.
+
+    DexScreener splits venue identity across two fields and cases the labels
+    inconsistently — the same Base response carries ``("v3",)`` and ``("V3",)``
+    for different venues — so both are lower-cased before joining. Labels are
+    joined with ``_`` to match the CoinGecko Onchain spelling (``uniswap_v3``),
+    which is what makes the two providers' ids comparable at all.
+
+    This composition still cannot recover product identity DexScreener never
+    reported: an Aerodrome pool arrives as ``dexId="aerodrome"`` with NO
+    labels, so classic and Slipstream collapse to the same id. That is exactly
+    why a response carrying these rows sets ``product_distinct_dex_id=False``.
+    """
+    dex_id = str(row.get("dexId") or "").strip().lower()
+    raw_labels = row.get("labels")
+    labels = [str(label).strip().lower() for label in raw_labels] if isinstance(raw_labels, list) else []
+    parts = [part for part in [dex_id, *labels] if part]
+    return "_".join(parts)
+
+
+def _parse_dexscreener_pool_row(row: Any, chain: str, platform: str) -> gateway_pb2.TokenPoolRow | None:
+    """One DexScreener ``/token-pairs/v1`` row -> ``TokenPoolRow`` (None = skip).
+
+    Mirrors ``_parse_token_pool_row``'s contract exactly so the two providers
+    are interchangeable on the wire: chain-aware address normalization,
+    syntactic validation (a row whose pair address is not an address is
+    dropped, never surfaced as selectable), and Empty != Zero on both money
+    fields. DexScreener returns CHECKSUMMED addresses, so the normalize step
+    is load-bearing here rather than cosmetic.
+
+    Rows for a different ``chainId`` than requested are dropped: the endpoint
+    is chain-scoped, but accepting a foreign-chain venue would put a pool the
+    caller cannot trade into a list they will rank by depth.
+    """
+    if not isinstance(row, dict):
+        return None
+    if str(row.get("chainId") or "").strip().lower() != platform:
+        return None
+    address = _normalize_pool_address(str(row.get("pairAddress") or ""), chain)
+    if not address or not _validate_pool_address(address, chain):
+        return None
+
+    def _token_address(key: str) -> str:
+        token = row.get(key)
+        if not isinstance(token, dict):
+            return ""
+        normalized = _normalize_pool_address(str(token.get("address") or ""), chain)
+        return normalized if _validate_pool_address(normalized, chain) else ""
+
+    base = row.get("baseToken")
+    quote = row.get("quoteToken")
+    base_symbol = str(base.get("symbol") or "").strip() if isinstance(base, dict) else ""
+    quote_symbol = str(quote.get("symbol") or "").strip() if isinstance(quote, dict) else ""
+    liquidity = row.get("liquidity")
+    volume = row.get("volume")
+    return gateway_pb2.TokenPoolRow(
+        pool_address=address,
+        dex_id=_dexscreener_dex_id(row),
+        # CoinGecko Onchain names pools "BTT / WETH"; match that spelling so a
+        # consumer rendering either provider's rows gets one stable shape.
+        name=f"{base_symbol} / {quote_symbol}" if base_symbol and quote_symbol else "",
+        reserve_usd=(_safe_decimal_str(liquidity.get("usd")) if isinstance(liquidity, dict) else ""),
+        volume_24h_usd=(_safe_decimal_str(volume.get("h24")) if isinstance(volume, dict) else ""),
+        base_token_address=_token_address("baseToken"),
+        quote_token_address=_token_address("quoteToken"),
     )
 
 

@@ -6452,6 +6452,7 @@ class TokenPoolsRequest(_message.Message):
     CHAIN_FIELD_NUMBER: _builtins.int
     TOKEN_ADDRESS_FIELD_NUMBER: _builtins.int
     PAGE_FIELD_NUMBER: _builtins.int
+    ALLOW_FALLBACK_PROVIDER_FIELD_NUMBER: _builtins.int
     chain: _builtins.str
     """Required. Chain name (canonical or registered alias)."""
     token_address: _builtins.str
@@ -6460,14 +6461,36 @@ class TokenPoolsRequest(_message.Message):
     """Solana-family base58 is case-sensitive and preserved).
     0 (default) = ATOMIC bounded fetch: the gateway pages the
     """
+    allow_fallback_provider: _builtins.bool
+    """upstream itself (raw-row-count driven) and returns the full
+    union as one consistent snapshot with `complete` set.
+    >=1 = single upstream page (compat/diagnostic use).
+
+    Opt-in to a KEYLESS FALLBACK provider (DexScreener) when the primary
+    CoinGecko Onchain lane is unavailable — chiefly a local SDK gateway with
+    no COINGECKO_API_KEY, where the primary lane cannot answer at all.
+
+    The fallback trades DEX-ID FIDELITY for availability: DexScreener reports
+    every Aerodrome pool as "aerodrome", classic and Slipstream alike (verified
+    2026-08-07: 10 Base USDC pools, all bare "aerodrome"), and its labels are
+    inconsistently cased ("v3" / "V3"). Product-EXACT pool resolution therefore
+    MUST leave this false — the default — and keep failing closed, which is
+    what `lp_adapter._resolve_product_ambiguous_pool` relies on.
+
+    Read `product_distinct_dex_id` on the response for the machine-checkable
+    guarantee; `source` names the provider that answered. Fallback and strict
+    results are cached under separate keys, so opting in never contaminates a
+    strict caller's cache entry.
+    """
     def __init__(
         self,
         *,
         chain: _builtins.str = ...,
         token_address: _builtins.str = ...,
         page: _builtins.int = ...,
+        allow_fallback_provider: _builtins.bool = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "page", b"page", "token_address", b"token_address"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["allow_fallback_provider", b"allow_fallback_provider", "chain", b"chain", "page", b"page", "token_address", b"token_address"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___TokenPoolsRequest: _TypeAlias = TokenPoolsRequest  # noqa: Y015
@@ -6482,19 +6505,29 @@ class TokenPoolRow(_message.Message):
     RESERVE_USD_FIELD_NUMBER: _builtins.int
     BASE_TOKEN_ADDRESS_FIELD_NUMBER: _builtins.int
     QUOTE_TOKEN_ADDRESS_FIELD_NUMBER: _builtins.int
+    VOLUME_24H_USD_FIELD_NUMBER: _builtins.int
     pool_address: _builtins.str
     """Chain-normalized (EVM lower-cased; Solana case preserved)"""
     dex_id: _builtins.str
     """and syntactically validated — invalid rows are dropped.
-    Product-distinct dex id (e.g. "aerodrome-slipstream").
+    Product-distinct dex id (e.g. "aerodrome-slipstream")
     """
     name: _builtins.str
-    """Human-readable pool name (may carry the fee, e.g. "WETH / USDC 0.05%")."""
+    """when the response sets `product_distinct_dex_id`.
+    Human-readable pool name (may carry the fee, e.g. "WETH / USDC 0.05%").
+    """
     reserve_usd: _builtins.str
     """Decimal-as-string; "" = unmeasured (Empty != Zero; never NaN/Infinity)."""
     base_token_address: _builtins.str
     """Chain-normalized + validated; "" when omitted or invalid."""
     quote_token_address: _builtins.str
+    volume_24h_usd: _builtins.str
+    """24h traded volume in USD. Decimal-as-string; "" = unmeasured (Empty !=
+    Zero) — a venue that reports no volume figure is NOT a venue that traded
+    $0. Reserves alone cannot tell a live venue from an abandoned one: the
+    motivating case (BTT/Ethereum, VIB-6599) held $211k of reserves and traded
+    $84 in 24h, and only this field makes that visible.
+    """
     def __init__(
         self,
         *,
@@ -6504,8 +6537,9 @@ class TokenPoolRow(_message.Message):
         reserve_usd: _builtins.str = ...,
         base_token_address: _builtins.str = ...,
         quote_token_address: _builtins.str = ...,
+        volume_24h_usd: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["base_token_address", b"base_token_address", "dex_id", b"dex_id", "name", b"name", "pool_address", b"pool_address", "quote_token_address", b"quote_token_address", "reserve_usd", b"reserve_usd"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["base_token_address", b"base_token_address", "dex_id", b"dex_id", "name", b"name", "pool_address", b"pool_address", "quote_token_address", b"quote_token_address", "reserve_usd", b"reserve_usd", "volume_24h_usd", b"volume_24h_usd"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___TokenPoolRow: _TypeAlias = TokenPoolRow  # noqa: Y015
@@ -6522,12 +6556,13 @@ class TokenPoolsResponse(_message.Message):
     SUCCESS_FIELD_NUMBER: _builtins.int
     ERROR_FIELD_NUMBER: _builtins.int
     COMPLETE_FIELD_NUMBER: _builtins.int
+    PRODUCT_DISTINCT_DEX_ID_FIELD_NUMBER: _builtins.int
     chain: _builtins.str
     """Echoed-back, canonicalized."""
     token_address: _builtins.str
     """Echoed-back, chain-normalized."""
     source: _builtins.str
-    """"coingecko_onchain" """
+    """"coingecko_onchain" | "dexscreener" (fallback; opt-in only)"""
     observed_at: _builtins.int
     """Unix seconds when the gateway fetched the data."""
     success: _builtins.bool
@@ -6540,6 +6575,19 @@ class TokenPoolsResponse(_message.Message):
     Consumers select by RANK-ORDER within the window (first exact match =
     the canonical pool for the pair) — never a deepest-of-all claim over a
     truncated window; no in-window match fails closed.
+    """
+    product_distinct_dex_id: _builtins.bool
+    """True iff every `dex_id` above is PRODUCT-DISTINCT — i.e. classic and
+    Slipstream Aerodrome pools carry different ids, so a dex id can be matched
+    against a connector's protocol slug. Only the primary CoinGecko Onchain
+    lane guarantees this; the opt-in DexScreener fallback does not.
+
+    Proto3 defaults this to false, which is the SAFE default in both
+    directions: an older gateway that never sets it reads as "no guarantee",
+    so a product-exact consumer fails closed rather than matching on ids that
+    silently lost their product suffix. Assert this field — do not string-
+    compare `source`, which is an open-ended denylist that grows every time a
+    provider is added.
     """
     @_builtins.property
     def pools(self) -> _containers.RepeatedCompositeFieldContainer[Global___TokenPoolRow]: ...
@@ -6554,8 +6602,9 @@ class TokenPoolsResponse(_message.Message):
         success: _builtins.bool = ...,
         error: _builtins.str = ...,
         complete: _builtins.bool = ...,
+        product_distinct_dex_id: _builtins.bool = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "complete", b"complete", "error", b"error", "observed_at", b"observed_at", "pools", b"pools", "source", b"source", "success", b"success", "token_address", b"token_address"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "complete", b"complete", "error", b"error", "observed_at", b"observed_at", "pools", b"pools", "product_distinct_dex_id", b"product_distinct_dex_id", "source", b"source", "success", b"success", "token_address", b"token_address"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___TokenPoolsResponse: _TypeAlias = TokenPoolsResponse  # noqa: Y015

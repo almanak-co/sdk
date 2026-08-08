@@ -63,7 +63,7 @@ class TestToolDefinition:
 class TestToolCatalog:
     def test_default_catalog_has_tools(self):
         catalog = get_default_catalog()
-        assert len(catalog) == 39
+        assert len(catalog) == 40
 
     def test_get_existing_tool(self):
         catalog = get_default_catalog()
@@ -117,13 +117,14 @@ class TestToolCatalog:
         assert "list_lending_positions" in names
         assert "list_lending_reserves" in names
         assert "get_portfolio" in names
-        assert len(names) == 39
+        assert "list_token_pools" in names
+        assert len(names) == 40
 
     def test_filter_by_category(self):
         catalog = get_default_catalog()
 
         data_tools = catalog.list_tools(category=ToolCategory.DATA)
-        assert len(data_tools) == 15
+        assert len(data_tools) == 16
         assert all(t.category == ToolCategory.DATA for t in data_tools)
         data_names = {t.name for t in data_tools}
         assert "get_wallet_overview" in data_names
@@ -143,13 +144,13 @@ class TestToolCatalog:
     def test_mcp_tools_output(self):
         catalog = get_default_catalog()
         mcp_tools = catalog.to_mcp_tools()
-        assert len(mcp_tools) == 39
+        assert len(mcp_tools) == 40
         assert all("name" in t and "description" in t and "inputSchema" in t for t in mcp_tools)
 
     def test_openai_tools_output(self):
         catalog = get_default_catalog()
         openai_tools = catalog.to_openai_tools()
-        assert len(openai_tools) == 39
+        assert len(openai_tools) == 40
         assert all(t["type"] == "function" for t in openai_tools)
 
     def test_custom_tool_registration(self):
@@ -164,7 +165,7 @@ class TestToolCatalog:
         )
         catalog.register(custom)
         assert "custom_tool" in catalog
-        assert len(catalog) == 40
+        assert len(catalog) == 41
 
     def test_risk_tiers_assigned(self):
         catalog = get_default_catalog()

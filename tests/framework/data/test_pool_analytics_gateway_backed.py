@@ -364,3 +364,162 @@ def test_best_pool_raises_datasource_unavailable_for_hold_path():
         )
     assert "VIB-4729" in excinfo.value.reason
     assert classify_failure(excinfo.value) == FailureKind.DATA_UNAVAILABLE
+
+
+# =============================================================================
+# VIB-6599 — list_token_pools + rank_token_pools
+# =============================================================================
+
+
+_BTT = "0xc669928185dbce49d2230cc9b0979be6dc797957"
+
+
+def _token_pools_response(
+    *,
+    success: bool = True,
+    error: str = "",
+    source: str = "coingecko_onchain",
+    complete: bool = True,
+    product_distinct: bool = True,
+    rows: list[tuple[str, str, str, str]] | None = None,
+) -> gateway_pb2.TokenPoolsResponse:
+    """Rows are ``(pool_address, dex_id, reserve_usd, volume_24h_usd)``."""
+    rows = (
+        rows
+        if rows is not None
+        else [
+            ("0x2d0ba902badaa82592f0e1c04c71d66cea21d921", "uniswap_v2", "211219.19", "84.35"),
+            ("0xb2cc224c1c9fee385f8ad6a55b4d94e92359dc59", "uniswap_v3", "10.76", "0"),
+        ]
+    )
+    return gateway_pb2.TokenPoolsResponse(
+        chain="ethereum",
+        token_address=_BTT,
+        pools=[
+            gateway_pb2.TokenPoolRow(
+                pool_address=address,
+                dex_id=dex_id,
+                name="BTT / WETH",
+                reserve_usd=reserve,
+                volume_24h_usd=volume,
+            )
+            for address, dex_id, reserve, volume in rows
+        ],
+        source=source,
+        observed_at=0,
+        success=success,
+        error=error,
+        complete=complete,
+        product_distinct_dex_id=product_distinct,
+    )
+
+
+def test_list_token_pools_decodes_rows_and_carries_both_caveats():
+    stub = MagicMock()
+    stub.ListTokenPools.return_value = _token_pools_response()
+    reader = PoolAnalyticsReader(gateway_client=_fake_gateway_with_stub(stub))
+
+    envelope = reader.list_token_pools(token_address=_BTT.upper(), chain="Ethereum")
+
+    result = envelope.value
+    assert result.source == "coingecko_onchain"
+    assert result.complete is True
+    assert result.product_distinct_dex_id is True
+    assert [p.dex_id for p in result.pools] == ["uniswap_v2", "uniswap_v3"]
+    assert result.pools[0].reserve_usd == Decimal("211219.19")
+    # A measured zero survives as Decimal(0) — NOT as None.
+    assert result.pools[1].volume_24h_usd == Decimal("0")
+
+    # EVM address lower-cased before it reaches the gateway. Not cosmetic: the
+    # upstream answers a checksummed address with an EMPTY LIST rather than an
+    # error, so a missed lowercase reads as "this token has no venues at all".
+    assert stub.ListTokenPools.call_args.args[0].token_address == _BTT
+    # Strict by default: opting in is the caller's explicit choice.
+    assert stub.ListTokenPools.call_args.args[0].allow_fallback_provider is False
+
+
+def test_list_token_pools_keeps_unmeasured_money_as_none():
+    """Empty != Zero: an unreported reserve must not arrive as ``Decimal(0)``.
+
+    ``PoolAnalytics`` collapses unmeasured to ``Decimal(0)`` for pre-VIB-4727
+    callers; this surface deliberately does not, because telling a dead venue
+    from an unreported one is the entire job.
+    """
+    stub = MagicMock()
+    stub.ListTokenPools.return_value = _token_pools_response(
+        rows=[("0x2d0ba902badaa82592f0e1c04c71d66cea21d921", "uniswap_v2", "", "")]
+    )
+    reader = PoolAnalyticsReader(gateway_client=_fake_gateway_with_stub(stub))
+
+    pool = reader.list_token_pools(token_address=_BTT, chain="ethereum").value.pools[0]
+
+    assert pool.reserve_usd is None
+    assert pool.volume_24h_usd is None
+
+
+def test_list_token_pools_forwards_the_fallback_opt_in():
+    stub = MagicMock()
+    stub.ListTokenPools.return_value = _token_pools_response(source="dexscreener", product_distinct=False)
+    reader = PoolAnalyticsReader(gateway_client=_fake_gateway_with_stub(stub))
+
+    envelope = reader.list_token_pools(token_address=_BTT, chain="ethereum", allow_fallback_provider=True)
+
+    assert stub.ListTokenPools.call_args.args[0].allow_fallback_provider is True
+    assert envelope.value.product_distinct_dex_id is False
+    # Both caveats are also legible without unpacking the dataclass.
+    assert envelope.meta.confidence < 0.85
+
+
+def test_list_token_pools_empty_venue_list_is_success_not_failure():
+    """"No venues on this chain" is a measured answer a caller must be able to act on."""
+    stub = MagicMock()
+    stub.ListTokenPools.return_value = _token_pools_response(rows=[])
+    reader = PoolAnalyticsReader(gateway_client=_fake_gateway_with_stub(stub))
+
+    assert reader.list_token_pools(token_address=_BTT, chain="ethereum").value.pools == ()
+
+
+def test_list_token_pools_maps_failures_to_the_hold_path():
+    """Both wire failure channels must classify as DATA_UNAVAILABLE, not crash the loop."""
+    unsuccessful = MagicMock()
+    unsuccessful.ListTokenPools.return_value = _token_pools_response(success=False, error="providers exhausted")
+    reader = PoolAnalyticsReader(gateway_client=_fake_gateway_with_stub(unsuccessful))
+    with pytest.raises(DataSourceUnavailable) as envelope_failure:
+        reader.list_token_pools(token_address=_BTT, chain="ethereum")
+    assert classify_failure(envelope_failure.value) == FailureKind.DATA_UNAVAILABLE
+
+    rpc_error = MagicMock()
+    rpc_error.ListTokenPools.side_effect = grpc.RpcError("gateway down")
+    reader = PoolAnalyticsReader(gateway_client=_fake_gateway_with_stub(rpc_error))
+    with pytest.raises(DataSourceUnavailable) as transport_failure:
+        reader.list_token_pools(token_address=_BTT, chain="ethereum")
+    assert classify_failure(transport_failure.value) == FailureKind.DATA_UNAVAILABLE
+
+
+def test_rank_token_pools_sorts_deepest_first_with_unmeasured_last():
+    from almanak.framework.data.pools.analytics import TokenPool, rank_token_pools
+
+    def _pool(name: str, reserve: Decimal | None) -> TokenPool:
+        return TokenPool(
+            pool_address=f"0x{name}",
+            dex_id="uniswap_v3",
+            name=name,
+            reserve_usd=reserve,
+            volume_24h_usd=None,
+            base_token_address="",
+            quote_token_address="",
+        )
+
+    pools = (
+        _pool("unknown", None),
+        _pool("shallow", Decimal("10")),
+        _pool("empty", Decimal("0")),
+        _pool("deep", Decimal("211219")),
+    )
+
+    # Unmeasured sorts LAST, not as zero: ranking an unknown depth below a
+    # measured-empty pool would assert something the data does not say.
+    assert [p.name for p in rank_token_pools(pools)] == ["deep", "shallow", "empty", "unknown"]
+
+    # With a floor, unmeasured is DROPPED — "unknown" does not satisfy ">= X".
+    assert [p.name for p in rank_token_pools(pools, Decimal("5"))] == ["deep", "shallow"]
