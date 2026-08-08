@@ -534,6 +534,7 @@ async def test_provider_prepares_requested_and_legacy_cadences() -> None:
     start = datetime(2025, 1, 1, tzinfo=UTC)
     provider = GMXOracleDataProvider(fallback=SimpleNamespace(), chain="arbitrum", market="NEWMARKET/USD")
     provider._source.prepare = AsyncMock(return_value="4h")
+    provider._source.prime_market_catalog = AsyncMock()  # type: ignore[method-assign]
     auto_config = PnLBacktestConfig(
         start_time=start,
         end_time=start + timedelta(days=200),
@@ -543,6 +544,7 @@ async def test_provider_prepares_requested_and_legacy_cadences() -> None:
     assert await provider.prepare_backtest(auto_config) == "4h"
     assert auto_config.resolved_timeframe == "4h"
     assert auto_config.interval_seconds == 3600
+    provider._source.prime_market_catalog.assert_awaited_once()
     provider._source.prepare.assert_awaited_once_with(
         requested="auto",
         start=auto_config.start_time,

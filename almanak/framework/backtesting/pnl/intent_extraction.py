@@ -1176,14 +1176,49 @@ def _normalized_intent_protocol(intent: Any) -> str | None:
     return None if protocol == "default" else protocol
 
 
+def _stamped_market_close_candidates(
+    positions: Sequence[Any],
+    market: str,
+    is_long: bool,
+    protocol: str | None,
+) -> list[Any]:
+    """Candidates whose stamped open-market address equals the close's address.
+
+    An address-form close names ONE venue market token, and the open path
+    stamps that exact identity in ``metadata["perp_market"]``
+    (``_stamp_perp_observation_identity``). Matching on the stamp instead of
+    the resolved index symbol keeps same-index collateral variants apart:
+    GMX lists several market tokens per index, and a symbol-level match would
+    FIFO-close whichever variant was opened first. Side and protocol filters
+    still apply — an address must never override them.
+    """
+    from almanak.framework.backtesting.pnl.position_models import PositionType
+
+    wanted = market.strip().lower()
+    matches = []
+    for position in positions:
+        if not getattr(position, "is_perp", False):
+            continue
+        if (position.position_type == PositionType.PERP_LONG) != is_long:
+            continue
+        if protocol and (not position.protocol or position.protocol.lower() != protocol):
+            continue
+        stamped = getattr(position, "metadata", {}).get("perp_market")
+        if isinstance(stamped, str) and stamped.strip().lower() == wanted:
+            matches.append(position)
+    return matches
+
+
 def find_perp_close_position_id(intent: Any, positions: Sequence[Any], *, chain: Any = None) -> str | None:
     """Resolve the simulated position a PERP_CLOSE intent targets.
 
     Venue position ids (e.g. PancakeSwap Perps' 0x tradeHash) never equal
     simulated ids ("PERP_LONG_gmx_v2_ETH_<ts>"), so after an exact-id check
-    the match falls back to (base token from market, side, protocol) — the
-    way real venues key perp positions. The oldest matching position wins
-    (FIFO) when several are open.
+    an ADDRESS-form market matches the exact market-token identity the open
+    path stamped (same-index collateral variants must never cross-close),
+    and only then does the match fall back to (base token from market, side,
+    protocol) — the way real venues key perp positions. The oldest matching
+    position wins (FIFO) when several are open at the same identity.
 
     Args:
         intent: PERP_CLOSE intent object
@@ -1203,6 +1238,23 @@ def find_perp_close_position_id(intent: Any, positions: Sequence[Any], *, chain:
     # position, so protocol_name / connector / adapter spellings match too.
     protocol = _normalized_intent_protocol(intent)
     market = getattr(intent, "market", None)
+    if isinstance(market, str) and is_address_like(market.strip()):
+        exact = _stamped_market_close_candidates(positions, market, is_long, protocol)
+        if exact:
+            exact.sort(key=lambda position: position.entry_time)
+            if len(exact) > 1:
+                logger.warning(
+                    "PERP_CLOSE matched %d open perp positions at market address %s is_long=%s; "
+                    "closing the oldest (%s)",
+                    len(exact),
+                    market,
+                    is_long,
+                    exact[0].position_id,
+                )
+            return exact[0].position_id
+        # No stamped-address match: fall through to the symbol matcher — a
+        # position opened via a label form ("ETH/USD") carries the label as
+        # its stamp and must stay closable by the address spelling.
     base_token, unresolvable_market = _perp_close_base_token(
         market, protocol=protocol, chain=getattr(intent, "chain", None) or chain
     )
