@@ -16,6 +16,7 @@ pin both sides of the fail-closed contract:
   guessed symbol).
 """
 
+import logging
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -32,8 +33,9 @@ from almanak.framework.backtesting.pnl.engine import (
     PnLBacktestConfig,
     PnLBacktester,
 )
-from almanak.framework.backtesting.pnl.intent_extraction import resolve_perp_base_price
+from almanak.framework.backtesting.pnl.intent_extraction import get_intent_tokens, resolve_perp_base_price
 from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+from almanak.framework.intents.perp_intents import PerpOpenIntent
 from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 from tests.unit.backtesting.pnl._mocks import MockDataProvider
 
@@ -113,6 +115,7 @@ class PerpOpenStub:
     leverage: Decimal = Decimal("2")
     is_long: bool = False
     protocol: str = "gmx_v2"
+    chain: str | None = None
 
 
 @dataclass
@@ -121,6 +124,93 @@ class PerpCloseStub:
     intent_type: str = "PERP_CLOSE"
     is_long: bool = False
     protocol: str = "gmx_v2"
+
+
+def _address_open_intent(chain: str | None = None) -> PerpOpenIntent:
+    """A real (not duck-typed) address-form PERP_OPEN, pinning the ``chain`` field."""
+    return PerpOpenIntent(
+        market=MARKET_ADDRESS,
+        collateral_token="USDC",
+        collateral_amount=Decimal("2500"),
+        size_usd=Decimal("5000"),
+        is_long=False,
+        leverage=Decimal("2"),
+        protocol="gmx_v2",
+        chain=chain,
+    )
+
+
+class TestAddressFirstIntentTokens:
+    """``get_intent_tokens`` routes address-form markets through the catalog.
+
+    Residual address-first gap (2026-08-08): fill pricing resolved through the
+    verified catalog, but the token list still degraded to the UNKNOWN
+    sentinel — every trade record carried ``tokens=["UNKNOWN"]``, the engine
+    warned "will not be price-tracked" on every tick, and the open position
+    lost its priceable-token fallback. The token list must resolve through
+    the same venue-verified catalog as fill pricing, and keep the fail-closed
+    UNKNOWN path (never a guessed symbol) when the catalog misses.
+    """
+
+    def test_primed_catalog_resolves_index_symbol_first(self, caplog: pytest.LogCaptureFixture) -> None:
+        _prime_catalog()
+        with caplog.at_level(logging.WARNING):
+            tokens = get_intent_tokens(_address_open_intent(), chain="arbitrum")
+        assert tokens == ["ETH", "USDC"]
+        assert not any("will not be price-tracked" in message for message in caplog.messages)
+
+    def test_intent_declared_chain_resolves_without_caller_chain(self) -> None:
+        _prime_catalog()
+        assert get_intent_tokens(_address_open_intent(chain="arbitrum")) == ["ETH", "USDC"]
+
+    @staticmethod
+    def _prime_avalanche_variant() -> None:
+        """The SAME market token verified on avalanche with a different index."""
+        market_catalog.remember(
+            "avalanche",
+            ResolvedGmxMarket(
+                label="BTC/USD [WBTC-USDC]",
+                market_token=MARKET_ADDRESS,
+                index_token=WETH_ARBITRUM,
+                index_symbol="BTC",
+                index_token_decimals=8,
+                long_token=WETH_ARBITRUM,
+                long_token_symbol="WBTC",
+                short_token=USDC_ARBITRUM,
+                short_token_symbol="USDC",
+            ),
+        )
+
+    def test_conflicting_chain_context_refuses_identity(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Intent chain vs run chain conflict: refuse, never pick either plane.
+
+        Pricing and position marks resolve on the RUN chain, so resolving
+        tokens on the intent-declared chain would label the position with one
+        asset while marking it at another's price (PR #3664 review). Both
+        records are primed and resolvable — the refusal must not depend on a
+        catalog miss.
+        """
+        _prime_catalog()
+        self._prime_avalanche_variant()
+        with caplog.at_level(logging.WARNING):
+            tokens = get_intent_tokens(_address_open_intent(chain="avalanche"), chain="arbitrum")
+        assert tokens == ["UNKNOWN"]
+        assert any("refusing a token identity" in message for message in caplog.messages)
+
+    def test_matching_intent_and_caller_chain_resolves(self) -> None:
+        _prime_catalog()
+        assert get_intent_tokens(_address_open_intent(chain="arbitrum"), chain="arbitrum") == ["ETH", "USDC"]
+
+    def test_unprimed_catalog_keeps_unknown_sentinel_and_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level(logging.WARNING):
+            tokens = get_intent_tokens(_address_open_intent(), chain="arbitrum")
+        assert tokens == ["UNKNOWN"]
+        assert any("will not be price-tracked" in message for message in caplog.messages)
+
+    def test_missing_chain_context_stays_fail_closed(self) -> None:
+        """A primed catalog without ANY chain context must not guess a chain."""
+        _prime_catalog()
+        assert get_intent_tokens(_address_open_intent()) == ["UNKNOWN"]
 
 
 class TestResolverSeam:
@@ -188,6 +278,31 @@ class TestEngineAddressFirstFill:
         assert total == INITIAL_CASH + Decimal("5000") * Decimal("0.1")
 
     @pytest.mark.asyncio
+    async def test_primed_open_trade_record_carries_index_symbol_not_unknown(self) -> None:
+        """The fill record's token list resolves through the catalog too.
+
+        Fill pricing already resolved, but the record (and the position's
+        token fallback) still degraded to ``["UNKNOWN"]`` — the observed
+        gmx demo symptom: correct round-trip PnL with UNKNOWN-labelled
+        trades and per-tick "will not be price-tracked" warnings.
+        """
+        _prime_catalog()
+        backtester = self._backtester()
+        portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CASH)
+
+        record = await backtester._execute_intent(
+            PerpOpenStub(market=MARKET_ADDRESS), portfolio, _weth_market_state(), TS, self._config()
+        )
+
+        assert record.success is True
+        record_labels = [str(token).upper() for token in record.tokens]
+        assert record_labels[0] == "ETH"
+        assert "UNKNOWN" not in record_labels
+        position_labels = [str(token).upper() for token in portfolio.positions[0].tokens]
+        assert position_labels[0] == "ETH"
+        assert "UNKNOWN" not in position_labels
+
+    @pytest.mark.asyncio
     async def test_primed_close_matches_the_exact_market_token_not_fifo_by_symbol(self) -> None:
         """An address-form close targets the exact market token, never a sibling.
 
@@ -246,6 +361,35 @@ class TestEngineAddressFirstFill:
 
         assert close_record.success is True
         assert portfolio.positions == []
+
+    @pytest.mark.asyncio
+    async def test_cross_chain_open_is_named_rejection_not_mixed_planes(self) -> None:
+        """An intent declaring another chain must not fill on this run's data.
+
+        Token identity would resolve on the declared chain while pricing and
+        marks resolve on the run chain — with the same address naming BTC on
+        avalanche and ETH on arbitrum, a fill would book BTC tokens at the
+        arbitrum ETH price (PR #3664 review, lars0x). Fail loud instead.
+        """
+        _prime_catalog()
+        TestAddressFirstIntentTokens._prime_avalanche_variant()
+        backtester = self._backtester()
+        portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CASH)
+
+        record = await backtester._execute_intent(
+            PerpOpenStub(market=MARKET_ADDRESS, chain="avalanche"),
+            portfolio,
+            _weth_market_state(),
+            TS,
+            self._config(),
+        )
+
+        assert record.success is False
+        reason = record.metadata.get("failure_reason", "")
+        assert "declares chain 'avalanche'" in reason
+        assert "'arbitrum'" in reason
+        assert portfolio.positions == []
+        assert portfolio.cash_usd == INITIAL_CASH
 
     @pytest.mark.asyncio
     async def test_unprimed_open_is_named_rejection_not_silent_entry(self) -> None:

@@ -298,12 +298,43 @@ def _append_unique_token(tokens: list[str], value: Any) -> None:
             tokens.append(token)
 
 
-def _perp_market_tokens(intent: Any) -> tuple[list[str], bool]:
+def _perp_market_tokens(intent: Any, chain: Any = None) -> tuple[list[str], bool]:
+    from almanak.core.constants import canonical_chain_name
+
     market = getattr(intent, "market", None)
     if not isinstance(market, str) or not market:
         return [], False
 
+    # An intent-declared chain that conflicts with the run's chain must not
+    # pick a token identity at all: pricing and position marks resolve on the
+    # RUN chain, and the same market-token address can name different assets
+    # on different chains — resolving tokens on the declared chain would
+    # attribute PnL to the wrong asset (PR #3664 review). The engine rejects
+    # such intents outright; this refusal keeps the label honest for any
+    # caller that reaches extraction directly.
+    intent_chain = getattr(intent, "chain", None)
+    if intent_chain and chain and canonical_chain_name(str(intent_chain)) != canonical_chain_name(str(chain)):
+        logger.warning(
+            "Perp intent declares chain %r but the run resolves on %r; refusing a token identity for market %r",
+            intent_chain,
+            chain,
+            market,
+        )
+        return ["UNKNOWN"], True
+
     base_token = _perp_market_base_token(market)
+    if base_token is None:
+        # Address-first intents carry the venue's market-token address, which
+        # the pure symbol parser refuses; resolve its index base through the
+        # venue-verified registry metadata — the same identity the pricing
+        # (``resolve_perp_base_price``) and close-matching lanes use — so the
+        # simulated position stays price-tracked instead of degrading to the
+        # UNKNOWN sentinel. Fail-closed on a miss: never a guessed symbol.
+        base_token = registry_perp_base_symbol(
+            market,
+            _normalized_intent_protocol(intent),
+            intent_chain or chain,
+        )
     if base_token is None:
         logger.warning(
             "Cannot resolve a token symbol from perp market %r; the simulated position will not be price-tracked",
@@ -477,15 +508,20 @@ def get_intent_protocol(intent: Any) -> str:
     return "default"
 
 
-def get_intent_tokens(intent: Any) -> list[str]:
+def get_intent_tokens(intent: Any, *, chain: Any = None) -> list[str]:
     """Extract the tokens involved in an intent.
 
     Perp intents carry a market identifier ("ETH/USD") instead of token
     attributes; the base symbol goes first so price lookups and the simulated
     position track the traded asset, with the collateral token after it.
-    Address-style markets return the UNKNOWN sentinel (the position falls
-    back to its entry price) rather than letting the collateral token become
-    the priced token, which would hide all price PnL.
+    Address-style markets resolve their index base through the venue-verified
+    perps-read registry on ONE validated effective chain: the intent-declared
+    chain when the caller supplies none, the caller's run ``chain`` otherwise —
+    and a conflict between the two refuses identity (UNKNOWN) outright, since
+    pricing resolves on the run chain and the same address can name different
+    assets per chain. An unresolvable market returns the UNKNOWN sentinel (the
+    position falls back to its entry price) rather than letting the
+    collateral token become the priced token, which would hide all price PnL.
 
     LP vocabulary intents (``LPOpenIntent``) similarly declare the pair as a
     single ``pool`` string ("WETH/USDC") with no token0/token1 attributes;
@@ -498,11 +534,13 @@ def get_intent_tokens(intent: Any) -> list[str]:
 
     Args:
         intent: Intent object
+        chain: The run's chain (keyword-only) — lets an address-form perp
+            market resolve its index base when the intent declares no chain
 
     Returns:
         List of token symbols
     """
-    tokens, stop = _perp_market_tokens(intent)
+    tokens, stop = _perp_market_tokens(intent, chain)
     if stop:
         return tokens
 
@@ -1725,7 +1763,7 @@ def get_executed_price(
         Executed price after slippage
     """
     # Get the primary token for price lookup
-    tokens = get_intent_tokens(intent)
+    tokens = get_intent_tokens(intent, chain=getattr(market_state, "chain", None))
     primary_token = tokens[0] if tokens else "WETH"
 
     # Apply slippage for market orders

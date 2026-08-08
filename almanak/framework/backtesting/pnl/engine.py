@@ -5053,6 +5053,32 @@ class PnLBacktester:
                     ),
                 )
 
+        # A perp intent explicitly declaring a chain other than the run's
+        # cannot be simulated by this single-chain engine: token identity
+        # would resolve on the declared chain while pricing, position marks,
+        # and close matching resolve on the run chain, and the same market
+        # address can name DIFFERENT assets on different chains — a mixed
+        # fill would attribute PnL to the wrong asset (PR #3664 review).
+        # Fail loud with a named rejection instead of mixing identity planes.
+        if intent_type in (IntentType.PERP_OPEN, IntentType.PERP_CLOSE):
+            from almanak.core.constants import canonical_chain_name
+
+            declared_chain = getattr(intent, "chain", None)
+            if declared_chain and canonical_chain_name(str(declared_chain)) != canonical_chain_name(chain):
+                return _GenericIntentDetails(
+                    intent_type=intent_type,
+                    protocol=protocol,
+                    tokens=tokens,
+                    amount_usd=Decimal("0"),
+                    close_resolution=_CloseResolution(
+                        amount_usd=Decimal("0"),
+                        failure_reason=(
+                            f"{intent_type.value} declares chain '{declared_chain}' but this backtest runs on "
+                            f"'{chain}' — a cross-chain perp intent cannot be simulated in a single-chain backtest"
+                        ),
+                    ),
+                )
+
         amount_usd = self._get_intent_amount_usd(
             intent,
             market_state,
@@ -5733,7 +5759,7 @@ class PnLBacktester:
         from .intent_extraction import get_intent_tokens
 
         tokens: list[TokenRef] = []
-        tokens.extend(get_intent_tokens(intent))
+        tokens.extend(get_intent_tokens(intent, chain=chain))
         _ = aliases
         return [
             _engine_helpers._normalize_token(token, chain)
