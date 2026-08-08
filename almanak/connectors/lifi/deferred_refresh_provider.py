@@ -25,9 +25,14 @@ class LiFiDeferredRefreshConnector(DeferredRefreshConnector, DeferredRefreshCapa
         wallet_address: str,
         *,
         rpc_url: str | None = None,
+        managed_fork: bool | None = None,
     ) -> dict[str, Any]:
-        """Fetch fresh LiFi transaction data."""
-        _ = rpc_url
+        """Fetch fresh LiFi transaction data.
+
+        LiFi does not relax any on-chain bound on forks, so ``managed_fork``
+        (ALM-3184) is accepted for protocol conformance and ignored.
+        """
+        _ = (rpc_url, managed_fork)
         return self._refresh_from_adapter(metadata, wallet_address)
 
     def _refresh_from_adapter(self, metadata: dict[str, Any], wallet_address: str) -> dict[str, Any]:

@@ -29,12 +29,15 @@ class _Adapter:
         return b"\x12\x34\x56\x78"
 
 
-def _ctx(adapter: object, *, rpc_url: str | None = None) -> CLCompilerContext:
+def _ctx(adapter: object, *, rpc_url: str | None = None, managed_fork: bool | None = False) -> CLCompilerContext:
     return CLCompilerContext(
         chain="arbitrum",
         wallet_address="0x2222222222222222222222222222222222222222",
         rpc_url=rpc_url,
         rpc_timeout=10.0,
+        # ALM-3184: declare production by default — undeclared resolves to
+        # production too, but declaring keeps each test's intent explicit.
+        managed_fork=managed_fork,
         permission_discovery=False,
         allow_placeholder_prices=True,
         token_resolver=None,
@@ -156,9 +159,9 @@ def test_uniswap_v3_swap_slippage_uses_quoter_directly_when_above_oracle() -> No
     assert clamped_expected == 1_200
 
 
-def test_uniswap_v3_swap_price_impact_guard_skips_canonical_local_rpc() -> None:
+def test_uniswap_v3_swap_price_impact_guard_skips_declared_managed_fork() -> None:
     result = UniswapV3Compiler._apply_swap_slippage_and_impact(
-        ctx=_ctx(_Adapter(), rpc_url="http://0.0.0.0:8545"),
+        ctx=_ctx(_Adapter(), rpc_url="http://0.0.0.0:8545", managed_fork=True),
         intent=_swap_intent(),
         oracle_estimate=1_000,
         quoter_amount=100,
@@ -166,6 +169,24 @@ def test_uniswap_v3_swap_price_impact_guard_skips_canonical_local_rpc() -> None:
 
     assert not isinstance(result, CompilationResult)
     assert result == (99, 100, 100)
+
+
+def test_uniswap_v3_price_impact_guard_stays_on_for_local_looking_production_rpc() -> None:
+    """ALM-3184 negative control: the URL alone must not disable the guard.
+
+    ``is_local_rpc`` returns True for any host on port 8545-8550, so reverting
+    the fix lets a production RPC proxy compile a 90%-impact swap.
+    """
+    result = UniswapV3Compiler._apply_swap_slippage_and_impact(
+        ctx=_ctx(_Adapter(), rpc_url="http://rpc-proxy.internal.example:8545", managed_fork=False),
+        intent=_swap_intent(),
+        oracle_estimate=1_000,
+        quoter_amount=100,
+    )
+
+    assert isinstance(result, CompilationResult)
+    assert result.status is CompilationStatus.FAILED
+    assert "Price impact too high" in result.error
 
 
 def test_uniswap_v3_swap_price_impact_guard_fails_nonlocal_rpc() -> None:
@@ -204,10 +225,21 @@ def test_uniswap_v3_swap_price_impact_error_renders_sub_one_percent_limit() -> N
     assert "Maximum allowed: 0%" not in result.error
 
 
-def test_uniswap_v3_local_rpc_detection_delegates_to_canonical_helper() -> None:
-    assert UniswapV3Compiler._is_local_anvil_rpc("http://0.0.0.0:8545")
-    assert UniswapV3Compiler._is_local_anvil_rpc("http://[::1]:8545")
-    assert not UniswapV3Compiler._is_local_anvil_rpc("https://arb.example.invalid")
+def test_uniswap_v3_fork_detection_requires_a_positive_signal_not_the_url() -> None:
+    """ALM-3184: only an explicit declaration marks a managed fork.
+
+    Reverting to ``is_local_rpc(ctx.rpc_url)`` makes the third assertion fail:
+    a production RPC proxy on ``:8545`` would read as a fork and the oracle
+    price-impact guard would be skipped on mainnet swaps.
+    """
+    assert UniswapV3Compiler._is_managed_fork(_ctx(_Adapter(), rpc_url="http://127.0.0.1:8545", managed_fork=True))
+    assert not UniswapV3Compiler._is_managed_fork(_ctx(_Adapter(), rpc_url="http://127.0.0.1:8545", managed_fork=False))
+    assert not UniswapV3Compiler._is_managed_fork(
+        _ctx(_Adapter(), rpc_url="http://rpc-proxy.internal.example:8545", managed_fork=False)
+    )
+    # Undeclared ⇒ production. No socket, no cache, nothing to isolate: the
+    # signal is now purely the declaration (ALM-3184 P1 removed the probe).
+    assert not UniswapV3Compiler._is_managed_fork(_ctx(_Adapter(), rpc_url="http://127.0.0.1:8545", managed_fork=None))
 
 
 def test_uniswap_v3_swap_quote_registry_result_stamps_adapter_selection(monkeypatch) -> None:

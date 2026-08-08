@@ -98,6 +98,12 @@ from almanak.framework.execution.extracted_data import (
     SwapAmounts,
 )
 
+# Positive managed-fork signal for money-path guards (ALM-3184)
+from almanak.framework.execution.fork_signal import (
+    is_managed_fork_network,
+    resolve_managed_fork,
+)
+
 # Gateway-backed Orchestrator (for strategy containers)
 from almanak.framework.execution.gateway_orchestrator import (
     GatewayExecutionOrchestrator,
@@ -289,7 +295,13 @@ __all__ = [
     "FallbackSimulator",
     "SimulationConfig",
     "create_simulator",
+    # Simulation-vendor selection only. Money-path guards must use
+    # resolve_managed_fork (ALM-3184) — is_local_rpc returns True for any
+    # host on port 8545-8550.
     "is_local_rpc",
+    # Managed-fork signal (declaration-only; no runtime detection)
+    "is_managed_fork_network",
+    "resolve_managed_fork",
     # Orchestrator
     "ExecutionOrchestrator",
     "ExecutionResult",

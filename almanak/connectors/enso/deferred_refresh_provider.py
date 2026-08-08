@@ -22,11 +22,17 @@ logger = logging.getLogger(__name__)
 ANVIL_MIN_SLIPPAGE_BPS = 500  # 5%
 
 
-def _is_local_rpc(rpc_url: str | None) -> bool:
-    """Thin wrapper around the canonical local-RPC detector in simulator.config."""
-    from almanak.framework.execution.simulator.config import is_local_rpc
+def _is_managed_fork(managed_fork: bool | None) -> bool:
+    """Positive managed-fork signal (ALM-3184).
 
-    return is_local_rpc(rpc_url)
+    Widening the on-chain ``minAmountOut`` bound to 5% is a real reduction in
+    execution safety, so it may only happen on a *declared* fork. The previous
+    URL heuristic granted it to any host on port 8545-8550 — including a
+    production RPC proxy.
+    """
+    from almanak.framework.execution.fork_signal import resolve_managed_fork
+
+    return resolve_managed_fork(managed_fork)
 
 
 class EnsoDeferredRefreshConnector(DeferredRefreshConnector, DeferredRefreshCapability):
@@ -41,9 +47,10 @@ class EnsoDeferredRefreshConnector(DeferredRefreshConnector, DeferredRefreshCapa
         wallet_address: str,
         *,
         rpc_url: str | None = None,
+        managed_fork: bool | None = None,
     ) -> dict[str, Any]:
         """Fetch fresh Enso transaction data."""
-        self._widen_slippage_for_anvil(metadata, rpc_url)
+        self._widen_slippage_for_anvil(metadata, rpc_url, managed_fork)
         return self._refresh_from_adapter(metadata, wallet_address)
 
     def _refresh_from_adapter(self, metadata: dict[str, Any], wallet_address: str) -> dict[str, Any]:
@@ -62,9 +69,15 @@ class EnsoDeferredRefreshConnector(DeferredRefreshConnector, DeferredRefreshCapa
         adapter = EnsoAdapter(config, allow_placeholder_prices=True)
         return adapter.get_fresh_swap_transaction(metadata)
 
-    def _widen_slippage_for_anvil(self, metadata: dict[str, Any], rpc_url: str | None) -> None:
-        """Widen Enso slippage for local Anvil forks before the fresh quote."""
-        if not _is_local_rpc(rpc_url):
+    def _widen_slippage_for_anvil(
+        self,
+        metadata: dict[str, Any],
+        rpc_url: str | None,
+        managed_fork: bool | None = None,
+    ) -> None:
+        """Widen Enso slippage for a declared managed Anvil fork."""
+        _ = rpc_url  # retained for signature stability; the signal is declared, not sniffed
+        if not _is_managed_fork(managed_fork):
             return
 
         route_params = metadata.get("route_params")
@@ -83,7 +96,7 @@ class EnsoDeferredRefreshConnector(DeferredRefreshConnector, DeferredRefreshCapa
         route_params["slippage_bps"] = ANVIL_MIN_SLIPPAGE_BPS
 
         logger.info(
-            "Anvil fork detected: widening Enso slippage from %d bps to %d bps",
+            "Managed Anvil fork confirmed: widening Enso slippage from %d bps to %d bps",
             current_bps,
             ANVIL_MIN_SLIPPAGE_BPS,
         )

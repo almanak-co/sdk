@@ -1214,6 +1214,7 @@ class ExecutionOrchestrator:
         session_store: ExecutionSessionStore | None = None,
         tx_risk_config: TransactionRiskConfig | None = None,
         registry_preflight: "RegistryPreflightCheck | None" = None,
+        managed_fork: bool | None = None,
     ) -> None:
         """Initialize the orchestrator.
 
@@ -1239,8 +1240,16 @@ class ExecutionOrchestrator:
                 ``_phase_registry_preflight`` phase stays layering-clean. ``None``
                 disables the phase (no-op) — paper/backtest orchestrators and any
                 caller without a registry-backed StateManager pass ``None``.
+            managed_fork: Tri-state managed-fork declaration (ALM-3184),
+                forwarded to ``refresh_deferred_bundle``. The gateway declares
+                it from ``GatewaySettings.network``. ``None`` means undeclared,
+                which resolves to production. Declaration only, never inferred
+                from ``rpc_url``: the previous URL heuristic granted fork status
+                to any host on port 8545-8550, which force-widened Enso slippage
+                to 5% against a production RPC proxy.
         """
         self.registry_preflight = registry_preflight
+        self.managed_fork = managed_fork
         self.signer = signer
         self.submitter = submitter
         self.simulator = simulator
@@ -1657,7 +1666,12 @@ class ExecutionOrchestrator:
         # Step 0: Refresh deferred transactions (LiFi, Enso) with fresh route data
         from .deferred_refresh import refresh_deferred_bundle
 
-        state.action_bundle = refresh_deferred_bundle(state.action_bundle, context.wallet_address, rpc_url=self.rpc_url)
+        state.action_bundle = refresh_deferred_bundle(
+            state.action_bundle,
+            context.wallet_address,
+            rpc_url=self.rpc_url,
+            managed_fork=self.managed_fork,
+        )
         action_bundle = state.action_bundle
 
         # Step 1: Build unsigned transactions from ActionBundle

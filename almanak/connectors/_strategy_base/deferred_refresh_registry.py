@@ -34,6 +34,7 @@ class DeferredRefreshCapability(Protocol):
         wallet_address: str,
         *,
         rpc_url: str | None = None,
+        managed_fork: bool | None = None,
     ) -> dict[str, Any]: ...
 
 
@@ -95,12 +96,20 @@ class DeferredRefreshRegistry:
         wallet_address: str,
         *,
         rpc_url: str | None = None,
+        managed_fork: bool | None = None,
     ) -> dict[str, Any]:
-        """Refresh transaction calldata through the connector that owns ``protocol``."""
+        """Refresh transaction calldata through the connector that owns ``protocol``.
+
+        ``managed_fork`` is the tri-state managed-fork declaration (ALM-3184):
+        ``None`` means undeclared, and providers that relax an on-chain safety
+        bound on forks must resolve it through
+        ``almanak.framework.execution.fork_signal`` rather than inspecting
+        ``rpc_url``.
+        """
         capability = self.lookup(protocol)
         if capability is None:
             raise DeferredRefreshRegistryError(f"protocol {protocol!r} does not publish deferred refresh")
-        return capability.refresh_transaction(metadata, wallet_address, rpc_url=rpc_url)
+        return capability.refresh_transaction(metadata, wallet_address, rpc_url=rpc_url, managed_fork=managed_fork)
 
     def all(self) -> tuple[DeferredRefreshConnector, ...]:
         """Return every registered connector in registration order."""

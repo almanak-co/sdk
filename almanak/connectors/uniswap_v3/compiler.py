@@ -28,7 +28,7 @@ from almanak.connectors._strategy_base.swap_quote_registry import (
     SwapQuoteUnavailable,
 )
 from almanak.connectors._strategy_swap_quote_registry import SWAP_QUOTE_REGISTRY, ensure_swap_quote_registry_loaded
-from almanak.framework.execution.simulator.config import is_local_rpc
+from almanak.framework.execution.fork_signal import resolve_managed_fork
 from almanak.framework.intents._compiler_helpers import (
     PriceImpactDecision,
     assemble_action_bundle,
@@ -788,9 +788,9 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
         offline_mode = ctx.using_placeholders or ctx.permission_discovery
         impact: PriceImpactDecision | None = None
         impact_result = None
-        if quoter_amount is not None and UniswapV3Compiler._is_local_anvil_rpc(ctx.rpc_url):
+        if quoter_amount is not None and UniswapV3Compiler._is_managed_fork(ctx):
             logger.info(
-                "Skipping oracle price-impact guard for local Anvil fork quote "
+                "Skipping oracle price-impact guard: managed Anvil fork confirmed "
                 "(rpc_url=%s). Fork block pool state and live oracle prices are not time-aligned.",
                 ctx.rpc_url,
             )
@@ -841,8 +841,14 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
         return min_output, quoted_for_metrics, clamped_expected
 
     @staticmethod
-    def _is_local_anvil_rpc(rpc_url: str | None) -> bool:
-        return is_local_rpc(rpc_url)
+    def _is_managed_fork(ctx: CLCompilerContext) -> bool:
+        """Positive managed-fork signal for the price-impact guard (ALM-3184).
+
+        Never infers from the URL and never contacts anything.
+        ``ctx.managed_fork`` is the threaded declaration (gateway:
+        ``Network.ANVIL``). Absent/unknown ⇒ production ⇒ guard ON.
+        """
+        return resolve_managed_fork(ctx.managed_fork)
 
     @staticmethod
     def _validate_swap_pool_after_fee_selection(

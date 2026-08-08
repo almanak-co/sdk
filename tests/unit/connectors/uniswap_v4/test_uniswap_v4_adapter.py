@@ -42,6 +42,44 @@ def _make_resolver():
     return resolver
 
 
+class TestConfigPositionalAbi:
+    """``UniswapV4Config`` is exported from the connector package: field order IS an ABI.
+
+    ALM-3184 review: `managed_fork` was first inserted BEFORE `gateway_client`,
+    which silently rebound this exact call — the client landed in
+    `managed_fork`, `gateway_client` stayed None, and the adapter quietly lost
+    gateway routing and could fall back to direct RPC. Nothing in the suite
+    caught it because every in-repo caller uses keywords.
+    """
+
+    def test_legacy_positional_shape_still_binds_gateway_client(self):
+        client = MagicMock()
+        config = UniswapV4Config("arbitrum", _TEST_WALLET, "http://127.0.0.1:8545", 3000, 50, client)
+
+        assert config.gateway_client is client
+        assert config.managed_fork is None
+        assert config.chain == "arbitrum"
+        assert config.wallet_address == _TEST_WALLET
+        assert config.rpc_url == "http://127.0.0.1:8545"
+        assert config.default_fee_tier == 3000
+        assert config.default_slippage_bps == 50
+
+    def test_adapter_built_from_legacy_positional_config_keeps_gateway_routing(self):
+        """The consequence the rebinding caused, asserted end-to-end."""
+        client = MagicMock()
+        config = UniswapV4Config("arbitrum", _TEST_WALLET, None, 3000, 50, client)
+        adapter = UniswapV4Adapter(config=config, token_resolver=_make_resolver())
+
+        assert adapter._gateway_client is client
+        assert adapter.managed_fork is None
+
+    def test_managed_fork_is_the_last_field(self):
+        """Pins the append-last rule so the next added field cannot repeat this."""
+        import dataclasses
+
+        assert [f.name for f in dataclasses.fields(UniswapV4Config)][-1] == "managed_fork"
+
+
 class TestAdapterInit:
     def test_init_with_chain(self):
         adapter = UniswapV4Adapter(chain="arbitrum")
@@ -357,21 +395,18 @@ class TestSwapExactInput:
         assert result.quote_source == "onchain_quoter"
         assert result.amount_out_minimum > 0
 
-    def test_local_anvil_skips_price_impact_guard(self):
-        """VIB-2058 C4: on a local Anvil fork the impact guard is skipped (fork pool
-        state and live oracle prices are not time-aligned), so an otherwise-failing
-        impact still compiles.
-        """
+    def _thin_quote_swap(self, *, rpc_url: str, managed_fork: bool | None):
         config = UniswapV4Config(
             chain="arbitrum",
             wallet_address=_TEST_WALLET,
-            rpc_url="http://127.0.0.1:8545",
+            rpc_url=rpc_url,
+            managed_fork=managed_fork,
         )
         adapter = UniswapV4Adapter(config=config, token_resolver=_make_resolver())
         thin_quote = self._make_local_quote(amount_out=150_000_000_000_000_000)
         adapter._sdk.get_quote = MagicMock(return_value=thin_quote)
 
-        result = adapter.swap_exact_input(
+        return adapter.swap_exact_input(
             token_in=self._USDC_ADDR,
             token_out=self._WETH_ADDR,
             amount_in=Decimal("1000"),
@@ -379,8 +414,24 @@ class TestSwapExactInput:
             price_ratio=self._USDC_TO_WETH_PRICE_RATIO,
         )
 
+    def test_declared_managed_fork_skips_price_impact_guard(self):
+        """VIB-2058 C4: on a managed Anvil fork the impact guard is skipped (fork pool
+        state and live oracle prices are not time-aligned), so an otherwise-failing
+        impact still compiles.
+
+        ALM-3184: the fork must be DECLARED — the URL alone no longer says so.
+        """
+        result = self._thin_quote_swap(rpc_url="http://127.0.0.1:8545", managed_fork=True)
+
         assert result.success is True
         assert result.quote_source == "onchain_quoter"
+
+    def test_local_looking_production_rpc_keeps_price_impact_guard_on(self):
+        """ALM-3184 negative control: reverting the fix lets this thin quote through."""
+        result = self._thin_quote_swap(rpc_url="http://rpc-proxy.internal.example:8545", managed_fork=False)
+
+        assert result.success is False
+        assert "Price impact too high" in (result.error or "")
 
 
 class TestTokenResolution:

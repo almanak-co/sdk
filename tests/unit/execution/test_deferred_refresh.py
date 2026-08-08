@@ -54,7 +54,9 @@ class _MockDeferredRefreshConnector(DeferredRefreshConnector, DeferredRefreshCap
         wallet_address: str,
         *,
         rpc_url: str | None = None,
+        managed_fork: bool | None = None,
     ) -> dict[str, Any]:
+        self.last_managed_fork = managed_fork
         return self._mock(metadata, wallet_address, rpc_url)
 
 
@@ -598,8 +600,8 @@ class TestDeferredRefresh:
 
         assert "'_deferred' tx_type" in str(exc_info.value)
 
-    def test_anvil_widens_enso_slippage(self):
-        """On Anvil forks, slippage_bps is widened to ANVIL_MIN_SLIPPAGE_BPS."""
+    def test_declared_managed_fork_widens_enso_slippage(self):
+        """On a DECLARED managed fork, slippage_bps is widened to ANVIL_MIN_SLIPPAGE_BPS."""
         mock_refresh_enso = MagicMock(
             return_value={
                 "to": "0xe5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
@@ -618,7 +620,7 @@ class TestDeferredRefresh:
 
         with patch.object(connector, "_refresh_from_adapter", mock_refresh_enso):
             with _patch_registry(connector):
-                result = refresh_deferred_bundle(bundle, WALLET, rpc_url="http://localhost:8545")
+                result = refresh_deferred_bundle(bundle, WALLET, rpc_url="http://localhost:8545", managed_fork=True)
 
         # Slippage should have been widened in the result
         assert result.metadata["route_params"]["slippage_bps"] == ANVIL_MIN_SLIPPAGE_BPS
@@ -629,7 +631,7 @@ class TestDeferredRefresh:
         called_metadata = mock_refresh_enso.call_args[0][0]
         assert called_metadata["route_params"]["slippage_bps"] == ANVIL_MIN_SLIPPAGE_BPS
 
-    def test_anvil_keeps_wide_slippage_unchanged(self):
+    def test_managed_fork_keeps_wide_slippage_unchanged(self):
         """If slippage is already >= ANVIL_MIN_SLIPPAGE_BPS, don't change it."""
         mock_refresh_enso = MagicMock(
             return_value={
@@ -649,7 +651,7 @@ class TestDeferredRefresh:
 
         with patch.object(connector, "_refresh_from_adapter", mock_refresh_enso):
             with _patch_registry(connector):
-                result = refresh_deferred_bundle(bundle, WALLET, rpc_url="http://127.0.0.1:8545")
+                result = refresh_deferred_bundle(bundle, WALLET, rpc_url="http://127.0.0.1:8545", managed_fork=True)
 
         # Should not widen further
         assert result.metadata["route_params"]["slippage_bps"] == 1000
@@ -657,7 +659,7 @@ class TestDeferredRefresh:
         called_metadata = mock_refresh_enso.call_args[0][0]
         assert called_metadata["route_params"]["slippage_bps"] == 1000
 
-    def test_anvil_enso_missing_slippage_bps_is_left_unchanged(self):
+    def test_managed_fork_enso_missing_slippage_bps_is_left_unchanged(self):
         """Missing slippage_bps should not crash the Enso deferred refresh path."""
         mock_refresh_enso = MagicMock(
             return_value={
@@ -675,7 +677,7 @@ class TestDeferredRefresh:
 
         with patch.object(connector, "_refresh_from_adapter", mock_refresh_enso):
             with _patch_registry(connector):
-                result = refresh_deferred_bundle(bundle, WALLET, rpc_url="http://localhost:8545")
+                result = refresh_deferred_bundle(bundle, WALLET, rpc_url="http://localhost:8545", managed_fork=True)
 
         assert "slippage_bps" not in result.metadata["route_params"]
         called_metadata = mock_refresh_enso.call_args[0][0]
@@ -700,7 +702,9 @@ class TestDeferredRefresh:
 
         with patch.object(connector, "_refresh_from_adapter", mock_refresh_enso):
             with _patch_registry(connector):
-                result = refresh_deferred_bundle(bundle, WALLET, rpc_url="https://arb-mainnet.g.alchemy.com/v2/key")
+                result = refresh_deferred_bundle(
+                    bundle, WALLET, rpc_url="https://arb-mainnet.g.alchemy.com/v2/key", managed_fork=False
+                )
 
         # Slippage should NOT have been widened
         assert result.metadata["route_params"]["slippage_bps"] == 50
@@ -708,8 +712,70 @@ class TestDeferredRefresh:
         called_metadata = mock_refresh_enso.call_args[0][0]
         assert called_metadata["route_params"]["slippage_bps"] == 50
 
-    def test_lifi_on_anvil_does_not_widen_slippage(self):
-        """LiFi bundles on Anvil should NOT trigger Enso slippage widening."""
+    def test_production_rpc_on_local_port_does_not_widen_slippage(self):
+        """ALM-3184 negative control: a local-SHAPED URL must not widen slippage.
+
+        ``is_local_rpc`` returns True for ANY host on port 8545-8550, so before
+        this fix a production RPC proxy on ``:8545`` had its Enso
+        ``minAmountOut`` bound relaxed from 0.5% to 5% on real mainnet swaps.
+        Reverting the fix turns this assertion red.
+        """
+        mock_refresh_enso = MagicMock(
+            return_value={
+                "to": "0xe5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+                "value": 0,
+                "data": "0x6672657368",
+                "gas_estimate": 180000,
+                "tx_type": "swap",
+            }
+        )
+
+        bundle = _make_enso_bundle()
+        bundle.metadata["route_params"]["slippage_bps"] = 50
+
+        connector = EnsoDeferredRefreshConnector()
+
+        for url in (
+            "http://rpc-proxy.internal.example:8545",
+            "https://anvil-cluster.rpc.example.com/v2/key",
+        ):
+            with patch.object(connector, "_refresh_from_adapter", mock_refresh_enso):
+                with _patch_registry(connector):
+                    result = refresh_deferred_bundle(bundle, WALLET, rpc_url=url, managed_fork=False)
+
+            assert result.metadata["route_params"]["slippage_bps"] == 50, url
+            assert mock_refresh_enso.call_args[0][0]["route_params"]["slippage_bps"] == 50, url
+
+    def test_undeclared_endpoint_does_not_widen_slippage(self):
+        """Undeclared ⇒ production (no widening), on a fork-shaped URL.
+
+        ALM-3184 P1: undeclared no longer means "go and find out". The runtime
+        probe is gone, so this is pure declaration resolution — no socket, no
+        shared cache, nothing to isolate.
+        """
+        mock_refresh_enso = MagicMock(
+            return_value={
+                "to": "0xe5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+                "value": 0,
+                "data": "0x6672657368",
+                "gas_estimate": 180000,
+                "tx_type": "swap",
+            }
+        )
+
+        bundle = _make_enso_bundle()
+        bundle.metadata["route_params"]["slippage_bps"] = 50
+
+        connector = EnsoDeferredRefreshConnector()
+
+        with patch.object(connector, "_refresh_from_adapter", mock_refresh_enso):
+            with _patch_registry(connector):
+                result = refresh_deferred_bundle(bundle, WALLET, rpc_url="http://127.0.0.1:8545")
+
+        assert result.metadata["route_params"]["slippage_bps"] == 50
+
+    def test_lifi_on_managed_fork_does_not_widen_slippage(self):
+        """LiFi bundles on a managed fork should NOT trigger Enso slippage widening."""
         mock_refresh_lifi = MagicMock(
             return_value={
                 "to": "0xd4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
@@ -725,7 +791,7 @@ class TestDeferredRefresh:
         bundle.metadata["route_params"]["slippage"] = 0.005
 
         with _patch_refresher("lifi", mock_refresh_lifi):
-            result = refresh_deferred_bundle(bundle, WALLET, rpc_url="http://localhost:8545")
+            result = refresh_deferred_bundle(bundle, WALLET, rpc_url="http://localhost:8545", managed_fork=True)
 
         # Should succeed without crashing; slippage unchanged
         assert result.metadata["route_params"]["slippage"] == 0.005
@@ -1235,7 +1301,13 @@ class TestRefusalRetryability:
 
 
 class TestIsLocalRpc:
-    """Tests for is_local_rpc() — canonical local-RPC detector used by deferred refresh."""
+    """Tests for is_local_rpc() — the SIMULATION-VENDOR local-RPC heuristic.
+
+    Since ALM-3184 no money-path guard consults this: it grants fork status to
+    any host on port 8545-8550. The cases below pin the heuristic's shape for
+    the one caller it is still correct for (skipping Tenderly/Alchemy against
+    fork state), and document why it is unsafe elsewhere.
+    """
 
     def test_localhost(self):
         assert is_local_rpc("http://localhost:8545") is True

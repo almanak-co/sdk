@@ -34,12 +34,21 @@ USDC = SimpleNamespace(symbol="USDC", decimals=6)
 WAVAX = SimpleNamespace(symbol="WAVAX", decimals=18)
 
 
-def _make_impl(oracle_out_wei: int | Exception, *, rpc_url: str = "https://api.avax.network/ext/bc/C/rpc"):
+def _make_impl(
+    oracle_out_wei: int | Exception,
+    *,
+    rpc_url: str = "https://api.avax.network/ext/bc/C/rpc",
+    managed_fork: bool | None = False,
+):
     ctx = MagicMock()
     ctx.rpc_url = rpc_url
     ctx.max_price_impact_pct = Decimal("0.05")
     ctx.using_placeholders = False
     ctx.permission_discovery = False
+    # ALM-3184: the guard keys on this declaration, never on rpc_url's shape.
+    # Default False = production, which is also the fail-safe for an undeclared
+    # compile whose node does not answer ``anvil_nodeInfo``.
+    ctx.managed_fork = managed_fork
     if isinstance(oracle_out_wei, Exception):
         ctx.services.calculate_expected_output.side_effect = oracle_out_wei
     else:
@@ -59,7 +68,12 @@ def _intent():
 
 def _guard(impl, quote_human: Decimal):
     return impl._guard_swap_price_impact(
-        _intent(), WAVAX, USDC, amount_in_wei=10**16, quote=SimpleNamespace(amount_out=quote_human), rpc_url=impl._ctx.rpc_url
+        _intent(),
+        WAVAX,
+        USDC,
+        amount_in_wei=10**16,
+        quote=SimpleNamespace(amount_out=quote_human),
+        rpc_url=impl._ctx.rpc_url,
     )
 
 
@@ -86,16 +100,30 @@ def test_healthy_pool_swap_passes_and_floors_off_guarded_baseline():
     assert amount_out_min_wei > ORACLE_OUT_WEI // 2
 
 
-def test_local_anvil_rpc_skips_guard():
-    """On a local Anvil fork the guard is skipped (fork state ≠ live oracle)."""
-    impl = _make_impl(ORACLE_OUT_WEI, rpc_url="http://127.0.0.1:8545")
+def test_declared_managed_fork_skips_guard():
+    """On a declared managed Anvil fork the guard is skipped (fork state ≠ live oracle)."""
+    impl = _make_impl(ORACLE_OUT_WEI, rpc_url="http://127.0.0.1:8545", managed_fork=True)
     result = _guard(impl, DRAINED_QUOTE_HUMAN)
     # Skipped → returns a tuple even for the drained quote (no fail-closed).
     assert isinstance(result, tuple)
     assert result[1] == ORACLE_OUT_WEI
 
 
-def test_local_anvil_skip_floors_off_quoter_not_stale_oracle():
+def test_local_looking_rpc_without_fork_signal_keeps_guard_on():
+    """ALM-3184 negative control: a local-SHAPED URL is not a fork signal.
+
+    Reverting the fix (``is_local_rpc(rpc_url)``) makes this URL skip the
+    guard, and the drained quote that destroyed ~99.85% of value in VIB-5740
+    compiles instead of failing closed.
+    """
+    impl = _make_impl(ORACLE_OUT_WEI, rpc_url="http://rpc-proxy.internal.example:8545", managed_fork=False)
+    result = _guard(impl, DRAINED_QUOTE_HUMAN)
+    assert isinstance(result, CompilationResult)
+    assert result.status is CompilationStatus.FAILED
+    assert "Price impact too high" in result.error
+
+
+def test_managed_fork_skip_floors_off_quoter_not_stale_oracle():
     """When the guard is skipped, a stale/low oracle must NOT lower the floor.
 
     On a fork the oracle reflects live mainnet price while the quoter reflects
@@ -105,7 +133,7 @@ def test_local_anvil_skip_floors_off_quoter_not_stale_oracle():
     """
     stale_low_oracle_wei = 100_000  # below the fork quote below
     fork_quote_human = Decimal("0.330")  # 330_000 units (6 dec)
-    impl = _make_impl(stale_low_oracle_wei, rpc_url="http://127.0.0.1:8545")
+    impl = _make_impl(stale_low_oracle_wei, rpc_url="http://127.0.0.1:8545", managed_fork=True)
     amount_out_min_wei, oracle_wei, quoter_wei = _guard(impl, fork_quote_human)
     assert oracle_wei == stale_low_oracle_wei
     assert quoter_wei == int(fork_quote_human * Decimal(10**6))  # 330_000

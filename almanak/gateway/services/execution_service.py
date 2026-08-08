@@ -239,6 +239,7 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
         Returns:
             IntentCompiler configured for the specified chain/wallet
         """
+        from almanak.framework.execution.fork_signal import is_managed_fork_network
         from almanak.framework.intents.compiler import IntentCompiler, IntentCompilerConfig
         from almanak.gateway.utils import get_rpc_url
 
@@ -267,7 +268,17 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
         # execution.CompileIntent, not in-process. Measured on Aave V3 Mantle
         # after governance zeroed ltv: the collateral-eligibility guard never
         # ran and the emitted bundle reverted on-chain (VIB-6111).
-        config = IntentCompilerConfig(allow_placeholder_prices=False, gateway_internal_preflight=True)
+        # managed_fork: the gateway's configured network IS the positive fork
+        # declaration (ALM-3184). Declaring it here means the production compile
+        # path never falls back to probing, and — critically — a mainnet gateway
+        # declares False, so the swap price-impact guard cannot be disabled by an
+        # RPC URL that merely looks local (a proxy on :8545, a hostname
+        # containing "anvil").
+        config = IntentCompilerConfig(
+            allow_placeholder_prices=False,
+            gateway_internal_preflight=True,
+            managed_fork=is_managed_fork_network(network),
+        )
         compiler = IntentCompiler(
             chain=chain,
             wallet_address=wallet_address,
@@ -462,6 +473,7 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
         Returns:
             ExecutionOrchestrator for the specified chain
         """
+        from almanak.framework.execution.fork_signal import is_managed_fork_network
         from almanak.framework.execution.orchestrator import ExecutionOrchestrator
         from almanak.framework.execution.simulator import create_simulator
         from almanak.framework.execution.submitter import PublicMempoolSubmitter
@@ -504,6 +516,10 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
             simulator=simulator,
             chain=chain,
             rpc_url=rpc_url,
+            # ALM-3184: the configured network is the positive fork declaration.
+            # A mainnet gateway declares False, so Enso's 5% slippage widening
+            # can no longer be granted by an RPC URL that merely looks local.
+            managed_fork=is_managed_fork_network(network),
         )
 
         self._orchestrator_cache[cache_key] = orchestrator

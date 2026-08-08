@@ -60,6 +60,8 @@ def refresh_deferred_bundle(
     action_bundle: ActionBundle,
     wallet_address: str,
     rpc_url: str | None = None,
+    *,
+    managed_fork: bool | None = None,
 ) -> ActionBundle:
     """Refresh stale deferred transaction data in an ActionBundle.
 
@@ -76,6 +78,12 @@ def refresh_deferred_bundle(
         wallet_address: Wallet address for the fresh quote request.
         rpc_url: RPC URL passed through to connector-owned refresh hooks for
             network-sensitive refresh adjustments.
+        managed_fork: Tri-state managed-fork declaration (ALM-3184) passed
+            through to refresh hooks that relax an on-chain safety bound on a
+            fork (Enso widens ``minAmountOut`` slippage to 5%). ``None`` means
+            undeclared, which resolves to production via
+            ``almanak.framework.execution.fork_signal``. It must never be
+            inferred from ``rpc_url``.
 
     Returns:
         A new ActionBundle with fresh transaction data, or the original
@@ -105,7 +113,9 @@ def refresh_deferred_bundle(
     # making the fresh API call.
     refresh_metadata = copy.deepcopy(metadata)
 
-    fresh_tx = _fetch_fresh_transaction(protocol, refresh_metadata, wallet_address, rpc_url=rpc_url)
+    fresh_tx = _fetch_fresh_transaction(
+        protocol, refresh_metadata, wallet_address, rpc_url=rpc_url, managed_fork=managed_fork
+    )
 
     # Build the new bundle with the (potentially widened) metadata
     new_bundle = ActionBundle(
@@ -353,6 +363,7 @@ def _fetch_fresh_transaction(
     wallet_address: str,
     *,
     rpc_url: str | None = None,
+    managed_fork: bool | None = None,
 ) -> dict[str, Any]:
     """Dispatch to the connector-owned refresh provider.
 
@@ -361,6 +372,8 @@ def _fetch_fresh_transaction(
         metadata: Bundle metadata containing route_params.
         wallet_address: Wallet address for the quote request.
         rpc_url: RPC URL forwarded to the provider.
+        managed_fork: Tri-state managed-fork declaration forwarded to the
+            provider (ALM-3184).
 
     Returns:
         Fresh transaction data.
@@ -378,7 +391,7 @@ def _fetch_fresh_transaction(
         )
 
     try:
-        fresh_tx = refresher.refresh_transaction(metadata, wallet_address, rpc_url=rpc_url)
+        fresh_tx = refresher.refresh_transaction(metadata, wallet_address, rpc_url=rpc_url, managed_fork=managed_fork)
     except DeferredRefreshError:
         raise
     except Exception as exc:

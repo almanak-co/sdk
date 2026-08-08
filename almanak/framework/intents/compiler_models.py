@@ -89,6 +89,25 @@ class IntentCompilerConfig:
             ``almanak/gateway/``, which IS the egress layer, and it stays False
             for every strategy-side and offline compile so those keep failing
             open exactly as before.
+
+        managed_fork: Tri-state declaration of "this compile targets a managed
+            Anvil fork" (ALM-3184). Swap compilers relax the oracle
+            price-impact guard — the only independent cross-check that an
+            on-chain quote has not been manipulated or drained — when this
+            resolves True, because fork block state and live oracle prices are
+            not time-aligned.
+
+            Declaration only — there is no runtime detection. The production
+            gateway compile path declares it from ``GatewaySettings.network``
+            (``Network.ANVIL``); offline permission discovery declares
+            ``False``; Anvil test harnesses declare ``True``. ``None`` means
+            nobody declared, which resolves to production
+            (``almanak.framework.execution.fork_signal``).
+
+            It replaces the previous ``is_local_rpc(rpc_url)`` test, which
+            returned True for **any** host on port 8545-8550 — so a production
+            RPC proxy on ``:8545`` compiled mainnet swaps with the guard off.
+            Absent/unknown now resolves to production, not to fork.
     """
 
     allow_placeholder_prices: bool = False
@@ -109,6 +128,7 @@ class IntentCompilerConfig:
     permission_discovery: bool = False
     offline_discovery: bool = False
     gateway_internal_preflight: bool = False
+    managed_fork: bool | None = None
 
     def __post_init__(self) -> None:
         """Validate swap pool selection settings."""

@@ -203,6 +203,11 @@ class _CompilerCache:
                     fixed_swap_fee_tier=fee_tier,
                     permission_discovery=True,
                     offline_discovery=hints.offline_discovery,
+                    # Declare production explicitly (ALM-3184). Manifest
+                    # discovery must be a pure function of the registry, so it
+                    # must never issue the undeclared-path fork probe — and it
+                    # compiles no live swap whose guard the answer would relax.
+                    managed_fork=False,
                 ),
             )
         return self._compilers[key]

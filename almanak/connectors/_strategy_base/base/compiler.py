@@ -105,6 +105,13 @@ class BaseCompilerContext:
     # risk-parameter pre-flights read via ``services.eth_call`` when there is
     # no gateway_client to borrow (VIB-6111). See IntentCompilerConfig.
     gateway_internal_preflight: bool = False
+    # Tri-state managed-fork declaration (ALM-3184). Only a literal True
+    # relaxes a money-path guard; None ("undeclared") and False both resolve to
+    # production via ``fork_signal.resolve_managed_fork``. Declaration only —
+    # never ``is_local_rpc`` (that URL heuristic grants fork status to any host
+    # on port 8545-8550) and never runtime detection (strategy-container code
+    # has no sanctioned egress but the gateway channel).
+    managed_fork: bool | None = None
     token_resolver: Any
     gateway_client: Any
     price_oracle: Any

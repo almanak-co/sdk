@@ -12,7 +12,7 @@ from almanak.connectors._strategy_base.base.compiler import (
     BaseProtocolCompiler,
     SwapCompilerContext,
 )
-from almanak.framework.execution.simulator.config import is_local_rpc
+from almanak.framework.execution.fork_signal import resolve_managed_fork
 from almanak.framework.intents._compiler_helpers import (
     PriceImpactDecision,
     assemble_action_bundle,
@@ -1246,10 +1246,13 @@ class _TraderJoeV2CompileImpl:
         # needed (unlike the Aerodrome adapter).
         quoter_amount_wei = int(quote.amount_out * Decimal(10**to_token.decimals))
 
-        guard_skipped = is_local_rpc(rpc_url)
+        # ALM-3184: positive managed-fork signal, never the URL heuristic — this
+        # guard is what caught a ~99.85% value-destroying swap on a drained LB
+        # pair (VIB-5740), and a production proxy on :8545 must not disable it.
+        guard_skipped = resolve_managed_fork(ctx.managed_fork)
         if guard_skipped:
             # Fork pool state and live oracle prices are not time-aligned.
-            logger.info("Skipping TraderJoe V2 oracle price-impact guard on local Anvil RPC (%s)", rpc_url)
+            logger.info("Skipping TraderJoe V2 oracle price-impact guard: managed Anvil fork confirmed (%s)", rpc_url)
         else:
             result = check_price_impact(
                 oracle_estimate=oracle_estimate_wei,

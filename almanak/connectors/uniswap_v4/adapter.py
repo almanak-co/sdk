@@ -135,6 +135,10 @@ class UniswapV4Config:
         gateway_client: Optional GatewayClient. When provided, on-chain
             eth_call queries route through ``gateway_client.eth_call`` and
             the ``rpc_url`` fallback is never exercised.
+        managed_fork: Tri-state managed-fork declaration threaded from the
+            compiler context (ALM-3184). ``None`` means undeclared, in which
+            case the price-impact guard probes the node rather than trusting
+            the shape of ``rpc_url``.
     """
 
     chain: str
@@ -143,6 +147,13 @@ class UniswapV4Config:
     default_fee_tier: int = 3000
     default_slippage_bps: int = 50
     gateway_client: GatewayClient | None = field(default=None, repr=False, compare=False)
+    # APPEND-LAST, deliberately (ALM-3184 review): this is a plain @dataclass, so
+    # field order IS the positional ABI, and UniswapV4Config is exported from the
+    # connector package. Inserting ahead of gateway_client silently rebound
+    # ``UniswapV4Config(chain, wallet, rpc_url, 3000, 50, client)`` — the client
+    # landed in managed_fork, gateway_client stayed None, and the adapter quietly
+    # lost gateway routing. New fields go here, at the end.
+    managed_fork: bool | None = None
 
 
 # =============================================================================
@@ -175,6 +186,7 @@ class UniswapV4Adapter:
             self.rpc_url = config.rpc_url
             self.default_fee_tier = config.default_fee_tier
             self.default_slippage_bps = config.default_slippage_bps
+            self.managed_fork = config.managed_fork
             self._gateway_client = gateway_client or config.gateway_client
         elif chain is not None:
             self.chain = chain.lower()
@@ -182,6 +194,7 @@ class UniswapV4Adapter:
             self.rpc_url = None
             self.default_fee_tier = 3000
             self.default_slippage_bps = 50
+            self.managed_fork = None
             self._gateway_client = gateway_client
         else:
             raise ValueError("Either chain or config must be provided")
@@ -487,8 +500,9 @@ class UniswapV4Adapter:
 
         Only runs against an executable on-chain quote: a ``local_estimate`` is
         itself oracle-derived, so comparing it to the oracle estimate is circular.
-        Skipped on a local Anvil fork (C4 — fork pool state and the live oracle are
-        not time-aligned).
+        Skipped on a confirmed managed Anvil fork (C4 — fork pool state and the
+        live oracle are not time-aligned); ALM-3184 requires that confirmation to
+        be a positive signal, never the shape of ``rpc_url``.
         """
         if quote_source != "onchain_quoter":
             return None
@@ -497,11 +511,11 @@ class UniswapV4Adapter:
             # executable quote already proved pool existence; depth is unguarded.
             return None
 
-        from almanak.framework.execution.simulator.config import is_local_rpc
+        from almanak.framework.execution.fork_signal import resolve_managed_fork
 
-        if is_local_rpc(self.rpc_url):
+        if resolve_managed_fork(self.managed_fork):
             logger.info(
-                "Skipping V4 price-impact guard for local Anvil rpc (%s): fork pool state "
+                "Skipping V4 price-impact guard: managed Anvil fork confirmed (%s). Fork pool state "
                 "and live oracle prices are not time-aligned.",
                 self.rpc_url,
             )

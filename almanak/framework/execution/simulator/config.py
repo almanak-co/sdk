@@ -71,6 +71,19 @@ LOCAL_RPC_PORTS: set[int] = {8545, 8546, 8547, 8548, 8549, 8550}
 def is_local_rpc(rpc_url: str | None) -> bool:
     """Check if an RPC URL appears to be a local/fork environment.
 
+    .. warning::
+
+       **Simulation-vendor selection only. NEVER key a money-path safety
+       decision on this** (ALM-3184). It is a URL heuristic: it returns True
+       for any host on port 8545-8550 and for any hostname containing
+       ``anvil`` / ``hardhat`` / ``ganache``, so a production RPC proxy on
+       ``:8545`` reads as a fork. A false positive here costs a skipped
+       Tenderly call; a false positive in a price-impact guard or a slippage
+       bound costs money. Use
+       ``almanak.framework.execution.fork_signal.resolve_managed_fork``, which
+       requires a positive declaration (a configured ``Network.ANVIL``) and
+       fails safe to production.
+
     This function detects local RPC URLs where Tenderly/Alchemy simulation
     would be WRONG because they simulate against mainnet state, not fork state.
 

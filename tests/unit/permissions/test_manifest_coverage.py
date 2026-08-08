@@ -111,6 +111,10 @@ def _get_compiler_for_protocol(protocol: str, chain: str) -> IntentCompiler:
             # when RPC is unavailable and still emit the full teardown
             # selector surface.
             permission_discovery=True,
+            # ALM-3184: discover_permissions declares production, so this
+            # mirror must too — otherwise the two compilers differ and this
+            # one takes the undeclared path's fork probe.
+            managed_fork=False,
         ),
     )
 

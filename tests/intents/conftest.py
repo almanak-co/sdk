@@ -2649,6 +2649,45 @@ def uses_zodiac_marker(request: pytest.FixtureRequest) -> pytest.Mark | None:
     return request.node.get_closest_marker("uses_zodiac")
 
 
+@pytest.fixture(autouse=True)
+def _declare_managed_fork(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Declare that compilers built in this package target a managed Anvil fork.
+
+    ALM-3184. Money-path guards (the Uniswap-V3-family / TraderJoe oracle
+    price-impact guard, Enso's slippage bound) relax only on an explicit
+    ``managed_fork=True`` declaration — there is deliberately no runtime
+    detection, because a probe in ``almanak/framework/`` is a gateway-boundary
+    bypass (AGENTS.md §Gateway boundary; blueprint 20 — the sidecar guard
+    rejects every non-gateway loopback connect).
+
+    In production that declaration is made by the gateway, from
+    ``GatewaySettings.network``. Intent tests construct ``IntentCompiler``
+    directly — 709 inline call sites across 207 files, with no shared factory
+    to thread it through — so the gateway never gets to make it. This fixture
+    makes it once, here, at the only place where it is unconditionally true:
+    **everything under ``tests/intents/`` runs against a managed Anvil fork.**
+
+    Only fills in an *undeclared* config, so a test that declares production
+    explicitly (``managed_fork=False``) keeps it — that is how the negative
+    controls stay meaningful. Reverted automatically by ``monkeypatch``.
+
+    Without this, the fork lane silently becomes production-strict: 57 swap
+    tests across 4 protocols would compare fork pool state against live oracle
+    prices, which are not time-aligned, and fail on price impact.
+    """
+    from almanak.framework.intents.compiler import IntentCompiler
+
+    original_init = IntentCompiler.__init__
+
+    def _init_declaring_fork(self, *args: Any, **kwargs: Any) -> None:
+        original_init(self, *args, **kwargs)
+        config = getattr(self, "_config", None)
+        if config is not None and getattr(config, "managed_fork", None) is None:
+            config.managed_fork = True
+
+    monkeypatch.setattr(IntentCompiler, "__init__", _init_declaring_fork)
+
+
 @pytest.fixture
 def _zodiac_intent_recorder(
     request: pytest.FixtureRequest,
