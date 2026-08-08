@@ -307,3 +307,118 @@ def test_malformed_multi_separator_pair_is_rejected_not_canonicalised() -> None:
 
     assert perp_market_pair_key("eth-usd/foo") is None
     assert perp_market_pair_key("ETH/USD") == "ETH/USD"
+
+
+GMX_ETH_MARKET = "0x70d95587d40A2caf56bd97485aB3Eec10Bee6336"
+WETH_ARBITRUM = "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"
+USDC_ARBITRUM = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
+
+
+class TestAddressFormMarketPricing:
+    """Address-first markets price through the venue-verified perps-read catalog.
+
+    The demo-run failure this pins: gmx_v2_directional_perp declares the GMX
+    market-token ADDRESS (address-first contract), the fill lane resolves the
+    base through PerpsReadRegistry.market_metadata -> the process market
+    catalog, and with the catalog unpopulated every PERP_OPEN was rejected as
+    unpriceable (2189 rejected fills, 0 trades). In a backtest the catalog is
+    populated by the GMX price-history provider's prepare
+    (remember_verified_market); these tests pin both sides of the seam.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_catalog(self):
+        from almanak.connectors.gmx_v2 import market_catalog
+
+        market_catalog.clear()
+        yield
+        market_catalog.clear()
+
+    @staticmethod
+    def _verify_eth_market() -> None:
+        from almanak.connectors.gmx_v2 import market_catalog
+        from almanak.connectors.gmx_v2.market_metadata import ResolvedGmxMarket
+
+        market_catalog.remember(
+            "arbitrum",
+            ResolvedGmxMarket(
+                label="ETH/USD [WETH-USDC]",
+                market_token=GMX_ETH_MARKET,
+                index_token=WETH_ARBITRUM,
+                index_symbol="ETH",
+                index_token_decimals=18,
+                long_token=WETH_ARBITRUM,
+                long_token_symbol="WETH",
+                short_token=USDC_ARBITRUM,
+                short_token_symbol="USDC",
+            ),
+        )
+
+    def test_verified_address_market_prices_off_wrapped_series(self) -> None:
+        self._verify_eth_market()
+
+        base, priced_symbol, price = resolve_perp_base_price(GMX_ETH_MARKET, _weth_market_state(), protocol="gmx_v2")
+
+        assert base == "ETH"
+        assert priced_symbol == "ETH"
+        assert price == ETH_PRICE
+
+    def test_unverified_address_market_stays_fail_closed(self) -> None:
+        # No catalog row: the resolver must refuse, never guess an identity.
+        base, priced_symbol, price = resolve_perp_base_price(GMX_ETH_MARKET, _weth_market_state(), protocol="gmx_v2")
+        assert (base, priced_symbol, price) == (None, None, None)
+
+    @pytest.mark.asyncio
+    async def test_address_form_open_fills_when_verified(self) -> None:
+        self._verify_eth_market()
+        backtester = TestEnginePerpOpenEndToEnd._backtester()
+        portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CASH)
+
+        record = await backtester._execute_intent(
+            PerpOpenStub(market=GMX_ETH_MARKET),
+            portfolio,
+            _weth_market_state(),
+            TS,
+            TestEnginePerpOpenEndToEnd._config(),
+        )
+
+        assert record.success is True
+        assert len(portfolio.positions) == 1
+        assert portfolio.positions[0].entry_price == ETH_PRICE
+
+    @pytest.mark.asyncio
+    async def test_address_form_open_unverified_is_named_rejection(self) -> None:
+        backtester = TestEnginePerpOpenEndToEnd._backtester()
+        portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CASH)
+
+        record = await backtester._execute_intent(
+            PerpOpenStub(market=GMX_ETH_MARKET),
+            portfolio,
+            _weth_market_state(),
+            TS,
+            TestEnginePerpOpenEndToEnd._config(),
+        )
+
+        assert record.success is False
+        reason = record.metadata.get("failure_reason", "")
+        assert "not priceable" in reason
+        assert portfolio.positions == []
+        assert portfolio.cash_usd == INITIAL_CASH
+
+    @pytest.mark.asyncio
+    async def test_address_form_close_matches_address_opened_position(self) -> None:
+        self._verify_eth_market()
+        backtester = TestEnginePerpOpenEndToEnd._backtester()
+        portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CASH)
+        state = _weth_market_state()
+        config = TestEnginePerpOpenEndToEnd._config()
+
+        await backtester._execute_intent(PerpOpenStub(market=GMX_ETH_MARKET), portfolio, state, TS, config)
+        assert len(portfolio.positions) == 1
+
+        close_record = await backtester._execute_intent(
+            PerpCloseStub(market=GMX_ETH_MARKET), portfolio, state, TS + timedelta(hours=1), config
+        )
+
+        assert close_record.success is True
+        assert portfolio.positions == []

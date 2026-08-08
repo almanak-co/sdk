@@ -140,6 +140,11 @@ class GmxV2DirectionalPerp(IntentStrategy):
         # Decide-time price, used as the entry-price fallback for the GMX
         # two-step flow if the result does not carry a fill price.
         self._pending_entry_price: Decimal | None = None
+        # True while a submitted open/close has no verdict yet. Deliberately
+        # NOT persisted: after a restart the callback is lost, and a latched
+        # True would brick decide() forever — resetting re-derives intent from
+        # _position_side (same doctrine as the forced-open latch, VIB-6527).
+        self._awaiting_fill = False
 
         # Liquidation distance ~ 1/leverage; the stop must sit inside it.
         liq_distance = Decimal("1") / self.leverage if self.leverage > 0 else Decimal("1")
@@ -163,6 +168,16 @@ class GmxV2DirectionalPerp(IntentStrategy):
     # ------------------------------------------------------------------ #
 
     def decide(self, market: MarketSnapshot) -> Intent | None:
+        if self._awaiting_fill:
+            # A submitted open/close has no verdict yet (delayed execution in
+            # backtests; the keeper window live). Deciding again while FLAT
+            # would stack a second open — observed as a doubled $200 exposure
+            # whose second fill wiped the entry-price reference. Gated ahead
+            # of EVERY submitting branch, forced actions included: the forced
+            # latch keys on _position_side, which is only committed on the
+            # fill verdict and cannot see an in-flight submission.
+            return Intent.hold(reason="submitted intent awaiting confirmation")
+
         if self.force_action:
             return self._forced_intent(market)
 
@@ -235,6 +250,7 @@ class GmxV2DirectionalPerp(IntentStrategy):
         # Captured for the entry-price fallback; committed to _entry_price only
         # on a confirmed fill (in on_intent_executed).
         self._pending_entry_price = entry_price
+        self._awaiting_fill = True
         logger.info(
             "OPEN %s %s: size=$%s, collateral=%s %s, entry~%.2f, funding=%s/h",
             signal.upper(), self.market, self.position_size_usd, collateral_amount,
@@ -299,6 +315,7 @@ class GmxV2DirectionalPerp(IntentStrategy):
         )
 
     def _close(self, side: str, *, reason: str) -> Intent:
+        self._awaiting_fill = True
         return Intent.perp_close(
             market=self.market_address,
             collateral_token=self.collateral_token,
@@ -381,6 +398,7 @@ class GmxV2DirectionalPerp(IntentStrategy):
                 collateral_price = Decimal("1")  # forced-test fallback (assumes stable collateral)
             # Collateral in token units, not USD (see _enter for the rationale).
             collateral_amount = (self.position_size_usd / self.leverage) / collateral_price
+            self._awaiting_fill = True
             return Intent.perp_open(
                 market=self.market_address,
                 collateral_token=self.collateral_token,
@@ -402,6 +420,10 @@ class GmxV2DirectionalPerp(IntentStrategy):
     # ------------------------------------------------------------------ #
 
     def on_intent_executed(self, intent: Any, success: bool, result: Any) -> None:
+        # The submitted intent has a verdict either way — decide() may act
+        # again. Cleared before any early return so a failed submission never
+        # leaves the strategy latched.
+        self._awaiting_fill = False
         if not success:
             logger.warning("Intent failed; position state unchanged (side=%s)", self._position_side)
             return
@@ -411,7 +433,11 @@ class GmxV2DirectionalPerp(IntentStrategy):
 
         if type_value == "PERP_OPEN":
             self._position_side = LONG if getattr(intent, "is_long", True) else SHORT
-            self._entry_price = self._resolve_fill_price(result) or self._pending_entry_price
+            fill_price = self._resolve_fill_price(result) or self._pending_entry_price
+            if fill_price is not None:
+                # Never wipe a known entry reference with None: a duplicate
+                # fill that carries no price must not blind the stop-loss.
+                self._entry_price = fill_price
             self._pending_entry_price = None
             logger.info("OPEN confirmed: side=%s, entry=%s", self._position_side, self._entry_price)
 
@@ -429,6 +455,12 @@ class GmxV2DirectionalPerp(IntentStrategy):
         if fill is None:
             extracted = getattr(result, "extracted_data", None) or {}
             fill = extracted.get("entry_price") if isinstance(extracted, dict) else None
+        if fill is None:
+            # Simulated results (backtest) carry the executed price on the
+            # trade record — the slippage-adjusted fill, exactly the entry
+            # reference the stop-loss should measure against.
+            trade_record = getattr(result, "trade_record", None)
+            fill = getattr(trade_record, "executed_price", None)
         try:
             return Decimal(str(fill)) if fill is not None else None
         except (ValueError, TypeError):

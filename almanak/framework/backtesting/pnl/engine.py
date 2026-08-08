@@ -1078,10 +1078,23 @@ class BacktestOHLCVView:
             try:
                 resolved = get_token_resolver().resolve(token, self._chain, log_errors=False, skip_gateway=True)
             except TokenResolutionError:
-                return None
-            candidate = token_ref_display(normalize_token_key(self._chain, resolved.address))
-            if candidate in buffers:
-                return candidate
+                resolved = None
+            if resolved is not None:
+                candidate = token_ref_display(normalize_token_key(self._chain, resolved.address))
+                if candidate in buffers:
+                    return candidate
+                candidates.append(candidate)
+        # Native identities ("ETH", the chain's native placeholder key) serve
+        # through the chain's DECLARED wrapped series when one is registered
+        # (native_series_aliases — same identity doctrine as the fill-pricing
+        # and perp candle lanes). Unaliased misses stay None: the caller's
+        # honest refusal.
+        resolve_series = getattr(self._engine, "resolve_series_token", None)
+        if resolve_series is not None:
+            for candidate in candidates:
+                aliased = resolve_series(candidate)
+                if aliased != candidate and aliased in buffers:
+                    return aliased
         return None
 
     def get_ohlcv(

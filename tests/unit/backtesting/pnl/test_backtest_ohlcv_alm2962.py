@@ -120,6 +120,25 @@ class TestBacktestOHLCVView:
         view = _view(_engine_with_series("WETH", [3000.0] * 20))
         assert len(view.get_ohlcv("WETH/USDC", limit=5)) == 5
 
+    def test_native_identity_serves_through_declared_wrapped_series(self):
+        # market.ohlcv("ETH") on an address-native run: identity resolves to
+        # the native placeholder, which has no series of its own; the run's
+        # DECLARED wrapped series (native_series_aliases / OHLCV_PROXY_MAP)
+        # serves it — same identity doctrine as the fill-pricing lane.
+        from almanak.framework.backtesting.pnl.indicator_engine import native_series_aliases
+
+        arb_weth = ("arbitrum", "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1")
+        arb_native = ("arbitrum", "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE")
+        token_map = {"WETH": arb_weth, "ETH": arb_native}
+        closes = [3000.0 + i for i in range(20)]
+        engine = _engine_with_series(f"{arb_weth[0]}:{arb_weth[1].lower()}", closes)
+        engine.register_series_aliases(native_series_aliases("arbitrum"))
+        view = _view(engine, token_map)
+
+        for spelling in ("ETH", f"{arb_native[0]}:{arb_native[1].lower()}"):
+            df = view.get_ohlcv(spelling, timeframe="1h", limit=5)
+            assert df["close"].iloc[-1] == closes[-1]
+
     def test_unknown_token_refuses(self):
         view = _view(_engine_with_series("WETH", [1.0] * 20))
         with pytest.raises(ValueError, match="no backtest price series"):

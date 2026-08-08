@@ -986,3 +986,132 @@ async def test_fallback_series_never_replaces_the_owned_venue_series() -> None:
 
     assert cache.data[WETH_KEY] == [venue_candle]
     assert provider._price_sources[f"arbitrum:{WETH_ARBITRUM}"] == "gmx_oracle_candles"
+
+
+# ---------------------------------------------------------------------------
+# Backtest population of the perps-read catalog (address-form fill pricing)
+# ---------------------------------------------------------------------------
+
+
+def _verified_market_response(market_token: str = MARKET_TOKEN) -> SimpleNamespace:
+    return SimpleNamespace(
+        success=True,
+        error="",
+        market=SimpleNamespace(
+            label="NEWMARKET/USD",
+            market_token=market_token,
+            index_token=INDEX_TOKEN,
+            index_symbol="NEWMARKET",
+            index_token_decimals=8,
+            long_token=LONG_TOKEN,
+            long_token_symbol="LONG",
+            short_token=SHORT_TOKEN,
+            short_token_symbol="SHORT",
+            verified=True,
+        ),
+    )
+
+
+def _prepared_provider(monkeypatch: pytest.MonkeyPatch, client: SimpleNamespace) -> GMXOracleDataProvider:
+    """Provider whose candle-lane prepare succeeds with an accepted identity."""
+    monkeypatch.setattr(_GMXOracleMarketSource, "_gateway", staticmethod(lambda: (client, gateway_pb2)))
+    provider = GMXOracleDataProvider(fallback=SimpleNamespace(), chain="arbitrum", market=MARKET_TOKEN)
+
+    async def _prepare(**_kwargs: object) -> str:
+        provider._source.resolved_market = "NEWMARKET/USD"
+        provider._source.market_token = MARKET_TOKEN.lower()
+        provider._source.index_token = INDEX_TOKEN.lower()
+        provider._source.index_symbol = "NEWMARKET"
+        return "1h"
+
+    provider._source.prepare = _prepare  # type: ignore[method-assign]
+    return provider
+
+
+def _hourly_config() -> PnLBacktestConfig:
+    start = datetime(2025, 1, 1, tzinfo=UTC)
+    return PnLBacktestConfig(start_time=start, end_time=start + timedelta(days=1), interval_seconds=3600)
+
+
+@pytest.mark.asyncio
+async def test_prepare_backtest_remembers_verified_market_for_fill_pricing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A backtest run must own the market identity the live compiler would.
+
+    The live path populates the perps-read catalog at compile time; a backtest
+    never compiles, so address-form PERP_OPEN fill pricing rejected every open
+    (gmx_v2_directional_perp: 2189 rejected fills, 0 trades) while the candle
+    lane held the verified identity. prepare_backtest now resolves through the
+    same venue-verified GetPerpMarket surface and remembers it.
+    """
+    from almanak.connectors._strategy_base.perps_read_registry import PerpsReadRegistry
+    from almanak.connectors.gmx_v2 import market_catalog
+
+    rpc = Mock(return_value=_verified_market_response())
+    client = SimpleNamespace(
+        config=SimpleNamespace(timeout=5.0),
+        market=SimpleNamespace(GetPerpMarket=rpc),
+    )
+    provider = _prepared_provider(monkeypatch, client)
+
+    assert await provider.prepare_backtest(_hourly_config()) == "1h"
+
+    record = market_catalog.by_address("arbitrum", MARKET_TOKEN)
+    assert record is not None
+    assert record.index_symbol == "NEWMARKET"
+    meta = PerpsReadRegistry.market_metadata("gmx_v2", MARKET_TOKEN, "arbitrum")
+    assert meta is not None
+    assert meta.index_token_symbol == "NEWMARKET"
+    assert meta.index_token_decimals == 8
+
+
+@pytest.mark.asyncio
+async def test_metadata_unavailable_keeps_fill_lane_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A gateway without GetPerpMarket (or a venue miss) must not fail the run
+    # and must not invent an identity: the catalog stays empty and the fill
+    # lane keeps its named per-intent rejection.
+    from almanak.connectors.gmx_v2 import market_catalog
+
+    client = SimpleNamespace(config=SimpleNamespace(timeout=5.0), market=None)
+    provider = _prepared_provider(monkeypatch, client)
+
+    assert await provider.prepare_backtest(_hourly_config()) == "1h"
+
+    assert market_catalog.by_address("arbitrum", MARKET_TOKEN) is None
+
+
+@pytest.mark.asyncio
+async def test_metadata_identity_mismatch_is_not_remembered(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Defense in depth: metadata whose market token disagrees with the candle
+    # provenance this run already verified is refused, never remembered.
+    from almanak.connectors.gmx_v2 import market_catalog
+
+    rpc = Mock(return_value=_verified_market_response(market_token="0x" + "9" * 40))
+    client = SimpleNamespace(
+        config=SimpleNamespace(timeout=5.0),
+        market=SimpleNamespace(GetPerpMarket=rpc),
+    )
+    provider = _prepared_provider(monkeypatch, client)
+
+    await provider.prepare_backtest(_hourly_config())
+
+    assert market_catalog.by_address("arbitrum", MARKET_TOKEN) is None
+    assert market_catalog.by_address("arbitrum", "0x" + "9" * 40) is None
+
+
+@pytest.mark.asyncio
+async def test_remember_is_a_noop_without_accepted_candle_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # No candle identity accepted -> nothing to cross-check -> the gateway is
+    # never touched (also keeps prepare-mocking tests hermetic).
+    monkeypatch.setattr(
+        _GMXOracleMarketSource,
+        "_gateway",
+        staticmethod(Mock(side_effect=AssertionError("gateway must not be touched"))),
+    )
+    provider = GMXOracleDataProvider(fallback=SimpleNamespace(), chain="arbitrum", market=MARKET_TOKEN)
+    provider._source.prepare = AsyncMock(return_value="1h")
+
+    assert await provider.prepare_backtest(_hourly_config()) == "1h"

@@ -21,6 +21,7 @@ Usage:
 
 import logging
 from collections import deque
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -87,6 +88,65 @@ def _timeframe_seconds(timeframe: OHLCVTimeframe) -> int:
     return parse_ohlcv_timeframe(timeframe).seconds
 
 
+def native_series_aliases(chain: str) -> dict[str, tuple[str, ...]]:
+    """Declared native→wrapped close-series aliases for a run chain.
+
+    The run's data plane tracks the WRAPPED ERC-20 (the token the funding /
+    token map names), while token identity resolves a native symbol ("ETH")
+    to the chain's native placeholder — a sentinel address with no OHLCV
+    series behind it, so every ``market.ema("ETH")`` read refused while the
+    run held a perfectly good WETH series and the strategy held forever.
+    The fill-pricing and perp candle lanes already own this identity through
+    ``OHLCV_PROXY_MAP`` (``perp_base_price_candidates``); this extends the
+    same declared 1:1 proxy to the indicator/OHLCV-by-token lane.
+
+    Fail-closed: only the chain's registry-declared wrapped symbol, and only
+    when ``OHLCV_PROXY_MAP`` declares that wrapped form a 1:1 peg of the
+    native. An undeclared wrapped form (e.g. WHYPE) yields no alias, so a
+    native read on that chain keeps refusing loudly instead of serving a
+    different asset's series.
+    """
+    from almanak.core.chains import ChainRegistry
+    from almanak.core.enums import ChainFamily
+    from almanak.framework.backtesting.pnl.data_provider import (
+        normalize_token_key,
+        token_ref_display,
+    )
+    from almanak.framework.data.models import OHLCV_PROXY_MAP
+    from almanak.framework.data.tokens.defaults import NATIVE_SENTINEL
+
+    descriptor = ChainRegistry.try_resolve(chain)
+    if descriptor is None or descriptor.family is not ChainFamily.EVM:
+        return {}
+    native = descriptor.native
+    if not native.wrapped_symbol:
+        return {}
+    native_upper = native.symbol.upper()
+    wrapped_symbol = str(native.wrapped_symbol)
+    wrapped_upper = wrapped_symbol.upper()
+    if OHLCV_PROXY_MAP.get(wrapped_upper) != native_upper:
+        return {}
+
+    # Candidate buffer keys for the wrapped series, most specific first: the
+    # REGISTRY-declared wrapped-native address key, then the symbol spellings
+    # (symbol-keyed fixture runs). The address identity comes from the chain
+    # descriptor, never from a run-map label: symbols are display metadata
+    # (blueprint 17), and a run map whose "WETH" entry points at an unrelated
+    # address must leave the native a loud miss — not hand it that series.
+    candidates: list[str] = []
+    if native.wrapped_address:
+        candidates.append(token_ref_display(normalize_token_key(descriptor.name, native.wrapped_address)))
+    for spelling in (wrapped_symbol, wrapped_upper):
+        if spelling not in candidates:
+            candidates.append(spelling)
+
+    sentinel_key = token_ref_display(normalize_token_key(descriptor.name, NATIVE_SENTINEL))
+    alias_keys = {sentinel_key, native_upper}
+    alias_keys.update(str(symbol).upper() for symbol in native.accepted_symbols)
+    resolved = tuple(candidates)
+    return {key: resolved for key in alias_keys}
+
+
 #: Cadence jitter cap (ALM-2962): vendors emit slightly irregular timestamps
 #: (CoinGecko hourly points are sometimes spaced 3601s apart), so on short
 #: windows the measured cadence can read a hair coarser than the true one.
@@ -139,6 +199,9 @@ class BacktestIndicatorEngine:
         self._base_max_history = max_history
         # token -> rolling deque of close prices (oldest first)
         self._price_buffers: dict[str, deque[Decimal]] = {}
+        # Declared same-asset series aliases (native placeholder → wrapped
+        # ERC-20 spellings), registered per run from native_series_aliases().
+        self._series_aliases: dict[str, tuple[str, ...]] = {}
         # Measured resolution of the UNDERLYING price data (ALM-2957). When
         # coarser than the tick interval (e.g. daily CG data under hourly
         # ticks), the tick buffer is an upsampled flat-within-period plane:
@@ -723,9 +786,38 @@ class BacktestIndicatorEngine:
         """
         return self.get_buffer_size(token) < self.min_warmup_ticks(config)
 
+    def register_series_aliases(self, aliases: Mapping[str, Sequence[str]]) -> None:
+        """Register declared same-asset series aliases (native → wrapped).
+
+        Each entry maps a requested token key to candidate buffer keys whose
+        series is DECLARED the same asset (``native_series_aliases``:
+        OHLCV_PROXY_MAP 1:1 pegs only). Never a general fallback — a token
+        outside the map that has no series keeps failing loudly.
+        """
+        for token, candidates in aliases.items():
+            self._series_aliases[str(token)] = tuple(str(candidate) for candidate in candidates)
+
+    def resolve_series_token(self, token: str) -> str:
+        """The buffer key whose close series serves ``token``.
+
+        A token with its own buffered series is authoritative (a directly
+        served native series keeps precedence — same lookup order as the
+        price lane); otherwise the first declared alias candidate with data
+        serves. Unaliased or unserved tokens return themselves so callers
+        keep their honest-miss paths.
+        """
+        if self._price_buffers.get(token):
+            return token
+        candidates = self._series_aliases.get(token) or self._series_aliases.get(token.strip().upper(), ())
+        for candidate in candidates:
+            if self._price_buffers.get(candidate):
+                return candidate
+        return token
+
     def reset(self) -> None:
-        """Clear all price buffers. Useful between backtest runs."""
+        """Clear all price buffers and series aliases. Useful between backtest runs."""
         self._price_buffers.clear()
+        self._series_aliases.clear()
 
     # ------------------------------------------------------------------
     # On-demand snapshot providers (ALM-2951)
@@ -797,7 +889,12 @@ class BacktestIndicatorEngine:
         different requested timeframe, and never serve a timeframe FINER
         than the underlying data's measured resolution (ALM-2957: daily CG
         points under hourly ticks pinned RSI at ~0/100 for months).
+
+        The token first resolves through the declared series aliases
+        (:meth:`resolve_series_token`) so a native identity with no series
+        of its own is served from its wrapped ERC-20 series.
         """
+        token = self.resolve_series_token(token)
         prices = list(self._price_buffers.get(token, []))
         if not prices:
             raise InsufficientDataError(required=1, available=0, indicator="price history")

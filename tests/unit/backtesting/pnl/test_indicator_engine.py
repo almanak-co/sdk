@@ -25,8 +25,10 @@ from almanak.framework.backtesting.pnl.indicator_engine import (
     DEFAULT_INDICATORS,
     DEFAULT_MAX_HISTORY,
     BacktestIndicatorEngine,
+    native_series_aliases,
     ohlcv_timeframe_for_interval,
 )
+from almanak.framework.data.interfaces import InsufficientDataError
 from almanak.framework.data.timeframes import OHLCVTimeframe
 from almanak.framework.market import ATRData, BollingerBandsData, MACDData, MarketSnapshot, RSIData
 
@@ -784,3 +786,116 @@ class TestGranularityHonesty:
         first = engine._max_history
         engine.set_data_granularity(86400, 3600)
         assert engine._max_history == first  # a second call must not compound
+
+
+# =============================================================================
+# Native-sentinel series aliases
+# =============================================================================
+
+WETH_ARB_KEY = "arbitrum:0x82af49447d8a07e3bd95bd0d56f35241523fbab1"
+NATIVE_ARB_KEY = "arbitrum:0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+
+
+class TestNativeSeriesAliases:
+    """market.ema("ETH") on an address-native run serves from the WETH series.
+
+    The hollow-backtest shape this pins: the GMX directional perp demo read
+    ema("ETH") on arbitrum, identity resolved it to the native placeholder
+    (arbitrum:0xeeee...), the indicator lane had no series behind the
+    sentinel, and the strategy held all 2209 ticks with a persistent
+    decision-input failure.
+    """
+
+    def _aliased_engine(self, key: str = WETH_ARB_KEY, n: int = 60) -> BacktestIndicatorEngine:
+        engine = _create_engine_with_prices(key, _generate_prices(3000.0, n))
+        engine.register_series_aliases(native_series_aliases("arbitrum"))
+        return engine
+
+    def test_ema_on_native_sentinel_serves_from_wrapped_series(self) -> None:
+        # The exact failing ledger key shape: (native placeholder, 1h, EMA, 9).
+        engine = self._aliased_engine()
+        _, provider = engine.snapshot_providers({}, 3600)
+
+        served = provider.ema(NATIVE_ARB_KEY, 9, timeframe=OHLCVTimeframe.ONE_HOUR)
+        direct = provider.ema(WETH_ARB_KEY, 9, timeframe=OHLCVTimeframe.ONE_HOUR)
+
+        assert served.ma_type == "EMA"
+        assert served.period == 9
+        assert served.value == direct.value
+
+    def test_snapshot_ema_eth_symbol_serves_end_to_end(self) -> None:
+        # The strategy-facing read: market.ema("ETH") with the run's symbol
+        # alias bridge registered (ETH -> native placeholder key), as the
+        # backtest snapshot factory wires it.
+        engine = self._aliased_engine()
+        snapshot = _make_snapshot()
+        snapshot._register_symbol_alias_keys({"ETH": NATIVE_ARB_KEY, "WETH": WETH_ARB_KEY})
+        rsi_provider, indicator_provider = engine.snapshot_providers({}, 3600)
+        snapshot._rsi_provider = rsi_provider
+        snapshot._indicator_provider = indicator_provider
+
+        data = snapshot.ema("ETH", period=9, timeframe=OHLCVTimeframe.ONE_HOUR)
+
+        assert data.ma_type == "EMA"
+        # Served means no decision-input failure remains on the ema lane.
+        assert not [k for k in snapshot._critical_data_failures if k[0] == "ema"]
+
+    def test_direct_native_series_keeps_precedence(self) -> None:
+        # A sentinel key with its own buffered series is authoritative: the
+        # alias never REPLACES a directly served native series.
+        engine = self._aliased_engine()
+        for price in _generate_prices(1.0, 60, volatility=0.1):
+            engine.append_price(NATIVE_ARB_KEY, price)
+        _, provider = engine.snapshot_providers({}, 3600)
+
+        served = provider.ema(NATIVE_ARB_KEY, 9, timeframe=OHLCVTimeframe.ONE_HOUR)
+        wrapped = provider.ema(WETH_ARB_KEY, 9, timeframe=OHLCVTimeframe.ONE_HOUR)
+
+        assert served.value != wrapped.value
+
+    def test_unaliased_sentinel_still_fails_loud(self) -> None:
+        # No aliases registered: the sentinel stays an honest miss.
+        engine = _create_engine_with_prices(WETH_ARB_KEY, _generate_prices(3000.0, 60))
+        _, provider = engine.snapshot_providers({}, 3600)
+
+        with pytest.raises(InsufficientDataError):
+            provider.ema(NATIVE_ARB_KEY, 9, timeframe=OHLCVTimeframe.ONE_HOUR)
+
+    def test_undeclared_wrapped_form_yields_no_alias(self) -> None:
+        # WHYPE is deliberately absent from OHLCV_PROXY_MAP: hyperevm's native
+        # must NOT proxy — never substitute beyond the declared 1:1 peg map.
+        assert native_series_aliases("hyperevm") == {}
+
+    def test_mislabeled_wrapped_run_entry_never_serves_the_native(self) -> None:
+        # Review P1: symbols are display metadata (blueprint 17). A run whose
+        # "WETH"-labeled series sits at an unrelated address must leave the
+        # native a LOUD miss — the alias address comes from the chain
+        # registry's declared wrapped_address, never from a run-map label.
+        mislabeled_key = "arbitrum:0x1111111111111111111111111111111111111111"
+        engine = _create_engine_with_prices(mislabeled_key, _generate_prices(3000.0, 60))
+        engine.register_series_aliases(native_series_aliases("arbitrum"))
+        _, provider = engine.snapshot_providers({}, 3600)
+
+        with pytest.raises(InsufficientDataError):
+            provider.ema(NATIVE_ARB_KEY, 9, timeframe=OHLCVTimeframe.ONE_HOUR)
+
+    def test_non_evm_and_unknown_chains_yield_no_alias(self) -> None:
+        assert native_series_aliases("solana") == {}
+        assert native_series_aliases("not-a-chain") == {}
+
+    def test_symbol_keyed_run_serves_native_symbol(self) -> None:
+        # Fixture providers key their series by plain symbol; "ETH" must serve
+        # from "WETH" there too (no token map required).
+        engine = _create_engine_with_prices("WETH", _generate_prices(3000.0, 60))
+        engine.register_series_aliases(native_series_aliases("arbitrum"))
+        _, provider = engine.snapshot_providers({}, 3600)
+
+        served = provider.ema("ETH", 9, timeframe=OHLCVTimeframe.ONE_HOUR)
+        direct = provider.ema("WETH", 9, timeframe=OHLCVTimeframe.ONE_HOUR)
+
+        assert served.value == direct.value
+
+    def test_reset_clears_aliases(self) -> None:
+        engine = self._aliased_engine()
+        engine.reset()
+        assert engine._series_aliases == {}

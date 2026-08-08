@@ -1004,6 +1004,7 @@ async def execute_iteration_loop(
     )
     from almanak.framework.backtesting.pnl.indicator_engine import (
         cadence_is_coarser,
+        native_series_aliases,
         timeframe_label,
     )
     from almanak.framework.data.lp import ILCalculator
@@ -1013,6 +1014,12 @@ async def execute_iteration_loop(
         config.interval_seconds,
         bt_logger,
     )
+    # A native-symbol read ("ETH") resolves to the chain's native placeholder,
+    # which has no close series of its own — serve it from the run's DECLARED
+    # wrapped series (OHLCV_PROXY_MAP; the same identity doctrine as the
+    # fill-pricing and perp candle lanes). Registered once per run; resolution
+    # happens per read, so a directly served native series keeps precedence.
+    state.indicator_engine.register_series_aliases(native_series_aliases(config.chain))
     rsi_provider, indicator_provider = state.indicator_engine.snapshot_providers(
         state.strategy_config, config.interval_seconds
     )

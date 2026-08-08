@@ -390,3 +390,110 @@ class TestTeardownReadsTheVenueNotTheCache:
         assert row.value_usd > Decimal("0.01")
 
         assert len(strat.generate_teardown_intents(TeardownMode.SOFT)) == 1
+
+
+class TestAwaitingFillLatch:
+    """A submitted open/close latches decide() until its verdict arrives.
+
+    The 92-day demo backtest (2-tick execution delay) decided OPEN twice
+    before the first fill landed: doubled $200 exposure, and the second
+    fill's commit wiped the entry-price reference, freezing the strategy at
+    "awaiting entry price" for 2,186 ticks. Live, a keeper window spanning an
+    iteration reproduces the same stack.
+    """
+
+    @staticmethod
+    def _signal_market(strat, *, signal="long", balance_usd="100"):
+        market = _market(balance_usd)
+        fast, slow = (
+            (Decimal("110"), Decimal("100")) if signal == "long" else (Decimal("100"), Decimal("110"))
+        )
+
+        def _ema(token, period=12, **_kw):
+            data = MagicMock()
+            data.value = fast if period == strat.ema_fast_period else slow
+            return data
+
+        market.ema.side_effect = _ema
+        market.funding_rate.return_value.rate_hourly = "0"
+        return market
+
+    def test_open_is_latched_until_verdict(self, gmx):
+        _, strat = gmx
+        market = self._signal_market(strat)
+
+        first = strat.decide(market)
+        assert first.intent_type.value == "PERP_OPEN"
+
+        second = strat.decide(market)
+        assert second.intent_type.value == "HOLD"
+        assert "awaiting confirmation" in second.reason
+
+    def test_failed_verdict_unlatches_and_reopens(self, gmx):
+        _, strat = gmx
+        market = self._signal_market(strat)
+
+        first = strat.decide(market)
+        strat.on_intent_executed(first, False, None)
+
+        retry = strat.decide(market)
+        assert retry.intent_type.value == "PERP_OPEN"
+
+    def test_close_is_latched_until_verdict(self, gmx):
+        module, strat = gmx
+        strat._position_side = module.LONG
+        strat._entry_price = Decimal("2500")
+        market = self._signal_market(strat, signal="short")
+
+        close = strat.decide(market)
+        assert close.intent_type.value == "PERP_CLOSE"
+
+        held = strat.decide(market)
+        assert held.intent_type.value == "HOLD"
+        assert "awaiting confirmation" in held.reason
+
+    def test_duplicate_fill_does_not_wipe_entry_price(self, gmx):
+        _, strat = gmx
+        market = self._signal_market(strat)
+
+        first = strat.decide(market)
+        strat.on_intent_executed(first, True, None)  # entry from _pending_entry_price
+        assert strat._entry_price is not None
+        entry = strat._entry_price
+
+        # A duplicate fill whose result carries no price (and no pending
+        # fallback remains) must not blind the stop-loss reference.
+        strat.on_intent_executed(first, True, None)
+        assert strat._entry_price == entry
+
+    def test_forced_open_is_latched_under_delayed_execution(self, gmx):
+        # Review P1: the forced branch returned before the gate and never
+        # armed the latch, so two consecutive forced decides with no verdict
+        # both emitted PERP_OPEN — the same doubled exposure the signal path
+        # fix removed. The gate now sits ahead of EVERY submitting branch.
+        from almanak.connectors._strategy_base.perps_read_base import PerpsReadResult
+
+        _, strat = gmx
+        strat.force_action = "open_long"
+        snapshot = MagicMock()
+        snapshot.perp_positions.return_value = PerpsReadResult(positions=(), ok=True)
+        snapshot.price.return_value = Decimal("3000")
+
+        assert strat.decide(snapshot).intent_type.value == "PERP_OPEN"
+
+        held = strat.decide(snapshot)
+        assert held.intent_type.value == "HOLD"
+        assert "awaiting confirmation" in held.reason
+
+    def test_backtest_trade_record_price_is_the_entry_reference(self, gmx):
+        _, strat = gmx
+        market = self._signal_market(strat)
+
+        intent = strat.decide(market)
+        result = MagicMock(spec=[])  # no entry_price / extracted_data attributes
+        result.trade_record = MagicMock()
+        result.trade_record.executed_price = Decimal("2294.78")
+        strat.on_intent_executed(intent, True, result)
+
+        # The slippage-adjusted fill outranks the decide-time fallback price.
+        assert strat._entry_price == Decimal("2294.78")

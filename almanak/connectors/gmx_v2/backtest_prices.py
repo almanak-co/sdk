@@ -308,6 +308,54 @@ class _GMXOracleMarketSource:
         self._coverage = (_utc(start), _utc(end))
         return requested
 
+    def remember_verified_market(self) -> None:
+        """Publish this run's venue-verified market identity to the perps-read catalog.
+
+        The live path populates ``market_catalog`` from the compiler (open /
+        close compilation); a backtest never compiles, so the address-form
+        fill-pricing and close-matching lanes
+        (``PerpsReadRegistry.market_metadata`` → ``market_catalog``) could not
+        resolve the declared market's index asset and rejected every PERP_OPEN
+        as unpriceable — while THIS source held the verified identity for
+        exactly that market. Resolve once through the same venue-verified
+        surface the compiler uses (``GetPerpMarket``, VIB-6561) and remember
+        the result.
+
+        Fail-open on an unavailable/unknowing dynamic surface: the candle
+        plane still serves, and the fill lane keeps its NAMED per-intent
+        rejection — never a guessed identity. Fail-closed on identity
+        disagreement with the candle provenance already accepted for this run,
+        and a no-op before that provenance exists (nothing to cross-check).
+        """
+        if self.market_token is None:
+            return
+        from . import market_catalog
+        from .market_metadata import resolve_market_via_gateway
+
+        try:
+            client, _ = self._gateway()
+            metadata = resolve_market_via_gateway(client, chain=self.chain, market=self.requested_market)
+        except Exception as exc:  # noqa: BLE001 - enrichment only; the fill lane stays loud without it
+            logger.warning(
+                "GMX market metadata unavailable for %s on %s: %s — address-form PERP_OPEN "
+                "fill pricing will reject until the market can be verified",
+                self.requested_market,
+                self.chain,
+                exc,
+            )
+            return
+        if metadata.market_token.lower() != self.market_token:
+            logger.warning(
+                "GMX market metadata identity for %s on %s disagrees with the verified candle "
+                "provenance (%s != %s); refusing to remember it",
+                self.requested_market,
+                self.chain,
+                metadata.market_token,
+                self.market_token,
+            )
+            return
+        market_catalog.remember(self.chain, metadata)
+
     def owns(self, token: TokenRef) -> bool:
         if self.index_symbol is None or self.index_token is None:
             return False
@@ -475,6 +523,10 @@ class GMXOracleDataProvider:
         resolved = await self._source.prepare(requested=requested, start=config.start_time, end=config.end_time)
         resolved_seconds = parse_ohlcv_timeframe(resolved, field_name="resolved GMX timeframe").seconds
         config.apply_resolved_timeframe(resolved, resolved_seconds)
+        # The address-form fill-pricing lane resolves the market's index asset
+        # through the process perps-read catalog, which only the (never-run-in-
+        # backtest) compiler used to populate.
+        await asyncio.to_thread(self._source.remember_verified_market)
         return resolved
 
     def register_token_addresses(self, addresses: dict[str, tuple[str, str]]) -> None:
