@@ -224,14 +224,93 @@ def declared_perp_price_history_targets(
     if explicit_protocol:
         add_protocol(explicit_protocol)
     else:
-        metadata = getattr(strategy, "STRATEGY_METADATA", None)
-        if metadata is None:
-            get_metadata = getattr(strategy, "get_metadata", None)
-            metadata = get_metadata() if callable(get_metadata) else None
-        for protocol in getattr(metadata, "supported_protocols", None) or ():
+        for protocol in getattr(_strategy_metadata(strategy), "supported_protocols", None) or ():
             add_protocol(protocol)
 
     return tuple((protocol, market) for protocol in protocols)
+
+
+def _strategy_metadata(strategy: BacktestableStrategy) -> Any:
+    """The strategy's registration metadata (``STRATEGY_METADATA`` or ``get_metadata()``), if any."""
+    metadata = getattr(strategy, "STRATEGY_METADATA", None)
+    if metadata is None:
+        get_metadata = getattr(strategy, "get_metadata", None)
+        metadata = get_metadata() if callable(get_metadata) else None
+    return metadata
+
+
+_PERP_TRADING_INTENT_TYPES = frozenset({IntentType.PERP_OPEN, IntentType.PERP_CLOSE})
+
+
+def _raise_on_undeclared_perp_market(
+    strategy: BacktestableStrategy,
+    strategy_config: Mapping[str, Any],
+) -> None:
+    """Fail preflight when a perp-trading strategy has no discoverable perp market.
+
+    Preparing the venue candle route is what primes the venue market catalog
+    (``remember_verified_market`` runs inside the provider's
+    ``prepare_backtest``); without it an address-form perp market can never
+    resolve a base price, so every PERP_OPEN is rejected at fill time as
+    unpriceable. A strategy that declares PERP_OPEN/PERP_CLOSE intents on a
+    protocol with a connector-native price plane and yields no target from the
+    declaration ladder is therefore a misconfiguration preflight can name in
+    one line. The ladder walks only the standard keys (``funding_market`` /
+    ``market`` + ``market_address``) by design — a bespoke key such as
+    ``hedge_market_address`` is invisible to it and must fail here, not a full
+    run of rejected fills later.
+    """
+    from almanak.connectors._strategy_base.perp_price_history_registry import (
+        PerpPriceHistoryRegistry,
+    )
+
+    metadata = _strategy_metadata(strategy)
+    declared_intents = getattr(metadata, "intent_types", None) or ()
+    if not any(IntentType.try_parse(value) in _PERP_TRADING_INTENT_TYPES for value in declared_intents):
+        return
+    spec = getattr(strategy, "_spec", None)
+    perp_capable: list[str] = []
+    for value in (
+        strategy_config.get("protocol"),
+        getattr(strategy, "protocol", None),
+        getattr(spec, "protocol", None),
+        *(getattr(metadata, "supported_protocols", None) or ()),
+    ):
+        # Gate on has() — the exact predicate the route filter uses — so a
+        # tier that disables the price plane through that seam (the trust
+        # matrix's network-free cells) disables this guard with it.
+        if not isinstance(value, str) or not PerpPriceHistoryRegistry.has(value):
+            continue
+        canonical = PerpPriceHistoryRegistry.canonical(value) or value.strip().lower().replace("-", "_")
+        if canonical not in perp_capable:
+            perp_capable.append(canonical)
+    if not perp_capable:
+        return
+    declared_market = _declared_strategy_value(strategy, strategy_config, ("funding_market", "market"))
+    if declared_market is None:
+        detail = (
+            "no perp market is declared. Declare 'market' (the pair label, e.g. 'ETH/USD') and "
+            "'market_address' (the venue's market-token contract address) in the strategy config "
+            "— the standard perp market contract; a non-standard key is not discovered"
+        )
+    else:
+        detail = (
+            f"the declared market {declared_market!r} did not resolve to a perp-capable protocol "
+            "(an explicit 'protocol' declaration outranks strategy metadata); declare the perp "
+            "venue's protocol alongside 'market' and 'market_address'"
+        )
+    raise PreflightValidationError(
+        message=(
+            f"Strategy declares perp trading intents on {', '.join(perp_capable)} but no perp "
+            f"price-history route was discovered: {detail}. Without the venue candle route the "
+            "market catalog is never primed and every perp intent is rejected at fill time as "
+            "unpriceable."
+        ),
+        failed_checks=["perp_price_history"],
+        recommendations=["Declare 'market' and 'market_address' under their standard keys in the strategy config."],
+        error_count=1,
+        warning_count=0,
+    )
 
 
 def _declared_strategy_value(
@@ -307,6 +386,7 @@ async def prepare_perp_price_history(
         if PerpPriceHistoryRegistry.has(protocol)
     ]
     if not targets:
+        _raise_on_undeclared_perp_market(strategy, strategy_config)
         if config.timeframe == "auto":
             raise PreflightValidationError(
                 message=(
@@ -357,6 +437,15 @@ async def prepare_perp_price_history(
                 warning_count=0,
             )
         market = declared_address
+    else:
+        # Label-only declaration is supported but drift-prone: the pair label
+        # is display/signal vocabulary, and a stale or re-labeled string fails
+        # runs the declared address would have kept alive.
+        bt_logger.warning(
+            f"Perp market for {protocol} is declared by pair label {market!r} only; also declare "
+            "'market_address' (the venue's market-token contract address) to pin the market "
+            "unambiguously (address-first market contract)."
+        )
     canonical = PerpPriceHistoryRegistry.canonical(protocol)
     assert canonical is not None
     chain_descriptor = ChainRegistry.try_resolve(config.chain)

@@ -61,7 +61,7 @@ async def test_engine_installs_manifest_provider_without_changing_strategy_ticks
         chain="arbitrum",
         timeframe="auto",
     )
-    logger = SimpleNamespace(info=Mock())
+    logger = SimpleNamespace(info=Mock(), warning=Mock())
 
     await prepare_perp_price_history(backtester, strategy, config, logger)
 
@@ -233,5 +233,5 @@ async def test_manifest_chain_metadata_resolves_strictly(monkeypatch: pytest.Mon
             backtester,
             SimpleNamespace(),
             config,
-            SimpleNamespace(info=Mock()),
+            SimpleNamespace(info=Mock(), warning=Mock()),
         )
