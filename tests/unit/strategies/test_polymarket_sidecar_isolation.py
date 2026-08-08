@@ -73,6 +73,31 @@ def isolated_socket(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(socket.socket, "connect_ex", restricted_connect_ex)
 
 
+@pytest.fixture
+def stub_underlying_connect(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[tuple]]:
+    """Replace the REAL ``socket.socket.connect`` / ``connect_ex`` with recorders.
+
+    Must be requested BEFORE ``isolated_socket`` in the test signature so the
+    isolation fixture captures the recorders as its ``orig_connect`` /
+    ``orig_connect_ex`` — an allow-listed connect then reaches a recorder
+    instead of dialling anything, keeping the allow-list check free of real
+    network I/O (a live gateway on the default port would otherwise accept
+    the dial). ``connect_ex`` records and returns 0 (success), mirroring the
+    real call's contract."""
+    reached: dict[str, list[tuple]] = {"connect": [], "connect_ex": []}
+
+    def _record_connect(self: socket.socket, address) -> None:  # type: ignore[no-untyped-def]
+        reached["connect"].append(address)
+
+    def _record_connect_ex(self: socket.socket, address) -> int:  # type: ignore[no-untyped-def]
+        reached["connect_ex"].append(address)
+        return 0
+
+    monkeypatch.setattr(socket.socket, "connect", _record_connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", _record_connect_ex)
+    return reached
+
+
 # =============================================================================
 # Smoke: the patch actually blocks
 # =============================================================================
@@ -89,20 +114,26 @@ class TestIsolationFixture:
         finally:
             s.close()
 
-    def test_allows_gateway_address(self, isolated_socket: None) -> None:
-        """Connect attempt to the gateway port doesn't raise the boundary
-        error (it raises ConnectionRefusedError because nothing is listening,
-        which is a different beast — proves the host/port pair is allowed)."""
+    def test_allows_gateway_address(
+        self, stub_underlying_connect: dict[str, list[tuple]], isolated_socket: None
+    ) -> None:
+        """The allow-listed gateway address must reach the underlying connect
+        AND connect_ex without tripping the boundary — proven against recorded
+        stubs, never a real dial. The disallowed probes double as ordering
+        guards: they only block if the isolation patch wraps the stubs
+        (fixture order held), so a silent inversion cannot fake a pass; the
+        connect_ex probe also smoke-tests its EPERM block-path."""
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(0.5)
         try:
-            with pytest.raises((ConnectionRefusedError, OSError)) as exc_info:
-                s.connect((_GATEWAY_HOST, _GATEWAY_PORT))
-            assert "GATEWAY_BOUNDARY_VIOLATION" not in str(exc_info.value), (
-                "gateway address must be on the allow-list"
-            )
+            with pytest.raises(OSError, match="GATEWAY_BOUNDARY_VIOLATION"):
+                s.connect(("8.8.8.8", 53))
+            assert s.connect_ex(("8.8.8.8", 53)) == errno.EPERM
+            s.connect((_GATEWAY_HOST, _GATEWAY_PORT))
+            assert s.connect_ex((_GATEWAY_HOST, _GATEWAY_PORT)) == 0
         finally:
             s.close()
+        assert stub_underlying_connect["connect"] == [(_GATEWAY_HOST, _GATEWAY_PORT)]
+        assert stub_underlying_connect["connect_ex"] == [(_GATEWAY_HOST, _GATEWAY_PORT)]
 
 
 # =============================================================================

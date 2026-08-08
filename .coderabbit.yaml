@@ -117,6 +117,14 @@ reviews:
       instructions: |
         Verify unit tests use mocks appropriately (no real network/blockchain calls).
         Check assertions are specific (not just "no exception thrown").
+        Sanctioned exception (maintainer decision, PR #3665):
+        tests/unit/strategies/test_ambient_gateway_hermeticity.py may bind a
+        loopback-only, test-owned gRPC server on the default gateway port and
+        dial it explicitly. It is the regression pin proving the unit suite
+        cannot reach an ambient gateway; a mocked gateway surface cannot
+        prove that (removing the hermeticity conftest guard must fail these
+        tests). Do not flag that file's loopback listener or its explicit
+        dial as a real-network violation.
 
   auto_review:
     enabled: true
