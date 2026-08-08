@@ -33,10 +33,12 @@ from typing import Any, ClassVar
 from almanak.connectors._strategy_base.address_registry import AddressRegistry
 from almanak.connectors._strategy_base.perps_read_base import (
     PerpsMarketMeta,
+    PerpsPositionOnChain,
     PerpsPositionPlan,
     PerpsPositionQuery,
     PerpsPositionValue,
     PerpsReadSpec,
+    SimulatedPerpPosition,
 )
 from almanak.core.constants import canonical_chain_name
 
@@ -228,6 +230,22 @@ class PerpsReadRegistry:
         """
         spec = cls._load_spec(cls._normalize(protocol))
         return spec.market_metadata(market_address, canonical_chain_name(chain)) if spec is not None else None
+
+    @classmethod
+    def simulate_position(cls, protocol: str, simulated: SimulatedPerpPosition) -> PerpsPositionOnChain | None:
+        """Project an engine-simulated position into the venue's on-chain read shape.
+
+        Backtest observation parity: delegates to the connector spec's optional
+        ``simulate_position`` hook so the backtest engine never imports a venue's
+        market table or fixed-point scaling. Returns ``None`` when the protocol
+        has no perps read, the venue declares no projection, or the connector
+        cannot resolve the position's identity — callers must treat ``None`` as
+        an *unmeasured* read (``ok=False``), never as an absent position.
+        """
+        spec = cls._load_spec(cls._normalize(protocol))
+        if spec is None or spec.simulate_position is None:
+            return None
+        return spec.simulate_position(simulated)
 
     @classmethod
     def value_position(cls, protocol: str, **kwargs: Any) -> PerpsPositionValue | None:

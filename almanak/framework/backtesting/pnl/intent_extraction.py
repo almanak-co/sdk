@@ -149,21 +149,55 @@ def perp_base_price_candidates(base: str) -> tuple[str, ...]:
     return (base_upper, *wrapped)
 
 
+def registry_perp_base_symbol(market: Any, protocol: Any, chain: Any) -> str | None:
+    """Resolve an ADDRESS-form perp market to its index base symbol.
+
+    Address-first strategies author the venue's market-token address, which
+    the pure symbol parser (``perp_market_base``) deliberately refuses. The
+    venue-neutral perps-read registry serves connector-owned, venue-verified
+    market metadata (index token symbol + decimals) for exactly this identity,
+    so the backtest pricing and close-matching lanes resolve the base through
+    it without the framework naming a venue. Fail-closed: an unknown venue,
+    missing chain, or unverified market returns ``None`` — callers keep their
+    named-rejection / refuse paths, never a guessed symbol.
+    """
+    if not isinstance(market, str):
+        return None
+    candidate = market.strip()
+    if not candidate.lower().startswith("0x"):
+        return None
+    if not isinstance(protocol, str) or not protocol or not chain:
+        return None
+    from almanak.connectors._strategy_base.perps_read_registry import PerpsReadRegistry
+
+    meta = PerpsReadRegistry.market_metadata(protocol, candidate, str(chain))
+    if meta is None:
+        return None
+    symbol = meta.index_token_symbol.strip().upper()
+    return symbol or None
+
+
 def resolve_perp_base_price(
     market: Any,
     market_state: MarketState,
     token_addresses: Mapping[str, tuple[str, str]] | None = None,
+    *,
+    protocol: Any = None,
 ) -> tuple[str | None, str | None, Decimal | None]:
     """Resolve a perp market identifier to ``(base, priced_symbol, price)``.
 
     ``base`` is the canonical base asset symbol (None when the identifier is
-    unparseable — address-style or empty). ``priced_symbol`` is the candidate
+    unparseable). Address-form identifiers resolve through the venue-neutral
+    perps-read registry when ``protocol`` is supplied (venue-verified index
+    metadata; fail-closed on a miss). ``priced_symbol`` is the candidate
     (base or its wrapped-native form) that actually resolved to a positive
     price in ``market_state``; ``price`` is that price. Both are None when the
     base asset genuinely cannot be priced from market state — callers must
     treat that as unpriceable and fail loudly, never substitute $1.
     """
     base = perp_market_base(market)
+    if base is None:
+        base = registry_perp_base_symbol(market, protocol, getattr(market_state, "chain", None))
     if base is None:
         return None, None, None
     for candidate in perp_base_price_candidates(base):
@@ -1077,10 +1111,15 @@ def _explicit_perp_close_match(
     return False, None
 
 
-def _perp_close_base_token(market: Any) -> tuple[str | None, bool]:
+def _perp_close_base_token(market: Any, *, protocol: Any = None, chain: Any = None) -> tuple[str | None, bool]:
     if not isinstance(market, str) or not market:
         return None, False
     base_token = _perp_market_base_token(market)
+    if base_token is None:
+        # Address-first close intents carry the market-token address; resolve
+        # its index base through the venue-verified registry metadata (the
+        # same identity the open path priced with). Fail-closed on a miss.
+        base_token = registry_perp_base_symbol(market, protocol, chain)
     if base_token is None:
         logger.warning(
             "PERP_CLOSE market %r cannot be resolved to a base token; refusing ambiguous close matching",
@@ -1137,7 +1176,7 @@ def _normalized_intent_protocol(intent: Any) -> str | None:
     return None if protocol == "default" else protocol
 
 
-def find_perp_close_position_id(intent: Any, positions: Sequence[Any]) -> str | None:
+def find_perp_close_position_id(intent: Any, positions: Sequence[Any], *, chain: Any = None) -> str | None:
     """Resolve the simulated position a PERP_CLOSE intent targets.
 
     Venue position ids (e.g. PancakeSwap Perps' 0x tradeHash) never equal
@@ -1149,6 +1188,8 @@ def find_perp_close_position_id(intent: Any, positions: Sequence[Any]) -> str | 
     Args:
         intent: PERP_CLOSE intent object
         positions: Open positions to match against
+        chain: The run's chain (keyword-only) — lets an address-form market
+            resolve its index base through venue-verified registry metadata
 
     Returns:
         The matched simulated position id, or None when nothing matches
@@ -1158,13 +1199,15 @@ def find_perp_close_position_id(intent: Any, positions: Sequence[Any]) -> str | 
     if explicit_id_matched:
         return explicit_id
 
-    market = getattr(intent, "market", None)
-    base_token, unresolvable_market = _perp_close_base_token(market)
-    if unresolvable_market:
-        return None
     # Resolve protocol with the same resolver the open path used to stamp the
     # position, so protocol_name / connector / adapter spellings match too.
     protocol = _normalized_intent_protocol(intent)
+    market = getattr(intent, "market", None)
+    base_token, unresolvable_market = _perp_close_base_token(
+        market, protocol=protocol, chain=getattr(intent, "chain", None) or chain
+    )
+    if unresolvable_market:
+        return None
     candidates = _perp_close_candidates(positions, base_token, is_long, protocol)
 
     if not candidates:
@@ -1640,7 +1683,12 @@ def get_executed_price(
         # An unpriceable base falls back to the primary-token read below —
         # PERP_OPEN never reaches that fallback with a $1 mark, because the
         # engine rejects unpriceable perp opens before pricing (s42).
-        _, _, perp_price = resolve_perp_base_price(getattr(intent, "market", None), market_state, token_addresses)
+        _, _, perp_price = resolve_perp_base_price(
+            getattr(intent, "market", None),
+            market_state,
+            token_addresses,
+            protocol=_normalized_intent_protocol(intent),
+        )
         if perp_price is not None:
             market_price = perp_price
         else:

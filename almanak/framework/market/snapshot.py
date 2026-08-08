@@ -3881,16 +3881,42 @@ class MarketSnapshot:
         return health
 
     def perp_positions(self, protocol: str, *, chain: str | None = None) -> PerpsReadResult:
-        """Read the wallet's measured on-chain perp positions for ``protocol``.
+        """Read the wallet's measured perp positions for ``protocol``.
 
         Returns the protocol-neutral :class:`PerpsReadResult`. ``ok=True`` with
         an empty tuple is measured flat; ``ok=False`` is an unavailable read and
-        must never be interpreted as zero exposure. All RPC access is routed
-        through the snapshot's gateway client.
+        must never be interpreted as zero exposure. On a live snapshot all RPC
+        access is routed through the snapshot's gateway client; on a backtest
+        snapshot with a bound simulated position view the read is served from
+        the engine's own book (observation parity) and no gateway call is made.
         """
         from almanak.framework.valuation.perps_position_reader import PerpsPositionReader
 
         effective_chain = self._resolve_chain(chain)
+
+        # Backtest serve-from-sim-state (same doctrine as position_health /
+        # lp_position_value): when the engine wired a simulated position view,
+        # the sim's own perp book IS the venue — instantaneous settlement means
+        # a booked fill is settled state, and this measured read is the same
+        # authority observation-driven strategies close against live. Without
+        # it, every backtest read is ok=False and observation-gated perp
+        # strategies hold forever while the same code trades live. A view that
+        # cannot serve honestly (unregistered venue, unprojectable position)
+        # refuses: ok=False plus a decision-input ledger entry — never a
+        # partial or fabricated book.
+        sim_view = getattr(self, "_simulated_position_view", None)
+        sim_reader = getattr(sim_view, "perp_positions", None) if sim_view is not None else None
+        if callable(sim_reader):
+            from almanak.connectors._strategy_base.perps_read_base import PerpsReadResult as _PerpsReadResult
+
+            try:
+                return sim_reader(protocol, chain=effective_chain, account=self._wallet_address)
+            except Exception as e:  # noqa: BLE001 — unserveable ⇒ unmeasured + ledger, never a raise
+                self._record_critical_data_failure(
+                    "perp_positions", "simulation", f"perp_positions unavailable in backtest: {e}"
+                )
+                return _PerpsReadResult(positions=(), ok=False)
+
         return PerpsPositionReader.from_gateway_client(self._gateway_client).read_positions(
             effective_chain,
             self._wallet_address,

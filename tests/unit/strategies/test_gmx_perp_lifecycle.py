@@ -223,6 +223,9 @@ class TestStrategyAuthoredCancelLifecycle:
         return SimpleNamespace(async_orders=[SimpleNamespace(order_id=order_key)])
 
     def test_first_open_is_a_non_marketable_resting_order(self, strategy):
+        # The cancel/replace choreography is the explicit opt-in mode; the
+        # default (force_action None) is the observation-driven lifecycle.
+        strategy.force_action = "lifecycle"
         market = MagicMock()
         market.price.return_value = Decimal("3000")
         market.collateral_value_usd.return_value = Decimal("10")
@@ -346,6 +349,111 @@ class TestStrategyAuthoredCancelLifecycle:
         strategy._position_observed = True
 
         assert strategy.generate_teardown_intents(TeardownMode.HARD) == []
+
+
+class TestObservationDrivenDefaultLifecycle:
+    """Default (no force_action) lifecycle: open -> observe -> close.
+
+    The recommended perp pattern, portable across live, Anvil, and the PnL
+    backtest plane: no submission mode, no trigger price, no cancellation, and
+    settlement is verified only through the measured ``perp_positions`` read.
+    """
+
+    ORDER_B = "0x" + "22" * 32
+
+    @staticmethod
+    def _intent(intent_type: str):
+        return SimpleNamespace(intent_type=SimpleNamespace(value=intent_type))
+
+    def test_default_open_is_a_market_open(self, strategy):
+        market = MagicMock()
+        market.price.return_value = Decimal("3000")
+        market.collateral_value_usd.return_value = Decimal("10")
+
+        intent = strategy.decide(market)
+
+        assert intent.intent_type.value == "PERP_OPEN"
+        assert intent.settlement_mode == "auto"
+        assert intent.trigger_price is None
+        assert strategy._loop_state == "opening_b"
+
+    def test_open_callback_with_order_key_persists_it(self, strategy):
+        strategy._loop_state = "opening_b"
+
+        strategy.on_intent_executed(
+            self._intent("PERP_OPEN"),
+            True,
+            SimpleNamespace(async_orders=[SimpleNamespace(order_id=self.ORDER_B)]),
+        )
+
+        assert strategy._loop_state == "order_b_pending"
+        assert strategy._replacement_order_key == self.ORDER_B
+
+    def test_open_callback_without_async_orders_falls_back_to_observation(self, strategy):
+        """Synchronous settlement (the PnL backtest plane) carries no order key:
+        the strategy proceeds to the observation gate instead of parking in
+        ``recovery_required`` — the measured venue read is the authority."""
+        strategy._loop_state = "opening_b"
+
+        strategy.on_intent_executed(self._intent("PERP_OPEN"), True, SimpleNamespace())
+
+        assert strategy._loop_state == "order_b_pending"
+        assert strategy._replacement_order_key is None
+
+    def test_close_callback_without_async_orders_falls_back_to_observation(self, strategy):
+        strategy._loop_state = "closing_b"
+        strategy._position_observed = True
+
+        strategy.on_intent_executed(self._intent("PERP_CLOSE"), True, SimpleNamespace())
+
+        assert strategy._loop_state == "close_submitted"
+        assert strategy._close_order_key is None
+
+    def test_malformed_key_with_orders_present_still_requires_recovery(self, strategy):
+        """A result that DOES carry async orders but with an unusable key is a
+        broken live enrichment — the loud recovery path is preserved."""
+        strategy._loop_state = "opening_b"
+
+        strategy.on_intent_executed(
+            self._intent("PERP_OPEN"),
+            True,
+            SimpleNamespace(async_orders=[SimpleNamespace(order_id="adapter-placeholder")]),
+        )
+
+        assert strategy._loop_state == "recovery_required"
+
+    def test_observation_gate_closes_only_after_position_measured(self, strategy):
+        strategy._loop_state = "order_b_pending"
+        market = MagicMock()
+
+        with patch.object(strategy, "_target_position_is_open", return_value=None):
+            assert strategy.decide(market).intent_type.value == "HOLD"
+        assert strategy._loop_state == "order_b_pending"
+
+        with patch.object(strategy, "_target_position_is_open", return_value=False):
+            assert strategy.decide(market).intent_type.value == "HOLD"
+        assert strategy._loop_state == "order_b_pending"
+
+        with patch.object(strategy, "_target_position_is_open", return_value=True):
+            intent = strategy.decide(market)
+        assert intent.intent_type.value == "PERP_CLOSE"
+        assert intent.size_usd is None
+        assert strategy._loop_state == "closing_b"
+        assert strategy._position_observed is True
+
+    def test_close_submitted_completes_only_on_measured_flat(self, strategy):
+        strategy._loop_state = "close_submitted"
+        strategy._position_observed = True
+        market = MagicMock()
+
+        with patch.object(strategy, "_target_position_is_open", return_value=True):
+            assert strategy.decide(market).intent_type.value == "HOLD"
+        assert strategy._loop_state == "close_submitted"
+
+        with patch.object(strategy, "_target_position_is_open", return_value=False):
+            assert strategy.decide(market).intent_type.value == "HOLD"
+        assert strategy._loop_state == "closed"
+        assert strategy._position_observed is False
 
 
 class TestTrackedTokensAdditional:

@@ -5,17 +5,25 @@ Tests the GMX V2 connector end-to-end on Arbitrum with USDC collateral
 (ERC-20 approval path, different from WETH native token path).
 
 Lifecycle modes via force_action config:
+  null/None   - Observation-driven open -> observe -> close: submit a market
+                open, wait until ``market.perp_positions`` measures the
+                position on-venue, submit a full close, wait until the venue
+                measures flat. The recommended perp pattern -- portable across
+                live, managed Anvil, and the PnL backtest plane, because it
+                asks for no pending-order or cancellation surface.
+  "lifecycle" - Open A -> Cancel A -> Open B -> settle B -> Close B. The
+                pending-order surface test: order A is requested in
+                ``submission`` mode so the callback holds the authoritative
+                ``OrderCreated`` key before the managed-Anvil keeper
+                convenience can fill it; cancellation waits for GMX's
+                account-cancel age gate. Live/Anvil only -- the PnL backtest
+                plane refuses PERP_CANCEL_ORDER and has no pending orders.
   "open"      - Open a single long position (for isolated testing)
   "close"     - Close an existing position (for isolated testing)
-  "lifecycle" - Open A -> Cancel A -> Open B -> settle B -> Close B
-  null/None   - Same as "lifecycle"
 
-The default lifecycle deliberately requests the first open in ``submission``
-mode. That gives the strategy callback the authoritative ``OrderCreated`` key
-before the managed-Anvil keeper convenience can fill it. The key and every
-phase are persisted, cancellation waits for GMX's account-cancel age gate, and
-the replacement is not closed until a gateway-routed on-chain position read
-proves it settled.
+Both lifecycles close only after a venue position read proves the open
+settled: the measured read, not the strategy's own cache, is the authority
+(the same three-valued discipline as ``probe_perp_position``).
 """
 
 import logging
@@ -161,25 +169,32 @@ class GMXPerpLifecycleStrategy(IntentStrategy):
                 return Intent.hold(reason="Force action 'close' already executed")
             return Intent.hold(reason=f"Waiting for {self._loop_state} to complete")
 
-        # Strategy-authored lifecycle (open A -> cancel A -> open B -> close B).
+        # Strategy-authored lifecycles. Default: observation-driven
+        # open -> observe -> close. force_action="lifecycle": the pending-order
+        # choreography (open A -> cancel A -> open B -> close B).
         if self._loop_state == "idle":
             current_price = _price_for_open()
             if current_price is None:
                 return Intent.hold(reason=f"Price data unavailable for {index_token}")
-            logger.info("Lifecycle: submitting pending order A")
+            if self.force_action == "lifecycle":
+                logger.info("Lifecycle: submitting pending order A")
+                self._previous_stable_state = "idle"
+                self._loop_state = "opening_a"
+                trigger_fraction = self.pending_trigger_distance_pct / Decimal("100")
+                trigger_price = (
+                    current_price * (Decimal("1") - trigger_fraction)
+                    if self.is_long
+                    else current_price * (Decimal("1") + trigger_fraction)
+                )
+                return self._create_open_intent(
+                    market,
+                    settlement_mode="submission",
+                    trigger_price=trigger_price,
+                )
+            logger.info("Lifecycle: submitting market open")
             self._previous_stable_state = "idle"
-            self._loop_state = "opening_a"
-            trigger_fraction = self.pending_trigger_distance_pct / Decimal("100")
-            trigger_price = (
-                current_price * (Decimal("1") - trigger_fraction)
-                if self.is_long
-                else current_price * (Decimal("1") + trigger_fraction)
-            )
-            return self._create_open_intent(
-                market,
-                settlement_mode="submission",
-                trigger_price=trigger_price,
-            )
+            self._loop_state = "opening_b"
+            return self._create_open_intent(market)
 
         if self._loop_state == "pending_a":
             if self._pending_order_key is None:
@@ -217,13 +232,13 @@ class GMXPerpLifecycleStrategy(IntentStrategy):
         if self._loop_state == "order_b_pending":
             position_open = self._target_position_is_open(market)
             if position_open is None:
-                return Intent.hold(reason="Replacement settlement is unmeasured; refusing to close")
+                return Intent.hold(reason="Open settlement is unmeasured; refusing to close")
             if not position_open:
-                return Intent.hold(reason="Replacement order B is pending keeper settlement")
+                return Intent.hold(reason="Submitted open is pending settlement")
             self._position_observed = True
             self._previous_stable_state = "order_b_pending"
             self._loop_state = "closing_b"
-            logger.info("Lifecycle: replacement position measured on-chain; submitting full close")
+            logger.info("Lifecycle: position measured on-venue; submitting full close")
             return self._create_close_intent()
 
         if self._loop_state == "close_submitted":
@@ -236,7 +251,10 @@ class GMXPerpLifecycleStrategy(IntentStrategy):
             self._previous_stable_state = "closed"
             self._position_observed = False
             self._position_size_usd = Decimal("0")
-            logger.info("Lifecycle complete -- Open A, Cancel A, Open B, Close B confirmed")
+            if self.force_action == "lifecycle":
+                logger.info("Lifecycle complete -- Open A, Cancel A, Open B, Close B confirmed")
+            else:
+                logger.info("Lifecycle complete -- open observed on-venue, close measured flat")
             return Intent.hold(reason="Lifecycle complete")
 
         if self._loop_state == "open":
@@ -349,35 +367,7 @@ class GMXPerpLifecycleStrategy(IntentStrategy):
         logger.info(f"Intent {intent_type} executed successfully")
 
         if intent_type == "PERP_OPEN":
-            prior_state = self._loop_state
-            if prior_state == "opening_a":
-                order_key = self._capture_order_key_or_require_recovery(result, phase="opening_a")
-                if order_key is None:
-                    return
-                self._pending_order_key = order_key
-                self._pending_order_created_at = None
-                self._loop_state = "pending_a"
-                self._previous_stable_state = "pending_a"
-                logger.info("Order A accepted and persisted: %s", order_key)
-                return
-            if prior_state == "opening_b":
-                order_key = self._capture_order_key_or_require_recovery(result, phase="opening_b")
-                if order_key is None:
-                    return
-                self._replacement_order_key = order_key
-                self._loop_state = "order_b_pending"
-                self._previous_stable_state = "order_b_pending"
-                logger.info("Replacement order B accepted and persisted: %s", order_key)
-                return
-            self._loop_state = "open"
-            # Promote the stable-state marker so a later failed close reverts
-            # to "open" (the current truth), not whatever was last recorded by
-            # decide() — typically "idle" when decide() opened the position,
-            # which would silently hide a live position from
-            # get_open_positions() after a failed teardown.
-            self._previous_stable_state = "open"
-            if prior_state != "open":
-                logger.info(f"State: {prior_state} -> open")
+            self._on_perp_open_executed(result)
         elif intent_type == "PERP_CANCEL_ORDER":
             if self._loop_state != "cancelling_a":
                 logger.warning("Ignoring unexpected cancel callback in state %s", self._loop_state)
@@ -391,12 +381,14 @@ class GMXPerpLifecycleStrategy(IntentStrategy):
         elif intent_type == "PERP_CLOSE":
             prior_state = self._loop_state
             if prior_state == "closing_b":
-                self._close_order_key = self._capture_order_key_or_require_recovery(result, phase="closing_b")
-                if self._close_order_key is None:
+                order_key, capture_ok = self._order_key_or_observation_fallback(result, phase="closing_b")
+                if not capture_ok:
                     return
+                self._close_order_key = order_key
                 self._loop_state = "close_submitted"
                 self._previous_stable_state = "close_submitted"
-                logger.info("Final close order accepted: %s", self._close_order_key)
+                if order_key is not None:
+                    logger.info("Final close order accepted: %s", order_key)
                 return
             self._loop_state = "closed"
             self._previous_stable_state = "closed"
@@ -405,6 +397,39 @@ class GMXPerpLifecycleStrategy(IntentStrategy):
             self._position_size_usd = Decimal("0")
             if prior_state != "closed":
                 logger.info(f"State: {prior_state} -> closed")
+
+    def _on_perp_open_executed(self, result: Any) -> None:
+        """Advance the machine after a successful PERP_OPEN (all lifecycle modes)."""
+        prior_state = self._loop_state
+        if prior_state == "opening_a":
+            order_key = self._capture_order_key_or_require_recovery(result, phase="opening_a")
+            if order_key is None:
+                return
+            self._pending_order_key = order_key
+            self._pending_order_created_at = None
+            self._loop_state = "pending_a"
+            self._previous_stable_state = "pending_a"
+            logger.info("Order A accepted and persisted: %s", order_key)
+            return
+        if prior_state == "opening_b":
+            order_key, capture_ok = self._order_key_or_observation_fallback(result, phase="opening_b")
+            if not capture_ok:
+                return
+            self._replacement_order_key = order_key
+            self._loop_state = "order_b_pending"
+            self._previous_stable_state = "order_b_pending"
+            if order_key is not None:
+                logger.info("Open order accepted and persisted: %s", order_key)
+            return
+        self._loop_state = "open"
+        # Promote the stable-state marker so a later failed close reverts
+        # to "open" (the current truth), not whatever was last recorded by
+        # decide() — typically "idle" when decide() opened the position,
+        # which would silently hide a live position from
+        # get_open_positions() after a failed teardown.
+        self._previous_stable_state = "open"
+        if prior_state != "open":
+            logger.info(f"State: {prior_state} -> open")
 
     @staticmethod
     def _authoritative_order_key(result: Any) -> str:
@@ -434,6 +459,31 @@ class GMXPerpLifecycleStrategy(IntentStrategy):
                 exc,
             )
             return None
+
+    def _order_key_or_observation_fallback(self, result: Any, *, phase: str) -> tuple[str | None, bool]:
+        """Capture the order key, or fall back to venue-read verification.
+
+        Returns ``(key, capture_ok)``. A result with NO asynchronous orders is
+        a synchronous settlement (the PnL backtest plane books fills instantly,
+        so no order ever exists) or a result that lost its order identity —
+        either way the safe next step is the same: never replay, proceed to the
+        observation gate, and let the measured ``perp_positions`` read decide.
+        Observing an open position risk-reduces (it gets closed); an unsettled
+        or lost order holds at the gate forever, exactly like the old
+        ``recovery_required`` park but able to unwind when the venue does show
+        the position. A result that DOES carry asynchronous orders but with a
+        malformed or ambiguous key keeps the loud ``recovery_required`` path —
+        that shape only occurs on a broken live enrichment.
+        """
+        orders = tuple(getattr(result, "async_orders", ()) or ())
+        if not orders:
+            logger.warning(
+                "GMX %s executed with no asynchronous order; verifying settlement via the venue position read",
+                phase,
+            )
+            return None, True
+        order_key = self._capture_order_key_or_require_recovery(result, phase=phase)
+        return order_key, order_key is not None
 
     # --- State persistence (required so teardown survives restarts) ---
 

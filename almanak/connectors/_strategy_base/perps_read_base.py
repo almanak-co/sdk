@@ -52,6 +52,7 @@ __all__ = [
     "PerpsPositionValue",
     "PerpsReadResult",
     "PerpsReadSpec",
+    "SimulatedPerpPosition",
     "decode_uint_hex",
     "pad_address",
 ]
@@ -166,6 +167,41 @@ class PerpsMarketMeta:
 
 
 @dataclass(frozen=True)
+class SimulatedPerpPosition:
+    """Human-unit description of one engine-simulated perp position.
+
+    The backtest engine books perp fills in human units (Decimal USD notional,
+    base-asset units, authoring-surface market keys like ``"ETH/USD"``). The
+    live observation surface (:meth:`MarketSnapshot.perp_positions`) serves raw
+    venue-decimal :class:`PerpsPositionOnChain` rows keyed by contract
+    addresses. A connector that supports backtest observation parity declares
+    ``simulate_position`` on its :class:`PerpsReadSpec` to project the former
+    into the latter — venue scaling and market-address resolution are venue
+    knowledge and stay in the connector; token identity (collateral address /
+    decimals) is token knowledge and arrives pre-resolved by the framework.
+
+    ``size_usd`` carries the position's accumulated entry notional (GMX
+    ``sizeInUsd`` semantics — not marked to market); ``size_tokens`` the base
+    asset units. ``None`` fields are *unmeasured* identity (Empty≠Zero): the
+    connector must return ``None`` rather than guess a scale or an address.
+    """
+
+    chain: str
+    account: str
+    #: Authoring-surface market key ("ETH/USD") or a raw market address.
+    market: str
+    is_long: bool
+    size_usd: Decimal
+    size_tokens: Decimal
+    collateral_token: str | None
+    collateral_token_address: str | None
+    collateral_token_decimals: int | None
+    collateral_amount: Decimal | None
+    #: Unix seconds of the simulated open.
+    opened_at: int
+
+
+@dataclass(frozen=True)
 class PerpsPositionQuery:
     """A resolved perp-position read request.
 
@@ -219,6 +255,16 @@ class PerpsReadSpec:
             reducer stamps (``"gmx"`` keeps GMX keys byte-identical).
         markets_for_chain: ``chain -> markets`` for per-market venues; ``None``
             for range-read venues (GMX).
+        simulate_position: optional backtest observation-parity projection —
+            ``SimulatedPerpPosition -> PerpsPositionOnChain | None``. Projects an
+            engine-simulated position into the venue's raw on-chain read shape
+            (real market/collateral addresses, venue fixed-point scaling) so
+            ``MarketSnapshot.perp_positions`` can serve the sim's own book in a
+            backtest. Must return ``None`` — never a guessed address or scale —
+            when the identity cannot be resolved; the framework then serves an
+            honest unmeasured read (``ok=False``). ``None`` (undeclared) means
+            the venue has no backtest observation parity and its backtest perp
+            reads stay unmeasured.
     """
 
     contract_kinds: Mapping[str, tuple[str, ...]]
@@ -228,6 +274,7 @@ class PerpsReadSpec:
     value_position: Callable[..., PerpsPositionValue]
     position_key_prefix: str = "gmx"
     markets_for_chain: Callable[[str], tuple[str, ...]] | None = None
+    simulate_position: Callable[[SimulatedPerpPosition], PerpsPositionOnChain | None] | None = None
 
 
 @dataclass(frozen=True)

@@ -172,7 +172,9 @@ def test_build_calls_empty_when_a_target_role_is_unresolved():
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.parametrize(("market", "label", "symbol", "decimals"), [(_ETH_MARKET, "ETH/USD", "ETH", 18), (_BTC_MARKET, "BTC/USD", "BTC", 8)])
+@pytest.mark.parametrize(
+    ("market", "label", "symbol", "decimals"), [(_ETH_MARKET, "ETH/USD", "ETH", 18), (_BTC_MARKET, "BTC/USD", "BTC", 8)]
+)
 def test_market_metadata_resolves_symbol_and_decimals(market, label, symbol, decimals):
     # The framework's pre-refactor ``_resolve_perps_index_token`` /
     # ``_get_perps_index_decimals`` helpers (the PR-2 oracle) were deleted in PR-3.
@@ -535,3 +537,92 @@ class TestValuePerpsPosition:
             index_token_decimals=18,
         )
         assert result.leverage == Decimal("0")
+
+
+# ---------------------------------------------------------------------------
+# Backtest observation parity: _gmx_simulate_position
+# ---------------------------------------------------------------------------
+
+
+def _simulated(**overrides):
+    from almanak.connectors._strategy_base.perps_read_base import SimulatedPerpPosition
+
+    base = {
+        "chain": "arbitrum",
+        "account": _ACCOUNT,
+        "market": "ETH/USD",
+        "is_long": True,
+        "size_usd": Decimal("10"),
+        "size_tokens": Decimal("0.005"),
+        "collateral_token": "USDC",
+        "collateral_token_address": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+        "collateral_token_decimals": 6,
+        "collateral_amount": Decimal("5"),
+        "opened_at": 1_700_000_000,
+    }
+    base.update(overrides)
+    return SimulatedPerpPosition(**base)
+
+
+class TestSimulatePosition:
+    """Connector-owned projection of an engine-simulated position (backtest
+    observation parity, address-first): the market identity must be a
+    venue-verified catalog row — reached by the authored market-token address
+    or an unambiguous remembered label — and GMX fixed-point scaling is applied
+    exactly (USD at 30 decimals, sizes at index decimals, collateral at
+    collateral-token decimals). A catalog miss is "not verified in this
+    process": the projection refuses (None) rather than guess an address or a
+    scale, and the framework serves an unmeasured read."""
+
+    def test_projects_verified_label_with_gmx_scaling(self):
+        prime_catalog(market_record("arbitrum", "ETH/USD"), chain="arbitrum")
+
+        row = gmx_perps._gmx_simulate_position(_simulated())
+
+        assert row is not None
+        assert row.market == _ETH_MARKET
+        assert row.collateral_token == "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
+        assert row.account == _ACCOUNT
+        assert row.is_long is True
+        assert row.size_in_usd == 10 * 10**_GMX_USD_DECIMALS
+        assert row.size_in_tokens == int(Decimal("0.005") * 10**18)  # ETH index: 18 dec
+        assert row.collateral_amount == 5 * 10**6
+        assert row.increased_at_time == 1_700_000_000
+        assert row.is_active is True
+        assert row.key_prefix == "gmx"
+
+    def test_accepts_verified_market_address_verbatim(self):
+        # The address-first contract: the demo authors the market-token
+        # address, so the stamped identity arrives as an address; the served
+        # row carries the verified record's canonical checksummed form.
+        prime_catalog(market_record("arbitrum", "ETH/USD"), chain="arbitrum")
+
+        row = gmx_perps._gmx_simulate_position(_simulated(market=_ETH_MARKET.lower()))
+
+        assert row is not None
+        assert row.market == _ETH_MARKET
+
+    def test_refuses_unverified_market(self):
+        # Empty catalog: a miss means "not verified in this process", never
+        # "does not exist" — the projection refuses for BOTH identity forms.
+        assert gmx_perps._gmx_simulate_position(_simulated()) is None
+        assert gmx_perps._gmx_simulate_position(_simulated(market=_ETH_MARKET)) is None
+
+    def test_refuses_unknown_label_and_foreign_address_when_catalog_is_primed(self):
+        prime_catalog(market_record("arbitrum", "ETH/USD"), chain="arbitrum")
+        assert gmx_perps._gmx_simulate_position(_simulated(market="NOTLISTED/USD")) is None
+        assert gmx_perps._gmx_simulate_position(_simulated(market="0x" + "99" * 20)) is None
+
+    def test_refuses_unresolved_collateral_identity(self):
+        prime_catalog(market_record("arbitrum", "ETH/USD"), chain="arbitrum")
+        assert gmx_perps._gmx_simulate_position(_simulated(collateral_token_address=None)) is None
+        assert gmx_perps._gmx_simulate_position(_simulated(collateral_token_decimals=None)) is None
+        assert gmx_perps._gmx_simulate_position(_simulated(collateral_amount=None)) is None
+
+    def test_registry_dispatches_simulate_position(self):
+        prime_catalog(market_record("arbitrum", "ETH/USD"), chain="arbitrum")
+        row = PerpsReadRegistry.simulate_position("gmx_v2", _simulated(market=_ETH_MARKET))
+        assert row is not None
+        assert row.market == _ETH_MARKET
+        # An unregistered venue refuses through the registry too.
+        assert PerpsReadRegistry.simulate_position("uniswap_v3", _simulated()) is None

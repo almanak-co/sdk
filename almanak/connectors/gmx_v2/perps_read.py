@@ -44,6 +44,7 @@ from almanak.connectors._strategy_base.perps_read_base import (
     PerpsPositionValue,
     PerpsReadResult,
     PerpsReadSpec,
+    SimulatedPerpPosition,
 )
 from almanak.connectors.gmx_v2 import market_catalog
 
@@ -250,6 +251,57 @@ def value_perps_position(
     )
 
 
+def _gmx_simulate_position(simulated: SimulatedPerpPosition) -> PerpsPositionOnChain | None:
+    """Project an engine-simulated position into GMX's raw on-chain read shape.
+
+    Backtest observation parity, address-first: the market identity must be a
+    venue-verified ``market_catalog`` row — reached by the market-token
+    address the strategy authored (the address-first contract), or by a label
+    that the remembered catalog resolves unambiguously. Every identity field
+    must resolve or the projection refuses (``None``) — a guessed address
+    would make the strategy-side matchers (market/collateral address
+    equality) silently never match, and a guessed scale would fabricate a
+    size. A catalog miss means "not verified in this process", and refusing
+    keeps that Empty≠Zero distinction: the framework serves an unmeasured
+    read, never an invented one.
+    """
+    from almanak.connectors.gmx_v2.market_rules import canonicalise_market
+
+    market_address: str | None
+    if simulated.market.startswith("0x"):
+        market_address = simulated.market
+    else:
+        market_address = market_catalog.address_for_label(simulated.chain, canonicalise_market(simulated.market))
+    if market_address is None:
+        return None
+    record = market_catalog.by_address(simulated.chain, market_address)
+    if record is None:
+        return None
+    if simulated.collateral_token_address is None or simulated.collateral_token_decimals is None:
+        return None
+    if simulated.collateral_amount is None:
+        return None
+    return PerpsPositionOnChain(
+        account=simulated.account,
+        # The verified record's canonical (checksummed) market-token form, so
+        # the served identity is byte-identical to a live reducer's output.
+        market=record.market_token,
+        collateral_token=simulated.collateral_token_address,
+        size_in_usd=int(simulated.size_usd * _USD_DIVISOR),
+        size_in_tokens=int(simulated.size_tokens * Decimal(10**record.index_token_decimals)),
+        collateral_amount=int(simulated.collateral_amount * Decimal(10**simulated.collateral_token_decimals)),
+        is_long=simulated.is_long,
+        # The sim plane models funding as a USD accrual on the position, not as
+        # GMX's raw per-size accumulators; these read as zero (no pending raw
+        # accrual), matching a position whose fees were just settled.
+        borrowing_factor=0,
+        funding_fee_amount_per_size=0,
+        increased_at_time=simulated.opened_at,
+        decreased_at_time=0,
+        key_prefix="gmx",
+    )
+
+
 #: GMX V2's published perp-read capability. Read targets are the per-chain
 #: ``reader`` (the call target) and ``data_store`` (a calldata arg), both owned by
 #: ``gmx_v2/addresses.py``. GMX returns the whole position book in one range read,
@@ -262,4 +314,5 @@ PERPS_READ_SPEC = PerpsReadSpec(
     value_position=value_perps_position,
     position_key_prefix="gmx",
     markets_for_chain=None,
+    simulate_position=_gmx_simulate_position,
 )

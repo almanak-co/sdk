@@ -71,7 +71,7 @@ from dataclasses import dataclass, field
 # We define the protocols inline and create simple default implementations
 from dataclasses import dataclass as _dataclass
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
@@ -1551,6 +1551,77 @@ class SimulatedPositionView:
     def _portfolio_chain(self) -> str:
         chain = getattr(self._market_state, "chain", None)
         return chain if isinstance(chain, str) and chain else DEFAULT_CHAIN
+
+    def perp_positions(self, protocol: str, *, chain: str | None = None, account: str = "") -> Any:
+        """Serve the sim's own perp book as a measured venue read (observation parity).
+
+        The instantaneous-settlement envelope decision: in the PnL plane a
+        booked fill IS the settled venue state, so the measured
+        ``perp_positions`` read — the same authority live strategies close
+        against — is served from the engine's book. ``ok=True`` with an empty
+        tuple is measured flat (the sim book is the venue in a backtest).
+
+        Raises on anything that cannot be served honestly — an unregistered
+        perps venue, or a position whose identity cannot be projected into the
+        venue's raw on-chain shape. The snapshot accessor converts a raise into
+        an unmeasured read (``ok=False``) plus a decision-input ledger entry.
+        A partially projected book is never served: an omitted position would
+        read as closed exposure and trigger a duplicate open or a skipped
+        close.
+        """
+        from almanak.connectors._strategy_base.perps_read_base import (
+            PerpsReadResult,
+            SimulatedPerpPosition,
+        )
+        from almanak.connectors._strategy_base.perps_read_registry import PerpsReadRegistry
+
+        canonical = PerpsReadRegistry.canonical(protocol)
+        if canonical is None:
+            raise ValueError(f"protocol {protocol!r} has no connector perps read; simulated book cannot be served")
+        run_chain = str(chain) if chain else str(getattr(self._portfolio, "chain", "") or self._portfolio_chain())
+
+        projected: list[Any] = []
+        for position in self._portfolio.positions:
+            if not position.is_perp or position.is_liquidated:
+                continue
+            position_protocol = PerpsReadRegistry.canonical(str(position.protocol)) or str(position.protocol).lower()
+            if position_protocol != canonical:
+                continue
+            metadata = position.metadata or {}
+            market_label = metadata.get("perp_market")
+            if not market_label:
+                raise ValueError(
+                    f"simulated perp position {position.position_id!r} carries no market identity "
+                    "(intent had no market field); cannot project it into the venue read shape"
+                )
+            size_tokens = next(iter(position.amounts.values()), None)
+            if size_tokens is None and position.entry_price > 0:
+                size_tokens = position.notional_usd / position.entry_price
+            if size_tokens is None:
+                raise ValueError(f"simulated perp position {position.position_id!r} has no derivable base-asset size")
+            raw_amount = metadata.get("perp_collateral_amount")
+            raw_decimals = metadata.get("perp_collateral_decimals")
+            simulated = SimulatedPerpPosition(
+                chain=run_chain,
+                account=account,
+                market=str(market_label),
+                is_long=position.is_long,
+                size_usd=position.notional_usd,
+                size_tokens=size_tokens,
+                collateral_token=metadata.get("perp_collateral_token"),
+                collateral_token_address=metadata.get("perp_collateral_address"),
+                collateral_token_decimals=int(raw_decimals) if raw_decimals is not None else None,
+                collateral_amount=Decimal(str(raw_amount)) if raw_amount is not None else None,
+                opened_at=int(position.entry_time.timestamp()),
+            )
+            row = PerpsReadRegistry.simulate_position(canonical, simulated)
+            if row is None:
+                raise ValueError(
+                    f"connector {canonical!r} could not project simulated perp position "
+                    f"{position.position_id!r} (market {market_label!r} on {run_chain!r}) into its on-chain shape"
+                )
+            projected.append(row)
+        return PerpsReadResult(positions=tuple(projected), ok=True)
 
 
 class BacktestPoolPriceView:
@@ -5004,7 +5075,7 @@ class PnLBacktester:
                 from .intent_extraction import perp_base_price_candidates, resolve_perp_base_price
 
                 base, priced_symbol, _price = resolve_perp_base_price(
-                    market, market_state, self._registered_token_addresses()
+                    market, market_state, self._registered_token_addresses(), protocol=protocol
                 )
                 if priced_symbol is None:
                     tried = ", ".join(perp_base_price_candidates(base)) if base is not None else market
@@ -6131,7 +6202,7 @@ class PnLBacktester:
         # address-native market states stay priceable too; the funding lane
         # unwraps it back to the bare base for its "<BASE>-USD" keys.
         _, priced_symbol, _price = resolve_perp_base_price(
-            getattr(intent, "market", None), market_state, self._registered_token_addresses()
+            getattr(intent, "market", None), market_state, self._registered_token_addresses(), protocol=protocol
         )
         if priced_symbol is not None:
             resolved, resolved_price = self._position_token_and_price(priced_symbol, market_state)
@@ -6150,7 +6221,7 @@ class PnLBacktester:
         )
 
         factory = SimulatedPosition.perp_long if intent_is_long(intent) else SimulatedPosition.perp_short
-        return factory(
+        position = factory(
             token=token,
             collateral_usd=collateral_usd,
             leverage=leverage,
@@ -6158,6 +6229,62 @@ class PnLBacktester:
             entry_time=timestamp,
             protocol=protocol,
         )
+        self._stamp_perp_observation_identity(position, intent, market_state)
+        return position
+
+    def _stamp_perp_observation_identity(
+        self,
+        position: "SimulatedPosition",
+        intent: Any,
+        market_state: MarketState,
+    ) -> None:
+        """Stamp authoring-surface identity onto a simulated perp open.
+
+        The snapshot's simulated ``perp_positions`` read projects positions into
+        the venue's raw on-chain shape (real market / collateral addresses), and
+        `SimulatedPosition` itself stores only a priceable base-token key — the
+        intent's market key and collateral identity would otherwise be parsed
+        away here. Resolution is registered-map-first (the run's own identity,
+        never a guess), resolver-fallback for the address and always the
+        resolver for decimals. Stamping is best-effort by design: the open
+        itself must not fail on unresolvable observation identity — only the
+        observation surface later refuses, with a ledger entry naming the gap.
+        """
+        metadata = position.metadata
+        market_label = getattr(intent, "market", None)
+        if market_label:
+            metadata["perp_market"] = str(market_label)
+        collateral_token = getattr(intent, "collateral_token", None)
+        if not collateral_token:
+            return
+        collateral_token = str(collateral_token)
+        metadata["perp_collateral_token"] = collateral_token
+        raw_amount = getattr(intent, "collateral_amount", None)
+        try:
+            amount = Decimal(str(raw_amount))
+        except (InvalidOperation, TypeError, ValueError):
+            amount = None
+        if amount is not None and amount > 0:
+            metadata["perp_collateral_amount"] = str(amount)
+
+        chain = str(getattr(market_state, "chain", DEFAULT_CHAIN))
+        registered = self._registered_token_addresses().get(collateral_token.strip().upper())
+        address = registered[1] if registered is not None else None
+        from almanak.framework.data.tokens import TokenResolutionError, get_token_resolver
+
+        try:
+            resolved = get_token_resolver().resolve(
+                address or collateral_token, chain, log_errors=False, skip_gateway=True
+            )
+        except (TokenResolutionError, ValueError):
+            resolved = None
+        if resolved is not None:
+            address = address or getattr(resolved, "address", None)
+            decimals = getattr(resolved, "decimals", None)
+            if decimals is not None:
+                metadata["perp_collateral_decimals"] = int(decimals)
+        if address:
+            metadata["perp_collateral_address"] = str(address)
 
     def _resolve_position_close(
         self,
@@ -6508,7 +6635,7 @@ class PnLBacktester:
         """
         from .intent_extraction import find_perp_close_position_id
 
-        position_close_id = find_perp_close_position_id(intent, portfolio.positions)
+        position_close_id = find_perp_close_position_id(intent, portfolio.positions, chain=portfolio.chain)
         if position_close_id is None:
             return None, amount_usd
         position = portfolio.get_position(position_close_id)

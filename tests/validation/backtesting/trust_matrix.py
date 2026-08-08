@@ -69,6 +69,7 @@ INVARIANT_ROWS: tuple[str, ...] = (
     "funding_gated_entry",
     "funding_fallback_provenance",
     "funding_lane_coherence",
+    "position_observation_lifecycle",
     "venue_native_price_plane",
     "rejection_no_state_change",
     "execution_error_terminality",
@@ -385,6 +386,21 @@ CELLS: tuple[TrustCell, ...] = (
         # measured history - so a strategy could enter on the measured rate
         # while its position accrued the fallback. The adapter now bridges
         # through the same worker-thread path.
+    ),
+    _cell(
+        "position_observation_lifecycle",
+        "perp",
+        "An observation-gated perp strategy (the real gmx_perp_lifecycle demo, no force_action) "
+        "progresses open -> observe via market.perp_positions -> close through the real engine loop: "
+        "the sim's own book is served back as a measured venue read and the run books exactly one "
+        "PERP_OPEN and one PERP_CLOSE.",
+        # Guards the simulated perp observation bridge: before it,
+        # perp_positions returned ok=False on every backtest tick (no gateway),
+        # so observation-gated perp strategies — the recommended pattern —
+        # submitted their open and held forever waiting to observe a fill the
+        # engine had already booked (reproduced 2026-08-07: a 13-day GMX
+        # backtest needed force_action="open" to trade at all and produced
+        # 180 stacked opens / 0 closes).
     ),
     _cell(
         "venue_native_price_plane",

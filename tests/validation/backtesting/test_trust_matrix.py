@@ -1446,6 +1446,104 @@ def test_perp_default_funding_fallback_is_exact_and_visible() -> None:
     ]
 
 
+def _observation_lifecycle_demo():
+    """The REAL gmx_perp_lifecycle demo class, framework machinery stubbed.
+
+    Explicit class import — the registry name ``gmx_perp_lifecycle`` is
+    shadowed by an incubating twin when auto-discovery scans the repo root, so
+    a name-based lookup could silently test the wrong strategy.
+    """
+    from unittest.mock import patch
+
+    from almanak.demo_strategies.gmx_perp_lifecycle.strategy import GMXPerpLifecycleStrategy
+
+    with patch(
+        "almanak.framework.strategies.intent_strategy.IntentStrategy.__init__",
+        return_value=None,
+    ):
+        demo = GMXPerpLifecycleStrategy.__new__(GMXPerpLifecycleStrategy)
+    demo._deployment_id = "trust-matrix-perp-observation"
+    demo._chain = "arbitrum"
+    demo.market = "ETH/USD"
+    # Address-first market contract: the demo authors the market-token address.
+    demo.market_address = "0x70d95587d40A2caf56bd97485aB3Eec10Bee6336"
+    demo.collateral_token = "USDC"
+    demo.collateral_amount = Decimal("5")
+    demo.leverage = Decimal("2.0")
+    demo.is_long = True
+    demo.max_slippage_pct = Decimal("2.0")
+    demo.force_action = None
+    demo.cancel_min_age_seconds = 315
+    demo.pending_trigger_distance_pct = Decimal("50")
+    demo._loop_state = "idle"
+    demo._previous_stable_state = "idle"
+    demo._position_size_usd = Decimal("0")
+    demo._pending_order_key = None
+    demo._pending_order_created_at = None
+    demo._replacement_order_key = None
+    demo._close_order_key = None
+    demo._position_observed = False
+    return demo
+
+
+@pytest.mark.trust_cell("perp:position_observation_lifecycle")
+def test_observation_gated_demo_lifecycle_closes_through_the_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The real demo, default mode, runs open -> observe -> close in the loop.
+
+    Guards the simulated perp observation bridge. Before it, every backtest
+    ``market.perp_positions`` read returned ``ok=False`` (no gateway), so
+    observation-gated perp strategies — the recommended pattern — submitted
+    their open and held forever waiting to observe a fill the engine had
+    already booked (reproduced 2026-08-07: a 13-day GMX backtest needed
+    ``force_action="open"`` to trade at all and produced 180 stacked opens /
+    0 closes). Reaching ``"closed"`` requires the observation gate to pass in
+    BOTH directions: the open measured on-venue, then the close measured flat.
+    """
+    from almanak.connectors._strategy_base.perp_price_history_registry import PerpPriceHistoryRegistry
+    from almanak.connectors.gmx_v2 import market_catalog
+
+    # Network-free tier: the demo's declared (gmx_v2, ETH/USD) target would
+    # otherwise route the venue-native price-history prewarm to the gateway.
+    # Prices come from the synthetic provider; the price plane is not this
+    # cell's subject (perp:venue_native_price_plane owns it).
+    monkeypatch.setattr(PerpPriceHistoryRegistry, "has", classmethod(lambda cls, protocol: False))
+
+    # Address-first: the observation projection resolves identity only through
+    # the process's venue-verified catalog. A live run populates it via dynamic
+    # verification (gateway GetPerpMarket); the network-free tier primes it
+    # from the audit-pinned fixture row and cleans up after itself.
+    from tests.unit.connectors.gmx_v2.market_fixtures import market_record
+
+    market_catalog.clear()
+    market_catalog.remember("arbitrum", market_record("arbitrum", "ETH/USD"))
+    try:
+        demo = _observation_lifecycle_demo()
+        series = flat_series(8)
+        # The demo prices its index token by the market's base symbol ("ETH");
+        # the address-form intent market resolves to that base through the
+        # primed venue-verified registry metadata, then prices off ETH/WETH.
+        series["ETH"] = list(series["WETH"])
+        result = run_backtest(
+            demo,
+            series,
+            hours=5,
+            strategy_type="perp",
+            data_config=BacktestDataConfig(use_historical_funding=False),
+        )
+    finally:
+        market_catalog.clear()
+
+    assert result.success
+    assert demo._loop_state == "closed", (
+        f"lifecycle did not complete: parked in {demo._loop_state!r} — the observation gate never passed"
+    )
+    kinds = [str(trade.intent_type.value) for trade in result.trades]
+    assert kinds.count("PERP_OPEN") == 1, f"expected exactly one open, saw {kinds}"
+    assert kinds.count("PERP_CLOSE") == 1, f"expected exactly one close, saw {kinds}"
+    assert all(trade.success for trade in result.trades)
+    assert kinds.index("PERP_OPEN") < kinds.index("PERP_CLOSE")
+
+
 @pytest.mark.trust_cell("perp:funding_lane_coherence")
 def test_perp_funding_lanes_agree_on_measured_rate(monkeypatch: pytest.MonkeyPatch) -> None:
     """decide()-visible funding and position-accrued funding share one source.
