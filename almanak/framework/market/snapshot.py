@@ -889,6 +889,13 @@ class MarketSnapshot:
         # config casing).
         if chain is None or requested_chain == self._chain:
             seeded = self._seeded_price_for_symbol(token)
+            if seeded is None:
+                # Same registry-declared native<->wrapped 1:1 plane the quote
+                # leg already resolves through: a backtest seeds only the
+                # tracked ERC-20 (WETH), while a strategy legitimately reads
+                # the gas symbol (``price("ETH")``) — an honest miss here
+                # would silently hold the whole run (the ALM-3067 shape).
+                seeded = self._seeded_native_wrapped_usd(oracle_token, requested_chain)
             if seeded is not None:
                 in_quote = self._seeded_price_in_quote(seeded, quote, requested_chain)
                 if in_quote is not None:
@@ -2613,8 +2620,21 @@ class MarketSnapshot:
         and never guessed: a quote with no seeded price and no native/wrapped
         equivalence stays an honest miss (``None``).
         """
-        candidates = [quote, *self._native_wrapped_equivalents(quote, requested_chain)]
-        for candidate in candidates:
+        seeded = self._seeded_price_for_symbol(self._token_cache_key(quote, requested_chain))
+        if seeded is not None:
+            return seeded
+        return self._seeded_native_wrapped_usd(quote, requested_chain)
+
+    def _seeded_native_wrapped_usd(self, symbol: str, requested_chain: str) -> Decimal | None:
+        """Seeded USD price of ``symbol``'s registry-declared 1:1 equivalent.
+
+        The native gas symbol prices off its seeded wrapped ERC-20 and vice
+        versa (``ChainDescriptor.native`` declares the pair; redeemable 1:1 —
+        the same plane WRAP_NATIVE/UNWRAP_NATIVE converts on). Candidates
+        resolve like any base read (alias-mapped, case-insensitive). Symbols
+        with no declared equivalence stay honest misses (``None``).
+        """
+        for candidate in self._native_wrapped_equivalents(symbol, requested_chain):
             seeded = self._seeded_price_for_symbol(self._token_cache_key(candidate, requested_chain))
             if seeded is not None:
                 return seeded

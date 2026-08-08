@@ -197,18 +197,17 @@ def declared_perp_price_history_targets(
     first use. The standard perp strategy contract declares the market via
     ``funding_market`` (or ``market``) and the venue via ``protocol`` or
     strategy metadata; those targets can be prewarmed before data iteration.
+
+    Targets carry the declared pair LABEL: the funding-history lane is
+    symbol-keyed (canonical ``"ETH-USD"`` form — see ``fetch_funding_points``)
+    and must never receive an address. The candle lane re-spells its single
+    chosen target through the declared ``market_address`` in
+    :func:`prepare_perp_price_history` (address-first market contract).
     """
-    raw_market = strategy_config.get("funding_market") or strategy_config.get("market")
-    if not isinstance(raw_market, str) or not raw_market.strip():
-        raw_market = getattr(strategy, "funding_market", None) or getattr(strategy, "market", None)
-    spec = getattr(strategy, "_spec", None)
-    spec_parameters = getattr(spec, "parameters", None)
-    if not isinstance(raw_market, str) or not raw_market.strip():
-        if isinstance(spec_parameters, Mapping):
-            raw_market = spec_parameters.get("funding_market") or spec_parameters.get("market")
-    if not isinstance(raw_market, str) or not raw_market.strip():
+    market = _declared_strategy_value(strategy, strategy_config, ("funding_market", "market"))
+    if market is None:
         return ()
-    market = raw_market.strip()
+    spec = getattr(strategy, "_spec", None)
 
     protocols: list[str] = []
 
@@ -233,6 +232,56 @@ def declared_perp_price_history_targets(
             add_protocol(protocol)
 
     return tuple((protocol, market) for protocol in protocols)
+
+
+def _declared_strategy_value(
+    strategy: BacktestableStrategy,
+    strategy_config: Mapping[str, Any],
+    keys: tuple[str, ...],
+) -> str | None:
+    """Resolve a declared value through the standard declaration ladder.
+
+    Precedence: ``strategy_config`` key, then strategy attribute, then
+    ``strategy._spec.parameters`` — the single ladder every perp market
+    declaration walks, so the label and address lookups can never drift
+    apart. Within a level the first truthy key wins (``or``-combined); a
+    level is accepted only when it yields a non-empty string. Returns the
+    stripped declaration, or ``None`` when nothing is declared.
+    """
+
+    def first(getter: Any) -> Any:
+        value = None
+        for key in keys:
+            value = value or getter(key)
+        return value
+
+    raw = first(strategy_config.get)
+    if not isinstance(raw, str) or not raw.strip():
+        raw = first(lambda key: getattr(strategy, key, None))
+    if not isinstance(raw, str) or not raw.strip():
+        parameters = getattr(getattr(strategy, "_spec", None), "parameters", None)
+        if isinstance(parameters, Mapping):
+            raw = first(parameters.get)
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    return raw.strip()
+
+
+def _declared_perp_market_address(
+    strategy: BacktestableStrategy,
+    strategy_config: Mapping[str, Any],
+) -> str | None:
+    """The strategy's declared perp market-token address, if any.
+
+    Address-first market contract: the author declares the venue market by
+    its market-token ADDRESS (``market_address``); the pair label stays
+    display/signal vocabulary. Same declaration ladder as the label lookup
+    in :func:`declared_perp_price_history_targets`. Returns the raw declared
+    string — the caller validates its shape and fails closed, so a malformed
+    declaration never silently falls back to resolving by a possibly-stale
+    label (the drift this contract exists to prevent).
+    """
+    return _declared_strategy_value(strategy, strategy_config, ("market_address",))
 
 
 async def prepare_perp_price_history(
@@ -287,6 +336,27 @@ async def prepare_perp_price_history(
         )
 
     protocol, market = unique_targets[0]
+    # Address-first market contract: a declared market_address is the
+    # unambiguous market spelling and outranks the pair label, which stays
+    # display/signal vocabulary. The venue registry resolves addresses
+    # directly, so a stale or re-labeled pair string cannot fail a run whose
+    # declared address is still a listed market. Fail closed on a malformed
+    # declaration — silently resolving by the label instead would reintroduce
+    # exactly the drift the address exists to prevent.
+    declared_address = _declared_perp_market_address(strategy, strategy_config)
+    if declared_address is not None:
+        if not is_address_like(declared_address):
+            raise PreflightValidationError(
+                message=(
+                    f"Declared market_address {declared_address!r} is not a token address; "
+                    "the address-first market contract requires the venue's market-token contract address"
+                ),
+                failed_checks=["perp_price_history"],
+                recommendations=["Set market_address to the venue's market-token contract address."],
+                error_count=1,
+                warning_count=0,
+            )
+        market = declared_address
     canonical = PerpPriceHistoryRegistry.canonical(protocol)
     assert canonical is not None
     chain_descriptor = ChainRegistry.try_resolve(config.chain)

@@ -473,7 +473,6 @@ class TestSymbolAliasBridge:
         assert snapshot.balance("USDC").balance == Decimal("10000")
         assert snapshot.balance(bridged_usdc[1]).balance == Decimal("10000")
 
-
     def test_indicator_set_by_address_reads_by_symbol(self):
         from almanak.framework.market import RSIData
 
@@ -590,6 +589,58 @@ class TestSeededPriceHonorsQuote:
         snapshot = self._snapshot()
         with pytest.raises(ValueError, match="Cannot determine price"):
             snapshot.price("WETH", "CBBTC")
+
+
+class TestSeededBaseLegNativeWrappedBridge:
+    """The seeded BASE leg prices natives off the wrapped ERC-20 (1:1 plane).
+
+    Regression (2026-08): a GMX ETH/USD backtest seeds only the venue's
+    verified index token (WETH) — the gas symbol's own identity is the
+    native sentinel, which is never a seeded price key. Without the bridge,
+    ``market.price("ETH")`` missed on every tick and a lifecycle strategy
+    held forever — a plausible-looking zero-trade run (the ALM-3067 shape).
+    Same registry-declared equivalence the quote leg already resolves
+    through; unrelated symbols stay honest misses.
+    """
+
+    WETH_ADDR = "0x82af49447d8a07e3bd95bd0d56f35241523fbab1"
+    SENTINEL = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    WETH_KEY = ("arbitrum", WETH_ADDR)
+    TOKEN_ADDRESSES = {"WETH": WETH_KEY, "ETH": ("arbitrum", SENTINEL)}
+
+    def _snapshot(self):
+        from almanak.framework.backtesting.pnl.data_provider import MarketState
+
+        state = MarketState(
+            timestamp=datetime(2026, 8, 7, tzinfo=UTC),
+            chain="arbitrum",
+            prices={self.WETH_KEY: Decimal("2500")},
+        )
+        return create_market_snapshot_from_state(state, chain="arbitrum", token_addresses=self.TOKEN_ADDRESSES)
+
+    def test_native_symbol_prices_off_seeded_wrapped(self):
+        snapshot = self._snapshot()
+        assert snapshot.price("ETH") == Decimal("2500")
+
+    def test_native_quote_composes_with_bridged_base(self):
+        snapshot = self._snapshot()
+        assert snapshot.price("ETH", "WETH") == Decimal("1")
+
+    def test_directly_seeded_native_keeps_precedence(self):
+        from almanak.framework.backtesting.pnl.data_provider import MarketState
+
+        state = MarketState(
+            timestamp=datetime(2026, 8, 7, tzinfo=UTC),
+            chain="arbitrum",
+            prices={self.WETH_KEY: Decimal("2500"), ("arbitrum", self.SENTINEL): Decimal("2499")},
+        )
+        snapshot = create_market_snapshot_from_state(state, chain="arbitrum", token_addresses=self.TOKEN_ADDRESSES)
+        assert snapshot.price("ETH") == Decimal("2499")
+
+    def test_unrelated_symbol_stays_honest_miss(self):
+        snapshot = self._snapshot()
+        with pytest.raises(ValueError, match="Cannot determine price"):
+            snapshot.price("ARB")
 
 
 class TestSymbolIntentFlows:
@@ -1011,9 +1062,7 @@ class TestTotalPortfolioUsd:
         from almanak.framework.market.models import TokenBalance
 
         snapshot = self._snapshot(self._portfolio(Decimal("100")))
-        snapshot.set_balance(
-            "USDT", TokenBalance(symbol="USDT", balance=Decimal("40"), balance_usd=Decimal("40"))
-        )
+        snapshot.set_balance("USDT", TokenBalance(symbol="USDT", balance=Decimal("40"), balance_usd=Decimal("40")))
 
         # 100 cash (counted once via remaining mirrors) + 40 real USDT.
         assert snapshot.total_portfolio_usd() == Decimal("140")

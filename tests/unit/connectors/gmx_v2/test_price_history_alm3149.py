@@ -803,3 +803,184 @@ async def test_candle_path_always_uses_dynamic_index_resolution() -> None:
         assert request["chain"] == "arbitrum"
         assert request["allow_delisted_address"] is False
         assert request["allow_index_equivalent"] is True
+
+
+# ---------------------------------------------------------------------------
+# Native-labeled index markets vs the run chain's native sentinel (ALM-3067):
+# GMX labels the WETH-indexed market "ETH", while the engine registers the
+# gas symbol at the native sentinel. One symbol must never claim two
+# identities — the venue plane publishes its alias under the index token's
+# registry symbol instead, and native reads price through the 1:1 wrap plane.
+# ---------------------------------------------------------------------------
+
+WETH_ARBITRUM = "0x82af49447d8a07e3bd95bd0d56f35241523fbab1"
+WETH_KEY = normalize_token_key("arbitrum", WETH_ARBITRUM)
+NATIVE_SENTINEL_KEY = normalize_token_key("arbitrum", "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE")
+
+
+def _eth_index_provider(start: datetime, index_token: str = WETH_ARBITRUM) -> GMXOracleDataProvider:
+    provider = GMXOracleDataProvider(fallback=SimpleNamespace(), chain="arbitrum", market="ETH/USD")
+    provider._source.index_symbol = "ETH"
+    provider._source.index_token = index_token
+    candle = OHLCV(
+        timestamp=start + timedelta(hours=1),
+        open=Decimal("2500"),
+        high=Decimal("2500"),
+        low=Decimal("2500"),
+        close=Decimal("2500"),
+        volume=None,
+    )
+    index_key = normalize_token_key("arbitrum", index_token)
+    provider._prefetch = AsyncMock(  # type: ignore[method-assign]
+        return_value=SimpleNamespace(data={index_key: [candle]})
+    )
+    return provider
+
+
+async def _second_tick_state(provider: GMXOracleDataProvider, start: datetime):
+    config = HistoricalDataConfig(
+        start_time=start,
+        end_time=start + timedelta(hours=2),
+        interval_seconds=3600,
+        tokens=["ETH"],
+        chains=["arbitrum"],
+        include_ohlcv=True,
+    )
+    states = [state async for _timestamp, state in provider.iterate(config)]
+    return states[1]
+
+
+@pytest.mark.asyncio
+async def test_eth_index_market_survives_native_sentinel_registration_at_tick_one() -> None:
+    """The exact tick-1 abort: static ETH->sentinel vs venue ETH->WETH alias."""
+    start = datetime(2025, 1, 1, tzinfo=UTC)
+    provider = _eth_index_provider(start)
+    state = await _second_tick_state(provider, start)
+
+    # The venue label is remapped to the index token's registry symbol; the
+    # bare gas symbol stays free for the engine's native registration.
+    assert state.symbol_aliases == {"WETH": WETH_KEY}
+    assert provider._source.owns("ETH")
+    assert provider._cache_key("ETH") == WETH_KEY
+
+    # The engine's per-tick registration of the run's static map (which
+    # carries ETH at the native sentinel, ALM-3067) must not be ambiguous.
+    token_addresses = {"ETH": NATIVE_SENTINEL_KEY, "WETH": WETH_KEY}
+    state.register_symbol_aliases(token_addresses)
+
+    # Native-symbol reads price through the registry's 1:1 wrap plane onto
+    # the venue series — on the state and on the strategy-facing snapshot.
+    assert state.get_price("ETH") == Decimal("2500")
+    assert state.get_price(NATIVE_SENTINEL_KEY) == Decimal("2500")
+    snapshot = create_market_snapshot_from_state(state, chain="arbitrum", token_addresses=token_addresses)
+    assert snapshot.price("ETH") == Decimal("2500")
+    assert snapshot.price("WETH") == Decimal("2500")
+
+
+@pytest.mark.asyncio
+async def test_native_collision_without_registry_identity_publishes_no_alias() -> None:
+    """An ETH-labeled index the registry cannot name yields no symbol alias."""
+    start = datetime(2025, 1, 1, tzinfo=UTC)
+    provider = _eth_index_provider(start, index_token=OTHER_INDEX_TOKEN)
+    state = await _second_tick_state(provider, start)
+
+    assert state.symbol_aliases == {}
+    other_key = normalize_token_key("arbitrum", OTHER_INDEX_TOKEN)
+    assert state.get_price(other_key) == Decimal("2500")
+    state.register_symbol_aliases({"ETH": NATIVE_SENTINEL_KEY})
+    with pytest.raises(KeyError):
+        state.get_price("ETH")
+
+
+@pytest.mark.asyncio
+async def test_genuine_identity_conflict_still_fails_closed() -> None:
+    """The ambiguity guards stay intact for real two-identity claims."""
+    start = datetime(2025, 1, 1, tzinfo=UTC)
+    provider = _eth_index_provider(start)
+    state = await _second_tick_state(provider, start)
+
+    conflicting = {"WETH": normalize_token_key("arbitrum", OTHER_INDEX_TOKEN)}
+    with pytest.raises(ValueError, match="Ambiguous market-data identity for WETH"):
+        state.register_symbol_aliases(conflicting)
+    with pytest.raises(ValueError, match="Ambiguous snapshot identity for WETH"):
+        create_market_snapshot_from_state(state, chain="arbitrum", token_addresses=conflicting)
+
+
+def test_non_native_index_symbol_keeps_the_venue_alias() -> None:
+    source = _GMXOracleMarketSource(chain="arbitrum", market="NEWMARKET/USD", venue="gmx_v2")
+    source.index_symbol = "NEWMARKET"
+    source.index_token = INDEX_TOKEN.lower()
+    assert source.alias_symbol() == "NEWMARKET"
+
+
+@pytest.mark.asyncio
+async def test_tracked_alias_spelling_routes_to_venue_series_not_fallback() -> None:
+    """Every spelling of the index identity is provider-owned (review P1).
+
+    A WETH-labeled address-first strategy tracks "WETH"; unowned, it would go
+    to the fallback, whose token map normalizes it onto the SAME
+    (chain, index_token) cache key — and the fallback merge would silently
+    replace the venue candles with another provider's data.
+    """
+    start = datetime(2025, 1, 1, tzinfo=UTC)
+    venue_candle = OHLCV(start, Decimal("2500"), Decimal("2500"), Decimal("2500"), Decimal("2500"))
+    usdc_candle = OHLCV(start, Decimal("1"), Decimal("1"), Decimal("1"), Decimal("1"))
+    fallback_cache = OHLCVCache(data={"USDC": [usdc_candle]}, fetched_at=start, default_chain="arbitrum")
+    fallback = SimpleNamespace(
+        provider_name="coingecko",
+        prefetch_ohlcv_data=AsyncMock(return_value=fallback_cache),
+    )
+    provider = GMXOracleDataProvider(fallback=fallback, chain="arbitrum", market="ETH/USD")
+    provider._source.index_symbol = "ETH"
+    provider._source.index_token = WETH_ARBITRUM
+    provider._source.timeframe = "4h"
+    provider._source._coverage = (start, start + timedelta(hours=4))
+    provider._source._series = [venue_candle]
+
+    for spelling in ("WETH", "ETH", WETH_ARBITRUM, f"arbitrum:{WETH_ARBITRUM}", WETH_KEY):
+        assert provider._source.owns(spelling), spelling
+
+    config = HistoricalDataConfig(
+        start_time=start,
+        end_time=start + timedelta(hours=4),
+        interval_seconds=3600,
+        tokens=["WETH", "USDC"],
+        chains=["arbitrum"],
+    )
+    cache = await provider._prefetch(config)
+
+    assert cache.data[WETH_KEY] == [venue_candle]
+    delegated = fallback.prefetch_ohlcv_data.await_args.args[0]
+    assert delegated.tokens == ["USDC"]
+    assert provider._price_sources[f"arbitrum:{WETH_ARBITRUM}"] == "gmx_oracle_candles"
+
+
+@pytest.mark.asyncio
+async def test_fallback_series_never_replaces_the_owned_venue_series() -> None:
+    """A custom-registered symbol for the index token cannot clobber the venue key."""
+    start = datetime(2025, 1, 1, tzinfo=UTC)
+    venue_candle = OHLCV(start, Decimal("2500"), Decimal("2500"), Decimal("2500"), Decimal("2500"))
+    imposter = OHLCV(start, Decimal("9"), Decimal("9"), Decimal("9"), Decimal("9"))
+    fallback_cache = OHLCVCache(data={WETH_KEY: [imposter]}, fetched_at=start, default_chain="arbitrum")
+    fallback = SimpleNamespace(
+        provider_name="coingecko",
+        prefetch_ohlcv_data=AsyncMock(return_value=fallback_cache),
+    )
+    provider = GMXOracleDataProvider(fallback=fallback, chain="arbitrum", market="ETH/USD")
+    provider._source.index_symbol = "ETH"
+    provider._source.index_token = WETH_ARBITRUM
+    provider._source.timeframe = "4h"
+    provider._source._coverage = (start, start + timedelta(hours=4))
+    provider._source._series = [venue_candle]
+
+    config = HistoricalDataConfig(
+        start_time=start,
+        end_time=start + timedelta(hours=4),
+        interval_seconds=3600,
+        tokens=["ETH", "MYETH"],
+        chains=["arbitrum"],
+    )
+    cache = await provider._prefetch(config)
+
+    assert cache.data[WETH_KEY] == [venue_candle]
+    assert provider._price_sources[f"arbitrum:{WETH_ARBITRUM}"] == "gmx_oracle_candles"

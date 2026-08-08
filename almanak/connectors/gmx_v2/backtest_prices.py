@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import bisect
+import logging
 import statistics
 from collections.abc import AsyncIterator
 from dataclasses import replace
@@ -24,9 +25,12 @@ from almanak.framework.backtesting.pnl.data_provider import (
     HistoricalDataConfig,
     MarketState,
     TokenRef,
+    is_address_like,
     is_token_key,
     normalize_token_key,
+    normalize_token_ref,
     token_ref_display,
+    token_ref_provider_symbol,
 )
 from almanak.framework.backtesting.pnl.providers.coingecko import OHLCVCache
 from almanak.framework.data.interfaces import DataSourceUnavailable
@@ -34,6 +38,8 @@ from almanak.framework.data.timeframes import CANONICAL_OHLCV_TIMEFRAMES, parse_
 
 if TYPE_CHECKING:
     from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
+
+logger = logging.getLogger(__name__)
 
 _GMX_TIMEFRAMES: tuple[str, ...] = tuple(timeframe.value for timeframe in CANONICAL_OHLCV_TIMEFRAMES)
 _PAGE_LIMIT = 10_000
@@ -63,6 +69,8 @@ class _GMXOracleMarketSource:
         self._series: list[OHLCV] = []
         self._series_timestamps: list[datetime] = []
         self._coverage: tuple[datetime, datetime] | None = None
+        self._alias_symbol: str | None = None
+        self._alias_symbol_resolved = False
 
     @staticmethod
     def _gateway() -> tuple[Any, Any]:
@@ -266,10 +274,66 @@ class _GMXOracleMarketSource:
     def owns(self, token: TokenRef) -> bool:
         if self.index_symbol is None or self.index_token is None:
             return False
-        if is_token_key(token):
-            chain, address = normalize_token_key(token[0], token[1])
+        # Normalize first so every spelling of the index identity — tuple key,
+        # bare address, "chain:address" display key — resolves to ownership.
+        normalized = normalize_token_ref(token, self.chain)
+        if is_token_key(normalized):
+            chain, address = normalized
             return chain == self.chain and address == self.index_token
-        return token_ref_display(token).upper() in {self.index_symbol, self.index_token.upper()}
+        assert isinstance(normalized, str)
+        labels = {self.index_symbol, self.index_token.upper()}
+        # The published read alias is owned vocabulary too: on a native-label
+        # collision the alias is the index token's registry symbol (WETH), and
+        # a strategy tracking that spelling must route to the venue series —
+        # sending it to the fallback would fetch the SAME (chain, address)
+        # cache key from another provider.
+        alias = self.alias_symbol()
+        if alias is not None:
+            labels.add(alias.upper())
+        return normalized.upper() in labels
+
+    def alias_symbol(self) -> str | None:
+        """Symbol under which the verified index identity may publish a read alias.
+
+        GMX labels its wrapped-native-indexed markets with the bare gas symbol
+        (index symbol "ETH", index token WETH), but on the run chain that
+        symbol's address-native identity is the native sentinel (ALM-3067), so
+        publishing the venue label would make one symbol claim two identities
+        and trip the engine's fail-closed ambiguity guard at tick 1. On such a
+        collision the alias is the index token's registry symbol (the wrapped
+        ERC-20, e.g. WETH); native-symbol reads then resolve through the chain
+        registry's native<->wrapped 1:1 plane. A collision the registry cannot
+        name outside the native family publishes no alias at all — the series
+        stays reachable by its ``(chain, address)`` identity, never under a
+        symbol two assets claim.
+        """
+        if self.index_symbol is None or self.index_token is None:
+            return None
+        if self._alias_symbol_resolved:
+            return self._alias_symbol
+        self._alias_symbol = self._resolve_alias_symbol(self.index_symbol, self.index_token)
+        self._alias_symbol_resolved = True
+        return self._alias_symbol
+
+    def _resolve_alias_symbol(self, index_symbol: str, index_token: str) -> str | None:
+        from almanak.core.chains._helpers import native_symbols_for
+        from almanak.framework.data.tokens.defaults import NATIVE_SENTINEL
+
+        index_key = normalize_token_key(self.chain, index_token)
+        if index_symbol.upper() not in native_symbols_for(self.chain):
+            return index_symbol
+        if index_key == normalize_token_key(self.chain, NATIVE_SENTINEL):
+            # The venue's claim IS the chain-native identity; the label agrees
+            # with the engine's own native registration.
+            return index_symbol
+        registry_symbol = token_ref_provider_symbol(index_key, self.chain)
+        if (
+            is_address_like(registry_symbol)
+            or ":" in registry_symbol
+            or registry_symbol.upper() in native_symbols_for(self.chain)
+        ):
+            return None
+        return registry_symbol
 
     def series(self, *, start: datetime, end: datetime, interval_seconds: int) -> list[OHLCV]:
         timeframe, coverage = self._prepared_series_contract()
@@ -430,6 +494,20 @@ class GMXOracleDataProvider:
             sources[token_ref_display(key)] = "gmx_oracle_candles"
 
         fallback_data = await self._prefetch_fallback(config, fallback_tokens)
+        # The venue-owned series is never replaced (blueprint 31: the GMX
+        # index asset never stitches or falls back). ``owns()`` routes every
+        # known spelling of the index identity here, but a user-registered
+        # custom symbol for the index token still normalizes onto the owned
+        # (chain, address) cache key in the fallback — dropping it loudly
+        # keeps that key venue-served; the dropped symbol becomes an honest
+        # per-tick miss instead of plausible cross-provider prices.
+        for key in [key for key in fallback_data if key in data]:
+            fallback_data.pop(key)
+            logger.warning(
+                "Discarding fallback price series for %s: its identity is the venue-owned "
+                "GMX index series, which is never replaced by another provider",
+                token_ref_display(key),
+            )
         data.update(fallback_data)
         fallback_source = getattr(self._fallback, "provider_name", "fallback")
         sources.update({token_ref_display(key): fallback_source for key in fallback_data})
@@ -544,10 +622,12 @@ class GMXOracleDataProvider:
                 "gmx_oracle": self._source.provenance,
             },
         )
-        if self._source.index_symbol is not None and self._source.index_token is not None:
-            state.register_symbol_aliases(
-                {self._source.index_symbol: normalize_token_key(self._chain, self._source.index_token)}
-            )
+        if self._source.index_token is not None:
+            alias_symbol = self._source.alias_symbol()
+            if alias_symbol is not None:
+                state.register_symbol_aliases(
+                    {alias_symbol: normalize_token_key(self._chain, self._source.index_token)}
+                )
         return state
 
     async def iterate(self, config: HistoricalDataConfig) -> AsyncIterator[tuple[datetime, MarketState]]:
@@ -578,6 +658,9 @@ class GMXOracleDataProvider:
             tokens.add(self._source.index_symbol)
         if self._source.index_token:
             tokens.add(self._source.index_token)
+        alias = self._source.alias_symbol()
+        if alias is not None:
+            tokens.add(alias)
         return sorted(tokens)
 
     @property
