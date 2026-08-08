@@ -31,7 +31,6 @@ from almanak.framework.observability.pnl_attributor import (
 )
 from almanak.framework.observability.position_events import compute_lp_close_value_usd
 
-
 # ---------------------------------------------------------------------------
 # select_open_for_lp_close — parity with the runner rule
 # ---------------------------------------------------------------------------
@@ -136,6 +135,27 @@ def test_compute_value_usd_price_miss_is_empty_not_zero():
 def test_compute_value_usd_accepts_bare_scalar_price():
     res = compute_lp_close_value_usd("WETH", "USDC", _A0, _A1, {"WETH": "2000", "USDC": "1"}, chain="arbitrum")
     assert Decimal(res.value_usd) == Decimal("2000")
+
+
+def test_compute_value_usd_preserves_mixed_case_solana_mint(monkeypatch: pytest.MonkeyPatch):
+    mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+    seen: list[str] = []
+
+    class _Resolver:
+        def resolve(self, token: str, **_kwargs):
+            seen.append(token)
+            return type("Token", (), {"decimals": 6})()
+
+    monkeypatch.setattr(
+        "almanak.framework.data.tokens.resolver.get_token_resolver",
+        lambda: _Resolver(),
+    )
+    prices = {f"solana:{mint}": "1", "solana:USDC": "1"}
+
+    res = compute_lp_close_value_usd(mint, "USDC", "2000000", "1000000", prices, chain="solana")
+
+    assert res.value_usd == "3"
+    assert seen == [mint, "USDC"]
 
 
 # ---------------------------------------------------------------------------

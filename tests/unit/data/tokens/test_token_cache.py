@@ -24,6 +24,8 @@ import pytest
 from almanak.framework.data.tokens.cache import TokenCacheManager, cache_key
 from almanak.framework.data.tokens.models import BridgeType, ResolvedToken
 
+SOL_USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+
 
 def make_resolved_token(
     symbol: str = "USDC",
@@ -75,6 +77,13 @@ class TestCacheKeyFunction:
         key1 = cache_key("arbitrum", address="0xABCD")
         key2 = cache_key("arbitrum", address="0xabcd")
         assert key1 == key2 == "arbitrum:0xabcd"
+
+    def test_cache_key_preserves_solana_mint_case(self):
+        key = cache_key("solana", address=SOL_USDC)
+        altered = cache_key("solana", address=SOL_USDC.swapcase())
+
+        assert key == f"solana:{SOL_USDC}"
+        assert altered != key
 
     def test_cache_key_normalizes_symbol(self):
         """Test cache key normalizes symbol to uppercase."""
@@ -199,6 +208,17 @@ class TestCachePutAndGet:
 
             result = cache.get("arbitrum", symbol="usdc")
             assert result is not None
+
+    def test_get_preserves_solana_mint_identity(self):
+        """A differently-cased base58 mint must not hit another token's row."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_file = Path(tmpdir) / "token_cache.json"
+            cache = TokenCacheManager(cache_file=cache_file)
+            token = make_resolved_token(address=SOL_USDC, chain="solana")
+            cache.put(token)
+
+            assert cache.get("solana", address=SOL_USDC) is not None
+            assert cache.get("solana", address=SOL_USDC.swapcase()) is None
 
 
 class TestMemoryCacheLayer:

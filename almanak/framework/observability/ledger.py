@@ -1914,11 +1914,10 @@ def build_ledger_entry(
         # price IS in the oracle but the unit conversion path isn't yet
         # supported). Gate the WARN on (a) only.
         from almanak.framework.accounting.gas_pricing import native_token_for_chain
+        from almanak.framework.market.price_store import lookup_price
 
         native_symbol = native_token_for_chain(chain)
-        oracle_has_native = any(
-            price_oracle.get(key) is not None for key in (native_symbol.upper(), native_symbol, native_symbol.lower())
-        )
+        oracle_has_native = lookup_price(price_oracle, chain=chain, symbol=native_symbol, quote="USD") is not None
         if not oracle_has_native:
             logger.warning(
                 "ledger gas_usd unavailable: chain=%s native_token=%s missing from price_oracle "

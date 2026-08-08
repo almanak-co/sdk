@@ -41,7 +41,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from almanak.framework.data.tokens.models import ResolvedToken
+from almanak.framework.data.tokens.models import ResolvedToken, normalize_token_address_for_chain
 
 logger = logging.getLogger(__name__)
 
@@ -124,10 +124,12 @@ def _safe_log(level: int, msg: str, *args: object, **kwargs: object) -> None:
 # values to anyone with a warm cache. v2 was introduced by PR #2505 because v1
 # could carry a stale ``bsc:WBTC`` / ``bsc:0x7130d2a1…`` entry recording
 # ``decimals=8`` (off-by-10^10 vs the on-chain BTCB contract's 18 decimals).
+# v3 makes address keys chain-family-aware: v2 lowercased Solana base58 mints,
+# so a differently-cased mint could hit metadata for another identity.
 # On load, a version mismatch drops the entire disk cache and forces a re-fill
 # from the corrected static registry. Cheap insurance — cache rebuilds itself
 # from registry hits within a single session.
-DISK_CACHE_SCHEMA_VERSION = 2
+DISK_CACHE_SCHEMA_VERSION = 3
 
 #: Minimum gap between disk-cache read retries after a transient fault.
 _DISK_RETRY_COOLDOWN_S = 30.0
@@ -152,7 +154,8 @@ def cache_key(chain: str, *, address: str | None = None, symbol: str | None = No
     """Generate a consistent cache key from chain and identifier.
 
     Keys are formatted as 'chain:identifier' where:
-    - For addresses: chain:address_lower (e.g., "arbitrum:0xaf88...")
+    - For addresses: chain plus chain-family-normalized address. EVM addresses
+      lowercase; Solana base58 mints preserve case.
     - For symbols: chain:SYMBOL_UPPER (e.g., "arbitrum:USDC")
 
     Args:
@@ -180,7 +183,8 @@ def cache_key(chain: str, *, address: str | None = None, symbol: str | None = No
 
     chain_lower = chain.lower()
     if address is not None:
-        return f"{chain_lower}:{address.lower()}"
+        normalized = normalize_token_address_for_chain(address, chain_lower)
+        return f"{chain_lower}:{normalized}"
     else:
         return f"{chain_lower}:{symbol.upper()}"  # type: ignore[union-attr]
 

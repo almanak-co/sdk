@@ -56,6 +56,16 @@ def looks_like_evm_address(value: str | None) -> bool:
     return isinstance(value, str) and bool(_EVM_ADDRESS_ANY_CASE.match(value.strip()))
 
 
+def looks_like_case_sensitive_address(value: str | None) -> bool:
+    """True for a supported case-sensitive, base58-shaped token address.
+
+    This shape-only helper is for boundaries that must preserve identity even
+    before chain context exists. Callers that know the chain should prefer
+    :func:`looks_like_address`, which validates the shape against its family.
+    """
+    return isinstance(value, str) and bool(_SOLANA_MINT.match(value.strip()))
+
+
 def looks_like_address(value: str | None, chain: str | None = None) -> bool:
     """True when ``value`` is address-shaped for ``chain``.
 
@@ -74,7 +84,7 @@ def looks_like_address(value: str | None, chain: str | None = None) -> bool:
         return True
     if looks_like_evm_address(stripped):
         return True
-    return is_solana_chain((chain or "").lower()) and bool(_SOLANA_MINT.match(stripped))
+    return is_solana_chain((chain or "").lower()) and looks_like_case_sensitive_address(stripped)
 
 
 @lru_cache(maxsize=_CACHE_SIZE)
@@ -126,6 +136,7 @@ def resolve_token_symbol(value: str | None, chain: str | None) -> str | None:
 
 __all__ = [
     "looks_like_address",
+    "looks_like_case_sensitive_address",
     "looks_like_evm_address",
     "resolve_token_symbol",
 ]

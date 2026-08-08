@@ -73,6 +73,7 @@ from .models import (
     StochasticData,
     TokenBalance,
 )
+from .price_store import PriceLookupResult, PriceStore, StoredPrice, lookup_price
 from .snapshot import MarketSnapshot
 
 # CodeRabbit (2026-05-06): keep ``FreshnessConfig`` and ``StablecoinConfig``
@@ -147,6 +148,10 @@ __all__ = [
     "TokenBalance",
     "PriceData",
     "PriceOracle",
+    "PriceStore",
+    "StoredPrice",
+    "PriceLookupResult",
+    "lookup_price",
     "RSIProvider",
     "BalanceProvider",
     "IndicatorProvider",

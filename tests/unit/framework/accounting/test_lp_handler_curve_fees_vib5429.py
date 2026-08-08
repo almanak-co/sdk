@@ -386,14 +386,28 @@ class TestCurveLegsZeroShortCircuit:
 
 class TestValueCurveLegsUsdEdges:
     def test_no_legs_returns_none(self):
-        assert _value_curve_legs_usd([], {}, True) == (None, False)
+        assert _value_curve_legs_usd([], {}, True, chain="ethereum") == (None, False)
 
     def test_all_measured_zero_no_prices_is_zero(self):
-        usd, used_peg = _value_curve_legs_usd([("DAI", Decimal(0)), ("USDC", Decimal(0))], {}, is_usd_stable=False)
+        usd, used_peg = _value_curve_legs_usd(
+            [("DAI", Decimal(0)), ("USDC", Decimal(0))], {}, is_usd_stable=False, chain="ethereum"
+        )
         assert usd == Decimal(0) and used_peg is False
 
     def test_nonzero_unpriced_nonstable_fails_closed(self):
-        assert _value_curve_legs_usd([("WETH", Decimal("1"))], {}, is_usd_stable=False) == (None, False)
+        assert _value_curve_legs_usd([("WETH", Decimal("1"))], {}, is_usd_stable=False, chain="ethereum") == (
+            None,
+            False,
+        )
+
+    def test_chain_qualified_address_price_is_selected(self):
+        token = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+        prices = {f"base:{token}": Decimal("1"), f"ethereum:{token}": Decimal("2000")}
+
+        assert _value_curve_legs_usd([(token, Decimal("2"))], prices, is_usd_stable=False, chain="base") == (
+            Decimal("2"),
+            False,
+        )
 
 
 class TestCurveCloseFeesUsdFailClosed:

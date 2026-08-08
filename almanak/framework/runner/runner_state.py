@@ -1315,19 +1315,13 @@ def _capital_flow_token_universe(snapshot: PortfolioSnapshot, chain: str, *, pri
 
 def _capital_flow_price_lookup(snapshot: PortfolioSnapshot) -> Callable[[str, str], Decimal | None]:
     """Price resolver over the *current* snapshot's audit-trail prices."""
-    prices: dict[tuple[str, str], Decimal] = {}
-    for key, meta in (getattr(snapshot, "token_prices", None) or {}).items():
-        chain, _, address = str(key).partition(":")
-        raw = meta.get("price_usd") if isinstance(meta, dict) else None
-        if not address or raw in (None, ""):
-            continue
-        try:
-            prices[(chain.strip().lower(), normalize_address(address))] = Decimal(str(raw))
-        except (ArithmeticError, ValueError):
-            continue
+    from almanak.framework.market.price_store import lookup_price
+
+    prices = getattr(snapshot, "token_prices", None) or {}
 
     def _price_of(chain: str, token_address: str) -> Decimal | None:
-        return prices.get((chain.strip().lower(), normalize_address(token_address)))
+        found = lookup_price(prices, chain=chain, address=token_address, quote="USD")
+        return found.price if found is not None else None
 
     return _price_of
 
@@ -1983,6 +1977,34 @@ def resolve_tracked_tokens(strategy: Any) -> list[str]:
         return []
 
 
+def _balance_token_dedupe_key(token: str, chain: str | None = None) -> tuple[str, ...]:
+    """Deduplicate symbols case-insensitively without folding address identity.
+
+    Bare non-EVM addresses need the intent's chain context: their case-sensitive
+    shape is meaningful only within the chain family that owns it.
+    """
+    from almanak.framework.data.tokens.address_resolution import (
+        looks_like_address,
+        looks_like_case_sensitive_address,
+        looks_like_evm_address,
+    )
+    from almanak.framework.data.tokens.models import TokenRef
+
+    stripped = token.strip()
+    prefix, separator, address = stripped.partition(":")
+    if separator and prefix and looks_like_address(address, prefix):
+        try:
+            chain, normalized_address = TokenRef(chain=prefix, address=address, decimals=0).identity_key
+            return ("identity", chain, normalized_address)
+        except (TypeError, ValueError):
+            return ("raw", stripped)
+    if looks_like_evm_address(stripped):
+        return ("evm_address", stripped.lower())
+    if looks_like_address(stripped, chain) or (not chain and looks_like_case_sensitive_address(stripped)):
+        return ("case_sensitive_address", stripped)
+    return ("symbol", stripped.upper())
+
+
 async def snapshot_balances_for_intent(
     runner: Any,
     intent: AnyIntent,
@@ -2004,22 +2026,23 @@ async def snapshot_balances_for_intent(
     """
     bp = balance_provider or runner.balance_provider
 
-    # Assemble the capture set with case-insensitive dedup. Order matters:
+    # Assemble the capture set with identity-aware dedup. Order matters:
     #   1. intent tokens — ORIGINAL casing. These must key-match the post
     #      snapshot, which is rebuilt from extract_intent_tokens (same casing),
     #      so reconciliation's compute_actual_deltas(pre∩post) still intersects.
     #   2. native gas (VIB-4979) — original casing (native_token_for_chain).
-    #   3. tracked tokens (VIB-5866 leg A) — UPPERCASED (see below).
+    #   3. tracked tokens (VIB-5866 leg A) — original, identity-preserving casing.
     tokens: list[str] = []
-    canon: set[str] = set()
+    canon: set[tuple[str, ...]] = set()
+    intent_chain = getattr(intent, "chain", None)
 
-    def _add(symbol: Any, *, upper: bool = False) -> None:
+    def _add(symbol: Any) -> None:
         if not isinstance(symbol, str) or not symbol:
             return
-        key = symbol.upper()
+        key = _balance_token_dedupe_key(symbol, str(intent_chain) if intent_chain else None)
         if key in canon:
             return
-        tokens.append(key if upper else symbol)
+        tokens.append(symbol)
         canon.add(key)
 
     for t in extract_intent_tokens(intent):
@@ -2039,12 +2062,10 @@ async def snapshot_balances_for_intent(
     # the SAME set NAV values (strategy._get_tracked_tokens). A wallet token the
     # strategy holds but the first intent doesn't name was dropped from Deployed
     # while counted in NAV → phantom PnL. Two correctness points:
-    #   - UPPERCASE the key: price_inputs_json keys are always upper
-    #     (get_price_oracle_dict normalizes) and the anchor's prices.get() is an
-    #     EXACT match, so a mixed-case asset (wstETH/cbETH/sUSDe) stored verbatim
-    #     would never be valued. Upper-casing makes it commensurable; the balance
-    #     read tolerates upper for the common set, and a symbol the provider can
-    #     only resolve mixed-case is simply skipped (Empty≠Zero, no regression).
+    #   - Preserve the token spelling. ``lookup_price`` is now the shared
+    #     case/identity-aware join at the deployed-wallet anchor, so mutating a
+    #     case-sensitive Solana mint (or a provider-sensitive mixed-case symbol)
+    #     is neither necessary nor safe.
     #   - Seed even when the intent named NO tokens (vault deposit / stake /
     #     prediction first action): the tracked-token anchor must still be
     #     written, so this runs before the "nothing to capture" guard below.
@@ -2052,7 +2073,7 @@ async def snapshot_balances_for_intent(
     # are inert for the delta math (VIB-4979's argument, generalized). Prices land
     # via the matching _refresh_price_oracle_for_ledger top-off.
     for tracked in getattr(runner, "_current_tracked_tokens", None) or []:
-        _add(tracked, upper=True)
+        _add(tracked)
 
     if not tokens:
         return None

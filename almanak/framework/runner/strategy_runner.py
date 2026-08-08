@@ -1407,7 +1407,7 @@ class StrategyRunner:
 
         # VIB-4843 FR-5001: open a per-iteration MarketSnapshot scope keyed by
         # the cycle_id so pre-warm → decide() → post-decide portfolio valuation
-        # all reuse ONE snapshot instance (and its pre-warmed _price_cache)
+        # all reuse ONE snapshot instance (and its pre-warmed typed price store)
         # instead of re-minting cold snapshots and re-fetching every price.
         self._begin_market_snapshot_iteration(strategy, cycle_id)
 
@@ -1867,7 +1867,7 @@ class StrategyRunner:
         # On cold Anvil forks, gateway price fetches can take 15-30s each.
         # If decide() makes multiple market.price() calls, the total easily
         # exceeds the 30s decide_timeout. Pre-warming populates the snapshot's
-        # _price_cache OUTSIDE the timeout budget so decide() hits cache.
+        # typed price store OUTSIDE the timeout budget so decide() hits cache.
         await self._pre_warm_prices(market, strategy)
 
         # Step 1c: Reset any critical-data-failure markers left by pre-warming.
@@ -8293,7 +8293,7 @@ class StrategyRunner:
 
             # VIB-5866 (leg A): top off the strategy's tracked-token prices so the
             # first-action anchor can value the tracked-token balances captured in
-            # pre_state_json. Warming market._price_cache here also feeds the
+            # pre_state_json. Warming the market's typed price store here also feeds the
             # nested with_sources oracle _merge_oracle_for_ledger reads next, so
             # the prices reach price_inputs_json in both the flat and nested paths.
             # Same non-empty guard as the native top-off (never flip an
@@ -8474,7 +8474,7 @@ class StrategyRunner:
         result under the canonical SYMBOL key the LP accounting consumer reads.
 
         Why a post-pass and not ``market.price(address)`` self-keying:
-        ``get_price_oracle_dict()`` keys by the raw ``price()`` argument, so an
+        ``get_price_oracle_dict()`` derives identities from the raw ``price()`` argument, so an
         address-priced leg would land under the raw-address key (``0X0B2B…``),
         not the symbol. We resolve the symbol explicitly and re-key.
 
@@ -9186,12 +9186,18 @@ class StrategyRunner:
             tx_risk_cfg.native_token_price_usd = 0.0
             if state.price_oracle:
                 from almanak.core.chains import ChainRegistry
+                from almanak.framework.market.price_store import lookup_price
 
                 descriptor = ChainRegistry.try_resolve(strategy.chain)
                 native_symbol = descriptor.native.symbol if descriptor is not None else "ETH"
-                native_price = state.price_oracle.get(native_symbol, 0)
-                if native_price:
-                    tx_risk_cfg.native_token_price_usd = float(native_price)
+                native_price = lookup_price(
+                    state.price_oracle,
+                    chain=strategy.chain,
+                    symbol=native_symbol,
+                    quote="USD",
+                )
+                if native_price is not None and native_price.price > 0:
+                    tx_risk_cfg.native_token_price_usd = float(native_price.price)
 
         # VIB-3295: emit a breadcrumb right before the execute
         # gRPC call so any hang in the orchestrator (strategy
@@ -10344,11 +10350,13 @@ class StrategyRunner:
             # MultiChainMarketSnapshot.price() requires chain=, so we derive
             # the chain from each intent to avoid TypeError.
             if hasattr(market, "price"):
+                from almanak.framework.market.price_store import lookup_price
+
                 fetched_any = False
                 for i in intents:
                     intent_chain = getattr(i, "chain", None) or orchestrator.primary_chain
                     for token in _extract_tokens_from_intent(i, default_chain=intent_chain):
-                        if not price_oracle or token not in price_oracle:
+                        if lookup_price(price_oracle, token=token, chain=intent_chain, quote="USD") is None:
                             try:
                                 market.price(token, chain=intent_chain)
                                 fetched_any = True
@@ -10362,7 +10370,12 @@ class StrategyRunner:
                     # (CodeRabbit review, PR #3612).
                     dest_chain = getattr(i, "destination_chain", None)
                     dest_token = getattr(i, "to_token", None)
-                    if dest_chain and dest_token and dest_chain != intent_chain:
+                    if (
+                        dest_chain
+                        and dest_token
+                        and dest_chain != intent_chain
+                        and lookup_price(price_oracle, token=dest_token, chain=dest_chain, quote="USD") is None
+                    ):
                         try:
                             market.price(dest_token, chain=dest_chain)
                             fetched_any = True
@@ -12044,7 +12057,7 @@ class StrategyRunner:
         # It is rarely in _get_tracked_tokens, so without this it is the one
         # price fetched INSIDE the decide()/valuation path. Pre-warm it here
         # so the single required fetch lands OUTSIDE the decide timeout and the
-        # valuation lane hits the shared snapshot's warm _price_cache instead.
+        # valuation lane hits the shared snapshot's warm typed price store instead.
         native = self._native_gas_token_for_prewarm(strategy)
         if native and native.upper() not in {t.upper() for t in tokens}:
             tokens = [*tokens, native]
@@ -12053,7 +12066,7 @@ class StrategyRunner:
             return
 
         logger.debug(f"Pre-warming price cache for {len(tokens)} tokens: {tokens}")
-        # Sequential iteration is intentional — _price_cache is not thread-safe
+        # Sequential iteration is intentional — the price store is not thread-safe
         for token in tokens:
             try:
                 await asyncio.to_thread(market.price, token)
@@ -12070,7 +12083,7 @@ class StrategyRunner:
         """
         from almanak.framework.accounting.gas_pricing import native_token_for_chain
 
-        # Sequential iteration is intentional — _price_cache is not thread-safe
+        # Sequential iteration is intentional — the price store is not thread-safe
         for chain in chains:
             chain_tokens = list(tokens)
             try:

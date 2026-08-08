@@ -22,7 +22,8 @@ import almanak.framework.observability.position_events as pe
 from almanak.framework.observability.position_events import compute_lp_ncoin_value_usd
 
 # Well-known decimals for the fixture coins.
-_DECIMALS = {"DAI": 18, "USDC": 6, "USDT": 6, "WBTC": 8, "WETH": 18}
+_SOL_USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+_DECIMALS = {"DAI": 18, "USDC": 6, "USDT": 6, "WBTC": 8, "WETH": 18, _SOL_USDC: 6}
 
 
 @pytest.fixture
@@ -107,6 +108,13 @@ class TestComputeLpNcoinValueUsd:
         prices = {"USDC": {"price_usd": "1.0"}}
         out = compute_lp_ncoin_value_usd(coin_symbols, all_amounts, prices, chain="ethereum")
         assert Decimal(out) == Decimal("300")
+
+    def test_mixed_case_solana_mint_is_preserved(self, stub_resolver: None) -> None:
+        prices = {f"solana:{_SOL_USDC}": {"price_usd": "1"}}
+
+        out = compute_lp_ncoin_value_usd([_SOL_USDC], [_raw("3", 6)], prices, chain="solana")
+
+        assert Decimal(out) == Decimal("3")
 
 
 class TestApplyLpCloseValueUsdNcoin:

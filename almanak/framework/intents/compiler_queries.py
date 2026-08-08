@@ -389,54 +389,46 @@ def lenient_oracle_price(price_oracle: dict | None, token: str, chain: str | Non
     token_str = str(token or "").strip()
     if not token_str:
         return None
-    oracle = price_oracle or {}
     token_upper = token_str.upper()
 
-    def _direct(sym_upper: str) -> Decimal | None:
-        for key, val in oracle.items():
-            if isinstance(key, str) and key.upper() == sym_upper and val:
-                return val
-        return None
-
-    # 1. Direct / case-insensitive on the raw value (previous behaviour first).
-    found = _direct(token_upper)
-    if found is not None:
-        return found
-
-    # 2. Address-form input: resolve to the canonical symbol and retry.
+    # Address-form inputs may carry a canonical symbol alias, but the blessed
+    # lookup still probes their exact chain/address identity first.
     from almanak.framework.data.tokens.address_resolution import resolve_token_symbol
 
     resolved = resolve_token_symbol(token_str, chain)
-    if resolved:
-        found = _direct(resolved)
-        if found is not None:
-            return found
     symbol_upper = resolved or token_upper
 
-    # 3. Wrapped↔native alias (both directions, matching the compiler).
+    # Wrapped↔native aliases are the symbol-alias step of the shared lookup.
     from almanak.framework.intents.compiler import IntentCompiler
+    from almanak.framework.market.price_store import lookup_price
 
     aliases: set[str] = set()
     native = IntentCompiler._WRAPPED_TO_NATIVE.get(symbol_upper)
     if native:
         aliases.add(native.upper())
     aliases.update(w.upper() for w, n in IntentCompiler._WRAPPED_TO_NATIVE.items() if n.upper() == symbol_upper)
-    for alias in aliases:
-        found = _direct(alias)
-        if found is not None:
-            return found
-
-    # 4. Known stablecoins are ~$1.
-    if symbol_upper in IntentCompiler._get_known_stablecoins():
-        return Decimal("1")
-
-    # 5. Address-keyed oracle entries resolving to this symbol.
-    for key, val in oracle.items():
-        if not val or not isinstance(key, str) or "0x" not in key.lower():
-            continue
-        if resolve_token_symbol(key, chain) == symbol_upper:
-            return val
-    return None
+    peg = Decimal("1") if symbol_upper in IntentCompiler._get_known_stablecoins() else None
+    # A degraded read may leave a zero under an earlier-precedence key while
+    # the same asset remains measurable through a wrapped/native alias or peg.
+    # Remove only the rejected key and re-run the canonical ladder; this keeps
+    # precedence centralized in ``lookup_price`` instead of recreating it here.
+    remaining = dict(price_oracle or {})
+    while True:
+        found = lookup_price(
+            remaining,
+            token=token_str,
+            chain=chain,
+            symbol=symbol_upper,
+            aliases=aliases,
+            peg=peg,
+        )
+        if found is None:
+            return None
+        if found.price > 0:
+            return found.price
+        if found.key is None:
+            return None
+        remaining.pop(found.key, None)
 
 
 class CompilerQueries:
@@ -664,32 +656,21 @@ class CompilerQueries:
         treated as a miss so the symbol path keeps ownership of the
         fail-closed zero/missing error shape.
         """
-        oracle = self._host.price_oracle
         address = getattr(token, "address", None)
-        if not oracle or not address or getattr(token, "is_native", False):
+        if not self._host.price_oracle or not address or getattr(token, "is_native", False):
             return None
-        addr_upper = str(address).strip().upper()
-        if not addr_upper:
+        if not str(address).strip():
             return None
-        # Ordered: the chain-qualified key must beat the bare-address key —
-        # with both present, the active-chain entry is the precise identity.
-        candidates = [addr_upper]
-        chain = getattr(self._host, "chain", None)
-        if chain:
-            candidates.insert(0, f"{str(chain).strip().upper()}:{addr_upper}")
-        # get_price_oracle_dict() uppercases keys — exact lookups first,
-        # case-insensitive scan as backstop for hand-built oracle dicts.
-        for key in candidates:
-            price = oracle.get(key)
-            if price:
-                return price
-        for candidate in candidates:
-            for key, price in oracle.items():
-                if price and isinstance(key, str) and key.strip().upper() == candidate:
-                    return price
-        return None
+        from almanak.framework.market.price_store import lookup_price
 
-    # crap-allowlist: plan-016 verbatim extraction — function body moved unchanged from compiler.py where it pre-existed at the same cc/CRAP score; the gate sees it as new code only because the host file changed. Coverage backfill tracked in plan-016 maintenance notes.
+        found = lookup_price(
+            self._host.price_oracle,
+            chain=getattr(self._host, "chain", None),
+            address=str(address),
+            infer_symbol_from_address=False,
+        )
+        return found.price if found is not None and found.price != 0 else None
+
     def require_token_price(self, symbol: str) -> Decimal:
         """Look up a token price, failing fast on missing or zero prices.
 
@@ -718,88 +699,57 @@ class CompilerQueries:
             ValueError: If the price is missing/zero and we are *not*
                 using placeholder prices.
         """
+        symbol_upper = symbol.upper()
+        native_alias = self._host._WRAPPED_TO_NATIVE.get(symbol_upper)
+        aliases = (native_alias,) if native_alias else ()
+
+        from almanak.framework.market.price_store import lookup_price
+
+        primary = lookup_price(
+            self._host.price_oracle,
+            chain=getattr(self._host, "chain", None),
+            symbol=symbol_upper,
+        )
+        if primary is not None and primary.price > 0:
+            return primary.price
+
+        alias = (
+            lookup_price(
+                self._host.price_oracle,
+                chain=getattr(self._host, "chain", None),
+                aliases=aliases,
+            )
+            if aliases
+            else None
+        )
+        if alias is not None and alias.price > 0:
+            return alias.price
+
+        fallback = self._placeholder_or_stablecoin_price(symbol, symbol_upper)
+        if fallback is not None:
+            return fallback
+
         if self._host.price_oracle is None:
-            if self._host._using_placeholders:
-                return Decimal("1")
-            # Fall back for stablecoins even without an oracle
-            if symbol.upper() in self._host._get_known_stablecoins():
-                return Decimal("1")
             raise ValueError(
                 f"No price oracle available and placeholder prices are disabled. Cannot resolve price for '{symbol}'."
             )
+        raise ValueError(
+            f"Price for '{symbol}' is {'zero' if primary is not None and primary.price == 0 else 'missing'} "
+            "in the price oracle. "
+            "Compilation requires a valid price to calculate amounts and slippage."
+        )
 
-        price = self._host.price_oracle.get(symbol)
-        if price is None or price == 0:
-            # Case-insensitive fallback: Token.__post_init__ uppercases symbols
-            # (e.g., "cbETH" -> "CBETH") but the price oracle may store them in
-            # original case. Try case-insensitive match before giving up.
-            symbol_upper = symbol.upper()
-            for key, val in self._host.price_oracle.items():
-                if key.upper() == symbol_upper and val is not None and val != 0:
-                    price = val
-                    logger.debug(f"Resolved '{symbol}' price via case-insensitive match (key='{key}')")
-                    break
-
-        if price is None or price == 0:
-            # Try wrapped-native alias (WETH -> ETH, WMATIC -> MATIC, etc.)
-            native_alias = self._host._WRAPPED_TO_NATIVE.get(symbol.upper())
-            if native_alias:
-                alias_price = self._host.price_oracle.get(native_alias)
-                if alias_price is not None and alias_price != 0:
-                    logger.debug(f"Resolved '{symbol}' price via native alias '{native_alias}'")
-                    return alias_price
-
-            if self._host._using_placeholders:
-                return Decimal("1")
-            # Stablecoin fallback: these are always ~$1, safe to assume
-            if symbol.upper() in self._host._get_known_stablecoins():
-                if symbol not in self._host._stablecoin_fallback_logged:
-                    logger.info(f"Price for '{symbol}' not in oracle cache, using stablecoin fallback ($1.00)")
-                    self._host._stablecoin_fallback_logged.add(symbol)
-                else:
-                    logger.debug(f"Reusing stablecoin fallback price for '{symbol}'")
-                return Decimal("1")
-            # Address-keyed fallback: post symbol-deprecation, strategies warm
-            # prices by contract address, which the snapshot caches under
-            # ``chain:0xaddr`` keys. When such a key resolves (offline) to the
-            # requested symbol, its price is the same asset's price — use it
-            # instead of failing closed on a price that IS in the oracle,
-            # just under the other identity form. Miss-path only: symbol-keyed
-            # lookups above are untouched.
-            address_keyed = self._address_keyed_price(symbol)
-            if address_keyed is not None:
-                logger.debug(f"Resolved '{symbol}' price via address-keyed oracle entry")
-                return address_keyed
-            raise ValueError(
-                f"Price for '{symbol}' is {'zero' if price == 0 else 'missing'} in the price oracle. "
-                "Compilation requires a valid price to calculate amounts and slippage."
-            )
-        return price
-
-    def _address_keyed_price(self, symbol: str) -> Decimal | None:
-        """Price from an address-keyed oracle entry resolving to ``symbol``.
-
-        Scans the oracle for ``chain:0xaddr`` / ``0xaddr``-shaped keys and
-        resolves each (offline, lru-cached) to its canonical symbol. Runs only
-        on the miss path, right before the fail-closed raise — the common
-        symbol-keyed path never pays for it. Returns ``None`` when no
-        address-keyed entry names this symbol (the raise proceeds unchanged).
-        """
-        oracle = self._host.price_oracle
-        if not oracle:
+    def _placeholder_or_stablecoin_price(self, symbol: str, symbol_upper: str) -> Decimal | None:
+        """Return the explicit $1 fallback, logging stablecoin use once."""
+        is_stablecoin = symbol_upper in self._host._get_known_stablecoins()
+        if not self._host._using_placeholders and not is_stablecoin:
             return None
-        from almanak.framework.data.tokens.address_resolution import resolve_token_symbol
-
-        target = symbol.strip().upper()
-        chain = getattr(self._host, "chain", None)
-        for key, val in oracle.items():
-            if val is None or val == 0 or not isinstance(key, str):
-                continue
-            if "0x" not in key.lower():
-                continue
-            if resolve_token_symbol(key, chain) == target:
-                return val
-        return None
+        if is_stablecoin and symbol not in self._host._stablecoin_fallback_logged:
+            logger.info(f"Price for '{symbol}' not in oracle cache, using stablecoin fallback ($1.00)")
+            self._host._stablecoin_fallback_logged.add(symbol)
+        elif is_stablecoin:
+            logger.debug(f"Reusing stablecoin fallback price for '{symbol}'")
+        return Decimal("1")
 
     # ------------------------------------------------------------------
     # Pool parsing

@@ -1,6 +1,6 @@
 """Teardown price-oracle warm + validate seam (VIB-4842).
 
-A freshly-constructed ``MarketSnapshot`` has an empty ``_price_cache`` until
+A freshly-constructed ``MarketSnapshot`` has an empty typed price store until
 something calls ``.price(...)``. The teardown path reads
 ``market.get_price_oracle_dict()`` straight into the compiler (see
 ``teardown_manager.py`` Step 5.5), so an un-warmed oracle means the compiler
@@ -469,7 +469,7 @@ def warm_and_validate_oracle(
     1. Extract the required token set from ``intents`` (+ native gas token).
     2. Synchronously call ``market.price(token)`` for each non-PT/YT token (the
        teardown setup path is not on the async strategy loop), populating
-       ``_price_cache``.
+       typed price store.
     3. Warm any Pendle PT/YT symbol via the dedicated ``market.pt_price()`` RPC
        (the generic GetPrice oracle does not carry PT/YT prices) and merge a
        MEASURED price into the oracle dict — never a fabricated one (VIB-5537).

@@ -26,7 +26,6 @@ from almanak.framework.observability.position_events import (
     build_position_event_from_intent,
 )
 
-
 # ──────────────────────────────────────────────────────────────────────────
 # _apply_lp_open_value_usd — direct unit coverage
 # ──────────────────────────────────────────────────────────────────────────
@@ -62,8 +61,7 @@ def test_value_usd_computed_from_flat_oracle():
     assert event.value_usd != ""
     # 0.000891557 × 2301.69 + 2.294332 × 1.0001 ≈ 2.052 + 2.295 ≈ $4.35
     assert Decimal("4.30") < Decimal(event.value_usd) < Decimal("4.40"), (
-        f"expected ~$4.35; got {event.value_usd!r}. "
-        "Pre-fix this asserted only != '' and silently let $2e18 through."
+        f"expected ~$4.35; got {event.value_usd!r}. Pre-fix this asserted only != '' and silently let $2e18 through."
     )
 
 
@@ -139,9 +137,7 @@ def test_value_usd_does_not_overwrite_pre_set_field():
 def test_value_usd_handles_decimal_oracle_values():
     """Decimal-typed oracle values (the new VIB-3885 helper output) work."""
     event = _make_lp_open_event()
-    _apply_lp_open_value_usd(
-        event, {"WETH": Decimal("2301.69"), "USDC": Decimal("1.0001")}, chain="arbitrum"
-    )
+    _apply_lp_open_value_usd(event, {"WETH": Decimal("2301.69"), "USDC": Decimal("1.0001")}, chain="arbitrum")
     assert Decimal("4.30") < Decimal(event.value_usd) < Decimal("4.40")
 
 
@@ -149,7 +145,7 @@ def test_value_usd_handles_lowercase_symbol_lookup():
     event = _make_lp_open_event()
     event.token0 = "weth"  # mixed case
     _apply_lp_open_value_usd(event, {"WETH": "2301.69", "USDC": "1.0001"}, chain="arbitrum")
-    # Helper upper-cases symbols before lookup; this should still hit.
+    # Symbol matching remains case-insensitive without changing token identity.
     assert event.value_usd != ""
     assert Decimal("4.30") < Decimal(event.value_usd) < Decimal("4.40")
 
@@ -158,6 +154,30 @@ def test_value_usd_rejected_on_non_finite_price():
     event = _make_lp_open_event()
     _apply_lp_open_value_usd(event, {"WETH": "NaN", "USDC": "1.0001"}, chain="arbitrum")
     assert event.value_usd == ""
+
+
+def test_value_usd_preserves_mixed_case_solana_mint(monkeypatch: pytest.MonkeyPatch):
+    mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+    event = _make_lp_open_event(amount0="2000000", amount1="1000000")
+    event.chain = "solana"
+    event.token0 = mint
+    event.token1 = "USDC"
+    seen: list[str] = []
+
+    def _decimals(token: str, _chain: str) -> int:
+        seen.append(token)
+        return 6
+
+    monkeypatch.setattr(
+        "almanak.framework.observability.position_events._resolve_token_decimals",
+        _decimals,
+    )
+    prices = {f"solana:{mint}": "1", "solana:USDC": "1"}
+
+    _apply_lp_open_value_usd(event, prices, chain="solana")
+
+    assert event.value_usd == "3"
+    assert seen == [mint, "USDC"]
 
 
 # ──────────────────────────────────────────────────────────────────────────

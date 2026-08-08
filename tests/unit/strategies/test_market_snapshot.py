@@ -66,7 +66,7 @@ class TestMarketSnapshotSetPriceData:
         market = MarketSnapshot(chain="arbitrum", wallet_address="0xtest")
         # set_price populates _prices (checked first by price())
         market.set_price("ETH", Decimal("2800"))
-        # set_price_data populates _price_cache (checked first by price_data())
+        # set_price_data populates the typed price store (checked first by price_data())
         market.set_price_data("ETH", PriceData(price=Decimal("3000"), change_24h_pct=Decimal("5.0")))
 
         # price_data() should return the richer PriceData
@@ -130,9 +130,8 @@ class TestMultiChainMarketSnapshotSetPriceData:
         """set_price_data() should populate the price cache for the chain.
 
         VIB-4062: uses the public price_data() API rather than inspecting
-        the now-flat internal _price_cache (the legacy multichain class
-        keyed per chain; the canonical class uses a flat cache and chain=
-        kwarg semantics).
+        the internal typed price store (the legacy multichain class keyed per
+        chain; the canonical class uses chain-aware store lookups).
         """
         market = MultiChainMarketSnapshot(
             chains=["arbitrum", "ethereum"],

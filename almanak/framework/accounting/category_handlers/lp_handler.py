@@ -19,6 +19,7 @@ from almanak.framework.accounting.category_handlers._price_helpers import (
 from almanak.framework.accounting.ids import make_accounting_event_id
 from almanak.framework.accounting.lp_accounting import LPAccountingEvent, compute_lp_cost_basis
 from almanak.framework.accounting.models import AccountingConfidence, AccountingIdentity, LPEventType
+from almanak.framework.market.price_store import lookup_price
 from almanak.framework.models.run_mode import RunMode
 
 if TYPE_CHECKING:
@@ -44,6 +45,11 @@ def _safe_decimal(value: Any) -> Decimal | None:
         return d if d.is_finite() else None
     except Exception:  # noqa: BLE001
         return None
+
+
+def _oracle_price(price_oracle: dict[str, Any], token: str, *, chain: str | None = None) -> Decimal | None:
+    found = lookup_price(price_oracle, token=token, chain=chain, quote="USD")
+    return found.price if found is not None else None
 
 
 def _as_int(value: Any) -> int | None:
@@ -733,6 +739,7 @@ def _compute_lp_pricing(
     ledger_row: dict[str, Any],
     intent_type_str: str,
     assumed_decimals: bool,
+    chain: str,
 ) -> tuple[Decimal | None, str, dict[str, Decimal]]:
     """USD pricing of an LP event (VIB-3756 + VIB-3885).
 
@@ -762,7 +769,7 @@ def _compute_lp_pricing(
     if assumed_decimals:
         return None, "", price_oracle
 
-    cost_basis_usd = compute_lp_cost_basis(amount0, amount1, token0, token1, price_oracle)
+    cost_basis_usd = compute_lp_cost_basis(amount0, amount1, token0, token1, price_oracle, chain=chain)
     if cost_basis_usd is not None:
         return cost_basis_usd, "", price_oracle
 
@@ -930,6 +937,7 @@ def _compute_lp_impermanent_loss(
     prior_open_payload: dict[str, Any] | None,
     cost_basis_usd: Decimal | None,
     fees_total_usd: Decimal | None,
+    chain: str,
 ) -> tuple[Decimal | None, Decimal | None]:
     """Compute ``(il_usd, hodl_value_usd)`` for ``LP_CLOSE``.
 
@@ -1048,11 +1056,11 @@ def _compute_lp_impermanent_loss(
     if amount0_open is None or amount1_open is None:
         return None, None
 
-    token0_open = (prior_open_payload.get("token0") or "").upper()
-    token1_open = (prior_open_payload.get("token1") or "").upper()
+    token0_open = str(prior_open_payload.get("token0") or "").strip()
+    token1_open = str(prior_open_payload.get("token1") or "").strip()
 
-    price0 = price_oracle.get(token0_open) if token0_open else None
-    price1 = price_oracle.get(token1_open) if token1_open else None
+    price0 = _oracle_price(price_oracle, token0_open, chain=chain) if token0_open else None
+    price1 = _oracle_price(price_oracle, token1_open, chain=chain) if token1_open else None
 
     # Fail-closed per CLAUDE.md "Empty ≠ Zero": any non-zero entry leg
     # missing a close-time price ⇒ V_hodl is unmeasurable, return both
@@ -1109,6 +1117,7 @@ def _compute_lp_realized_pnl_and_fees(
     price_oracle: dict[str, Decimal],
     prior_open_payload: dict[str, Any] | None,
     cost_basis_usd: Decimal | None,
+    chain: str,
 ) -> tuple[Decimal | None, Decimal | None]:
     """Realized PnL + fees_total_usd on LP_CLOSE / LP_COLLECT_FEES (G6 contract VIB-3933).
 
@@ -1133,7 +1142,7 @@ def _compute_lp_realized_pnl_and_fees(
     # bucket is a function of fees0/1 + close-time prices, not of the
     # open-basis context. realized_pnl_usd still requires the prior
     # OPEN below.
-    fees_total_usd = compute_lp_cost_basis(fees0, fees1, token0, token1, price_oracle)
+    fees_total_usd = compute_lp_cost_basis(fees0, fees1, token0, token1, price_oracle, chain=chain)
     realized_pnl_usd: Decimal | None = None
     if prior_open_payload and cost_basis_usd is not None:
         open_basis = _safe_decimal(prior_open_payload.get("cost_basis_usd"))
@@ -1192,6 +1201,8 @@ def _value_curve_legs_usd(
     legs: list[tuple[str, Decimal | None]],
     price_oracle: dict[str, Decimal],
     is_usd_stable: bool,
+    *,
+    chain: str,
 ) -> tuple[Decimal | None, bool]:
     """Sum ``(symbol, human_amount)`` legs to USD. Returns ``(usd, used_peg)``.
 
@@ -1218,7 +1229,7 @@ def _value_curve_legs_usd(
         has_any = True
         if amount == 0:
             continue  # measured-zero leg: $0, no price needed
-        price = price_oracle.get((symbol or "").upper())
+        price = _oracle_price(price_oracle, symbol, chain=chain)
         if price is None:
             if is_usd_stable:
                 price = Decimal("1")  # USD-stable peg (provenance-stamped by caller)
@@ -1293,7 +1304,7 @@ def _curve_close_fees_usd(
     legs = _curve_legs(lp_close_data.all_fees, coin_symbols, chain)
     if legs is None:
         return None
-    fees_usd, _used_peg = _value_curve_legs_usd(legs, price_oracle, _is_usd_stable_pool(coin_symbols))
+    fees_usd, _used_peg = _value_curve_legs_usd(legs, price_oracle, _is_usd_stable_pool(coin_symbols), chain=chain)
     return fees_usd
 
 
@@ -1336,7 +1347,7 @@ def _curve_lp_principal_usd(
     legs = _curve_legs(all_amounts, coin_symbols, chain)
     if legs is None:
         return None, False
-    return _value_curve_legs_usd(legs, price_oracle, _is_usd_stable_pool(coin_symbols))
+    return _value_curve_legs_usd(legs, price_oracle, _is_usd_stable_pool(coin_symbols), chain=chain)
 
 
 def _resolve_curve_lp_basis_and_confidence(
@@ -1459,6 +1470,8 @@ def _value_weighted_leg_basis(
     active_legs: list[tuple[str, Decimal]],
     total_val_usd: Decimal | None,
     price_oracle: dict[str, Decimal],
+    *,
+    chain: str,
 ) -> list[Decimal | None]:
     """Split ``total_val_usd`` across legs by close-time USD value (VIB-4264).
 
@@ -1482,7 +1495,7 @@ def _value_weighted_leg_basis(
 
     leg_value_usd: list[Decimal] = []
     for leg_token, leg_amount in active_legs:
-        price = price_oracle.get((leg_token or "").upper())
+        price = _oracle_price(price_oracle, leg_token, chain=chain)
         if price is None or not price.is_finite():
             return [None] * n  # whole-hook None: unmeasurable cross-leg ratio
         leg_value_usd.append(leg_amount * price)
@@ -1709,7 +1722,7 @@ def _apply_lp_wallet_basis_hooks(
         total_val_usd: Decimal | None = cost_basis_usd if principal_present else fees_total_usd
         # VIB-4264: value-weight ``total_val_usd`` across legs by close-time
         # USD value (see ``_value_weighted_leg_basis``). Keyed BY INDEX.
-        per_leg_basis = _value_weighted_leg_basis(active_legs, total_val_usd, price_oracle)
+        per_leg_basis = _value_weighted_leg_basis(active_legs, total_val_usd, price_oracle, chain=chain)
 
         for idx, (leg_token, leg_amount) in enumerate(active_legs):
             basis_store.record_swap_acquisition(
@@ -1821,6 +1834,7 @@ def handle_lp(
         ledger_row=ledger_row,
         intent_type_str=intent_type_str,
         assumed_decimals=assumed_decimals,
+        chain=chain,
     )
 
     # VIB-5429 — override cost_basis + confidence with the N-coin Curve valuation
@@ -1901,6 +1915,7 @@ def handle_lp(
         price_oracle=price_oracle,
         prior_open_payload=prior_open_payload,
         cost_basis_usd=cost_basis_usd,
+        chain=chain,
     )
 
     # VIB-5429 — override fees_total_usd with the N-coin Curve fee valuation on a
@@ -1937,6 +1952,7 @@ def handle_lp(
         prior_open_payload=prior_open_payload,
         cost_basis_usd=cost_basis_usd,
         fees_total_usd=fees_total_usd,
+        chain=chain,
     )
 
     # VIB-4262: mirror LP token flow into the chain+wallet basis pool so a

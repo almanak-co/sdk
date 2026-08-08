@@ -2245,14 +2245,14 @@ def compute_lp_close_value_usd(
     Extracted from ``_apply_lp_close_value_usd`` (VIB-4896) so the offline
     repair CLI (``almanak strat repair-teardown-lp-close``) and the runner's
     iteration / teardown lanes share one implementation of the decimal/price
-    math. Behaviour is preserved verbatim — same upper-casing, same tolerant
-    ``price_usd``/``price`` + lower-case fallback price lookup, same
-    structured WARNs (each carrying ``position_id``/``chain``) on every
+    math. Token identity is retained verbatim for case-sensitive chains while
+    symbol matching remains case-insensitive. The same tolerant price handling
+    and structured WARNs (each carrying ``position_id``/``chain``) remain on every
     early-exit branch so a silent empty value_usd never hides in production
     again (the May-22 ``lp_triple`` rerun bug).
     """
-    token0 = (token0 or "").upper()
-    token1 = (token1 or "").upper()
+    token0 = str(token0 or "").strip()
+    token1 = str(token1 or "").strip()
     amount0_str = amount0
     amount1_str = amount1
     if not (amount0_str and amount1_str and token0 and token1):
@@ -2298,33 +2298,8 @@ def compute_lp_close_value_usd(
         a0 = _D(str(amount0_str)) / _D(10**ti0.decimals)
         a1 = _D(str(amount1_str)) / _D(10**ti1.decimals)
 
-        # Tolerant price lookup — mirrors VIB-3885 helper used by category
-        # handlers and ``_apply_lp_open_value_usd`` at L1478. ``sym`` is
-        # already upper-cased above, so the OPEN path uses ``sym.lower()`` as
-        # the second fallback for oracles that key on lowercase symbols.
-        # Likewise accepts both ``price_usd`` and ``price`` keys on nested
-        # entries. (CodeRabbit Major on PR #2490 — the prior ``sym.upper()``
-        # fallback was dead and the single ``price_usd`` key diverged from
-        # the OPEN helper.)
-        def _price(sym: str) -> _D | None:
-            entry = price_oracle.get(sym) or price_oracle.get(sym.lower())
-            if entry is None:
-                return None
-            if isinstance(entry, dict):
-                p = entry.get("price_usd") or entry.get("price")
-                if p is None:
-                    return None
-                try:
-                    return _D(str(p))
-                except Exception:  # noqa: BLE001
-                    return None
-            try:
-                d = _D(str(entry))
-            except Exception:  # noqa: BLE001
-                return None
-            return d if d.is_finite() else None
-
-        p0, p1 = _price(token0), _price(token1)
+        p0 = _price_from_oracle(price_oracle, token0, chain=chain)
+        p1 = _price_from_oracle(price_oracle, token1, chain=chain)
         if p0 is None or p1 is None:
             logger.warning(
                 "lp_close_value_usd.skipped reason=price_oracle_miss "
@@ -2357,45 +2332,12 @@ def compute_lp_close_value_usd(
         return LpCloseValueResult(skip_reason="arithmetic_or_resolver_error")
 
 
-def _price_from_oracle(price_oracle: dict, sym: str) -> Decimal | None:
-    """Tolerant per-symbol price lookup shared by the N-coin close valuer.
+def _price_from_oracle(price_oracle: dict, sym: str, *, chain: str | None = None) -> Decimal | None:
+    """Resolve one measured USD mark through the shared identity seam."""
+    from almanak.framework.market.price_store import lookup_price
 
-    Mirrors the ``_price`` closure inside :func:`compute_lp_close_value_usd`
-    (VIB-3885 / PR #2490): accepts an upper- or lower-cased oracle key and both
-    ``price_usd`` / ``price`` on a nested dict entry, and rejects a
-    non-finite Decimal. Returns ``None`` (unmeasured — Empty≠Zero) on any miss,
-    never a fabricated zero.
-    """
-    # Explicit membership + ``is None`` checks (NOT ``or`` chaining): a legitimate
-    # 0 / 0.0 price is falsy, so ``or`` would wrongly fall through to the next
-    # key / field and resolve an INCORRECT price (or None when a real zero was
-    # present). Take the first key actually PRESENT with a non-None value, and
-    # the first field actually PRESENT — a downstream ``is_finite`` / ``<= 0``
-    # guard is what rejects a bad price, not the lookup.
-    entry = None
-    for key in (sym, sym.lower(), sym.upper()):
-        if key in price_oracle and price_oracle[key] is not None:
-            entry = price_oracle[key]
-            break
-    if entry is None:
-        return None
-    if isinstance(entry, dict):
-        if entry.get("price_usd") is not None:
-            p = entry["price_usd"]
-        elif entry.get("price") is not None:
-            p = entry["price"]
-        else:
-            return None
-        try:
-            d = Decimal(str(p))
-        except (InvalidOperation, ValueError, TypeError):
-            return None
-        return d if d.is_finite() else None
-    try:
-        d = Decimal(str(entry))
-    except (InvalidOperation, ValueError, TypeError):
-        return None
-    return d if d.is_finite() else None
+    found = lookup_price(price_oracle, token=sym, chain=chain, quote="USD")
+    return found.price if found is not None else None
 
 
 def compute_lp_ncoin_value_usd(
@@ -2440,7 +2382,7 @@ def compute_lp_ncoin_value_usd(
         resolver = get_token_resolver()
         total = Decimal(0)
         for sym, raw_amount in zip(coin_symbols, all_amounts, strict=True):
-            symbol = (sym or "").upper()
+            symbol = str(sym or "").strip()
             if not symbol or raw_amount is None:
                 # Empty ≠ Zero — an unmeasured leg (or an unknown coin) poisons
                 # the whole close value; a partial sum would understate recovered
@@ -2466,7 +2408,7 @@ def compute_lp_ncoin_value_usd(
                     resolver_err,
                 )
                 return ""
-            price = _price_from_oracle(price_oracle, symbol)
+            price = _price_from_oracle(price_oracle, symbol, chain=chain)
             if price is None:
                 logger.warning(
                     "lp_ncoin_value_usd.skipped reason=price_oracle_miss position_id=%s chain=%s symbol=%s",
@@ -2682,29 +2624,13 @@ def _apply_lp_open_value_usd(event: PositionEvent, price_oracle: dict, chain: st
         return  # already set by something upstream — don't overwrite
     amount0_str = event.amount0
     amount1_str = event.amount1
-    token0 = (event.token0 or "").upper()
-    token1 = (event.token1 or "").upper()
+    token0 = str(event.token0 or "").strip()
+    token1 = str(event.token1 or "").strip()
     if not (amount0_str and amount1_str and token0 and token1):
         return
 
-    def _price(sym: str) -> Decimal | None:
-        # Tolerant of both nested ({price_usd: ...}) and flat shapes —
-        # mirrors the VIB-3885 helper for category handlers.
-        raw = price_oracle.get(sym) or price_oracle.get(sym.lower())
-        if raw is None:
-            return None
-        if isinstance(raw, dict):
-            raw = raw.get("price_usd") or raw.get("price")
-            if raw is None:
-                return None
-        try:
-            d = Decimal(str(raw))
-        except (ArithmeticError, ValueError, TypeError):
-            return None
-        return d if d.is_finite() else None
-
-    p0 = _price(token0)
-    p1 = _price(token1)
+    p0 = _price_from_oracle(price_oracle, token0, chain=chain)
+    p1 = _price_from_oracle(price_oracle, token1, chain=chain)
     if p0 is None or p1 is None:
         return
 

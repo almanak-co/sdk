@@ -434,12 +434,13 @@ def _wallet_value_at_first_action(ledger_entries: list[Any]) -> Decimal | None:
         if not isinstance(balances, dict) or not isinstance(prices, dict):
             continue
 
+        chain = getattr(entry, "chain", None) if not isinstance(entry, dict) else entry.get("chain")
         total = Decimal("0")
         for token, balance_raw in balances.items():
             balance = _to_decimal(balance_raw)
             if balance == 0:
                 continue
-            price_entry = _price_entry_for_token(prices, token)
+            price_entry = _price_entry_for_token(prices, token, chain=chain)
             if not isinstance(price_entry, dict):
                 continue
             price = _to_decimal(price_entry.get("price_usd"))
@@ -451,41 +452,20 @@ def _wallet_value_at_first_action(ledger_entries: list[Any]) -> Decimal | None:
     return None
 
 
-def _price_entry_for_token(prices: dict, token: Any) -> Any:
+def _price_entry_for_token(prices: dict, token: Any, *, chain: str | None = None) -> Any:
     """Find the ``price_inputs_json`` entry for a wallet-balance key.
 
-    Balance snapshots stamp the intent's token string VERBATIM (address-form
-    post symbol-deprecation), while ``price_inputs_json`` is symbol-keyed —
-    an exact-string join silently excluded those holdings from the
-    "Deployed" anchor and understated the baseline. Probe order: exact
-    (previous behaviour) → case-insensitive → the snapshot's
-    ``chain:0xaddr`` composite keys by address → offline address→symbol
-    resolution using chains named by the composite keys. Misses stay
-    excluded, as before.
+    Balance snapshots stamp the intent's token string verbatim. Delegate to
+    the shared identity-aware lookup so the deployed-wallet anchor uses the
+    same deterministic precedence as compilation and accounting. Ambiguous
+    cross-chain address matches fail closed; misses stay excluded.
     """
-    entry = prices.get(token)
-    if isinstance(entry, dict):
-        return entry
     if not isinstance(token, str):
         return None
-    token_lower = token.strip().lower()
-    for key, value in prices.items():
-        if isinstance(key, str) and key.lower() == token_lower and isinstance(value, dict):
-            return value
-    if token_lower.startswith("0x"):
-        for key, value in prices.items():
-            if isinstance(key, str) and key.lower().endswith(":" + token_lower) and isinstance(value, dict):
-                return value
-        from almanak.framework.data.tokens.address_resolution import resolve_token_symbol
+    from almanak.framework.market.price_store import lookup_price
 
-        chains = {key.split(":", 1)[0].lower() for key in prices if isinstance(key, str) and ":" in key}
-        for chain_guess in sorted(chains):
-            symbol = resolve_token_symbol(token_lower, chain_guess)
-            if symbol:
-                value = prices.get(symbol)
-                if isinstance(value, dict):
-                    return value
-    return None
+    found = lookup_price(prices, token=token, chain=chain, quote="USD")
+    return found.raw if found is not None and isinstance(found.raw, dict) else None
 
 
 def ledger_quant_stats_from_entries(ledger_entries: list[Any]) -> LedgerQuantStats:
@@ -1199,7 +1179,7 @@ def compute_cost_stack(
     return stack
 
 
-def _inventory_price_for_token(prices: dict[str, Any], token: str) -> Decimal | None:
+def _inventory_price_for_token(prices: dict[str, Any], token: str, *, chain: str | None = None) -> Decimal | None:
     """Look up a held swap-inventory token's mark price (VIB-4984).
 
     ``token`` is the FIFO lot's resolved symbol (e.g. ``"WETH"``).
@@ -1209,32 +1189,16 @@ def _inventory_price_for_token(prices: dict[str, Any], token: str) -> Decimal | 
     - flat ``{symbol: price}`` / ``{"chain:address": price}``
     - snapshot shape ``{"chain:0xaf88…": {"price_usd": "1.0", "symbol": "USDC"}}``
 
-    Matching is case-insensitive on the symbol field and on the ``chain:``
-    suffix. Returns ``None`` when no mark price is found (degrade — never
-    fetch a live price; gateway boundary).
+    Matching uses the shared identity-aware lookup. Returns ``None`` when no
+    unambiguous mark price is found (degrade — never fetch a live price;
+    gateway boundary).
     """
     if not prices or not token:
         return None
-    needle = str(token).lower()
-    for key, val in prices.items():
-        key_str = str(key).lower()
-        if key_str == needle or key_str.endswith(":" + needle):
-            if isinstance(val, dict):
-                price = val.get("price_usd")
-                parsed = _to_decimal_or_none(price)
-                if parsed is not None:
-                    return parsed
-                continue
-            parsed = _to_decimal_or_none(val)
-            if parsed is not None:
-                return parsed
-        if isinstance(val, dict):
-            symbol = val.get("symbol")
-            if symbol and str(symbol).lower() == needle:
-                parsed = _to_decimal_or_none(val.get("price_usd"))
-                if parsed is not None:
-                    return parsed
-    return None
+    from almanak.framework.market.price_store import lookup_price
+
+    found = lookup_price(prices, token=token, chain=chain, quote="USD")
+    return found.price if found is not None else None
 
 
 def _to_decimal_or_none(value: Any) -> Decimal | None:
@@ -1344,7 +1308,7 @@ def compute_inventory_unrealized(
         if cost_for_remaining is None:
             # Missing basis — refuse to mark held inventory as pure profit.
             return None
-        mark = _inventory_price_for_token(latest_token_prices, token)
+        mark = _inventory_price_for_token(latest_token_prices, token, chain=lot_chain)
         if mark is None:
             # No persisted mark for this held token — degrade rather than
             # fetch a live price (gateway boundary).

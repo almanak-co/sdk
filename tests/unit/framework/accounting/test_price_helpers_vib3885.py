@@ -26,7 +26,6 @@ from almanak.framework.accounting.category_handlers._price_helpers import (
 from almanak.framework.accounting.category_handlers.swap_handler import _token_usd
 from almanak.framework.accounting.lp_accounting import compute_lp_cost_basis
 
-
 # ──────────────────────────────────────────────────────────────────────────
 # parse_price_inputs — direct shape coverage
 # ──────────────────────────────────────────────────────────────────────────
@@ -226,6 +225,25 @@ def test_lp_cost_basis_works_for_both_shapes(raw):
     assert cost is not None
     # 0.000891557 * 2301.69 + 2.294332 * 1.0001 ≈ 2.052 + 2.295 ≈ $4.35
     assert Decimal("4.30") < cost < Decimal("4.40")
+
+
+def test_lp_cost_basis_uses_chain_qualified_address_identity():
+    token = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+    oracle = {
+        f"base:{token}": Decimal("1"),
+        f"ethereum:{token}": Decimal("2000"),
+    }
+
+    cost = compute_lp_cost_basis(
+        Decimal("2"),
+        Decimal("0"),
+        token,
+        "UNPRICED_ZERO_LEG",
+        oracle,
+        chain="base",
+    )
+
+    assert cost == Decimal("2")
 
 
 def test_lp_cost_basis_returns_none_on_empty_oracle():

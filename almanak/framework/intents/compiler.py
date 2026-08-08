@@ -2681,9 +2681,13 @@ class IntentCompiler:
         prices = self.price_oracle
         if not prices:
             return
+        from almanak.framework.market.price_store import lookup_price
+
         for wrapped, native in self._WRAPPED_TO_NATIVE.items():
-            w_price = prices.get(wrapped)
-            n_price = prices.get(native)
+            wrapped_found = lookup_price(prices, chain=self.chain, symbol=wrapped, quote="USD")
+            native_found = lookup_price(prices, chain=self.chain, symbol=native, quote="USD")
+            w_price = wrapped_found.price if wrapped_found is not None else None
+            n_price = native_found.price if native_found is not None else None
             # Truthiness here intentionally treats Decimal(0) and None identically
             # (a zero price is as useless as a missing one). Using truthiness also
             # lets mypy narrow ``Decimal | None`` -> ``Decimal`` without ``type: ignore``.

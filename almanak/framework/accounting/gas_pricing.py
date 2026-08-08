@@ -102,13 +102,13 @@ def native_token_for_chain(chain: str) -> str:
     return descriptor.native.symbol
 
 
-def _lookup_price(price_oracle: dict[str, Any] | None, symbol: str) -> Decimal | None:
+def _lookup_price(price_oracle: dict[str, Any] | None, symbol: str, *, chain: str) -> Decimal | None:
     """Return the USD price of *symbol* from *price_oracle*, or None.
 
-    Tries upper-case (canonical), then exact, then lower-case — matches the
-    precedence used by ``lending_accounting._amount_to_usd`` so we stay
-    consistent across the codebase.  ``None`` is returned for any failure
-    (missing oracle, missing key, unparseable value).
+    Uses the shared identity-aware lookup contract, so accounting observes the
+    same exact identity → chain-qualified key → symbol precedence as intent
+    sizing. ``None`` is returned for any failure (missing oracle, missing key,
+    unparseable or non-positive value).
 
     Accepts both shapes the runner emits today:
       * Flat ``{symbol: price}`` (legacy `MarketSnapshot.get_price_oracle_dict()`).
@@ -118,30 +118,12 @@ def _lookup_price(price_oracle: dict[str, Any] | None, symbol: str) -> Decimal |
     Without the nested branch, teardown ledger rows lost ``gas_usd`` because
     `compute_gas_usd` couldn't parse the oracle's nested ``price_usd`` field.
     """
-    if not price_oracle:
+    from almanak.framework.market.price_store import lookup_price
+
+    found = lookup_price(price_oracle, chain=chain, symbol=symbol, quote="USD")
+    if found is None:
         return None
-    candidate = price_oracle.get(symbol.upper())
-    if candidate is None:
-        candidate = price_oracle.get(symbol)
-    if candidate is None:
-        candidate = price_oracle.get(symbol.lower())
-    if candidate is None:
-        return None
-    if isinstance(candidate, dict):
-        candidate = candidate.get("price_usd")
-        if candidate is None:
-            return None
-    try:
-        price = Decimal(str(candidate))
-    except (InvalidOperation, ValueError, TypeError):
-        return None
-    if not price.is_finite():
-        # ``Decimal("NaN")`` raises ``InvalidOperation`` on the ``<= 0``
-        # comparison below; ``Decimal("Infinity")`` parses cleanly and
-        # passes ``> 0`` but is never a legitimate USD price.  Reject
-        # non-finite values up front so the rest of the helper can
-        # treat ``price`` as a real number.
-        return None
+    price = found.price
     if price <= 0:
         # A zero or negative price is never legitimate for a native gas token.
         # Treat as unavailable rather than fabricating a $0 gas cost.
@@ -237,7 +219,7 @@ def compute_gas_usd(
         return None
 
     native_symbol = native_token_for_chain(chain)
-    native_price = _lookup_price(price_oracle, native_symbol)
+    native_price = _lookup_price(price_oracle, native_symbol, chain=chain)
     if native_price is None:
         return None
 

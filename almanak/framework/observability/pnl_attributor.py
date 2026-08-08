@@ -306,7 +306,7 @@ def _pair_close_with_open(history: list, close_event: Any) -> dict | None:
     return unpaired_opens[-1] if unpaired_opens else None
 
 
-def _price_for_token(prices: dict, token: str) -> Decimal | None:
+def _price_for_token(prices: dict, token: str, *, chain: str | None = None) -> Decimal | None:
     """Look up a token price in a flexible ``{key: price_or_dict}`` dict.
 
     Supports two shapes to match ``PortfolioSnapshot.token_prices`` and the
@@ -317,41 +317,15 @@ def _price_for_token(prices: dict, token: str) -> Decimal | None:
       -> PortfolioSnapshot shape; we match by suffix after ``chain:`` and
       by ``symbol`` field.
 
-    Comparison is case-insensitive. Returns ``None`` when the token is
-    missing or the price cannot be parsed to Decimal.
+    Resolution uses the SDK-wide identity-aware price lookup. Returns ``None``
+    when the token is missing, ambiguous, or cannot be parsed to Decimal.
     """
     if not prices or not token:
         return None
-    needle = str(token).lower()
+    from almanak.framework.market.price_store import lookup_price
 
-    def _parse(v: Any) -> Decimal | None:
-        try:
-            return Decimal(str(v))
-        except (InvalidOperation, ValueError, TypeError):
-            return None
-
-    for key, val in prices.items():
-        key_str = str(key).lower()
-        # Direct match: flat {symbol/address: price_str}
-        if key_str == needle or key_str.endswith(":" + needle):
-            if isinstance(val, dict):
-                price = val.get("price_usd")
-                parsed = _parse(price) if price is not None else None
-                if parsed is not None:
-                    return parsed
-                continue
-            parsed = _parse(val)
-            if parsed is not None:
-                return parsed
-        # PortfolioSnapshot shape: check nested symbol field
-        if isinstance(val, dict):
-            symbol = val.get("symbol")
-            if symbol and str(symbol).lower() == needle:
-                price = val.get("price_usd")
-                parsed = _parse(price) if price is not None else None
-                if parsed is not None:
-                    return parsed
-    return None
+    found = lookup_price(prices, token=token, chain=chain, quote="USD")
+    return found.price if found is not None else None
 
 
 def _scale_raw_amount_to_human(raw: Decimal, token: str, chain: str) -> Decimal | None:
@@ -490,9 +464,10 @@ def compute_impermanent_loss(
 
     token0 = entry.get("token0") or open_event.get("token0") or ""
     token1 = entry.get("token1") or open_event.get("token1") or ""
+    chain = close_event.get("chain") or open_event.get("chain") or None
 
-    price0_now = _price_for_token(prices, token0) if token0 else None
-    price1_now = _price_for_token(prices, token1) if token1 else None
+    price0_now = _price_for_token(prices, token0, chain=chain) if token0 else None
+    price1_now = _price_for_token(prices, token1, chain=chain) if token1 else None
 
     # CodeRabbit audit fix: return None when ANY non-zero leg is missing
     # its price. The previous code defaulted missing prices to 0, which
@@ -1332,8 +1307,8 @@ async def stamp_entry_state_on_open(
             chain=chain,
             price_oracle=price_oracle,
         )
-        price0 = _price_for_token(prices, token0) if prices else None
-        price1 = _price_for_token(prices, token1) if prices else None
+        price0 = _price_for_token(prices, token0, chain=chain) if prices else None
+        price1 = _price_for_token(prices, token1, chain=chain) if prices else None
 
         # VIB-5896 — thread the pool-coin universe (stamped transiently on the
         # in-memory PositionEvent by ``_apply_lp_open`` for N-coin fungible

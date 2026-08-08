@@ -20,11 +20,12 @@ import concurrent.futures
 import inspect
 import logging
 import re
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from almanak.core.chains import ChainRegistry
 from almanak.core.finality import DataFinality
 
 from ..data.interfaces import VolumeUnavailableError
@@ -51,6 +52,7 @@ from .models import (
     StochasticData,
     TokenBalance,
 )
+from .price_store import PriceStore, StoredPrice, lookup_price
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -165,24 +167,6 @@ def _token_cache_key(token: str, chain: str) -> str:
     if _is_evm_address(stripped):
         return f"{chain.lower()}:{stripped.lower()}"
     return token
-
-
-def _address_key_symbol_alias(token_key: str, chain: str | None) -> str | None:
-    """Canonical UPPER symbol for an address-form oracle key, or ``None``.
-
-    ``price(<address>)`` caches under ``chain:0xaddr`` keys that no
-    symbol-keyed consumer (compiler, gas pricing, ledger writers) can join.
-    This resolves such keys to their canonical symbol for an ADDITIVE alias
-    export in :meth:`MarketSnapshot.get_price_oracle_dict`. Offline-only and
-    best-effort — an unresolvable key yields ``None`` and stays exported
-    under its address form only. Symbol-shaped keys return ``None`` (cheap
-    pre-filter, no resolver import on the common path).
-    """
-    if not isinstance(token_key, str) or "0x" not in token_key.lower():
-        return None
-    from almanak.framework.data.tokens.address_resolution import resolve_token_symbol
-
-    return resolve_token_symbol(token_key, chain)
 
 
 def _alias_target_display_key(key: str) -> str | None:
@@ -650,15 +634,18 @@ class MarketSnapshot:
             self._chains = None
 
         # Cache for fetched data
-        self._price_cache: dict[str, PriceData] = {}
+        # ALM-3187: one quote-aware, identity-keyed price cache.  Address
+        # records use TokenRef.identity_key; legacy symbol-only seeds live in
+        # the store's explicit alias index rather than sharing a flat keyspace.
+        self._price_store: PriceStore[PriceData] = PriceStore()
         self._rsi_cache: dict[tuple[str, OHLCVTimeframe, int], RSIData] = {}
         self._balance_cache: dict[str, TokenBalance] = {}
-        # Explicit plain-symbol -> "chain:0xaddress" read/write aliases for
+        # Explicit plain-symbol -> "chain:0xaddress" cache-key aliases for
         # address-native backtest snapshots (VIB-5508 follow-up). Populated
         # ONLY via ``_register_symbol_alias_keys`` by the PnL engine bridge,
-        # from the run's own registered token-address map. Live snapshots
-        # never register aliases, so ``_token_cache_key`` stays a pure
-        # pass-through for plain symbols outside a backtest.
+        # from the run's own registered token-address map. PriceStore also
+        # maintains an independent, ambiguity-safe symbol index for price
+        # reads on every snapshot; this map governs cache-key rewriting only.
         self._symbol_alias_keys: dict[str, str] = {}
         # Balance keys that all mirror the SAME underlying cash source
         # (``SimulatedPortfolio.cash_usd``). Populated ONLY via
@@ -907,9 +894,11 @@ class MarketSnapshot:
                 # ~1880 for ``price("WETH", "ETH")`` and a peg-guarded
                 # strategy held every tick while working live).
 
-        # Check cache
-        if cache_key in self._price_cache:
-            return self._price_cache[cache_key].price
+        # Check the quote-aware typed store.  ``token`` may be a symbol, a raw
+        # address, or the snapshot-native ``chain:address`` display key.
+        cached = lookup_price(self._price_store, token=token, chain=requested_chain, quote=quote)
+        if cached is not None:
+            return cached.price
 
         # Use oracle if available. Two protocols:
         #   1. Modern callable oracle: ``oracle(token, quote, chain)`` → Decimal.
@@ -954,9 +943,16 @@ class MarketSnapshot:
                 # VIB-3889: stamp the inferred source on the cached entry
                 # so ``get_price_oracle_dict(with_sources=True)`` carries
                 # the actual provider name into ``price_inputs_json``.
-                self._price_cache[cache_key] = PriceData(
+                price_data = PriceData(
                     price=price_value,
                     source=_infer_oracle_source(self._price_oracle),
+                )
+                self._price_store.put(
+                    token,
+                    chain=requested_chain,
+                    quote=quote,
+                    price=price_value,
+                    data=price_data,
                 )
                 self._critical_data_failures.pop(("price", cache_key), None)
                 return price_value
@@ -1009,14 +1005,17 @@ class MarketSnapshot:
         raw_token = token
         requested_chain = self._resolve_chain(chain)
         token = self._token_cache_key(token, requested_chain, warn_on_symbol=True)
-        cache_key = f"{token}/{quote}@{requested_chain}"
 
-        if cache_key in self._price_cache:
-            return self._price_cache[cache_key]
+        cached = lookup_price(self._price_store, token=token, chain=requested_chain, quote=quote)
+        if cached is not None and isinstance(cached.raw, PriceData):
+            return cached.raw
 
         # Get basic price and create PriceData
         current_price = self.price(raw_token, quote, chain=requested_chain)
-        return self._price_cache.get(cache_key, PriceData(price=current_price))
+        cached = lookup_price(self._price_store, token=token, chain=requested_chain, quote=quote)
+        return (
+            cached.raw if cached is not None and isinstance(cached.raw, PriceData) else PriceData(price=current_price)
+        )
 
     def pt_price(
         self,
@@ -2105,8 +2104,8 @@ class MarketSnapshot:
                 ``self.chain`` or be ``None``.
             price: Optional already-known USD price (keyword-only, VIB-4843
                 FR-5003). When supplied, ``balance_usd`` is computed as
-                ``balance * price`` WITHOUT a re-fetch. When omitted, the warm
-                ``_price_cache`` is consulted (still no oracle call); only when
+                ``balance * price`` WITHOUT a re-fetch. When omitted, the typed
+                price store is consulted (still no oracle call); only when
                 neither is available is ``balance_usd`` left as the coerced
                 ``Decimal("0")`` for callers to fill via ``price()``. This
                 removes the redundant price re-fetch the portfolio valuation
@@ -2114,7 +2113,7 @@ class MarketSnapshot:
 
         Returns:
             TokenBalance with current balance (and ``balance_usd`` filled from
-            ``price`` / ``_price_cache`` when derivable).
+            ``price`` / the typed price store when derivable).
 
         Raises:
             ChainNotConfiguredError / AmbiguousChainError: same rules as :meth:`price`.
@@ -2448,7 +2447,7 @@ class MarketSnapshot:
         Never issues an oracle call. Resolution order:
 
         1. The caller-supplied ``price`` (authoritative, no fetch).
-        2. A warm ``_price_cache`` / pre-populated ``_prices`` entry for the
+        2. A warm typed-price-store / pre-populated ``_prices`` entry for the
            token on this chain (still no fetch).
 
         Empty≠Zero: USD is (re)computed ONLY when the current ``balance_usd``
@@ -2672,8 +2671,8 @@ class MarketSnapshot:
     def _cached_price_for(self, token: str, requested_chain: str) -> Decimal | None:
         """Return an already-known USD price for ``token`` WITHOUT a fetch.
 
-        Consults the pre-populated ``_prices`` map and the warm
-        ``_price_cache`` (the same cache ``price()`` writes). Returns ``None``
+        Consults the pre-populated ``_prices`` map and the warm typed price
+        store (the same cache ``price()`` writes). Returns ``None``
         when no cached price exists — the caller must NOT trigger an oracle
         call from a balance lookup.
         """
@@ -2681,11 +2680,8 @@ class MarketSnapshot:
             seeded = self._seeded_price_for_symbol(token)
             if seeded is not None:
                 return seeded
-        cache_key = f"{token}/USD@{requested_chain}"
-        cached = self._price_cache.get(cache_key)
-        if cached is not None:
-            return cached.price
-        return None
+        cached = lookup_price(self._price_store, token=token, chain=requested_chain, quote="USD")
+        return cached.price if cached is not None else None
 
     def _coerce_balance_result(self, token: str, raw: Any) -> tuple[TokenBalance, bool]:
         """Normalize a balance-provider return value into a ``TokenBalance``.
@@ -2849,6 +2845,13 @@ class MarketSnapshot:
         """
         token = self._token_cache_key(token)
         self._prices[token] = price_value
+        self._price_store.put(
+            token,
+            chain=self._chain,
+            quote="USD",
+            price=price_value,
+            data=PriceData(price=price_value, source="preloaded"),
+        )
 
     def set_price_data(
         self,
@@ -2914,8 +2917,13 @@ class MarketSnapshot:
             existing = self._chains or (self._chain,)
             if target_chain not in existing:
                 self._chains = (*existing, target_chain)
-        cache_key = f"{token}/{quote}@{target_chain}"
-        self._price_cache[cache_key] = price_data
+        self._price_store.put(
+            token,
+            chain=target_chain,
+            quote=quote,
+            price=price_data.price,
+            data=price_data,
+        )
 
     def set_balance(
         self,
@@ -4408,13 +4416,16 @@ class MarketSnapshot:
             return None
 
     def get_price_oracle_dict(self, with_sources: bool = False) -> dict[str, Any]:
-        """Get all prices as a dict suitable for IntentCompiler.
+        """Return the derived USD-only compatibility view for legacy consumers.
 
-        Combines pre-populated prices and cached prices from oracle calls.
-        Keys are normalized to uppercase to match Token.symbol (which is
-        always uppercased by Token.__post_init__).  This prevents
-        case-mismatch lookup failures for mixed-case tokens like cbETH,
-        wstETH, crvUSD, sUSDe, etc.
+        The authoritative cache is :class:`PriceStore`, keyed by
+        ``TokenRef.identity_key`` plus quote.  This method deliberately exports
+        only ``quote=USD`` records.  Address identities render as
+        ``chain:address``; symbol aliases are additive on the snapshot's primary
+        chain. Off-primary symbol-only records also render as
+        ``chain:SYMBOL`` because they have no address identity to fall back
+        to; a bare alias is added when that symbol is unambiguous across the
+        snapshot. Solana mint casing is preserved.
 
         Args:
             with_sources: When ``True`` (VIB-3889), return the canonical
@@ -4428,88 +4439,54 @@ class MarketSnapshot:
             Flat ``dict[str, Decimal]`` (default) or nested
             ``dict[str, dict]`` when ``with_sources=True``.
         """
-        if not with_sources:
-            prices: dict[str, Decimal] = {}
-            # Add pre-populated prices (normalize keys to uppercase)
-            for key, val in self._prices.items():
-                prices[key.upper()] = val
-            # Add cached prices from oracle calls (key format: "TOKEN/USD")
-            for cache_key, price_data in self._price_cache.items():
-                if "/" in cache_key:
-                    token = cache_key.split("/")[0].upper()
-                    prices[token] = price_data.price
-            # Address-keyed entries (``chain:0xaddr`` — how ``price(<address>)``
-            # caches) additionally export under their canonical SYMBOL so
-            # symbol-keyed consumers (compiler ``require_token_price``, gas
-            # pricing, ledger price_inputs_json) can join. Direct keys win on
-            # collision — an explicitly symbol-fetched price is never
-            # overwritten by an alias.
-            self._merge_address_key_aliases(prices, lambda val: val, lambda pd: pd.price)
-            return prices
+        out: dict[str, Any] = {}
 
-        # VIB-3889 nested shape: {symbol: {price_usd, oracle_source, ...}}
-        # — the canonical AttemptNo17 §1.2 G12 shape that ledger.py:529-544
-        # propagates verbatim into transaction_ledger.price_inputs_json.
-        nested: dict[str, dict[str, Any]] = {}
-        for key, val in self._prices.items():
-            nested[key.upper()] = {
-                "price_usd": str(val),
-                "oracle_source": "preloaded",
-                "fetched_at": "",
-                "confidence": "HIGH",
-            }
-        for cache_key, price_data in self._price_cache.items():
-            if "/" not in cache_key:
-                continue
-            token = cache_key.split("/")[0].upper()
+        def _value(record: StoredPrice[PriceData]) -> Any:
+            if not with_sources:
+                return record.price
+            price_data = record.data
+            timestamp = getattr(price_data, "timestamp", None)
             source = getattr(price_data, "source", "") or "unknown"
-            ts = getattr(price_data, "timestamp", None)
-            nested[token] = {
-                "price_usd": str(price_data.price),
-                "oracle_source": source,
-                "fetched_at": ts.isoformat() if ts is not None else "",
-                "confidence": "HIGH",
-            }
-
-        # Symbol aliases for address-keyed entries — same rule as the flat
-        # branch above: additive, direct keys win on collision.
-        def _nested_from_preloaded(val: Any) -> dict[str, Any]:
-            return {"price_usd": str(val), "oracle_source": "preloaded", "fetched_at": "", "confidence": "HIGH"}
-
-        def _nested_from_cached(price_data: Any) -> dict[str, Any]:
-            ts = getattr(price_data, "timestamp", None)
             return {
-                "price_usd": str(price_data.price),
-                "oracle_source": getattr(price_data, "source", "") or "unknown",
-                "fetched_at": ts.isoformat() if ts is not None else "",
+                "price_usd": str(record.price),
+                "oracle_source": source,
+                "fetched_at": timestamp.isoformat() if timestamp is not None and source != "preloaded" else "",
                 "confidence": "HIGH",
             }
 
-        self._merge_address_key_aliases(nested, _nested_from_preloaded, _nested_from_cached)
-        return nested
+        descriptor = ChainRegistry.try_resolve(str(self._chain))
+        primary_chain = descriptor.name if descriptor is not None else str(self._chain).strip().lower()
+        records = self._price_store.records(quote="USD")
+        symbol_chains: dict[str, set[str]] = {}
+        for record in records:
+            if record.symbol:
+                symbol_chains.setdefault(record.symbol.upper(), set()).add(record.chain)
 
-    def _merge_address_key_aliases(
-        self,
-        out: dict[str, Any],
-        from_preloaded: Callable[[Any], Any],
-        from_cached: Callable[[Any], Any],
-    ) -> None:
-        """Merge symbol aliases for address-keyed price entries into ``out``.
-
-        Shared by both ``get_price_oracle_dict`` shapes; ``from_preloaded`` /
-        ``from_cached`` produce the shape-specific value. Additive only —
-        existing (direct) keys always win.
-        """
-        for key, val in self._prices.items():
-            alias = _address_key_symbol_alias(key, self._chain)
-            if alias and alias not in out:
-                out[alias] = from_preloaded(val)
-        for cache_key, price_data in self._price_cache.items():
-            if "/" not in cache_key:
-                continue
-            alias = _address_key_symbol_alias(cache_key.split("/")[0], self._chain)
-            if alias and alias not in out:
-                out[alias] = from_cached(price_data)
+        # Identities are always exported because they are unambiguous. Address
+        # records add a bare symbol only on the canonical primary chain. A
+        # symbol-only record has no identity fallback, so retain a qualified
+        # representation and add the bare compatibility alias only when the
+        # symbol is primary-chain or unique across this snapshot.
+        for record in records:
+            value = _value(record)
+            if record.identity_key is not None:
+                identity_chain, address = record.identity_key
+                out[f"{identity_chain}:{address}"] = value
+                if (
+                    record.symbol
+                    and self._price_store.has_unambiguous_symbol_alias(record)
+                    and (identity_chain == primary_chain or len(symbol_chains[record.symbol.upper()]) == 1)
+                ):
+                    out.setdefault(record.symbol.upper(), value)
+            elif record.symbol:
+                symbol = record.symbol.upper()
+                if record.chain != primary_chain:
+                    out[f"{record.chain}:{symbol}"] = value
+                if record.chain == primary_chain or len(symbol_chains[symbol]) == 1:
+                    # A direct symbol record is authoritative over an additive
+                    # address-derived alias regardless of insertion order.
+                    out[symbol] = value
+        return out
 
     # =========================================================================
     # VIB-4062 — Methods ported from the data-layer copy.
@@ -6507,7 +6484,7 @@ class MarketSnapshot:
         _add("solana_lst_provider", self._solana_lst_provider is not None)
 
         total_cache_size = (
-            len(self._price_cache)
+            len(self._price_store)
             + len(self._balance_cache)
             + len(self._rsi_cache)
             + len(self._lending_rate_cache)

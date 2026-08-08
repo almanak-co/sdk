@@ -33,6 +33,9 @@ from almanak.framework.observability.pnl_attributor import (
 from almanak.framework.observability.position_events import PositionEvent
 from almanak.framework.state.backends.sqlite import SQLiteConfig, SQLiteStore
 
+WETH_ARB = "0x82af49447d8a07e3bd95bd0d56f35241523fbab1"
+USDC_ARB = "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
+
 # --- LP attribution tests ---
 
 
@@ -744,6 +747,28 @@ class TestImpermanentLoss:
         il = compute_impermanent_loss(open_evt, close_evt)
         assert il == __import__("decimal").Decimal("0")
 
+    def test_address_tokens_join_symbol_prices_with_chain_context(self):
+        open_evt = {
+            "chain": "arbitrum",
+            "attribution_json": _entry_state_json(
+                token0=WETH_ARB,
+                token1=USDC_ARB,
+                amount0="1",
+                amount1="2000",
+                price0="2000",
+                price1="1",
+            ),
+            "token0": WETH_ARB,
+            "token1": USDC_ARB,
+        }
+        close_evt = {
+            "chain": "arbitrum",
+            "value_usd": "4350",
+            "attribution_json": _close_attr_with_prices({"WETH": "2400", "USDC": "1"}),
+        }
+
+        assert compute_impermanent_loss(open_evt, close_evt) == Decimal("-50")
+
     def test_compute_impermanent_loss_missing_entry_state_returns_none(self):
         """Legacy OPEN without entry_state sidecar -> None, not a wrong 0."""
         open_evt = {
@@ -887,6 +912,36 @@ class TestStampEntryStateOnOpen:
         # HUMAN units stored, NOT the raw integers.
         assert es["amount0"] == "1"
         assert es["amount1"] == "2000"
+
+    def test_stamp_entry_state_prices_address_tokens_from_symbol_oracle(self, store):
+        open_event = PositionEvent(
+            id="open-alm3187-address-prices",
+            deployment_id="strat:alm3187",
+            position_id="3187",
+            position_type="LP",
+            event_type="OPEN",
+            chain="arbitrum",
+            token0=WETH_ARB,
+            token1=USDC_ARB,
+            amount0="1000000000000000000",
+            amount1="2000000000",
+            value_usd="4000",
+        )
+        asyncio.get_event_loop().run_until_complete(store.save_position_event(open_event))
+        asyncio.get_event_loop().run_until_complete(
+            stamp_entry_state_on_open(
+                store,
+                open_event,
+                price_oracle={"WETH": Decimal("2000"), "USDC": Decimal("1")},
+            )
+        )
+
+        events = asyncio.get_event_loop().run_until_complete(
+            store.get_position_events("strat:alm3187", position_id="3187", event_type="OPEN")
+        )
+        entry_state = json.loads(events[0]["attribution_json"])["entry_state"]
+        assert entry_state["price0"] == "2000"
+        assert entry_state["price1"] == "1"
 
     def test_stamp_entry_state_unmeasured_amount_is_null_not_zero(self, store):
         """VIB-5036 / Empty != Zero: an unmeasured open amount is stamped as

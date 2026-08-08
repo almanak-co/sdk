@@ -80,6 +80,17 @@ class TestAddressFirstLookup:
         price = compiler._queries.require_token_price_for(_spcxb())
         assert price == Decimal("115")
 
+    def test_active_chain_disambiguates_same_address_on_another_chain(self):
+        """A same-address entry on another chain can never win by order."""
+        compiler = _compiler(
+            {
+                f"ethereum:{SPCXB_ADDR}": Decimal("999"),
+                f"bsc:{SPCXB_ADDR}": Decimal("115"),
+            }
+        )
+        price = compiler._queries.require_token_price_for(_spcxb())
+        assert price == Decimal("115")
+
     def test_address_key_wins_over_symbol_key(self):
         """The address is the more precise identity — it takes precedence."""
         compiler = _compiler(

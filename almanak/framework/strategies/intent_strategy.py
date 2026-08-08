@@ -320,7 +320,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
         self._ohlcv_dedup_provider: Any | None = None
 
         # VIB-4843 FR-5001: per-iteration MarketSnapshot memo. The runner
-        # pre-warms ONE snapshot's _price_cache; decide(), the post-decide
+        # pre-warms ONE snapshot's typed price store; decide(), the post-decide
         # portfolio valuation (PortfolioValuer / Track-C), and any other path
         # that calls create_market_snapshot() must reuse that SAME instance so
         # the warm cache is not thrown away (the redundant-CoinGecko-call bug).
@@ -1067,7 +1067,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
         token unique to the iteration (the ``cycle_id``). Subsequent
         ``create_market_snapshot()`` calls within the same iteration — pre-warm,
         ``decide()``, and post-decide portfolio valuation — return the SAME
-        instance so the pre-warmed ``_price_cache`` is reused instead of thrown
+        instance so the pre-warmed typed price store is reused instead of thrown
         away. Passing a new token (or ``None``) invalidates the memo.
 
         Idempotent: re-stamping the current token is a no-op so the runner can
@@ -1098,7 +1098,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
 
         VIB-4843 FR-5001: memoizes the snapshot per iteration so pre-warm →
         ``decide()`` → portfolio valuation all share ONE instance (and its
-        ``_price_cache``). Reuse is keyed by the iteration token the runner
+        typed price store). Reuse is keyed by the iteration token the runner
         stamps via :meth:`begin_market_snapshot_iteration`.
 
         Two invalidation regimes, never both:
@@ -1108,7 +1108,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
           pre-warm → decide() → portfolio valuation — regardless of wall-clock,
           because :meth:`begin_market_snapshot_iteration` invalidates it the
           moment the next iteration stamps a new token. Applying a TTL here would
-          drop the warm ``_price_cache`` mid-iteration on a slow ``decide()`` and
+          drop the warm typed price store mid-iteration on a slow ``decide()`` and
           defeat the dedup (the Codex VIB-4843 finding).
         * **No token stamped** (direct callers / tests): a short TTL bounds reuse
           so prices are never served stale across loops with no iteration scope.

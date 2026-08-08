@@ -9,10 +9,15 @@ Empty ≠ Zero — an unresolvable reference is absent, never fabricated.
 
 from __future__ import annotations
 
+import json
 from decimal import Decimal
 
 from almanak.framework.accounting.lending_reads import _resolve_oracle_price
-from almanak.framework.dashboard.quant_aggregations import _price_entry_for_token
+from almanak.framework.dashboard.quant_aggregations import (
+    _inventory_price_for_token,
+    _price_entry_for_token,
+    _wallet_value_at_first_action,
+)
 
 # Canonical USDC on Base — resolvable by the offline static registry.
 USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
@@ -32,6 +37,13 @@ class TestResolveOraclePrice:
     def test_address_joins_composite_key(self) -> None:
         oracle = {f"base:{USDC_BASE.lower()}": Decimal("0.999")}
         assert _resolve_oracle_price(oracle, USDC_BASE) == Decimal("0.999")
+
+    def test_explicit_chain_selects_address_price(self) -> None:
+        oracle = {
+            f"base:{USDC_BASE}": Decimal("0.999"),
+            f"ethereum:{USDC_BASE}": Decimal("2000"),
+        }
+        assert _resolve_oracle_price(oracle, USDC_BASE, chain="base") == Decimal("0.999")
 
     def test_address_resolves_to_symbol_key_via_composite_chain_probe(self) -> None:
         # Symbol-keyed entry plus an unrelated composite key that names the
@@ -67,6 +79,13 @@ class TestPriceEntryForToken:
         prices = {f"BASE:{USDC_BASE.upper()}": {"price_usd": "1"}}
         assert _price_entry_for_token(prices, USDC_BASE.lower()) == {"price_usd": "1"}
 
+    def test_explicit_chain_selects_address_price(self) -> None:
+        prices = {
+            f"base:{USDC_BASE}": {"price_usd": "1"},
+            f"ethereum:{USDC_BASE}": {"price_usd": "2000"},
+        }
+        assert _price_entry_for_token(prices, USDC_BASE, chain="base") == {"price_usd": "1"}
+
     def test_address_resolves_to_symbol_key_via_composite_chain_probe(self) -> None:
         prices = {"USDC": {"price_usd": "1"}, f"base:{UNKNOWN_ADDR}": {"price_usd": "5"}}
         assert _price_entry_for_token(prices, USDC_BASE) == {"price_usd": "1"}
@@ -84,3 +103,27 @@ class TestPriceEntryForToken:
 
     def test_non_string_token(self) -> None:
         assert _price_entry_for_token({"USDC": {"price_usd": "1"}}, None) is None
+
+
+def test_wallet_anchor_uses_ledger_chain_for_address_price() -> None:
+    entry = {
+        "chain": "base",
+        "pre_state_json": json.dumps({"wallet_balances": {USDC_BASE: "2"}}),
+        "price_inputs_json": json.dumps(
+            {
+                f"base:{USDC_BASE}": {"price_usd": "1"},
+                f"ethereum:{USDC_BASE}": {"price_usd": "2000"},
+            }
+        ),
+    }
+
+    assert _wallet_value_at_first_action([entry]) == Decimal("2")
+
+
+def test_inventory_price_uses_lot_chain_for_duplicate_symbol() -> None:
+    prices = {
+        f"base:{USDC_BASE}": {"price_usd": "1", "symbol": "USDC"},
+        f"ethereum:{USDC_BASE}": {"price_usd": "2000", "symbol": "USDC"},
+    }
+
+    assert _inventory_price_for_token(prices, "USDC", chain="base") == Decimal("1")

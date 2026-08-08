@@ -500,8 +500,9 @@ class TestSymbolAliasBridge:
                 "WETH": ("ethereum", "not-an-address"),  # EVM-family target must be a 0x key
             },
         )
-        with pytest.raises(ValueError, match="Cannot determine price"):
-            snapshot.price("WETH")
+        # The malformed explicit bridge is skipped, but PriceStore's
+        # ambiguity-safe registry alias still joins WETH to the seeded identity.
+        assert snapshot.price("WETH") == Decimal("3000")
 
     SOL_MINT = "So11111111111111111111111111111111111111112"
     SOL_KEY = ("solana", SOL_MINT)

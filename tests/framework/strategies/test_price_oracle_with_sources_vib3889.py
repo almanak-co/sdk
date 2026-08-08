@@ -34,7 +34,10 @@ def _market(prices: dict | None = None, cache: dict | None = None) -> MarketSnap
         for k, v in prices.items():
             snap.set_price(k, v)
     if cache:
-        snap._price_cache.update(cache)
+        for cache_key, price_data in cache.items():
+            token_quote, _, chain = cache_key.partition("@")
+            token, _, quote = token_quote.partition("/")
+            snap.set_price_data(token, price_data, quote=quote or "USD", chain=chain or None)
     return snap
 
 

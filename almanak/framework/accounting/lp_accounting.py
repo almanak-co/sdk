@@ -20,6 +20,7 @@ from uuid import uuid4
 from almanak.framework.accounting.ids import make_accounting_event_id
 from almanak.framework.accounting.measured import encode_money_payload
 from almanak.framework.accounting.models import AccountingConfidence, AccountingIdentity, LPEventType
+from almanak.framework.market.price_store import lookup_price
 from almanak.framework.models.run_mode import RunMode
 
 logger = logging.getLogger(__name__)
@@ -371,6 +372,8 @@ def compute_lp_cost_basis(
     token0: str,
     token1: str,
     price_oracle: dict[str, Any] | None,
+    *,
+    chain: str | None = None,
 ) -> Decimal | None:
     """Compute LP entry cost basis as amount0*price0 + amount1*price1.
 
@@ -399,7 +402,7 @@ def compute_lp_cost_basis(
     # ``token0`` / ``token1`` are typed as ``str`` upstream but a malformed
     # ledger row could carry ``None``. Guard with ``(t or "")`` to keep the
     # function fail-closed (returns None) instead of raising AttributeError.
-    for amt, sym in ((amount0, (token0 or "").upper()), (amount1, (token1 or "").upper())):
+    for amt, token in ((amount0, token0 or ""), (amount1, token1 or "")):
         if amt is None:
             # VIB-5131 — Empty≠Zero: an UNMEASURED leg (None) is not a concrete
             # zero. Skipping it and returning the other leg's value would emit a
@@ -412,7 +415,8 @@ def compute_lp_cost_basis(
             # VIB-5124 case handled below), which legitimately contributes $0 and
             # must NOT void the basis.
             return None
-        price = price_oracle.get(sym)
+        found = lookup_price(price_oracle, token=token, chain=chain, quote="USD")
+        price = found.price if found is not None else None
         # VIB-5124 — a measured-zero leg contributes exactly $0. When its price is
         # AVAILABLE it still counts as a measured leg (0·price == 0; ``has_any``
         # set) so a both-zero-with-prices event yields a measured ``Decimal("0")``
@@ -426,15 +430,7 @@ def compute_lp_cost_basis(
         if price is None:
             return None
         try:
-            decimal_price = Decimal(str(price))
-        except Exception:  # noqa: BLE001
-            return None
-        # Reject non-finite prices (NaN / Infinity) — they would propagate
-        # through arithmetic into a NaN total and silently corrupt accounting.
-        if not decimal_price.is_finite():
-            return None
-        try:
-            total += amt * decimal_price
+            total += amt * price
             has_any = True
         except Exception:  # noqa: BLE001
             return None
@@ -615,7 +611,12 @@ def build_lp_accounting_event(  # noqa: C901
 
     # Skip cost basis when decimals were assumed: amounts may be off by 1e12 for 6-decimal tokens.
     cost_basis_usd = _compute_cost_basis(
-        amount0, amount1, token0, token1, price_oracle if not assumed_decimals else None
+        amount0,
+        amount1,
+        token0,
+        token1,
+        price_oracle if not assumed_decimals else None,
+        chain=chain,
     )
 
     return LPAccountingEvent(

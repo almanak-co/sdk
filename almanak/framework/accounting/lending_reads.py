@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import Any
 
 from almanak.connectors._strategy_base.lending_read_base import (
@@ -144,7 +144,7 @@ def _inject_whole_account_collateral_prices(
     for sym in market_params.get("collaterals") or {}:
         if sym in prices:
             continue
-        price = _resolve_oracle_price(price_oracle, sym)
+        price = _resolve_oracle_price(price_oracle, sym, chain=chain)
         if price is None:
             continue  # Unpriced approved collateral — only fatal if HELD (reducer decides).
         try:
@@ -243,7 +243,7 @@ def read_lending_account_state(
         injected_tokens: dict[str, str] = {}  # query_field -> symbol (e.g. collateral_token, loan_token)
         resolver = get_token_resolver()
         for query_field, symbol in LendingReadRegistry.valuation_roles(protocol, chain, market_id):
-            price = _resolve_oracle_price(price_oracle, symbol)
+            price = _resolve_oracle_price(price_oracle, symbol, chain=chain)
             if price is None:
                 logger.debug(
                     "read_lending_account_state: price unavailable for %s (%s) on %s",
@@ -283,7 +283,7 @@ def read_lending_account_state(
                 return None
             collateral_address = col_info.address
             if collateral_token not in prices:
-                price = _resolve_oracle_price(price_oracle, collateral_token)
+                price = _resolve_oracle_price(price_oracle, collateral_token, chain=chain)
                 if price is None:
                     logger.debug(
                         "read_lending_account_state: price unavailable for collateral %s on %s",
@@ -331,7 +331,12 @@ def read_lending_account_state(
         return None
 
 
-def _resolve_oracle_price(price_oracle: dict | None, asset: str) -> Decimal | None:
+def _resolve_oracle_price(
+    price_oracle: dict | None,
+    asset: str,
+    *,
+    chain: str | None = None,
+) -> Decimal | None:
     """Look up a token's USD price from the price_oracle dict, tolerant of both shapes.
 
     Accepts both the legacy flat ``{symbol: price}`` shape (returned by
@@ -343,61 +348,14 @@ def _resolve_oracle_price(price_oracle: dict | None, asset: str) -> Decimal | No
     collateral/debt/HF because the readers passed the dict to
     ``Decimal(str(...))`` and got None back.
 
-    Symbol lookup is case-insensitive — tries exact match first (cheap fast
-    path), then falls back to a normalized-key map so mixed-case oracle keys
-    like ``"wstETH"`` resolve regardless of the asset's casing
-    (CodeRabbit 2026-05-04 review).
+    Resolution delegates to the shared identity-aware lookup contract. That
+    keeps chain/address precedence and case handling identical to compilation,
+    gas accounting, and dashboard valuation.
     """
-    if price_oracle is None:
-        return None
-    candidate = price_oracle.get(asset)
-    if candidate is None:
-        # Mixed-case fallback: build a one-shot lower-keyed lookup so any
-        # oracle entry whose key normalizes to the same lower form matches.
-        # ``next(iter(...), None)`` returns the first colliding value when
-        # multiple oracle keys share a normalized form (rare); the asset's
-        # canonical symbol from ``Intent`` is always single-cased so
-        # collisions in real callers don't happen.
-        asset_lower = asset.lower()
-        candidate = next(
-            (v for k, v in price_oracle.items() if isinstance(k, str) and k.lower() == asset_lower),
-            None,
-        )
-    if candidate is None and asset.strip().lower().startswith("0x"):
-        # Address-form asset (post symbol-deprecation intents): join against
-        # the snapshot's address-composite oracle keys ("chain:0xaddr") by
-        # exact address, or resolve the address to its canonical symbol and
-        # retry. Empty ≠ Zero: an unresolvable address stays unpriced.
-        asset_addr = asset.strip().lower()
-        candidate = next(
-            (v for k, v in price_oracle.items() if isinstance(k, str) and k.lower().endswith(":" + asset_addr)),
-            None,
-        )
-        if candidate is None:
-            from almanak.framework.data.tokens.address_resolution import resolve_token_symbol
+    from almanak.framework.market.price_store import lookup_price
 
-            # Composite oracle keys carry their own chain — probe them for a
-            # chain to resolve this bare address against.
-            chains = {
-                k.split(":", 1)[0].lower()
-                for k in price_oracle
-                if isinstance(k, str) and ":" in k and k.lower().partition(":")[2].startswith("0x")
-            }
-            for chain_guess in sorted(chains):
-                resolved = resolve_token_symbol(asset_addr, chain_guess)
-                if resolved and resolved in price_oracle:
-                    candidate = price_oracle[resolved]
-                    break
-    if candidate is None:
-        return None
-    if isinstance(candidate, dict):
-        candidate = candidate.get("price_usd")
-        if candidate is None:
-            return None
-    try:
-        return Decimal(str(candidate))
-    except (InvalidOperation, ValueError, TypeError):
-        return None
+    found = lookup_price(price_oracle, token=asset, chain=chain, quote="USD")
+    return found.price if found is not None else None
 
 
 def read_market_oracle_price(

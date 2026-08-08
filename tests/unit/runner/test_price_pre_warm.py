@@ -4,7 +4,7 @@ Validates that:
 - _pre_warm_prices calls market.price() for strategy tokens before decide()
 - Pre-warming failures are silently ignored (decide() retries on its own)
 - Strategies without _get_tracked_tokens are gracefully handled
-- Pre-warmed prices populate the market's _price_cache
+- Pre-warmed prices populate the market's typed price store
 """
 
 import asyncio

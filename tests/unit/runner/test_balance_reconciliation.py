@@ -610,15 +610,18 @@ class TestSnapshotTrackedTokenUniverse:
         assert "ARB" in snap.balances
 
     @pytest.mark.asyncio
-    async def test_mixed_case_tracked_token_stored_uppercase(self):
-        """A canonical mixed-case tracked asset (wstETH) is stored under its
-        UPPERCASE key so it matches the uppercase price_inputs the anchor's
-        exact `prices.get()` reads (Codex P1) — else it would never be valued."""
+    async def test_mixed_case_tracked_token_preserves_provider_identity(self):
+        """A mixed-case tracked asset keeps its provider-facing spelling.
+
+        The deployed-wallet anchor now joins through the canonical price
+        lookup, so mutating the balance key is unnecessary and would corrupt a
+        case-sensitive Solana mint.
+        """
         balances = {
             "USDC": Decimal("100"),
             "WETH": Decimal("0.05"),
             "ETH": Decimal("0.002"),
-            "WSTETH": Decimal("3"),
+            "wstETH": Decimal("3"),
         }
 
         async def get_bal(token):
@@ -635,9 +638,29 @@ class TestSnapshotTrackedTokenUniverse:
         snap = await runner._snapshot_balances_for_intent(intent)
 
         assert snap is not None
-        assert "WSTETH" in snap.balances  # uppercased to match uppercase price keys
-        assert "wstETH" not in snap.balances
-        assert snap.balances["WSTETH"] == Decimal("3")
+        assert "wstETH" in snap.balances
+        assert "WSTETH" not in snap.balances
+        assert snap.balances["wstETH"] == Decimal("3")
+
+    @pytest.mark.asyncio
+    async def test_solana_mints_that_differ_only_by_case_remain_distinct(self):
+        first = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+        second = first.swapcase()
+
+        async def get_bal(token):
+            bal = MagicMock()
+            bal.balance = Decimal("1") if token == first else Decimal("2")
+            return bal
+
+        bp = MagicMock()
+        bp.get_balance = AsyncMock(side_effect=get_bal)
+        runner = _make_runner(balance_provider=bp)
+        runner._current_tracked_tokens = [first, second]
+
+        snap = await runner._snapshot_balances_for_intent(HoldIntent(reason="solana identity"))
+
+        assert snap is not None
+        assert snap.balances == {first: Decimal("1"), second: Decimal("2")}
 
     @pytest.mark.asyncio
     async def test_tracked_captured_when_intent_names_no_tokens(self):
