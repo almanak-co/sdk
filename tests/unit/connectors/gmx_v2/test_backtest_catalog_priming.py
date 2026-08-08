@@ -5,9 +5,15 @@ dynamic gateway verification — a code path a PnL backtest never executes.
 Without priming, the fill-pricing lane (``registry_perp_base_symbol`` →
 ``PerpsReadRegistry.market_metadata``) read an empty catalog and rejected
 every address-form PERP_OPEN as unpriceable ("0 trades" backtests). The
-candle-lane provider now primes the catalog in ``prepare_backtest`` via the
+candle-lane provider primes the catalog in ``prepare_backtest`` via the
 gateway's verified ``GetPerpMarket``; a prime miss stays soft so downstream
 pricing keeps its fail-closed named rejection.
+
+Priming happens through exactly ONE path — the provenance-checked
+``remember_verified_market``, which runs after ``prepare`` accepts the candle
+identity and refuses metadata that disagrees with it. A second, unconditional
+pre-``prepare`` prime once inserted records that check could never veto
+(the #3660/#3661 double-merge regression); these tests pin the single path.
 """
 
 from __future__ import annotations
@@ -15,7 +21,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import Mock
 
 import pytest
 
@@ -62,22 +68,39 @@ def _fake_gateway_client(rpc: Mock) -> SimpleNamespace:
     )
 
 
+def _accept_candle_identity(source: _GMXOracleMarketSource) -> None:
+    """Stamp the provenance ``prepare`` would have accepted for this market."""
+    source.resolved_market = "ETH/USD [WETH-USDC]"
+    source.market_token = MARKET_TOKEN.lower()
+    source.index_token = INDEX_TOKEN.lower()
+    source.index_symbol = "ETH"
+
+
+def _provider_with_prepared_candles(monkeypatch: pytest.MonkeyPatch, gateway: object) -> GMXOracleDataProvider:
+    monkeypatch.setattr(_GMXOracleMarketSource, "_gateway", staticmethod(gateway))
+    provider = GMXOracleDataProvider(fallback=SimpleNamespace(), chain="arbitrum", market=MARKET_TOKEN)
+
+    async def _prepare(**_kwargs: object) -> str:
+        _accept_candle_identity(provider._source)
+        return "1h"
+
+    provider._source.prepare = _prepare  # type: ignore[method-assign]
+    return provider
+
+
+def _hourly_auto_config() -> PnLBacktestConfig:
+    start = datetime(2026, 5, 1, tzinfo=UTC)
+    return PnLBacktestConfig(start_time=start, end_time=start + timedelta(days=1), timeframe="auto")
+
+
 @pytest.mark.asyncio
 async def test_prepare_backtest_primes_catalog_with_verified_market(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     rpc = Mock(return_value=_verified_market_response())
-    monkeypatch.setattr(
-        _GMXOracleMarketSource,
-        "_gateway",
-        staticmethod(lambda: (_fake_gateway_client(rpc), None)),
-    )
-    provider = GMXOracleDataProvider(fallback=SimpleNamespace(), chain="arbitrum", market=MARKET_TOKEN)
-    provider._source.prepare = AsyncMock(return_value="1h")  # type: ignore[method-assign]
-    start = datetime(2026, 5, 1, tzinfo=UTC)
-    config = PnLBacktestConfig(start_time=start, end_time=start + timedelta(days=1), timeframe="auto")
+    provider = _provider_with_prepared_candles(monkeypatch, lambda: (_fake_gateway_client(rpc), None))
 
-    assert await provider.prepare_backtest(config) == "1h"
+    assert await provider.prepare_backtest(_hourly_auto_config()) == "1h"
 
     record = market_catalog.by_address("arbitrum", MARKET_TOKEN)
     assert record is not None
@@ -101,21 +124,16 @@ async def test_prime_miss_is_soft_and_keeps_catalog_empty(
     def _raise() -> tuple[object, object]:
         raise RuntimeError("no gateway reachable")
 
-    monkeypatch.setattr(_GMXOracleMarketSource, "_gateway", staticmethod(_raise))
-    provider = GMXOracleDataProvider(fallback=SimpleNamespace(), chain="arbitrum", market=MARKET_TOKEN)
-    provider._source.prepare = AsyncMock(return_value="1h")  # type: ignore[method-assign]
-    start = datetime(2026, 5, 1, tzinfo=UTC)
-    config = PnLBacktestConfig(start_time=start, end_time=start + timedelta(days=1), timeframe="auto")
+    provider = _provider_with_prepared_candles(monkeypatch, _raise)
 
     with caplog.at_level("WARNING"):
-        assert await provider.prepare_backtest(config) == "1h"
+        assert await provider.prepare_backtest(_hourly_auto_config()) == "1h"
 
     assert market_catalog.by_address("arbitrum", MARKET_TOKEN) is None
-    assert any("Could not prime the GMX market catalog" in message for message in caplog.messages)
+    assert any("GMX market metadata unavailable" in message for message in caplog.messages)
 
 
-@pytest.mark.asyncio
-async def test_unverified_market_is_never_remembered(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_unverified_market_is_never_remembered(monkeypatch: pytest.MonkeyPatch) -> None:
     """Only venue-verified records may enter the catalog (its one hard rule)."""
     response = _verified_market_response()
     response.market.verified = False
@@ -126,7 +144,42 @@ async def test_unverified_market_is_never_remembered(monkeypatch: pytest.MonkeyP
         staticmethod(lambda: (_fake_gateway_client(rpc), None)),
     )
     source = _GMXOracleMarketSource(chain="arbitrum", market=MARKET_TOKEN, venue="gmx_v2")
+    _accept_candle_identity(source)
 
-    await source.prime_market_catalog()
+    source.remember_verified_market()
+
+    assert market_catalog.by_address("arbitrum", MARKET_TOKEN) is None
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("index_token", "0x" + "8" * 40),
+        ("index_symbol", "BTC"),
+    ],
+)
+def test_verified_index_identity_mismatch_is_never_remembered(
+    monkeypatch: pytest.MonkeyPatch, field: str, value: str
+) -> None:
+    """The WHOLE candle-verified identity gates the catalog, not just the market token.
+
+    Candle provenance and ``GetPerpMarket`` serve from the same registry rows,
+    and a GMX market token names an immutable on-chain tuple — so metadata that
+    keeps the market token but swaps the index identity is a gateway
+    contradicting itself. Remembering it would price and close the market
+    against an index the accepted candle series never verified.
+    """
+    response = _verified_market_response()
+    setattr(response.market, field, value)
+    rpc = Mock(return_value=response)
+    monkeypatch.setattr(
+        _GMXOracleMarketSource,
+        "_gateway",
+        staticmethod(lambda: (_fake_gateway_client(rpc), None)),
+    )
+    source = _GMXOracleMarketSource(chain="arbitrum", market=MARKET_TOKEN, venue="gmx_v2")
+    _accept_candle_identity(source)
+
+    source.remember_verified_market()
 
     assert market_catalog.by_address("arbitrum", MARKET_TOKEN) is None

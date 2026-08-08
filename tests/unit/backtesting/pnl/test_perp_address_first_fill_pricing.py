@@ -5,10 +5,10 @@ fill-pricing lane resolves its index base symbol through
 ``PerpsReadRegistry.market_metadata`` → the connector's process-wide verified
 market catalog. That catalog is populated by the intent compiler's dynamic
 gateway verification on the live path and by the candle-lane provider's
-``prime_market_catalog`` at PnL-backtest startup — a PnL backtest never
-compiles, so before priming existed every address-form PERP_OPEN was rejected
-as unpriceable (1105 attempts, 0 fills). These tests pin both sides of the
-fail-closed contract:
+provenance-checked ``remember_verified_market`` at PnL-backtest startup — a
+PnL backtest never compiles, so before priming existed every address-form
+PERP_OPEN was rejected as unpriceable (1105 attempts, 0 fills). These tests
+pin both sides of the fail-closed contract:
 
 - primed catalog → the open fills at the real market price with a
   price-tracked position and live PnL;

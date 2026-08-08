@@ -82,43 +82,6 @@ class _GMXOracleMarketSource:
             client.connect()
         return client, gateway_pb2
 
-    async def prime_market_catalog(self) -> None:
-        """Remember the venue-verified market record before the run starts.
-
-        The process-wide market catalog is otherwise populated only by the
-        intent compiler's dynamic gateway verification — a code path a PnL
-        backtest never executes, so the fill-pricing lane
-        (``registry_perp_base_symbol`` → ``PerpsReadRegistry.market_metadata``)
-        read an empty catalog and rejected every address-form PERP_OPEN as
-        unpriceable. Mirrors the live warm step
-        (``inner_runner._resolve_perp_index_symbol``): resolve the declared
-        market through the gateway's verified ``GetPerpMarket`` and remember
-        it for this process. Best-effort by design: a miss logs and keeps the
-        catalog empty, so downstream pricing stays fail-closed (the engine's
-        named rejection stands) — it never substitutes a guessed symbol.
-        """
-        from almanak.connectors.gmx_v2 import market_catalog
-        from almanak.connectors.gmx_v2.market_metadata import resolve_market_via_gateway
-
-        try:
-            client, _ = self._gateway()
-            resolved = await asyncio.to_thread(
-                resolve_market_via_gateway,
-                client,
-                chain=self.chain,
-                market=self.requested_market,
-            )
-        except Exception as exc:  # noqa: BLE001 - priming is best-effort; pricing stays fail-closed
-            logger.warning(
-                "Could not prime the GMX market catalog for %s on %s (%s); "
-                "address-form fill pricing will fail closed with its named rejection",
-                self.requested_market,
-                self.chain,
-                exc,
-            )
-            return
-        market_catalog.remember(self.chain, resolved)
-
     async def _fetch_page(self, *, timeframe: str, before_ts: int) -> Any:
         client, gateway_pb2 = self._gateway()
         request = gateway_pb2.GetPerpPriceCandlesRequest(
@@ -318,8 +281,10 @@ class _GMXOracleMarketSource:
         resolve the declared market's index asset and rejected every PERP_OPEN
         as unpriceable — while THIS source held the verified identity for
         exactly that market. Resolve once through the same venue-verified
-        surface the compiler uses (``GetPerpMarket``, VIB-6561) and remember
-        the result.
+        surface the compiler uses (``GetPerpMarket``, VIB-6561) — the warm
+        step the live runner performs in
+        ``inner_runner._resolve_perp_index_symbol`` — and remember the
+        result. It never substitutes a guessed symbol.
 
         Fail-open on an unavailable/unknowing dynamic surface: the candle
         plane still serves, and the fill lane keeps its NAMED per-intent
@@ -344,14 +309,20 @@ class _GMXOracleMarketSource:
                 exc,
             )
             return
-        if metadata.market_token.lower() != self.market_token:
+        metadata_identity = (
+            metadata.market_token.lower(),
+            metadata.index_token.lower(),
+            metadata.index_symbol.upper(),
+        )
+        candle_identity = (self.market_token, self.index_token, self.index_symbol)
+        if metadata_identity != candle_identity:
             logger.warning(
                 "GMX market metadata identity for %s on %s disagrees with the verified candle "
                 "provenance (%s != %s); refusing to remember it",
                 self.requested_market,
                 self.chain,
-                metadata.market_token,
-                self.market_token,
+                metadata_identity,
+                candle_identity,
             )
             return
         market_catalog.remember(self.chain, metadata)
@@ -513,19 +484,17 @@ class GMXOracleDataProvider:
         return requested or cls._canonical_timeframe_for_interval(int(config.interval_seconds))
 
     async def prepare_backtest(self, config: PnLBacktestConfig) -> str:
-        # Prime the process-wide verified market catalog first: the PnL
-        # engine's fill-pricing and close-matching lanes read it through
-        # ``PerpsReadRegistry.market_metadata``, and no compiler runs in a
-        # backtest to populate it. A prime miss is non-fatal — those lanes
-        # keep their fail-closed named rejections.
-        await self._source.prime_market_catalog()
         requested = self._requested_timeframe(config)
         resolved = await self._source.prepare(requested=requested, start=config.start_time, end=config.end_time)
         resolved_seconds = parse_ohlcv_timeframe(resolved, field_name="resolved GMX timeframe").seconds
         config.apply_resolved_timeframe(resolved, resolved_seconds)
-        # The address-form fill-pricing lane resolves the market's index asset
-        # through the process perps-read catalog, which only the (never-run-in-
-        # backtest) compiler used to populate.
+        # Sole priming path for the process perps-read catalog, which only the
+        # (never-run-in-backtest) compiler otherwise populates. Deliberately
+        # AFTER prepare(): the resolved metadata is cross-checked against the
+        # accepted candle provenance, and an unconditional pre-prepare prime
+        # would remember records that check can never veto. A miss is
+        # non-fatal — the fill-pricing and close-matching lanes keep their
+        # fail-closed named rejections.
         await asyncio.to_thread(self._source.remember_verified_market)
         return resolved
 
