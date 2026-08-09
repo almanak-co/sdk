@@ -1080,13 +1080,17 @@ class TestSimulateV3SwapCharacterization:
         exec_price and effective_slippage_bps == price_impact_bps (V3 path
         pins these equal).
 
-        Note on units/fees: the simulator treats ``fee_bps`` literally as
-        "reduce input by fee_bps basis points" — i.e. ``fee_factor =
-        (10000 - fee_bps) / 10000``.  It expects fee_bps to already be in
-        bps (30 for 0.3%), NOT the Uniswap-style fee_tier (3000 for 0.3%).
-        Tests below use ``fee_bps`` in true basis points and pin current
-        behavior; the caller-side fee_tier-vs-bps interpretation is a
-        separate tracked concern, out of scope for this refactor.
+        Note on units/fees: the simulator takes ``fee_pips`` in Uniswap-native
+        pips — ``fee_factor = (1_000_000 - fee_pips) / 1_000_000``, so 3000
+        means 0.3%, the same unit ``PoolPrice.fee_tier`` reports and
+        ``FEE_TO_TICK_SPACING`` is keyed on.
+
+        This parameter used to be ``fee_bps`` while ``estimate_slippage`` fed
+        it the pips value anyway — the 100x overcharge fixed under VIB-6609.
+        The values below were multiplied by 100 when the unit changed, so every
+        assertion pins exactly the same behaviour it pinned before; some are
+        therefore implausibly large as real fee tiers (300000 pips = 30%),
+        which is fine for characterization but is not a realistic pool.
         """
         est = _make_v3_estimator()
         ticks = _tick_band(
@@ -1106,7 +1110,7 @@ class TestSimulateV3SwapCharacterization:
             tick_spacing=60,
             token0_decimals=18,
             token1_decimals=18,
-            fee_bps=30,
+            fee_pips=3000,
         )
         assert isinstance(result, SlippageEstimate)
         assert result.expected_price > Decimal(0)
@@ -1135,7 +1139,7 @@ class TestSimulateV3SwapCharacterization:
             tick_spacing=60,
             token0_decimals=18,
             token1_decimals=18,
-            fee_bps=30,
+            fee_pips=3000,
         )
         assert result.expected_price > Decimal(0)
         assert result.price_impact_bps < 100
@@ -1165,7 +1169,7 @@ class TestSimulateV3SwapCharacterization:
             tick_spacing=60,
             token0_decimals=18,
             token1_decimals=6,
-            fee_bps=3000,
+            fee_pips=300000,
         )
         assert result.price_impact_bps >= 0
         assert result.recommended_max_size >= Decimal(0)
@@ -1190,7 +1194,7 @@ class TestSimulateV3SwapCharacterization:
             tick_spacing=60,
             token0_decimals=18,
             token1_decimals=6,
-            fee_bps=500,
+            fee_pips=50000,
         )
         assert isinstance(result, SlippageEstimate)
         assert result.expected_price >= Decimal(0)
@@ -1210,7 +1214,7 @@ class TestSimulateV3SwapCharacterization:
             tick_spacing=60,
             token0_decimals=18,
             token1_decimals=6,
-            fee_bps=3000,
+            fee_pips=300000,
         )
         assert result.price_impact_bps == 10000
         assert result.effective_slippage_bps == 10000
@@ -1219,8 +1223,8 @@ class TestSimulateV3SwapCharacterization:
 
     # --- fee tier coverage ------------------------------------------------
 
-    @pytest.mark.parametrize("fee_bps", [1, 5, 30, 100])
-    def test_v3_fee_tiers_all_produce_wellformed_estimates(self, fee_bps):
+    @pytest.mark.parametrize("fee_pips", [100, 500, 3000, 10000])
+    def test_v3_fee_tiers_all_produce_wellformed_estimates(self, fee_pips):
         """Canonical Uniswap V3 fee tiers (100/500/3000/10000 pips =
         1/5/30/100 bps) run end-to-end and produce finite, non-negative
         results."""
@@ -1242,7 +1246,7 @@ class TestSimulateV3SwapCharacterization:
             tick_spacing=60,
             token0_decimals=18,
             token1_decimals=18,
-            fee_bps=fee_bps,
+            fee_pips=fee_pips,
         )
         assert result.price_impact_bps >= 0
         assert result.effective_slippage_bps >= 0
@@ -1270,8 +1274,8 @@ class TestSimulateV3SwapCharacterization:
             "token0_decimals": 18,
             "token1_decimals": 18,
         }
-        low = est._simulate_v3_swap(fee_bps=1, **kwargs)
-        high = est._simulate_v3_swap(fee_bps=100, **kwargs)
+        low = est._simulate_v3_swap(fee_pips=100, **kwargs)
+        high = est._simulate_v3_swap(fee_pips=10000, **kwargs)
         # Higher fee → exec_price (output/input) for zeroForOne should be <= lower fee's.
         assert high.expected_price <= low.expected_price
 
@@ -1297,7 +1301,7 @@ class TestSimulateV3SwapCharacterization:
             tick_spacing=60,
             token0_decimals=18,
             token1_decimals=6,
-            fee_bps=3000,
+            fee_pips=300000,
         )
         assert result.expected_price > Decimal(0)
         assert result.price_impact_bps >= 0
@@ -1323,24 +1327,27 @@ class TestSimulateV3SwapCharacterization:
             tick_spacing=60,
             token0_decimals=18,
             token1_decimals=6,
-            fee_bps=3000,
+            fee_pips=300000,
         )
         assert isinstance(result, SlippageEstimate)
 
     # --- V3-family protocols (sushiswap_v3, pancakeswap_v3, aerodrome-CL) -
-    # The simulator is protocol-agnostic: it only cares about fee_bps,
+    # The simulator is protocol-agnostic: it only cares about fee_pips,
     # tick_spacing and liquidity_net.  We exercise the three dominant
     # variants by passing their canonical tick_spacing + fee combinations.
+    # Fees are the real on-chain tiers in pips: 0.30% / 0.25% / 0.05%.
+    # Note pancakeswap's 2500 is NOT a whole number of bps (25 exactly here,
+    # but 0.25% = 25 bps) — carrying pips means no tier has to be rounded.
 
     @pytest.mark.parametrize(
-        "label,fee_bps,tick_spacing",
+        "label,fee_pips,tick_spacing",
         [
-            ("sushiswap_v3_030", 30, 60),
-            ("pancakeswap_v3_025", 25, 50),
-            ("aerodrome_cl_005", 5, 10),
+            ("sushiswap_v3_030", 3000, 60),
+            ("pancakeswap_v3_025", 2500, 50),
+            ("aerodrome_cl_005", 500, 10),
         ],
     )
-    def test_v3_family_variants_end_to_end(self, label, fee_bps, tick_spacing):
+    def test_v3_family_variants_end_to_end(self, label, fee_pips, tick_spacing):
         """All V3-family protocols pinning: each (fee, tick_spacing) combo
         runs end-to-end and returns a well-formed estimate."""
         est = _make_v3_estimator()
@@ -1361,8 +1368,159 @@ class TestSimulateV3SwapCharacterization:
             tick_spacing=tick_spacing,
             token0_decimals=18,
             token1_decimals=18,
-            fee_bps=fee_bps,
+            fee_pips=fee_pips,
         )
         assert result.price_impact_bps >= 0, f"{label}: negative impact"
         assert result.effective_slippage_bps == result.price_impact_bps, f"{label}: slippage != impact"
         assert result.recommended_max_size >= Decimal(0), f"{label}: negative max size"
+
+
+# ---------------------------------------------------------------------------
+# Fee-unit regression: PoolPrice.fee_tier (pips) -> _simulate_v3_swap (bps)
+# ---------------------------------------------------------------------------
+
+
+class TestFeeUnitConversion:
+    """VIB-6609 — the fee reaches the tick-walk in Uniswap-native pips.
+
+    `estimate_slippage` used to hand `PoolPrice.fee_tier` (1e-6) to a `fee_bps`
+    (1e-4) parameter, charging 30% on every 0.3% pool. The unit is now native
+    end-to-end, so no conversion happens and no rounding can distort a
+    non-canonical tier in either direction.
+    """
+
+    @pytest.mark.parametrize(
+        ("fee_pips", "expected_retained"),
+        [
+            (0, Decimal("1")),
+            (1, Decimal("0.999999")),  # sub-bps tier: NOT rounded away to 0
+            (100, Decimal("0.9999")),  # 0.01%
+            (149, Decimal("0.999851")),  # NOT rounded down to 1 bps (0.9999)
+            (249, Decimal("0.999751")),  # NOT rounded to 2 or 3 bps
+            (250, Decimal("0.99975")),
+            (500, Decimal("0.9995")),  # 0.05%
+            (3000, Decimal("0.997")),  # 0.30%
+            (10000, Decimal("0.99")),  # 1.00%
+        ],
+    )
+    def test_fee_factor_is_exact_for_every_tier(self, fee_pips, expected_retained):
+        """Exactness in BOTH directions.
+
+        Rounding pips to an integer bps cannot be made safe: half-up shaves a
+        149-pip fee down to 1 bps (optimism), and ceiling inflates a 1-pip fee
+        to 1 bps — 100x the other way. Carrying pips removes the choice.
+        """
+        from almanak.framework.data.pools.liquidity import _scaled_amount_after_fee
+
+        retained = _scaled_amount_after_fee(
+            amount=Decimal("1"),
+            zero_for_one=True,
+            token0_decimals=0,
+            token1_decimals=0,
+            fee_pips=fee_pips,
+        )
+        assert retained == expected_retained
+
+    def test_fee_is_monotonic_in_pips(self):
+        """No tier may cost less than a strictly cheaper one — the property a
+        rounded conversion breaks by mapping distinct tiers onto one bps."""
+        from almanak.framework.data.pools.liquidity import _scaled_amount_after_fee
+
+        def retained(pips: int) -> Decimal:
+            return _scaled_amount_after_fee(
+                amount=Decimal("1"),
+                zero_for_one=True,
+                token0_decimals=0,
+                token1_decimals=0,
+                fee_pips=pips,
+            )
+
+        tiers = [0, 1, 49, 50, 99, 100, 149, 249, 250, 500, 3000, 10000]
+        values = [retained(t) for t in tiers]
+        assert values == sorted(values, reverse=True)
+        assert len(set(values)) == len(values), "distinct tiers collapsed onto one fee"
+
+    def test_fee_contribution_end_to_end_is_the_pool_fee_not_a_hundred_x_it(self):
+        """END-TO-END negative control on the hand-off, not on either function.
+
+        Holds the pool fixture constant and varies ONLY ``fee_tier``, so the
+        tick-walk's own contribution cancels: what remains is exactly what the
+        fee costs. A 0.3% pool must add ~30 bps over the fee-free baseline.
+
+        Measured on this fixture: pre-fix the same comparison added **+2223
+        bps** (pips read as bps); post-fix it adds **+22 bps**. Restoring the
+        1e-4 denominator in ``_scaled_amount_after_fee`` fails this test —
+        that is the property it exists to pin.
+
+        Deliberately a DELTA and not an absolute bound: this fixture reports a
+        large fee-free baseline from a separate tick-walk magnitude defect
+        (invariant to liquidity, so not a depth artefact) that this change does
+        not claim to fix. An absolute assertion would fail for a reason that
+        has nothing to do with fee units."""
+        from datetime import UTC, datetime
+
+        from almanak.framework.data.models import DataMeta
+        from almanak.framework.data.pools.reader import PoolPrice
+
+        def _meta() -> DataMeta:
+            return DataMeta(source="test", observed_at=datetime.now(UTC), finality="latest")
+
+        est = _make_v3_estimator()
+        pool = "0x" + "11" * 20
+        tier = 3000  # 0.3% pool, Uniswap-native pips
+
+        # Deep, flat book around the current tick so tick-walk impact is ~0
+        # and the fee is the only cost the simulator can attribute.
+        ticks = _tick_band(-6000, 6000, 10**24, _tick_to_price(-6000, 18, 18), _tick_to_price(6000, 18, 18))
+
+        est._resolve_pool = lambda *a, **kw: pool  # type: ignore[method-assign]
+        est._is_zero_for_one = lambda *a, **kw: True  # type: ignore[method-assign]
+        est._read_pool_price = lambda *a, **kw: DataEnvelope(  # type: ignore[method-assign]
+            value=PoolPrice(
+                price=Decimal("1"),
+                tick=0,
+                liquidity=10**24,
+                fee_tier=tier,
+                block_number=1,
+                timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+                pool_address=pool,
+                token0_decimals=18,
+                token1_decimals=18,
+            ),
+            meta=_meta(),
+            classification=DataClassification.EXECUTION_GRADE,
+        )
+        est._liquidity_reader.read_liquidity_depth = lambda **kw: DataEnvelope(  # type: ignore[method-assign]
+            value=LiquidityDepth(
+                ticks=ticks,
+                total_liquidity=10**24,
+                current_tick=0,
+                current_price=Decimal("1"),
+                pool_address=pool,
+                token0_decimals=18,
+                token1_decimals=18,
+                tick_spacing=60,
+            ),
+            meta=_meta(),
+            classification=DataClassification.EXECUTION_GRADE,
+        )
+
+        def _slippage_at(fee_pips: int) -> int:
+            nonlocal tier
+            tier = fee_pips
+            return est.estimate_slippage(
+                token_in="0x" + "aa" * 20,
+                token_out="0x" + "bb" * 20,
+                amount=Decimal("0.01"),
+                chain="optimism",
+            ).value.effective_slippage_bps
+
+        fee_cost_bps = _slippage_at(3000) - _slippage_at(0)
+
+        # 3000 pips == 30 bps == 0.3%. Allow slack for the simulator's
+        # approximation, but nowhere near the ~2223 bps the bug produced.
+        assert 10 <= fee_cost_bps <= 60, (
+            f"a 0.3% pool must cost ~30 bps, but charging it cost "
+            f"{fee_cost_bps} bps \u2014 fee_tier (1e-6) is being read as "
+            f"fee_bps (1e-4) again"
+        )

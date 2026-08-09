@@ -571,21 +571,30 @@ def _scaled_amount_after_fee(
     zero_for_one: bool,
     token0_decimals: int,
     token1_decimals: int,
-    fee_bps: int,
+    fee_pips: int,
 ) -> Decimal:
     """Return the raw-unit input amount after fee deduction.
 
     Scales ``amount`` by 10^decimals for the input-side token, then applies
-    ``fee_factor = (10000 - fee_bps) / 10000``. Preserves the original
-    fee-accumulation convention exactly (fees are deducted up-front, before
-    any tick-walk).
+    ``fee_factor = (1_000_000 - fee_pips) / 1_000_000``.
+
+    The fee is carried in Uniswap-native **pips** (1e-6 fractions: 3000 =
+    0.3%), the same unit as ``PoolPrice.fee_tier`` and the ``FEE_TO_TICK_SPACING``
+    keys, so the value reaches this function exactly as the pool reports it.
+
+    This used to take basis points, and ``estimate_slippage`` handed it the
+    pips value regardless — charging 3000 bps = 30% on every 0.3% pool. The
+    unit is native end-to-end now rather than converted at the boundary,
+    because an integer bps simply cannot hold a sub-100-pip fee: rounding a
+    149-pip tier to 1 bps under-charges it, and rounding a 1-pip tier up to
+    1 bps over-charges it 100x. Neither belongs on a money path.
     """
     if zero_for_one:
         raw_amount = amount * Decimal(10) ** token0_decimals
     else:
         raw_amount = amount * Decimal(10) ** token1_decimals
 
-    fee_factor = Decimal(10000 - fee_bps) / Decimal(10000)
+    fee_factor = Decimal(1_000_000 - fee_pips) / Decimal(1_000_000)
     return raw_amount * fee_factor
 
 
@@ -916,7 +925,10 @@ class SlippageEstimator:
                 tick_spacing=depth.tick_spacing,
                 token0_decimals=token0_decimals,
                 token1_decimals=token1_decimals,
-                fee_bps=pool_price.fee_tier,
+                # Native pips, same unit `read_liquidity_depth` takes above
+                # and the same unit the pool reports — no conversion, so no
+                # rounding can shave or inflate a non-canonical fee tier.
+                fee_pips=pool_price.fee_tier,
             )
 
             if estimate.effective_slippage_bps > self._high_slippage_threshold_bps:
@@ -1342,7 +1354,7 @@ class SlippageEstimator:
         tick_spacing: int,
         token0_decimals: int,
         token1_decimals: int,
-        fee_bps: int,
+        fee_pips: int,
     ) -> SlippageEstimate:
         """Simulate a swap through V3 tick ranges to compute exact price impact.
 
@@ -1378,7 +1390,7 @@ class SlippageEstimator:
             zero_for_one=zero_for_one,
             token0_decimals=token0_decimals,
             token1_decimals=token1_decimals,
-            fee_bps=fee_bps,
+            fee_pips=fee_pips,
         )
 
         total_output = Decimal(0)
