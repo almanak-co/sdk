@@ -186,7 +186,7 @@ class EnsoReceiptParser:
 
         # Log parsed receipt with user-friendly formatting
         tx_fmt = format_tx_hash(tx_hash)
-        gas_fmt = format_gas_cost(gas_used)
+        gas_fmt = format_gas_cost(receipt.get("gasUsed"))
         logger.info(f"🔍 Parsed Enso swap: tx={tx_fmt}, amount_out={amount_out:,}, {gas_fmt}")
 
         return SwapResult(

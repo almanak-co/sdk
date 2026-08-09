@@ -181,10 +181,7 @@ class TestFormatTokenAmountHuman:
 
 class TestFormatTokenWithUsd:
     def test_full_formatting(self):
-        assert (
-            format_token_with_usd(1_500_000_000_000_000_000, "ETH", 18, Decimal("3400"))
-            == "1.5000 ETH ($5,100.00)"
-        )
+        assert format_token_with_usd(1_500_000_000_000_000_000, "ETH", 18, Decimal("3400")) == "1.5000 ETH ($5,100.00)"
 
     def test_usdc_with_price(self):
         assert format_token_with_usd(100_000_000, "USDC", 6, Decimal("1")) == "100.0000 USDC ($100.00)"
@@ -247,6 +244,18 @@ class TestFormatGasCost:
 
     def test_zero_gas(self):
         assert format_gas_cost(0) == "0 gas"
+
+    @pytest.mark.parametrize("gas_used", ["0x0", "0x4a7", "0xabc"])
+    def test_rpc_quantity_strings(self, gas_used: str):
+        assert format_gas_cost(gas_used) == f"{int(gas_used, 16):,} gas"
+
+    @pytest.mark.parametrize(
+        "gas_used",
+        [None, True, "", "not-a-quantity", "1191", "-1", "+0x1", "0x01", "0x_4a7", "0X4a7", "0x4A7", " 0x1"],
+    )
+    def test_invalid_gas_is_unmeasured(self, gas_used: int | str | None, caplog: pytest.LogCaptureFixture):
+        assert format_gas_cost(gas_used) == "N/A gas"
+        assert "displaying it as unmeasured" in caplog.text
 
 
 # ---------------------------------------------------------------------------

@@ -29,10 +29,13 @@ Covers:
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from almanak.connectors.sushiswap_v3.receipt_parser import (
     EVENT_TOPICS,
@@ -319,6 +322,31 @@ class TestParseReceipt:
         assert result.success is True
         assert result.events == []
         assert result.transaction_success is True
+
+    @pytest.mark.parametrize("gas_used", [None, "malformed"])
+    def test_unmeasured_gas_logging_preserves_decoded_events(
+        self,
+        gas_used: str | None,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Missing or malformed gas remains diagnostic-only after decoding."""
+        parser = SushiSwapV3ReceiptParser(chain="arbitrum")
+        receipt = _make_receipt([_make_swap_log()])
+        if gas_used is None:
+            receipt.pop("gasUsed")
+        else:
+            receipt["gasUsed"] = gas_used
+
+        with caplog.at_level(
+            logging.INFO,
+            logger="almanak.connectors.sushiswap_v3.receipt_parser",
+        ):
+            result = parser.parse_receipt(receipt)
+
+        assert result.success is True
+        assert len(result.events) == 1
+        assert len(result.swap_events) == 1
+        assert "N/A gas" in caplog.text
 
     def test_failed_transaction(self):
         parser = SushiSwapV3ReceiptParser(chain="arbitrum")

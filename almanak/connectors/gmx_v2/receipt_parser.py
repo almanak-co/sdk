@@ -967,9 +967,8 @@ class GMXv2ReceiptParser:
                             order_events.append(order_data)
 
             # Log parsed receipt with user-friendly formatting
-            gas_used = receipt.get("gasUsed", 0)
             tx_fmt = format_tx_hash(tx_hash)
-            gas_fmt = format_gas_cost(gas_used)
+            gas_fmt = format_gas_cost(receipt.get("gasUsed"))
 
             if position_increases:
                 for p in position_increases:

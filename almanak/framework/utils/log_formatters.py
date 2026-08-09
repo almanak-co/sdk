@@ -36,6 +36,8 @@ Usage:
     '+2.00% (better)'
 """
 
+import logging
+import re
 from decimal import Decimal
 from functools import lru_cache
 from typing import TYPE_CHECKING
@@ -44,6 +46,9 @@ from almanak.config.framework import framework_config_from_env
 
 if TYPE_CHECKING:
     pass
+
+
+logger = logging.getLogger(__name__)
 
 
 def format_usd(amount: Decimal | float | int | None) -> str:
@@ -226,19 +231,20 @@ def format_token_with_usd_human(
 
 
 def format_gas_cost(
-    gas_used: int,
+    gas_used: int | str | None,
     gas_price_gwei: float | Decimal | None = None,
     eth_price_usd: Decimal | float | None = None,
 ) -> str:
     """Format gas usage with optional USD cost.
 
     Args:
-        gas_used: Gas units used
+        gas_used: Gas units used as an integer or JSON-RPC quantity string
         gas_price_gwei: Gas price in Gwei (optional)
         eth_price_usd: ETH price in USD (optional)
 
     Returns:
-        Formatted string like '131,114 gas (~$2.45)' or '131,114 gas'
+        Formatted string like '131,114 gas (~$2.45)' or '131,114 gas'.
+        Returns 'N/A gas' when gas usage is absent or invalid.
 
     Examples:
         >>> format_gas_cost(131114, 20, Decimal("3400"))
@@ -246,14 +252,27 @@ def format_gas_cost(
         >>> format_gas_cost(131114)
         '131,114 gas'
     """
-    gas_str = f"{gas_used:,} gas"
+    normalized_gas_used: int | None = None
+    if isinstance(gas_used, int) and not isinstance(gas_used, bool):
+        normalized_gas_used = gas_used
+    # String inputs are wire-level JSON-RPC QUANTITY values, not generic
+    # numeric text. Keep this stricter than legacy ingress coercers so logs do
+    # not relabel malformed wire data as measured gas.
+    elif isinstance(gas_used, str) and re.fullmatch(r"0x(?:0|[1-9a-f][0-9a-f]*)", gas_used):
+        normalized_gas_used = int(gas_used, 16)
+
+    if normalized_gas_used is None or normalized_gas_used < 0:
+        logger.warning("Cannot format invalid gas quantity %r; displaying it as unmeasured", gas_used)
+        return "N/A gas"
+
+    gas_str = f"{normalized_gas_used:,} gas"
 
     if gas_price_gwei is None or eth_price_usd is None:
         return gas_str
 
     # Calculate gas cost in ETH then USD
     # gas_used * gas_price_gwei * 1e-9 = gas cost in ETH
-    gas_cost_eth = Decimal(str(gas_used)) * Decimal(str(gas_price_gwei)) * Decimal("1e-9")
+    gas_cost_eth = Decimal(normalized_gas_used) * Decimal(str(gas_price_gwei)) * Decimal("1e-9")
     gas_cost_usd = gas_cost_eth * Decimal(str(eth_price_usd))
 
     return f"{gas_str} (~{format_usd(gas_cost_usd)})"

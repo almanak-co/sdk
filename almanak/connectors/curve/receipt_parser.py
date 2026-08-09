@@ -650,9 +650,8 @@ class CurveReceiptParser:
                             swap_events.append(swap_data)
 
             # Log parsed receipt
-            gas_used = receipt.get("gasUsed", 0)
             tx_fmt = format_tx_hash(tx_hash)
-            gas_fmt = format_gas_cost(gas_used)
+            gas_fmt = format_gas_cost(receipt.get("gasUsed"))
 
             if swap_events:
                 swap = swap_events[0]

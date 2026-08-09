@@ -636,9 +636,8 @@ class SushiSwapV3ReceiptParser:
                 )
 
             # Log parsed receipt with user-friendly formatting
-            gas_used = receipt.get("gasUsed", 0)
             tx_fmt = format_tx_hash(tx_hash)
-            gas_fmt = format_gas_cost(gas_used)
+            gas_fmt = format_gas_cost(receipt.get("gasUsed"))
             if swap_result:
                 slippage_fmt = format_slippage_bps(swap_result.slippage_bps) if swap_result.slippage_bps else "N/A"
                 # ``amount_*_decimal`` may be None when token decimals could

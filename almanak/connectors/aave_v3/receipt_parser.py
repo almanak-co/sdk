@@ -881,9 +881,8 @@ class AaveV3ReceiptParser:
             liquidations = typed["liquidations"]
 
             # Log parsed receipt with user-friendly formatting
-            gas_used = receipt.get("gasUsed", 0)
             tx_fmt = format_tx_hash(tx_hash)
-            gas_fmt = format_gas_cost(gas_used)
+            gas_fmt = format_gas_cost(receipt.get("gasUsed"))
 
             actions = self._summarize_actions(supplies, withdraws, borrows, repays, liquidations)
 

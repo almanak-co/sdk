@@ -7,8 +7,11 @@ VIB-1502: Tests for LP enrichment methods (extract_position_id, extract_liquidit
 extract_lp_close_data).
 """
 
+import logging
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from almanak.connectors.curve.receipt_parser import (
     EVENT_TOPICS,
@@ -103,6 +106,36 @@ def _mock_resolver(decimals_map: dict[str, int]):
 
     mock_resolver.resolve = resolve
     return mock_resolver
+
+
+@pytest.mark.parametrize(
+    ("gas_used", "expected_gas"),
+    [("0x4a7", "1,191 gas"), (None, "N/A gas"), ("malformed", "N/A gas")],
+)
+def test_parse_receipt_gas_logging_cannot_discard_events(
+    gas_used: str | None,
+    expected_gas: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Raw or unmeasured gas remains diagnostic-only after event decoding."""
+    parser = CurveReceiptParser(chain="ethereum")
+    event = MagicMock()
+    event.event_type = CurveEventType.TRANSFER
+    receipt = _build_swap_receipt()
+    if gas_used is None:
+        receipt.pop("gasUsed")
+    else:
+        receipt["gasUsed"] = gas_used
+
+    with (
+        patch.object(parser, "_parse_log", return_value=event),
+        caplog.at_level(logging.INFO, logger="almanak.connectors.curve.receipt_parser"),
+    ):
+        result = parser.parse_receipt(receipt)
+
+    assert result.success is True
+    assert result.events == [event, event, event]
+    assert expected_gas in caplog.text
 
 
 class TestExtractSwapAmountsDecimals:

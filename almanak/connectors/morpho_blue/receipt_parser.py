@@ -665,9 +665,8 @@ class MorphoBlueReceiptParser:
                     events.append(event)
 
             # Log parsed receipt with user-friendly formatting
-            gas_used = receipt.get("gasUsed", 0)
             tx_fmt = format_tx_hash(transaction_hash)
-            gas_fmt = format_gas_cost(gas_used)
+            gas_fmt = format_gas_cost(receipt.get("gasUsed"))
 
             # Count event types for summary
             event_types: dict[str, int] = {}

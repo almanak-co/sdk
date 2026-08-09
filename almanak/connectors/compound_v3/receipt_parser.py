@@ -248,9 +248,8 @@ class CompoundV3ReceiptParser:
                         collateral_withdrawn[asset] = collateral_withdrawn.get(asset, Decimal("0")) + amount
 
             # Log parsed receipt with user-friendly formatting
-            gas_used = receipt.get("gasUsed", 0)
             tx_fmt = format_tx_hash(tx_hash)
-            gas_fmt = format_gas_cost(gas_used)
+            gas_fmt = format_gas_cost(receipt.get("gasUsed"))
 
             # Build summary of actions
             # Compound V3 implements borrow via withdraw() and repay via supply().

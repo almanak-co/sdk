@@ -7,6 +7,7 @@ This test suite covers:
 - Event type detection
 """
 
+import logging
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -376,6 +377,87 @@ class TestGMXv2ReceiptParser:
         assert len(result.events) == 1
         assert result.events[0].event_type == GMXv2EventType.POSITION_INCREASE
         assert result.events[0].event_name == "PositionIncrease"
+
+    def test_parse_receipt_accepts_json_rpc_hex_gas_used(
+        self, parser: GMXv2ReceiptParser, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A raw keeper receipt must not lose decoded events to log formatting."""
+        receipt = {
+            "transactionHash": "0x1234",
+            "blockNumber": 42,
+            "gasUsed": "0x4a7",
+            "logs": [
+                {
+                    "topics": [EVENT_TOPICS["PositionIncrease"]],
+                    "data": "0x" + "00" * 320,
+                    "address": "0x1234567890123456789012345678901234567890",
+                    "logIndex": "0x0",
+                }
+            ],
+        }
+
+        with caplog.at_level(logging.INFO, logger="almanak.connectors.gmx_v2.receipt_parser"):
+            result = parser.parse_receipt(receipt)
+
+        assert result.success is True
+        assert len(result.events) == 1
+        assert result.events[0].event_type == GMXv2EventType.POSITION_INCREASE
+        assert "1,191 gas" in caplog.text
+
+    @pytest.mark.parametrize(
+        ("include_key", "gas_used"),
+        [
+            (False, None),
+            (True, None),
+            (True, True),
+            (True, False),
+            (True, -1),
+            (True, 1.0),
+            (True, ""),
+            (True, "not-a-quantity"),
+            (True, "1191"),
+            (True, "-1"),
+            (True, "0x"),
+            (True, "+0x1"),
+            (True, "0x01"),
+            (True, "0x_4a7"),
+            (True, "0X4a7"),
+            (True, "0x4A7"),
+            (True, " 0x1"),
+        ],
+    )
+    def test_parse_receipt_invalid_gas_is_unmeasured_without_losing_event(
+        self,
+        parser: GMXv2ReceiptParser,
+        caplog: pytest.LogCaptureFixture,
+        *,
+        include_key: bool,
+        gas_used: object,
+    ) -> None:
+        """VIB-6606: invalid or missing gas metadata must not discard events."""
+        receipt = {
+            "transactionHash": "0x1234",
+            "blockNumber": 42,
+            "logs": [
+                {
+                    "topics": [EVENT_TOPICS["PositionIncrease"]],
+                    "data": "0x" + "00" * 320,
+                    "address": "0x1234567890123456789012345678901234567890",
+                    "logIndex": "0x0",
+                }
+            ],
+        }
+        if include_key:
+            receipt["gasUsed"] = gas_used
+
+        with caplog.at_level(logging.INFO):
+            result = parser.parse_receipt(receipt)
+
+        assert result.success is True
+        assert len(result.events) == 1
+        assert result.events[0].event_type == GMXv2EventType.POSITION_INCREASE
+        assert "N/A gas" in caplog.text
+        assert "displaying it as unmeasured" in caplog.text
 
     def test_parse_receipt_with_position_decrease(self, parser: GMXv2ReceiptParser) -> None:
         """Test parsing receipt with PositionDecrease event."""

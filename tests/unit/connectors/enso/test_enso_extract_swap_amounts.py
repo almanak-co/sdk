@@ -4,8 +4,11 @@ Verifies that the ResultEnricher-compatible extraction method correctly
 parses ERC-20 Transfer events from Enso swap receipts.
 """
 
+import logging
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from almanak.connectors.enso.receipt_parser import (
     TRANSFER_EVENT_SIGNATURE,
@@ -58,6 +61,40 @@ def _make_receipt(
         "gasUsed": 150_000,
         "effectiveGasPrice": 30_000_000_000,
     }
+
+
+@pytest.mark.parametrize(
+    ("gas_used", "expected_gas"),
+    [("0x4a7", "1,191 gas"), (None, "N/A gas"), ("malformed", "N/A gas")],
+)
+def test_parse_swap_receipt_gas_logging_preserves_amount_out(
+    gas_used: str | None,
+    expected_gas: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Wire or unmeasured gas cannot change a successful Transfer result."""
+    amount_out = 500_000_000_000_000_000
+    receipt = _make_receipt(
+        logs=[_transfer_log(TOKEN_OUT, "0xrouter", WALLET, amount_out)]
+    )
+    if gas_used is None:
+        receipt.pop("gasUsed")
+    else:
+        receipt["gasUsed"] = gas_used
+
+    with caplog.at_level(
+        logging.INFO,
+        logger="almanak.connectors.enso.receipt_parser",
+    ):
+        result = EnsoReceiptParser(chain="arbitrum").parse_swap_receipt(
+            receipt,
+            wallet_address=WALLET,
+            token_out=TOKEN_OUT,
+        )
+
+    assert result.success is True
+    assert result.amount_out == amount_out
+    assert expected_gas in caplog.text
 
 
 # ---------------------------------------------------------------------------

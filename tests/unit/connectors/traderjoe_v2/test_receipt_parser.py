@@ -7,6 +7,7 @@ This test suite covers:
 - Receipt parsing from transaction receipts
 """
 
+import logging
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
@@ -337,6 +338,45 @@ class TestTraderJoeV2ReceiptParser:
 
         assert result.success is True
         # Events may or may not be parsed depending on implementation details
+
+    @pytest.mark.parametrize("gas_used", [None, "malformed"])
+    def test_unmeasured_gas_logging_preserves_parsed_events(
+        self,
+        parser: TraderJoeV2ReceiptParser,
+        gas_used: str | None,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Missing or malformed gas cannot invalidate an already-parsed event."""
+        event = TraderJoeV2Event(
+            event_type=TraderJoeV2EventType.TRANSFER,
+            event_name="Transfer",
+            log_index=0,
+            transaction_hash=TEST_TX_HASH,
+            block_number=12_345_678,
+            contract_address=WAVAX_ADDRESS,
+            data={"from": TEST_WALLET, "to": TEST_POOL, "amount": 10**18},
+        )
+        receipt = {
+            "status": 1,
+            "transactionHash": TEST_TX_HASH,
+            "blockNumber": 12_345_678,
+            "logs": [{}],
+        }
+        if gas_used is not None:
+            receipt["gasUsed"] = gas_used
+
+        with (
+            patch.object(parser, "_parse_logs", return_value=[event]),
+            caplog.at_level(
+                logging.INFO,
+                logger="almanak.connectors.traderjoe_v2.receipt_parser",
+            ),
+        ):
+            result = parser.parse_receipt(receipt)
+
+        assert result.success is True
+        assert result.events == [event]
+        assert "N/A gas" in caplog.text
 
 
 # =============================================================================

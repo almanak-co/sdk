@@ -269,7 +269,7 @@ class TraderJoeV2ReceiptParser:
 
             # Log parsed receipt with user-friendly formatting
             tx_fmt = format_tx_hash(tx_hash)
-            gas_fmt = format_gas_cost(gas_used)
+            gas_fmt = format_gas_cost(receipt.get("gasUsed"))
 
             if liquidity_result and liquidity_result.success:
                 action = "ADD" if liquidity_result.is_add else "REMOVE"
