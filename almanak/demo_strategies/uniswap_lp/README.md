@@ -70,15 +70,27 @@ almanak strat run --interval 60
 
 Edit `config.json` to customize the strategy:
 
-```json
+```jsonc
 {
     "pool": "WETH/USDC/500",       // Pool: TOKEN0/TOKEN1/FEE_TIER (native USDC on Arbitrum)
     "range_width_pct": 0.20,       // 20% total range width (±10%)
-    "amount0": "0.1",              // WETH amount to deposit
-    "amount1": "340",              // USDC amount to deposit
-    "force_action": "open"         // "open", "close", or "" for auto
+    "amount0": "0.001",            // WETH amount used only by a forced open
+    "amount1": "3",                // USDC amount used only by a forced open
+    "min_position_usd": "3",        // HOLD below this wallet inventory
+    "force_action": ""             // "open", "close", or "" for auto
 }
 ```
+
+The comments above are explanatory JSONC; remove them when copying the object into
+the strict-JSON `config.json` file.
+
+`min_position_usd` is an explicit dust guard, not a protocol minimum. The shipped
+Arbitrum, Optimism, and Robinhood demo configurations set it to `$3`, so a user can
+reduce the demo's funding without silently inheriting the strategy class's conservative
+`$100` fallback. Keep the threshold below the capital you intend to deploy.
+Automatic mode (`force_action: ""`) applies this guard to wallet inventory before
+opening or reopening. A forced open bypasses the guard and uses `amount0` and
+`amount1` directly; reserve it for deliberate testing.
 
 ### Fee Tiers
 

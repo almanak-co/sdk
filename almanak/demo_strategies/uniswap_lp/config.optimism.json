@@ -21,6 +21,7 @@
     "range_width_pct": 0.2,
     "amount0": "0.001",
     "amount1": "3",
+    "min_position_usd": "3",
     "max_slippage": "0.005",
     "anvil_funding": {
         "ETH": 100,
