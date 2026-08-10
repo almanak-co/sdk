@@ -28,6 +28,7 @@ from almanak.framework.runner.strategy_runner import (
     StrategyRunner,
 )
 from almanak.framework.state.state_manager import StateData
+from tests.unit.runner._boot_snapshot import measured_boot_snapshot
 
 # =============================================================================
 # Mock Classes
@@ -282,6 +283,16 @@ class MockStateManager:
     async def save_portfolio_metrics(self, metrics: Any) -> bool:
         self._metrics[getattr(metrics, "deployment_id", "")] = metrics
         return True
+
+    async def get_latest_snapshot(self, deployment_id: str) -> Any:
+        """Model the already-bootstrapped runner state used by this suite.
+
+        Fresh-deployment behavior belongs to the dedicated VIB-5854 tests.  The
+        runner tests below characterize iterations after startup, so returning
+        an existing snapshot prevents them from accidentally exercising a
+        second boot capture.
+        """
+        return measured_boot_snapshot(deployment_id)
 
     async def get_portfolio_metrics(self, deployment_id: str) -> Any:
         return self._metrics.get(deployment_id)

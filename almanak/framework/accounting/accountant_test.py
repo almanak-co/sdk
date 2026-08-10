@@ -560,9 +560,14 @@ def _snapshot_equity(s: dict[str, Any]) -> Decimal | None:
     successful unwind as an accounting failure (G8 false positive seen on
     looping mainnet, 2026-05-01).
 
-    Returns ``None`` ONLY when both columns are unmeasured. A pure-cash
-    snapshot or a pure-deployed snapshot is a valid equity point.
+    An ``UNAVAILABLE`` row is the runner's diagnostic failure contract. Its
+    persisted ``0 + 0`` placeholders are not measurements and must never enter
+    G6's ``priced`` bracket as a zero-valued endpoint. Returns ``None`` for
+    that confidence or when both columns are unmeasured. A measured pure-cash
+    or pure-deployed snapshot remains a valid equity point.
     """
+    if s.get("value_confidence") == "UNAVAILABLE":
+        return None
     deployed = _dec(s.get("total_value_usd"))
     cash = _dec(s.get("available_cash_usd"))
     if deployed is None and cash is None:
@@ -2093,7 +2098,7 @@ def _cell_g6_reconciliation(  # noqa: C901
     # snapshots. ``_snapshot_equity`` sums total_value_usd (deployed) +
     # available_cash_usd (uninvested wallet) — a post-teardown snapshot
     # with all-cash equity is a valid endpoint, not a measurement gap.
-    priced = [s for s in ordered_by_time if _snapshot_equity(s) is not None]
+    priced = [s for s in ordered_by_time if _snapshot_confidence_can_anchor_pnl(s) and _snapshot_equity(s) is not None]
     if len(priced) < 2:
         return (
             CellResult(
@@ -3014,20 +3019,24 @@ def _cell_g8_time_series(snapshots: list[dict[str, Any]]) -> CellResult:
     into ``available_cash_usd``. Treating that as null double-counts
     teardown success as an accounting failure.
 
-    The cell now fails only when **equity itself** is missing — i.e. both
-    columns are unmeasured. Pure cash-only is a valid equity curve point.
+    The cell fails when **equity itself** is missing — both columns are
+    unmeasured — or explicitly ``UNAVAILABLE``. Pure cash-only is a valid
+    measured equity curve point.
     """
     if not snapshots:
         return CellResult("G8", "Time-series (equity curve)", "FAIL", "no snapshots")
 
-    unmeasured = [s for s in snapshots if _snapshot_equity(s) is None]
+    confidence_unmeasured = sum(not _snapshot_confidence_can_anchor_pnl(s) for s in snapshots)
+    equity_unmeasured = sum(_snapshot_equity(s) is None for s in snapshots)
+    unmeasured = sum(not _snapshot_confidence_can_anchor_pnl(s) or _snapshot_equity(s) is None for s in snapshots)
     if unmeasured:
         return CellResult(
             "G8",
             "Time-series",
             "FAIL",
-            f"{len(unmeasured)}/{len(snapshots)} snapshots have unmeasured equity "
-            "(both total_value_usd AND available_cash_usd are null)",
+            f"{unmeasured}/{len(snapshots)} snapshots have unmeasured equity "
+            f"({confidence_unmeasured} with missing/invalid confidence; "
+            f"{equity_unmeasured} with null/invalid equity columns)",
         )
     return CellResult(
         "G8",

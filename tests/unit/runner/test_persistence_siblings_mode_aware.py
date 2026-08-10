@@ -39,7 +39,7 @@ from almanak.framework.state.exceptions import (
     AccountingWriteKind,
 )
 from almanak.framework.state.state_manager import StateConflictError, StateData
-
+from tests.unit.runner._boot_snapshot import measured_boot_snapshot
 
 # =============================================================================
 # Shared helpers
@@ -301,6 +301,7 @@ def _make_loop_runner() -> StrategyRunner:
         enable_alerting=False,
     )
     state_mgr = AsyncMock()
+    state_mgr.get_latest_snapshot = AsyncMock(return_value=measured_boot_snapshot())
     state_mgr.get_accounting_events_sync = MagicMock(return_value=[])
     state_mgr.get_position_events_sync = MagicMock(return_value=[])
     runner = StrategyRunner(
@@ -584,14 +585,15 @@ class TestVaultLaneIterationEscalation:
         )
 
         # Build a RunIterationState to call _step_periodic_hooks directly
+        from datetime import UTC, datetime
+
         from almanak.framework.runner.strategy_runner import RunIterationState
-        from datetime import datetime, timezone
 
         strategy = _make_vault_strategy()
         iteration_state = RunIterationState(
             strategy=strategy,
             deployment_id="test_vault_strategy",
-            start_time=datetime.now(timezone.utc),
+            start_time=datetime.now(UTC),
         )
 
         # CancelledError must propagate -- the AccountingPersistenceError must NOT replace it

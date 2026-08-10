@@ -32,12 +32,17 @@ from typing import TYPE_CHECKING, Any, assert_never, cast
 
 from almanak.core.chains._helpers import is_solana_chain
 from almanak.core.lifecycle import LifecycleCommand, LifecycleState
-from almanak.framework.portfolio.models import ValueConfidence, serialize_value_confidence
+from almanak.framework.portfolio.models import (
+    ValueConfidence,
+    is_measured_accounting_snapshot,
+    serialize_value_confidence,
+)
 
 from ..api.timeline import TimelineEvent, TimelineEventType, add_event
 from ..state.exceptions import AccountingPersistenceError
 
 if TYPE_CHECKING:
+    from ..portfolio.models import PortfolioSnapshot
     from .runner_models import (
         IterationResult,
         StatefulActivityProviderProtocol,
@@ -134,6 +139,131 @@ def effective_iteration_wait_seconds(interval: float, guard_refusal_streak: int)
 # =============================================================================
 # Cross-entry-point startup helpers
 # =============================================================================
+
+
+async def capture_boot_snapshot_with_accounting(
+    runner: StrategyRunner,
+    strategy: StrategyProtocol,
+    deployment_id: str,
+) -> PortfolioSnapshot | None:
+    """Persist the pre-trade valuation bracket exactly once (VIB-5854).
+
+    G6 reconciles wallet-value movement over the portfolio-snapshot bracket
+    against every accounting row in that same interval.  Before this boot
+    capture, a fresh deployment's first snapshot was written *after* its first
+    transaction.  The evaluator correctly rejected that mismatched interval,
+    but the producer supplied no way to observe the opening wallet inventory.
+
+    The helper is shared by all three strategy execution entry points and must
+    run before :func:`reconstruct_lending_basis_store`: the opening-balance FIFO
+    seed also needs the true pre-trade inventory. A measured opening snapshot
+    makes the operation idempotent across restarts even when a later diagnostic
+    row is ``UNAVAILABLE``; a legacy diagnostic
+    ``UNAVAILABLE`` row is retained as evidence but canonical valuation is
+    retried instead of trusting its placeholder zero equity.
+    ``force_snapshot=True`` bypasses the ordinary cadence throttle, and both
+    cycle-id surfaces are stamped with a deterministic boot identity so
+    snapshots and metrics remain joinable.
+
+    Live-mode accounting persistence failures remain fatal.  Paper and dry-run
+    failures are logged and left absent; G6's window-coverage invariant then
+    exposes the missing bracket instead of manufacturing a green result.
+    """
+    if not runner.config.enable_state_persistence:
+        return None
+
+    from almanak.framework.observability.context import clear_cycle_id, get_cycle_id, set_cycle_id
+
+    # This is intentionally the runner_state persistence choke point, not
+    # capture_snapshot_with_accounting: boot has no IterationResult to rewrite
+    # as ACCOUNTING_FAILED, and that post-iteration wrapper does not force a
+    # snapshot when no trade flag exists yet.  The canonical capture function
+    # still enforces valuation, confidence, snapshot+metrics persistence, and
+    # typed AccountingPersistenceError semantics; this boundary adds the
+    # startup mode policy explicitly below.
+    from .runner_state import capture_portfolio_snapshot
+
+    boot_cycle_id = f"boot-{deployment_id}"
+    saved_last_cycle_id = getattr(runner, "_last_cycle_id", "") or ""
+    saved_ctx_cycle_id = get_cycle_id()
+    try:
+        # A measured latest observation proves boot already established a
+        # usable endpoint, so preserve the long-standing fast path (and narrow
+        # state-manager adapters). An unmeasured latest row proves nothing
+        # about the opening, however: before recapturing, read the two oldest
+        # rows so a later diagnostic UNAVAILABLE cannot make restart write a
+        # mid-lifecycle row under the deterministic boot cycle id. A legacy
+        # diagnostic may legitimately precede the first strict boot retry, so
+        # "first row" alone is not the same thing as "opening endpoint".
+        # get_snapshots_since is already implemented by both local StateManager
+        # and hosted GatewayStateManager; the fallback keeps narrow test/legacy
+        # adapters that expose only get_first_snapshot working.
+        latest = await runner.state_manager.get_latest_snapshot(deployment_id)
+        if is_measured_accounting_snapshot(latest):
+            return latest
+
+        get_since = getattr(runner.state_manager, "get_snapshots_since", None)
+        if callable(get_since):
+            opening_rows = await get_since(
+                deployment_id,
+                datetime.fromtimestamp(0, tz=UTC),
+                limit=2,
+            )
+        else:
+            get_first = getattr(runner.state_manager, "get_first_snapshot", None)
+            if not callable(get_first):
+                raise RuntimeError("state backend cannot read the opening portfolio snapshot")
+            first = await get_first(deployment_id)
+            opening_rows = [first] if first is not None else []
+
+        existing = next(
+            (
+                snapshot
+                for snapshot in opening_rows
+                if is_measured_accounting_snapshot(snapshot)
+                and (snapshot is opening_rows[0] or getattr(snapshot, "cycle_id", "") == boot_cycle_id)
+            ),
+            opening_rows[0] if opening_rows else latest,
+        )
+        if is_measured_accounting_snapshot(existing):
+            return existing
+        if existing is not None:
+            logger.warning(
+                "Ignoring unmeasured existing snapshot at accounting boot for %s; retrying canonical valuation",
+                deployment_id,
+            )
+
+        runner._last_cycle_id = boot_cycle_id
+        set_cycle_id(boot_cycle_id)
+        runner._begin_market_snapshot_iteration(strategy, boot_cycle_id)
+        captured = await capture_portfolio_snapshot(
+            runner,
+            strategy,
+            iteration_number=0,
+            force_snapshot=True,
+            require_measured_equity=True,
+        )
+        if not is_measured_accounting_snapshot(captured):
+            raise RuntimeError("canonical boot capture returned no measured accounting endpoint")
+        return captured
+    except Exception as exc:  # noqa: BLE001 - mode-aware accounting boundary
+        if runner._is_live_mode():
+            if isinstance(exc, AccountingPersistenceError):
+                raise
+            raise RuntimeError(f"Failed to capture accounting boot snapshot for {deployment_id}: {exc}") from exc
+        logger.error(
+            "Failed to capture accounting boot snapshot for %s; G6 window coverage will remain unmeasured: %s",
+            deployment_id,
+            exc,
+            exc_info=True,
+        )
+        return None
+    finally:
+        runner._last_cycle_id = saved_last_cycle_id
+        if saved_ctx_cycle_id is None:
+            clear_cycle_id()
+        else:
+            set_cycle_id(saved_ctx_cycle_id)
 
 
 def reconstruct_lending_basis_store(
@@ -497,6 +627,11 @@ async def initialize_run_loop(  # noqa: C901
             if runner._is_live_mode():
                 raise RuntimeError(f"Failed to initialize state manager for {deployment_id}: {e}") from e
             logger.error(f"Failed to initialize state manager: {e}")
+
+    # VIB-5854: persist the true pre-trade wallet bracket before FIFO
+    # reconstruction seeds OPENING_BALANCE lots from the earliest snapshot.
+    if state_manager_ready:
+        await capture_boot_snapshot_with_accounting(runner, strategy, deployment_id)
 
     # Reconstruct FIFO basis store from durable accounting_events so REPAY and
     # PT_REDEEM attribution is correct after a runner restart (VIB-3484).

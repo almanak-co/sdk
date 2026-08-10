@@ -18,6 +18,7 @@ from almanak.framework.accounting.basis import FIFOBasisStore
 from almanak.framework.accounting.processor import AccountingProcessor, write_outbox_entry
 from almanak.framework.models.run_mode import RunMode
 from almanak.framework.state.exceptions import AccountingPersistenceError, AccountingWriteKind
+from tests.unit.runner._boot_snapshot import measured_boot_snapshot
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -617,6 +618,10 @@ async def test_initialize_run_loop_drains_pending_outbox() -> None:
 
     state_manager = MagicMock()
     state_manager.initialize = AsyncMock()
+    # This integration test characterizes outbox recovery after startup.  A
+    # prior snapshot makes that post-boot state explicit; fresh boot capture is
+    # covered by the dedicated VIB-5854 runner tests.
+    state_manager.get_latest_snapshot = AsyncMock(return_value=measured_boot_snapshot("strat-1"))
     state_manager.get_accounting_events_sync = MagicMock(return_value=[])
     state_manager.load_state = AsyncMock(return_value=None)
     # Audit F4 (T12 cutover): the boot guard added by VIB-4198 awaits
@@ -681,6 +686,8 @@ async def test_initialize_run_loop_drain_pending_raises_in_live_mode() -> None:
 
     state_manager = MagicMock()
     state_manager.initialize = AsyncMock()
+    # See the post-boot fixture rationale in the sibling test above.
+    state_manager.get_latest_snapshot = AsyncMock(return_value=measured_boot_snapshot("strat-1"))
     state_manager.get_accounting_events_sync = MagicMock(return_value=[])
     # See test_initialize_run_loop_drains_pending_outbox above for the
     # rationale on these two stubs (audit F4).

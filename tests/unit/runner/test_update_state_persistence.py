@@ -35,6 +35,7 @@ from almanak.framework.state.exceptions import (
     AccountingWriteKind,
 )
 from almanak.framework.state.state_manager import StateConflictError, StateData
+from tests.unit.runner._boot_snapshot import measured_boot_snapshot
 
 # =============================================================================
 # Unit-level: update_state itself
@@ -193,6 +194,7 @@ def _make_loop_runner() -> StrategyRunner:
         enable_alerting=False,
     )
     state_mgr = AsyncMock()
+    state_mgr.get_latest_snapshot = AsyncMock(return_value=measured_boot_snapshot())
     state_mgr.get_accounting_events_sync = MagicMock(return_value=[])
     state_mgr.get_position_events_sync = MagicMock(return_value=[])
     runner = StrategyRunner(

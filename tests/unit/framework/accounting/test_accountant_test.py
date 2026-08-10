@@ -43,6 +43,15 @@ def test_snapshot_equity_returns_none_only_when_both_unmeasured():
     assert _snapshot_equity(s) is None
 
 
+def test_snapshot_equity_refuses_unavailable_zero_claim():
+    s = {
+        "total_value_usd": "0",
+        "available_cash_usd": "0",
+        "value_confidence": "UNAVAILABLE",
+    }
+    assert _snapshot_equity(s) is None
+
+
 def _make_db_with_minimal_lp_run() -> Path:
     """Build a synthetic LP-shaped DB that should pass G1 / G7 / G10 and
     keep Track-C-dependent cells (G14, G15) as XFAIL."""

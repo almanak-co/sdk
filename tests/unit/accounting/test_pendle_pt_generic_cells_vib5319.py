@@ -236,6 +236,7 @@ def _snapshots() -> list[dict[str, Any]]:
             "timestamp": "2026-06-23T01:11:55+00:00",
             "total_value_usd": "26.5",
             "available_cash_usd": "100.0",
+            "value_confidence": "HIGH",
             "wallet_balances_json": json.dumps(
                 [{"symbol": "wstETH", "balance": "0.04", "value_usd": "85.75", "price_usd": "2143.8"}]
             ),
@@ -245,6 +246,7 @@ def _snapshots() -> list[dict[str, Any]]:
             "timestamp": "2026-06-23T01:15:19+00:00",
             "total_value_usd": "26.5",
             "available_cash_usd": "100.0",
+            "value_confidence": "HIGH",
             "wallet_balances_json": json.dumps(
                 [{"symbol": "wstETH", "balance": "0.05", "value_usd": "107.16", "price_usd": "2143.1"}]
             ),
@@ -263,6 +265,7 @@ def _balanced_snapshots(component_pnl: str) -> list[dict[str, Any]]:
             "timestamp": "2026-06-23T01:11:55+00:00",
             "total_value_usd": "0",
             "available_cash_usd": "100.0",
+            "value_confidence": "HIGH",
             "wallet_balances_json": "[]",
         },
         {
@@ -270,6 +273,7 @@ def _balanced_snapshots(component_pnl: str) -> list[dict[str, Any]]:
             "timestamp": "2026-06-23T01:15:19+00:00",
             "total_value_usd": "0",
             "available_cash_usd": str(final_cash),
+            "value_confidence": "HIGH",
             "wallet_balances_json": "[]",
         },
     ]

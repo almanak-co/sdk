@@ -563,10 +563,19 @@ def _run_once(  # noqa: C901
             # writer cannot emit interest_delta_usd → L4 Accountant Test fails.
             # Run AFTER setup_gateway_integration so the gRPC channel is up.
             from ..runner._run_loop_helpers import (
+                capture_boot_snapshot_with_accounting,
                 hydrate_recent_open_events_cache,
                 reconstruct_lending_basis_store,
             )
 
+            await capture_boot_snapshot_with_accounting(
+                runner,
+                strategy_instance,
+                _require_strategy_deployment_id(
+                    strategy_instance,
+                    operation="capture_boot_snapshot_with_accounting",
+                ),
+            )
             reconstruct_lending_basis_store(
                 runner,
                 strategy_instance,
@@ -1000,10 +1009,19 @@ def _run_test_lifecycle(  # noqa: C901
             # optional teardown in a single CLI invocation, but the in-memory
             # FIFO store is empty if a previous CLI process opened the borrow.
             from ..runner._run_loop_helpers import (
+                capture_boot_snapshot_with_accounting,
                 hydrate_recent_open_events_cache,
                 reconstruct_lending_basis_store,
             )
 
+            await capture_boot_snapshot_with_accounting(
+                runner,
+                strategy_instance,
+                _require_strategy_deployment_id(
+                    strategy_instance,
+                    operation="capture_boot_snapshot_with_accounting",
+                ),
+            )
             reconstruct_lending_basis_store(
                 runner,
                 strategy_instance,

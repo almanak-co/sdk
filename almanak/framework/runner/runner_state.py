@@ -34,6 +34,7 @@ from ..portfolio import (
     PortfolioSnapshot,
     ValueConfidence,
     enforce_open_position_value_invariant,
+    is_measured_accounting_snapshot,
     serialize_value_confidence,
 )
 from ..state.exceptions import AccountingPersistenceError, AccountingWriteKind
@@ -74,6 +75,10 @@ if TYPE_CHECKING:
 # in JSONL output.  The logger name is kept identical to the original so that
 # existing log-capture tests and log-filtering rules continue to work.
 logger = structlog.get_logger("almanak.framework.runner.strategy_runner")
+
+
+class UnmeasuredAccountingSnapshotError(RuntimeError):
+    """A strict accounting endpoint could not produce measured equity."""
 
 
 # -------------------------------------------------------------------------
@@ -915,6 +920,8 @@ async def capture_portfolio_snapshot(
     strategy: StrategyProtocol,
     iteration_number: int,
     force_snapshot: bool = False,
+    *,
+    require_measured_equity: bool = False,
 ) -> PortfolioSnapshot | None:
     """Capture and persist portfolio snapshot after iteration.
 
@@ -929,6 +936,9 @@ async def capture_portfolio_snapshot(
         strategy: The strategy to capture snapshot from
         iteration_number: Current iteration count
         force_snapshot: If True, bypass the throttle (e.g., trade executed this cycle)
+        require_measured_equity: Refuse and do not persist an UNAVAILABLE or
+            structurally unmeasured snapshot. Used by the pre-trade boot lane,
+            where a diagnostic zero row cannot become an accounting endpoint.
 
     Returns:
         PortfolioSnapshot if captured, None if skipped or not supported
@@ -973,6 +983,13 @@ async def capture_portfolio_snapshot(
         # than double-firing. Strictly additive: no valuation / netting math
         # changes, only a confidence demotion on an already-corrupt row.
         snapshot = enforce_open_position_value_invariant(snapshot)
+
+        if require_measured_equity and not is_measured_accounting_snapshot(snapshot):
+            raise UnmeasuredAccountingSnapshotError(
+                "accounting endpoint has unmeasured equity: "
+                f"confidence={serialize_value_confidence(snapshot.value_confidence) or 'UNMEASURED'} "
+                f"deployed={snapshot.total_value_usd} cash={snapshot.available_cash_usd}"
+            )
 
         # VIB-4225 (ACC-02) §6 F1-F3 contract — inspect the typed
         # ``gas_native_status`` the strategy stamped during snapshot
@@ -1024,8 +1041,17 @@ async def capture_portfolio_snapshot(
         # mode-aware decision (paper/dry-run may continue) lives upstream so
         # this layer never silently drops the failure.
         raise
+    except UnmeasuredAccountingSnapshotError:
+        # The strict boot lane owns mode policy. Persisting its ordinary
+        # UNAVAILABLE diagnostic row would fabricate a zero-valued opening
+        # endpoint and make a later retry idempotent on bad evidence.
+        raise
     except Exception as e:
         logger.warning(f"Failed to capture portfolio snapshot: {e}")
+        if require_measured_equity:
+            raise UnmeasuredAccountingSnapshotError(
+                f"accounting endpoint capture failed before measured equity: {e}"
+            ) from e
         await _persist_unavailable_on_failure(runner, strategy, iteration_number, now, e)
         return None
 

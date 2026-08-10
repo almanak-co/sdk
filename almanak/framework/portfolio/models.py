@@ -437,6 +437,41 @@ class PortfolioSnapshot:
         return [], {}
 
 
+def is_measured_accounting_snapshot(snapshot: Any) -> bool:
+    """Whether a snapshot can serve as an accounting equity endpoint.
+
+    A measured zero is valid. Missing/UNAVAILABLE confidence, non-finite
+    values, negative component legs, and structurally absent values are not.
+    Both deployed and cash legs must be measured so their sum has one exact
+    interpretation under the VIB-3614 split.
+    """
+    if snapshot is None:
+        return False
+    try:
+        confidence = ValueConfidence.parse_optional(
+            getattr(snapshot, "value_confidence", None),
+            field_name="accounting snapshot value_confidence",
+        )
+    except ValueConfidenceParseError:
+        return False
+    if confidence is None or confidence == ValueConfidence.UNAVAILABLE:
+        return False
+
+    values: list[Decimal] = []
+    for field_name in ("total_value_usd", "available_cash_usd"):
+        raw = getattr(snapshot, field_name, None)
+        if raw is None or isinstance(raw, bool):
+            return False
+        try:
+            value = raw if isinstance(raw, Decimal) else Decimal(str(raw))
+        except (InvalidOperation, TypeError, ValueError):
+            return False
+        if not value.is_finite() or value < 0:
+            return False
+        values.append(value)
+    return sum(values, Decimal("0")).is_finite()
+
+
 # VIB-4970 — fail-closed writer invariant for the portfolio-snapshot lane.
 #
 # ``PositionType`` values (StrEnum, so equal to and hashable as their string

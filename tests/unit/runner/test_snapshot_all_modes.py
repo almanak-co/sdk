@@ -6,7 +6,7 @@ equity curve for dashboard and PnL tracking.
 """
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -16,6 +16,7 @@ from almanak.framework.runner.strategy_runner import (
     RunnerConfig,
     StrategyRunner,
 )
+from tests.unit.runner._boot_snapshot import measured_boot_snapshot
 
 
 def _make_runner(enable_state_persistence: bool = True, dry_run: bool = False) -> StrategyRunner:
@@ -28,6 +29,7 @@ def _make_runner(enable_state_persistence: bool = True, dry_run: bool = False) -
     )
     state_mgr = AsyncMock()
     state_mgr.initialize = AsyncMock()
+    state_mgr.get_latest_snapshot = AsyncMock(return_value=measured_boot_snapshot())
     state_mgr.get_accounting_events_sync = MagicMock(return_value=[])
     state_mgr.get_position_events_sync = MagicMock(return_value=[])
     runner = StrategyRunner(

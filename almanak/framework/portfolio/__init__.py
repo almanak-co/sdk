@@ -24,6 +24,7 @@ from almanak.framework.portfolio.models import (
     ValueConfidenceParseError,
     enforce_open_position_value_invariant,
     find_zero_valued_open_positions,
+    is_measured_accounting_snapshot,
     serialize_value_confidence,
 )
 
@@ -36,5 +37,6 @@ __all__ = [
     "ValueConfidenceParseError",
     "enforce_open_position_value_invariant",
     "find_zero_valued_open_positions",
+    "is_measured_accounting_snapshot",
     "serialize_value_confidence",
 ]

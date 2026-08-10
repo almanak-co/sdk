@@ -26,6 +26,7 @@ from click.testing import CliRunner
 
 from almanak.framework.cli import run_helpers
 from almanak.framework.runner.runner_models import IterationResult, IterationStatus
+from tests.unit.runner._boot_snapshot import measured_boot_snapshot
 
 # ---------------------------------------------------------------------------
 # Helpers: fake runner / strategy / state manager
@@ -45,6 +46,12 @@ def _make_fake_runner(
     runner.request_shutdown = MagicMock()
     runner._emit_iteration_summary = MagicMock()
     runner._capture_portfolio_snapshot = AsyncMock()
+    # These broad CLI tests characterize post-boot execution.  Model a restart
+    # with an existing opening snapshot so VIB-5854's idempotent boot capture
+    # does not add a second valuation to assertions unrelated to startup.  The
+    # fresh-deployment path has dedicated producer tests.
+    runner.state_manager = MagicMock()
+    runner.state_manager.get_latest_snapshot = AsyncMock(return_value=measured_boot_snapshot("test-strat"))
 
     # The exit-code logic inspects these directly.
     runner._signal_received = False

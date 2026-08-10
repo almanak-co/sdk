@@ -76,6 +76,7 @@ from almanak.framework.state.exceptions import (
     AccountingPersistenceError,
     AccountingWriteKind,
 )
+from tests.unit.runner._boot_snapshot import measured_boot_snapshot
 
 # =============================================================================
 # Fixtures
@@ -100,6 +101,7 @@ def _make_runner(
         enable_alerting=enable_alerting,
     )
     state_mgr = AsyncMock()
+    state_mgr.get_latest_snapshot = AsyncMock(return_value=measured_boot_snapshot())
     state_mgr.get_accounting_events_sync = MagicMock(return_value=[])
     state_mgr.get_position_events_sync = MagicMock(return_value=[])
     runner = StrategyRunner(

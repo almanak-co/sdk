@@ -68,6 +68,23 @@ def _g6(primitive: str):
     raise AssertionError(f"G6 absent from report for {primitive}")
 
 
+def test_missing_confidence_cannot_anchor_g6_or_g8(tmp_path: Path) -> None:
+    """Consumer negative control: empty confidence is unmeasured, not zero-risk."""
+    db = tmp_path / "missing-confidence.sqlite"
+    shutil.copy2(_FIXTURE_BASE / "lp" / "expected_baseline.sqlite", db)
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE portfolio_snapshots SET value_confidence = ''")
+
+    report = run_against_sqlite(db, primitive="lp", strict_lifecycle=True)
+    cells = {cell.cell_id: cell for cell in report.cells}
+    assert cells["G6"].status == "FAIL"
+    assert "measured equity" in cells["G6"].diagnostic
+    assert cells["G8"].status == "FAIL"
+    assert "unmeasured equity" in cells["G8"].diagnostic
+    assert "with missing/invalid confidence" in cells["G8"].diagnostic
+    assert "0 with null/invalid equity columns" in cells["G8"].diagnostic
+
+
 # --------------------------------------------------------------- pure function
 
 
@@ -248,6 +265,55 @@ def test_gap_is_unchanged_by_the_guard() -> None:
 
 
 # ------------------------------------------------- end-to-end negative control
+
+
+def test_unavailable_zero_row_cannot_become_g6_opening_endpoint(tmp_path: Path) -> None:
+    """A diagnostic 0/0 row is absent evidence, not measured zero equity.
+
+    This reproduces the legacy boot failure shape in the real Accountant Test
+    consumer. The row sorts before every measured snapshot; if G6 launders it
+    into ``Decimal(0)``, the opening endpoint and reconciliation move. Correct
+    behavior excludes it from ``priced`` and leaves the measured G6 result
+    byte-for-byte unchanged.
+    """
+    src = _FIXTURE_BASE / "lp" / "expected_baseline.sqlite"
+    db = tmp_path / "lp.sqlite"
+    shutil.copy(src, db)
+
+    before = run_against_sqlite(db, primitive="lp", strict_lifecycle=True)
+    g6_before = next(c for c in before.cells if c.cell_id == "G6")
+
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.execute(
+            """
+            INSERT INTO portfolio_snapshots (
+                deployment_id, cycle_id, execution_mode, timestamp,
+                iteration_number, total_value_usd, available_cash_usd,
+                deployed_capital_usd, wallet_total_value_usd,
+                value_confidence, positions_json, token_prices_json,
+                wallet_balances_json, chain, created_at
+            )
+            SELECT
+                deployment_id, 'boot-unavailable', execution_mode,
+                datetime(timestamp, '-1 second'), -1, '0', '0', '0', '0',
+                'UNAVAILABLE', '[]', '{}', '[]', chain,
+                datetime(timestamp, '-1 second')
+            FROM portfolio_snapshots
+            ORDER BY timestamp
+            LIMIT 1
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    after = run_against_sqlite(db, primitive="lp", strict_lifecycle=True)
+    g6_after = next(c for c in after.cells if c.cell_id == "G6")
+
+    assert g6_after.status == g6_before.status
+    assert g6_after.diagnostic == g6_before.diagnostic
+    assert g6_after.decomposition == g6_before.decomposition
 
 
 def test_a_late_baseline_does_not_excuse_an_unrelated_gap(tmp_path: Path) -> None:
