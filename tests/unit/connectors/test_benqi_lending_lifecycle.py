@@ -20,6 +20,7 @@ from unittest.mock import MagicMock, PropertyMock, patch
 import pytest
 
 from almanak.demo_strategies.benqi_lending_lifecycle.strategy import BenqiLendingLifecycleStrategy
+from almanak.framework.teardown import TeardownMode
 
 
 @pytest.fixture
@@ -40,12 +41,16 @@ def strategy():
     """Create a BenqiLendingLifecycleStrategy with mock config."""
     with (
         patch.object(BenqiLendingLifecycleStrategy, "chain", new_callable=PropertyMock, return_value="avalanche"),
-        patch.object(BenqiLendingLifecycleStrategy, "get_config", side_effect=lambda k, d=None: {
-            "collateral_token": "USDC",
-            "collateral_amount": "500",
-            "borrow_token": "USDT",
-            "ltv_target": "0.2",
-        }.get(k, d)),
+        patch.object(
+            BenqiLendingLifecycleStrategy,
+            "get_config",
+            side_effect=lambda k, d=None: {
+                "collateral_token": "USDC",
+                "collateral_amount": "500",
+                "borrow_token": "USDT",
+                "ltv_target": "0.2",
+            }.get(k, d),
+        ),
         patch.object(BenqiLendingLifecycleStrategy, "STRATEGY_NAME", "benqi_lending_lifecycle"),
     ):
         s = BenqiLendingLifecycleStrategy.__new__(BenqiLendingLifecycleStrategy)
@@ -248,3 +253,23 @@ class TestBenqiLifecycleStateMachine:
         assert status["state"] == "idle"
         assert status["protocol"] == "benqi"
         assert status["chain"] == "avalanche"
+
+    def test_teardown_redeems_live_qitoken_balance_vib5404(self, strategy):
+        """Every full exit must not redeem only the cached principal.
+
+        BENQI supply interest increases the qiToken exchange rate. Redeeming
+        ``_collateral_supplied`` via ``redeemUnderlying`` therefore leaves a
+        positive qiToken balance. ``withdraw_all=True`` delegates sizing to the
+        compiler's live ``balanceOf(qiToken)`` read and burns every share.
+        """
+        strategy._collateral_supplied = Decimal("500")
+        strategy._borrowed_amount = Decimal("100")
+
+        lifecycle_withdraw = strategy._create_withdraw_intent()
+        repay, withdraw = strategy.generate_teardown_intents(TeardownMode.SOFT)
+
+        assert repay.repay_full is True
+        for full_exit in (lifecycle_withdraw, withdraw):
+            assert full_exit.withdraw_all is True
+            assert full_exit.amount == Decimal("0")
+            assert full_exit.token == "USDC"

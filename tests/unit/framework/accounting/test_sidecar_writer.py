@@ -26,7 +26,6 @@ import pytest
 
 from almanak.framework.accounting.sidecar import AccountingSidecarWriter, _sidecar_dir, _sidecar_path
 
-
 # ---------------------------------------------------------------------------
 # Minimal stubs
 # ---------------------------------------------------------------------------
@@ -133,9 +132,7 @@ def test_sidecar_path_uses_deployment_id_as_stem() -> None:
     assert path.suffix == ".jsonl"
 
 
-def test_almanak_accounting_dir_env_override(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_almanak_accounting_dir_env_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """ALMANAK_ACCOUNTING_DIR env var directs sidecar files to a custom directory."""
     custom_dir = tmp_path / "custom_accounting"
     monkeypatch.setenv("ALMANAK_ACCOUNTING_DIR", str(custom_dir))
@@ -264,6 +261,54 @@ def test_append_no_swap_amounts_uses_intent_fallback(tmp_path: Path) -> None:
     assert line["token_in"] == "DAI"
     assert line["amount_in"] == "50"  # from intent.amount_usd fallback
     assert line["token_out"] == "WETH"
+
+
+def test_full_withdraw_uses_receipt_amount_not_zero_sentinel(monkeypatch: pytest.MonkeyPatch) -> None:
+    intent = SimpleNamespace(
+        intent_type=SimpleNamespace(value="WITHDRAW"),
+        token="USDC",
+        amount=Decimal("0"),
+        withdraw_all=True,
+        protocol="benqi",
+    )
+    result = _execution_result(with_swap_amounts=False)
+    result.extracted_data = {"withdraw_amount": 400_000_068}
+    token = SimpleNamespace(decimals=6)
+    resolver = SimpleNamespace(resolve=lambda *_args, **_kwargs: token)
+    monkeypatch.setattr(
+        "almanak.framework.data.tokens.resolver.get_token_resolver",
+        lambda: resolver,
+    )
+
+    line = AccountingSidecarWriter._build_line(
+        deployment_id="benqi-lifecycle",
+        intent=intent,
+        result=result,
+        chain="avalanche",
+    )
+
+    assert line["amount_in"] == "400.000068"
+
+
+def test_full_withdraw_without_receipt_amount_is_unmeasured() -> None:
+    intent = SimpleNamespace(
+        intent_type=SimpleNamespace(value="WITHDRAW"),
+        token="USDC",
+        amount=Decimal("0"),
+        withdraw_all=True,
+        protocol="benqi",
+    )
+    result = _execution_result(with_swap_amounts=False)
+    result.extracted_data = {}
+
+    line = AccountingSidecarWriter._build_line(
+        deployment_id="benqi-lifecycle",
+        intent=intent,
+        result=result,
+        chain="avalanche",
+    )
+
+    assert line["amount_in"] is None
 
 
 def test_append_position_id_populated(tmp_path: Path) -> None:

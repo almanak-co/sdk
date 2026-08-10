@@ -299,8 +299,8 @@ class BenqiAdapter:
             amount: Amount of underlying to withdraw
             withdraw_all: If True, withdraw entire balance
             redeem_amount: Exact qiToken amount for redeem() when withdraw_all=True.
-                Not yet wired from the compiler — reserved for future use when
-                the compiler can query on-chain qiToken balances.
+                The compiler resolves this from the wallet's live qiToken
+                balance (VIB-5404).
 
         Returns:
             TransactionResult with TX data

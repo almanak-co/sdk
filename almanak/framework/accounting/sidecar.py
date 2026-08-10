@@ -228,20 +228,34 @@ class AccountingSidecarWriter:
                 or getattr(intent, "token", None)
             )
             token_out = _or_none(getattr(intent, "to_token", None))
-            amt = next(
-                (
-                    v
-                    for v in [
-                        getattr(intent, "amount", None),
-                        getattr(intent, "supply_amount", None),
-                        getattr(intent, "borrow_amount", None),
-                        getattr(intent, "amount_usd", None),
-                    ]
-                    if v is not None
-                ),
-                None,
-            )
-            amount_in = str(amt) if amt is not None else None
+            if intent_type == "WITHDRAW" and getattr(intent, "withdraw_all", False):
+                # ``amount=0`` is a compiler sentinel for a full exit, not a
+                # measured withdrawal. Use the same receipt projection as the
+                # canonical lending books; unresolved evidence stays null.
+                from almanak.framework.accounting.category_handlers.lending_handler import _extract_amount_human
+
+                extracted = getattr(result, "extracted_data", None) if result else None
+                measured = (
+                    _extract_amount_human(extracted, intent_type, chain, token_in or "UNKNOWN")
+                    if isinstance(extracted, dict)
+                    else None
+                )
+                amount_in = str(measured) if measured is not None else None
+            else:
+                amt = next(
+                    (
+                        v
+                        for v in [
+                            getattr(intent, "amount", None),
+                            getattr(intent, "supply_amount", None),
+                            getattr(intent, "borrow_amount", None),
+                            getattr(intent, "amount_usd", None),
+                        ]
+                        if v is not None
+                    ),
+                    None,
+                )
+                amount_in = str(amt) if amt is not None else None
 
         # --- cost_basis_usd: not yet computed at runner level; always null ---
         cost_basis_usd: str | None = None

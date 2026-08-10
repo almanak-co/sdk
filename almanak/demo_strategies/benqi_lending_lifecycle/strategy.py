@@ -26,7 +26,7 @@ Lifecycle steps (one per iteration):
 1. SUPPLY: Supply USDC collateral (enterMarkets via use_as_collateral)
 2. BORROW: Borrow USDT against the supplied collateral
 3. REPAY: Repay the borrowed USDT (repay_full with MAX_UINT256 approve)
-4. WITHDRAW: Withdraw USDC collateral (amount-based, not withdraw_all)
+4. WITHDRAW: Redeem the live qiToken balance and withdraw all USDC collateral
 5. HOLD: Lifecycle complete
 
 Coverage gaps filled:
@@ -248,17 +248,16 @@ class BenqiLendingLifecycleStrategy(IntentStrategy):
         )
 
     def _create_withdraw_intent(self) -> Intent:
-        """Create a WITHDRAW intent: reclaim USDC collateral."""
+        """Create a WITHDRAW intent that redeems the live qiToken balance."""
         logger.info(
-            f"WITHDRAW intent: withdraw {format_token_amount_human(self._collateral_supplied, self.collateral_token)} "
-            f"collateral from BENQI (amount-based)"
+            f"WITHDRAW intent: withdraw all {self.collateral_token} collateral from BENQI (live qiToken balance)"
         )
 
         return Intent.withdraw(
             token=self.collateral_token,
-            amount=self._collateral_supplied,
+            amount=Decimal("0"),
             protocol="benqi",
-            withdraw_all=False,
+            withdraw_all=True,
             chain=self.chain,
         )
 
@@ -436,9 +435,12 @@ class BenqiLendingLifecycleStrategy(IntentStrategy):
             intents.append(
                 Intent.withdraw(
                     token=self.collateral_token,
-                    amount=self._collateral_supplied,
+                    amount=Decimal("0"),
                     protocol="benqi",
-                    withdraw_all=False,
+                    # VIB-5404: resolve and redeem the live qiToken balance at
+                    # compile time.  Redeeming the cached principal with
+                    # redeemUnderlying strands interest-accrual dust.
+                    withdraw_all=True,
                     chain=self.chain,
                 )
             )

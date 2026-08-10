@@ -37,10 +37,9 @@ hand-rolled close for that position. A swap whose held token already IS the
 target is dropped (nothing to do).
 
 Connector caveat: a few connectors cannot honour the bare ``withdraw_all`` /
-``repay_full`` marker (e.g. Benqi's Compound-fork ``redeemUnderlying`` needs the
-qiToken balance, not MAX_UINT256). Those keep hand-rolling their close. The
-Aave-family / Morpho / MetaMorpho connectors used by the lending and vault demos
-honour the markers cleanly.
+``repay_full`` marker and must keep hand-rolling their close. Benqi is not one
+of them: since VIB-5404 its compiler resolves the live qiToken balance and emits
+``redeem(qiTokenBalance)`` rather than a stale ``redeemUnderlying(principal)``.
 """
 
 from __future__ import annotations
