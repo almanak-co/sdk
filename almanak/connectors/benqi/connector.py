@@ -37,6 +37,7 @@ CONNECTOR = Connector(
     lending_read=LendingReadDecl(
         account_state=ImportRef(module="almanak.connectors.benqi.lending_read", attribute="ACCOUNT_STATE_READ_SPEC"),
         market_table=ImportRef(module="almanak.connectors.benqi.lending_read", attribute="BENQI_ACCOUNT_STATE_MARKETS"),
+        rate_history_chains=("avalanche",),
     ),
     # TD-14 post-close on-chain closure verifier (VIB-5795): getAccountSnapshot
     # per position leg (supplied value / borrow balance ≤ dust); Compound-V2

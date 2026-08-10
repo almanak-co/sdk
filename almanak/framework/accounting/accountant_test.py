@@ -83,7 +83,16 @@ CLOSE_EVENT_TYPES: tuple[str, ...] = tuple(
 # ``Primitive`` via ``SCORECARD_PROFILES`` (assembled below). ``Primitive`` is
 # kept as a back-compat alias: it is exported in ``__all__`` and referenced by
 # annotations throughout this module.
-ProfileName = Literal["lp", "looping", "perp", "pendle_pt", "pendle_lp", "curve_lp", "settlement"]
+ProfileName = Literal[
+    "lp",
+    "looping",
+    "lending_lifecycle",
+    "perp",
+    "pendle_pt",
+    "pendle_lp",
+    "curve_lp",
+    "settlement",
+]
 Primitive = ProfileName
 CellStatus = Literal["PASS", "FAIL", "XFAIL", "SKIP"]
 
@@ -4209,6 +4218,8 @@ def _cells_lending(  # noqa: C901
     acct_payloads: dict[Any, dict[str, Any]],
     payload_errors: dict[Any, str],
     position_state_rows: list[dict[str, Any]] | None = None,
+    *,
+    require_loop_leg_attribution: bool = True,
 ) -> list[CellResult]:
     position_state_rows = position_state_rows or []
     lending_state_rows = [r for r in position_state_rows if r.get("position_type") == "LENDING"]
@@ -4233,14 +4244,15 @@ def _cells_lending(  # noqa: C901
                 "lending payload(s) failed Pydantic validation; cell data unusable",
             )
         )
-        out.append(
-            CellResult(
-                "L6",
-                "Loop-leg attribution",
-                "FAIL",
-                "lending payload(s) failed Pydantic validation; cell data unusable",
+        if require_loop_leg_attribution:
+            out.append(
+                CellResult(
+                    "L6",
+                    "Loop-leg attribution",
+                    "FAIL",
+                    "lending payload(s) failed Pydantic validation; cell data unusable",
+                )
             )
-        )
     if not payload_blocked:
         # CodeRabbit (2026-05-02): truthiness checks collapse Decimal("0") /
         # "0" into "missing", which downgrades a measured-zero-carry run to
@@ -4442,6 +4454,34 @@ def _cells_lending(  # noqa: C901
                 "no LENDING rows in position_state_snapshots",
             )
         )
+    # L6 applicability is selected by the scorecard profile, never inferred from
+    # the *absence* of a SWAP. A pure lending lifecycle intentionally has no
+    # borrow→swap leg; a leverage-loop profile must still fail loudly when that
+    # same leg is absent. Presence is different: if a run declared pure lending
+    # but actually disposed a borrowed asset, score that observed loop leg so a
+    # misdeclared profile cannot hide missing basis attribution.
+    observed_borrow_assets = {
+        str((acct_payloads.get(r.get("id"), {}) or {}).get("asset") or "").upper()
+        for r in acct_events
+        if r.get("event_type") == "BORROW"
+    }
+    observed_borrow_assets.discard("")
+    observed_matching_swap = any(
+        r.get("event_type") == "SWAP"
+        and str((acct_payloads.get(r.get("id"), {}) or {}).get("token_in") or "").upper() in observed_borrow_assets
+        for r in acct_events
+    )
+    if not require_loop_leg_attribution and not observed_matching_swap:
+        out.append(
+            CellResult(
+                "L6",
+                "Loop-leg attribution",
+                "SKIP",
+                "not applicable to the explicit lending-lifecycle profile (no borrow→swap leg in its contract)",
+            )
+        )
+        return out
+
     # L6: loop-leg attribution (VIB-3964).
     # The basis store now mints swap-key acquisition lots on BORROW / WITHDRAW
     # and consumes them on SUPPLY / REPAY, so a SWAP that disposes the borrowed
@@ -5558,6 +5598,29 @@ SCORECARD_PROFILES: dict[str, ScorecardProfile] = {
             ctx.acct_payloads,
             ctx.payload_errors,
             ctx.position_state_rows,
+        ),
+    ),
+    # Pure lending (BENQI / VIB-5734) uses the same canonical lifecycle and ε
+    # as ``looping`` but differs deliberately in L6 applicability. A
+    # SUPPLY→BORROW→REPAY→WITHDRAW study has no borrow→swap leg by contract, so
+    # L6 is a declared SKIP; leverage-loop fixtures must keep using ``looping``,
+    # where the same missing attribution is a real defect.
+    "lending_lifecycle": ScorecardProfile(
+        name="lending_lifecycle",
+        canonical_primitive=_TaxonomyPrimitive.LENDING,
+        required_lifecycle=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
+        eps_pct=Decimal("0.0010"),
+        eps_scaling=lambda b: (
+            max(b.notional_traded, b.max_debt),
+            "max(notional_traded, max_debt_outstanding)",
+        ),
+        cells=lambda ctx: _cells_lending(
+            ctx.acct_events,
+            ctx.snapshots,
+            ctx.acct_payloads,
+            ctx.payload_errors,
+            ctx.position_state_rows,
+            require_loop_leg_attribution=False,
         ),
     ),
     "perp": ScorecardProfile(

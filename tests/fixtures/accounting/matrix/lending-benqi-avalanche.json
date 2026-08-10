@@ -1,0 +1,48 @@
+{
+  "_provenance": {
+    "row_id": "lending-benqi-avalanche",
+    "fixture": "lending_benqi",
+    "chain": "avalanche",
+    "primitive": "lending_lifecycle",
+    "captured_from": "tests/reports/pr3670-benqi-observability/matrix-clean-89261a48d-0b324728f/accountant-result.json",
+    "source_database": "tests/reports/pr3670-benqi-observability/matrix-clean-89261a48d-0b324728f/accounting.sqlite",
+    "source_database_sha256": "a5820df9c4b06b2e7b7c301a6358947f6b3255388beaa004ec85d8408e7c99c5",
+    "captured_at": "2026-08-10T01:36:01+00:00",
+    "captured_at_commit": "89261a48d68ba0edd160bdde17d33860d0d2384c",
+    "dependency_commit": "0b324728f6924d21fc743f93ea219e7bdf550485",
+    "source_tree": "0fffd3045e49b9f039c47195ee442c02b3f3f047",
+    "post_fix_for": ["VIB-5734"],
+    "note": "Real managed-Avalanche-fork execution of this exact matrix fixture using a newly generated Anvil-only wallet. The zero-position boot observation precedes every ledger row; the earlier clean-wallet bundle retains independent venue-side zero-state reads. Source tree composes PR #3670 candidate 89261a48d with required boot-snapshot dependency PR #3669 commit 0b324728f. The shared-wallet composite addendum is intentionally not used."
+  },
+  "cells": {
+    "G1": "PASS",
+    "G10": "PASS",
+    "G11": "SKIP",
+    "G12": "PASS",
+    "G13": "PASS",
+    "G14": "XFAIL",
+    "G15": "PASS",
+    "G16": "PASS",
+    "G2": "PASS",
+    "G3": "PASS",
+    "G4": "PASS",
+    "G5": "PASS",
+    "G6": "PASS",
+    "G7": "PASS",
+    "G8": "PASS",
+    "G9": "PASS",
+    "L1": "XFAIL",
+    "L2": "PASS",
+    "L3": "PASS",
+    "L4": "PASS",
+    "L5": "PASS",
+    "L5_22": "XFAIL",
+    "L6": "SKIP"
+  },
+  "scores": {
+    "passed": 18,
+    "failed": 0,
+    "xfailed": 3,
+    "total": 23
+  }
+}

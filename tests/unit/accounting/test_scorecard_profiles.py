@@ -106,6 +106,14 @@ def test_profile_for_raises_on_unknown() -> None:
             Decimal("250"),
             "max(notional_traded, max_debt_outstanding)",
         ),
+        # Pure lending uses the same reconciliation basis as leverage looping;
+        # only its declarative L6 applicability differs.
+        (
+            "lending_lifecycle",
+            G6Bases(notional_traded=Decimal("400"), max_debt=Decimal("250"), max_perp_notional=Decimal("999")),
+            Decimal("400"),
+            "max(notional_traded, max_debt_outstanding)",
+        ),
         # Looping — notional dominates here.
         (
             "looping",
@@ -137,4 +145,5 @@ def test_g6_eps_pct_values_match_legacy() -> None:
     """The per-profile ε percent matches the former hardcoded values."""
     assert SCORECARD_PROFILES["lp"].eps_pct == Decimal("0.0025")
     assert SCORECARD_PROFILES["looping"].eps_pct == Decimal("0.0010")
+    assert SCORECARD_PROFILES["lending_lifecycle"].eps_pct == Decimal("0.0010")
     assert SCORECARD_PROFILES["perp"].eps_pct == Decimal("0.0005")

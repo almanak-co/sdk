@@ -3333,6 +3333,12 @@ class PortfolioValuer:
 
             # Merge enriched valuer details into position details
             merged_details = {**p.details, **enriched_details}
+            # Track C materialises ``PositionValue`` rather than the source
+            # ``PositionInfo``. Preserve the canonical, asset-scoped lending id
+            # in details so SUPPLY/BORROW rows for different reserves cannot
+            # collapse onto the generic protocol/type label (VIB-3891).
+            if p.position_type in (PositionType.SUPPLY, PositionType.BORROW) and p.position_id:
+                merged_details["position_id"] = p.position_id
 
             # VIB-5890: record the mark a spot TOKEN holding was priced at into the
             # shared ``prices`` map so ``_build_token_price_records`` emits a
@@ -5141,9 +5147,12 @@ class PortfolioValuer:
           valuation roles (Morpho Blue — VIB-4551, plus Silo V2 / Euler V2 / Fluid,
           which ride the same capability-gated path) read the aggregate account
           state with the market's collateral/loan token prices injected
-          (non-USD-native), scoped by ``market_id``. A per-market protocol needing
-          a different injection (BENQI's collaterals-map) is excluded — it would
-          fail closed and only appear wired.
+          (non-USD-native), scoped by ``market_id``. A connector-declared
+          whole-account synthetic market (BENQI) resolves its fixed market id
+          through :class:`LendingPositionRef` and injects every token in the
+          market's ``collaterals`` map. Its one measured account-level HF is
+          shared by the wallet's Track-C legs; it is never reinterpreted as a
+          per-leg HF.
         * **supply_apy_pct / borrow_apy_pct** — for market-health protocols
           (Compound) via the gateway-routed :meth:`MarketSnapshot.lending_rate`.
           The Aave family already carries ``supply_apy_pct`` from
@@ -5171,25 +5180,43 @@ class PortfolioValuer:
 
         protocol = position.protocol
         has_market_health = LendingReadRegistry.market_health_reader(protocol) is not None
-        # Per-market lending protocols we can value here: Compound V3 (summed
+        # Market-scoped lending reads we can value here: Compound V3 (summed
         # market-health reader) and protocols whose account-state read declares
         # priceable valuation roles (Morpho Blue, Silo V2, Euler V2, Fluid —
         # non-USD-native, valued via injected token prices). Gate on
-        # ``declares_valuation_roles``, NOT ``publishes_market_table``: a
-        # per-market protocol that needs a *different* injection (BENQI's
-        # collaterals-map, ``valuation_role_keys=()``) is deliberately excluded —
-        # routing it through the priced read would fail closed forever, looking
-        # wired but inert. The Aave family declares no roles ⇒ whole-account.
-        is_per_market = has_market_health or LendingReadRegistry.declares_valuation_roles(protocol)
+        # ``declares_valuation_roles`` covers isolated markets. A whole-account
+        # read may also publish one synthetic market table (BENQI): the connector
+        # owns both that identity and its collaterals-map pricing contract, so it
+        # is safe to route through the same market-scoped reader without naming
+        # the venue here. The Aave family publishes no table and remains unscoped.
+        is_synthetic_whole_account = LendingReadRegistry.whole_account_read(
+            protocol
+        ) and LendingReadRegistry.publishes_market_table(protocol)
+        is_market_scoped = (
+            has_market_health or LendingReadRegistry.declares_valuation_roles(protocol) or is_synthetic_whole_account
+        )
 
         # Resolve the market id for per-market protocols, accepting both detail
         # spellings — on-chain discovery uses ``market_id`` while a strategy's
-        # ``get_open_positions`` reports ``market``. Whole-account protocols (the
-        # Aave family) carry no market id; force ``None`` so a stray detail key can
-        # never mis-route a whole-account leg into the per-market read path
-        # (keeps the Aave path byte-neutral).
-        if is_per_market:
-            market_id = position.details.get("market_id") or position.details.get("market")
+        # ``get_open_positions`` reports ``market``. Connector-declared synthetic
+        # whole-account markets own their identity: strategy-authored details
+        # must never override it and route the account read to an unknown market.
+        # Whole-account protocols without a synthetic table (the Aave family)
+        # carry no market id and remain byte-neutral.
+        if is_market_scoped:
+            if is_synthetic_whole_account:
+                from almanak.connectors._strategy_base.lending_read_base import LendingPositionRef
+
+                market_id = LendingReadRegistry.resolve_market_id(
+                    LendingPositionRef(
+                        protocol=protocol,
+                        chain=chain,
+                        collateral_token=None,
+                        loan_token=None,
+                    )
+                )
+            else:
+                market_id = position.details.get("market_id") or position.details.get("market")
             if not market_id:
                 # A per-market lending leg we recognise but cannot scope (no market
                 # id) — fail closed: this seam owns the leg's Track-C fields, so
@@ -5215,8 +5242,19 @@ class PortfolioValuer:
         # not the owner. Fall back to the deployment wallet (1 gateway : 1 strategy
         # ⇒ one owner) so the read can execute. The Aave family is discovered with
         # its wallet on-chain, so this fallback never changes its byte-neutral path.
-        if not wallet and is_per_market:
+        if not wallet and is_market_scoped:
             wallet = strategy_wallet
+        if not wallet and is_synthetic_whole_account:
+            # This PR makes synthetic whole-account Track C an owned, supported
+            # path. If neither discovery nor the deployment supplies its owner,
+            # fail closed instead of retaining strategy-authored HF/APY that may
+            # describe an earlier wallet observation.
+            return {
+                **enriched_details,
+                "health_factor": None,
+                "supply_apy_pct": None,
+                "borrow_apy_pct": None,
+            }
         if not wallet:
             return enriched_details
         # EVM addresses are case-insensitive — normalise so a checksummed and a
@@ -5263,17 +5301,58 @@ class PortfolioValuer:
                     out["supply_apy_pct"] = self._lending_rate_pct(market, protocol, base_symbol, "supply", chain)
                 if out.get("borrow_apy_pct") is None:
                     out["borrow_apy_pct"] = self._lending_rate_pct(market, protocol, base_symbol, "borrow", chain)
-        elif is_per_market and market_id:
-            # Isolated-market protocols (Morpho Blue and the role-based family).
-            # VIB-5729: these used to stamp an unconditional None because Morpho
-            # had no live on-chain rate — that blocker (VIB-5040) shipped, so the
-            # rate is now read MARKET-SCOPED here. Venues whose connector has no
-            # gateway rate provider (silo_v2 / euler_v2 / fluid_vault today) fall
-            # out of ``_lending_rate_pct`` as None and stay honestly unmeasured —
-            # capability-gated, not protocol-name-gated.
-            out.update(self._isolated_market_rates(market, protocol, chain, market_id, position))
+        elif is_market_scoped and market_id:
+            out.update(
+                self._market_scoped_lending_rates(
+                    market,
+                    protocol,
+                    chain,
+                    market_id,
+                    position,
+                    whole_account=is_synthetic_whole_account,
+                )
+            )
 
         return out
+
+    def _market_scoped_lending_rates(
+        self,
+        market: MarketDataSource,
+        protocol: str,
+        chain: str,
+        market_id: str,
+        position: "PositionInfo",
+        *,
+        whole_account: bool,
+    ) -> dict[str, Any]:
+        """Read rates with the attribution appropriate to the market shape."""
+        if not whole_account:
+            # Isolated-market protocols (Morpho Blue and the role-based family).
+            # VIB-5729: read MARKET-SCOPED rates. A connector with no gateway
+            # provider remains honestly unmeasured — never a placeholder.
+            return self._isolated_market_rates(market, protocol, chain, market_id, position)
+
+        # Whole-account HF is shared across legs, but rates are qiToken
+        # market-specific. Attribute only the side represented by this leg; the
+        # other side remains explicitly unmeasured (Empty ≠ Zero).
+        from almanak.framework.teardown.models import PositionType
+
+        asset = (position.details or {}).get("asset")
+        if not asset:
+            return {"supply_apy_pct": None, "borrow_apy_pct": None}
+        side = "borrow" if position.position_type == PositionType.BORROW else "supply"
+        pct = self._lending_rate_pct(
+            market,
+            protocol,
+            str(asset),
+            side,
+            chain,
+            market_id=market_id,
+        )
+        return {
+            "supply_apy_pct": pct if side == "supply" else None,
+            "borrow_apy_pct": pct if side == "borrow" else None,
+        }
 
     def _isolated_market_rates(
         self,
@@ -5448,15 +5527,19 @@ class PortfolioValuer:
         market_id: str,
         market: MarketDataSource,
     ) -> dict[str, Any] | None:
-        """USD price map for a per-market lending read's valuation roles.
+        """USD price map for a market-scoped lending read.
 
         Non-USD-native protocols (Morpho Blue) declare which tokens the
         account-state reducer must value (``valuation_roles`` → the market's
-        collateral + loan symbols); this resolves each to a USD price via the
-        gateway-routed :meth:`MarketSnapshot.price`. Empty ≠ Zero: a token whose
-        price is unavailable is omitted, so the downstream read fails closed
-        (returns ``None``) rather than valuing an incomplete set. Returns ``None``
-        when there are no roles (the read then needs no oracle) or none priced.
+        collateral + loan symbols). Whole-account synthetic markets (BENQI)
+        declare a ``collaterals`` map instead; every listed symbol is priced via
+        the gateway-routed :meth:`MarketSnapshot.price`.
+
+        Empty ≠ Zero: an unavailable token price is omitted rather than valued
+        at zero. The partial map is returned so the connector reducer decides
+        whether it is complete enough and fails closed when it is not. Returns
+        ``None`` when the market declares neither shape or no token can be
+        priced.
         """
         if market is None:
             return None
@@ -5464,10 +5547,16 @@ class PortfolioValuer:
 
         try:
             roles = LendingReadRegistry.valuation_roles(protocol, chain, market_id)
+            params = LendingReadRegistry.market_params(protocol, chain, market_id) or {}
         except Exception:
             return None
+        symbols = [symbol for _query_field, symbol in roles]
+        if not symbols:
+            collaterals = params.get("collaterals")
+            if isinstance(collaterals, dict):
+                symbols = [str(symbol) for symbol in collaterals]
         oracle: dict[str, Any] = {}
-        for _query_field, symbol in roles:
+        for symbol in symbols:
             try:
                 price = market.price(symbol, chain=_chain_key(chain))
             except Exception:

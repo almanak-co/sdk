@@ -748,8 +748,9 @@ class TestPortfolioValuerDiscoveryIntegration:
         strategy.STRATEGY_METADATA = metadata
 
         if "positions" in overrides:
+            from datetime import UTC, datetime
+
             from almanak.framework.teardown.models import TeardownPositionSummary
-            from datetime import datetime, UTC
 
             summary = TeardownPositionSummary(
                 deployment_id="test-strategy",
@@ -957,6 +958,76 @@ class TestPortfolioValuerDiscoveryIntegration:
         # Should have merged details
         assert positions[0].details.get("asset_address") == "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
         assert positions[0].details.get("asset") == "USDC"
+        # PositionValue has no direct position_id field. Track C reads this
+        # canonical, asset-scoped copy from details rather than falling back to
+        # the collision-prone generic label ``aave_v3 SUPPLY``.
+        assert positions[0].details.get("position_id") == "aave-supply-USDC-arbitrum"
+
+    def test_same_side_lending_assets_keep_distinct_track_c_identities(self):
+        """Valuation → materialisation preserves one Track-C id per reserve."""
+        from datetime import UTC, datetime
+
+        from almanak.framework.accounting.position_state import materialise_position_state
+
+        valuer = self._make_valuer()
+        supplied = [
+            PositionInfo(
+                position_type=PositionType.SUPPLY,
+                position_id="aave-supply-USDC-arbitrum",
+                chain="arbitrum",
+                protocol="aave_v3",
+                value_usd=Decimal("10"),
+                details={"asset": "USDC"},
+            ),
+            PositionInfo(
+                position_type=PositionType.SUPPLY,
+                position_id="aave-supply-WETH-arbitrum",
+                chain="arbitrum",
+                protocol="aave_v3",
+                value_usd=Decimal("20"),
+                details={"asset": "WETH"},
+            ),
+        ]
+        strategy = self._make_strategy(positions=supplied)
+        market = self._make_market()
+
+        with (
+            patch.object(valuer._discovery, "discover", return_value=DiscoveryResult()),
+            patch.object(
+                valuer,
+                "_reprice_position_enriched",
+                side_effect=lambda position, *_args: (
+                    position.value_usd,
+                    {"supply_balance": str(position.value_usd)},
+                    True,
+                ),
+            ),
+            patch.object(
+                valuer,
+                "_enrich_lending_trackc_fields",
+                side_effect=lambda _position, _chain, details, *_args, **_kwargs: details,
+            ),
+            patch("almanak.framework.accounting.position_state.is_hosted", return_value=False),
+        ):
+            positions, _total, unavailable = valuer._get_positions(strategy, market, {})
+            rows = [
+                materialise_position_state(
+                    position=position,
+                    market=market,
+                    prices={},
+                    deployment_id="test-strategy",
+                    cycle_id="cycle-1",
+                    timestamp=datetime.now(UTC),
+                )
+                for position in positions
+            ]
+
+        assert unavailable is False
+        assert len(rows) == 2
+        assert {row.position_id for row in rows if row is not None} == {
+            "aave-supply-USDC-arbitrum",
+            "aave-supply-WETH-arbitrum",
+        }
 
     def test_both_sources_different_positions(self):
         """Strategy reports perp, discovery finds lending — both included."""
@@ -1019,7 +1090,6 @@ class TestPortfolioValuerDiscoveryIntegration:
         """Missing wallet address means no discovery config."""
         valuer = self._make_valuer()
         strategy = self._make_strategy(wallet_address="")
-        market = self._make_market()
 
         config = valuer._build_discovery_config(strategy, [])
         assert config is None
@@ -1083,10 +1153,11 @@ class TestPortfolioValuerFullIntegration:
         ``details['valuation_status'] = 'no_path'`` marker. A reader cannot
         distinguish "measured zero" from "we have no idea" without this.
         """
+        from datetime import UTC, datetime
+
+        from almanak.framework.portfolio.models import ValueConfidence
         from almanak.framework.teardown.models import TeardownPositionSummary
         from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
-        from almanak.framework.portfolio.models import ValueConfidence
-        from datetime import datetime, UTC
 
         valuer = PortfolioValuer(gateway_client=None)
 

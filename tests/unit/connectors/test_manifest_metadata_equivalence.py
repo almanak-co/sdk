@@ -448,9 +448,10 @@ def test_dex_volume_decls_pin_liquidity_subgraph_ids() -> None:
 #   arbitrum + polygon (MORPHO_MARKETS catalogues markets there and the
 #   gateway provider already served every catalogue chain); aave_v3 gains
 #   bsc (addresses.py had shipped the bsc pool_data_provider all along).
-FROZEN_LENDING_RATE_PROTOCOLS = ("aave_v3", "compound_v3", "morpho_blue", "spark")
+FROZEN_LENDING_RATE_PROTOCOLS = ("aave_v3", "benqi", "compound_v3", "morpho_blue", "spark")
 FROZEN_LENDING_RATE_CHAINS = {
     "aave_v3": ("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bsc"),
+    "benqi": ("avalanche",),
     "compound_v3": ("ethereum", "arbitrum", "optimism", "polygon", "base"),
     # VIB-5729: monad + robinhood join for the SAME reason arbitrum + polygon
     # did — MORPHO_MARKETS catalogues markets (with IRM addresses) on both, and
@@ -469,7 +470,7 @@ FROZEN_LENDING_PROTOCOL_CHAINS = {
     "optimism": ["aave_v3", "compound_v3"],
     "polygon": ["aave_v3", "compound_v3", "morpho_blue"],
     "base": ["aave_v3", "compound_v3", "morpho_blue"],
-    "avalanche": ["aave_v3"],
+    "avalanche": ["aave_v3", "benqi"],
     "bsc": ["aave_v3"],
     # VIB-5729: morpho_blue is the only lending venue with a registered market
     # catalogue on these chains, so it is the only rate-lane provider there.

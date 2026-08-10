@@ -1097,30 +1097,150 @@ class TestVib5006LendingTrackCEnrichment:
         assert out["health_factor"] is None
         assert calls == []  # no read issued without a market to scope it
 
-    def test_benqi_excluded_from_per_market_priced_read(self, monkeypatch):
-        """BENQI publishes a market table but declares NO valuation roles (it needs
-        a different collaterals-map injection), so it must NOT route through the
-        priced per-market read — which would fail closed forever and only *look*
-        wired. The dispatch gates on declares_valuation_roles, so a benqi leg's
-        market id is forced None and it never issues a market-scoped read."""
+    def test_benqi_whole_account_hf_uses_synthetic_market_and_collateral_prices(self, monkeypatch):
+        """VIB-5734: BENQI's connector-declared whole-account read is observable
+        in Track C even though its strategy positions carry neither wallet nor
+        market id. The framework resolves the synthetic id through the registry,
+        uses the deployment wallet, and prices the connector's complete
+        collaterals map. The resulting HF remains explicitly account-level."""
+        from almanak.connectors._strategy_base.lending_read_base import LendingAccountState
+
         valuer = self._valuer_with_on_chain(None)
-        position = self._make_position(
-            "BORROW", protocol="benqi", details={"wallet": "0xWALLET", "market_id": "0xbenqimkt"}
-        )
+        supply = self._make_position("SUPPLY", protocol="benqi", chain="avalanche", details={"asset": "USDC"})
+        borrow = self._make_position("BORROW", protocol="benqi", chain="avalanche", details={"asset": "USDT"})
         as_calls: list = []
-        mh_calls: list = []
+
+        def _account_state(**kw):
+            as_calls.append(kw)
+            return LendingAccountState(
+                collateral_usd=Decimal("6"),
+                debt_usd=Decimal("1.5"),
+                health_factor=Decimal("4"),
+                liquidation_threshold_bps=None,
+                e_mode_category=None,
+            )
+
         monkeypatch.setattr(
             "almanak.framework.accounting.lending_reads.read_lending_account_state",
-            lambda **kw: as_calls.append(kw),
+            _account_state,
         )
+        market = MagicMock()
+        market.price.return_value = Decimal("1")
+        rate_calls: list[dict] = []
+
+        def _rate(_protocol, _asset, side, **kwargs):
+            rate_calls.append(kwargs)
+            return MagicMock(apy_percent=Decimal("2.5") if side == "supply" else Decimal("4.25"))
+
+        market.lending_rate.side_effect = _rate
+        cache: dict = {}
+
+        supply_out = valuer._enrich_lending_trackc_fields(
+            supply,
+            "avalanche",
+            {},
+            cache,
+            market,
+            strategy_wallet="0xABCDEF0000000000000000000000000000000001",
+        )
+        borrow_out = valuer._enrich_lending_trackc_fields(
+            borrow,
+            "avalanche",
+            {},
+            cache,
+            market,
+            strategy_wallet="0xABCDEF0000000000000000000000000000000001",
+        )
+
+        assert supply_out["health_factor"] == "4"
+        assert borrow_out["health_factor"] == "4"
+        assert supply_out["supply_apy_pct"] == "2.5"
+        assert supply_out["borrow_apy_pct"] is None
+        assert borrow_out["supply_apy_pct"] is None
+        assert borrow_out["borrow_apy_pct"] == "4.25"
+        assert [rate_call["market_id"] for rate_call in rate_calls] == ["benqi", "benqi"]
+        assert len(as_calls) == 1  # one whole-account measurement shared by both legs
+        call = as_calls[0]
+        assert call["market_id"] == "benqi"
+        assert call["wallet_address"] == "0xabcdef0000000000000000000000000000000001"
+        assert {"USDC", "USDT", "WAVAX"} <= set(call["price_oracle"])
+        assert set(call["price_oracle"].values()) == {Decimal("1")}
+
+    def test_benqi_synthetic_market_identity_overrides_conflicting_strategy_details(self, monkeypatch):
+        """VIB-5734: connector-owned whole-account identity is authoritative.
+
+        A strategy-provided market hint may be stale or asset-scoped; it must
+        not redirect BENQI's synthetic whole-account read away from ``benqi``.
+        """
+        valuer = self._valuer_with_on_chain(None)
+        position = self._make_position(
+            "SUPPLY",
+            protocol="benqi",
+            chain="avalanche",
+            details={
+                "asset": "USDC",
+                "market_id": "untrusted-market-id",
+                "market": "another-untrusted-id",
+            },
+        )
+        captured: dict = {}
+
+        def _account_state(**kwargs):
+            captured.update(kwargs)
+            return self._account_state(Decimal("4"))
+
         monkeypatch.setattr(
-            "almanak.framework.accounting.lending_reads.read_lending_market_health",
-            lambda **kw: mh_calls.append(kw),
+            "almanak.framework.accounting.lending_reads.read_lending_account_state",
+            _account_state,
         )
-        valuer._enrich_lending_trackc_fields(position, "avalanche", {}, {}, MagicMock())
-        assert mh_calls == []  # benqi has no market-health reader
-        # Never scoped to the benqi market id — the per-market priced read is not taken.
-        assert all(kw.get("market_id") is None for kw in as_calls)
+        market = MagicMock()
+        market.price.return_value = Decimal("1")
+        market.lending_rate.return_value = MagicMock(apy_percent=Decimal("2.5"))
+
+        out = valuer._enrich_lending_trackc_fields(
+            position,
+            "avalanche",
+            {},
+            {},
+            market,
+            strategy_wallet="0xABCDEF0000000000000000000000000000000001",
+        )
+
+        assert out["health_factor"] == "4"
+        assert captured["market_id"] == "benqi"
+
+    def test_benqi_missing_wallet_erases_stale_track_c_values(self, monkeypatch):
+        """An owned BENQI read with no resolvable owner is unmeasured, not stale."""
+        valuer = self._valuer_with_on_chain(None)
+        position = self._make_position(
+            "SUPPLY",
+            protocol="benqi",
+            chain="avalanche",
+            details={"asset": "USDC"},
+        )
+        calls: list[dict] = []
+        monkeypatch.setattr(
+            "almanak.framework.accounting.lending_reads.read_lending_account_state",
+            lambda **kwargs: calls.append(kwargs),
+        )
+
+        out = valuer._enrich_lending_trackc_fields(
+            position,
+            "avalanche",
+            {
+                "health_factor": "9.99",
+                "supply_apy_pct": "7.5",
+                "borrow_apy_pct": "8.5",
+            },
+            {},
+            MagicMock(),
+            strategy_wallet="",
+        )
+
+        assert out["health_factor"] is None
+        assert out["supply_apy_pct"] is None
+        assert out["borrow_apy_pct"] is None
+        assert calls == []
 
     def test_account_state_read_cached_across_legs(self, monkeypatch):
         """Both legs of a loop (same protocol/chain/wallet) share ONE read."""
@@ -1267,7 +1387,7 @@ class TestCompoundV3LendingTrackCEnrichment:
         as_calls: list = []
         monkeypatch.setattr(
             "almanak.framework.accounting.lending_reads.read_lending_market_health",
-            lambda **kw: (mh_calls.append(kw) or self._market_state(Decimal("3.0"))),
+            lambda **kw: mh_calls.append(kw) or self._market_state(Decimal("3.0")),
         )
         monkeypatch.setattr(
             "almanak.framework.accounting.lending_reads.read_lending_account_state",
@@ -1757,9 +1877,7 @@ class TestVib5729PerMarketVenuesWithoutRateProviderStayUnmeasured:
             except ModuleNotFoundError:
                 assert not has_provider, f"{protocol} should have a gateway rate provider"
                 continue
-            found = any(
-                hasattr(v, "fetch_lending_current") for v in vars(mod).values() if isinstance(v, type)
-            )
+            found = any(hasattr(v, "fetch_lending_current") for v in vars(mod).values() if isinstance(v, type))
             assert found is has_provider, f"{protocol}: gateway rate provider presence changed"
 
     @pytest.mark.parametrize("protocol", ["silo_v2", "euler_v2", "fluid_vault"])
@@ -1860,13 +1978,9 @@ class TestVib5729SignatureCallerContract:
         import importlib
         import inspect
 
-        for slug in ("aave_v3", "compound_v3", "morpho_blue", "morpho_vault", "spark"):
+        for slug in ("aave_v3", "benqi", "compound_v3", "morpho_blue", "morpho_vault", "spark"):
             mod = importlib.import_module(f"almanak.connectors.{slug}.gateway.provider")
-            impls = [
-                v
-                for v in vars(mod).values()
-                if isinstance(v, type) and "fetch_lending_current" in vars(v)
-            ]
+            impls = [v for v in vars(mod).values() if isinstance(v, type) and "fetch_lending_current" in vars(v)]
             assert impls, f"{slug}: no fetch_lending_current implementation found"
             for cls in impls:
                 params = inspect.signature(cls.fetch_lending_current).parameters
