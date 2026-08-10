@@ -144,7 +144,7 @@ def native_series_aliases(chain: str) -> dict[str, tuple[str, ...]]:
     alias_keys = {sentinel_key, native_upper}
     alias_keys.update(str(symbol).upper() for symbol in native.accepted_symbols)
     resolved = tuple(candidates)
-    return {key: resolved for key in alias_keys}
+    return dict.fromkeys(alias_keys, resolved)
 
 
 #: Cadence jitter cap (ALM-2962): vendors emit slightly irregular timestamps
