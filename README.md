@@ -151,6 +151,7 @@ almanak ax swap USDC ETH 100 --dry-run         # Simulate a swap
 almanak ax swap USDC ETH 100                   # Execute after confirmation
 almanak ax --chain polygon lending-reserves    # Which Aave reserves are borrowable/active before you configure a strategy
 almanak ax --chain ethereum lending-reserves --protocol morpho_blue --collateral sUSDe  # Find a Morpho market_id to pin
+almanak ax -c arbitrum perp-market gmx_v2 XMR/USD  # Resolve a perp market via live venue discovery (on-chain verified)
 almanak ax -n "swap 5 USDC to WETH on base"   # Natural language mode
 
 # Strategy development

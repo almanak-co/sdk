@@ -488,6 +488,11 @@ async def test_market_service_rejects_invalid_routing(
     [
         (ValueError("ambiguous market"), grpc.StatusCode.INVALID_ARGUMENT, "ambiguous market"),
         (
+            PerpMarketVerificationError("API/on-chain market mismatch"),
+            grpc.StatusCode.FAILED_PRECONDITION,
+            "API/on-chain market mismatch",
+        ),
+        (
             PerpMarketCatalogueUnavailable("tokens unavailable"),
             grpc.StatusCode.UNAVAILABLE,
             "tokens unavailable",

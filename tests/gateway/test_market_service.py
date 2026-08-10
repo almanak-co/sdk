@@ -5,8 +5,10 @@ import os
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import grpc
 import pytest
 
+from almanak.connectors._base.gateway_capabilities import PerpMarketVerificationError
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2
 from almanak.gateway.services.market_service import MarketServiceServicer
@@ -506,6 +508,32 @@ class TestMarketServiceGetIndicator:
 
         mock_context.set_code.assert_called()
         assert "not supported" in str(mock_context.set_details.call_args)
+
+
+class TestMarketServiceGetPerpMarket:
+    """Tests for MarketService.GetPerpMarket."""
+
+    @pytest.mark.asyncio
+    async def test_verification_error_is_failed_precondition(self, market_service, mock_context):
+        """An API/on-chain mismatch remains an inconclusive verification failure."""
+        error = PerpMarketVerificationError("API/on-chain market mismatch")
+        provider = MagicMock()
+        provider.perp_market_discovery_chains.return_value = frozenset({"arbitrum"})
+        provider.resolve_perp_market = AsyncMock(side_effect=error)
+
+        with (
+            patch.object(market_service, "_perp_discovery_providers", return_value={"gmx_v2": provider}),
+            patch("almanak.gateway.services.pt_rpc_adapter.build_gateway_eth_call", return_value=AsyncMock()),
+        ):
+            response = await market_service.GetPerpMarket(
+                gateway_pb2.GetPerpMarketRequest(protocol="gmx_v2", chain="arbitrum", market="XMR/USD"),
+                mock_context,
+            )
+
+        assert response.success is False
+        assert response.error == str(error)
+        mock_context.set_code.assert_called_once_with(grpc.StatusCode.FAILED_PRECONDITION)
+        mock_context.set_details.assert_called_once_with(str(error))
 
 
 class TestGetPriceManualOverrideFallback:

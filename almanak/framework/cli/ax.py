@@ -12,7 +12,7 @@ import asyncio
 import functools
 import sys
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NoReturn
 
 import click
 
@@ -884,6 +884,181 @@ def _render_resolved_token(resolved, *, chain: str, json_output: bool, contract_
             pass  # Silently skip -- don't spam the user when RPC is simply absent
 
 
+# ---------------------------------------------------------------------------
+# almanak ax perp-market <protocol> <market>
+# ---------------------------------------------------------------------------
+
+_PERP_MARKET_INCONCLUSIVE_HINT = (
+    "Inconclusive: the market may exist on the venue. Retry when the gateway is "
+    "reachable (or check gateway logs); report this as 'could not verify', never "
+    "as 'the venue does not list this market'."
+)
+
+
+@ax.command(name="perp-market")
+@click.argument("protocol")
+@click.argument("market")
+@_chain_option
+@click.pass_context
+def perp_market(ctx, protocol, market):
+    """Resolve a perpetual market via the gateway's live discovery path.
+
+    Queries the gateway's ``GetPerpMarket`` RPC: the connector's own venue
+    catalogue plus on-chain verification of the market/index/long/short
+    token tuple. This is the live market universe — the same resolution a
+    deployed strategy performs at runtime.
+
+    Absence of a market from SDK docs or static fallback tables (e.g. the
+    GMX ``GMX_V2_MARKETS`` registry) is NOT evidence the venue lacks it —
+    static tables are offline fallbacks, not the market universe. Only
+    ``status: not_found`` from this command means "the venue does not list
+    this market". ``status: unavailable`` / ``unverified`` means the answer
+    is unknown: report it as "could not verify", never as "not supported".
+
+    Accepts a canonical label (``XMR/USD``), the full venue market name, or
+    the exact market address.
+
+    \b
+    Examples:
+        almanak ax -c arbitrum perp-market gmx_v2 XMR/USD
+        almanak ax -c arbitrum --json perp-market gmx_v2 BTC/USD
+        almanak ax -c arbitrum --json perp-market gmx_v2 0x47c031236e19d024b42f8AE6780E44A573170703
+
+    \b
+    Exit codes:
+        0 -- market resolved and on-chain verified (record printed).
+        1 -- venue does not list this market (authoritative live NOT_FOUND).
+        2 -- invalid input: unknown protocol, chain without perp discovery
+             support, or a market query the venue rejected as malformed.
+        4 -- could not verify: gateway/catalogue unavailable, or metadata
+             failed on-chain verification. NOT evidence of absence.
+    """
+    import json as _json
+
+    from almanak.framework.cli.ax_render import render_error
+
+    json_output = ctx.obj["json_output"]
+    chain = ctx.obj["chain"]
+
+    def _emit_failure(status: str, error: str, exit_code: int, hint: str | None = None) -> NoReturn:
+        if json_output:
+            payload: dict = {
+                "status": status,
+                "protocol": protocol,
+                "chain": chain,
+                "market": market,
+                "error": error,
+            }
+            if hint:
+                payload["hint"] = hint
+            click.echo(_json.dumps(payload, indent=2))
+        else:
+            render_error(f"{status}: {error}", json_output=False)
+            if hint:
+                click.echo(hint, err=True)
+        sys.exit(exit_code)
+
+    try:
+        channel, error_note = _acquire_gateway_channel(ctx)
+    except Exception as exc:
+        # The helper's contract is (None, note) on failure, but exit 1 is
+        # reserved for the venue's authoritative NOT_FOUND — never let an
+        # acquisition fault escape to Click's default exit code.
+        _emit_failure(
+            "unavailable",
+            f"unexpected CLI failure: {exc}",
+            4,
+            hint=_PERP_MARKET_INCONCLUSIVE_HINT,
+        )
+    if channel is None:
+        _emit_failure(
+            "unavailable",
+            error_note or "gateway unavailable",
+            4,
+            hint=_PERP_MARKET_INCONCLUSIVE_HINT,
+        )
+
+    import grpc
+
+    from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
+
+    try:
+        try:
+            stub = gateway_pb2_grpc.MarketServiceStub(channel)
+            response = stub.GetPerpMarket(
+                gateway_pb2.GetPerpMarketRequest(
+                    protocol=protocol,
+                    chain=chain,
+                    market=market,
+                    require_listed=True,
+                ),
+                timeout=30.0,
+            )
+        except grpc.RpcError as exc:
+            code = exc.code()
+            details = exc.details() or str(exc)
+            if code is grpc.StatusCode.NOT_FOUND:
+                _emit_failure("not_found", details, 1)
+            if code is grpc.StatusCode.INVALID_ARGUMENT:
+                _emit_failure("invalid", details, 2)
+            if code is grpc.StatusCode.FAILED_PRECONDITION:
+                # Gateway refused to return an unverified record — fail closed,
+                # but this is "could not verify", not "does not exist".
+                _emit_failure("unverified", details, 4, hint=_PERP_MARKET_INCONCLUSIVE_HINT)
+            _emit_failure("unavailable", details, 4, hint=_PERP_MARKET_INCONCLUSIVE_HINT)
+        except Exception as exc:
+            # Never let a local CLI fault (stub construction, proto encoding,
+            # interceptor failure) escape as Click's default exit 1 — this
+            # command reserves exit 1 for the authoritative venue "does not
+            # list this market" answer. Unknown faults are inconclusive.
+            _emit_failure(
+                "unavailable",
+                f"unexpected CLI failure: {exc}",
+                4,
+                hint=_PERP_MARKET_INCONCLUSIVE_HINT,
+            )
+        if not response.success or not response.market.verified:
+            # Defensive: the gateway's contract is to fail closed via gRPC
+            # status codes, so a non-success OK response is unexpected.
+            _emit_failure(
+                "unverified",
+                response.error or "gateway returned an unverified market record",
+                4,
+                hint=_PERP_MARKET_INCONCLUSIVE_HINT,
+            )
+    finally:
+        _close_channel(channel)
+
+    item = response.market
+    if json_output:
+        click.echo(
+            _json.dumps(
+                {
+                    "status": "found",
+                    "protocol": item.protocol,
+                    "chain": item.chain,
+                    "label": item.label,
+                    "market_token": item.market_token,
+                    "index_token": item.index_token,
+                    "index_symbol": item.index_symbol,
+                    "index_token_decimals": item.index_token_decimals,
+                    "long_token": item.long_token,
+                    "long_token_symbol": item.long_token_symbol,
+                    "short_token": item.short_token,
+                    "short_token_symbol": item.short_token_symbol,
+                    "verified": item.verified,
+                },
+                indent=2,
+            )
+        )
+    else:
+        click.echo(f"{item.label} on {item.protocol} ({item.chain}) — verified on-chain")
+        click.echo(f"  market_token  {item.market_token}")
+        click.echo(f"  index         {item.index_symbol} ({item.index_token}, {item.index_token_decimals} decimals)")
+        click.echo(f"  long          {item.long_token_symbol} ({item.long_token})")
+        click.echo(f"  short         {item.short_token_symbol} ({item.short_token})")
+
+
 def _open_channel_if_reachable(ctx: click.Context):
     """Return a gRPC channel to the configured gateway if it is already
     running, or ``None`` if no gateway is listening on the configured
@@ -933,33 +1108,16 @@ def _close_channel(channel) -> None:
             pass
 
 
-def _build_resolver_for_cli(ctx, *, use_gateway: bool):
-    """Return ``(resolver, channel_or_None, gateway_note)``.
+def _acquire_gateway_channel(ctx: click.Context):
+    """Return ``(channel_or_None, error_note)`` for the configured gateway.
 
-    When ``use_gateway`` is True, create a short-lived resolver instance
-    bound to the configured gateway host/port. This keeps ``ax resolve``
-    isolated from the process-wide resolver singleton used by long-lived
-    runtimes.
-
-    If the configured gateway isn't reachable we auto-start a
-    ``ManagedGateway`` on the fly — same behaviour as the other ax
-    subcommands (``swap``, ``balance``, ...).  Without this step
-    ``ax resolve`` would silently fall through to the static registry
-    and look like the token doesn't exist, which is the wrong answer
-    for anything the gateway's dynamic path would have found (Pendle
-    PT/YT/SY, CoinGecko-only tokens, etc.).
-
-    If the auto-start itself fails we fall back to static-only
-    resolution and return a human-readable note explaining what we
-    tried.
+    Probes the configured host:port and auto-starts a ``ManagedGateway``
+    when nothing is listening — same behaviour as the other ax subcommands
+    (``swap``, ``balance``, ...). On any failure returns ``(None, note)``
+    with a human-readable reason; callers decide whether that is a
+    degraded-fallback (``resolve``) or a hard "could not verify"
+    (``perp-market``).
     """
-    from almanak.framework.data.tokens import create_token_resolver
-
-    resolver = create_token_resolver()
-
-    if not use_gateway:
-        return resolver, None, None
-
     from almanak.config import load_config
 
     host = ctx.obj.get("gateway_host", "localhost")
@@ -969,11 +1127,16 @@ def _build_resolver_for_cli(ctx, *, use_gateway: bool):
     # (ALMANAK_GATEWAY_AUTH_TOKEN via ``GatewayConfig.auth_token``,
     # legacy unprefixed ``GATEWAY_AUTH_TOKEN`` via
     # ``CliRuntimeConfig.legacy_gateway_auth_token``) when no CLI-provided
-    # token is on the context. ``ax resolve`` frequently attaches to a
-    # gateway started by another process (a long-running strategy, or the
-    # shared sidecar in CI), and that process is the one that exported the
-    # env var — without this fallback, auth-enabled gateways reject the probe.
-    _cfg = load_config()
+    # token is on the context. ``ax`` frequently attaches to a gateway
+    # started by another process (a long-running strategy, or the shared
+    # sidecar in CI), and that process is the one that exported the env
+    # var — without this fallback, auth-enabled gateways reject the probe.
+    # Malformed local configuration (e.g. a broken .env line) degrades to the
+    # (None, note) contract instead of escaping as an unrelated exception.
+    try:
+        _cfg = load_config()
+    except Exception as e:
+        return None, f"failed to load gateway configuration: {e}"
     gateway_auth_token = (
         ctx.obj.get("gateway_auth_token") or _cfg.gateway.auth_token or _cfg.cli.legacy_gateway_auth_token
     )
@@ -981,7 +1144,7 @@ def _build_resolver_for_cli(ctx, *, use_gateway: bool):
     try:
         import grpc
     except Exception as e:  # grpc import failure
-        return resolver, None, f"gRPC unavailable: {e}"
+        return None, f"gRPC unavailable: {e}"
 
     # Probe the configured host:port. If nothing's listening, auto-start a
     # ManagedGateway the same way _get_executor does for swap/balance.
@@ -994,7 +1157,7 @@ def _build_resolver_for_cli(ctx, *, use_gateway: bool):
             port = ctx.obj.get("gateway_port", port)
             gateway_auth_token = ctx.obj.get("gateway_auth_token", gateway_auth_token)
         except Exception as e:
-            return resolver, None, (f"no gateway running on {host}:{port} and auto-start failed: {e}")
+            return None, (f"no gateway running on {host}:{port} and auto-start failed: {e}")
 
     try:
         channel = grpc.insecure_channel(f"{host}:{port}")
@@ -1003,8 +1166,45 @@ def _build_resolver_for_cli(ctx, *, use_gateway: bool):
 
             channel = grpc.intercept_channel(channel, _AuthClientInterceptor(gateway_auth_token))
     except Exception as e:  # grpc channel construction failure
-        return resolver, None, f"could not build gRPC channel to {host}:{port}: {e}"
+        return None, f"could not build gRPC channel to {host}:{port}: {e}"
 
+    return channel, None
+
+
+def _build_resolver_for_cli(ctx, *, use_gateway: bool):
+    """Return ``(resolver, channel_or_None, gateway_note)``.
+
+    When ``use_gateway`` is True, create a short-lived resolver instance
+    bound to the configured gateway host/port. This keeps ``ax resolve``
+    isolated from the process-wide resolver singleton used by long-lived
+    runtimes.
+
+    If the configured gateway isn't reachable we auto-start a
+    ``ManagedGateway`` on the fly (via ``_acquire_gateway_channel``).
+    Without this step ``ax resolve`` would silently fall through to the
+    static registry and look like the token doesn't exist, which is the
+    wrong answer for anything the gateway's dynamic path would have found
+    (Pendle PT/YT/SY, CoinGecko-only tokens, etc.).
+
+    If the auto-start itself fails we fall back to static-only
+    resolution and return a human-readable note explaining what we
+    tried.
+    """
+    from almanak.framework.data.tokens import create_token_resolver
+
+    resolver = create_token_resolver()
+
+    if not use_gateway:
+        return resolver, None, None
+
+    channel, error_note = _acquire_gateway_channel(ctx)
+    if channel is None:
+        return resolver, None, error_note
+
+    # _start_managed_gateway may have updated the context with the port it
+    # actually bound; read back for the note.
+    host = ctx.obj.get("gateway_host", "localhost")
+    port = ctx.obj.get("gateway_port", 50051)
     resolver = create_token_resolver(gateway_channel=channel)
     return resolver, channel, f"attempted dynamic lookup via {host}:{port}"
 

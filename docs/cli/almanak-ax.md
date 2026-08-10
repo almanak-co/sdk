@@ -221,6 +221,7 @@ Commands:
   lp-close          Close (fully withdraw) a liquidity position.
   lp-info           Get details about an existing LP position.
   lp-list           List all LP positions owned by your wallet on a chain.
+  perp-market       Resolve a perpetual market via the gateway's live...
   pool              Get details about a liquidity pool.
   portfolio         Aggregate snapshot: native + ERC20 balances, LP...
   positions         Position reconciliation commands (T24 / VIB-4210).

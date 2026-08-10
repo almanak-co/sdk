@@ -2496,7 +2496,12 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             context.set_code(grpc.StatusCode.UNAVAILABLE)
             context.set_details(str(exc))
             return gateway_pb2.PerpMarketResponse(success=False, error=str(exc))
-        except (ValueError, PerpMarketVerificationError) as exc:
+        except PerpMarketVerificationError as exc:
+            logger.warning("GetPerpMarket verification failed for %s/%s/%s: %s", protocol, chain, market, exc)
+            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            context.set_details(str(exc))
+            return gateway_pb2.PerpMarketResponse(success=False, error=str(exc))
+        except ValueError as exc:
             logger.warning("GetPerpMarket rejected %s/%s/%s: %s", protocol, chain, market, exc)
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(exc))
