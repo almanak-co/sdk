@@ -36,6 +36,11 @@ from tests.backtesting_funding import pnl_token_funding, provider_symbol
 # =============================================================================
 
 
+def _stable_symbol_phase(symbol: str) -> int:
+    """Return a process-independent phase for deterministic synthetic prices."""
+    return sum((position + 1) * ord(character) for position, character in enumerate(symbol.upper())) % 100
+
+
 class FastMockDataProvider:
     """High-performance mock data provider for benchmark testing.
 
@@ -77,7 +82,7 @@ class FastMockDataProvider:
 
         # Simple deterministic price movement using sine wave
         # This creates realistic-looking price action without randomness
-        wave = Decimal(str(math.sin(index * 0.1 + hash(symbol) % 100)))
+        wave = Decimal(str(math.sin(index * 0.1 + _stable_symbol_phase(symbol))))
         trend = Decimal(str(index * 0.00001))  # Slight upward trend
         change = wave * self._volatility + trend
 
@@ -257,7 +262,7 @@ class TestPnLBacktesterPerformance:
         60 seconds. This is a critical performance requirement for practical
         strategy development workflows.
 
-        Performance target: < 60 CPU-seconds (asserted on process_time — load-robust)
+        Performance target: < 60 seconds in the isolated CI performance lane
         Data points: ~8760 (365 days * 24 hours)
         Operations: ~365 swaps (1 per day)
         """
@@ -295,14 +300,12 @@ class TestPnLBacktesterPerformance:
         )
 
         # Execute with timing
-        start_cpu = time.process_time()
+        start = time.perf_counter()
         result = await backtester.backtest(strategy, config)
-        # Budgets are asserted on CPU time, not wall clock: shared CI runners
-        # under load made identical code take 31-33s wall vs ~6s locally, so
-        # wall-clock budgets measured the RUNNER, not the code (chronic flake).
-        # process_time() counts compute actually performed - a real regression
-        # (more work) still trips it; a starved scheduler no longer does.
-        elapsed = time.process_time() - start_cpu
+        # The benchmark suite runs serially, without coverage instrumentation,
+        # on its own fixed runner class. Wall time therefore measures the
+        # strategy-development experience instead of xdist contention.
+        elapsed = time.perf_counter() - start
 
         # Verify correctness
         assert result.success, f"Backtest failed: {result.error}"
@@ -353,7 +356,7 @@ class TestPnLBacktesterPerformance:
         backtest with no trading activity. This represents the baseline
         overhead of the backtesting loop without trade execution.
 
-        Performance target: < 30 CPU-seconds (baseline, no trading; asserted on process_time — load-robust)
+        Performance target: < 30 seconds in the isolated CI performance lane
         """
         # Setup
         start_time = datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
@@ -392,14 +395,11 @@ class TestPnLBacktesterPerformance:
         )
 
         # Execute with timing
-        start_cpu = time.process_time()
+        start = time.perf_counter()
         result = await backtester.backtest(strategy, config)
-        # Budgets are asserted on CPU time, not wall clock: shared CI runners
-        # under load made identical code take 31-33s wall vs ~6s locally, so
-        # wall-clock budgets measured the RUNNER, not the code (chronic flake).
-        # process_time() counts compute actually performed - a real regression
-        # (more work) still trips it; a starved scheduler no longer does.
-        elapsed = time.process_time() - start_cpu
+        # See the first benchmark: this suite is isolated from xdist and
+        # coverage, so wall time is now a valid SLA measurement.
+        elapsed = time.perf_counter() - start
 
         # Verify
         assert result.success
@@ -428,7 +428,7 @@ class TestPnLBacktesterPerformance:
         hour (8760 trades in a year). This represents a high-frequency
         trading scenario that exercises the full execution pipeline.
 
-        Performance target: < 90 CPU-seconds (asserted on process_time — load-robust) (with ~8760 trades)
+        Performance target: < 90 seconds in the isolated CI performance lane (with ~8760 trades)
         """
         # Setup
         start_time = datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
@@ -461,14 +461,9 @@ class TestPnLBacktesterPerformance:
         )
 
         # Execute with timing
-        start_cpu = time.process_time()
+        start = time.perf_counter()
         result = await backtester.backtest(strategy, config)
-        # Budgets are asserted on CPU time, not wall clock: shared CI runners
-        # under load made identical code take 31-33s wall vs ~6s locally, so
-        # wall-clock budgets measured the RUNNER, not the code (chronic flake).
-        # process_time() counts compute actually performed - a real regression
-        # (more work) still trips it; a starved scheduler no longer does.
-        elapsed = time.process_time() - start_cpu
+        elapsed = time.perf_counter() - start
 
         # Verify
         assert result.success
@@ -535,14 +530,9 @@ class TestPnLBacktesterPerformance:
         )
 
         # Execute with timing
-        start_cpu = time.process_time()
+        start = time.perf_counter()
         result = await backtester.backtest(strategy, config)
-        # Budgets are asserted on CPU time, not wall clock: shared CI runners
-        # under load made identical code take 31-33s wall vs ~6s locally, so
-        # wall-clock budgets measured the RUNNER, not the code (chronic flake).
-        # process_time() counts compute actually performed - a real regression
-        # (more work) still trips it; a starved scheduler no longer does.
-        elapsed = time.process_time() - start_cpu
+        elapsed = time.perf_counter() - start
 
         # Verify
         assert result.success

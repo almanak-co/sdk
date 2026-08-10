@@ -53,8 +53,12 @@ def _insert_ledger_row(store: SQLiteStore, row: _FakeLedgerRow) -> None:
         ) VALUES (?, ?, ?, ?, ?, 'SWAP', ?, 1)
         """,
         (
-            row.id, row.cycle_id, row.deployment_id, row.execution_mode,
-            row.timestamp, row.gas_usd,
+            row.id,
+            row.cycle_id,
+            row.deployment_id,
+            row.execution_mode,
+            row.timestamp,
+            row.gas_usd,
         ),
     )
     store._conn.commit()  # type: ignore[union-attr]
@@ -92,14 +96,20 @@ def _snapshot(deployment_id: str = "demo") -> PortfolioSnapshot:
 
 # --- D1.2: gas_spent_usd = SUM(transaction_ledger.gas_usd) -----------------------
 
+
 @pytest.mark.asyncio
 async def test_gas_spent_usd_equals_ledger_sum(sqlite_store: SQLiteStore) -> None:
     """D1.2: aggregator sums all ledger.gas_usd; status stamped 'ok'."""
     deployment_id = "dep-A"
     for i, gas in enumerate(["0.0042", "0.0017", ""]):
-        _insert_ledger_row(sqlite_store, _FakeLedgerRow(
-            id=f"row-{i}", deployment_id=deployment_id, gas_usd=gas,
-        ))
+        _insert_ledger_row(
+            sqlite_store,
+            _FakeLedgerRow(
+                id=f"row-{i}",
+                deployment_id=deployment_id,
+                gas_usd=gas,
+            ),
+        )
     total = await sqlite_store.sum_ledger_gas_usd(deployment_id)
     assert total == Decimal("0.0059")
 
@@ -113,6 +123,7 @@ async def test_aggregator_no_rows_returns_zero(sqlite_store: SQLiteStore) -> Non
 
 # --- F4a: live SQL failure → AccountingPersistenceError -------------------------
 
+
 @pytest.mark.asyncio
 async def test_f4a_live_query_failure_raises() -> None:
     """F4a: live mode + sum_ledger_gas_usd raises non-NotImplementedError → typed error."""
@@ -123,8 +134,11 @@ async def test_f4a_live_query_failure_raises() -> None:
 
     with pytest.raises(AccountingPersistenceError) as excinfo:
         await _populate_gas_spent_usd(
-            _runner_for_metrics(state_manager), metrics, snapshot,
-deployment_id="demo", is_live=True,
+            _runner_for_metrics(state_manager),
+            metrics,
+            snapshot,
+            deployment_id="demo",
+            is_live=True,
         )
     assert excinfo.value.write_kind == "metrics"
     assert snapshot.snapshot_metadata["gas_aggregator_status"] == "query_failed"
@@ -139,8 +153,11 @@ async def test_f4a_paper_query_failure_logs_and_continues() -> None:
     metrics = MagicMock(gas_spent_usd=Decimal("0"))
 
     await _populate_gas_spent_usd(
-        _runner_for_metrics(state_manager), metrics, snapshot,
-deployment_id="demo", is_live=False,
+        _runner_for_metrics(state_manager),
+        metrics,
+        snapshot,
+        deployment_id="demo",
+        is_live=False,
     )
     assert metrics.gas_spent_usd == Decimal("0")
     assert snapshot.snapshot_metadata["gas_aggregator_status"] == "query_failed"
@@ -148,26 +165,29 @@ deployment_id="demo", is_live=False,
 
 # --- F4b: old gateway NotImplementedError → no raise in any mode -----------------
 
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("is_live", [True, False])
 async def test_f4b_hosted_aggregator_unsupported(is_live: bool) -> None:
     """F4b: old gateway UNIMPLEMENTED catches in BOTH live and paper; never halts."""
     state_manager = MagicMock()
-    state_manager.sum_ledger_gas_usd = AsyncMock(
-        side_effect=NotImplementedError("VIB-4247 follow-up")
-    )
+    state_manager.sum_ledger_gas_usd = AsyncMock(side_effect=NotImplementedError("VIB-4247 follow-up"))
     snapshot = _snapshot()
     metrics = MagicMock(gas_spent_usd=Decimal("0"))
 
     await _populate_gas_spent_usd(
-        _runner_for_metrics(state_manager), metrics, snapshot,
-deployment_id="demo", is_live=is_live,
+        _runner_for_metrics(state_manager),
+        metrics,
+        snapshot,
+        deployment_id="demo",
+        is_live=is_live,
     )
     assert metrics.gas_spent_usd == Decimal("0")
     assert snapshot.snapshot_metadata["gas_aggregator_status"] == "hosted_unsupported"
 
 
 # --- F4c: type-narrowness — unrelated ValueError → live raises -------------------
+
 
 @pytest.mark.asyncio
 async def test_f4c_aggregator_type_narrow_catch() -> None:
@@ -181,8 +201,11 @@ async def test_f4c_aggregator_type_narrow_catch() -> None:
 
     with pytest.raises(AccountingPersistenceError):
         await _populate_gas_spent_usd(
-            _runner_for_metrics(state_manager), metrics, snapshot,
-deployment_id="demo", is_live=True,
+            _runner_for_metrics(state_manager),
+            metrics,
+            snapshot,
+            deployment_id="demo",
+            is_live=True,
         )
     # Status stamped query_failed (not hosted_unsupported) — proves the catch
     # is type-narrow, not bare-except.
@@ -190,6 +213,7 @@ deployment_id="demo", is_live=True,
 
 
 # --- F5: NULL / empty / "0" rows coalesce to 0 ---------------------------------
+
 
 @pytest.mark.asyncio
 async def test_f5_null_and_empty_rows_coalesced(sqlite_store: SQLiteStore) -> None:
@@ -206,9 +230,14 @@ async def test_f5_null_and_empty_rows_coalesced(sqlite_store: SQLiteStore) -> No
     )
     sqlite_store._conn.commit()
     for i, gas in enumerate(["", "0", "0.001"]):
-        _insert_ledger_row(sqlite_store, _FakeLedgerRow(
-            id=f"row-{i}", deployment_id=deployment_id, gas_usd=gas,
-        ))
+        _insert_ledger_row(
+            sqlite_store,
+            _FakeLedgerRow(
+                id=f"row-{i}",
+                deployment_id=deployment_id,
+                gas_usd=gas,
+            ),
+        )
     total = await sqlite_store.sum_ledger_gas_usd(deployment_id)
     assert total == Decimal("0.001")
     # 4 rows total in this deployment — proves no row was dropped from the count.
@@ -221,28 +250,40 @@ async def test_f5_null_and_empty_rows_coalesced(sqlite_store: SQLiteStore) -> No
 
 # --- F6: idempotency + freshness -----------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_f6_idempotent_and_fresh(sqlite_store: SQLiteStore) -> None:
     """F6: three repeated calls match (idempotent); insert a new row, second
     call after the insert reflects the new SUM (fresh).
     """
     deployment_id = "dep-F6"
-    _insert_ledger_row(sqlite_store, _FakeLedgerRow(
-        id="row-0", deployment_id=deployment_id, gas_usd="0.0042",
-    ))
+    _insert_ledger_row(
+        sqlite_store,
+        _FakeLedgerRow(
+            id="row-0",
+            deployment_id=deployment_id,
+            gas_usd="0.0042",
+        ),
+    )
     a = await sqlite_store.sum_ledger_gas_usd(deployment_id)
     b = await sqlite_store.sum_ledger_gas_usd(deployment_id)
     c = await sqlite_store.sum_ledger_gas_usd(deployment_id)
     assert a == b == c == Decimal("0.0042")  # idempotent
 
-    _insert_ledger_row(sqlite_store, _FakeLedgerRow(
-        id="row-1", deployment_id=deployment_id, gas_usd="0.0001",
-    ))
+    _insert_ledger_row(
+        sqlite_store,
+        _FakeLedgerRow(
+            id="row-1",
+            deployment_id=deployment_id,
+            gas_usd="0.0001",
+        ),
+    )
     fresh = await sqlite_store.sum_ledger_gas_usd(deployment_id)
     assert fresh == Decimal("0.0043")  # picked up the new row, not stuck at a's value
 
 
 # --- happy path: gas_aggregator_status='ok' on success --------------------------
+
 
 @pytest.mark.asyncio
 async def test_happy_path_stamps_ok() -> None:
@@ -253,8 +294,11 @@ async def test_happy_path_stamps_ok() -> None:
     metrics = MagicMock(gas_spent_usd=Decimal("0"))
 
     await _populate_gas_spent_usd(
-        _runner_for_metrics(state_manager), metrics, snapshot,
-deployment_id="demo", is_live=True,
+        _runner_for_metrics(state_manager),
+        metrics,
+        snapshot,
+        deployment_id="demo",
+        is_live=True,
     )
     assert metrics.gas_spent_usd == Decimal("0.005")
     assert snapshot.snapshot_metadata["gas_aggregator_status"] == "ok"
@@ -262,6 +306,8 @@ deployment_id="demo", is_live=True,
 
 # --- backend without sum_ledger_gas_usd attribute → hosted_unsupported ---------
 
+
+@pytest.mark.benchmark
 @pytest.mark.asyncio
 async def test_aggregator_perf_10k_rows(sqlite_store: SQLiteStore) -> None:
     """D2.5.2 perf: SUM over 10k mixed-empty rows completes in < 100 ms.
@@ -281,8 +327,7 @@ async def test_aggregator_perf_10k_rows(sqlite_store: SQLiteStore) -> None:
             gas = ""
         else:
             gas = None
-        rows.append((f"row-{i}", "cycle-perf", deployment_id, "paper",
-                     datetime.now(UTC).isoformat(), "SWAP", gas, 1))
+        rows.append((f"row-{i}", "cycle-perf", deployment_id, "paper", datetime.now(UTC).isoformat(), "SWAP", gas, 1))
     sqlite_store._conn.executemany(
         """
         INSERT INTO transaction_ledger
@@ -312,8 +357,11 @@ async def test_legacy_backend_without_aggregator() -> None:
     metrics = MagicMock(gas_spent_usd=Decimal("0"))
 
     await _populate_gas_spent_usd(
-        _runner_for_metrics(state_manager), metrics, snapshot,
-deployment_id="demo", is_live=True,
+        _runner_for_metrics(state_manager),
+        metrics,
+        snapshot,
+        deployment_id="demo",
+        is_live=True,
     )
     assert metrics.gas_spent_usd == Decimal("0")
     assert snapshot.snapshot_metadata["gas_aggregator_status"] == "hosted_unsupported"

@@ -67,6 +67,11 @@ from tests.intents.conftest import (
 
 CHAIN_NAME = "mantle"
 
+# Aave aTokens store scaled balances: mint divides by the liquidity index and
+# balanceOf multiplies by the current index. The composed rounded operations
+# have produced a two-wei difference in pinned-fork CI at Mantle's USDC scale.
+ATOKEN_BALANCE_ROUNDING_TOLERANCE_WEI = 2
+
 # Aave V3 Pool ABI (minimal - getUserAccountData + getReserveData for aToken
 # address lookup, used by the Layer-4b aToken-balance receiver-side check).
 AAVE_POOL_ABI = [
@@ -154,6 +159,16 @@ def get_atoken_address(web3: Web3, asset: str) -> str:
     return reserve_data[8]
 
 
+def assert_atoken_delta_within_rounding(actual: int, expected: int, operation: str) -> None:
+    """Assert an aToken delta matches its underlying amount within index-rounding tolerance."""
+    absolute_error = abs(actual - expected)
+    assert absolute_error <= ATOKEN_BALANCE_ROUNDING_TOLERANCE_WEI, (
+        f"aUSDC {operation} must match the underlying amount within "
+        f"{ATOKEN_BALANCE_ROUNDING_TOLERANCE_WEI} wei of index rounding. "
+        f"Expected: {expected}, Got: {actual}, Absolute error: {absolute_error}"
+    )
+
+
 def get_reserve_ltv(web3: Web3, asset: str) -> int:
     """Read an Aave V3 reserve's loan-to-value, in basis points (VIB-6111).
 
@@ -171,7 +186,7 @@ def get_reserve_ltv(web3: Web3, asset: str) -> int:
     reserve_data = pool_contract.functions.getReserveData(Web3.to_checksum_address(asset)).call()
     configuration = reserve_data[0]
     # web3 decodes the single-member struct as a tuple/list; unwrap defensively.
-    packed = configuration[0] if isinstance(configuration, (list, tuple)) else configuration
+    packed = configuration[0] if isinstance(configuration, list | tuple) else configuration
     return packed & 0xFFFF
 
 
@@ -322,12 +337,7 @@ class TestAaveV3SupplyIntent:
         assert usdc_spent == expected_usdc_spent, (
             f"USDC spent must EXACTLY equal supply amount. Expected: {expected_usdc_spent}, Got: {usdc_spent}"
         )
-        # aToken balance is index-scaled on each accrual; we assert the
-        # delta is at least supply_amount minus a 1-wei rounding tolerance.
-        assert ausdc_received >= expected_usdc_spent - 1, (
-            f"aUSDC received must be ≥ supply amount (modulo 1-wei index "
-            f"rounding). Expected ≥ {expected_usdc_spent - 1}, Got: {ausdc_received}"
-        )
+        assert_atoken_delta_within_rounding(ausdc_received, expected_usdc_spent, "received")
 
         print("\nALL CHECKS PASSED")
 
@@ -440,13 +450,7 @@ class TestAaveV3SupplyIntent:
             f"USDC received must EXACTLY equal withdraw amount. "
             f"Expected: {expected_usdc_received}, Got: {usdc_received}"
         )
-        # aUSDC burned should be at least the withdraw amount (modulo the
-        # 1-wei rounding from index-scaled aToken accounting).
-        assert ausdc_burned >= expected_usdc_received - 1, (
-            f"aUSDC burned must be ≥ withdraw amount (modulo 1-wei index "
-            f"rounding). Expected ≥ {expected_usdc_received - 1}, "
-            f"Got: {ausdc_burned}"
-        )
+        assert_atoken_delta_within_rounding(ausdc_burned, expected_usdc_received, "burned")
 
         print("\nALL CHECKS PASSED")
 
