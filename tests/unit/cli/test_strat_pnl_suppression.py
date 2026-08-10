@@ -23,13 +23,14 @@ from click.testing import CliRunner
 from almanak.framework.cli.strat_pnl import strat_pnl
 from almanak.framework.observability.ledger import LedgerEntry
 from almanak.framework.portfolio.models import (
+    BaselineProvenance,
     PortfolioMetrics,
     PortfolioSnapshot,
     TokenBalance,
     ValueConfidence,
+    encode_baseline_provenance,
 )
 from almanak.framework.state.backends.sqlite import SQLiteConfig, SQLiteStore
-
 
 _DEPLOYMENT_ID = "uniswap_rsi:abc123def456"
 _BASE_TS = datetime(2026, 5, 30, 12, 0, 0, tzinfo=UTC)
@@ -129,6 +130,12 @@ def _make_metrics() -> PortfolioMetrics:
         deposits_usd=Decimal("0"),
         withdrawals_usd=Decimal("0"),
         gas_spent_usd=Decimal("0.02"),
+        positions_json=encode_baseline_provenance(
+            BaselineProvenance(
+                source="strategy_allocation_usd",
+                initial_value_usd=Decimal("6.47"),
+            )
+        ),
     )
 
 

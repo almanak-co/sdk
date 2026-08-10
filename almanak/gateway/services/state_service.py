@@ -1168,6 +1168,33 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         are preserved byte-for-byte against the pre-refactor behaviour —
         downstream observability may grep the exact strings.
         """
+        return await self._save_portfolio_metrics(
+            request,
+            context,
+            provenance_rpc=False,
+        )
+
+    async def SavePortfolioMetricsWithProvenance(
+        self,
+        request: gateway_pb2.SaveMetricsRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.SaveMetricsResponse:
+        """Version-fenced mutation that requires a real provenance marker."""
+        return await self._save_portfolio_metrics(
+            request,
+            context,
+            provenance_rpc=True,
+        )
+
+    async def _save_portfolio_metrics(
+        self,
+        request: gateway_pb2.SaveMetricsRequest,
+        context: grpc.aio.ServicerContext,
+        *,
+        provenance_rpc: bool,
+    ) -> gateway_pb2.SaveMetricsResponse:
+        """Validate and dispatch one metrics write through its version lane."""
+        from almanak.framework.portfolio.models import decode_baseline_provenance
         from almanak.gateway.services._save_metrics_helpers import (
             MetricsValidationError,
             parse_metrics_inputs,
@@ -1193,6 +1220,18 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(exc.message)
             return gateway_pb2.SaveMetricsResponse(success=False, error=exc.message)
+
+        provenance = decode_baseline_provenance(inputs.positions_json) if inputs.positions_json is not None else None
+        if provenance_rpc and provenance is None:
+            error = "baseline provenance is required for the provenance save RPC"
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(error)
+            return gateway_pb2.SaveMetricsResponse(success=False, error=error)
+        if not provenance_rpc and provenance is not None:
+            error = "provenance-bearing metrics must use SavePortfolioMetricsWithProvenance"
+            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            context.set_details(error)
+            return gateway_pb2.SaveMetricsResponse(success=False, error=error)
 
         now = datetime.now(UTC)
 
@@ -1224,6 +1263,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         leaks through to ``GetPortfolioMetrics`` and the dashboard renders
         a $0 NAV despite snapshots existing.
         """
+        from almanak.framework.portfolio.models import decode_baseline_provenance
         from almanak.gateway.services._save_metrics_helpers import (
             PG_UPSERT_QUERY,
             build_pg_upsert_args,
@@ -1241,12 +1281,28 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             warm = self._state_manager.warm_backend
             total_value_usd = await resolve_total_value_usd(warm, inputs.deployment_id)
 
-            await self._snapshot_fetchrow(
+            saved = await self._snapshot_fetchrow(
                 PG_UPSERT_QUERY,
                 *build_pg_upsert_args(inputs, request, execution_mode, now, total_value_usd),
             )
+            if saved is None:
+                has_provenance = (
+                    inputs.positions_json is not None and decode_baseline_provenance(inputs.positions_json) is not None
+                )
+                error = (
+                    "established accounting baseline is immutable"
+                    if has_provenance
+                    else "baseline provenance is required when establishing a new portfolio_metrics row"
+                )
+                context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+                context.set_details(error)
+                return gateway_pb2.SaveMetricsResponse(success=False, error=error)
+            saved_positions_json = saved["positions_json"]
             logger.debug("Portfolio metrics saved for strategy=%s", inputs.deployment_id)
-            return gateway_pb2.SaveMetricsResponse(success=True)
+            return gateway_pb2.SaveMetricsResponse(
+                success=True,
+                positions_json=(saved_positions_json or "[]").encode("utf-8"),
+            )
         except Exception as e:
             logger.error("SavePortfolioMetrics failed for %s: %s", inputs.deployment_id, e)
             context.set_code(grpc.StatusCode.INTERNAL)
@@ -1269,8 +1325,14 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         - maps the (result / no-backend / missing-method / exception)
           outcomes to the exact pre-refactor response shapes.
         """
+        from almanak.framework.portfolio.models import (
+            BaselineProvenanceError,
+            canonicalize_metrics_positions_json,
+            decode_baseline_provenance,
+        )
         from almanak.gateway.services._save_metrics_helpers import (
             build_portfolio_metrics,
+            resolve_metrics_positions_json,
             resolve_total_value_usd,
         )
 
@@ -1279,21 +1341,45 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             assert self._state_manager is not None
             warm = self._state_manager.warm_backend
 
-            total_value_usd = await resolve_total_value_usd(warm, inputs.deployment_id)
-            metrics = build_portfolio_metrics(inputs, request, execution_mode, total_value_usd)
-
-            if warm and hasattr(warm, "save_portfolio_metrics"):
-                result = await warm.save_portfolio_metrics(metrics)
-                if result:
-                    logger.debug("Portfolio metrics saved (SQLite) for strategy=%s", inputs.deployment_id)
-                    return gateway_pb2.SaveMetricsResponse(success=True)
+            if not warm or not hasattr(warm, "save_portfolio_metrics"):
                 return gateway_pb2.SaveMetricsResponse(
-                    success=False, error="Backend save_portfolio_metrics returned False"
+                    success=False, error="No warm backend with portfolio metrics support"
                 )
 
-            return gateway_pb2.SaveMetricsResponse(
-                success=False, error="No warm backend with portfolio metrics support"
-            )
+            total_value_usd = await resolve_total_value_usd(warm, inputs.deployment_id)
+            positions_json = await resolve_metrics_positions_json(warm, inputs.deployment_id, inputs.positions_json)
+            metrics = build_portfolio_metrics(inputs, request, execution_mode, total_value_usd, positions_json)
+
+            result = await warm.save_portfolio_metrics(metrics)
+            if result:
+                acknowledged_positions_json = positions_json
+                if inputs.positions_json is not None and decode_baseline_provenance(inputs.positions_json):
+                    if not hasattr(warm, "get_portfolio_metrics"):
+                        raise BaselineProvenanceError(
+                            "warm metrics backend cannot acknowledge persisted baseline provenance"
+                        )
+                    persisted = await cast(Any, warm).get_portfolio_metrics(inputs.deployment_id)
+                    if persisted is None:
+                        raise BaselineProvenanceError(
+                            "warm metrics backend did not return persisted baseline provenance"
+                        )
+                    acknowledged_positions_json = getattr(persisted, "positions_json", "[]") or "[]"
+                    if canonicalize_metrics_positions_json(
+                        acknowledged_positions_json
+                    ) != canonicalize_metrics_positions_json(inputs.positions_json):
+                        raise BaselineProvenanceError(
+                            "warm metrics backend acknowledgement does not match the complete request"
+                        )
+                logger.debug("Portfolio metrics saved (SQLite) for strategy=%s", inputs.deployment_id)
+                return gateway_pb2.SaveMetricsResponse(
+                    success=True,
+                    positions_json=acknowledged_positions_json.encode("utf-8"),
+                )
+            return gateway_pb2.SaveMetricsResponse(success=False, error="Backend save_portfolio_metrics returned False")
+        except BaselineProvenanceError as e:
+            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            context.set_details(str(e))
+            return gateway_pb2.SaveMetricsResponse(success=False, error=str(e))
         except Exception as e:
             logger.error("SavePortfolioMetrics (SQLite) failed for %s: %s", inputs.deployment_id, e)
             context.set_code(grpc.StatusCode.INTERNAL)
@@ -1325,6 +1411,8 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             cycle_id=row["cycle_id"] or "",
             execution_mode=row["execution_mode"] or "",
             is_complete=bool(row["is_complete"]) if row["is_complete"] is not None else True,
+            positions_json=(row["positions_json"] or "[]").encode("utf-8"),
+            baseline_provenance_supported=True,
         )
 
     @staticmethod
@@ -1344,6 +1432,8 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             cycle_id=getattr(metrics, "cycle_id", "") or "",
             execution_mode=getattr(metrics, "execution_mode", "") or "",
             is_complete=getattr(metrics, "is_complete", True),
+            positions_json=(getattr(metrics, "positions_json", "[]") or "[]").encode("utf-8"),
+            baseline_provenance_supported=True,
         )
 
     def _portfolio_metrics_error_response(
@@ -1365,14 +1455,14 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                 SELECT initial_value_usd, initial_timestamp,
                        deposits_usd, withdrawals_usd, gas_spent_usd,
                        deployment_id, cycle_id, execution_mode, is_complete,
-                       updated_at
+                       updated_at, positions_json::text AS positions_json
                 FROM portfolio_metrics
                 WHERE deployment_id = $1
                 """,
                 deployment_id,
             )
             if row is None:
-                return gateway_pb2.PortfolioMetricsData(found=False)
+                return gateway_pb2.PortfolioMetricsData(found=False, baseline_provenance_supported=True)
             return self._pg_portfolio_metrics_to_proto(row)
         except Exception as e:
             logger.error("GetPortfolioMetrics failed for %s: %s", deployment_id, e)
@@ -1390,11 +1480,11 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
 
             warm = self._state_manager.warm_backend
             if not warm or not hasattr(warm, "get_portfolio_metrics"):
-                return gateway_pb2.PortfolioMetricsData(found=False)
+                return gateway_pb2.PortfolioMetricsData(found=False, baseline_provenance_supported=True)
 
             metrics = await warm.get_portfolio_metrics(deployment_id)
             if metrics is None:
-                return gateway_pb2.PortfolioMetricsData(found=False)
+                return gateway_pb2.PortfolioMetricsData(found=False, baseline_provenance_supported=True)
             return self._sqlite_portfolio_metrics_to_proto(metrics)
         except Exception as e:
             logger.error("GetPortfolioMetrics (SQLite) failed for %s: %s", deployment_id, e)

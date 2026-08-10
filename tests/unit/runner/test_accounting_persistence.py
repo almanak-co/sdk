@@ -25,7 +25,7 @@ import pytest
 
 from almanak.framework.intents.vocabulary import SwapIntent
 from almanak.framework.observability.ledger import LedgerEntry
-from almanak.framework.portfolio import ValueConfidence
+from almanak.framework.portfolio import PortfolioSnapshot, ValueConfidence
 from almanak.framework.runner._run_loop_helpers import capture_snapshot_with_accounting
 from almanak.framework.runner.runner_models import IterationResult, IterationStatus
 from almanak.framework.runner.runner_state import CapitalFlowMeasurementError
@@ -386,7 +386,59 @@ def _metrics_stub():
     m.cycle_id = "c1"
     m.execution_mode = "live"
     m.is_complete = True
+    m.positions_json = "[]"
     return m
+
+
+@pytest.mark.asyncio
+async def test_gateway_metrics_failure_cannot_orphan_provenance_on_snapshot() -> None:
+    """Snapshot success followed by metrics failure leaves no provenance claim."""
+    from almanak.framework.runner.runner_state import _persist_snapshot_and_metrics
+
+    persisted: dict[str, list[object]] = {"snapshots": [], "metrics": []}
+    state_manager = MagicMock(spec=["save_portfolio_snapshot", "save_portfolio_metrics"])
+
+    async def save_snapshot(snapshot):
+        persisted["snapshots"].append(snapshot.to_positions_payload())
+        return 7
+
+    async def fail_metrics(_metrics):
+        raise AccountingPersistenceError(write_kind="metrics", deployment_id="s1")
+
+    state_manager.save_portfolio_snapshot = AsyncMock(side_effect=save_snapshot)
+    state_manager.save_portfolio_metrics = AsyncMock(side_effect=fail_metrics)
+    runner = MagicMock()
+    runner.state_manager = state_manager
+    snapshot = PortfolioSnapshot(
+        timestamp=datetime.now(UTC),
+        deployment_id="s1",
+        total_value_usd=Decimal("100"),
+        available_cash_usd=Decimal("50"),
+        value_confidence=ValueConfidence.HIGH,
+        chain="arbitrum",
+        iteration_number=1,
+        cycle_id="c1",
+        execution_mode="live",
+    )
+    metrics = _metrics_stub()
+    metrics.positions_json = (
+        '[{"initial_value_usd":"100","record_type":"accounting_baseline_provenance",'
+        '"schema_version":1,"source":"strategy_allocation_usd"}]'
+    )
+
+    with pytest.raises(AccountingPersistenceError, match="metrics"):
+        await _persist_snapshot_and_metrics(runner, snapshot, metrics)
+
+    assert persisted["metrics"] == []
+    assert persisted["snapshots"] == [
+        {
+            "schema_version": PortfolioSnapshot.SNAPSHOT_ENVELOPE_SCHEMA_VERSION,
+            "positions": [],
+            "metadata": {},
+            "reconciliation": {},
+        }
+    ]
+    assert "accounting_baseline_provenance" not in str(persisted["snapshots"])
 
 
 @pytest.mark.asyncio
@@ -642,9 +694,7 @@ async def test_capital_flow_measurement_failure_logs_error_and_continues_non_liv
 
     assert result is original
     assert any(
-        rec.levelno == logging.ERROR
-        and "non-live mode" in rec.message
-        and "write_kind=metrics" in rec.message
+        rec.levelno == logging.ERROR and "non-live mode" in rec.message and "write_kind=metrics" in rec.message
         for rec in caplog.records
     )
     runner._alert_accounting_failure.assert_not_awaited()  # type: ignore[attr-defined]

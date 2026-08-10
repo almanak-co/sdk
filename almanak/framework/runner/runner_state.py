@@ -30,9 +30,11 @@ from ..deployment import is_hosted
 from ..intents.vocabulary import AnyIntent, BorrowIntent, HoldIntent, PerpCloseIntent, PerpOpenIntent
 from ..models.run_mode import RunMode
 from ..portfolio import (
+    BaselineProvenance,
     PortfolioMetrics,
     PortfolioSnapshot,
     ValueConfidence,
+    encode_baseline_provenance,
     enforce_open_position_value_invariant,
     is_measured_accounting_snapshot,
     serialize_value_confidence,
@@ -1810,6 +1812,7 @@ async def _build_metrics_for_snapshot(  # noqa: C901
             # to 0 raises TypeError). Only honour the allocation when it
             # parses to a positive finite Decimal.
             initial = None
+            baseline_source = ""
             if allocation is not None:
                 try:
                     allocation_dec = Decimal(str(allocation))
@@ -1817,6 +1820,7 @@ async def _build_metrics_for_snapshot(  # noqa: C901
                     allocation_dec = None
                 if allocation_dec is not None and allocation_dec.is_finite() and allocation_dec > 0:
                     initial = allocation_dec
+                    baseline_source = "strategy_allocation_usd"
                     logger.info(
                         "Portfolio baseline anchored to strategy.allocation_usd=$%.2f for %s "
                         "(explicit allocation contract)",
@@ -1824,7 +1828,12 @@ async def _build_metrics_for_snapshot(  # noqa: C901
                         deployment_id,
                     )
             if initial is None:
-                initial = snapshot.total_value_usd or snapshot.available_cash_usd
+                if snapshot.total_value_usd:
+                    initial = snapshot.total_value_usd
+                    baseline_source = "snapshot_total_value_usd"
+                else:
+                    initial = snapshot.available_cash_usd
+                    baseline_source = "snapshot_available_cash_usd"
             if initial == 0:
                 logger.warning(
                     "Portfolio baseline is zero for %s — both total_value_usd and available_cash_usd "
@@ -1840,6 +1849,12 @@ async def _build_metrics_for_snapshot(  # noqa: C901
                 deployment_id=deployment_id,
                 execution_mode=execution_mode,
                 cycle_id=cycle_id,
+                positions_json=encode_baseline_provenance(
+                    BaselineProvenance(
+                        source=baseline_source,
+                        initial_value_usd=initial,
+                    )
+                ),
             )
             logger.info(f"Portfolio baseline established for {deployment_id}: ${initial:.2f}")
             await _populate_gas_spent_usd(

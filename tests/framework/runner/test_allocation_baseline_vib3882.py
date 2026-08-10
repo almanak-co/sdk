@@ -22,7 +22,7 @@ from typing import Any
 
 import pytest
 
-from almanak.framework.portfolio.models import ValueConfidence
+from almanak.framework.portfolio.models import ValueConfidence, decode_baseline_provenance
 
 # ─── Stubs for runner deps that aren't relevant to this baseline test ─────
 
@@ -146,22 +146,21 @@ def test_allocation_property_returns_none_on_garbage_input():
 
 
 @pytest.mark.asyncio
-async def test_baseline_uses_strategy_allocation_when_set(
-    stub_runner: _StubRunner, fresh_snapshot: _StubSnapshot
-):
+async def test_baseline_uses_strategy_allocation_when_set(stub_runner: _StubRunner, fresh_snapshot: _StubSnapshot):
     """The May 2 reproducer: wallet has $19.26, strategy declares $4 →
     baseline must be $4 (allocation), not $19.26 (wallet)."""
     from almanak.framework.runner.runner_state import _build_metrics_for_snapshot
 
     strategy = _make_strategy(total_value_usd="4.0")
-    metrics = await _build_metrics_for_snapshot(
-        stub_runner, "strat-h1", fresh_snapshot, strategy=strategy
-    )
+    metrics = await _build_metrics_for_snapshot(stub_runner, "strat-h1", fresh_snapshot, strategy=strategy)
     assert metrics is not None
     assert metrics.initial_value_usd == Decimal("4.0"), (
-        "VIB-3882: baseline must come from strategy.allocation_usd, "
-        "not snapshot.available_cash_usd"
+        "VIB-3882: baseline must come from strategy.allocation_usd, not snapshot.available_cash_usd"
     )
+    provenance = decode_baseline_provenance(metrics.positions_json)
+    assert provenance is not None
+    assert provenance.source == "strategy_allocation_usd"
+    assert provenance.initial_value_usd == Decimal("4.0")
 
 
 @pytest.mark.asyncio
@@ -173,33 +172,28 @@ async def test_baseline_falls_back_to_wallet_when_allocation_missing(
     from almanak.framework.runner.runner_state import _build_metrics_for_snapshot
 
     strategy = _make_strategy(total_value_usd=None)
-    metrics = await _build_metrics_for_snapshot(
-        stub_runner, "strat-h1", fresh_snapshot, strategy=strategy
-    )
+    metrics = await _build_metrics_for_snapshot(stub_runner, "strat-h1", fresh_snapshot, strategy=strategy)
     assert metrics is not None
     assert metrics.initial_value_usd == Decimal("19.26")
+    provenance = decode_baseline_provenance(metrics.positions_json)
+    assert provenance is not None
+    assert provenance.source == "snapshot_available_cash_usd"
 
 
 @pytest.mark.asyncio
-async def test_baseline_falls_back_when_no_strategy_passed(
-    stub_runner: _StubRunner, fresh_snapshot: _StubSnapshot
-):
+async def test_baseline_falls_back_when_no_strategy_passed(stub_runner: _StubRunner, fresh_snapshot: _StubSnapshot):
     """``strategy=None`` keeps the legacy behaviour for callers that
     don't have a strategy in scope (e.g. ``update_portfolio_metrics``).
     """
     from almanak.framework.runner.runner_state import _build_metrics_for_snapshot
 
-    metrics = await _build_metrics_for_snapshot(
-        stub_runner, "strat-h1", fresh_snapshot, strategy=None
-    )
+    metrics = await _build_metrics_for_snapshot(stub_runner, "strat-h1", fresh_snapshot, strategy=None)
     assert metrics is not None
     assert metrics.initial_value_usd == Decimal("19.26")
 
 
 @pytest.mark.asyncio
-async def test_baseline_allocation_overrides_high_wallet_balance(
-    stub_runner: _StubRunner, value_confidence_high: Any
-):
+async def test_baseline_allocation_overrides_high_wallet_balance(stub_runner: _StubRunner, value_confidence_high: Any):
     """The headline case: shared test wallet pre-funded with $1000;
     strategy declares $4. Baseline = $4."""
     from almanak.framework.runner.runner_state import _build_metrics_for_snapshot
@@ -212,8 +206,6 @@ async def test_baseline_allocation_overrides_high_wallet_balance(
         value_confidence=value_confidence_high,
     )
     strategy = _make_strategy(total_value_usd="4.0")
-    metrics = await _build_metrics_for_snapshot(
-        stub_runner, "strat-h1", snapshot, strategy=strategy
-    )
+    metrics = await _build_metrics_for_snapshot(stub_runner, "strat-h1", snapshot, strategy=strategy)
     assert metrics is not None
     assert metrics.initial_value_usd == Decimal("4.0")

@@ -441,6 +441,11 @@ service StateService {
   // Save or update portfolio metrics (PnL baseline).
   rpc SavePortfolioMetrics(SaveMetricsRequest) returns (SaveMetricsResponse);
 
+  // Version-fenced mutation for a provenance-bearing baseline. Old gateways
+  // do not implement this method and therefore return UNIMPLEMENTED without
+  // entering the legacy SavePortfolioMetrics handler or mutating storage.
+  rpc SavePortfolioMetricsWithProvenance(SaveMetricsRequest) returns (SaveMetricsResponse);
+
   // Get portfolio metrics for a strategy.
   rpc GetPortfolioMetrics(GetMetricsRequest) returns (PortfolioMetricsData);
 
@@ -682,11 +687,18 @@ message SaveMetricsRequest {
   string cycle_id = 8;
   string execution_mode = 9;
   bool is_complete = 10;
+  // Versioned accounting baseline provenance plus any future metrics records.
+  // Optional preserves an existing row when an older strategy container omits it.
+  optional bytes positions_json = 13;
 }
 
 message SaveMetricsResponse {
   bool success = 1;
   string error = 2;
+  // Echo of the metrics records that were durably accepted. A new client
+  // carrying baseline provenance requires this acknowledgement so an old
+  // gateway cannot silently discard an unknown request field.
+  bytes positions_json = 3;
 }
 
 message GetMetricsRequest {
@@ -707,6 +719,11 @@ message PortfolioMetricsData {
   string cycle_id = 10;
   string execution_mode = 11;
   bool is_complete = 12;
+  bytes positions_json = 13;
+  // Read-only capability handshake for immutable baseline provenance. A new
+  // client MUST observe true before sending a provenance-bearing mutation;
+  // old gateways omit the field and therefore fail closed as false.
+  bool baseline_provenance_supported = 14;
 }
 
 // Ledger entry messages (VIB-3201) -- mirrors the LedgerEntry dataclass in

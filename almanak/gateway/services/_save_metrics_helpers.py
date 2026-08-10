@@ -84,6 +84,9 @@ class ParsedMetricsInputs:
     withdrawals_usd: Decimal | None
     gas_spent_usd: Decimal
     timestamp: datetime
+    # ``None`` means an older client omitted the optional field. Persistence
+    # must preserve an existing row in that case rather than erase provenance.
+    positions_json: str | None = None
 
 
 def parse_metrics_inputs(
@@ -136,6 +139,29 @@ def parse_metrics_inputs(
     except (OverflowError, OSError, ValueError) as exc:
         raise MetricsValidationError("initial_timestamp is out of range") from exc
 
+    positions_json: str | None = None
+    if request.HasField("positions_json"):
+        if not request.positions_json:
+            raise MetricsValidationError("positions_json must be a non-empty JSON list")
+        try:
+            positions_json = request.positions_json.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise MetricsValidationError("positions_json must be UTF-8") from exc
+        from almanak.framework.portfolio.models import (
+            BaselineProvenanceError,
+            validate_baseline_provenance_initial_value,
+        )
+
+        try:
+            # The decoder validates the bounded list shape even when the list
+            # contains no provenance marker yet.
+            validate_baseline_provenance_initial_value(
+                positions_json,
+                initial_value_usd=initial_value_usd,
+            )
+        except BaselineProvenanceError as exc:
+            raise MetricsValidationError(str(exc)) from exc
+
     return ParsedMetricsInputs(
         deployment_id=deployment_id,
         initial_value_usd=initial_value_usd,
@@ -143,6 +169,7 @@ def parse_metrics_inputs(
         withdrawals_usd=withdrawals_usd,
         gas_spent_usd=gas_spent_usd,
         timestamp=timestamp,
+        positions_json=positions_json,
     )
 
 
@@ -159,25 +186,113 @@ def parse_metrics_inputs(
 # rows on hosted Postgres. Both columns are now persisted on every UPSERT,
 # matching SQLite parity at sqlite.py:2253.
 PG_UPSERT_QUERY = """
-                    INSERT INTO portfolio_metrics (
-                        deployment_id, initial_value_usd, initial_timestamp,
-                        deposits_usd, withdrawals_usd, gas_spent_usd,
-                        cycle_id, execution_mode, is_complete,
-                        updated_at, total_value_usd, positions_json
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb)
-                    ON CONFLICT (deployment_id) DO UPDATE SET
-                        initial_value_usd = EXCLUDED.initial_value_usd,
-                        initial_timestamp = EXCLUDED.initial_timestamp,
-                        deposits_usd = EXCLUDED.deposits_usd,
-                        withdrawals_usd = EXCLUDED.withdrawals_usd,
-                        gas_spent_usd = EXCLUDED.gas_spent_usd,
-                        cycle_id = EXCLUDED.cycle_id,
-                        execution_mode = EXCLUDED.execution_mode,
-                        is_complete = EXCLUDED.is_complete,
-                        updated_at = EXCLUDED.updated_at,
-                        total_value_usd = EXCLUDED.total_value_usd,
-                        positions_json = EXCLUDED.positions_json
-                    RETURNING deployment_id
+                    WITH legacy_update AS (
+                        UPDATE portfolio_metrics SET
+                            initial_timestamp = $3,
+                            deposits_usd = $4,
+                            withdrawals_usd = $5,
+                            gas_spent_usd = $6,
+                            cycle_id = $7,
+                            execution_mode = $8,
+                            is_complete = $9,
+                            updated_at = $10,
+                            total_value_usd = $11
+                        WHERE deployment_id = $1
+                          AND $12::jsonb IS NULL
+                          AND initial_value_usd::numeric = $2::numeric
+                        RETURNING deployment_id, positions_json::text AS positions_json
+                    -- Current clients serialize the complete legacy list even
+                    -- when it has no provenance marker. Keep those hosted rows
+                    -- writable without granting this shape insert or seal-
+                    -- mutation authority.
+                    ), markerless_update AS (
+                        UPDATE portfolio_metrics SET
+                            initial_timestamp = $3,
+                            deposits_usd = $4,
+                            withdrawals_usd = $5,
+                            gas_spent_usd = $6,
+                            cycle_id = $7,
+                            execution_mode = $8,
+                            is_complete = $9,
+                            updated_at = $10,
+                            total_value_usd = $11,
+                            positions_json = $12::jsonb
+                        WHERE deployment_id = $1
+                          AND $12::jsonb IS NOT NULL
+                          AND initial_value_usd::numeric = $2::numeric
+                          AND jsonb_array_length(jsonb_path_query_array(
+                                positions_json,
+                                '$[*] ? (@.record_type == "accounting_baseline_provenance")'
+                              )) = 0
+                          AND jsonb_array_length(jsonb_path_query_array(
+                                $12::jsonb,
+                                '$[*] ? (@.record_type == "accounting_baseline_provenance")'
+                              )) = 0
+                        RETURNING deployment_id, positions_json::text AS positions_json
+                    ), sealed_upsert AS (
+                        INSERT INTO portfolio_metrics (
+                            deployment_id, initial_value_usd, initial_timestamp,
+                            deposits_usd, withdrawals_usd, gas_spent_usd,
+                            cycle_id, execution_mode, is_complete,
+                            updated_at, total_value_usd, positions_json
+                        ) SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+                                 $12::jsonb
+                        -- Old-client omission may update an established legacy
+                        -- row above, but can never create a new unproven row.
+                        WHERE $12::jsonb IS NOT NULL
+                          AND jsonb_array_length(jsonb_path_query_array(
+                                $12::jsonb,
+                                '$[*] ? (@.record_type == "accounting_baseline_provenance")'
+                              )) = 1
+                        ON CONFLICT (deployment_id) DO UPDATE SET
+                            initial_value_usd = portfolio_metrics.initial_value_usd,
+                            initial_timestamp = EXCLUDED.initial_timestamp,
+                            deposits_usd = EXCLUDED.deposits_usd,
+                            withdrawals_usd = EXCLUDED.withdrawals_usd,
+                            gas_spent_usd = EXCLUDED.gas_spent_usd,
+                            cycle_id = EXCLUDED.cycle_id,
+                            execution_mode = EXCLUDED.execution_mode,
+                            is_complete = EXCLUDED.is_complete,
+                            updated_at = EXCLUDED.updated_at,
+                            total_value_usd = EXCLUDED.total_value_usd,
+                            positions_json = EXCLUDED.positions_json
+                        WHERE portfolio_metrics.initial_value_usd::numeric = $2::numeric
+                          AND (
+                                (
+                                    jsonb_array_length(jsonb_path_query_array(
+                                        portfolio_metrics.positions_json,
+                                        '$[*] ? (@.record_type == "accounting_baseline_provenance")'
+                                    )) = 0
+                                    AND jsonb_array_length(jsonb_path_query_array(
+                                        $12::jsonb,
+                                        '$[*] ? (@.record_type == "accounting_baseline_provenance")'
+                                    )) = 0
+                                )
+                                OR (
+                                    jsonb_array_length(jsonb_path_query_array(
+                                        portfolio_metrics.positions_json,
+                                        '$[*] ? (@.record_type == "accounting_baseline_provenance")'
+                                    )) = 1
+                                    AND jsonb_array_length(jsonb_path_query_array(
+                                        $12::jsonb,
+                                        '$[*] ? (@.record_type == "accounting_baseline_provenance")'
+                                    )) = 1
+                                    AND jsonb_path_query_first(
+                                        portfolio_metrics.positions_json,
+                                        '$[*] ? (@.record_type == "accounting_baseline_provenance")'
+                                    ) = jsonb_path_query_first(
+                                        $12::jsonb,
+                                        '$[*] ? (@.record_type == "accounting_baseline_provenance")'
+                                    )
+                                )
+                          )
+                        RETURNING deployment_id, positions_json::text AS positions_json
+                    )
+                    SELECT deployment_id, positions_json FROM legacy_update
+                    UNION ALL
+                    SELECT deployment_id, positions_json FROM markerless_update
+                    UNION ALL
+                    SELECT deployment_id, positions_json FROM sealed_upsert
                     """
 
 
@@ -187,7 +302,6 @@ def build_pg_upsert_args(
     execution_mode: RunModeStamp,
     now: datetime,
     total_value_usd: Decimal | None,
-    positions_json: str = "[]",
 ) -> tuple[Any, ...]:
     """Build the positional args tuple for the portfolio_metrics UPSERT.
 
@@ -203,13 +317,26 @@ def build_pg_upsert_args(
 
     ``total_value_usd`` is sourced from the latest snapshot via
     :func:`resolve_total_value_usd` — the proto contract (VIB-2765) does not
-    carry it on the wire, mirroring the SQLite path. ``positions_json``
-    defaults to ``"[]"`` because the RPC contract does not carry positions
-    either; the SQLite path also writes ``"[]"`` (the SaveMetrics request
-    doesn't carry positions; ``PortfolioMetrics.positions_json`` defaults to
-    ``"[]"`` and SQLite's writer pulls it via ``getattr``).
+    carry it on the wire, mirroring the SQLite path. ``positions_json`` is the
+    validated optional request payload. ``None`` deliberately reaches the SQL
+    statement so an older client preserves an existing legacy record on
+    update. A present markerless list from the current SDK may replace only an
+    existing markerless row with the same initial value. Neither markerless
+    shape can insert a row or touch a sealed row.
     """
-    from almanak.framework.portfolio.models import encode_optional_decimal_text, encode_optional_flow
+    from almanak.framework.portfolio.models import (
+        encode_optional_decimal_text,
+        encode_optional_flow,
+        validate_baseline_provenance_initial_value,
+    )
+
+    if inputs.positions_json is not None:
+        # Persistence-layer defense: callers constructing ParsedMetricsInputs
+        # directly cannot bypass the gateway ingress invariant.
+        validate_baseline_provenance_initial_value(
+            inputs.positions_json,
+            initial_value_usd=inputs.initial_value_usd,
+        )
 
     return (
         inputs.deployment_id,
@@ -224,7 +351,7 @@ def build_pg_upsert_args(
         request.is_complete,
         now,
         encode_optional_decimal_text(total_value_usd, field_name="portfolio total_value_usd"),
-        positions_json,
+        inputs.positions_json,
     )
 
 
@@ -271,6 +398,7 @@ def build_portfolio_metrics(
     request: gateway_pb2.SaveMetricsRequest,
     execution_mode: RunModeStamp,
     total_value_usd: Decimal | None,
+    positions_json: str,
 ) -> PortfolioMetrics:
     """Build a ``PortfolioMetrics`` for the warm backend save path.
 
@@ -296,4 +424,27 @@ def build_portfolio_metrics(
         cycle_id=request.cycle_id or None,
         execution_mode=execution_mode,
         is_complete=request.is_complete,
+        positions_json=positions_json,
     )
+
+
+async def resolve_metrics_positions_json(
+    warm_backend: Any,
+    deployment_id: str,
+    incoming: str | None,
+) -> str:
+    """Preserve an existing row on omission; refuse an unproven first write."""
+    from almanak.framework.portfolio.models import BaselineProvenanceError, decode_baseline_provenance
+
+    if incoming is not None and decode_baseline_provenance(incoming) is not None:
+        return incoming
+    if warm_backend and hasattr(warm_backend, "get_portfolio_metrics"):
+        existing = await warm_backend.get_portfolio_metrics(deployment_id)
+        if existing is not None:
+            if incoming is not None:
+                return incoming
+            existing_json = getattr(existing, "positions_json", "[]")
+            if isinstance(existing_json, str) and existing_json:
+                return existing_json
+
+    raise BaselineProvenanceError("baseline provenance is required when establishing a new portfolio_metrics row")

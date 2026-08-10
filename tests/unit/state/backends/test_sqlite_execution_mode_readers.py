@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -13,7 +15,13 @@ import pytest_asyncio
 
 from almanak.framework.models.run_mode import RunMode, RunModeStamp
 from almanak.framework.observability.ledger import LedgerEntry
-from almanak.framework.portfolio.models import PortfolioMetrics
+from almanak.framework.portfolio.models import (
+    BaselineProvenance,
+    BaselineProvenanceError,
+    PortfolioMetrics,
+    decode_baseline_provenance,
+    encode_baseline_provenance,
+)
 from almanak.framework.state.backends.sqlite import SQLiteConfig, SQLiteStore
 
 
@@ -51,6 +59,9 @@ async def test_portfolio_metrics_reader_parses_persisted_modes(
         timestamp=datetime(2026, 7, 31, tzinfo=UTC),
         total_value_usd=Decimal("10"),
         initial_value_usd=Decimal("10"),
+        positions_json=encode_baseline_provenance(
+            BaselineProvenance(source="strategy_allocation_usd", initial_value_usd=Decimal("10"))
+        ),
     )
     assert await store.save_portfolio_metrics(metrics) is True
     store._conn.execute(  # type: ignore[union-attr]
@@ -63,6 +74,232 @@ async def test_portfolio_metrics_reader_parses_persisted_modes(
 
     assert loaded is not None
     _assert_mode(loaded.execution_mode, expected)
+
+
+@pytest.mark.asyncio
+async def test_portfolio_metrics_provenance_round_trips_in_same_sqlite_row(store: SQLiteStore) -> None:
+    payload = (
+        '[{"initial_value_usd":"4","record_type":"accounting_baseline_provenance",'
+        '"schema_version":1,"source":"strategy_allocation_usd"}]'
+    )
+    metrics = PortfolioMetrics(
+        deployment_id="deployment:metricsprovenance1",
+        timestamp=datetime(2026, 8, 9, tzinfo=UTC),
+        total_value_usd=Decimal("4"),
+        initial_value_usd=Decimal("4"),
+        positions_json=payload,
+    )
+
+    assert await store.save_portfolio_metrics(metrics) is True
+    loaded = await store.get_portfolio_metrics(metrics.deployment_id)
+
+    assert loaded is not None
+    assert loaded.initial_value_usd == Decimal("4")
+    assert loaded.positions_json == payload
+
+
+@pytest.mark.asyncio
+async def test_portfolio_metrics_provenance_is_write_once_in_sqlite(store: SQLiteStore) -> None:
+    payload = (
+        '[{"initial_value_usd":"4","record_type":"accounting_baseline_provenance",'
+        '"schema_version":1,"source":"strategy_allocation_usd"}]'
+    )
+    established = PortfolioMetrics(
+        deployment_id="deployment:metricsimmutable1",
+        timestamp=datetime(2026, 8, 9, tzinfo=UTC),
+        total_value_usd=Decimal("4"),
+        initial_value_usd=Decimal("4"),
+        positions_json=payload,
+    )
+    assert await store.save_portfolio_metrics(established) is True
+
+    with pytest.raises(BaselineProvenanceError, match="cannot be removed or replaced"):
+        await store.save_portfolio_metrics(
+            PortfolioMetrics(
+                deployment_id=established.deployment_id,
+                timestamp=established.timestamp,
+                total_value_usd=Decimal("4"),
+                initial_value_usd=Decimal("4"),
+                positions_json="[]",
+            )
+        )
+    with pytest.raises(BaselineProvenanceError, match="initial_value_usd"):
+        await store.save_portfolio_metrics(
+            PortfolioMetrics(
+                deployment_id=established.deployment_id,
+                timestamp=established.timestamp,
+                total_value_usd=Decimal("5"),
+                initial_value_usd=Decimal("5"),
+                positions_json=payload,
+            )
+        )
+
+    loaded = await store.get_portfolio_metrics(established.deployment_id)
+    assert loaded is not None
+    assert loaded.initial_value_usd == Decimal("4")
+    assert loaded.positions_json == payload
+
+
+@pytest.mark.asyncio
+async def test_legacy_sqlite_baseline_remains_immutable_and_unproven(store: SQLiteStore) -> None:
+    """A pre-existing legacy row remains updateable but cannot be backfilled."""
+    deployment_id = "deployment:legacybaseline1"
+    timestamp = datetime(2026, 8, 9, tzinfo=UTC)
+    store._conn.execute(  # type: ignore[union-attr]
+        """
+        INSERT INTO portfolio_metrics (
+            deployment_id, initial_value_usd, initial_timestamp,
+            total_value_usd, positions_json, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (deployment_id, "4", timestamp.isoformat(), "4", "[]", timestamp.isoformat()),
+    )
+    store._conn.commit()  # type: ignore[union-attr]
+
+    legacy_update = PortfolioMetrics(
+        deployment_id=deployment_id,
+        timestamp=timestamp,
+        total_value_usd=Decimal("4"),
+        initial_value_usd=Decimal("4"),
+        positions_json="[]",
+    )
+    assert await store.save_portfolio_metrics(legacy_update) is True
+
+    provenance = encode_baseline_provenance(
+        BaselineProvenance(source="strategy_allocation_usd", initial_value_usd=Decimal("4"))
+    )
+    with pytest.raises(BaselineProvenanceError, match="cannot be backfilled"):
+        await store.save_portfolio_metrics(
+            PortfolioMetrics(
+                deployment_id=deployment_id,
+                timestamp=timestamp,
+                total_value_usd=Decimal("4"),
+                initial_value_usd=Decimal("4"),
+                positions_json=provenance,
+            )
+        )
+
+    loaded = await store.get_portfolio_metrics(deployment_id)
+    assert loaded is not None
+    assert loaded.initial_value_usd == Decimal("4")
+    assert decode_baseline_provenance(loaded.positions_json) is None
+
+
+@pytest.mark.asyncio
+async def test_direct_sqlite_rejects_markerless_first_row_without_mutation(store: SQLiteStore) -> None:
+    markerless = PortfolioMetrics(
+        deployment_id="deployment:markerless-first",
+        timestamp=datetime(2026, 8, 9, tzinfo=UTC),
+        total_value_usd=Decimal("4"),
+        initial_value_usd=Decimal("4"),
+        positions_json="[]",
+    )
+
+    with pytest.raises(BaselineProvenanceError, match="required when establishing"):
+        await store.save_portfolio_metrics(markerless)
+
+    assert await store.get_portfolio_metrics(markerless.deployment_id) is None
+
+
+@pytest.mark.asyncio
+async def test_sqlite_refuses_contradictory_provenance_on_first_write(store: SQLiteStore) -> None:
+    contradictory = PortfolioMetrics(
+        deployment_id="deployment:contradictory-first-write",
+        timestamp=datetime(2026, 8, 9, tzinfo=UTC),
+        total_value_usd=Decimal("4"),
+        initial_value_usd=Decimal("4"),
+        positions_json=encode_baseline_provenance(
+            BaselineProvenance(source="strategy_allocation_usd", initial_value_usd=Decimal("5"))
+        ),
+    )
+
+    with pytest.raises(BaselineProvenanceError, match="must equal metrics initial_value_usd"):
+        await store.save_portfolio_metrics(contradictory)
+    assert await store.get_portfolio_metrics(contradictory.deployment_id) is None
+
+
+@pytest.mark.asyncio
+async def test_sqlite_refuses_lexically_different_provenance_rewrite(store: SQLiteStore) -> None:
+    deployment_id = "deployment:exact-provenance-object"
+
+    def metrics(value_text: str) -> PortfolioMetrics:
+        return PortfolioMetrics(
+            deployment_id=deployment_id,
+            timestamp=datetime(2026, 8, 9, tzinfo=UTC),
+            total_value_usd=Decimal("4"),
+            initial_value_usd=Decimal("4"),
+            positions_json=encode_baseline_provenance(
+                BaselineProvenance(
+                    source="strategy_allocation_usd",
+                    initial_value_usd=Decimal(value_text),
+                )
+            ),
+        )
+
+    assert await store.save_portfolio_metrics(metrics("4.00")) is True
+    with pytest.raises(BaselineProvenanceError, match="cannot be removed or replaced"):
+        await store.save_portfolio_metrics(metrics("4"))
+
+    loaded = await store.get_portfolio_metrics(deployment_id)
+    assert loaded is not None
+    assert '"initial_value_usd":"4.00"' in loaded.positions_json
+
+
+@pytest.mark.asyncio
+async def test_concurrent_sqlite_baseline_creation_has_exactly_one_winner(tmp_path, monkeypatch) -> None:
+    """Validation and write are one transaction, including across store instances."""
+    db_path = tmp_path / "baseline-race.sqlite"
+    stores = [SQLiteStore(SQLiteConfig(db_path=str(db_path))) for _ in range(2)]
+    for sqlite_store in stores:
+        await sqlite_store.initialize()
+
+    # Force both pre-fix SELECTs to finish before either INSERT. With the fixed
+    # BEGIN IMMEDIATE boundary, the second store cannot reach validation until
+    # the first commits; the timeout keeps that correct serialization live.
+    from almanak.framework.state.backends import sqlite as sqlite_module
+
+    original_validate = sqlite_module._validated_metrics_positions_json
+    barrier = threading.Barrier(2)
+
+    def synchronized_validate(conn, metrics):
+        result = original_validate(conn, metrics)
+        try:
+            barrier.wait(timeout=0.25)
+        except threading.BrokenBarrierError:
+            pass
+        return result
+
+    monkeypatch.setattr(sqlite_module, "_validated_metrics_positions_json", synchronized_validate)
+
+    def candidate(value: str) -> PortfolioMetrics:
+        return PortfolioMetrics(
+            deployment_id="deployment:baseline-race",
+            timestamp=datetime(2026, 8, 9, tzinfo=UTC),
+            total_value_usd=Decimal(value),
+            initial_value_usd=Decimal(value),
+            positions_json=encode_baseline_provenance(
+                BaselineProvenance(source="strategy_allocation_usd", initial_value_usd=Decimal(value))
+            ),
+        )
+
+    try:
+        outcomes = await asyncio.gather(
+            stores[0].save_portfolio_metrics(candidate("4")),
+            stores[1].save_portfolio_metrics(candidate("5")),
+            return_exceptions=True,
+        )
+        assert sum(outcome is True for outcome in outcomes) == 1
+        errors = [outcome for outcome in outcomes if isinstance(outcome, BaselineProvenanceError)]
+        assert len(errors) == 1
+
+        loaded = await stores[0].get_portfolio_metrics("deployment:baseline-race")
+        assert loaded is not None
+        provenance = decode_baseline_provenance(loaded.positions_json)
+        assert provenance is not None
+        assert provenance.initial_value_usd == loaded.initial_value_usd
+    finally:
+        for sqlite_store in stores:
+            await sqlite_store.close()
 
 
 @pytest.mark.asyncio
@@ -102,6 +339,9 @@ async def test_persisted_invalid_mode_is_rejected(store: SQLiteStore, reader: st
             timestamp=datetime(2026, 7, 31, tzinfo=UTC),
             total_value_usd=Decimal("10"),
             initial_value_usd=Decimal("10"),
+            positions_json=encode_baseline_provenance(
+                BaselineProvenance(source="strategy_allocation_usd", initial_value_usd=Decimal("10"))
+            ),
         )
         assert await store.save_portfolio_metrics(metrics) is True
         store._conn.execute(  # type: ignore[union-attr]

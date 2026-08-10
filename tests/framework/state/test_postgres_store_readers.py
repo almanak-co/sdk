@@ -1221,10 +1221,34 @@ def test_pg_upsert_query_includes_total_value_and_positions_columns():
     # INSERT column list must include both fields.
     assert "total_value_usd" in PG_UPSERT_QUERY
     assert "positions_json" in PG_UPSERT_QUERY
-    # On UPDATE conflict path, both must also be refreshed (otherwise the
-    # second row a strategy ever writes still loses the value).
+    # The provenance-aware conflict path refreshes both fields. The separate
+    # old-client branch deliberately omits a positions_json assignment so an
+    # omitted optional field can preserve, but never create or rewrite, the
+    # established authority.
     assert "total_value_usd = EXCLUDED.total_value_usd" in PG_UPSERT_QUERY
     assert "positions_json = EXCLUDED.positions_json" in PG_UPSERT_QUERY
+    legacy_update = PG_UPSERT_QUERY.split("), markerless_update AS (", maxsplit=1)[0]
+    assert "positions_json =" not in legacy_update
+    assert "AND $12::jsonb IS NULL" in legacy_update
+    markerless_update = PG_UPSERT_QUERY.split("), markerless_update AS (", maxsplit=1)[1].split(
+        "), sealed_upsert AS (", maxsplit=1
+    )[0]
+    assert "positions_json = $12::jsonb" in markerless_update
+    assert "initial_value_usd::numeric = $2::numeric" in markerless_update
+    assert markerless_update.count("accounting_baseline_provenance") == 2
+    assert markerless_update.count(")) = 0") == 2
+    assert "WHERE $12::jsonb IS NOT NULL" in PG_UPSERT_QUERY
+    first_insert = PG_UPSERT_QUERY.split("ON CONFLICT", maxsplit=1)[0]
+    assert "accounting_baseline_provenance" in first_insert
+    assert ")) = 1" in first_insert
+    # Once a marker exists, the conflict arm only updates when both the
+    # baseline value and marker agree. A missing optional payload may preserve,
+    # but never rewrite, the established authority.
+    assert "jsonb_path_query_array" in PG_UPSERT_QUERY
+    assert "portfolio_metrics.initial_value_usd::numeric = $2::numeric" in PG_UPSERT_QUERY
+    assert "jsonb_path_query_first" in PG_UPSERT_QUERY
+    assert "initial_value_usd = portfolio_metrics.initial_value_usd" in PG_UPSERT_QUERY
+    assert "RETURNING deployment_id, positions_json::text AS positions_json" in PG_UPSERT_QUERY
 
 
 def test_build_pg_upsert_args_appends_total_value_and_positions():
@@ -1254,11 +1278,79 @@ def test_build_pg_upsert_args_appends_total_value_and_positions():
     assert len(args) == 12
     assert args[0] == _DEPLOYMENT_ID  # deployment_id column (canonical wire id)
     assert args[10] == "12345.67"  # total_value_usd
-    assert args[11] == "[]"  # positions_json default
+    assert args[11] is None  # omitted older-client field preserves existing row
 
-    # Override positions_json explicitly.
-    args2 = build_pg_upsert_args(inputs, request, RunMode.PAPER, now, Decimal("0"), positions_json='[{"x":1}]')
+    # Validated explicit positions_json is carried by ParsedMetricsInputs.
+    inputs2 = ParsedMetricsInputs(
+        deployment_id=_DEPLOYMENT_ID,
+        initial_value_usd=Decimal("100"),
+        deposits_usd=Decimal("0"),
+        withdrawals_usd=Decimal("0"),
+        gas_spent_usd=Decimal("0"),
+        timestamp=datetime(2026, 5, 1, tzinfo=UTC),
+        positions_json='[{"x":1}]',
+    )
+    args2 = build_pg_upsert_args(inputs2, request, RunMode.PAPER, now, Decimal("0"))
     assert args2[11] == '[{"x":1}]'
+
+
+def test_build_pg_upsert_args_refuses_contradictory_first_write_provenance():
+    """The hosted persistence packer independently enforces baseline equality."""
+    from almanak.framework.portfolio.models import BaselineProvenanceError
+    from almanak.gateway.proto import gateway_pb2
+    from almanak.gateway.services._save_metrics_helpers import ParsedMetricsInputs, build_pg_upsert_args
+
+    inputs = ParsedMetricsInputs(
+        deployment_id=_DEPLOYMENT_ID,
+        initial_value_usd=Decimal("4"),
+        deposits_usd=Decimal("0"),
+        withdrawals_usd=Decimal("0"),
+        gas_spent_usd=Decimal("0"),
+        timestamp=datetime(2026, 5, 1, tzinfo=UTC),
+        positions_json=(
+            '[{"initial_value_usd":"5","record_type":"accounting_baseline_provenance",'
+            '"schema_version":1,"source":"strategy_allocation_usd"}]'
+        ),
+    )
+
+    with pytest.raises(BaselineProvenanceError, match="must equal metrics initial_value_usd"):
+        build_pg_upsert_args(
+            inputs,
+            gateway_pb2.SaveMetricsRequest(),
+            RunMode.PAPER,
+            datetime(2026, 5, 4, tzinfo=UTC),
+            Decimal("4"),
+        )
+
+
+def test_build_pg_upsert_args_rejects_noncanonical_provenance_schema():
+    """Hosted persistence rejects v1 marker extensions before binding JSONB."""
+    from almanak.framework.portfolio.models import BaselineProvenanceError
+    from almanak.gateway.proto import gateway_pb2
+    from almanak.gateway.services._save_metrics_helpers import ParsedMetricsInputs, build_pg_upsert_args
+
+    inputs = ParsedMetricsInputs(
+        deployment_id=_DEPLOYMENT_ID,
+        initial_value_usd=Decimal("4"),
+        deposits_usd=Decimal("0"),
+        withdrawals_usd=Decimal("0"),
+        gas_spent_usd=Decimal("0"),
+        timestamp=datetime(2026, 5, 1, tzinfo=UTC),
+        positions_json=(
+            '[{"initial_value_usd":"4","note":"sealed",'
+            '"record_type":"accounting_baseline_provenance",'
+            '"schema_version":1,"source":"strategy_allocation_usd"}]'
+        ),
+    )
+
+    with pytest.raises(BaselineProvenanceError, match="unknown fields: note"):
+        build_pg_upsert_args(
+            inputs,
+            gateway_pb2.SaveMetricsRequest(),
+            RunMode.PAPER,
+            datetime(2026, 5, 4, tzinfo=UTC),
+            Decimal("4"),
+        )
 
 
 # =============================================================================

@@ -515,9 +515,40 @@ class GatewayStateManager:
         Returns:
             True if save succeeded.
         """
-        from almanak.framework.portfolio.models import encode_optional_flow
+        from almanak.framework.portfolio.models import (
+            canonicalize_metrics_positions_json,
+            decode_baseline_provenance,
+            encode_optional_flow,
+            validate_baseline_provenance_initial_value,
+        )
 
         try:
+            positions_json = getattr(metrics, "positions_json", "[]") or "[]"
+            # Strategy-container boundary: reject oversized/malformed payloads
+            # before transport. The gateway repeats the same validation because
+            # it cannot trust every caller to be this SDK version.
+            provenance = validate_baseline_provenance_initial_value(
+                positions_json,
+                initial_value_usd=metrics.initial_value_usd,
+            )
+            if provenance is not None:
+                # This read-only handshake must happen before SavePortfolioMetrics.
+                # An old gateway ignores the additive positions_json request field
+                # and can otherwise commit an irreversible legacy baseline before
+                # its empty save response exposes the version skew.
+                capability = self._client.state.GetPortfolioMetrics(
+                    gateway_pb2.GetMetricsRequest(deployment_id=metrics.deployment_id),
+                    timeout=self._timeout,
+                )
+                if not capability.baseline_provenance_supported:
+                    raise AccountingPersistenceError(
+                        write_kind=AccountingWriteKind.METRICS,
+                        deployment_id=metrics.deployment_id,
+                        message=(
+                            "gateway does not support immutable accounting baseline provenance; "
+                            "refusing the metrics write before mutation"
+                        ),
+                    )
             request = gateway_pb2.SaveMetricsRequest(
                 initial_value_usd=str(metrics.initial_value_usd),
                 initial_timestamp=int(metrics.timestamp.timestamp()),
@@ -531,8 +562,14 @@ class GatewayStateManager:
                 cycle_id=getattr(metrics, "cycle_id", "") or "",
                 execution_mode=getattr(metrics, "execution_mode", "") or "",
                 is_complete=getattr(metrics, "is_complete", True),
+                positions_json=positions_json.encode("utf-8"),
             )
-            response = self._client.state.SavePortfolioMetrics(request, timeout=self._timeout)
+            save_rpc = (
+                self._client.state.SavePortfolioMetricsWithProvenance
+                if provenance is not None
+                else self._client.state.SavePortfolioMetrics
+            )
+            response = save_rpc(request, timeout=self._timeout)
 
             if not response.success:
                 # VIB-3157: mirror save_portfolio_snapshot -- silent False returns caused
@@ -543,6 +580,37 @@ class GatewayStateManager:
                     deployment_id=metrics.deployment_id,
                     message=f"SavePortfolioMetrics failed: {response.error}",
                 )
+            if provenance is not None:
+                if not response.positions_json:
+                    raise AccountingPersistenceError(
+                        write_kind=AccountingWriteKind.METRICS,
+                        deployment_id=metrics.deployment_id,
+                        message="gateway did not acknowledge persisted accounting baseline provenance",
+                    )
+                try:
+                    acknowledged_json = response.positions_json.decode("utf-8")
+                    acknowledged = decode_baseline_provenance(acknowledged_json)
+                except (UnicodeDecodeError, ValueError) as exc:
+                    raise AccountingPersistenceError(
+                        write_kind=AccountingWriteKind.METRICS,
+                        deployment_id=metrics.deployment_id,
+                        message="gateway returned an invalid accounting baseline provenance acknowledgement",
+                        cause=exc,
+                    ) from exc
+                if acknowledged != provenance:
+                    raise AccountingPersistenceError(
+                        write_kind=AccountingWriteKind.METRICS,
+                        deployment_id=metrics.deployment_id,
+                        message="gateway accounting baseline provenance acknowledgement does not match the request",
+                    )
+                if canonicalize_metrics_positions_json(acknowledged_json) != canonicalize_metrics_positions_json(
+                    positions_json
+                ):
+                    raise AccountingPersistenceError(
+                        write_kind=AccountingWriteKind.METRICS,
+                        deployment_id=metrics.deployment_id,
+                        message="gateway metrics-record acknowledgement does not match the complete request",
+                    )
 
             logger.debug("Portfolio metrics saved via gateway for strategy=%s", metrics.deployment_id)
             return True
@@ -619,6 +687,7 @@ class GatewayStateManager:
                 cycle_id=response.cycle_id or "",
                 execution_mode=RunMode.parse_optional(response.execution_mode),
                 is_complete=response.is_complete,
+                positions_json=response.positions_json.decode("utf-8") if response.positions_json else "[]",
             )
         except Exception as e:
             logger.debug("Failed to get portfolio metrics via gateway: %s", e)

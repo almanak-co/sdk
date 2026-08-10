@@ -1723,6 +1723,7 @@ class SaveMetricsRequest(_message.Message):
     CYCLE_ID_FIELD_NUMBER: _builtins.int
     EXECUTION_MODE_FIELD_NUMBER: _builtins.int
     IS_COMPLETE_FIELD_NUMBER: _builtins.int
+    POSITIONS_JSON_FIELD_NUMBER: _builtins.int
     initial_value_usd: _builtins.str
     initial_timestamp: _builtins.int
     """Unix epoch seconds"""
@@ -1734,6 +1735,10 @@ class SaveMetricsRequest(_message.Message):
     cycle_id: _builtins.str
     execution_mode: _builtins.str
     is_complete: _builtins.bool
+    positions_json: _builtins.bytes
+    """Versioned accounting baseline provenance plus any future metrics records.
+    Optional preserves an existing row when an older strategy container omits it.
+    """
     def __init__(
         self,
         *,
@@ -1746,9 +1751,15 @@ class SaveMetricsRequest(_message.Message):
         cycle_id: _builtins.str = ...,
         execution_mode: _builtins.str = ...,
         is_complete: _builtins.bool = ...,
+        positions_json: _builtins.bytes | None = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "deposits_usd", b"deposits_usd", "execution_mode", b"execution_mode", "gas_spent_usd", b"gas_spent_usd", "initial_timestamp", b"initial_timestamp", "initial_value_usd", b"initial_value_usd", "is_complete", b"is_complete", "withdrawals_usd", b"withdrawals_usd"]  # noqa: Y015
+    _HasFieldArgType: _TypeAlias = _typing.Literal["_positions_json", b"_positions_json", "positions_json", b"positions_json"]  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["_positions_json", b"_positions_json", "cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "deposits_usd", b"deposits_usd", "execution_mode", b"execution_mode", "gas_spent_usd", b"gas_spent_usd", "initial_timestamp", b"initial_timestamp", "initial_value_usd", b"initial_value_usd", "is_complete", b"is_complete", "positions_json", b"positions_json", "withdrawals_usd", b"withdrawals_usd"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+    _WhichOneofReturnType__positions_json: _TypeAlias = _typing.Literal["positions_json"]  # noqa: Y015
+    _WhichOneofArgType__positions_json: _TypeAlias = _typing.Literal["_positions_json", b"_positions_json"]  # noqa: Y015
+    def WhichOneof(self, oneof_group: _WhichOneofArgType__positions_json) -> _WhichOneofReturnType__positions_json | None: ...
 
 Global___SaveMetricsRequest: _TypeAlias = SaveMetricsRequest  # noqa: Y015
 
@@ -1758,15 +1769,22 @@ class SaveMetricsResponse(_message.Message):
 
     SUCCESS_FIELD_NUMBER: _builtins.int
     ERROR_FIELD_NUMBER: _builtins.int
+    POSITIONS_JSON_FIELD_NUMBER: _builtins.int
     success: _builtins.bool
     error: _builtins.str
+    positions_json: _builtins.bytes
+    """Echo of the metrics records that were durably accepted. A new client
+    carrying baseline provenance requires this acknowledgement so an old
+    gateway cannot silently discard an unknown request field.
+    """
     def __init__(
         self,
         *,
         success: _builtins.bool = ...,
         error: _builtins.str = ...,
+        positions_json: _builtins.bytes = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "success", b"success"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "positions_json", b"positions_json", "success", b"success"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___SaveMetricsResponse: _TypeAlias = SaveMetricsResponse  # noqa: Y015
@@ -1802,6 +1820,8 @@ class PortfolioMetricsData(_message.Message):
     CYCLE_ID_FIELD_NUMBER: _builtins.int
     EXECUTION_MODE_FIELD_NUMBER: _builtins.int
     IS_COMPLETE_FIELD_NUMBER: _builtins.int
+    POSITIONS_JSON_FIELD_NUMBER: _builtins.int
+    BASELINE_PROVENANCE_SUPPORTED_FIELD_NUMBER: _builtins.int
     initial_value_usd: _builtins.str
     initial_timestamp: _builtins.int
     deposits_usd: _builtins.str
@@ -1814,6 +1834,12 @@ class PortfolioMetricsData(_message.Message):
     cycle_id: _builtins.str
     execution_mode: _builtins.str
     is_complete: _builtins.bool
+    positions_json: _builtins.bytes
+    baseline_provenance_supported: _builtins.bool
+    """Read-only capability handshake for immutable baseline provenance. A new
+    client MUST observe true before sending a provenance-bearing mutation;
+    old gateways omit the field and therefore fail closed as false.
+    """
     def __init__(
         self,
         *,
@@ -1828,8 +1854,10 @@ class PortfolioMetricsData(_message.Message):
         cycle_id: _builtins.str = ...,
         execution_mode: _builtins.str = ...,
         is_complete: _builtins.bool = ...,
+        positions_json: _builtins.bytes = ...,
+        baseline_provenance_supported: _builtins.bool = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "deposits_usd", b"deposits_usd", "execution_mode", b"execution_mode", "found", b"found", "gas_spent_usd", b"gas_spent_usd", "initial_timestamp", b"initial_timestamp", "initial_value_usd", b"initial_value_usd", "is_complete", b"is_complete", "updated_at", b"updated_at", "withdrawals_usd", b"withdrawals_usd"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["baseline_provenance_supported", b"baseline_provenance_supported", "cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "deposits_usd", b"deposits_usd", "execution_mode", b"execution_mode", "found", b"found", "gas_spent_usd", b"gas_spent_usd", "initial_timestamp", b"initial_timestamp", "initial_value_usd", b"initial_value_usd", "is_complete", b"is_complete", "positions_json", b"positions_json", "updated_at", b"updated_at", "withdrawals_usd", b"withdrawals_usd"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___PortfolioMetricsData: _TypeAlias = PortfolioMetricsData  # noqa: Y015

@@ -728,6 +728,11 @@ class StateServiceStub(object):
                 request_serializer=gateway__pb2.SaveMetricsRequest.SerializeToString,
                 response_deserializer=gateway__pb2.SaveMetricsResponse.FromString,
                 _registered_method=True)
+        self.SavePortfolioMetricsWithProvenance = channel.unary_unary(
+                '/almanak.gateway.proto.StateService/SavePortfolioMetricsWithProvenance',
+                request_serializer=gateway__pb2.SaveMetricsRequest.SerializeToString,
+                response_deserializer=gateway__pb2.SaveMetricsResponse.FromString,
+                _registered_method=True)
         self.GetPortfolioMetrics = channel.unary_unary(
                 '/almanak.gateway.proto.StateService/GetPortfolioMetrics',
                 request_serializer=gateway__pb2.GetMetricsRequest.SerializeToString,
@@ -896,6 +901,15 @@ class StateServiceServicer(object):
 
     def SavePortfolioMetrics(self, request, context):
         """Save or update portfolio metrics (PnL baseline).
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def SavePortfolioMetricsWithProvenance(self, request, context):
+        """Version-fenced mutation for a provenance-bearing baseline. Old gateways
+        do not implement this method and therefore return UNIMPLEMENTED without
+        entering the legacy SavePortfolioMetrics handler or mutating storage.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -1172,6 +1186,11 @@ def add_StateServiceServicer_to_server(servicer, server):
             ),
             'SavePortfolioMetrics': grpc.unary_unary_rpc_method_handler(
                     servicer.SavePortfolioMetrics,
+                    request_deserializer=gateway__pb2.SaveMetricsRequest.FromString,
+                    response_serializer=gateway__pb2.SaveMetricsResponse.SerializeToString,
+            ),
+            'SavePortfolioMetricsWithProvenance': grpc.unary_unary_rpc_method_handler(
+                    servicer.SavePortfolioMetricsWithProvenance,
                     request_deserializer=gateway__pb2.SaveMetricsRequest.FromString,
                     response_serializer=gateway__pb2.SaveMetricsResponse.SerializeToString,
             ),
@@ -1482,6 +1501,33 @@ class StateService(object):
             request,
             target,
             '/almanak.gateway.proto.StateService/SavePortfolioMetrics',
+            gateway__pb2.SaveMetricsRequest.SerializeToString,
+            gateway__pb2.SaveMetricsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SavePortfolioMetricsWithProvenance(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.StateService/SavePortfolioMetricsWithProvenance',
             gateway__pb2.SaveMetricsRequest.SerializeToString,
             gateway__pb2.SaveMetricsResponse.FromString,
             options,

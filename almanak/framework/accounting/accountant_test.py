@@ -1556,6 +1556,104 @@ def _cell_g4_capital_deployed(snapshots: list[dict[str, Any]]) -> CellResult:
     )
 
 
+def _g5_parse_baseline_provenance(
+    metrics_row: dict[str, Any],
+    initial: Decimal,
+) -> tuple[Any | None, CellResult | None]:
+    """Parse G5's atomic authority and reject corrupt/contradictory records."""
+    from almanak.framework.portfolio.models import BaselineProvenanceError, decode_baseline_provenance
+
+    try:
+        provenance = decode_baseline_provenance(metrics_row.get("positions_json") or "[]")
+    except BaselineProvenanceError as exc:
+        return None, CellResult(
+            "G5",
+            "Initial vs current",
+            "FAIL",
+            f"baseline provenance is invalid: {exc}",
+        )
+    if provenance is not None and provenance.initial_value_usd != initial:
+        return None, CellResult(
+            "G5",
+            "Initial vs current",
+            "FAIL",
+            f"baseline provenance contradicts portfolio_metrics: provenance initial="
+            f"${provenance.initial_value_usd} metrics initial=${initial} source={provenance.source}",
+        )
+    return provenance, None
+
+
+def _g5_baseline_source_failure(
+    *,
+    provenance: Any | None,
+    initial: Decimal,
+    opening_deployed: Decimal | None,
+    opening_cash: Decimal | None,
+    opening: Decimal,
+    detail: str,
+) -> CellResult | None:
+    """Return a fail-closed G5 result when source evidence contradicts the opening."""
+    if provenance is not None and provenance.source == "snapshot_total_value_usd" and initial != opening_deployed:
+        return CellResult(
+            "G5",
+            "Initial vs current",
+            "FAIL",
+            f"baseline provenance source contradicts snapshot-0: source=snapshot_total_value_usd "
+            f"initial=${initial} snapshot-0 deployed=${opening_deployed}; {detail}",
+        )
+    if provenance is not None and provenance.source == "snapshot_available_cash_usd" and initial != opening_cash:
+        return CellResult(
+            "G5",
+            "Initial vs current",
+            "FAIL",
+            f"baseline provenance source contradicts snapshot-0: source=snapshot_available_cash_usd "
+            f"initial=${initial} snapshot-0 cash=${opening_cash}; {detail}",
+        )
+    cash_drop = (
+        opening_deployed is not None
+        and opening_cash is not None
+        and initial == opening_deployed
+        and opening_cash > _G5_CASH_DROP_FLOOR_USD
+    )
+    if not cash_drop or (provenance is not None and provenance.source == "strategy_allocation_usd"):
+        return None
+    if provenance is None:
+        return CellResult(
+            "G5",
+            "Initial vs current",
+            "FAIL",
+            f"baseline excludes the cash leg: initial_value_usd=${initial} equals snapshot-0 "
+            f"deployed=${opening_deployed} while snapshot-0 held cash=${opening_cash}; "
+            f"opening equity was ${opening}, so any PnL measured against this baseline is "
+            f"offset by ${opening_cash}. TWO legacy writers produce this shape and the row "
+            f"has no immutable provenance: (a) the VIB-6349 defect — "
+            f"'total_value_usd or available_cash_usd' silently discarding cash when a "
+            f"position is already open at the first snapshot; (b) the VIB-3882 contract — "
+            f"a strategy declaring allocation_usd that coincidentally equals its deployed "
+            f"value, where excluding unrelated wallet cash is INTENDED. Legacy ambiguity "
+            f"cannot be resolved retroactively. {detail}",
+        )
+    if provenance.source == "snapshot_available_cash_usd":
+        return CellResult(
+            "G5",
+            "Initial vs current",
+            "FAIL",
+            f"baseline provenance proves the deployed leg was excluded: source="
+            f"snapshot_available_cash_usd initial=${initial} snapshot-0 deployed=${opening_deployed}; "
+            f"opening equity=${opening}, so PnL against the persisted baseline is offset "
+            f"by ${opening_deployed}. {detail}",
+        )
+    return CellResult(
+        "G5",
+        "Initial vs current",
+        "FAIL",
+        f"baseline provenance proves the cash leg was discarded: source="
+        f"{provenance.source} initial=${initial} snapshot-0 cash=${opening_cash}; "
+        f"opening equity=${opening}, so PnL against the persisted baseline is offset "
+        f"by ${opening_cash}. {detail}",
+    )
+
+
 def _cell_g5_initial_vs_current(
     metrics: list[dict[str, Any]],
     snapshots: list[dict[str, Any]],
@@ -1571,23 +1669,21 @@ def _cell_g5_initial_vs_current(
 
     Two independent errors produced that number; both are addressed here.
 
-    **1. Denomination.** ``initial_value_usd`` is written as
-    ``snapshot.total_value_usd or snapshot.available_cash_usd``
-    (``runner_state.py``) — the *deployed* side alone whenever a position is
-    already open at the first snapshot, else cash. The current side is
+    **1. Denomination.** Legacy ``initial_value_usd`` rows were written from
+    deployed value when a position was already open at the first snapshot,
+    else cash. The current side is
     ``_snapshot_equity`` = deployed + cash. Subtracting one from the other
     mixes bases, which is how the sign flipped. The reported delta is now
     equity-vs-equity, both sides from ``_snapshot_equity``, so a denomination
     mismatch can no longer reach the number.
 
-    **2. The baseline itself.** When ``initial_value_usd`` equals snapshot 0's
-    *deployed* column while that same snapshot also carries cash, the ``or``
-    silently discarded the cash leg: the baseline is not the strategy's
-    starting equity, and every consumer that falls back to it inherits the
-    error. That is a FAIL, named. Measured across the committed fixtures this
-    fires on ``lp_curve`` (baseline ``$10.01`` against ``$155,787`` of starting
-    equity), ``lp_curve_tricrypto``, and the R1 GMX capture — and on none of
-    the six fixtures whose baseline is coherent.
+    **2. The baseline itself.** New rows carry an immutable, same-row source
+    record. A declared ``strategy_allocation_usd`` may intentionally exclude
+    unrelated wallet cash (VIB-3882); a ``snapshot_total_value_usd`` source
+    with a measured cash leg proves the fallback defect. Legacy rows retain
+    the conservative ambiguous FAIL because their origin cannot be inferred
+    retroactively. Malformed, duplicate, unknown-version, or contradictory
+    provenance fails closed.
 
     Baseline *placement* is reported, never silently folded in: a first
     snapshot that post-dates the first ledger row cannot see that
@@ -1601,6 +1697,9 @@ def _cell_g5_initial_vs_current(
     initial = _dec(m.get("initial_value_usd"))
     if initial is None:
         return CellResult("G5", "Initial vs current", "FAIL", "initial_value_usd null")
+    provenance, provenance_failure = _g5_parse_baseline_provenance(m, initial)
+    if provenance_failure is not None:
+        return provenance_failure
     if not snapshots:
         return CellResult(
             "G5",
@@ -1672,6 +1771,10 @@ def _cell_g5_initial_vs_current(
     delta = current - opening
 
     detail = f"opening_equity=${opening} current=${current} delta=${delta}"
+    if provenance is not None:
+        detail += f"; baseline_source={provenance.source} schema_version={provenance.schema_version}"
+    else:
+        detail += "; baseline_source=legacy_unmeasured"
     if trailing_refused:
         detail += (
             f"; NOTE current is NOT the run's last snapshot — {refused} trailing/other row(s) "
@@ -1684,27 +1787,16 @@ def _cell_g5_initial_vs_current(
     # cannot establish the drop, so both columns must be measured to fire.
     opening_deployed = _dec(ordered[0].get("total_value_usd"))
     opening_cash = _dec(ordered[0].get("available_cash_usd"))
-    if (
-        opening_deployed is not None
-        and opening_cash is not None
-        and initial == opening_deployed
-        and opening_cash > _G5_CASH_DROP_FLOOR_USD
-    ):
-        return CellResult(
-            "G5",
-            "Initial vs current",
-            "FAIL",
-            f"baseline excludes the cash leg: initial_value_usd=${initial} equals snapshot-0 "
-            f"deployed=${opening_deployed} while snapshot-0 held cash=${opening_cash}; "
-            f"opening equity was ${opening}, so any PnL measured against this baseline is "
-            f"offset by ${opening_cash}. TWO writers produce this shape and the DB cannot "
-            f"tell them apart (no baseline-provenance column): (a) the VIB-6349 defect — "
-            f"'total_value_usd or available_cash_usd' silently discarding cash when a "
-            f"position is already open at the first snapshot; (b) the VIB-3882 contract — "
-            f"a strategy declaring allocation_usd that coincidentally equals its deployed "
-            f"value, where excluding unrelated wallet cash is INTENDED. Confirm which "
-            f"before treating this as a defect. {detail}",
-        )
+    source_failure = _g5_baseline_source_failure(
+        provenance=provenance,
+        initial=initial,
+        opening_deployed=opening_deployed,
+        opening_cash=opening_cash,
+        opening=opening,
+        detail=detail,
+    )
+    if source_failure is not None:
+        return source_failure
 
     # Placement is a diagnostic on an otherwise-consistent baseline: the delta
     # is real but understates by whatever the first transaction already spent.

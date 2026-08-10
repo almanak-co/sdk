@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from almanak.framework.portfolio.models import decode_baseline_provenance
 from almanak.framework.runner.runner_state import _build_metrics_for_snapshot
 
 
@@ -73,6 +74,10 @@ class TestPortfolioBaselineFallback:
 
         assert metrics is not None
         assert metrics.initial_value_usd == Decimal("1000")
+        provenance = decode_baseline_provenance(metrics.positions_json)
+        assert provenance is not None
+        assert provenance.source == "snapshot_total_value_usd"
+        assert provenance.initial_value_usd == Decimal("1000")
 
     @pytest.mark.asyncio
     async def test_zero_positions_falls_back_to_cash(self):
@@ -95,6 +100,9 @@ class TestPortfolioBaselineFallback:
             "Baseline should use wallet cash when no positions are open, "
             "not zero (which would make all future PnL calculations return zero)"
         )
+        provenance = decode_baseline_provenance(metrics.positions_json)
+        assert provenance is not None
+        assert provenance.source == "snapshot_available_cash_usd"
 
     @pytest.mark.asyncio
     async def test_both_zero_emits_warning(self):
@@ -120,6 +128,10 @@ class TestPortfolioBaselineFallback:
 
         assert metrics is not None
         assert metrics.initial_value_usd == Decimal("0")
+        provenance = decode_baseline_provenance(metrics.positions_json)
+        assert provenance is not None
+        assert provenance.source == "snapshot_available_cash_usd"
+        assert provenance.initial_value_usd == 0
         warning_calls = mock_logger.warning.call_args_list
         assert any("baseline is zero" in str(call).lower() or "zero" in str(call).lower() for call in warning_calls), (
             f"Expected baseline-zero warning; warning calls: {warning_calls}"
@@ -133,6 +145,7 @@ class TestPortfolioBaselineFallback:
 
         existing = MagicMock()
         existing.initial_value_usd = Decimal("999")
+        existing.positions_json = '[{"record_type":"accounting_baseline_provenance","schema_version":1,"source":"strategy_allocation_usd","initial_value_usd":"999"}]'
         existing.timestamp = MagicMock()
         existing.total_value_usd = Decimal("999")
         runner.state_manager.get_portfolio_metrics = AsyncMock(return_value=existing)
@@ -149,3 +162,4 @@ class TestPortfolioBaselineFallback:
 
         # initial_value_usd must stay at the original baseline, not be re-set
         assert metrics.initial_value_usd == Decimal("999")
+        assert metrics.positions_json == existing.positions_json

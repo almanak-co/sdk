@@ -39,9 +39,11 @@ from types import SimpleNamespace
 import pytest
 
 from almanak.framework.portfolio.models import (
+    BaselineProvenance,
     PortfolioMetrics,
     decode_optional_decimal_text,
     decode_optional_flow,
+    encode_baseline_provenance,
     encode_optional_decimal_text,
     encode_optional_flow,
 )
@@ -61,6 +63,9 @@ def _metrics(
         deposits_usd=deposits,
         withdrawals_usd=withdrawals,
         gas_spent_usd=Decimal("0.50"),
+        positions_json=encode_baseline_provenance(
+            BaselineProvenance(source="strategy_allocation_usd", initial_value_usd=Decimal("4"))
+        ),
     )
 
 
@@ -491,9 +496,7 @@ async def test_migration_backfill_does_not_fabricate_measured_zero(tmp_path) -> 
         await backend.close()
 
     assert loaded is not None, "migration lost the pre-existing row"
-    assert loaded.total_value_usd is None, (
-        "ADD COLUMN backfilled a MEASURED ZERO onto a row that was never measured"
-    )
+    assert loaded.total_value_usd is None, "ADD COLUMN backfilled a MEASURED ZERO onto a row that was never measured"
 
 
 def test_every_portfolio_metrics_writer_supplies_total_value_usd() -> None:
@@ -760,7 +763,12 @@ def test_sqlite_cowrite_process_kill_rolls_back_and_reopens_cleanly(tmp_path) ->
         from pathlib import Path
 
         import almanak.framework.portfolio.models as portfolio_models
-        from almanak.framework.portfolio.models import PortfolioMetrics, PortfolioSnapshot
+        from almanak.framework.portfolio.models import (
+            BaselineProvenance,
+            PortfolioMetrics,
+            PortfolioSnapshot,
+            encode_baseline_provenance,
+        )
         from almanak.framework.state.backends.sqlite import SQLiteConfig, SQLiteStore
 
         async def main():
@@ -774,6 +782,12 @@ def test_sqlite_cowrite_process_kill_rolls_back_and_reopens_cleanly(tmp_path) ->
                 total_value_usd=None,
                 initial_value_usd=Decimal("4"),
                 gas_spent_usd=Decimal("0.5"),
+                positions_json=encode_baseline_provenance(
+                    BaselineProvenance(
+                        source="strategy_allocation_usd",
+                        initial_value_usd=Decimal("4"),
+                    )
+                ),
             )
             snapshot = PortfolioSnapshot(
                 deployment_id=metrics.deployment_id,
@@ -879,6 +893,7 @@ def _pg_row(**overrides) -> dict:
         "withdrawals_usd": "0",
         "gas_spent_usd": "0.5",
         "positions_text": "[]",
+        "positions_json": "[]",
         "cycle_id": "c1",
         "deployment_id": "deployment:abc123def456",
         "execution_mode": "live",
@@ -1170,11 +1185,16 @@ async def test_gateway_state_manager_wire_round_trip_preserves_unmeasured(monkey
     captured: dict[str, gateway_pb2.SaveMetricsRequest] = {}
 
     class _FakeStateStub:
-        def SavePortfolioMetrics(self, request, timeout=None):  # noqa: N802 — gRPC stub name
+        def SavePortfolioMetricsWithProvenance(self, request, timeout=None):  # noqa: N802 — gRPC stub name
             captured["request"] = request
-            return gateway_pb2.SaveMetricsResponse(success=True)
+            return gateway_pb2.SaveMetricsResponse(success=True, positions_json=request.positions_json)
 
         def GetPortfolioMetrics(self, request, timeout=None):  # noqa: N802 — gRPC stub name
+            if "request" not in captured:
+                return gateway_pb2.PortfolioMetricsData(
+                    found=False,
+                    baseline_provenance_supported=True,
+                )
             saved = captured["request"]
             # Echo the round-trip through the real server-side response builder.
             return StateService._sqlite_portfolio_metrics_to_proto(
@@ -1212,11 +1232,16 @@ async def test_gateway_state_manager_wire_round_trip_preserves_measured_zero(mon
     captured: dict[str, gateway_pb2.SaveMetricsRequest] = {}
 
     class _FakeStateStub:
-        def SavePortfolioMetrics(self, request, timeout=None):  # noqa: N802 — gRPC stub name
+        def SavePortfolioMetricsWithProvenance(self, request, timeout=None):  # noqa: N802 — gRPC stub name
             captured["request"] = request
-            return gateway_pb2.SaveMetricsResponse(success=True)
+            return gateway_pb2.SaveMetricsResponse(success=True, positions_json=request.positions_json)
 
         def GetPortfolioMetrics(self, request, timeout=None):  # noqa: N802 — gRPC stub name
+            if "request" not in captured:
+                return gateway_pb2.PortfolioMetricsData(
+                    found=False,
+                    baseline_provenance_supported=True,
+                )
             saved = captured["request"]
             return StateService._sqlite_portfolio_metrics_to_proto(
                 _metrics(

@@ -37,7 +37,7 @@ from unittest.mock import AsyncMock, MagicMock
 import grpc
 import pytest
 
-from almanak.framework.portfolio.models import PortfolioMetrics
+from almanak.framework.portfolio.models import BaselineProvenanceError, PortfolioMetrics
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2
 from almanak.gateway.services.state_service import StateServiceServicer
@@ -86,9 +86,10 @@ def _make_request(
     cycle_id: str = "",
     execution_mode: str = "",
     is_complete: bool = False,
+    positions_json: bytes | None = b"[]",
 ) -> gateway_pb2.SaveMetricsRequest:
     """Build a SaveMetricsRequest with sensible defaults."""
-    return gateway_pb2.SaveMetricsRequest(
+    request = gateway_pb2.SaveMetricsRequest(
         initial_value_usd=initial_value_usd,
         initial_timestamp=initial_timestamp,
         deposits_usd=deposits_usd,
@@ -99,6 +100,9 @@ def _make_request(
         execution_mode=execution_mode,
         is_complete=is_complete,
     )
+    if positions_json is not None:
+        request.positions_json = positions_json
+    return request
 
 
 def _install_warm_backend(service: StateServiceServicer, warm: MagicMock | None) -> None:
@@ -223,6 +227,58 @@ async def test_non_finite_decimal_rejected(service, context, field, value):
 
 
 @pytest.mark.asyncio
+async def test_contradictory_first_write_provenance_is_rejected_at_rpc_ingress(service, context):
+    payload = (
+        b'[{"initial_value_usd":"5","record_type":"accounting_baseline_provenance",'
+        b'"schema_version":1,"source":"strategy_allocation_usd"}]'
+    )
+    service._snapshot_pool = MagicMock()
+    service._snapshot_fetchrow = AsyncMock()
+
+    response = await service.SavePortfolioMetrics(
+        _make_request(initial_value_usd="4", positions_json=payload),
+        context,
+    )
+
+    assert response.success is False
+    assert "must equal metrics initial_value_usd" in response.error
+    context.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
+    service._snapshot_fetchrow.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_provenance_rpc_rejects_markerless_request_before_dispatch(service, context):
+    """The version-fenced endpoint cannot be used as a marker-less bypass."""
+    service.SavePortfolioMetrics = AsyncMock()
+
+    response = await service.SavePortfolioMetricsWithProvenance(_make_request(positions_json=b"[]"), context)
+
+    assert response.success is False
+    assert "provenance is required" in response.error
+    context.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
+    service.SavePortfolioMetrics.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_legacy_rpc_rejects_provenance_before_any_persistence(service, context):
+    """A caller cannot bypass the version fence through the legacy method."""
+    payload = (
+        b'[{"initial_value_usd":"4","record_type":"accounting_baseline_provenance",'
+        b'"schema_version":1,"source":"strategy_allocation_usd"}]'
+    )
+    service._snapshot_pool = MagicMock()
+    service._snapshot_fetchrow = AsyncMock()
+    request = _make_request(initial_value_usd="4", positions_json=payload)
+
+    response = await service.SavePortfolioMetrics(request, context)
+
+    assert response.success is False
+    assert "must use SavePortfolioMetricsWithProvenance" in response.error
+    context.set_code.assert_called_once_with(grpc.StatusCode.FAILED_PRECONDITION)
+    service._snapshot_fetchrow.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_empty_decimal_strings_coerced_to_zero(service, context):
     """Empty strings: ``"0"`` for the baselines, UNMEASURED for the flows.
 
@@ -237,7 +293,7 @@ async def test_empty_decimal_strings_coerced_to_zero(service, context):
     warm = AsyncMock()
     warm.save_portfolio_metrics = AsyncMock(return_value=True)
     _install_warm_backend(service, warm)
-    request = gateway_pb2.SaveMetricsRequest(deployment_id="zeros")
+    request = gateway_pb2.SaveMetricsRequest(deployment_id="zeros", positions_json=b"[]")
 
     response = await service.SavePortfolioMetrics(request, context)
 
@@ -327,8 +383,8 @@ async def test_out_of_range_timestamp_rejected(service, context):
 
 
 @pytest.mark.asyncio
-async def test_postgres_branch_success(service, context):
-    """When the pg pool is present, the RPC issues the UPSERT and returns success.
+async def test_postgres_markerless_present_first_write_is_rejected(service, context):
+    """A present markerless list cannot establish a PostgreSQL row.
 
     Pins: exactly one ``_snapshot_fetchrow`` call with the deployment_id /
     timestamp / metric fields passed positionally in the documented order,
@@ -341,7 +397,7 @@ async def test_postgres_branch_success(service, context):
     arg and no identity translation.
     """
     service._snapshot_pool = MagicMock()  # truthy => PostgreSQL branch
-    service._snapshot_fetchrow = AsyncMock(return_value={"deployment_id": "strat-pg"})
+    service._snapshot_fetchrow = AsyncMock(return_value=None)
 
     # VIB-3933 finding #1: PG path now reads latest snapshot for total_value_usd
     # before issuing the UPSERT (parity with SQLite). Provide a warm backend
@@ -366,9 +422,9 @@ async def test_postgres_branch_success(service, context):
 
     response = await service.SavePortfolioMetrics(request, context)
 
-    assert response.success is True
-    assert response.error == ""
-    assert_set_code_not_called(context)
+    assert response.success is False
+    assert "provenance is required" in response.error
+    context.set_code.assert_called_once_with(grpc.StatusCode.FAILED_PRECONDITION)
     service._snapshot_fetchrow.assert_awaited_once()
     # Positional args after the query string (VIB-4721/4722 — no separate
     # deployment_id / request.deployment_id arg): deployment_id, initial_value_usd,
@@ -387,10 +443,158 @@ async def test_postgres_branch_success(service, context):
     assert isinstance(args[10], datetime) and args[10].tzinfo is not None
     # VIB-3933 finding #1: snapshot's total_value_usd carried into the row.
     assert args[11] == "12345.67"
-    # positions_json defaults to "[]" — proto carries no positions and SQLite
-    # path also writes "[]" via PortfolioMetrics dataclass default.
+    # A present markerless list reaches the atomic query but its INSERT SELECT
+    # predicate returns no row because it contains zero provenance records.
     assert args[12] == "[]"
     warm.get_latest_snapshot.assert_awaited_once_with("depl-1")
+
+
+@pytest.mark.asyncio
+async def test_postgres_immutable_baseline_conflict_returns_failed_precondition(service, context):
+    """A filtered-out UPSERT means storage refused a baseline rewrite."""
+    payload = (
+        b'[{"initial_value_usd":"4","record_type":"accounting_baseline_provenance",'
+        b'"schema_version":1,"source":"strategy_allocation_usd"}]'
+    )
+    service._snapshot_pool = MagicMock()
+    service._snapshot_fetchrow = AsyncMock(return_value=None)
+    warm = MagicMock()
+    warm.get_latest_snapshot = AsyncMock(return_value=None)
+    _install_warm_backend(service, warm)
+
+    response = await service.SavePortfolioMetricsWithProvenance(
+        _make_request(initial_value_usd="4", positions_json=payload), context
+    )
+
+    assert response.success is False
+    assert response.error == "established accounting baseline is immutable"
+    context.set_code.assert_called_once_with(grpc.StatusCode.FAILED_PRECONDITION)
+    context.set_details.assert_called_once_with("established accounting baseline is immutable")
+
+
+@pytest.mark.asyncio
+async def test_postgres_old_client_cannot_create_unproven_first_row(service, context):
+    """The atomic SQL returns no row and no INSERT for an omitted first write."""
+    from almanak.gateway.services._save_metrics_helpers import PG_UPSERT_QUERY
+
+    service._snapshot_pool = MagicMock()
+    service._snapshot_fetchrow = AsyncMock(return_value=None)
+    warm = MagicMock()
+    warm.get_latest_snapshot = AsyncMock(return_value=None)
+    _install_warm_backend(service, warm)
+
+    response = await service.SavePortfolioMetrics(_make_request(positions_json=None), context)
+
+    assert response.success is False
+    assert "provenance is required" in response.error
+    assert service._snapshot_fetchrow.call_args.args[12] is None
+    assert "WITH legacy_update AS" in PG_UPSERT_QUERY
+    assert "WHERE $12::jsonb IS NOT NULL" in PG_UPSERT_QUERY
+    context.set_code.assert_called_once_with(grpc.StatusCode.FAILED_PRECONDITION)
+
+
+@pytest.mark.asyncio
+async def test_postgres_old_client_may_update_existing_legacy_row(service, context):
+    """The omission branch updates an existing row while preserving its absence."""
+    service._snapshot_pool = MagicMock()
+    service._snapshot_fetchrow = AsyncMock(return_value={"deployment_id": "my-deploy", "positions_json": "[]"})
+    warm = MagicMock()
+    warm.get_latest_snapshot = AsyncMock(return_value=None)
+    _install_warm_backend(service, warm)
+
+    response = await service.SavePortfolioMetrics(_make_request(positions_json=None), context)
+
+    assert response.success is True
+    assert response.positions_json == b"[]"
+    assert service._snapshot_fetchrow.call_args.args[12] is None
+
+
+@pytest.mark.asyncio
+async def test_current_sdk_markerless_update_reaches_existing_postgres_legacy_row(service, context):
+    """Current clients send a present list; hosted legacy rows must keep updating."""
+    from almanak.framework.state.gateway_state_manager import GatewayStateManager
+
+    markerless = '[{"record_type":"legacy_observation","value":"keep-exactly"}]'
+    client = MagicMock()
+    client.state.SavePortfolioMetrics.return_value = gateway_pb2.SaveMetricsResponse(success=True)
+    manager = GatewayStateManager(client)
+    metrics = PortfolioMetrics(
+        deployment_id="deployment:hosted-legacy",
+        timestamp=datetime(2026, 8, 9, tzinfo=UTC),
+        total_value_usd=Decimal("4"),
+        initial_value_usd=Decimal("4"),
+        positions_json=markerless,
+    )
+
+    assert await manager.save_portfolio_metrics(metrics) is True
+    request = client.state.SavePortfolioMetrics.call_args.args[0]
+    assert request.HasField("positions_json")
+    assert request.positions_json == markerless.encode()
+
+    service._snapshot_pool = MagicMock()
+    service._snapshot_fetchrow = AsyncMock(
+        return_value={"deployment_id": metrics.deployment_id, "positions_json": markerless}
+    )
+    warm = MagicMock()
+    warm.get_latest_snapshot = AsyncMock(return_value=None)
+    _install_warm_backend(service, warm)
+
+    response = await service.SavePortfolioMetrics(request, context)
+
+    assert response.success is True
+    assert response.positions_json == markerless.encode()
+    assert service._snapshot_fetchrow.call_args.args[12] == markerless
+
+
+@pytest.mark.asyncio
+async def test_postgres_markerless_update_cannot_touch_sealed_row(service, context):
+    """The markerless lane returns no row when persisted provenance is sealed."""
+    from almanak.gateway.services._save_metrics_helpers import PG_UPSERT_QUERY
+
+    service._snapshot_pool = MagicMock()
+    # Models PostgreSQL evaluating the markerless_update existing-marker count
+    # as one and returning no row from every mutually-exclusive CTE lane.
+    service._snapshot_fetchrow = AsyncMock(return_value=None)
+    warm = MagicMock()
+    warm.get_latest_snapshot = AsyncMock(return_value=None)
+    _install_warm_backend(service, warm)
+
+    response = await service.SavePortfolioMetrics(_make_request(initial_value_usd="4", positions_json=b"[]"), context)
+
+    assert response.success is False
+    assert "provenance is required" in response.error
+    markerless_lane = PG_UPSERT_QUERY.split("), markerless_update AS (", maxsplit=1)[1].split(
+        "), sealed_upsert AS (", maxsplit=1
+    )[0]
+    assert markerless_lane.count("accounting_baseline_provenance") == 2
+    assert markerless_lane.count(")) = 0") == 2
+    context.set_code.assert_called_once_with(grpc.StatusCode.FAILED_PRECONDITION)
+
+
+@pytest.mark.asyncio
+async def test_postgres_rejects_lexically_different_provenance_object(service, context):
+    """JSONB equality refuses replacing sealed decimal text 4.00 with 4."""
+    payload = (
+        b'[{"initial_value_usd":"4","record_type":"accounting_baseline_provenance",'
+        b'"schema_version":1,"source":"strategy_allocation_usd"}]'
+    )
+    service._snapshot_pool = MagicMock()
+    # Models the atomic conflict predicate rejecting an existing marker whose
+    # sealed value text is "4.00" even though both Decimals compare equal.
+    service._snapshot_fetchrow = AsyncMock(return_value=None)
+    warm = MagicMock()
+    warm.get_latest_snapshot = AsyncMock(return_value=None)
+    _install_warm_backend(service, warm)
+
+    response = await service.SavePortfolioMetricsWithProvenance(
+        _make_request(initial_value_usd="4", positions_json=payload),
+        context,
+    )
+
+    assert response.success is False
+    assert response.error == "established accounting baseline is immutable"
+    assert service._snapshot_fetchrow.call_args.args[12] == payload.decode()
+    context.set_code.assert_called_once_with(grpc.StatusCode.FAILED_PRECONDITION)
 
 
 @pytest.mark.asyncio
@@ -447,6 +651,191 @@ async def test_sqlite_success_with_latest_snapshot_total_value(service, context)
     assert saved.deposits_usd == Decimal("500")
     assert saved.withdrawals_usd == Decimal("100")
     assert saved.gas_spent_usd == Decimal("25")
+    assert saved.positions_json == "[]"
+
+
+@pytest.mark.asyncio
+async def test_postgres_positions_provenance_is_bound_in_same_upsert(service, context):
+    """Hosted persistence binds exact provenance bytes into the metrics row."""
+    payload = (
+        b'[{"initial_value_usd":"4","record_type":"accounting_baseline_provenance",'
+        b'"schema_version":1,"source":"strategy_allocation_usd"}]'
+    )
+    service._snapshot_pool = MagicMock()
+    service._snapshot_fetchrow = AsyncMock(return_value={"deployment_id": "depl-1", "positions_json": payload.decode()})
+    warm = MagicMock()
+    warm.get_latest_snapshot = AsyncMock(return_value=None)
+    _install_warm_backend(service, warm)
+
+    response = await service.SavePortfolioMetricsWithProvenance(
+        _make_request(deployment_id="depl-1", initial_value_usd="4", positions_json=payload), context
+    )
+
+    assert response.success is True
+    assert service._snapshot_fetchrow.call_args.args[12] == payload.decode()
+    assert response.positions_json == payload
+
+
+@pytest.mark.asyncio
+async def test_sqlite_omitted_positions_preserves_existing_provenance(service, context):
+    """Version-skewed clients cannot erase an existing SQLite provenance row."""
+    existing = PortfolioMetrics(
+        deployment_id="strat-sqlite",
+        timestamp=datetime(2026, 8, 9, tzinfo=UTC),
+        total_value_usd=Decimal("4"),
+        initial_value_usd=Decimal("4"),
+        positions_json='[{"record_type":"kept"}]',
+    )
+    warm = AsyncMock()
+    warm.get_latest_snapshot = AsyncMock(return_value=None)
+    warm.get_portfolio_metrics = AsyncMock(return_value=existing)
+    warm.save_portfolio_metrics = AsyncMock(return_value=True)
+    _install_warm_backend(service, warm)
+
+    response = await service.SavePortfolioMetrics(
+        _make_request(deployment_id="strat-sqlite", positions_json=None), context
+    )
+
+    assert response.success is True
+    saved: PortfolioMetrics = warm.save_portfolio_metrics.call_args.args[0]
+    assert saved.positions_json == existing.positions_json
+
+
+@pytest.mark.asyncio
+async def test_sqlite_old_client_cannot_create_unproven_first_row(service, context):
+    """Omission on a first write fails before the warm backend can mutate."""
+    warm = AsyncMock()
+    warm.get_latest_snapshot = AsyncMock(return_value=None)
+    warm.get_portfolio_metrics = AsyncMock(return_value=None)
+    warm.save_portfolio_metrics = AsyncMock(return_value=True)
+    _install_warm_backend(service, warm)
+
+    response = await service.SavePortfolioMetrics(
+        _make_request(deployment_id="strat-old-client", positions_json=None), context
+    )
+
+    assert response.success is False
+    assert "provenance is required" in response.error
+    context.set_code.assert_called_once_with(grpc.StatusCode.FAILED_PRECONDITION)
+    warm.save_portfolio_metrics.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_gateway_rejects_present_markerless_first_row(service, context):
+    """A present empty list cannot bypass first-row provenance enforcement."""
+    warm = AsyncMock()
+    warm.get_latest_snapshot = AsyncMock(return_value=None)
+    warm.get_portfolio_metrics = AsyncMock(return_value=None)
+    warm.save_portfolio_metrics = AsyncMock(return_value=True)
+    _install_warm_backend(service, warm)
+
+    response = await service.SavePortfolioMetrics(
+        _make_request(deployment_id="strat-markerless", positions_json=b"[]"), context
+    )
+
+    assert response.success is False
+    assert "provenance is required" in response.error
+    context.set_code.assert_called_once_with(grpc.StatusCode.FAILED_PRECONDITION)
+    warm.save_portfolio_metrics.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_gateway_refuses_backend_that_drops_provenance(service, context):
+    """The acknowledgement is a read-after-write fact, not an input echo."""
+    payload = (
+        b'[{"initial_value_usd":"4","record_type":"accounting_baseline_provenance",'
+        b'"schema_version":1,"source":"strategy_allocation_usd"}]'
+    )
+    persisted_without_record = PortfolioMetrics(
+        deployment_id="strat-sqlite",
+        timestamp=datetime(2026, 8, 9, tzinfo=UTC),
+        total_value_usd=Decimal("4"),
+        initial_value_usd=Decimal("4"),
+        positions_json="[]",
+    )
+    warm = AsyncMock()
+    warm.get_latest_snapshot = AsyncMock(return_value=None)
+    warm.save_portfolio_metrics = AsyncMock(return_value=True)
+    warm.get_portfolio_metrics = AsyncMock(return_value=persisted_without_record)
+    _install_warm_backend(service, warm)
+
+    response = await service.SavePortfolioMetricsWithProvenance(
+        _make_request(deployment_id="strat-sqlite", initial_value_usd="4", positions_json=payload),
+        context,
+    )
+
+    assert response.success is False
+    assert "does not match the complete request" in response.error
+    context.set_code.assert_called_once_with(grpc.StatusCode.FAILED_PRECONDITION)
+
+
+@pytest.mark.asyncio
+async def test_sqlite_gateway_acknowledges_exact_persisted_provenance(service, context):
+    payload = (
+        b'[{"initial_value_usd":"4","record_type":"accounting_baseline_provenance",'
+        b'"schema_version":1,"source":"strategy_allocation_usd"}]'
+    )
+    persisted = PortfolioMetrics(
+        deployment_id="strat-sqlite",
+        timestamp=datetime(2026, 8, 9, tzinfo=UTC),
+        total_value_usd=Decimal("4"),
+        initial_value_usd=Decimal("4"),
+        positions_json=payload.decode(),
+    )
+    warm = AsyncMock()
+    warm.get_latest_snapshot = AsyncMock(return_value=None)
+    warm.save_portfolio_metrics = AsyncMock(return_value=True)
+    warm.get_portfolio_metrics = AsyncMock(return_value=persisted)
+    _install_warm_backend(service, warm)
+
+    response = await service.SavePortfolioMetricsWithProvenance(
+        _make_request(deployment_id="strat-sqlite", initial_value_usd="4", positions_json=payload),
+        context,
+    )
+
+    assert response.success is True
+    assert response.positions_json == payload
+
+
+@pytest.mark.asyncio
+async def test_sqlite_immutable_baseline_conflict_returns_failed_precondition(service, context):
+    warm = AsyncMock()
+    warm.get_latest_snapshot = AsyncMock(return_value=None)
+    warm.save_portfolio_metrics = AsyncMock(
+        side_effect=BaselineProvenanceError("established initial_value_usd cannot be changed")
+    )
+    _install_warm_backend(service, warm)
+
+    response = await service.SavePortfolioMetrics(_make_request(), context)
+
+    assert response.success is False
+    assert response.error == "established initial_value_usd cannot be changed"
+    context.set_code.assert_called_once_with(grpc.StatusCode.FAILED_PRECONDITION)
+    context.set_details.assert_called_once_with("established initial_value_usd cannot be changed")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        (b"", "non-empty JSON list"),
+        (b"{}", "must be a JSON list"),
+        (b"not-json", "must be valid JSON"),
+        (b"[\xff]", "must be UTF-8"),
+        (b"[" + (b" " * (64 * 1024)) + b"]", "exceeds 65536 bytes"),
+    ],
+    ids=["empty", "object", "invalid-json", "non-utf8", "oversized"],
+)
+async def test_positions_provenance_boundary_rejects_invalid_payload(service, context, payload, message):
+    service._snapshot_pool = MagicMock()
+    service._snapshot_fetchrow = AsyncMock()
+
+    response = await service.SavePortfolioMetrics(_make_request(positions_json=payload), context)
+
+    assert response.success is False
+    assert message in response.error
+    context.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
+    service._snapshot_fetchrow.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -491,8 +880,16 @@ async def test_sqlite_warm_backend_without_get_latest_snapshot(service, context)
     The ``hasattr`` guard protects early warm-backend impls that only
     implement ``save_portfolio_metrics``.
     """
-    warm = MagicMock(spec=["save_portfolio_metrics"])  # no get_latest_snapshot
+    existing = PortfolioMetrics(
+        deployment_id="my-deploy",
+        timestamp=datetime(2026, 8, 9, tzinfo=UTC),
+        total_value_usd=Decimal("10000"),
+        initial_value_usd=Decimal("10000"),
+        positions_json="[]",
+    )
+    warm = MagicMock(spec=["save_portfolio_metrics", "get_portfolio_metrics"])  # no get_latest_snapshot
     warm.save_portfolio_metrics = AsyncMock(return_value=True)
+    warm.get_portfolio_metrics = AsyncMock(return_value=existing)
     _install_warm_backend(service, warm)
 
     response = await service.SavePortfolioMetrics(_make_request(), context)

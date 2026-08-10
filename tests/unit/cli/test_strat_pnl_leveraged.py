@@ -40,10 +40,12 @@ from almanak.framework.cli.strat_pnl import (
 )
 from almanak.framework.observability.ledger import LedgerEntry
 from almanak.framework.portfolio.models import (
+    BaselineProvenance,
     PortfolioMetrics,
     PortfolioSnapshot,
     PositionValue,
     ValueConfidence,
+    encode_baseline_provenance,
 )
 from almanak.framework.state.backends.sqlite import SQLiteConfig, SQLiteStore
 from almanak.framework.teardown.models import PositionType
@@ -105,6 +107,12 @@ def _metrics(deployment_id: str, initial: Decimal, total: Decimal, gas: Decimal)
         deposits_usd=Decimal("0"),
         withdrawals_usd=Decimal("0"),
         gas_spent_usd=gas,
+        positions_json=encode_baseline_provenance(
+            BaselineProvenance(
+                source="strategy_allocation_usd",
+                initial_value_usd=initial,
+            )
+        ),
     )
 
 

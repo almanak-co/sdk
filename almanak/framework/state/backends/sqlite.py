@@ -88,6 +88,38 @@ def _canonical_deployment_id(obj: Any) -> str:
     return str(obj.deployment_id)
 
 
+def _validated_metrics_positions_json(conn: sqlite3.Connection, metrics: Any) -> str:
+    """Validate the write-once baseline authority against the current metrics row."""
+    from almanak.framework.portfolio.models import (
+        BaselineProvenanceError,
+        validate_baseline_provenance_initial_value,
+        validate_immutable_baseline_update,
+    )
+
+    incoming = getattr(metrics, "positions_json", "[]")
+    provenance = validate_baseline_provenance_initial_value(
+        incoming,
+        initial_value_usd=metrics.initial_value_usd,
+    )
+    row = conn.execute(
+        "SELECT positions_json, initial_value_usd FROM portfolio_metrics WHERE deployment_id = ?",
+        (_canonical_deployment_id(metrics),),
+    ).fetchone()
+    if row is None:
+        if provenance is None:
+            raise BaselineProvenanceError(
+                "baseline provenance is required when establishing a new portfolio_metrics row"
+            )
+    else:
+        validate_immutable_baseline_update(
+            existing_positions_json=row[0] or "[]",
+            incoming_positions_json=incoming,
+            existing_initial_value_usd=Decimal(str(row[1])),
+            incoming_initial_value_usd=metrics.initial_value_usd,
+        )
+    return incoming
+
+
 def _require_deployment_id(value: str | None, *, operation: str) -> str:
     deployment_id = (value or "").strip()
     if not deployment_id:
@@ -2406,6 +2438,7 @@ class SQLiteStore:
                         getattr(snapshot, "execution_mode", "") or getattr(metrics, "execution_mode", "") or ""
                     )
                     deployment_id = snapshot.deployment_id or metrics.deployment_id
+                    metrics_positions_json = _validated_metrics_positions_json(conn, metrics)
 
                     # 1. Save snapshot via INSERT ... ON CONFLICT DO UPDATE
                     # mirroring save_portfolio_snapshot (CodeRabbit). The
@@ -2511,7 +2544,7 @@ class SQLiteStore:
                             encode_optional_decimal_text(
                                 metrics.total_value_usd, field_name="portfolio total_value_usd"
                             ),
-                            getattr(metrics, "positions_json", "[]"),
+                            metrics_positions_json,
                             cycle_id,
                             execution_mode,
                             getattr(metrics, "is_complete", True),
@@ -2522,7 +2555,10 @@ class SQLiteStore:
                     conn.execute("COMMIT")
                     return snapshot_id
                 except Exception:
-                    conn.execute("ROLLBACK")
+                    # Preserve the original persistence/provenance failure if
+                    # SQLite has already aborted the transaction.
+                    with contextlib.suppress(sqlite3.Error):
+                        conn.execute("ROLLBACK")
                     raise
 
         loop = asyncio.get_event_loop()
@@ -3069,34 +3105,52 @@ class SQLiteStore:
 
         def _sync_save() -> bool:
             now = datetime.now(UTC).isoformat()
+            conn = self._conn
+            assert conn is not None
 
-            self._conn.execute(  # type: ignore[union-attr]
-                """
-                INSERT OR REPLACE INTO portfolio_metrics (
-                    deployment_id, initial_value_usd, initial_timestamp,
-                    deposits_usd, withdrawals_usd, gas_spent_usd,
-                    total_value_usd, positions_json, cycle_id,
-                    execution_mode, is_complete, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    _canonical_deployment_id(metrics),
-                    str(metrics.initial_value_usd),
-                    metrics.timestamp.isoformat(),
-                    # Empty≠Zero: unmeasured flows persist as '' (VIB-5866).
-                    encode_optional_flow(metrics.deposits_usd),
-                    encode_optional_flow(metrics.withdrawals_usd),
-                    str(metrics.gas_spent_usd),
-                    encode_optional_decimal_text(metrics.total_value_usd, field_name="portfolio total_value_usd"),
-                    getattr(metrics, "positions_json", "[]"),
-                    getattr(metrics, "cycle_id", None),
-                    getattr(metrics, "execution_mode", "") or "",
-                    getattr(metrics, "is_complete", True),
-                    now,
-                ),
-            )
-            self._conn.commit()  # type: ignore[union-attr]
-            return True
+            # The read that validates the immutable baseline and the write it
+            # authorizes are one serialized transaction. BEGIN IMMEDIATE also
+            # closes the race across distinct SQLiteStore instances, whose
+            # process-local locks cannot see one another.
+            with self._db_lock:
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    positions_json = _validated_metrics_positions_json(conn, metrics)
+                    conn.execute(
+                        """
+                        INSERT OR REPLACE INTO portfolio_metrics (
+                            deployment_id, initial_value_usd, initial_timestamp,
+                            deposits_usd, withdrawals_usd, gas_spent_usd,
+                            total_value_usd, positions_json, cycle_id,
+                            execution_mode, is_complete, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            _canonical_deployment_id(metrics),
+                            str(metrics.initial_value_usd),
+                            metrics.timestamp.isoformat(),
+                            # Empty≠Zero: unmeasured flows persist as '' (VIB-5866).
+                            encode_optional_flow(metrics.deposits_usd),
+                            encode_optional_flow(metrics.withdrawals_usd),
+                            str(metrics.gas_spent_usd),
+                            encode_optional_decimal_text(
+                                metrics.total_value_usd, field_name="portfolio total_value_usd"
+                            ),
+                            positions_json,
+                            getattr(metrics, "cycle_id", None),
+                            getattr(metrics, "execution_mode", "") or "",
+                            getattr(metrics, "is_complete", True),
+                            now,
+                        ),
+                    )
+                    conn.execute("COMMIT")
+                    return True
+                except Exception:
+                    # Preserve the original persistence/provenance failure if
+                    # SQLite has already aborted the transaction.
+                    with contextlib.suppress(sqlite3.Error):
+                        conn.execute("ROLLBACK")
+                    raise
 
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _sync_save)

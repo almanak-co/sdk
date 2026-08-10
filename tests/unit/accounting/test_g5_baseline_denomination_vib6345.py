@@ -16,6 +16,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 from almanak.framework.accounting.accountant_test import _cell_g5_initial_vs_current
+from almanak.framework.portfolio.models import BaselineProvenance, encode_baseline_provenance
 
 # The R1 capture, verbatim from portfolio_metrics / portfolio_snapshots.
 R1_INITIAL = "4.995035872593559900814399999"
@@ -24,8 +25,13 @@ R1_SNAP0_CASH = "6.0841818147029043624"
 R1_SNAP_FINAL_CASH = "10.70438231735181704"
 
 
-def _metrics(initial: str) -> list[dict[str, object]]:
-    return [{"initial_value_usd": initial}]
+def _metrics(initial: str, *, source: str | None = None) -> list[dict[str, object]]:
+    row: dict[str, object] = {"initial_value_usd": initial}
+    if source is not None:
+        row["positions_json"] = encode_baseline_provenance(
+            BaselineProvenance(source=source, initial_value_usd=Decimal(initial))
+        )
+    return [row]
 
 
 def _snap(ts: str, deployed: object, cash: object) -> dict[str, object]:
@@ -336,8 +342,8 @@ def test_unorderable_timestamps_fail_rather_than_use_sqlite_row_order() -> None:
 def test_or_drop_diagnostic_does_not_claim_the_defect_exclusively() -> None:
     """codex P2 + grok MEDIUM, converged independently.
 
-    The DB carries no baseline-provenance column, so this shape is produced by
-    BOTH the VIB-6349 defect and the VIB-3882 allocation contract. The cell
+    This legacy row carries no baseline-provenance record, so the shape is
+    produced by BOTH the VIB-6349 defect and the VIB-3882 allocation contract. The cell
     still FAILs — loud is the correct direction for a gate — but it must not
     assert a cause it cannot know. Accepted tradeoff, pinned here.
     """
@@ -355,6 +361,112 @@ def test_or_drop_diagnostic_does_not_claim_the_defect_exclusively() -> None:
     assert "allocation_usd" in result.diagnostic
     # Must not state the defect as fact.
     assert "dropped the cash leg" not in result.diagnostic
+
+
+def test_allocation_provenance_resolves_numeric_collision_as_intentional() -> None:
+    """VIB-3882 may intentionally exclude unrelated wallet cash."""
+    result = _cell_g5_initial_vs_current(
+        _metrics("100", source="strategy_allocation_usd"),
+        [
+            _snap_c("2026-05-09T00:00:00+00:00", "100", "15"),
+            _snap_c("2026-05-09T01:00:00+00:00", "0", "118"),
+        ],
+        ledger=None,
+    )
+
+    assert result.status == "PASS", result.diagnostic
+    assert "baseline_source=strategy_allocation_usd" in result.diagnostic
+
+
+def test_snapshot_total_provenance_proves_cash_drop_defect() -> None:
+    result = _cell_g5_initial_vs_current(
+        _metrics("100", source="snapshot_total_value_usd"),
+        [
+            _snap_c("2026-05-09T00:00:00+00:00", "100", "15"),
+            _snap_c("2026-05-09T01:00:00+00:00", "0", "118"),
+        ],
+        ledger=None,
+    )
+
+    assert result.status == "FAIL"
+    assert "provenance proves the cash leg was discarded" in result.diagnostic
+    assert "source=snapshot_total_value_usd" in result.diagnostic
+
+
+def test_cash_drop_diagnostic_reports_the_measured_provenance_source() -> None:
+    """A numeric collision must not relabel cash provenance as total-value provenance."""
+    result = _cell_g5_initial_vs_current(
+        _metrics("100", source="snapshot_available_cash_usd"),
+        [
+            _snap_c("2026-05-09T00:00:00+00:00", "100", "100"),
+            _snap_c("2026-05-09T01:00:00+00:00", "0", "205"),
+        ],
+        ledger=None,
+    )
+
+    assert result.status == "FAIL"
+    assert "source=snapshot_available_cash_usd" in result.diagnostic
+    assert "source=snapshot_total_value_usd" not in result.diagnostic
+    assert "deployed leg was excluded" in result.diagnostic
+    assert "cash leg was discarded" not in result.diagnostic
+
+
+def test_provenance_value_contradiction_fails_before_scoring() -> None:
+    metrics = _metrics("100", source="strategy_allocation_usd")
+    metrics[0]["initial_value_usd"] = "101"
+
+    result = _cell_g5_initial_vs_current(
+        metrics,
+        [
+            _snap_c("2026-05-09T00:00:00+00:00", "100", "15"),
+            _snap_c("2026-05-09T01:00:00+00:00", "0", "118"),
+        ],
+        ledger=None,
+    )
+
+    assert result.status == "FAIL"
+    assert "provenance contradicts portfolio_metrics" in result.diagnostic
+
+
+def test_snapshot_metadata_cannot_orphan_a_provenance_claim() -> None:
+    """A saved snapshot plus failed metrics write is still legacy/unproven."""
+    opening = _snap_c("2026-05-09T00:00:00+00:00", "100", "15")
+    opening["snapshot_metadata"] = {
+        "accounting_baseline_provenance": {
+            "source": "strategy_allocation_usd",
+            "initial_value_usd": "100",
+        }
+    }
+
+    result = _cell_g5_initial_vs_current(
+        _metrics("100"),
+        [opening, _snap_c("2026-05-09T01:00:00+00:00", "0", "118")],
+        ledger=None,
+    )
+
+    assert result.status == "FAIL"
+    assert "no immutable provenance" in result.diagnostic
+
+
+def test_malformed_provenance_fails_g5_before_numeric_collision_logic() -> None:
+    metrics = _metrics("100")
+    metrics[0]["positions_json"] = (
+        '[{"record_type":"accounting_baseline_provenance","schema_version":99,'
+        '"source":"strategy_allocation_usd","initial_value_usd":"100"}]'
+    )
+
+    result = _cell_g5_initial_vs_current(
+        metrics,
+        [
+            _snap_c("2026-05-09T00:00:00+00:00", "100", "15"),
+            _snap_c("2026-05-09T01:00:00+00:00", "0", "118"),
+        ],
+        ledger=None,
+    )
+
+    assert result.status == "FAIL"
+    assert "baseline provenance is invalid" in result.diagnostic
+    assert "schema_version=99" in result.diagnostic
 
 
 def test_exact_confidence_vocabulary_is_not_case_folded() -> None:

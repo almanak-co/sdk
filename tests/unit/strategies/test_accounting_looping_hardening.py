@@ -88,6 +88,18 @@ def _market(
     return SimpleNamespace(position_health=position_health, price=price, balance=balance)
 
 
+def test_allocation_contract_uses_starting_collateral_not_prefunded_wallet() -> None:
+    strat = _bare_strategy(starting_collateral_usd=Decimal("4"))
+
+    assert strat.allocation_usd == Decimal("4")
+
+
+def test_allocation_contract_rejects_non_positive_or_non_finite_values() -> None:
+    assert _bare_strategy(starting_collateral_usd=Decimal("0")).allocation_usd is None
+    assert _bare_strategy(starting_collateral_usd=Decimal("-1")).allocation_usd is None
+    assert _bare_strategy(starting_collateral_usd=Decimal("NaN")).allocation_usd is None
+
+
 # ---------------------------------------------------------------------------
 # Teardown delegation + structural acceptance
 # ---------------------------------------------------------------------------

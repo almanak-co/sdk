@@ -33,7 +33,13 @@ from almanak.framework.accounting.capital_flows import (
     clear_provenance_caches,
     pad_address_topic,
 )
-from almanak.framework.portfolio import PortfolioMetrics, PortfolioSnapshot, ValueConfidence
+from almanak.framework.portfolio import (
+    BaselineProvenance,
+    PortfolioMetrics,
+    PortfolioSnapshot,
+    ValueConfidence,
+    encode_baseline_provenance,
+)
 from almanak.framework.portfolio.models import TokenBalance
 from almanak.framework.runner.capital_flow_state import (
     DETAIL_NO_GATEWAY,
@@ -434,6 +440,12 @@ def _metrics(
         initial_value_usd=Decimal("1000"),
         deposits_usd=deposits,
         withdrawals_usd=withdrawals,
+        positions_json=encode_baseline_provenance(
+            BaselineProvenance(
+                source="snapshot_total_value_usd",
+                initial_value_usd=Decimal("1000"),
+            )
+        ),
     )
 
 

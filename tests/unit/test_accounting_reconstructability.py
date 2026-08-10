@@ -26,10 +26,12 @@ import pytest_asyncio
 from almanak.framework.observability.ledger import LedgerEntry
 from almanak.framework.observability.position_events import PositionEvent
 from almanak.framework.portfolio.models import (
+    BaselineProvenance,
     PortfolioMetrics,
     PortfolioSnapshot,
     PositionValue,
     ValueConfidence,
+    encode_baseline_provenance,
 )
 from almanak.framework.state.backends.sqlite import (
     SQLiteConfig,
@@ -37,7 +39,6 @@ from almanak.framework.state.backends.sqlite import (
     _convert_dual_identity_tables_to_deployment_id,
 )
 from almanak.framework.teardown.models import PositionType
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -115,11 +116,17 @@ async def test_snapshot_and_metrics_atomic_cowrite(store: SQLiteStore):
     metrics = PortfolioMetrics(
         timestamp=NOW,
         total_value_usd=Decimal("10000"),
-        initial_value_usd=Decimal("9500"),
+        initial_value_usd=Decimal("10000"),
         deposits_usd=Decimal("0"),
         withdrawals_usd=Decimal("0"),
         gas_spent_usd=Decimal("1.50"),
-        positions_json=json.dumps([{"label": "AAVE WETH Supply"}]),
+        positions_json=encode_baseline_provenance(
+            BaselineProvenance(
+                source="snapshot_total_value_usd",
+                initial_value_usd=Decimal("10000"),
+            ),
+            positions_json=json.dumps([{"label": "AAVE WETH Supply"}]),
+        ),
         cycle_id=CYCLE_ID,
         deployment_id=DEPLOYMENT_ID,
         execution_mode=EXECUTION_MODE,
@@ -304,7 +311,13 @@ async def test_metrics_execution_mode_roundtrip(store: SQLiteStore):
     metrics = PortfolioMetrics(
         timestamp=NOW,
         total_value_usd=Decimal("5000"),
-        initial_value_usd=Decimal("4800"),
+        initial_value_usd=Decimal("5000"),
+        positions_json=encode_baseline_provenance(
+            BaselineProvenance(
+                source="snapshot_total_value_usd",
+                initial_value_usd=Decimal("5000"),
+            )
+        ),
         cycle_id=CYCLE_ID,
         deployment_id=DEPLOYMENT_ID,
         execution_mode="paper",
@@ -596,6 +609,7 @@ async def test_vib3614_snapshot_roundtrip(store: SQLiteStore):
 
     # get_snapshots_since
     from datetime import timedelta
+
     since_results = await store.get_snapshots_since(DEPLOYMENT_ID, ts - timedelta(seconds=1))
     assert len(since_results) == 1
     assert since_results[0].deployed_capital_usd == Decimal("3750")
@@ -629,11 +643,16 @@ async def test_vib3614_snapshot_and_metrics_roundtrip(store: SQLiteStore):
     metrics = PortfolioMetrics(
         timestamp=ts,
         total_value_usd=Decimal("8000"),
-        initial_value_usd=Decimal("7500"),
+        initial_value_usd=Decimal("8000"),
         deposits_usd=Decimal("0"),
         withdrawals_usd=Decimal("0"),
         gas_spent_usd=Decimal("2.00"),
-        positions_json="[]",
+        positions_json=encode_baseline_provenance(
+            BaselineProvenance(
+                source="snapshot_total_value_usd",
+                initial_value_usd=Decimal("8000"),
+            )
+        ),
         cycle_id=CYCLE_ID,
         deployment_id=DEPLOYMENT_ID,
         execution_mode=EXECUTION_MODE,

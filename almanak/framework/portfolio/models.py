@@ -9,6 +9,7 @@ These models are used by:
 - Dashboard - Displaying portfolio value and PnL charts
 """
 
+import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -23,6 +24,193 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+
+BASELINE_PROVENANCE_RECORD_TYPE = "accounting_baseline_provenance"
+BASELINE_PROVENANCE_SCHEMA_VERSION = 1
+BASELINE_PROVENANCE_MAX_BYTES = 64 * 1024
+BASELINE_PROVENANCE_SOURCES = frozenset(
+    {
+        "strategy_allocation_usd",
+        "snapshot_total_value_usd",
+        "snapshot_available_cash_usd",
+    }
+)
+
+
+class BaselineProvenanceError(ValueError):
+    """A portfolio-metrics baseline provenance record is malformed or contradictory."""
+
+
+@dataclass(frozen=True)
+class BaselineProvenance:
+    """Immutable authority for how ``PortfolioMetrics.initial_value_usd`` was selected."""
+
+    source: str
+    initial_value_usd: Decimal
+    schema_version: int = BASELINE_PROVENANCE_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        if self.schema_version != BASELINE_PROVENANCE_SCHEMA_VERSION:
+            raise BaselineProvenanceError(
+                f"unsupported baseline provenance schema_version={self.schema_version}; "
+                f"expected {BASELINE_PROVENANCE_SCHEMA_VERSION}"
+            )
+        if self.source not in BASELINE_PROVENANCE_SOURCES:
+            raise BaselineProvenanceError(f"unsupported baseline provenance source={self.source!r}")
+        if not self.initial_value_usd.is_finite() or self.initial_value_usd < 0:
+            raise BaselineProvenanceError("baseline provenance initial_value_usd must be finite and non-negative")
+
+    def to_record(self) -> dict[str, Any]:
+        """Return the stable JSON record stored atomically with portfolio metrics."""
+        return {
+            "initial_value_usd": str(self.initial_value_usd),
+            "record_type": BASELINE_PROVENANCE_RECORD_TYPE,
+            "schema_version": self.schema_version,
+            "source": self.source,
+        }
+
+
+def _load_metrics_positions_records(positions_json: str) -> list[Any]:
+    """Parse the bounded list carried by ``PortfolioMetrics.positions_json``."""
+    if not isinstance(positions_json, str):
+        raise BaselineProvenanceError("portfolio metrics positions_json must be text")
+    if len(positions_json.encode("utf-8")) > BASELINE_PROVENANCE_MAX_BYTES:
+        raise BaselineProvenanceError(f"portfolio metrics positions_json exceeds {BASELINE_PROVENANCE_MAX_BYTES} bytes")
+    try:
+        records = json.loads(positions_json)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise BaselineProvenanceError("portfolio metrics positions_json must be valid JSON") from exc
+    if not isinstance(records, list):
+        raise BaselineProvenanceError("portfolio metrics positions_json must be a JSON list")
+    return records
+
+
+def encode_baseline_provenance(
+    provenance: BaselineProvenance,
+    *,
+    positions_json: str = "[]",
+) -> str:
+    """Append one immutable provenance record without changing unrelated list records."""
+    records = _load_metrics_positions_records(positions_json)
+    existing = [
+        record
+        for record in records
+        if isinstance(record, dict) and record.get("record_type") == BASELINE_PROVENANCE_RECORD_TYPE
+    ]
+    if existing:
+        raise BaselineProvenanceError("baseline provenance record already exists and cannot be overwritten")
+    encoded = json.dumps([*records, provenance.to_record()], sort_keys=True, separators=(",", ":"))
+    if len(encoded.encode("utf-8")) > BASELINE_PROVENANCE_MAX_BYTES:
+        raise BaselineProvenanceError(f"portfolio metrics positions_json exceeds {BASELINE_PROVENANCE_MAX_BYTES} bytes")
+    return encoded
+
+
+def decode_baseline_provenance(positions_json: str) -> BaselineProvenance | None:
+    """Decode exactly one provenance record; return ``None`` only for a legacy absence."""
+    records = _load_metrics_positions_records(positions_json)
+    matches = [
+        record
+        for record in records
+        if isinstance(record, dict) and record.get("record_type") == BASELINE_PROVENANCE_RECORD_TYPE
+    ]
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise BaselineProvenanceError("portfolio metrics contains duplicate baseline provenance records")
+    record = matches[0]
+    expected_keys = {
+        "record_type",
+        "schema_version",
+        "source",
+        "initial_value_usd",
+    }
+    unknown_keys = set(record) - expected_keys
+    if unknown_keys:
+        raise BaselineProvenanceError("baseline provenance contains unknown fields: " + ", ".join(sorted(unknown_keys)))
+    version = record.get("schema_version")
+    source = record.get("source")
+    initial_text = record.get("initial_value_usd")
+    if not isinstance(version, int) or isinstance(version, bool):
+        raise BaselineProvenanceError("baseline provenance schema_version must be an integer")
+    if not isinstance(source, str):
+        raise BaselineProvenanceError("baseline provenance source must be text")
+    if not isinstance(initial_text, str):
+        raise BaselineProvenanceError("baseline provenance initial_value_usd must be exact decimal text")
+    if initial_text != initial_text.strip():
+        raise BaselineProvenanceError("baseline provenance initial_value_usd must not contain surrounding whitespace")
+    try:
+        initial = Decimal(initial_text)
+    except InvalidOperation as exc:
+        raise BaselineProvenanceError("baseline provenance initial_value_usd is not a decimal") from exc
+    return BaselineProvenance(
+        source=source,
+        initial_value_usd=initial,
+        schema_version=version,
+    )
+
+
+def canonicalize_metrics_positions_json(positions_json: str) -> str:
+    """Validate and deterministically encode the complete metrics record list."""
+    records = _load_metrics_positions_records(positions_json)
+    # Validate the provenance subset too; list-shape validation alone would
+    # accept duplicate, malformed, or future-unknown baseline claims.
+    decode_baseline_provenance(positions_json)
+    return json.dumps(records, sort_keys=True, separators=(",", ":"))
+
+
+def validate_baseline_provenance_initial_value(
+    positions_json: str,
+    *,
+    initial_value_usd: Decimal,
+) -> BaselineProvenance | None:
+    """Require a sealed provenance value to equal its enclosing metrics baseline."""
+    provenance = decode_baseline_provenance(positions_json)
+    if provenance is not None and provenance.initial_value_usd != initial_value_usd:
+        raise BaselineProvenanceError("baseline provenance initial_value_usd must equal metrics initial_value_usd")
+    return provenance
+
+
+def validate_immutable_baseline_update(
+    *,
+    existing_positions_json: str,
+    incoming_positions_json: str,
+    existing_initial_value_usd: Decimal,
+    incoming_initial_value_usd: Decimal,
+) -> None:
+    """Refuse any update that would rewrite an established baseline authority."""
+    existing = decode_baseline_provenance(existing_positions_json)
+    incoming = decode_baseline_provenance(incoming_positions_json)
+    if existing is None:
+        if incoming_initial_value_usd != existing_initial_value_usd:
+            raise BaselineProvenanceError("established initial_value_usd cannot be changed")
+        # Absence is historical evidence too. A later SDK can preserve the
+        # legacy row, but cannot retroactively claim which source established
+        # it: that observation was never sealed at creation time.
+        if incoming is not None:
+            raise BaselineProvenanceError("legacy baseline provenance is absent and cannot be backfilled")
+        return
+    if existing.initial_value_usd != existing_initial_value_usd:
+        raise BaselineProvenanceError("persisted baseline provenance contradicts persisted initial_value_usd")
+    if incoming_initial_value_usd != existing_initial_value_usd:
+        raise BaselineProvenanceError("established initial_value_usd cannot be changed")
+    if incoming is None:
+        raise BaselineProvenanceError("established baseline provenance cannot be removed or replaced")
+    # Dataclass equality deliberately normalizes Decimal spelling, but the
+    # persisted authority is an exact versioned JSON object. PostgreSQL JSONB
+    # equality already applies this rule; enforce the same contract locally.
+    existing_record = next(
+        record
+        for record in _load_metrics_positions_records(existing_positions_json)
+        if isinstance(record, dict) and record.get("record_type") == BASELINE_PROVENANCE_RECORD_TYPE
+    )
+    incoming_record = next(
+        record
+        for record in _load_metrics_positions_records(incoming_positions_json)
+        if isinstance(record, dict) and record.get("record_type") == BASELINE_PROVENANCE_RECORD_TYPE
+    )
+    if incoming_record != existing_record:
+        raise BaselineProvenanceError("established baseline provenance cannot be removed or replaced")
 
 
 class ValueConfidenceParseError(ValueError):
@@ -786,7 +974,7 @@ class PortfolioMetrics:
     gas_spent_usd: Decimal = Decimal("0")  # Cumulative gas costs
 
     # Phase 1a: rich accounting fields (persisted in SQLite, round-tripped)
-    positions_json: str = "[]"  # JSON-encoded position details
+    positions_json: str = "[]"  # JSON list of versioned metrics-side records
     cycle_id: str | None = None  # Current execution cycle
 
     execution_mode: RunModeStamp = ""

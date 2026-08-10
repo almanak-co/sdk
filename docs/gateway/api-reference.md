@@ -8,7 +8,7 @@ This document describes the gRPC API exposed by the Almanak Gateway.
 |---------|---------|-------------|
 | Health | 3 | Standard gRPC health checks and chain registration |
 | MarketService | 9 | Price data, Pendle PT/YT-USD price, balances, batch balances, technical indicators, Uniswap V4 pool key lookup, and verified lending/perpetual-market resolution |
-| StateService | 30 | Strategy state persistence, portfolio snapshots/metrics, transaction ledger, accounting events, position events, accounting outbox, atomic ledger+registry writes, and cutover migration state |
+| StateService | 31 | Strategy state persistence, portfolio snapshots/metrics, transaction ledger, accounting events, position events, accounting outbox, atomic ledger+registry writes, and cutover migration state |
 | ExecutionService | 3 | Intent compilation and transaction execution |
 | ObserveService | 4 | Logging, alerts, metrics, and timeline events |
 | RpcService | 7 | JSON-RPC proxy to blockchains with typed queries |
@@ -464,10 +464,27 @@ rpc GetSnapshotsSince(GetSnapshotsSinceRequest) returns (SnapshotList)
 
 ### SavePortfolioMetrics
 
-Save computed portfolio metrics (PnL, Sharpe, drawdown, etc.).
+Legacy update lane for an already-established metrics row. An omitted
+positions field preserves that row's complete stored list. A present
+markerless full list may replace only an existing markerless row when the
+initial value is identical; it cannot touch a sealed row. Neither shape can
+establish a row or add/remove provenance. Provenance-bearing requests are
+rejected and current sealed clients use the version-fenced method below.
 
 ```protobuf
 rpc SavePortfolioMetrics(SaveMetricsRequest) returns (SaveMetricsResponse)
+```
+
+### SavePortfolioMetricsWithProvenance
+
+Version-fenced save for a metrics baseline carrying immutable provenance. A
+client first checks `PortfolioMetricsData.baseline_provenance_supported`; an
+older gateway cannot dispatch this RPC and returns `UNIMPLEMENTED` without
+entering the legacy mutation handler. Every first row must carry exactly one
+valid provenance record.
+
+```protobuf
+rpc SavePortfolioMetricsWithProvenance(SaveMetricsRequest) returns (SaveMetricsResponse)
 ```
 
 ### GetPortfolioMetrics

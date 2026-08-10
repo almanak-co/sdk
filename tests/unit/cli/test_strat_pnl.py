@@ -29,10 +29,12 @@ from almanak.framework.observability.position_events import (
     PositionType,
 )
 from almanak.framework.portfolio.models import (
+    BaselineProvenance,
     PortfolioMetrics,
     PortfolioSnapshot,
     PositionValue,
     ValueConfidence,
+    encode_baseline_provenance,
 )
 from almanak.framework.state.backends.sqlite import SQLiteConfig, SQLiteStore
 
@@ -93,6 +95,12 @@ def _make_metrics(
         deposits_usd=Decimal(deposits),
         withdrawals_usd=Decimal(withdrawals),
         gas_spent_usd=Decimal(gas),
+        positions_json=encode_baseline_provenance(
+            BaselineProvenance(
+                source="strategy_allocation_usd",
+                initial_value_usd=Decimal(initial),
+            )
+        ),
     )
 
 

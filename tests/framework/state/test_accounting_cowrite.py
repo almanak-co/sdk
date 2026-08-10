@@ -6,13 +6,20 @@ Validates:
 """
 
 import asyncio
-import tempfile
+import sqlite3
 from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
 
-from almanak.framework.portfolio.models import PortfolioMetrics, PortfolioSnapshot, ValueConfidence
+from almanak.framework.portfolio.models import (
+    BaselineProvenance,
+    BaselineProvenanceError,
+    PortfolioMetrics,
+    PortfolioSnapshot,
+    ValueConfidence,
+    encode_baseline_provenance,
+)
 from almanak.framework.state.backends.sqlite import SQLiteConfig, SQLiteStore
 
 
@@ -28,30 +35,39 @@ def store(tmp_path):
 
 
 def _make_snapshot(deployment_id: str = "strat:abc123", **kwargs) -> PortfolioSnapshot:
-    defaults = dict(
-        timestamp=datetime.now(UTC),
-        deployment_id=deployment_id,
-        total_value_usd=Decimal("10000"),
-        available_cash_usd=Decimal("5000"),
-        value_confidence=ValueConfidence.HIGH,
-        chain="arbitrum",
-        iteration_number=1,
-    )
+    defaults = {
+        "timestamp": datetime.now(UTC),
+        "deployment_id": deployment_id,
+        "total_value_usd": Decimal("10000"),
+        "available_cash_usd": Decimal("5000"),
+        "value_confidence": ValueConfidence.HIGH,
+        "chain": "arbitrum",
+        "iteration_number": 1,
+    }
     defaults.update(kwargs)
     return PortfolioSnapshot(**defaults)
 
 
 def _make_metrics(deployment_id: str = "strat:abc123", **kwargs) -> PortfolioMetrics:
-    defaults = dict(
-        deployment_id=deployment_id,
-        timestamp=datetime.now(UTC),
-        total_value_usd=Decimal("10000"),
-        initial_value_usd=Decimal("9500"),
-        deposits_usd=Decimal("0"),
-        withdrawals_usd=Decimal("0"),
-        gas_spent_usd=Decimal("15"),
-    )
+    defaults = {
+        "deployment_id": deployment_id,
+        "timestamp": datetime.now(UTC),
+        "total_value_usd": Decimal("10000"),
+        "initial_value_usd": Decimal("9500"),
+        "deposits_usd": Decimal("0"),
+        "withdrawals_usd": Decimal("0"),
+        "gas_spent_usd": Decimal("15"),
+    }
     defaults.update(kwargs)
+    defaults.setdefault(
+        "positions_json",
+        encode_baseline_provenance(
+            BaselineProvenance(
+                source="strategy_allocation_usd",
+                initial_value_usd=Decimal(defaults["initial_value_usd"]),
+            )
+        ),
+    )
     return PortfolioMetrics(**defaults)
 
 
@@ -62,9 +78,7 @@ class TestMetricsTotalValuePersistence:
         metrics = _make_metrics(total_value_usd=Decimal("12345.67"))
         asyncio.get_event_loop().run_until_complete(store.save_portfolio_metrics(metrics))
 
-        loaded = asyncio.get_event_loop().run_until_complete(
-            store.get_portfolio_metrics("strat:abc123")
-        )
+        loaded = asyncio.get_event_loop().run_until_complete(store.get_portfolio_metrics("strat:abc123"))
         assert loaded is not None
         assert loaded.total_value_usd == Decimal("12345.67")
 
@@ -73,9 +87,7 @@ class TestMetricsTotalValuePersistence:
         metrics = _make_metrics(total_value_usd=Decimal("500"))
         asyncio.get_event_loop().run_until_complete(store.save_portfolio_metrics(metrics))
 
-        loaded = asyncio.get_event_loop().run_until_complete(
-            store.get_portfolio_metrics("strat:abc123")
-        )
+        loaded = asyncio.get_event_loop().run_until_complete(store.get_portfolio_metrics("strat:abc123"))
         assert loaded is not None
         assert loaded.total_value_usd != Decimal("0")
         assert loaded.total_value_usd == Decimal("500")
@@ -89,9 +101,7 @@ class TestMetricsTotalValuePersistence:
         )
         asyncio.get_event_loop().run_until_complete(store.save_portfolio_metrics(metrics))
 
-        loaded = asyncio.get_event_loop().run_until_complete(
-            store.get_portfolio_metrics("strat:abc123")
-        )
+        loaded = asyncio.get_event_loop().run_until_complete(store.get_portfolio_metrics("strat:abc123"))
         assert loaded is not None
         assert loaded.pnl_before_gas == Decimal("500")
         assert loaded.pnl_after_gas == Decimal("450")
@@ -104,17 +114,11 @@ class TestAtomicCoWrite:
         snapshot = _make_snapshot()
         metrics = _make_metrics()
 
-        sid = asyncio.get_event_loop().run_until_complete(
-            store.save_snapshot_and_metrics(snapshot, metrics)
-        )
+        sid = asyncio.get_event_loop().run_until_complete(store.save_snapshot_and_metrics(snapshot, metrics))
         assert sid > 0
 
-        loaded_snap = asyncio.get_event_loop().run_until_complete(
-            store.get_latest_snapshot("strat:abc123")
-        )
-        loaded_metrics = asyncio.get_event_loop().run_until_complete(
-            store.get_portfolio_metrics("strat:abc123")
-        )
+        loaded_snap = asyncio.get_event_loop().run_until_complete(store.get_latest_snapshot("strat:abc123"))
+        loaded_metrics = asyncio.get_event_loop().run_until_complete(store.get_portfolio_metrics("strat:abc123"))
         assert loaded_snap is not None
         assert loaded_metrics is not None
         assert loaded_snap.total_value_usd == Decimal("10000")
@@ -125,26 +129,51 @@ class TestAtomicCoWrite:
         snapshot = _make_snapshot(deployment_id="test:inv")
         metrics = _make_metrics(deployment_id="test:inv")
 
-        asyncio.get_event_loop().run_until_complete(
-            store.save_snapshot_and_metrics(snapshot, metrics)
-        )
+        asyncio.get_event_loop().run_until_complete(store.save_snapshot_and_metrics(snapshot, metrics))
 
-        snap = asyncio.get_event_loop().run_until_complete(
-            store.get_latest_snapshot("test:inv")
-        )
-        met = asyncio.get_event_loop().run_until_complete(
-            store.get_portfolio_metrics("test:inv")
-        )
+        snap = asyncio.get_event_loop().run_until_complete(store.get_latest_snapshot("test:inv"))
+        met = asyncio.get_event_loop().run_until_complete(store.get_portfolio_metrics("test:inv"))
         # Both exist
         assert snap is not None
         assert met is not None
 
         # Neither for unknown strategy
-        snap2 = asyncio.get_event_loop().run_until_complete(
-            store.get_latest_snapshot("unknown:xxx")
-        )
-        met2 = asyncio.get_event_loop().run_until_complete(
-            store.get_portfolio_metrics("unknown:xxx")
-        )
+        snap2 = asyncio.get_event_loop().run_until_complete(store.get_latest_snapshot("unknown:xxx"))
+        met2 = asyncio.get_event_loop().run_until_complete(store.get_portfolio_metrics("unknown:xxx"))
         assert snap2 is None
         assert met2 is None
+
+    @pytest.mark.parametrize("writer", ["metrics", "cowrite"])
+    def test_rollback_failure_cannot_mask_provenance_refusal(self, store, writer: str) -> None:
+        """The immutable-baseline error remains authoritative if ROLLBACK also fails."""
+
+        class _RollbackFailingConnection:
+            def __init__(self, wrapped):
+                self._wrapped = wrapped
+                self.rollback_attempted = False
+
+            def execute(self, sql, *args, **kwargs):
+                if sql == "ROLLBACK":
+                    self.rollback_attempted = True
+                    raise sqlite3.OperationalError("cannot rollback - no transaction is active")
+                return self._wrapped.execute(sql, *args, **kwargs)
+
+            def __getattr__(self, name):
+                return getattr(self._wrapped, name)
+
+        assert store._conn is not None
+        failing_conn = _RollbackFailingConnection(store._conn)
+        store._conn = failing_conn
+        metrics = _make_metrics(
+            positions_json=encode_baseline_provenance(
+                BaselineProvenance(source="strategy_allocation_usd", initial_value_usd=Decimal("5"))
+            )
+        )
+
+        with pytest.raises(BaselineProvenanceError, match="must equal metrics initial_value_usd"):
+            if writer == "metrics":
+                asyncio.get_event_loop().run_until_complete(store.save_portfolio_metrics(metrics))
+            else:
+                asyncio.get_event_loop().run_until_complete(store.save_snapshot_and_metrics(_make_snapshot(), metrics))
+
+        assert failing_conn.rollback_attempted

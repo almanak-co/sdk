@@ -57,6 +57,7 @@ class TestSavePortfolioMetrics:
             deposits_usd="500.00",
             withdrawals_usd="100.00",
             gas_spent_usd="25.00",
+            positions_json=b"[]",
         )
         response = await state_service.SavePortfolioMetrics(request, mock_context)
 
@@ -91,6 +92,7 @@ class TestSavePortfolioMetrics:
         request = gateway_pb2.SaveMetricsRequest(
             deployment_id="test-strategy",
             initial_value_usd="10000",
+            positions_json=b"[]",
         )
         response = await state_service.SavePortfolioMetrics(request, mock_context)
 
@@ -109,6 +111,7 @@ class TestSavePortfolioMetrics:
         request = gateway_pb2.SaveMetricsRequest(
             deployment_id="test-strategy",
             initial_value_usd="10000",
+            positions_json=b"[]",
         )
         response = await state_service.SavePortfolioMetrics(request, mock_context)
 
@@ -116,7 +119,6 @@ class TestSavePortfolioMetrics:
         assert response.error == "internal server error"
         mock_context.set_code.assert_called_with(grpc.StatusCode.INTERNAL)
         mock_context.set_details.assert_called_with("internal server error")
-
 
     @pytest.mark.asyncio
     async def test_save_metrics_invalid_decimal(self, state_service, mock_context):
@@ -152,6 +154,7 @@ class TestGetPortfolioMetrics:
             deposits_usd=Decimal("500"),
             withdrawals_usd=Decimal("100"),
             gas_spent_usd=Decimal("25"),
+            positions_json='[{"record_type":"kept"}]',
         )
 
         mock_warm = AsyncMock()
@@ -170,6 +173,8 @@ class TestGetPortfolioMetrics:
         assert response.withdrawals_usd == "100"
         assert response.gas_spent_usd == "25"
         assert response.updated_at > 0
+        assert response.positions_json == b'[{"record_type":"kept"}]'
+        assert response.baseline_provenance_supported is True
 
     @pytest.mark.asyncio
     async def test_get_metrics_not_found(self, state_service, mock_context):
@@ -184,6 +189,7 @@ class TestGetPortfolioMetrics:
         response = await state_service.GetPortfolioMetrics(request, mock_context)
 
         assert response.found is False
+        assert response.baseline_provenance_supported is True
 
     @pytest.mark.parametrize("deployment_id", ["", "   "])
     @pytest.mark.asyncio
@@ -230,6 +236,7 @@ class TestGetPortfolioMetrics:
                 "cycle_id": "cycle-1",
                 "execution_mode": "paper",
                 "is_complete": False,
+                "positions_json": '[{"record_type":"kept"}]',
             }
         )
 
@@ -245,6 +252,8 @@ class TestGetPortfolioMetrics:
         assert response.cycle_id == "cycle-1"
         assert response.execution_mode == "paper"
         assert response.is_complete is False
+        assert response.positions_json == b'[{"record_type":"kept"}]'
+        assert response.baseline_provenance_supported is True
         state_service._snapshot_fetchrow.assert_awaited_once()  # type: ignore[attr-defined]
 
     @pytest.mark.asyncio
@@ -260,6 +269,7 @@ class TestGetPortfolioMetrics:
         )
 
         assert response.found is False
+        assert response.baseline_provenance_supported is True
         mock_context.set_code.assert_not_called()
 
     @pytest.mark.asyncio
@@ -303,11 +313,241 @@ class TestGatewayStateManagerMetrics:
             deposits_usd=Decimal("500"),
             withdrawals_usd=Decimal("100"),
             gas_spent_usd=Decimal("25"),
+            positions_json='[{"record_type":"kept"}]',
         )
 
         result = await gsm.save_portfolio_metrics(metrics)
         assert result is True
         mock_state_stub.SavePortfolioMetrics.assert_called_once()
+        request = mock_state_stub.SavePortfolioMetrics.call_args.args[0]
+        assert request.HasField("positions_json")
+        assert request.positions_json == b'[{"record_type":"kept"}]'
+
+    @pytest.mark.asyncio
+    async def test_new_client_refuses_old_gateway_before_any_mutation(self):
+        """The read-only capability preflight prevents the old save RPC call."""
+        from almanak.framework.portfolio.models import (
+            BaselineProvenance,
+            PortfolioMetrics,
+            encode_baseline_provenance,
+        )
+        from almanak.framework.state.exceptions import AccountingPersistenceError
+        from almanak.framework.state.gateway_state_manager import GatewayStateManager
+
+        class OldGatewayState:
+            def __init__(self) -> None:
+                self.persisted: list[gateway_pb2.SaveMetricsRequest] = []
+
+            def GetPortfolioMetrics(self, _request, *, timeout):
+                del timeout
+                # Old wire response: the additive capability field is absent
+                # and therefore decodes as false in the new client.
+                return gateway_pb2.PortfolioMetricsData(found=False)
+
+            def SavePortfolioMetrics(self, request, *, timeout):
+                del timeout
+                self.persisted.append(request)
+                return gateway_pb2.SaveMetricsResponse(success=True)
+
+        old_state = OldGatewayState()
+        mock_client = MagicMock()
+        mock_client.state = old_state
+        gsm = GatewayStateManager(mock_client)
+        metrics = PortfolioMetrics(
+            deployment_id="deployment:version-skew",
+            timestamp=datetime(2026, 8, 9, tzinfo=UTC),
+            total_value_usd=Decimal("4"),
+            initial_value_usd=Decimal("4"),
+            positions_json=encode_baseline_provenance(
+                BaselineProvenance(source="strategy_allocation_usd", initial_value_usd=Decimal("4"))
+            ),
+        )
+
+        with pytest.raises(AccountingPersistenceError, match="before mutation"):
+            await gsm.save_portfolio_metrics(metrics)
+        assert old_state.persisted == []
+
+    @pytest.mark.asyncio
+    async def test_version_fenced_rpc_prevents_mutation_after_gateway_downgrade(self):
+        """A restart between preflight and save cannot fall through to the legacy mutator."""
+        from almanak.framework.portfolio.models import (
+            BaselineProvenance,
+            PortfolioMetrics,
+            encode_baseline_provenance,
+        )
+        from almanak.framework.state.exceptions import AccountingPersistenceError
+        from almanak.framework.state.gateway_state_manager import GatewayStateManager
+
+        class RestartedGatewayState:
+            def __init__(self) -> None:
+                self.legacy_persisted: list[gateway_pb2.SaveMetricsRequest] = []
+
+            def GetPortfolioMetrics(self, _request, *, timeout):
+                del timeout
+                # The first request reached a provenance-aware gateway.
+                return gateway_pb2.PortfolioMetricsData(
+                    found=False,
+                    baseline_provenance_supported=True,
+                )
+
+            def SavePortfolioMetricsWithProvenance(self, _request, *, timeout):
+                del timeout
+                # Before the second request, routing moved to an old gateway.
+                # On the wire that server returns UNIMPLEMENTED without invoking
+                # any handler; this exception models that non-mutating result.
+                raise RuntimeError("UNIMPLEMENTED")
+
+            def SavePortfolioMetrics(self, request, *, timeout):
+                del timeout
+                self.legacy_persisted.append(request)
+                return gateway_pb2.SaveMetricsResponse(success=True)
+
+        restarted_state = RestartedGatewayState()
+        mock_client = MagicMock()
+        mock_client.state = restarted_state
+        gsm = GatewayStateManager(mock_client)
+        metrics = PortfolioMetrics(
+            deployment_id="deployment:restart-race",
+            timestamp=datetime(2026, 8, 9, tzinfo=UTC),
+            total_value_usd=Decimal("4"),
+            initial_value_usd=Decimal("4"),
+            positions_json=encode_baseline_provenance(
+                BaselineProvenance(source="strategy_allocation_usd", initial_value_usd=Decimal("4"))
+            ),
+        )
+
+        with pytest.raises(AccountingPersistenceError, match="UNIMPLEMENTED"):
+            await gsm.save_portfolio_metrics(metrics)
+        assert restarted_state.legacy_persisted == []
+
+    @pytest.mark.asyncio
+    async def test_client_refuses_contradictory_provenance_before_rpc(self):
+        from almanak.framework.portfolio.models import (
+            BaselineProvenance,
+            PortfolioMetrics,
+            encode_baseline_provenance,
+        )
+        from almanak.framework.state.exceptions import AccountingPersistenceError
+        from almanak.framework.state.gateway_state_manager import GatewayStateManager
+
+        mock_client = MagicMock()
+        mock_client.state = MagicMock()
+        gsm = GatewayStateManager(mock_client)
+        metrics = PortfolioMetrics(
+            deployment_id="deployment:contradictory-client",
+            timestamp=datetime(2026, 8, 9, tzinfo=UTC),
+            total_value_usd=Decimal("4"),
+            initial_value_usd=Decimal("4"),
+            positions_json=encode_baseline_provenance(
+                BaselineProvenance(source="strategy_allocation_usd", initial_value_usd=Decimal("5"))
+            ),
+        )
+
+        with pytest.raises(AccountingPersistenceError, match="must equal metrics initial_value_usd"):
+            await gsm.save_portfolio_metrics(metrics)
+        mock_client.state.GetPortfolioMetrics.assert_not_called()
+        mock_client.state.SavePortfolioMetricsWithProvenance.assert_not_called()
+        mock_client.state.SavePortfolioMetrics.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_gateway_provenance_echo_must_match_request(self):
+        from almanak.framework.portfolio.models import (
+            BaselineProvenance,
+            PortfolioMetrics,
+            encode_baseline_provenance,
+        )
+        from almanak.framework.state.exceptions import AccountingPersistenceError
+        from almanak.framework.state.gateway_state_manager import GatewayStateManager
+
+        requested = encode_baseline_provenance(
+            BaselineProvenance(source="strategy_allocation_usd", initial_value_usd=Decimal("4"))
+        )
+        wrong = encode_baseline_provenance(
+            BaselineProvenance(source="snapshot_available_cash_usd", initial_value_usd=Decimal("4"))
+        )
+        mock_client = MagicMock()
+        mock_client.state = MagicMock()
+        mock_client.state.GetPortfolioMetrics.return_value = gateway_pb2.PortfolioMetricsData(
+            found=False, baseline_provenance_supported=True
+        )
+        mock_client.state.SavePortfolioMetricsWithProvenance.return_value = gateway_pb2.SaveMetricsResponse(
+            success=True, positions_json=wrong.encode()
+        )
+        gsm = GatewayStateManager(mock_client)
+        metrics = PortfolioMetrics(
+            deployment_id="deployment:bad-echo",
+            timestamp=datetime(2026, 8, 9, tzinfo=UTC),
+            total_value_usd=Decimal("4"),
+            initial_value_usd=Decimal("4"),
+            positions_json=requested,
+        )
+
+        with pytest.raises(AccountingPersistenceError, match="does not match"):
+            await gsm.save_portfolio_metrics(metrics)
+        mock_client.state.SavePortfolioMetrics.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_gateway_echo_cannot_drop_unrelated_metrics_records(self):
+        from almanak.framework.portfolio.models import (
+            BaselineProvenance,
+            PortfolioMetrics,
+            encode_baseline_provenance,
+        )
+        from almanak.framework.state.exceptions import AccountingPersistenceError
+        from almanak.framework.state.gateway_state_manager import GatewayStateManager
+
+        provenance = BaselineProvenance(source="strategy_allocation_usd", initial_value_usd=Decimal("4"))
+        requested = encode_baseline_provenance(
+            provenance,
+            positions_json='[{"record_type":"future_metric","value":"sealed"}]',
+        )
+        dropped = encode_baseline_provenance(provenance)
+        mock_client = MagicMock()
+        mock_client.state = MagicMock()
+        mock_client.state.GetPortfolioMetrics.return_value = gateway_pb2.PortfolioMetricsData(
+            found=False, baseline_provenance_supported=True
+        )
+        mock_client.state.SavePortfolioMetricsWithProvenance.return_value = gateway_pb2.SaveMetricsResponse(
+            success=True,
+            positions_json=dropped.encode(),
+        )
+        gsm = GatewayStateManager(mock_client)
+        metrics = PortfolioMetrics(
+            deployment_id="deployment:dropped-record",
+            timestamp=datetime(2026, 8, 9, tzinfo=UTC),
+            total_value_usd=Decimal("4"),
+            initial_value_usd=Decimal("4"),
+            positions_json=requested,
+        )
+
+        with pytest.raises(AccountingPersistenceError, match="complete request"):
+            await gsm.save_portfolio_metrics(metrics)
+        mock_client.state.SavePortfolioMetrics.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_save_metrics_rejects_oversized_positions_before_rpc(self):
+        """The strategy-side boundary enforces the same 64 KiB cap as gateway ingress."""
+        from almanak.framework.portfolio.models import PortfolioMetrics
+        from almanak.framework.state.exceptions import AccountingPersistenceError
+        from almanak.framework.state.gateway_state_manager import GatewayStateManager
+
+        mock_client = MagicMock()
+        mock_client.state = MagicMock()
+        gsm = GatewayStateManager(mock_client)
+        metrics = PortfolioMetrics(
+            deployment_id="test-strategy",
+            timestamp=datetime(2026, 8, 9, tzinfo=UTC),
+            total_value_usd=Decimal("4"),
+            initial_value_usd=Decimal("4"),
+            positions_json='["' + ("x" * (64 * 1024)) + '"]',
+        )
+
+        with pytest.raises(AccountingPersistenceError, match="exceeds"):
+            await gsm.save_portfolio_metrics(metrics)
+
+        mock_client.state.GetPortfolioMetrics.assert_not_called()
+        mock_client.state.SavePortfolioMetricsWithProvenance.assert_not_called()
+        mock_client.state.SavePortfolioMetrics.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_get_metrics_via_gateway_client(self):
@@ -332,6 +572,7 @@ class TestGatewayStateManagerMetrics:
             gas_spent_usd="25",
             updated_at=1712000000,
             found=True,
+            positions_json=b'[{"record_type":"kept"}]',
         )
         # The latest snapshot carries the current NAV the proto cannot transmit.
         mock_state_stub.GetLatestSnapshot.return_value = gateway_pb2.SnapshotData(
@@ -351,6 +592,7 @@ class TestGatewayStateManagerMetrics:
         assert result.deployment_id == "test-strategy"
         assert result.initial_value_usd == Decimal("10000")
         assert result.deposits_usd == Decimal("500")
+        assert result.positions_json == '[{"record_type":"kept"}]'
         # VIB-2475: total_value_usd sourced from the snapshot (not hardcoded 0).
         assert result.total_value_usd == Decimal("12345")
         # pnl_before_gas = 12345 - 10000 - 500 + 100 = 1945 (was -9900 poisoned).
