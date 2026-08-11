@@ -12,7 +12,7 @@ description: >-
   debugging strategy execution on Anvil forks. Do NOT use for general
   smart contract development, Solidity code, or non-strategy SDK internals.
 metadata:
-  version: "2.24.0"
+  version: "2.25.0"
   author: Almanak
   license: Apache-2.0
   type: documentation
@@ -2006,6 +2006,41 @@ def get_open_positions(self):
 `PERP` > `BORROW` > `SUPPLY` > `LP` > `STAKE` > `PREDICTION` > `CEX` > `TOKEN`
 
 For strategies with no positions, return `TeardownPositionSummary.empty(self.deployment_id)`.
+
+#### Perpetual position type boundary
+
+Perpetual strategies must preserve the `perps` scaffold's normalized venue
+probe in both teardown methods:
+
+```python
+from almanak.framework.strategies import probe_perp_position
+
+probe = probe_perp_position(
+    market,
+    protocol=self.protocol,
+    chain=self.chain,
+    market_symbol=self.market,
+)
+```
+
+The two position models are not interchangeable:
+
+- `market.perp_positions()` returns raw `PerpsPositionOnChain`. Its
+  `size_in_usd` and `size_in_tokens` are venue-scaled integers intended for
+  connector/framework code. It does **not** have `notional_usd`.
+- `probe_perp_position()` returns normalized `PerpProbePosition` rows. Only
+  these rows expose strategy-facing `notional_usd: Decimal | None`.
+
+Never access `position.notional_usd` on a raw row, and never publish raw
+`size_in_usd` as `PositionInfo.value_usd`. Handle the probe's three states:
+OPEN uses venue positions and side; FLAT overrides stale cache; UNMEASURED keeps
+persisted exposure with `value_usd_unknown=True` and
+`valuation_status="no_path"`. Every full close uses `size_usd=None`.
+
+Retain a unit test that constructs the real SDK `PerpsPositionOnChain` and
+passes it through `get_open_positions()` and `generate_teardown_intents()`. A
+MagicMock or SimpleNamespace with an invented `notional_usd` field cannot catch
+this boundary error.
 
 #### `generate_teardown_intents()`
 

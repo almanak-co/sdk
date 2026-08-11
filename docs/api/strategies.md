@@ -86,6 +86,53 @@ class MyStrategy(IntentStrategy):
 !!! warning "Always query on-chain state"
     `get_open_positions()` must query live on-chain balances, not cached values. Stale data can cause teardown to skip positions or attempt to close positions that no longer exist.
 
+### Perpetual teardown: use the normalized probe
+
+Perpetual position reads have two deliberately different models:
+
+| Model | Returned by | Intended consumer |
+|---|---|---|
+| `PerpsPositionOnChain` | `market.perp_positions(...)` | Connector/framework code. Amounts such as `size_in_usd` and `size_in_tokens` are raw venue-scaled integers. |
+| `PerpProbePosition` | `probe_perp_position(...)` | Strategy teardown code. `notional_usd` is a normalized `Decimal` or `None` when valuation is unavailable. |
+
+Do not read `notional_usd` from a raw `PerpsPositionOnChain`, and do not copy
+raw `size_in_usd` into `PositionInfo.value_usd`. GMX, Hyperliquid, and other
+venues use different fixed-point scales. The public conversion seam is
+`probe_perp_position`:
+
+```python
+from almanak.framework.strategies import probe_perp_position
+
+def _venue_probe(self, market=None):
+    snapshot = market
+    if snapshot is None:
+        try:
+            snapshot = self.create_market_snapshot()
+        except Exception:
+            snapshot = None
+    return probe_perp_position(
+        snapshot,
+        protocol=self.protocol,
+        chain=self.chain,
+        market_symbol=self.market,
+    )
+```
+
+Use the same probe in both teardown methods:
+
+- `OPEN`: enumerate every `probe.positions` row, use its venue-reported side,
+  and use `row.notional_usd` only on that normalized row.
+- `FLAT`: return no positions and no close intents, even if local state is stale.
+- `UNMEASURED`: retain the persisted exposure as a fail-closed fallback. Mark
+  its `PositionInfo.details` with `value_usd_unknown=True` and
+  `valuation_status="no_path"`; unmeasured is not flat and `None` is not zero.
+- Every close uses `size_usd=None` so the compiler closes the full live position.
+
+Start from the `perps` scaffold or the packaged
+`gmx_v2_directional_perp` reference. A teardown unit test must construct a real
+`PerpsPositionOnChain` and pass it through the probe; a mock that invents a
+`notional_usd` attribute cannot validate this boundary.
+
 ## Testing with `force_action`
 
 Real strategies gate their `decide()` output behind signals — RSI thresholds, MACD crosses, balance checks, cooldowns. That makes them hard to test on a forked block where those signals may not fire. The convention is a `force_action` config field that **bypasses signal gates** and lets you drive a known intent through the production code path.

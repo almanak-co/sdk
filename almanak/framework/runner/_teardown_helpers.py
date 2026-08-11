@@ -140,12 +140,14 @@ async def fetch_positions_or_fallback(
         # without cutover storage.
         positions = await resolve_open_positions_with_registry(strategy)
     except Exception as pos_err:
+        strategy_hook = f"{type(strategy).__module__}.{type(strategy).__qualname__}.get_open_positions()"
         if not runner.config.allow_unsafe_teardown_fallback:
             error_msg = (
-                f"Cannot fetch positions for safety validation for {deployment_id}: {pos_err}. "
+                f"Strategy hook {strategy_hook} failed while fetching positions for safety validation "
+                f"for {deployment_id}: {type(pos_err).__name__}: {pos_err}. "
                 f"Inline fallback is disabled (allow_unsafe_teardown_fallback=False)."
             )
-            logger.error(error_msg)
+            logger.exception(error_msg)
             if request:
                 from .runner_teardown import _safe_mark
 
@@ -155,8 +157,10 @@ async def fetch_positions_or_fallback(
                 deployment_id, IterationStatus.STRATEGY_ERROR, error_msg, start_time
             )
         logger.warning(
-            f"Cannot fetch positions for safety validation — "
-            f"falling back to inline teardown for {deployment_id} (unsafe fallback enabled): {pos_err}"
+            f"Strategy hook {strategy_hook} failed while fetching positions for safety validation — "
+            f"falling back to inline teardown for {deployment_id} (unsafe fallback enabled): "
+            f"{type(pos_err).__name__}: {pos_err}",
+            exc_info=True,
         )
         fallback_result = await runner._execute_teardown_inline(
             strategy, teardown_intents, teardown_market, start_time, request, state_manager

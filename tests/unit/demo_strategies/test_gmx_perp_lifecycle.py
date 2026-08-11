@@ -12,9 +12,16 @@ import importlib.util
 import json
 from decimal import Decimal
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
+
+from almanak.connectors._strategy_base.perps_read_base import (
+    PerpsPositionOnChain,
+    PerpsReadResult,
+)
+from almanak.connectors.gmx_v2 import market_catalog
+from tests.unit.connectors.gmx_v2.market_fixtures import prime_catalog
 
 _SEED_DIR = (
     Path(__file__).resolve().parents[3]
@@ -22,6 +29,15 @@ _SEED_DIR = (
     / "demo_strategies"
     / "gmx_perp_lifecycle"
 )
+_ETH_USD_MARKET = "0x70d95587d40A2caf56bd97485aB3Eec10Bee6336"
+_USDC_ARBITRUM = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
+
+
+@pytest.fixture(autouse=True)
+def _verified_markets():
+    prime_catalog()
+    yield
+    market_catalog.clear()
 
 
 def _load_module():
@@ -44,7 +60,37 @@ def strat():
         s._config = cfg
         s.get_config = lambda k, d=None: cfg.get(k, d)
         cls.__init__(s)
+    s._chain = "arbitrum"
+    s._deployment_id = "deployment:gmx_perp_lifecycle_test"
     return s
+
+
+def _venue(strat, *, positions, ok=True, truncated=False, price="3000"):
+    snapshot = MagicMock()
+    snapshot.perp_positions.return_value = PerpsReadResult(
+        positions=tuple(positions),
+        ok=ok,
+        truncated=truncated,
+    )
+    snapshot.price.return_value = Decimal(price)
+    strat.create_market_snapshot = lambda: snapshot
+    return snapshot
+
+
+def _raw_position(*, is_long=True):
+    return PerpsPositionOnChain(
+        account="0x" + "1" * 40,
+        market=_ETH_USD_MARKET,
+        collateral_token=_USDC_ARBITRUM,
+        size_in_usd=100 * 10**30,
+        size_in_tokens=10**17,
+        collateral_amount=50 * 10**6,
+        is_long=is_long,
+        borrowing_factor=0,
+        funding_fee_amount_per_size=0,
+        increased_at_time=0,
+        decreased_at_time=0,
+    )
 
 
 class TestFullCloseSemantics:
@@ -65,3 +111,66 @@ class TestFullCloseSemantics:
         assert len(intents) == 1
         assert intents[0].intent_type.value == "PERP_CLOSE"
         assert intents[0].size_usd is None
+
+
+class TestVenueDerivedTeardown:
+    """ALM-3218: raw venue rows are normalized before strategy valuation."""
+
+    def test_raw_position_the_cache_missed_is_reported_and_closed(self, strat):
+        from almanak.framework.teardown import TeardownMode
+
+        strat._loop_state = "idle"
+        _venue(strat, positions=[_raw_position(is_long=False)])
+
+        summary = strat.get_open_positions()
+        assert len(summary.positions) == 1
+        row = summary.positions[0]
+        assert row.value_usd == Decimal("300.0")
+        assert row.details["position_source"] == "venue"
+        assert row.details["is_long"] is False
+
+        intents = strat.generate_teardown_intents(TeardownMode.SOFT)
+        assert len(intents) == 1
+        assert intents[0].is_long is False
+        assert intents[0].collateral_token == _USDC_ARBITRUM
+        assert intents[0].size_usd is None
+
+    def test_measured_flat_venue_overrides_stale_cache(self, strat):
+        from almanak.framework.teardown import TeardownMode
+
+        strat._loop_state = "open"
+        strat._position_size_usd = Decimal("100")
+        _venue(strat, positions=[])
+
+        assert strat.get_open_positions().positions == []
+        assert strat.generate_teardown_intents(TeardownMode.SOFT) == []
+
+    def test_open_venue_position_with_unavailable_price_keeps_venue_identity(self, strat):
+        strat._loop_state = "open"
+        strat._position_size_usd = Decimal("100")
+        snapshot = _venue(strat, positions=[_raw_position()])
+        snapshot.price.side_effect = RuntimeError("oracle unavailable")
+
+        summary = strat.get_open_positions()
+        assert len(summary.positions) == 1
+        row = summary.positions[0]
+        assert row.value_usd == Decimal("100")
+        assert row.details["position_source"] == "venue"
+        assert row.details["value_usd_unknown"] is True
+        assert row.details["valuation_status"] == "no_path"
+
+    def test_unmeasured_venue_retains_marked_cache_fallback(self, strat):
+        from almanak.framework.teardown import TeardownMode
+
+        strat._loop_state = "open"
+        strat._position_size_usd = Decimal("100")
+        _venue(strat, positions=[], ok=False)
+
+        summary = strat.get_open_positions()
+        assert len(summary.positions) == 1
+        row = summary.positions[0]
+        assert row.value_usd == Decimal("100")
+        assert row.details["position_source"] == "strategy_cache_unverified"
+        assert row.details["value_usd_unknown"] is True
+        assert row.details["valuation_status"] == "no_path"
+        assert len(strat.generate_teardown_intents(TeardownMode.SOFT)) == 1

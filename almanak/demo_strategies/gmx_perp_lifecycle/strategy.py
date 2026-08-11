@@ -1,5 +1,9 @@
 """GMX V2 strategy-authored pending-order and position lifecycle.
 
+This is an advanced connector-conformance demo for GMX's asynchronous order,
+cancellation, and settlement states. For a general strategy-authoring reference,
+start from ``gmx_v2_directional_perp`` or the ``perps`` scaffold instead.
+
 Kitchen Loop iteration 27 -- first test of PerpOpenIntent and PerpCloseIntent.
 Tests the GMX V2 connector end-to-end on Arbitrum with USDC collateral
 (ERC-20 approval path, different from WETH native token path).
@@ -29,12 +33,16 @@ settled: the measured read, not the strategy's own cache, is the authority
 import logging
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from almanak.framework.intents import Intent, IntentType
 from almanak.framework.market import MarketSnapshot
 from almanak.framework.strategies import IntentStrategy, almanak_strategy
 from almanak.framework.utils.log_formatters import format_usd
+
+if TYPE_CHECKING:
+    from almanak.framework.strategies import PerpProbe
+    from almanak.framework.teardown import PositionInfo
 
 logger = logging.getLogger(__name__)
 
@@ -311,24 +319,38 @@ class GMXPerpLifecycleStrategy(IntentStrategy):
             trigger_price=trigger_price,
         )
 
+    def _venue_probe(self, market: MarketSnapshot | None = None, *, is_long: bool | None = None) -> "PerpProbe":
+        """Return normalized venue truth for this GMX market.
+
+        ``MarketSnapshot.perp_positions()`` returns raw
+        ``PerpsPositionOnChain`` rows. Strategy code must not value those rows
+        directly: their numeric fields use venue-specific fixed-point scales.
+        ``probe_perp_position`` is the public conversion seam and returns
+        ``PerpProbePosition`` rows whose ``notional_usd`` is normalized.
+        """
+        from almanak.framework.strategies import probe_perp_position
+
+        snapshot = market
+        if snapshot is None:
+            try:
+                snapshot = self.create_market_snapshot()
+            except Exception as exc:  # noqa: BLE001 — no snapshot is UNMEASURED, never flat
+                logger.warning("teardown: no market snapshot for the venue probe (%s)", exc)
+                snapshot = None
+        return probe_perp_position(
+            snapshot,
+            protocol="gmx_v2",
+            chain=self.chain,
+            market_symbol=self.market_address,
+            is_long=is_long,
+        )
+
     def _target_position_is_open(self, market: MarketSnapshot) -> bool | None:
         """Return measured target exposure, or ``None`` when the read is incomplete."""
-        from almanak.connectors.gmx_v2.addresses import GMX_V2_TOKENS
-
-        result = market.perp_positions("gmx_v2", chain=self.chain)
-        if not result.ok or result.truncated:
+        probe = self._venue_probe(market, is_long=self.is_long)
+        if not probe.is_measured:
             return None
-        market_address = self.market_address
-        collateral_address = GMX_V2_TOKENS.get(self.chain, {}).get(self.collateral_token)
-        if market_address is None or collateral_address is None:
-            return None
-        return any(
-            position.is_active
-            and position.market.lower() == market_address.lower()
-            and position.collateral_token.lower() == collateral_address.lower()
-            and position.is_long is self.is_long
-            for position in result.positions
-        )
+        return probe.is_open
 
     def _create_close_intent(self) -> Intent:
         """Create PerpCloseIntent to close the full position."""
@@ -537,34 +559,103 @@ class GMXPerpLifecycleStrategy(IntentStrategy):
 
     # --- Teardown ---
 
-    def get_open_positions(self):
-        from almanak.connectors.gmx_v2.addresses import GMX_V2_TOKENS
-        from almanak.framework.teardown import PositionInfo, PositionType, TeardownPositionSummary
+    def _cache_may_hold_position(self) -> bool:
+        """Whether persisted state requires a fail-closed UNMEASURED fallback."""
+        if self._position_observed:
+            return self._loop_state != "closed"
+        return self._loop_state in {
+            "open",
+            "opening",
+            "opening_a",
+            "pending_a",
+            "cancelling_a",
+            "opening_b",
+            "order_b_pending",
+            "closing",
+            "closing_b",
+            "close_submitted",
+            "recovery_required",
+        }
 
-        positions = []
-        # Report an open position whenever state says "open", even if size is
-        # unknown (corrupt/missing persisted state) — otherwise teardown would
-        # silently skip a live position after a restart.
-        if self._loop_state == "open" or (
-            self._position_observed and self._loop_state in ("order_b_pending", "closing_b", "close_submitted")
-        ):
-            positions.append(
-                PositionInfo(
-                    position_type=PositionType.PERP,
-                    position_id=f"gmx-{self.market}-{self.chain}",
-                    chain=self.chain,
-                    protocol="gmx_v2",
-                    value_usd=self._position_size_usd,
-                    details={
-                        "market": self.market_address,
-                        "market_address": self.market_address,
-                        "is_long": self.is_long,
-                        "leverage": str(self.leverage),
-                        "collateral_token": self.collateral_token,
-                        "collateral_address": GMX_V2_TOKENS.get(self.chain, {}).get(self.collateral_token),
-                        "size_known": self._position_size_usd > 0,
-                    },
+    def _cache_needs_close(self) -> bool:
+        """Whether fallback state needs a new close rather than settlement observation."""
+        return self._loop_state != "close_submitted" and self._cache_may_hold_position()
+
+    def _teardown_position_row(
+        self,
+        *,
+        is_long: bool,
+        collateral_token: str,
+        value_usd: Decimal,
+        from_venue: bool,
+        value_measured: bool,
+    ) -> "PositionInfo":
+        from almanak.framework.teardown import PositionInfo, PositionType
+
+        side = "long" if is_long else "short"
+        details: dict[str, Any] = {
+            "market": self.market_address,
+            "market_address": self.market_address,
+            "is_long": is_long,
+            "side": side,
+            "leverage": str(self.leverage),
+            "collateral_token": collateral_token,
+            "position_source": "venue" if from_venue else "strategy_cache_unverified",
+        }
+        if not value_measured:
+            details["value_usd_unknown"] = True
+            details["valuation_status"] = "no_path"
+        return PositionInfo(
+            position_type=PositionType.PERP,
+            position_id=(
+                f"gmx-{self.market_address.lower()}-"
+                f"{collateral_token.lower()}-{side}"
+            ),
+            chain=self.chain,
+            protocol="gmx_v2",
+            value_usd=value_usd,
+            details=details,
+        )
+
+    def get_open_positions(self):
+        """Enumerate GMX venue positions, retaining cache only when unmeasured."""
+        from almanak.framework.teardown import PositionInfo, TeardownPositionSummary
+
+        probe = self._venue_probe()
+        positions: list[PositionInfo] = []
+        if probe.is_open:
+            for found in probe.positions:
+                measured = found.notional_usd is not None
+                positions.append(
+                    self._teardown_position_row(
+                        is_long=found.is_long,
+                        collateral_token=found.collateral_token,
+                        value_usd=found.notional_usd if measured else self._position_size_usd,
+                        from_venue=True,
+                        value_measured=measured,
+                    )
                 )
+        elif not probe.is_measured and self._cache_may_hold_position():
+            logger.warning(
+                "teardown: GMX position read UNMEASURED (%s) — retaining cached side=%s; "
+                "an unmeasured read is not a flat account",
+                probe.reason,
+                "long" if self.is_long else "short",
+            )
+            positions.append(
+                self._teardown_position_row(
+                    is_long=self.is_long,
+                    collateral_token=self.collateral_token,
+                    value_usd=self._position_size_usd,
+                    from_venue=False,
+                    value_measured=False,
+                )
+            )
+        elif probe.is_flat and self._cache_may_hold_position():
+            logger.info(
+                "teardown: GMX measured FLAT on %s while cached state=%s — reporting the venue",
+                self.market,
+                self._loop_state,
             )
 
         return TeardownPositionSummary(
@@ -576,23 +667,27 @@ class GMXPerpLifecycleStrategy(IntentStrategy):
     def generate_teardown_intents(self, mode, market=None):
         from almanak.framework.teardown import TeardownMode
 
-        intents = []
-        if self._loop_state == "open" or (
-            self._position_observed and self._loop_state in ("order_b_pending", "closing_b")
-        ):
-            slippage = Decimal("0.03") if mode == TeardownMode.HARD else Decimal("0.01")
-            # Always emit a full close by passing size_usd=None — the compiler
-            # live-reads the on-chain position size at compile time. Passing a
-            # cached notional would strand residual dust if the position drifted
-            # (VIB-5950/ALM-2976); size_usd=0 would be a no-op.
-            intents.append(
-                Intent.perp_close(
-                    market=self.market_address,
-                    collateral_token=self.collateral_token,
-                    is_long=self.is_long,
-                    size_usd=None,
-                    max_slippage=slippage,
-                    protocol="gmx_v2",
-                )
+        probe = self._venue_probe(market)
+        if probe.is_open:
+            close_targets = [(found.is_long, found.collateral_token) for found in probe.positions]
+        elif probe.is_flat:
+            close_targets = []
+        elif self._cache_needs_close():
+            close_targets = [(self.is_long, self.collateral_token)]
+        else:
+            close_targets = []
+
+        slippage = Decimal("0.03") if mode == TeardownMode.HARD else Decimal("0.01")
+        return [
+            Intent.perp_close(
+                market=self.market_address,
+                collateral_token=collateral_token,
+                is_long=is_long,
+                # Full close: the compiler resolves the live size. Never pass a
+                # cached or raw venue notional (VIB-5950 / ALM-2976 / ALM-3218).
+                size_usd=None,
+                max_slippage=slippage,
+                protocol="gmx_v2",
             )
-        return intents
+            for is_long, collateral_token in close_targets
+        ]
