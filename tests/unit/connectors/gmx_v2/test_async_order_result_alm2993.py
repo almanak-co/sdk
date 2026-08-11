@@ -113,11 +113,24 @@ def _receipt(logs: list[dict]) -> dict:
 
 
 def _gateway_result(receipts: list[dict]) -> GatewayExecutionResult:
+    normalized_receipts = []
+    tx_hashes = []
+    for index, raw_receipt in enumerate(receipts):
+        tx_hash = f"0x{index + 1:064x}"
+        receipt = dict(raw_receipt)
+        receipt.setdefault("transactionHash", tx_hash)
+        receipt.setdefault("blockNumber", 123)
+        receipt.setdefault("blockHash", "0xblock")
+        receipt.setdefault("gasUsed", 200_000)
+        receipt.setdefault("effectiveGasPrice", 1)
+        receipt.setdefault("logs", [])
+        tx_hashes.append(tx_hash)
+        normalized_receipts.append(receipt)
     return GatewayExecutionResult(
         success=True,
-        tx_hashes=[f"0x{i + 1:064x}" for i in range(len(receipts))],
-        total_gas_used=200_000,
-        receipts=receipts,
+        tx_hashes=tx_hashes,
+        total_gas_used=200_000 * len(receipts),
+        receipts=normalized_receipts,
         execution_id="alm-2993",
     )
 

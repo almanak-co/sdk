@@ -360,10 +360,22 @@ class TestSushiSwapV3SwapEnrichment:
             tx_hashes=["0xapprove1", "0xswap2"],
             total_gas_used=78_245,
             receipts=[
-                {"status": "0x1", "gas_used": 55_449, "logs": None},  # approve tx: OP-style hex status + null logs
                 {
+                    "tx_hash": "0xapprove1",
+                    "block_number": 42,
+                    "block_hash": "0xblock1",
+                    "status": "0x1",
+                    "gas_used": 55_449,
+                    "effective_gas_price": 1,
+                    "logs": [],
+                },
+                {
+                    "tx_hash": "0xswap2",
+                    "block_number": 42,
+                    "block_hash": "0xblock2",
                     "status": "0x1",
                     "gas_used": 22_796,
+                    "effective_gas_price": 1,
                     "logs": [transfer_out, swap_log, transfer_in],
                     "from_address": self.WALLET,
                 },  # swap tx
@@ -472,6 +484,7 @@ class TestGatewayReceiptFromAddress:
 
         wallet = "0x1234567890abcdef1234567890abcdef12345678"
         receipt_data = {
+            "tx_hash": "0xtx1",
             "status": 1,
             "gas_used": 100000,
             "block_number": 42,
@@ -502,10 +515,12 @@ class TestGatewayReceiptFromAddress:
         from almanak.framework.execution.gateway_orchestrator import GatewayExecutionResult
 
         receipt_data = {
+            "tx_hash": "0xtx1",
             "status": 1,
             "gas_used": 100000,
             "block_number": 42,
             "block_hash": "0xblockhash",
+            "effective_gas_price": 1,
             "logs": [],
         }
         gw_result = GatewayExecutionResult(
@@ -1401,9 +1416,7 @@ class TestExtractionSpecPerProtocolOverlay:
         literal-dispatch ratchets forbid a new ``"curve"`` literal here)."""
         from almanak.connectors.curve.receipt_parser import CurveReceiptParser
 
-        assert CurveReceiptParser.EXTRACTION_REMOVALS_BY_INTENT["LP_OPEN"] == frozenset(
-            {"tick_lower", "tick_upper"}
-        )
+        assert CurveReceiptParser.EXTRACTION_REMOVALS_BY_INTENT["LP_OPEN"] == frozenset({"tick_lower", "tick_upper"})
         assert "lp_close_data" not in CurveReceiptParser.EXTRACTION_REMOVALS_BY_INTENT["LP_CLOSE"]
         assert "curve" not in ResultEnricher.EXTRACTION_SPECS_REMOVE_BY_PROTOCOL
 

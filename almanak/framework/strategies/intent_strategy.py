@@ -33,7 +33,7 @@ from abc import abstractmethod
 from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, final
 
 if TYPE_CHECKING:
     from ..data.wallet_activity import WalletActivityProvider
@@ -672,6 +672,21 @@ class IntentStrategy(StrategyBase[ConfigT]):
         """
         return False
 
+    @final
+    def _framework_persistent_state(self) -> dict[str, Any]:
+        """Return framework-owned state without consulting overridable accessors.
+
+        Runner replay barriers call this method unbound on ``IntentStrategy``
+        so a strategy override cannot hide or substitute framework-owned
+        tracker state after a landed transaction.
+        """
+        tracker = getattr(self, "_lp_position_tracker", None)
+        if tracker is None:
+            return {}
+        # Always overwrite the reserved slot, including with an empty dict, so
+        # a closed position cannot be resurrected from stale durable state.
+        return {_LP_TRACKER_STATE_KEY: tracker.to_persistent_dict()}
+
     # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     def save_state(self) -> None:
         """Save current strategy state to persistence.
@@ -681,51 +696,38 @@ class IntentStrategy(StrategyBase[ConfigT]):
         if not self._state_manager or not self._deployment_id:
             return
 
-        state = self.get_persistent_state() or {}
-
-        # VIB-3742: append framework-owned LP tracker state under a reserved
-        # key. Always overwrite the framework slot (even with an empty dict)
-        # so a fully-cleared tracker — e.g. the strategy just closed its last
-        # position — leaves an explicit empty payload in storage rather than
-        # the stale prior state. Without this, a restart would resurrect
-        # already-closed bin_ids / position_ids and re-inject them into the
-        # next LP_CLOSE / LP_COLLECT_FEES.
-        tracker = getattr(self, "_lp_position_tracker", None)
-        if tracker is not None:
-            state = dict(state)  # don't mutate user's dict in place
-            state[_LP_TRACKER_STATE_KEY] = tracker.to_persistent_dict()
-
-        if not state:
-            return
+        user_state = self.get_persistent_state() or {}
+        # Call the framework implementation unbound: framework-owned state may
+        # not be hidden by a strategy override at this durability boundary.
+        framework_state = IntentStrategy._framework_persistent_state(self)
 
         try:
-            from ..state.state_manager import StateData
+            from ..state.strategy_state import replace_strategy_persistent_state
 
-            # Create StateData object with the strategy state
-            # Try to get existing version for proper CAS updates
-            version = getattr(self, "_state_version", 0) + 1
+            previous_save = self._pending_save
 
-            state_data = StateData(
-                deployment_id=self.deployment_id,
-                version=version,
-                state=state,
-            )
+            async def _persist_after_previous() -> None:
+                if previous_save is not None:
+                    await previous_save
+                saved = await replace_strategy_persistent_state(
+                    self._state_manager,
+                    self.deployment_id,
+                    user_state,
+                    framework_state=framework_state,
+                )
+                self._state_version = saved.version
 
             # Run async save_state - handle both sync and async contexts
             try:
                 asyncio.get_running_loop()
-                # We're in an async context, schedule as task
-                future = asyncio.ensure_future(self._state_manager.save_state(state_data))
-                # Store future for potential awaiting
-                self._pending_save = future
+                # Chain rather than replace the previous task: two callbacks in
+                # one loop cannot race and overwrite the shared row.
+                self._pending_save = asyncio.create_task(_persist_after_previous())
             except RuntimeError:
                 # No running loop - create one and run
-                asyncio.run(self._state_manager.save_state(state_data))
+                asyncio.run(_persist_after_previous())
 
-            # Update version for next save
-            self._state_version = version
-
-            logger.debug(f"Saved state for {self._deployment_id}: {list(state.keys())}")
+            logger.debug(f"Scheduled state save for {self._deployment_id}: {list(user_state.keys())}")
         except Exception as e:
             logger.warning(f"Failed to save state: {e}")
 
@@ -761,16 +763,9 @@ class IntentStrategy(StrategyBase[ConfigT]):
         own ``load_persistent_state`` is invoked. Returns
         ``(user_state, framework_state)``.
         """
-        if not state:
-            return {}, {}
-        framework_state: dict[str, Any] = {}
-        user_state: dict[str, Any] = {}
-        for key, value in state.items():
-            if isinstance(key, str) and key.startswith("__framework_") and key.endswith("__"):
-                framework_state[key] = value
-            else:
-                user_state[key] = value
-        return user_state, framework_state
+        from ..state.strategy_state import split_strategy_persistent_state
+
+        return split_strategy_persistent_state(state)
 
     def _restore_framework_state(self, framework_state: dict[str, Any]) -> None:
         """Apply framework-owned state to internal components."""

@@ -28,6 +28,7 @@ from almanak.framework.runner._run_loop_helpers import handle_iteration_failure
 from almanak.framework.runner.failure_kind import FailureKind
 from almanak.framework.runner.runner_models import IterationResult, IterationStatus
 from almanak.framework.runner.strategy_runner import RunnerConfig, StrategyRunner
+from tests.unit.runner._state_manager import absent_state_manager
 
 _PAUSE_PATCH = "almanak.framework.runner.strategy_runner.StrategyRunner._is_strategy_paused"
 _TEARDOWN_PATCH = "almanak.framework.runner.strategy_runner.StrategyRunner._check_teardown_requested"
@@ -56,7 +57,7 @@ def _make_runner(circuit_breaker=None, emergency_manager=None):
         price_oracle=MagicMock(),
         balance_provider=MagicMock(),
         execution_orchestrator=MagicMock(),
-        state_manager=MagicMock(),
+        state_manager=absent_state_manager(),
         config=config,
         circuit_breaker=circuit_breaker,
         emergency_manager=emergency_manager,

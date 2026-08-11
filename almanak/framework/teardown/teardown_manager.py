@@ -2819,6 +2819,32 @@ class TeardownManager:
                             actual_slippage=actual_slippage,
                         )
                     else:
+                        # A failed result with known hashes is not an ordinary
+                        # revert: one or more transactions may already be mined,
+                        # while receipt-set corruption prevents us from knowing
+                        # which legs landed. Never walk either the time or
+                        # slippage retry axis; both can duplicate on-chain work.
+                        from almanak.framework.execution.reconciliation import (
+                            failed_submission_requires_reconciliation,
+                            reconciliation_required_error,
+                        )
+
+                        if failed_submission_requires_reconciliation(exec_result):
+                            terminal_error = reconciliation_required_error(exec_result)
+                            logger.error(
+                                "Intent %d/%d requires receipt reconciliation; refusing teardown replay: %s",
+                                intent_index + 1,
+                                len(intents),
+                                terminal_error,
+                            )
+                            return ExecutionAttempt(
+                                success=False,
+                                slippage_used=slippage,
+                                actual_slippage=Decimal("0"),
+                                error=terminal_error,
+                                retryable=False,
+                                disposition=Disposition.NON_RETRYABLE.value,
+                            )
                         # VIB-4532 / VIB-4664 / VIB-4258: classify the revert so a
                         # deterministic failure (insufficient balance, contract-arg,
                         # ERC-721 not-approved) short-circuits and a transport/RPC

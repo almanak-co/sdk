@@ -23,9 +23,17 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from almanak.core.chains import DEFAULT_CHAIN, ChainRegistry
+from almanak.core.enums import ChainFamily
 from almanak.framework.execution.gas.constants import (
     DEFAULT_GRPC_EXECUTE_TIMEOUT_SECONDS,
     DEFAULT_TX_TIMEOUT_SECONDS,
+)
+from almanak.framework.execution.submission import (
+    ReplayPolicy,
+    SubmissionProvenance,
+    SubmissionTransactionEvidence,
+    TransactionRole,
+    execution_plan_hash,
 )
 from almanak.framework.gateway_client import GatewayClient
 from almanak.gateway.proto import gateway_pb2
@@ -35,6 +43,20 @@ if TYPE_CHECKING:
     from .outcome import ExecutionOutcome
 
 logger = logging.getLogger(__name__)
+
+
+def _submission_provenance_from_proto(response: Any) -> SubmissionProvenance:
+    """Map the wire enum, treating absent/unknown values as UNSPECIFIED.
+
+    An older gateway has no field and protobuf's zero value is likewise
+    UNSPECIFIED. Never infer NOT_ATTEMPTED from a missing field.
+    """
+    raw = getattr(response, "submission_provenance", 0)
+    if raw == gateway_pb2.SUBMISSION_PROVENANCE_NOT_ATTEMPTED:
+        return SubmissionProvenance.NOT_ATTEMPTED
+    if raw == gateway_pb2.SUBMISSION_PROVENANCE_ATTEMPTED:
+        return SubmissionProvenance.ATTEMPTED
+    return SubmissionProvenance.UNSPECIFIED
 
 
 @dataclass
@@ -66,8 +88,42 @@ class GatewayExecutionResult:
     total_gas_used: int
     receipts: list[dict]
     execution_id: str
+    chain_family: str = "EVM"
     error: str | None = None
     error_code: str | None = None
+    submission_provenance: SubmissionProvenance = SubmissionProvenance.UNSPECIFIED
+    execution_plan_hash: str = ""
+    submission_transactions: list[SubmissionTransactionEvidence] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        """Refuse a successful wire result whose receipt set is incomplete.
+
+        Older or differently-versioned gateways may still emit the historical
+        bad shape where receipt serialization skipped one element but retained
+        every transaction hash. Positional association is then unknowable, so
+        the strategy-side boundary independently converts the result to a
+        failure before enrichment or ledger persistence can treat it as clean.
+        """
+        self.submission_provenance = SubmissionProvenance.parse(self.submission_provenance)
+        self.submission_transactions = [
+            item
+            for value in self.submission_transactions
+            if (item := SubmissionTransactionEvidence.from_value(value)) is not None
+        ]
+        if not self.success:
+            return
+
+        from almanak.framework.execution.reconciliation import successful_receipt_set_error
+
+        receipt_error = successful_receipt_set_error(
+            self.tx_hashes,
+            self.receipts,
+            solana=self.chain_family == ChainFamily.SOLANA.value,
+        )
+        if receipt_error is not None:
+            self.success = False
+            self.error = f"gateway receipt-set validation failed: {receipt_error}"
+            self.error_code = "RECEIPT_SET_INCOMPLETE"
 
     @property
     def tx_hash(self) -> str | None:
@@ -160,24 +216,14 @@ class GatewayExecutionResult:
         from almanak.framework.execution.orchestrator import TransactionResult
 
         results = []
-        if len(self.tx_hashes) < len(self.receipts):
-            logger.warning(
-                "tx_hashes/receipts length mismatch: %d tx_hashes vs %d receipts. "
-                "Some TransactionResults will have empty tx_hash.",
-                len(self.tx_hashes),
-                len(self.receipts),
-            )
+        is_solana = self.chain_family == ChainFamily.SOLANA.value
         for i, receipt_data in enumerate(self.receipts):
-            tx_hash = self.tx_hashes[i] if i < len(self.tx_hashes) else ""
+            tx_hash = self.tx_hashes[i]
 
             # Normalize receipt values once to ensure consistency between
             # TransactionReceipt and TransactionResult
             if isinstance(receipt_data, dict):
-                # Normalize status: some chains (e.g. OP Stack) may return "0x1" instead of 1.
-                # Without this, the TransactionResult would have success=False and _collect_receipts
-                # would skip the receipt, causing swap_amounts / position_id enrichment to fail
-                # even on successful transactions (VIB-1437).
-                status_raw = receipt_data.get("status", 1)
+                status_raw = 1 if is_solana and receipt_data.get("success") is True else receipt_data.get("status", 1)
                 try:
                     if isinstance(status_raw, str):
                         # Supports decimal and 0x/0X-prefixed hex values (e.g. OP Stack returns "0x1").
@@ -193,10 +239,10 @@ class GatewayExecutionResult:
                         tx_hash,
                     )
                     status = 0
-                gas_used = receipt_data.get("gas_used", 0)
+                gas_used = receipt_data.get("fee_lamports", 0) if is_solana else receipt_data.get("gas_used", 0)
                 logs = receipt_data.get("logs") or []
             else:
-                status = 1
+                status = 0
                 gas_used = 0
                 logs = []
 
@@ -206,10 +252,10 @@ class GatewayExecutionResult:
             if isinstance(receipt_data, dict):
                 tx_receipt = TransactionReceipt(
                     tx_hash=tx_hash,
-                    block_number=receipt_data.get("block_number", 0),
+                    block_number=receipt_data.get("slot", 0) if is_solana else receipt_data.get("block_number", 0),
                     block_hash=receipt_data.get("block_hash", ""),
                     gas_used=gas_used,
-                    effective_gas_price=receipt_data.get("effective_gas_price", 0),
+                    effective_gas_price=1 if is_solana else receipt_data.get("effective_gas_price", 0),
                     status=status,
                     logs=logs,
                     from_address=receipt_data.get("from_address"),
@@ -243,7 +289,7 @@ class GatewayExecutionResult:
             receipts=list(self.receipts),
             total_fee_native=Decimal(self.total_gas_used),
             error=self.error,
-            chain_family="EVM",
+            chain_family=self.chain_family,
             position_id=self.position_id,
             swap_amounts=self.swap_amounts,
             lp_close_data=self.lp_close_data,
@@ -251,6 +297,9 @@ class GatewayExecutionResult:
             async_orders=list(self.async_orders),
             extracted_data=self.extracted_data,
             extraction_warnings=self.extraction_warnings,
+            submission_provenance=self.submission_provenance,
+            execution_plan_hash=self.execution_plan_hash,
+            submission_transactions=list(self.submission_transactions),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -262,6 +311,9 @@ class GatewayExecutionResult:
             "execution_id": self.execution_id,
             "error": self.error,
             "error_code": self.error_code,
+            "submission_provenance": self.submission_provenance.value,
+            "execution_plan_hash": self.execution_plan_hash,
+            "submission_transactions": [item.to_dict() for item in self.submission_transactions],
             "bridge_data": self.bridge_data.to_dict() if self.bridge_data else None,
             "async_orders": [order.to_dict() for order in self.async_orders],
         }
@@ -470,6 +522,8 @@ class GatewayExecutionOrchestrator:
             else:
                 bundle_dict = action_bundle
 
+            expected_plan_hash = execution_plan_hash(action_bundle)
+
             # Include sensitive_data (e.g. Raydium NFT mint keypair) for the
             # gateway roundtrip. The gateway extracts it on the Execute side
             # to pass to SolanaExecutionPlanner for co-signing.
@@ -508,15 +562,36 @@ class GatewayExecutionOrchestrator:
             else:
                 tx_hashes = [h if h.startswith("0x") else f"0x{h}" for h in response.tx_hashes]
 
+            response_plan_hash = getattr(response, "execution_plan_hash", "")
+            plan_hash_matches = isinstance(response_plan_hash, str) and response_plan_hash == expected_plan_hash
+
             return GatewayExecutionResult(
                 success=response.success,
                 tx_hashes=tx_hashes,
                 total_gas_used=response.total_gas_used,
                 receipts=receipts,
                 execution_id=response.execution_id,
+                chain_family="SOLANA" if isinstance(family_for(self._chain), SvmFamily) else "EVM",
                 error=response.error if response.error else None,
                 error_code=response.error_code if response.error_code else None,
                 extraction_warnings=extraction_warnings,
+                submission_provenance=_submission_provenance_from_proto(response),
+                execution_plan_hash=response_plan_hash if plan_hash_matches else "",
+                submission_transactions=[
+                    SubmissionTransactionEvidence(
+                        tx_id=item.tx_id,
+                        role={
+                            gateway_pb2.EXECUTION_TRANSACTION_ROLE_SETUP_APPROVAL: TransactionRole.SETUP_APPROVAL,
+                            gateway_pb2.EXECUTION_TRANSACTION_ROLE_ACTION: TransactionRole.ACTION,
+                        }.get(item.role, TransactionRole.UNKNOWN),
+                        replay_policy=(
+                            ReplayPolicy.RECOMPILE_ONLY
+                            if item.replay_policy == gateway_pb2.REPLAY_POLICY_RECOMPILE_ONLY
+                            else ReplayPolicy.NEVER
+                        ),
+                    )
+                    for item in (getattr(response, "submission_transactions", []) if plan_hash_matches else [])
+                ],
             )
 
         except Exception as e:

@@ -13,6 +13,7 @@ from typing import Any
 
 from almanak.framework.execution.chain_strategy import ChainExecutionStrategy
 from almanak.framework.execution.outcome import ExecutionOutcome
+from almanak.framework.execution.submission import SubmissionProvenance
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +81,9 @@ class EvmExecutionStrategy(ChainExecutionStrategy):
             lp_close_data=getattr(result, "lp_close_data", None),
             extracted_data=getattr(result, "extracted_data", {}),
             extraction_warnings=getattr(result, "extraction_warnings", []),
+            submission_provenance=SubmissionProvenance.parse(
+                getattr(result, "submission_provenance", SubmissionProvenance.UNSPECIFIED)
+            ),
         )
 
     async def check_connection(self) -> bool:

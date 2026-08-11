@@ -123,7 +123,9 @@ def _make_db_with_minimal_lp_run() -> Path:
         VALUES ('led-1', 'cyc-1', 'lp-test', 'live', '2026-05-01T00:00:00Z',
             'LP_OPEN', 'WETH', '0.001', 'USDC', '3.0', 500000, '0.05',
             '0xdeadbeef', 'arbitrum', 'uniswap_v3', 1,
-            '{"lp_open_data": {"tick_lower": 100, "tick_upper": 200, "liquidity": "1234567"}}',
+            '{"lp_open_data": {"tick_lower": 100, "tick_upper": 200, "liquidity": "1234567"},
+              "sub_transactions": [{"tx_hash": "0xdeadbeef", "target_contract": "",
+                "function_selector": "", "gas_used": 500000, "status": "success", "role": "ACTION"}]}',
             '{"WETH": {"price_usd": "3000", "oracle_source": "chainlink", "fetched_at": "", "confidence": "HIGH"}, "USDC": {"price_usd": "1.0", "oracle_source": "chainlink", "fetched_at": "", "confidence": "HIGH"}}',
             '{}', '{}', 1, 1, 1)
         """
@@ -255,14 +257,14 @@ def test_accountant_test_runs_for_each_primitive(primitive):
     db_path = _make_db_with_minimal_lp_run()
     try:
         report = run_against_sqlite(db_path, primitive=primitive)
-        # 15 generic + 6 primitive + 1 cell #22 (VIB-4201/T15) + 1 G16 native lane
-        # (VIB-6061) = 23 cells per primitive. Cell #22 and G16 are BOTH
-        # informational; gating is still measured on the 21 cells that are neither,
-        # per the format_markdown contract.
-        assert report.total_cells == 23
+        # 15 generic + 6 primitive + 1 cell #22 (VIB-4201/T15) + G16 native lane
+        # (VIB-6061) + G17 receipt-set integrity = 24 cells per primitive.
+        # Cell #22 and G16 are informational; G17 is a gating invariant.
+        assert report.total_cells == 24
         cell_ids = {c.cell_id for c in report.cells}
         assert "L5_22" in cell_ids
         assert "G16" in cell_ids
+        assert "G17" in cell_ids
         # Markdown serialization works
         md = report.format_markdown()
         assert "# Accountant Test —" in md

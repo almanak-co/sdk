@@ -32,7 +32,7 @@ from almanak.framework.runner.strategy_runner import (
     RunnerConfig,
     StrategyRunner,
 )
-
+from tests.unit.runner._state_manager import absent_state_manager
 
 # =============================================================================
 # Helpers
@@ -53,7 +53,7 @@ def _make_runner(
         dry_run=dry_run,
     )
     if state_manager is None:
-        state_manager = MagicMock()
+        state_manager = absent_state_manager()
     if balance_provider is None:
         balance_provider = MagicMock()
     return StrategyRunner(

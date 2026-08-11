@@ -26,20 +26,29 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from almanak.framework.execution.gateway_orchestrator import GatewayExecutionResult
 from almanak.framework.execution.orchestrator import (
-    ExecutionContext,
     ExecutionPhase,
     ExecutionResult,
     TransactionResult,
 )
-from almanak.framework.intents.vocabulary import HoldIntent, SwapIntent
+from almanak.framework.execution.submission import (
+    ReplayPolicy,
+    SubmissionProvenance,
+    SubmissionTransactionEvidence,
+    TransactionRole,
+    execution_plan_hash,
+)
+from almanak.framework.intents.compiler import CompilationResult, CompilationStatus
+from almanak.framework.intents.state_machine import IntentStateMachine, RetryConfig, StateMachineConfig
+from almanak.framework.intents.vocabulary import SwapIntent
+from almanak.framework.runner.runner_models import ExecutionBarrierPhase, ExecutionProgress
 from almanak.framework.runner.strategy_runner import (
     IterationStatus,
     RunnerConfig,
     SingleChainExecutionState,
     StrategyRunner,
 )
-
 
 # =============================================================================
 # Helpers
@@ -70,13 +79,24 @@ def _make_runner(
         # Ensure ``getattr(orch, "tx_risk_config", None)`` returns None so tests
         # exercising the slippage path use intent.max_slippage (not a Mock).
         execution_orchestrator.tx_risk_config = None
-    return StrategyRunner(
+    runner = StrategyRunner(
         price_oracle=MagicMock(),
         balance_provider=balance_provider,
         execution_orchestrator=execution_orchestrator,
         state_manager=state_manager,
         config=config,
     )
+    runner._load_execution_progress = AsyncMock(
+        return_value=ExecutionProgress(
+            execution_id="pending",
+            deployment_id="test-strategy",
+            intents_hash="landed-accounting-pending",
+            total_steps=1,
+            reconciliation_required_step_index=0,
+        )
+    )
+    runner._save_execution_progress = AsyncMock()
+    return runner
 
 
 def _make_strategy() -> MagicMock:
@@ -267,10 +287,7 @@ class TestSingleChainPreRetryConfirmed:
         state.state_machine.retry_count = 0  # first attempt -- not a retry
 
         single_chain_orch = MagicMock()
-        assert (
-            await runner._single_chain_pre_retry_confirmed(state, single_chain_orch)
-            is False
-        )
+        assert await runner._single_chain_pre_retry_confirmed(state, single_chain_orch) is False
 
     @pytest.mark.asyncio
     async def test_non_timeout_error_returns_false(self) -> None:
@@ -282,17 +299,12 @@ class TestSingleChainPreRetryConfirmed:
         state.last_execution_result = ExecutionResult(
             success=False,
             phase=ExecutionPhase.SIGNING,
-            transaction_results=[
-                TransactionResult(tx_hash="0xabc", success=False, gas_used=0, gas_cost_wei=0)
-            ],
+            transaction_results=[TransactionResult(tx_hash="0xabc", success=False, gas_used=0, gas_cost_wei=0)],
             error="reverted",
         )
 
         single_chain_orch = MagicMock()
-        assert (
-            await runner._single_chain_pre_retry_confirmed(state, single_chain_orch)
-            is False
-        )
+        assert await runner._single_chain_pre_retry_confirmed(state, single_chain_orch) is False
 
     @pytest.mark.asyncio
     async def test_all_prior_confirmed_short_circuits_to_success(self) -> None:
@@ -305,23 +317,16 @@ class TestSingleChainPreRetryConfirmed:
         state.last_execution_result = ExecutionResult(
             success=False,
             phase=ExecutionPhase.SUBMISSION,
-            transaction_results=[
-                TransactionResult(tx_hash="0xdead", success=False, gas_used=0, gas_cost_wei=0)
-            ],
+            transaction_results=[TransactionResult(tx_hash="0xdead", success=False, gas_used=0, gas_cost_wei=0)],
             error="timeout waiting for receipt",
         )
 
-        submitted_receipt = SimpleNamespace(
-            tx_hash="0xdead", success=True, gas_used=21000, gas_cost_wei=100, logs=[]
-        )
+        submitted_receipt = SimpleNamespace(tx_hash="0xdead", success=True, gas_used=21000, gas_cost_wei=100, logs=[])
         single_chain_orch = MagicMock()
         single_chain_orch.submitter = MagicMock()
         single_chain_orch.submitter.get_receipt = AsyncMock(return_value=submitted_receipt)
 
-        assert (
-            await runner._single_chain_pre_retry_confirmed(state, single_chain_orch)
-            is True
-        )
+        assert await runner._single_chain_pre_retry_confirmed(state, single_chain_orch) is True
         # Success ExecutionResult synthesised
         assert state.last_execution_result.success is True
         assert state.last_execution_result.total_gas_used == 21000
@@ -338,28 +343,294 @@ class TestSingleChainPreRetryConfirmed:
         original_result = ExecutionResult(
             success=False,
             phase=ExecutionPhase.SUBMISSION,
-            transaction_results=[
-                TransactionResult(tx_hash="0xdead", success=False, gas_used=0, gas_cost_wei=0)
-            ],
+            transaction_results=[TransactionResult(tx_hash="0xdead", success=False, gas_used=0, gas_cost_wei=0)],
             error="timeout waiting for receipt",
         )
         state.last_execution_result = original_result
 
-        reverted_receipt = SimpleNamespace(
-            tx_hash="0xdead", success=False, gas_used=21000, gas_cost_wei=100, logs=[]
-        )
+        reverted_receipt = SimpleNamespace(tx_hash="0xdead", success=False, gas_used=21000, gas_cost_wei=100, logs=[])
         single_chain_orch = MagicMock()
         single_chain_orch.submitter = MagicMock()
         single_chain_orch.submitter.get_receipt = AsyncMock(return_value=reverted_receipt)
 
         # Reverted TX -> not all confirmed -> do not short-circuit
-        assert (
-            await runner._single_chain_pre_retry_confirmed(state, single_chain_orch)
-            is False
-        )
+        assert await runner._single_chain_pre_retry_confirmed(state, single_chain_orch) is False
         # Does not overwrite last_execution_result
         assert state.last_execution_result is original_result
         state.state_machine.set_receipt.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_incomplete_gateway_receipt_set_with_known_hash_is_never_redispatched() -> None:
+    """Live state-machine control: a mined-but-unmeasured bundle executes once.
+
+    The gateway deliberately returns no partial receipts because positional
+    association is no longer trustworthy. The retained hash must survive into
+    the receipt state machine and force a terminal reconciliation verdict; it
+    must not enter the automatic retry loop and broadcast the bundle again.
+    """
+    orchestrator = MagicMock()
+    orchestrator.tx_risk_config = None
+    orchestrator.reset_nonce_cache = MagicMock()
+    orchestrator.execute = AsyncMock(
+        return_value=GatewayExecutionResult(
+            success=False,
+            tx_hashes=["0x" + "a" * 64],
+            total_gas_used=21_000,
+            receipts=[],
+            execution_id="exec-incomplete",
+            error="receipt 1 could not be serialized",
+            error_code="RECEIPT_SET_INCOMPLETE",
+        )
+    )
+    runner = _make_runner(execution_orchestrator=orchestrator)
+    runner._save_execution_progress = AsyncMock()  # type: ignore[method-assign]
+    strategy = _make_strategy()
+    state = _make_state(strategy)
+
+    bundle = MagicMock()
+    bundle.transactions = [MagicMock(), MagicMock()]
+    bundle.intent_type = "SWAP"
+    bundle.metadata = {}
+    compiler = MagicMock()
+    compiler.default_protocol = None
+    compiler.compile.return_value = CompilationResult(
+        status=CompilationStatus.SUCCESS,
+        intent_id=state.intent.intent_id,
+        action_bundle=bundle,
+    )
+    state.compiler = compiler
+    state.state_machine = IntentStateMachine(
+        intent=state.intent,
+        compiler=compiler,
+        config=StateMachineConfig(
+            retry_config=RetryConfig(max_retries=2, initial_delay_seconds=0.0, jitter_factor=0.0)
+        ),
+        on_sadflow_enter=runner._on_sadflow_enter,
+    )
+
+    with patch("almanak.framework.observability.emitter.emit_phase_event") as emit_phase_event:
+        assert await runner._single_chain_state_machine_loop(state) is None
+
+    assert state.state_machine.is_complete
+    assert not state.state_machine.success
+    assert state.state_machine.retry_count == 0
+    assert "BROADCAST_RECONCILIATION_REQUIRED" in (state.state_machine.error or "")
+    orchestrator.execute.assert_awaited_once()
+    progress = runner._save_execution_progress.await_args.args[1]
+    assert progress.reconciliation_required_step_index == 0
+    assert progress.serialized_intents == [state.intent.serialize()]
+    [evidence] = progress.submission_evidence
+    assert evidence.step_index == 0
+    assert evidence.chain == "arbitrum"
+    assert evidence.submitted_transaction_ids == ["0x" + "a" * 64]
+    timeline = emit_phase_event.call_args.kwargs
+    assert timeline["tx_hash"] == "0x" + "a" * 64
+    assert timeline["details"]["submitted_tx_hashes"] == ["0x" + "a" * 64]
+
+    # The same retained hash reaches the failure-ledger extractor even though
+    # transaction_results is necessarily empty without trustworthy receipts.
+    from almanak.framework.observability.ledger import _extract_tx_and_gas
+
+    tx_hash, _gas_used, _gas_usd = _extract_tx_and_gas(state.last_execution_result)
+    assert tx_hash == "0x" + "a" * 64
+
+    # Next-cycle negative control: the pre-decide gate reads the durable marker
+    # and returns before strategy.decide() or another orchestrator broadcast.
+    runner._load_execution_progress = AsyncMock(return_value=progress)  # type: ignore[method-assign]
+    resumed = await runner._check_and_resume_stuck_execution(strategy, datetime.now(UTC))
+    assert resumed is not None
+    assert resumed.status == IterationStatus.EXECUTION_FAILED
+    orchestrator.execute.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_landed_approval_reverted_action_recompiles_fresh_bundle() -> None:
+    """A mixed receipt set may recompile, but the original bundle is never replayed."""
+
+    def _receipt(tx_hash: str, status: int) -> dict[str, object]:
+        return {
+            "tx_hash": tx_hash,
+            "block_number": 42,
+            "block_hash": "0xblock",
+            "gas_used": 21_000,
+            "effective_gas_price": "1",
+            "status": status,
+            "logs": [],
+        }
+
+    approval_tx = {
+        "tx_type": "approve",
+        "data": "0x095ea7b3" + "00" * 64,
+        "value": "0x0",
+        "to": "0xtoken",
+    }
+    action_tx = {"tx_type": "swap", "data": "0x12345678", "value": "0x0", "to": "0xrouter"}
+    first_bundle = MagicMock(transactions=[approval_tx, action_tx], metadata={})
+    first_bundle.to_dict.return_value = {"intent_type": "SWAP", "transactions": [approval_tx, action_tx]}
+    fresh_bundle = MagicMock(transactions=[action_tx], metadata={})
+    fresh_bundle.to_dict.return_value = {"intent_type": "SWAP", "transactions": [action_tx]}
+
+    first_result = GatewayExecutionResult(
+        success=False,
+        tx_hashes=["0xapprove", "0xaction"],
+        total_gas_used=42_000,
+        receipts=[_receipt("0xapprove", 1), _receipt("0xaction", 0)],
+        execution_id="mixed",
+        error="action reverted",
+        submission_provenance=SubmissionProvenance.ATTEMPTED,
+        execution_plan_hash=execution_plan_hash(first_bundle),
+        submission_transactions=[
+            SubmissionTransactionEvidence("0xapprove", TransactionRole.SETUP_APPROVAL, ReplayPolicy.RECOMPILE_ONLY),
+            SubmissionTransactionEvidence("0xaction", TransactionRole.ACTION, ReplayPolicy.NEVER),
+        ],
+    )
+    second_result = GatewayExecutionResult(
+        success=True,
+        tx_hashes=["0xfreshaction"],
+        total_gas_used=21_000,
+        receipts=[_receipt("0xfreshaction", 1)],
+        execution_id="fresh",
+        submission_provenance=SubmissionProvenance.ATTEMPTED,
+        execution_plan_hash=execution_plan_hash(fresh_bundle),
+        submission_transactions=[
+            SubmissionTransactionEvidence("0xfreshaction", TransactionRole.ACTION, ReplayPolicy.NEVER)
+        ],
+    )
+    orchestrator = MagicMock(tx_risk_config=None)
+    orchestrator.reset_nonce_cache = MagicMock()
+    orchestrator.execute = AsyncMock(side_effect=[first_result, second_result])
+    runner = _make_runner(execution_orchestrator=orchestrator)
+    runner._save_execution_progress = AsyncMock()  # type: ignore[method-assign]
+    state = _make_state(_make_strategy())
+    compiler = MagicMock(default_protocol=None)
+    compiler.compile.side_effect = [
+        CompilationResult(
+            status=CompilationStatus.SUCCESS,
+            intent_id=state.intent.intent_id,
+            action_bundle=first_bundle,
+        ),
+        CompilationResult(
+            status=CompilationStatus.SUCCESS,
+            intent_id=state.intent.intent_id,
+            action_bundle=fresh_bundle,
+        ),
+    ]
+    state.compiler = compiler
+    state.state_machine = IntentStateMachine(
+        intent=state.intent,
+        compiler=compiler,
+        config=StateMachineConfig(retry_config=RetryConfig(max_retries=1, initial_delay_seconds=0, jitter_factor=0)),
+    )
+
+    assert await runner._single_chain_state_machine_loop(state) is None
+
+    assert state.state_machine.success
+    assert compiler.compile.call_count == 2
+    assert [call.kwargs["action_bundle"] for call in orchestrator.execute.await_args_list] == [
+        first_bundle,
+        fresh_bundle,
+    ]
+    saved_phases = [call.args[1].effective_barrier_phase for call in runner._save_execution_progress.await_args_list]
+    assert ExecutionBarrierPhase.RECOMPILE_REQUIRED in saved_phases
+
+
+@pytest.mark.asyncio
+async def test_pre_broadcast_marker_write_failure_prevents_submission() -> None:
+    orchestrator = MagicMock()
+    orchestrator.tx_risk_config = None
+    orchestrator.execute = AsyncMock()
+    runner = _make_runner(execution_orchestrator=orchestrator)
+    runner._save_execution_progress = AsyncMock(side_effect=RuntimeError("state database unavailable"))  # type: ignore[method-assign]
+    state = _make_state(_make_strategy())
+    state.state_machine = MagicMock(retry_count=0)
+    state.compiler = MagicMock(default_protocol=None)
+    step_result = MagicMock()
+    step_result.action_bundle = MagicMock(transactions=[MagicMock()], metadata={})
+
+    assert await runner._single_chain_execute_step(state, step_result) is None
+
+    orchestrator.execute.assert_not_awaited()
+    failed_receipt = state.state_machine.set_receipt.call_args.args[0]
+    assert failed_receipt.success is False
+    assert "BROADCAST_RECONCILIATION_REQUIRED" in failed_receipt.error
+    assert "marker write failed" in failed_receipt.error
+
+
+@pytest.mark.asyncio
+async def test_explicit_not_attempted_failure_clears_single_chain_barrier_for_retry() -> None:
+    """A gateway refusal before submission must not become a permanent incident."""
+    orchestrator = MagicMock()
+    orchestrator.tx_risk_config = None
+    orchestrator.reset_nonce_cache = MagicMock()
+    orchestrator.execute = AsyncMock(
+        return_value=GatewayExecutionResult(
+            success=False,
+            tx_hashes=[],
+            total_gas_used=0,
+            receipts=[],
+            execution_id="exec-not-submitted",
+            error="policy refused transaction before submission",
+            submission_provenance=SubmissionProvenance.NOT_ATTEMPTED,
+        )
+    )
+    runner = _make_runner(execution_orchestrator=orchestrator)
+    runner._save_execution_progress = AsyncMock()  # type: ignore[method-assign]
+    runner._clear_execution_progress = AsyncMock()  # type: ignore[method-assign]
+    state = _make_state(_make_strategy())
+    state.state_machine = MagicMock(retry_count=0)
+    state.compiler = MagicMock(default_protocol=None)
+    step_result = MagicMock()
+    step_result.action_bundle = MagicMock(transactions=[MagicMock()], metadata={})
+
+    assert await runner._single_chain_execute_step(state, step_result) is None
+
+    orchestrator.execute.assert_awaited_once()
+    runner._clear_execution_progress.assert_awaited_once_with(state.deployment_id)
+    failed_receipt = state.state_machine.set_receipt.call_args.args[0]
+    assert failed_receipt.success is False
+    assert failed_receipt.error == "policy refused transaction before submission"
+    assert "BROADCAST_RECONCILIATION_REQUIRED" not in failed_receipt.error
+
+
+@pytest.mark.asyncio
+async def test_landed_result_retains_marker_until_downstream_completion() -> None:
+    orchestrator = MagicMock()
+    orchestrator.tx_risk_config = None
+    orchestrator.execute = AsyncMock(
+        return_value=ExecutionResult(
+            success=True,
+            phase=ExecutionPhase.COMPLETE,
+            completed_at=datetime.now(UTC),
+        )
+    )
+    runner = _make_runner(execution_orchestrator=orchestrator)
+    runner._save_execution_progress = AsyncMock()  # type: ignore[method-assign]
+    runner._clear_execution_progress = AsyncMock(side_effect=AssertionError("must not clear before accounting"))  # type: ignore[method-assign]
+    state = _make_state(_make_strategy())
+    state.state_machine = MagicMock(retry_count=0)
+    state.compiler = MagicMock(default_protocol=None)
+    step_result = MagicMock()
+    step_result.action_bundle = MagicMock(transactions=[MagicMock()], metadata={})
+
+    assert await runner._single_chain_execute_step(state, step_result) is None
+
+    orchestrator.execute.assert_awaited_once()
+    assert runner._save_execution_progress.await_count == 2
+    runner._clear_execution_progress.assert_not_awaited()
+    landed_receipt = state.state_machine.set_receipt.call_args.args[0]
+    assert landed_receipt.success is True
+    retained_marker = runner._save_execution_progress.await_args.args[1]
+    assert retained_marker.is_accounting_pending
+    assert retained_marker.intents_hash == "landed-accounting-pending"
+
+    # Crash-gap control: a restart between receipt validation and accounting
+    # observes the retained marker and refuses a second broadcast.
+    runner._load_execution_progress = AsyncMock(return_value=retained_marker)  # type: ignore[method-assign]
+    resumed = await runner._check_and_resume_stuck_execution(state.strategy, datetime.now(UTC))
+    assert resumed is not None
+    assert resumed.status == IterationStatus.ACCOUNTING_FAILED
+    orchestrator.execute.assert_awaited_once()
 
 
 # =============================================================================

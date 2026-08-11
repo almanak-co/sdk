@@ -119,7 +119,10 @@ class TestSolanaTransactionReceipt:
         assert receipt.slot == 42
         assert receipt.block_time is None
         assert receipt.fee_lamports == 0
-        assert receipt.success is True
+        # Missing transaction metadata is not proof of a successful money
+        # move. Parsers must set success explicitly after validating the full
+        # production receipt and signature identity.
+        assert receipt.success is False
         assert receipt.err is None
         assert receipt.logs == []
         assert receipt.pre_token_balances == []

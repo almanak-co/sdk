@@ -22,6 +22,14 @@ from almanak.framework.execution.solana.route_refresh import (
     SolanaRouteRefreshRequest,
     SolanaRouteRefreshResult,
 )
+from almanak.framework.execution.submission import (
+    ReplayPolicy,
+    SubmissionProvenance,
+    SubmissionTransactionEvidence,
+    TransactionRole,
+    certify_submission_transactions,
+    execution_plan_hash,
+)
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
 from almanak.gateway.validation import (
@@ -72,6 +80,90 @@ PRICE_SENSITIVE_INTENT_TYPES = frozenset(
 # inheriting a fabricated oracle. Must remain a subset of
 # PRICE_SENSITIVE_INTENT_TYPES — the gate never reaches it otherwise.
 PRICE_OPTIONAL_CLOSE_INTENT_TYPES = frozenset({"LPCLOSE", "PERPCLOSE"})
+
+
+class ReceiptSetSerializationError(RuntimeError):
+    """The gateway could not preserve one receipt per transaction result."""
+
+
+def _submission_provenance_to_proto(value: Any) -> gateway_pb2.SubmissionProvenance.ValueType:
+    """Serialize provenance without upgrading missing/unknown evidence."""
+    parsed = SubmissionProvenance.parse(value)
+    return {
+        SubmissionProvenance.NOT_ATTEMPTED: gateway_pb2.SUBMISSION_PROVENANCE_NOT_ATTEMPTED,
+        SubmissionProvenance.ATTEMPTED: gateway_pb2.SUBMISSION_PROVENANCE_ATTEMPTED,
+    }.get(parsed, gateway_pb2.SUBMISSION_PROVENANCE_UNSPECIFIED)
+
+
+def _submission_transactions_to_proto(
+    values: list[SubmissionTransactionEvidence],
+) -> list[gateway_pb2.SubmissionTransactionEvidence]:
+    """Serialize conservative role evidence without upgrading unknown values."""
+    return [
+        gateway_pb2.SubmissionTransactionEvidence(
+            tx_id=item.tx_id,
+            role={
+                TransactionRole.SETUP_APPROVAL: gateway_pb2.EXECUTION_TRANSACTION_ROLE_SETUP_APPROVAL,
+                TransactionRole.ACTION: gateway_pb2.EXECUTION_TRANSACTION_ROLE_ACTION,
+            }.get(item.role, gateway_pb2.EXECUTION_TRANSACTION_ROLE_UNSPECIFIED),
+            replay_policy=(
+                gateway_pb2.REPLAY_POLICY_RECOMPILE_ONLY
+                if item.replay_policy is ReplayPolicy.RECOMPILE_ONLY
+                else gateway_pb2.REPLAY_POLICY_NEVER
+            ),
+        )
+        for item in values
+    ]
+
+
+def _serialize_evm_transaction_results(transaction_results: list[Any]) -> tuple[list[str], bytes]:
+    """Serialize an EVM result without ever dropping an individual receipt.
+
+    The response's ``tx_hashes`` and ``receipts`` arrays are positional peers.
+    Returning unequal cardinalities lets the strategy container associate a
+    receipt with the wrong hash, or persist aggregate gas without the legs that
+    substantiate it. Any missing hash, missing receipt, conversion failure, or
+    non-object payload therefore fails the entire RPC result closed.
+    """
+    tx_hashes: list[str] = []
+    receipts_data: list[dict[str, Any]] = []
+    for index, transaction_result in enumerate(transaction_results):
+        raw_hash = getattr(transaction_result, "tx_hash", None)
+        tx_hash = raw_hash.strip() if isinstance(raw_hash, str) else ""
+        if not tx_hash:
+            raise ReceiptSetSerializationError(f"transaction result {index} has no non-blank tx_hash")
+
+        receipt = getattr(transaction_result, "receipt", None)
+        if receipt is None:
+            raise ReceiptSetSerializationError(f"transaction result {index} ({tx_hash}) has no receipt")
+
+        try:
+            receipt_data = receipt.to_dict() if hasattr(receipt, "to_dict") else dict(receipt)
+        except Exception as exc:
+            raise ReceiptSetSerializationError(
+                f"receipt {index} ({tx_hash}) could not be converted to a dictionary: {exc}"
+            ) from exc
+        if not isinstance(receipt_data, dict):
+            raise ReceiptSetSerializationError(
+                f"receipt {index} ({tx_hash}) serialized as {type(receipt_data).__qualname__}, expected dict"
+            )
+
+        tx_hashes.append(tx_hash)
+        receipts_data.append(receipt_data)
+
+    if len(tx_hashes) != len(receipts_data):  # pragma: no cover - construction makes this defensive
+        raise ReceiptSetSerializationError(
+            f"receipt-set cardinality mismatch: {len(tx_hashes)} tx hashes != {len(receipts_data)} receipts"
+        )
+    from almanak.framework.execution.reconciliation import complete_receipt_set_error
+
+    if receipt_error := complete_receipt_set_error(tx_hashes, receipts_data):
+        raise ReceiptSetSerializationError(receipt_error)
+    try:
+        receipts_bytes = json.dumps(receipts_data).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ReceiptSetSerializationError(f"receipt set is not JSON serializable: {exc}") from exc
+    return tx_hashes, receipts_bytes
 
 
 class _GatewaySolanaRouteRefresher:
@@ -964,7 +1056,11 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
         except ValidationError as e:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
-            return gateway_pb2.ExecutionResult(success=False, error=str(e))
+            return gateway_pb2.ExecutionResult(
+                success=False,
+                error=str(e),
+                submission_provenance=gateway_pb2.SUBMISSION_PROVENANCE_NOT_ATTEMPTED,
+            )
 
         try:
             from almanak.gateway.validation import validate_address_for_chain
@@ -973,7 +1069,11 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
         except ValidationError as e:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(e))
-            return gateway_pb2.ExecutionResult(success=False, error=str(e))
+            return gateway_pb2.ExecutionResult(
+                success=False,
+                error=str(e),
+                submission_provenance=gateway_pb2.SUBMISSION_PROVENANCE_NOT_ATTEMPTED,
+            )
 
         await self._ensure_initialized()
 
@@ -1021,6 +1121,8 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
             # Propagate actual fees from the planner result.
             # total_fee_native is in SOL; convert to lamports for the proto field.
             fee_lamports = int(outcome.total_fee_native * 1_000_000_000)
+            plan_hash = execution_plan_hash(action_bundle)
+            submission_transactions = certify_submission_transactions(action_bundle, outcome.tx_ids)
 
             return gateway_pb2.ExecutionResult(
                 success=outcome.success,
@@ -1029,6 +1131,9 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
                 receipts=receipts_bytes,
                 execution_id="",
                 error=outcome.error or "",
+                submission_provenance=_submission_provenance_to_proto(outcome.submission_provenance),
+                execution_plan_hash=plan_hash,
+                submission_transactions=_submission_transactions_to_proto(submission_transactions),
             )
 
         except Exception as e:
@@ -1040,6 +1145,7 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
                 success=False,
                 error=error_msg,
                 error_code="EXECUTION_FAILED",
+                submission_provenance=gateway_pb2.SUBMISSION_PROVENANCE_UNSPECIFIED,
             )
 
     # crap-allowlist: VIB-4722 only renamed the execution context identity to deployment_id.
@@ -1104,40 +1210,52 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
                 finally:
                     orchestrator.tx_risk_config.max_gas_price_gwei = default_gas_cap
 
-            # Extract tx_hashes and receipts from transaction_results
-            transaction_results = result.transaction_results or []
-            tx_hashes = [tr.tx_hash for tr in transaction_results if tr.tx_hash]
-            receipts_data = []
-            for tr in transaction_results:
-                if tr.receipt:
-                    # Use to_dict if available (preferred method)
-                    if hasattr(tr.receipt, "to_dict"):
-                        try:
-                            receipts_data.append(tr.receipt.to_dict())
-                        except Exception as e:
-                            logger.warning(
-                                f"Failed to serialize receipt using to_dict(): {e}. Receipt type: {type(tr.receipt)}"
-                            )
-                            # Fallback: try to convert to dict manually
-                            try:
-                                receipts_data.append(dict(tr.receipt))
-                            except Exception as e2:
-                                logger.error(
-                                    f"Failed to convert receipt to dict: {e2}. "
-                                    f"Skipping receipt for transaction {tr.tx_hash}"
-                                )
-                    else:
-                        # Fallback: convert to dict manually
-                        try:
-                            receipts_data.append(dict(tr.receipt))
-                        except Exception as e:
-                            logger.error(
-                                f"Receipt type {type(tr.receipt)} does not support to_dict() "
-                                f"and cannot be converted to dict: {e}. "
-                                f"Skipping receipt for transaction {tr.tx_hash}"
-                            )
-            receipts_bytes = json.dumps(receipts_data).encode("utf-8")
+            from almanak.framework.execution.signer.safe.base import SafeSigner
 
+            atomic_safe_batch = isinstance(orchestrator.signer, SafeSigner) and len(action_bundle.transactions) > 1
+
+            # Preserve the positional 1:1 tx-hash/receipt contract. The old
+            # loop skipped an individual receipt after a conversion failure
+            # while retaining every hash and returning success=True, making the
+            # downstream receipt set silently incomplete.
+            transaction_results = result.transaction_results or []
+            try:
+                tx_hashes, receipts_bytes = _serialize_evm_transaction_results(transaction_results)
+            except ReceiptSetSerializationError as exc:
+                # Transactions may already be mined. Return an application-level
+                # failure with every known hash so callers do not interpret a
+                # transport INTERNAL as permission to blindly resubmit the
+                # bundle. Partial receipts are omitted as a set: positional
+                # association is no longer trustworthy once one leg is missing.
+                known_hashes: list[str] = []
+                for transaction_result in transaction_results:
+                    raw_hash = getattr(transaction_result, "tx_hash", None)
+                    if isinstance(raw_hash, str) and raw_hash.strip():
+                        known_hashes.append(raw_hash.strip())
+                logger.error("EVM receipt set incomplete after execution: %s", exc)
+                plan_hash = execution_plan_hash(action_bundle)
+                return gateway_pb2.ExecutionResult(
+                    success=False,
+                    tx_hashes=known_hashes,
+                    total_gas_used=result.total_gas_used or 0,
+                    receipts=b"",
+                    execution_id=result.correlation_id or "",
+                    error=str(exc),
+                    error_code="RECEIPT_SET_INCOMPLETE",
+                    submission_provenance=_submission_provenance_to_proto(
+                        getattr(result, "submission_provenance", SubmissionProvenance.UNSPECIFIED)
+                    ),
+                    execution_plan_hash=plan_hash,
+                    submission_transactions=_submission_transactions_to_proto(
+                        certify_submission_transactions(
+                            action_bundle,
+                            known_hashes,
+                            atomic_batch=atomic_safe_batch,
+                        )
+                    ),
+                )
+
+            plan_hash = execution_plan_hash(action_bundle)
             return gateway_pb2.ExecutionResult(
                 success=result.success,
                 tx_hashes=tx_hashes,
@@ -1145,6 +1263,17 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
                 receipts=receipts_bytes,
                 execution_id=result.correlation_id or "",
                 error=result.error or "",
+                submission_provenance=_submission_provenance_to_proto(
+                    getattr(result, "submission_provenance", SubmissionProvenance.UNSPECIFIED)
+                ),
+                execution_plan_hash=plan_hash,
+                submission_transactions=_submission_transactions_to_proto(
+                    certify_submission_transactions(
+                        action_bundle,
+                        tx_hashes,
+                        atomic_batch=atomic_safe_batch,
+                    )
+                ),
             )
 
         except Exception as e:
@@ -1156,6 +1285,7 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
                 success=False,
                 error=error_msg,
                 error_code="EXECUTION_FAILED",
+                submission_provenance=gateway_pb2.SUBMISSION_PROVENANCE_UNSPECIFIED,
             )
 
     async def GetTransactionStatus(

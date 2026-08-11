@@ -684,7 +684,28 @@ class TestGatewayExecutionOrchestrator:
             success=True,
             tx_hashes=["0xabc", "0xdef"],
             total_gas_used=150000,
-            receipts=json.dumps([{"status": 1}]).encode("utf-8"),
+            receipts=json.dumps(
+                [
+                    {
+                        "tx_hash": "0xabc",
+                        "block_number": 42,
+                        "block_hash": "0xblock1",
+                        "status": 1,
+                        "gas_used": 50_000,
+                        "effective_gas_price": 1,
+                        "logs": [],
+                    },
+                    {
+                        "tx_hash": "0xdef",
+                        "block_number": 43,
+                        "block_hash": "0xblock2",
+                        "status": 1,
+                        "gas_used": 100_000,
+                        "effective_gas_price": 1,
+                        "logs": [],
+                    },
+                ]
+            ).encode("utf-8"),
             execution_id="exec-123",
         )
         mock_client.execution.Execute.return_value = mock_response

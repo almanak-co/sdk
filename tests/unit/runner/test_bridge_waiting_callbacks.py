@@ -4,7 +4,6 @@ Validates VIB-1818: the bridge-waiting execution path must call on_intent_execut
 and save_state() after each step, matching the single-chain path behavior.
 """
 
-import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
@@ -102,7 +101,7 @@ class TestBridgeWaitingCallbacksOnSuccess:
             mock_intent_cls.has_chained_amount.return_value = False
             mock_intent_cls.get_amount_field.return_value = Decimal("100")
 
-            result = await runner._execute_with_bridge_waiting(
+            await runner._execute_with_bridge_waiting(
                 strategy=strategy,
                 intents=[intent],
                 orchestrator=orchestrator,
@@ -142,7 +141,7 @@ class TestBridgeWaitingCallbacksOnSuccess:
             mock_intent_cls.has_chained_amount.return_value = False
             mock_intent_cls.get_amount_field.return_value = Decimal("100")
 
-            result = await runner._execute_with_bridge_waiting(
+            await runner._execute_with_bridge_waiting(
                 strategy=strategy,
                 intents=[intent1, intent2],
                 orchestrator=orchestrator,
@@ -175,7 +174,7 @@ class TestBridgeWaitingCallbacksOnFailure:
         ):
             mock_intent_cls.has_chained_amount.return_value = False
 
-            result = await runner._execute_with_bridge_waiting(
+            await runner._execute_with_bridge_waiting(
                 strategy=strategy,
                 intents=[intent],
                 orchestrator=orchestrator,
@@ -211,7 +210,7 @@ class TestBridgeWaitingCallbacksOnFailure:
         ):
             mock_intent_cls.has_chained_amount.return_value = False
 
-            result = await runner._execute_with_bridge_waiting(
+            await runner._execute_with_bridge_waiting(
                 strategy=strategy,
                 intents=[intent],
                 orchestrator=orchestrator,
@@ -226,11 +225,11 @@ class TestBridgeWaitingCallbacksOnFailure:
 
 
 class TestBridgeWaitingCallbackErrorHandling:
-    """Test that callback errors don't crash the execution path."""
+    """Landed callback/state errors retain the replay barrier."""
 
     @pytest.mark.asyncio
-    async def test_on_intent_executed_error_is_swallowed(self):
-        """If on_intent_executed raises, execution still succeeds."""
+    async def test_on_intent_executed_error_retains_barrier(self):
+        """A callback failure cannot advance a landed bridge leg to complete."""
         runner = _make_runner()
         strategy = _make_strategy()
         strategy.on_intent_executed.side_effect = RuntimeError("callback bug")
@@ -239,8 +238,8 @@ class TestBridgeWaitingCallbackErrorHandling:
 
         with (
             patch.object(runner, "_load_execution_progress", new_callable=AsyncMock, return_value=None),
-            patch.object(runner, "_save_execution_progress", new_callable=AsyncMock),
-            patch.object(runner, "_clear_execution_progress", new_callable=AsyncMock),
+            patch.object(runner, "_save_execution_progress", new_callable=AsyncMock) as save_progress,
+            patch.object(runner, "_clear_execution_progress", new_callable=AsyncMock) as clear_progress,
             patch.object(runner, "_get_gateway_client", return_value=None),
             patch.object(runner, "_record_success"),
             patch.object(runner, "_calculate_duration_ms", return_value=100),
@@ -250,20 +249,22 @@ class TestBridgeWaitingCallbackErrorHandling:
             mock_intent_cls.has_chained_amount.return_value = False
             mock_intent_cls.get_amount_field.return_value = Decimal("100")
 
-            # Should not raise despite callback error
-            result = await runner._execute_with_bridge_waiting(
-                strategy=strategy,
-                intents=[intent],
-                orchestrator=orchestrator,
-                start_time=datetime.now(UTC),
-            )
+            with pytest.raises(RuntimeError, match="callback failed; replay barrier retained"):
+                await runner._execute_with_bridge_waiting(
+                    strategy=strategy,
+                    intents=[intent],
+                    orchestrator=orchestrator,
+                    start_time=datetime.now(UTC),
+                )
 
-        # save_state still called even if on_intent_executed errored
-        strategy.save_state.assert_called_once()
+        assert save_progress.await_count >= 1
+        assert any(call.args[1].is_accounting_pending for call in save_progress.await_args_list)
+        clear_progress.assert_not_awaited()
+        strategy.save_state.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_save_state_error_is_swallowed(self):
-        """If save_state raises, execution still succeeds."""
+    async def test_save_state_error_retains_barrier_and_fails_closed(self):
+        """A landed bridge leg cannot advance when strategy state is not durable."""
         runner = _make_runner()
         strategy = _make_strategy()
         strategy.save_state.side_effect = RuntimeError("state bug")
@@ -283,13 +284,13 @@ class TestBridgeWaitingCallbackErrorHandling:
             mock_intent_cls.has_chained_amount.return_value = False
             mock_intent_cls.get_amount_field.return_value = Decimal("100")
 
-            # Should not raise despite save_state error
-            result = await runner._execute_with_bridge_waiting(
-                strategy=strategy,
-                intents=[intent],
-                orchestrator=orchestrator,
-                start_time=datetime.now(UTC),
-            )
+            with pytest.raises(RuntimeError, match="replay barrier retained"):
+                await runner._execute_with_bridge_waiting(
+                    strategy=strategy,
+                    intents=[intent],
+                    orchestrator=orchestrator,
+                    start_time=datetime.now(UTC),
+                )
 
         strategy.on_intent_executed.assert_called_once()
 

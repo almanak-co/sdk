@@ -7,8 +7,9 @@ tells the :class:`EscalatingSlippageManager` how to react:
   (current behaviour, including the 5%/8% operator-approval gates).
 * ``NON_RETRYABLE`` — deterministic revert that no slippage level can fix
   (insufficient balance/collateral, contract-arg validation, ERC-721
-  not-approved, gas underestimate, protocol-permanent). Short-circuit and
-  surface; teardown moves on to the next risk-reducing intent.
+  not-approved, gas underestimate, protocol-permanent), or a failed outcome
+  with known submitted hashes that requires receipt reconciliation.
+  Short-circuit and surface; teardown moves on to the next risk-reducing intent.
 * ``RETRY_SAME_LEVEL`` — transient transport/RPC failure (Anvil ``Fork Error``,
   DNS, timeout, nonce, rate-limit). Retry at the SAME slippage level; never
   escalate, never ask the operator to approve loss for a network blip.
@@ -44,6 +45,7 @@ class RevertClass(StrEnum):
     # transaction was built. Distinct from TRANSPORT_TRANSIENT because the
     # failure is pre-submission and no slippage level is relevant to it.
     ROUTE_REFRESH_REFUSED = "route_refresh_refused"
+    RECONCILIATION_REQUIRED = "reconciliation_required"
     UNKNOWN = "unknown"
 
 
@@ -123,6 +125,7 @@ _CATEGORY_DISPOSITION: dict[str, tuple[RevertClass, Disposition]] = {
     "NETWORK_ERROR": (RevertClass.TRANSPORT_TRANSIENT, Disposition.RETRY_SAME_LEVEL),
     "RATE_LIMIT": (RevertClass.TRANSPORT_TRANSIENT, Disposition.RETRY_SAME_LEVEL),
     "NONCE_ERROR": (RevertClass.TRANSPORT_TRANSIENT, Disposition.RETRY_SAME_LEVEL),
+    "RECONCILIATION_REQUIRED": (RevertClass.RECONCILIATION_REQUIRED, Disposition.NON_RETRYABLE),
 }
 
 

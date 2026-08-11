@@ -99,7 +99,10 @@ CREATE TABLE teardown_requests (id INTEGER PRIMARY KEY, status TEXT,
     positions_closed INTEGER, positions_total INTEGER, started_at TEXT, updated_at TEXT);
 """
 
-_SUBTX = '{"sub_transactions":[{"tx_hash":"%s","gas_used":21000,"status":"success","role":"ACTION"}]}'
+_SUBTX = (
+    '{"sub_transactions":[{"tx_hash":"%s","target_contract":"","function_selector":"",'
+    '"gas_used":210000,"status":"success","role":"ACTION"}]}'
+)
 
 _HASH_A = "0x" + "a" * 64
 _HASH_B = "0x" + "b" * 64
@@ -559,7 +562,7 @@ def test_g8_no_longer_reports_pass_when_it_checked_nothing(tmp_path: Path) -> No
 
     res = gate.gate_sub_transactions(con)
     assert res.status == "FAIL"
-    assert "missing sub_transactions" in res.detail
+    assert "sub_transactions_missing" in res.detail
 
 
 def test_g8_skip_distinguishes_empty_ledger_from_all_reverted(tmp_path: Path) -> None:
@@ -610,7 +613,7 @@ def test_g8_parent_hash_check_spans_degraded_rows(tmp_path: Path) -> None:
     )
     res = gate.gate_sub_transactions(con)
     assert res.status == "FAIL"
-    assert "matches no ACTION sub-tx" in res.detail
+    assert "parent_action_mismatch" in res.detail
 
 
 # ---------------------------------------------------------------------------
@@ -841,7 +844,7 @@ def test_g8_treats_unparsable_json_as_missing_not_as_a_crash(tmp_path: Path) -> 
     _insert(con, rid=2, tx_hash=_HASH_B, extracted="}{ not json")
     res = gate.gate_sub_transactions(con)
     assert res.status == "FAIL"
-    assert "1 landed rows missing sub_transactions array" in res.detail
+    assert "sub_transactions_missing" in res.detail
 
 
 def test_empty_population_detail_does_not_claim_rows_reverted(tmp_path: Path) -> None:

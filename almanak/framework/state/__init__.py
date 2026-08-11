@@ -66,6 +66,19 @@ from .state_manager import (
     WarmBackendType,
     WarmStore,
 )
+from .strategy_state import (
+    RUNNER_OWNED_STATE_KEYS,
+    STATE_OWNERSHIP_VERSION,
+    STATE_OWNERSHIP_VERSION_KEY,
+    STRATEGY_USER_STATE_KEY,
+    StateValuePreconditionError,
+    compare_and_delete_state_value,
+    compare_and_replace_state_value,
+    merge_runner_state_values,
+    replace_strategy_persistent_state,
+    runner_state_value,
+    split_strategy_persistent_state,
+)
 
 __all__ = [
     # State manager
@@ -80,6 +93,17 @@ __all__ = [
     "WarmBackendType",
     "WarmStore",
     "SQLiteConfigLight",
+    "STRATEGY_USER_STATE_KEY",
+    "STATE_OWNERSHIP_VERSION",
+    "STATE_OWNERSHIP_VERSION_KEY",
+    "RUNNER_OWNED_STATE_KEYS",
+    "StateValuePreconditionError",
+    "compare_and_delete_state_value",
+    "compare_and_replace_state_value",
+    "merge_runner_state_values",
+    "runner_state_value",
+    "replace_strategy_persistent_state",
+    "split_strategy_persistent_state",
     # Backends
     "SQLiteStore",
     "SQLiteConfig",

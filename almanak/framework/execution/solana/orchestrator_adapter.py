@@ -13,6 +13,7 @@ from typing import Any
 
 from almanak.framework.execution.extracted_data import LPCloseData, SwapAmounts
 from almanak.framework.execution.solana.planner import SolanaExecutionPlanner
+from almanak.framework.execution.submission import SubmissionProvenance
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +33,10 @@ class SolanaExecutionResult:
     total_gas_used: int = 0
     total_gas_cost_wei: int = 0
     receipts: list[dict[str, Any]] = field(default_factory=list)
+    chain_family: str = "SOLANA"
     error: str | None = None
     fee_lamports: int = 0
+    submission_provenance: SubmissionProvenance = SubmissionProvenance.UNSPECIFIED
 
     # Enrichment fields (populated by ResultEnricher)
     position_id: int | str | None = None
@@ -57,19 +60,20 @@ class SolanaExecutionResult:
             logs = receipt_data.get("logs", [])
             fee = receipt_data.get("fee_lamports", 0)
 
+            success = receipt_data.get("success") is True
             tx_receipt = TransactionReceipt(
                 tx_hash=tx_hash,
                 block_number=receipt_data.get("slot", 0),
                 block_hash="",
                 gas_used=fee,
                 effective_gas_price=1,
-                status=1 if receipt_data.get("success", True) else 0,
+                status=1 if success else 0,
                 logs=logs,
             )
 
             results.append(
                 TransactionResult(
-                    success=receipt_data.get("success", True),
+                    success=success,
                     tx_hash=tx_hash,
                     gas_used=fee,
                     logs=logs,
@@ -142,4 +146,5 @@ class SolanaOrchestratorAdapter:
             receipts=outcome.receipts,
             error=outcome.error,
             fee_lamports=fee_lamports,
+            submission_provenance=outcome.submission_provenance,
         )

@@ -185,6 +185,55 @@ ACCOUNTING_BACKEND_STATUS_ERRORED: AccountingBackendStatus.ValueType  # 3
 """backend present but read raised → UNMEASURED"""
 Global___AccountingBackendStatus: _TypeAlias = AccountingBackendStatus  # noqa: Y015
 
+class _SubmissionProvenance:
+    ValueType = _typing.NewType("ValueType", _builtins.int)
+    V: _TypeAlias = ValueType  # noqa: Y015
+
+class _SubmissionProvenanceEnumTypeWrapper(_enum_type_wrapper._EnumTypeWrapper[_SubmissionProvenance.ValueType], _builtins.type):
+    DESCRIPTOR: _descriptor.EnumDescriptor
+    SUBMISSION_PROVENANCE_UNSPECIFIED: _SubmissionProvenance.ValueType  # 0
+    SUBMISSION_PROVENANCE_NOT_ATTEMPTED: _SubmissionProvenance.ValueType  # 1
+    SUBMISSION_PROVENANCE_ATTEMPTED: _SubmissionProvenance.ValueType  # 2
+
+class SubmissionProvenance(_SubmissionProvenance, metaclass=_SubmissionProvenanceEnumTypeWrapper): ...
+
+SUBMISSION_PROVENANCE_UNSPECIFIED: SubmissionProvenance.ValueType  # 0
+SUBMISSION_PROVENANCE_NOT_ATTEMPTED: SubmissionProvenance.ValueType  # 1
+SUBMISSION_PROVENANCE_ATTEMPTED: SubmissionProvenance.ValueType  # 2
+Global___SubmissionProvenance: _TypeAlias = SubmissionProvenance  # noqa: Y015
+
+class _ExecutionTransactionRole:
+    ValueType = _typing.NewType("ValueType", _builtins.int)
+    V: _TypeAlias = ValueType  # noqa: Y015
+
+class _ExecutionTransactionRoleEnumTypeWrapper(_enum_type_wrapper._EnumTypeWrapper[_ExecutionTransactionRole.ValueType], _builtins.type):
+    DESCRIPTOR: _descriptor.EnumDescriptor
+    EXECUTION_TRANSACTION_ROLE_UNSPECIFIED: _ExecutionTransactionRole.ValueType  # 0
+    EXECUTION_TRANSACTION_ROLE_SETUP_APPROVAL: _ExecutionTransactionRole.ValueType  # 1
+    EXECUTION_TRANSACTION_ROLE_ACTION: _ExecutionTransactionRole.ValueType  # 2
+
+class ExecutionTransactionRole(_ExecutionTransactionRole, metaclass=_ExecutionTransactionRoleEnumTypeWrapper): ...
+
+EXECUTION_TRANSACTION_ROLE_UNSPECIFIED: ExecutionTransactionRole.ValueType  # 0
+EXECUTION_TRANSACTION_ROLE_SETUP_APPROVAL: ExecutionTransactionRole.ValueType  # 1
+EXECUTION_TRANSACTION_ROLE_ACTION: ExecutionTransactionRole.ValueType  # 2
+Global___ExecutionTransactionRole: _TypeAlias = ExecutionTransactionRole  # noqa: Y015
+
+class _ReplayPolicy:
+    ValueType = _typing.NewType("ValueType", _builtins.int)
+    V: _TypeAlias = ValueType  # noqa: Y015
+
+class _ReplayPolicyEnumTypeWrapper(_enum_type_wrapper._EnumTypeWrapper[_ReplayPolicy.ValueType], _builtins.type):
+    DESCRIPTOR: _descriptor.EnumDescriptor
+    REPLAY_POLICY_NEVER: _ReplayPolicy.ValueType  # 0
+    REPLAY_POLICY_RECOMPILE_ONLY: _ReplayPolicy.ValueType  # 1
+
+class ReplayPolicy(_ReplayPolicy, metaclass=_ReplayPolicyEnumTypeWrapper): ...
+
+REPLAY_POLICY_NEVER: ReplayPolicy.ValueType  # 0
+REPLAY_POLICY_RECOMPILE_ONLY: ReplayPolicy.ValueType  # 1
+Global___ReplayPolicy: _TypeAlias = ReplayPolicy  # noqa: Y015
+
 class _Resolution:
     ValueType = _typing.NewType("ValueType", _builtins.int)
     V: _TypeAlias = ValueType  # noqa: Y015
@@ -4109,6 +4158,28 @@ class ExecuteRequest(_message.Message):
 Global___ExecuteRequest: _TypeAlias = ExecuteRequest  # noqa: Y015
 
 @_typing.final
+class SubmissionTransactionEvidence(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    TX_ID_FIELD_NUMBER: _builtins.int
+    ROLE_FIELD_NUMBER: _builtins.int
+    REPLAY_POLICY_FIELD_NUMBER: _builtins.int
+    tx_id: _builtins.str
+    role: Global___ExecutionTransactionRole.ValueType
+    replay_policy: Global___ReplayPolicy.ValueType
+    def __init__(
+        self,
+        *,
+        tx_id: _builtins.str = ...,
+        role: Global___ExecutionTransactionRole.ValueType = ...,
+        replay_policy: Global___ReplayPolicy.ValueType = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["replay_policy", b"replay_policy", "role", b"role", "tx_id", b"tx_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___SubmissionTransactionEvidence: _TypeAlias = SubmissionTransactionEvidence  # noqa: Y015
+
+@_typing.final
 class ExecutionResult(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
@@ -4119,6 +4190,9 @@ class ExecutionResult(_message.Message):
     ERROR_FIELD_NUMBER: _builtins.int
     ERROR_CODE_FIELD_NUMBER: _builtins.int
     EXECUTION_ID_FIELD_NUMBER: _builtins.int
+    SUBMISSION_PROVENANCE_FIELD_NUMBER: _builtins.int
+    EXECUTION_PLAN_HASH_FIELD_NUMBER: _builtins.int
+    SUBMISSION_TRANSACTIONS_FIELD_NUMBER: _builtins.int
     success: _builtins.bool
     total_gas_used: _builtins.int
     receipts: _builtins.bytes
@@ -4126,8 +4200,12 @@ class ExecutionResult(_message.Message):
     error: _builtins.str
     error_code: _builtins.str
     execution_id: _builtins.str
+    submission_provenance: Global___SubmissionProvenance.ValueType
+    execution_plan_hash: _builtins.str
     @_builtins.property
     def tx_hashes(self) -> _containers.RepeatedScalarFieldContainer[_builtins.str]: ...
+    @_builtins.property
+    def submission_transactions(self) -> _containers.RepeatedCompositeFieldContainer[Global___SubmissionTransactionEvidence]: ...
     def __init__(
         self,
         *,
@@ -4138,8 +4216,11 @@ class ExecutionResult(_message.Message):
         error: _builtins.str = ...,
         error_code: _builtins.str = ...,
         execution_id: _builtins.str = ...,
+        submission_provenance: Global___SubmissionProvenance.ValueType = ...,
+        execution_plan_hash: _builtins.str = ...,
+        submission_transactions: _abc.Iterable[Global___SubmissionTransactionEvidence] | None = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "error_code", b"error_code", "execution_id", b"execution_id", "receipts", b"receipts", "success", b"success", "total_gas_used", b"total_gas_used", "tx_hashes", b"tx_hashes"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "error_code", b"error_code", "execution_id", b"execution_id", "execution_plan_hash", b"execution_plan_hash", "receipts", b"receipts", "submission_provenance", b"submission_provenance", "submission_transactions", b"submission_transactions", "success", b"success", "total_gas_used", b"total_gas_used", "tx_hashes", b"tx_hashes"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___ExecutionResult: _TypeAlias = ExecutionResult  # noqa: Y015

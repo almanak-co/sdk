@@ -27,6 +27,7 @@ from almanak.framework.execution.orchestrator import (
     TransactionResult,
 )
 from almanak.framework.intents.vocabulary import SwapIntent
+from almanak.framework.runner.runner_models import ExecutionProgress
 from almanak.framework.runner.strategy_runner import (
     IterationStatus,
     RunnerConfig,
@@ -424,6 +425,60 @@ class TestSingleChainHandleSuccess:
         strategy.on_intent_executed.assert_called_once()
         assert strategy.on_intent_executed.call_args.kwargs.get("success") is True
         runner._write_ledger_entry.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_callback_failure_retains_landed_replay_barrier(self) -> None:
+        """A landed tx cannot become complete when user callback state did not advance."""
+        runner = _make_runner()
+        runner._emit_execution_timeline_event = MagicMock()
+        runner._write_ledger_entry = AsyncMock()
+        runner._reconcile_post_execution_balances = AsyncMock(return_value={"incident": False})
+        runner._persist_landed_strategy_state_strict = AsyncMock()  # type: ignore[method-assign]
+        runner._complete_single_chain_replay_barrier = AsyncMock()  # type: ignore[method-assign]
+        strategy = _make_strategy()
+        strategy.on_intent_executed.side_effect = RuntimeError("callback state did not advance")
+        state = _make_state(strategy, intent=SwapIntent(from_token="USDC", to_token="ETH", amount=Decimal("100")))
+        state.state_machine = MagicMock(retry_count=0)
+        state.replay_barrier = ExecutionProgress(
+            execution_id="landed",
+            deployment_id=strategy.deployment_id,
+            intents_hash="landed-accounting-pending",
+            total_steps=1,
+            reconciliation_required_step_index=0,
+        )
+        state.last_execution_result = ExecutionResult(
+            success=True, phase=ExecutionPhase.COMPLETE, completed_at=datetime.now(UTC)
+        )
+        state.last_execution_context = ExecutionContext(deployment_id=strategy.deployment_id)
+
+        with patch("almanak.framework.runner.strategy_runner.ResultEnricher") as mock_enricher:
+            mock_enricher.return_value.enrich.return_value = state.last_execution_result
+            with pytest.raises(RuntimeError, match="callback failed; replay barrier retained"):
+                await runner._single_chain_handle_success(state)
+
+        runner._persist_landed_strategy_state_strict.assert_not_awaited()
+        runner._complete_single_chain_replay_barrier.assert_not_awaited()
+
+    def test_framework_tracker_failure_is_strict_only_for_replay_sealed_call(self) -> None:
+        from almanak.framework.strategies.lp_position_tracker import LPPositionTracker
+
+        runner = _make_runner()
+        strategy = _make_strategy()
+        strategy._lp_position_tracker = LPPositionTracker()
+        strategy._framework_record_intent_execution.side_effect = RuntimeError("tracker failed")
+        intent = SwapIntent(from_token="USDC", to_token="ETH", amount=Decimal("1"))
+
+        with pytest.raises(RuntimeError, match="callback failed; replay barrier retained"):
+            runner._notify_intent_executed(strategy, intent, True, None, strict=True)
+        strategy.on_intent_executed.assert_called_once()
+
+    def test_optional_copy_hook_failure_blocks_replay_completion(self) -> None:
+        runner = _make_runner()
+        strategy = _make_strategy()
+        strategy.on_copy_execution_result.side_effect = RuntimeError("copy state failed")
+
+        with pytest.raises(RuntimeError, match="strategy hook .* failed; replay barrier retained"):
+            runner._invoke_optional_hook(strategy, "on_copy_execution_result", object(), True, None, strict=True)
 
     @pytest.mark.asyncio
     async def test_async_submission_cannot_commit_success_before_terminal_settlement(self) -> None:

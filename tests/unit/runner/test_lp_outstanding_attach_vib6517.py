@@ -38,6 +38,7 @@ from almanak.framework.runner.strategy_runner import (
     StrategyRunner,
 )
 from almanak.framework.teardown.lp_clamp import LpClampUnresolved
+from tests.unit.runner._state_manager import absent_state_manager
 
 _PAUSE_PATCH = "almanak.framework.runner.strategy_runner.StrategyRunner._is_strategy_paused"
 _TEARDOWN_PATCH = "almanak.framework.runner.strategy_runner.StrategyRunner._check_teardown_requested"
@@ -61,7 +62,7 @@ def _make_runner(*, rows: list | Exception | None = _OPEN_ROWS, dry_run: bool = 
         enable_alerting=False,
         dry_run=dry_run,
     )
-    state_manager = MagicMock()
+    state_manager = absent_state_manager()
     if isinstance(rows, Exception):
         state_manager.get_position_events_filtered = AsyncMock(side_effect=rows)
     else:

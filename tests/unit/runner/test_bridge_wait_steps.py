@@ -25,6 +25,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from almanak.framework.execution.chain_executor import TransactionExecutionResult
+from almanak.framework.execution.gateway_orchestrator import GatewayExecutionResult
+from almanak.framework.execution.multichain import ExecutionStatus, IntentExecutionResult
+from almanak.framework.execution.submission import SubmissionProvenance
 from almanak.framework.intents.vocabulary import HoldIntent, SwapIntent
 from almanak.framework.runner.runner_models import ExecutionProgress
 from almanak.framework.runner.strategy_runner import (
@@ -33,7 +36,6 @@ from almanak.framework.runner.strategy_runner import (
     RunnerConfig,
     StrategyRunner,
 )
-
 
 # =============================================================================
 # Helpers
@@ -67,6 +69,7 @@ def _make_runner(
     # MagicMock persistence backends degrade to logged errors instead of the
     # live-mode fail-closed AccountingPersistenceError.
     runner._is_live_mode = MagicMock(return_value=False)  # type: ignore[method-assign]
+    runner._save_execution_progress = AsyncMock()  # type: ignore[method-assign]
     return runner
 
 
@@ -96,7 +99,7 @@ def _make_state(
 ) -> BridgeWaitState:
     strategy = strategy or _make_strategy()
     orchestrator = orchestrator or _make_orchestrator()
-    return BridgeWaitState(
+    state = BridgeWaitState(
         strategy=strategy,
         intents=intents,
         orchestrator=orchestrator,
@@ -105,6 +108,11 @@ def _make_state(
         deployment_id=strategy.deployment_id,
         first_intent=intents[0] if intents else None,
     )
+    state.progress = resume_progress or _make_progress(
+        deployment_id=strategy.deployment_id,
+        total_steps=len(intents),
+    )
+    return state
 
 
 def _make_progress(
@@ -161,6 +169,7 @@ class TestInitBridgeWaitState:
         runner._get_gateway_client = MagicMock(return_value=None)
 
         resume = _make_progress(total_steps=3)
+        resume.intents_hash = "hash1"
         resume.completed_step_index = 0  # next step to execute = 1
         resume.previous_amount_received = Decimal("42")
 
@@ -182,6 +191,30 @@ class TestInitBridgeWaitState:
         # Fresh-start path must NOT be hit when resume_progress is provided
         runner._load_execution_progress.assert_not_called()
         runner._save_execution_progress.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_mismatched_supplied_reconciliation_progress_fails_closed(self) -> None:
+        runner = _make_runner()
+        runner._compute_intents_hash = MagicMock(return_value="new-hash")
+        runner._load_execution_progress = AsyncMock()
+        runner._clear_execution_progress = AsyncMock()
+        runner._get_gateway_client = MagicMock(return_value=None)
+        resume = _make_progress()
+        resume.intents_hash = "old-hash"
+        resume.reconciliation_required_step_index = 0
+        state = _make_state(
+            intents=[SwapIntent(from_token="USDC", to_token="ETH", amount=Decimal("1"))],
+            resume_progress=resume,
+        )
+
+        with (
+            patch("almanak.framework.runner.strategy_runner.EnsoStateProvider", return_value=MagicMock()),
+            pytest.raises(RuntimeError, match="does not match the current intent plan"),
+        ):
+            await runner._init_bridge_wait_state(state)
+
+        runner._clear_execution_progress.assert_not_awaited()
+        runner._load_execution_progress.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_saved_progress_hash_match_resumes(self) -> None:
@@ -240,6 +273,73 @@ class TestInitBridgeWaitState:
         # Fresh progress saved
         runner._save_execution_progress.assert_awaited()
         assert state.start_step_index == 0
+
+    @pytest.mark.asyncio
+    async def test_saved_progress_hash_mismatch_with_execution_evidence_is_retained(self) -> None:
+        runner = _make_runner()
+        runner._compute_intents_hash = MagicMock(return_value="new-hash")
+        stale = _make_progress(total_steps=2)
+        stale.intents_hash = "old-hash"
+        stale.completed_step_index = 0
+        runner._load_execution_progress = AsyncMock(return_value=stale)
+        runner._clear_execution_progress = AsyncMock()
+        runner._save_execution_progress = AsyncMock()
+        runner._get_gateway_client = MagicMock(return_value=None)
+        state = _make_state(intents=[HoldIntent(reason="changed after first leg")])
+
+        with (
+            patch("almanak.framework.runner.strategy_runner.EnsoStateProvider", return_value=MagicMock()),
+            pytest.raises(RuntimeError, match="contains execution evidence"),
+        ):
+            await runner._init_bridge_wait_state(state)
+
+        runner._clear_execution_progress.assert_not_awaited()
+        runner._save_execution_progress.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_completed_tombstone_is_superseded_by_new_plan(self) -> None:
+        runner = _make_runner()
+        runner._compute_intents_hash = MagicMock(return_value="new-hash")
+        completed = _make_progress(total_steps=1)
+        completed.intents_hash = "old-hash"
+        completed.completed_step_index = 0
+        runner._load_execution_progress = AsyncMock(return_value=completed)
+        runner._clear_execution_progress = AsyncMock()
+        runner._save_execution_progress = AsyncMock()
+        runner._get_gateway_client = MagicMock(return_value=None)
+        state = _make_state(intents=[HoldIntent(reason="next plan")])
+
+        with patch(
+            "almanak.framework.runner.strategy_runner.EnsoStateProvider",
+            return_value=MagicMock(),
+        ):
+            await runner._init_bridge_wait_state(state)
+
+        runner._clear_execution_progress.assert_awaited_once_with(state.deployment_id)
+        runner._save_execution_progress.assert_awaited_once()
+        assert state.progress is not completed
+        assert state.progress.intents_hash == "new-hash"
+
+    @pytest.mark.asyncio
+    async def test_legacy_retry_marker_fails_typed_without_mutation(self) -> None:
+        runner = _make_runner()
+        strategy = _make_strategy()
+        intent = SwapIntent(from_token="USDC", to_token="ETH", amount=Decimal("1"))
+        progress = _make_progress()
+        progress.failed_at_step_index = 0
+        progress.failure_error = "retry me"
+        progress.serialized_intents = [intent.serialize()]
+        runner._load_execution_progress = AsyncMock(return_value=progress)
+        runner._save_execution_progress = AsyncMock()
+
+        result = await runner._check_and_resume_stuck_execution(strategy, datetime.now(UTC))
+
+        assert result is not None
+        assert result.status == IterationStatus.EXECUTION_FAILED
+        assert "legacy retry marker lacks plan-bound fresh-compile evidence" in (result.error or "")
+        assert progress.failed_at_step_index == 0
+        assert progress.failure_error == "retry me"
+        runner._save_execution_progress.assert_not_awaited()
 
 
 # =============================================================================
@@ -417,9 +517,7 @@ class TestBridgeWaitPollCompletionFailures:
         state.current_intent = intent
         state.state_provider = MagicMock()
         state.state_provider.register_bridge_transfer = MagicMock(return_value="deposit-1")
-        state.state_provider.wait_for_bridge_completion = AsyncMock(
-            side_effect=TimeoutError("5 minutes passed")
-        )
+        state.state_provider.wait_for_bridge_completion = AsyncMock(side_effect=TimeoutError("5 minutes passed"))
 
         result = SimpleNamespace(tx_result=TransactionExecutionResult(success=True, tx_hash="0xabc"))
 
@@ -465,9 +563,7 @@ class TestBridgeWaitPollCompletionFailures:
         state.current_intent = intent
         state.state_provider = MagicMock()
         state.state_provider.register_bridge_transfer = MagicMock(return_value="deposit-1")
-        state.state_provider.wait_for_bridge_completion = AsyncMock(
-            side_effect=ConnectionError("gateway unreachable")
-        )
+        state.state_provider.wait_for_bridge_completion = AsyncMock(side_effect=ConnectionError("gateway unreachable"))
 
         result = SimpleNamespace(tx_result=TransactionExecutionResult(success=True, tx_hash="0xabc"))
 
@@ -517,9 +613,7 @@ class TestBridgeWaitPollCompletionFailures:
         state.current_intent = intent
         state.state_provider = MagicMock()
         state.state_provider.register_bridge_transfer = MagicMock(return_value="deposit-1")
-        state.state_provider.wait_for_bridge_completion = AsyncMock(
-            side_effect=ValueError("malformed bridge response")
-        )
+        state.state_provider.wait_for_bridge_completion = AsyncMock(side_effect=ValueError("malformed bridge response"))
 
         result = SimpleNamespace(tx_result=TransactionExecutionResult(success=True, tx_hash="0xabc"))
 
@@ -730,11 +824,125 @@ class TestBridgeWaitProcessIntent:
         should_break = await runner._bridge_wait_process_intent(state, 0)
         assert should_break is True
         assert state.failed_step == "step-1"
-        assert state.error_message == "insufficient funds"
+        assert state.error_message is not None
+        assert state.error_message.startswith("BROADCAST_RECONCILIATION_REQUIRED")
+        assert state.error_message.endswith("insufficient funds")
         assert state.callback_fired is True
         assert state.failed_result is failed_result
         strategy.on_intent_executed.assert_called_once()
         assert strategy.on_intent_executed.call_args.kwargs.get("success") is False
+
+    @pytest.mark.asyncio
+    async def test_pre_broadcast_marker_failure_prevents_bridge_lane_submission(self) -> None:
+        runner = _make_runner()
+        runner._save_execution_progress = AsyncMock(side_effect=RuntimeError("Postgres unavailable"))
+        intent = SwapIntent(from_token="USDC", to_token="ETH", amount=Decimal("1"))
+        state = _make_state(intents=[intent])
+
+        with pytest.raises(RuntimeError, match="Postgres unavailable"):
+            await runner._bridge_wait_process_intent(state, 0)
+
+        state.orchestrator.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_bridge_lane_exception_after_marker_is_terminal_across_restart(self) -> None:
+        runner = _make_runner()
+        persisted: list[ExecutionProgress] = []
+        runner._save_execution_progress = AsyncMock(
+            side_effect=lambda _deployment, progress: persisted.append(progress)
+        )
+        strategy = _make_strategy()
+        intent = SwapIntent(from_token="USDC", to_token="ETH", amount=Decimal("1"))
+        state = _make_state(intents=[intent], strategy=strategy)
+        state.orchestrator.execute.side_effect = RuntimeError("transport lost after submission")
+
+        assert await runner._bridge_wait_process_intent(state, 0) is True
+        assert persisted
+        marker = persisted[0]
+        assert marker.is_reconciliation_required
+
+        runner._load_execution_progress = AsyncMock(return_value=marker)
+        resumed = await runner._check_and_resume_stuck_execution(strategy, datetime.now(UTC))
+        assert resumed is not None
+        assert resumed.status == IterationStatus.EXECUTION_FAILED
+        state.orchestrator.execute.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_known_broadcast_failure_is_terminal_across_resume(self) -> None:
+        """Bridge/same-chain plan progress must never replay a known hash."""
+        runner = _make_runner()
+        runner._save_execution_progress = AsyncMock()
+        strategy = _make_strategy()
+        intent = SwapIntent(from_token="USDC", to_token="ETH", amount=Decimal("1"))
+        state = _make_state(intents=[intent], strategy=strategy)
+        state.progress = _make_progress()
+        gateway_result = GatewayExecutionResult(
+            success=False,
+            tx_hashes=["0x" + "c" * 64],
+            total_gas_used=0,
+            receipts=[],
+            execution_id="gateway-exec-2",
+            error="receipt set incomplete",
+        )
+        failed_result = IntentExecutionResult(
+            intent=intent,
+            chain="arbitrum",
+            status=ExecutionStatus.FAILED,
+            tx_result=gateway_result,
+            error=gateway_result.error,
+        )
+        state.orchestrator.execute.return_value = failed_result
+
+        assert await runner._bridge_wait_process_intent(state, 0) is True
+        first = await runner._bridge_wait_finalize(state)
+
+        assert first.status == IterationStatus.EXECUTION_FAILED
+        assert state.progress.reconciliation_required_step_index == 0
+        assert state.progress.failed_at_step_index is None
+        assert state.orchestrator.execute.await_count == 1
+
+        runner._load_execution_progress = AsyncMock(return_value=state.progress)
+        resumed = await runner._check_and_resume_stuck_execution(strategy, datetime.now(UTC))
+
+        assert resumed is not None
+        assert "BROADCAST_RECONCILIATION_REQUIRED" in (resumed.error or "")
+        assert state.orchestrator.execute.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_explicit_not_attempted_failure_becomes_retryable_progress(self) -> None:
+        runner = _make_runner()
+        runner._save_execution_progress = AsyncMock()
+        strategy = _make_strategy()
+        intent = SwapIntent(from_token="USDC", to_token="ETH", amount=Decimal("1"))
+        state = _make_state(intents=[intent], strategy=strategy)
+        state.progress = _make_progress()
+        gateway_result = GatewayExecutionResult(
+            success=False,
+            tx_hashes=[],
+            total_gas_used=0,
+            receipts=[],
+            execution_id="gateway-not-submitted",
+            error="policy refused transaction before submission",
+            submission_provenance=SubmissionProvenance.NOT_ATTEMPTED,
+        )
+        failed_result = IntentExecutionResult(
+            intent=intent,
+            chain="arbitrum",
+            status=ExecutionStatus.FAILED,
+            tx_result=gateway_result,
+            error=gateway_result.error,
+        )
+        state.orchestrator.execute.return_value = failed_result
+
+        assert await runner._bridge_wait_process_intent(state, 0) is True
+        result = await runner._bridge_wait_finalize(state)
+
+        assert result.status == IterationStatus.EXECUTION_FAILED
+        assert "BROADCAST_RECONCILIATION_REQUIRED" not in (result.error or "")
+        assert state.progress.failed_at_step_index == 0
+        assert state.progress.reconciliation_required_step_index is None
+        assert state.progress.is_stuck
+        assert state.orchestrator.execute.await_count == 1
 
 
 # =============================================================================
@@ -788,7 +996,8 @@ class TestBridgeWaitFinalize:
         assert "boom" in result.error
         # Progress saved with failure metadata
         runner._save_execution_progress.assert_awaited()
-        assert state.progress.failed_at_step_index == 0
+        assert state.progress.failed_at_step_index is None
+        assert state.progress.reconciliation_required_step_index == 0
         assert state.progress.failure_error == "boom"
         # Progress NOT cleared on failure (only cleared on success)
         runner._clear_execution_progress.assert_not_called()

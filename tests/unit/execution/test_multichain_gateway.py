@@ -5,13 +5,12 @@ path where all transactions are routed through the gateway sidecar.
 """
 
 import json
-from decimal import Decimal
-from unittest.mock import MagicMock, AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from almanak.framework.execution.multichain import MultiChainOrchestrator, IntentExecutionResult
 from almanak.framework.execution.gateway_orchestrator import GatewayExecutionResult
+from almanak.framework.execution.multichain import IntentExecutionResult, MultiChainOrchestrator
 
 
 @pytest.fixture
@@ -110,7 +109,19 @@ class TestGatewayExecution:
         exec_response.success = True
         exec_response.tx_hashes = ["0xabc"]
         exec_response.total_gas_used = 100000
-        exec_response.receipts = json.dumps([{"status": 1}]).encode()
+        exec_response.receipts = json.dumps(
+            [
+                {
+                    "tx_hash": "0xabc",
+                    "block_number": 42,
+                    "block_hash": "0xblock",
+                    "status": 1,
+                    "gas_used": 100000,
+                    "effective_gas_price": 1,
+                    "logs": [],
+                }
+            ]
+        ).encode()
         exec_response.execution_id = "exec-1"
         exec_response.error = ""
         exec_response.error_code = ""
@@ -140,7 +151,19 @@ class TestGatewayExecution:
         exec_response.success = True
         exec_response.tx_hashes = ["0xdef"]
         exec_response.total_gas_used = 50000
-        exec_response.receipts = json.dumps([]).encode()
+        exec_response.receipts = json.dumps(
+            [
+                {
+                    "tx_hash": "0xdef",
+                    "block_number": 42,
+                    "block_hash": "0xblock",
+                    "status": 1,
+                    "gas_used": 50000,
+                    "effective_gas_price": 1,
+                    "logs": [],
+                }
+            ]
+        ).encode()
         exec_response.execution_id = "exec-2"
         exec_response.error = ""
         exec_response.error_code = ""
@@ -218,6 +241,7 @@ class TestCompileAndExecuteNoOp:
     def _make_mco(self):
         """Build a config-mode MCO with injected mock compiler and config."""
         from almanak.framework.execution.multichain import MultiChainOrchestrator
+
         # Use a MagicMock config so _compile_and_execute_intent's `self._config is not None` passes
         mock_config = MagicMock()
         mco = MultiChainOrchestrator(config=mock_config)

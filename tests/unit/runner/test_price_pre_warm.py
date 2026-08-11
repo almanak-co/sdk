@@ -19,7 +19,7 @@ from almanak.framework.runner.strategy_runner import (
     RunnerConfig,
     StrategyRunner,
 )
-
+from tests.unit.runner._state_manager import absent_state_manager
 
 # =============================================================================
 # Helpers
@@ -60,7 +60,7 @@ def _make_runner():
         price_oracle=MagicMock(),
         balance_provider=MagicMock(),
         execution_orchestrator=MagicMock(),
-        state_manager=MagicMock(),
+        state_manager=absent_state_manager(),
         config=config,
     )
 

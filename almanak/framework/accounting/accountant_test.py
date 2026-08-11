@@ -43,6 +43,7 @@ from almanak.framework.accounting.payload_schemas import (
     is_v1_event_type,
     validate_payload,
 )
+from almanak.framework.accounting.receipt_set import evaluate_landed_receipt_sets
 from almanak.framework.accounting.scorecard_profiles import (
     G6Bases,
     ScorecardCtx,
@@ -178,7 +179,7 @@ def _assert_fixture_lifecycle(
 # into the denominator moves the bar for every prior run and makes scores
 # non-comparable. Being informational is about GATING ARITHMETIC only -- these
 # cells still evaluate, still render, and still report FAIL loudly.
-_INFORMATIONAL_CELL_IDS = frozenset({"L5_22", "G16"})
+_INFORMATIONAL_CELL_IDS = frozenset({"L5_22", "G16", "G17"})
 
 
 @dataclass
@@ -332,16 +333,24 @@ class AccountantReport:
         # from the denominator, not from the report: it renders as a normal row and
         # its status is called out below, so a FAIL is impossible to miss while the
         # gating arithmetic stays comparable with every prior run.
+        #
+        # G17 follows the same rollout rule. It is a strict invariant over the
+        # persisted landed receipt set, but cannot be folded into a historical
+        # denominator that pre-dates the cell without making prior scores
+        # incomparable.
         gated_cells = [c for c in self.cells if c.cell_id not in _INFORMATIONAL_CELL_IDS]
         cell22 = next((c for c in self.cells if c.cell_id == "L5_22"), None)
         g16 = next((c for c in self.cells if c.cell_id == "G16"), None)
+        g17 = next((c for c in self.cells if c.cell_id == "G17"), None)
         gated_pass = sum(1 for c in gated_cells if c.status == "PASS")
         cell22_status = cell22.status if cell22 is not None else "absent"
         g16_status = g16.status if g16 is not None else "absent"
+        g17_status = g17.status if g17 is not None else "absent"
         lines.append(
             f"- Gating: {gated_pass}/{len(gated_cells)} PASS (≥16/21 required); "
             f"cell L5_22 informational only this cycle (status: {cell22_status}); "
-            f"cell G16 informational only this cycle (status: {g16_status})"
+            f"cell G16 informational only this cycle (status: {g16_status}); "
+            f"cell G17 informational only this cycle (status: {g17_status})"
         )
         lines.append("")
         lines.append("## Cells")
@@ -1406,6 +1415,57 @@ def _cell_g16_native_lane(
         "FAIL",
         f"{headline} Residual {residual} exceeds tolerance {tolerance}.",
         decomposition=decomposition,
+    )
+
+
+def _cell_g17_receipt_set(rows: list[dict[str, Any]]) -> CellResult:
+    """G17 — persisted landed rows carry an internally complete receipt set.
+
+    This is intentionally narrower than chain completeness.  It detects a
+    missing or contradictory leg inside a row the ledger persisted; it cannot
+    detect a whole attempt absent from the DB (VIB-6303), which requires an
+    independent nonce-window reconciliation (VIB-6368).
+    """
+    evaluation = evaluate_landed_receipt_sets(rows)
+    description = "Receipt-set integrity (typed legs, identity, status, exact execution resource)"
+    if evaluation.landed_rows == 0:
+        return CellResult(
+            "G17",
+            description,
+            "SKIP",
+            "no landed ledger rows; receipt-set integrity asserted nothing",
+        )
+    if evaluation.findings:
+        rendered = "; ".join(
+            f"{finding.row_id}:{finding.code}: {finding.detail}" for finding in evaluation.findings[:5]
+        )
+        remainder = len(evaluation.findings) - 5
+        if remainder > 0:
+            rendered = f"{rendered}; +{remainder} more finding(s)"
+        return CellResult(
+            "G17",
+            description,
+            "FAIL",
+            f"{len(evaluation.findings)} violation(s) across {evaluation.landed_rows} landed row(s): {rendered}",
+            decomposition={
+                "landed_rows": evaluation.landed_rows,
+                "sub_transactions": evaluation.sub_transactions,
+                "finding_codes": [finding.code for finding in evaluation.findings],
+                "scope": "persisted landed rows only; nonce completeness not asserted",
+            },
+        )
+    return CellResult(
+        "G17",
+        description,
+        "PASS",
+        f"{evaluation.landed_rows} landed row(s), {evaluation.sub_transactions} unique successful "
+        "sub-transaction(s): parent ACTION identity and exact aggregate gas verified; "
+        "nonce completeness not asserted",
+        decomposition={
+            "landed_rows": evaluation.landed_rows,
+            "sub_transactions": evaluation.sub_transactions,
+            "scope": "persisted landed rows only; nonce completeness not asserted",
+        },
     )
 
 
@@ -5964,6 +6024,12 @@ def evaluate_cells(
     # primitive-agnostic (it catches any venue charging native outside transaction
     # gas), but it is informational for now, exactly like cell #22 below.
     cells.append(_cell_g16_native_lane(snapshots, ledger, acct_events))
+
+    # G17 — receipt-set integrity. Kept beside the other newly introduced
+    # informational cells so the historical 21-cell gating denominator remains
+    # comparable. The cell itself is strict and reports every contradiction as
+    # FAIL; only the release-score arithmetic is unchanged this cycle.
+    cells.append(_cell_g17_receipt_set(ledger))
 
     # VIB-4201 (T15): cell #22 — registry coherence. Appended after the
     # 15 generic + 6 primitive-specific cells. NOT in the ≥16/21 gating

@@ -1112,8 +1112,9 @@ def _extract_tx_and_gas(
 ) -> tuple[str, int, str]:
     """Phase gamma -- (tx_hash, gas_used, gas_usd) from the result envelope.
 
-    - ``tx_hash`` = ``result.transaction_results[0].tx_hash or ""`` when the
-      list is non-empty; empty-list or missing attr -> ``""``.
+    - ``tx_hash`` = the ACTION transaction hash when typed transaction results
+      exist; otherwise the first retained envelope hash. The fallback preserves
+      submission identity for failed results whose receipts are untrustworthy.
     - ``gas_used`` = ``result.total_gas_used or 0`` (None coalesces to 0).
     - ``gas_usd``: when the result carries a pre-computed ``gas_cost_usd``
       (e.g. ResultEnricher's prediction-handler path that already did the
@@ -1150,6 +1151,11 @@ def _extract_tx_and_gas(
         )
         chosen = action_tx if action_tx is not None else tx_results[0]
         tx_hash = chosen.tx_hash or ""
+    else:
+        from almanak.framework.execution.reconciliation import submitted_transaction_hashes
+
+        submitted_hashes = submitted_transaction_hashes(result)
+        tx_hash = submitted_hashes[0] if submitted_hashes else ""
 
     gas_used = getattr(result, "total_gas_used", 0) or 0
 

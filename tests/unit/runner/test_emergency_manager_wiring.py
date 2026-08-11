@@ -25,7 +25,7 @@ from almanak.framework.runner.strategy_runner import (
     RunnerConfig,
     StrategyRunner,
 )
-
+from tests.unit.runner._state_manager import absent_state_manager
 
 # =============================================================================
 # Helpers
@@ -75,7 +75,7 @@ def _make_runner(circuit_breaker=None, emergency_manager=None):
         price_oracle=MagicMock(),
         balance_provider=MagicMock(),
         execution_orchestrator=MagicMock(),
-        state_manager=MagicMock(),
+        state_manager=absent_state_manager(),
         config=config,
         circuit_breaker=circuit_breaker,
         emergency_manager=emergency_manager,
@@ -250,7 +250,7 @@ class TestEmergencyWithTimeout:
             price_oracle=MagicMock(),
             balance_provider=MagicMock(),
             execution_orchestrator=MagicMock(),
-            state_manager=MagicMock(),
+            state_manager=absent_state_manager(),
             config=config,
             circuit_breaker=breaker,
             emergency_manager=em,

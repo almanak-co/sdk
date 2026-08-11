@@ -138,6 +138,18 @@ class TestUnknownPreservesEscalation:
         assert rc is RevertClass.UNKNOWN
 
 
+def test_broadcast_reconciliation_required_is_terminal() -> None:
+    message = (
+        "BROADCAST_RECONCILIATION_REQUIRED: transaction submission returned known hash(es); refusing automatic replay"
+    )
+
+    assert categorize_error(message) == "RECONCILIATION_REQUIRED"
+    assert classify_teardown_failure(message) == (
+        RevertClass.RECONCILIATION_REQUIRED,
+        Disposition.NON_RETRYABLE,
+    )
+
+
 class TestSharedKeywordParity:
     """Guard the extraction: ``categorize_error`` keeps the legacy contract.
 

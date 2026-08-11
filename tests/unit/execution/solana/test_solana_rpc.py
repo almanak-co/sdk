@@ -1,6 +1,5 @@
 """Tests for Solana RPC client."""
 
-import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -10,11 +9,11 @@ from almanak.framework.execution.solana.rpc import (
     SolanaRpcClient,
     SolanaRpcConfig,
     SolanaRpcError,
+    SolanaTransactionError,
     TransactionReceipt,
     _commitment_met,
     _parse_transaction_response,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -64,6 +63,7 @@ class TestCommitmentMet:
 class TestParseTransactionResponse:
     def test_successful_transaction(self):
         tx_data = {
+            "transaction": {"signatures": ["sig123"]},
             "slot": 123456789,
             "blockTime": 1700000000,
             "meta": {
@@ -87,6 +87,7 @@ class TestParseTransactionResponse:
 
     def test_failed_transaction(self):
         tx_data = {
+            "transaction": {"signatures": ["sig_fail"]},
             "slot": 100,
             "meta": {
                 "fee": 5000,
@@ -101,10 +102,72 @@ class TestParseTransactionResponse:
         assert receipt.err == {"InstructionError": [0, "Custom"]}
 
     def test_missing_meta(self):
-        tx_data = {"slot": 50}
-        receipt = _parse_transaction_response("sig_empty", tx_data)
-        assert receipt.success is True
-        assert receipt.fee_lamports == 0
+        tx_data = {"transaction": {"signatures": ["sig_empty"]}, "slot": 50}
+        with pytest.raises(SolanaRpcError, match="metadata"):
+            _parse_transaction_response("sig_empty", tx_data)
+
+    @pytest.mark.parametrize(
+        ("tx_data", "message"),
+        [
+            ({"transaction": {"signatures": ["sig_incomplete"]}, "slot": True, "meta": {}}, "measured slot"),
+            (
+                {
+                    "transaction": {"signatures": ["sig_incomplete"]},
+                    "slot": 50,
+                    "meta": {"fee": -1, "err": None, "logMessages": []},
+                },
+                "measured fee",
+            ),
+            (
+                {
+                    "transaction": {"signatures": ["sig_incomplete"]},
+                    "slot": 50,
+                    "meta": {"fee": 5000, "logMessages": []},
+                },
+                "explicit status",
+            ),
+            (
+                {
+                    "transaction": {"signatures": ["sig_incomplete"]},
+                    "slot": 50,
+                    "meta": {"fee": 5000, "err": None, "logMessages": None},
+                },
+                "typed logs",
+            ),
+            (
+                {
+                    "transaction": {"signatures": ["sig_incomplete"]},
+                    "slot": 50,
+                    "meta": {"fee": 5000, "err": None, "logMessages": [], "preTokenBalances": {}},
+                },
+                "token balances",
+            ),
+        ],
+    )
+    def test_incomplete_receipt_fields_fail_closed(self, tx_data, message):
+        with pytest.raises(SolanaRpcError, match=message):
+            _parse_transaction_response("sig_incomplete", tx_data)
+
+    @pytest.mark.parametrize(
+        ("transaction", "message"),
+        [
+            (None, "transaction object"),
+            ({}, "transaction signatures"),
+            ({"signatures": []}, "transaction signatures"),
+            ({"signatures": [123]}, "transaction signatures"),
+            ({"signatures": ["another_signature"]}, "identity does not match"),
+        ],
+        ids=["missing-transaction", "missing-signatures", "empty-signatures", "non-string", "mismatch"],
+    )
+    def test_transaction_identity_fails_closed(self, transaction, message):
+        tx_data = {
+            "transaction": transaction,
+            "slot": 50,
+            "meta": {"fee": 5000, "err": {"InstructionError": [0, "Custom"]}, "logMessages": []},
+        }
+
+        with pytest.raises(SolanaRpcError, match=message):
+            _parse_transaction_response("sig_expected", tx_data)
 
 
 # ---------------------------------------------------------------------------
@@ -213,9 +276,7 @@ class TestConfirmTransaction:
 
     @pytest.fixture(autouse=True)
     def _fast_poll(self, monkeypatch):
-        monkeypatch.setattr(
-            "almanak.framework.execution.solana.rpc.POLL_INTERVAL_SECONDS", 0.001
-        )
+        monkeypatch.setattr("almanak.framework.execution.solana.rpc.POLL_INTERVAL_SECONDS", 0.001)
 
     @pytest.mark.asyncio
     async def test_zero_timeout_returns_unconfirmed_without_polling(self, client):
@@ -291,6 +352,118 @@ class TestConfirmTransaction:
         assert result == ConfirmationResult(signature="sig4", confirmed=False)
 
 
+class TestConfirmAndGetReceipt:
+    @pytest.mark.asyncio
+    async def test_on_chain_failure_returns_complete_failed_receipt(self, client):
+        err = {"InstructionError": [0, "Custom"]}
+        tx_data = {
+            "transaction": {"signatures": ["sig_fail"]},
+            "slot": 123,
+            "meta": {
+                "fee": 5000,
+                "err": err,
+                "logMessages": ["Program log: failed"],
+            },
+        }
+        with (
+            patch.object(
+                client,
+                "confirm_transaction",
+                return_value=ConfirmationResult(signature="sig_fail", confirmed=True, slot=123, err=err),
+            ),
+            patch.object(client, "get_transaction", return_value=tx_data) as get_transaction,
+        ):
+            receipt = await client.confirm_and_get_receipt("sig_fail")
+
+        assert receipt == TransactionReceipt(
+            signature="sig_fail",
+            slot=123,
+            fee_lamports=5000,
+            success=False,
+            err=err,
+            logs=["Program log: failed"],
+        )
+        get_transaction.assert_awaited_once_with("sig_fail", None)
+
+    @pytest.mark.asyncio
+    async def test_failed_confirmation_without_full_receipt_stays_ambiguous(self, client):
+        err = {"InstructionError": [0, "Custom"]}
+        with (
+            patch.object(
+                client,
+                "confirm_transaction",
+                return_value=ConfirmationResult(signature="sig_fail", confirmed=True, slot=123, err=err),
+            ),
+            patch.object(client, "get_transaction", return_value=None),
+        ):
+            with pytest.raises(SolanaTransactionError, match="sig_fail"):
+                await client.confirm_and_get_receipt("sig_fail")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("transaction", "message"),
+        [
+            (None, "transaction object"),
+            ({"signatures": []}, "transaction signatures"),
+            ({"signatures": ["different_signature"]}, "identity does not match"),
+        ],
+        ids=["missing-transaction", "malformed-signatures", "mismatched-signature"],
+    )
+    async def test_failed_confirmation_requires_matching_transaction_identity(self, client, transaction, message):
+        """The production confirm path cannot attach another transaction's metadata to the requested signature."""
+        err = {"InstructionError": [0, "Custom"]}
+        tx_data = {
+            "transaction": transaction,
+            "slot": 123,
+            "meta": {"fee": 5000, "err": err, "logMessages": ["Program log: failed"]},
+        }
+        with (
+            patch.object(
+                client,
+                "confirm_transaction",
+                return_value=ConfirmationResult(signature="sig_fail", confirmed=True, slot=123, err=err),
+            ),
+            patch.object(client, "get_transaction", return_value=tx_data),
+        ):
+            with pytest.raises(SolanaRpcError, match=message):
+                await client.confirm_and_get_receipt("sig_fail")
+
+    @pytest.mark.asyncio
+    async def test_success_confirmation_without_full_receipt_stays_ambiguous(self, client):
+        with (
+            patch.object(
+                client,
+                "confirm_transaction",
+                return_value=ConfirmationResult(signature="sig_success", confirmed=True, slot=123),
+            ),
+            patch.object(client, "get_transaction", return_value=None),
+        ):
+            with pytest.raises(SolanaTransactionError, match="complete getTransaction receipt unavailable"):
+                await client.confirm_and_get_receipt("sig_success")
+
+    @pytest.mark.asyncio
+    async def test_contradictory_success_receipt_does_not_erase_confirmation_error(self, client):
+        err = {"InstructionError": [0, "Custom"]}
+        with (
+            patch.object(
+                client,
+                "confirm_transaction",
+                return_value=ConfirmationResult(signature="sig_fail", confirmed=True, slot=123, err=err),
+            ),
+            patch.object(
+                client,
+                "get_transaction",
+                return_value={
+                    "transaction": {"signatures": ["sig_fail"]},
+                    "slot": 123,
+                    "meta": {"fee": 5000, "err": None, "logMessages": []},
+                },
+            ),
+        ):
+            with pytest.raises(SolanaTransactionError, match="sig_fail"):
+                await client.confirm_and_get_receipt("sig_fail")
+
+
 # ---------------------------------------------------------------------------
 # TransactionReceipt tests
 # ---------------------------------------------------------------------------
@@ -315,6 +488,6 @@ class TestTransactionReceipt:
     def test_defaults(self):
         receipt = TransactionReceipt(signature="sig2")
         assert receipt.slot == 0
-        assert receipt.success is True
+        assert receipt.success is False
         assert receipt.logs == []
         assert receipt.pre_token_balances == []

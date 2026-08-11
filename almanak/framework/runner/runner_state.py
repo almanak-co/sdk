@@ -40,7 +40,7 @@ from ..portfolio import (
     serialize_value_confidence,
 )
 from ..state.exceptions import AccountingPersistenceError, AccountingWriteKind
-from ..state.state_manager import StateConflictError, StateData, StateNotFoundError
+from ..state.state_manager import StateConflictError
 from .capital_flow_state import (
     DETAIL_NO_GATEWAY,
     DETAIL_SCAN_DEFERRED,
@@ -250,51 +250,39 @@ async def update_state(
     is_live = bool(execution_mode and str(execution_mode).lower() == "live")
 
     try:
-        # Try to load current state, create new if not found
-        try:
-            state = await runner.state_manager.load_state(deployment_id)
-            # GatewayStateManager returns None instead of raising StateNotFoundError
-            if state is None:
-                raise StateNotFoundError(deployment_id)
-            expected_version = state.version
-        except StateNotFoundError:
-            # First run - create new state
-            state = StateData(
-                deployment_id=deployment_id,
-                version=1,
-                state={},
-            )
-            expected_version = None  # No version check for new state
-            logger.debug(f"Creating initial state for {deployment_id}")
+        from ..state.strategy_state import merge_runner_state_values, replace_strategy_persistent_state
 
-        # Merge strategy's persistent state first (position_id, etc.)
-        # strategy.save_state() uses ensure_future (fire-and-forget) which
-        # races with this method. Merge here to avoid clobbering.
-        if hasattr(strategy, "get_persistent_state"):
-            try:
-                strat_state = strategy.get_persistent_state()
-                if strat_state:
-                    state.state.update(strat_state)
-            except Exception:
-                logger.warning(
-                    "Failed to merge strategy persistent state for %s, position tracking data may be stale",
-                    deployment_id,
-                    exc_info=True,
-                )
-
-        # Update state with iteration info
-        state.state["last_iteration"] = {
-            "timestamp": result.timestamp.isoformat(),
-            "status": result.status.value,
-            "intent_type": result.intent.intent_type.value if result.intent else None,
-            "duration_ms": result.duration_ms,
+        runner_values = {
+            "last_iteration": {
+                "timestamp": result.timestamp.isoformat(),
+                "status": result.status.value,
+                "intent_type": result.intent.intent_type.value if result.intent else None,
+                "duration_ms": result.duration_ms,
+            },
+            "total_iterations": runner._total_iterations,
+            "successful_iterations": runner._successful_iterations,
+            "consecutive_errors": runner._consecutive_errors,
         }
-        state.state["total_iterations"] = runner._total_iterations
-        state.state["successful_iterations"] = runner._successful_iterations
-        state.state["consecutive_errors"] = runner._consecutive_errors
+        get_persistent_state = getattr(strategy, "get_persistent_state", None)
+        if callable(get_persistent_state):
+            flush = getattr(runner, "_flush_strategy_pending_save_strict", None)
+            if callable(flush):
+                await flush(strategy)
+            user_state = get_persistent_state() or {}
+            framework_state: dict[str, Any] = {}
+            from ..strategies.intent_strategy import IntentStrategy
 
-        # Save with CAS (or create if new)
-        await runner.state_manager.save_state(state, expected_version=expected_version)
+            if isinstance(strategy, IntentStrategy):
+                framework_state = IntentStrategy._framework_persistent_state(strategy)
+            await replace_strategy_persistent_state(
+                runner.state_manager,
+                deployment_id,
+                user_state,
+                framework_state=framework_state,
+                runner_state=runner_values,
+            )
+        else:
+            await merge_runner_state_values(runner.state_manager, deployment_id, runner_values)
 
         logger.debug(f"State updated for {deployment_id}")
 
@@ -436,19 +424,13 @@ async def persist_vault_state(
     is_live = bool(execution_mode and str(execution_mode).lower() == "live")
 
     try:
-        state = await runner.state_manager.load_state(deployment_id)
-        if state is None:
-            # First run -- create state so vault lifecycle is not lost
-            state = StateData(
-                deployment_id=deployment_id,
-                version=1,
-                state={},
-            )
-            expected_version = None
-        else:
-            expected_version = state.version
-        state.state[vault_state_key] = vault_state_dict
-        await runner.state_manager.save_state(state, expected_version=expected_version)
+        from ..state.strategy_state import merge_runner_state_values
+
+        await merge_runner_state_values(
+            runner.state_manager,
+            deployment_id,
+            {vault_state_key: vault_state_dict},
+        )
         logger.debug("Vault state persisted (phase=%s)", vault_state_dict.get("settlement_phase", "?"))
     except StateConflictError as e:
         logger.error(

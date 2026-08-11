@@ -155,6 +155,7 @@ class TestInitBridgeWaitStateExtended:
         runner._get_gateway_client = MagicMock(return_value=None)
 
         resume = _make_progress(total_steps=3)
+        resume.intents_hash = "x"
         resume.completed_step_index = 1  # next = 2
         resume.previous_amount_received = Decimal("0")
 
@@ -243,7 +244,7 @@ class TestBridgeWaitProcessIntentSuccess:
         assert called_intent.amount == Decimal("42")
 
     @pytest.mark.asyncio
-    async def test_strategy_save_state_exception_does_not_abort(self) -> None:
+    async def test_strategy_save_state_exception_retains_replay_barrier(self) -> None:
         runner = _make_runner()
         runner._save_execution_progress = AsyncMock()
         strategy = _make_strategy()
@@ -260,11 +261,11 @@ class TestBridgeWaitProcessIntentSuccess:
             "almanak.framework.runner.strategy_runner.is_cross_chain_intent",
             return_value=False,
         ):
-            should_break = await runner._bridge_wait_process_intent(state, 0)
+            with pytest.raises(RuntimeError, match="replay barrier retained"):
+                await runner._bridge_wait_process_intent(state, 0)
 
-        assert should_break is False
-        # Still counted as success, state.failed_step stays None
-        assert state.failed_step is None
+        retained = runner._save_execution_progress.await_args_list[0].args[1]
+        assert retained.is_accounting_pending
 
 
 # =============================================================================
@@ -678,7 +679,8 @@ class TestBridgeWaitBuildFailedResult:
         result = await runner._bridge_wait_build_failed_result(state)
         assert result.status == IterationStatus.EXECUTION_FAILED
         # Progress records defaulted to index 0
-        assert state.progress.failed_at_step_index == 0
+        assert state.progress.failed_at_step_index is None
+        assert state.progress.reconciliation_required_step_index == 0
 
     @pytest.mark.asyncio
     async def test_bridge_failure_logs_bridge_message_not_revert_diagnostics(self) -> None:
@@ -729,7 +731,7 @@ class TestBridgeWaitBuildFailedResult:
         state.error_message = "reverted"
         state.current_intent = intent
         state.rpc_urls = {"arbitrum": "https://rpc"}
-        state.failed_result = SimpleNamespace(gas_warnings=None)
+        state.failed_result = SimpleNamespace(success=False, gas_warnings=None)
 
         diag_report = MagicMock()
         diag_report.format.return_value = "diag text"

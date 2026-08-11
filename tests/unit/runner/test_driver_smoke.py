@@ -19,7 +19,7 @@ import pytest
 
 from almanak.framework.execution.chain_executor import TransactionExecutionResult
 from almanak.framework.intents.vocabulary import HoldIntent, SwapIntent
-from almanak.framework.runner.runner_models import ExecutionProgress
+from almanak.framework.runner.runner_models import ExecutionBarrierPhase, ExecutionLane, ExecutionProgress
 from almanak.framework.runner.strategy_runner import (
     IterationStatus,
     RunnerConfig,
@@ -434,6 +434,10 @@ class TestBridgeWaitingResume:
             deployment_id=strategy.deployment_id,
             intents_hash="h",
             total_steps=2,
+            serialized_intents=[intent_a.serialize(), intent_b.serialize()],
+            failed_at_step_index=1,
+            execution_lane=ExecutionLane.SAME_CHAIN_MULTI_LEG,
+            barrier_phase=ExecutionBarrierPhase.RECOMPILE_REQUIRED,
         )
         resume.completed_step_index = 0
         resume.previous_amount_received = Decimal("100")

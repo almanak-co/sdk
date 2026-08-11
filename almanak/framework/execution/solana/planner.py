@@ -33,6 +33,7 @@ from almanak.framework.execution.solana.types import (
     SignedSolanaTransaction,
     SolanaTransaction,
 )
+from almanak.framework.execution.submission import SubmissionProvenance
 
 logger = logging.getLogger(__name__)
 
@@ -125,12 +126,14 @@ class SolanaExecutionPlanner(ChainExecutionStrategy):
                 success=False,
                 chain_family="SOLANA",
                 error="SolanaExecutionPlanner: no RPC URL configured",
+                submission_provenance=SubmissionProvenance.NOT_ATTEMPTED,
             )
         if not self._signer:
             return ExecutionOutcome(
                 success=False,
                 chain_family="SOLANA",
                 error="SolanaExecutionPlanner: no private key configured",
+                submission_provenance=SubmissionProvenance.NOT_ATTEMPTED,
             )
 
         context = context or {}
@@ -139,6 +142,23 @@ class SolanaExecutionPlanner(ChainExecutionStrategy):
         all_signatures: list[str] = []
         all_receipts: list[dict[str, Any]] = []
         total_fee_lamports = 0
+        submission_provenance = SubmissionProvenance.NOT_ATTEMPTED
+
+        def failed_outcome(error: str, extra_receipt: Any | None = None) -> ExecutionOutcome:
+            receipts = list(all_receipts)
+            fee_lamports = total_fee_lamports
+            if extra_receipt is not None:
+                receipts.append(extra_receipt.to_dict())
+                fee_lamports += extra_receipt.fee_lamports
+            return ExecutionOutcome(
+                success=False,
+                chain_family="SOLANA",
+                tx_ids=list(all_signatures),
+                receipts=receipts,
+                total_fee_native=Decimal(fee_lamports) / Decimal(LAMPORTS_PER_SOL),
+                error=error,
+                submission_provenance=submission_provenance,
+            )
 
         for action_bundle in actions:
             # Extract metadata and transactions from the ActionBundle
@@ -162,12 +182,7 @@ class SolanaExecutionPlanner(ChainExecutionStrategy):
                         fresh_tx = await asyncio.to_thread(self._refresh_deferred_route, metadata)
                         fresh_serialized = fresh_tx.get("serialized_transaction")
                         if not fresh_serialized:
-                            return ExecutionOutcome(
-                                success=False,
-                                chain_family="SOLANA",
-                                tx_ids=all_signatures,
-                                error="Solana route refresh returned no serialized_transaction",
-                            )
+                            return failed_outcome("Solana route refresh returned no serialized_transaction")
 
                         # Validate slippage: reject if fresh out_amount degraded
                         # beyond the original slippage tolerance
@@ -183,15 +198,10 @@ class SolanaExecutionPlanner(ChainExecutionStrategy):
                                     slippage_ratio = (original_out_int - fresh_out_int) / original_out_int
                                     slippage_tolerance = slippage_bps / 10_000
                                     if slippage_ratio > slippage_tolerance:
-                                        return ExecutionOutcome(
-                                            success=False,
-                                            chain_family="SOLANA",
-                                            tx_ids=all_signatures,
-                                            error=(
-                                                f"Solana route refresh slippage too high: "
-                                                f"original_out={original_out_int}, fresh_out={fresh_out_int}, "
-                                                f"degradation={slippage_ratio:.4%} exceeds tolerance={slippage_tolerance:.4%}"
-                                            ),
+                                        return failed_outcome(
+                                            f"Solana route refresh slippage too high: "
+                                            f"original_out={original_out_int}, fresh_out={fresh_out_int}, "
+                                            f"degradation={slippage_ratio:.4%} exceeds tolerance={slippage_tolerance:.4%}"
                                         )
                             except (ValueError, TypeError) as conv_err:
                                 logger.warning(f"Could not compare out_amounts for slippage check: {conv_err}")
@@ -203,12 +213,7 @@ class SolanaExecutionPlanner(ChainExecutionStrategy):
                             f"(original_out={original_out}, fresh_out={fresh_out})"
                         )
                     except Exception as e:
-                        return ExecutionOutcome(
-                            success=False,
-                            chain_family="SOLANA",
-                            tx_ids=all_signatures,
-                            error=f"Solana route refresh failed: {e}",
-                        )
+                        return failed_outcome(f"Solana route refresh failed: {e}")
 
                 # Step 1b: For non-deferred transactions (e.g. Raydium LP), replace
                 # the stale compile-time blockhash with a fresh one so it doesn't
@@ -219,11 +224,7 @@ class SolanaExecutionPlanner(ChainExecutionStrategy):
                         logger.info("Replaced stale blockhash with fresh one")
                     except Exception as e:
                         logger.error(f"Failed to replace blockhash: {e}")
-                        return ExecutionOutcome(
-                            success=False,
-                            error=f"Blockhash replacement failed: {e}",
-                            chain_family="SOLANA",
-                        )
+                        return failed_outcome(f"Blockhash replacement failed: {e}")
 
                 # Step 2: Sign the transaction (with additional signers if present)
                 # Check sensitive_data first (preferred), fall back to metadata for compat
@@ -235,31 +236,21 @@ class SolanaExecutionPlanner(ChainExecutionStrategy):
                         additional_signers=additional_signers,
                     )
                 except SolanaSignerError as e:
-                    return ExecutionOutcome(
-                        success=False,
-                        chain_family="SOLANA",
-                        tx_ids=all_signatures,
-                        error=f"Signing failed: {e}",
-                    )
+                    return failed_outcome(f"Signing failed: {e}")
 
                 if dry_run:
                     logger.info("DRY RUN: Would submit signed transaction to Solana RPC")
-                    all_signatures.append("dry-run-signature")
                     continue
 
                 # Step 3: Submit to Solana RPC
+                submission_provenance = SubmissionProvenance.ATTEMPTED
                 try:
                     signature = await self._rpc.send_transaction(
                         signed_tx_base64=signed_tx_b64,
                         skip_preflight=False,
                     )
                 except SolanaRpcError as e:
-                    return ExecutionOutcome(
-                        success=False,
-                        chain_family="SOLANA",
-                        tx_ids=all_signatures,
-                        error=f"Transaction submission failed: {e}",
-                    )
+                    return failed_outcome(f"Transaction submission failed: {e}")
 
                 all_signatures.append(signature)
 
@@ -271,12 +262,9 @@ class SolanaExecutionPlanner(ChainExecutionStrategy):
                     )
 
                     if not receipt.success:
-                        return ExecutionOutcome(
-                            success=False,
-                            chain_family="SOLANA",
-                            tx_ids=all_signatures,
-                            receipts=[receipt.to_dict()],
-                            error=f"Transaction failed on-chain: {receipt.err}",
+                        return failed_outcome(
+                            f"Transaction failed on-chain: {receipt.err}",
+                            extra_receipt=receipt,
                         )
 
                     all_receipts.append(receipt.to_dict())
@@ -287,19 +275,9 @@ class SolanaExecutionPlanner(ChainExecutionStrategy):
                     )
 
                 except SolanaTransactionError as e:
-                    return ExecutionOutcome(
-                        success=False,
-                        chain_family="SOLANA",
-                        tx_ids=all_signatures,
-                        error=f"Transaction failed: {e}",
-                    )
+                    return failed_outcome(f"Transaction failed: {e}")
                 except TimeoutError as e:
-                    return ExecutionOutcome(
-                        success=False,
-                        chain_family="SOLANA",
-                        tx_ids=all_signatures,
-                        error=f"Confirmation timeout: {e}",
-                    )
+                    return failed_outcome(f"Confirmation timeout: {e}")
 
         return ExecutionOutcome(
             success=True,
@@ -307,6 +285,7 @@ class SolanaExecutionPlanner(ChainExecutionStrategy):
             tx_ids=all_signatures,
             receipts=all_receipts,
             total_fee_native=Decimal(total_fee_lamports) / Decimal(LAMPORTS_PER_SOL),
+            submission_provenance=submission_provenance,
         )
 
     async def check_connection(self) -> bool:

@@ -24,7 +24,7 @@ from almanak.framework.models.run_mode import RunMode
 from almanak.framework.portfolio.models import ValueConfidenceParseError, serialize_value_confidence
 from almanak.framework.state.exceptions import AccountingPersistenceError, AccountingWriteKind
 from almanak.framework.state.ledger_registry_mode import LedgerRegistrySaveMode
-from almanak.framework.state.state_manager import StateData
+from almanak.framework.state.state_manager import StateConflictError, StateData
 from almanak.gateway.proto import gateway_pb2
 
 if TYPE_CHECKING:
@@ -206,8 +206,6 @@ class GatewayStateManager:
 
                 # Check for version conflict
                 if "version" in error_msg.lower() or "conflict" in error_msg.lower():
-                    from almanak.framework.state.state_manager import StateConflictError
-
                     raise StateConflictError(
                         deployment_id=state.deployment_id,
                         expected_version=expected_version or 0,
@@ -226,6 +224,20 @@ class GatewayStateManager:
                 created_at=state.created_at,
             )
 
+        except grpc.RpcError as e:
+            # The hosted state service reports optimistic-lock conflicts as
+            # ABORTED. Real gRPC stubs raise before returning SaveStateResponse,
+            # so translate the typed status at this boundary; shared-row CAS
+            # helpers can then reload and retry without message matching.
+            code = e.code() if hasattr(e, "code") else None
+            if code == grpc.StatusCode.ABORTED:
+                raise StateConflictError(
+                    deployment_id=state.deployment_id,
+                    expected_version=expected_version or 0,
+                    actual_version=0,
+                ) from e
+            logger.error(f"Gateway save state failed for {state.deployment_id}: {e}")
+            raise
         except Exception as e:
             if "StateConflictError" in type(e).__name__:
                 raise

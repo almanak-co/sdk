@@ -131,7 +131,7 @@ class SolanaTransactionReceipt:
     slot: int
     block_time: int | None = None
     fee_lamports: int = 0
-    success: bool = True
+    success: bool = False
     err: dict[str, Any] | None = None
     logs: list[str] = field(default_factory=list)
     pre_token_balances: list[dict[str, Any]] = field(default_factory=list)

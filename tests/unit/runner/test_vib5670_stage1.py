@@ -268,9 +268,7 @@ class TestRegistryResolveChainParam:
             "almanak.framework.migration.backfill._nft_manager_for_protocol_chain",
             return_value="0xNPM",
         ) as nft:
-            out = runner._registry_resolve_chain_and_nft_manager(
-                strategy, "LP_OPEN", "uniswap_v3", chain="polygon"
-            )
+            out = runner._registry_resolve_chain_and_nft_manager(strategy, "LP_OPEN", "uniswap_v3", chain="polygon")
         assert out == ("polygon", "0xNPM")
         assert nft.call_args.args[1] == "polygon"
 
@@ -289,10 +287,12 @@ class TestAdaptLegToExecutionResult:
             total_gas_used=21000,
             receipts=[
                 {
+                    "tx_hash": "0xdead",
                     "status": 1,
                     "gas_used": 21000,
                     "effective_gas_price": 2,
                     "block_number": 100,
+                    "block_hash": "0xblock",
                     "logs": [],
                 }
             ],
@@ -392,9 +392,7 @@ class TestPersistExecutedLeg:
                 "almanak.framework.runner.strategy_runner.ResultEnricher",
                 return_value=enricher,
             ),
-            patch(
-                "almanak.framework.accounting.sidecar.AccountingSidecarWriter"
-            ) as sidecar_cls,
+            patch("almanak.framework.accounting.sidecar.AccountingSidecarWriter") as sidecar_cls,
         ):
             await runner._persist_executed_leg(
                 strategy=strategy,

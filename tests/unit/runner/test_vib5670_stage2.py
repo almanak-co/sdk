@@ -33,15 +33,22 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from almanak.framework.execution.multichain import MultiChainOrchestrator
+from almanak.framework.execution.gateway_orchestrator import GatewayExecutionResult
+from almanak.framework.execution.multichain import ExecutionStatus, IntentExecutionResult, MultiChainOrchestrator
 from almanak.framework.execution.orchestrator import (
     ExecutionPhase,
     ExecutionResult,
     TransactionResult,
 )
+from almanak.framework.execution.submission import SubmissionProvenance
 from almanak.framework.intents.intent_errors import InvalidAmountError
 from almanak.framework.intents.vocabulary import IntentType
-from almanak.framework.runner.runner_models import IterationStatus
+from almanak.framework.runner.runner_models import (
+    ExecutionBarrierPhase,
+    ExecutionLane,
+    ExecutionProgress,
+    IterationStatus,
+)
 from almanak.framework.runner.strategy_runner import RunnerConfig, StrategyRunner
 from almanak.framework.state.exceptions import AccountingPersistenceError
 
@@ -69,6 +76,9 @@ class _IntentStub:
         self.intent_type = intent_type
         self.protocol = protocol
         self.intent_id = intent_id
+
+    def serialize(self) -> dict[str, object]:
+        return {"intent_id": self.intent_id, "chain": self.chain}
 
 
 class _IntentFacadeStub:
@@ -120,6 +130,10 @@ def _make_runner() -> StrategyRunner:
         alert_manager=MagicMock(),
         config=config,
     )
+    # This suite exercises the same-chain lane in isolation. Persistence
+    # durability has real SQLite/hosted coverage elsewhere; keep this seam
+    # explicit so an AsyncMock StateManager cannot fabricate StateData rows.
+    runner._save_execution_progress = AsyncMock()  # type: ignore[method-assign]
     return runner
 
 
@@ -146,7 +160,9 @@ def _make_leg(*, chain: str = "arbitrum", success: bool = True, error: str | Non
     return leg
 
 
-def _leg_execution_result(gas_used: int = 10, gas_cost_wei: int = 1000) -> tuple[ExecutionResult, list[TransactionResult]]:
+def _leg_execution_result(
+    gas_used: int = 10, gas_cost_wei: int = 1000
+) -> tuple[ExecutionResult, list[TransactionResult]]:
     tr = TransactionResult(tx_hash="0xabc", success=True, gas_used=gas_used, gas_cost_wei=gas_cost_wei)
     er = ExecutionResult(
         success=True,
@@ -166,7 +182,9 @@ def _wire_happy_path(runner: StrategyRunner, legs: list[MagicMock]) -> MagicMock
 
     runner._persist_executed_leg = AsyncMock(return_value="")  # type: ignore[method-assign]
     runner._adapt_leg_to_execution_result = MagicMock(  # type: ignore[method-assign]
-        side_effect=[_leg_execution_result(gas_used=10 * (i + 1), gas_cost_wei=1000 * (i + 1)) for i in range(len(legs))]
+        side_effect=[
+            _leg_execution_result(gas_used=10 * (i + 1), gas_cost_wei=1000 * (i + 1)) for i in range(len(legs))
+        ]
     )
     runner._multichain_wallet_for = MagicMock(return_value="0xlegwallet")  # type: ignore[method-assign]
     runner._balance_provider_for_chain = MagicMock(return_value=MagicMock(name="leg_provider"))  # type: ignore[method-assign]
@@ -177,7 +195,7 @@ def _wire_happy_path(runner: StrategyRunner, legs: list[MagicMock]) -> MagicMock
     return orchestrator
 
 
-async def _run_lane(runner, orchestrator, intents, strategy=None):
+async def _run_lane(runner, orchestrator, intents, strategy=None, resume_progress=None):
     strategy = strategy or _make_strategy()
     _IntentFacadeStub.resolved_calls = []
     with patch("almanak.framework.runner.strategy_runner.Intent", _IntentFacadeStub):
@@ -188,6 +206,7 @@ async def _run_lane(runner, orchestrator, intents, strategy=None):
             start_time=datetime.now(UTC),
             price_map={"USDC": "1"},
             price_oracle={"USDC": Decimal("1")},
+            resume_progress=resume_progress,
         )
 
 
@@ -197,6 +216,36 @@ async def _run_lane(runner, orchestrator, intents, strategy=None):
 
 
 class TestSameChainLegsSuccess:
+    @pytest.mark.asyncio
+    async def test_recompile_resume_skips_landed_prefix_and_uses_current_prices(self):
+        runner = _make_runner()
+        intents = [
+            _IntentStub(chain="arbitrum", intent_id="intent-landed"),
+            _IntentStub(chain="arbitrum", intent_id="intent-recompile"),
+        ]
+        orchestrator = _wire_happy_path(runner, [_make_leg(chain="arbitrum")])
+        progress = ExecutionProgress(
+            execution_id="resume-exec",
+            deployment_id="dep-1",
+            intents_hash="sealed-plan",
+            total_steps=2,
+            completed_step_index=0,
+            previous_amount_received=Decimal("7"),
+            serialized_intents=[intent.serialize() for intent in intents],
+            failed_at_step_index=1,
+            execution_lane=ExecutionLane.SAME_CHAIN_MULTI_LEG,
+            barrier_phase=ExecutionBarrierPhase.RECOMPILE_REQUIRED,
+        )
+
+        result = await _run_lane(runner, orchestrator, intents, resume_progress=progress)
+
+        assert result.status == IterationStatus.SUCCESS
+        orchestrator.execute.assert_awaited_once()
+        call = orchestrator.execute.await_args
+        assert call.args[0].intent_id == "intent-recompile"
+        assert call.kwargs == {"price_map": {"USDC": "1"}, "price_oracle": {"USDC": Decimal("1")}}
+        runner._persist_executed_leg.assert_awaited_once()
+
     @pytest.mark.asyncio
     async def test_each_leg_persisted_with_leg_chain_wallet_and_pre_snapshot(self):
         runner = _make_runner()
@@ -330,7 +379,9 @@ class TestSameChainLegsFailStop:
         result = await _run_lane(runner, orchestrator, intents)
 
         assert result.status == IterationStatus.EXECUTION_FAILED
-        assert result.error == "[arbitrum] reverted"
+        assert result.error is not None
+        assert result.error.startswith("[arbitrum] BROADCAST_RECONCILIATION_REQUIRED")
+        assert result.error.endswith("reverted")
         # Leg 1 persisted; failed leg 2 did not persist.
         assert runner._persist_executed_leg.await_count == 1
         # Failure notify fired with success=False and no result.
@@ -350,6 +401,81 @@ class TestSameChainLegsFailStop:
 
         runner.balance_provider.invalidate_cache.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_known_broadcast_failure_is_persisted_and_never_resumed(self):
+        """A receipt-set failure executes once across the restart boundary."""
+        runner = _make_runner()
+        intents = [_IntentStub(chain="arbitrum")]
+        gateway_result = GatewayExecutionResult(
+            success=False,
+            tx_hashes=["0x" + "a" * 64, "0x" + "b" * 64],
+            total_gas_used=0,
+            receipts=[],
+            execution_id="gateway-exec-1",
+            error="receipt set incomplete",
+        )
+        failed_leg = IntentExecutionResult(
+            intent=intents[0],
+            chain="arbitrum",
+            status=ExecutionStatus.FAILED,
+            tx_result=gateway_result,
+            error=gateway_result.error,
+        )
+        orchestrator = _wire_happy_path(runner, [failed_leg])
+        runner._save_execution_progress = AsyncMock()  # type: ignore[method-assign]
+
+        first = await _run_lane(runner, orchestrator, intents)
+
+        assert first.status == IterationStatus.EXECUTION_FAILED
+        assert "BROADCAST_RECONCILIATION_REQUIRED" in (first.error or "")
+        progress = runner._save_execution_progress.await_args.args[1]
+        assert progress.reconciliation_required_step_index == 0
+        assert progress.failed_at_step_index is None
+        assert orchestrator.execute.await_count == 1
+
+        runner._load_execution_progress = AsyncMock(return_value=progress)  # type: ignore[method-assign]
+        resumed = await runner._check_and_resume_stuck_execution(_make_strategy(), datetime.now(UTC))
+
+        assert resumed is not None
+        assert resumed.status == IterationStatus.EXECUTION_FAILED
+        assert "BROADCAST_RECONCILIATION_REQUIRED" in (resumed.error or "")
+        assert orchestrator.execute.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_pre_broadcast_marker_failure_prevents_first_leg(self):
+        runner = _make_runner()
+        intents = [_IntentStub(chain="arbitrum")]
+        orchestrator = _wire_happy_path(runner, [_make_leg()])
+        runner._save_execution_progress = AsyncMock(side_effect=RuntimeError("state unavailable"))  # type: ignore[method-assign]
+
+        with pytest.raises(RuntimeError, match="state unavailable"):
+            await _run_lane(runner, orchestrator, intents)
+
+        orchestrator.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_crash_after_submission_leaves_restart_barrier(self):
+        runner = _make_runner()
+        intents = [_IntentStub(chain="arbitrum")]
+        orchestrator = _wire_happy_path(runner, [])
+        orchestrator.execute = AsyncMock(side_effect=RuntimeError("worker crashed after submit"))
+        persisted: list[object] = []
+        runner._save_execution_progress = AsyncMock(
+            side_effect=lambda _deployment, progress: persisted.append(progress)
+        )  # type: ignore[method-assign]
+
+        with pytest.raises(RuntimeError, match="worker crashed after submit"):
+            await _run_lane(runner, orchestrator, intents)
+
+        assert len(persisted) == 2
+        marker = persisted[-1]
+        assert marker.is_reconciliation_required
+        runner._load_execution_progress = AsyncMock(return_value=marker)  # type: ignore[method-assign]
+        resumed = await runner._check_and_resume_stuck_execution(_make_strategy(), datetime.now(UTC))
+        assert resumed is not None
+        assert resumed.status == IterationStatus.EXECUTION_FAILED
+        orchestrator.execute.assert_awaited_once()
+
 
 # =============================================================================
 # Audit fixes (Codex P1/P2)
@@ -358,11 +484,42 @@ class TestSameChainLegsFailStop:
 
 class TestSameChainLegsAuditHardening:
     @pytest.mark.asyncio
-    async def test_persist_failure_notifies_framework_truth_before_reraise(self):
-        """Codex P1: a confirmed-broadcast leg whose persist fails must still
-        notify with framework_success=True + save strategy state before the
-        fail-closed halt — otherwise the next iteration re-opens the position
-        it already holds (duplicate broadcast)."""
+    async def test_explicit_not_attempted_failure_retains_fresh_compile_marker(self):
+        runner = _make_runner()
+        runner._clear_execution_progress = AsyncMock()  # type: ignore[method-assign]
+        runner._save_execution_progress = AsyncMock()  # type: ignore[method-assign]
+        intent = _IntentStub(chain="arbitrum")
+        gateway_result = GatewayExecutionResult(
+            success=False,
+            tx_hashes=[],
+            total_gas_used=0,
+            receipts=[],
+            execution_id="gateway-not-submitted",
+            error="policy refused transaction before submission",
+            submission_provenance=SubmissionProvenance.NOT_ATTEMPTED,
+        )
+        failed_leg = IntentExecutionResult(
+            intent=intent,
+            chain="arbitrum",
+            status=ExecutionStatus.FAILED,
+            tx_result=gateway_result,
+            error=gateway_result.error,
+        )
+        orchestrator = _wire_happy_path(runner, [failed_leg])
+
+        result = await _run_lane(runner, orchestrator, [intent])
+
+        assert result.status == IterationStatus.EXECUTION_FAILED
+        assert "BROADCAST_RECONCILIATION_REQUIRED" not in (result.error or "")
+        runner._clear_execution_progress.assert_not_awaited()
+        marker = runner._save_execution_progress.await_args_list[-1].args[1]
+        assert marker.effective_barrier_phase is ExecutionBarrierPhase.RECOMPILE_REQUIRED
+        assert marker.failed_at_step_index == 0
+        orchestrator.execute.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_persist_failure_retains_marker_without_retrying_callback(self):
+        """A post-broadcast failure relies on the durable marker, not a second callback."""
         runner = _make_runner()
         intents = [_IntentStub(chain="arbitrum")]
         orchestrator = _wire_happy_path(runner, [_make_leg()])
@@ -374,11 +531,10 @@ class TestSameChainLegsAuditHardening:
         with pytest.raises(AccountingPersistenceError):
             await _run_lane(runner, orchestrator, intents, strategy=strategy)
 
-        runner._notify_intent_executed.assert_called_once()
-        n_args = runner._notify_intent_executed.call_args
-        assert n_args.args[2] is False  # user verdict: the pipeline failed
-        assert n_args.kwargs["framework_success"] is True  # chain truth
-        strategy.save_state.assert_called_once()
+        marker = runner._save_execution_progress.await_args_list[-1].args[1]
+        assert marker.effective_barrier_phase is ExecutionBarrierPhase.LANDED_REPAIR_PENDING
+        runner._notify_intent_executed.assert_not_called()
+        strategy.save_state.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_downgraded_leg_fail_stops_remaining_legs(self):
@@ -388,6 +544,7 @@ class TestSameChainLegsAuditHardening:
         runner = _make_runner()
         intents = [_IntentStub(chain="arbitrum"), _IntentStub(chain="arbitrum")]
         orchestrator = _wire_happy_path(runner, [_make_leg(), _make_leg()])
+        runner._save_execution_progress = AsyncMock()  # type: ignore[method-assign]
         runner._persist_executed_leg = AsyncMock(  # type: ignore[method-assign]
             return_value="Reconciliation incident (enforced): delta out of range"
         )
@@ -401,6 +558,20 @@ class TestSameChainLegsAuditHardening:
         assert runner._persist_executed_leg.await_count == 1
         runner._record_failure.assert_called_once()
         runner._record_success.assert_not_called()
+
+        marker = runner._save_execution_progress.await_args_list[-1].args[1]
+        assert marker.completed_step_index == 0
+        assert marker.reconciliation_required_step_index == 0
+        assert marker.is_stuck is True
+        assert "Reconciliation incident (enforced)" in (marker.failure_error or "")
+
+        # A restart is terminal at the pre-decide gate. The same-chain lane
+        # must not get another chance to replace the marker and replay leg 0.
+        runner._load_execution_progress = AsyncMock(return_value=marker)  # type: ignore[method-assign]
+        resumed = await runner._check_and_resume_stuck_execution(_make_strategy(), datetime.now(UTC))
+        assert resumed is not None
+        assert resumed.status == IterationStatus.EXECUTION_FAILED
+        assert orchestrator.execute.await_count == 1
 
 
 # =============================================================================

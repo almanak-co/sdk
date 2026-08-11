@@ -1190,7 +1190,11 @@ class IntentStateMachine:
             self._error_type = self._categorize_error(self._last_error)
 
         # Fail fast on deterministic errors that will never succeed on retry
-        _NON_RETRYABLE_TYPES = {"COMPILATION_PERMANENT", "INSUFFICIENT_FUNDS"}
+        _NON_RETRYABLE_TYPES = {
+            "COMPILATION_PERMANENT",
+            "INSUFFICIENT_FUNDS",
+            "RECONCILIATION_REQUIRED",
+        }
         if self._error_type in _NON_RETRYABLE_TYPES:
             logger.info(
                 f"Non-retryable error ({self._error_type}): {self._last_error}. "

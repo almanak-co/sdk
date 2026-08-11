@@ -74,8 +74,9 @@ class TestTransactionResults:
 
         [tx_result] = result.transaction_results
 
-        # success defaults to True, fee/slot/logs default to 0 / 0 / [].
-        assert tx_result.success is True
+        # Missing success is unmeasured, never fabricated as successful.
+        assert tx_result.success is False
+        assert tx_result.receipt.status == 0
         assert tx_result.gas_used == 0
         assert tx_result.logs == []
         assert tx_result.receipt.block_number == 0

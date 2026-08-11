@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
+from almanak.framework.execution.submission import SubmissionProvenance, SubmissionTransactionEvidence
+
 if TYPE_CHECKING:
     from almanak.framework.execution.extracted_data import AsyncOrderData, BridgeData, LPCloseData, SwapAmounts
 
@@ -41,6 +43,9 @@ class ExecutionOutcome:
     total_fee_native: Decimal = Decimal(0)
     error: str | None = None
     chain_family: str = "EVM"
+    submission_provenance: SubmissionProvenance = SubmissionProvenance.UNSPECIFIED
+    execution_plan_hash: str = ""
+    submission_transactions: list[SubmissionTransactionEvidence] = field(default_factory=list)
 
     # Enrichment fields (same shape as ExecutionResult / GatewayExecutionResult)
     position_id: int | str | None = None

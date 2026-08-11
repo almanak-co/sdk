@@ -105,7 +105,7 @@ class TransactionReceipt:
     slot: int = 0
     block_time: int | None = None
     fee_lamports: int = 0
-    success: bool = True
+    success: bool = False
     err: dict[str, Any] | None = None
     logs: list[str] = field(default_factory=list)
     pre_token_balances: list[dict[str, Any]] = field(default_factory=list)
@@ -365,7 +365,8 @@ class SolanaRpcClient:
             TransactionReceipt with full details.
 
         Raises:
-            SolanaTransactionError: If the transaction fails on-chain.
+            SolanaTransactionError: If a failed transaction's complete receipt is unavailable.
+            SolanaRpcError: If the full transaction receipt is malformed or incomplete.
             TimeoutError: If confirmation times out.
         """
         # Wait for confirmation
@@ -374,23 +375,19 @@ class SolanaRpcClient:
         if not confirmation.confirmed:
             raise TimeoutError(f"Transaction {signature} was not confirmed within {timeout_seconds}s")
 
-        if confirmation.err:
-            raise SolanaTransactionError(
-                signature=signature,
-                error=confirmation.err,
-            )
-
         # Fetch full receipt
         tx_data = await self.get_transaction(signature, commitment)
         if tx_data is None:
             logger.warning(f"Transaction {signature} confirmed but getTransaction returned None")
-            return TransactionReceipt(
+            raise SolanaTransactionError(
                 signature=signature,
-                slot=confirmation.slot,
-                success=True,
+                error=confirmation.err or "complete getTransaction receipt unavailable",
             )
 
-        return _parse_transaction_response(signature, tx_data)
+        receipt = _parse_transaction_response(signature, tx_data)
+        if confirmation.err and receipt.success:
+            raise SolanaTransactionError(signature=signature, error=confirmation.err, logs=receipt.logs)
+        return receipt
 
     async def get_token_accounts_by_owner(
         self,
@@ -493,17 +490,47 @@ def _commitment_met(actual: str, target: str) -> bool:
 
 def _parse_transaction_response(signature: str, tx_data: dict[str, Any]) -> TransactionReceipt:
     """Parse a getTransaction RPC response into a TransactionReceipt."""
-    meta = tx_data.get("meta", {}) or {}
+    if not isinstance(tx_data, dict):
+        raise SolanaRpcError("getTransaction", "returned a non-object receipt")
+    transaction = tx_data.get("transaction")
+    if not isinstance(transaction, dict):
+        raise SolanaRpcError("getTransaction", "receipt has no transaction object")
+    signatures = transaction.get("signatures")
+    if not isinstance(signatures, list) or not signatures or not isinstance(signatures[0], str):
+        raise SolanaRpcError("getTransaction", "receipt has no transaction signatures")
+    if signatures[0] != signature:
+        raise SolanaRpcError("getTransaction", "receipt transaction identity does not match requested signature")
+    slot = tx_data.get("slot")
+    meta = tx_data.get("meta")
+    if not isinstance(slot, int) or isinstance(slot, bool) or slot < 0:
+        raise SolanaRpcError("getTransaction", "receipt has no measured slot")
+    if not isinstance(meta, dict):
+        raise SolanaRpcError("getTransaction", "receipt has no metadata object")
+    fee = meta.get("fee")
+    logs = meta.get("logMessages")
+    block_time = tx_data.get("blockTime")
+    pre_balances = meta.get("preTokenBalances", [])
+    post_balances = meta.get("postTokenBalances", [])
+    if not isinstance(fee, int) or isinstance(fee, bool) or fee < 0:
+        raise SolanaRpcError("getTransaction", "receipt has no measured fee")
+    if "err" not in meta:
+        raise SolanaRpcError("getTransaction", "receipt has no explicit status")
+    if not isinstance(logs, list) or any(not isinstance(item, str) for item in logs):
+        raise SolanaRpcError("getTransaction", "receipt has no typed logs")
+    if block_time is not None and (not isinstance(block_time, int) or isinstance(block_time, bool) or block_time < 0):
+        raise SolanaRpcError("getTransaction", "receipt has invalid block time")
+    if not isinstance(pre_balances, list) or not isinstance(post_balances, list):
+        raise SolanaRpcError("getTransaction", "receipt has invalid token balances")
     return TransactionReceipt(
         signature=signature,
-        slot=tx_data.get("slot", 0),
-        block_time=tx_data.get("blockTime"),
-        fee_lamports=meta.get("fee", 0),
+        slot=slot,
+        block_time=block_time,
+        fee_lamports=fee,
         success=meta.get("err") is None,
         err=meta.get("err"),
-        logs=meta.get("logMessages", []),
-        pre_token_balances=meta.get("preTokenBalances", []),
-        post_token_balances=meta.get("postTokenBalances", []),
+        logs=logs,
+        pre_token_balances=pre_balances,
+        post_token_balances=post_balances,
     )
 
 

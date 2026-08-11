@@ -49,6 +49,14 @@ def categorize_error(error_message: str) -> str | None:
     """
     error_lower = error_message.lower()
 
+    # A transaction hash is proof that submission may already have happened.
+    # This stable prefix is produced by the runner boundary when a failed
+    # outcome retains hashes but cannot provide a trustworthy receipt set.
+    # Replaying the same bundle could duplicate money-moving actions, so this
+    # category is terminal until an operator reconciles those hashes on-chain.
+    if "broadcast_reconciliation_required" in error_lower:
+        return "RECONCILIATION_REQUIRED"
+
     # Specific protocol-level capacity revert tokens that always repeat
     # for the same (collateral, borrow_amount). Check BEFORE the generic
     # `revert` keyword so the runner classifies them as

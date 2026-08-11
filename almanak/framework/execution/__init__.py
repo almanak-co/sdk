@@ -264,6 +264,7 @@ from almanak.framework.execution.solana import (
     SolanaTransaction,
     SolanaTransactionReceipt,
 )
+from almanak.framework.execution.submission import SubmissionProvenance
 
 # Submitter implementations
 from almanak.framework.execution.submitter import PublicMempoolSubmitter
@@ -276,6 +277,7 @@ __all__ = [
     "SignedTransaction",
     "SimulationResult",
     "SubmissionResult",
+    "SubmissionProvenance",
     "TransactionReceipt",
     "AsyncOrderData",
     "AsyncOrderKind",

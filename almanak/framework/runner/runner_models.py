@@ -10,6 +10,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any, Protocol
 
+from ..execution.submission import SubmissionProvenance, SubmissionTransactionEvidence
 from ..intents.vocabulary import AnyIntent, DecideResult
 from ..portfolio import PortfolioSnapshot
 from .failure_kind import FailureKind
@@ -342,6 +343,104 @@ class IterationResult:
 
 
 @dataclass
+class StepSubmissionEvidence:
+    """Durable submission evidence scoped to one execution step."""
+
+    step_index: int
+    chain: str
+    submission_provenance: SubmissionProvenance = SubmissionProvenance.UNSPECIFIED
+    submitted_transaction_ids: list[str] = field(default_factory=list)
+    execution_plan_hash: str = ""
+    submission_transactions: list[SubmissionTransactionEvidence] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "step_index": self.step_index,
+            "chain": self.chain,
+            "submission_provenance": self.submission_provenance.value,
+            "submitted_transaction_ids": list(self.submitted_transaction_ids),
+            "execution_plan_hash": self.execution_plan_hash,
+            "submission_transactions": [item.to_dict() for item in self.submission_transactions],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "StepSubmissionEvidence":
+        raw_ids = data.get("submitted_transaction_ids", [])
+        ids = [item for item in raw_ids if isinstance(item, str) and item.strip()] if isinstance(raw_ids, list) else []
+        return cls(
+            step_index=int(data.get("step_index", 0)),
+            chain=str(data.get("chain", "")),
+            submission_provenance=SubmissionProvenance.parse(data.get("submission_provenance")),
+            submitted_transaction_ids=ids,
+            execution_plan_hash=str(data.get("execution_plan_hash", "")),
+            submission_transactions=[
+                item
+                for value in (data.get("submission_transactions") or [])
+                if (item := SubmissionTransactionEvidence.from_value(value)) is not None
+            ],
+        )
+
+
+class ExecutionLane(StrEnum):
+    """Durable owner of an execution-progress marker."""
+
+    UNKNOWN = "unknown"
+    SINGLE_CHAIN = "single_chain"
+    SAME_CHAIN_MULTI_LEG = "same_chain_multi_leg"
+    BRIDGE = "bridge"
+
+    @classmethod
+    def parse(cls, value: Any) -> "ExecutionLane":
+        try:
+            return cls(value)
+        except (TypeError, ValueError):
+            return cls.UNKNOWN
+
+
+class ExecutionBarrierPhase(StrEnum):
+    """Durable no-rebroadcast barrier phase.
+
+    ``LANDED_REPAIR_PENDING`` is intentionally distinct from retryable failure:
+    chain work already landed and only the sealed post-land repair pipeline (or
+    an explicit operator attestation) may advance it.
+    """
+
+    PRE_BROADCAST = "pre_broadcast"
+    RETRYABLE = "retryable"
+    RECOMPILE_REQUIRED = "recompile_required"
+    RECONCILIATION_REQUIRED = "reconciliation_required"
+    LANDED_REPAIR_PENDING = "landed_repair_pending"
+    COMPLETED = "completed"
+
+
+@dataclass(frozen=True)
+class ExecutionRepairAttestation:
+    """Operator evidence attached to a landed-work repair seal."""
+
+    operator: str
+    accounting_repair_reference: str
+    strategy_state_repair_reference: str
+    attested_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "operator": self.operator,
+            "accounting_repair_reference": self.accounting_repair_reference,
+            "strategy_state_repair_reference": self.strategy_state_repair_reference,
+            "attested_at": self.attested_at.isoformat(),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ExecutionRepairAttestation":
+        return cls(
+            operator=str(data["operator"]),
+            accounting_repair_reference=str(data["accounting_repair_reference"]),
+            strategy_state_repair_reference=str(data["strategy_state_repair_reference"]),
+            attested_at=datetime.fromisoformat(str(data["attested_at"])),
+        )
+
+
+@dataclass
 class ExecutionProgress:
     """Tracks execution progress for resuming after restart.
 
@@ -358,12 +457,17 @@ class ExecutionProgress:
         failed_at_step_index: Index of the step that failed (None if no failure)
         failure_error: Error message from the failed step
         accounting_pending_step_index: Index of a step whose broadcast is confirmed
-            on-chain but whose accounting write did not complete (VIB-5670,
-            multi-chain / bridge lane only). Means "broadcast confirmed on-chain,
+            on-chain but whose accounting/state repair did not complete. Means
+            "broadcast confirmed on-chain,
             accounting write incomplete — do NOT re-broadcast on resume." Mutually
             exclusive per step with ``failed_at_step_index`` (which means the step
-            never broadcast and must be re-executed). Never set on the single-chain
-            lane (single-intent iterations never build an ExecutionProgress).
+            never broadcast and must be re-executed). Every broadcast lane uses
+            this same phase contract.
+        reconciliation_required_step_index: Index of a failed step that retained
+            one or more submitted transaction hashes but no trustworthy receipt
+            set. This is a terminal operator-reconciliation marker: unlike an
+            ordinary failure it must never be automatically re-executed, and
+            unlike accounting-pending it must not allow later legs to proceed.
     """
 
     execution_id: str
@@ -378,11 +482,127 @@ class ExecutionProgress:
     failed_at_step_index: int | None = None
     failure_error: str | None = None
     accounting_pending_step_index: int | None = None
+    reconciliation_required_step_index: int | None = None
+    submission_evidence: list[StepSubmissionEvidence] = field(default_factory=list)
+    execution_lane: ExecutionLane = ExecutionLane.UNKNOWN
+    barrier_phase: ExecutionBarrierPhase | None = None
+    repair_attestation: ExecutionRepairAttestation | None = None
+
+    def mark_reconciliation_required(self, step_index: int, error: str) -> None:
+        """Monotonically block a step whose submission outcome is uncertain."""
+        if self.effective_barrier_phase is ExecutionBarrierPhase.COMPLETED:
+            raise ValueError("a completed execution cannot re-enter reconciliation")
+        self.barrier_phase = ExecutionBarrierPhase.RECONCILIATION_REQUIRED
+        self.reconciliation_required_step_index = step_index
+        self.accounting_pending_step_index = None
+        self.failed_at_step_index = None
+        self.failure_error = error
+        self.last_updated = datetime.now(UTC)
+
+    def mark_landed_repair_pending(self, step_index: int, error: str) -> None:
+        """Advance a confirmed step to the no-rebroadcast repair phase."""
+        if self.effective_barrier_phase is ExecutionBarrierPhase.COMPLETED:
+            raise ValueError("a completed execution cannot require landed repair")
+        self.barrier_phase = ExecutionBarrierPhase.LANDED_REPAIR_PENDING
+        self.accounting_pending_step_index = step_index
+        self.reconciliation_required_step_index = None
+        self.failed_at_step_index = None
+        self.failure_error = error
+        self.last_updated = datetime.now(UTC)
+
+    def mark_recompile_required(self, step_index: int, error: str) -> None:
+        """Permit only a fresh compile of the exact remaining vocabulary plan."""
+        if self.effective_barrier_phase is ExecutionBarrierPhase.COMPLETED:
+            raise ValueError("a completed execution cannot require recompilation")
+        self.barrier_phase = ExecutionBarrierPhase.RECOMPILE_REQUIRED
+        self.failed_at_step_index = step_index
+        self.reconciliation_required_step_index = None
+        self.accounting_pending_step_index = None
+        self.failure_error = error
+        self.last_updated = datetime.now(UTC)
+
+    def seal_repaired_step(self, step_index: int, attestation: ExecutionRepairAttestation | None = None) -> None:
+        """Seal repaired landed work and select the next exact-plan phase."""
+        if self.effective_barrier_phase is not ExecutionBarrierPhase.LANDED_REPAIR_PENDING:
+            raise ValueError("only landed-repair-pending work can be repair-sealed")
+        if self.accounting_pending_step_index not in (None, step_index):
+            raise ValueError("repair step does not match the durable pending step")
+        self.completed_step_index = max(self.completed_step_index, step_index)
+        self.accounting_pending_step_index = None
+        self.reconciliation_required_step_index = None
+        self.failure_error = None
+        self.repair_attestation = attestation
+        if step_index + 1 < self.total_steps:
+            # A repaired prefix may resume only by freshly compiling the
+            # exact sealed suffix with current prices and allowances. Generic
+            # RETRYABLE is a legacy, unbound phase and is deliberately refused
+            # by the runner.
+            self.barrier_phase = ExecutionBarrierPhase.RECOMPILE_REQUIRED
+            self.failed_at_step_index = step_index + 1
+        else:
+            self.barrier_phase = ExecutionBarrierPhase.COMPLETED
+            self.failed_at_step_index = None
+            self.intents_hash = "landed-complete"
+        self.last_updated = datetime.now(UTC)
+
+    @property
+    def effective_barrier_phase(self) -> ExecutionBarrierPhase:
+        """Return the explicit phase, or conservatively infer a legacy marker."""
+        if self.barrier_phase is not None:
+            return self.barrier_phase
+        if self.accounting_pending_step_index is not None or self.intents_hash == "landed-accounting-pending":
+            return ExecutionBarrierPhase.LANDED_REPAIR_PENDING
+        if self.reconciliation_required_step_index is not None:
+            return ExecutionBarrierPhase.RECONCILIATION_REQUIRED
+        if self.failed_at_step_index is not None:
+            return ExecutionBarrierPhase.RETRYABLE
+        if self.intents_hash == "landed-complete" or (
+            self.total_steps > 0 and self.completed_step_index >= self.total_steps - 1
+        ):
+            return ExecutionBarrierPhase.COMPLETED
+        return ExecutionBarrierPhase.PRE_BROADCAST
+
+    def record_submission_evidence(
+        self,
+        *,
+        step_index: int,
+        chain: str,
+        submission_provenance: SubmissionProvenance,
+        submitted_transaction_ids: list[str] | tuple[str, ...],
+        execution_plan_hash: str = "",
+        submission_transactions: list[SubmissionTransactionEvidence] | tuple[SubmissionTransactionEvidence, ...] = (),
+    ) -> None:
+        """Upsert evidence for one step without conflating multi-leg IDs."""
+        evidence = StepSubmissionEvidence(
+            step_index=step_index,
+            chain=chain,
+            submission_provenance=submission_provenance,
+            submitted_transaction_ids=list(submitted_transaction_ids),
+            execution_plan_hash=execution_plan_hash,
+            submission_transactions=list(submission_transactions),
+        )
+        self.submission_evidence = [item for item in self.submission_evidence if item.step_index != step_index]
+        self.submission_evidence.append(evidence)
+        self.submission_evidence.sort(key=lambda item: item.step_index)
 
     @property
     def is_stuck(self) -> bool:
-        """Check if execution is stuck (has a failed step that needs retry)."""
-        return self.failed_at_step_index is not None
+        """Whether progress requires retry or operator reconciliation."""
+        return self.effective_barrier_phase in {
+            ExecutionBarrierPhase.PRE_BROADCAST,
+            ExecutionBarrierPhase.RETRYABLE,
+            ExecutionBarrierPhase.RECOMPILE_REQUIRED,
+            ExecutionBarrierPhase.RECONCILIATION_REQUIRED,
+            ExecutionBarrierPhase.LANDED_REPAIR_PENDING,
+        }
+
+    @property
+    def is_reconciliation_required(self) -> bool:
+        """True when chain reconciliation must precede any further broadcast."""
+        return self.effective_barrier_phase in {
+            ExecutionBarrierPhase.PRE_BROADCAST,
+            ExecutionBarrierPhase.RECONCILIATION_REQUIRED,
+        }
 
     @property
     def is_accounting_pending(self) -> bool:
@@ -392,7 +612,12 @@ class ExecutionProgress:
         on-chain, so the step must NOT be re-executed/re-broadcast; only its
         deferred accounting write remains.
         """
-        return self.accounting_pending_step_index is not None
+        return self.effective_barrier_phase is ExecutionBarrierPhase.LANDED_REPAIR_PENDING
+
+    @property
+    def is_completed(self) -> bool:
+        """Whether every sealed step reached its downstream durable boundary."""
+        return self.effective_barrier_phase is ExecutionBarrierPhase.COMPLETED
 
     @property
     def next_step_to_execute(self) -> int:
@@ -436,6 +661,11 @@ class ExecutionProgress:
             "failed_at_step_index": self.failed_at_step_index,
             "failure_error": self.failure_error,
             "accounting_pending_step_index": self.accounting_pending_step_index,
+            "reconciliation_required_step_index": self.reconciliation_required_step_index,
+            "submission_evidence": [item.to_dict() for item in self.submission_evidence],
+            "execution_lane": self.execution_lane.value,
+            "barrier_phase": self.barrier_phase.value if self.barrier_phase is not None else None,
+            "repair_attestation": self.repair_attestation.to_dict() if self.repair_attestation is not None else None,
         }
 
     @classmethod
@@ -455,6 +685,19 @@ class ExecutionProgress:
             failed_at_step_index=data.get("failed_at_step_index"),
             failure_error=data.get("failure_error"),
             accounting_pending_step_index=data.get("accounting_pending_step_index"),
+            reconciliation_required_step_index=data.get("reconciliation_required_step_index"),
+            submission_evidence=[
+                StepSubmissionEvidence.from_dict(item)
+                for item in (data.get("submission_evidence") or [])
+                if isinstance(item, dict)
+            ],
+            execution_lane=ExecutionLane.parse(data.get("execution_lane")),
+            barrier_phase=ExecutionBarrierPhase(data["barrier_phase"]) if data.get("barrier_phase") else None,
+            repair_attestation=(
+                ExecutionRepairAttestation.from_dict(data["repair_attestation"])
+                if isinstance(data.get("repair_attestation"), dict)
+                else None
+            ),
         )
 
 
@@ -636,6 +879,7 @@ class StatefulActivityProviderProtocol(Protocol):
 __all__ = [
     "CriticalCallbackError",
     "ExecutionProgress",
+    "StepSubmissionEvidence",
     "IterationResult",
     "IterationStatus",
     "RunnerConfig",

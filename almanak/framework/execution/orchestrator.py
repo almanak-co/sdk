@@ -94,6 +94,7 @@ from .session import (
     create_session,
 )
 from .session_store import ExecutionSessionStore
+from .submission import SubmissionProvenance
 
 logger = logging.getLogger(__name__)
 
@@ -246,6 +247,7 @@ class ExecutionResult:
     started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     completed_at: datetime | None = None
     correlation_id: str = ""
+    submission_provenance: SubmissionProvenance = SubmissionProvenance.UNSPECIFIED
 
     # === Gas Estimation Warnings ===
     gas_warnings: list[str] = field(default_factory=list)
@@ -270,6 +272,7 @@ class ExecutionResult:
 
     def __post_init__(self) -> None:
         """Generate correlation_id if not provided."""
+        self.submission_provenance = SubmissionProvenance.parse(self.submission_provenance)
         if not self.correlation_id:
             import uuid
 
@@ -322,6 +325,7 @@ class ExecutionResult:
             async_orders=list(self.async_orders),
             extracted_data=self.extracted_data,
             extraction_warnings=self.extraction_warnings,
+            submission_provenance=self.submission_provenance,
         )
 
     @property
@@ -348,6 +352,7 @@ class ExecutionResult:
             "started_at": self.started_at.isoformat(),
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
             "correlation_id": self.correlation_id,
+            "submission_provenance": self.submission_provenance.value,
             # Gas warnings
             "gas_warnings": self.gas_warnings,
             # Enriched data
@@ -1589,6 +1594,7 @@ class ExecutionOrchestrator:
                     success=False,
                     phase=ExecutionPhase.VALIDATION,
                     correlation_id=fallback_context.correlation_id,
+                    submission_provenance=SubmissionProvenance.NOT_ATTEMPTED,
                 )
                 result.error = f"Unexpected error: {exc}"
                 result.error_phase = ExecutionPhase.VALIDATION
@@ -1635,6 +1641,7 @@ class ExecutionOrchestrator:
             success=False,
             phase=ExecutionPhase.VALIDATION,
             correlation_id=context.correlation_id,
+            submission_provenance=SubmissionProvenance.NOT_ATTEMPTED,
         )
 
         # Create execution session for crash recovery (PREPARING phase)
@@ -2156,6 +2163,11 @@ class ExecutionOrchestrator:
             context,
             {"tx_count": len(signed_txs)},
         )
+
+        # This assignment is immediately before the first submitter call. Any
+        # exception or hashless response after this point is ambiguous and must
+        # remain replay-blocking; pre-submit phases retain NOT_ATTEMPTED.
+        result.submission_provenance = SubmissionProvenance.ATTEMPTED
 
         use_sequential = len(signed_txs) >= 2 and not isinstance(self.signer, SafeSigner)
         submission_results: list[Any]

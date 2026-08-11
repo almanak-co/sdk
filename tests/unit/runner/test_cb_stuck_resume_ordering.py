@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -28,15 +28,20 @@ from almanak.framework.execution.circuit_breaker import (
     CircuitBreakerConfig,
     CircuitBreakerState,
 )
-from almanak.framework.intents.vocabulary import HoldIntent
+from almanak.framework.execution.multichain import MultiChainOrchestrator
+from almanak.framework.execution.submission import SubmissionProvenance
+from almanak.framework.intents.vocabulary import HoldIntent, Intent
 from almanak.framework.runner.strategy_runner import (
+    ExecutionBarrierPhase,
+    ExecutionLane,
+    ExecutionProgress,
     IterationResult,
     IterationStatus,
     RunIterationState,
     RunnerConfig,
     StrategyRunner,
 )
-
+from tests.unit.runner._state_manager import absent_state_manager
 
 # =============================================================================
 # Helpers (same mocking shape as test_run_iteration_steps.py)
@@ -57,7 +62,7 @@ def _make_runner(
         price_oracle=MagicMock(),
         balance_provider=MagicMock(),
         execution_orchestrator=MagicMock(),
-        state_manager=MagicMock(),
+        state_manager=absent_state_manager(),
         config=config,
         circuit_breaker=circuit_breaker,
     )
@@ -138,6 +143,252 @@ class TestMultiChainStuckResumeBeforeCircuitBreaker:
         assert result is resume_result
         assert result.status is IterationStatus.SUCCESS
         assert result.status is not IterationStatus.CIRCUIT_BREAKER_OPEN
+
+    @pytest.mark.asyncio
+    async def test_landed_prefix_recompile_bypasses_breaker_until_suffix_finishes(self) -> None:
+        breaker = _tripped_breaker()
+        runner = _make_runner(circuit_breaker=breaker)
+        strategy = _make_strategy()
+        state = _make_state(strategy)
+        state.recompile_progress = ExecutionProgress(
+            execution_id="suffix",
+            deployment_id=strategy.deployment_id,
+            intents_hash="sealed",
+            total_steps=2,
+            completed_step_index=0,
+            failed_at_step_index=1,
+            execution_lane=ExecutionLane.SAME_CHAIN_MULTI_LEG,
+            barrier_phase=ExecutionBarrierPhase.RECOMPILE_REQUIRED,
+        )
+
+        with (
+            patch.object(runner, "_check_teardown_requested", return_value=None),
+            patch.object(runner, "_check_and_resume_stuck_execution", new=AsyncMock(return_value=None)),
+        ):
+            result = await runner._step_teardown_and_cb_gate(state)
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_landed_prefix_builds_snapshot_then_resumes_before_periodic_hooks_or_decide(self) -> None:
+        runner = _make_runner()
+        strategy = _make_strategy()
+        progress = ExecutionProgress(
+            execution_id="suffix-order",
+            deployment_id=strategy.deployment_id,
+            intents_hash="sealed",
+            total_steps=2,
+            completed_step_index=0,
+            failed_at_step_index=1,
+            execution_lane=ExecutionLane.SAME_CHAIN_MULTI_LEG,
+            barrier_phase=ExecutionBarrierPhase.RECOMPILE_REQUIRED,
+        )
+        events: list[str] = []
+        sentinel = IterationResult(status=IterationStatus.SUCCESS, deployment_id=strategy.deployment_id)
+
+        async def _gate(state: RunIterationState):
+            state.recompile_progress = progress
+            return None
+
+        async def _snapshot(state: RunIterationState):
+            events.append("snapshot")
+            state.market = object()
+            return None
+
+        async def _resume(state: RunIterationState):
+            events.append("resume")
+            assert state.market is not None
+            return sentinel
+
+        with (
+            patch.object(runner, "_step_pause_gate", new=AsyncMock(return_value=None)),
+            patch.object(runner, "_step_teardown_and_cb_gate", new=AsyncMock(side_effect=_gate)),
+            patch.object(runner, "_step_build_snapshot", new=AsyncMock(side_effect=_snapshot)),
+            patch.object(runner, "_resume_recompile_required", new=AsyncMock(side_effect=_resume)),
+            patch.object(runner, "_step_periodic_hooks", new=AsyncMock()) as periodic,
+        ):
+            result = await runner.run_iteration(strategy)
+
+        assert result is sentinel
+        assert events == ["snapshot", "resume"]
+        periodic.assert_not_awaited()
+        strategy.decide.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_bridge_suffix_recovery_uses_sealed_intent_and_current_market(self) -> None:
+        runner = _make_runner()
+        runner.execution_orchestrator = MagicMock(spec=MultiChainOrchestrator)
+        strategy = _make_strategy()
+        bridge = Intent.bridge(
+            token="USDC",
+            amount=Decimal("5"),
+            from_chain="base",
+            to_chain="arbitrum",
+        )
+        intents = [HoldIntent(reason="already completed"), bridge]
+        progress = ExecutionProgress(
+            execution_id="bridge-suffix",
+            deployment_id=strategy.deployment_id,
+            intents_hash=runner._compute_intents_hash(intents),
+            total_steps=2,
+            completed_step_index=0,
+            serialized_intents=[intent.serialize() for intent in intents],
+            failed_at_step_index=1,
+            execution_lane=ExecutionLane.BRIDGE,
+            barrier_phase=ExecutionBarrierPhase.RECOMPILE_REQUIRED,
+        )
+        market = object()
+        state = _make_state(strategy)
+        state.market = market
+        state.recompile_progress = progress
+        sentinel = IterationResult(status=IterationStatus.SUCCESS, deployment_id=strategy.deployment_id)
+        runner._execute_multi_chain = AsyncMock(return_value=sentinel)  # type: ignore[method-assign]
+
+        result = await runner._resume_recompile_required(state)
+
+        assert result is sentinel
+        call = runner._execute_multi_chain.await_args.kwargs
+        assert call["market"] is market
+        assert call["resume_progress"] is progress
+        assert call["intents"][1].serialize() == bridge.serialize()
+
+    @pytest.mark.asyncio
+    async def test_intermediate_operator_repair_reenters_snapshot_gated_suffix_recompile(self) -> None:
+        runner = _make_runner()
+        strategy = _make_strategy()
+        progress = ExecutionProgress(
+            execution_id="repaired-prefix",
+            deployment_id=strategy.deployment_id,
+            intents_hash="sealed-plan",
+            total_steps=2,
+            completed_step_index=-1,
+            execution_lane=ExecutionLane.SAME_CHAIN_MULTI_LEG,
+        )
+        progress.mark_landed_repair_pending(0, "callback/state repair required")
+        progress.seal_repaired_step(0)
+        assert progress.effective_barrier_phase is ExecutionBarrierPhase.RECOMPILE_REQUIRED
+
+        runner._load_execution_progress = AsyncMock(return_value=progress)  # type: ignore[method-assign]
+        state = _make_state(strategy)
+
+        assert (
+            await runner._check_and_resume_stuck_execution(
+                strategy,
+                state.start_time,
+                iteration_state=state,
+            )
+            is None
+        )
+        assert state.recompile_progress is progress
+
+    @pytest.mark.asyncio
+    async def test_teardown_bypasses_reconciliation_resume_gate(self) -> None:
+        """A pending risk-reduction request runs before a stuck marker gate."""
+        runner = _make_runner()
+        runner._is_multi_chain = True
+        strategy = _make_strategy()
+        teardown_mode = MagicMock()
+        teardown_result = IterationResult(
+            status=IterationStatus.SUCCESS,
+            deployment_id=strategy.deployment_id,
+            duration_ms=1,
+        )
+        resume_mock = AsyncMock(
+            return_value=IterationResult(
+                status=IterationStatus.EXECUTION_FAILED,
+                deployment_id=strategy.deployment_id,
+                error="BROADCAST_RECONCILIATION_REQUIRED",
+                duration_ms=1,
+            )
+        )
+        teardown_mock = AsyncMock(return_value=teardown_result)
+        with (
+            patch.object(runner, "_check_teardown_requested", return_value=teardown_mode),
+            patch.object(runner, "_check_and_resume_stuck_execution", new=resume_mock),
+            patch.object(runner, "_execute_teardown", new=teardown_mock),
+        ):
+            result = await runner._step_teardown_and_cb_gate(_make_state(strategy))
+
+        assert result is teardown_result
+        teardown_mock.assert_awaited_once_with(strategy, teardown_mode, ANY)
+        resume_mock.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_teardown_stays_pending_while_attempted_bridge_can_deliver(self) -> None:
+        runner = _make_runner()
+        strategy = _make_strategy()
+        progress = ExecutionProgress(
+            execution_id="bridge-1",
+            deployment_id=strategy.deployment_id,
+            intents_hash="bridge-plan",
+            total_steps=1,
+            reconciliation_required_step_index=0,
+            execution_lane=ExecutionLane.BRIDGE,
+        )
+        progress.record_submission_evidence(
+            step_index=0,
+            chain="arbitrum",
+            submission_provenance=SubmissionProvenance.ATTEMPTED,
+            submitted_transaction_ids=["0xsource"],
+        )
+        runner._load_execution_progress = AsyncMock(return_value=progress)  # type: ignore[method-assign]
+        teardown_mode = MagicMock()
+        teardown_mock = AsyncMock()
+
+        with (
+            patch.object(runner, "_check_teardown_requested", return_value=teardown_mode),
+            patch.object(runner, "_execute_teardown", new=teardown_mock),
+        ):
+            result = await runner._step_teardown_and_cb_gate(_make_state(strategy))
+
+        assert result is not None
+        assert result.status is IterationStatus.EXECUTION_FAILED
+        assert "in-flight bridge" in (result.error or "")
+        teardown_mock.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_not_attempted_bridge_marker_is_released_before_teardown(self) -> None:
+        runner = _make_runner()
+        progress = ExecutionProgress(
+            execution_id="bridge-2",
+            deployment_id="test-strategy",
+            intents_hash="bridge-plan",
+            total_steps=1,
+            reconciliation_required_step_index=0,
+            execution_lane=ExecutionLane.BRIDGE,
+        )
+        progress.record_submission_evidence(
+            step_index=0,
+            chain="arbitrum",
+            submission_provenance=SubmissionProvenance.NOT_ATTEMPTED,
+            submitted_transaction_ids=[],
+        )
+        runner._load_execution_progress = AsyncMock(return_value=progress)  # type: ignore[method-assign]
+        runner._clear_execution_progress = AsyncMock()  # type: ignore[method-assign]
+
+        assert await runner._teardown_bridge_barrier_error("test-strategy") is None
+        runner._clear_execution_progress.assert_awaited_once_with("test-strategy")
+
+    @pytest.mark.asyncio
+    async def test_no_prefix_recompile_bridge_marker_is_cas_consumed_before_teardown(self) -> None:
+        runner = _make_runner()
+        progress = ExecutionProgress(
+            execution_id="bridge-recompile",
+            deployment_id="test-strategy",
+            intents_hash="bridge-plan",
+            total_steps=2,
+            completed_step_index=-1,
+            failed_at_step_index=0,
+            execution_lane=ExecutionLane.BRIDGE,
+            barrier_phase=ExecutionBarrierPhase.RECOMPILE_REQUIRED,
+        )
+        runner._load_execution_progress = AsyncMock(return_value=progress)  # type: ignore[method-assign]
+        runner._consume_recompile_progress = AsyncMock()  # type: ignore[method-assign]
+        runner._clear_execution_progress = AsyncMock()  # type: ignore[method-assign]
+
+        assert await runner._teardown_bridge_barrier_error("test-strategy") is None
+        runner._consume_recompile_progress.assert_awaited_once_with(progress)
+        runner._clear_execution_progress.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_paused_breaker_does_not_block_multi_chain_stuck_resume(self) -> None:
@@ -248,8 +499,9 @@ class TestSingleChainCircuitBreakerUnchanged:
         assert runner._is_multi_chain is False  # default: MagicMock orchestrator
         strategy = _make_strategy()
 
-        # Resume is gated on _is_multi_chain -- patch it anyway to prove
-        # it is NOT invoked on the single-chain path.
+        # The shared pre-decide gate now inspects terminal reconciliation
+        # markers on single-chain runners too; with no marker, the OPEN breaker
+        # still blocks new work exactly as before.
         resume_mock = AsyncMock(return_value=None)
         with (
             patch.object(runner, "_check_teardown_requested", return_value=None),
@@ -257,7 +509,7 @@ class TestSingleChainCircuitBreakerUnchanged:
         ):
             result = await runner._step_teardown_and_cb_gate(_make_state(strategy))
 
-        resume_mock.assert_not_awaited()
+        resume_mock.assert_awaited_once()
         assert result is not None
         assert result.status is IterationStatus.CIRCUIT_BREAKER_OPEN
         assert not result.success

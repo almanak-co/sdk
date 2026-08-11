@@ -10,6 +10,7 @@ from decimal import Decimal
 
 from almanak.framework.execution.extracted_data import AsyncOrderData, AsyncOrderKind, AsyncOrderStatus, SwapAmounts
 from almanak.framework.execution.outcome import ExecutionOutcome
+from almanak.framework.execution.submission import SubmissionProvenance
 
 
 class TestExecutionOutcome:
@@ -26,6 +27,7 @@ class TestExecutionOutcome:
         assert outcome.lp_close_data is None
         assert outcome.extracted_data == {}
         assert outcome.extraction_warnings == []
+        assert outcome.submission_provenance is SubmissionProvenance.UNSPECIFIED
 
     def test_construction_full(self):
         swap = SwapAmounts(
@@ -154,7 +156,26 @@ class TestGatewayExecutionResultToOutcome:
             success=True,
             tx_hashes=["0xaaa", "0xbbb"],
             total_gas_used=42000,
-            receipts=[{"status": 1}, {"status": 1}],
+            receipts=[
+                {
+                    "tx_hash": "0xaaa",
+                    "block_number": 1,
+                    "block_hash": "0xblock1",
+                    "status": 1,
+                    "gas_used": 21000,
+                    "effective_gas_price": 1,
+                    "logs": [],
+                },
+                {
+                    "tx_hash": "0xbbb",
+                    "block_number": 2,
+                    "block_hash": "0xblock2",
+                    "status": 1,
+                    "gas_used": 21000,
+                    "effective_gas_price": 1,
+                    "logs": [],
+                },
+            ],
             execution_id="exec-123",
             position_id=7,
             extracted_data={"bin_ids": [1, 2, 3]},
@@ -224,7 +245,7 @@ class TestGatewayExecutionResultToOutcome:
 
         result = GatewayExecutionResult(
             success=True,
-            tx_hashes=["0xaaa"],
+            tx_hashes=["0xaaa", "0xbbb", "0xccc", "0xddd"],
             total_gas_used=100000,
             receipts=[
                 {},  # no gas data at all
@@ -235,3 +256,21 @@ class TestGatewayExecutionResultToOutcome:
             execution_id="exec-2",
         )
         assert result.total_gas_cost_wei == 50_000_000_000_000
+
+    def test_success_with_incomplete_receipt_set_fails_closed(self):
+        from almanak.framework.execution.gateway_orchestrator import GatewayExecutionResult
+
+        result = GatewayExecutionResult(
+            success=True,
+            tx_hashes=["0xaaa", "0xbbb"],
+            total_gas_used=42_000,
+            receipts=[{"status": 1, "gas_used": 21_000}],
+            execution_id="exec-incomplete",
+        )
+
+        assert result.success is False
+        assert result.error_code == "RECEIPT_SET_INCOMPLETE"
+        assert result.error == (
+            "gateway receipt-set validation failed: 2 submitted transaction identifiers != 1 receipts"
+        )
+        assert result.transaction_results == []

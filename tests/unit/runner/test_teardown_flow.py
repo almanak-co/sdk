@@ -12,7 +12,7 @@ Validates that:
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
-from unittest.mock import MagicMock, AsyncMock, patch, call
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
@@ -24,6 +24,7 @@ from almanak.framework.runner.strategy_runner import (
     StrategyRunner,
 )
 from almanak.framework.teardown.models import ClosureVerification, TeardownMode
+from tests.unit.runner._state_manager import absent_state_manager
 
 
 @pytest.fixture(autouse=True)
@@ -49,7 +50,7 @@ def _make_runner(**overrides) -> StrategyRunner:
         price_oracle=MagicMock(),
         balance_provider=MagicMock(),
         execution_orchestrator=MagicMock(),
-        state_manager=MagicMock(),
+        state_manager=absent_state_manager(),
         alert_manager=None,
     )
     defaults.update(overrides)
@@ -1186,8 +1187,8 @@ def _make_teardown_manager_class_mock(
     the import is lazy. So we patch the source module instead.
     """
     from almanak.framework.teardown.cancel_window import CancelWindowResult
-    from almanak.framework.teardown.safety_guard import SafetyValidation
     from almanak.framework.teardown.models import TeardownState, TeardownStatus
+    from almanak.framework.teardown.safety_guard import SafetyValidation
 
     mgr = MagicMock()
     mgr.orchestrator = MagicMock()
@@ -1223,7 +1224,8 @@ def _make_teardown_manager_class_mock(
     mgr.state_manager.save_teardown_state = AsyncMock()
     mgr.state_manager.delete_teardown_state = AsyncMock()
     # _persist_state returns a TeardownState
-    from datetime import UTC, datetime as _dt
+    from datetime import UTC
+    from datetime import datetime as _dt
 
     state = TeardownState(
         teardown_id="td_test",
@@ -1274,6 +1276,7 @@ def _make_teardown_manager_class_mock(
 
 def _make_successful_teardown_result():
     from decimal import Decimal
+
     from almanak.framework.teardown.models import TeardownResult
 
     return TeardownResult(
@@ -1295,6 +1298,7 @@ def _make_successful_teardown_result():
 
 def _make_failed_teardown_result(error_msg: str = "Slippage too high"):
     from decimal import Decimal
+
     from almanak.framework.teardown.models import TeardownResult
 
     return TeardownResult(
@@ -1318,6 +1322,7 @@ def _make_failed_teardown_result(error_msg: str = "Slippage too high"):
 def _make_strategy_for_manager(**overrides):
     """Build a strategy suitable for the full TeardownManager path."""
     from decimal import Decimal
+
     from almanak.framework.teardown.models import (
         PositionInfo,
         PositionType,

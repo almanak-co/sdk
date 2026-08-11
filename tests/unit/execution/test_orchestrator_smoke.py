@@ -25,6 +25,7 @@ from almanak.framework.execution.orchestrator import (
     ExecutionOrchestrator,
     ExecutionPhase,
 )
+from almanak.framework.execution.submission import SubmissionProvenance
 from almanak.framework.models.reproduction_bundle import ActionBundle
 from almanak.framework.strategies.base import RiskGuardResult
 
@@ -120,6 +121,7 @@ class TestExecuteHoldShortCircuit:
 
         assert result.success is True
         assert result.phase == ExecutionPhase.COMPLETE
+        assert result.submission_provenance is SubmissionProvenance.NOT_ATTEMPTED
         # Short-circuited before any signing or submission
         orchestrator.signer.sign_batch.assert_not_called()
         orchestrator.submitter.submit.assert_not_called()
@@ -179,6 +181,7 @@ class TestExecuteRiskGuardBlock:
 
         assert result.success is False
         assert result.error_phase == ExecutionPhase.VALIDATION
+        assert result.submission_provenance is SubmissionProvenance.NOT_ATTEMPTED
         assert "too big" in (result.error or "")
         assert any(t == ExecutionEventType.RISK_BLOCKED for t, _ in events)
 
@@ -418,6 +421,7 @@ class TestExecuteHappyPath:
         assert result.completed_at is not None
         assert len(result.transaction_results) == 1
         assert result.transaction_results[0].success is True
+        assert result.submission_provenance is SubmissionProvenance.ATTEMPTED
         # Canonical success event was emitted
         assert any(t == ExecutionEventType.EXECUTION_SUCCESS for t, _ in events)
         # TX_CONFIRMED per receipt
@@ -433,6 +437,7 @@ class TestExecuteHappyPath:
 
         assert result.success is True
         assert result.phase == ExecutionPhase.COMPLETE
+        assert result.submission_provenance is SubmissionProvenance.NOT_ATTEMPTED
         # Submitter.submit must NOT have been called under dry_run
         orchestrator.submitter.submit.assert_not_called()
 

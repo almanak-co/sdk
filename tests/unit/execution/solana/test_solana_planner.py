@@ -5,22 +5,22 @@ from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import solders.system_program as sp
 from solders.hash import Hash as SolHash
 from solders.keypair import Keypair
 from solders.message import MessageV0
 from solders.signature import Signature
 from solders.transaction import VersionedTransaction
 
-import solders.system_program as sp
-
+from almanak.framework.execution.reconciliation import failed_submission_requires_reconciliation
 from almanak.framework.execution.solana.planner import SolanaExecutionPlanner
-from almanak.framework.execution.solana.rpc import TransactionReceipt
 from almanak.framework.execution.solana.route_refresh import (
     SolanaRouteRefreshRequest,
     SolanaRouteRefreshResult,
 )
+from almanak.framework.execution.solana.rpc import ConfirmationResult, TransactionReceipt
+from almanak.framework.execution.submission import SubmissionProvenance
 from almanak.framework.models.reproduction_bundle import ActionBundle
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -146,6 +146,7 @@ class TestPlannerNoConfig:
         outcome = await planner.execute_actions([])
         assert outcome.success is False
         assert "no RPC URL" in outcome.error
+        assert outcome.submission_provenance is SubmissionProvenance.NOT_ATTEMPTED
 
     @pytest.mark.asyncio
     async def test_no_private_key_returns_error(self):
@@ -156,6 +157,7 @@ class TestPlannerNoConfig:
         outcome = await planner.execute_actions([MagicMock()])
         assert outcome.success is False
         assert "no private key" in outcome.error
+        assert outcome.submission_provenance is SubmissionProvenance.NOT_ATTEMPTED
 
 
 # ---------------------------------------------------------------------------
@@ -198,6 +200,7 @@ class TestExecuteActions:
         assert len(outcome.receipts) == 1
         assert outcome.receipts[0]["signature"] == "MockSigABC123"
         assert outcome.total_fee_native == Decimal("5000") / Decimal("1000000000")
+        assert outcome.submission_provenance is SubmissionProvenance.ATTEMPTED
 
     @pytest.mark.asyncio
     async def test_dry_run(self, planner, action_bundle):
@@ -208,7 +211,9 @@ class TestExecuteActions:
                 context={"dry_run": True},
             )
         assert outcome.success is True
-        assert outcome.tx_ids == ["dry-run-signature"]
+        assert outcome.tx_ids == []
+        assert outcome.receipts == []
+        assert outcome.submission_provenance is SubmissionProvenance.NOT_ATTEMPTED
 
     @pytest.mark.asyncio
     async def test_send_failure(self, planner, action_bundle):
@@ -228,6 +233,7 @@ class TestExecuteActions:
 
         assert outcome.success is False
         assert "submission failed" in outcome.error
+        assert outcome.submission_provenance is SubmissionProvenance.ATTEMPTED
 
     @pytest.mark.asyncio
     async def test_confirmation_timeout(self, planner, action_bundle):
@@ -250,25 +256,116 @@ class TestExecuteActions:
 
     @pytest.mark.asyncio
     async def test_on_chain_failure(self, planner, action_bundle):
-        """On-chain transaction failure should return failed outcome."""
-        failed_receipt = TransactionReceipt(
-            signature="sig_fail",
-            slot=100,
-            success=False,
-            err={"InstructionError": [0, "Custom"]},
-        )
+        """The real RPC confirmation path retains enough failed-receipt evidence for safe retry."""
+        err = {"InstructionError": [0, "Custom"]}
         with (
             patch.object(planner, "_replace_blockhash", new_callable=AsyncMock, side_effect=lambda tx: tx),
             patch.object(planner._rpc, "send_transaction", new_callable=AsyncMock) as mock_send,
-            patch.object(planner._rpc, "confirm_and_get_receipt", new_callable=AsyncMock) as mock_confirm,
+            patch.object(
+                planner._rpc,
+                "confirm_transaction",
+                new_callable=AsyncMock,
+                return_value=ConfirmationResult(signature="sig_fail", confirmed=True, slot=100, err=err),
+            ),
+            patch.object(
+                planner._rpc,
+                "get_transaction",
+                new_callable=AsyncMock,
+                return_value={
+                    "transaction": {"signatures": ["sig_fail"]},
+                    "slot": 100,
+                    "meta": {"fee": 5000, "err": err, "logMessages": ["Program log: failed"]},
+                },
+            ),
         ):
             mock_send.return_value = "sig_fail"
-            mock_confirm.return_value = failed_receipt
-
             outcome = await planner.execute_actions([action_bundle])
 
         assert outcome.success is False
         assert "failed on-chain" in outcome.error
+        assert outcome.receipts == [
+            {
+                "signature": "sig_fail",
+                "slot": 100,
+                "block_time": None,
+                "fee_lamports": 5000,
+                "success": False,
+                "err": err,
+                "logs": ["Program log: failed"],
+                "pre_token_balances": [],
+                "post_token_balances": [],
+            }
+        ]
+        assert failed_submission_requires_reconciliation(outcome) is False
+
+    @pytest.mark.asyncio
+    async def test_second_transaction_failure_retains_ordered_receipts_and_all_fees(self, planner, action_bundle):
+        """A partial bundle failure keeps positional evidence for every submitted signature."""
+        action_bundle.transactions.append(dict(action_bundle.transactions[0]))
+        success_receipt = TransactionReceipt(
+            signature="sig_success",
+            slot=100,
+            block_time=1700000000,
+            fee_lamports=5000,
+            success=True,
+            logs=["Program log: first ok"],
+            pre_token_balances=[],
+            post_token_balances=[],
+        )
+        failure_receipt = TransactionReceipt(
+            signature="sig_failure",
+            slot=101,
+            block_time=1700000001,
+            fee_lamports=7000,
+            success=False,
+            err={"InstructionError": [0, "Custom"]},
+            logs=["Program log: second failed"],
+            pre_token_balances=[],
+            post_token_balances=[],
+        )
+        with (
+            patch.object(planner, "_replace_blockhash", new_callable=AsyncMock, side_effect=lambda tx: tx),
+            patch.object(
+                planner._rpc,
+                "send_transaction",
+                new_callable=AsyncMock,
+                side_effect=["sig_success", "sig_failure"],
+            ),
+            patch.object(
+                planner._rpc,
+                "confirm_and_get_receipt",
+                new_callable=AsyncMock,
+                side_effect=[success_receipt, failure_receipt],
+            ),
+        ):
+            outcome = await planner.execute_actions([action_bundle])
+
+        assert outcome.success is False
+        assert outcome.tx_ids == ["sig_success", "sig_failure"]
+        assert [receipt["signature"] for receipt in outcome.receipts] == ["sig_success", "sig_failure"]
+        assert outcome.total_fee_native == Decimal("12000") / Decimal("1000000000")
+        assert failed_submission_requires_reconciliation(outcome) is True
+
+    @pytest.mark.asyncio
+    async def test_confirmed_success_without_full_receipt_requires_reconciliation(self, planner, action_bundle):
+        """A signature confirmation alone cannot fabricate accounting evidence."""
+        with (
+            patch.object(planner, "_replace_blockhash", new_callable=AsyncMock, side_effect=lambda tx: tx),
+            patch.object(planner._rpc, "send_transaction", new_callable=AsyncMock, return_value="sig_missing"),
+            patch.object(
+                planner._rpc,
+                "confirm_transaction",
+                new_callable=AsyncMock,
+                return_value=ConfirmationResult(signature="sig_missing", confirmed=True, slot=100, err=None),
+            ),
+            patch.object(planner._rpc, "get_transaction", new_callable=AsyncMock, return_value=None),
+        ):
+            outcome = await planner.execute_actions([action_bundle])
+
+        assert outcome.success is False
+        assert outcome.tx_ids == ["sig_missing"]
+        assert outcome.receipts == []
+        assert failed_submission_requires_reconciliation(outcome) is True
 
 
 # ---------------------------------------------------------------------------
@@ -283,12 +380,8 @@ class TestMultiSignerPassthrough:
         extra_kp = Keypair()
 
         # Build 2-signer tx (wallet + additional)
-        ix1 = sp.transfer(
-            sp.TransferParams(from_pubkey=keypair.pubkey(), to_pubkey=extra_kp.pubkey(), lamports=1000)
-        )
-        ix2 = sp.transfer(
-            sp.TransferParams(from_pubkey=extra_kp.pubkey(), to_pubkey=keypair.pubkey(), lamports=500)
-        )
+        ix1 = sp.transfer(sp.TransferParams(from_pubkey=keypair.pubkey(), to_pubkey=extra_kp.pubkey(), lamports=1000))
+        ix2 = sp.transfer(sp.TransferParams(from_pubkey=extra_kp.pubkey(), to_pubkey=keypair.pubkey(), lamports=500))
         msg = MessageV0.try_compile(keypair.pubkey(), [ix1, ix2], [], SolHash.default())
         num_signers = msg.header.num_required_signatures
         unsigned_tx = VersionedTransaction.populate(msg, [Signature.default()] * num_signers)

@@ -134,10 +134,39 @@ class TestExecutionProgressAccountingPending:
         assert _make_progress().is_accounting_pending is False
         assert _make_progress(accounting_pending_step_index=0).is_accounting_pending is True
 
-    def test_is_stuck_scoped_to_failed_only(self):
-        # accounting-pending must NOT be conflated with a re-executable stuck step.
-        assert _make_progress(accounting_pending_step_index=2).is_stuck is False
+    def test_is_stuck_includes_landed_repair_without_making_it_reexecutable(self):
+        # Accounting-pending is a blocking recovery state, but next-step
+        # semantics still advance past the already-landed transaction.
+        pending = _make_progress(accounting_pending_step_index=2)
+        assert pending.is_stuck is True
+        assert pending.next_step_to_execute == 3
         assert _make_progress(failed_at_step_index=2).is_stuck is True
+
+    def test_reconciliation_marker_round_trips_and_is_terminal(self):
+        progress = _make_progress(
+            reconciliation_required_step_index=1,
+            failure_error="BROADCAST_RECONCILIATION_REQUIRED: 0xabc",
+        )
+
+        restored = ExecutionProgress.from_dict(progress.to_dict())
+
+        assert restored.reconciliation_required_step_index == 1
+        assert restored.is_reconciliation_required is True
+        assert restored.is_stuck is True
+
+    def test_rollback_reader_is_schema_compatible_but_not_execute_once_safe(self):
+        payload = _make_progress(
+            reconciliation_required_step_index=0,
+            failure_error="BROADCAST_RECONCILIATION_REQUIRED: 0xabc",
+        ).to_dict()
+        # Model an older reader which ignores the additive field. Deserialization
+        # succeeds, but the broadcast step becomes retryable again.
+        del payload["reconciliation_required_step_index"]
+
+        restored = ExecutionProgress.from_dict(payload)
+
+        assert restored.reconciliation_required_step_index is None
+        assert restored.next_step_to_execute == 0
 
 
 # =============================================================================
@@ -164,9 +193,7 @@ class TestBalanceProviderForChain:
         orchestrator.primary_chain = "arbitrum"
         orchestrator.chain_wallets = {"base": "0xBASEwallet"}
         client = MagicMock()
-        runner = _make_runner(
-            balance_provider=primary_bp, orchestrator=orchestrator, gateway_client=client
-        )
+        runner = _make_runner(balance_provider=primary_bp, orchestrator=orchestrator, gateway_client=client)
 
         provider = runner._balance_provider_for_chain("base")
         assert isinstance(provider, GatewayBalanceProvider)
@@ -184,9 +211,7 @@ class TestBalanceProviderForChain:
         orchestrator.chain_wallets = None  # no per-chain registry
         orchestrator.wallet_address = "0xUNIFORM"
         client = MagicMock()
-        runner = _make_runner(
-            balance_provider=primary_bp, orchestrator=orchestrator, gateway_client=client
-        )
+        runner = _make_runner(balance_provider=primary_bp, orchestrator=orchestrator, gateway_client=client)
 
         provider = runner._balance_provider_for_chain("base")
         assert provider.wallet_address == "0xUNIFORM"

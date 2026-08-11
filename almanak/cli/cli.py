@@ -30,6 +30,7 @@ from almanak.framework.cli.capability_matrix import capability_matrix as framewo
 from almanak.framework.cli.chain_params import ChainChoice
 from almanak.framework.cli.check import check as framework_check_cmd
 from almanak.framework.cli.demo import demo as framework_demo_cmd
+from almanak.framework.cli.execution_recovery import execution_recovery as framework_execution_recovery_group
 from almanak.framework.cli.export import export as framework_export_cmd
 from almanak.framework.cli.permissions import permissions as framework_permissions_cmd
 from almanak.framework.cli.repair_position_references import (
@@ -204,6 +205,7 @@ strat.add_command(framework_resume_cmd, name="resume")
 strat.add_command(framework_strat_pnl_cmd, name="pnl")
 strat.add_command(framework_repair_lp_close_cmd, name="repair-teardown-lp-close")
 strat.add_command(framework_repair_position_references_cmd, name="repair-position-references")
+strat.add_command(framework_execution_recovery_group, name="execution-recovery")
 
 
 def _load_cli_config(path: str) -> dict:

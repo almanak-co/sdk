@@ -1442,6 +1442,29 @@ message ExecuteRequest {
   int32 max_gas_price_gwei = 8;  // Gas price cap in gwei (0 = use gateway default)
 }
 
+enum SubmissionProvenance {
+  SUBMISSION_PROVENANCE_UNSPECIFIED = 0;
+  SUBMISSION_PROVENANCE_NOT_ATTEMPTED = 1;
+  SUBMISSION_PROVENANCE_ATTEMPTED = 2;
+}
+
+enum ExecutionTransactionRole {
+  EXECUTION_TRANSACTION_ROLE_UNSPECIFIED = 0;
+  EXECUTION_TRANSACTION_ROLE_SETUP_APPROVAL = 1;
+  EXECUTION_TRANSACTION_ROLE_ACTION = 2;
+}
+
+enum ReplayPolicy {
+  REPLAY_POLICY_NEVER = 0;
+  REPLAY_POLICY_RECOMPILE_ONLY = 1;
+}
+
+message SubmissionTransactionEvidence {
+  string tx_id = 1;
+  ExecutionTransactionRole role = 2;
+  ReplayPolicy replay_policy = 3;
+}
+
 message ExecutionResult {
   bool success = 1;
   repeated string tx_hashes = 2;
@@ -1450,6 +1473,9 @@ message ExecutionResult {
   string error = 5;
   string error_code = 6;
   string execution_id = 7;
+  SubmissionProvenance submission_provenance = 8;
+  string execution_plan_hash = 9;
+  repeated SubmissionTransactionEvidence submission_transactions = 10;
 }
 
 message TxStatusRequest {

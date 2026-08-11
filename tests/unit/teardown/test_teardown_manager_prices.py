@@ -8,21 +8,22 @@ Validates that:
 - TypeError fallback only catches market-keyword errors, not real bugs
 """
 
-import json
 from datetime import UTC, datetime
 from decimal import Decimal
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from almanak.framework.teardown.teardown_manager import TeardownManager
+from almanak.framework.execution.gateway_orchestrator import GatewayExecutionResult
+from almanak.framework.execution.submission import SubmissionProvenance
+from almanak.framework.teardown.config import TeardownConfig
 from almanak.framework.teardown.models import (
     TeardownMode,
     TeardownPositionSummary,
     TeardownState,
     TeardownStatus,
 )
-from almanak.framework.teardown.config import TeardownConfig
+from almanak.framework.teardown.teardown_manager import TeardownManager
 
 
 def _make_strategy(intents=None):
@@ -215,7 +216,6 @@ async def test_execute_empty_dict_oracle_not_coerced_to_none():
 
     # Patch _execute_intents to capture the price_oracle arg
     captured_oracle = []
-    original_execute = manager._execute_intents
 
     async def spy_execute(*args, **kwargs):
         captured_oracle.append(kwargs.get("price_oracle"))
@@ -419,6 +419,72 @@ async def test_execute_intents_swap_price_hardstop_is_non_retryable():
     assert result.success is False
     assert result.intents_failed == 1
     assert result.intents_succeeded == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "submission_provenance",
+    [SubmissionProvenance.UNSPECIFIED, SubmissionProvenance.NOT_ATTEMPTED],
+)
+async def test_execute_intents_known_broadcast_hash_never_retries_teardown(
+    submission_provenance: SubmissionProvenance,
+) -> None:
+    """A receipt-set failure after broadcast is terminal on teardown too."""
+    strategy = _make_strategy()
+    positions = MagicMock(spec=TeardownPositionSummary)
+    positions.total_value_usd = Decimal("10000")
+    state = TeardownState(
+        teardown_id="td_receipt_reconciliation",
+        deployment_id="test_strat",
+        mode=TeardownMode.SOFT,
+        status=TeardownStatus.EXECUTING,
+        total_intents=1,
+        completed_intents=0,
+        current_intent_index=0,
+        started_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+        pending_intents_json="[]",
+        cancel_window_until=datetime.now(UTC),
+        config_json="{}",
+    )
+    intent = MagicMock()
+    intent.intent_type = "SUPPLY"
+    intent.chain = "arbitrum"
+    intent.to_dict.return_value = {"type": "supply"}
+    del intent.max_slippage
+
+    compilation = MagicMock()
+    compilation.status.value = "SUCCESS"
+    compilation.action_bundle = MagicMock()
+    compiler = MagicMock()
+    compiler.compile.return_value = compilation
+    orchestrator = MagicMock()
+    orchestrator.execute = AsyncMock(
+        return_value=GatewayExecutionResult(
+            success=False,
+            tx_hashes=["0x" + "b" * 64],
+            total_gas_used=42_000,
+            receipts=[],
+            execution_id="teardown-incomplete",
+            error="receipt set is incomplete",
+            error_code="RECEIPT_SET_INCOMPLETE",
+            submission_provenance=submission_provenance,
+        )
+    )
+    manager = TeardownManager(orchestrator=orchestrator, compiler=compiler)
+
+    result = await manager._execute_intents(
+        teardown_id=state.teardown_id,
+        strategy=strategy,
+        intents=[intent],
+        positions=positions,
+        mode=TeardownMode.SOFT,
+        teardown_state=state,
+    )
+
+    assert not result.success
+    assert result.intents_failed == 1
+    orchestrator.execute.assert_awaited_once()
 
 
 @pytest.mark.asyncio

@@ -29,6 +29,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from almanak.framework.execution.submission import SubmissionProvenance
 from almanak.framework.runner.teardown_commit import TeardownCommitOutcome
 from almanak.framework.teardown.config import TeardownConfig
 from almanak.framework.teardown.consolidation import ConsolidationOutcome
@@ -796,6 +797,7 @@ class TestRunTokenConsolidationExecution:
         failed = SimpleNamespace(
             success=False,
             transaction_results=[],
+            submission_provenance=SubmissionProvenance.NOT_ATTEMPTED,
             total_gas_used=0,
             gas_cost_usd="0",
             extracted_data={},

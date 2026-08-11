@@ -1184,7 +1184,9 @@ def _maybe_auto_deploy_vault(
 
         _raw_state_data = _asyncio.run(state_manager.load_state(deployment_id))
         if _raw_state_data and _raw_state_data.state:
-            initial_vault_state = _raw_state_data.state.get(VAULT_STATE_KEY)
+            from ..state.strategy_state import runner_state_value
+
+            initial_vault_state = runner_state_value(_raw_state_data.state, VAULT_STATE_KEY)
     except Exception as _e:  # noqa: BLE001
         logger.debug("Could not load persisted state for vault init (deployment_id=%s): %s", deployment_id, _e)
         # No persisted state — VaultLifecycleManager uses defaults

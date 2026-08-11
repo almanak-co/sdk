@@ -2400,6 +2400,7 @@ class StateManager:
                 latency = (time.perf_counter() - start) * 1000
                 self._record_metrics(StateTier.WARM, "load", latency, False, str(e))
                 logger.error(f"WARM tier load failed: {e}")
+                raise
 
         raise StateNotFoundError(deployment_id)
 

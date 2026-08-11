@@ -97,20 +97,44 @@ scorer = _load_script("score_demos_anvil")
 _HA = "0x" + "a" * 64
 _HB = "0x" + "b" * 64
 _SUBTX = json.dumps(
-    {"sub_transactions": [
-        {"tx_hash": _HA, "gas_used": 21000, "status": "success", "role": "ACTION"}]}
+    {
+        "sub_transactions": [
+            {
+                "tx_hash": _HA,
+                "target_contract": "",
+                "function_selector": "",
+                "gas_used": 210000,
+                "status": "success",
+                "role": "ACTION",
+            }
+        ]
+    }
 )
 
 
 def _row(**kw) -> dict:
-    d = dict(
-        id=1, timestamp="2026-01-01T00:30:00", deployment_id="d", cycle_id="c",
-        intent_type="SWAP", token_in="USDC", amount_in="100.0",
-        token_out="WETH", amount_out="0.03", gas_used=210000, gas_usd="0.42",
-        tx_hash=_HA, success=1, error="", slippage_bps=5.0, effective_price="3333",
-        extracted_data_json=_SUBTX, price_inputs_json="{}",
-        pre_state_json="{}", post_state_json="{}",
-    )
+    d = {
+        "id": 1,
+        "timestamp": "2026-01-01T00:30:00",
+        "deployment_id": "d",
+        "cycle_id": "c",
+        "intent_type": "SWAP",
+        "token_in": "USDC",
+        "amount_in": "100.0",
+        "token_out": "WETH",
+        "amount_out": "0.03",
+        "gas_used": 210000,
+        "gas_usd": "0.42",
+        "tx_hash": _HA,
+        "success": 1,
+        "error": "",
+        "slippage_bps": 5.0,
+        "effective_price": "3333",
+        "extracted_data_json": _SUBTX,
+        "price_inputs_json": "{}",
+        "pre_state_json": "{}",
+        "post_state_json": "{}",
+    }
     d.update(kw)
     return d
 
@@ -164,12 +188,20 @@ def _noop_degraded_row() -> dict:
 
     return _row(
         intent_type="LP_CLOSE",
-        token_in="", amount_in="", token_out="", amount_out="",
-        gas_used=0, gas_usd="", tx_hash="",
-        success=int(entry.success), error=entry.error,
-        slippage_bps=None, effective_price="",
+        token_in="",
+        amount_in="",
+        token_out="",
+        amount_out="",
+        gas_used=0,
+        gas_usd="",
+        tx_hash="",
+        success=int(entry.success),
+        error=entry.error,
+        slippage_bps=None,
+        effective_price="",
         extracted_data_json=entry.extracted_data_json,
     )
+
 
 #: Every ledger row shape whose treatment this PR could plausibly change.
 SHAPES: dict[str, list[dict]] = {
@@ -188,16 +220,21 @@ SHAPES: dict[str, list[dict]] = {
         _row(id=2, success=0, error="execution reverted", tx_hash="", gas_usd=""),
     ],
     "slippage_contradiction_landed": [
-        _row(slippage_bps=50.0,
-             extracted_data_json=json.dumps({"swap_amounts": {"slippage_source": "NONE"}}))],
+        _row(slippage_bps=50.0, extracted_data_json=json.dumps({"swap_amounts": {"slippage_source": "NONE"}}))
+    ],
     "slippage_contradiction_reverted": [
-        _row(success=0, error="execution reverted", tx_hash="", slippage_bps=50.0,
-             extracted_data_json=json.dumps({"swap_amounts": {"slippage_source": "NONE"}}))],
+        _row(
+            success=0,
+            error="execution reverted",
+            tx_hash="",
+            slippage_bps=50.0,
+            extracted_data_json=json.dumps({"swap_amounts": {"slippage_source": "NONE"}}),
+        )
+    ],
     # G9: json valid, swap_amounts present, slippage_source ABSENT. NOT IN
     # yields NULL here, so this row escaped the offender scan while still
     # counting toward the denominator.
-    "empty_swap_amounts": [
-        _row(extracted_data_json=json.dumps({"swap_amounts": {}}))],
+    "empty_swap_amounts": [_row(extracted_data_json=json.dumps({"swap_amounts": {}}))],
     "malformed_json_row": [_row(), _row(id=2, tx_hash=_HB, extracted_data_json="}{ not json")],
     # The shape the tx_hash conjunct newly distinguishes: the marker WITHOUT a
     # hash. Same books verdict as ``landed_degraded``, but nothing was ever
@@ -587,16 +624,16 @@ def test_verdicts_match_the_recorded_matrix(shape: str, tmp_path: Path) -> None:
 #: not being thought of — it can only slip by being *ranked wrong*, which is a
 #: single visible decision per verdict instead of a combinatorial one.
 _STRENGTH: dict[str, int] = {
-    "FAIL": 3,     # evaluated; defect found; blocks the release
-    "CRASH": 2,    # blocks the release, but produced no verdict at all
+    "FAIL": 3,  # evaluated; defect found; blocks the release
+    "CRASH": 2,  # blocks the release, but produced no verdict at all
     "PARTIAL": 2,  # evaluated; partial defect (demo scorer)
-    "SKIP": 1,     # blocks (exit 2), but evaluated nothing
-    "N/A": 1,      # did not evaluate — ranked WITH SKIP, not with PASS, because
-                   # "not applicable" can mean "filtered out before evaluation",
-                   # which is the exact defect class this file audits
-    "XFAIL": 0,    # tolerated by the ratchet; does not block
+    "SKIP": 1,  # blocks (exit 2), but evaluated nothing
+    "N/A": 1,  # did not evaluate — ranked WITH SKIP, not with PASS, because
+    # "not applicable" can mean "filtered out before evaluation",
+    # which is the exact defect class this file audits
+    "XFAIL": 0,  # tolerated by the ratchet; does not block
     "XPASS": 0,
-    "PASS": 0,     # evaluated; nothing wrong
+    "PASS": 0,  # evaluated; nothing wrong
 }
 
 
@@ -676,8 +713,7 @@ def test_every_justified_loss_is_still_covered_by_another_surface() -> None:
     for (shape, gid, _pre, _post), (compensator, _why) in JUSTIFIED_LOSSES.items():
         assert compensator != gid, f"{shape}/{gid} cannot compensate for itself"
         assert compensator in MATRIX[shape], (
-            f"{shape}/{gid} names {compensator} as its compensating surface, but "
-            "that surface is not in the matrix"
+            f"{shape}/{gid} names {compensator} as its compensating surface, but that surface is not in the matrix"
         )
         c_pre, c_post = MATRIX[shape][compensator]
         assert c_post == "FAIL", (
@@ -717,9 +753,7 @@ def test_matrix_dimensions_are_pinned() -> None:
         f"{len(MATRIX)} shapes, expected {_EXPECTED_SHAPES} — if this is a "
         "deliberate addition or removal, update _EXPECTED_SHAPES in the same commit"
     )
-    assert len(surfaces) == _EXPECTED_SURFACES, (
-        f"{len(surfaces)} surfaces, expected {_EXPECTED_SURFACES} — same rule"
-    )
+    assert len(surfaces) == _EXPECTED_SURFACES, f"{len(surfaces)} surfaces, expected {_EXPECTED_SURFACES} — same rule"
 
 
 def test_every_recorded_shape_is_actually_exercised() -> None:
@@ -758,11 +792,7 @@ def test_no_stale_justifications() -> None:
     narrowing at that exact (shape, surface) to pass unnoticed. Removing the
     entry has to be part of fixing the transition.
     """
-    real_losses = {
-        (shape, gid, pre, post)
-        for shape, gid, pre, post in _transitions()
-        if _is_loss(pre, post)
-    }
+    real_losses = {(shape, gid, pre, post) for shape, gid, pre, post in _transitions() if _is_loss(pre, post)}
     stale = set(JUSTIFIED_LOSSES) - real_losses
     assert not stale, (
         "justification recorded for a transition that is not a loss — delete it, "
@@ -784,10 +814,7 @@ def test_the_degraded_shapes_are_caught_where_they_used_to_pass() -> None:
     moved money with unmeasured amounts sailed through; now it is caught.
     """
     for shape in ("landed_degraded", "landed_degraded_no_gas", "landed_degraded_no_subtx"):
-        gained = [
-            gid for gid, (pre, post) in MATRIX[shape].items()
-            if pre in ("PASS", "SKIP") and post == "FAIL"
-        ]
+        gained = [gid for gid, (pre, post) in MATRIX[shape].items() if pre in ("PASS", "SKIP") and post == "FAIL"]
         assert gained, f"{shape} gained no coverage — the sweep did nothing here"
 
 

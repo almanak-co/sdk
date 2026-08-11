@@ -1211,6 +1211,51 @@ class TestInitCopyTradingExtras:
 
 
 class TestVaultLifecycleExtras:
+    def test_vault_initial_state_loads_from_strategy_envelope(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        mocks = _patch_component_factories(monkeypatch)
+        mocks["_has_placeholder_vault_address"].return_value = False
+        from almanak.framework.state.state_manager import StateData
+        from almanak.framework.state.strategy_state import STRATEGY_USER_STATE_KEY
+        from almanak.framework.vault.lifecycle import VAULT_STATE_KEY
+
+        class _FakeStateMgr:
+            async def load_state(self, deployment_id: str) -> Any:
+                return StateData(
+                    deployment_id=deployment_id,
+                    version=2,
+                    state={STRATEGY_USER_STATE_KEY: {VAULT_STATE_KEY: {"phase": "settling"}}},
+                )
+
+        captured: dict[str, Any] = {}
+        from almanak.framework.vault import lifecycle as vlc_mod
+
+        def _capture(**kwargs: Any) -> Any:
+            captured.update(kwargs)
+            return MagicMock()
+
+        monkeypatch.setattr(vlc_mod, "VaultLifecycleManager", _capture)
+        run_helpers._maybe_auto_deploy_vault(
+            strategy_config={
+                "chain": "arbitrum",
+                "vault": {
+                    "vault_address": "0x" + "a" * 40,
+                    "valuator_address": "0x" + "b" * 40,
+                    "underlying_token": "USDC",
+                    "settlement_interval_minutes": 60,
+                },
+            },
+            resolved_network="mainnet",
+            effective_dry_run=False,
+            config_chain="arbitrum",
+            runtime_config=_make_fake_local_config(),
+            gateway_client=MagicMock(),
+            execution_orchestrator=MagicMock(),
+            state_manager=_FakeStateMgr(),
+            strategy_instance=_make_strategy_instance(),
+            deployment_id="vault-envelope",
+        )
+        assert captured["initial_vault_state"] == {"phase": "settling"}
+
     @pytest.mark.parametrize(
         ("effective_dry_run", "expected"),
         [(True, RunMode.DRY_RUN), (False, RunMode.LIVE)],

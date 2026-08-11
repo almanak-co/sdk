@@ -29,10 +29,12 @@ Example:
 """
 
 import asyncio
+import inspect
 import logging
 import signal
 import sys
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -106,6 +108,8 @@ from .runner_alerts import RunnerAlerter
 # ---- Re-exports from runner_models (keeps all existing import paths working) ----
 from .runner_models import (  # noqa: F401
     CriticalCallbackError,
+    ExecutionBarrierPhase,
+    ExecutionLane,
     ExecutionProgress,
     IterationResult,
     IterationStatus,
@@ -128,6 +132,11 @@ _TEARDOWN_OPTOUT_WARNED: set[str] = set()
 # Maximum sleep slice for the interruptible inter-iteration wait (VIB-5528).
 # A queued STOP is honored within this many seconds regardless of --interval.
 _WAIT_POLL_SLICE_SECONDS = 15
+
+
+class _ReplayCallbackError(RuntimeError):
+    """A landed-transaction callback failed before durable state completion."""
+
 
 # V4 native-ETH sentinel: a PoolKey's native currency leg is the EVM zero
 # address (address(0)), NOT a V4-specific magic value. Framework-owned so the
@@ -565,6 +574,7 @@ class RunIterationState:
     teardown_mode: "TeardownMode | None" = None
     pre_balances: dict[str, Decimal] = field(default_factory=dict)
     intent_tokens: list[str] = field(default_factory=list)
+    recompile_progress: "ExecutionProgress | None" = None
 
 
 @dataclass
@@ -643,6 +653,7 @@ class SingleChainExecutionState:
     last_execution_result: Any | None = None
     last_execution_context: Any | None = None
     last_bundle_metadata: dict[str, Any] | None = None
+    replay_barrier: ExecutionProgress | None = None
 
 
 @dataclass
@@ -678,6 +689,7 @@ class BridgeWaitState:
     start_step_index: int = 0
     previous_amount_received: Decimal | None = None
     progress: "ExecutionProgress | None" = None
+    progress_was_loaded: bool = False
 
     # --- Running bookkeeping (updated while iterating intents) ---
     successful_count: int = 0
@@ -1439,7 +1451,16 @@ class StrategyRunner:
             if early is not None:
                 return early
 
-            # Periodic hooks that run every iteration but never early-exit.
+            # A partially completed plan is already in flight. Build current
+            # market data and resume its sealed suffix before arbitrary
+            # periodic hooks or a new decide() can mutate strategy state.
+            if state.recompile_progress is not None and state.recompile_progress.completed_step_index >= 0:
+                early = await self._step_build_snapshot(state)
+                if early is not None:
+                    return early
+                return await self._resume_recompile_required(state)
+
+            # Periodic hooks that run every ordinary iteration but never early-exit.
             await self._step_periodic_hooks(state)
 
             # Step 1: Build market snapshot (+ dry-run balance injection +
@@ -1447,6 +1468,12 @@ class StrategyRunner:
             early = await self._step_build_snapshot(state)
             if early is not None:
                 return early
+
+            # No business action landed in this failed plan. Retire the exact
+            # safe marker with CAS, then let normal decide/compile consume the
+            # fresh snapshot. The old ActionBundle is never retained or replayed.
+            if state.recompile_progress is not None:
+                await self._consume_recompile_progress(state.recompile_progress)
 
             # Step 1.5: One-shot post-resume side-state reconciliation
             # (VIB-5155 / ALM-2719). Warn-only; never early-exits.
@@ -1615,18 +1642,19 @@ class StrategyRunner:
     async def _step_teardown_and_cb_gate(self, state: RunIterationState) -> IterationResult | None:
         """Teardown detection, stuck-execution recovery, and early CB gate.
 
-        Covers the original Step 0a (teardown detection), Step 0c (stuck
-        execution resumption for multi-chain, #1665: runs BEFORE the CB
+        Covers the original Step 0a (teardown detection and immediate
+        risk-reducing dispatch), Step 0c (stuck execution resumption for
+        multi-chain, #1665: runs BEFORE the CB
         gate so an open/paused breaker cannot strand saved mid-sequence
         progress), Step 0b (circuit breaker early check, skipped during
         teardown or when resume fired), and Step 0.5 (teardown dispatch).
 
-        Ordering rationale (issue #1665): resuming a saved multi-chain
-        flow is continuation of already-started work. It must not be
-        blocked by a tripped breaker, for the same reason teardowns
-        bypass the CB — both are about finishing work that is already
-        in flight. The CB gate still applies to NEW work and to the
-        single-chain path unchanged.
+        Ordering rationale: teardown is a distinct risk-reduction lane and
+        therefore runs before a normal-execution reconciliation marker. When
+        no teardown is requested, resuming a saved multi-chain flow is
+        continuation of already-started work and runs before the CB (issue
+        #1665). The CB gate still applies to NEW work and to the single-chain
+        path unchanged.
         """
         strategy = state.strategy
         deployment_id = state.deployment_id
@@ -1638,24 +1666,43 @@ class StrategyRunner:
         teardown_mode = self._check_teardown_requested(strategy)
         state.teardown_mode = teardown_mode
 
-        # Step 0c (pre-CB for multi-chain, #1665): Check for stuck execution
+        # Operator-requested teardown is an independent risk-reduction lane.
+        # A retained normal-execution reconciliation marker must block new
+        # decisions and replay, but it must never consume or strand teardown.
+        # Teardown owns its own receipt/accounting barriers and does not clear
+        # the original marker.
+        if teardown_mode is not None:
+            bridge_block = await self._teardown_bridge_barrier_error(deployment_id)
+            if bridge_block is not None:
+                self._record_failure()
+                return IterationResult(
+                    status=IterationStatus.EXECUTION_FAILED,
+                    intent=None,
+                    error=bridge_block,
+                    deployment_id=deployment_id,
+                    duration_ms=self._calculate_duration_ms(start_time),
+                )
+            return await self._execute_teardown(strategy, teardown_mode, start_time)
+
+        # Step 0c (pre-CB, #1665): Check for stuck execution
         # that needs resumption BEFORE the circuit-breaker gate. A tripped
         # breaker must not strand partial bridge/cross-chain flows with
         # saved progress -- finishing in-flight work is independent of
         # whether NEW work is allowed. If resume fires, return directly;
         # the CB gate below only applies to NEW work.
-        if self._is_multi_chain:
-            stuck_result = await self._check_and_resume_stuck_execution(
-                strategy=strategy,
-                start_time=start_time,
-            )
-            if stuck_result is not None:
-                return stuck_result
+        stuck_result = await self._check_and_resume_stuck_execution(
+            strategy=strategy,
+            start_time=start_time,
+            iteration_state=state,
+        )
+        if stuck_result is not None:
+            return stuck_result
 
         # Step 0b: Circuit breaker check — block execution if breaker is OPEN/PAUSED
         # Skip when a teardown is pending — teardown must always be allowed to run
         # so operators can safely close positions even after consecutive failures.
-        if self._circuit_breaker is not None and teardown_mode is None:
+        has_landed_prefix = state.recompile_progress is not None and state.recompile_progress.completed_step_index >= 0
+        if self._circuit_breaker is not None and teardown_mode is None and not has_landed_prefix:
             cb_result = self._circuit_breaker.check()
             if not cb_result.can_execute:
                 logger.warning(
@@ -1704,14 +1751,6 @@ class StrategyRunner:
                     deployment_id=deployment_id,
                     duration_ms=self._calculate_duration_ms(start_time),
                 )
-
-        # Step 0.5: Check for teardown request (reuses result from Step 0a)
-        # If teardown is requested, intercept the iteration and execute teardown.
-        # Single-chain teardowns route through TeardownManager for full safety
-        # (loss caps, escalating slippage, cancel window, post-execution verification).
-        # Multi-chain teardowns use the inline path until TeardownManager supports it.
-        if teardown_mode is not None:
-            return await self._execute_teardown(strategy, teardown_mode, start_time)
 
         # Step 0.6 (VIB-5572): failed-teardown entry latch. When no teardown is
         # currently pending (``teardown_mode is None``) but a PRIOR teardown
@@ -3080,14 +3119,17 @@ class StrategyRunner:
         result: Any | None,
         *,
         framework_success: bool | None = None,
+        strict: bool = False,
     ) -> None:
         """Fire ``strategy.on_intent_executed`` with framework hooks attached.
 
         Calls the framework's LP position tracker (VIB-3742) BEFORE the user's
         ``on_intent_executed`` callback so the user override sees the captured
         bin_ids / position_ids on ``self.lp_position_tracker``. Both calls are
-        guarded — exceptions in either are logged at WARNING and never
-        propagated, mirroring the prior inline behaviour.
+        guarded — by default exceptions in either are logged at WARNING and
+        never propagated, mirroring the prior inline behaviour. Replay-sealed
+        execution lanes pass ``strict=True`` so a landed transaction cannot be
+        marked complete before callback-owned state is durably advanced.
 
         ``success`` is the *user-facing verdict* — reflects slippage breach,
         reconciliation failure, etc. ``framework_success`` is the *on-chain
@@ -3101,6 +3143,7 @@ class StrategyRunner:
         behaviour for callers that don't need to distinguish.
         """
         tracker_success = success if framework_success is None else framework_success
+        callback_error: Exception | None = None
 
         # Step 1: framework-level hook (LP position tracker, etc.)
         # Gate strictly on a real LPPositionTracker instance — MagicMock
@@ -3122,6 +3165,7 @@ class StrategyRunner:
                     exc,
                     exc_info=True,
                 )
+                callback_error = exc
 
         # Step 2: user callback
         if hasattr(strategy, "on_intent_executed"):
@@ -3129,12 +3173,18 @@ class StrategyRunner:
                 strategy.on_intent_executed(intent, success=success, result=result)
             except Exception as e:
                 logger.warning(f"Error in on_intent_executed callback: {e}")
+                if callback_error is None:
+                    callback_error = e
 
         # Step 3: capture the pending async-settlement fill handle (VIB-5614). On a
         # successful open of an async-settlement perp, cache the connector-produced
         # correlation handle so the pre-decide pump can reconcile the fill on later
         # ticks. Gated so non-reconciling strategies are untouched. Warn-only.
         self._maybe_capture_pending_fill_handle(strategy, intent, success, result)
+        if strict and callback_error is not None:
+            raise _ReplayCallbackError(
+                "Landed transaction callback failed; replay barrier retained"
+            ) from callback_error
 
     def _emit_execution_timeline_event(
         self,
@@ -6590,6 +6640,7 @@ class StrategyRunner:
         bundle_metadata: dict[str, Any] | None = None,
         price_oracle: dict | None = None,
         pre_snapshot: Any | None = None,
+        strict_callbacks: bool = False,
     ) -> str:
         """Run the shared accounting sequence for one executed multi-chain leg (VIB-5670).
 
@@ -6765,6 +6816,7 @@ class StrategyRunner:
             user_success,
             execution_result,
             framework_success=True,
+            strict=strict_callbacks,
         )
         return marker
 
@@ -7150,7 +7202,13 @@ class StrategyRunner:
         surface the root cause faster.
         """
         _ = attempt  # Included for callback compatibility
-        non_retryable_types = {"INSUFFICIENT_FUNDS", "NONCE_ERROR", "COMPILATION_PERMANENT", "REVERT"}
+        non_retryable_types = {
+            "INSUFFICIENT_FUNDS",
+            "NONCE_ERROR",
+            "COMPILATION_PERMANENT",
+            "RECONCILIATION_REQUIRED",
+            "REVERT",
+        }
         if error_type in non_retryable_types:
             logger.warning(
                 f"Non-retryable error ({error_type}): {context.error_message}. "
@@ -7159,14 +7217,20 @@ class StrategyRunner:
             return SadflowAction.abort(context.error_message)
         return None
 
-    def _invoke_optional_hook(self, strategy: StrategyProtocol, hook_name: str, *args: Any) -> None:
-        """Invoke a strategy hook if present, swallowing callback errors."""
+    def _invoke_optional_hook(
+        self, strategy: StrategyProtocol, hook_name: str, *args: Any, strict: bool = False
+    ) -> None:
+        """Invoke an optional hook, failing replay-sealed lanes when requested."""
         if not hasattr(strategy, hook_name):
             return
         try:
             getattr(strategy, hook_name)(*args)
         except Exception as e:
             logger.warning(f"Error in strategy hook {hook_name}: {e}")
+            if strict:
+                raise _ReplayCallbackError(
+                    f"Landed transaction strategy hook {hook_name} failed; replay barrier retained"
+                ) from e
 
     async def _execute_single_chain(
         self,
@@ -8964,25 +9028,62 @@ class StrategyRunner:
             if await self._single_chain_pre_retry_confirmed(state, single_chain_orch):
                 return None  # Treated as success; continue state-machine loop
 
+            from almanak.framework.execution.reconciliation import (
+                failed_submission_allows_recompile,
+                failed_submission_requires_reconciliation,
+                reconciliation_required_error,
+                submitted_transaction_hashes,
+            )
+
+            broadcast_marker: ExecutionProgress | None = None
             # Route CLOB bundles to the connector-built CLOB handler (off-chain orders),
             # all other bundles to the on-chain ExecutionOrchestrator.
             if state.clob_handler and state.clob_handler.can_handle(step_result.action_bundle):
                 execution_result = await self._single_chain_execute_clob(state, step_result)
             else:
-                execution_result = await self._single_chain_execute_onchain(
+                execution_result, broadcast_marker = await self._single_chain_execute_onchain_guarded(
                     state, step_result, execution_context, single_chain_orch
                 )
+                state.replay_barrier = broadcast_marker
 
-            # Convert ExecutionResult to TransactionReceipt for state machine
-            tx_hash = ""
-            if execution_result.transaction_results:
-                tx_hash = execution_result.transaction_results[0].tx_hash
+            # Convert ExecutionResult to TransactionReceipt for state machine.
+            # A failed gateway result can intentionally carry hashes with NO
+            # receipts (the receipt set is incomplete and positional identity
+            # is unknowable). Read the result envelope as well as converted
+            # transaction_results so that evidence of broadcast cannot vanish.
+            submitted_hashes = submitted_transaction_hashes(execution_result)
+            tx_hash = submitted_hashes[0] if submitted_hashes else ""
+            receipt_error = execution_result.error
+            plan_hash = str(getattr(execution_result, "execution_plan_hash", ""))
+            recompile_allowed = bool(
+                broadcast_marker is not None
+                and not execution_result.success
+                and plan_hash
+                and failed_submission_allows_recompile(execution_result, expected_plan_hash=plan_hash)
+            )
+            reconciliation_required = bool(
+                broadcast_marker is not None
+                and not execution_result.success
+                and not recompile_allowed
+                and failed_submission_requires_reconciliation(execution_result)
+            )
+            if reconciliation_required:
+                receipt_error = reconciliation_required_error(execution_result)
+                execution_result.error = receipt_error
+            await self._single_chain_seal_broadcast_marker(
+                deployment_id=deployment_id,
+                marker=broadcast_marker,
+                execution_result=execution_result,
+                submitted_hashes=submitted_hashes,
+                reconciliation_error=receipt_error if reconciliation_required else None,
+                recompile_error=(receipt_error or "fresh recompilation required") if recompile_allowed else None,
+            )
 
             receipt = TransactionReceipt(
                 success=execution_result.success,
                 tx_hash=tx_hash,
                 gas_used=execution_result.total_gas_used,
-                error=execution_result.error,
+                error=receipt_error,
             )
 
             # Set receipt for state machine validation
@@ -9001,7 +9102,12 @@ class StrategyRunner:
             # lifecycle marker — full text lives in `transaction_ledger.error`.
             details: dict[str, Any] = {
                 "success": execution_result.success,
-                "tx_count": len(execution_result.transaction_results),
+                "tx_count": len(submitted_hashes),
+                # Preserve the complete submitted set in the timeline. The
+                # top-level tx_hash remains the action/first hash for existing
+                # consumers; this list is the immutable replay-safety evidence
+                # when a multi-tx receipt set is rejected atomically.
+                "submitted_tx_hashes": list(submitted_hashes),
             }
             if not execution_result.success:
                 details["failure_reason"] = self._classify_failure_reason(execution_result.error or "")
@@ -9026,18 +9132,9 @@ class StrategyRunner:
                     f"Execution failed for {deployment_id}: {execution_result.error} "
                     f"(retry {state_machine.retry_count}/{self.config.max_retries})"
                 )
-                # On timeout, approvals likely succeeded -- keep cache valid.
-                # On other failures, clear cache since approvals may not have
-                # succeeded or may have been consumed.
-                is_timeout = execution_result.error and "timeout" in execution_result.error.lower()
-                if not is_timeout:
-                    compiler.clear_allowance_cache()
-                else:
-                    logger.info("Timeout error -- preserving allowance cache for retry")
-                # Reset nonce cache on failure to force fresh on-chain
-                # query on retry. Prevents nonce drift. (VIB-1449)
-                if hasattr(self.execution_orchestrator, "reset_nonce_cache"):
-                    self.execution_orchestrator.reset_nonce_cache()
+                self._single_chain_reset_caches_after_failure(
+                    compiler, execution_result, reconciliation_required=reconciliation_required
+                )
 
         except Exception as e:
             logger.error(f"Execution error: {e}", exc_info=True)
@@ -9054,6 +9151,210 @@ class StrategyRunner:
             )
 
         return None
+
+    def _single_chain_reset_caches_after_failure(
+        self, compiler: Any, execution_result: ExecutionResult, *, reconciliation_required: bool
+    ) -> None:
+        """Refresh execution caches unless a plain timeout may have landed approvals."""
+        is_timeout = bool(
+            not reconciliation_required and execution_result.error and "timeout" in execution_result.error.lower()
+        )
+        if is_timeout:
+            logger.info("Timeout error -- preserving allowance cache for retry")
+        else:
+            compiler.clear_allowance_cache()
+
+        # Force a fresh on-chain nonce query on retry. Prevents nonce drift. (VIB-1449)
+        if hasattr(self.execution_orchestrator, "reset_nonce_cache"):
+            self.execution_orchestrator.reset_nonce_cache()
+
+    async def _single_chain_execute_onchain_guarded(
+        self,
+        state: SingleChainExecutionState,
+        step_result: Any,
+        execution_context: ExecutionContext,
+        orchestrator: ExecutionOrchestrator,
+    ) -> tuple[ExecutionResult, ExecutionProgress]:
+        """Persist a replay barrier before an on-chain submission can begin."""
+        from almanak.framework.execution.reconciliation import RECONCILIATION_REQUIRED_PREFIX
+
+        pending_error = (
+            f"{RECONCILIATION_REQUIRED_PREFIX}: execution outcome is not durably sealed; "
+            "operator reconciliation is required before replay"
+        )
+        marker = ExecutionProgress(
+            execution_id=state.intent.intent_id,
+            deployment_id=state.deployment_id,
+            intents_hash="broadcast-pending",
+            total_steps=1,
+            failure_error=pending_error,
+            reconciliation_required_step_index=0,
+            serialized_intents=[state.intent.serialize()],
+            execution_lane=ExecutionLane.SINGLE_CHAIN,
+            barrier_phase=ExecutionBarrierPhase.PRE_BROADCAST,
+        )
+        from almanak.framework.execution.submission import SubmissionProvenance, execution_plan_hash
+
+        marker.record_submission_evidence(
+            step_index=0,
+            chain=str(getattr(state.strategy, "chain", "")),
+            submission_provenance=SubmissionProvenance.UNSPECIFIED,
+            submitted_transaction_ids=[],
+            execution_plan_hash=execution_plan_hash(step_result.action_bundle),
+        )
+        await self._flush_strategy_pending_save_strict(state.strategy)
+        try:
+            await self._save_execution_progress(state.deployment_id, marker)
+        except Exception as exc:
+            raise RuntimeError(f"{pending_error}; marker write failed: {exc}") from exc
+        try:
+            result = await self._single_chain_execute_onchain(state, step_result, execution_context, orchestrator)
+        except Exception as exc:
+            raise RuntimeError(f"{pending_error}; execution raised: {exc}") from exc
+        return result, marker
+
+    async def _single_chain_seal_broadcast_marker(
+        self,
+        *,
+        deployment_id: str,
+        marker: ExecutionProgress | None,
+        execution_result: ExecutionResult,
+        submitted_hashes: tuple[str, ...],
+        reconciliation_error: str | None,
+        recompile_error: str | None = None,
+    ) -> None:
+        """Upgrade ambiguous evidence or clear a conclusively observed broadcast marker."""
+        from almanak.framework.execution.reconciliation import RECONCILIATION_REQUIRED_PREFIX, submission_provenance
+
+        marker_chain = ""
+        if marker is not None and marker.submission_evidence:
+            marker_chain = marker.submission_evidence[0].chain
+        if marker is not None and marker.serialized_intents:
+            marker_chain = str(marker.serialized_intents[0].get("chain") or marker_chain)
+        if marker is not None:
+            marker.record_submission_evidence(
+                step_index=0,
+                chain=marker_chain,
+                submission_provenance=submission_provenance(execution_result),
+                submitted_transaction_ids=submitted_hashes,
+                execution_plan_hash=str(getattr(execution_result, "execution_plan_hash", "")),
+                submission_transactions=list(getattr(execution_result, "submission_transactions", ())),
+            )
+
+        if reconciliation_error is not None:
+            if marker is None:
+                raise RuntimeError(reconciliation_error)
+            marker.execution_id = getattr(execution_result, "execution_id", None) or (
+                submitted_hashes[0] if submitted_hashes else marker.execution_id
+            )
+            marker.intents_hash = "reconciliation-required"
+            marker.mark_reconciliation_required(0, reconciliation_error)
+            try:
+                await self._save_execution_progress(deployment_id, marker)
+            except Exception as exc:
+                raise RuntimeError(f"{reconciliation_error}; marker update failed: {exc}") from exc
+            return
+        if recompile_error is not None:
+            if marker is None:
+                raise RuntimeError(recompile_error)
+            marker.mark_recompile_required(0, recompile_error)
+            try:
+                await self._save_execution_progress(deployment_id, marker)
+            except Exception as exc:
+                raise RuntimeError(f"{recompile_error}; marker update failed: {exc}") from exc
+            return
+        if marker is None:
+            return
+        if execution_result.success:
+            marker.execution_id = getattr(execution_result, "execution_id", None) or (
+                submitted_hashes[0] if submitted_hashes else marker.execution_id
+            )
+            marker.intents_hash = "landed-accounting-pending"
+            pending_error = (
+                f"{RECONCILIATION_REQUIRED_PREFIX}: transaction landed but durable accounting and "
+                "strategy state are not sealed; operator reconciliation is required before replay"
+            )
+            marker.mark_landed_repair_pending(0, pending_error)
+            try:
+                await self._save_execution_progress(deployment_id, marker)
+            except Exception as exc:
+                raise RuntimeError(f"{pending_error}; marker update failed: {exc}") from exc
+            return
+        # A complete, internally consistent failed receipt proves an atomic
+        # revert and is the only post-submission outcome that is safe to retry.
+        try:
+            await self._clear_execution_progress(deployment_id)
+        except Exception as exc:
+            raise RuntimeError(
+                f"{RECONCILIATION_REQUIRED_PREFIX}: execution completed but the pre-broadcast marker "
+                f"could not be cleared; operator reconciliation is required: {exc}"
+            ) from exc
+
+    async def _complete_single_chain_replay_barrier(
+        self, deployment_id: str, progress: ExecutionProgress | None = None
+    ) -> None:
+        """Seal downstream completion without a delete/ACK ambiguity window."""
+        if progress is None:
+            progress = await self._load_execution_progress(deployment_id)
+        if progress is None:
+            raise RuntimeError("Landed transaction replay barrier disappeared before completion")
+        progress.seal_repaired_step(progress.total_steps - 1)
+        # This monotonic tombstone transition is safe under an ambiguous save
+        # acknowledgement: either the old blocking marker remains, or the
+        # durable completed state exists. Deleting the marker cannot provide
+        # that guarantee when a backend commits and then loses its ACK.
+        await self._save_execution_progress(deployment_id, progress)
+
+    @staticmethod
+    async def _flush_strategy_pending_save_strict(strategy: StrategyProtocol) -> None:
+        """Await an IntentStrategy fire-and-forget save without swallowing errors."""
+        pending = getattr(strategy, "_pending_save", None)
+        if pending is None or not inspect.isawaitable(pending):
+            return
+        try:
+            await pending
+        finally:
+            strategy_with_pending = cast(Any, strategy)
+            strategy_with_pending._pending_save = None
+
+    async def _persist_landed_strategy_state_strict(self, strategy: StrategyProtocol, *, lane: str) -> None:
+        """Durably merge callback-mutated state while preserving the replay marker."""
+        from ..state.strategy_state import replace_strategy_persistent_state
+
+        try:
+            # Drain an older fire-and-forget write before reading the row. It
+            # could otherwise race this marker-preserving CAS and clobber it.
+            await self._flush_strategy_pending_save_strict(strategy)
+            strategy_manager = getattr(strategy, "_state_manager", None)
+            get_persistent_state = getattr(strategy, "get_persistent_state", None)
+            if strategy_manager is self.state_manager and callable(get_persistent_state):
+                persistent_state = get_persistent_state() or {}
+                from ..strategies.intent_strategy import IntentStrategy
+
+                framework_state: dict[str, Any] = {}
+                if isinstance(strategy, IntentStrategy):
+                    # Invoke the final framework implementation unbound. A
+                    # strategy override must not hide landed tracker metadata
+                    # while the replay barrier advances to complete.
+                    framework_state = IntentStrategy._framework_persistent_state(strategy)
+                saved = await replace_strategy_persistent_state(
+                    self.state_manager,
+                    strategy.deployment_id,
+                    persistent_state,
+                    framework_state=framework_state,
+                )
+                if hasattr(strategy, "_state_version"):
+                    strategy._state_version = saved.version
+                return
+
+            save_state = getattr(strategy, "save_state", None)
+            if callable(save_state):
+                result = save_state()
+                if inspect.isawaitable(result):
+                    await result
+                await self._flush_strategy_pending_save_strict(strategy)
+        except Exception as exc:
+            raise RuntimeError(f"Landed {lane} strategy state could not be persisted; replay barrier retained") from exc
 
     async def _single_chain_pre_retry_confirmed(
         self, state: SingleChainExecutionState, single_chain_orch: ExecutionOrchestrator
@@ -9133,6 +9434,16 @@ class StrategyRunner:
                 gas_used=sum(r.gas_used for r in prev_receipts),
             )
         )
+        # The prior attempt's reconciliation marker still owns this broadcast.
+        # Upgrade it durably before downstream accounting/callback/state work;
+        # otherwise a successful late confirmation would try to seal a
+        # reconciliation marker directly, or a crash could replay the landed tx.
+        if state.replay_barrier is not None:
+            state.replay_barrier.mark_landed_repair_pending(
+                0,
+                "late-confirmed transaction requires downstream accounting/state completion",
+            )
+            await self._save_execution_progress(state.deployment_id, state.replay_barrier)
         return True
 
     async def _single_chain_execute_clob(self, state: SingleChainExecutionState, step_result: Any) -> ExecutionResult:
@@ -9465,24 +9776,29 @@ class StrategyRunner:
         # Notify strategy of successful execution (framework hooks first,
         # then user callback — see _notify_intent_executed for VIB-3742
         # LP position tracker integration).
-        self._notify_intent_executed(strategy, intent, True, state.last_execution_result)
+        self._notify_intent_executed(
+            strategy,
+            intent,
+            True,
+            state.last_execution_result,
+            strict=state.replay_barrier is not None,
+        )
         self._invoke_optional_hook(
             strategy,
             "on_copy_execution_result",
             intent,
             True,
             state.last_execution_result,
+            strict=state.replay_barrier is not None,
         )
 
         if state_machine.retry_count > 0:
             logger.info(f"Intent succeeded after {state_machine.retry_count} retries")
 
-        # Save strategy state after successful execution
-        if hasattr(strategy, "save_state"):
-            try:
-                strategy.save_state()
-            except Exception as e:
-                logger.warning(f"Error saving strategy state: {e}")
+        await self._persist_landed_strategy_state_strict(strategy, lane="single-chain")
+
+        if state.replay_barrier is not None:
+            await self._complete_single_chain_replay_barrier(deployment_id, state.replay_barrier)
 
         return IterationResult(
             status=IterationStatus.SUCCESS,
@@ -9742,13 +10058,21 @@ class StrategyRunner:
         # must reflect chain reality, not the user-facing verdict, so a
         # future LP_CLOSE can find the bin_ids / position_id that the
         # opening TX actually committed on-chain.
-        self._notify_intent_executed(strategy, intent, False, last_execution_result, framework_success=True)
+        self._notify_intent_executed(
+            strategy,
+            intent,
+            False,
+            last_execution_result,
+            framework_success=True,
+            strict=state.replay_barrier is not None,
+        )
         self._invoke_optional_hook(
             strategy,
             "on_copy_execution_result",
             intent,
             False,
             last_execution_result,
+            strict=state.replay_barrier is not None,
         )
 
         # Record slippage-breach trade in ledger (VIB-2402).
@@ -9787,12 +10111,10 @@ class StrategyRunner:
             related_ledger_entry_id=slippage_ledger_id or "",
         )
 
-        # Persist state even when circuit breaker fails; on-chain state already changed.
-        if hasattr(strategy, "save_state"):
-            try:
-                strategy.save_state()
-            except Exception as e:
-                logger.warning(f"Error saving strategy state: {e}")
+        await self._persist_landed_strategy_state_strict(strategy, lane="single-chain-slippage")
+
+        if state.replay_barrier is not None:
+            await self._complete_single_chain_replay_barrier(state.deployment_id, state.replay_barrier)
 
         # Issue #1780: mirror the ``state.record_metrics`` gate used by
         # ``_single_chain_handle_success`` so a slippage-breach iteration
@@ -9846,13 +10168,21 @@ class StrategyRunner:
         # chain reality (the on-chain position state DID move) so a future
         # LP_CLOSE can find the bin_ids / position_id that the TX
         # committed.
-        self._notify_intent_executed(strategy, intent, False, last_execution_result, framework_success=True)
+        self._notify_intent_executed(
+            strategy,
+            intent,
+            False,
+            last_execution_result,
+            framework_success=True,
+            strict=state.replay_barrier is not None,
+        )
         self._invoke_optional_hook(
             strategy,
             "on_copy_execution_result",
             intent,
             False,
             last_execution_result,
+            strict=state.replay_barrier is not None,
         )
 
         # VIB-5121 — a native LP_OPEN/LP_CLOSE that LANDED on-chain but tripped
@@ -9930,14 +10260,10 @@ class StrategyRunner:
             related_ledger_entry_id=recon_ledger_id or "",
         )
 
-        # Persist strategy state even on reconciliation failure: the
-        # on-chain state has already moved, so any internal bookkeeping
-        # the strategy captured pre-reconciliation must not be lost.
-        if hasattr(strategy, "save_state"):
-            try:
-                strategy.save_state()
-            except Exception as e:
-                logger.warning(f"Error saving strategy state: {e}")
+        await self._persist_landed_strategy_state_strict(strategy, lane="single-chain-reconciliation")
+
+        if state.replay_barrier is not None:
+            await self._complete_single_chain_replay_barrier(state.deployment_id, state.replay_barrier)
 
         # Operator-facing alert on this single incident (independent
         # of the consecutive-errors alert that the outer run loop
@@ -10117,6 +10443,7 @@ class StrategyRunner:
         self,
         strategy: StrategyProtocol,
         start_time: datetime,
+        iteration_state: RunIterationState | None = None,
     ) -> IterationResult | None:
         """Check for stuck execution and resume if found.
 
@@ -10133,8 +10460,6 @@ class StrategyRunner:
             IterationResult if we're resuming a stuck execution (success or failure)
             None if no stuck execution found (caller should proceed with decide())
         """
-        from ..intents.vocabulary import Intent
-
         deployment_id = strategy.deployment_id
 
         # Load any saved execution progress
@@ -10152,54 +10477,106 @@ class StrategyRunner:
             # started the next one yet (clean restart scenario).
             return None
 
-        # We have a stuck execution - check if we can resume
-        if saved_progress.serialized_intents is None:
-            logger.warning(
-                f"Stuck execution found for {deployment_id} but no serialized intents. "
-                f"Clearing progress and starting fresh."
+        if saved_progress.is_reconciliation_required:
+            error = saved_progress.failure_error or (
+                "BROADCAST_RECONCILIATION_REQUIRED: submitted transaction hashes "
+                "must be reconciled before execution can resume"
             )
-            await self._clear_execution_progress(deployment_id)
-            return None
-
-        # Deserialize the saved intents
-        try:
-            intents: list[AnyIntent] = [
-                Intent.deserialize(intent_data) for intent_data in saved_progress.serialized_intents
-            ]
-        except Exception as e:
             logger.error(
-                f"Failed to deserialize saved intents for {deployment_id}: {e}. Clearing progress and starting fresh."
+                "Refusing to resume execution %s for %s: %s",
+                saved_progress.execution_id,
+                deployment_id,
+                error,
             )
-            await self._clear_execution_progress(deployment_id)
+            self._record_failure()
+            return IterationResult(
+                status=IterationStatus.EXECUTION_FAILED,
+                intent=None,
+                error=error,
+                deployment_id=deployment_id,
+                duration_ms=self._calculate_duration_ms(start_time),
+            )
+
+        if saved_progress.is_accounting_pending:
+            error = saved_progress.failure_error or (
+                "LANDED_REPAIR_PENDING: transaction landed but accounting, callback, or strategy-state repair "
+                "has not been durably sealed"
+            )
+            logger.error("Refusing to replay landed work %s: %s", saved_progress.execution_id, error)
+            self._record_failure()
+            return IterationResult(
+                status=IterationStatus.ACCOUNTING_FAILED,
+                intent=None,
+                error=error,
+                deployment_id=deployment_id,
+                duration_ms=self._calculate_duration_ms(start_time),
+            )
+
+        if saved_progress.effective_barrier_phase is ExecutionBarrierPhase.RECOMPILE_REQUIRED:
+            if iteration_state is None:
+                error = "RECOMPILE_REQUIRED: recovery needs a fresh market snapshot; refusing pre-snapshot execution"
+                return IterationResult(
+                    status=IterationStatus.EXECUTION_FAILED,
+                    intent=None,
+                    error=error,
+                    deployment_id=deployment_id,
+                    duration_ms=self._calculate_duration_ms(start_time),
+                )
+            iteration_state.recompile_progress = saved_progress
             return None
 
-        failed_step = saved_progress.failed_at_step_index or 0
-        total_steps = saved_progress.total_steps
+        if saved_progress.effective_barrier_phase is ExecutionBarrierPhase.RETRYABLE:
+            error = (
+                "BROADCAST_RECONCILIATION_REQUIRED: legacy retry marker lacks plan-bound "
+                "fresh-compile evidence; refusing automatic replay"
+            )
+            self._record_failure()
+            return IterationResult(
+                status=IterationStatus.EXECUTION_FAILED,
+                intent=None,
+                error=error,
+                deployment_id=deployment_id,
+                duration_ms=self._calculate_duration_ms(start_time),
+            )
 
-        logger.info(
-            f"Resuming stuck execution for {deployment_id}: "
-            f"retrying step {failed_step + 1}/{total_steps} "
-            f"(execution_id={saved_progress.execution_id}, "
-            f"error was: {saved_progress.failure_error})"
+        raise RuntimeError(f"unsupported execution barrier phase: {saved_progress.effective_barrier_phase}")
+
+    async def _consume_recompile_progress(self, progress: ExecutionProgress) -> None:
+        """CAS-retire a no-prefix marker before normal decide recompiles it."""
+        from almanak.framework.state import compare_and_delete_state_value
+
+        await compare_and_delete_state_value(
+            self.state_manager,
+            progress.deployment_id,
+            "execution_progress",
+            progress.to_dict(),
         )
 
-        # Clear the failure state so we can retry
-        saved_progress.failed_at_step_index = None
-        saved_progress.failure_error = None
-        saved_progress.last_updated = datetime.now(UTC)
-        await self._save_execution_progress(deployment_id, saved_progress)
+    async def _resume_recompile_required(self, state: RunIterationState) -> IterationResult:
+        """Resume only a sealed, unlanded suffix with current snapshot prices."""
+        from ..intents.vocabulary import Intent
 
-        # Get orchestrator (must be multi-chain since we only check stuck in multi-chain mode)
-        assert isinstance(self.execution_orchestrator, MultiChainOrchestrator)
-        orchestrator = self.execution_orchestrator
-
-        # Execute with the saved intents, resuming from the failed step
-        return await self._execute_with_bridge_waiting(
-            strategy=strategy,
+        progress = state.recompile_progress
+        if progress is None or progress.serialized_intents is None:
+            raise RuntimeError("RECOMPILE_REQUIRED marker is missing its sealed vocabulary plan")
+        if not isinstance(self.execution_orchestrator, MultiChainOrchestrator):
+            raise RuntimeError("RECOMPILE_REQUIRED multi-leg plan needs a multi-chain orchestrator")
+        intents = [Intent.deserialize(value) for value in progress.serialized_intents]
+        if self._compute_intents_hash(intents) != progress.intents_hash:
+            raise RuntimeError("RECOMPILE_REQUIRED sealed intent hash does not match its vocabulary plan")
+        next_step = progress.failed_at_step_index
+        if next_step is None or next_step != progress.completed_step_index + 1:
+            raise RuntimeError("RECOMPILE_REQUIRED marker does not identify the exact unlanded suffix")
+        has_cross_chain = any(is_cross_chain_intent(intent) for intent in intents)
+        expected_lane = ExecutionLane.BRIDGE if has_cross_chain else ExecutionLane.SAME_CHAIN_MULTI_LEG
+        if progress.execution_lane is not expected_lane:
+            raise RuntimeError("RECOMPILE_REQUIRED marker lane does not match its sealed vocabulary plan")
+        return await self._execute_multi_chain(
+            strategy=state.strategy,
             intents=intents,
-            orchestrator=orchestrator,
-            start_time=start_time,
-            resume_progress=saved_progress,
+            start_time=state.start_time,
+            market=state.market,
+            resume_progress=progress,
         )
 
     def _check_teardown_requested(
@@ -10294,6 +10671,47 @@ class StrategyRunner:
         logger.info(f"Teardown requested for {deployment_id} (mode={mode.value})")
         return mode
 
+    async def _teardown_bridge_barrier_error(self, deployment_id: str) -> str | None:
+        """Keep teardown pending while an in-flight bridge can still deliver assets.
+
+        Teardown may supersede a bridge plan only before submission or after
+        every step reached its durable completion boundary. Attempted,
+        unknown, or post-land-pending bridge work must be reconciled first;
+        otherwise teardown can report zero exposure and stop before destination
+        funds arrive.
+        """
+        progress = await self._load_execution_progress(deployment_id)
+        if progress is None or progress.execution_lane is not ExecutionLane.BRIDGE:
+            return None
+        if progress.is_completed:
+            await self._clear_execution_progress(deployment_id)
+            return None
+        if (
+            progress.effective_barrier_phase is ExecutionBarrierPhase.RECOMPILE_REQUIRED
+            and progress.completed_step_index < 0
+        ):
+            await self._consume_recompile_progress(progress)
+            return None
+        if progress.failed_at_step_index is not None and not progress.submission_evidence:
+            await self._clear_execution_progress(deployment_id)
+            return None
+
+        step_index = progress.reconciliation_required_step_index
+        evidence = [item for item in progress.submission_evidence if item.step_index == step_index]
+        from almanak.framework.execution.submission import SubmissionProvenance
+
+        if (
+            len(evidence) == 1
+            and evidence[0].submission_provenance is SubmissionProvenance.NOT_ATTEMPTED
+            and not evidence[0].submitted_transaction_ids
+        ):
+            await self._clear_execution_progress(deployment_id)
+            return None
+        return (
+            "BROADCAST_RECONCILIATION_REQUIRED: teardown remains pending because an in-flight bridge "
+            "may still deliver destination assets; reconcile and seal the bridge execution before teardown"
+        )
+
     # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     async def _execute_multi_chain(  # noqa: C901
         self,
@@ -10301,6 +10719,7 @@ class StrategyRunner:
         intents: list[AnyIntent],
         start_time: datetime,
         market: Any = None,
+        resume_progress: ExecutionProgress | None = None,
     ) -> IterationResult:
         """Execute intents through the multi-chain orchestrator with bridge waiting.
 
@@ -10417,6 +10836,7 @@ class StrategyRunner:
                 start_time=start_time,
                 price_map=price_map,
                 price_oracle=price_oracle,
+                resume_progress=resume_progress,
             )
 
         # Same-chain only flows (VIB-5670 Stage 2): the runner drives the legs
@@ -10435,6 +10855,7 @@ class StrategyRunner:
             start_time=start_time,
             price_map=price_map,
             price_oracle=price_oracle,
+            resume_progress=resume_progress,
         )
 
     @staticmethod
@@ -10506,6 +10927,7 @@ class StrategyRunner:
         start_time: datetime,
         price_map: dict[str, str] | None = None,
         price_oracle: dict | None = None,
+        resume_progress: ExecutionProgress | None = None,
     ) -> IterationResult:
         """Runner-driven per-leg loop for same-chain multi-chain flows (VIB-5670 Stage 2).
 
@@ -10540,7 +10962,10 @@ class StrategyRunner:
         # first step has no previous output to reference. Raised BEFORE any
         # broadcast; escapes to run_iteration's generic handler (pre-5670 the
         # same InvalidAmountError escaped from execute_sequence).
-        if first_intent is not None and Intent.has_chained_amount(first_intent):
+        start_step_index = resume_progress.failed_at_step_index if resume_progress is not None else 0
+        if start_step_index is None:
+            raise RuntimeError("RECOMPILE_REQUIRED same-chain marker has no exact suffix index")
+        if start_step_index == 0 and first_intent is not None and Intent.has_chained_amount(first_intent):
             intent_type = first_intent.intent_type.value if hasattr(first_intent, "intent_type") else "Unknown"
             raise InvalidAmountError(
                 intent_type=intent_type,
@@ -10551,16 +10976,32 @@ class StrategyRunner:
         leg_tx_results: list[TransactionResult] = []
         total_gas_used = 0
         total_gas_cost_wei = 0
-        previous_amount_received: Decimal | None = None
+        previous_amount_received = resume_progress.previous_amount_received if resume_progress is not None else None
         error_summary = ""
         persisted_count = 0
 
+        await self._flush_strategy_pending_save_strict(strategy)
+        if resume_progress is None:
+            progress, pending_error = self._new_multi_leg_replay_barrier(deployment_id, intents)
+            await self._save_execution_progress(deployment_id, progress)
+        else:
+            progress = resume_progress
+            from almanak.framework.execution.reconciliation import RECONCILIATION_REQUIRED_PREFIX
+
+            pending_error = (
+                f"{RECONCILIATION_REQUIRED_PREFIX}: multi-leg outcome is not durably sealed; "
+                "operator reconciliation is required before replay"
+            )
+
         try:
-            for intent in intents:
+            for i in range(start_step_index, len(intents)):
+                intent = intents[i]
                 intent_to_execute, chain_error = self._resolve_same_chain_leg_amount(intent, previous_amount_received)
                 if intent_to_execute is None:
                     leg_chain = Intent.get_chain(intent) or orchestrator.primary_chain
                     error_summary = f"[{leg_chain}] {chain_error}"
+                    # Resolution failed before this leg could broadcast.
+                    await self._clear_execution_progress(deployment_id)
                     break
 
                 leg_chain = Intent.get_chain(intent_to_execute) or orchestrator.primary_chain
@@ -10578,17 +11019,57 @@ class StrategyRunner:
                         intent_to_execute, balance_provider=leg_provider
                     )
 
-                # Broadcast this single leg.
+                # Atomically replace RECOMPILE_REQUIRED with a pre-broadcast
+                # barrier before the fresh compiler can submit anything.
+                progress.barrier_phase = ExecutionBarrierPhase.PRE_BROADCAST
+                progress.failed_at_step_index = None
+                progress.reconciliation_required_step_index = i
+                progress.failure_error = pending_error
+                progress.last_updated = datetime.now(UTC)
+                await self._save_execution_progress(deployment_id, progress)
+
+                # Broadcast this single leg. MultiChainOrchestrator.execute
+                # recompiles the vocabulary intent and re-reads allowance.
                 leg = await orchestrator.execute(intent_to_execute, price_map=price_map, price_oracle=price_oracle)
+                from almanak.framework.execution.reconciliation import (
+                    submission_provenance,
+                    submitted_transaction_hashes,
+                )
+
+                progress.record_submission_evidence(
+                    step_index=i,
+                    chain=leg_chain,
+                    submission_provenance=submission_provenance(leg),
+                    submitted_transaction_ids=submitted_transaction_hashes(leg),
+                    execution_plan_hash=str(getattr(getattr(leg, "tx_result", None), "execution_plan_hash", "")),
+                    submission_transactions=list(
+                        getattr(getattr(leg, "tx_result", None), "submission_transactions", ())
+                    ),
+                )
 
                 if not leg.success:
-                    error_summary = f"[{leg.chain}] {leg.error or 'Unknown error'}"
+                    retryable, classified_error = await self._classify_failed_leg_progress(
+                        deployment_id,
+                        progress,
+                        i,
+                        leg,
+                    )
+                    if not retryable and hasattr(leg, "error"):
+                        leg.error = classified_error
+                    error_summary = f"[{leg.chain}] {classified_error}"
                     logger.warning(
                         f"Multi-chain leg failed at intent {intent_to_execute.intent_id[:8]}..., "
                         f"chain={leg.chain}: {leg.error}"
                     )
                     self._notify_intent_executed(strategy, intent_to_execute, False, None)
                     break
+
+                progress.mark_landed_repair_pending(
+                    i,
+                    "LANDED_REPAIR_PENDING: same-chain leg landed; accounting, callback, and strategy state "
+                    "must be sealed before any replay",
+                )
+                await self._save_execution_progress(deployment_id, progress)
 
                 # Persist THIS leg before the next one broadcasts (fail-stop:
                 # accounting errors propagate out of the try, through the
@@ -10617,35 +11098,21 @@ class StrategyRunner:
                         record_metrics=False,
                         price_oracle=price_oracle,
                         pre_snapshot=pre_snapshot,
+                        strict_callbacks=True,
                     )
                 except Exception:
                     # The leg's broadcast is CONFIRMED on-chain but its durable
-                    # record failed (fail-closed halt follows). Before
-                    # re-raising, fire the one notify with the framework-vs-user
-                    # split (framework_success=True: trackers + strategy state
-                    # must reflect chain reality) and persist strategy state —
-                    # otherwise the NEXT iteration's decide() re-opens the
-                    # position it already holds (duplicate broadcast) before
-                    # the consecutive-error breaker halts the loop. The
-                    # same-chain lane has no ExecutionProgress resume to skip
-                    # the step; strategy/tracker state IS the re-open guard.
-                    self._notify_intent_executed(
-                        strategy,
-                        intent_to_execute,
-                        False,
-                        execution_result,
-                        framework_success=True,
-                    )
-                    if hasattr(strategy, "save_state"):
-                        try:
-                            strategy.save_state()
-                        except Exception as save_err:  # noqa: BLE001
-                            logger.warning("save_state failed while halting on a persistence error: %s", save_err)
+                    # record or strict callback failed. The pre-broadcast
+                    # marker remains the authoritative no-rebroadcast guard.
+                    # Do not invoke callbacks a second time: the first call may
+                    # have partially mutated state before raising.
                     raise
                 total_gas_used += execution_result.total_gas_used
                 total_gas_cost_wei += execution_result.total_gas_cost_wei
                 leg_tx_results.extend(tx_results)
                 persisted_count += 1
+
+                await self._persist_landed_strategy_state_strict(strategy, lane="multi-leg")
 
                 if leg_marker:
                     # Enforced recon incident / slippage breach / degraded
@@ -10658,9 +11125,19 @@ class StrategyRunner:
                         f"Multi-chain leg downgraded at intent {intent_to_execute.intent_id[:8]}..., "
                         f"chain={leg_chain}: {leg_marker} — halting remaining legs"
                     )
+                    progress.completed_step_index = i
+                    # The leg already landed. Retain a terminal reconciliation
+                    # marker so the pre-decide recovery gate blocks a repeated
+                    # plan; this same-chain lane does not resume from
+                    # ``completed_step_index`` and would otherwise overwrite
+                    # the tombstone and broadcast leg zero again.
+                    progress.mark_reconciliation_required(i, leg_marker)
+                    await self._save_execution_progress(deployment_id, progress)
                     break
-
                 previous_amount_received = self._leg_amount_received(leg, intent_to_execute)
+                await self._advance_multi_leg_replay_barrier(
+                    deployment_id, progress, i, len(intents), previous_amount_received
+                )
         finally:
             # Always invalidate balance caches after execution — success, leg
             # failure, or a propagating accounting error (pre-5670 parity: the
@@ -10704,6 +11181,79 @@ class StrategyRunner:
             deployment_id=deployment_id,
             duration_ms=self._calculate_duration_ms(start_time),
         )
+
+    def _new_multi_leg_replay_barrier(
+        self, deployment_id: str, intents: list[AnyIntent]
+    ) -> tuple[ExecutionProgress, str]:
+        """Build the conservative marker persisted before a multi-leg broadcast."""
+        from almanak.framework.execution.reconciliation import RECONCILIATION_REQUIRED_PREFIX
+
+        pending_error = (
+            f"{RECONCILIATION_REQUIRED_PREFIX}: multi-leg outcome is not durably sealed; "
+            "operator reconciliation is required before replay"
+        )
+        return (
+            ExecutionProgress(
+                execution_id=str(uuid.uuid4())[:8],
+                deployment_id=deployment_id,
+                intents_hash=self._compute_intents_hash(intents),
+                total_steps=len(intents),
+                serialized_intents=[intent.serialize() for intent in intents],
+                execution_lane=ExecutionLane.SAME_CHAIN_MULTI_LEG,
+                barrier_phase=ExecutionBarrierPhase.PRE_BROADCAST,
+                failure_error=pending_error,
+                reconciliation_required_step_index=0 if intents else None,
+            ),
+            pending_error,
+        )
+
+    async def _advance_multi_leg_replay_barrier(
+        self,
+        deployment_id: str,
+        progress: ExecutionProgress,
+        step_index: int,
+        total_steps: int,
+        previous_amount_received: Decimal | None,
+    ) -> None:
+        """Atomically retain a next-leg barrier or seal the completed tombstone."""
+        progress.previous_amount_received = previous_amount_received
+        progress.seal_repaired_step(step_index)
+        if step_index + 1 < total_steps:
+            # No submission for the next exact-plan step has begun. A crash in
+            # this gap may resume only by recompiling that sealed suffix.
+            progress.mark_recompile_required(step_index + 1, "fresh recompilation required for next sealed leg")
+        await self._save_execution_progress(deployment_id, progress)
+
+    async def _classify_failed_leg_progress(
+        self,
+        deployment_id: str,
+        progress: ExecutionProgress,
+        step_index: int,
+        result: Any,
+    ) -> tuple[bool, str]:
+        """Seal a failed leg as fresh-recompile or operator reconciliation."""
+        from almanak.framework.execution.reconciliation import (
+            failed_submission_allows_recompile,
+            failed_submission_requires_reconciliation,
+            reconciliation_required_error,
+        )
+
+        tx_result = getattr(result, "tx_result", None)
+        plan_hash = str(getattr(tx_result, "execution_plan_hash", ""))
+        if plan_hash and failed_submission_allows_recompile(result, expected_plan_hash=plan_hash):
+            error = "fresh recompilation required after setup-only landing"
+            progress.mark_recompile_required(step_index, error)
+            retryable = True
+        elif failed_submission_requires_reconciliation(result):
+            error = reconciliation_required_error(result)
+            progress.mark_reconciliation_required(step_index, error)
+            retryable = False
+        else:
+            error = str(getattr(result, "error", None) or "fresh recompilation required")
+            progress.mark_recompile_required(step_index, error)
+            retryable = True
+        await self._save_execution_progress(deployment_id, progress)
+        return retryable, error
 
     async def _execute_with_bridge_waiting(
         self,
@@ -10752,6 +11302,24 @@ class StrategyRunner:
         )
 
         await self._init_bridge_wait_state(state)
+
+        # A retained-hash failure is intentionally not resumable. This guard
+        # covers direct callers as well as the normal pre-decide stuck-progress
+        # gate, including rolling-upgrade/mixed-version process restarts.
+        if state.progress_was_loaded and state.progress is not None and state.progress.is_reconciliation_required:
+            error = state.progress.failure_error or (
+                "BROADCAST_RECONCILIATION_REQUIRED: submitted transaction hashes "
+                "must be reconciled before execution can resume"
+            )
+            logger.error("Refusing bridge-lane resume for %s: %s", state.deployment_id, error)
+            self._record_failure()
+            return IterationResult(
+                status=IterationStatus.EXECUTION_FAILED,
+                intent=state.first_intent,
+                error=error,
+                deployment_id=state.deployment_id,
+                duration_ms=self._calculate_duration_ms(state.start_time),
+            )
 
         # Walk each intent; each iteration either succeeds, sets
         # state.failed_step and breaks, or continues to the next intent.
@@ -10809,19 +11377,28 @@ class StrategyRunner:
             gateway_client=state.gateway_client,
         )
 
-        # Determine execution progress
+        # Determine execution progress. Intent identity is part of the durable
+        # replay boundary: a caller may never attach progress from one plan to
+        # another, nor clear evidence-bearing progress merely because decide()
+        # produced a different plan after world state changed.
+        intents_hash = self._compute_intents_hash(intents)
         if state.resume_progress is not None:
             # Resuming from a stuck execution (passed from _check_and_resume_stuck_execution)
+            if state.resume_progress.intents_hash != intents_hash:
+                raise RuntimeError(
+                    "BROADCAST_RECONCILIATION_REQUIRED: supplied bridge resume progress "
+                    "does not match the current intent plan; refusing to clear or replay it"
+                )
             state.start_step_index = state.resume_progress.next_step_to_execute
             state.previous_amount_received = state.resume_progress.previous_amount_received
             state.progress = state.resume_progress
+            state.progress_was_loaded = True
             logger.info(
                 f"Resuming stuck execution from step {state.start_step_index + 1}/{len(intents)} "
                 f"(execution_id={state.progress.execution_id})"
             )
         else:
             # Check for saved execution progress (resumption after restart)
-            intents_hash = self._compute_intents_hash(intents)
             saved_progress = await self._load_execution_progress(deployment_id)
 
             if saved_progress and saved_progress.intents_hash == intents_hash:
@@ -10833,11 +11410,32 @@ class StrategyRunner:
                     f"(execution_id={saved_progress.execution_id})"
                 )
                 state.progress = saved_progress
+                state.progress_was_loaded = True
             else:
                 # Start fresh execution
                 if saved_progress:
-                    logger.info("Intents changed (hash mismatch), starting fresh execution")
-                    await self._clear_execution_progress(deployment_id)
+                    if saved_progress.is_completed:
+                        # A completed tombstone means every landed step and its
+                        # downstream accounting/strategy state were durably
+                        # sealed.  A lost best-effort cleanup ACK must not brick
+                        # the next, intentionally different plan.
+                        logger.info("Clearing completed execution tombstone before starting a new intent plan")
+                        await self._clear_execution_progress(deployment_id)
+                    else:
+                        has_execution_evidence = bool(
+                            saved_progress.completed_step_index >= 0
+                            or saved_progress.failed_at_step_index is not None
+                            or saved_progress.reconciliation_required_step_index is not None
+                            or saved_progress.accounting_pending_step_index is not None
+                        )
+                        if has_execution_evidence:
+                            raise RuntimeError(
+                                "BROADCAST_RECONCILIATION_REQUIRED: saved bridge progress "
+                                "does not match the current intent plan and contains execution evidence; "
+                                "refusing to clear or replay it"
+                            )
+                        logger.info("Intents changed (hash mismatch), starting fresh execution")
+                        await self._clear_execution_progress(deployment_id)
 
                 # Serialize intents for stuck execution recovery
                 serialized_intents = [intent.serialize() for intent in intents]
@@ -10848,6 +11446,8 @@ class StrategyRunner:
                     intents_hash=intents_hash,
                     total_steps=len(intents),
                     serialized_intents=serialized_intents,
+                    execution_lane=ExecutionLane.BRIDGE,
+                    barrier_phase=ExecutionBarrierPhase.PRE_BROADCAST,
                 )
                 # Save initial progress with serialized intents
                 await self._save_execution_progress(deployment_id, state.progress)
@@ -11049,6 +11649,7 @@ class StrategyRunner:
                 record_metrics=False,
                 price_oracle=state.price_oracle,
                 pre_snapshot=pre_snapshot,
+                strict_callbacks=True,
             )
         except Exception:
             # The broadcast is CONFIRMED on-chain but the durable accounting
@@ -11062,19 +11663,14 @@ class StrategyRunner:
             # notify with the framework-vs-user split (trackers + strategy
             # state must reflect chain reality before the halt), and re-raise
             # so run_iteration halts with the appropriate failure status +
-            # operator alert (design v3 #4 / v4 #1).
+            # operator alert (design v3 #4 / v4 #1). Do not retry the
+            # callback here: it may have partially mutated state before
+            # raising, and the persisted marker is the replay guard.
             assert state.progress is not None
             state.progress.accounting_pending_step_index = i
             state.progress.previous_amount_received = state.previous_amount_received
             state.progress.last_updated = datetime.now(UTC)
             await self._save_execution_progress(deployment_id, state.progress)
-            self._notify_intent_executed(
-                strategy,
-                intent_to_execute,
-                False,
-                execution_result,
-                framework_success=True,
-            )
             raise
         state.leg_tx_results.extend(tx_results)
         if leg_marker:
@@ -11196,6 +11792,24 @@ class StrategyRunner:
             intent_to_execute, chain=chain, is_cross_chain=is_cross_chain
         )
 
+        # Arm a durable replay barrier immediately before the orchestrator can
+        # submit. It remains set through receipt validation, accounting, the
+        # callback, and strategy-state persistence.
+        assert state.progress is not None
+        from almanak.framework.execution.reconciliation import RECONCILIATION_REQUIRED_PREFIX
+
+        pending_error = (
+            f"{RECONCILIATION_REQUIRED_PREFIX}: bridge-lane outcome is not durably sealed; "
+            "operator reconciliation is required before replay"
+        )
+        await self._flush_strategy_pending_save_strict(strategy)
+        state.progress.barrier_phase = ExecutionBarrierPhase.PRE_BROADCAST
+        state.progress.failed_at_step_index = None
+        state.progress.reconciliation_required_step_index = i
+        state.progress.failure_error = pending_error
+        state.progress.last_updated = datetime.now(UTC)
+        await self._save_execution_progress(deployment_id, state.progress)
+
         # Execute the intent
         try:
             result = await orchestrator.execute(
@@ -11210,7 +11824,25 @@ class StrategyRunner:
             state.error_message = str(e)
             return True
 
+        from almanak.framework.execution.reconciliation import submission_provenance, submitted_transaction_hashes
+
+        state.progress.record_submission_evidence(
+            step_index=i,
+            chain=chain,
+            submission_provenance=submission_provenance(result),
+            submitted_transaction_ids=submitted_transaction_hashes(result),
+            execution_plan_hash=str(getattr(getattr(result, "tx_result", None), "execution_plan_hash", "")),
+            submission_transactions=list(getattr(getattr(result, "tx_result", None), "submission_transactions", ())),
+        )
+
         if not result.success:
+            _retryable, classified_error = await self._classify_failed_leg_progress(
+                deployment_id,
+                state.progress,
+                i,
+                result,
+            )
+            result.error = classified_error
             logger.error(f"Step {step_num} failed: {result.error}")
             # Notify strategy of failed execution (mirrors _execute_single_chain)
             self._notify_intent_executed(strategy, intent, False, result)
@@ -11260,6 +11892,14 @@ class StrategyRunner:
         ):
             return True
 
+        assert state.progress is not None
+        state.progress.mark_landed_repair_pending(
+            i,
+            "LANDED_REPAIR_PENDING: bridge-lane transaction landed; accounting, callback, and strategy state "
+            "must be sealed before any replay",
+        )
+        await self._save_execution_progress(deployment_id, state.progress)
+
         # VIB-5670 Stage 3: persist THIS leg through the shared accounting
         # pipeline BEFORE progress advances (persist-before-progress; a
         # persistence failure stamps accounting_pending_step_index and
@@ -11275,19 +11915,15 @@ class StrategyRunner:
             pre_snapshot=pre_snapshot,
         )
 
-        # Save strategy state after successful execution
-        if hasattr(strategy, "save_state"):
-            try:
-                strategy.save_state()
-            except Exception as e:
-                logger.warning(f"Error saving strategy state: {e}")
+        await self._persist_landed_strategy_state_strict(strategy, lane="bridge-lane")
 
         # Save progress after each step completes successfully.
         # progress is always populated by ``_init_bridge_wait_state`` before
         # any step helper runs; the assert narrows the type for mypy.
-        assert state.progress is not None
-        state.progress.completed_step_index = i
         state.progress.previous_amount_received = state.previous_amount_received
+        state.progress.seal_repaired_step(i)
+        if i + 1 < len(intents):
+            state.progress.mark_recompile_required(i + 1, "fresh recompilation required for next sealed leg")
         await self._save_execution_progress(deployment_id, state.progress)
         logger.info(f"Step {step_num}/{len(intents)} completed, progress saved")
 
@@ -11701,10 +12337,11 @@ class StrategyRunner:
         (``framework_success=True`` — chain reality moved; user
         ``success=False`` — the settlement failed), then marks
         ``state.callback_fired`` so ``_bridge_wait_finalize`` does not
-        double-fire. A persistence failure here logs ERROR + the deferred-write
-        log and leaves ``callback_fired`` unset (finalize's fallback notify
-        covers the strategy callback) — it NEVER blocks the existing
-        failure/finalize path.
+        double-fire. A pre-callback persistence failure leaves it unset so
+        finalization can notify once. A callback failure marks it fired (the
+        callback may already have partially mutated state) and retains the
+        bridge failure marker. Either failure is logged to the deferred-write
+        log and never blocks the existing failure/finalize path.
 
         Only runs for ``-bridge`` failure materializations (source confirmed,
         settlement failed). Pre-broadcast and source-reverted failures persist
@@ -11740,9 +12377,16 @@ class StrategyRunner:
                 record_metrics=False,
                 price_oracle=state.price_oracle,
                 pre_snapshot=None,
+                strict_callbacks=True,
             )
             state.callback_fired = True
         except Exception as exc:  # noqa: BLE001 — loud-but-never-block (blueprint 27 §14.1)
+            # A strict callback was already invoked. It may have partially
+            # mutated state before raising, so finalization must not call it a
+            # second time. The bridge failure marker remains the durable
+            # no-rebroadcast guard.
+            if isinstance(exc, _ReplayCallbackError):
+                state.callback_fired = True
             logger.error(
                 "Bridge source REQUEST persistence failed (settlement degraded, money "
                 "already moved on %s): %s — recording to the deferred-write log; the "
@@ -11796,8 +12440,16 @@ class StrategyRunner:
             f"{state.successful_count}/{len(intents)} succeeded"
         )
 
-        # Clear execution progress on successful completion
-        await self._clear_execution_progress(deployment_id)
+        # `_bridge_wait_process_intent` already sealed the last leg with a
+        # monotonic completed tombstone. Clearing that tombstone is optional
+        # cleanup so a later cycle may intentionally submit identical intents.
+        # A lost clear ACK is safe in both directions: committed deletion means
+        # downstream state is already durable; an uncommitted deletion leaves
+        # the completed tombstone and suppresses replay.
+        try:
+            await self._clear_execution_progress(deployment_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Completed execution-progress tombstone cleanup deferred: %s", exc)
 
         # VIB-5670 Stage 3: attach a receipt-count / gas SUMMARY aggregate for
         # iteration-level consumers (NOOP gate, iteration_summary) — NOT a
@@ -11845,8 +12497,31 @@ class StrategyRunner:
         except (IndexError, ValueError):
             failed_intent_index = 0
 
-        # Save failure state for retry on next iteration
-        state.progress.failed_at_step_index = failed_intent_index
+        # A failed result is retry-safe only when the gateway explicitly proves
+        # no submission was attempted or a complete receipt set proves revert.
+        # A successful source leg followed by bridge failure remains terminal:
+        # the source-chain money move landed even though ``failed_result`` is
+        # successful.
+        from almanak.framework.execution.reconciliation import failed_submission_requires_reconciliation
+
+        safe_retry = bool(
+            state.failed_result is not None
+            and getattr(state.failed_result, "success", None) is False
+            and not failed_submission_requires_reconciliation(state.failed_result)
+        )
+        if state.progress.effective_barrier_phase is ExecutionBarrierPhase.RECOMPILE_REQUIRED:
+            state.progress.failed_at_step_index = failed_intent_index
+            state.progress.reconciliation_required_step_index = None
+        elif safe_retry:
+            state.progress.mark_recompile_required(
+                failed_intent_index,
+                error_message or "fresh recompilation required after proven non-landing",
+            )
+        else:
+            state.progress.mark_reconciliation_required(
+                failed_intent_index,
+                error_message or "BROADCAST_RECONCILIATION_REQUIRED: bridge-lane outcome is ambiguous",
+            )
         state.progress.failure_error = error_message
         state.progress.last_updated = datetime.now(UTC)
         await self._save_execution_progress(deployment_id, state.progress)

@@ -29,7 +29,7 @@ from almanak.framework.services.stuck_detector import (
     StuckDetectionResult,
     StuckDetector,
 )
-
+from tests.unit.runner._state_manager import absent_state_manager
 
 # =============================================================================
 # Helpers
@@ -74,7 +74,7 @@ def _make_runner(
         price_oracle=MagicMock(),
         balance_provider=MagicMock(),
         execution_orchestrator=MagicMock(),
-        state_manager=MagicMock(),
+        state_manager=absent_state_manager(),
         alert_manager=alert_manager,
         config=config,
         stuck_detector=stuck_detector,
@@ -389,7 +389,7 @@ class TestAlertWithStuckDetector:
             price_oracle=MagicMock(),
             balance_provider=MagicMock(),
             execution_orchestrator=MagicMock(),
-            state_manager=MagicMock(),
+            state_manager=absent_state_manager(),
             alert_manager=alert_mgr,
             config=config,
             circuit_breaker=breaker,

@@ -21,7 +21,7 @@ from almanak.framework.runner.strategy_runner import (
     IterationStatus,
     StrategyRunner,
 )
-
+from almanak.framework.state.state_manager import StateNotFoundError
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -54,6 +54,9 @@ def _make_state_manager() -> MagicMock:
     sm.save_position_event = AsyncMock(return_value=None)
     sm.save_portfolio_snapshot = AsyncMock(return_value=1)
     sm.save_portfolio_metrics = AsyncMock(return_value=True)
+    sm.load_state = AsyncMock(side_effect=StateNotFoundError("test deployment"))
+    sm.save_state = AsyncMock(return_value=None)
+    sm.delete_state = AsyncMock(return_value=True)
     return sm
 
 

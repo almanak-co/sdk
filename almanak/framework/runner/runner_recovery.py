@@ -21,7 +21,7 @@ from ..execution.session import (
     ExecutionSession,
     TransactionStatus,
 )
-from ..state.state_manager import StateData, StateNotFoundError
+from ..state.state_manager import StateNotFoundError
 from .runner_models import ExecutionProgress
 
 # Use the original strategy_runner logger so existing log-capture tests and
@@ -389,8 +389,11 @@ async def load_execution_progress(runner: Any, deployment_id: str) -> ExecutionP
         progress_data = state.state.get("execution_progress")
         if progress_data:
             return ExecutionProgress.from_dict(progress_data)
+    except StateNotFoundError:
+        return None
     except Exception as e:
-        logger.debug(f"No execution progress found for {deployment_id}: {e}")
+        logger.error(f"Failed to load execution progress for {deployment_id}: {e}")
+        raise
     return None
 
 
@@ -403,32 +406,25 @@ async def save_execution_progress(runner: Any, deployment_id: str, progress: Exe
         progress: Execution progress to save
     """
     try:
-        # Try to load existing state, create if it doesn't exist
-        try:
-            state = await runner.state_manager.load_state(deployment_id)
-            # GatewayStateManager returns None instead of raising StateNotFoundError
-            if state is None:
-                raise StateNotFoundError(deployment_id)
-            expected_version = state.version
-        except StateNotFoundError:
-            # Create initial state for this strategy
-            state = StateData(
-                deployment_id=deployment_id,
-                version=1,
-                state={},
-            )
-            expected_version = None  # No version check for new state
-            logger.debug(f"Creating initial state for {deployment_id}")
+        from ..state.strategy_state import merge_runner_state_values
 
         progress.last_updated = datetime.now(UTC)
-        state.state["execution_progress"] = progress.to_dict()
-        await runner.state_manager.save_state(state, expected_version=expected_version)
+        # Execution progress shares one row with strategy, metrics, and vault
+        # state. The owned-value CAS primitive reloads and preserves concurrent
+        # overlays while retrying bounded version conflicts, so exact hashes
+        # observed after submission cannot be lost behind a stale row version.
+        await merge_runner_state_values(
+            runner.state_manager,
+            deployment_id,
+            {"execution_progress": progress.to_dict()},
+        )
         logger.debug(
             f"Saved execution progress for {deployment_id}: "
             f"step {progress.completed_step_index + 1}/{progress.total_steps}"
         )
     except Exception as e:
         logger.error(f"Failed to save execution progress: {e}")
+        raise
 
 
 async def clear_execution_progress(runner: Any, deployment_id: str) -> None:
@@ -447,5 +443,8 @@ async def clear_execution_progress(runner: Any, deployment_id: str) -> None:
             del state.state["execution_progress"]
             await runner.state_manager.save_state(state, expected_version=state.version)
             logger.debug(f"Cleared execution progress for {deployment_id}")
+    except StateNotFoundError:
+        return
     except Exception as e:
-        logger.debug(f"Could not clear execution progress: {e}")
+        logger.error(f"Failed to clear execution progress: {e}")
+        raise
