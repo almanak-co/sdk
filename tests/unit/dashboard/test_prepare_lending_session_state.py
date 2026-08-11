@@ -39,10 +39,12 @@ class _StubClient:
         *,
         state: dict[str, Any] | None = None,
         prices: dict[str, float | str] | None = None,
+        position: dict[str, Any] | None = None,
         state_error: Exception | None = None,
     ) -> None:
         self._state = state or {}
         self._prices = prices or {}
+        self._position = position or {}
         self._state_error = state_error
 
     def get_state(self) -> dict[str, Any]:
@@ -53,9 +55,12 @@ class _StubClient:
     def get_price(self, token: str, *, chain: str) -> float | str | None:
         return self._prices.get(token)
 
+    def get_position(self) -> dict[str, Any]:
+        return self._position
 
-def test_merges_raw_state_without_clobbering_session_state() -> None:
-    """Caller-provided keys win; missing/empty keys backfill from raw state."""
+
+def test_live_raw_state_replaces_stale_caller_position_values() -> None:
+    """Gateway state wins for live keys; caller extras remain preserved."""
     client = _StubClient(
         state={
             "collateral_amount": "999",  # should NOT overwrite caller's value
@@ -69,9 +74,191 @@ def test_merges_raw_state_without_clobbering_session_state() -> None:
         config=LendingDashboardConfig(collateral_token="USDC", borrow_token="USDT"),
         strategy_config={"chain": "arbitrum"},
     )
-    assert out["collateral_amount"] == "100"  # caller's value preserved
+    assert out["collateral_amount"] == "999"
     assert out["borrowed_token_amount"] == "50"  # backfilled
     assert out["extra_marker"] == "from_raw"
+
+
+def test_latest_measured_snapshot_replaces_first_loop_state() -> None:
+    client = _StubClient(
+        state={"collateral_amount": "2.2", "borrowed_amount": "0.66", "health_factor": "2.75"},
+        position={
+            "strategy_positions": [
+                {
+                    "position_type": "SUPPLY",
+                    "value_usd": "2.8525277",
+                    "details": {
+                        "asset": "USDC",
+                        "supply_balance": "2.8525277",
+                        "supply_value_usd": "2.8525277",
+                        "health_factor": "2.602438498447043724",
+                        "captured_at": "2026-08-06T01:00:00+00:00",
+                    },
+                },
+                {
+                    "position_type": "BORROW",
+                    "value_usd": "-0.85495646",
+                    "details": {
+                        "asset": "USDT",
+                        "borrow_balance": "0.85495646",
+                        "debt_value_usd": "0.85495646",
+                        "health_factor": "2.602438498447043724",
+                        "captured_at": "2026-08-06T01:00:00+00:00",
+                    },
+                },
+            ]
+        },
+    )
+
+    out = prepare_lending_session_state(
+        client,
+        session_state={"collateral_amount": "2.2", "borrowed_amount": "0.66"},
+        config=LendingDashboardConfig(collateral_token="USDC", borrow_token="USDT"),
+        strategy_config={"chain": "arbitrum"},
+    )
+
+    assert out["collateral_amount"] == "2.8525277"
+    assert out["borrowed_amount"] == "0.85495646"
+    assert out["health_factor"] == "2.602438498447043724"
+    assert out["position_as_of"] == "2026-08-06T01:00:00+00:00"
+
+
+def test_snapshot_rows_replace_heartbeat_twins_instead_of_double_counting() -> None:
+    captured_at = "2026-08-06T01:00:00+00:00"
+    client = _StubClient(
+        state={"collateral_amount": "2.2"},
+        position={
+            "strategy_positions": [
+                {
+                    "position_type": "SUPPLY",
+                    "protocol": "aave_v3",
+                    "chain": "arbitrum",
+                    "value_usd": "2.2",
+                    "details": {"asset": "USDC", "amount": "2.2"},
+                },
+                {
+                    "position_type": "SUPPLY",
+                    "protocol": "aave_v3",
+                    "chain": "arbitrum",
+                    "value_usd": "2.8525277",
+                    "details": {
+                        "asset": "USDC",
+                        "supply_balance": "2.8525277",
+                        "supply_value_usd": "2.8525277",
+                        "captured_at": captured_at,
+                    },
+                },
+            ]
+        },
+    )
+
+    out = prepare_lending_session_state(
+        client,
+        session_state={},
+        config=LendingDashboardConfig(collateral_token="USDC", borrow_token="USDT"),
+        strategy_config={"protocol": "aave_v3", "chain": "arbitrum"},
+    )
+
+    assert out["collateral_amount"] == "2.8525277"
+    assert out["collateral_value_usd"] == "2.8525277"
+
+
+def test_supply_uses_gross_supply_value_instead_of_top_level_net_value() -> None:
+    client = _StubClient(
+        position={
+            "strategy_positions": [
+                {
+                    "position_type": "SUPPLY",
+                    "protocol": "aave_v3",
+                    "chain": "arbitrum",
+                    "value_usd": "60",
+                    "details": {
+                        "asset": "USDC",
+                        "supply_balance": "100",
+                        "supply_value_usd": "100",
+                        "debt_value_usd": "40",
+                        "captured_at": "2026-08-06T01:00:00+00:00",
+                    },
+                }
+            ]
+        }
+    )
+
+    out = prepare_lending_session_state(
+        client,
+        session_state={},
+        config=LendingDashboardConfig(collateral_token="USDC", borrow_token="USDT"),
+        strategy_config={"protocol": "aave_v3", "chain": "arbitrum"},
+    )
+
+    assert out["collateral_value_usd"] == "100"
+
+
+def test_partial_measured_snapshot_does_not_fabricate_missing_leg_as_zero() -> None:
+    client = _StubClient(
+        state={"collateral_amount": "3", "collateral_value_usd": "3"},
+        position={
+            "strategy_positions": [
+                {
+                    "position_type": "BORROW",
+                    "protocol": "aave_v3",
+                    "chain": "arbitrum",
+                    "details": {
+                        "asset": "USDT",
+                        "borrow_balance": "1",
+                        "debt_value_usd": "1",
+                        "captured_at": "2026-08-06T01:00:00+00:00",
+                    },
+                }
+            ]
+        },
+    )
+
+    out = prepare_lending_session_state(
+        client,
+        session_state={},
+        config=LendingDashboardConfig(collateral_token="USDC", borrow_token="USDT"),
+        strategy_config={"protocol": "aave_v3", "chain": "arbitrum"},
+    )
+
+    assert out["collateral_amount"] == "3"
+    assert out["collateral_value_usd"] == "3"
+    assert out["borrowed_amount"] == "1"
+
+
+def test_conflicting_scoped_health_factors_are_explicitly_unmeasured() -> None:
+    client = _StubClient(
+        state={"health_factor": "9"},
+        position={
+            "strategy_positions": [
+                {
+                    "position_type": row_type,
+                    "protocol": "aave_v3",
+                    "chain": "arbitrum",
+                    "details": {
+                        "asset": asset,
+                        balance_key: "1",
+                        value_key: "1",
+                        "health_factor": health_factor,
+                        "captured_at": "2026-08-06T01:00:00+00:00",
+                    },
+                }
+                for row_type, asset, balance_key, value_key, health_factor in (
+                    ("SUPPLY", "USDC", "supply_balance", "supply_value_usd", "2"),
+                    ("BORROW", "USDT", "borrow_balance", "debt_value_usd", "3"),
+                )
+            ]
+        },
+    )
+
+    out = prepare_lending_session_state(
+        client,
+        session_state={},
+        config=LendingDashboardConfig(collateral_token="USDC", borrow_token="USDT"),
+        strategy_config={"protocol": "aave_v3", "chain": "arbitrum"},
+    )
+
+    assert "health_factor" not in out
 
 
 def test_get_state_exception_does_not_raise() -> None:
@@ -98,9 +285,7 @@ def test_alternate_supplied_borrowed_keys_are_recognized() -> None:
             "_supplied_token_amount": "0.5",
             "_borrowed_token_amount": "300",
         },
-        config=LendingDashboardConfig(
-            collateral_token="WETH", borrow_token="USDC", liquidation_ltv=0.85, max_ltv=0.80
-        ),
+        config=LendingDashboardConfig(collateral_token="WETH", borrow_token="USDC", liquidation_ltv=0.85, max_ltv=0.80),
         strategy_config={"chain": "arbitrum"},
     )
     # 0.5 WETH * $2000 = $1000 collateral; 300 USDC * $1 = $300 debt.

@@ -461,6 +461,66 @@ _LP_COMPOSITION_DETAIL_KEYS: tuple[str, ...] = (
     "in_range",
 )
 
+_LENDING_DETAIL_KEYS: tuple[str, ...] = (
+    "amount",
+    "asset",
+    "borrow_balance",
+    "debt_value_usd",
+    "health_factor",
+    "position_id",
+    "supply_balance",
+    "supply_value_usd",
+    "supply_apy_pct",
+    "borrow_apy_pct",
+    "mark_unmeasured",
+    "valuation_status",
+    "supply_value_usd_unmeasured",
+    "debt_value_usd_unmeasured",
+    "valuation_source",
+)
+
+
+def _lending_strategy_positions_from_snapshot(
+    snapshot: PortfolioSnapshot | None,
+) -> list[gateway_pb2.StrategyPosition]:
+    """Surface the latest valuer-measured lending legs to custom dashboards.
+
+    Strategy persistence describes what the strategy last *intended* to hold and
+    can lag later SUPPLY/BORROW/REPAY/WITHDRAW executions.  The portfolio snapshot
+    is refreshed after those executions and carries the gateway-observed balances,
+    USD marks and account health factor.  Reuse ``strategy_positions`` as the
+    typed display transport, as the LP and held-PT projections already do.
+    """
+    if snapshot is None or not getattr(snapshot, "positions", None):
+        return []
+    out: list[gateway_pb2.StrategyPosition] = []
+    captured_at = snapshot.timestamp.isoformat() if snapshot.timestamp is not None else ""
+    for pos in snapshot.positions:
+        position_type = str(getattr(pos.position_type, "value", pos.position_type))
+        if position_type not in {"SUPPLY", "BORROW"}:
+            continue
+        details = getattr(pos, "details", None) or {}
+        if not any(
+            details.get(key) not in (None, "")
+            for key in ("supply_balance", "borrow_balance", "health_factor", "mark_unmeasured")
+        ):
+            continue
+        proto_details = {k: str(details[k]) for k in _LENDING_DETAIL_KEYS if details.get(k) not in (None, "")}
+        if captured_at:
+            proto_details["captured_at"] = captured_at
+        position_id = str(details.get("position_id") or pos.label or "")
+        sp = gateway_pb2.StrategyPosition(
+            position_type=position_type,
+            position_id=position_id,
+            chain=pos.chain,
+            protocol=pos.protocol,
+            details=proto_details,
+        )
+        if pos.value_usd is not None and details.get("mark_unmeasured") is not True:
+            sp.value_usd = str(pos.value_usd)
+        out.append(sp)
+    return out
+
 
 def _lp_strategy_positions_from_snapshot(
     snapshot: PortfolioSnapshot | None,
@@ -568,6 +628,15 @@ def build_position_proto(
     except Exception:
         logger.debug("Failed to populate snapshot balances", exc_info=True)
 
+    lending_positions = _lending_strategy_positions_from_snapshot(snapshot)
+    measured_health_factors = {
+        row.details["health_factor"] for row in lending_positions if row.details.get("health_factor") not in (None, "")
+    }
+    measured_health_factor = next(iter(measured_health_factors)) if len(measured_health_factors) == 1 else None
+
+    if measured_health_factor is not None:
+        position.health_factor = measured_health_factor
+
     if state:
         # Fallback: extract token balances from state dict if snapshot didn't have them
         if not snapshot_balances_populated:
@@ -583,7 +652,7 @@ def build_position_proto(
                     )
 
         # Extract health factor and leverage if present
-        if "health_factor" in state:
+        if not measured_health_factors and "health_factor" in state:
             position.health_factor = str(state["health_factor"])
         if "leverage" in state:
             position.leverage = str(state["leverage"])
@@ -600,6 +669,12 @@ def build_position_proto(
     # card can render what the position IS right now, instead of falling back to
     # wallet balances or the frozen LP_OPEN mint amounts.
     position.strategy_positions.extend(_lp_strategy_positions_from_snapshot(snapshot))
+
+    # Current lending balances/risk from the latest measured snapshot.  This is
+    # intentionally ahead of heartbeat-cached strategy positions: a later
+    # successful intent must update the operator view even when strategy state
+    # still describes the first loop.
+    position.strategy_positions.extend(lending_positions)
 
     # Include cached strategy positions from heartbeat
     if cached_positions:

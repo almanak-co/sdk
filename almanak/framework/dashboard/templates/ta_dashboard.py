@@ -65,6 +65,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
+from almanak.framework.dashboard.money import reject_caller_money_keys
 from almanak.framework.dashboard.plots import (
     plot_adx_indicator,
     plot_atr_indicator,
@@ -79,6 +80,7 @@ from almanak.framework.dashboard.plots.base import apply_theme, get_default_conf
 from almanak.framework.dashboard.plots.ta_plots import SubplotTarget
 from almanak.framework.dashboard.sections import (
     render_cost_stack_section,
+    render_nav_history_section,
     render_pnl_section,
     render_trade_tape_section,
 )
@@ -1017,7 +1019,7 @@ def prepare_ta_session_state(
         The enriched session_state dict. Always returns; degrades to the
         unenriched state on any API failure rather than raising.
     """
-    result: dict[str, Any] = dict(session_state) if session_state else {}
+    result: dict[str, Any] = reject_caller_money_keys(session_state, surface="prepare_ta_session_state")
     if config is None:
         return result
 
@@ -1104,9 +1106,6 @@ def prepare_ta_session_state(
         if start_time is not None:
             result["strategy_start_time"] = start_time
 
-    # Performance "PnL" tile.
-    _populate_performance_pnl(api_client, result)
-
     # Current Position section: balances + base price. Without this the
     # section silently shows 0.0000 / $0.00 / $0.00 even when the wallet
     # holds funds, because _render_position reads keys nothing else fills.
@@ -1160,34 +1159,6 @@ def _populate_trade_tape_derived(
         result.setdefault("buy_signals", buys)
         result.setdefault("sell_signals", sells)
     result.setdefault("total_trades", len(rows))
-
-
-def _populate_performance_pnl(api_client: Any, result: dict[str, Any]) -> None:
-    """Populate the Performance ``total_pnl`` tile from the authoritative
-    summary (24h NAV-based PnL, robust to the swap cost-basis gap).
-
-    ``win_rate`` is intentionally NOT populated — a realized per-trade win
-    rate requires accounting lot-matching the dashboard must not reimplement
-    (and is unreliable while swap cost basis is measured-zero). When it's
-    absent, ``_render_performance`` shows "N/A" rather than a fabricated 50%.
-    """
-    if "total_pnl" in result or api_client is None:
-        return
-    try:
-        summary = api_client.get_summary()
-        if summary is not None:
-            # get_summary may return a typed object or a dict (cf. _trade_tape_rows);
-            # support both so an object-shaped client doesn't silently degrade to $0.
-            pnl_24h = getattr(summary, "pnl_24h_usd", None)
-            if pnl_24h is None and isinstance(summary, dict):
-                pnl_24h = summary.get("pnl_24h_usd")
-            # Empty ≠ Zero: None (typed) and "" (dict-serialised unmeasured)
-            # both mean "no measured 24h value" — leave ``total_pnl`` absent so
-            # the tile renders "—", never a fabricated $0.00 (VIB-5787).
-            if pnl_24h is not None and pnl_24h != "":
-                result["total_pnl"] = pnl_24h
-    except Exception:  # noqa: BLE001
-        logger.debug("api_client.get_summary() failed for TA performance PnL", exc_info=True)
 
 
 def _populate_position_balances(
@@ -1292,6 +1263,7 @@ def render_ta_dashboard(
 
     # Eyeball — am I making or losing money?
     render_pnl_section(deployment_id)
+    render_nav_history_section(deployment_id)
 
     # Charts section - Price with signals and indicator
     _render_charts_section(session_state, strategy_config, config, period)
@@ -2303,47 +2275,22 @@ def _render_position(
 
 
 def _render_performance(session_state: dict[str, Any]) -> None:
-    """Render the performance metrics section."""
+    """Render non-money strategy KPIs.
+
+    PnL and NAV are already rendered from the accounting-backed sections.
+    Transporting a second money value through ``session_state`` created the
+    contradictory same-page PnL surface tracked by VIB-5341.
+    """
     trades = session_state.get("total_trades", 0)
     # win_rate is None/absent unless a caller computed a real realized win rate.
     # Previously this defaulted to "50", which rendered a fabricated 50% for
     # every strategy. Show "N/A" instead of inventing a coin-flip stat.
     win_rate_raw = session_state.get("win_rate")
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
     with col1:
-        # VIB-5737: this tile is the WALLET 24h NAV delta (StrategySummary.
-        # pnl_24h_usd), a different metric than the authoritative "Strategy PnL"
-        # (realized + unrealized) in the money-trail card above. Labeling both
-        # "PnL" made them look like two contradictory values for the same thing
-        # (the field bug: this froze at ~gas while Strategy PnL moved). Name it
-        # explicitly. Empty ≠ Zero: when the summary RPC failed / pnl_24h is
-        # unmeasured, ``total_pnl`` is ABSENT — show "—", never a fabricated
-        # "$0.00" that reads as a measured break-even.
-        total_pnl_raw = session_state.get("total_pnl")
-        if total_pnl_raw is not None and total_pnl_raw != "":
-            pnl = Decimal(str(total_pnl_raw))
-            st.metric(
-                "24h PnL",
-                f"${pnl:+,.2f}",
-                help=(
-                    "Wallet net-asset-value change over the last 24h. Distinct from "
-                    "the Strategy PnL card above (realized + unrealized mark-to-market); "
-                    "on a short run this is dominated by gas and moves little."
-                ),
-            )
-        else:
-            st.metric(
-                "24h PnL",
-                "—",
-                help=(
-                    "Wallet 24h NAV change — unavailable (the summary could not be "
-                    "read). Shown as — rather than a fabricated $0.00 (Empty ≠ Zero)."
-                ),
-            )
-    with col2:
         st.metric("Trades", str(trades))
-    with col3:
+    with col2:
         if win_rate_raw is None:
             st.metric(
                 "Win Rate",

@@ -7,7 +7,7 @@ confirmed lying-tile behaviour from the 20260713-0947 robinhood mainnet run:
 1. "active exposure" literal on a flat/closed position (Open position NAV badge)
 2. Max drawdown rendered as a positive number with an up-arrow
 4. "BUY SIGNAL" badge still shown after teardown (lifecycle gating)
-5. 24h-PnL fabricated "$0.00" vs a real Strategy PnL (Empty ≠ Zero)
+5. TA-local 24h PnL disagreed with canonical Strategy PnL
 6. TOKEN_DECIMALS static map missing a chain's stable (USDG) → registry-first
 7. LP tick→price conversion using wrong decimals → collapsed price axis
 """
@@ -318,16 +318,10 @@ def test_summary_to_dict_serialises_unmeasured_24h_as_empty():
     assert client._summary_to_dict(summary_zero)["pnl_24h_usd"] == "0"
 
 
-def test_populate_performance_pnl_skips_empty_string(monkeypatch):
+def test_ta_template_has_no_second_pnl_population_path():
     import almanak.framework.dashboard.templates.ta_dashboard as tad
 
-    client = SimpleNamespace(get_summary=lambda: {"pnl_24h_usd": ""})
-    result: dict = {}
-    tad._populate_performance_pnl(client, result)
-    # "" (unmeasured) must NOT populate total_pnl → tile renders "—".
-    assert "total_pnl" not in result
-
-    client_measured = SimpleNamespace(get_summary=lambda: {"pnl_24h_usd": "0"})
-    result2: dict = {}
-    tad._populate_performance_pnl(client_measured, result2)
-    assert result2["total_pnl"] == "0"
+    # VIB-5341: TA used to translate GetSummary.pnl_24h_usd into a second
+    # template-local PnL tile beside the canonical accounting PnL section.
+    # Removing the producer entirely makes disagreement structurally impossible.
+    assert not hasattr(tad, "_populate_performance_pnl")

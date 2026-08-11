@@ -369,24 +369,6 @@ def test_prepare_populates_total_trades_from_tape():
     assert out["total_trades"] == 2
 
 
-def test_prepare_populates_total_pnl_from_summary():
-    # Performance "PnL" tile: headline PnL from the authoritative summary
-    # (24h NAV-based), not a hardcoded 0.
-    client = _FakeClient(summary={"pnl_24h_usd": "1.23"})
-    out = prepare_ta_session_state(client, session_state={}, config=_config())
-    assert out["total_pnl"] == "1.23"
-
-
-def test_prepare_populates_total_pnl_from_object_summary():
-    # get_summary may return a typed object (not a dict) — attribute access must
-    # work so the PnL tile doesn't silently degrade to $0.00.
-    from types import SimpleNamespace
-
-    client = _FakeClient(summary=SimpleNamespace(pnl_24h_usd="2.50"))
-    out = prepare_ta_session_state(client, session_state={}, config=_config())
-    assert out["total_pnl"] == "2.50"
-
-
 def test_prepare_leaves_win_rate_unset():
     # win_rate must NOT be fabricated — _render_performance renders "N/A" when
     # absent rather than the old hardcoded 50%.
@@ -395,7 +377,7 @@ def test_prepare_leaves_win_rate_unset():
     assert "win_rate" not in out
 
 
-def test_prepare_preserves_caller_supplied_performance_keys():
+def test_prepare_rejects_caller_money_but_preserves_strategy_kpis():
     client = _FakeClient(
         summary={"pnl_24h_usd": "9.99"},
         tape_rows=[{"timestamp": "2026-06-03T01:00:00Z", "intent_type": "SWAP"}],
@@ -406,7 +388,7 @@ def test_prepare_preserves_caller_supplied_performance_keys():
         config=_config(),
     )
     assert out["total_trades"] == 7
-    assert out["total_pnl"] == "3.50"
+    assert "total_pnl" not in out
     assert out["win_rate"] == "62"
 
 
@@ -415,20 +397,18 @@ def test_render_performance_shows_na_without_win_rate():
     # branch (win_rate absent) and the populated branch both render without raising.
     from almanak.framework.dashboard.templates.ta_dashboard import _render_performance
 
-    _render_performance({"total_pnl": "1.23", "total_trades": 2})  # win_rate absent → N/A
-    _render_performance({"total_pnl": "1.23", "total_trades": 2, "win_rate": "60"})  # explicit → rendered
+    _render_performance({"total_trades": 2})  # win_rate absent → N/A
+    _render_performance({"total_trades": 2, "win_rate": "60"})  # explicit → rendered
 
 
-def test_render_performance_24h_pnl_empty_not_zero(monkeypatch):
-    # VIB-5737 / Empty ≠ Zero: when total_pnl is ABSENT (summary RPC failed /
-    # pnl_24h unmeasured) the 24h PnL tile shows "—", never a fabricated "$0.00".
+def test_render_performance_has_no_second_money_tile(monkeypatch):
     import almanak.framework.dashboard.templates.ta_dashboard as tad
 
     calls: list[tuple[str, str]] = []
 
     class _St:
         def columns(self, _n):
-            return (self, self, self)
+            return (self, self)
 
         def __enter__(self):
             return self
@@ -441,16 +421,9 @@ def test_render_performance_24h_pnl_empty_not_zero(monkeypatch):
 
     monkeypatch.setattr(tad, "st", _St())
 
-    # total_pnl absent → "—"
     _render_performance = tad._render_performance
-    _render_performance({"total_trades": 5})
-    pnl_tiles = [v for lbl, v in calls if lbl == "24h PnL"]
-    assert pnl_tiles == ["—"]
-
-    calls.clear()
-    # measured zero is legitimate → "$+0.00" (NOT "—")
-    _render_performance({"total_trades": 5, "total_pnl": "0"})
-    assert [v for lbl, v in calls if lbl == "24h PnL"] == ["$+0.00"]
+    _render_performance({"total_trades": 5, "total_pnl": "999"})
+    assert [label for label, _value in calls] == ["Trades", "Win Rate"]
 
 
 def test_prepare_preserves_caller_supplied_balances():

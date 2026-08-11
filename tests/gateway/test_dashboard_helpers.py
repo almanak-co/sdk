@@ -916,6 +916,105 @@ class TestBuildPositionProto:
         assert position.health_factor == "1.8"
         assert position.leverage == "2.5"
 
+    def test_latest_snapshot_lending_state_overrides_stale_strategy_health(self):
+        snapshot = self._make_snapshot([])
+        snapshot.positions = [
+            PositionValue(
+                position_type=PositionType.SUPPLY,
+                protocol="aave_v3",
+                chain="arbitrum",
+                value_usd=Decimal("2.8525277"),
+                label="aave_v3 SUPPLY",
+                details={
+                    "asset": "USDC",
+                    "position_id": "aave_v3-supply-USDC-arbitrum",
+                    "supply_balance": "2.8525277",
+                    "supply_value_usd": "2.8525277",
+                    "health_factor": "2.602438498447043724",
+                    "valuation_source": "on_chain",
+                },
+            ),
+            PositionValue(
+                position_type=PositionType.BORROW,
+                protocol="aave_v3",
+                chain="arbitrum",
+                value_usd=Decimal("-0.85495646"),
+                label="aave_v3 BORROW",
+                details={
+                    "asset": "USDT",
+                    "position_id": "aave_v3-borrow-USDT-arbitrum",
+                    "borrow_balance": "0.85495646",
+                    "debt_value_usd": "0.85495646",
+                    "health_factor": "2.602438498447043724",
+                    "valuation_source": "on_chain",
+                },
+            ),
+        ]
+
+        position = build_position_proto(
+            state={"health_factor": "2.75"},
+            cached_positions=None,
+            snapshot=snapshot,
+        )
+
+        assert position.health_factor == "2.602438498447043724"
+        assert [row.position_type for row in position.strategy_positions] == ["SUPPLY", "BORROW"]
+        assert position.strategy_positions[0].details["supply_balance"] == "2.8525277"
+        assert position.strategy_positions[1].details["borrow_balance"] == "0.85495646"
+        assert position.strategy_positions[0].details["captured_at"] == snapshot.timestamp.isoformat()
+
+    def test_unmeasured_lending_leg_preserves_provenance_without_fabricated_value(self):
+        snapshot = self._make_snapshot([])
+        snapshot.positions = [
+            PositionValue(
+                position_type=PositionType.SUPPLY,
+                protocol="aave_v3",
+                chain="arbitrum",
+                value_usd=Decimal("0"),
+                label="aave_v3 SUPPLY",
+                details={
+                    "asset": "USDC",
+                    "valuation_source": "on_chain",
+                    "valuation_status": "no_path",
+                    "mark_unmeasured": True,
+                    "supply_value_usd_unmeasured": True,
+                },
+            )
+        ]
+
+        position = build_position_proto(state=None, cached_positions=None, snapshot=snapshot)
+
+        assert len(position.strategy_positions) == 1
+        row = position.strategy_positions[0]
+        assert row.details["mark_unmeasured"] == "True"
+        assert row.details["valuation_status"] == "no_path"
+        assert row.value_usd == ""
+
+    def test_conflicting_measured_health_factors_do_not_pick_arbitrary_first(self):
+        snapshot = self._make_snapshot([])
+        snapshot.positions = [
+            PositionValue(
+                position_type=leg,
+                protocol=protocol,
+                chain="arbitrum",
+                value_usd=Decimal("1"),
+                label=f"{protocol} {leg.value}",
+                details={
+                    "asset": asset,
+                    balance_key: "1",
+                    "health_factor": health_factor,
+                },
+            )
+            for leg, protocol, asset, balance_key, health_factor in (
+                (PositionType.SUPPLY, "aave_v3", "USDC", "supply_balance", "2"),
+                (PositionType.BORROW, "compound_v3", "USDT", "borrow_balance", "3"),
+            )
+        ]
+
+        position = build_position_proto(state={"health_factor": "9"}, cached_positions=None, snapshot=snapshot)
+
+        assert position.health_factor == ""
+
     def test_missing_health_factor_and_leverage_stay_empty(self):
         """Absent keys coalesce to the proto-default empty string."""
         state = {"balances": {}}  # present but empty dict

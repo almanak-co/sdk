@@ -67,6 +67,8 @@ def _enter_template_patches(
     module_path: str,
     calls: list[tuple[str, Any]],
     extra_targets: tuple[str, ...] = (),
+    *,
+    includes_nav: bool = False,
 ) -> None:
     """Activate the standard patches needed to render a template in a unit test.
 
@@ -80,6 +82,8 @@ def _enter_template_patches(
     st_mock.columns.side_effect = _fake_columns
 
     stack.enter_context(patch(f"{module_path}.render_pnl_section", side_effect=_track_call("pnl", calls)))
+    if includes_nav:
+        stack.enter_context(patch(f"{module_path}.render_nav_history_section", side_effect=_track_call("nav", calls)))
     stack.enter_context(patch(f"{module_path}.render_cost_stack_section", side_effect=_track_call("cost", calls)))
     stack.enter_context(patch(f"{module_path}.render_trade_tape_section", side_effect=_track_call("tape", calls)))
     stack.enter_context(patch(f"{module_path}.st", st_mock))
@@ -93,6 +97,12 @@ def call_log() -> list[tuple[str, Any]]:
 
 
 _EXPECTED_ORDER = [("pnl", "strat-1"), ("cost", "strat-1"), ("tape", "strat-1")]
+_EXPECTED_ORDER_WITH_NAV = [
+    ("pnl", "strat-1"),
+    ("nav", "strat-1"),
+    ("cost", "strat-1"),
+    ("tape", "strat-1"),
+]
 
 
 # ---------------------------------------------------------------------------
@@ -110,9 +120,10 @@ class TestTATemplateSectionOrdering:
                 "almanak.framework.dashboard.templates.ta_dashboard",
                 call_log,
                 extra_targets=("plot_price_with_signals", "make_subplots", "go"),
+                includes_nav=True,
             )
             render_ta_dashboard("strat-1", {}, {}, TADashboardConfig(indicator_name="RSI"))
-        assert call_log == _EXPECTED_ORDER
+        assert call_log == _EXPECTED_ORDER_WITH_NAV
 
 
 class TestLPTemplateSectionOrdering:
@@ -162,9 +173,10 @@ class TestLendingTemplateSectionOrdering:
                     "plot_collateral_breakdown",
                     "plot_lending_rates_comparison",
                 ),
+                includes_nav=True,
             )
             render_lending_dashboard("strat-1", {}, {}, get_aave_v3_config())
-        assert call_log == _EXPECTED_ORDER
+        assert call_log == _EXPECTED_ORDER_WITH_NAV
 
 
 class TestPerpTemplateSectionOrdering:

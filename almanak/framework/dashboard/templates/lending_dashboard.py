@@ -46,8 +46,23 @@ from almanak.framework.dashboard.plots import (
 )
 from almanak.framework.dashboard.sections import (
     render_cost_stack_section,
+    render_nav_history_section,
     render_pnl_section,
     render_trade_tape_section,
+)
+
+_LENDING_LIVE_KEYS = frozenset(
+    {
+        "collateral_amount",
+        "borrowed_amount",
+        "collateral_value_usd",
+        "borrowed_value_usd",
+        "health_factor",
+        "ltv",
+        "leverage",
+        "available_to_borrow_usd",
+        "position_as_of",
+    }
 )
 
 
@@ -142,7 +157,9 @@ def _apply_risk_metrics(
     # per-asset ``liquidationThreshold``) would silently mask the real
     # liquidation distance — for a money-critical metric, that is the exact
     # failure mode this dashboard exists to prevent.
-    if borrowed_value > 0 and not _positive_decimal(hydrated.get("health_factor")):
+    if hydrated.pop("health_factor_unmeasured", False):
+        hydrated.pop("health_factor", None)
+    elif borrowed_value > 0 and not _positive_decimal(hydrated.get("health_factor")):
         hydrated["health_factor"] = str((collateral_value * Decimal(str(config.liquidation_ltv))) / borrowed_value)
     elif borrowed_value <= 0:
         # No debt -> no liquidation risk. Drop any stale ``health_factor``
@@ -190,6 +207,105 @@ def _resolve_health_factor(session_state: dict[str, Any]) -> float | None:
     return float(hf) if hf is not None else None
 
 
+def _scoped_snapshot_lending_rows(position: dict[str, Any], protocol: str, chain: str) -> list[dict[str, Any]]:
+    def is_scoped(row: Any) -> bool:
+        if not isinstance(row, dict) or str(row.get("position_type") or "").upper() not in {"SUPPLY", "BORROW"}:
+            return False
+        details = details_value if isinstance((details_value := row.get("details")), dict) else {}
+        scope = (str(row.get(key) or "").lower() for key in ("protocol", "chain"))
+        return bool(details.get("captured_at")) and all(
+            actual in {"", expected.lower()} for actual, expected in zip(scope, (protocol, chain), strict=True)
+        )
+
+    return [row for row in position.get("strategy_positions", []) if is_scoped(row)]
+
+
+def _aggregate_measured_lending_leg(
+    rows: list[dict[str, Any]],
+    *,
+    row_type: str,
+    asset_symbol: str,
+    balance_key: str,
+    value_key: str,
+) -> tuple[Decimal | None, Decimal | None]:
+    amounts: list[Decimal] = []
+    values: list[Decimal] = []
+    for row in rows:
+        if str(row.get("position_type") or "").upper() != row_type:
+            continue
+        details = details_value if isinstance((details_value := row.get("details")), dict) else {}
+        asset = str(details.get("asset") or "").upper()
+        if (asset and asset != asset_symbol.upper()) or details.get("mark_unmeasured") in {True, "true"}:
+            continue
+        amount = _decimal_or_none(details.get(balance_key))
+        if amount is None:
+            continue
+        amounts.append(amount)
+        value = _decimal_or_none(details.get(value_key))
+        if value is not None:
+            values.append(abs(value))
+    if not amounts:
+        return None, None
+    return sum(amounts, Decimal("0")), sum(values, Decimal("0")) if len(values) == len(amounts) else None
+
+
+def _measured_lending_snapshot(
+    api_client: Any,
+    *,
+    collateral_token: str,
+    borrow_token: str,
+    protocol: str,
+    chain: str,
+) -> dict[str, Any]:
+    """Project the latest gateway-valued lending legs into template fields."""
+    try:
+        position = api_client.get_position()
+    except Exception:  # noqa: BLE001
+        return {}
+    if not isinstance(position, dict):
+        return {}
+    rows = _scoped_snapshot_lending_rows(position, protocol, chain)
+    if not rows:
+        return {}
+
+    supplied, supplied_usd = _aggregate_measured_lending_leg(
+        rows,
+        row_type="SUPPLY",
+        asset_symbol=collateral_token,
+        balance_key="supply_balance",
+        value_key="supply_value_usd",
+    )
+    borrowed, borrowed_usd = _aggregate_measured_lending_leg(
+        rows,
+        row_type="BORROW",
+        asset_symbol=borrow_token,
+        balance_key="borrow_balance",
+        value_key="debt_value_usd",
+    )
+    result: dict[str, Any] = {
+        key: str(value)
+        for key, value in (
+            ("collateral_amount", supplied),
+            ("collateral_value_usd", supplied_usd),
+            ("borrowed_amount", borrowed),
+            ("borrowed_value_usd", borrowed_usd),
+        )
+        if value is not None
+    }
+    health_factors = {
+        value
+        for row in rows
+        if (details := row.get("details")) and details.get("mark_unmeasured") not in {True, "true"}
+        if (value := _decimal_or_none(details.get("health_factor"))) is not None
+    }
+    if len(health_factors) == 1:
+        result["health_factor"] = str(next(iter(health_factors)))
+    else:
+        result["health_factor_unmeasured"] = True
+    result["position_as_of"] = max(str(row["details"]["captured_at"]) for row in rows)
+    return result
+
+
 def prepare_lending_session_state(
     api_client: Any,
     *,
@@ -207,7 +323,11 @@ def prepare_lending_session_state(
     useful for Aave-style supply/borrow loops.
     """
     strategy_config = strategy_config or {}
-    hydrated = dict(session_state or {})
+    # Caller state may contain chart/UI extras, but live position keys must be
+    # refreshed. Preserving them is what froze the looping card after its first
+    # SUPPLY/BORROW pair (VIB-6581).
+    caller_state = dict(session_state or {})
+    hydrated = {k: v for k, v in caller_state.items() if k not in _LENDING_LIVE_KEYS}
 
     try:
         raw_state = api_client.get_state()
@@ -215,12 +335,31 @@ def prepare_lending_session_state(
         raw_state = {}
     if isinstance(raw_state, dict):
         for key, value in raw_state.items():
-            if key not in hydrated or hydrated[key] in (None, ""):
+            if key in _LENDING_LIVE_KEYS or key not in hydrated or hydrated[key] in (None, ""):
                 hydrated[key] = value
 
     collateral_token = str(strategy_config.get("collateral_token") or config.collateral_token)
     borrow_token = str(strategy_config.get("borrow_token") or config.borrow_token)
     chain = str(strategy_config.get("chain") or config.chain)
+
+    # Latest portfolio snapshot is refreshed after every successful intent and
+    # therefore outranks strategy persistence for live balances/risk.
+    hydrated.update(
+        _measured_lending_snapshot(
+            api_client,
+            collateral_token=collateral_token,
+            borrow_token=borrow_token,
+            protocol=str(strategy_config.get("protocol") or config.protocol),
+            chain=chain,
+        )
+    )
+
+    # Historical/replay dashboards may have no live position response. Preserve
+    # the documented caller fallback only for fields neither gateway source
+    # measured; a real zero from either source is retained.
+    for key in _LENDING_LIVE_KEYS:
+        if key not in hydrated and caller_state.get(key) not in (None, ""):
+            hydrated[key] = caller_state[key]
 
     supplied_amount = _as_decimal(
         hydrated.get("collateral_amount", hydrated.get("supplied_token_amount", hydrated.get("_supplied_token_amount")))
@@ -293,6 +432,10 @@ def render_lending_dashboard(
 
     # Eyeball — am I making or losing money?
     render_pnl_section(deployment_id)
+    render_nav_history_section(deployment_id)
+
+    if session_state.get("position_as_of"):
+        st.caption(f"Position state as of {session_state['position_as_of']}")
 
     # Health Factor and LTV Section
     col1, col2 = st.columns(2)
