@@ -1327,3 +1327,45 @@ class TestEmptyOracleFailsClosed:
         monkeypatch.setenv("ALMANAK_ALLOW_PLACEHOLDER_PRICES", "0")
         assert (await runner.run_iteration(strategy)).success is False
         assert execution_orchestrator.execute_called is False
+
+
+class TestManagedForkCompilerWiring:
+    """ALM-3184: the live runner must carry its positive network declaration."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("network", "expected"),
+        [("anvil", True), ("mainnet", False), (None, False), ("not-a-network", False)],
+    )
+    async def test_runner_threads_only_explicit_anvil(
+        self,
+        runner: StrategyRunner,
+        monkeypatch: pytest.MonkeyPatch,
+        network: str | None,
+        expected: bool,
+    ) -> None:
+        from almanak.framework.runner import strategy_runner as runner_module
+
+        real_config = runner_module.IntentCompilerConfig
+        captured = []
+
+        def capture_config(**kwargs):
+            config = real_config(**kwargs)
+            captured.append(config)
+            return config
+
+        monkeypatch.setattr(runner_module, "IntentCompilerConfig", capture_config)
+        strategy = MockStrategy(
+            decide_returns=Intent.swap(
+                from_token="USDC",
+                to_token="ETH",
+                amount_usd=Decimal("100"),
+            )
+        )
+        strategy._gateway_network = network
+
+        result = await runner.run_iteration(strategy)
+
+        assert result.success is True
+        assert captured, "runner never constructed its in-process compiler config"
+        assert captured[-1].managed_fork is expected

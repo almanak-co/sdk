@@ -61,6 +61,41 @@ class TestValidateTeardownOptions:
         th.validate_teardown_options(no_gateway=False, network=None, discover=True, wallet_wide=False)
 
 
+class TestManagedForkTeardownCompilerWiring:
+    """The direct CLI teardown compiler consumes the resolved gateway network."""
+
+    @pytest.mark.parametrize(
+        ("network", "expected"),
+        [("anvil", True), ("mainnet", False), (None, False), ("anvil-ish", False)],
+    )
+    def test_build_machinery_threads_only_explicit_anvil(self, monkeypatch, network, expected):
+        from almanak.framework.execution import gateway_orchestrator
+        from almanak.framework.intents import compiler as compiler_module
+        from almanak.framework.teardown import state_manager as teardown_state
+
+        captured = SimpleNamespace(config=None)
+
+        class FakeCompiler:
+            def __init__(self, **kwargs):
+                captured.config = kwargs["config"]
+
+        monkeypatch.setattr(gateway_orchestrator, "GatewayExecutionOrchestrator", MagicMock)
+        monkeypatch.setattr(compiler_module, "IntentCompiler", FakeCompiler)
+        monkeypatch.setattr(teardown_state, "TeardownStateAdapter", MagicMock)
+
+        machinery = th.build_teardown_machinery(
+            gateway_client=MagicMock(),
+            chain="arbitrum",
+            wallet_address="0x1234567890abcdef1234567890abcdef12345678",
+            price_oracle={"ETH": Decimal("3000")},
+            no_accounting=False,
+            network=network,
+        )
+
+        assert machinery.compiler is not None
+        assert captured.config.managed_fork is expected
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Plan-B --discover: self-resolved deployment_id + sharp attribution gate (VIB-5476)
 # ──────────────────────────────────────────────────────────────────────────────

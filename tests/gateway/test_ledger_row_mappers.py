@@ -44,6 +44,7 @@ class TestLedgerEntryToProto:
             protocol="uniswap_v3",
             success=True,
             error="",
+            extracted_data_json='{"sub_transactions":[]}',
         )
         msg = _ledger_entry_to_proto(entry)
         assert msg.id == "ledger-1"
@@ -64,6 +65,7 @@ class TestLedgerEntryToProto:
         assert msg.protocol == "uniswap_v3"
         assert msg.success is True
         assert msg.error == ""
+        assert msg.extracted_data_json == '{"sub_transactions":[]}'
 
     def test_falsy_fields_collapse_to_wire_defaults(self):
         entry = LedgerEntry(

@@ -175,7 +175,7 @@ def resolve_wallet_address(
 class GatewaySetupResult:
     """Bundle of artifacts produced by ``setup_gateway``.
 
-    The click body needs all four downstream:
+    The click body needs all five downstream:
     - ``client`` — talks to the gateway over gRPC
     - ``managed_gateway`` — set only when we auto-started one; ``None`` for
       ``--no-gateway``. The cleanup path stops it.
@@ -184,12 +184,18 @@ class GatewaySetupResult:
     - ``solana_anvil_needed`` — derived during managed-gateway boot from
       the strategy's chain dispatch; the Solana fork bring-up below
       consults it.
+    - ``network`` — the resolved positive network declaration consumed by
+      in-process compiler money-path guards; unknown for ``--no-gateway``.
     """
 
     client: GatewayClient
     managed_gateway: ManagedGateway | None
     gateway_port: int
     solana_anvil_needed: bool
+    # Positive network declaration used by downstream money-path guards.
+    # ``None`` is intentional for --no-gateway: the CLI cannot attest to the
+    # externally managed gateway's environment, so consumers fail closed.
+    network: str | None
 
 
 def setup_gateway(
@@ -258,6 +264,7 @@ def setup_gateway(
             managed_gateway=None,
             gateway_port=gateway_port,
             solana_anvil_needed=solana_anvil_needed,
+            network=None,
         )
 
     # Default: auto-start a managed gateway.
@@ -389,6 +396,7 @@ def setup_gateway(
         managed_gateway=managed_gateway,
         gateway_port=gateway_port,
         solana_anvil_needed=solana_anvil_needed,
+        network=resolved_network,
     )
 
 
@@ -1344,6 +1352,7 @@ def build_teardown_machinery(
     wallet_address: str | None,
     price_oracle: Any | None,
     no_accounting: bool,
+    network: str | None = None,
 ) -> TeardownMachinery:
     """Construct the synchronous teardown machinery and emit the
     ``--no-accounting`` operator-warning if applicable.
@@ -1362,6 +1371,7 @@ def build_teardown_machinery(
     from almanak.framework.local_paths import LocalPathError
     from almanak.framework.teardown.state_manager import TeardownStateAdapter
 
+    from ..execution.fork_signal import is_managed_fork_network
     from ..execution.gateway_orchestrator import GatewayExecutionOrchestrator
     from ..intents.compiler import IntentCompiler, IntentCompilerConfig
 
@@ -1381,7 +1391,10 @@ def build_teardown_machinery(
     # gateway_client is mandatory: LP_CLOSE compilation queries on-chain state
     # (ERC20 LP balances for Aerodrome, position liquidity for Uniswap V3).
     # Without it every on-chain query returns None and compilation fails silently.
-    compiler_config = IntentCompilerConfig(allow_placeholder_prices=price_oracle is None)
+    compiler_config = IntentCompilerConfig(
+        allow_placeholder_prices=price_oracle is None,
+        managed_fork=is_managed_fork_network(network),
+    )
     compiler = IntentCompiler(
         chain=chain,  # type: ignore[arg-type]
         wallet_address=wallet_address,  # type: ignore[arg-type]

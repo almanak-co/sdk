@@ -62,6 +62,7 @@ from ..data.interfaces import BalanceProvider, PriceOracle
 from ..execution.circuit_breaker import CircuitBreaker
 from ..execution.enso_state_provider import EnsoStateProvider
 from ..execution.extract_result import CriticalAccountingError
+from ..execution.fork_signal import is_managed_fork_network
 from ..execution.interfaces import TransactionReceipt as FullTransactionReceipt
 from ..execution.multichain import (
     MultiChainOrchestrator,
@@ -7417,6 +7418,10 @@ class StrategyRunner:
                 state.price_oracle = {}
         compiler_config = IntentCompilerConfig(
             allow_placeholder_prices=state.price_oracle is None,
+            # ALM-3184: the runner's gateway declaration is the authoritative
+            # network environment. Only explicit Anvil relaxes fork-specific
+            # money-path guards; absent/malformed declarations stay production.
+            managed_fork=is_managed_fork_network(getattr(strategy, "_gateway_network", None)),
         )
 
         state.compiler = IntentCompiler(

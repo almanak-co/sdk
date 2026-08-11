@@ -67,6 +67,7 @@ from almanak.framework.runner.runner_state import (
     CapitalFlowAttributionError,
     CapitalFlowMeasurementError,
     _build_metrics_for_snapshot,
+    _capital_flow_strategy_tx_hashes,
     _populate_capital_flows,
     _recover_capital_flow_record,
     _write_valuation_into_strategy_state,
@@ -311,6 +312,8 @@ def _gateway_ledger_row(
     epoch: int = 1_784_000_000,
     intent_type: str = "SUPPLY",
     with_tx_hash: bool = True,
+    gas_used: int = 0,
+    extracted_data_json: str = "",
 ) -> dict[str, Any]:
     """A row built by the REAL ``_proto_ledger_to_dict`` from a real proto.
 
@@ -337,7 +340,9 @@ def _gateway_ledger_row(
             chain=chain,
             timestamp=epoch,
             tx_hash=tx,
+            gas_used=gas_used,
             success=True,
+            extracted_data_json=extracted_data_json,
         )
     )
     assert isinstance(row["timestamp"], int), "gateway rows carry int epochs, not datetimes"
@@ -406,6 +411,23 @@ def _ledger_row(*, tx: str = "0xanchor", chain: str = CHAIN, seconds: int = 0) -
         tx_hash=tx,
         chain=chain,
         timestamp=datetime(2026, 7, 19, 12, 0, seconds, tzinfo=UTC),
+        success=True,
+        error="",
+        gas_used=0,
+        extracted_data_json=json.dumps(
+            {
+                "sub_transactions": [
+                    {
+                        "tx_hash": tx,
+                        "target_contract": CONTRACT,
+                        "function_selector": "",
+                        "gas_used": 0,
+                        "status": "success",
+                        "role": "ACTION",
+                    }
+                ]
+            }
+        ),
     )
 
 
@@ -1410,6 +1432,149 @@ class TestGatewayLedgerRowShape:
         assert record["unclassified_in_usd"] == "0"
         assert metrics.deposits_usd == Decimal("0")
         assert metrics.withdrawals_usd == Decimal("0")
+
+    @pytest.mark.asyncio
+    async def test_validated_child_collect_receipt_is_strategy_owned(self):
+        """The exact production seam: LP_CLOSE proceeds land on receipt two."""
+        parent = "0x" + "68" * 32
+        collect = "0x" + "69" * 32
+        extracted = json.dumps(
+            {
+                "sub_transactions": [
+                    {
+                        "tx_hash": parent,
+                        "target_contract": CONTRACT,
+                        "function_selector": "",
+                        "gas_used": 10,
+                        "status": "success",
+                        "role": "ACTION",
+                    },
+                    {
+                        "tx_hash": collect,
+                        "target_contract": CONTRACT,
+                        "function_selector": "",
+                        "gas_used": 20,
+                        "status": "success",
+                        "role": "ACTION",
+                    },
+                ]
+            }
+        )
+        row = _gateway_ledger_row(
+            tx=parent,
+            intent_type="LP_CLOSE",
+            gas_used=30,
+            extracted_data_json=extracted,
+        )
+        sm = FakeGatewayStateManager(rows=[row])
+        sm.snapshot_mirror = _measured_mirror()
+        runner = FakeRunner(sm)
+        eth = FakeEth(
+            head=120,
+            logs=[_log(frm=CONTRACT, to=WALLET, amount=999_000_000, block=110, tx=collect)],
+            codes={CONTRACT: "0x6080604052"},
+        )
+        metrics, snapshot = _metrics(), _snapshot()
+
+        await _run(runner, metrics, snapshot, {CHAIN: FakeWeb3(eth)})
+
+        record = snapshot.snapshot_metadata[CAPITAL_FLOWS_KEY]
+        assert collect in _capital_flow_strategy_tx_hashes([row])
+        assert record["status"] == STATUS_MEASURED
+        assert record["pending_unclassified"] == []
+        assert metrics.deposits_usd == Decimal("0")
+
+    def test_blank_success_parent_never_creates_synthetic_zero_hash(self):
+        noop = _gateway_ledger_row(tx="")
+        noop["success"] = True
+        noop["error"] = ""
+        noop["extracted_data_json"] = ""
+
+        assert _capital_flow_strategy_tx_hashes([noop]) == frozenset()
+
+    def test_failed_parent_is_not_strategy_owned(self):
+        failed = _gateway_ledger_row(tx="0xfailed")
+        failed["success"] = False
+        failed["error"] = "execution reverted"
+
+        assert _capital_flow_strategy_tx_hashes([failed]) == frozenset()
+
+    @pytest.mark.asyncio
+    async def test_unknown_contract_inflow_not_in_receipt_set_still_poisons(self):
+        """A protocol-shaped counterparty does not grant an allowlist bypass."""
+        parent = "0x" + "70" * 32
+        external = "0x" + "71" * 32
+        extracted = json.dumps(
+            {
+                "sub_transactions": [
+                    {
+                        "tx_hash": parent,
+                        "target_contract": CONTRACT,
+                        "function_selector": "",
+                        "gas_used": 10,
+                        "status": "success",
+                        "role": "ACTION",
+                    }
+                ]
+            }
+        )
+        row = _gateway_ledger_row(tx=parent, gas_used=10, extracted_data_json=extracted)
+        sm = FakeGatewayStateManager(rows=[row])
+        sm.snapshot_mirror = _measured_mirror()
+        runner = FakeRunner(sm)
+        eth = FakeEth(
+            head=120,
+            logs=[_log(frm=CONTRACT, to=WALLET, amount=999_000_000, block=110, tx=external)],
+            codes={CONTRACT: "0x6080604052"},
+        )
+
+        record = await _two_cycles(runner, eth)
+
+        assert external not in _capital_flow_strategy_tx_hashes([row])
+        assert record["status"] == STATUS_UNMEASURED
+        assert record["unmeasured_reason"] == REASON_UNCLASSIFIED_MATERIAL
+
+    @pytest.mark.asyncio
+    async def test_failed_child_receipt_cannot_forgive_matching_inflow(self):
+        child = "0x" + "72" * 32
+        parent = "0x" + "73" * 32
+        extracted = json.dumps(
+            {
+                "sub_transactions": [
+                    {
+                        "tx_hash": parent,
+                        "target_contract": CONTRACT,
+                        "function_selector": "",
+                        "gas_used": 10,
+                        "status": "success",
+                        "role": "ACTION",
+                    },
+                    {
+                        "tx_hash": child,
+                        "target_contract": CONTRACT,
+                        "function_selector": "",
+                        "gas_used": 20,
+                        "status": "failure",
+                        "role": "ACTION",
+                    },
+                ]
+            }
+        )
+        row = _gateway_ledger_row(tx=parent, gas_used=30, extracted_data_json=extracted)
+        sm = FakeGatewayStateManager(rows=[row])
+        sm.snapshot_mirror = _measured_mirror()
+        runner = FakeRunner(sm)
+        eth = FakeEth(
+            head=120,
+            logs=[_log(frm=CONTRACT, to=WALLET, amount=999_000_000, block=110, tx=child)],
+            codes={CONTRACT: "0x6080604052"},
+        )
+
+        record = await _two_cycles(runner, eth)
+
+        assert child not in _capital_flow_strategy_tx_hashes([row])
+        assert record["status"] == STATUS_UNMEASURED
+        assert record["unmeasured_reason"] == REASON_UNCLASSIFIED_MATERIAL
 
     @pytest.mark.asyncio
     async def test_run3_repro_projection_without_tx_hash_self_poisons(self):

@@ -174,6 +174,7 @@ def _ledger_entry_to_proto(entry: Any) -> gateway_pb2.LedgerEntryInfo:
         protocol=_attr_text(entry, "protocol"),
         success=bool(entry.success),
         error=_attr_text(entry, "error"),
+        extracted_data_json=_attr_text(entry, "extracted_data_json"),
     )
 
 

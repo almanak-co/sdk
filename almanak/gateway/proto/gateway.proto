@@ -3605,6 +3605,9 @@ message LedgerEntryInfo {
   string protocol = 16;
   bool success = 17;
   string error = 18;
+  // Opaque durable receipt payload. Consumers validate the typed
+  // sub_transactions set before accepting child hashes as strategy-owned.
+  string extracted_data_json = 19;
 }
 
 // VIB-5416 — request/response for StateService.GetLedgerEntriesMeasured.

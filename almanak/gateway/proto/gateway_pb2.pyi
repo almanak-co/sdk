@@ -9110,6 +9110,7 @@ class LedgerEntryInfo(_message.Message):
     PROTOCOL_FIELD_NUMBER: _builtins.int
     SUCCESS_FIELD_NUMBER: _builtins.int
     ERROR_FIELD_NUMBER: _builtins.int
+    EXTRACTED_DATA_JSON_FIELD_NUMBER: _builtins.int
     id: _builtins.str
     cycle_id: _builtins.str
     deployment_id: _builtins.str
@@ -9128,6 +9129,10 @@ class LedgerEntryInfo(_message.Message):
     protocol: _builtins.str
     success: _builtins.bool
     error: _builtins.str
+    extracted_data_json: _builtins.str
+    """Opaque durable receipt payload. Consumers validate the typed
+    sub_transactions set before accepting child hashes as strategy-owned.
+    """
     def __init__(
         self,
         *,
@@ -9149,8 +9154,9 @@ class LedgerEntryInfo(_message.Message):
         protocol: _builtins.str = ...,
         success: _builtins.bool = ...,
         error: _builtins.str = ...,
+        extracted_data_json: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["amount_in", b"amount_in", "amount_out", b"amount_out", "chain", b"chain", "cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "effective_price", b"effective_price", "error", b"error", "gas_usd", b"gas_usd", "gas_used", b"gas_used", "id", b"id", "intent_type", b"intent_type", "protocol", b"protocol", "slippage_bps", b"slippage_bps", "success", b"success", "timestamp", b"timestamp", "token_in", b"token_in", "token_out", b"token_out", "tx_hash", b"tx_hash"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["amount_in", b"amount_in", "amount_out", b"amount_out", "chain", b"chain", "cycle_id", b"cycle_id", "deployment_id", b"deployment_id", "effective_price", b"effective_price", "error", b"error", "extracted_data_json", b"extracted_data_json", "gas_usd", b"gas_usd", "gas_used", b"gas_used", "id", b"id", "intent_type", b"intent_type", "protocol", b"protocol", "slippage_bps", b"slippage_bps", "success", b"success", "timestamp", b"timestamp", "token_in", b"token_in", "token_out", b"token_out", "tx_hash", b"tx_hash"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___LedgerEntryInfo: _TypeAlias = LedgerEntryInfo  # noqa: Y015

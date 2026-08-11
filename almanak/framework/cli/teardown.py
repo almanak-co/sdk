@@ -922,6 +922,7 @@ def execute_teardown(  # noqa: C901
             wallet_address=wallet_address,
             price_oracle=price_oracle,
             no_accounting=no_accounting,
+            network=_gw_setup.network,
         )
 
         # Phase 9c: run the teardown end-to-end inside an async context with

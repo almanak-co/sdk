@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import sqlite3
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -12,7 +13,12 @@ import pytest
 import scripts.ci.accounting_regression_assert as regression_gate
 from almanak.framework.accounting.accountant_test import _cell_g17_receipt_set
 from almanak.framework.accounting.ledger_guard import DEGRADED_PREFIX
-from almanak.framework.accounting.receipt_set import evaluate_landed_receipt_sets
+from almanak.framework.accounting.receipt_set import (
+    MAX_EXTRACTED_DATA_BYTES,
+    MAX_SUB_TRANSACTIONS_PER_ROW,
+    evaluate_landed_receipt_sets,
+    validated_landed_receipt_hashes,
+)
 from almanak.framework.execution.gateway_orchestrator import GatewayExecutionResult
 from almanak.framework.observability.ledger import _build_extracted_data_json
 
@@ -125,6 +131,95 @@ def test_valid_multi_leg_row_passes_with_exact_gas() -> None:
     assert evaluation.landed_rows == 1
     assert evaluation.sub_transactions == 2
     assert evaluation.findings == ()
+
+
+def test_validated_hashes_include_every_successful_receipt_leg() -> None:
+    assert validated_landed_receipt_hashes([_valid_row()]) == frozenset({_APPROVAL_HASH, _ACTION_HASH})
+
+
+def test_invalid_noop_row_does_not_erase_independent_valid_receipt_evidence() -> None:
+    noop = {
+        "id": "ledger-noop",
+        "success": 1,
+        "error": "",
+        "tx_hash": "",
+        "gas_used": 0,
+        "extracted_data_json": "",
+    }
+
+    assert validated_landed_receipt_hashes([_valid_row(), noop]) == frozenset({_APPROVAL_HASH, _ACTION_HASH})
+    evaluation = evaluate_landed_receipt_sets([_valid_row(), noop])
+    assert not evaluation.passed, "G17 remains whole-page strict"
+    assert {finding.code for finding in evaluation.findings} == {"sub_transactions_missing"}
+
+
+def test_cross_row_duplicate_disqualifies_every_claimant() -> None:
+    first = _valid_row()
+    second = copy.deepcopy(first)
+    second["id"] = "ledger-2"
+    second_extracted = json.loads(second["extracted_data_json"])
+    second_extracted["sub_transactions"][0]["tx_hash"] = _OTHER_HASH
+    second["extracted_data_json"] = json.dumps(second_extracted)
+
+    assert validated_landed_receipt_hashes([first, second]) == frozenset()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [_delete_leg, _duplicate_hash, _failed_status, _blank_hash, _parent_mismatch, _gas_plus_one, _gas_minus_one],
+)
+def test_invalid_receipt_set_contributes_no_trusted_hashes(mutation) -> None:
+    row = copy.deepcopy(_valid_row())
+    mutation(row)
+
+    assert validated_landed_receipt_hashes([row]) == frozenset()
+
+
+def test_oversized_receipt_json_contributes_no_trusted_hashes() -> None:
+    row = _valid_row()
+    row["extracted_data_json"] = " " * (MAX_EXTRACTED_DATA_BYTES + 1)
+
+    evaluation = evaluate_landed_receipt_sets([row])
+    assert {finding.code for finding in evaluation.findings} == {"extracted_data_too_large"}
+    assert validated_landed_receipt_hashes([row]) == frozenset()
+
+
+def test_malformed_unicode_receipt_json_fails_closed_without_raising() -> None:
+    row = _valid_row()
+    row["extracted_data_json"] = "\ud800"
+
+    evaluation = evaluate_landed_receipt_sets([row])
+    assert {finding.code for finding in evaluation.findings} == {"sub_transactions_missing"}
+    assert validated_landed_receipt_hashes([row]) == frozenset()
+
+
+def test_excessive_receipt_legs_contribute_no_trusted_hashes() -> None:
+    row = _valid_row()
+    leg = json.loads(row["extracted_data_json"])["sub_transactions"][0]
+    row["extracted_data_json"] = json.dumps(
+        {"sub_transactions": [copy.deepcopy(leg) for _ in range(MAX_SUB_TRANSACTIONS_PER_ROW + 1)]}
+    )
+
+    evaluation = evaluate_landed_receipt_sets([row])
+    assert {finding.code for finding in evaluation.findings} == {"sub_transactions_overflow"}
+    assert validated_landed_receipt_hashes([row]) == frozenset()
+
+
+def test_real_uniswap_lp_db_trusts_collect_receipt_not_only_parent() -> None:
+    """The sealed Anvil round trip that reproduced the $10,686 false inflow."""
+    fixture = Path(__file__).parents[2] / "fixtures/accounting/uniswap_lp_collect_capital_flow.db"
+    collect_hash = "0x683bfe6fce881a19534c62e1b65dbf23d3b30de72326c736fb336174a0cb8d9d"
+    parent_hash = "0x86872c82bc9ee153b2e9a8a6df33173af37ca9b0096be7d98a824aeed81dd52d"
+    with sqlite3.connect(fixture) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT id, success, error, tx_hash, gas_used, extracted_data_json "
+            "FROM transaction_ledger ORDER BY timestamp"
+        ).fetchall()
+
+    trusted = validated_landed_receipt_hashes(rows)
+    assert parent_hash in trusted
+    assert collect_hash in trusted
 
 
 def test_zero_gas_is_measured_not_empty() -> None:

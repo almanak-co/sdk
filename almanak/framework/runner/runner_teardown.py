@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 from almanak.core.chains._helpers import bridged_stablecoin_map
 from almanak.core.lifecycle import LifecycleState
 
+from ..execution.fork_signal import is_managed_fork_network
 from ..intents.compiler import IntentCompiler, IntentCompilerConfig
 from ..intents.vocabulary import Intent
 from ..teardown.decision_log import TeardownDecisionPhase, log_teardown_decision
@@ -2720,7 +2721,10 @@ def build_teardown_compiler(
         # ``allow_placeholder_prices`` stays False unconditionally (VIB-2928):
         # the no-price case already hard-stopped above, so the compiler must
         # never silently substitute $1 for an unpriced token.
-        compiler_config = IntentCompilerConfig(allow_placeholder_prices=False)
+        compiler_config = IntentCompilerConfig(
+            allow_placeholder_prices=False,
+            managed_fork=is_managed_fork_network(getattr(strategy, "_gateway_network", None)),
+        )
         return IntentCompiler(
             chain=strategy.chain,
             wallet_address=strategy.wallet_address,

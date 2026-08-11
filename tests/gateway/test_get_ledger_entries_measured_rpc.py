@@ -136,8 +136,16 @@ async def test_entries_returned_in_deterministic_chronological_order():
     # before its acquisition. The handler must re-sort ascending by (timestamp, id).
     def _entry(_id, dt):
         return LedgerEntry(
-            id=_id, deployment_id=_DEPLOYMENT_ID, timestamp=dt, intent_type="STAKE",
-            token_in="ETH", amount_in="1.0", token_out="wstETH", amount_out="0.1", chain="ethereum", success=True,
+            id=_id,
+            deployment_id=_DEPLOYMENT_ID,
+            timestamp=dt,
+            intent_type="STAKE",
+            token_in="ETH",
+            amount_in="1.0",
+            token_out="wstETH",
+            amount_out="0.1",
+            chain="ethereum",
+            success=True,
         )
 
     # Backend returns newest-first (DESC) + a same-timestamp pair out of id order.
@@ -223,6 +231,25 @@ def test_client_projection_carries_tx_hash():
     assert measured is True
     assert "tx_hash" in rows[0], "projection must not drop tx_hash"
     assert rows[0]["tx_hash"] == "0x160a765a"
+
+
+@pytest.mark.asyncio
+async def test_receipt_payload_round_trips_servicer_and_client_projection():
+    payload = '{"sub_transactions":[{"tx_hash":"0xchild"}]}'
+    entry = _stake_entry()
+    entry.extracted_data_json = payload
+    servicer = _make_servicer(entries=[entry])
+    response = await servicer.GetLedgerEntriesMeasured(
+        gateway_pb2.GetLedgerEntriesMeasuredRequest(deployment_id=_DEPLOYMENT_ID),
+        _make_context(),
+    )
+    assert response.entries[0].extracted_data_json == payload
+
+    gsm = _make_gsm(gateway_pb2.ACCOUNTING_BACKEND_STATUS_AVAILABLE, entries=response.entries)
+    rows, measured = gsm.read_ledger_entries_measured(_DEPLOYMENT_ID)
+    assert measured is True
+    assert rows[0]["extracted_data_json"] == payload
+    assert rows[0]["gas_used"] == entry.gas_used
 
 
 def test_client_projection_carries_cycle_and_protocol_for_teardown_recovery():

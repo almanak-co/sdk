@@ -23,6 +23,13 @@ from almanak.framework.accounting.ledger_guard import landed
 
 _VALID_ROLES = frozenset({"APPROVAL", "ACTION", "INCIDENTAL"})
 
+# Defensive read bounds for the opaque ledger JSON.  The execution pipeline
+# emits at most a handful of legs today; these limits leave orders of
+# magnitude of headroom while preventing a corrupt row from turning every
+# snapshot into an unbounded JSON/list walk.
+MAX_EXTRACTED_DATA_BYTES = 1_048_576
+MAX_SUB_TRANSACTIONS_PER_ROW = 256
+
 
 @dataclass(frozen=True)
 class ReceiptSetFinding:
@@ -48,10 +55,13 @@ class ReceiptSetEvaluation:
 
 
 def _optional_field(row: Any, key: str) -> Any:
-    """Read an optional field from dicts and ``sqlite3.Row`` values."""
+    """Read an optional field from dicts, DB rows, or ``LedgerEntry`` objects."""
     if isinstance(row, dict):
         return row.get(key)
-    return row[key] if key in row.keys() else None
+    keys = getattr(row, "keys", None)
+    if callable(keys):
+        return row[key] if key in keys() else None
+    return getattr(row, key, None)
 
 
 def _row_id(row: Any, index: int) -> str:
@@ -179,7 +189,19 @@ def _evaluate_landed_row(
     seen_hashes: dict[str, str],
 ) -> tuple[int, list[ReceiptSetFinding]]:
     row_id = _row_id(row, index)
-    extracted = _decode_extracted_data(_optional_field(row, "extracted_data_json"))
+    raw_extracted = _optional_field(row, "extracted_data_json")
+    if (
+        isinstance(raw_extracted, str)
+        and len(raw_extracted.encode("utf-8", errors="surrogatepass")) > MAX_EXTRACTED_DATA_BYTES
+    ):
+        return 0, [
+            ReceiptSetFinding(
+                "extracted_data_too_large",
+                row_id,
+                f"extracted_data_json exceeds {MAX_EXTRACTED_DATA_BYTES} bytes",
+            )
+        ]
+    extracted = _decode_extracted_data(raw_extracted)
     sub_transactions = extracted.get("sub_transactions") if extracted is not None else None
     if not isinstance(sub_transactions, list) or not sub_transactions:
         return 0, [
@@ -187,6 +209,14 @@ def _evaluate_landed_row(
                 "sub_transactions_missing",
                 row_id,
                 "landed row has no non-empty sub_transactions array",
+            )
+        ]
+    if len(sub_transactions) > MAX_SUB_TRANSACTIONS_PER_ROW:
+        return 0, [
+            ReceiptSetFinding(
+                "sub_transactions_overflow",
+                row_id,
+                f"sub_transactions has {len(sub_transactions)} entries; maximum is {MAX_SUB_TRANSACTIONS_PER_ROW}",
             )
         ]
 
@@ -279,8 +309,72 @@ def evaluate_landed_receipt_sets(rows: list[Any]) -> ReceiptSetEvaluation:
     )
 
 
+def validated_landed_receipt_hashes(rows: list[Any]) -> frozenset[str]:
+    """Return receipt hashes from individually valid landed rows.
+
+    Persisted JSON is not receipt evidence by itself.  The shared G17
+    row contract must accept a row first: each leg succeeded, roles and fields
+    are typed, gas reconciles exactly, and the parent names an ACTION leg.  A
+    malformed or legacy row contributes no hashes, but cannot erase valid
+    evidence from an independent row elsewhere in the bounded ledger page.
+
+    Global uniqueness remains fail-closed.  A hash claimed by more than one
+    otherwise-valid row is excluded from *every* claimant, so one chain
+    transaction can never forgive transfers for two ledger rows.  The full
+    G17 evaluator remains whole-page strict and reports every malformed row;
+    this narrower function answers only which individual receipt identities
+    are trustworthy for capital-flow attribution.
+
+    Parent ledger hashes are deliberately excluded.  They are an independent
+    durable signal that callers may consume for legacy single-transaction
+    rows which predate typed receipt sets.
+    """
+    valid_rows: list[set[str]] = []
+    claim_counts: dict[str, int] = {}
+    for index, row in enumerate(rows):
+        if not landed(
+            _optional_field(row, "success"),
+            _optional_field(row, "error"),
+            _optional_field(row, "tx_hash"),
+        ):
+            continue
+
+        # Validate this row in isolation.  The row-local seen set still catches
+        # duplicate legs inside one receipt set; cross-row duplicates are
+        # handled symmetrically in the second pass below.
+        _, findings = _evaluate_landed_row(row, index=index, seen_hashes={})
+        if findings:
+            continue
+
+        extracted = _decode_extracted_data(_optional_field(row, "extracted_data_json"))
+        if extracted is None:
+            continue
+        sub_transactions = extracted.get("sub_transactions")
+        if not isinstance(sub_transactions, list):
+            continue
+
+        row_hashes = {
+            _canonical_hash(sub_transaction["tx_hash"].strip())
+            for sub_transaction in sub_transactions
+            if isinstance(sub_transaction, dict)
+            and isinstance(sub_transaction.get("tx_hash"), str)
+            and sub_transaction["tx_hash"].strip()
+        }
+        valid_rows.append(row_hashes)
+        for tx_hash in row_hashes:
+            claim_counts[tx_hash] = claim_counts.get(tx_hash, 0) + 1
+
+    duplicate_hashes = {tx_hash for tx_hash, count in claim_counts.items() if count > 1}
+    return frozenset(
+        tx_hash for row_hashes in valid_rows if row_hashes.isdisjoint(duplicate_hashes) for tx_hash in row_hashes
+    )
+
+
 __all__ = [
     "ReceiptSetEvaluation",
     "ReceiptSetFinding",
+    "MAX_EXTRACTED_DATA_BYTES",
+    "MAX_SUB_TRANSACTIONS_PER_ROW",
     "evaluate_landed_receipt_sets",
+    "validated_landed_receipt_hashes",
 ]

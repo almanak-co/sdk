@@ -329,6 +329,24 @@ class TestTeardownCompilerCreation:
         # Compiler should have real prices, not placeholders
         assert compiler.price_oracle is not None
 
+    @pytest.mark.parametrize(
+        ("network", "expected"),
+        [("anvil", True), ("mainnet", False), (None, False), ("anvil-ish", False)],
+    )
+    def test_threads_only_explicit_anvil_to_teardown_compiler(self, network, expected):
+        runner = _make_runner()
+        strategy = MagicMock()
+        strategy.chain = "arbitrum"
+        strategy.wallet_address = "0x1234567890abcdef1234567890abcdef12345678"
+        strategy._gateway_network = network
+        market = MagicMock()
+        market.get_price_oracle_dict.return_value = {"ETH": 3000, "USDC": 1}
+
+        compiler = runner._build_teardown_compiler(strategy, market)
+
+        assert compiler is not None
+        assert compiler._config.managed_fork is expected
+
     def test_returns_none_on_failure(self):
         """Should return None if compiler cannot be created."""
         runner = _make_runner()

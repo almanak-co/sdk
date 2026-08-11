@@ -41,6 +41,7 @@ from almanak.framework.execution.config import (
     ConfigurationError,
     MultiChainRuntimeConfig,
 )
+from almanak.framework.execution.fork_signal import is_managed_fork_network
 from almanak.framework.execution.gateway_orchestrator import (
     GatewayExecutionOrchestrator,
     GatewayExecutionResult,
@@ -504,7 +505,10 @@ class MultiChainOrchestrator:
                 default_protocol=default_protocol,
                 price_oracle={},
                 rpc_url=rpc_url,
-                config=IntentCompilerConfig(allow_placeholder_prices=False),
+                config=IntentCompilerConfig(
+                    allow_placeholder_prices=False,
+                    managed_fork=is_managed_fork_network(self._config.network),
+                ),
                 chain_wallets=self._gw_chain_wallets,
             )
             logger.debug(f"Created IntentCompiler for {chain_lower} (wallet={self._config.execution_address[:10]}...)")

@@ -26,6 +26,8 @@ from ..accounting.capital_flows import (
     normalize_tx_hash,
     scan_chain_transfers,
 )
+from ..accounting.ledger_guard import landed
+from ..accounting.receipt_set import validated_landed_receipt_hashes
 from ..deployment import is_hosted
 from ..intents.vocabulary import AnyIntent, BorrowIntent, HoldIntent, PerpCloseIntent, PerpOpenIntent
 from ..models.run_mode import RunMode
@@ -1203,6 +1205,32 @@ def _ledger_sort_key(row: Any) -> float:
     return 0.0
 
 
+def _capital_flow_strategy_tx_hashes(ledger_rows: list[Any]) -> frozenset[str]:
+    """Return durable hashes owned by this deployment's execution lane.
+
+    A multi-transaction intent persists one parent ledger hash but can move
+    assets in any successful receipt leg.  Receipt hashes are accepted only
+    through the shared G17 receipt-set validator.  Malformed, failed,
+    duplicate, gas-inconsistent, or parent-mismatched JSON contributes no
+    exclusions and therefore cannot forgive a genuine external flow.
+
+    Valid landed parent hashes remain independently authoritative for legacy
+    single-transaction rows.  Failed rows and blank hashes contribute
+    nothing.
+    """
+    parent_hashes: set[str] = set()
+    for row in ledger_rows:
+        tx_hash = _ledger_field(row, "tx_hash")
+        normalized_hash = normalize_tx_hash(tx_hash) if str(tx_hash or "").strip() else ""
+        if normalized_hash and landed(
+            _ledger_field(row, "success"),
+            _ledger_field(row, "error"),
+            tx_hash,
+        ):
+            parent_hashes.add(normalized_hash)
+    return frozenset(parent_hashes | set(validated_landed_receipt_hashes(ledger_rows)))
+
+
 async def _load_capital_flow_ledger(runner: Any, deployment_id: str) -> list[Any] | None:
     """One page of ledger rows, or ``None`` when the backend cannot serve them.
 
@@ -1465,9 +1493,9 @@ async def _scan_capital_flow_interval(
     recognised as ours and dropped instead of poisoning the era.
     """
     primary = (getattr(runner, "_primary_chain_lower", None) or getattr(snapshot, "chain", "") or "").strip().lower()
-    ledger_hashes = [h for h in (_ledger_field(row, "tx_hash") for row in ledger_rows) if h]
+    strategy_tx_hashes = _capital_flow_strategy_tx_hashes(ledger_rows)
 
-    resolved = tally_pending(unmatched_pending(record.pending_unclassified, ledger_hashes))
+    resolved = tally_pending(unmatched_pending(record.pending_unclassified, strategy_tx_hashes))
 
     observations: list[TransferObservation] = []
     cursors: dict[str, int] = {}
@@ -1492,7 +1520,7 @@ async def _scan_capital_flow_interval(
             from_block_exclusive=cursor,
             head_block=heads[chain],
             token_universe=_capital_flow_token_universe(snapshot, chain, primary=chain == primary),
-            ledger_tx_hashes=ledger_hashes,
+            ledger_tx_hashes=strategy_tx_hashes,
         )
 
         if result.status is ScanStatus.TRANSIENT_FAILURE:
