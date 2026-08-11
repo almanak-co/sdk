@@ -118,6 +118,7 @@ class SushiSwapV3GatewayConnector(
         start_ts: int,
         end_ts: int,
         interval_secs: int,
+        window_secs: int,
     ) -> Any:
         """TWAP series — block-by-block bisect fan-out tracked in VIB-4870."""
         from almanak.gateway.services.rate_history_service import RateHistoryUnavailable

@@ -25,6 +25,7 @@ from almanak.framework.backtesting.pnl.indicator_engine import (
     DEFAULT_INDICATORS,
     DEFAULT_MAX_HISTORY,
     BacktestIndicatorEngine,
+    IndicatorTimeframeMismatchError,
     native_series_aliases,
     ohlcv_timeframe_for_interval,
 )
@@ -696,8 +697,10 @@ class TestGranularityHonesty:
         engine = self._daily_under_hourly_engine()
         rsi_provider, _ = engine.snapshot_providers(None, 3600)
 
-        with pytest.raises(ValueError, match="resolution"):
+        with pytest.raises(IndicatorTimeframeMismatchError, match="resolution") as exc_info:
             rsi_provider("WETH", period=14, timeframe="1h")
+        assert exc_info.value.native_timeframe == "1d"
+        assert exc_info.value.requested_timeframe == "1h"
         with pytest.raises(ValueError, match="ALM-2957"):
             rsi_provider("WETH", period=14)  # default = tick timeframe
 

@@ -225,6 +225,7 @@ class AerodromeGatewayConnector(
         start_ts: int,
         end_ts: int,
         interval_secs: int,
+        window_secs: int,
     ) -> Any:
         """TWAP series — not yet implemented (mirrors the Uniswap V3 lane).
 

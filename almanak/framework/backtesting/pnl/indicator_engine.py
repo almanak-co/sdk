@@ -70,6 +70,29 @@ SUPPORTED_INDICATORS = frozenset(
 _TIMEFRAME_LABELS = {60: "1m", 300: "5m", 900: "15m", 1800: "30m", 3600: "1h", 14400: "4h", 86400: "1d"}
 
 
+class IndicatorTimeframeMismatchError(ValueError):
+    """An indicator asks for observations finer than the measured price plane.
+
+    Strategies commonly catch ``ValueError`` from indicator accessors and
+    convert an unavailable read into HOLD.  That remains appropriate for
+    transient warm-up, but a cadence mismatch is structural for the whole run:
+    no later tick can make a 1h RSI truthful on a 4h native series.  The PnL
+    loop recognizes this typed refusal even when strategy code catches it and
+    aborts instead of certifying a hollow backtest.
+    """
+
+    def __init__(self, *, native_seconds: int, requested_seconds: int) -> None:
+        self.native_seconds = int(native_seconds)
+        self.requested_seconds = int(requested_seconds)
+        self.native_timeframe = timeframe_label(self.native_seconds)
+        self.requested_timeframe = timeframe_label(self.requested_seconds)
+        super().__init__(
+            f"underlying price data has {self.native_timeframe} resolution; a "
+            f"{self.requested_timeframe} indicator would be computed from flat upsampled "
+            f"ticks and saturate (ALM-2957) — request {self.native_timeframe} or coarser"
+        )
+
+
 def timeframe_label(interval_seconds: int) -> str:
     """Canonical timeframe label for a tick interval (fallback: ``"{n}s"``)."""
     return _TIMEFRAME_LABELS.get(int(interval_seconds), f"{int(interval_seconds)}s")
@@ -718,6 +741,7 @@ class BacktestIndicatorEngine:
             day_ago = prices[-window - 1]
             day_slice = prices[-window - 1 :]
             change_pct = ((current - day_ago) / day_ago * 100) if day_ago > 0 else Decimal("0")
+            existing = snapshot.price_data(token)
             snapshot.set_price_data(
                 token,
                 PriceData(
@@ -726,7 +750,12 @@ class BacktestIndicatorEngine:
                     change_24h_pct=Decimal(str(round(change_pct, 4))),
                     high_24h=max(day_slice),
                     low_24h=min(day_slice),
-                    source="backtest_price_series",
+                    # Enrichment changes rolling statistics, not the price
+                    # observation's origin. Preserve historical provenance
+                    # and as-of time seeded by the provider bridge.
+                    timestamp=existing.timestamp,
+                    source=existing.source,
+                    confidence=existing.confidence,
                 ),
             )
 
@@ -908,10 +937,9 @@ class BacktestIndicatorEngine:
             and cadence_is_coarser(native, tick_interval_seconds)
             and cadence_is_coarser(native, requested)
         ):
-            raise ValueError(
-                f"underlying price data has {timeframe_label(native)} resolution; a "
-                f"{timeframe_label(requested)} indicator would be computed from flat upsampled "
-                f"ticks and saturate (ALM-2957) — request {timeframe_label(native)} or coarser"
+            raise IndicatorTimeframeMismatchError(
+                native_seconds=native,
+                requested_seconds=requested,
             )
         if requested == tick_interval_seconds:
             return prices

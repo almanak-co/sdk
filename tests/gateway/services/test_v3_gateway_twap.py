@@ -21,13 +21,16 @@ from types import SimpleNamespace
 import pytest
 
 from almanak.connectors._base.v3_gateway_twap import (
+    _block_at_or_before,
     _decode_observe_response,
     _fetch_pool_tokens_and_decimals,
+    _historical_blocks_for_grid,
     _read_word,
     _tick_to_price,
     _twap_call_observe,
     _twap_tick_from_cumulatives,
     fetch_v3_twap_observation,
+    fetch_v3_twap_series,
 )
 from almanak.gateway.services.rate_history_service import RateHistoryUnavailable
 
@@ -100,6 +103,38 @@ def _make_servicer(web3) -> SimpleNamespace:
         return web3
 
     return SimpleNamespace(_get_web3=_get_web3)
+
+
+def _make_historical_web3(*, latest_block: int = 10, genesis_timestamp: int = 1_000):
+    """Linear fake chain plus archive-call ledger for historical series tests."""
+    calls: list[tuple[str, int | str | None, str]] = []
+
+    async def _get_block(block_identifier):
+        number = latest_block if block_identifier == "latest" else int(block_identifier)
+        return {"number": number, "timestamp": genesis_timestamp + number * 10}
+
+    async def _call(tx, block_identifier=None):
+        to = tx["to"].lower()
+        sel = tx["data"][2:10]
+        calls.append((sel, block_identifier, to))
+        if sel == _OBSERVE:
+            # First dynamic-array element is secondsAgos[0].
+            window = int(tx["data"][10 + 64 + 64 : 10 + 64 + 128], 16)
+            block = int(block_identifier)
+            return _encode_observe_response([0, block * window])
+        if sel == _TOKEN0:
+            return _addr_word(_WETH)
+        if sel == _TOKEN1:
+            return _addr_word(_USDC)
+        if sel == _DECIMALS:
+            return _uint_word(18 if to == _WETH.lower() else 6)
+        raise AssertionError(f"unexpected eth.call sel={sel} to={to}")
+
+    web3 = SimpleNamespace(
+        eth=SimpleNamespace(call=_call, get_block=_get_block),
+        to_checksum_address=lambda address: address,
+    )
+    return web3, calls
 
 
 # --------------------------------------------------------------------------- #
@@ -182,6 +217,75 @@ def test_fetch_v3_twap_observation_truncates_negative_tick() -> None:
     assert Decimal(point.price) == truncated_price
     assert Decimal(point.price) != floored_price
     assert point.tick_observation_count == 2
+
+
+def test_historical_block_grid_resolves_latest_block_at_or_before_each_target() -> None:
+    web3, _calls = _make_historical_web3()
+
+    samples = asyncio.run(
+        _historical_blocks_for_grid(
+            web3,
+            start_ts=1_025,
+            end_ts=1_045,
+            interval_secs=20,
+            protocol="uniswap_v3",
+        )
+    )
+
+    assert samples == [(2, 1_020), (4, 1_040)]
+
+
+def test_historical_block_resolver_bisects_after_interpolation_stalls() -> None:
+    """A timestamp cliff forces the bounded bisection fallback after eight probes."""
+    probed_blocks: list[int] = []
+
+    async def _get_block(block_identifier):
+        number = int(block_identifier)
+        probed_blocks.append(number)
+        return {"number": number, "timestamp": 0 if number < 1_000 else 1_000_000}
+
+    web3 = SimpleNamespace(eth=SimpleNamespace(get_block=_get_block))
+    resolved = asyncio.run(
+        _block_at_or_before(
+            web3,
+            500,
+            lower=(0, 0),
+            upper=(1_000, 1_000_000),
+            protocol="uniswap_v3",
+        )
+    )
+
+    assert resolved == (999, 0)
+    assert resolved[1] <= 500
+    assert any(block > 100 for block in probed_blocks), probed_blocks
+
+
+def test_historical_series_preserves_grid_cardinality_and_block_provenance() -> None:
+    """A stalled block is read once but re-expanded to every requested tick."""
+    web3, calls = _make_historical_web3()
+    servicer = _make_servicer(web3)
+
+    points = asyncio.run(
+        fetch_v3_twap_series(
+            servicer,
+            chain="ethereum",
+            pool_address="0xpool",
+            start_ts=1_020,
+            end_ts=1_021,
+            interval_secs=1,
+            window_secs=1_800,
+            protocol="uniswap_v3",
+        )
+    )
+
+    assert len(points) == 2
+    assert [point.timestamp for point in points] == [1_020, 1_020]
+    assert [point.block_number for point in points] == [2, 2]
+    assert [point.price for point in points] == [_tick_to_price(2, 18, 6)] * 2
+    observe_calls = [call for call in calls if call[0] == _OBSERVE]
+    assert observe_calls == [(_OBSERVE, 2, "0xpool")]
+    # Immutable pool metadata is measured once for the series, not per tick.
+    assert sum(call[0] in {_TOKEN0, _TOKEN1, _DECIMALS} for call in calls) == 4
 
 
 # --------------------------------------------------------------------------- #

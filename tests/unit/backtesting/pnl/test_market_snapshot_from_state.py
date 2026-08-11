@@ -6,7 +6,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from almanak.framework.backtesting.pnl.data_provider import HistoricalPriceObservation, MarketState
 from almanak.framework.backtesting.pnl.engine import create_market_snapshot_from_state
+from almanak.framework.backtesting.pnl.types import DataConfidence
 
 
 def _make_market_state(tokens: dict[str, Decimal], timestamp: datetime | None = None):
@@ -163,6 +165,75 @@ class TestNoPortfolio:
 
         price = snapshot.price("WETH")
         assert price == Decimal("3000")
+
+
+class TestHistoricalPriceMetadata:
+    """The historical provider's observation survives the snapshot bridge."""
+
+    PAXG_ADDR = "0x45804880de22913dafe09f4980848ece6ecbaf78"
+    XAUT_ADDR = "0x68749665ff8d2d112fa859aa293f07a622782f38"
+    PAXG_KEY = ("ethereum", PAXG_ADDR)
+    XAUT_KEY = ("ethereum", XAUT_ADDR)
+
+    def _state(self) -> MarketState:
+        observed_at = datetime(2025, 8, 11, 12, 0, tzinfo=UTC)
+        prices = {
+            self.PAXG_KEY: Decimal("3382.70"),
+            self.XAUT_KEY: Decimal("3351.20"),
+        }
+        return MarketState(
+            timestamp=observed_at,
+            chain="ethereum",
+            prices=prices,
+            price_observations={
+                key: HistoricalPriceObservation(
+                    price=price,
+                    timestamp=observed_at,
+                    source="coingecko",
+                    confidence=DataConfidence.MEDIUM,
+                )
+                for key, price in prices.items()
+            },
+        )
+
+    def test_address_keyed_rwa_observations_reach_strategy_oracle_shape(self):
+        state = self._state()
+        snapshot = create_market_snapshot_from_state(
+            state,
+            chain="ethereum",
+            token_addresses={"PAXG": self.PAXG_KEY, "XAUT": self.XAUT_KEY},
+        )
+
+        oracle = snapshot.get_price_oracle_dict(with_sources=True)
+
+        for symbol, key in (("PAXG", self.PAXG_KEY), ("XAUT", self.XAUT_KEY)):
+            identity = f"{key[0]}:{key[1]}"
+            assert oracle[symbol] == oracle[identity]
+            assert oracle[symbol]["oracle_source"] == "coingecko"
+            assert oracle[symbol]["fetched_at"] == state.timestamp.isoformat()
+            assert oracle[symbol]["confidence"] == "ESTIMATED"
+
+    def test_rolling_price_enrichment_preserves_provider_observation(self):
+        from almanak.framework.backtesting.pnl.indicator_engine import BacktestIndicatorEngine
+
+        state = self._state()
+        snapshot = create_market_snapshot_from_state(
+            state,
+            chain="ethereum",
+            token_addresses={"PAXG": self.PAXG_KEY},
+        )
+        token = f"ethereum:{self.PAXG_ADDR}"
+        indicators = BacktestIndicatorEngine(required_indicators=[])
+        for i in range(25):
+            price = Decimal("3382.70") if i == 24 else Decimal("3300") + Decimal(i)
+            indicators.append_price(token, price)
+
+        indicators.enrich_price_data(snapshot, tick_interval_seconds=3600, active_tokens={token})
+
+        enriched = snapshot.get_price_oracle_dict(with_sources=True)["PAXG"]
+        assert enriched["oracle_source"] == "coingecko"
+        assert enriched["fetched_at"] == state.timestamp.isoformat()
+        assert enriched["confidence"] == "ESTIMATED"
 
 
 class TestAddressKeyedSnapshotResolution:

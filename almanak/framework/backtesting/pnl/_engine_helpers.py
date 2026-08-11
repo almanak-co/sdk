@@ -46,6 +46,7 @@ from typing import TYPE_CHECKING, Any
 from almanak.core.chains import DEFAULT_CHAIN, ChainRegistry
 from almanak.core.chains._helpers import native_symbols_for
 from almanak.core.intent_types import IntentType
+from almanak.core.perp_markets import perp_market_base
 from almanak.framework.backtesting.exceptions import NoAcceptableDataSourceError
 from almanak.framework.backtesting.models import (
     BacktestEngine,
@@ -93,6 +94,7 @@ from almanak.framework.backtesting.pnl.intent_extraction import (
     lp_pool_tokens,
 )
 from almanak.framework.backtesting.pnl.money import PriceQuote, TokenIdentity, TokenUnits, UsdAmount
+from almanak.framework.backtesting.pnl.perp_targets import PerpPriceHistoryTarget
 from almanak.framework.backtesting.pnl.portfolio import (
     CASH_EQUIVALENT_STABLECOIN_SYMBOLS,
     SimulatedPortfolio,
@@ -190,44 +192,180 @@ def _expected_price_lookup_label(
 def declared_perp_price_history_targets(
     strategy: BacktestableStrategy,
     strategy_config: Mapping[str, Any],
-) -> tuple[tuple[str, str], ...]:
+) -> tuple[PerpPriceHistoryTarget, ...]:
     """Discover explicit perp targets that are safe to load before tick 1.
 
-    Funding access remains dynamic, so unknown targets still materialize on
-    first use. The standard perp strategy contract declares the market via
-    ``funding_market`` (or ``market``) and the venue via ``protocol`` or
-    strategy metadata; those targets can be prewarmed before data iteration.
+    A strategy-owned ``backtest_perp_price_history_targets()`` hook is the
+    canonical declaration for dynamic baskets. Legacy scalar declarations
+    remain supported. As a migration bridge, the exact generated basket shape
+    (``markets`` pair labels plus ``perp_markets`` identity records and one
+    scalar ``protocol``) is decoded narrowly; ``market_order`` is never a
+    discovery input.
 
-    Targets carry the declared pair LABEL: the funding-history lane is
-    symbol-keyed (canonical ``"ETH-USD"`` form — see ``fetch_funding_points``)
-    and must never receive an address. The candle lane re-spells its single
-    chosen target through the declared ``market_address`` in
-    :func:`prepare_perp_price_history` (address-first market contract).
+    Each record carries both spellings: the funding lane uses ``market`` and
+    the candle lane uses ``price_market`` (address first).
     """
+    hook = getattr(strategy, "backtest_perp_price_history_targets", None)
+    if callable(hook):
+        declared = hook()
+        if isinstance(declared, PerpPriceHistoryTarget):
+            declared = (declared,)
+        if isinstance(declared, str | bytes | Mapping):
+            raise ValueError("backtest_perp_price_history_targets() must return PerpPriceHistoryTarget records")
+        try:
+            targets = tuple(declared)
+        except TypeError as exc:
+            raise ValueError(
+                "backtest_perp_price_history_targets() must return an iterable of PerpPriceHistoryTarget records"
+            ) from exc
+        invalid = next((target for target in targets if not isinstance(target, PerpPriceHistoryTarget)), None)
+        if invalid is not None:
+            raise ValueError(
+                "backtest_perp_price_history_targets() must return only PerpPriceHistoryTarget records; "
+                f"got {invalid!r}"
+            )
+        return tuple(dict.fromkeys(targets))
+
     market = _declared_strategy_value(strategy, strategy_config, ("funding_market", "market"))
-    if market is None:
+    if market is not None:
+        spec = getattr(strategy, "_spec", None)
+
+        protocols: list[str] = []
+
+        def add_protocol(value: Any) -> None:
+            if not isinstance(value, str) or not value.strip():
+                return
+            normalized = value.strip().lower().replace("-", "_")
+            if normalized not in protocols:
+                protocols.append(normalized)
+
+        explicit_protocol = (
+            strategy_config.get("protocol") or getattr(strategy, "protocol", None) or getattr(spec, "protocol", None)
+        )
+        if explicit_protocol:
+            add_protocol(explicit_protocol)
+        else:
+            for protocol in getattr(_strategy_metadata(strategy), "supported_protocols", None) or ():
+                add_protocol(protocol)
+
+        market_address = _declared_perp_market_address(strategy, strategy_config)
+        return tuple(
+            PerpPriceHistoryTarget(protocol=protocol, market=market, market_address=market_address)
+            for protocol in protocols
+        )
+
+    return _generated_basket_perp_price_history_targets(strategy_config)
+
+
+def _generated_basket_perp_price_history_targets(
+    strategy_config: Mapping[str, Any],
+) -> tuple[PerpPriceHistoryTarget, ...]:
+    """Decode only the unchanged generated multi-perp strategy config.
+
+    The compatibility contract is intentionally closed: pair order comes from
+    ``markets``; identity comes from matching ``perp_markets`` entries; the
+    two collections must describe exactly the same bases. ``market_order`` is
+    ignored even when present.
+    """
+    has_markets = "markets" in strategy_config
+    has_perp_markets = "perp_markets" in strategy_config
+    # Both keys identify the exact compatibility shape. A lone generic
+    # ``markets`` collection belongs to other strategy families and must not
+    # be reinterpreted as a malformed perp declaration.
+    if not (has_markets and has_perp_markets):
         return ()
-    spec = getattr(strategy, "_spec", None)
+    markets = strategy_config.get("markets")
+    perp_markets = strategy_config.get("perp_markets")
+    protocol = strategy_config.get("protocol")
+    if not isinstance(protocol, str) or not protocol.strip():
+        raise ValueError("Generated perp basket config requires one non-empty scalar 'protocol'")
+    if not isinstance(markets, list) or not markets:
+        raise ValueError("Generated perp basket config requires a non-empty 'markets' list of pair labels")
+    if not isinstance(perp_markets, Mapping) or not perp_markets:
+        raise ValueError("Generated perp basket config requires a non-empty 'perp_markets' mapping")
 
-    protocols: list[str] = []
+    entries: dict[str, Mapping[str, Any]] = {}
+    for raw_key, raw_entry in perp_markets.items():
+        if not isinstance(raw_key, str) or not raw_key.strip() or not isinstance(raw_entry, Mapping):
+            raise ValueError("Generated perp basket 'perp_markets' must map base symbols to identity records")
+        base = raw_key.strip().upper()
+        if base in entries:
+            raise ValueError(f"Generated perp basket contains duplicate market identity for {base}")
+        entries[base] = raw_entry
 
-    def add_protocol(value: Any) -> None:
-        if not isinstance(value, str) or not value.strip():
-            return
-        normalized = value.strip().lower().replace("-", "_")
-        if normalized not in protocols:
-            protocols.append(normalized)
+    targets: list[PerpPriceHistoryTarget] = []
+    seen_bases: set[str] = set()
+    for raw_market in markets:
+        market_base = perp_market_base(raw_market)
+        if market_base is None:
+            raise ValueError(f"Generated perp basket market {raw_market!r} is not a pair label")
+        if market_base in seen_bases:
+            raise ValueError(f"Generated perp basket contains duplicate pair label for {market_base}")
+        seen_bases.add(market_base)
+        entry = entries.get(market_base)
+        if entry is None:
+            raise ValueError(
+                f"Generated perp basket market {raw_market!r} has no matching perp_markets[{market_base!r}]"
+            )
+        market_token = _validated_generated_basket_entry(market_base, entry)
+        targets.append(
+            PerpPriceHistoryTarget(protocol=protocol, market=str(raw_market).strip(), market_address=market_token)
+        )
 
-    explicit_protocol = (
-        strategy_config.get("protocol") or getattr(strategy, "protocol", None) or getattr(spec, "protocol", None)
+    extra = sorted(set(entries) - seen_bases)
+    if extra:
+        raise ValueError(f"Generated perp basket has perp_markets entries not present in markets: {extra}")
+    return tuple(targets)
+
+
+def _validated_generated_basket_entry(base: str, entry: Mapping[str, Any]) -> str:
+    """Validate one closed-shape generated market identity and return its market token."""
+    index_symbol = entry.get("index_symbol")
+    market_token = entry.get("market_token")
+    index_token = entry.get("index_token")
+    if not isinstance(index_symbol, str) or index_symbol.strip().upper() != base:
+        raise ValueError(f"Generated perp basket perp_markets[{base!r}].index_symbol must match pair base {base!r}")
+    if not isinstance(market_token, str) or not is_address_like(market_token):
+        raise ValueError(f"Generated perp basket perp_markets[{base!r}].market_token must be a token address")
+    if not isinstance(index_token, str) or not is_address_like(index_token):
+        raise ValueError(f"Generated perp basket perp_markets[{base!r}].index_token must be a token address")
+    return market_token
+
+
+def coverage_aware_default_timeframe(strategy: BacktestableStrategy) -> str | None:
+    """Return ``"auto"`` for one atomic connector-native perp target set.
+
+    ``PnLBacktestConfig.timeframe=None`` preserves the legacy contract: the
+    provider request is pinned to ``interval_seconds``.  Hosted callers that
+    omit a price cadence need a coverage-aware default for connector-native
+    perp history, but only when the engine can discover the same atomic target
+    set that :func:`prepare_perp_price_history` will route. A protocol name
+    alone is insufficient, and cross-protocol declarations remain ambiguous.
+    """
+    from almanak.connectors._strategy_base.perp_price_history_registry import PerpPriceHistoryRegistry
+    from almanak.framework.backtesting.pnl.engine import PnLBacktester
+
+    strategy_config = PnLBacktester._get_strategy_config_dict(strategy)
+    try:
+        targets = tuple(
+            dict.fromkeys(
+                target
+                for target in declared_perp_price_history_targets(strategy, strategy_config)
+                if PerpPriceHistoryRegistry.has(target.protocol)
+            )
+        )
+    except ValueError:
+        # Declaration validation belongs to the engine's strict preflight. A
+        # hosted default must not mask or re-spell an invalid target contract.
+        return None
+    canonical_protocols = tuple(PerpPriceHistoryRegistry.canonical(target.protocol) for target in targets)
+    return (
+        "auto"
+        if targets
+        and all(protocol is not None for protocol in canonical_protocols)
+        and len(set(canonical_protocols)) == 1
+        else None
     )
-    if explicit_protocol:
-        add_protocol(explicit_protocol)
-    else:
-        for protocol in getattr(_strategy_metadata(strategy), "supported_protocols", None) or ():
-            add_protocol(protocol)
-
-    return tuple((protocol, market) for protocol in protocols)
 
 
 def _strategy_metadata(strategy: BacktestableStrategy) -> Any:
@@ -363,6 +501,82 @@ def _declared_perp_market_address(
     return _declared_strategy_value(strategy, strategy_config, ("market_address",))
 
 
+def _preflight_perp_price_history_targets(
+    strategy: BacktestableStrategy,
+    strategy_config: Mapping[str, Any],
+) -> tuple[PerpPriceHistoryTarget, ...]:
+    """Decode strategy targets and render declaration failures as preflight errors."""
+    from almanak.connectors._strategy_base.perp_price_history_registry import PerpPriceHistoryRegistry
+
+    try:
+        declared_targets = declared_perp_price_history_targets(strategy, strategy_config)
+    except ValueError as exc:
+        raise PreflightValidationError(
+            message=(f"Invalid perp price-history declaration under the address-first market contract: {exc}"),
+            failed_checks=["perp_price_history"],
+            recommendations=[
+                "Return typed PerpPriceHistoryTarget records or use the documented scalar/generated basket config."
+            ],
+            error_count=1,
+            warning_count=0,
+        ) from exc
+    return tuple(target for target in declared_targets if PerpPriceHistoryRegistry.has(target.protocol))
+
+
+def _install_perp_price_history_provider(
+    *,
+    backtester: PnLBacktester,
+    provider_cls: Any,
+    canonical: str,
+    venue: str,
+    chain: str,
+    markets: tuple[str, ...],
+) -> Any:
+    """Reuse or install the singular/plural connector-native provider."""
+    current_provider = backtester.data_provider
+    provider_targets = tuple((venue, chain, market) for market in markets)
+    current_targets = getattr(current_provider, "price_history_targets", None)
+    if current_targets is None:
+        current_target = getattr(current_provider, "price_history_target", None)
+        current_targets = (current_target,) if current_target is not None else ()
+    if current_targets == provider_targets:
+        if callable(getattr(current_provider, "prepare_backtest", None)):
+            return current_provider
+        raise PreflightValidationError(
+            message=(
+                f"Provider claiming price-history targets {provider_targets!r} does not implement "
+                "the preparation contract"
+            ),
+            failed_checks=["perp_price_history"],
+            recommendations=["Install a connector-declared historical backtest provider."],
+            error_count=1,
+            warning_count=0,
+        )
+    if len(markets) == 1:
+        provider = provider_cls.for_backtest(
+            fallback=current_provider,
+            chain=chain,
+            market=markets[0],
+            venue=venue,
+        )
+    else:
+        factory = getattr(provider_cls, "for_backtest_many", None)
+        if not callable(factory):
+            raise PreflightValidationError(
+                message=(
+                    f"{canonical} declares {len(markets)} perp markets but its price-history provider "
+                    "does not implement atomic multi-target preparation"
+                ),
+                failed_checks=["perp_price_history"],
+                recommendations=["Install a connector provider with for_backtest_many() support."],
+                error_count=1,
+                warning_count=0,
+            )
+        provider = factory(fallback=current_provider, chain=chain, markets=markets, venue=venue)
+    backtester.data_provider = provider
+    return provider
+
+
 async def prepare_perp_price_history(
     backtester: PnLBacktester,
     strategy: BacktestableStrategy,
@@ -380,11 +594,7 @@ async def prepare_perp_price_history(
     )
 
     strategy_config = backtester._get_strategy_config_dict(strategy)
-    targets = [
-        (protocol, market)
-        for protocol, market in declared_perp_price_history_targets(strategy, strategy_config)
-        if PerpPriceHistoryRegistry.has(protocol)
-    ]
+    targets = _preflight_perp_price_history_targets(strategy, strategy_config)
     if not targets:
         _raise_on_undeclared_perp_market(strategy, strategy_config)
         if config.timeframe == "auto":
@@ -402,52 +612,37 @@ async def prepare_perp_price_history(
                 warning_count=0,
             )
         return
-    unique_targets = list(dict.fromkeys(targets))
-    if len(unique_targets) > 1:
+    unique_targets = tuple(dict.fromkeys(targets))
+    canonical_protocols = {
+        canonical
+        for target in unique_targets
+        if (canonical := PerpPriceHistoryRegistry.canonical(target.protocol)) is not None
+    }
+    if len(canonical_protocols) != 1:
         raise PreflightValidationError(
             message=(
-                "Automatic venue-native price routing currently requires one declared perp market per "
-                f"backtest; got {unique_targets!r}"
+                "One atomic venue-native price plane requires every declared perp target to use the same "
+                f"connector protocol; got {sorted(canonical_protocols)!r}"
             ),
             failed_checks=["perp_price_history"],
-            recommendations=["Split the run or provide an explicit multi-market data provider."],
+            recommendations=["Split cross-protocol baskets into separate runs or provide a composed data provider."],
             error_count=1,
             warning_count=0,
         )
 
-    protocol, market = unique_targets[0]
-    # Address-first market contract: a declared market_address is the
-    # unambiguous market spelling and outranks the pair label, which stays
-    # display/signal vocabulary. The venue registry resolves addresses
-    # directly, so a stale or re-labeled pair string cannot fail a run whose
-    # declared address is still a listed market. Fail closed on a malformed
-    # declaration — silently resolving by the label instead would reintroduce
-    # exactly the drift the address exists to prevent.
-    declared_address = _declared_perp_market_address(strategy, strategy_config)
-    if declared_address is not None:
-        if not is_address_like(declared_address):
-            raise PreflightValidationError(
-                message=(
-                    f"Declared market_address {declared_address!r} is not a token address; "
-                    "the address-first market contract requires the venue's market-token contract address"
-                ),
-                failed_checks=["perp_price_history"],
-                recommendations=["Set market_address to the venue's market-token contract address."],
-                error_count=1,
-                warning_count=0,
-            )
-        market = declared_address
-    else:
+    canonical = next(iter(canonical_protocols))
+    markets = tuple(target.price_market for target in unique_targets)
+    for target in unique_targets:
+        if target.market_address is not None:
+            continue
         # Label-only declaration is supported but drift-prone: the pair label
         # is display/signal vocabulary, and a stale or re-labeled string fails
         # runs the declared address would have kept alive.
         bt_logger.warning(
-            f"Perp market for {protocol} is declared by pair label {market!r} only; also declare "
+            f"Perp market for {target.protocol} is declared by pair label {target.market!r} only; also declare "
             "'market_address' (the venue's market-token contract address) to pin the market "
             "unambiguously (address-first market contract)."
         )
-    canonical = PerpPriceHistoryRegistry.canonical(protocol)
-    assert canonical is not None
     chain_descriptor = ChainRegistry.try_resolve(config.chain)
     chain = chain_descriptor.name if chain_descriptor is not None else config.chain.lower()
     declared_chains: set[str] = set()
@@ -471,33 +666,20 @@ async def prepare_perp_price_history(
             warning_count=0,
         )
     venue = PerpPriceHistoryRegistry.venue_for(canonical)
-    target = (venue, chain, market)
-    current_provider = backtester.data_provider
-    provider: PerpPriceHistoryProvider
-    if getattr(current_provider, "price_history_target", None) != target:
-        provider = provider_cls.for_backtest(
-            fallback=current_provider,
-            chain=chain,
-            market=market,
-            venue=venue,
-        )
-        backtester.data_provider = provider
-    elif isinstance(current_provider, PerpPriceHistoryProvider):
-        provider = current_provider
-    else:
-        raise PreflightValidationError(
-            message=f"Provider claiming price-history target {target!r} does not implement the preparation contract",
-            failed_checks=["perp_price_history"],
-            recommendations=["Install a connector-declared historical backtest provider."],
-            error_count=1,
-            warning_count=0,
-        )
+    provider: PerpPriceHistoryProvider = _install_perp_price_history_provider(
+        backtester=backtester,
+        provider_cls=provider_cls,
+        canonical=canonical,
+        venue=venue,
+        chain=chain,
+        markets=markets,
+    )
     try:
         resolved = await provider.prepare_backtest(config)
     except (DataSourceError, ValueError) as exc:
         requested = config.resolved_timeframe or config.timeframe or f"{config.interval_seconds}s"
         raise PreflightValidationError(
-            message=(f"{venue} price-history preflight failed for {market!r} at {requested!r}: {exc}"),
+            message=(f"{venue} price-history preflight failed for {markets!r} at {requested!r}: {exc}"),
             failed_checks=["perp_price_history"],
             recommendations=[
                 "Use timeframe='auto' to select the finest complete native cadence, shorten the window, "
@@ -507,7 +689,7 @@ async def prepare_perp_price_history(
             warning_count=0,
         ) from exc
     bt_logger.info(
-        f"Resolved {venue} {market} to native {resolved} price candles "
+        f"Resolved {venue} {markets!r} to one atomic native {resolved} price-candle plane "
         f"for the complete {config.duration_days:.1f}-day window"
     )
 
@@ -520,23 +702,102 @@ async def _prewarm_declared_funding_history(
     """Materialize declared snapshot funding series before data iteration."""
     if not source.history_capable:
         return
-    for venue, market in declared_perp_price_history_targets(strategy, strategy_config):
+    for target in declared_perp_price_history_targets(strategy, strategy_config):
         try:
-            point_count = await source.materialize_history(venue, market)
+            point_count = await source.materialize_history(target.protocol, target.market)
         except DataSourceError as exc:
             logger.warning(
                 "Snapshot funding prewarm unavailable for %s %s; continuing without prewarm: %s",
-                venue,
-                market,
+                target.protocol,
+                target.market,
                 exc,
             )
             continue
         logger.info(
             "Prewarmed %d snapshot funding points for %s %s before tick 1",
             point_count,
-            venue,
-            market,
+            target.protocol,
+            target.market,
         )
+
+
+async def _prepare_declared_historical_twap(
+    strategy: BacktestableStrategy,
+    strategy_config: Mapping[str, Any],
+    config: PnLBacktestConfig,
+    manifest: Any | None,
+) -> Any | None:
+    """Prewarm explicitly declared exact-pool TWAP dependencies.
+
+    Archive ``observe()`` evidence is execution-grade and has no truthful
+    fallback. Any declaration or coverage failure therefore aborts preflight
+    before tick 1 instead of producing a plausible zero-trade run.
+    """
+    from almanak.framework.backtesting.pnl.providers.snapshot_twap import (
+        SnapshotTWAPSource,
+        declared_historical_twap_targets,
+    )
+
+    try:
+        targets = declared_historical_twap_targets(
+            strategy,
+            strategy_config,
+            default_chain=config.chain,
+        )
+    except ValueError as exc:
+        raise PreflightValidationError(
+            message=f"Historical exact-pool TWAP declaration is invalid: {exc}",
+            failed_checks=["historical_exact_pool_twap"],
+            recommendations=[
+                "Declare HistoricalTWAPTarget values through get_backtest_twap_targets() "
+                "with an exact chain, protocol, pool address, and observation window."
+            ],
+            error_count=1,
+            warning_count=0,
+        ) from exc
+    if not targets:
+        return None
+
+    run_chain = config.chain.strip().lower()
+    mismatched = [target.chain for target in targets if target.chain != run_chain]
+    if mismatched:
+        raise PreflightValidationError(
+            message=(
+                f"Historical exact-pool TWAP targets must use the backtest chain {run_chain!r}; "
+                f"declared={sorted(set(mismatched))!r}"
+            ),
+            failed_checks=["historical_exact_pool_twap"],
+            recommendations=["Run one chain per backtest or update the HistoricalTWAPTarget chain."],
+            error_count=1,
+            warning_count=0,
+        )
+
+    source = SnapshotTWAPSource(
+        start_time=config.start_time,
+        end_time=config.end_time,
+        sample_interval_seconds=config.interval_seconds,
+        manifest=manifest,
+    )
+    for target in targets:
+        try:
+            count = await source.materialize_history(target)
+        except (DataSourceError, ValueError) as exc:
+            raise PreflightValidationError(
+                message=f"Historical exact-pool TWAP preflight failed for {target.manifest_key}: {exc}",
+                failed_checks=["historical_exact_pool_twap"],
+                recommendations=[
+                    "Configure a gateway RPC with archive state for the target chain, verify the exact pool "
+                    "existed throughout the requested window, or shorten the backtest window."
+                ],
+                error_count=1,
+                warning_count=0,
+            ) from exc
+        logger.info(
+            "Prewarmed %d exact-pool TWAP observations for %s before tick 1",
+            count,
+            target.manifest_key,
+        )
+    return source
 
 
 # =============================================================================
@@ -1066,6 +1327,12 @@ async def execute_iteration_loop(
         strategy,
         state.strategy_config,
     )
+    twap_source = await _prepare_declared_historical_twap(
+        strategy,
+        state.strategy_config,
+        config,
+        state.data_broker.manifest if state.data_broker is not None else None,
+    )
 
     # Stable for the whole run: provider registrations happen during
     # initialize_backtest, before this loop starts.
@@ -1186,7 +1453,7 @@ async def execute_iteration_loop(
                     bt_logger.warning(
                         f"Price data resolution is {timeframe_label(measured)} but the backtest ticks at "
                         f"{tick_timeframe}: indicators finer than {timeframe_label(measured)} will refuse "
-                        f"and be recorded as decision-input failures (ALM-2957)"
+                        f"hard-stop the run when first read (ALM-2957)"
                     )
 
             # Bridge engine-internal plain-symbol reads (intent USD sizing,
@@ -1230,6 +1497,7 @@ async def execute_iteration_loop(
                 portfolio=state.portfolio,
                 token_addresses=tick_token_addresses,
                 funding_rate_source=funding_rate_source,
+                price_aggregator=twap_source.view_at(timestamp) if twap_source is not None else None,
                 rsi_provider=rsi_provider,
                 indicator_provider=indicator_provider,
                 gas_view=gas_view,
@@ -1275,18 +1543,24 @@ async def execute_iteration_loop(
 
             # Track data quality: record successful price lookups
             # Count tokens with available prices in this tick
-            expected_tokens = config.tokens
+            # Coverage follows the effective provider universe assembled at
+            # initialization (configured + funded + numeraire + gas/provider
+            # requirements), not only the public ``config.tokens`` list.
+            # Otherwise successfully fetched funded assets disappear from the
+            # manifest and a run can report 100% coverage over half its real
+            # valuation dependencies (ALM-3232).
+            expected_tokens = state.data_config.tokens
             expected_token_addresses = token_addresses
             provider_name = getattr(backtester.data_provider, "provider_name", "unknown")
 
             # Record successful lookups for each available token
-            for token in expected_tokens:
+            for expected_token in expected_tokens:
                 expected_token_label = _expected_price_lookup_label(
-                    token,
+                    expected_token,
                     token_addresses=expected_token_addresses,
                     chain=config.chain,
                 )
-                if market_state.has_token(token):
+                if market_state.has_token(expected_token):
                     state.data_quality_tracker.record_lookup(
                         success=True,
                         source=provider_name,
@@ -1461,6 +1735,49 @@ def _invoke_strategy_decide(
                     tick=tick_count, timestamp=timestamp, intent=None, source="decide_error", detail=str(e)
                 )
         return None
+    finally:
+        _raise_on_indicator_timeframe_mismatch(snapshot, tick_count=tick_count)
+
+
+def _raise_on_indicator_timeframe_mismatch(snapshot: Any, *, tick_count: int) -> None:
+    """Abort when an actually-read indicator is finer than historical data.
+
+    This is deliberately demand-driven until strategies declare typed
+    indicator requirements.  It catches both an uncaught accessor error and a
+    strategy that catches ``ValueError`` and returns HOLD, while avoiding false
+    preflight failures for price-only strategies that never read indicators.
+    """
+    from almanak.framework.backtesting.pnl.indicator_engine import IndicatorTimeframeMismatchError
+
+    causes = getattr(snapshot, "_critical_data_failure_causes", {})
+    mismatch = next(
+        (
+            (source, cause)
+            for (source, _key), cause in causes.items()
+            if isinstance(cause, IndicatorTimeframeMismatchError)
+        ),
+        None,
+    )
+    if mismatch is None:
+        return
+
+    source, cause = mismatch
+    raise PreflightValidationError(
+        message=(
+            f"Strategy indicator timeframe is incompatible with the resolved historical price data: "
+            f"{source} requested {cause.requested_timeframe}, but the data plane provides "
+            f"{cause.native_timeframe}. The backtest stopped at tick {tick_count} rather than treating "
+            "the unavailable indicator as a valid HOLD."
+        ),
+        failed_checks=["indicator_timeframe_compatibility"],
+        recommendations=[
+            f"Request {cause.native_timeframe} or a coarser timeframe in the strategy indicator call.",
+            f"Alternatively select a historical price plane with complete {cause.requested_timeframe} coverage "
+            "for the requested window, or shorten the window.",
+        ],
+        error_count=1,
+        warning_count=0,
+    ) from cause
 
 
 def notify_intent_outcome(

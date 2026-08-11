@@ -786,14 +786,9 @@ def _service_price_timeframe(
     if requested is not None or quick:
         return requested
 
-    from almanak.connectors._strategy_base.perp_price_history_registry import PerpPriceHistoryRegistry
-    from almanak.framework.backtesting.pnl._engine_helpers import declared_perp_price_history_targets
+    from almanak.framework.backtesting.pnl._engine_helpers import coverage_aware_default_timeframe
 
-    strategy_config = getattr(strategy, "config", None)
-    if not isinstance(strategy_config, Mapping):
-        strategy_config = {}
-    targets = declared_perp_price_history_targets(strategy, strategy_config)
-    return "auto" if any(PerpPriceHistoryRegistry.has(protocol) for protocol, _market in targets) else None
+    return coverage_aware_default_timeframe(strategy)
 
 
 def _build_equity_point_response(

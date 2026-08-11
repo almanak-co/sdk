@@ -24,11 +24,11 @@ import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
 from almanak.core.chains import DEFAULT_CHAIN
-from almanak.framework.data.interfaces import DataSourceUnavailable
+from almanak.framework.data.interfaces import DataSourceUnavailable, data_source_error_from_grpc
 
 if TYPE_CHECKING:
     pass
@@ -215,6 +215,17 @@ class TWAPResult:
     token0_is_base: bool
 
 
+@dataclass(frozen=True, slots=True)
+class HistoricalTWAPPoint:
+    """One exact-pool historical TWAP observation returned by the gateway."""
+
+    timestamp: int
+    price: Decimal
+    tick_observation_count: int
+    source: str
+    block_number: int | None = None
+
+
 @dataclass
 class CachedTWAP:
     """A single cached TWAP entry with TTL tracking."""
@@ -231,6 +242,159 @@ class CachedTWAP:
     @property
     def age_seconds(self) -> float:
         return (datetime.now(UTC) - self.fetched_at).total_seconds()
+
+
+MAX_TWAP_SERIES_POINTS_PER_REQUEST = 512
+
+
+def _decode_historical_twap_chunk(
+    response: Any,
+    *,
+    chunk_targets: list[int],
+    pool_address: str,
+) -> list[HistoricalTWAPPoint]:
+    """Validate one complete response chunk without collapsing block stalls."""
+    source = response.source.strip()
+    if not source:
+        raise DataSourceUnavailable(
+            source="gateway",
+            reason="GetDexTwapSeries success response omitted provenance source",
+        )
+    if len(response.points) != len(chunk_targets):
+        raise DataSourceUnavailable(
+            source=source,
+            reason=(
+                "GetDexTwapSeries returned incomplete grid coverage for "
+                f"{pool_address}: requested={len(chunk_targets)}, "
+                f"received={len(response.points)} over "
+                f"[{chunk_targets[0]}, {chunk_targets[-1]}]"
+            ),
+        )
+    points: list[HistoricalTWAPPoint] = []
+    for target_ts, raw in zip(chunk_targets, response.points, strict=True):
+        try:
+            price = Decimal(raw.price)
+        except (InvalidOperation, ValueError) as exc:
+            raise DataSourceUnavailable(
+                source=source,
+                reason=f"GetDexTwapSeries returned malformed price {raw.price!r} at {raw.timestamp}",
+            ) from exc
+        if raw.timestamp <= 0 or raw.timestamp > target_ts or price <= 0:
+            raise DataSourceUnavailable(
+                source=source,
+                reason=(
+                    "GetDexTwapSeries returned invalid/future observation "
+                    f"timestamp={raw.timestamp}, price={price}, target={target_ts}"
+                ),
+            )
+        if raw.tick_observation_count < 2:
+            raise DataSourceUnavailable(
+                source=source,
+                reason=(
+                    f"GetDexTwapSeries observation at {raw.timestamp} reported only "
+                    f"{raw.tick_observation_count} cumulative ticks"
+                ),
+            )
+        if raw.as_of_block <= 0:
+            raise DataSourceUnavailable(
+                source=source,
+                reason=f"GetDexTwapSeries observation at {raw.timestamp} omitted its archive block anchor",
+            )
+        points.append(
+            HistoricalTWAPPoint(
+                timestamp=raw.timestamp,
+                price=price,
+                tick_observation_count=raw.tick_observation_count,
+                source=source,
+                block_number=raw.as_of_block,
+            )
+        )
+    return points
+
+
+def fetch_historical_twap_points(
+    *,
+    protocol: str,
+    chain: str,
+    pool_address: str,
+    start_ts: int,
+    end_ts: int,
+    interval_secs: int,
+    window_secs: int,
+    max_points_per_request: int = MAX_TWAP_SERIES_POINTS_PER_REQUEST,
+) -> list[HistoricalTWAPPoint]:
+    """Fetch an exact-pool historical TWAP series through the gateway.
+
+    The observation window and sample cadence are independent. Large ranges
+    are chunked without changing either: e.g. a 30-minute pool TWAP may be
+    sampled on an hourly backtest grid for a year. Response identity is
+    verified on every chunk, and malformed/partial price evidence fails the
+    whole load rather than falling back to a derived token/USD ratio.
+    """
+    if start_ts > end_ts:
+        raise ValueError(f"start_ts must be <= end_ts (got {start_ts} > {end_ts})")
+    if interval_secs <= 0:
+        raise ValueError(f"interval_secs must be > 0, got {interval_secs}")
+    if window_secs <= 0:
+        raise ValueError(f"window_secs must be > 0, got {window_secs}")
+    if max_points_per_request <= 0:
+        raise ValueError(f"max_points_per_request must be > 0, got {max_points_per_request}")
+
+    client, gateway_pb2 = _twap_get_connected_gateway_client()
+    normalized_protocol = protocol.strip().lower()
+    normalized_chain = chain.strip().lower()
+    normalized_pool = pool_address.strip().lower()
+    targets = list(range(start_ts, end_ts + 1, interval_secs))
+    points: list[HistoricalTWAPPoint] = []
+
+    for offset in range(0, len(targets), max_points_per_request):
+        chunk_targets = targets[offset : offset + max_points_per_request]
+        request = gateway_pb2.GetDexTwapSeriesRequest(
+            dex=normalized_protocol,
+            chain=normalized_chain,
+            pool_address=normalized_pool,
+            start_ts=chunk_targets[0],
+            end_ts=chunk_targets[-1],
+            interval_secs=interval_secs,
+            window_secs=window_secs,
+        )
+        try:
+            response = client.rate_history.GetDexTwapSeries(request, timeout=client.config.timeout)
+        except Exception as exc:
+            typed = data_source_error_from_grpc(exc, default_source="gateway")
+            if typed is not None:
+                raise typed from exc
+            raise DataSourceUnavailable(
+                source="gateway",
+                reason=f"GetDexTwapSeries RPC failed: {exc}",
+            ) from exc
+        if not response.success:
+            raise DataSourceUnavailable(
+                source=response.source or "gateway",
+                reason=response.error or "GetDexTwapSeries returned success=false",
+            )
+        if (
+            response.dex.strip().lower() != normalized_protocol
+            or response.chain.strip().lower() != normalized_chain
+            or response.pool_address.strip().lower() != normalized_pool
+        ):
+            raise DataSourceUnavailable(
+                source=response.source or "gateway",
+                reason=(
+                    "GetDexTwapSeries response identity drift: "
+                    f"requested=({normalized_protocol},{normalized_chain},{normalized_pool}) "
+                    f"received=({response.dex},{response.chain},{response.pool_address})"
+                ),
+            )
+        points.extend(
+            _decode_historical_twap_chunk(
+                response,
+                chunk_targets=chunk_targets,
+                pool_address=normalized_pool,
+            )
+        )
+
+    return points
 
 
 # Re-export HistoricalDataConfig / MarketState / OHLCV from the
@@ -600,6 +764,8 @@ __all__ = [
     "ARCHIVE_RPC_URL_ENV_PATTERN",
     "CachedTWAP",
     "DEFAULT_TWAP_WINDOW_SECONDS",
+    "HistoricalTWAPPoint",
+    "MAX_TWAP_SERIES_POINTS_PER_REQUEST",
     "OBSERVE_SELECTOR",
     "SLOT0_SELECTOR",
     "TWAPDataProvider",
@@ -607,4 +773,5 @@ __all__ = [
     "TWAPObservation",
     "TWAPPoolNotFoundError",
     "TWAPResult",
+    "fetch_historical_twap_points",
 ]

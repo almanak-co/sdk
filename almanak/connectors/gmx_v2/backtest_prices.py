@@ -23,6 +23,7 @@ from almanak.framework.backtesting.pnl.data_provider import (
     OHLCV,
     HistoricalDataCapability,
     HistoricalDataConfig,
+    HistoricalPriceObservation,
     MarketState,
     TokenRef,
     is_address_like,
@@ -33,6 +34,7 @@ from almanak.framework.backtesting.pnl.data_provider import (
     token_ref_provider_symbol,
 )
 from almanak.framework.backtesting.pnl.providers.coingecko import OHLCVCache
+from almanak.framework.backtesting.pnl.types import DataConfidence
 from almanak.framework.data.interfaces import DataSourceUnavailable
 from almanak.framework.data.timeframes import CANONICAL_OHLCV_TIMEFRAMES, parse_ohlcv_timeframe
 
@@ -82,7 +84,7 @@ class _GMXOracleMarketSource:
             client.connect()
         return client, gateway_pb2
 
-    async def _fetch_page(self, *, timeframe: str, before_ts: int) -> Any:
+    async def _fetch_page(self, *, timeframe: str, before_ts: int, limit: int = _PAGE_LIMIT) -> Any:
         client, gateway_pb2 = self._gateway()
         request = gateway_pb2.GetPerpPriceCandlesRequest(
             venue=self.venue,
@@ -90,7 +92,7 @@ class _GMXOracleMarketSource:
             market=self.requested_market,
             timeframe=timeframe,
             before_ts=before_ts,
-            limit=_PAGE_LIMIT,
+            limit=limit,
         )
         try:
             response = await asyncio.to_thread(
@@ -157,10 +159,25 @@ class _GMXOracleMarketSource:
         start_utc, end_utc = _utc(start), _utc(end)
         start_ts, end_ts = int(start_utc.timestamp()), int(end_utc.timestamp())
         before_ts = end_ts + seconds
+        expected_first_ts = start_ts - (start_ts % seconds)
+        # GMX pages by candle-open timestamp while the provider exposes the
+        # candle only at close. Request one raw candle before the first close
+        # we need and one currently-forming candle after the last close. A
+        # fixed 10k page can extend years before a short backtest and make an
+        # unrelated malformed upstream row abort otherwise valid coverage.
+        earliest_open_ts = expected_first_ts - seconds
         by_timestamp: dict[int, OHLCV] = {}
 
         for _request_number in range(_MAX_PAGE_REQUESTS):
-            response = await self._fetch_page(timeframe=timeframe, before_ts=before_ts)
+            latest_open_ts = (before_ts // seconds) * seconds - seconds
+            remaining_points = ((latest_open_ts - earliest_open_ts) // seconds) + 1
+            if remaining_points <= 0:
+                break
+            response = await self._fetch_page(
+                timeframe=timeframe,
+                before_ts=before_ts,
+                limit=min(_PAGE_LIMIT, remaining_points),
+            )
             self._accept_identity(response, timeframe)
             page = [self._decode_candle(raw, timeframe) for raw in response.candles]
             if not page:
@@ -195,7 +212,6 @@ class _GMXOracleMarketSource:
         # A complete native plane has one close on every UTC-aligned boundary
         # spanning the requested window.  Checking only oldest/newest would
         # accept internal outages and forward-fill across them.
-        expected_first_ts = start_ts - (start_ts % seconds)
         expected_last_ts = end_ts - (end_ts % seconds)
         series = [
             candle for candle in series if expected_first_ts <= int(candle.timestamp.timestamp()) <= expected_last_ts
@@ -249,10 +265,7 @@ class _GMXOracleMarketSource:
                         raise
                     cadence_errors.append(f"{timeframe}: {exc}")
                     continue
-                self.timeframe = timeframe
-                self._series = series
-                self._series_timestamps = [candle.timestamp for candle in series]
-                self._coverage = (_utc(start), _utc(end))
+                self.install_series(timeframe=timeframe, series=series, start=start, end=end)
                 return timeframe
             raise GMXPriceHistoryCoverageError(
                 "No native GMX candle timeframe covers the requested window: " + "; ".join(cadence_errors)
@@ -265,11 +278,22 @@ class _GMXOracleMarketSource:
                 f"GMX does not support explicit timeframe {requested!r}; choose one of {_GMX_TIMEFRAMES} or 'auto'"
             )
         series = await self._fetch_complete(timeframe=requested, start=start, end=end)
-        self.timeframe = requested
+        self.install_series(timeframe=requested, series=series, start=start, end=end)
+        return requested
+
+    def install_series(
+        self,
+        *,
+        timeframe: str,
+        series: list[OHLCV],
+        start: datetime,
+        end: datetime,
+    ) -> None:
+        """Commit one fully validated candidate cadence to this source."""
+        self.timeframe = timeframe
         self._series = series
         self._series_timestamps = [candle.timestamp for candle in series]
         self._coverage = (_utc(start), _utc(end))
-        return requested
 
     def remember_verified_market(self) -> None:
         """Publish this run's venue-verified market identity to the perps-read catalog.
@@ -445,14 +469,37 @@ class _GMXOracleMarketSource:
 
 
 class GMXOracleDataProvider:
-    """Route one verified GMX index asset to GMX and all other assets to fallback."""
+    """Route verified GMX index assets to GMX and all other assets to fallback."""
 
     resolution_based_availability: ClassVar[bool] = True
     historical_capability: ClassVar[HistoricalDataCapability] = HistoricalDataCapability.FULL
 
-    def __init__(self, *, fallback: Any, chain: str, market: str, venue: str = "gmx_v2") -> None:
+    def __init__(
+        self,
+        *,
+        fallback: Any,
+        chain: str,
+        market: str | None = None,
+        markets: tuple[str, ...] | None = None,
+        venue: str = "gmx_v2",
+    ) -> None:
+        requested_markets = markets if markets is not None else ((market,) if market is not None else ())
+        if not requested_markets:
+            raise ValueError("GMX price-history provider requires at least one market")
+        if market is not None and markets is not None:
+            raise ValueError("Declare GMX price-history market or markets, not both")
+        if any(not isinstance(item, str) or not item.strip() for item in requested_markets):
+            raise ValueError("Every GMX price-history market must be a non-empty string")
+        normalized_markets = tuple(item.strip() for item in requested_markets)
+        if len({item.lower() for item in normalized_markets}) != len(normalized_markets):
+            raise ValueError("GMX price-history markets must be unique")
         self._fallback = fallback
-        self._source = _GMXOracleMarketSource(chain=chain, market=market, venue=venue)
+        self._sources = tuple(
+            _GMXOracleMarketSource(chain=chain, market=item, venue=venue) for item in normalized_markets
+        )
+        # Singular compatibility for callers and tests that inspect the
+        # original one-market provider internals.
+        self._source = self._sources[0]
         self._chain = chain.lower()
         self._cache: OHLCVCache | None = None
         self._price_sources: dict[str, str] = {}
@@ -461,6 +508,17 @@ class GMXOracleDataProvider:
     @classmethod
     def for_backtest(cls, *, fallback: Any, chain: str, market: str, venue: str) -> GMXOracleDataProvider:
         return cls(fallback=fallback, chain=chain, market=market, venue=venue)
+
+    @classmethod
+    def for_backtest_many(
+        cls,
+        *,
+        fallback: Any,
+        chain: str,
+        markets: tuple[str, ...],
+        venue: str,
+    ) -> GMXOracleDataProvider:
+        return cls(fallback=fallback, chain=chain, markets=markets, venue=venue)
 
     @staticmethod
     def _canonical_timeframe_for_interval(interval_seconds: int) -> str:
@@ -485,7 +543,14 @@ class GMXOracleDataProvider:
 
     async def prepare_backtest(self, config: PnLBacktestConfig) -> str:
         requested = self._requested_timeframe(config)
-        resolved = await self._source.prepare(requested=requested, start=config.start_time, end=config.end_time)
+        if len(self._sources) == 1:
+            resolved = await self._source.prepare(requested=requested, start=config.start_time, end=config.end_time)
+        else:
+            resolved = await self._prepare_all_sources(
+                requested=requested,
+                start=config.start_time,
+                end=config.end_time,
+            )
         resolved_seconds = parse_ohlcv_timeframe(resolved, field_name="resolved GMX timeframe").seconds
         config.apply_resolved_timeframe(resolved, resolved_seconds)
         # Sole priming path for the process perps-read catalog, which only the
@@ -495,8 +560,93 @@ class GMXOracleDataProvider:
         # would remember records that check can never veto. A miss is
         # non-fatal — the fill-pricing and close-matching lanes keep their
         # fail-closed named rejections.
-        await asyncio.to_thread(self._source.remember_verified_market)
+        for source in self._sources:
+            await asyncio.to_thread(source.remember_verified_market)
         return resolved
+
+    async def _prepare_all_sources(self, *, requested: str, start: datetime, end: datetime) -> str:
+        """Commit one native cadence only when it completely covers every target."""
+        if requested != "auto" and requested not in _GMX_TIMEFRAMES:
+            raise ValueError(
+                f"GMX does not support explicit timeframe {requested!r}; choose one of {_GMX_TIMEFRAMES} or 'auto'"
+            )
+        candidates = _GMX_TIMEFRAMES if requested == "auto" else (requested,)
+        cadence_errors: list[str] = []
+        for timeframe in candidates:
+            prepared: list[tuple[_GMXOracleMarketSource, list[OHLCV]]] = []
+            candidate_error: str | None = None
+            for source in self._sources:
+                try:
+                    series = await source._fetch_complete(timeframe=timeframe, start=start, end=end)
+                except GMXPriceHistoryCoverageError as exc:
+                    candidate_error = f"{source.requested_market}: {exc}"
+                    break
+                except DataSourceUnavailable as exc:
+                    if exc.transport:
+                        raise
+                    candidate_error = f"{source.requested_market}: {exc}"
+                    break
+                prepared.append((source, series))
+            if candidate_error is not None:
+                if requested != "auto":
+                    raise GMXPriceHistoryCoverageError(
+                        f"GMX {timeframe} does not cover every basket target; {candidate_error}"
+                    )
+                cadence_errors.append(f"{timeframe}: {candidate_error}")
+                continue
+
+            # Every source accepted this exact candidate. Validate the
+            # identities before publishing any series as the run's plane.
+            self._validate_source_identities()
+            for source, series in prepared:
+                source.install_series(timeframe=timeframe, series=series, start=start, end=end)
+            return timeframe
+
+        raise GMXPriceHistoryCoverageError(
+            "No single native GMX candle timeframe covers every basket target: " + "; ".join(cadence_errors)
+        )
+
+    def _validate_source_identities(self) -> None:
+        """Reject duplicate assets and aliases before any market state is served."""
+        owners: dict[tuple[str, str], str] = {}
+        labels: dict[str, tuple[str, str]] = {}
+        for source in self._sources:
+            if source.index_token is None or source.index_symbol is None:
+                raise DataSourceUnavailable(
+                    source="gmx_oracle",
+                    reason=f"GMX market {source.requested_market!r} has no verified index identity",
+                )
+            index_key = normalize_token_key(self._chain, source.index_token)
+            previous_market = owners.get(index_key)
+            if previous_market is not None and previous_market != source.requested_market:
+                raise DataSourceUnavailable(
+                    source="gmx_oracle",
+                    reason=(
+                        f"GMX markets {previous_market!r} and {source.requested_market!r} resolve to "
+                        f"the same index token {token_ref_display(index_key)}"
+                    ),
+                )
+            owners[index_key] = source.requested_market
+            for label in (source.index_symbol, source.alias_symbol()):
+                if label is None:
+                    continue
+                normalized_label = label.upper()
+                prior_key = labels.get(normalized_label)
+                if prior_key is not None and prior_key != index_key:
+                    raise DataSourceUnavailable(
+                        source="gmx_oracle",
+                        reason=(
+                            f"GMX basket alias {normalized_label!r} resolves to both "
+                            f"{token_ref_display(prior_key)} and {token_ref_display(index_key)}"
+                        ),
+                    )
+                labels[normalized_label] = index_key
+
+    def _source_for(self, token: TokenRef) -> _GMXOracleMarketSource | None:
+        owners = [source for source in self._sources if source.owns(token)]
+        if len(owners) > 1:
+            raise RuntimeError(f"GMX basket token {token_ref_display(token)!r} has multiple price-history owners")
+        return owners[0] if owners else None
 
     def register_token_addresses(self, addresses: dict[str, tuple[str, str]]) -> None:
         register = getattr(self._fallback, "register_token_addresses", None)
@@ -504,14 +654,15 @@ class GMXOracleDataProvider:
             register(addresses)
 
     def _cache_key(self, token: TokenRef) -> TokenRef:
-        if self._source.owns(token):
-            if self._source.index_token is None:
+        source = self._source_for(token)
+        if source is not None:
+            if source.index_token is None:
                 raise RuntimeError("GMX oracle market identity was not prepared before cache-key resolution")
             # Provider-owned prices are always address-native.  The verified
             # symbol is published separately as a read alias on MarketState;
             # replacing the key with the symbol would break address-native
             # strategy configs, reporting, and data-quality accounting.
-            return normalize_token_key(self._chain, self._source.index_token)
+            return normalize_token_key(self._chain, source.index_token)
         key_fn = getattr(self._fallback, "_market_cache_key", None)
         if callable(key_fn):
             return key_fn(token, self._chain)
@@ -520,8 +671,9 @@ class GMXOracleDataProvider:
         return token_ref_display(token).upper()
 
     async def get_price(self, token: TokenRef, timestamp: datetime) -> Decimal:
-        if self._source.owns(token):
-            return self._source.price_at(timestamp)
+        source = self._source_for(token)
+        if source is not None:
+            return source.price_at(timestamp)
         return await self._fallback.get_price(token, timestamp)
 
     async def get_ohlcv(
@@ -531,8 +683,9 @@ class GMXOracleDataProvider:
         end: datetime,
         interval_seconds: int = 3600,
     ) -> list[OHLCV]:
-        if self._source.owns(token):
-            return self._source.series(start=start, end=end, interval_seconds=interval_seconds)
+        source = self._source_for(token)
+        if source is not None:
+            return source.series(start=start, end=end, interval_seconds=interval_seconds)
         return await self._fallback.get_ohlcv(token, start, end, interval_seconds)
 
     async def _prefetch(self, config: HistoricalDataConfig) -> OHLCVCache:
@@ -541,7 +694,8 @@ class GMXOracleDataProvider:
         fallback_tokens: list[TokenRef] = []
         owns_any = False
         for token in config.tokens:
-            if not self._source.owns(token):
+            source = self._source_for(token)
+            if source is None:
                 fallback_tokens.append(token)
                 continue
             owns_any = True
@@ -549,7 +703,7 @@ class GMXOracleDataProvider:
             if key in data:
                 continue
             native_interval = self._native_interval_seconds()
-            candles = self._source.series(
+            candles = source.series(
                 start=config.start_time,
                 end=config.end_time,
                 interval_seconds=native_interval,
@@ -584,9 +738,14 @@ class GMXOracleDataProvider:
         return OHLCVCache(data=data, fetched_at=datetime.now(UTC), default_chain=self._chain)
 
     def _native_interval_seconds(self) -> int:
-        if self._source.timeframe is None:
+        timeframes = {source.timeframe for source in self._sources}
+        if None in timeframes:
             raise RuntimeError("GMX oracle history was not prepared before prefetch")
-        return parse_ohlcv_timeframe(self._source.timeframe, field_name="resolved GMX timeframe").seconds
+        resolved_timeframes = {timeframe for timeframe in timeframes if timeframe is not None}
+        if len(resolved_timeframes) != 1:
+            raise RuntimeError(f"GMX basket sources do not share one native timeframe: {sorted(resolved_timeframes)!r}")
+        timeframe = next(iter(resolved_timeframes))
+        return parse_ohlcv_timeframe(timeframe, field_name="resolved GMX timeframe").seconds
 
     async def _prefetch_fallback(
         self,
@@ -663,6 +822,7 @@ class GMXOracleDataProvider:
         assert self._cache is not None
         prices: dict[TokenRef, Decimal] = {}
         ohlcv: dict[TokenRef, OHLCV] = {}
+        price_observations: dict[TokenRef, HistoricalPriceObservation] = {}
         for token in config.tokens:
             key = self._cache_key(token)
             candles = self._cache.data.get(key, [])
@@ -672,8 +832,21 @@ class GMXOracleDataProvider:
                 continue
             candle = candles[cursor]
             prices[key] = candle.close
+            source = self._price_sources.get(token_ref_display(key), "")
+            if source:
+                price_observations[key] = HistoricalPriceObservation(
+                    price=candle.close,
+                    timestamp=candle.timestamp,
+                    source=source,
+                    confidence=self._confidence_for_source(source),
+                )
             if config.include_ohlcv:
                 ohlcv[key] = candle
+        metadata: dict[str, Any] = {"price_sources": dict(self._price_sources)}
+        if len(self._sources) == 1:
+            metadata["gmx_oracle"] = self._source.provenance
+        else:
+            metadata["gmx_oracles"] = [source.provenance for source in self._sources]
         state = MarketState(
             timestamp=current,
             prices=prices,
@@ -681,18 +854,27 @@ class GMXOracleDataProvider:
             chain=self._chain,
             block_number=None,
             gas_price_gwei=None,
-            metadata={
-                "price_sources": dict(self._price_sources),
-                "gmx_oracle": self._source.provenance,
-            },
+            price_observations=price_observations,
+            metadata=metadata,
         )
-        if self._source.index_token is not None:
-            alias_symbol = self._source.alias_symbol()
-            if alias_symbol is not None:
-                state.register_symbol_aliases(
-                    {alias_symbol: normalize_token_key(self._chain, self._source.index_token)}
-                )
+        aliases = {
+            alias_symbol: normalize_token_key(self._chain, source.index_token)
+            for source in self._sources
+            if source.index_token is not None and (alias_symbol := source.alias_symbol()) is not None
+        }
+        if aliases:
+            state.register_symbol_aliases(aliases)
         return state
+
+    @staticmethod
+    def _confidence_for_source(source: str) -> DataConfidence:
+        """Map known price providers without promoting an unknown source."""
+        source_lower = source.lower()
+        if "gmx_oracle" in source_lower or "chainlink" in source_lower or "twap" in source_lower:
+            return DataConfidence.HIGH
+        if "coingecko" in source_lower:
+            return DataConfidence.MEDIUM
+        return DataConfidence.LOW
 
     async def iterate(self, config: HistoricalDataConfig) -> AsyncIterator[tuple[datetime, MarketState]]:
         self._cache = await self._prefetch(config)
@@ -718,13 +900,14 @@ class GMXOracleDataProvider:
     @property
     def supported_tokens(self) -> list[str]:
         tokens = set(getattr(self._fallback, "supported_tokens", []))
-        if self._source.index_symbol:
-            tokens.add(self._source.index_symbol)
-        if self._source.index_token:
-            tokens.add(self._source.index_token)
-        alias = self._source.alias_symbol()
-        if alias is not None:
-            tokens.add(alias)
+        for source in self._sources:
+            if source.index_symbol:
+                tokens.add(source.index_symbol)
+            if source.index_token:
+                tokens.add(source.index_token)
+            alias = source.alias_symbol()
+            if alias is not None:
+                tokens.add(alias)
         return sorted(tokens)
 
     @property
@@ -732,19 +915,36 @@ class GMXOracleDataProvider:
         return [self._chain]
 
     @property
-    def price_provenance(self) -> dict[str, str | None]:
-        return self._source.provenance
+    def price_provenance(self) -> dict[str, Any]:
+        if len(self._sources) == 1:
+            return self._source.provenance
+        return {
+            "source": "gmx_oracle_candles",
+            "venue": self._source.venue,
+            "chain": self._chain,
+            "timeframe": self._source.timeframe,
+            "fidelity": "index_mark_ohlc_without_execution_spread_or_price_impact",
+            "targets": [source.provenance for source in self._sources],
+        }
 
     @property
     def price_history_target(self) -> tuple[str, str, str]:
         return self._source.venue, self._chain, self._source.requested_market
 
     @property
+    def price_history_targets(self) -> tuple[tuple[str, str, str], ...]:
+        return tuple((source.venue, self._chain, source.requested_market) for source in self._sources)
+
+    @property
     def required_price_tokens(self) -> tuple[TokenRef, ...]:
         """Verified dynamic index identity the engine must include in its data plane."""
-        if self._source.index_token is None:
-            return ()
-        return (normalize_token_key(self._chain, self._source.index_token),)
+        return tuple(
+            dict.fromkeys(
+                normalize_token_key(self._chain, source.index_token)
+                for source in self._sources
+                if source.index_token is not None
+            )
+        )
 
 
 __all__ = ["GMXOracleDataProvider", "GMXPriceHistoryCoverageError"]

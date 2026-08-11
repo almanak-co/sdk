@@ -80,6 +80,8 @@ INVARIANT_ROWS: tuple[str, ...] = (
     "fungible_close_by_pool_id",
     "fee_reporting_tie_out",
     "snapshot_price_case_insensitive",
+    "historical_price_provenance",
+    "historical_exact_pool_twap",
     "snapshot_total_counts_cash_once",
     "trade_pnl_attribution",
     "math_il_closed_form",
@@ -226,6 +228,19 @@ CELLS: tuple[TrustCell, ...] = (
         "Numeraire-canonical merge (blueprint 31 §7): with a moving numeraire price, "
         "the primary metrics tell the numeraire story and every USD PnL figure equals "
         "its numeraire sibling x the emitted end reference price, Decimal-exact.",
+    ),
+    _cell(
+        "historical_price_provenance",
+        "swap",
+        "Address-keyed funded RWA prices retain provider source and historical observation time "
+        "through decide(), while the price manifest covers the full effective provider universe (ALM-3232).",
+    ),
+    _cell(
+        "historical_exact_pool_twap",
+        "swap",
+        "An exact-pool TWAP dependency is prewarmed from archive observe() evidence, preserves its pool/window/"
+        "block identity and actual observation time, and is never replaced by the funded tokens' USD ratio "
+        "(ALM-3232).",
     ),
     # --- LP column ---
     _cell(
@@ -405,9 +420,9 @@ CELLS: tuple[TrustCell, ...] = (
     _cell(
         "venue_native_price_plane",
         "perp",
-        "A dynamically resolved GMX synthetic market uses one verified venue-native index-price plane; "
-        "auto selects the finest complete native cadence, timestamps closes only when observable, and never "
-        "stitches the market to a symbol-guess fallback (ALM-3149).",
+        "Dynamically resolved GMX synthetic markets use one verified venue-native index-price plane; "
+        "auto selects one finest complete native cadence atomically across the basket, timestamps closes only "
+        "when observable, and never stitches a market to a symbol-guess fallback (ALM-3149, ALM-3234).",
     ),
     _cell(
         "round_trip_conservation",

@@ -18,6 +18,7 @@ gateway provider (the ``_query_observe`` decode block).
 
 from __future__ import annotations
 
+import asyncio
 import math
 import time
 from decimal import Decimal
@@ -377,3 +378,202 @@ async def fetch_v3_twap_observation(
         price=price,
         tick_observation_count=len(tick_cumulatives),
     )
+
+
+def _block_field(block: Any, name: str) -> int:
+    """Read an integer block field from Web3 mapping/attribute responses."""
+    value = block.get(name) if hasattr(block, "get") else getattr(block, name, None)
+    if value is None:
+        raise ValueError(f"block response omitted {name!r}")
+    if isinstance(value, str):
+        return int(value, 16) if value.startswith("0x") else int(value)
+    return int(value)
+
+
+async def _historical_block_sample(web3: Any, block_identifier: int | str, *, protocol: str) -> tuple[int, int]:
+    """Return ``(block_number, block_timestamp)`` with typed failure attribution."""
+    from almanak.gateway.services.rate_history_service import RateHistoryUnavailable
+
+    try:
+        block = await web3.eth.get_block(block_identifier)
+        return _block_field(block, "number"), _block_field(block, "timestamp")
+    except Exception as exc:
+        raise RateHistoryUnavailable(
+            protocol,
+            f"failed to resolve archive block {block_identifier!r}: {exc}",
+        ) from exc
+
+
+async def _block_at_or_before(
+    web3: Any,
+    target_timestamp: int,
+    *,
+    lower: tuple[int, int],
+    upper: tuple[int, int],
+    protocol: str,
+) -> tuple[int, int]:
+    """Resolve the latest block whose timestamp is no later than ``target``.
+
+    Block timestamps are monotonic but block time is not constant. Interpolation
+    normally lands within a few blocks over long backtest windows; after eight
+    interpolation attempts the resolver switches to bisection so pathological
+    timestamp distributions still make logarithmic, bounded progress.
+    """
+    lower_number, lower_timestamp = lower
+    upper_number, upper_timestamp = upper
+    if target_timestamp < lower_timestamp:
+        raise ValueError(f"target timestamp {target_timestamp} precedes earliest block timestamp {lower_timestamp}")
+    if target_timestamp >= upper_timestamp:
+        return upper
+
+    attempts = 0
+    while upper_number - lower_number > 1:
+        attempts += 1
+        if attempts > 8 or upper_timestamp <= lower_timestamp:
+            candidate_number = (lower_number + upper_number) // 2
+        else:
+            numerator = (target_timestamp - lower_timestamp) * (upper_number - lower_number)
+            candidate_number = lower_number + numerator // (upper_timestamp - lower_timestamp)
+            candidate_number = max(lower_number + 1, min(upper_number - 1, candidate_number))
+        candidate = await _historical_block_sample(web3, candidate_number, protocol=protocol)
+        if candidate[1] <= target_timestamp:
+            lower_number, lower_timestamp = candidate
+        else:
+            upper_number, upper_timestamp = candidate
+    return lower_number, lower_timestamp
+
+
+async def _historical_blocks_for_grid(
+    web3: Any,
+    *,
+    start_ts: int,
+    end_ts: int,
+    interval_secs: int,
+    protocol: str,
+) -> list[tuple[int, int]]:
+    """Resolve the at-or-before archive block for every requested sample."""
+    from almanak.gateway.services.rate_history_service import RateHistoryUnavailable
+
+    if start_ts > end_ts:
+        raise RateHistoryUnavailable(protocol, f"start_ts must be <= end_ts (got {start_ts} > {end_ts})")
+    if interval_secs <= 0:
+        raise RateHistoryUnavailable(protocol, f"interval_secs must be > 0 (got {interval_secs})")
+
+    genesis = await _historical_block_sample(web3, 0, protocol=protocol)
+    latest = await _historical_block_sample(web3, "latest", protocol=protocol)
+    if start_ts < genesis[1]:
+        raise RateHistoryUnavailable(
+            protocol,
+            f"requested TWAP series starts before chain genesis ({start_ts} < {genesis[1]})",
+        )
+    if end_ts > latest[1]:
+        raise RateHistoryUnavailable(
+            protocol,
+            f"requested TWAP series ends after the measured chain head ({end_ts} > {latest[1]})",
+        )
+
+    samples: list[tuple[int, int]] = []
+    lower = genesis
+    for target in range(start_ts, end_ts + 1, interval_secs):
+        lower = await _block_at_or_before(
+            web3,
+            target,
+            lower=lower,
+            upper=latest,
+            protocol=protocol,
+        )
+        samples.append(lower)
+    return samples
+
+
+async def fetch_v3_twap_series(
+    servicer: Any,
+    *,
+    chain: str,
+    pool_address: str,
+    start_ts: int,
+    end_ts: int,
+    interval_secs: int,
+    window_secs: int,
+    protocol: str,
+) -> list[Any]:
+    """Read an exact-pool historical TWAP series from archive state.
+
+    Each requested sample resolves to the latest block at or before its UTC
+    timestamp and calls that pool's native ``observe([window_secs, 0])`` at
+    the resolved block. The emitted timestamp is the selected block timestamp,
+    not the requested grid boundary. Pool token identities and decimals are
+    immutable V3 metadata, so they are measured once per series request and
+    reused across samples. A duplicate selected block is observed once and
+    re-expanded to its requested grid points; prices are never derived from
+    token/USD ratios.
+    """
+    from almanak.gateway.services.rate_history_service import (
+        DexTwapPoint,
+        RateHistoryUnavailable,
+    )
+
+    if window_secs <= 0:
+        raise RateHistoryUnavailable(protocol, f"window_secs must be > 0 (got {window_secs})")
+
+    web3, pool_checksum = await _twap_resolve_web3_and_pool(
+        servicer,
+        chain,
+        pool_address,
+        protocol=protocol,
+    )
+    block_samples = await _historical_blocks_for_grid(
+        web3,
+        start_ts=start_ts,
+        end_ts=end_ts,
+        interval_secs=interval_secs,
+        protocol=protocol,
+    )
+    # Multiple grid points may legitimately resolve to the same block on a
+    # halted/low-cadence chain. Read it once; downstream staleness checks use
+    # the actual block timestamp and will refuse an over-old observation.
+    unique_blocks = list(dict.fromkeys(block_samples))
+    if not unique_blocks:
+        return []
+
+    t0_decimals, t1_decimals = await _twap_resolve_pool_decimals(
+        web3,
+        pool_checksum,
+        unique_blocks[-1][0],
+        protocol=protocol,
+        pool_address=pool_address,
+    )
+
+    async def observe(block_sample: tuple[int, int]) -> DexTwapPoint:
+        block_number, block_timestamp = block_sample
+        tick_cumulatives, _liquidity = await _twap_call_observe(
+            web3,
+            pool_checksum=pool_checksum,
+            seconds_agos=[window_secs, 0],
+            block_identifier=block_number,
+            protocol=protocol,
+            pool_address=pool_address,
+        )
+        tick_diff = tick_cumulatives[1] - tick_cumulatives[0]
+        tick_twap = _twap_tick_from_cumulatives(tick_diff, window_secs)
+        return DexTwapPoint(
+            timestamp=block_timestamp,
+            price=_tick_to_price(tick_twap, t0_decimals, t1_decimals),
+            tick_observation_count=len(tick_cumulatives),
+            block_number=block_number,
+        )
+
+    point_by_block: dict[tuple[int, int], DexTwapPoint] = {}
+    # Bound archive-RPC concurrency. A one-year hourly run still performs one
+    # real observe() per sample, but does not serialize thousands of round trips
+    # or create an unbounded task fan-out.
+    for offset in range(0, len(unique_blocks), 32):
+        chunk = unique_blocks[offset : offset + 32]
+        observed = await asyncio.gather(*(observe(sample) for sample in chunk))
+        point_by_block.update(zip(chunk, observed, strict=True))
+
+    # Preserve the requested grid cardinality. Multiple targets can resolve to
+    # the same archive block when a chain stalls; re-expand the cached sample
+    # instead of silently returning fewer observations than the caller asked
+    # for. The duplicated point retains the real block timestamp.
+    return [point_by_block[sample] for sample in block_samples]

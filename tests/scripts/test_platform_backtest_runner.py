@@ -175,6 +175,45 @@ def test_build_platform_backtest_config_parses_platform_payload() -> None:
     assert config.allow_hardcoded_fallback is True
 
 
+def test_platform_native_perp_price_timeframe_defaults_to_auto() -> None:
+    config = SimpleNamespace(timeframe=None)
+    strategy = SimpleNamespace(config={"protocol": "gmx_v2", "market": "ETH/USD"})
+
+    runner.apply_platform_price_timeframe_default("{}", config, strategy=strategy)
+
+    assert config.timeframe == "auto"
+
+
+@pytest.mark.parametrize("explicit", ["1h", None])
+def test_platform_explicit_price_timeframe_is_never_replaced(
+    monkeypatch: pytest.MonkeyPatch,
+    explicit: str | None,
+) -> None:
+    config = SimpleNamespace(timeframe=explicit)
+    monkeypatch.setattr(
+        runner,
+        "coverage_aware_default_timeframe",
+        lambda current: pytest.fail("explicit timeframe must bypass default discovery"),
+    )
+
+    runner.apply_platform_price_timeframe_default(
+        json.dumps({"timeframe": explicit}),
+        config,
+        strategy=object(),
+    )
+
+    assert config.timeframe == explicit
+
+
+def test_platform_non_native_strategy_keeps_legacy_price_timeframe(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = SimpleNamespace(timeframe=None)
+    monkeypatch.setattr(runner, "coverage_aware_default_timeframe", lambda current: None)
+
+    runner.apply_platform_price_timeframe_default("{}", config, strategy=object())
+
+    assert config.timeframe is None
+
+
 def test_platform_funding_only_non_native_token_is_registered_in_address_map() -> None:
     class Strategy:
         STRATEGY_METADATA = type("Meta", (), {"default_chain": "base", "supported_chains": ["base"]})()

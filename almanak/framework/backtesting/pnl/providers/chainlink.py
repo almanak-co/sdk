@@ -40,6 +40,7 @@ from ..data_provider import (
     OHLCV,
     HistoricalDataCapability,
     HistoricalDataConfig,
+    HistoricalPriceObservation,
     MarketState,
     TokenRef,
     token_ref_display,
@@ -209,10 +210,18 @@ def _utc(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
-def _price_at(points: Sequence[tuple[datetime, Decimal]], timestamp: datetime) -> Decimal | None:
+def _observation_at(
+    points: Sequence[tuple[datetime, Decimal]],
+    timestamp: datetime,
+) -> tuple[datetime, Decimal] | None:
     target = _utc(timestamp)
     eligible = [(ts, price) for ts, price in points if _utc(ts) <= target]
-    return max(eligible, key=lambda item: item[0])[1] if eligible else None
+    return max(eligible, key=lambda item: _utc(item[0])) if eligible else None
+
+
+def _price_at(points: Sequence[tuple[datetime, Decimal]], timestamp: datetime) -> Decimal | None:
+    observation = _observation_at(points, timestamp)
+    return observation[1] if observation is not None else None
 
 
 def _connected_gateway() -> tuple[Any, Any]:
@@ -622,14 +631,22 @@ class ChainlinkDataProvider:
         while current <= end:
             prices: dict[TokenRef, Decimal] = {}
             ohlcv: dict[TokenRef, OHLCV] = {}
+            price_observations: dict[TokenRef, HistoricalPriceObservation] = {}
             historical_price_hits = 0
             cache_price_hits = 0
             for token in config.tokens:
                 assert isinstance(token, str)
-                price = _price_at(series[token.upper()], current)
-                if price is None:
+                observation = _observation_at(series[token.upper()], current)
+                if observation is None:
                     continue
+                observed_at, price = observation
                 prices[token.upper()] = price
+                price_observations[token.upper()] = HistoricalPriceObservation(
+                    price=price,
+                    timestamp=_utc(observed_at),
+                    source=f"chainlink_{source_by_token[token.upper()]}",
+                    confidence=DataConfidence.HIGH,
+                )
                 if source_by_token[token.upper()] == "historical":
                     historical_price_hits += 1
                 else:
@@ -656,6 +673,7 @@ class ChainlinkDataProvider:
                     chain=config.chains[0] if config.chains else self._chain,
                     block_number=None,
                     gas_price_gwei=None,
+                    price_observations=price_observations,
                     metadata={
                         "data_source": data_source,
                         "historical_price_hits": historical_price_hits,

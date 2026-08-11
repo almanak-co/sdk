@@ -667,6 +667,11 @@ class MarketSnapshot:
         # snapshot. Runner can use this to avoid treating "HOLD forever because
         # market data is broken" as healthy behavior.
         self._critical_data_failures: dict[tuple[str, str], str] = {}
+        # Preserve the typed first cause alongside the public string ledger.
+        # The PnL runner uses this private plane to distinguish a structural
+        # indicator/data cadence mismatch from ordinary indicator warm-up even
+        # when strategy code catches the accessor's ValueError and returns HOLD.
+        self._critical_data_failure_causes: dict[tuple[str, str], Exception] = {}
         # Backtest-only (ALM-2943): run-scoped dedup set injected by the PnL
         # engine's snapshot factory so documented-soft empty accessors
         # (wallet_activity / prediction_price) ledger-note the unsimulated
@@ -2257,7 +2262,10 @@ class MarketSnapshot:
     def _record_critical_data_failure(self, source: str, key: str, error: Exception | str) -> None:
         """Record a market-data failure that can invalidate a HOLD outcome."""
         # Keep the first (most specific) failure detail for each key.
-        self._critical_data_failures.setdefault((source, key), str(error))
+        failure_key = (source, key)
+        self._critical_data_failures.setdefault(failure_key, str(error))
+        if isinstance(error, Exception):
+            self._critical_data_failure_causes.setdefault(failure_key, error)
 
     def _note_backtest_soft_empty(self, source: str, lane: str) -> None:
         """Once-per-run ledger note for documented-soft empty returns (ALM-2943).
@@ -2292,6 +2300,7 @@ class MarketSnapshot:
         inside decide()) do not incorrectly poison the HOLD-escalation check.
         """
         self._critical_data_failures.clear()
+        self._critical_data_failure_causes.clear()
 
     def has_critical_data_failures(self) -> bool:
         """Return True when this snapshot observed any critical data failures."""
@@ -4447,11 +4456,15 @@ class MarketSnapshot:
             price_data = record.data
             timestamp = getattr(price_data, "timestamp", None)
             source = getattr(price_data, "source", "") or "unknown"
+            confidence = getattr(price_data, "confidence", "UNAVAILABLE")
+            confidence = getattr(confidence, "value", confidence)
+            if confidence not in {"HIGH", "ESTIMATED", "STALE", "UNAVAILABLE"}:
+                confidence = "UNAVAILABLE"
             return {
                 "price_usd": str(record.price),
                 "oracle_source": source,
                 "fetched_at": timestamp.isoformat() if timestamp is not None and source != "preloaded" else "",
-                "confidence": "HIGH",
+                "confidence": confidence,
             }
 
         descriptor = ChainRegistry.try_resolve(str(self._chain))

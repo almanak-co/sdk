@@ -1,10 +1,10 @@
 """Run-scoped data-provenance manifest for the backtest data lanes (ALM-2943).
 
-Every serve that flows through a backtest data lane — price ticks, pool
-volume/TVL days, funding history, OHLCV views, and (future) lending APY /
-pool-state history — appends one manifest observation: which lane served
-which key to which consumer, from which source, over which time range, and
-with what outcome.
+Every serve that flows through a backtest data lane — price ticks, exact-pool
+TWAP observations, pool volume/TVL days, funding history, OHLCV views, and
+(future) lending APY / pool-state history — appends one manifest observation:
+which lane served which key to which consumer, from which source, over which
+time range, and with what outcome.
 The manifest is the run's single lane-keyed provenance record; the two
 pre-existing run structures (``DataQualityTracker``,
 ``DataCoverageMetrics``) remain untouched consumers-to-unify (survey §4).
@@ -48,6 +48,7 @@ __all__ = [
     "LANE_POOL_TVL",
     "LANE_POOL_VOLUME",
     "LANE_PRICE",
+    "LANE_TWAP",
     "OUTCOME_DEGRADED",
     "OUTCOME_REFUSED",
     "OUTCOME_SERVED",
@@ -57,6 +58,7 @@ __all__ = [
 #: Canonical lane names. One lane = one kind of question a run asks of the
 #: data plane; keys within a lane identify the token / pool / market asked.
 LANE_PRICE = "price"
+LANE_TWAP = "twap"
 LANE_OHLCV = "ohlcv"
 LANE_POOL_VOLUME = "pool_volume"
 LANE_POOL_TVL = "pool_tvl"

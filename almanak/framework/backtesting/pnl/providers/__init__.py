@@ -150,6 +150,7 @@ from .rate_limiter import (
     create_coingecko_rate_limiter,
 )
 from .registry import ProviderMetadata, ProviderRegistry
+from .snapshot_twap import HistoricalTWAPTarget, SnapshotTWAPSource, SnapshotTWAPView
 from .subgraph_client import (
     SubgraphQueryError,
     SubgraphRateLimitError,
@@ -186,6 +187,9 @@ __all__ = [
     "CachedTWAP",
     "TWAPInsufficientHistoryError",
     "TWAPPoolNotFoundError",
+    "HistoricalTWAPTarget",
+    "SnapshotTWAPSource",
+    "SnapshotTWAPView",
     "AggregatedDataProvider",
     # Gas Price Providers
     "GasPriceProvider",

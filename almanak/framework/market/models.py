@@ -122,6 +122,7 @@ class PriceData:
     low_24h: Decimal = Decimal("0")
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
     source: str = ""
+    confidence: str = "HIGH"
 
 
 @dataclass

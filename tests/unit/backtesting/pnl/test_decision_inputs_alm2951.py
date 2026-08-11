@@ -21,6 +21,7 @@ from almanak.framework.backtesting.pnl.engine import (
     DefaultSlippageModel,
     PnLBacktester,
 )
+from almanak.framework.backtesting.pnl.error_handling import PreflightValidationError
 from almanak.framework.backtesting.pnl.indicator_engine import BacktestIndicatorEngine
 from almanak.framework.market import MarketSnapshot
 from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
@@ -154,7 +155,9 @@ class TestPriceDataEnrichment:
         assert data.high_24h == Decimal("3029")
         assert data.low_24h == Decimal("3005")
         assert data.change_24h_pct > 0
-        assert data.source == "backtest_price_series"
+        # Rolling enrichment preserves the observation origin. This fixture
+        # seeds a legacy scalar-only price, whose honest source is preloaded.
+        assert data.source == "preloaded"
 
     def test_untouched_during_warmup(self):
         engine = BacktestIndicatorEngine()
@@ -479,8 +482,8 @@ class _RsiReadingStrategy:
 class TestGranularityHandoff:
     """ALM-2957 (#3311 review round): the loop's first tick must thread the
     provider's MEASURED data granularity into the indicator engine — a daily
-    plane under hourly ticks makes 1h indicator reads refuse-and-record
-    instead of serving saturated values."""
+    plane under hourly ticks makes an actually-read 1h indicator abort instead
+    of serving saturated values or certifying a hollow run."""
 
     @pytest.mark.asyncio
     async def test_first_tick_threads_measured_granularity(self):
@@ -488,14 +491,15 @@ class TestGranularityHandoff:
         backtester.data_provider.measured_granularity_seconds = 86400
         strategy = _RsiReadingStrategy()
 
-        result = await backtester.backtest(strategy, _config(num_hours=40))
+        with pytest.raises(PreflightValidationError) as exc_info:
+            await backtester.backtest(strategy, _config(num_hours=40))
 
-        # Every read refused (never served a degenerate 1h RSI)...
-        assert strategy.served and not any(strategy.served)
-        # ...and the refusals are on the decision-input ledger.
-        rsi_entries = [f for f in result.decision_input_failures if f.get("source") == "rsi"]
-        assert rsi_entries, result.decision_input_failures
-        assert any("resolution" in str(f.get("detail")) for f in rsi_entries)
+        assert strategy.served == [False]
+        assert exc_info.value.failed_checks == ["indicator_timeframe_compatibility"]
+        message = str(exc_info.value)
+        assert "rsi requested 1h" in message
+        assert "data plane provides 1d" in message
+        assert "stopped at tick 1" in message
 
     @pytest.mark.asyncio
     async def test_matching_granularity_serves_after_warmup(self):

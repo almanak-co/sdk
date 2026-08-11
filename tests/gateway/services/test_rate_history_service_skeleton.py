@@ -21,6 +21,7 @@ import pytest
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2
 from almanak.gateway.services.rate_history_service import (
+    DexTwapPoint,
     GasPricePoint,
     LendingRatePoint,
     RateHistoryServiceServicer,
@@ -385,6 +386,71 @@ def test_twap_series_rejects_zero_interval(
     assert response.success is False
 
 
+def test_twap_series_rejects_negative_observation_window(servicer: RateHistoryServiceServicer) -> None:
+    ctx = _MockContext()
+    request = gateway_pb2.GetDexTwapSeriesRequest(
+        dex="uniswap_v3",
+        chain="ethereum",
+        pool_address="0xc756bba710d45647715079ce50aa16aab36ded42",
+        start_ts=1_700_000_000,
+        end_ts=1_700_003_600,
+        interval_secs=3_600,
+        window_secs=-1,
+    )
+
+    response = asyncio.run(servicer.GetDexTwapSeries(request, ctx))  # type: ignore[arg-type]
+
+    assert ctx.code == grpc.StatusCode.INVALID_ARGUMENT
+    assert response.success is False
+    assert response.error == "window_secs must be >= 0"
+
+
+@pytest.mark.parametrize("requested_window,expected_window", [(0, 3_600), (1_800, 1_800)])
+def test_twap_series_forwards_observation_window_independently_from_cadence(
+    servicer: RateHistoryServiceServicer,
+    requested_window: int,
+    expected_window: int,
+) -> None:
+    from decimal import Decimal
+
+    captured = {}
+
+    class Provider:
+        def twap_supported_chains(self):
+            return frozenset({"ethereum"})
+
+        async def fetch_twap_series(self, _servicer, **kwargs):
+            captured.update(kwargs)
+            return [
+                DexTwapPoint(
+                    timestamp=1_700_000_000,
+                    price=Decimal("1.001"),
+                    tick_observation_count=2,
+                    block_number=18_000_000,
+                )
+            ]
+
+    servicer._twap_providers["uniswap_v3"] = Provider()  # type: ignore[assignment]
+    ctx = _MockContext()
+    request = gateway_pb2.GetDexTwapSeriesRequest(
+        dex="uniswap_v3",
+        chain="ethereum",
+        pool_address="0xc756bba710d45647715079ce50aa16aab36ded42",
+        start_ts=1_700_000_000,
+        end_ts=1_700_003_600,
+        interval_secs=3_600,
+        window_secs=requested_window,
+    )
+
+    response = asyncio.run(servicer.GetDexTwapSeries(request, ctx))  # type: ignore[arg-type]
+
+    assert response.success is True
+    assert response.source == "on_chain_archive"
+    assert captured["interval_secs"] == 3_600
+    assert captured["window_secs"] == expected_window
+    assert response.points[0].as_of_block == 18_000_000
+
+
 def test_volume_rejects_empty_pool_address(
     servicer: RateHistoryServiceServicer,
 ) -> None:
@@ -424,6 +490,21 @@ def test_encode_decimal_zero_is_zero_string(
     from decimal import Decimal
 
     assert servicer._encode_decimal(Decimal("0")) == "0"
+
+
+def test_twap_point_encoder_preserves_archive_block_anchor(servicer: RateHistoryServiceServicer) -> None:
+    from decimal import Decimal
+
+    encoded = servicer._encode_twap_point(
+        DexTwapPoint(
+            timestamp=1_700_000_000,
+            price=Decimal("1.002"),
+            tick_observation_count=2,
+            block_number=18_000_000,
+        )
+    )
+    assert encoded.timestamp == 1_700_000_000
+    assert encoded.as_of_block == 18_000_000
 
 
 def test_lending_point_partial_unmeasured(

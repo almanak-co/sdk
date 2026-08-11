@@ -65,6 +65,7 @@ from almanak.connectors._base.gateway_connector import GatewayConnector
 from almanak.connectors._base.types import ProtocolKind, ProtocolName
 from almanak.connectors._base.v3_gateway_twap import (
     _fetch_pool_tokens_and_decimals,
+    fetch_v3_twap_series,
 )
 from almanak.connectors._base.v3_gateway_twap import (
     fetch_v3_twap_observation as _fetch_uniswap_v3_twap_observation,
@@ -297,21 +298,18 @@ class UniswapV3GatewayConnector(
         start_ts: int,
         end_ts: int,
         interval_secs: int,
+        window_secs: int,
     ) -> Any:
-        """TWAP series.
-
-        The pre-W7 framework code (``twap.py``) only computes a single
-        observation at a time; building a series at ``interval_secs``
-        spacing requires the block-by-block bisect that lives in
-        ``_query_observe_at_block``. That fan-out arrives in Step 3 of
-        the W7 plan (DEX TWAP cluster). For Step 2 (this PR), the series
-        lane raises ``RateHistoryUnavailable``.
-        """
-        from almanak.gateway.services.rate_history_service import RateHistoryUnavailable
-
-        raise RateHistoryUnavailable(
-            "uniswap_v3",
-            "DEX TWAP series fan-out lands in W7 step 3 (DEX cluster); see plan PR #2473 §5.3",
+        """Exact-pool historical TWAPs measured from archive ``observe()`` state."""
+        return await fetch_v3_twap_series(
+            servicer,
+            chain=chain,
+            pool_address=pool_address,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            interval_secs=interval_secs,
+            window_secs=window_secs,
+            protocol="uniswap_v3",
         )
 
     # ---------------------------------------------------------------------

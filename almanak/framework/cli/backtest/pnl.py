@@ -839,10 +839,16 @@ def _run_backtest(
         click.echo("BACKTEST ABORTED: PREFLIGHT VALIDATION FAILED", err=True)
         click.echo("=" * 60, err=True)
         click.echo(str(e), err=True)
-        click.echo(
-            "\nTo run anyway with degraded data, re-run with --allow-missing-prices.",
-            err=True,
-        )
+        if "indicator_timeframe_compatibility" in e.failed_checks:
+            click.echo(
+                "\nThis structural timeframe mismatch cannot be bypassed with --allow-missing-prices.",
+                err=True,
+            )
+        else:
+            click.echo(
+                "\nTo run anyway with degraded data, re-run with --allow-missing-prices.",
+                err=True,
+            )
         sys.exit(2)
     except Exception as e:
         click.echo(f"Error running backtest: {e}", err=True)

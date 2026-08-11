@@ -6972,9 +6972,11 @@ class DexTwapPoint(_message.Message):
     TIMESTAMP_FIELD_NUMBER: _builtins.int
     PRICE_FIELD_NUMBER: _builtins.int
     TICK_OBSERVATION_COUNT_FIELD_NUMBER: _builtins.int
+    AS_OF_BLOCK_FIELD_NUMBER: _builtins.int
     timestamp: _builtins.int
     """Unix seconds, UTC. For a single fetch this is the gateway-side
-    observation timestamp; for a series it's the bucket boundary.
+    observation timestamp. Historical series emit the actual timestamp of
+    the selected archive block at or before the requested sample boundary.
     """
     price: _builtins.str
     """TWAP price (quote / base, in human-readable units). Decimal-as-string."""
@@ -6983,14 +6985,19 @@ class DexTwapPoint(_message.Message):
     pool's ring-buffer had over the requested window. 0 when the
     connector doesn't expose an analogous counter.
     """
+    as_of_block: _builtins.int
+    """Exact block at which observe() was evaluated. 0 means unspecified for
+    legacy/non-historical providers; historical archive series always set it.
+    """
     def __init__(
         self,
         *,
         timestamp: _builtins.int = ...,
         price: _builtins.str = ...,
         tick_observation_count: _builtins.int = ...,
+        as_of_block: _builtins.int = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["price", b"price", "tick_observation_count", b"tick_observation_count", "timestamp", b"timestamp"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["as_of_block", b"as_of_block", "price", b"price", "tick_observation_count", b"tick_observation_count", "timestamp", b"timestamp"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___DexTwapPoint: _TypeAlias = DexTwapPoint  # noqa: Y015
@@ -7788,6 +7795,7 @@ class GetDexTwapSeriesRequest(_message.Message):
     START_TS_FIELD_NUMBER: _builtins.int
     END_TS_FIELD_NUMBER: _builtins.int
     INTERVAL_SECS_FIELD_NUMBER: _builtins.int
+    WINDOW_SECS_FIELD_NUMBER: _builtins.int
     dex: _builtins.str
     chain: _builtins.str
     pool_address: _builtins.str
@@ -7798,6 +7806,12 @@ class GetDexTwapSeriesRequest(_message.Message):
     """Required. Spacing between consecutive TWAP samples in seconds.
     Validator rejects <= 0.
     """
+    window_secs: _builtins.int
+    """TWAP observation window in seconds. This is independent from the sample
+    cadence: an hourly backtest may request a 30-minute TWAP at every hourly
+    tick. Zero preserves compatibility with older clients and means
+    ``interval_secs``.
+    """
     def __init__(
         self,
         *,
@@ -7807,8 +7821,9 @@ class GetDexTwapSeriesRequest(_message.Message):
         start_ts: _builtins.int = ...,
         end_ts: _builtins.int = ...,
         interval_secs: _builtins.int = ...,
+        window_secs: _builtins.int = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "dex", b"dex", "end_ts", b"end_ts", "interval_secs", b"interval_secs", "pool_address", b"pool_address", "start_ts", b"start_ts"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "dex", b"dex", "end_ts", b"end_ts", "interval_secs", b"interval_secs", "pool_address", b"pool_address", "start_ts", b"start_ts", "window_secs", b"window_secs"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___GetDexTwapSeriesRequest: _TypeAlias = GetDexTwapSeriesRequest  # noqa: Y015

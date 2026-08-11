@@ -396,8 +396,8 @@ async def test_auto_selects_finest_cadence_with_actual_complete_coverage() -> No
     calls: list[str] = []
     counts: dict[str, int] = {}
 
-    async def fetch_page(*, timeframe: str, before_ts: int) -> SimpleNamespace:
-        del before_ts
+    async def fetch_page(*, timeframe: str, before_ts: int, limit: int) -> SimpleNamespace:
+        del before_ts, limit
         calls.append(timeframe)
         counts[timeframe] = counts.get(timeframe, 0) + 1
         if timeframe == "4h":
@@ -458,8 +458,8 @@ async def test_explicit_timeframe_fails_without_silent_downgrade() -> None:
     source = _GMXOracleMarketSource(chain="arbitrum", market="NEWMARKET/USD", venue="gmx_v2")
     calls: list[str] = []
 
-    async def fetch_page(*, timeframe: str, before_ts: int) -> SimpleNamespace:
-        del before_ts
+    async def fetch_page(*, timeframe: str, before_ts: int, limit: int) -> SimpleNamespace:
+        del before_ts, limit
         calls.append(timeframe)
         if len(calls) == 1:
             return _page(timeframe, start + timedelta(days=1), end - timedelta(hours=1))
@@ -485,14 +485,35 @@ async def test_market_identity_drift_is_rejected_while_paging() -> None:
         ]
     )
 
-    async def fetch_page(*, timeframe: str, before_ts: int) -> SimpleNamespace:
-        del timeframe, before_ts
+    async def fetch_page(*, timeframe: str, before_ts: int, limit: int) -> SimpleNamespace:
+        del timeframe, before_ts, limit
         return next(pages)
 
     source._fetch_page = fetch_page  # type: ignore[method-assign]
 
     with pytest.raises(DataSourceUnavailable, match="identity changed"):
         await source.prepare(requested="1h", start=start, end=end)
+
+
+@pytest.mark.asyncio
+async def test_fetch_complete_bounds_page_to_requested_window() -> None:
+    start = datetime(2025, 1, 1, tzinfo=UTC)
+    end = start + timedelta(days=1)
+    source = _GMXOracleMarketSource(chain="arbitrum", market="NEWMARKET/USD", venue="gmx_v2")
+    limits: list[int] = []
+
+    async def fetch_page(*, timeframe: str, before_ts: int, limit: int) -> SimpleNamespace:
+        del before_ts
+        limits.append(limit)
+        native_opens = [start - timedelta(hours=4) + timedelta(hours=4 * index) for index in range(8)]
+        return _page(timeframe, *native_opens)
+
+    source._fetch_page = fetch_page  # type: ignore[method-assign]
+
+    series = await source._fetch_complete(timeframe="4h", start=start, end=end)
+
+    assert limits == [8]
+    assert [candle.timestamp for candle in series] == [start + timedelta(hours=4 * index) for index in range(7)]
 
 
 @pytest.mark.asyncio

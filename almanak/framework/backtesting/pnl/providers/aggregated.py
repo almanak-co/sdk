@@ -52,6 +52,7 @@ from almanak.framework.data.interfaces import DataSourceUnavailable
 from ..data_provider import (
     OHLCV,
     HistoricalDataConfig,
+    HistoricalPriceObservation,
     MarketState,
     TokenRef,
     is_address_like,
@@ -1077,12 +1078,21 @@ class AggregatedDataProvider:
 
         while current_time <= end_time:
             prices: dict[TokenRef, Decimal] = {}
+            price_observations: dict[TokenRef, HistoricalPriceObservation] = {}
             missing: list[str] = []
 
             for token in config.tokens:
                 try:
-                    price = await self.get_price(token, current_time)
-                    prices[self._market_state_key(token, default_chain)] = price
+                    result = await self.get_price_with_source(token, current_time)
+                    key = self._market_state_key(token, default_chain)
+                    prices[key] = result.price
+                    price_observations[key] = HistoricalPriceObservation(
+                        price=result.price,
+                        timestamp=result.timestamp,
+                        source=result.source,
+                        confidence=result.confidence,
+                        is_stale=result.is_stale,
+                    )
                 except Exception as e:
                     missing.append(f"{token_ref_display(token)} ({e})")
                     logger.warning(
@@ -1106,6 +1116,7 @@ class AggregatedDataProvider:
                 prices=prices,
                 ohlcv={},
                 chain=config.chains[0] if config.chains else DEFAULT_CHAIN,
+                price_observations=price_observations,
             )
 
             yield (current_time, market_state)

@@ -94,6 +94,7 @@ from .pnl import (
     HistoricalDataProvider,
     MarketState,
     ParallelBacktestResult,
+    PerpPriceHistoryTarget,
     PnLBacktestConfig,
     PnLBacktester,
     PortfolioAggregator,
@@ -169,6 +170,7 @@ __all__ = [
     # PnL Backtester (historical simulation)
     "PnLBacktester",
     "PnLBacktestConfig",
+    "PerpPriceHistoryTarget",
     "SimulatedPortfolio",
     "SimulatedPosition",
     "SimulatedFill",

@@ -54,6 +54,7 @@ from almanak.integrations.chains import integration_chain_id, integration_chain_
 from ..data_provider import (
     OHLCV,
     HistoricalDataConfig,
+    HistoricalPriceObservation,
     MarketState,
     TokenKey,
     TokenRef,
@@ -62,6 +63,7 @@ from ..data_provider import (
     normalize_token_key,
     token_ref_display,
 )
+from ..types import DataConfidence
 from .coingecko_gateway import GatewayCoinGeckoTransport, gateway_coingecko_configured
 from .rate_limiter import TokenBucketRateLimiter
 
@@ -1670,23 +1672,27 @@ class CoinGeckoDataProvider:
             # Build prices dict from cache
             prices: dict[TokenRef, Decimal] = {}
             ohlcv_data: dict[TokenRef, OHLCV] = {}
+            price_observations: dict[TokenRef, HistoricalPriceObservation] = {}
             default_chain = config.chains[0] if config.chains else DEFAULT_CHAIN
 
             for token in config.tokens:
                 cache_key = self._market_cache_key(token, default_chain)
 
-                # Get OHLCV data if requested
-                if config.include_ohlcv:
-                    candle = self._cache.get_ohlcv_at(cache_key, current_time)
-                    if candle is not None:
+                # The selected at-or-before candle is the measured price
+                # observation even when callers do not request OHLCV output.
+                # Keep its own timestamp so a forward-filled point never
+                # masquerades as newly observed at ``current_time``.
+                candle = self._cache.get_ohlcv_at(cache_key, current_time)
+                if candle is not None:
+                    prices[cache_key] = candle.close
+                    price_observations[cache_key] = HistoricalPriceObservation(
+                        price=candle.close,
+                        timestamp=candle.timestamp,
+                        source="coingecko",
+                        confidence=DataConfidence.MEDIUM,
+                    )
+                    if config.include_ohlcv:
                         ohlcv_data[cache_key] = candle
-                        prices[cache_key] = candle.close
-
-                # If no OHLCV, try to get price directly from cache
-                if cache_key not in prices:
-                    price = self._cache.get_price_at(cache_key, current_time)
-                    if price is not None:
-                        prices[cache_key] = price
 
             # Create MarketState for this timestamp
             market_state = MarketState(
@@ -1696,6 +1702,7 @@ class CoinGeckoDataProvider:
                 chain=config.chains[0] if config.chains else DEFAULT_CHAIN,
                 block_number=None,  # Not available from CoinGecko
                 gas_price_gwei=None,  # Not available from CoinGecko
+                price_observations=price_observations,
             )
 
             yield (current_time, market_state)

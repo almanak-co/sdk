@@ -233,6 +233,7 @@ class DexTwapPoint:
     timestamp: int
     price: Decimal
     tick_observation_count: int = 0
+    block_number: int | None = None
 
 
 @dataclass(frozen=True)
@@ -674,6 +675,7 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
             timestamp=p.timestamp,
             price=cls._encode_decimal(p.price),
             tick_observation_count=p.tick_observation_count,
+            as_of_block=p.block_number or 0,
         )
 
     @classmethod
@@ -1539,6 +1541,10 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
         dex = _normalize_key(request.dex)
         chain = _normalize_key(request.chain)
         pool_address = request.pool_address.strip()
+        if request.window_secs < 0:
+            detail = "window_secs must be >= 0"
+            _invalid_argument(context, detail)
+            return gateway_pb2.DexTwapHistoryResponse(success=False, error=detail)
 
         prep = self._prepare_twap_dispatch(
             dex=dex,
@@ -1553,6 +1559,10 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
             return prep.error_response
         assert prep.provider is not None  # narrowed by error_response check
         provider = prep.provider
+        # ``window_secs`` is the pool observation window; ``interval_secs`` is
+        # only the requested sample cadence. Older clients omit the new wire
+        # field, so preserve their historical one-window-per-sample behavior.
+        window_secs = request.window_secs or request.interval_secs
 
         try:
             points = await provider.fetch_twap_series(
@@ -1562,6 +1572,7 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
                 start_ts=request.start_ts,
                 end_ts=request.end_ts,
                 interval_secs=request.interval_secs,
+                window_secs=window_secs,
             )
         except RateHistoryUnavailable as exc:
             return gateway_pb2.DexTwapHistoryResponse(
@@ -1588,7 +1599,7 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
             chain=chain,
             pool_address=pool_address,
             points=[self._encode_twap_point(p) for p in points],
-            source="on_chain",
+            source="on_chain_archive",
             success=True,
         )
 

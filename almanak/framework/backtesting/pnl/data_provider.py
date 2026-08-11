@@ -38,6 +38,7 @@ from enum import StrEnum
 from typing import Any, Protocol, TypeGuard, runtime_checkable
 
 from almanak.core.chains import DEFAULT_CHAIN
+from almanak.framework.backtesting.pnl.types import DataConfidence
 
 TokenKey = tuple[str, str]
 TokenRef = str | TokenKey
@@ -275,6 +276,34 @@ class OHLCV:
         }
 
 
+@dataclass(frozen=True)
+class HistoricalPriceObservation:
+    """One provider-attributed historical USD price observation.
+
+    ``MarketState.prices`` remains the scalar valuation plane used by the
+    simulation.  This companion record carries the metadata that strategies
+    and audit surfaces need without changing the price key or value.  The
+    timestamp is the provider observation/as-of time, never the wall-clock
+    time at which a backtest happened to ingest the row.
+    """
+
+    price: Decimal
+    timestamp: datetime
+    source: str
+    confidence: DataConfidence
+    is_stale: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-safe representation for diagnostic state dumps."""
+        return {
+            "price": str(self.price),
+            "timestamp": self.timestamp.isoformat(),
+            "source": self.source,
+            "confidence": self.confidence.value,
+            "is_stale": self.is_stale,
+        }
+
+
 @dataclass
 class MarketState:
     """Point-in-time snapshot of market data.
@@ -296,6 +325,9 @@ class MarketState:
         symbol_aliases: Registered ``{SYMBOL_UPPER: (chain, address)}`` read
             aliases (see :meth:`register_symbol_aliases`). Not serialized:
             derived per run from the engine's registered token-address map.
+        price_observations: Provider-attributed metadata for entries in
+            ``prices``. Custom/legacy providers may omit it; consumers must
+            then keep provenance unavailable rather than inventing it.
     """
 
     timestamp: datetime
@@ -306,6 +338,7 @@ class MarketState:
     gas_price_gwei: Decimal | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     symbol_aliases: dict[str, TokenKey] = field(default_factory=dict)
+    price_observations: dict[TokenRef, HistoricalPriceObservation] = field(default_factory=dict)
 
     def register_symbol_aliases(self, token_addresses: Mapping[str, Any]) -> None:
         """Register same-chain ``{SYMBOL: (chain, address)}`` read aliases.
@@ -460,6 +493,21 @@ class MarketState:
 
         raise KeyError(f"Price not available for token: {token}")
 
+    def get_price_observation(self, token: TokenRef) -> HistoricalPriceObservation | None:
+        """Return measured metadata for the resolved price key, when supplied.
+
+        The lookup follows the same address/symbol alias precedence as
+        :meth:`get_price`.  There is deliberately no fallback constructed
+        from ``MarketState.timestamp`` or ``metadata``: a legacy provider that
+        emitted only a scalar price did not prove either its observation time
+        or per-token source.
+        """
+        for key in self._lookup_keys(token):
+            observation = self._lookup(self.price_observations, key)
+            if observation is not _MISSING:
+                return observation
+        return None
+
     def get_ohlcv(self, token: TokenRef) -> OHLCV | None:
         """Get OHLCV data for a token at this market state.
 
@@ -500,7 +548,7 @@ class MarketState:
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary."""
-        return {
+        payload = {
             "timestamp": self.timestamp.isoformat(),
             "prices": {token_ref_display(k): str(v) for k, v in self.prices.items()},
             "ohlcv": {token_ref_display(k): v.to_dict() for k, v in self.ohlcv.items()},
@@ -509,6 +557,11 @@ class MarketState:
             "gas_price_gwei": str(self.gas_price_gwei) if self.gas_price_gwei is not None else None,
             "metadata": self.metadata,
         }
+        if self.price_observations:
+            payload["price_observations"] = {
+                token_ref_display(key): observation.to_dict() for key, observation in self.price_observations.items()
+            }
+        return payload
 
 
 @dataclass
@@ -707,6 +760,7 @@ class HistoricalDataProvider(Protocol):
 
 __all__ = [
     "HistoricalDataCapability",
+    "HistoricalPriceObservation",
     "OHLCV",
     "TokenKey",
     "TokenRef",

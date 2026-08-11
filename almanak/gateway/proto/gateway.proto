@@ -2758,7 +2758,8 @@ message FundingRatePoint {
 
 message DexTwapPoint {
   // Unix seconds, UTC. For a single fetch this is the gateway-side
-  // observation timestamp; for a series it's the bucket boundary.
+  // observation timestamp. Historical series emit the actual timestamp of
+  // the selected archive block at or before the requested sample boundary.
   int64 timestamp = 1;
 
   // TWAP price (quote / base, in human-readable units). Decimal-as-string.
@@ -2768,6 +2769,10 @@ message DexTwapPoint {
   // pool's ring-buffer had over the requested window. 0 when the
   // connector doesn't expose an analogous counter.
   int64 tick_observation_count = 3;
+
+  // Exact block at which observe() was evaluated. 0 means unspecified for
+  // legacy/non-historical providers; historical archive series always set it.
+  int64 as_of_block = 4;
 }
 
 message DexVolumePoint {
@@ -3114,6 +3119,12 @@ message GetDexTwapSeriesRequest {
   // Required. Spacing between consecutive TWAP samples in seconds.
   // Validator rejects <= 0.
   int64 interval_secs = 6;
+
+  // TWAP observation window in seconds. This is independent from the sample
+  // cadence: an hourly backtest may request a 30-minute TWAP at every hourly
+  // tick. Zero preserves compatibility with older clients and means
+  // ``interval_secs``.
+  int64 window_secs = 7;
 }
 
 message DexTwapHistoryResponse {

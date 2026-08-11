@@ -229,6 +229,31 @@ class _TickingProvider:
             )
 
 
+class _EffectiveUniverseProvider:
+    """Prices every token the engine resolves into its provider config."""
+
+    provider_name = "mock_effective_universe"
+
+    async def iterate(self, config: Any):
+        price_by_symbol = {
+            "WETH": Decimal("3000"),
+            "USDC": Decimal("1"),
+            "PAXG": Decimal("3382.70"),
+            "XAUT": Decimal("3351.20"),
+        }
+        for i in range(3):
+            timestamp = config.start_time + timedelta(hours=i)
+            prices = {}
+            for token in config.tokens:
+                display = str(token[1]) if isinstance(token, tuple) else str(token)
+                symbol = {
+                    "0x45804880de22913dafe09f4980848ece6ecbaf78": "PAXG",
+                    "0x68749665ff8d2d112fa859aa293f07a622782f38": "XAUT",
+                }.get(display.lower(), display.upper())
+                prices[token] = price_by_symbol[symbol]
+            yield timestamp, MarketState(timestamp=timestamp, prices=prices, chain="ethereum")
+
+
 class _CandleReadingStrategy:
     """Reads market.ohlcv() so the run serves the price AND ohlcv lanes."""
 
@@ -310,6 +335,60 @@ class TestManifestOnBacktestResult:
         assert payload["data_manifest"]["entries"]
         json.dumps(payload["data_manifest"])  # JSON-safe end to end
         assert BacktestResult.from_dict(payload).data_manifest == result.data_manifest
+
+    @pytest.mark.asyncio
+    async def test_price_manifest_uses_effective_universe_including_funded_rwas(self):
+        start = datetime(2025, 8, 11, tzinfo=UTC)
+        paxg = "0x45804880de22913dafe09f4980848ece6ecbaf78"
+        xaut = "0x68749665ff8d2d112fa859aa293f07a622782f38"
+        config = PnLBacktestConfig(
+            start_time=start,
+            end_time=start + timedelta(hours=2),
+            chain="ethereum",
+            tokens=["WETH", "USDC"],
+            token_funding=[
+                {
+                    "symbol": "PAXG",
+                    "address": paxg,
+                    "chain": "ethereum",
+                    "amount": "1",
+                    "amount_type": "token",
+                },
+                {
+                    "symbol": "XAUT",
+                    "address": xaut,
+                    "chain": "ethereum",
+                    "amount": "1",
+                    "amount_type": "token",
+                },
+            ],
+            include_gas_costs=False,
+            preflight_validation=False,
+            inclusion_delay_blocks=0,
+        )
+        backtester = PnLBacktester(
+            data_provider=_EffectiveUniverseProvider(),
+            fee_models={"default": DefaultFeeModel()},
+            slippage_models={"default": DefaultSlippageModel()},
+            token_addresses={"PAXG": ("ethereum", paxg), "XAUT": ("ethereum", xaut)},
+        )
+
+        result = await backtester.backtest(_CandleReadingStrategy(), config)
+
+        assert result.error is None
+        assert result.data_manifest is not None
+        price_entries = [
+            entry
+            for entry in result.data_manifest["entries"]
+            if entry["lane"] == LANE_PRICE and entry["outcome"] == OUTCOME_SERVED
+        ]
+        assert {entry["key"] for entry in price_entries} == {
+            "WETH",
+            "USDC",
+            f"ETHEREUM:{paxg}".upper(),
+            f"ETHEREUM:{xaut}".upper(),
+        }
+        assert all(entry["count"] == 3 for entry in price_entries)
 
     @pytest.mark.asyncio
     async def test_broker_deactivated_after_run(self):

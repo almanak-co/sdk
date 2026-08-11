@@ -343,6 +343,20 @@ class TestServicePriceTimeframe:
 
         assert _service_price_timeframe(strategy=strategy, spec=None, requested="1h", quick=False) == "1h"
 
+    def test_multiple_native_targets_do_not_default_auto(self, monkeypatch: pytest.MonkeyPatch):
+        from almanak.connectors._strategy_base.perp_price_history_registry import PerpPriceHistoryRegistry
+
+        metadata = SimpleNamespace(supported_protocols=("gmx_v2", "second_native_venue"))
+        strategy = SimpleNamespace(STRATEGY_METADATA=metadata, market="DOGE/USD")
+        original_has = PerpPriceHistoryRegistry.has
+        monkeypatch.setattr(
+            PerpPriceHistoryRegistry,
+            "has",
+            classmethod(lambda cls, protocol: protocol == "second_native_venue" or original_has(protocol)),
+        )
+
+        assert _service_price_timeframe(strategy=strategy, spec=None, requested=None, quick=False) is None
+
     def test_named_gmx_service_request_reaches_engine_as_auto(self):
         metadata = SimpleNamespace(supported_protocols=("gmx_v2",))
         strategy = SimpleNamespace(

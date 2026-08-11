@@ -110,6 +110,7 @@ from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 from almanak.framework.backtesting.pnl.data_provider import (
     HistoricalDataCapability,
     HistoricalDataProvider,
+    HistoricalPriceObservation,
     MarketState,
     TokenRef,
     is_address_like,
@@ -121,6 +122,7 @@ from almanak.framework.backtesting.pnl.data_provider import (
 from almanak.framework.backtesting.pnl.data_quality import DataQualityTracker
 from almanak.framework.backtesting.pnl.error_handling import (
     BacktestErrorHandler,
+    PreflightValidationError,
 )
 from almanak.framework.backtesting.pnl.indicator_engine import BacktestIndicatorEngine
 from almanak.framework.backtesting.pnl.intent_support import GENERIC_SIMULATED_INTENT_TYPES
@@ -149,10 +151,11 @@ from almanak.framework.backtesting.pnl.support_matrix import (
     boot_compliance_violations,
     evaluate_backtest_support,
 )
+from almanak.framework.backtesting.pnl.types import DataConfidence
 from almanak.framework.data.timeframes import OHLCVTimeframe, parse_ohlcv_timeframe
 
 # Import strategy-related types
-from almanak.framework.market import MarketSnapshot, TokenBalance
+from almanak.framework.market import MarketSnapshot, PriceData, TokenBalance
 
 logger = logging.getLogger(__name__)
 
@@ -720,6 +723,7 @@ def create_market_snapshot_from_state(
     pool_analytics_reader: Any | None = None,
     rate_history_reader: Any | None = None,
     soft_empty_noted: "set[str] | None" = None,
+    price_aggregator: Any | None = None,
 ) -> MarketSnapshot:
     """Create a MarketSnapshot from historical MarketState data.
 
@@ -745,6 +749,10 @@ def create_market_snapshot_from_state(
             funding-gated strategies read the historical (or configured
             fallback) rate in effect at the tick instead of raising
             "No funding rate provider configured".
+        price_aggregator: Optional per-tick pool price aggregator. Historical
+            backtests bind the exact-pool TWAP view here; it is deliberately
+            separate from ``pool_price_view``, whose pair-ratio proxy is not a
+            substitute for a pool oracle observation.
         il_calculator: Run-scoped ``ILCalculator``. Pass the SAME instance
             every tick so LP positions registered at fill time (see
             ``sync_il_calculator_positions``) stay visible to
@@ -784,6 +792,7 @@ def create_market_snapshot_from_state(
         funding_rate_provider=(
             funding_rate_source.view_at(market_state.timestamp) if funding_rate_source is not None else None
         ),
+        price_aggregator=price_aggregator,
         rsi_provider=rsi_provider,
         indicator_provider=indicator_provider,
         default_timeframe=default_timeframe,
@@ -2602,7 +2611,53 @@ def _seed_snapshot_prices(snapshot: MarketSnapshot, market_state: MarketState) -
                 price = market_state.get_price(snapshot_token)
             except KeyError:
                 continue
-        snapshot.set_price(snapshot_token, price)
+        observation = _market_state_price_observation(market_state, token)
+        if observation is None:
+            observation = _market_state_price_observation(market_state, snapshot_token)
+        if observation is None:
+            # Legacy/custom providers that emit only scalar prices keep the
+            # existing honest "preloaded" shape with no fetched_at.  The
+            # bridge must not invent a per-token timestamp or provider.
+            snapshot.set_price(snapshot_token, price)
+            continue
+        if observation.price != price:
+            raise ValueError(
+                f"Historical price metadata diverged for {snapshot_token}: "
+                f"scalar={price}, observation={observation.price}"
+            )
+        if not observation.source:
+            snapshot.set_price(snapshot_token, price)
+            continue
+        snapshot.set_price_data(
+            snapshot_token,
+            PriceData(
+                price=price,
+                timestamp=observation.timestamp,
+                source=observation.source,
+                confidence=_snapshot_price_confidence(observation),
+            ),
+        )
+
+
+def _snapshot_price_confidence(observation: HistoricalPriceObservation) -> str:
+    """Project backtest confidence into the accounting compatibility vocabulary."""
+    if observation.is_stale:
+        return "STALE"
+    if observation.confidence is DataConfidence.HIGH:
+        return "HIGH"
+    if observation.confidence in {DataConfidence.MEDIUM, DataConfidence.LOW}:
+        return "ESTIMATED"
+    return "UNAVAILABLE"
+
+
+def _market_state_price_observation(
+    market_state: MarketState,
+    token: TokenRef,
+) -> HistoricalPriceObservation | None:
+    """Read the typed plane without treating permissive mocks as evidence."""
+    if not isinstance(market_state, MarketState):
+        return None
+    return market_state.get_price_observation(token)
 
 
 def _market_state_chain(market_state: MarketState) -> str:
@@ -4296,6 +4351,11 @@ class PnLBacktester:
                     bt_logger=bt_logger,
                     state=state,
                 )
+            except PreflightValidationError:
+                # A demand-discovered structural requirement mismatch is not
+                # a recoverable simulation error and must reach hosted/CLI
+                # callers as the actionable preflight-style failure verbatim.
+                raise
             except Exception as e:
                 return _engine_helpers.build_error_result(
                     backtester=self,

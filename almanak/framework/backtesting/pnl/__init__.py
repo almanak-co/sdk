@@ -118,6 +118,7 @@ from .mev_simulator import (
     get_token_vulnerability,
     simulate_mev_cost,
 )
+from .perp_targets import PerpPriceHistoryTarget
 
 if TYPE_CHECKING:
     from .optuna_tuner import (
@@ -275,6 +276,7 @@ __all__ = [
     "PnLBacktester",
     "BacktestableStrategy",
     "BacktestIndicatorEngine",
+    "PerpPriceHistoryTarget",
     "create_market_snapshot_from_state",
     # Fee and slippage models
     "FeeModel",

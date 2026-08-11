@@ -35,13 +35,17 @@ import inspect
 import math
 import sys
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
 
-from almanak.connectors.gmx_v2.backtest_prices import _GMXOracleMarketSource
+from almanak.connectors.gmx_v2.backtest_prices import (
+    GMXOracleDataProvider,
+    GMXPriceHistoryCoverageError,
+    _GMXOracleMarketSource,
+)
 from almanak.core.models.quote_asset import QuoteAsset
 from almanak.framework.backtesting.adapters.lp_adapter import (
     LPBacktestAdapter,
@@ -59,9 +63,12 @@ from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 from almanak.framework.backtesting.pnl.data_manifest import (
     CONSUMER_STRATEGY_DECISION,
     LANE_FUNDING,
+    LANE_PRICE,
+    LANE_TWAP,
     OUTCOME_DEGRADED,
+    OUTCOME_SERVED,
 )
-from almanak.framework.backtesting.pnl.data_provider import MarketState
+from almanak.framework.backtesting.pnl.data_provider import OHLCV, HistoricalPriceObservation, MarketState
 from almanak.framework.backtesting.pnl.engine import DefaultFeeModel, DefaultSlippageModel, PnLBacktester
 from almanak.framework.backtesting.pnl.metrics_calculator import (
     calculate_max_drawdown,
@@ -73,6 +80,8 @@ from almanak.framework.backtesting.pnl.metrics_calculator import (
 from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
 from almanak.framework.backtesting.pnl.position_models import PositionType, SimulatedPosition
 from almanak.framework.backtesting.pnl.providers.perp._gateway_history import FundingHistoryPoint
+from almanak.framework.backtesting.pnl.providers.twap import HistoricalTWAPPoint
+from almanak.framework.backtesting.pnl.types import DataConfidence
 from almanak.framework.intents.lending_intents import (
     BorrowIntent,
     RepayIntent,
@@ -427,6 +436,263 @@ def test_swap_price_series_matches_valuation() -> None:
     payload = result.to_dict()
     assert len(payload["price_series"]) == len(result.price_series)
     assert payload["price_series_display_labels"][weth_key].upper() == "WETH"
+
+
+@pytest.mark.trust_cell("swap:historical_price_provenance")
+def test_historical_rwa_price_provenance_and_effective_manifest() -> None:
+    """The user's PAXG/XAUT decision inputs stay fresh and visible end to end."""
+    paxg = "0x45804880de22913dafe09f4980848ece6ecbaf78"
+    xaut = "0x68749665ff8d2d112fa859aa293f07a622782f38"
+    rwa_symbols = {paxg: "PAXG", xaut: "XAUT"}
+
+    class RWAProvider:
+        provider_name = "coingecko"
+
+        async def iterate(self, config):
+            prices_by_symbol = {
+                "WETH": Decimal("3000"),
+                "USDC": Decimal("1"),
+                "PAXG": Decimal("3382.70"),
+                "XAUT": Decimal("3351.20"),
+            }
+            for hour in range(3):
+                timestamp = config.start_time + timedelta(hours=hour)
+                prices = {}
+                observations = {}
+                for token in config.tokens:
+                    address_or_symbol = token[1] if isinstance(token, tuple) else token
+                    symbol = rwa_symbols.get(str(address_or_symbol).lower(), str(address_or_symbol).upper())
+                    price = prices_by_symbol[symbol]
+                    prices[token] = price
+                    observations[token] = HistoricalPriceObservation(
+                        price=price,
+                        timestamp=timestamp,
+                        source="coingecko",
+                        confidence=DataConfidence.MEDIUM,
+                    )
+                yield (
+                    timestamp,
+                    MarketState(
+                        timestamp=timestamp,
+                        prices=prices,
+                        chain="ethereum",
+                        price_observations=observations,
+                    ),
+                )
+
+    class RWAProbe:
+        deployment_id = "rwa_provenance_probe"
+
+        def __init__(self) -> None:
+            self.observations = []
+            self.fresh_reference_ticks = 0
+
+        def decide(self, market):
+            oracle = market.get_price_oracle_dict(with_sources=True)
+            self.observations.append((market.timestamp, oracle))
+            references_are_fresh = all(
+                item["oracle_source"] not in {"", "unknown", "preloaded"}
+                and item["fetched_at"]
+                and 0 <= (market.timestamp - datetime.fromisoformat(item["fetched_at"])).total_seconds() <= 300
+                for item in (oracle["PAXG"], oracle["XAUT"])
+            )
+            if references_are_fresh:
+                self.fresh_reference_ticks += 1
+            return None
+
+    config = PnLBacktestConfig(
+        start_time=START,
+        end_time=START + timedelta(hours=2),
+        interval_seconds=3_600,
+        chain="ethereum",
+        tokens=["WETH", "USDC"],
+        token_funding=[
+            {
+                "symbol": "PAXG",
+                "address": paxg,
+                "chain": "ethereum",
+                "amount": "1",
+                "amount_type": "token",
+            },
+            {
+                "symbol": "XAUT",
+                "address": xaut,
+                "chain": "ethereum",
+                "amount": "1",
+                "amount_type": "token",
+            },
+        ],
+        include_gas_costs=False,
+        preflight_validation=False,
+        inclusion_delay_blocks=0,
+    )
+    strategy = RWAProbe()
+    backtester = PnLBacktester(
+        data_provider=RWAProvider(),
+        fee_models={"default": DefaultFeeModel()},
+        slippage_models={"default": DefaultSlippageModel()},
+        token_addresses={"PAXG": ("ethereum", paxg), "XAUT": ("ethereum", xaut)},
+    )
+
+    result = asyncio.run(backtester.backtest(strategy, config))
+
+    assert result.success
+    assert len(strategy.observations) == 3
+    assert strategy.fresh_reference_ticks == 3
+    for tick, oracle in strategy.observations:
+        for symbol in ("PAXG", "XAUT"):
+            assert oracle[symbol]["oracle_source"] == "coingecko"
+            assert oracle[symbol]["fetched_at"] == tick.isoformat()
+            assert oracle[symbol]["confidence"] == "ESTIMATED"
+
+    assert result.data_manifest is not None
+    served_price_keys = {
+        entry["key"]
+        for entry in result.data_manifest["entries"]
+        if entry["lane"] == LANE_PRICE and entry["outcome"] == OUTCOME_SERVED
+    }
+    assert served_price_keys == {
+        "WETH",
+        "USDC",
+        f"ethereum:{paxg}".upper(),
+        f"ethereum:{xaut}".upper(),
+    }
+
+
+@pytest.mark.trust_cell("swap:historical_exact_pool_twap")
+def test_historical_exact_pool_twap_reaches_unchanged_strategy_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Archive pool evidence reaches decide() and cannot collapse to a USD ratio."""
+    paxg = "0x45804880de22913dafe09f4980848ece6ecbaf78"
+    xaut = "0x68749665ff8d2d112fa859aa293f07a622782f38"
+    pool = "0xc756bba710d45647715079ce50aa16aab36ded42"
+    exact_pool = pool
+    pool_twap = Decimal("1.042")
+    fetch_calls = []
+
+    def archive_fetch(**kwargs):
+        fetch_calls.append(kwargs)
+        targets = range(kwargs["start_ts"], kwargs["end_ts"] + 1, kwargs["interval_secs"])
+        return [
+            HistoricalTWAPPoint(
+                timestamp=target - 10,
+                price=pool_twap,
+                tick_observation_count=2,
+                source="on_chain_archive",
+                block_number=19_000_000 + index,
+            )
+            for index, target in enumerate(targets)
+        ]
+
+    monkeypatch.setattr(
+        "almanak.framework.backtesting.pnl.providers.snapshot_twap.fetch_historical_twap_points",
+        archive_fetch,
+    )
+
+    class RWAProvider:
+        provider_name = "coingecko"
+
+        async def iterate(self, config):
+            prices_by_address = {
+                paxg: Decimal("3382.70"),
+                xaut: Decimal("3351.20"),
+            }
+            for hour in range(3):
+                timestamp = config.start_time + timedelta(hours=hour)
+                prices = {}
+                observations = {}
+                for token in config.tokens:
+                    raw = token[1].lower() if isinstance(token, tuple) else str(token).lower()
+                    price = prices_by_address.get(raw, Decimal("1"))
+                    prices[token] = price
+                    observations[token] = HistoricalPriceObservation(
+                        price=price,
+                        timestamp=timestamp,
+                        source="coingecko",
+                        confidence=DataConfidence.MEDIUM,
+                    )
+                yield (
+                    timestamp,
+                    MarketState(
+                        timestamp=timestamp,
+                        prices=prices,
+                        chain="ethereum",
+                        price_observations=observations,
+                    ),
+                )
+
+    class ExactPoolTWAPProbe:
+        deployment_id = "exact_pool_twap_probe"
+        config = {"swap_pool": exact_pool, "protocol": "uniswap_v3", "twap_window_seconds": 1_800}
+        pool = exact_pool
+        protocol = "uniswap_v3"
+        twap_window_seconds = 1_800
+        STRATEGY_METADATA = SimpleNamespace(
+            tags=["swap"],
+            supported_protocols=["uniswap_v3"],
+            intent_types=["SWAP", "HOLD"],
+        )
+
+        def __init__(self) -> None:
+            self.envelopes = []
+
+        def decide(self, market):
+            self.envelopes.append(
+                market.twap(
+                    "PAXG/XAUT",
+                    chain="ethereum",
+                    window_seconds=self.twap_window_seconds,
+                    pool_address=self.pool,
+                    protocol=self.protocol,
+                    token0_decimals=18,
+                    token1_decimals=6,
+                )
+            )
+            return None
+
+    config = PnLBacktestConfig(
+        start_time=START,
+        end_time=START + timedelta(hours=2),
+        interval_seconds=3_600,
+        chain="ethereum",
+        tokens=["PAXG", "XAUT"],
+        token_funding=[
+            {"symbol": "PAXG", "address": paxg, "chain": "ethereum", "amount": "1", "amount_type": "token"},
+            {"symbol": "XAUT", "address": xaut, "chain": "ethereum", "amount": "1", "amount_type": "token"},
+        ],
+        include_gas_costs=False,
+        preflight_validation=False,
+        inclusion_delay_blocks=0,
+    )
+    strategy = ExactPoolTWAPProbe()
+    backtester = PnLBacktester(
+        data_provider=RWAProvider(),
+        fee_models={"default": DefaultFeeModel()},
+        slippage_models={"default": DefaultSlippageModel()},
+        token_addresses={"PAXG": ("ethereum", paxg), "XAUT": ("ethereum", xaut)},
+    )
+
+    result = asyncio.run(backtester.backtest(strategy, config))
+
+    assert result.success
+    assert len(fetch_calls) == 1
+    assert fetch_calls[0]["pool_address"] == pool
+    assert fetch_calls[0]["window_secs"] == 1_800
+    assert fetch_calls[0]["interval_secs"] == 3_600
+    assert len(strategy.envelopes) == 3
+    assert all(envelope.price == pool_twap for envelope in strategy.envelopes)
+    # The independently sourced USD ratio is intentionally different; serving
+    # it here would prove the old pair-ratio proxy leaked into the TWAP lane.
+    assert pool_twap != Decimal("3382.70") / Decimal("3351.20")
+    assert all(envelope.value.block_range[0] >= 19_000_000 for envelope in strategy.envelopes)
+    assert all(envelope.meta.source == "historical:on_chain_archive" for envelope in strategy.envelopes)
+    assert result.data_manifest is not None
+    entries = [entry for entry in result.data_manifest["entries"] if entry["lane"] == LANE_TWAP]
+    assert len(entries) == 1
+    assert entries[0]["outcome"] == OUTCOME_SERVED
+    assert entries[0]["count"] == 3
+    assert entries[0]["ladder"] == ["archive_observe"]
+    assert "window_seconds=1800" in entries[0]["detail"]
+    assert "sample_interval_seconds=3600" in entries[0]["detail"]
 
 
 @pytest.mark.trust_cell("swap:rejection_no_state_change")
@@ -1636,6 +1902,7 @@ def test_perp_venue_native_price_plane_is_dynamic_complete_and_no_lookahead() ->
         source = _GMXOracleMarketSource(chain="arbitrum", market="NEWMARKET/USD", venue="gmx_v2")
         calls: list[str] = []
         cursors: list[tuple[str, int]] = []
+        page_limits: list[tuple[str, int]] = []
         counts: dict[str, int] = {}
 
         def page(timeframe: str, opens: list) -> SimpleNamespace:
@@ -1653,9 +1920,10 @@ def test_perp_venue_native_price_plane_is_dynamic_complete_and_no_lookahead() ->
                 ],
             )
 
-        async def fetch_page(*, timeframe: str, before_ts: int) -> SimpleNamespace:
+        async def fetch_page(*, timeframe: str, before_ts: int, limit: int) -> SimpleNamespace:
             calls.append(timeframe)
             cursors.append((timeframe, before_ts))
+            page_limits.append((timeframe, limit))
             counts[timeframe] = counts.get(timeframe, 0) + 1
             if timeframe == "4h":
                 count = int((end - start).total_seconds() // (4 * 3600)) + 1
@@ -1677,6 +1945,7 @@ def test_perp_venue_native_price_plane_is_dynamic_complete_and_no_lookahead() ->
         opens = [start - timedelta(hours=4) + timedelta(hours=4 * index) for index in range(count)]
         split = len(opens) // 2
         assert cursors[-1] == ("4h", int(opens[split].timestamp()))
+        assert page_limits[-2:] == [("4h", count + 1), ("4h", split)]
         assert source.index_symbol == "NEWMARKET"  # discovered response, absent from SDK tables
         assert source.index_token == ("0x" + "2" * 40)
         # First raw open is start-4h; its close becomes observable exactly at
@@ -1686,6 +1955,52 @@ def test_perp_venue_native_price_plane_is_dynamic_complete_and_no_lookahead() ->
             right.timestamp - left.timestamp == timedelta(hours=4)
             for left, right in zip(source._series, source._series[1:], strict=False)
         )
+
+        # ALM-3234: a basket commits one shared cadence only after every
+        # market accepts it. SOL succeeding at 1h must not leak a mixed plane
+        # when DOGE rejects 1h and the common answer is 4h.
+        provider = GMXOracleDataProvider.for_backtest_many(
+            fallback=SimpleNamespace(),
+            chain="arbitrum",
+            markets=("SOL-market", "DOGE-market", "AVAX-market"),
+            venue="gmx_v2",
+        )
+        basket_calls: list[tuple[str, str]] = []
+        for index, basket_source in enumerate(provider._sources, start=1):
+            symbol = basket_source.requested_market.removesuffix("-market")
+            basket_source.resolved_market = f"{symbol}/USD"
+            basket_source.market_token = "0x" + str(index + 3) * 40
+            basket_source.index_token = "0x" + str(index) * 40
+            basket_source.index_symbol = symbol
+            basket_source.remember_verified_market = lambda: None  # type: ignore[method-assign]
+
+            async def fetch_complete(
+                *,
+                timeframe: str,
+                start: datetime,
+                end: datetime,
+                basket_source=basket_source,
+                basket_index=index,
+            ) -> list[OHLCV]:
+                basket_calls.append((basket_source.requested_market, timeframe))
+                if timeframe in {"1m", "5m", "15m"}:
+                    raise GMXPriceHistoryCoverageError("retention")
+                if timeframe == "1h" and basket_source.requested_market == "DOGE-market":
+                    raise GMXPriceHistoryCoverageError("internal gap")
+                price = Decimal(str(basket_index * 10))
+                return [OHLCV(timestamp=start, open=price, high=price, low=price, close=price, volume=None)]
+
+            basket_source._fetch_complete = fetch_complete  # type: ignore[method-assign]
+
+        basket_config = PnLBacktestConfig(start_time=start, end_time=start + timedelta(days=200), timeframe="auto")
+        assert await provider.prepare_backtest(basket_config) == "4h"
+        assert {basket_source.timeframe for basket_source in provider._sources} == {"4h"}
+        assert ("AVAX-market", "1h") not in basket_calls
+        assert basket_calls[-3:] == [
+            ("SOL-market", "4h"),
+            ("DOGE-market", "4h"),
+            ("AVAX-market", "4h"),
+        ]
 
     asyncio.run(scenario())
 

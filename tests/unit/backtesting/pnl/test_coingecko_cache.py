@@ -527,6 +527,44 @@ class TestCoinGeckoIteration:
         assert data_points[0][1].prices == {normalized_key: Decimal("105")}
         assert data_points[0][1].ohlcv == {normalized_key: candle}
         assert data_points[0][1].available_tokens == [f"{normalized_key[0]}:{normalized_key[1]}"]
+        observation = data_points[0][1].get_price_observation(token_key)
+        assert observation is not None
+        assert observation.price == Decimal("105")
+        assert observation.timestamp == candle.timestamp
+        assert observation.source == "coingecko"
+        assert observation.confidence.value == "medium"
+
+    @pytest.mark.asyncio
+    async def test_iterate_keeps_forward_filled_candle_observation_time(self):
+        """A reused close remains stamped at its measured candle, not the later tick."""
+        observed_at = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
+        tick = observed_at + timedelta(hours=1)
+        candle = OHLCV(
+            timestamp=observed_at,
+            open=Decimal("100"),
+            high=Decimal("100"),
+            low=Decimal("100"),
+            close=Decimal("100"),
+            volume=None,
+        )
+        provider = CoinGeckoDataProvider(retry_config=RetryConfig(max_retries=0))
+        provider._prefetch_ohlcv_data = AsyncMock(  # type: ignore[method-assign]
+            return_value=OHLCVCache(data={"PAXG": [candle]}, fetched_at=observed_at)
+        )
+        config = HistoricalDataConfig(
+            start_time=tick,
+            end_time=tick + timedelta(minutes=1),
+            interval_seconds=3600,
+            tokens=["PAXG"],
+            include_ohlcv=False,
+        )
+
+        [(_, state)] = [(timestamp, state) async for timestamp, state in provider.iterate(config)]
+
+        observation = state.get_price_observation("PAXG")
+        assert observation is not None
+        assert observation.timestamp == observed_at
+        assert state.timestamp == tick
 
     @pytest.mark.asyncio
     async def test_iterate_emits_address_keyed_market_state_for_symbol_with_token_address(self):

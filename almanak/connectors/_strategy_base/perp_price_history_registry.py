@@ -31,6 +31,9 @@ class PerpPriceHistoryProvider(HistoricalDataProvider, Protocol):
     @property
     def price_history_target(self) -> tuple[str, str, str]: ...
 
+    @property
+    def price_history_targets(self) -> tuple[tuple[str, str, str], ...]: ...
+
 
 class PerpPriceHistoryProviderFactory(Protocol):
     """Class-level construction seam published by a connector manifest."""
@@ -41,6 +44,15 @@ class PerpPriceHistoryProviderFactory(Protocol):
         fallback: HistoricalDataProvider,
         chain: str,
         market: str,
+        venue: str,
+    ) -> PerpPriceHistoryProvider: ...
+
+    def for_backtest_many(
+        self,
+        *,
+        fallback: HistoricalDataProvider,
+        chain: str,
+        markets: tuple[str, ...],
         venue: str,
     ) -> PerpPriceHistoryProvider: ...
 

@@ -206,7 +206,9 @@ def test_funding_targets_keep_the_pair_label_when_an_address_is_declared() -> No
         {"protocol": "gmx_v2", "market": "ETH/USD", "market_address": GMX_ETH_MARKET_ADDRESS},
     )
 
-    assert targets == (("gmx_v2", "ETH/USD"),)
+    assert [(target.protocol, target.market, target.market_address) for target in targets] == [
+        ("gmx_v2", "ETH/USD", GMX_ETH_MARKET_ADDRESS)
+    ]
 
 
 @pytest.mark.asyncio

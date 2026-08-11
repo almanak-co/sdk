@@ -1234,9 +1234,12 @@ class GatewayDexTwapCapability(Protocol):
       secs_ago_end, as_of_block) -> DexTwapPoint`` — single TWAP
       observation over the requested window.
     * ``fetch_twap_series(*, servicer, chain, pool_address, start_ts,
-      end_ts, interval_secs) -> list[DexTwapPoint]`` — TWAP samples at
-      ``interval_secs`` spacing. Connectors may down-sample upstream and
-      return at the requested resolution.
+      end_ts, interval_secs, window_secs) -> list[DexTwapPoint]`` — TWAP
+      samples at ``interval_secs`` spacing, each measured over
+      ``window_secs``. The connector returns exactly one point per requested
+      grid timestamp in order. Multiple timestamps may carry the same actual
+      block timestamp when the chain stalled, but partial/down-sampled series
+      are not valid coverage.
 
     The connector receives ``servicer`` so the DEX-specific archive-RPC
     cache and web3 helpers stay on the service and the capability body
@@ -1268,6 +1271,7 @@ class GatewayDexTwapCapability(Protocol):
         start_ts: int,
         end_ts: int,
         interval_secs: int,
+        window_secs: int,
     ) -> Any: ...
 
 
