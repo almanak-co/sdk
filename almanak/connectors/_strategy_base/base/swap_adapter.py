@@ -102,6 +102,9 @@ class DefaultSwapAdapter:
         self.last_fee_selection: dict[str, Any] = {}
         self.last_quoted_amount_out: int | None = None
         self._cached_fee: int | None = None
+        # Distinguishes compiler-config fixed mode from a per-intent pin
+        # (SwapIntent.swap_params) in last_fee_selection reporting.
+        self._fixed_source: str = "fixed_config"
 
         from almanak.framework.intents.compiler_constants import PROTOCOL_ROUTERS
 
@@ -111,6 +114,22 @@ class DefaultSwapAdapter:
     def get_router_address(self) -> str:
         """Get the router address."""
         return self.router_address
+
+    def pin_fee_tier(self, fee_tier: int) -> None:
+        """Pin this adapter to one fee tier for a per-intent pool pin.
+
+        Flips the instance into "fixed" selection mode so every subsequent
+        tier decision (quote, calldata, pool validation) uses exactly
+        ``fee_tier`` — never a quoter- or heuristic-selected alternative.
+        Selection reports ``source="intent_pinned"`` so bundle metadata can
+        distinguish a SwapIntent.swap_params pin from compiler-config fixed
+        mode. Safe because adapter instances are single-use per compilation
+        (see class docstring); tier validity is checked in
+        ``_select_fee_tier`` where the candidate set is known.
+        """
+        self.pool_selection_mode = "fixed"
+        self.fixed_fee_tier = fee_tier
+        self._fixed_source = "intent_pinned"
 
     def select_fee_tier(self, from_token: str, to_token: str, amount_in: int) -> int:
         """Pre-select fee tier and cache the result.
@@ -257,10 +276,18 @@ class DefaultSwapAdapter:
                 )
             self.last_fee_selection = {
                 "mode": "fixed",
-                "source": "fixed_config",
+                "source": self._fixed_source,
                 "selected_fee_tier": self.fixed_fee_tier,
                 "candidate_fee_tiers": list(candidates),
             }
+            # Quote the one fixed tier so min-out and the price-impact guard
+            # see executable pool state rather than the oracle estimate. The
+            # tier is never re-selected from this quote; on quote failure the
+            # pin stands and the compiler falls back to the oracle estimate
+            # (pool existence is enforced separately post-selection).
+            quoted = self._select_fee_tier_by_quoter(from_token, to_token, amount_in, (self.fixed_fee_tier,))
+            if quoted is not None:
+                self.last_fee_selection["quoted_candidates"] = quoted["quoted_candidates"]
             return self.fixed_fee_tier
 
         if not candidates:

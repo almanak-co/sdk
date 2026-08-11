@@ -118,6 +118,21 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
                 warnings=warnings,
             )
 
+            pin_or_fail = self._resolve_pinned_pool(
+                ctx=ctx,
+                intent=intent,
+                protocol=protocol,
+                actual_from_token=actual_from_token,
+                actual_to_token=actual_to_token,
+            )
+            if isinstance(pin_or_fail, CompilationResult):
+                return pin_or_fail
+            pinned_fee_tier: int | None = None
+            pinned_pool: str | None = None
+            if pin_or_fail is not None:
+                pinned_fee_tier, pinned_pool = pin_or_fail
+                adapter.pin_fee_tier(pinned_fee_tier)
+
             quoter_amount = self._quote_swap_via_registry(
                 ctx=ctx,
                 protocol=protocol,
@@ -127,13 +142,29 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
                 actual_to_token=actual_to_token,
                 amount_in=amount_in,
                 adapter=adapter,
+                pinned_fee_tier=pinned_fee_tier,
+                pinned_pool=pinned_pool,
             )
             if quoter_amount is None:
                 try:
                     adapter.select_fee_tier(actual_from_token, actual_to_token, amount_in)
                 except Exception as exc:
+                    if pinned_fee_tier is not None:
+                        # A pin must never degrade into auto selection or an
+                        # oracle-only estimate on an unusable tier.
+                        return CompilationResult(
+                            status=CompilationStatus.FAILED,
+                            error=f"Pinned fee tier {pinned_fee_tier} is unusable for {protocol}: {exc}",
+                            intent_id=intent.intent_id,
+                        )
                     logger.warning("Fee tier pre-selection failed, falling back to oracle estimate: %s", exc)
                 quoter_amount = adapter.get_quoted_amount_out()
+            if pinned_fee_tier is not None:
+                # The registry quote path reports the provider's own selection
+                # context; restate the compile-level fact that this tier came
+                # from a SwapIntent.swap_params pin.
+                adapter.last_fee_selection["mode"] = "fixed"
+                adapter.last_fee_selection["source"] = "intent_pinned"
 
             slippage_or_fail = self._apply_swap_slippage_and_impact(
                 ctx=ctx,
@@ -193,10 +224,11 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
                     "slippage": str(intent.max_slippage),
                     "protocol": protocol,
                     "router": router_address,
-                    "pool_selection_mode": ctx.swap_pool_selection_mode,
+                    "pool_selection_mode": "fixed" if pinned_fee_tier is not None else ctx.swap_pool_selection_mode,
                     "selected_fee_tier": adapter.last_fee_selection.get("selected_fee_tier"),
                     "fee_tier_candidates": adapter.last_fee_selection.get("candidate_fee_tiers"),
                     "fee_selection_source": adapter.last_fee_selection.get("source"),
+                    "pinned_pool": pinned_pool,
                     "deadline": deadline,
                     "chain": ctx.chain,
                 },
@@ -693,6 +725,135 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
         return value, actual_from, actual_to
 
     @staticmethod
+    def _resolve_pinned_pool(
+        *,
+        ctx: CLCompilerContext,
+        intent: SwapIntent,
+        protocol: str,
+        actual_from_token: str,
+        actual_to_token: str,
+    ) -> tuple[int, str | None] | CompilationResult | None:
+        """Resolve a per-intent pool pin from ``intent.swap_params``.
+
+        ``swap_params={"fee_tier": <bps>}`` pins the tier directly;
+        ``swap_params={"pool": "0x..."}`` resolves the pool's pair and fee
+        on-chain and pins the resulting tier. A pinned swap either executes
+        against exactly the requested pool or fails compilation — a pin is
+        never silently downgraded to auto tier selection.
+
+        Returns None when the intent does not pin (default auto behavior),
+        ``(fee_tier, pool_address | None)`` on a valid pin, or a FAILED
+        CompilationResult.
+        """
+        params = intent.swap_params or {}
+        pinned_tier = params.get("fee_tier")
+        pinned_pool = params.get("pool")
+        if pinned_tier is None and pinned_pool is None:
+            return None
+
+        if protocol in SWAP_ROUTER_ALGEBRA_PROTOCOLS:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"swap_params fee_tier/pool pinning is not supported for {protocol}: "
+                    f"Algebra-style pools have one dynamic-fee pool per pair, so there is "
+                    f"no tier to pin. Remove the pin for this protocol."
+                ),
+                intent_id=intent.intent_id,
+            )
+
+        if pinned_pool is None:
+            if pinned_tier is None:  # unreachable: the both-None case returned above
+                return None
+            return int(pinned_tier), None
+
+        # Offline permission discovery cannot resolve a pool address, and does
+        # not need to: swap permissions are (router, selector)-scoped, so the
+        # discovered manifest is identical for every tier of the pair.
+        if ctx.permission_discovery:
+            return (int(pinned_tier), None) if pinned_tier is not None else None
+
+        from almanak.connectors.uniswap_v3.pool_validation import read_v3_pool_binding, validate_v3_pool
+
+        binding = read_v3_pool_binding(
+            pinned_pool,
+            ctx.rpc_url,
+            chain=ctx.chain,
+            gateway_client=ctx.gateway_client,
+        )
+        if binding is None:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"Cannot resolve pinned pool {pinned_pool} on {ctx.chain}: token0()/token1()/fee() "
+                    f"reads failed or returned non-pool values. The address may not be a "
+                    f"{protocol} pool, or no RPC is available. If RPC access is the problem, "
+                    f'pin by tier instead: swap_params={{"fee_tier": <raw V3 fee, e.g. 500>}}.'
+                ),
+                intent_id=intent.intent_id,
+            )
+
+        pool_tokens = {binding.token0.lower(), binding.token1.lower()}
+        swap_tokens = {actual_from_token.lower(), actual_to_token.lower()}
+        if pool_tokens != swap_tokens:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"Pinned pool {pinned_pool} holds pair {binding.token0}/{binding.token1}, "
+                    f"which does not match the swap pair {actual_from_token}/{actual_to_token}. "
+                    f"Pin the pool for the pair actually being swapped."
+                ),
+                intent_id=intent.intent_id,
+            )
+
+        if pinned_tier is not None and int(pinned_tier) != binding.fee_tier:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"swap_params conflict: pool {pinned_pool} has fee tier {binding.fee_tier} "
+                    f"but fee_tier={pinned_tier} was also given. Drop one of the two keys."
+                ),
+                intent_id=intent.intent_id,
+            )
+
+        # Factory cross-check: the router derives the pool from ITS factory as
+        # (pair, fee). A pool address from a different fork's factory would
+        # resolve to a plausible binding yet execute against a different
+        # contract than the one supplied — reject instead of half-pinning.
+        factory_check = validate_v3_pool(
+            ctx.chain,
+            protocol,
+            binding.token0,
+            binding.token1,
+            binding.fee_tier,
+            ctx.rpc_url,
+            gateway_client=ctx.gateway_client,
+        )
+        if factory_check.exists is None:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"Cannot verify pinned pool {pinned_pool} against the {protocol} factory on "
+                    f"{ctx.chain}: {factory_check.warning or 'factory lookup unavailable'}. "
+                    f"Refusing to compile a pinned swap without factory confirmation."
+                ),
+                intent_id=intent.intent_id,
+            )
+        if not factory_check.exists or (factory_check.pool_address or "").lower() != pinned_pool.lower():
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"Pinned pool {pinned_pool} is not the {protocol} pool for "
+                    f"{binding.token0}/{binding.token1} fee {binding.fee_tier} on {ctx.chain} "
+                    f"(factory returned {factory_check.pool_address or 'no pool'}). The address "
+                    f"likely belongs to a different protocol or chain."
+                ),
+                intent_id=intent.intent_id,
+            )
+
+        return binding.fee_tier, pinned_pool
+
+    @staticmethod
     def _quote_swap_via_registry(
         *,
         ctx: CLCompilerContext,
@@ -703,6 +864,8 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
         actual_to_token: str,
         amount_in: int,
         adapter: Any,
+        pinned_fee_tier: int | None = None,
+        pinned_pool: str | None = None,
     ) -> int | None:
         request = SwapQuoteRequest(
             chain=ctx.chain,
@@ -714,7 +877,10 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
             token_out_symbol=to_token.symbol,
             token_in_decimals=from_token.decimals,
             token_out_decimals=to_token.decimals,
-            fee_tier=ctx.fixed_swap_fee_tier if ctx.swap_pool_selection_mode == "fixed" else None,
+            fee_tier=pinned_fee_tier
+            if pinned_fee_tier is not None
+            else (ctx.fixed_swap_fee_tier if ctx.swap_pool_selection_mode == "fixed" else None),
+            pool_address=pinned_pool,
         )
         ensure_swap_quote_registry_loaded()
         try:
@@ -732,6 +898,21 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
         selected_fee = quote.metadata.get("fee_tier")
         if selected_fee is None:
             logger.warning("Swap quote provider for %s returned no fee tier, falling back to adapter quote", protocol)
+            return None
+
+        # Enforce the pin at the seam, not by trust: request.fee_tier is only a
+        # hint to the provider. A provider that quotes a different tier must not
+        # have its selection cached (get_swap_calldata would then encode a pool
+        # the intent did not pin). Discard the quote instead — the adapter
+        # fallback quotes the pinned tier itself, so the pin always holds.
+        if pinned_fee_tier is not None and int(selected_fee) != pinned_fee_tier:
+            logger.warning(
+                "Swap quote provider for %s quoted fee tier %s but the intent pins %s; "
+                "discarding the provider quote and quoting the pinned tier directly",
+                protocol,
+                selected_fee,
+                pinned_fee_tier,
+            )
             return None
 
         UniswapV3Compiler._apply_external_quote_selection(adapter, quote, int(selected_fee))

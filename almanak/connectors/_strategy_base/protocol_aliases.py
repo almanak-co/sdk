@@ -100,6 +100,17 @@ UNISWAP_V3_FORKS: frozenset[str] = frozenset(
     }
 )
 
+# Canonical protocols whose swap compilers CONSUME each SwapIntent.swap_params
+# pinning key. The intent compiler rejects a pinned swap routed to any protocol
+# outside the key's set (after alias/default normalization), so an explicit pin
+# can never be silently discarded by a connector that ignores swap_params
+# (PR #3644 review). Aerodrome pins CL pools via its own ``tick_spacing`` key
+# and is deliberately absent here.
+SWAP_PIN_KEY_SUPPORT: dict[str, frozenset[str]] = {
+    "fee_tier": UNISWAP_V3_FORKS,
+    "pool": UNISWAP_V3_FORKS | frozenset({"curve"}),
+}
+
 
 # =============================================================================
 # Public API

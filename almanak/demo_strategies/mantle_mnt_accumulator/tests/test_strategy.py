@@ -88,3 +88,30 @@ class TestPersistence:
         fresh.load_persistent_state(state)
 
         assert fresh._last_trade_time == T0
+
+
+class TestFeeTierPinning:
+    """swap_params tier pinning via the optional ``swap_fee_tier`` config."""
+
+    def test_accumulation_swaps_carry_the_pin(self, config: dict) -> None:
+        config["swap_fee_tier"] = 500
+        strategy = MantleMntAccumulator(config=config, chain=config["chain"], wallet_address="0x" + "1" * 40)
+        # NEUTRAL RSI with ample stables triggers the regular accumulation buy.
+        intent = strategy.decide(snap(T0, rsi=Decimal("50")))
+        assert intent.intent_type.value == "SWAP"
+        assert intent.swap_params == {"fee_tier": 500}
+
+    def test_unset_tier_keeps_auto_routing(self, strategy: MantleMntAccumulator) -> None:
+        intent = strategy.decide(snap(T0, rsi=Decimal("50")))
+        assert intent.intent_type.value == "SWAP"
+        assert intent.swap_params is None
+
+    def test_teardown_sweep_stays_unpinned(self, config: dict) -> None:
+        from almanak.framework.teardown import TeardownMode
+
+        config["swap_fee_tier"] = 500
+        strategy = MantleMntAccumulator(config=config, chain=config["chain"], wallet_address="0x" + "1" * 40)
+        intents = strategy.generate_teardown_intents(TeardownMode.SOFT, market=snap(T0))
+        swaps = [i for i in intents if i.intent_type.value == "SWAP"]
+        assert swaps, "teardown should sweep the target token"
+        assert all(i.swap_params is None for i in swaps)

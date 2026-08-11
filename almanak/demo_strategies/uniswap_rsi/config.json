@@ -24,6 +24,7 @@
     "protocol": "uniswap_v3",
     "base_token": "WETH",
     "quote_token": "USDC",
+    "swap_pool": null,
     "anvil_funding": {
         "ETH": 100,
         "WETH": 1,

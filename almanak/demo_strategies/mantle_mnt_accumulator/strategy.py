@@ -98,6 +98,12 @@ class MantleMntAccumulator(IntentStrategy):
         self.max_slippage = Decimal(str(_cfg(c, "max_slippage_bps", 150))) / Decimal("10000")
         self.cooldown = timedelta(minutes=int(_cfg(c, "cooldown_minutes", 30)))
 
+        # Optional fee-tier pin (V3 forks, e.g. Agni): every accumulation swap
+        # then executes on the pair's pool at exactly this tier instead of
+        # whichever tier quotes best at the moment. None keeps auto selection.
+        raw_fee_tier = _cfg(c, "swap_fee_tier", None)
+        self.swap_fee_tier: int | None = int(raw_fee_tier) if raw_fee_tier is not None else None
+
         # Internal state
         self._last_trade_time: datetime | None = None
         # Market clock from the latest decide() snapshot.
@@ -114,9 +120,9 @@ class MantleMntAccumulator(IntentStrategy):
             f"{self.target_token}/{self.stable_token} via {self.protocol}, "
             f"RSI({self.rsi_period}) oversold<{self.rsi_oversold} heavy<{self.heavy_dip_rsi} "
             f"overbought>{self.rsi_overbought}, "
-            f"buy tiers: {self.base_buy_pct*100:.0f}%/{self.dip_buy_pct*100:.0f}%/"
-            f"{self.heavy_dip_buy_pct*100:.0f}%, "
-            f"profit take: {self.profit_take_pct*100:.0f}%"
+            f"buy tiers: {self.base_buy_pct * 100:.0f}%/{self.dip_buy_pct * 100:.0f}%/"
+            f"{self.heavy_dip_buy_pct * 100:.0f}%, "
+            f"profit take: {self.profit_take_pct * 100:.0f}%"
         )
 
     # --------------------------------------------------------------------- #
@@ -157,27 +163,23 @@ class MantleMntAccumulator(IntentStrategy):
 
         logger.debug(
             f"RSI={rsi_val:.1f} signal={current_signal} "
-            f"position={position_pct*100:.1f}% "
+            f"position={position_pct * 100:.1f}% "
             f"stables=${stable_bal.balance_usd:.2f} "
             f"target=${target_bal.balance_usd:.2f}"
         )
 
         # Cooldown check
         if not self._cooldown_passed():
-            return Intent.hold(
-                reason=f"Cooldown active (last trade {self._last_trade_time})"
-            )
+            return Intent.hold(reason=f"Cooldown active (last trade {self._last_trade_time})")
 
         # PROFIT TAKE: overbought + significant position
         if current_signal == "OVERBOUGHT" and position_pct > Decimal("0.2"):
-            sell_amount = self._round_amount(
-                target_bal.balance * self.profit_take_pct
-            )
+            sell_amount = self._round_amount(target_bal.balance * self.profit_take_pct)
             if sell_amount > 0:
                 logger.info(
                     f"PROFIT TAKE: RSI={rsi_val:.1f} > {self.rsi_overbought} | "
                     f"Selling {sell_amount:.4f} {self.target_token} "
-                    f"({self.profit_take_pct*100:.0f}% of position)"
+                    f"({self.profit_take_pct * 100:.0f}% of position)"
                 )
                 return Intent.swap(
                     from_token=self.target_token,
@@ -185,24 +187,23 @@ class MantleMntAccumulator(IntentStrategy):
                     amount=sell_amount,
                     max_slippage=self.max_slippage,
                     protocol=self.protocol,
+                    swap_params=self._pin_params(),
                 )
 
         # Position cap check - don't buy if already heavily positioned
         if position_pct >= self.max_position_pct:
             return Intent.hold(
-                reason=f"Position at {position_pct*100:.1f}% >= cap {self.max_position_pct*100:.0f}%"
+                reason=f"Position at {position_pct * 100:.1f}% >= cap {self.max_position_pct * 100:.0f}%"
             )
 
         # HEAVY DIP BUY: deeply oversold
         if current_signal == "HEAVY_DIP" and stable_bal.balance_usd > Decimal("10"):
-            buy_amount = self._round_amount(
-                stable_bal.balance * self.heavy_dip_buy_pct
-            )
+            buy_amount = self._round_amount(stable_bal.balance * self.heavy_dip_buy_pct)
             if buy_amount > 0:
                 logger.info(
                     f"HEAVY DIP BUY: RSI={rsi_val:.1f} < {self.heavy_dip_rsi} | "
                     f"Buying with {buy_amount:.2f} {self.stable_token} "
-                    f"({self.heavy_dip_buy_pct*100:.0f}% of stables)"
+                    f"({self.heavy_dip_buy_pct * 100:.0f}% of stables)"
                 )
                 return Intent.swap(
                     from_token=self.stable_token,
@@ -210,14 +211,13 @@ class MantleMntAccumulator(IntentStrategy):
                     amount=buy_amount,
                     max_slippage=self.max_slippage,
                     protocol=self.protocol,
+                    swap_params=self._pin_params(),
                 )
 
         # DIP BUY: oversold (signal change detection)
         if current_signal == "OVERSOLD" and self._last_rsi_signal != "OVERSOLD":
             if stable_bal.balance_usd > Decimal("10"):
-                buy_amount = self._round_amount(
-                    stable_bal.balance * self.dip_buy_pct
-                )
+                buy_amount = self._round_amount(stable_bal.balance * self.dip_buy_pct)
                 if buy_amount > 0:
                     logger.info(
                         f"DIP BUY: RSI={rsi_val:.1f} < {self.rsi_oversold} | "
@@ -231,13 +231,12 @@ class MantleMntAccumulator(IntentStrategy):
                         amount=buy_amount,
                         max_slippage=self.max_slippage,
                         protocol=self.protocol,
+                        swap_params=self._pin_params(),
                     )
 
         # REGULAR BUY: neutral zone, small periodic accumulation
         if current_signal == "NEUTRAL" and stable_bal.balance_usd > Decimal("50"):
-            buy_amount = self._round_amount(
-                stable_bal.balance * self.base_buy_pct
-            )
+            buy_amount = self._round_amount(stable_bal.balance * self.base_buy_pct)
             if buy_amount > 0:
                 logger.info(
                     f"REGULAR BUY: RSI={rsi_val:.1f} neutral | "
@@ -250,17 +249,28 @@ class MantleMntAccumulator(IntentStrategy):
                     amount=buy_amount,
                     max_slippage=self.max_slippage,
                     protocol=self.protocol,
+                    swap_params=self._pin_params(),
                 )
 
         self._last_rsi_signal = current_signal
         return Intent.hold(
             reason=f"RSI={rsi_val:.1f} signal={current_signal} "
-            f"pos={position_pct*100:.1f}% stables=${stable_bal.balance_usd:.2f}"
+            f"pos={position_pct * 100:.1f}% stables=${stable_bal.balance_usd:.2f}"
         )
 
     # --------------------------------------------------------------------- #
     # Helpers
     # --------------------------------------------------------------------- #
+
+    def _pin_params(self) -> dict | None:
+        """swap_params for the accumulation swaps: the configured tier pin.
+
+        The teardown sweep stays unpinned on purpose — closing the position
+        must not block on one pool's health.
+        """
+        # `is not None`, not truthiness: a misconfigured 0 must reach intent
+        # validation and fail loudly there, never silently unpin.
+        return {"fee_tier": self.swap_fee_tier} if self.swap_fee_tier is not None else None
 
     def _classify_signal(self, rsi_val: Decimal) -> str:
         if rsi_val < self.heavy_dip_rsi:
@@ -329,8 +339,7 @@ class MantleMntAccumulator(IntentStrategy):
         self._total_buys = state.get("total_buys", 0)
         self._total_sells = state.get("total_sells", 0)
         logger.info(
-            f"Loaded state: buys={self._total_buys}, sells={self._total_sells}, "
-            f"last_signal={self._last_rsi_signal}"
+            f"Loaded state: buys={self._total_buys}, sells={self._total_sells}, last_signal={self._last_rsi_signal}"
         )
 
     # --------------------------------------------------------------------- #
@@ -387,7 +396,9 @@ class MantleMntAccumulator(IntentStrategy):
 
         max_slippage = Decimal("0.03") if mode == TeardownMode.HARD else self.max_slippage
 
-        # On teardown, sell all target token back to stables
+        # On teardown, sell all target token back to stables. Deliberately
+        # unpinned (no swap_params): risk reduction must not block on the
+        # pinned pool's health.
         return [
             Intent.swap(
                 from_token=self.target_token,

@@ -81,6 +81,19 @@ class CamelotCompiler(BaseProtocolCompiler[SwapCompilerContext]):
         transactions: list[TransactionData] = []
         warnings: list[str] = []
 
+        # A per-intent pool pin must never be silently ignored: Algebra has one
+        # dynamic-fee pool per pair, so there is nothing to pin here.
+        if intent.swap_params and ({"fee_tier", "pool"} & intent.swap_params.keys()):
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    "swap_params fee_tier/pool pinning is not supported for camelot: "
+                    "Algebra-style pools have one dynamic-fee pool per pair, so there "
+                    "is no tier to pin. Remove the pin for this protocol."
+                ),
+                intent_id=intent.intent_id,
+            )
+
         try:
             inputs = self._resolve_swap_inputs(ctx, intent)
             if isinstance(inputs, CompilationResult):

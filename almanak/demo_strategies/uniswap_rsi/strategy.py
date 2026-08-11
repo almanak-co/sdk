@@ -49,6 +49,7 @@ almanak/demo_strategies/uniswap_rsi/
 # The framework provides clean abstractions so you focus on strategy logic.
 
 import logging
+import re
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
@@ -231,6 +232,11 @@ class UniswapRSIStrategy(IntentStrategy):
         self.protocol = str(self.get_config("protocol", DEFAULT_PROTOCOL)).strip()
         self.base_token = self.get_config("base_token", "WETH")
         self.quote_token = self.get_config("quote_token", "USDC")
+        # Optional exact-pool pin (V3 forks): a pool address makes every swap
+        # execute against that one pool — the same pool whose analytics the
+        # strategy would read — instead of whichever tier quotes best at the
+        # moment. None keeps auto tier selection (historical behavior).
+        self.swap_pool = self.get_config("swap_pool", None)
 
         # =====================================================================
         # Internal state tracking (optional but useful)
@@ -319,6 +325,24 @@ class UniswapRSIStrategy(IntentStrategy):
                 field="rsi_oversold",
             )
 
+        swap_pool = self.get_config("swap_pool", None)
+        if swap_pool is not None:
+            from almanak.connectors._strategy_base.protocol_aliases import UNISWAP_V3_FORKS
+
+            if protocol not in UNISWAP_V3_FORKS:
+                raise ConfigValidationError(
+                    f"swap_pool pinning requires a Uniswap V3 fork protocol; {protocol!r} does not "
+                    f"support exact-pool pinning. Remove swap_pool or switch protocol.",
+                    field="swap_pool",
+                )
+            # Full-match (same rule SwapIntent enforces) so a 42-char non-hex
+            # value fails at preflight, not later inside decide().
+            if not isinstance(swap_pool, str) or not re.fullmatch(r"0x[0-9a-fA-F]{40}", swap_pool):
+                raise ConfigValidationError(
+                    f"swap_pool must be a 0x-prefixed 20-byte hex address, got {swap_pool!r}",
+                    field="swap_pool",
+                )
+
         rearm_band = Decimal(str(self.get_config("rsi_rearm_band", "10")))
         if rearm_band < 0:
             raise ConfigValidationError(f"rsi_rearm_band ({rearm_band}) must be >= 0", field="rsi_rearm_band")
@@ -344,6 +368,14 @@ class UniswapRSIStrategy(IntentStrategy):
         max_position = Decimal(str(self.get_config("max_position_usd", "0")))
         if max_position < 0:
             raise ConfigValidationError(f"max_position_usd ({max_position}) must be >= 0", field="max_position_usd")
+
+    def _pin_params(self) -> dict | None:
+        """swap_params for the trading swaps: the configured exact-pool pin.
+
+        The teardown sweep stays unpinned on purpose — closing a position must
+        not block on one pool's health.
+        """
+        return {"pool": self.swap_pool} if self.swap_pool else None
 
     # =========================================================================
     # MAIN DECISION LOGIC
@@ -521,6 +553,7 @@ class UniswapRSIStrategy(IntentStrategy):
                 amount_usd=self.trade_size_usd,
                 max_slippage=Decimal(str(self.max_slippage_bps)) / Decimal("10000"),  # Convert bps to decimal
                 protocol=self.protocol,
+                swap_params=self._pin_params(),
             )
 
         # -----------------------------------------------------------------
@@ -573,6 +606,7 @@ class UniswapRSIStrategy(IntentStrategy):
                 amount_usd=self.trade_size_usd,
                 max_slippage=Decimal(str(self.max_slippage_bps)) / Decimal("10000"),  # Convert bps to decimal
                 protocol=self.protocol,
+                swap_params=self._pin_params(),
             )
 
         # -----------------------------------------------------------------

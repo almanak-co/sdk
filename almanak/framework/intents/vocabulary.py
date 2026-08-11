@@ -18,6 +18,7 @@ Each intent type has its own dataclass with specific parameters, and the
 Intent class provides factory methods for creating them ergonomically.
 """
 
+import re
 import uuid
 import warnings
 from collections.abc import Sequence
@@ -165,6 +166,10 @@ def __getattr__(name: str) -> Any:
 # Core Intent Data Classes (kept in vocabulary.py)
 # =============================================================================
 
+# Shape check for swap_params address keys; checksum casing is deliberately not
+# enforced here — connector compilers normalize case when resolving the pool.
+_EVM_ADDRESS_RE = re.compile(r"0x[0-9a-fA-F]{40}")
+
 
 class SwapIntent(BaseIntent):
     """Intent to swap one token for another.
@@ -185,6 +190,13 @@ class SwapIntent(BaseIntent):
             Valid values: "low", "medium", "high", "veryHigh". Defaults to "veryHigh".
         priority_fee_max_lamports: Maximum priority fee in lamports for Jupiter swaps.
             Defaults to 1_000_000 (0.001 SOL).
+        swap_params: Optional connector-specific routing escape hatch (see the
+            field description for the reachable keys per connector). For Uniswap
+            V3 forks, ``{"fee_tier": 500}`` (raw V3 fee units — millionths:
+            500 = 0.05%) or ``{"pool": "0x..."}`` pins the swap to one exact
+            pool: auto tier selection is disabled and compilation fails loudly
+            if the pinned pool is unusable, instead of falling back to another
+            tier.
         intent_id: Unique identifier for this intent
         created_at: Timestamp when the intent was created
 
@@ -199,6 +211,10 @@ class SwapIntent(BaseIntent):
     Example:
         # Same-chain swap
         Intent.swap("USDC", "WETH", amount_usd=1000, chain="arbitrum")
+
+        # Same-chain swap pinned to one exact pool (V3 forks)
+        Intent.swap("USDC", "WETH", amount_usd=1000, chain="arbitrum",
+                    protocol="uniswap_v3", swap_params={"fee_tier": 500})
 
         # Cross-chain swap: Base USDC -> Arbitrum WETH
         Intent.swap("USDC", "WETH", amount_usd=1000,
@@ -236,7 +252,12 @@ class SwapIntent(BaseIntent):
         "Reachable keys today: Aerodrome — ``classic`` (bool: force Classic vs CL routing), "
         "``tick_spacing`` (positive int: pin a CL pool's tick spacing), ``stable`` (bool: "
         "Classic stable vs volatile pool type); Curve — ``pool`` (str address for "
-        "disambiguation), ``oracle_guard_bps`` (int), ``strict_oracle_guard`` (bool). "
+        "disambiguation), ``oracle_guard_bps`` (int), ``strict_oracle_guard`` (bool); "
+        "Uniswap V3 forks (uniswap_v3/sushiswap_v3/pancakeswap_v3/agni_finance) — "
+        "``fee_tier`` (positive int in raw V3 fee units, i.e. millionths: 500 = 0.05%, "
+        "3000 = 0.3%; pins the exact fee tier, disabling auto tier selection), "
+        "``pool`` (str address: pin the exact pool; the compiler resolves "
+        "its tokens and fee on-chain and fails compilation on any mismatch). "
         "Only the shape is validated centrally; deeper per-key validation lives in each "
         "connector compiler.",
     )
@@ -248,7 +269,10 @@ class SwapIntent(BaseIntent):
     # malformed values early so a typo'd escape hatch fails loudly at
     # construction rather than being silently ignored downstream.
     _SWAP_PARAMS_BOOL_KEYS: frozenset[str] = frozenset({"classic", "stable", "strict_oracle_guard"})
-    _SWAP_PARAMS_POSITIVE_INT_KEYS: frozenset[str] = frozenset({"tick_spacing", "oracle_guard_bps"})
+    _SWAP_PARAMS_POSITIVE_INT_KEYS: frozenset[str] = frozenset({"tick_spacing", "oracle_guard_bps", "fee_tier"})
+    # ``pool`` is shared by Curve (pool disambiguation) and the V3 forks (pool
+    # pinning); both consume an EVM address, so the address shape is central.
+    _SWAP_PARAMS_ADDRESS_KEYS: frozenset[str] = frozenset({"pool"})
 
     @model_validator(mode="after")
     def validate_swap_intent(self) -> "SwapIntent":
@@ -271,6 +295,10 @@ class SwapIntent(BaseIntent):
         # Cross-chain swaps require an aggregator protocol (Enso or LiFi)
         if self.is_cross_chain and self.protocol and self.protocol.lower() not in ("enso", "lifi"):
             raise ValueError("Cross-chain swaps require protocol='enso' or protocol='lifi'")
+        # Pool pinning is same-chain V3-fork semantics; an aggregator-routed
+        # cross-chain swap would silently ignore the pin, which defeats it.
+        if self.is_cross_chain and self.swap_params and ({"fee_tier", "pool"} & self.swap_params.keys()):
+            raise ValueError("swap_params fee_tier/pool pinning is not supported for cross-chain swaps")
         self._validate_swap_params()
         return self
 
@@ -298,6 +326,11 @@ class SwapIntent(BaseIntent):
                 # swap_params={"tick_spacing": True} is not silently coerced.
                 if isinstance(val, bool) or not isinstance(val, int) or val <= 0:
                     raise ValueError(f"swap_params.{key} must be a positive integer, got {val!r}")
+        for key in self._SWAP_PARAMS_ADDRESS_KEYS:
+            if key in self.swap_params:
+                val = self.swap_params[key]
+                if not isinstance(val, str) or not _EVM_ADDRESS_RE.fullmatch(val):
+                    raise ValueError(f"swap_params.{key} must be a 0x-prefixed 20-byte hex address, got {val!r}")
 
     @property
     def is_chained_amount(self) -> bool:

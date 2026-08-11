@@ -35,6 +35,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Per-intent V3 pool pinning — `SwapIntent.swap_params` `fee_tier` / `pool`
+  (ALM feature request from the PancakeSwap atomic-execution planner
+  finding).** On every Uniswap V3 fork (`uniswap_v3`, `sushiswap_v3`,
+  `pancakeswap_v3`, `agni_finance`) a swap can now pin its exact execution
+  pool per intent: `swap_params={"fee_tier": 500}` pins the tier directly,
+  `swap_params={"pool": "0x..."}` resolves the pool on-chain (token0/token1/fee
+  read + pair match + `factory.getPool` cross-check, so an address from a
+  different fork's factory is rejected) and pins its tier. A pinned swap
+  either executes against exactly the requested pool or FAILS compilation —
+  it never silently falls back to auto tier selection. Bundle metadata
+  reports `fee_selection_source="intent_pinned"` and the pinned pool address.
+  Camelot (Algebra) rejects both keys loudly — one dynamic-fee pool per pair,
+  nothing to pin — and cross-chain swaps refuse a pin the aggregator would
+  ignore. The intent compiler also gates the pin keys centrally after protocol
+  normalization: a pin routed to any connector that does not consume it
+  (traderjoe_v2, aggregators, Solana venues, `fee_tier` on Curve) fails
+  compilation instead of routing with the pin silently discarded. Fixed-mode tier selection (config-level and pinned) now also quotes
+  its single tier via QuoterV2 when RPC/gateway is available, so min-out and
+  the price-impact guard see executable pool state instead of the oracle
+  estimate. Demos: `pancakeswap_aave_carry_bsc` pins its entry swap to the
+  0.01% stable tier, `uniswap_rsi` gains an optional `swap_pool` config key
+  (exact-pool pin), `mantle_mnt_accumulator` gains `swap_fee_tier` — all
+  three deliberately leave teardown sweeps unpinned so risk reduction never
+  blocks on one pool's health.
+
 - **GMX venue-native spot prices for synthetic perp indices (ALM-3177).** The
   gateway price aggregator on Arbitrum/Avalanche now includes a `gmx_ticker`
   source that serves USD mids straight from GMX's signed oracle ticker feed

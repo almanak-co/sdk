@@ -17,6 +17,7 @@ type-checking-only.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from almanak.connectors._strategy_base.address_registry import AbiFamily, AddressRegistry
@@ -28,8 +29,11 @@ from almanak.connectors._strategy_base.pool_validation_base import (
     eth_call,
 )
 from almanak.connectors._strategy_base.v3_pool_abi import (
+    V3_FEE_SELECTOR,
     V3_GET_POOL_SELECTOR,
     V3_SLOT0_SELECTOR,
+    V3_TOKEN0_SELECTOR,
+    V3_TOKEN1_SELECTOR,
     encode_v3_get_pool,
 )
 
@@ -38,9 +42,16 @@ if TYPE_CHECKING:
 
 __all__ = [
     "V3_GET_POOL_SELECTOR",
+    "V3PoolBinding",
     "fetch_v3_pool_sqrt_price_x96",
+    "read_v3_pool_binding",
     "validate_v3_pool",
 ]
+
+# fee() returns uint24, but real V3-fork fees never exceed 100% (1_000_000
+# hundredths-of-a-bip). Anything above that means the address is not a V3 pool
+# (an unrelated contract happening to answer the selector).
+_MAX_SANE_FEE = 1_000_000
 
 
 def _encode_get_pool_v3(token_a: str, token_b: str, fee: int) -> str:
@@ -119,6 +130,57 @@ def validate_v3_pool(
         )
 
     return PoolValidationResult(exists=True, reason=PoolValidationReason.CONFIRMED, pool_address=pool_address)
+
+
+@dataclass(frozen=True)
+class V3PoolBinding:
+    """token0/token1/fee read directly from a V3-style pool contract.
+
+    Addresses are lowercase ``0x…`` strings as returned by ``decode_address``.
+    """
+
+    token0: str
+    token1: str
+    fee_tier: int
+
+
+def read_v3_pool_binding(
+    pool_address: str,
+    rpc_url: str | None,
+    *,
+    chain: str | None = None,
+    gateway_client: GatewayClient | None = None,
+) -> V3PoolBinding | None:
+    """Read ``token0()``, ``token1()`` and ``fee()`` from a V3-style pool.
+
+    Used by per-intent pool pinning (``SwapIntent.swap_params["pool"]``) to
+    resolve a user-supplied pool address into the (pair, fee) the router
+    needs. Works for Uniswap V3 and its forks — the pool ABI is shared.
+
+    Returns:
+        The pool's binding, or None when any read fails or returns a value
+        no real V3 pool would (zero token address, fee above 100%). Callers
+        decide whether None is a hard error; this reader stays diagnostic.
+    """
+    if rpc_url is None and gateway_client is None:
+        return None
+
+    token0_raw = eth_call(rpc_url or "", pool_address, V3_TOKEN0_SELECTOR, chain=chain, gateway_client=gateway_client)
+    token1_raw = eth_call(rpc_url or "", pool_address, V3_TOKEN1_SELECTOR, chain=chain, gateway_client=gateway_client)
+    fee_raw = eth_call(rpc_url or "", pool_address, V3_FEE_SELECTOR, chain=chain, gateway_client=gateway_client)
+    if token0_raw is None or token1_raw is None or fee_raw is None or len(fee_raw) < 32:
+        return None
+
+    token0 = decode_address(token0_raw)
+    token1 = decode_address(token1_raw)
+    if token0 == ZERO_ADDRESS or token1 == ZERO_ADDRESS:
+        return None
+
+    fee_tier = int.from_bytes(fee_raw[:32], "big")
+    if fee_tier <= 0 or fee_tier > _MAX_SANE_FEE:
+        return None
+
+    return V3PoolBinding(token0=token0, token1=token1, fee_tier=fee_tier)
 
 
 def fetch_v3_pool_sqrt_price_x96(

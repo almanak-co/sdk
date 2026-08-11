@@ -1531,6 +1531,10 @@ class IntentCompiler:
         Returns:
             CompilationResult with swap ActionBundle
         """
+        pin_rejected = self._reject_unsupported_swap_pin(intent)
+        if pin_rejected is not None:
+            return pin_rejected
+
         routed = self._dispatch_swap_protocol_route(intent)
         if routed is not None:
             return routed
@@ -1540,6 +1544,87 @@ class IntentCompiler:
         if connector_compiler is not None:
             return connector_compiler.compile(self._build_compiler_context(protocol, connector_compiler), intent)
         return self._compile_default_router_swap_body(intent, protocol)
+
+    def _resolve_swap_pin_protocol(self, intent: SwapIntent) -> str:
+        """Resolve the protocol the pin will ACTUALLY be handed to.
+
+        The gate below runs before ``_dispatch_swap_protocol_route``, and that
+        dispatch consults ``SWAP_ROUTE_INFERENCE_REGISTRY`` first: a
+        protocol-less swap on a ``PT-``/``YT-`` symbol is claimed by Pendle
+        regardless of the chain default. Resolving ``intent.protocol`` alone
+        therefore answered a DIFFERENT question than the one the gate asks —
+        it named the fallback, not the destination. A protocol-less pinned
+        PT swap passed the gate as the chain default (``uniswap_v3``, which
+        does consume pins), then compiled against Pendle, which does not read
+        ``swap_params`` at all, and the pin was silently discarded — exactly
+        the outcome this gate exists to make impossible (CodeRabbit, PR #3644).
+
+        Inference is consulted only when the intent declares no protocol.
+
+        KNOWN INCOMPLETE — do not read this as "the gate now covers every lane".
+        It closes the INFERENCE lane only. ``_dispatch_swap_protocol_route``
+        tries the chain-family lane FIRST, and ``SvmFamily`` claims every SWAP
+        on a Solana chain unconditionally and routes it to Jupiter, which does
+        not read ``swap_params`` either — while ``default_protocol`` on a Solana
+        compiler is still ``uniswap_v3``, so a pinned Solana swap passes this
+        gate and has its pin discarded downstream. That hole predates this gate
+        and is tracked separately; it is NOT closed here. (Cross-chain pins are
+        already refused at the model layer, and the ``get_connector_compiler``
+        fallback resolves identically to this function, so those two lanes
+        agree.)
+
+        The ``except`` below is narrow in effect, not in intent: the unpinned
+        majority returns before this function is ever called, so what it
+        swallows is ``infer_protocol``'s deliberate fail-closed raise (raised
+        when two connectors both claim an intent). That is safe today only
+        because ``_dispatch_swap_protocol_route`` calls ``infer_protocol`` again
+        WITHOUT a guard a few lines later, so the raise still stops the compile.
+        Anyone who wraps that call must revisit this one.
+        """
+        if intent.protocol:
+            return self._resolve_protocol(intent.protocol)
+        try:
+            from almanak.connectors._strategy_swap_route_inference_registry import SWAP_ROUTE_INFERENCE_REGISTRY
+
+            inferred = SWAP_ROUTE_INFERENCE_REGISTRY.infer_protocol(intent)
+        except Exception:  # pragma: no cover - unreachable while Pendle is the only provider
+            inferred = None
+        return self._resolve_protocol(inferred) if inferred else self._resolve_protocol(intent.protocol)
+
+    def _reject_unsupported_swap_pin(self, intent: SwapIntent) -> CompilationResult | None:
+        """Fail closed when pin keys target a connector that does not consume them.
+
+        ``swap_params`` ``fee_tier``/``pool`` promise "execute exactly there or
+        fail". Most connectors never read ``swap_params``, so without this gate
+        a reachable same-chain intent like ``protocol="traderjoe_v2",
+        swap_params={"fee_tier": 500}`` would route normally with the pin
+        silently discarded (PR #3644 review). Runs BEFORE any dispatch, on the
+        normalized protocol, so aliases ("agni" -> "agni_finance") and
+        chain-default resolution (protocol=None) are covered.
+        """
+        params = intent.swap_params
+        if not params:
+            return None
+        present = [key for key in ("fee_tier", "pool") if key in params]
+        if not present:
+            return None
+        from almanak.connectors._strategy_base.protocol_aliases import SWAP_PIN_KEY_SUPPORT
+
+        protocol = self._resolve_swap_pin_protocol(intent)
+        unsupported = [key for key in present if protocol not in SWAP_PIN_KEY_SUPPORT[key]]
+        if not unsupported:
+            return None
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            error=(
+                f"swap_params {'/'.join(unsupported)} pinning is not supported for protocol "
+                f"'{protocol}': its swap compiler does not consume the pin, and an explicit "
+                f"pin must never be silently discarded. fee_tier pins are supported on "
+                f"{', '.join(sorted(SWAP_PIN_KEY_SUPPORT['fee_tier']))}; pool pins additionally "
+                f"on curve. For Aerodrome CL pools use swap_params tick_spacing instead."
+            ),
+            intent_id=intent.intent_id,
+        )
 
     def _dispatch_swap_protocol_route(self, intent: SwapIntent) -> CompilationResult | None:
         """Route a SWAP intent to the correct protocol-specific compiler.

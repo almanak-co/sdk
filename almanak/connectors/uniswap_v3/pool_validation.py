@@ -12,12 +12,16 @@ from __future__ import annotations
 
 from almanak.connectors._strategy_base.v3_pool_validation import (
     V3_GET_POOL_SELECTOR,
+    V3PoolBinding,
     fetch_v3_pool_sqrt_price_x96,
+    read_v3_pool_binding,
     validate_v3_pool,
 )
 
 __all__ = [
     "V3_GET_POOL_SELECTOR",
+    "V3PoolBinding",
     "fetch_v3_pool_sqrt_price_x96",
+    "read_v3_pool_binding",
     "validate_v3_pool",
 ]

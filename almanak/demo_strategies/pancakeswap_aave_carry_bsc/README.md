@@ -45,6 +45,13 @@ almanak strat teardown request -s <deployment_id> --wait
 | `swap_to_token` | `USDT` | Token to swap borrowed funds into |
 | `ltv_target` | `0.3` | Target loan-to-value ratio (30%) |
 
+The entry swap is pinned to PancakeSwap V3's 0.01% stable tier via
+`swap_params={"fee_tier": 100}` — the carry's entry math assumes that pool's
+fee, so auto tier selection must never route it through a pricier tier. The
+teardown recovery swap intentionally stays unpinned: risk reduction must not
+block on one pool's health. Pinning only works in live/agent runs; the PnL
+backtest plane does not simulate per-pool routing.
+
 ## BSC Notes
 
 - USDC and USDT on BSC have **18 decimals** (not 6 like other chains)

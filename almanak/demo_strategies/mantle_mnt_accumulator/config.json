@@ -29,6 +29,7 @@
     "cooldown_minutes": 5,
     "max_slippage_bps": 300,
     "max_position_pct": 90,
+    "swap_fee_tier": null,
     "anvil_funding": {
         "MNT": 1000,
         "WMNT": 100,

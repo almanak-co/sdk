@@ -40,6 +40,26 @@ For production-like validation, run continuously and use the separate teardown c
 
 The strategy validates that the configured protocol is supported on the configured chain before it starts. Current supported protocol families are `uniswap_v3`, `traderjoe_v2`, `aerodrome`, `pancakeswap_v3`, and `sushiswap_v3`.
 
+### Exact-pool pinning (optional)
+
+On Uniswap V3 fork protocols you can pin every trading swap to one exact pool by
+setting `swap_pool` to the pool's address (default `null` keeps auto tier
+selection):
+
+```json
+{
+    "swap_pool": "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640"
+}
+```
+
+With the pin set, the pool whose analytics you would inspect (e.g.
+`market.pool_analytics(pool)`) is the pool the swap executes against — the
+compiler resolves the address on-chain, verifies it matches the configured pair
+and the protocol's factory, and fails compilation rather than routing through a
+different fee tier. The teardown sweep intentionally stays unpinned so closing
+the position never blocks on one pool's health. Note pinning is enforced in
+live/agent execution; the PnL backtest plane does not simulate per-pool routing.
+
 ## Behavior
 
 The strategy monitors RSI for `base_token`.

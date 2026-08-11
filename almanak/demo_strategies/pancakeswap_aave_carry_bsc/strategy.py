@@ -207,9 +207,7 @@ class PancakeswapAaveCarryBscStrategy(IntentStrategy):
 
         # Any other state (incl. legacy pre-VIB-5637 teardown-phase states restored
         # from persisted state) is terminal for decide(): hold and let teardown unwind.
-        return Intent.hold(
-            reason=f"State '{self._state}' is teardown-owned — holding until teardown signal."
-        )
+        return Intent.hold(reason=f"State '{self._state}' is teardown-owned — holding until teardown signal.")
 
     # =========================================================================
     # PHASE HELPERS
@@ -270,9 +268,7 @@ class PancakeswapAaveCarryBscStrategy(IntentStrategy):
             safe_ceiling_usd = health.max_borrow_usd * self.max_borrow_fraction
             borrow_amount_usd = borrow_amount * borrow_price
             if borrow_amount_usd > safe_ceiling_usd:
-                borrow_amount = (safe_ceiling_usd / borrow_price).quantize(
-                    Decimal("0.01"), rounding=ROUND_DOWN
-                )
+                borrow_amount = (safe_ceiling_usd / borrow_price).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
                 logger.warning(
                     f"Clamping borrow to {format_token_amount_human(borrow_amount, self.borrow_token)}: "
                     f"requested {format_usd(borrow_amount_usd)} exceeds {self.max_borrow_fraction:.0%} of "
@@ -315,6 +311,12 @@ class PancakeswapAaveCarryBscStrategy(IntentStrategy):
             max_slippage=Decimal("0.005"),
             protocol="pancakeswap_v3",
             chain=self.chain,
+            # The carry's entry math assumes the deep USDC/USDT 0.01% pool's
+            # fee; pin the tier so auto selection can never route the entry
+            # through a thinner, pricier tier. The teardown recovery swap
+            # deliberately stays unpinned — risk reduction must not block on
+            # one pool's health.
+            swap_params={"fee_tier": 100},
         )
 
     # The carry's unwind (swap-back -> repay -> withdraw) is intentionally NOT a set
@@ -357,9 +359,7 @@ class PancakeswapAaveCarryBscStrategy(IntentStrategy):
                 # accounting/teardown reflect what executed even if config is
                 # hot-reloaded mid-flight.
                 self._supplied_amount = Decimal(str(getattr(intent, "amount", self.collateral_amount)))
-                logger.info(
-                    f"SUPPLY OK: supplied={self._supplied_amount} {self.collateral_token} -- state -> supplied"
-                )
+                logger.info(f"SUPPLY OK: supplied={self._supplied_amount} {self.collateral_token} -- state -> supplied")
 
             elif intent_type_val == "BORROW" and self._state == BORROWING:
                 self._state = BORROWED
@@ -462,7 +462,11 @@ class PancakeswapAaveCarryBscStrategy(IntentStrategy):
                     chain=self.chain,
                     protocol="pancakeswap_v3",
                     value_usd=Decimal("0"),
-                    details={"asset": self.swap_to_token, "amount": str(self._swapped_amount), "origin": "swapped_from_borrow"},
+                    details={
+                        "asset": self.swap_to_token,
+                        "amount": str(self._swapped_amount),
+                        "origin": "swapped_from_borrow",
+                    },
                 )
             )
 
@@ -576,9 +580,7 @@ class PancakeswapAaveCarryBscStrategy(IntentStrategy):
         successful teardown.
         """
         if success:
-            logger.info(
-                f"Teardown completed. Recovered {format_usd(recovered_usd)} — clearing tracked carry state."
-            )
+            logger.info(f"Teardown completed. Recovered {format_usd(recovered_usd)} — clearing tracked carry state.")
             self._supplied_amount = Decimal("0")
             self._borrowed_amount = Decimal("0")
             self._swapped_amount = Decimal("0")

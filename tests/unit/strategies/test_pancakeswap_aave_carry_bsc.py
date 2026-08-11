@@ -274,6 +274,17 @@ class TestEntryPhase:
         assert intent.from_token == "USDC"
         assert intent.to_token == "USDT"
 
+    def test_entry_swap_pins_stable_fee_tier(self):
+        """The carry's entry math assumes the 0.01% stable pool's fee; the entry
+        swap must pin that tier so auto selection can never route elsewhere."""
+        strategy = _make_strategy()
+        strategy._state = BORROWED
+        strategy._borrowed_amount = Decimal("90")
+
+        intent = strategy.decide(_make_market())
+
+        assert intent.swap_params == {"fee_tier": 100}
+
 
 # =============================================================================
 # Lifecycle: Carry established -> HOLD (unwind is teardown-owned, VIB-5637)
@@ -536,15 +547,16 @@ class TestTeardownInterface:
 
         sentinel = [MagicMock(name="hf_safe_unwind_intent")]
         market = _make_market()
-        with patch(
-            "almanak.framework.teardown.generate_lending_unwind", return_value=sentinel
-        ) as mock_unwind:
+        with patch("almanak.framework.teardown.generate_lending_unwind", return_value=sentinel) as mock_unwind:
             intents = strategy.generate_teardown_intents(TeardownMode.SOFT, market=market)
 
-        # (1) leading intent closes the swap leg USDT -> USDC
+        # (1) leading intent closes the swap leg USDT -> USDC. Deliberately
+        # UNPINNED (swap_params is None): risk reduction must not block on the
+        # entry pool's health — only the entry swap pins fee_tier=100.
         assert intents[0].intent_type.value == "SWAP"
         assert intents[0].from_token == "USDT"
         assert intents[0].to_token == "USDC"
+        assert intents[0].swap_params is None
         # (2) the rest is exactly the primitive's HF-safe staircase
         assert intents[1:] == sentinel
 
@@ -612,9 +624,7 @@ class TestTeardownInterface:
 
         from almanak.framework.teardown import TeardownMode
 
-        with patch(
-            "almanak.framework.teardown.generate_lending_unwind", return_value=[]
-        ) as mock_unwind:
+        with patch("almanak.framework.teardown.generate_lending_unwind", return_value=[]) as mock_unwind:
             intents = strategy.generate_teardown_intents(TeardownMode.SOFT, market=_make_market())
 
         assert intents == []
@@ -662,9 +672,7 @@ class TestTeardownInterface:
         from almanak.framework.teardown import TeardownMode
 
         sentinel = [MagicMock(name="hf_safe_unwind_intent")]
-        with patch(
-            "almanak.framework.teardown.generate_lending_unwind", return_value=sentinel
-        ) as mock_unwind:
+        with patch("almanak.framework.teardown.generate_lending_unwind", return_value=sentinel) as mock_unwind:
             intents = strategy.generate_teardown_intents(TeardownMode.SOFT, market=_make_market())
 
         assert intents == sentinel
@@ -727,13 +735,15 @@ class TestStatePersistence:
     def test_load_persistent_state(self):
         strategy = _make_strategy()
 
-        strategy.load_persistent_state({
-            "state": BORROWED,
-            "previous_stable": IDLE,
-            "supplied_amount": "0.5",
-            "borrowed_amount": "90",
-            "swapped_amount": "0",
-        })
+        strategy.load_persistent_state(
+            {
+                "state": BORROWED,
+                "previous_stable": IDLE,
+                "supplied_amount": "0.5",
+                "borrowed_amount": "90",
+                "swapped_amount": "0",
+            }
+        )
 
         assert strategy._state == BORROWED
         assert strategy._supplied_amount == Decimal("0.5")

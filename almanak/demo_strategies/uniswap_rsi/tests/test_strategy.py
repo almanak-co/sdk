@@ -89,3 +89,61 @@ class TestPersistence:
         fresh.load_persistent_state(state)
 
         assert fresh._last_trade_at == T0
+
+
+class TestPoolPinning:
+    """swap_params exact-pool pinning via the optional ``swap_pool`` config."""
+
+    POOL = "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640"  # mainnet USDC/WETH 0.05%
+
+    def test_trading_swaps_carry_the_pin(self, config: dict) -> None:
+        config["swap_pool"] = self.POOL
+        strategy = UniswapRSIStrategy(config=config, chain=config["chain"], wallet_address="0x" + "1" * 40)
+        buy = strategy.decide(snap(T0, rsi=Decimal("25")))
+        assert buy.intent_type.value == "SWAP"
+        assert buy.swap_params == {"pool": self.POOL}
+
+    def test_unset_pool_keeps_auto_routing(self, strategy: UniswapRSIStrategy) -> None:
+        buy = strategy.decide(snap(T0, rsi=Decimal("25")))
+        assert buy.intent_type.value == "SWAP"
+        assert buy.swap_params is None
+
+    def test_teardown_sweep_stays_unpinned(self, config: dict) -> None:
+        config["swap_pool"] = self.POOL
+        strategy = UniswapRSIStrategy(config=config, chain=config["chain"], wallet_address="0x" + "1" * 40)
+        from almanak.framework.teardown import TeardownMode
+
+        intents = strategy.generate_teardown_intents(TeardownMode.SOFT, market=snap(T0))
+        swaps = [i for i in intents if i.intent_type.value == "SWAP"]
+        assert swaps, "teardown should sweep the base token"
+        assert all(i.swap_params is None for i in swaps)
+
+    def test_malformed_pool_rejected_at_preflight(self, config: dict) -> None:
+        from almanak.framework.strategies import ConfigValidationError
+
+        config["swap_pool"] = "0x123"
+        with pytest.raises(ConfigValidationError, match="swap_pool"):
+            UniswapRSIStrategy(config=config, chain=config["chain"], wallet_address="0x" + "1" * 40)
+
+    def test_pool_pin_rejected_for_non_v3_fork(self, config: dict) -> None:
+        from almanak.framework.strategies import ConfigValidationError
+
+        config["swap_pool"] = self.POOL
+        config["protocol"] = "traderjoe_v2"
+        config["chain"] = "avalanche"
+        with pytest.raises(ConfigValidationError, match="V3 fork"):
+            UniswapRSIStrategy(config=config, chain=config["chain"], wallet_address="0x" + "1" * 40)
+
+    def test_sell_swaps_carry_the_pin(self, config: dict) -> None:
+        config["swap_pool"] = self.POOL
+        strategy = UniswapRSIStrategy(config=config, chain=config["chain"], wallet_address="0x" + "1" * 40)
+        sell = strategy.decide(snap(T0, rsi=Decimal("75")))
+        assert sell.intent_type.value == "SWAP"
+        assert sell.swap_params == {"pool": self.POOL}
+
+    def test_non_hex_pool_of_correct_length_rejected_at_preflight(self, config: dict) -> None:
+        from almanak.framework.strategies import ConfigValidationError
+
+        config["swap_pool"] = "0x" + "g" * 40  # 42 chars, not hex
+        with pytest.raises(ConfigValidationError, match="swap_pool"):
+            UniswapRSIStrategy(config=config, chain=config["chain"], wallet_address="0x" + "1" * 40)
