@@ -61,6 +61,27 @@ def _lending(leg: PositionType, *, market_id: str = "0xmkt", symbol: str = "USDC
     )
 
 
+def _token() -> PositionInfo:
+    return PositionInfo(
+        position_type=PositionType.TOKEN,
+        position_id="accounting-quant-ta-weth",
+        chain="arbitrum",
+        protocol="uniswap_v3",
+        value_usd=Decimal("0"),
+        details={"token_address": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1"},
+    )
+
+
+class _TokenGateway:
+    def __init__(self, balance: int | None) -> None:
+        self.balance = balance
+        self.calls: list[dict] = []
+
+    def query_erc20_balance(self, **kwargs):
+        self.calls.append(kwargs)
+        return self.balance
+
+
 def _compound_v3_position(leg: PositionType, *, token: str = "WETH", market: str = "usdc") -> PositionInfo:
     """A Compound V3 lending leg exactly as ``compound_v3_lifecycle`` (and every
     sibling Compound V3 strategy) emits it from ``get_open_positions()``
@@ -135,6 +156,47 @@ class _MarketKeyStrictMarket:
 
     def price(self, token):  # pragma: no cover - amounts unused by the CHECK
         raise KeyError(token)
+
+
+# ---------------------------------------------------------------------------
+# TOKEN reconciliation — shared TD-14 balance authority (VIB-6311)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_token_balance_confirms_open_before_teardown() -> None:
+    gateway = _TokenGateway(123)
+    report = await reconcile_known_positions_against_chain(
+        summary=_summary(_token()),
+        gateway_client=gateway,
+        market=None,
+        wallet_address="0x1111111111111111111111111111111111111111",
+    )
+    assert report.entries[0].verdict is ReconciliationVerdict.CONFIRMED_OPEN
+    assert gateway.calls[0]["block"] is None
+
+
+@pytest.mark.asyncio
+async def test_token_balance_confirms_closed_after_teardown() -> None:
+    report = await reconcile_known_positions_against_chain(
+        summary=_summary(_token()),
+        gateway_client=_TokenGateway(0),
+        market=None,
+        wallet_address="0x1111111111111111111111111111111111111111",
+        phase="post",
+    )
+    assert report.entries[0].verdict is ReconciliationVerdict.DIVERGED_CLOSED
+
+
+@pytest.mark.asyncio
+async def test_token_balance_read_failure_remains_unverifiable() -> None:
+    report = await reconcile_known_positions_against_chain(
+        summary=_summary(_token()),
+        gateway_client=_TokenGateway(None),
+        market=None,
+        wallet_address="0x1111111111111111111111111111111111111111",
+    )
+    assert report.entries[0].verdict is ReconciliationVerdict.UNVERIFIABLE
 
 
 # ---------------------------------------------------------------------------
@@ -736,9 +798,7 @@ async def test_perp_connector_measured_empty_diverges_closed(monkeypatch):
     monkeypatch.setitem(
         tpc._REGISTRY,
         "measured_perp",
-        _declared_perp_hook(
-            ClosureCheckResult(closed=True, protocol="measured_perp", position_id="0xkey")
-        ),
+        _declared_perp_hook(ClosureCheckResult(closed=True, protocol="measured_perp", position_id="0xkey")),
     )
     perp = PositionInfo(
         position_type=PositionType.PERP,
@@ -798,9 +858,7 @@ async def test_perp_connector_unmeasured_stays_unverifiable(monkeypatch):
 async def test_perp_open_state_capability_requires_exact_true(monkeypatch):
     from almanak.connectors._strategy_base import teardown_post_condition as tpc
 
-    hook = _declared_perp_hook(
-        ClosureCheckResult(closed=False, protocol="measured_perp", position_id="0xkey")
-    )
+    hook = _declared_perp_hook(ClosureCheckResult(closed=False, protocol="measured_perp", position_id="0xkey"))
     hook.supports_open_state_reconciliation = "true"  # type: ignore[attr-defined]
     monkeypatch.setitem(tpc._REGISTRY, "measured_perp", hook)
     perp = PositionInfo(
@@ -841,10 +899,7 @@ async def test_pending_order_with_exact_connector_post_condition_is_not_applicab
 
     assert report.entries[0].verdict is ReconciliationVerdict.NOT_APPLICABLE
     assert not report.has_unverifiable
-    assert (
-        report.apply_to_verification_status(VerificationStatus.CHAIN_VERIFIED)
-        is VerificationStatus.CHAIN_VERIFIED
-    )
+    assert report.apply_to_verification_status(VerificationStatus.CHAIN_VERIFIED) is VerificationStatus.CHAIN_VERIFIED
 
 
 @pytest.mark.asyncio

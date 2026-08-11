@@ -85,6 +85,7 @@ CLOSE_EVENT_TYPES: tuple[str, ...] = tuple(
 # kept as a back-compat alias: it is exported in ``__all__`` and referenced by
 # annotations throughout this module.
 ProfileName = Literal[
+    "spot",
     "lp",
     "looping",
     "lending_lifecycle",
@@ -5707,6 +5708,219 @@ def _cells_settlement(
     ]
 
 
+def _spot_swap_payloads(
+    acct_events: list[dict[str, Any]],
+    acct_payloads: dict[Any, dict[str, Any]],
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    return [(row, acct_payloads.get(row.get("id"), {})) for row in acct_events if row.get("event_type") == "SWAP"]
+
+
+def _spot_replay_lots(
+    swaps: list[tuple[dict[str, Any], dict[str, Any]]],
+) -> tuple[dict[str, list[list[Decimal]]], list[str]]:
+    """Replay the persisted SWAP payloads through a minimal FIFO ledger.
+
+    The replay is deliberately independent of the production ``FIFOBasisStore``:
+    S2 is meant to catch a defect in that implementation, so importing it here
+    would make the Accountant repeat the same bug rather than audit it.
+    """
+    lots: dict[str, list[list[Decimal]]] = {}
+    errors: list[str] = []
+    matched_disposals = 0
+    for row, payload in swaps:
+        row_id = str(row.get("id") or "?")
+        token_in = str(payload.get("token_in") or "").upper()
+        token_out = str(payload.get("token_out") or "").upper()
+        amount_in = _dec(payload.get("amount_in"))
+        amount_out = _dec(payload.get("amount_out"))
+        amount_in_usd = _dec(payload.get("amount_in_usd"))
+        amount_out_usd = _dec(payload.get("amount_out_usd"))
+        if not token_in or not token_out or amount_in is None or amount_out is None:
+            errors.append(f"row {row_id}: token/amount evidence is unmeasured")
+            continue
+
+        remaining = amount_in
+        basis_consumed = Decimal("0")
+        for lot in lots.get(token_in, []):
+            if remaining <= 0:
+                break
+            lot_amount, lot_cost = lot
+            if lot_amount <= 0:
+                continue
+            consumed = min(remaining, lot_amount)
+            consumed_cost = lot_cost * (consumed / lot_amount)
+            lot[0] -= consumed
+            lot[1] -= consumed_cost
+            remaining -= consumed
+            basis_consumed += consumed_cost
+
+        persisted_unmatched = _dec(payload.get("unmatched_amount_in"))
+        if persisted_unmatched is None or persisted_unmatched != remaining:
+            errors.append(
+                f"row {row_id}: unmatched_amount_in={persisted_unmatched} does not equal FIFO replay {remaining}"
+            )
+        matched = amount_in - remaining
+        if matched > 0:
+            matched_disposals += 1
+            if amount_in_usd is None:
+                errors.append(f"row {row_id}: matched disposal has no amount_in_usd")
+            else:
+                matched_proceeds = amount_in_usd * (matched / amount_in)
+                expected_pnl = matched_proceeds - basis_consumed
+                actual_pnl = _dec(payload.get("realized_pnl_usd_matched"))
+                if actual_pnl is None or actual_pnl != expected_pnl:
+                    errors.append(f"row {row_id}: realized_pnl_usd_matched={actual_pnl} != FIFO replay {expected_pnl}")
+
+        if amount_out > 0:
+            if amount_out_usd is None:
+                errors.append(f"row {row_id}: acquired {token_out} without measured USD basis")
+            else:
+                lots.setdefault(token_out, []).append([amount_out, amount_out_usd])
+
+    if matched_disposals == 0:
+        errors.append("no SWAP disposal matched a previously acquired FIFO lot")
+    return lots, errors
+
+
+def _spot_snapshot_inventory(snapshot: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    positions = _json(snapshot.get("positions_json"))
+    metadata_value = positions.get("metadata")
+    metadata: dict[str, Any] = metadata_value if isinstance(metadata_value, dict) else {}
+    swap_inventory_value = metadata.get("swap_inventory")
+    swap_inventory: dict[str, Any] = swap_inventory_value if isinstance(swap_inventory_value, dict) else {}
+    tokens = swap_inventory.get("tokens")
+    return tokens if isinstance(tokens, dict) else {}
+
+
+def _spot_mark_cell(snapshots: list[dict[str, Any]]) -> CellResult:
+    marked_snapshots = 0
+    errors: list[str] = []
+    for snapshot in snapshots:
+        inventory = _spot_snapshot_inventory(snapshot)
+        if not inventory:
+            continue
+        marked_snapshots += 1
+        wallet_rows = _json_list(snapshot.get("wallet_balances_json"))
+        wallet = {str(row.get("symbol") or "").lower(): row for row in wallet_rows}
+        for token, mark in inventory.items():
+            wallet_row = wallet.get(str(token).lower())
+            if wallet_row is None:
+                errors.append(f"snapshot {snapshot.get('id')}: {token} absent from wallet balances")
+                continue
+            if _dec(mark.get("quantity")) != _dec(wallet_row.get("balance")):
+                errors.append(f"snapshot {snapshot.get('id')}: {token} quantity != wallet balance")
+            if _dec(mark.get("value_usd")) != _dec(wallet_row.get("value_usd")):
+                errors.append(f"snapshot {snapshot.get('id')}: {token} inventory mark != wallet mark")
+            balance = _dec(wallet_row.get("balance"))
+            price = _dec(wallet_row.get("price_usd"))
+            wallet_value = _dec(wallet_row.get("value_usd"))
+            if balance is None or price is None or wallet_value is None or balance * price != wallet_value:
+                errors.append(f"snapshot {snapshot.get('id')}: {token} wallet mark != balance × price")
+    if marked_snapshots == 0:
+        errors.append("no snapshot published an open swap_inventory mark")
+    return CellResult(
+        "S3",
+        "Open-inventory mark equals wallet balance × price",
+        "PASS" if not errors else "FAIL",
+        f"{marked_snapshots} open-inventory snapshots match wallet quantity and USD mark"
+        if not errors
+        else "; ".join(errors),
+    )
+
+
+def _spot_basis_cell(swaps: list[tuple[dict[str, Any], dict[str, Any]]], snapshots: list[dict[str, Any]]) -> CellResult:
+    errors: list[str] = []
+    checked_basis = 0
+    for snapshot in snapshots:
+        inventory = _spot_snapshot_inventory(snapshot)
+        if not inventory:
+            continue
+        snapshot_ts = str(snapshot.get("timestamp") or "")
+        prefix = [(row, payload) for row, payload in swaps if str(row.get("timestamp") or "") <= snapshot_ts]
+        lots, replay_errors = _spot_replay_lots(prefix)
+        errors.extend(error for error in replay_errors if "no SWAP disposal matched" not in error)
+        for token, mark in inventory.items():
+            checked_basis += 1
+            replay_basis = sum((lot[1] for lot in lots.get(str(token).upper(), []) if lot[0] > 0), Decimal("0"))
+            if _dec(mark.get("cost_usd")) != replay_basis:
+                errors.append(
+                    f"snapshot {snapshot.get('id')}: {token} cost_usd={mark.get('cost_usd')} != replay {replay_basis}"
+                )
+    if checked_basis == 0:
+        errors.append("no open inventory basis was available to audit")
+    return CellResult(
+        "S4",
+        "Acquired basis equals persisted open-lot basis",
+        "PASS" if not errors else "FAIL",
+        f"{checked_basis} held-token basis marks equal independent acquisition replay"
+        if not errors
+        else "; ".join(errors),
+    )
+
+
+def _cells_spot(
+    acct_events: list[dict[str, Any]],
+    snapshots: list[dict[str, Any]],
+    acct_payloads: dict[Any, dict[str, Any]],
+    payload_errors: dict[Any, str],
+) -> list[CellResult]:
+    """S1–S4: persisted BUY→SELL SWAP round-trip contract (VIB-4203)."""
+    swaps = _spot_swap_payloads(acct_events, acct_payloads)
+    malformed = [str(row.get("id")) for row, _ in swaps if row.get("id") in payload_errors]
+    if malformed:
+        diagnostic = f"SWAP payload validation failed for rows {malformed}"
+        return [
+            CellResult(f"S{i}", title, "FAIL", diagnostic)
+            for i, title in enumerate(
+                (
+                    "BUY-leg cost basis recorded",
+                    "SELL-leg realized PnL reconciles to FIFO replay",
+                    "Open-inventory mark equals wallet balance × price",
+                    "Acquired basis equals persisted open-lot basis",
+                ),
+                start=1,
+            )
+        ]
+
+    # S1 — a closed pair with a measured acquisition lot.
+    round_trip = False
+    if len(swaps) >= 2:
+        first = swaps[0][1]
+        last = swaps[-1][1]
+        round_trip = (
+            str(first.get("token_in") or "").upper() == str(last.get("token_out") or "").upper()
+            and str(first.get("token_out") or "").upper() == str(last.get("token_in") or "").upper()
+            and first.get("cost_basis_recorded") is True
+            and all(
+                first.get(key) not in (None, "")
+                for key in ("amount_in", "amount_out", "amount_in_usd", "amount_out_usd")
+            )
+            and all(
+                (_dec(first.get(key)) or Decimal("0")) > 0
+                for key in ("amount_in", "amount_out", "amount_in_usd", "amount_out_usd")
+            )
+        )
+    s1 = CellResult(
+        "S1",
+        "BUY-leg cost basis recorded",
+        "PASS" if round_trip else "FAIL",
+        "opening SWAP recorded measured basis and terminal SWAP closes the token pair"
+        if round_trip
+        else "need a measured SWAP→SWAP-back pair whose BUY records acquisition basis",
+    )
+
+    # S2 — independent FIFO replay of every matched disposal.
+    _, replay_errors = _spot_replay_lots(swaps)
+    s2 = CellResult(
+        "S2",
+        "SELL-leg realized PnL reconciles to FIFO replay",
+        "PASS" if not replay_errors else "FAIL",
+        "independent FIFO replay matches persisted matched PnL" if not replay_errors else "; ".join(replay_errors),
+    )
+
+    return [s1, s2, _spot_mark_cell(snapshots), _spot_basis_cell(swaps, snapshots)]
+
+
 # ─── Scorecard profile registry (G-A foundation) ─────────────────────────
 #
 # One declarative table replaces the former per-primitive if/elif ladders (the
@@ -5720,6 +5934,21 @@ def _cells_settlement(
 # ``_TaxonomyPrimitive`` is the canonical enum (imported as such because the
 # module-local ``Primitive`` name is the ``ProfileName`` string alias).
 SCORECARD_PROFILES: dict[str, ScorecardProfile] = {
+    "spot": ScorecardProfile(
+        name="spot",
+        canonical_primitive=_TaxonomyPrimitive.SWAP,
+        # SWAP is atomic in the taxonomy. The S1–S4 pack, rather than the
+        # coarse intent-type guard, proves the BUY→SELL round trip.
+        required_lifecycle=(),
+        eps_pct=Decimal("0.0025"),
+        eps_scaling=lambda b: (b.notional_traded, "notional_traded"),
+        cells=lambda ctx: _cells_spot(
+            ctx.acct_events,
+            ctx.snapshots,
+            ctx.acct_payloads,
+            ctx.payload_errors,
+        ),
+    ),
     "lp": ScorecardProfile(
         name="lp",
         canonical_primitive=_TaxonomyPrimitive.LP,

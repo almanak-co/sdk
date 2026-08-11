@@ -143,6 +143,7 @@ def test_g6_eps_selectors_match_legacy(
 
 def test_g6_eps_pct_values_match_legacy() -> None:
     """The per-profile ε percent matches the former hardcoded values."""
+    assert SCORECARD_PROFILES["spot"].eps_pct == Decimal("0.0025")
     assert SCORECARD_PROFILES["lp"].eps_pct == Decimal("0.0025")
     assert SCORECARD_PROFILES["looping"].eps_pct == Decimal("0.0010")
     assert SCORECARD_PROFILES["lending_lifecycle"].eps_pct == Decimal("0.0010")

@@ -1,0 +1,45 @@
+{
+  "_provenance": {
+    "row_id": "spot-uniswap_v3-arbitrum",
+    "fixture": "ta",
+    "chain": "arbitrum",
+    "primitive": "spot",
+    "captured_from": "20260811-1309-short6r-ta-arb",
+    "source_database_sha256": "e9f3f6e15e2742a3071e300ff7c866520600616cf07997ddf8f1b9f5e9003c7e",
+    "source_deployment_id": "deployment:1fae8febbd35",
+    "captured_at": "2026-08-11T15:06:21+00:00",
+    "captured_at_commit": "949f562eb76bfe6b33232921a4c07b03f9c39123",
+    "post_fix_for": ["VIB-4203", "VIB-4232"],
+    "note": "Real Arbitrum-mainnet 20-minute BUY-hold-SWAP-back run. The source DB is immutable short-run evidence; the baseline was scored by the spot profile on latest-main code. S1-S4 all pass, every submitted transaction succeeded, and the terminal wallet returned to USDC. Clean managed-Anvil proof deployment:194e6b4e8771 also passed S1-S4, closed 1/1 with zero failures, and ended CHAIN_VERIFIED; DB sha256 86eed9194aff2b3a0caf077557ad5814d71b5b9244be71329807d1a71ba2eafa, final Accountant JSON sha256 d0ff11966c79e5eaa84e7d289e3e5870cc76892a3c1ac10d8798261547aaf2d7."
+  },
+  "cells": {
+    "G1": "PASS",
+    "G10": "PASS",
+    "G11": "SKIP",
+    "G12": "PASS",
+    "G13": "PASS",
+    "G14": "XFAIL",
+    "G15": "XFAIL",
+    "G16": "PASS",
+    "G17": "PASS",
+    "G2": "PASS",
+    "G3": "PASS",
+    "G4": "PASS",
+    "G5": "PASS",
+    "G6": "PASS",
+    "G7": "PASS",
+    "G8": "PASS",
+    "G9": "PASS",
+    "L5_22": "XFAIL",
+    "S1": "PASS",
+    "S2": "PASS",
+    "S3": "PASS",
+    "S4": "PASS"
+  },
+  "scores": {
+    "passed": 18,
+    "failed": 0,
+    "xfailed": 3,
+    "total": 22
+  }
+}

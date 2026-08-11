@@ -579,6 +579,29 @@ def _reconcile_lending(*, position: PositionInfo, market: MarketSnapshot | None)
     return ReconciliationVerdict.DIVERGED_CLOSED, f"{leg} value ${leg_value} at/under dust (closed)"
 
 
+def _reconcile_token(
+    *,
+    position: PositionInfo,
+    wallet_address: str,
+    gateway_client: Any,
+) -> tuple[ReconciliationVerdict, str]:
+    """Reconcile TOKEN inventory through the canonical TD-14 balance authority."""
+    from almanak.framework.teardown.token_post_condition import token_balance_teardown_post_condition
+
+    check = token_balance_teardown_post_condition(
+        position=position,
+        wallet_address=wallet_address,
+        gateway_client=gateway_client,
+        rpc_url=None,
+        block=None,
+    )
+    if check.unmeasured:
+        return ReconciliationVerdict.UNVERIFIABLE, check.error or "TOKEN balance read was unmeasured"
+    if check.closed:
+        return ReconciliationVerdict.DIVERGED_CLOSED, "TOKEN balanceOf is zero/within measured dust"
+    return ReconciliationVerdict.CONFIRMED_OPEN, f"TOKEN balanceOf residual: {check.residual}"
+
+
 async def _reconcile_one(
     *,
     position: PositionInfo,
@@ -669,7 +692,19 @@ async def _reconcile_one(
                 ReconciliationVerdict.CONFIRMED_OPEN,
                 f"connector measured residual perp state: {getattr(check, 'residual', {})}",
             )
-        # VAULT / STAKE / TOKEN / CEX / PREDICTION have no per-position
+        if position.position_type is PositionType.TOKEN:
+            # TOKEN's canonical TD-14 authority is an exact gateway-routed
+            # balanceOf read. Reuse the same authority in Plan-A so a measured
+            # pre-teardown balance proves the enumerated holding really exists,
+            # and a measured post-teardown zero proves closure. Previously this
+            # branch returned UNVERIFIABLE even when TD-14 had measured zero,
+            # so TD-15 downgraded a clean swap round trip to UNVERIFIED.
+            return _reconcile_token(
+                position=position,
+                wallet_address=wallet_address,
+                gateway_client=gateway_client,
+            )
+        # VAULT / STAKE / CEX / PREDICTION have no per-position
         # Plan-A chain-read capability yet — be honest: UNVERIFIABLE, never a
         # fabricated CONFIRMED. (Their per-position verify is owned by their own
         # cutover / post-condition tickets, not this read-path check.)
