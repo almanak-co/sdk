@@ -230,6 +230,10 @@ def verify_lending_closure(
     # is "never raises" (CodeRabbit, PR #3336).
     details = raw_details if isinstance(raw_details, dict) else {}
     asset = details.get("asset")
+    if asset is None:
+        # Position-registry rows use the canonical registry field. An explicit
+        # but malformed ``asset`` remains dominant and fails closed below.
+        asset = details.get("asset_symbol")
     if not isinstance(asset, str) or not asset.strip():
         return ClosureCheckResult(
             closed=False,
@@ -237,7 +241,7 @@ def verify_lending_closure(
             protocol=protocol,
             position_id=position_id,
             error=(
-                f"{protocol} post-condition needs details['asset'] (underlying symbol) to "
+                f"{protocol} post-condition needs details['asset'|'asset_symbol'] (underlying symbol) to "
                 f"resolve the market; found {asset!r} — cannot verify (unmeasured)"
             ),
         )

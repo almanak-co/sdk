@@ -45,6 +45,10 @@ CONNECTOR = Connector(
     name="aave_v3",
     kind=ProtocolKind.LENDING,
     external_ids={"defillama": "aave-v3"},
+    teardown_post_condition=ImportRef(
+        module="almanak.connectors.aave_v3.teardown_post_condition",
+        attribute="aave_v3_teardown_post_condition",
+    ),
     fee_model=FeeModelDecl(
         model=ImportRef(module="almanak.connectors.aave_v3.fee_model", attribute="AaveV3FeeModel"),
         description="Aave V3 lending protocol fee model",

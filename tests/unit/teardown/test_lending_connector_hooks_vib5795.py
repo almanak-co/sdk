@@ -1,4 +1,4 @@
-"""Connector-specific lending teardown hooks: euler_v2 / silo_v2 / benqi (VIB-5795).
+"""Connector-specific lending teardown hooks: Aave / Euler / Silo / Benqi (VIB-5795).
 
 Exercises each hook against a scripted gateway double with the REAL connector
 address catalogues — multi-target sums (residual parked in a non-preferred
@@ -11,6 +11,9 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from almanak.connectors.aave_v3.addresses import AAVE_V3, AAVE_V3_TOKENS
+from almanak.connectors.aave_v3.lending_read import LENDING_READ_SPEC
+from almanak.connectors.aave_v3.teardown_post_condition import aave_v3_teardown_post_condition
 from almanak.connectors.benqi.adapter import BENQI_QI_TOKENS
 from almanak.connectors.benqi.teardown_post_condition import benqi_teardown_post_condition
 from almanak.connectors.euler_v2.adapter import DEBT_OF_SELECTOR, EULER_V2_VAULTS_BY_CHAIN
@@ -101,7 +104,9 @@ class TestEulerV2Hook:
             assert call["block"] == 1
 
     def test_residual_debt_is_measured_open(self):
-        gateway = _ScriptedGateway(call_words={_AVAX_USDC_VAULTS[0]: 7_000_000, **dict.fromkeys(_AVAX_USDC_VAULTS[1:], 0)})
+        gateway = _ScriptedGateway(
+            call_words={_AVAX_USDC_VAULTS[0]: 7_000_000, **dict.fromkeys(_AVAX_USDC_VAULTS[1:], 0)}
+        )
         result = euler_v2_teardown_post_condition(
             _pos("euler_v2", "BORROW", "avalanche", "USDC"), _WALLET, gateway_client=gateway, block=1
         )
@@ -191,6 +196,107 @@ class _BenqiGateway:
 
 # ~0.02 underlying per qiToken — a realistic Compound-V2 mantissa scale.
 _RATE = 20_000_000_000_000_000
+
+
+def _aave_reserve_blob(supply: int, stable_debt: int, variable_debt: int) -> str:
+    words = (supply, stable_debt, variable_debt, 0, 0, 0, 0, 0, 1)
+    return "0x" + "".join(format(value, "064x") for value in words)
+
+
+class _AaveGateway:
+    def __init__(self, blob: str | None):
+        self.blob = blob
+        self.eth_calls: list[dict] = []
+
+    def eth_call(self, **kwargs):
+        self.eth_calls.append(kwargs)
+        return self.blob
+
+
+class TestAaveV3Hook:
+    def test_flat_reserve_is_closed_and_block_pinned(self):
+        gateway = _AaveGateway(_aave_reserve_blob(0, 0, 0))
+        result = aave_v3_teardown_post_condition(
+            _pos("aave_v3", "SUPPLY", "arbitrum", "USDC"), _WALLET, gateway_client=gateway, block=777
+        )
+
+        assert result.closed is True
+        call = gateway.eth_calls[0]
+        assert call["to"] == AAVE_V3["arbitrum"]["pool_data_provider"]
+        assert call["data"] == LENDING_READ_SPEC.build_calldata(AAVE_V3_TOKENS["arbitrum"]["USDC"], _WALLET)
+        assert call["block"] == 777
+
+    def test_supply_and_borrow_use_distinct_reserve_words(self):
+        gateway = _AaveGateway(_aave_reserve_blob(5_000_000, 7, 9))
+        supply = aave_v3_teardown_post_condition(
+            _pos("aave_v3", "SUPPLY", "arbitrum", "USDC"), _WALLET, gateway_client=gateway, block=1
+        )
+        debt = aave_v3_teardown_post_condition(
+            _pos("aave_v3", "BORROW", "arbitrum", "USDC"), _WALLET, gateway_client=gateway, block=1
+        )
+
+        assert supply.closed is False
+        assert supply.residual == {"asset": "USDC", "leg": "supply", "residual_wei": 5_000_000}
+        assert debt.closed is False
+        assert debt.residual == {"asset": "USDC", "leg": "debt", "residual_wei": 16}
+
+    def test_bnb_alias_resolves_the_canonical_bsc_reserve(self):
+        gateway = _AaveGateway(_aave_reserve_blob(0, 0, 0))
+        result = aave_v3_teardown_post_condition(
+            _pos("aave_v3", "SUPPLY", "bnb", "USDC"), _WALLET, gateway_client=gateway, block=1
+        )
+
+        assert result.closed is True
+        assert gateway.eth_calls[0]["to"] == AAVE_V3["bsc"]["pool_data_provider"]
+        assert AAVE_V3_TOKENS["bsc"]["USDC"].lower().removeprefix("0x") in gateway.eth_calls[0]["data"].lower()
+
+    def test_non_lending_position_defers_to_the_position_type_authority(self):
+        gateway = _AaveGateway(_aave_reserve_blob(0, 0, 0))
+        result = aave_v3_teardown_post_condition(
+            _pos("aave_v3", "TOKEN", "arbitrum", "USDC"), _WALLET, gateway_client=gateway, block=1
+        )
+
+        assert result.closed is True
+        assert result.not_applicable is True
+        assert gateway.eth_calls == []
+
+    def test_missing_position_type_remains_unmeasured(self):
+        gateway = _AaveGateway(_aave_reserve_blob(0, 0, 0))
+        result = aave_v3_teardown_post_condition(
+            _pos("aave_v3", "", "arbitrum", "USDC"), _WALLET, gateway_client=gateway, block=1
+        )
+
+        assert result.closed is False
+        assert result.unmeasured is True
+        assert result.not_applicable is False
+        assert gateway.eth_calls == []
+
+    def test_malformed_response_and_unknown_reserve_are_unmeasured(self):
+        malformed = aave_v3_teardown_post_condition(
+            _pos("aave_v3", "SUPPLY", "arbitrum", "USDC"),
+            _WALLET,
+            gateway_client=_AaveGateway("0x01"),
+            block=1,
+        )
+        gateway = _AaveGateway(_aave_reserve_blob(0, 0, 0))
+        unknown = aave_v3_teardown_post_condition(
+            _pos("aave_v3", "SUPPLY", "arbitrum", "PEPE"), _WALLET, gateway_client=gateway, block=1
+        )
+
+        assert malformed.unmeasured is True
+        assert malformed.closed is False
+        assert unknown.unmeasured is True
+        assert unknown.closed is False
+        assert gateway.eth_calls == []
+
+    def test_catalogue_lookup_is_case_insensitive(self):
+        gateway = _AaveGateway(_aave_reserve_blob(0, 0, 0))
+        result = aave_v3_teardown_post_condition(
+            _pos("aave_v3", "SUPPLY", "arbitrum", "usdc"), _WALLET, gateway_client=gateway, block=1
+        )
+
+        assert result.closed is True
+        assert AAVE_V3_TOKENS["arbitrum"]["USDC"].lower().removeprefix("0x") in gateway.eth_calls[0]["data"].lower()
 
 
 class TestBenqiHook:

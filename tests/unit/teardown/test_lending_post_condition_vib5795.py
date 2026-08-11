@@ -147,6 +147,30 @@ class TestVerifyLendingClosureGuards:
         assert result.closed is False
         assert result.error and "LP" in result.error
 
+    def test_registry_asset_symbol_is_measured_without_weakening_explicit_asset(self):
+        supply_reader = _reader(0)
+        result = verify_lending_closure(
+            _position(details={"asset_symbol": "WETH"}),
+            _WALLET,
+            object(),
+            99,
+            read_supply=supply_reader,
+            read_debt=_reader(0),
+        )
+
+        assert result.closed is True
+        assert supply_reader.calls == [("ethereum", "WETH", _WALLET, 99)]
+
+        malformed = verify_lending_closure(
+            _position(details={"asset": 42, "asset_symbol": "WETH"}),
+            _WALLET,
+            object(),
+            99,
+            read_supply=_reader(0),
+            read_debt=_reader(0),
+        )
+        assert malformed.unmeasured is True
+
 
 class TestVerifyLendingClosureDispatch:
     def test_supply_routes_to_supply_reader_only(self):
@@ -353,11 +377,12 @@ class TestRegistration:
                         "resolves — a LENDING default was introduced without updating "
                         "the VIB-5795 design rationale"
                     )
-        assert declaring >= 3  # euler_v2, silo_v2, benqi at minimum
+        assert declaring >= 4  # aave_v3, euler_v2, silo_v2, benqi at minimum
 
     def test_vib5795_acceptance_slugs_resolve(self):
-        """Ticket acceptance: the three named protocols are hook-covered."""
+        """Every connector-owned lending hook resolves from its canonical slug."""
         for slug, name in (
+            ("aave_v3", "aave_v3_teardown_post_condition"),
             ("euler_v2", "euler_v2_teardown_post_condition"),
             ("silo_v2", "silo_v2_teardown_post_condition"),
             ("benqi", "benqi_teardown_post_condition"),

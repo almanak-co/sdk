@@ -24,7 +24,7 @@ from almanak.framework.teardown.post_conditions import (
     ClosureCheckResult,
     get_teardown_post_condition,
 )
-from almanak.framework.teardown.teardown_manager import TeardownManager
+from almanak.framework.teardown.teardown_manager import TeardownManager, _resolve_and_run_post_condition
 
 
 @pytest.fixture
@@ -52,10 +52,38 @@ def _make_position_snapshot(*positions) -> SimpleNamespace:
 def _make_strategy(open_positions: list | None = None) -> MagicMock:
     strategy = MagicMock()
     strategy.wallet_address = "0xabc"
-    strategy.get_open_positions.return_value = SimpleNamespace(
-        positions=open_positions or []
-    )
+    strategy.get_open_positions.return_value = SimpleNamespace(positions=open_positions or [])
     return strategy
+
+
+def test_aave_token_position_reaches_the_position_type_balance_authority():
+    token = "0x" + "22" * 20
+    wallet = "0x" + "11" * 20
+    gateway = MagicMock()
+    gateway.query_erc20_balance.return_value = 0
+    position = SimpleNamespace(
+        protocol="aave_v3",
+        position_type="TOKEN",
+        position_id=token,
+        chain="arbitrum",
+        details={"token_address": token},
+    )
+
+    result = _resolve_and_run_post_condition(
+        position,
+        wallet_address=wallet,
+        gateway_client=gateway,
+        rpc_url=None,
+        block=777,
+    )
+
+    assert result is not None and result.closed is True and result.not_applicable is False
+    gateway.query_erc20_balance.assert_called_once_with(
+        chain="arbitrum",
+        token_address=token,
+        wallet_address=wallet,
+        block=777,
+    )
 
 
 @pytest.mark.asyncio
@@ -206,9 +234,7 @@ async def test_verify_closure_falls_back_to_in_memory_when_no_snapshot():
     mgr = TeardownManager()
     # Strategy still reports open positions -> fail.
     strategy_with_residual = _make_strategy(open_positions=[object()])
-    assert (
-        await mgr._verify_closure(strategy=strategy_with_residual)
-    ) is False
+    assert (await mgr._verify_closure(strategy=strategy_with_residual)) is False
 
     # Strategy reports nothing open -> pass.
     strategy_clean = _make_strategy(open_positions=[])
@@ -535,6 +561,97 @@ def _make_lending_strategy() -> MagicMock:
     return strategy
 
 
+def _aave_reserve_blob(atoken_balance: int, stable_debt: int, variable_debt: int) -> str:
+    words = (atoken_balance, stable_debt, variable_debt, 0, 0, 0, 0, 0, 0)
+    return "0x" + "".join(format(value, "064x") for value in words)
+
+
+class _AaveReserveGateway:
+    """Return reserve-specific Aave user data through the real TD-14 hook."""
+
+    def __init__(self, blobs: dict[str, str]):
+        self._blobs = {asset.lower(): blob for asset, blob in blobs.items()}
+        self.calls: list[tuple[str, str, str, int | str | None]] = []
+
+    def eth_call(self, *, chain, to, data, block=None):
+        asset = "0x" + data[10 + 24 : 10 + 64]
+        self.calls.append((chain, to, asset, block))
+        return self._blobs.get(asset.lower())
+
+
+def _aave_positions() -> tuple[SimpleNamespace, SimpleNamespace]:
+    supply = SimpleNamespace(
+        protocol="aave_v3",
+        position_id="aave_v3-supply-USDC-arbitrum",
+        chain="arbitrum",
+        position_type="SUPPLY",
+        details={"asset": "USDC", "type": "collateral"},
+    )
+    borrow = SimpleNamespace(
+        protocol="aave_v3",
+        position_id="aave_v3-borrow-USDT-arbitrum",
+        chain="arbitrum",
+        position_type="BORROW",
+        details={"asset": "USDT", "type": "borrow"},
+    )
+    return supply, borrow
+
+
+@pytest.mark.asyncio
+async def test_aave_teardown_flat_reserves_are_chain_verified_at_td14_seam():
+    """The manifest-owned Aave hook proves both exact reserve legs closed."""
+    from almanak.connectors.aave_v3.addresses import AAVE_V3_TOKENS
+
+    tokens = AAVE_V3_TOKENS["arbitrum"]
+    gateway = _AaveReserveGateway(
+        {
+            tokens["USDC"]: _aave_reserve_blob(0, 0, 0),
+            tokens["USDT"]: _aave_reserve_blob(0, 0, 0),
+        }
+    )
+    mgr = TeardownManager()
+    mgr.compiler = SimpleNamespace(gateway_client=gateway)
+
+    detailed = await mgr._verify_closure_detailed(
+        strategy=_make_lending_strategy(),
+        pre_execution_positions=_make_position_snapshot(*_aave_positions()),
+        close_receipt_block=123456,
+    )
+
+    assert detailed.all_closed is True
+    assert detailed.positions_closed == 2
+    assert detailed.verification_status is VerificationStatus.CHAIN_VERIFIED
+    assert {call[2].lower() for call in gateway.calls} == {
+        tokens["USDC"].lower(),
+        tokens["USDT"].lower(),
+    }
+    assert {call[3] for call in gateway.calls} == {123456}
+
+
+@pytest.mark.asyncio
+async def test_aave_teardown_residual_debt_is_failed_at_td14_seam():
+    """A measured variable-debt residual defeats an otherwise flat account."""
+    from almanak.connectors.aave_v3.addresses import AAVE_V3_TOKENS
+
+    tokens = AAVE_V3_TOKENS["arbitrum"]
+    gateway = _AaveReserveGateway(
+        {
+            tokens["USDC"]: _aave_reserve_blob(0, 0, 0),
+            tokens["USDT"]: _aave_reserve_blob(0, 0, 11),
+        }
+    )
+    mgr = TeardownManager()
+    mgr.compiler = SimpleNamespace(gateway_client=gateway)
+
+    detailed = await mgr._verify_closure_detailed(
+        strategy=_make_lending_strategy(),
+        pre_execution_positions=_make_position_snapshot(*_aave_positions()),
+    )
+
+    assert detailed.all_closed is False
+    assert detailed.verification_status is VerificationStatus.FAILED
+
+
 def _euler_supply_position() -> SimpleNamespace:
     return SimpleNamespace(
         protocol="euler_v2",
@@ -569,9 +686,7 @@ async def test_lending_teardown_both_legs_flat_is_chain_verified():
 
     detailed = await mgr._verify_closure_detailed(
         strategy=_make_lending_strategy(),
-        pre_execution_positions=_make_position_snapshot(
-            _euler_supply_position(), _euler_borrow_position()
-        ),
+        pre_execution_positions=_make_position_snapshot(_euler_supply_position(), _euler_borrow_position()),
     )
 
     assert detailed.all_closed is True
@@ -593,9 +708,7 @@ async def test_lending_teardown_residual_debt_is_failed_despite_clean_collateral
 
     detailed = await mgr._verify_closure_detailed(
         strategy=_make_lending_strategy(),
-        pre_execution_positions=_make_position_snapshot(
-            _euler_supply_position(), _euler_borrow_position()
-        ),
+        pre_execution_positions=_make_position_snapshot(_euler_supply_position(), _euler_borrow_position()),
     )
 
     assert detailed.all_closed is False
@@ -610,9 +723,7 @@ async def test_lending_teardown_unmeasured_leg_is_unverified_not_failed():
 
     detailed = await mgr._verify_closure_detailed(
         strategy=_make_lending_strategy(),
-        pre_execution_positions=_make_position_snapshot(
-            _euler_supply_position(), _euler_borrow_position()
-        ),
+        pre_execution_positions=_make_position_snapshot(_euler_supply_position(), _euler_borrow_position()),
     )
 
     assert detailed.all_closed is True
