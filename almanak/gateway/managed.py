@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import hmac
 import logging
+import re
 import socket
 import threading
 import time
@@ -37,6 +38,10 @@ logger = logging.getLogger(__name__)
 # ``almanak/framework/deployment/mode.py`` (``_TRUTHY``). Anything else — most
 # importantly ``"0"`` / ``"false"`` / ``""`` / whitespace — is FALSE.
 _TRUTHY_ENV = frozenset({"1", "true", "yes", "on"})
+_EVM_TOKEN_ADDRESS_RE = re.compile(r"^0[xX][0-9a-fA-F]{40}$")
+
+type AnvilFundingAmount = float | int | str
+type AnvilFunding = dict[str, AnvilFundingAmount | dict[str, AnvilFundingAmount]]
 
 
 def _env_flag_enabled(name: str) -> bool:
@@ -188,7 +193,7 @@ class ManagedGateway:
         settings: GatewaySettings,
         anvil_chains: list[str] | None = None,
         wallet_address: str | None = None,
-        anvil_funding: dict[str, float | int | str] | None = None,
+        anvil_funding: AnvilFunding | None = None,
         external_anvil_ports: dict[str, int] | None = None,
         keep_anvil: bool = False,
     ):
@@ -475,14 +480,84 @@ class ManagedGateway:
     # most expensive demo strategies (lending lifecycles, multi-hop swaps).
     DEFAULT_ANVIL_NATIVE_GAS_AMOUNT: Decimal = Decimal("100")
 
+    def _anvil_funding_for_chain(self, chain: str) -> dict[str, AnvilFundingAmount]:
+        """Return the flat funding section applicable to ``chain``.
+
+        A flat object is retained for single-chain compatibility. Multi-chain
+        configs can use ``{chain: {address: amount}}`` so the same request can
+        name different contracts on each chain without symbol resolution.
+        Mixed flat/nested layouts are rejected as ambiguous.
+        """
+        funding = self._anvil_funding
+        if not funding:
+            return {}
+        nested = [isinstance(value, dict) for value in funding.values()]
+        if any(nested):
+            if not all(nested):
+                raise ValueError("anvil_funding cannot mix flat address amounts with per-chain sections")
+            from almanak.core.constants import canonical_chain_name
+
+            active_chain = canonical_chain_name(chain)
+            matching_sections = [
+                value
+                for section_chain, value in funding.items()
+                if isinstance(section_chain, str) and canonical_chain_name(section_chain) == active_chain
+            ]
+            if len(matching_sections) > 1:
+                raise ValueError(f"anvil_funding defines duplicate alias sections for chain {chain!r}")
+            section = matching_sections[0] if matching_sections else {}
+            if not isinstance(section, dict):  # narrowed by all(nested), defensive for untyped callers
+                raise ValueError(f"anvil_funding[{chain!r}] must be an address-to-amount object")
+            return section
+        return funding  # type: ignore[return-value]  # narrowed above
+
+    def _parse_anvil_funding_for_chain(
+        self,
+        chain: str,
+    ) -> tuple[str | None, dict[str, Decimal], dict[str, Decimal]]:
+        """Validate and normalize one chain's native/address funding section."""
+        from almanak.core.chains import ChainRegistry
+
+        descriptor = ChainRegistry.try_resolve(chain)
+        chain_native = descriptor.native.symbol if descriptor is not None else None
+        native_amounts: dict[str, Decimal] = {}
+        erc20_tokens: dict[str, Decimal] = {}
+        for token_ref, amount in self._anvil_funding_for_chain(chain).items():
+            try:
+                parsed = Decimal(str(amount))
+            except Exception as e:
+                raise ValueError(f"Invalid anvil_funding value for {token_ref}: {amount!r}") from e
+            if token_ref.upper() in self.NATIVE_TOKEN_SYMBOLS:
+                symbol = token_ref.upper()
+                if chain_native is not None and symbol == chain_native.upper():
+                    native_amounts[symbol] = native_amounts.get(symbol, Decimal("0")) + parsed
+                else:
+                    logger.warning(
+                        "anvil_funding contains native symbol '%s' but chain='%s' uses '%s'; "
+                        "the foreign native entry is ignored",
+                        symbol,
+                        chain,
+                        chain_native or "an unregistered native asset",
+                    )
+            elif _EVM_TOKEN_ADDRESS_RE.fullmatch(token_ref):
+                normalized_address = token_ref.lower()
+                erc20_tokens[normalized_address] = erc20_tokens.get(normalized_address, Decimal("0")) + parsed
+            else:
+                raise ValueError(
+                    f"anvil_funding ERC-20 key {token_ref!r} is a symbol, not a contract address. "
+                    "Use the exact chain-specific 0x address; native gas funding remains symbol-keyed."
+                )
+        return chain_native, native_amounts, erc20_tokens
+
     async def _fund_anvil_wallets(self, chains: list[str] | None = None) -> None:
         """Fund the wallet on each Anvil fork.
 
         Behaviour (VIB-3752):
 
         * Reads token amounts from ``self._anvil_funding`` (set from
-          ``config.json``). Native tokens (ETH, AVAX, etc.) go through
-          ``anvil_setBalance``; ERC-20s go through storage-slot manipulation.
+          ``config.json``). Native gas symbols (ETH, AVAX, etc.) go through
+          ``anvil_setBalance``; every ERC-20 key must be a contract address.
+          Multi-chain configs use ``{chain: {address: amount}}`` sections.
         * Even when ``anvil_funding`` does not specify the chain's native token
           (or is empty entirely), every Anvil fork wallet receives a baseline
           ``DEFAULT_ANVIL_NATIVE_GAS_AMOUNT`` of native gas. Without this,
@@ -491,7 +566,8 @@ class ManagedGateway:
           when the per-chain lookup expected ``ETH`` and the strategy listed
           something else) would hit ``Insufficient funds for gas`` on every
           submission.
-        * Errors are logged but do not prevent gateway startup.
+        * Any requested funding failure aborts startup; an under-funded fork
+          is never exposed to the strategy as a valid test environment.
 
         Args:
             chains: If provided, only fund wallets on these chains. If None,
@@ -534,42 +610,16 @@ class ManagedGateway:
                 f"applying default {self.DEFAULT_ANVIL_NATIVE_GAS_AMOUNT} native gas per chain"
             )
 
-        # Separate native tokens (per-symbol) from ERC-20s
-        native_amounts: dict[str, Decimal] = {}
-        erc20_tokens: dict[str, Decimal] = {}
-        for symbol, amount in self._anvil_funding.items():
-            try:
-                parsed = Decimal(str(amount))
-            except Exception as e:
-                logger.warning(f"Skipping invalid anvil_funding value for {symbol}: {amount!r} ({e})")
-                continue
-            if symbol.upper() in self.NATIVE_TOKEN_SYMBOLS:
-                sym = symbol.upper()
-                native_amounts[sym] = native_amounts.get(sym, Decimal("0")) + parsed
-            else:
-                erc20_tokens[symbol] = parsed
-
-        from almanak.core.chains import ChainRegistry
-
         managers_to_fund = {c: m for c, m in self._anvil_managers.items() if chains is None or c in chains}
+
+        # Validate every section before mutating any fork. A bad symbol on the
+        # second chain must not leave the first chain funded and startup half-done.
+        parsed_funding = {chain: self._parse_anvil_funding_for_chain(chain) for chain in managers_to_fund}
+
+        funding_failures: list[str] = []
         for chain, manager in managers_to_fund.items():
             try:
-                # Only fund the native token that matches this chain (VIB-4801)
-                _descriptor = ChainRegistry.try_resolve(chain)
-                chain_native = _descriptor.native.symbol if _descriptor is not None else None
-                # Warn if the user specified "ETH" but this chain uses a different native token.
-                # This is a common footgun: BSC/Avalanche/Polygon use BNB/AVAX/MATIC, not ETH.
-                if chain_native and chain_native != "ETH" and "ETH" in native_amounts:
-                    eth_amount = native_amounts["ETH"]
-                    logger.warning(
-                        "anvil_funding contains 'ETH' (%.4f) but chain='%s' uses '%s' as native token. "
-                        "Did you mean '%s'? The 'ETH' entry will NOT fund native gas on this chain. "
-                        "Update your config.json anvil_funding key.",
-                        eth_amount,
-                        chain,
-                        chain_native,
-                        chain_native,
-                    )
+                chain_native, native_amounts, erc20_tokens = parsed_funding[chain]
                 native_amount = native_amounts.get(chain_native, Decimal("0")) if chain_native else Decimal("0")
 
                 # VIB-3752: ensure baseline native gas funding even when the
@@ -587,19 +637,34 @@ class ManagedGateway:
                     applied_default = True
 
                 if native_amount > 0:
-                    await manager.fund_wallet(wallet, native_amount)
+                    native_funded = await manager.fund_wallet(wallet, native_amount)
                     suffix = " (default)" if applied_default else ""
                     native_label = chain_native or f"<unknown native for {chain}>"
-                    logger.info(f"Funded native {native_label}: {native_amount}{suffix}")
+                    if native_funded:
+                        logger.info(f"Funded native {native_label}: {native_amount}{suffix}")
+                    else:
+                        funding_failures.append(f"{chain}: could not fund native gas asset {native_label}")
                 if erc20_tokens:
                     # VIB-2570: Log each ERC20 token being funded so failures are traceable
                     logger.info(f"Funding ERC20 tokens on {chain}: {list(erc20_tokens.keys())}")
-                    await manager.fund_tokens(wallet, erc20_tokens)
-                logger.info(f"Anvil funding complete for {chain}")
+                    tokens_funded = await manager.fund_tokens(wallet, erc20_tokens)
+                    if not tokens_funded:
+                        funding_failures.append(
+                            f"{chain}: could not provision ERC-20 addresses {list(erc20_tokens.keys())}"
+                        )
+                if not any(failure.startswith(f"{chain}:") for failure in funding_failures):
+                    logger.info(f"Anvil funding complete for {chain}")
             except Exception as e:
                 # VIB-2570: Log at ERROR (not WARNING) when funding fails after restart —
                 # the strategy WILL fail with INSUFFICIENT_FUNDS if this is not resolved.
                 logger.error(f"Anvil funding failed for {chain}: {e}")
+                funding_failures.append(f"{chain}: {e}")
+
+        if funding_failures:
+            raise RuntimeError(
+                "Managed Anvil funding could not provision every requested asset; "
+                "refusing to start an under-funded fork. Failures: " + "; ".join(funding_failures)
+            )
 
     async def _stop_anvil_forks(self, *, force: bool = False) -> None:
         """Stop all managed Anvil fork instances and restore env vars.

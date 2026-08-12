@@ -104,15 +104,16 @@ Ajoutez un bloc `anvil_funding` à votre `config.json` pour financer automatique
 
 ```json
 {
+    "chain": "arbitrum",
     "anvil_funding": {
         "ETH": 10,
-        "USDC": 10000,
-        "WETH": 5
+        "0xaf88d065e77c8cc2239327c5edb3a432268e5831": 10000,
+        "0x82af49447d8a07e3bd95bd0d56f35241523fbab1": 5
     }
 }
 ```
 
-Les tokens natifs (ETH, AVAX, etc.) sont financés via `anvil_setBalance`. Les tokens ERC-20 sont financés par manipulation des slots de stockage. Cela se produit automatiquement à chaque démarrage du fork.
+Les tokens natifs (ETH, AVAX, etc.) sont financés via `anvil_setBalance`. Pour les ERC-20, les clés doivent être les adresses exactes des contrats sur la chaîne ; les symboles sont refusés. Cela se produit automatiquement à chaque démarrage du fork.
 
 ### Meilleures performances RPC (optionnel)
 

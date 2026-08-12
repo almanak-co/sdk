@@ -107,15 +107,16 @@ Add an `anvil_funding` block to your `config.json` to automatically fund your wa
 
 ```json
 {
+    "chain": "arbitrum",
     "anvil_funding": {
         "ETH": 10,
-        "USDC": 10000,
-        "WETH": 5
+        "0xaf88d065e77c8cc2239327c5edb3a432268e5831": 10000,
+        "0x82af49447d8a07e3bd95bd0d56f35241523fbab1": 5
     }
 }
 ```
 
-Native tokens (ETH, AVAX, etc.) are funded via `anvil_setBalance`. ERC-20 tokens are funded via storage slot manipulation. This happens automatically each time the fork starts.
+Native tokens (ETH, AVAX, etc.) are funded via `anvil_setBalance`. ERC-20 keys must be exact chain-specific contract addresses and are funded via storage slot manipulation. Symbols are metadata and are rejected for ERC-20 funding. This happens automatically each time the fork starts.
 
 ### Better RPC Performance (Optional)
 

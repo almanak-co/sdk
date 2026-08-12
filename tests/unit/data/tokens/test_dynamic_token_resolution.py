@@ -441,8 +441,19 @@ class TestFundTokensAddressKeyed:
         is_raw_address = address_key.startswith("0x") and len(address_key) == 42
         assert is_raw_address is True
 
-    def test_symbol_key_uses_normal_path(self):
-        """When key is a symbol (not address), normal TOKEN_DECIMALS fallback is used."""
+    def test_symbol_key_is_not_address_identity(self):
+        """A symbol cannot satisfy the address-only funding contract."""
         symbol_key = "USDC"
         is_raw_address = symbol_key.startswith("0x") and len(symbol_key) == 42
         assert is_raw_address is False
+
+    def test_jitosol_base_address_has_static_metadata(self):
+        """ALM-3255: the real Base contract decorates without a symbol lookup."""
+        from almanak.framework.data.tokens.resolver import get_token_resolver
+
+        address = "0x97be14dd8f994a5364573bc035d85309e7cb34de"
+        token = get_token_resolver().resolve(address, "base", skip_gateway=True)
+
+        assert token.address == address
+        assert token.symbol == "JITOSOL"
+        assert token.decimals == 9

@@ -3,15 +3,15 @@
     "token_funding": [
         {
             "symbol": "WETH",
-            "address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
-            "chain": "ethereum",
+            "address": "0x4200000000000000000000000000000000000006",
+            "chain": "base",
             "amount": "0.05",
             "amount_type": "token"
         },
         {
             "symbol": "USDC",
-            "address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
-            "chain": "ethereum",
+            "address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "chain": "base",
             "amount": "100",
             "amount_type": "usd"
         }
@@ -26,7 +26,7 @@
     "fee_hint": null,
     "anvil_funding": {
         "ETH": 100,
-        "WETH": 1,
-        "USDC": 10000
+        "0x4200000000000000000000000000000000000006": 1,
+        "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913": 10000
     }
 }

@@ -16,7 +16,10 @@ Usage:
 
     await fork_manager.start()
     await fork_manager.fund_wallet("0x...", eth_amount=Decimal("10"))
-    await fork_manager.fund_tokens("0x...", {"USDC": Decimal("10000")})
+    await fork_manager.fund_tokens(
+        "0x...",
+        {"0xaf88d065e77c8cC2239327C5EDb3A432268e5831": Decimal("10000")},
+    )
 
     # Reset to latest block periodically
     await fork_manager.reset_to_latest()
@@ -37,11 +40,12 @@ from typing import Any
 
 from almanak.config.framework import framework_config_from_env
 from almanak.core.chains._helpers import (
-    anvil_balance_slots_map,
+    anvil_balance_slots_by_address_map,
+    anvil_balance_storage_seeds_by_address_map,
     anvil_block_gas_limit_map,
     anvil_funding_tokens_map,
-    anvil_whale_tokens_map,
-    wrapped_native_deposit_symbol_map,
+    anvil_whale_tokens_by_address_map,
+    wrapped_native_deposit_address_map,
 )
 
 logger = logging.getLogger(__name__)
@@ -148,14 +152,13 @@ CHAIN_IDS: Mapping[str, int] = _build_chain_ids()
 # EVM chains do not need an entry here.
 _CHAIN_BLOCK_GAS_LIMITS: Mapping[str, int] = anvil_block_gas_limit_map()
 
-
-# Common ERC-20 token addresses per chain
+# Legacy catalogue exported for paper-reporting and test-discovery consumers.
+# ``fund_tokens`` deliberately does not consult it: user funding identity is
+# address-only. Remove this compatibility view with those downstream callers.
 TOKEN_ADDRESSES: Mapping[str, Mapping[str, str]] = anvil_funding_tokens_map()
-# (Per-chain rows live on ``ChainDescriptor.anvil.funding_tokens`` —
-# one file per chain under almanak/core/chains/. VIB-4851 CS-6.)
 
-
-# Token decimals
+# Legacy display-metadata fallback used outside the managed funding path.
+# Funding decimals are resolved by exact address or read from ``decimals()``.
 TOKEN_DECIMALS: dict[str, int] = {
     "WETH": 18,
     "WETH.e": 18,
@@ -195,25 +198,28 @@ TOKEN_DECIMALS: dict[str, int] = {
     "xETH": 18,
 }
 
-
 # Known ERC-20 balanceOf storage slots per chain.
 # Sourced from verified intent tests (tests/intents/conftest.py CHAIN_CONFIGS).
 # Using known slots avoids slow brute-force probing and is 100% reliable.
-KNOWN_BALANCE_SLOTS: Mapping[str, Mapping[str, int]] = anvil_balance_slots_map()
+KNOWN_BALANCE_SLOTS: Mapping[str, Mapping[str, int]] = anvil_balance_slots_by_address_map()
+
+# Solady-style balance storage seeds keyed by exact contract address. These
+# contracts do not use Solidity's standard ``mapping(address => uint256)``
+# storage formula and therefore cannot be discovered by numeric slot probing.
+BALANCE_STORAGE_SEEDS: Mapping[str, Mapping[str, int]] = anvil_balance_storage_seeds_by_address_map()
 
 # Tokens where storage slot manipulation produces a valid balanceOf() but
 # transferFrom() reverts (proxy implementation mismatch).  For these tokens,
 # whale impersonation is used instead of slot patching.
-# Format: { chain: { token_symbol_upper: whale_address } }
-WHALE_FUNDED_TOKENS: Mapping[str, Mapping[str, str]] = anvil_whale_tokens_map()
+# Format: { chain: { token_address_lower: whale_address } }
+WHALE_FUNDED_TOKENS: Mapping[str, Mapping[str, str]] = anvil_whale_tokens_by_address_map()
 
 # Wrapped native tokens that can be funded via deposit() instead of storage
 # slot manipulation.  deposit() is more reliable for these contracts because
 # it uses the contract's own logic (no proxy/slot mismatch risk).
-WRAPPED_NATIVE_TOKENS: Mapping[str, str] = wrapped_native_deposit_symbol_map()
-# (Membership == ``anvil.wrapped_native_deposit`` chains; symbol comes from
-# ``NativeToken.wrapped_symbol`` verbatim — sonic is "wS"; the deposit-funding
-# comparison below uppercases both sides. VIB-4851 CS-6.)
+WRAPPED_NATIVE_TOKENS: Mapping[str, str] = wrapped_native_deposit_address_map()
+
+_EVM_TOKEN_ADDRESS_RE = re.compile(r"^0[xX][0-9a-fA-F]{40}$")
 
 
 # =============================================================================
@@ -806,8 +812,9 @@ class RollingForkManager:
             logger.exception(f"Error funding wallet: {e}")
             return False
 
-    # crap-allowlist: 5-tier funding fallback — wrapped-native deposit() / whale
-    # impersonation / known balance slot / anvil_deal / brute-force slot probe.
+    # crap-allowlist: 6-tier funding fallback — wrapped-native deposit() / whale
+    # impersonation / known balance slot / seeded balance key / anvil_deal /
+    # brute-force slot probe.
     # Each tier exists to fund a class of token the prior tier can't handle safely,
     # and the "first-that-succeeds-wins" sequencing relies on shared skip_storage_fallback
     # state that doesn't cleanly split across helper boundaries.
@@ -816,19 +823,24 @@ class RollingForkManager:
         address: str,
         tokens: dict[str, Decimal],
     ) -> bool:
-        """Fund a wallet with ERC-20 tokens.
+        """Fund a wallet with address-keyed ERC-20 amounts.
 
-        Token keys can be symbols ("USDC", "wstETH") or ERC-20 addresses
-        ("0xf951E335..."). Symbols are matched case-insensitively.
+        Token symbols are display metadata and are never accepted as asset
+        identity here. Every key must be the exact ERC-20 contract address on
+        ``self.chain``. Unknown addresses discover ``decimals()`` on-chain;
+        they are not forced through the static token registry.
 
         Funding priority:
-        1. Known storage slots (fast, reliable -- verified in intent tests)
-        2. anvil_deal RPC (works on newer Anvil versions)
-        3. Brute-force storage slot probing (slow fallback)
+        1. Wrapped-native ``deposit()`` (WETH/WAVAX/WBNB and equivalents)
+        2. Whale impersonation for tokens that cannot be safely slot-patched
+        3. Known storage slots (fast, reliable -- verified in intent tests)
+        4. Address-keyed seeded storage recipes (non-standard layouts)
+        5. ``anvil_deal`` RPC (works on newer Anvil versions)
+        6. Brute-force storage slot probing (slow fallback)
 
         Args:
             address: Wallet address to fund
-            tokens: Dict mapping token symbol/address to amount
+            tokens: Dict mapping ERC-20 contract address to amount
 
         Returns:
             True if all tokens funded successfully, False otherwise
@@ -841,79 +853,38 @@ class RollingForkManager:
         from almanak.framework.data.tokens.exceptions import TokenNotFoundError, TokenResolutionError
 
         resolver = get_token_resolver()
-        chain_tokens = TOKEN_ADDRESSES.get(self.chain, {})
         known_slots = KNOWN_BALANCE_SLOTS.get(self.chain, {})
-
-        # Build case-insensitive lookup indexes for local tables
-        chain_tokens_ci = {k.lower(): v for k, v in chain_tokens.items()}
-        known_slots_ci = {k.lower(): v for k, v in known_slots.items()}
-        token_decimals_ci = {k.lower(): v for k, v in TOKEN_DECIMALS.items()}
-
-        # Load paper-local token overrides (VIB-2378). Imported from the anvil
-        # package (not backtesting) so funding never pulls in report_generator
-        # /jinja2 or the paper engine — see token_overrides module docstring.
-        from almanak.framework.anvil.token_overrides import load_token_overrides
-
-        paper_overrides_raw = load_token_overrides(self.chain)
-        paper_overrides_ci = {k.lower(): v for k, v in paper_overrides_raw.items()}
+        balance_storage_seeds = BALANCE_STORAGE_SEEDS.get(self.chain, {})
 
         success = True
 
         for token_key, amount in tokens.items():
-            is_raw_address = isinstance(token_key, str) and token_key.startswith(("0x", "0X")) and len(token_key) == 42
-
-            token_address: str | None = None
-            decimals: int | None = None
-            display_name = token_key  # for log messages
-
-            if is_raw_address:
-                # Token key is an ERC-20 address — use it directly
-                token_address = token_key.lower()
-                try:
-                    # Resolver normalizes case internally, so checksummed/lower/upper all work
-                    resolved = resolver.resolve(token_address, self.chain)
-                    decimals = resolved.decimals
-                    display_name = resolved.symbol or token_key[:10] + "..."
-                except (TokenNotFoundError, TokenResolutionError):
-                    # Not in resolver — try on-chain decimals() call
-                    decimals = await self._fetch_decimals_onchain(token_address)
-                    if decimals is not None:
-                        logger.info(f"Resolved decimals={decimals} for {token_key[:10]}... via on-chain call")
-            else:
-                # Token key is a symbol — resolve via TokenResolver then local fallbacks
-                try:
-                    resolved = resolver.resolve(token_key, self.chain)
-                    token_address = resolved.address
-                    decimals = resolved.decimals
-                    display_name = resolved.symbol or token_key
-                except (TokenNotFoundError, TokenResolutionError):
-                    # Check paper-local overrides before local TOKEN_ADDRESSES (VIB-2378)
-                    override = paper_overrides_ci.get(token_key.lower())
-                    if override is not None:
-                        token_address = override.address
-                        decimals = override.decimals
-                        display_name = token_key
-                        logger.info(f"Resolved {token_key} via paper-local token override: {token_address}")
-                        # Address-only overrides (decimals=None): try on-chain lookup
-                        if decimals is None:
-                            decimals = await self._fetch_decimals_onchain(token_address)
-                            if decimals is not None:
-                                logger.info(f"Resolved decimals={decimals} for {display_name} via on-chain call")
-                    else:
-                        # Fallback to local TOKEN_ADDRESSES (case-insensitive)
-                        token_address = chain_tokens_ci.get(token_key.lower())
-                        decimals = token_decimals_ci.get(token_key.lower())
-
-            if not token_address:
-                if is_raw_address:
-                    logger.error(
-                        f"Cannot resolve token address {token_key} on {self.chain}. "
-                        f"Verify the contract is deployed on this chain."
-                    )
-                else:
-                    logger.warning(f"Unknown token {token_key} for chain {self.chain}, skipping")
+            if not isinstance(token_key, str) or _EVM_TOKEN_ADDRESS_RE.fullmatch(token_key) is None:
+                logger.error(
+                    "ERC-20 funding keys must be contract addresses on %s; got %r. "
+                    "Bare symbols are not stable token identity.",
+                    self.chain,
+                    token_key,
+                )
                 success = False
                 continue
+
+            token_address = token_key.lower()
+            decimals: int | None = None
+            display_name = token_address[:10] + "..."
+            try:
+                # Address-first registry lookup supplies cached/static metadata
+                # when known, but identity remains the caller's exact address.
+                resolved = resolver.resolve(token_address, self.chain, log_errors=False, skip_gateway=True)
+                decimals = resolved.decimals
+                display_name = resolved.symbol or display_name
+            except (TokenNotFoundError, TokenResolutionError):
+                # Registry coverage is not a funding allowlist. Any deployed
+                # ERC-20 can proceed after its decimals are discovered on-chain.
+                decimals = await self._fetch_decimals_onchain(token_address)
+                if decimals is not None:
+                    logger.info(f"Resolved decimals={decimals} for {display_name} via on-chain call")
+
             if decimals is None:
                 logger.error(
                     f"Unknown decimals for {display_name} on {self.chain}, skipping (refusing to default to 18)"
@@ -929,15 +900,11 @@ class RollingForkManager:
                 funded = False
                 skip_storage_fallback = False
 
-                # Use display_name (resolved symbol) for priority-0 lookups so
-                # raw-address inputs also match (e.g., "0xC02...Cc2" resolves to "WETH").
-                lookup_symbol = display_name.upper()
-
                 # Priority 0a: Wrapped native deposit() (VIB-2571)
                 # For WETH/WAVAX/WBNB etc., calling deposit() with ETH value is
                 # more reliable than storage slot manipulation (proxy/slot issues).
                 wrapped_native = WRAPPED_NATIVE_TOKENS.get(self.chain)
-                if wrapped_native and lookup_symbol == wrapped_native.upper():
+                if wrapped_native == token_address:
                     funded = await self._fund_wrapped_native_via_deposit(
                         address, token_address, amount_hex, amount, display_name
                     )
@@ -954,7 +921,7 @@ class RollingForkManager:
                 # transferFrom (e.g., Ethereum USDC FiatTokenProxy, Base cbBTC).
                 if not funded:
                     whale_tokens = WHALE_FUNDED_TOKENS.get(self.chain, {})
-                    whale_address = whale_tokens.get(lookup_symbol)
+                    whale_address = whale_tokens.get(token_address)
                     if whale_address:
                         funded = await self._fund_token_via_whale(
                             address, token_address, amount_hex, whale_address, display_name
@@ -976,13 +943,25 @@ class RollingForkManager:
                             )
 
                 # Priority 1: Known storage slot (fast and reliable)
-                # Look up by original symbol key (case-insensitive)
                 if not funded and not skip_storage_fallback:
-                    known_slot = known_slots_ci.get(token_key.lower())
+                    known_slot = known_slots.get(token_address)
                     if known_slot is not None:
                         funded = await self._set_balance_at_slot(
                             address, token_address, amount_hex, known_slot, display_name
                         )
+
+                # Priority 1b: Address-keyed Solady balance seed. This is an
+                # explicit contract recipe, not token-symbol resolution.
+                if not funded and not skip_storage_fallback:
+                    balance_seed = balance_storage_seeds.get(token_address)
+                    if balance_seed is not None:
+                        funded = await self._set_balance_at_seed(
+                            address, token_address, amount_hex, balance_seed, display_name
+                        )
+                        # Numeric slot probing cannot discover this layout and
+                        # would only write unrelated contract state. Keep
+                        # anvil_deal as a safe fallback, but skip brute force.
+                        skip_storage_fallback = True
 
                 # Priority 2: anvil_deal RPC (returns null on success)
                 if not funded:
@@ -1077,6 +1056,38 @@ class RollingForkManager:
             return True
 
         logger.debug(f"Known slot {slot} for {token_symbol}: balance {balance} != expected {expected}")
+        return False
+
+    async def _set_balance_at_seed(
+        self,
+        wallet_address: str,
+        token_address: str,
+        amount_hex: str,
+        seed: int,
+        token_symbol: str,
+    ) -> bool:
+        """Set a balance using Solady's compact address-and-seed layout."""
+        storage_slot = self._calculate_seeded_balance_slot(wallet_address, seed)
+        success, _ = await self._rpc_call_raw(
+            "anvil_setStorageAt",
+            [token_address, storage_slot, self._pad_hex_to_32_bytes(amount_hex)],
+        )
+        if not success:
+            return False
+
+        await self._rpc_call_raw("evm_mine", [])
+        balance = await self._get_token_balance(token_address, wallet_address)
+        expected = int(amount_hex, 16)
+        if balance == expected:
+            logger.info(
+                "Funded %s... with %s via address-keyed balance seed %#x",
+                wallet_address[:10],
+                token_symbol,
+                seed,
+            )
+            return True
+
+        logger.debug("Balance seed %#x for %s: balance %s != expected %s", seed, token_symbol, balance, expected)
         return False
 
     async def _fund_wrapped_native_via_deposit(
@@ -1597,6 +1608,19 @@ class RollingForkManager:
 
         return "0x" + hash_result
 
+    def _calculate_seeded_balance_slot(self, owner: str, seed: int) -> str:
+        """Calculate Solady's ``keccak256(owner[20] || zero[8] || seed[4])`` key."""
+        from eth_hash.auto import keccak as keccak256
+
+        if _EVM_TOKEN_ADDRESS_RE.fullmatch(owner) is None:
+            raise ValueError(f"Invalid EVM owner address: {owner!r}")
+        if not 0 <= seed <= 0xFFFFFFFF:
+            raise ValueError(f"Balance storage seed must fit in four bytes: {seed!r}")
+
+        owner_bytes = bytes.fromhex(owner[2:])
+        hash_result = keccak256(owner_bytes + bytes(8) + seed.to_bytes(4, "big")).hex()
+        return "0x" + hash_result
+
     def _pad_hex_to_32_bytes(self, hex_value: str) -> str:
         """Pad a hex value to 32 bytes (64 hex characters).
 
@@ -1634,4 +1658,5 @@ __all__ = [
     "TOKEN_ADDRESSES",
     "TOKEN_DECIMALS",
     "KNOWN_BALANCE_SLOTS",
+    "BALANCE_STORAGE_SEEDS",
 ]

@@ -51,7 +51,7 @@ _NPM = UNISWAP_V3[_CHAIN]["position_manager"].lower()
 # WETH leg, i.e. an intermediate manifest that never deploys. Mirror the demo's
 # ``anvil_funding`` so the assertions reflect what a real WETH/USDG strategy
 # authorises on robinhood.
-_STRATEGY_CONFIG = {"anvil_funding": {"WETH": 1, "USDG": 100}}
+_STRATEGY_CONFIG = {"chain": _CHAIN, "anvil_funding": {_WETH: 1, _USDG: 100}}
 
 
 def _manifest_pairs(intent_types: list[str]) -> set[tuple[str, str]]:
@@ -64,9 +64,7 @@ def _manifest_pairs(intent_types: list[str]) -> set[tuple[str, str]]:
         config=_STRATEGY_CONFIG,
     )
     return {
-        (perm.target.lower(), sel.selector.lower())
-        for perm in manifest.permissions
-        for sel in perm.function_selectors
+        (perm.target.lower(), sel.selector.lower()) for perm in manifest.permissions for sel in perm.function_selectors
     }
 
 
@@ -77,15 +75,12 @@ def _approve_targets(intent_types: list[str]) -> set[str]:
 
 class TestUniswapV3RobinhoodManifest:
     def test_manifest_non_empty(self) -> None:
-        assert _manifest_pairs(["SWAP", "LP_OPEN", "LP_CLOSE"]), (
-            "uniswap_v3 robinhood manifest must be non-empty"
-        )
+        assert _manifest_pairs(["SWAP", "LP_OPEN", "LP_CLOSE"]), "uniswap_v3 robinhood manifest must be non-empty"
 
     def test_swap_authorises_router_and_usdg_approve(self) -> None:
         pairs = _manifest_pairs(["SWAP"])
         assert (_SWAP_ROUTER_02, EXACT_INPUT_SINGLE_SELECTOR) in pairs, (
-            f"SWAP manifest missing SwapRouter02 exactInputSingle "
-            f"({EXACT_INPUT_SINGLE_SELECTOR}) on {_SWAP_ROUTER_02}"
+            f"SWAP manifest missing SwapRouter02 exactInputSingle ({EXACT_INPUT_SINGLE_SELECTOR}) on {_SWAP_ROUTER_02}"
         )
         approves = _approve_targets(["SWAP"])
         assert approves == {_USDG, _WETH}, (
@@ -94,8 +89,7 @@ class TestUniswapV3RobinhoodManifest:
             f"got {sorted(approves)}"
         )
         assert _USDE not in approves, (
-            f"SWAP manifest must NOT authorise approve on USDe ({_USDE}) — "
-            "robinhood trades WETH/USDG, not USDe."
+            f"SWAP manifest must NOT authorise approve on USDe ({_USDE}) — robinhood trades WETH/USDG, not USDe."
         )
 
     def test_lp_open_authorises_npm_mint_and_pair_approve(self) -> None:
@@ -109,8 +103,7 @@ class TestUniswapV3RobinhoodManifest:
             f"any extra target is silent over-authorisation; got {sorted(approves)}"
         )
         assert _USDE not in approves, (
-            f"LP_OPEN manifest must NOT authorise approve on USDe ({_USDE}) — "
-            "the liquid robinhood pool is WETH/USDG."
+            f"LP_OPEN manifest must NOT authorise approve on USDe ({_USDE}) — the liquid robinhood pool is WETH/USDG."
         )
 
     def test_lp_close_includes_npm_teardown_selectors(self) -> None:
@@ -120,6 +113,4 @@ class TestUniswapV3RobinhoodManifest:
             (NFT_POSITION_COLLECT_SELECTOR, "collect"),
             (NFT_POSITION_BURN_SELECTOR, "burn"),
         ):
-            assert (_NPM, selector) in pairs, (
-                f"LP_CLOSE manifest missing {label} ({selector}) on NPM {_NPM}"
-            )
+            assert (_NPM, selector) in pairs, f"LP_CLOSE manifest missing {label} ({selector}) on NPM {_NPM}"

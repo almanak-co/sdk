@@ -13,6 +13,6 @@
     "supply_amount": "1000",
     "anvil_funding": {
         "ETH": 1,
-        "USDC": 10000
+        "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48": 10000
     }
 }

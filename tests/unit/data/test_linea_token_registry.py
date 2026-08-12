@@ -68,11 +68,11 @@ def test_linea_weth_is_18_decimals():
 
 
 @pytest.mark.parametrize(
-    "token_symbol,expected_slot",
-    [("USDC", 9), ("WETH", 3), ("USDT", 51)],
+    "token_address,expected_slot",
+    [(LINEA_USDC, 9), (LINEA_WETH, 3), (LINEA_USDT, 51)],
     ids=["USDC-slot-9", "WETH-slot-3", "USDT-slot-51"],
 )
-def test_linea_storage_slots_are_verified(token_symbol: str, expected_slot: int):
+def test_linea_storage_slots_are_verified(token_address: str, expected_slot: int):
     """Linea storage slots must match on-chain verified values.
 
     Verified 2026-04-12 using cast index + cast storage on Linea mainnet.
@@ -81,11 +81,12 @@ def test_linea_storage_slots_are_verified(token_symbol: str, expected_slot: int)
     from almanak.framework.anvil.fork_manager import KNOWN_BALANCE_SLOTS
 
     assert "linea" in KNOWN_BALANCE_SLOTS, "Linea missing from KNOWN_BALANCE_SLOTS"
-    assert token_symbol in KNOWN_BALANCE_SLOTS["linea"], (
-        f"{token_symbol} missing from KNOWN_BALANCE_SLOTS['linea']"
+    normalized_address = token_address.lower()
+    assert normalized_address in KNOWN_BALANCE_SLOTS["linea"], (
+        f"{normalized_address} missing from KNOWN_BALANCE_SLOTS['linea']"
     )
-    assert KNOWN_BALANCE_SLOTS["linea"][token_symbol] == expected_slot, (
-        f"KNOWN_BALANCE_SLOTS['linea']['{token_symbol}'] is "
-        f"{KNOWN_BALANCE_SLOTS['linea'][token_symbol]} but on-chain verified "
+    assert KNOWN_BALANCE_SLOTS["linea"][normalized_address] == expected_slot, (
+        f"KNOWN_BALANCE_SLOTS['linea']['{normalized_address}'] is "
+        f"{KNOWN_BALANCE_SLOTS['linea'][normalized_address]} but on-chain verified "
         f"value is {expected_slot}. Wrong slots cause silent Anvil funding failures."
     )

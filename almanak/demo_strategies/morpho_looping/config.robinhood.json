@@ -26,7 +26,7 @@
     "swap_slippage": "0.005",
     "anvil_funding": {
         "ETH": 100,
-        "USDe": 200,
-        "USDG": 200
+        "0x5d3a1Ff2b6BAb83b63cd9AD0787074081a52ef34": 200,
+        "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168": 200
     }
 }

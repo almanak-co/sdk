@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Coroutine
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import click
 
@@ -48,16 +48,22 @@ def _normalize_quick_chains(raw: Any) -> list[str]:
     return []
 
 
-def _normalize_anvil_funding(raw: Any) -> dict[str, int | float | str]:
+type AnvilFundingAmount = int | float | str
+type NormalizedAnvilFunding = dict[str, AnvilFundingAmount | dict[str, AnvilFundingAmount]]
+
+
+def _normalize_anvil_funding(raw: Any) -> NormalizedAnvilFunding:
     """Normalize a quick-config ``anvil_funding`` value into a safe dict (VIB-3876).
 
     User-authored config files may set ``anvil_funding`` to a malformed value
     — a list (``anvil_funding: [WETH, USDC]``), a string, an int — all of
     which would propagate to ``ManagedGateway._anvil_funding`` and then crash
     inside ``_fund_anvil_wallets()`` on ``.items()``. Validate the shape
-    here (a dict of ``{token_symbol: amount}``) and emit a warning + safe
-    fallback for anything else, rather than letting the gateway boot fail
-    with an opaque ``AttributeError`` mid-startup.
+    here (a flat ``{address: amount}`` object or per-chain
+    ``{chain: {address: amount}}`` object) and emit a warning + safe fallback
+    for malformed values, rather than letting the gateway boot fail with an
+    opaque ``AttributeError`` mid-startup. ERC-20 address enforcement happens
+    at the managed gateway boundary, which also permits native gas symbols.
 
     Token amounts may be ints, floats, or strings (the gateway accepts strings
     for high-precision Decimal values like wstETH); other value types
@@ -67,38 +73,63 @@ def _normalize_anvil_funding(raw: Any) -> dict[str, int | float | str]:
         raw: The raw value read from the config's ``anvil_funding`` field.
 
     Returns:
-        A ``{token_symbol: amount}`` dict suitable for ``ManagedGateway``,
+        An address-keyed flat or per-chain dict suitable for ``ManagedGateway``,
         or an empty dict if ``raw`` is malformed.
     """
     if not isinstance(raw, dict):
         if raw not in (None, {}):
             logger.warning(
-                "Ignoring malformed anvil_funding (%s); expected dict[str, int | float | str], got %r",
+                "Ignoring malformed anvil_funding (%s); expected a flat or per-chain funding object, got %r",
                 type(raw).__name__,
                 raw,
             )
         return {}
-    cleaned: dict[str, int | float | str] = {}
-    for key, value in raw.items():
-        if not isinstance(key, str):
-            logger.warning(
-                "Ignoring anvil_funding entry with non-string key %r (value=%r)",
-                key,
-                value,
-            )
-            continue
-        if isinstance(value, bool) or not isinstance(value, int | float | str):
-            # bool is a subclass of int — reject it explicitly so True/False
-            # don't silently get treated as 1/0 fund amounts.
-            logger.warning(
-                "Ignoring anvil_funding[%s] — expected int | float | str, got %s (value=%r)",
-                key,
-                type(value).__name__,
-                value,
-            )
-            continue
-        cleaned[key] = value
-    return cleaned
+
+    def clean_mapping(
+        mapping: dict[Any, Any],
+        *,
+        path: str,
+        allow_chain_sections: bool,
+    ) -> NormalizedAnvilFunding:
+        cleaned: NormalizedAnvilFunding = {}
+        for key, value in mapping.items():
+            if not isinstance(key, str):
+                logger.warning(
+                    "Ignoring %s entry with non-string key %r (value=%r)",
+                    path,
+                    key,
+                    value,
+                )
+                continue
+
+            entry_path = f"{path}[{key}]"
+            if isinstance(value, dict):
+                if not allow_chain_sections:
+                    logger.warning("Ignoring %s nested deeper than one chain level", entry_path)
+                    continue
+                nested = clean_mapping(value, path=entry_path, allow_chain_sections=False)
+                if nested or not value:
+                    # ``allow_chain_sections=False`` drops every dict-valued
+                    # child, so the recursive result is a flat amount map.
+                    cleaned[key] = cast(dict[str, AnvilFundingAmount], nested)
+                else:
+                    logger.warning("Ignoring %s because it contains no valid funding entries", entry_path)
+                continue
+
+            if isinstance(value, bool) or not isinstance(value, int | float | str):
+                # bool is a subclass of int — reject it explicitly so True/False
+                # don't silently get treated as 1/0 fund amounts.
+                logger.warning(
+                    "Ignoring %s — expected int | float | str, got %s (value=%r)",
+                    entry_path,
+                    type(value).__name__,
+                    value,
+                )
+                continue
+            cleaned[key] = value
+        return cleaned
+
+    return clean_mapping(raw, path="anvil_funding", allow_chain_sections=True)
 
 
 # Chains that run on solana-test-validator, not Anvil. Filtered out of
@@ -405,7 +436,7 @@ def _resolve_anvil_chains_and_funding(
     early_strategy_class: type[IntentStrategy[Any]] | None,
     external_anvil_ports: dict[str, int],
     quick_config: dict[str, Any] | None = None,
-) -> tuple[list[str], dict[str, float | int | str]]:
+) -> tuple[list[str], NormalizedAnvilFunding]:
     """Resolve EVM chains needing Anvil forks (and their funding) for `--network anvil`.
 
     ``quick_config`` lets a caller that already parsed the config (VIB-5920's
@@ -416,7 +447,7 @@ def _resolve_anvil_chains_and_funding(
     from .run import get_default_chain
 
     anvil_chains: list[str] = []
-    anvil_funding: dict[str, float | int | str] = {}
+    anvil_funding: NormalizedAnvilFunding = {}
 
     # Parse + schema-validate ONCE through the shared loader (#2101). A
     # malformed config fails fast with a ``click.ClickException`` naming the
@@ -624,7 +655,7 @@ def _start_managed_gateway_and_connect(
     gateway_settings: Any,
     anvil_chains: list[str],
     isolated_wallet_address: str | None,
-    anvil_funding: dict[str, float | int | str],
+    anvil_funding: NormalizedAnvilFunding,
     external_anvil_ports: dict[str, int],
     keep_anvil: bool,
     effective_host: str,
@@ -835,7 +866,7 @@ def _setup_gateway(
 
     # Determine which chains need Anvil forks
     anvil_chains: list[str] = []
-    anvil_funding: dict[str, float | int | str] = {}
+    anvil_funding: NormalizedAnvilFunding = {}
     if gateway_network == "anvil":
         anvil_chains, anvil_funding = _resolve_anvil_chains_and_funding(
             working_dir=working_dir,

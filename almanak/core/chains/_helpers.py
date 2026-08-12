@@ -352,6 +352,65 @@ def anvil_balance_slots_map() -> Mapping[str, Mapping[str, int]]:
     )
 
 
+def _anvil_funding_address_for_symbol(*, chain: str, symbol: str, funding_tokens: Mapping[str, str]) -> str:
+    """Return a descriptor-owned funding address while constructing address-keyed views.
+
+    Symbols are permitted only at the static descriptor authoring boundary, where
+    they are human-readable labels tying the funding catalogue to its verified
+    slot/whale recipes. Runtime consumers receive only normalized addresses and
+    never resolve user input through this helper.
+    """
+    matches = [address for candidate, address in funding_tokens.items() if candidate.upper() == symbol.upper()]
+    if len(matches) != 1:
+        raise ValueError(
+            f"ChainDescriptor({chain}).anvil funding recipe {symbol!r} must match exactly one funding_tokens entry"
+        )
+    return matches[0].lower()
+
+
+def anvil_balance_slots_by_address_map() -> Mapping[str, Mapping[str, int]]:
+    """Read-only ``{chain: {token_address: balance_slot}}`` funding recipes.
+
+    This is the runtime view used by managed EVM funding. Contract addresses,
+    not symbols, are the identity keys; symbol labels remain confined to the
+    descriptor authoring surface and cannot select a token at runtime.
+    """
+    result: dict[str, Mapping[str, int]] = {}
+    for descriptor in ChainRegistry.all():
+        slots = descriptor.anvil.balance_slots
+        if slots is None:
+            continue
+        funding_tokens = descriptor.anvil.funding_tokens or {}
+        result[descriptor.name] = MappingProxyType(
+            {
+                _anvil_funding_address_for_symbol(
+                    chain=descriptor.name,
+                    symbol=symbol,
+                    funding_tokens=funding_tokens,
+                ): slot
+                for symbol, slot in slots.items()
+            }
+        )
+    return MappingProxyType(result)
+
+
+def anvil_balance_storage_seeds_by_address_map() -> Mapping[str, Mapping[str, int]]:
+    """Read-only ``{chain: {token_address: Solady balance seed}}`` recipes.
+
+    Unlike legacy balance-slot recipes, these are authored and consumed using
+    exact contract addresses. No token symbol participates in the join.
+    """
+    return MappingProxyType(
+        {
+            descriptor.name: MappingProxyType(
+                {address.lower(): seed for address, seed in descriptor.anvil.balance_storage_seeds.items()}
+            )
+            for descriptor in ChainRegistry.all()
+            if descriptor.anvil.balance_storage_seeds is not None
+        }
+    )
+
+
 def anvil_whale_tokens_map() -> Mapping[str, Mapping[str, str]]:
     """Read-only ``{chain: {SYMBOL: whale_address}}`` impersonation fallbacks.
 
@@ -361,6 +420,27 @@ def anvil_whale_tokens_map() -> Mapping[str, Mapping[str, str]]:
     return MappingProxyType(
         {d.name: d.anvil.whale_funded_tokens for d in ChainRegistry.all() if d.anvil.whale_funded_tokens is not None}
     )
+
+
+def anvil_whale_tokens_by_address_map() -> Mapping[str, Mapping[str, str]]:
+    """Read-only ``{chain: {token_address: whale_address}}`` funding recipes."""
+    result: dict[str, Mapping[str, str]] = {}
+    for descriptor in ChainRegistry.all():
+        whales = descriptor.anvil.whale_funded_tokens
+        if whales is None:
+            continue
+        funding_tokens = descriptor.anvil.funding_tokens or {}
+        result[descriptor.name] = MappingProxyType(
+            {
+                _anvil_funding_address_for_symbol(
+                    chain=descriptor.name,
+                    symbol=symbol,
+                    funding_tokens=funding_tokens,
+                ): whale
+                for symbol, whale in whales.items()
+            }
+        )
+    return MappingProxyType(result)
 
 
 def anvil_block_gas_limit_map() -> Mapping[str, int]:
@@ -390,6 +470,17 @@ def wrapped_native_deposit_symbol_map() -> Mapping[str, str]:
             d.name: d.native.wrapped_symbol
             for d in ChainRegistry.all()
             if d.anvil.wrapped_native_deposit and d.native.wrapped_symbol is not None
+        }
+    )
+
+
+def wrapped_native_deposit_address_map() -> Mapping[str, str]:
+    """Read-only ``{chain: wrapped_token_address}`` for deposit-fundable wrappers."""
+    return MappingProxyType(
+        {
+            descriptor.name: descriptor.native.wrapped_address.lower()
+            for descriptor in ChainRegistry.all()
+            if descriptor.anvil.wrapped_native_deposit and descriptor.native.wrapped_address is not None
         }
     )
 

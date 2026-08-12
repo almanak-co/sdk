@@ -92,12 +92,9 @@ def _inner_gas_hint(tx: Any) -> int | None:
     if isinstance(tx, dict):
         value = tx.get("gas_limit") or tx.get("gas") or tx.get("gas_estimate")
     else:
-        value = (
-            getattr(tx, "gas_limit", None)
-            or getattr(tx, "gas", None)
-            or getattr(tx, "gas_estimate", None)
-        )
+        value = getattr(tx, "gas_limit", None) or getattr(tx, "gas", None) or getattr(tx, "gas_estimate", None)
     return int(value) if value is not None else None
+
 
 # Keys a case config can carry for pre-funding that are NOT intent constructor
 # kwargs. The harness pops these before unpacking the rest into the intent.
@@ -157,9 +154,7 @@ _STABLECOIN_BORROW_SYMBOLS: frozenset[str] = frozenset({"USDC", "USDT", "DAI"})
 # collateral up to 1 unit (~$ETH headroom for a small stablecoin debt at 20%
 # LTV), and (2) the legacy unit-based fallback when the price oracle has no
 # entry for the pair. Centralised here so the two branches can't drift.
-_ETH_CORRELATED_COLLATERALS: frozenset[str] = frozenset(
-    {"WETH", "wstETH", "cbETH", "rETH", "weETH"}
-)
+_ETH_CORRELATED_COLLATERALS: frozenset[str] = frozenset({"WETH", "wstETH", "cbETH", "rETH", "weETH"})
 
 
 def _resolve_borrow_seed_collateral(chain: str, borrow_symbol: str) -> str:
@@ -177,9 +172,7 @@ def _resolve_borrow_seed_collateral(chain: str, borrow_symbol: str) -> str:
       protocols the harness drives.
     """
     if borrow_symbol in _STABLECOIN_BORROW_SYMBOLS:
-        return _BORROW_SEED_DEFAULT_COLLATERAL_BY_CHAIN.get(
-            chain, _BORROW_SEED_FALLBACK_COLLATERAL
-        )
+        return _BORROW_SEED_DEFAULT_COLLATERAL_BY_CHAIN.get(chain, _BORROW_SEED_FALLBACK_COLLATERAL)
     return "USDC"
 
 
@@ -2698,7 +2691,7 @@ class ZodiacOrchestrator:
         if not self.recorded_intents:
             return
 
-        protocols, intent_types, config = _derive_manifest_inputs(self.recorded_intents)
+        protocols, intent_types, config = _derive_manifest_inputs(self.recorded_intents, self.chain)
         if not protocols or not intent_types:
             return
 
@@ -2743,24 +2736,77 @@ class ZodiacOrchestrator:
             self._applied_targets.add(fingerprint)
 
 
+def _funding_key_for_token_ref(ref: str, chain: str) -> str | None:
+    """Join a test intent token label to its exact chain-owned funding key.
+
+    Intent tests deliberately exercise the public symbol-form intent API, but
+    the permission manifest's ``anvil_funding`` surface is address-only. Join
+    labels against static chain/token/connector metadata at the test-authoring
+    boundary; never send a symbol into managed funding or permission lookup.
+    """
+    from almanak.connectors._strategy_protocol_metadata_registry import PROTOCOL_METADATA_REGISTRY
+    from almanak.core.chains import ChainRegistry
+    from almanak.core.chains._helpers import native_symbols_for
+    from almanak.core.constants import canonical_chain_name
+    from almanak.framework.data.tokens.address_resolution import looks_like_evm_address
+    from almanak.framework.data.tokens.defaults import DEFAULT_TOKENS
+
+    stripped = ref.strip()
+    if not stripped:
+        return None
+    if looks_like_evm_address(stripped):
+        return stripped.lower()
+
+    active_chain = canonical_chain_name(chain)
+    descriptor = ChainRegistry.try_resolve(active_chain)
+    if descriptor is None:
+        return None
+    if stripped.upper() in native_symbols_for(active_chain):
+        return descriptor.native.symbol
+
+    candidates = {
+        address.lower()
+        for token_map in (descriptor.tokens or {}, descriptor.anvil.funding_tokens or {})
+        for symbol, address in token_map.items()
+        if symbol.upper() == stripped.upper()
+    }
+    if descriptor.native.wrapped_symbol and stripped.upper() == descriptor.native.wrapped_symbol.upper():
+        if descriptor.native.wrapped_address:
+            candidates.add(descriptor.native.wrapped_address.lower())
+
+    # The chain descriptor intentionally stays compact. Intent coverage also
+    # exercises long-tail assets from the generated static token catalogue
+    # (for example sUSDai and Polygon frxUSD/WBTC) and connector-owned
+    # synthetic assets (Pendle PT/YT tokens). Join those authoring labels here
+    # without invoking TokenResolver or any runtime symbol lookup.
+    for token in DEFAULT_TOKENS:
+        if token.symbol.upper() != stripped.upper():
+            continue
+        address = token.get_address(active_chain)
+        if address:
+            candidates.add(address.lower())
+    for metadata in PROTOCOL_METADATA_REGISTRY.synthetic_tokens():
+        if canonical_chain_name(metadata.chain) == active_chain and metadata.symbol.upper() == stripped.upper():
+            candidates.add(metadata.address.lower())
+    return next(iter(candidates)) if len(candidates) == 1 else None
+
+
 def _derive_manifest_inputs(
     intents: Sequence[Any],
+    chain: str,
 ) -> tuple[set[str], set[str], dict[str, Any]]:
     """Derive ``(protocols, intent_types, config)`` from observed source intents.
 
-    Token symbols / addresses are aggregated into ``config["anvil_funding"]``
-    rather than into the per-intent-type ``_TOKEN_CONFIG_FIELDS`` keys. The
-    manifest generator's ``_extract_token_permissions`` scans both surfaces
-    for token symbols, but ``anvil_funding`` is a dict keyed by symbol — so
-    a multi-step test that compiles two intents with *different* asset pairs
-    (e.g. supply USDC, then borrow WETH) gets approves for ALL referenced
-    tokens. Using a typed key like ``from_token`` would have stamped only
-    the first intent's value and silently dropped the rest, leading to
-    false-negative AuthorizationFailed reverts mid-test.
+    Token references are aggregated into ``config["anvil_funding"]`` rather
+    than into the per-intent-type ``_TOKEN_CONFIG_FIELDS`` keys. Every ERC-20
+    label is converted to its exact chain address first, so a multi-step test
+    that compiles intents with different asset pairs gets approvals for all
+    referenced contracts without symbol-based funding identity. Native gas is
+    the only symbol-form key because it has no ERC-20 contract address.
     """
     protocols: set[str] = set()
     intent_types: set[str] = set()
-    token_symbols: set[str] = set()
+    token_refs: set[str] = set()
 
     for intent in intents:
         proto = getattr(intent, "protocol", None)
@@ -2771,13 +2817,25 @@ def _derive_manifest_inputs(
             intent_types.add(itype)
         for symbol in _intent_token_symbols(intent):
             if symbol:
-                token_symbols.add(symbol)
+                token_refs.add(symbol)
 
-    config: dict[str, Any] = {}
-    if token_symbols:
-        # Value is irrelevant — only the keys are scanned. Use the symbol
-        # itself as a small debugging aid so the dict prints meaningfully.
-        config["anvil_funding"] = {sym: sym for sym in sorted(token_symbols)}
+    config: dict[str, Any] = {"chain": chain}
+    if token_refs:
+        funding_keys: set[str] = set()
+        unresolved: list[str] = []
+        for ref in sorted(token_refs):
+            funding_key = _funding_key_for_token_ref(ref, chain)
+            if funding_key is None:
+                unresolved.append(ref)
+            else:
+                funding_keys.add(funding_key)
+        if unresolved:
+            raise ValueError(
+                f"Intent test funding labels have no unique static address on {chain}: {', '.join(unresolved)}"
+            )
+        # Values are irrelevant to permission discovery; echoing the exact key
+        # keeps diagnostics readable without reintroducing symbol identity.
+        config["anvil_funding"] = {key: key for key in sorted(funding_keys)}
     return protocols, intent_types, config
 
 

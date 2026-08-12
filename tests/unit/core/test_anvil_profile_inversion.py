@@ -16,11 +16,15 @@ from __future__ import annotations
 
 from almanak.core.chains import ChainRegistry
 from almanak.core.chains._helpers import (
+    anvil_balance_slots_by_address_map,
+    anvil_balance_storage_seeds_by_address_map,
     anvil_balance_slots_map,
     anvil_block_gas_limit_map,
     anvil_funding_tokens_map,
+    anvil_whale_tokens_by_address_map,
     anvil_whale_tokens_map,
     bridged_stablecoin_map,
+    wrapped_native_deposit_address_map,
     wrapped_native_deposit_symbol_map,
 )
 
@@ -64,6 +68,7 @@ FROZEN_TOKEN_ADDRESSES: dict[str, dict[str, str]] = {
         "USDbC": "0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA",
         "DAI": "0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb",
         "wstETH": "0xc1CBa3fCea344f92D9239c08C0568f6F2F0ee452",
+        "cbBTC": "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf",
     },
     "polygon": {
         "WMATIC": "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",
@@ -303,6 +308,26 @@ class TestAnvilProfileInversion:
         derived = {c: dict(v) for c, v in anvil_whale_tokens_map().items()}
         assert derived == FROZEN_WHALE_FUNDED_TOKENS
 
+    def test_runtime_funding_recipes_are_address_keyed(self) -> None:
+        token_addresses = {
+            chain: {symbol.upper(): address.lower() for symbol, address in tokens.items()}
+            for chain, tokens in FROZEN_TOKEN_ADDRESSES.items()
+        }
+        expected_slots = {
+            chain: {token_addresses[chain][symbol.upper()]: slot for symbol, slot in slots.items()}
+            for chain, slots in FROZEN_KNOWN_BALANCE_SLOTS.items()
+        }
+        expected_whales = {
+            chain: {token_addresses[chain][symbol.upper()]: whale for symbol, whale in whales.items()}
+            for chain, whales in FROZEN_WHALE_FUNDED_TOKENS.items()
+        }
+        assert {chain: dict(values) for chain, values in anvil_balance_slots_by_address_map().items()} == expected_slots
+        assert {chain: dict(values) for chain, values in anvil_whale_tokens_by_address_map().items()} == expected_whales
+        assert all(address.startswith("0x") for address in wrapped_native_deposit_address_map().values())
+        assert dict(anvil_balance_storage_seeds_by_address_map()["base"]) == {
+            "0x97be14dd8f994a5364573bc035d85309e7cb34de": 0x87A211A2,
+        }
+
     def test_wrapped_deposit_gate_membership_and_symbols(self) -> None:
         derived = dict(wrapped_native_deposit_symbol_map())
         assert set(derived) == set(FROZEN_WRAPPED_NATIVE_TOKENS)
@@ -335,14 +360,22 @@ class TestAnvilProfileInversion:
 
     def test_fork_manager_module_views(self) -> None:
         from almanak.framework.anvil.fork_manager import (
+            BALANCE_STORAGE_SEEDS,
             KNOWN_BALANCE_SLOTS,
             TOKEN_ADDRESSES,
             WHALE_FUNDED_TOKENS,
         )
 
         assert {c: dict(v) for c, v in TOKEN_ADDRESSES.items()} == FROZEN_TOKEN_ADDRESSES
-        assert {c: dict(v) for c, v in KNOWN_BALANCE_SLOTS.items()} == FROZEN_KNOWN_BALANCE_SLOTS
-        assert {c: dict(v) for c, v in WHALE_FUNDED_TOKENS.items()} == FROZEN_WHALE_FUNDED_TOKENS
+        assert {c: dict(v) for c, v in KNOWN_BALANCE_SLOTS.items()} == {
+            c: dict(v) for c, v in anvil_balance_slots_by_address_map().items()
+        }
+        assert {c: dict(v) for c, v in WHALE_FUNDED_TOKENS.items()} == {
+            c: dict(v) for c, v in anvil_whale_tokens_by_address_map().items()
+        }
+        assert {c: dict(v) for c, v in BALANCE_STORAGE_SEEDS.items()} == {
+            c: dict(v) for c, v in anvil_balance_storage_seeds_by_address_map().items()
+        }
 
     def test_solana_fork_manager_descriptor_cross_check(self) -> None:
         from almanak.framework.anvil.solana_fork_manager import (

@@ -240,19 +240,27 @@ class TemplateConfig:
     config_params: dict[str, str]
 
 
-# Chain-specific anvil_funding defaults (native + wrapped + WETH + USDC).
-# Chains not listed here get the ETH-native default in generate_config_json().
-_CHAIN_NATIVE_FUNDING: dict[str, dict[str, object]] = {
-    "mantle": {"MNT": 1000, "WMNT": 10, "WETH": 5, "USDC": 10000},
-    "avalanche": {"AVAX": 100, "WAVAX": 10, "WETH": 5, "USDC": 10000},
-    "bsc": {"BNB": 10, "WBNB": 5, "WETH": 5, "USDC": 10000},
-    "polygon": {"MATIC": 1000, "WMATIC": 100, "WETH": 5, "USDC": 10000},
-    "sonic": {"S": 100, "WETH": 5, "USDC": 10000},
-    "monad": {"MON": 100, "WETH": 5, "USDC": 10000},
-    "zerog": {"A0GI": 50, "W0G": 20, "USDC.E": 100},
-}
+@dataclass(frozen=True)
+class _AnvilFundingSpec:
+    """Address-authoring labels and amounts for one scaffold chain."""
 
-_DEFAULT_ANVIL_FUNDING: dict[str, object] = {"ETH": 10, "WETH": 5, "USDC": 10000}
+    native_amount: object
+    erc20_amounts: dict[str, object]
+
+
+# Native gas keeps its canonical chain symbol because it has no ERC-20
+# contract; every ERC-20 label is joined to its exact chain address by
+# ``_default_anvil_funding``. One chain table avoids parallel dispatch maps.
+_CHAIN_ANVIL_FUNDING_SPECS: dict[str, _AnvilFundingSpec] = {
+    "mantle": _AnvilFundingSpec(1000, {"WMNT": 10, "WETH": 5, "USDC": 10000}),
+    "avalanche": _AnvilFundingSpec(100, {"WAVAX": 10, "WETH": 5, "USDC": 10000}),
+    "bsc": _AnvilFundingSpec(10, {"WBNB": 5, "WETH": 5, "USDC": 10000}),
+    "polygon": _AnvilFundingSpec(1000, {"WMATIC": 100, "WETH": 5, "USDC": 10000}),
+    "sonic": _AnvilFundingSpec(100, {"WETH": 5, "USDC": 10000}),
+    "monad": _AnvilFundingSpec(100, {"WETH": 5, "USDC": 10000}),
+    "zerog": _AnvilFundingSpec(50, {"W0G": 20, "USDC.E": 100}),
+}
+_DEFAULT_ANVIL_FUNDING_SPEC = _AnvilFundingSpec(10, {"WETH": 5, "USDC": 10000})
 
 # Default token_funding entries as (symbol, amount, amount_type). Addresses are
 # resolved per-chain at scaffold time from the static token registry — the
@@ -264,37 +272,73 @@ _DEFAULT_TOKEN_FUNDING_SPECS: tuple[tuple[str, str, str], ...] = (
 )
 
 
+def _static_token_address(chain: str, label: str) -> str | None:
+    """Join a scaffold label to descriptor-owned address metadata.
+
+    This is an authoring-time join over static chain data, not user token
+    resolution. Runtime funding receives only the returned address.
+    """
+    descriptor = ChainRegistry.try_resolve(chain)
+    if descriptor is None:
+        return None
+    if descriptor.native.wrapped_symbol and label.upper() == descriptor.native.wrapped_symbol.upper():
+        return descriptor.native.wrapped_address
+    matches = [
+        address
+        for symbol, address in (descriptor.anvil.funding_tokens or {}).items()
+        if symbol.upper() == label.upper()
+    ]
+    if len(matches) == 1:
+        return matches[0]
+
+    chain_tokens = {symbol.upper(): address for symbol, address in (descriptor.tokens or {}).items()}
+    direct = chain_tokens.get(label.upper())
+    if direct is not None:
+        return direct
+
+    # A descriptor may author a canonical bridged token with an ``.e`` suffix
+    # while scaffold metadata uses the unsuffixed label. Only accept a unique
+    # normalized match; ambiguous identities remain unmeasured.
+    normalized_label = label.upper().removesuffix(".E")
+    bridged_matches = {
+        address
+        for symbol, address in (descriptor.anvil.funding_tokens or {}).items()
+        if symbol.upper().removesuffix(".E") == normalized_label
+    }
+    return next(iter(bridged_matches)) if len(bridged_matches) == 1 else None
+
+
+def _default_anvil_funding(chain: str) -> dict[str, object]:
+    """Build address-keyed ERC-20 funding defaults for one chain."""
+    descriptor = ChainRegistry.try_resolve(chain)
+    if descriptor is None:
+        return {}
+
+    spec = _CHAIN_ANVIL_FUNDING_SPECS.get(descriptor.name, _DEFAULT_ANVIL_FUNDING_SPEC)
+    funding: dict[str, object] = {descriptor.native.symbol: spec.native_amount}
+    for label, amount in spec.erc20_amounts.items():
+        address = _static_token_address(chain, label)
+        if address is not None:
+            funding[address] = amount
+    return funding
+
+
 def _default_token_funding(chain: str) -> list[dict[str, str]]:
     """Build the default ``token_funding`` list with real per-chain addresses.
 
-    Resolves each default symbol through the token registry's static layers
-    (``get_token_resolver`` with ``skip_gateway=True`` — no gateway runs at
-    scaffold time). Symbols the registry does not know on *chain* are omitted
-    entirely: an unmeasured address must never be fabricated as ``0x000…0``
-    (Empty ≠ Zero).
+    Joins the human-readable scaffold labels to descriptor-owned static
+    addresses. Labels the chain does not know are omitted entirely: an
+    unmeasured address must never be fabricated as ``0x000…0`` (Empty ≠ Zero).
     """
-    from almanak.framework.data.tokens import get_token_resolver
-
-    resolver = get_token_resolver()
     entries: list[dict[str, str]] = []
     for symbol, amount, amount_type in _DEFAULT_TOKEN_FUNDING_SPECS:
-        # Best-effort cosmetic default: any resolver failure (not just the
-        # documented TokenResolutionError — an unsupported chain surfaces as
-        # ValueError/KeyError from the normalizer, and helper bugs can raise
-        # anything) must degrade to "omit this symbol", never abort scaffolding.
-        try:
-            resolved = resolver.resolve(symbol, chain, log_errors=False, skip_gateway=True)
-        except Exception:  # noqa: BLE001 — scaffold-time best-effort default
-            continue
-        # Empty ≠ Zero: a resolver that returns nothing (or an addressless
-        # record) leaves the symbol unmeasured — never fabricate a 0x000…0
-        # placeholder the user would have to hand-replace.
-        if resolved is None or not getattr(resolved, "address", None):
+        address = _static_token_address(chain, symbol)
+        if address is None:
             continue
         entries.append(
             {
                 "symbol": symbol,
-                "address": resolved.address,
+                "address": address,
                 "amount": amount,
                 "amount_type": amount_type,
             }
@@ -4416,10 +4460,10 @@ def generate_config_json(
         if token_funding:
             data["token_funding"] = token_funding
 
-    # Add anvil_funding for all templates (unless already set).
-    # This ensures `almanak strat run --network anvil` funds the wallet automatically.
+    # Add anvil_funding for all templates (unless already set). Native gas is
+    # represented by the chain's native symbol; ERC-20 keys are exact addresses.
     if "anvil_funding" not in data:
-        data["anvil_funding"] = _CHAIN_NATIVE_FUNDING.get(chain, _DEFAULT_ANVIL_FUNDING)
+        data["anvil_funding"] = _default_anvil_funding(chain)
 
     return json.dumps(data, indent=4) + "\n"
 

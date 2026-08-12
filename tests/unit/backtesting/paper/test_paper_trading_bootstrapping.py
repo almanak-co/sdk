@@ -4,7 +4,7 @@ Covers:
 - ERC-20 address checksumming (not uppercasing) in backtest CLI
 - Token symbol case preservation (wstETH, swETH, USDbC, wS)
 - PaperTraderConfig.get_initial_balances() preserves original case
-- RollingForkManager.fund_tokens() case-insensitive symbol resolution
+- RollingForkManager.fund_tokens() address-only identity enforcement
 - RollingForkManager._fetch_decimals_onchain() fallback
 """
 
@@ -73,7 +73,7 @@ class TestGetInitialBalances:
 
 
 class TestFundTokens:
-    """fund_tokens() must handle raw addresses and case-insensitive symbols."""
+    """fund_tokens() must handle raw addresses and reject symbols."""
 
     @pytest.fixture()
     def manager(self):
@@ -133,23 +133,20 @@ class TestFundTokens:
             assert result is True
 
     @pytest.mark.asyncio()
-    async def test_case_insensitive_symbol_lookup(self, manager):
-        """Symbols like 'wstETH' should resolve even if TOKEN_ADDRESSES has different casing."""
-        mock_resolved = MagicMock(
-            address="0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0", decimals=18, symbol="wstETH"
-        )
+    async def test_symbol_key_is_rejected_without_resolution_or_rpc(self, manager):
+        """A bare symbol cannot choose a contract, even when the registry knows it."""
         mock_resolver = MagicMock()
-        mock_resolver.resolve.return_value = mock_resolved
-
         with (
             patch("almanak.framework.data.tokens.get_token_resolver", return_value=mock_resolver),
-            patch.object(manager, "_rpc_call_raw", new_callable=AsyncMock, return_value=(True, None)),
+            patch.object(manager, "_rpc_call_raw", new_callable=AsyncMock) as mock_rpc,
         ):
             result = await manager.fund_tokens(
                 "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
                 {"wstETH": Decimal("1.0")},
             )
-            assert result is True
+        assert result is False
+        mock_resolver.resolve.assert_not_called()
+        mock_rpc.assert_not_awaited()
 
     @pytest.mark.asyncio()
     async def test_uppercase_0x_treated_as_address(self, manager):
@@ -255,7 +252,6 @@ class TestAnvilFundingAddressParsing:
         assert not ("wstETH".startswith(("0x", "0X")) and len("wstETH") == 42)
 
 
-
 # ---- PaperTraderConfig.bootstrap field (VIB-2375) ----
 
 
@@ -344,12 +340,27 @@ class TestBootstrapConfig:
         assert data["bootstrap"]["arbitrum"]["USDC"] == "100"
         assert data["bootstrap"]["ethereum"]["USDT"] == "50"
 
-        restored = PaperTraderConfig.from_dict({
-            "chain": "arbitrum",
-            "rpc_url": "https://arb.example.com",
-            "deployment_id": "test",
-            **{k: v for k, v in data.items() if k not in ("chain", "rpc_url", "deployment_id", "chain_id", "max_duration_seconds", "fork_rpc_url", "allow_hardcoded_fallback")},
-        })
+        restored = PaperTraderConfig.from_dict(
+            {
+                "chain": "arbitrum",
+                "rpc_url": "https://arb.example.com",
+                "deployment_id": "test",
+                **{
+                    k: v
+                    for k, v in data.items()
+                    if k
+                    not in (
+                        "chain",
+                        "rpc_url",
+                        "deployment_id",
+                        "chain_id",
+                        "max_duration_seconds",
+                        "fork_rpc_url",
+                        "allow_hardcoded_fallback",
+                    )
+                },
+            }
+        )
         assert restored.bootstrap["arbitrum"]["USDC"] == Decimal("100")
         assert restored.bootstrap["ethereum"]["USDT"] == Decimal("50")
 

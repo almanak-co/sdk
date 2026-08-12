@@ -413,6 +413,10 @@ class TestRollingForkManagerState:
 class TestKnownBalanceSlots:
     """Tests for KNOWN_BALANCE_SLOTS constant."""
 
+    @staticmethod
+    def _address(chain: str, symbol: str) -> str:
+        return TOKEN_ADDRESSES[chain][symbol].lower()
+
     def test_known_slots_covers_major_chains(self) -> None:
         """Test that KNOWN_BALANCE_SLOTS covers all major chains."""
         expected_chains = ["arbitrum", "ethereum", "base", "avalanche", "optimism", "polygon", "bsc"]
@@ -428,36 +432,33 @@ class TestKnownBalanceSlots:
         usdc_chains = ["arbitrum", "ethereum", "base", "avalanche", "optimism", "polygon"]
         for chain in usdc_chains:
             slots = KNOWN_BALANCE_SLOTS.get(chain, {})
-            assert "USDC" in slots, f"Missing USDC slot for chain: {chain}"
+            assert self._address(chain, "USDC") in slots, f"Missing USDC slot for chain: {chain}"
 
     def test_arbitrum_known_slots(self) -> None:
         """Test Arbitrum known slots match verified values from intent tests."""
         arb_slots = KNOWN_BALANCE_SLOTS["arbitrum"]
-        assert arb_slots["USDC"] == 9
-        assert arb_slots["WETH"] == 51
-        assert arb_slots["USDT"] == 51
+        assert arb_slots[self._address("arbitrum", "USDC")] == 9
+        assert arb_slots[self._address("arbitrum", "WETH")] == 51
+        assert arb_slots[self._address("arbitrum", "USDT")] == 51
 
     def test_ethereum_known_slots(self) -> None:
         """Test Ethereum known slots match verified values."""
         eth_slots = KNOWN_BALANCE_SLOTS["ethereum"]
-        assert eth_slots["USDC"] == 9
-        assert eth_slots["WETH"] == 3
-        assert eth_slots["USDT"] == 2
+        assert eth_slots[self._address("ethereum", "USDC")] == 9
+        assert eth_slots[self._address("ethereum", "WETH")] == 3
+        assert eth_slots[self._address("ethereum", "USDT")] == 2
 
     def test_base_known_slots(self) -> None:
         """Test Base known slots match verified values."""
         base_slots = KNOWN_BALANCE_SLOTS["base"]
-        assert base_slots["USDC"] == 9
-        assert base_slots["WETH"] == 3
+        assert base_slots[self._address("base", "USDC")] == 9
+        assert base_slots[self._address("base", "WETH")] == 3
 
     def test_all_known_slot_tokens_have_addresses(self) -> None:
-        """Every token in KNOWN_BALANCE_SLOTS must have a corresponding address in TOKEN_ADDRESSES."""
+        """Every runtime slot key is an address from the descriptor catalogue."""
         for chain, slots in KNOWN_BALANCE_SLOTS.items():
-            chain_addrs = TOKEN_ADDRESSES.get(chain, {})
-            for token in slots:
-                assert token in chain_addrs, (
-                    f"Token '{token}' has known slot for chain '{chain}' but no address in TOKEN_ADDRESSES"
-                )
+            chain_addrs = {address.lower() for address in TOKEN_ADDRESSES.get(chain, {}).values()}
+            assert set(slots) <= chain_addrs
 
 
 # =============================================================================
@@ -796,8 +797,9 @@ class TestRpcCallRawTimeout:
                 ctx.__aexit__ = AsyncMock(return_value=False)
                 return ctx
 
-        with patch.object(manager, "_is_port_open", return_value=True), patch(
-            "aiohttp.ClientSession", CapturingSession
+        with (
+            patch.object(manager, "_is_port_open", return_value=True),
+            patch("aiohttp.ClientSession", CapturingSession),
         ):
             ready = await manager._wait_for_ready()
 

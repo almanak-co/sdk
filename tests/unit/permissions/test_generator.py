@@ -14,6 +14,7 @@ from almanak.framework.execution.signer.safe.constants import (
 from almanak.framework.intents.compiler import ERC20_APPROVE_SELECTOR
 from almanak.framework.intents.vocabulary import SwapIntent
 from almanak.framework.permissions.generator import (
+    _anvil_funding_refs,
     _expand_intent_types_for_teardown,
     _overrides_teardown,
     discover_teardown_protocols,
@@ -137,18 +138,17 @@ class TestTokenExtraction:
             config=config,
         )
         # Find approve-only permissions (ERC-20 tokens from config)
-        approve_perms = [
-            p for p in manifest.permissions
-            if p.label.startswith("ERC-20:")
-        ]
+        approve_perms = [p for p in manifest.permissions if p.label.startswith("ERC-20:")]
         assert len(approve_perms) >= 1
 
     def test_extracts_anvil_funding_tokens(self):
-        """Tokens in anvil_funding should produce approve permissions."""
+        """Address-keyed anvil_funding produces approve permissions directly."""
+        usdc = "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
+        weth = "0x82af49447d8a07e3bd95bd0d56f35241523fbab1"
         config = {
             "anvil_funding": {
-                "USDC": 10000,
-                "WETH": 5,
+                usdc: 10000,
+                weth: 5,
             },
         }
         manifest = generate_manifest(
@@ -162,11 +162,43 @@ class TestTokenExtraction:
         # Note: labels may vary because discovery and config permissions get
         # merged by target address (first label wins).
         approve_targets = [
-            p.target for p in manifest.permissions
+            p.target
+            for p in manifest.permissions
             if any(s.selector == ERC20_APPROVE_SELECTOR for s in p.function_selectors)
         ]
-        # WETH and USDC addresses on arbitrum should both have approve
-        assert len(approve_targets) >= 2
+        assert {usdc, weth} <= set(approve_targets)
+
+    def test_flat_anvil_funding_is_scoped_to_config_chain(self):
+        """A single-chain config cannot leak funding identity into another chain."""
+        ethereum_usdc = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        config = {
+            "chain": "ethereum",
+            "anvil_funding": {"ETH": 100, ethereum_usdc: 10_000},
+        }
+
+        assert _anvil_funding_refs(config, "ethereum") == {"ETH", ethereum_usdc}
+        assert _anvil_funding_refs(config, "avalanche") == set()
+
+    def test_flat_anvil_funding_is_ignored_for_ambiguous_multi_chain_config(self):
+        """One address-keyed block cannot safely describe multiple chains."""
+        ethereum_usdc = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        config = {
+            "chains": ["ethereum", "avalanche"],
+            "anvil_funding": {"ETH": 100, ethereum_usdc: 10_000},
+        }
+
+        assert _anvil_funding_refs(config, "ethereum") == set()
+        assert _anvil_funding_refs(config, "avalanche") == set()
+
+    def test_flat_anvil_funding_honors_singleton_chains_alias(self):
+        ethereum_usdc = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        config = {
+            "chains": ["eth"],
+            "anvil_funding": {"ETH": 100, ethereum_usdc: 10_000},
+        }
+
+        assert _anvil_funding_refs(config, "eip155:1") == {"ETH", ethereum_usdc}
+        assert _anvil_funding_refs(config, "avalanche") == set()
 
     def test_no_config_no_token_permissions(self):
         """No config should produce no extra token permissions."""
@@ -179,10 +211,7 @@ class TestTokenExtraction:
         )
         # Token approve perms from config should be absent
         # (the compiler may still produce approve txs for the synthetic intent)
-        config_approve_perms = [
-            p for p in manifest.permissions
-            if p.label.startswith("ERC-20:")
-        ]
+        config_approve_perms = [p for p in manifest.permissions if p.label.startswith("ERC-20:")]
         assert len(config_approve_perms) == 0
 
 
@@ -231,9 +260,7 @@ class TestWarnings:
 class TestZodiacTargetConversion:
     """Test to_zodiac_targets() conversion."""
 
-    def _make_manifest(
-        self, permissions: list[ContractPermission], chain: str = "arbitrum"
-    ) -> PermissionManifest:
+    def _make_manifest(self, permissions: list[ContractPermission], chain: str = "arbitrum") -> PermissionManifest:
         return PermissionManifest(
             version="1.0",
             chain=chain,
@@ -244,17 +271,19 @@ class TestZodiacTargetConversion:
 
     def test_basic_call_with_selectors(self):
         """CALL + selectors -> clearance=2, executionOptions=0, functions present."""
-        manifest = self._make_manifest([
-            ContractPermission(
-                target="0xaf88d065e77c8cc2239327c5edb3a432268e5831",
-                label="ERC-20: USDC",
-                operation=0,
-                send_allowed=False,
-                function_selectors=[
-                    FunctionPermission(selector="0x095ea7b3", label="approve(address,uint256)"),
-                ],
-            ),
-        ])
+        manifest = self._make_manifest(
+            [
+                ContractPermission(
+                    target="0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+                    label="ERC-20: USDC",
+                    operation=0,
+                    send_allowed=False,
+                    function_selectors=[
+                        FunctionPermission(selector="0x095ea7b3", label="approve(address,uint256)"),
+                    ],
+                ),
+            ]
+        )
         targets = manifest.to_zodiac_targets()
         assert len(targets) == 1
         t = targets[0]
@@ -267,15 +296,17 @@ class TestZodiacTargetConversion:
 
     def test_delegatecall_no_selectors_target_clearance(self):
         """DELEGATECALL + no selectors -> clearance=1 (Target), executionOptions=2."""
-        manifest = self._make_manifest([
-            ContractPermission(
-                target="0x38869bf66a61cf6bdb996a6ae40d5853fd43b526",
-                label="MultiSend (example)",
-                operation=1,
-                send_allowed=False,
-                function_selectors=[],
-            ),
-        ])
+        manifest = self._make_manifest(
+            [
+                ContractPermission(
+                    target="0x38869bf66a61cf6bdb996a6ae40d5853fd43b526",
+                    label="MultiSend (example)",
+                    operation=1,
+                    send_allowed=False,
+                    function_selectors=[],
+                ),
+            ]
+        )
         targets = manifest.to_zodiac_targets()
         assert len(targets) == 1
         t = targets[0]
@@ -285,33 +316,37 @@ class TestZodiacTargetConversion:
 
     def test_send_allowed_execution_options(self):
         """send_allowed=True with CALL -> executionOptions=1 (Send)."""
-        manifest = self._make_manifest([
-            ContractPermission(
-                target="0xaf88d065e77c8cc2239327c5edb3a432268e5831",
-                label="test",
-                operation=0,
-                send_allowed=True,
-                function_selectors=[
-                    FunctionPermission(selector="0xaabbccdd", label="test()"),
-                ],
-            ),
-        ])
+        manifest = self._make_manifest(
+            [
+                ContractPermission(
+                    target="0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+                    label="test",
+                    operation=0,
+                    send_allowed=True,
+                    function_selectors=[
+                        FunctionPermission(selector="0xaabbccdd", label="test()"),
+                    ],
+                ),
+            ]
+        )
         targets = manifest.to_zodiac_targets()
         assert targets[0]["executionOptions"] == 1  # Send
 
     def test_delegatecall_with_send_execution_options(self):
         """DELEGATECALL + send_allowed -> executionOptions=3 (Both)."""
-        manifest = self._make_manifest([
-            ContractPermission(
-                target="0xaf88d065e77c8cc2239327c5edb3a432268e5831",
-                label="test",
-                operation=1,
-                send_allowed=True,
-                function_selectors=[
-                    FunctionPermission(selector="0xaabbccdd", label="test()"),
-                ],
-            ),
-        ])
+        manifest = self._make_manifest(
+            [
+                ContractPermission(
+                    target="0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+                    label="test",
+                    operation=1,
+                    send_allowed=True,
+                    function_selectors=[
+                        FunctionPermission(selector="0xaabbccdd", label="test()"),
+                    ],
+                ),
+            ]
+        )
         targets = manifest.to_zodiac_targets()
         assert targets[0]["executionOptions"] == 3  # Both
 
@@ -326,23 +361,26 @@ class TestZodiacTargetConversion:
         targets = manifest.to_zodiac_targets()
         assert len(targets) > 0
         from web3 import Web3
+
         for t in targets:
             assert t["address"] == Web3.to_checksum_address(t["address"])
 
     def test_multiple_selectors(self):
         """Multiple selectors produce multiple function entries."""
-        manifest = self._make_manifest([
-            ContractPermission(
-                target="0xaf88d065e77c8cc2239327c5edb3a432268e5831",
-                label="Router",
-                operation=0,
-                send_allowed=False,
-                function_selectors=[
-                    FunctionPermission(selector="0x095ea7b3", label="approve(address,uint256)"),
-                    FunctionPermission(selector="0x8d80ff0a", label="multiSend(bytes)"),
-                ],
-            ),
-        ])
+        manifest = self._make_manifest(
+            [
+                ContractPermission(
+                    target="0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+                    label="Router",
+                    operation=0,
+                    send_allowed=False,
+                    function_selectors=[
+                        FunctionPermission(selector="0x095ea7b3", label="approve(address,uint256)"),
+                        FunctionPermission(selector="0x8d80ff0a", label="multiSend(bytes)"),
+                    ],
+                ),
+            ]
+        )
         targets = manifest.to_zodiac_targets()
         assert len(targets[0]["functions"]) == 2
 
@@ -386,6 +424,7 @@ class TestZodiacTargetConversion:
         chain_id = CHAIN_MAPPING["arbitrum"]
         router_addr = ROUTER_ADDRESSES[chain_id]
         from web3 import Web3
+
         checksummed = Web3.to_checksum_address(router_addr)
         enso_targets = [t for t in targets if t["address"] == checksummed]
         assert len(enso_targets) == 1, "Expected exactly one Enso Router target"
@@ -648,7 +687,9 @@ class TestConfigPropagation:
         """Config values should be available to teardown via __init__."""
         config = {"base_token": "DAI"}
         protocols, warnings = discover_teardown_protocols(
-            _StrategyWithConfigDerivedTeardown, "base", config=config,
+            _StrategyWithConfigDerivedTeardown,
+            "base",
+            config=config,
         )
         assert "uniswap_v3" in protocols
         assert not warnings
@@ -656,7 +697,9 @@ class TestConfigPropagation:
     def test_failing_init_falls_back_to_stub(self):
         """When __init__ fails, stub should still allow teardown discovery."""
         protocols, warnings = discover_teardown_protocols(
-            _StrategyWithFailingInit, "base", config={"base_token": "WETH"},
+            _StrategyWithFailingInit,
+            "base",
+            config={"base_token": "WETH"},
         )
         assert "enso" in protocols
         # No warnings from teardown itself (only __init__ failed, teardown succeeded)
@@ -691,7 +734,9 @@ class TestConfigPropagation:
         config = {"base_token": "WETH"}
         for chain in ("base", "arbitrum", "ethereum"):
             protocols, warnings = discover_teardown_protocols(
-                _StrategyWithConfigDerivedTeardown, chain, config=config,
+                _StrategyWithConfigDerivedTeardown,
+                chain,
+                config=config,
             )
             assert "uniswap_v3" in protocols
         # Config should be unchanged after all invocations
@@ -778,11 +823,7 @@ class TestManifestTeardownExpansion:
             supported_protocols=["aave_v3"],
             intent_types=["SUPPLY", "BORROW", "REPAY", "HOLD"],
         )
-        all_selectors = {
-            s.selector
-            for p in manifest.permissions
-            for s in p.function_selectors
-        }
+        all_selectors = {s.selector for p in manifest.permissions for s in p.function_selectors}
         assert AAVE_WITHDRAW_SELECTOR in all_selectors, (
             "withdraw() selector should be auto-added via teardown complement expansion"
         )

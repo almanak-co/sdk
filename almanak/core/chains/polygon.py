@@ -26,7 +26,7 @@ DESCRIPTOR = register_chain(
         # sentinel to POL for token identity — but the gas/price/funding stack is
         # pinned to MATIC (the oracle MATIC/USD feed key, the gateway native
         # symbol derived from this descriptor, and every shipped Polygon config's
-        # anvil_funding key). The two views are bridged: ``symbol`` stays MATIC
+        # native-gas anvil_funding key). The two views are bridged: ``symbol`` stays MATIC
         # (gas/price/funding canonical) while ``accepted_symbols=("POL",)`` makes
         # both symbols route to the native-balance path (VIB-4851 A1, the
         # registry-derived replacement for NATIVE_SYMBOLS_BY_CHAIN["polygon"]).

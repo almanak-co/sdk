@@ -126,13 +126,13 @@ class TestForkManagerWstETHSlot:
     def test_wsteth_slot_registered_for_arbitrum(self):
         from almanak.framework.anvil.fork_manager import KNOWN_BALANCE_SLOTS
 
-        assert "wstETH" in KNOWN_BALANCE_SLOTS.get("arbitrum", {})
+        assert WSTETH_ARBITRUM.lower() in KNOWN_BALANCE_SLOTS.get("arbitrum", {})
 
     def test_wsteth_slot_is_1(self):
         """Slot 1 confirmed via brute-force in iter 147."""
         from almanak.framework.anvil.fork_manager import KNOWN_BALANCE_SLOTS
 
-        assert KNOWN_BALANCE_SLOTS["arbitrum"]["wstETH"] == 1
+        assert KNOWN_BALANCE_SLOTS["arbitrum"][WSTETH_ARBITRUM.lower()] == 1
 
     def test_wsteth_token_address_exists_for_arbitrum(self):
         from almanak.framework.anvil.fork_manager import TOKEN_ADDRESSES

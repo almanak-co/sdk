@@ -21,7 +21,7 @@
     }
   ],
   "anvil_funding": {
-    "AVAX": 10,
-    "USDC": 1000
+      "AVAX": 10,
+      "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E": 1000
   }
 }

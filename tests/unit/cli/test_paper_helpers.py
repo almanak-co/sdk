@@ -169,6 +169,18 @@ class TestPaperStartHelpers:
         _, tokens_int = ph.parse_funding_dict({123: "7"}, native, source="test")
         assert tokens_int == {"123": Decimal("7")}
 
+    def test_load_funding_selects_nested_section_by_chain_alias(self):
+        base_usdc = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+        strategy_config = {"anvil_funding": {"eip155:8453": {base_usdc: 500}}}
+
+        with patch.object(ph, "load_strategy_config", return_value=strategy_config):
+            config_eth, config_tokens, config_bootstrap, loaded = ph.load_funding_from_config("demo", "base")
+
+        assert config_eth is None
+        assert config_bootstrap == {}
+        assert loaded is strategy_config
+        assert {address.lower(): amount for address, amount in config_tokens.items()} == {base_usdc: Decimal("500")}
+
 
 # ---------------------------------------------------------------------------
 # paper_resume helpers (3 tests)

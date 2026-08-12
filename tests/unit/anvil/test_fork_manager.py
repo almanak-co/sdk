@@ -26,7 +26,9 @@ class TestKeepAliveDetached:
     async def _start_and_capture_popen(self, *, keep_alive_detached: bool):
         _clear_flags_cache()
         mgr = RollingForkManager(
-            rpc_url="http://rpc.test", chain="avalanche", anvil_port=9999,
+            rpc_url="http://rpc.test",
+            chain="avalanche",
+            anvil_port=9999,
             keep_alive_detached=keep_alive_detached,
         )
         with (
@@ -276,7 +278,7 @@ class TestFundTokensWrappedNativeFallback:
             patch.object(manager, "_set_balance_at_slot", new_callable=AsyncMock) as mock_slot,
             patch.object(manager, "_rpc_call_raw", new_callable=AsyncMock, return_value=(True, None)),
         ):
-            result = await manager.fund_tokens(self.WALLET, {"WAVAX": Decimal("10")})
+            result = await manager.fund_tokens(self.WALLET, {self.WAVAX_ADDRESS: Decimal("10")})
         assert result is True
         mock_slot.assert_not_called()
 
@@ -289,7 +291,7 @@ class TestFundTokensWrappedNativeFallback:
             # anvil_deal not needed since slot succeeds; but mock to avoid real RPC calls
             patch.object(manager, "_rpc_call_raw", new_callable=AsyncMock, return_value=(False, None)),
         ):
-            result = await manager.fund_tokens(self.WALLET, {"WAVAX": Decimal("10")})
+            result = await manager.fund_tokens(self.WALLET, {self.WAVAX_ADDRESS: Decimal("10")})
         assert result is True
         # Slot 3 is WAVAX's known slot on Avalanche — must have been called
         mock_slot.assert_called_once()
@@ -306,7 +308,7 @@ class TestFundTokensWrappedNativeFallback:
             patch.object(manager, "_set_balance_at_slot", new_callable=AsyncMock, return_value=False),
             patch.object(manager, "_rpc_call_raw", new_callable=AsyncMock, return_value=(True, None)) as mock_rpc,
         ):
-            result = await manager.fund_tokens(self.WALLET, {"WAVAX": Decimal("10")})
+            result = await manager.fund_tokens(self.WALLET, {self.WAVAX_ADDRESS: Decimal("10")})
         assert result is True
         # anvil_deal should have been called (returns True = success)
         deal_calls = [c for c in mock_rpc.call_args_list if c[0][0] == "anvil_deal"]
@@ -426,6 +428,7 @@ class TestFundTokenViaStorageSnapshotRevert:
         set_storage_calls = [c for c in rpc_mock.call_args_list if c[0][0] == "anvil_setStorageAt"]
         assert len(set_storage_calls) == 0, "Must NOT write storage when snapshot is unavailable"
 
+
 class TestFundTokenViaWhaleGasFunding:
     """Whale impersonation must work even when the whale is a contract with 0 ETH.
 
@@ -522,12 +525,59 @@ class TestFundTokenViaWhaleGasFunding:
         assert restore_args[0] == self.WHALE
         assert restore_args[1] == original_balance_hex, "Restore must use the original balance"
 
+
 def test_cbbtc_base_whale_entry_present():
     """cbBTC on Base must be in the whale list — guards against accidental deletion
     of the entry that prevents storage probing from corrupting FiatTokenV2_2 state.
     """
     assert "base" in fm.WHALE_FUNDED_TOKENS
-    assert "CBBTC" in fm.WHALE_FUNDED_TOKENS["base"]
+    assert "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf" in fm.WHALE_FUNDED_TOKENS["base"]
+
+
+@pytest.mark.asyncio
+async def test_symbol_funding_key_is_rejected_before_any_rpc() -> None:
+    """ALM-3255: a valid token symbol must never select an ERC-20 contract."""
+    manager = _make_running_manager(chain="base")
+    with patch.object(manager, "_rpc_call_raw", new_callable=AsyncMock) as rpc:
+        result = await manager.fund_tokens(
+            "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+            {"JitoSOL": Decimal("10")},
+        )
+    assert result is False
+    rpc.assert_not_awaited()
+
+
+class TestAddressKeyedBalanceSeedFunding:
+    """ALM-3255: JitoSOL funding uses its exact Base address and Solady seed."""
+
+    JITOSOL_ADDRESS = "0x97be14dd8f994a5364573bc035d85309e7cb34de"
+    WALLET = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+    SEED = 0x87A211A2
+
+    def test_calculates_solady_balance_storage_key(self) -> None:
+        manager = RollingForkManager(rpc_url="http://rpc.test", chain="base", anvil_port=9999)
+        assert manager._calculate_seeded_balance_slot(self.WALLET, self.SEED) == (
+            "0x523a6896f5f8911768b8b7bb6464df9b5b7fefd3b0494de3368a2aaa2375e6c3"
+        )
+
+    @pytest.mark.asyncio()
+    async def test_exact_jitosol_address_selects_seed_recipe(self) -> None:
+        manager = _make_running_manager(chain="base")
+        with (
+            patch.object(manager, "_set_balance_at_seed", new_callable=AsyncMock, return_value=True) as set_seed,
+            patch.object(manager, "_rpc_call_raw", new_callable=AsyncMock) as rpc,
+        ):
+            result = await manager.fund_tokens(self.WALLET, {self.JITOSOL_ADDRESS: Decimal("1")})
+
+        assert result is True
+        set_seed.assert_awaited_once_with(
+            self.WALLET,
+            self.JITOSOL_ADDRESS,
+            hex(10**9),
+            self.SEED,
+            "JITOSOL",
+        )
+        rpc.assert_not_awaited()
 
 
 def _make_running_manager(chain: str = "arbitrum") -> RollingForkManager:
@@ -616,9 +666,7 @@ class TestResetToLatest:
     async def test_anvil_reset_exception_falls_back_to_stop_start(self):
         mgr = _make_running_manager()
         with (
-            patch.object(
-                mgr, "_rpc_call_raw", AsyncMock(side_effect=RuntimeError("rpc boom"))
-            ),
+            patch.object(mgr, "_rpc_call_raw", AsyncMock(side_effect=RuntimeError("rpc boom"))),
             patch.object(mgr, "_assert_chain_id_after_reset", new_callable=AsyncMock),
             patch.object(mgr, "stop", new_callable=AsyncMock) as mock_stop,
             patch.object(mgr, "start", new_callable=AsyncMock, return_value=True),

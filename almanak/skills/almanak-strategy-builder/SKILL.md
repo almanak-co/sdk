@@ -1308,8 +1308,8 @@ the strategy module.
     "trade_size_usd": 1000,
     "max_slippage_bps": 50,
     "anvil_funding": {
-        "USDC": "10000",
-        "WETH": "5"
+        "0xaf88d065e77c8cc2239327c5edb3a432268e5831": "10000",
+        "0x82af49447d8a07e3bd95bd0d56f35241523fbab1": "5"
     }
 }
 ```
@@ -1322,15 +1322,21 @@ the strategy module.
     "swap_amount_usdc": "100",
     "max_slippage_bps": 100,
     "anvil_funding": {
-        "USDC": 500
+        "base": {
+            "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913": 500
+        },
+        "arbitrum": {
+            "0xaf88d065e77c8cc2239327c5edb3a432268e5831": 500
+        }
     }
 }
 ```
 
 The `chains` field lists the chains the strategy operates on and is read by the platform at
 deployment time. It should match `supported_chains` from the `@almanak_strategy` decorator.
-For single-chain strategies, `chain` (singular) is also accepted. `anvil_funding` is flat --
-the same tokens are funded on all chains.
+For single-chain strategies, `chain` (singular) is also accepted. A flat
+`anvil_funding` object applies to all managed chains; use per-chain sections for
+multi-chain strategies because ERC-20 contract addresses are chain-specific.
 An optional `"network"` field (`"mainnet"` or `"anvil"`) sets the default network for
 `almanak strat run` when no `--network` flag is passed (local runs only; the flag always wins).
 All other fields are strategy-specific and accessed via `self.config.get(key, default)`.
@@ -1379,7 +1385,10 @@ Each entry specifies the token symbol, on-chain address, amount, and how to inte
 ### anvil_funding
 
 When running on Anvil (`--network anvil`), the framework auto-funds the wallet
-with tokens specified in `anvil_funding`. Values are in token units (not USD).
+with tokens specified in `anvil_funding`. ERC-20 keys must be exact chain-specific
+contract addresses; symbols are display metadata and are rejected. The chain's
+native gas symbol is the only exception because native gas has no ERC-20 address.
+Values are in token units (not USD). Funding failure aborts managed gateway startup.
 
 <!-- almanak-sdk-end: configuration -->
 
@@ -1943,13 +1952,18 @@ class CrossChainArbStrategy(IntentStrategy):
     "chains": ["base", "arbitrum"],
     "swap_amount_usdc": "100",
     "anvil_funding": {
-        "USDC": 500
+        "base": {
+            "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913": 500
+        },
+        "arbitrum": {
+            "0xaf88d065e77c8cc2239327c5edb3a432268e5831": 500
+        }
     }
 }
 ```
 
-Note: `anvil_funding` is flat (not per-chain) -- the same tokens are funded on
-all chains.
+Use per-chain funding sections for multi-chain strategies. A flat object remains
+valid for a single chain (or an address intentionally shared across every fork).
 
 **Strategy properties:**
 

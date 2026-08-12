@@ -338,9 +338,7 @@ class TestManifestCoverage:
             )
 
             # Also verify the multiSend(bytes) selector is present
-            multisend_perm = next(
-                p for p in manifest.permissions if p.target.lower() == multisend_addr.lower()
-            )
+            multisend_perm = next(p for p in manifest.permissions if p.target.lower() == multisend_addr.lower())
             selectors = {s.selector for s in multisend_perm.function_selectors}
             assert MULTISEND_SELECTOR in selectors, (
                 f"MultiSend permission missing multiSend(bytes) selector for {name} on {chain}"
@@ -375,18 +373,12 @@ class TestManifestCoverage:
         # Collect token symbols from config using the same fields as the generator
         from almanak.framework.permissions.generator import _TOKEN_CONFIG_FIELDS
 
-        token_symbols: set[str] = set()
+        config_token_refs: set[str] = set()
         for key, value in config.items():
             if key in _TOKEN_CONFIG_FIELDS and isinstance(value, str) and value:
-                token_symbols.add(value)
+                config_token_refs.add(value)
 
-        anvil_funding = config.get("anvil_funding", {})
-        if isinstance(anvil_funding, dict):
-            for token_key in anvil_funding:
-                if isinstance(token_key, str):
-                    token_symbols.add(token_key)
-
-        if not token_symbols:
+        if not config_token_refs and not config.get("anvil_funding"):
             pytest.skip(f"No token symbols in config for {name}")
 
         # Native ETH sentinel - not an ERC-20
@@ -396,7 +388,10 @@ class TestManifestCoverage:
 
         resolver = get_token_resolver()
 
+        from almanak.framework.permissions.generator import _anvil_funding_refs
+
         for chain in chains:
+            token_refs = config_token_refs | _anvil_funding_refs(config, chain)
             # strict=False: this sweep spans every declared chain of every
             # demo, and one shared symbol-form config legitimately has
             # static-registry gaps on some chains (ALM-3175). Deploy-grade
@@ -415,12 +410,10 @@ class TestManifestCoverage:
             # Build lookup: target -> set of selectors
             manifest_selectors: dict[str, set[str]] = {}
             for perm in manifest.permissions:
-                manifest_selectors[perm.target.lower()] = {
-                    s.selector for s in perm.function_selectors
-                }
+                manifest_selectors[perm.target.lower()] = {s.selector for s in perm.function_selectors}
 
             # For each resolvable token, verify approve selector exists
-            for symbol in sorted(token_symbols):
+            for symbol in sorted(token_refs):
                 try:
                     resolved = resolver.resolve(symbol, chain)
                 except Exception:  # noqa: BLE001

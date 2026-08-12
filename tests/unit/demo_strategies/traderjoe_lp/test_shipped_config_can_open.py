@@ -124,7 +124,13 @@ def test_anvil_funding_cannot_be_the_only_thing_that_clears_the_threshold(config
     actually implies a working mainnet demo, which is what everyone assumes it means.
     """
     anvil = config.get("anvil_funding", {})
-    anvil_stable = Decimal(str(anvil.get("USDT", anvil.get("USDC", 0))))
+    stable_addresses = {
+        entry["address"].lower()
+        for entry in config.get("token_funding", [])
+        if entry.get("symbol", "").upper() in {"USDC", "USDT"}
+    }
+    normalized_anvil = {key.lower(): amount for key, amount in anvil.items()}
+    anvil_stable = sum((Decimal(str(normalized_anvil.get(address, 0))) for address in stable_addresses), Decimal("0"))
     threshold = Decimal(str(config["min_position_usd"]))
     funded = _funded_usd_lower_bound(config)
 

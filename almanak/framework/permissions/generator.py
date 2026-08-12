@@ -273,6 +273,49 @@ def _address_form_entry(
     return _approve_permission(address, label)
 
 
+def _anvil_funding_refs(config: dict[str, Any], chain: str) -> set[str]:
+    """Return address/native keys from the section applicable to ``chain``.
+
+    Flat funding belongs to the config's single declared ``chain`` when present.
+    A ``chains`` list is also consulted; more than one declared chain is
+    ambiguous because the same address need not identify the same asset on
+    every chain, so flat funding is ignored in that case.
+    This matters for manifest discovery across a strategy's wider
+    ``supported_chains`` set: an Ethereum config must not leak its addresses
+    or native gas symbol into an Avalanche manifest.
+    """
+    funding = config.get("anvil_funding", {})
+    if not isinstance(funding, dict):
+        return set()
+
+    from almanak.core.constants import canonical_chain_name
+
+    active_chain = canonical_chain_name(chain)
+    if funding and all(isinstance(value, dict) for value in funding.values()):
+        matching_sections = [
+            value
+            for section_chain, value in funding.items()
+            if isinstance(section_chain, str) and canonical_chain_name(section_chain) == active_chain
+        ]
+        if len(matching_sections) > 1:
+            raise PermissionGenerationError(f"anvil_funding defines duplicate alias sections for chain {chain!r}")
+        funding = matching_sections[0] if matching_sections else {}
+    else:
+        configured_chain = config.get("chain")
+        if isinstance(configured_chain, str):
+            if canonical_chain_name(configured_chain) != active_chain:
+                return set()
+        else:
+            configured_chains = config.get("chains")
+            if isinstance(configured_chains, list):
+                declared_chains = {canonical_chain_name(value) for value in configured_chains if isinstance(value, str)}
+                if len(declared_chains) != 1 or active_chain not in declared_chains:
+                    return set()
+    if not isinstance(funding, dict):
+        return set()
+    return {key for key in funding if isinstance(key, str)}
+
+
 def _extract_token_permissions(
     chain: str,
     config: dict[str, Any],
@@ -290,8 +333,9 @@ def _extract_token_permissions(
 
     Address-form references emit directly: the approve target IS the
     address, so no registry entry is required (dynamically-resolved tokens
-    included) and resolution only decorates the label. Symbol-form
-    references resolve through the static registry only
+    included) and resolution only decorates the label. Bare symbols from
+    ``anvil_funding`` are rejected; symbol-form references in the strategy's
+    other legacy token fields resolve through the static registry only
     (``skip_gateway=True``): the manifest must be deterministic, and a
     market-search-resolved address must never be baked into a Safe grant.
 
@@ -305,18 +349,29 @@ def _extract_token_permissions(
         if key in _TOKEN_CONFIG_FIELDS and isinstance(value, str) and value:
             token_refs.add(value)
 
-    # Scan anvil_funding keys (token symbols or addresses)
-    anvil_funding = config.get("anvil_funding", {})
-    if isinstance(anvil_funding, dict):
-        for token_key in anvil_funding:
-            if isinstance(token_key, str):
-                token_refs.add(token_key)
+    # Scan flat or active per-chain anvil_funding address keys. Native symbols
+    # are still accepted as the gas-asset exception and filtered below.
+    funding_refs = _anvil_funding_refs(config, chain)
+    token_refs.update(funding_refs)
 
     if not token_refs:
         return [], []
 
-    from ..data.tokens import get_token_resolver
-    from ..data.tokens.address_resolution import looks_like_evm_address
+    from almanak.core.chains._helpers import native_symbols_for
+    from almanak.framework.data.tokens import get_token_resolver
+    from almanak.framework.data.tokens.address_resolution import looks_like_evm_address
+
+    native_symbols = native_symbols_for(chain)
+    invalid_funding_symbols = sorted(
+        ref
+        for ref in funding_refs
+        if not looks_like_evm_address(ref.strip()) and ref.strip().upper() not in native_symbols
+    )
+    if invalid_funding_symbols:
+        raise PermissionGenerationError(
+            "anvil_funding ERC-20 keys must be exact contract addresses; bare symbols are not token identity: "
+            + ", ".join(invalid_funding_symbols)
+        )
 
     # Resolver construction failure propagates: it would drop EVERY token
     # approval at once, the worst case of the fail-open this function bans.
@@ -329,15 +384,21 @@ def _extract_token_permissions(
     for ref in sorted(token_refs):
         stripped = ref.strip()
 
+        if stripped.upper() in native_symbols:
+            warnings.append(
+                f"Config token '{ref}' is the native asset on {chain}: no ERC-20 approve permission emitted"
+            )
+            continue
+
         if looks_like_evm_address(stripped):
             entry = _address_form_entry(resolver, stripped, chain, warnings)
             if entry is not None:
                 permissions.append(entry)
             continue
 
-        # Symbol-form reference (legacy input shape; SDK 3.0 rejects bare
-        # symbols) — the static registry is the only trustworthy source of
-        # its address during permission generation.
+        # Symbol-form reference from a legacy non-funding config field — the
+        # static registry is the only trustworthy source of its address during
+        # permission generation.
         try:
             resolved = resolver.resolve(stripped, chain, log_errors=False, skip_gateway=True)
         except Exception:
@@ -360,7 +421,7 @@ def _extract_token_permissions(
             f"Cannot resolve config token(s) {unresolved_names} on {chain} to an address "
             "for the ERC-20 approve permission. An omitted approve target reverts unauthorized at "
             "execTransactionWithRole at runtime. Reference the token by its contract address in config "
-            "(symbols resolve through the static registry only during permission generation), or register "
+            "(legacy non-funding symbols resolve through the static registry only), or register "
             "the token in the static registry."
         )
         if strict:

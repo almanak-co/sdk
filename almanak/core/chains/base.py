@@ -91,6 +91,7 @@ DESCRIPTOR = register_chain(
                 "USDbC": "0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA",
                 "DAI": "0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb",
                 "wstETH": "0xc1CBa3fCea344f92D9239c08C0568f6F2F0ee452",
+                "cbBTC": "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf",
             },
             balance_slots={
                 "USDC": 9,
@@ -98,6 +99,13 @@ DESCRIPTOR = register_chain(
                 "USDbC": 9,
                 "DAI": 0,
                 "wstETH": 1,
+            },
+            # JitoSOL uses Solady's seeded balance layout rather than a
+            # standard Solidity mapping. The runtime recipe is keyed by the
+            # exact Base contract address; the seed comes from the verified
+            # CrossChainERC20 implementation's _BALANCE_SLOT_SEED constant.
+            balance_storage_seeds={
+                "0x97bE14Dd8f994A5364573BC035D85309E7CB34de": 0x87A211A2,
             },
             whale_funded_tokens={
                 "CBBTC": "0xBdb9300b7CDE636d9cD4AFF00f6F009fFBBc8EE6",

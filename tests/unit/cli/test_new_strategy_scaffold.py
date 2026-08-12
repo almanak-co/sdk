@@ -12,6 +12,8 @@ from almanak.core.models.quote_asset import QuoteAsset
 from almanak.framework.anvil.accounts import anvil_default_address
 from almanak.framework.cli.new_strategy import (
     StrategyTemplate,
+    _default_anvil_funding,
+    _static_token_address,
     generate_config_json,
     generate_dashboard_metadata,
     generate_dashboard_ui,
@@ -501,12 +503,18 @@ def test_copy_trader_config_uses_second_anvil_account_as_leader() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Mantle-specific anvil_funding config branch
+# Address-keyed anvil_funding config
 # ---------------------------------------------------------------------------
 
 
+def _funding_address(chain: str, symbol: str) -> str:
+    address = _static_token_address(chain, symbol)
+    assert address is not None
+    return address
+
+
 def test_generate_config_json_mantle_includes_anvil_funding() -> None:
-    """generate_config_json for Mantle includes MNT/WMNT/WETH anvil_funding entries."""
+    """Mantle keeps native MNT but emits ERC-20 contract addresses."""
     import json
 
     config_str = generate_config_json(
@@ -518,9 +526,9 @@ def test_generate_config_json_mantle_includes_anvil_funding() -> None:
     assert "anvil_funding" in config, "Mantle config must include anvil_funding"
     funding = config["anvil_funding"]
     assert funding.get("MNT") == 1000
-    assert funding.get("WMNT") == 10
-    assert funding.get("WETH") == 5
-    assert funding.get("USDC") == 10000
+    assert funding.get(_funding_address("mantle", "WMNT")) == 10
+    assert funding.get(_funding_address("mantle", "WETH")) == 5
+    assert funding.get(_funding_address("mantle", "USDC")) == 10000
 
 
 def test_generate_config_json_all_chains_include_anvil_funding() -> None:
@@ -537,8 +545,9 @@ def test_generate_config_json_all_chains_include_anvil_funding() -> None:
         assert "anvil_funding" in config, f"Chain {chain} must include anvil_funding"
         funding = config["anvil_funding"]
         assert funding.get("ETH") == 10, f"Chain {chain} must fund 10 ETH"
-        assert funding.get("WETH") == 5, f"Chain {chain} must fund 5 WETH"
-        assert funding.get("USDC") == 10000, f"Chain {chain} must fund 10000 USDC"
+        assert funding.get(_funding_address(chain, "WETH")) == 5, f"Chain {chain} must fund 5 WETH"
+        assert funding.get(_funding_address(chain, "USDC")) == 10000, f"Chain {chain} must fund 10000 USDC"
+        assert all(key == "ETH" or key.startswith("0x") for key in funding)
 
 
 def test_generate_config_json_bsc_uses_native_tokens() -> None:
@@ -553,9 +562,9 @@ def test_generate_config_json_bsc_uses_native_tokens() -> None:
     config = json.loads(config_str)
     funding = config["anvil_funding"]
     assert funding.get("BNB") == 10
-    assert funding.get("WBNB") == 5
-    assert funding.get("WETH") == 5
-    assert funding.get("USDC") == 10000
+    assert funding.get(_funding_address("bsc", "WBNB")) == 5
+    assert funding.get(_funding_address("bsc", "WETH")) == 5
+    assert funding.get(_funding_address("bsc", "USDC")) == 10000
 
 
 def test_generate_config_json_sonic_uses_native_tokens() -> None:
@@ -570,8 +579,8 @@ def test_generate_config_json_sonic_uses_native_tokens() -> None:
     config = json.loads(config_str)
     funding = config["anvil_funding"]
     assert funding.get("S") == 100
-    assert funding.get("WETH") == 5
-    assert funding.get("USDC") == 10000
+    assert funding.get(_funding_address("sonic", "WETH")) == 5
+    assert funding.get(_funding_address("sonic", "USDC")) == 10000
 
 
 def test_generate_config_json_avalanche_uses_native_tokens() -> None:
@@ -586,9 +595,9 @@ def test_generate_config_json_avalanche_uses_native_tokens() -> None:
     config = json.loads(config_str)
     funding = config["anvil_funding"]
     assert funding.get("AVAX") == 100
-    assert funding.get("WAVAX") == 10
-    assert funding.get("WETH") == 5
-    assert funding.get("USDC") == 10000
+    assert funding.get(_funding_address("avalanche", "WAVAX")) == 10
+    assert funding.get(_funding_address("avalanche", "WETH")) == 5
+    assert funding.get(_funding_address("avalanche", "USDC")) == 10000
 
 
 # ---------------------------------------------------------------------------
@@ -3444,7 +3453,7 @@ def test_scaffold_decide_carries_no_force_action_note(template: StrategyTemplate
 
 
 # ---------------------------------------------------------------------------
-# Token funding: token_funding carries real per-chain addresses from the token registry
+# Token funding: token_funding carries descriptor-owned per-chain addresses
 # ---------------------------------------------------------------------------
 
 _ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
@@ -3452,14 +3461,10 @@ _ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
 @pytest.mark.parametrize("chain", ["arbitrum", "base", "ethereum"])
 def test_config_json_token_funding_resolves_real_addresses(chain: str) -> None:
-    """token_funding addresses must come from the token registry, never 0x000…0.
+    """token_funding addresses must come from static chain data, never 0x000…0.
 
-    Asserted against the registry itself (not literals) so the test cannot
-    drift from the table it is meant to pin.
+    The scaffold does not invoke symbol resolution to produce these entries.
     """
-    from almanak.framework.data.tokens import get_token_resolver
-
-    resolver = get_token_resolver()
     cfg = json.loads(generate_config_json("Funding Probe", StrategyTemplate.PERPS, chain))
     token_funding = cfg["token_funding"]
     assert token_funding, "expected token_funding entries for a registry-known chain"
@@ -3468,10 +3473,17 @@ def test_config_json_token_funding_resolves_real_addresses(chain: str) -> None:
     assert symbols == {"WETH", "USDC"}
     for entry in token_funding:
         assert entry["address"] != _ZERO_ADDRESS
-        expected = resolver.resolve(entry["symbol"], chain, skip_gateway=True).address
-        assert entry["address"] == expected, (
-            f"{entry['symbol']} on {chain}: scaffold emitted {entry['address']}, registry says {expected}"
+        expected = _static_token_address(chain, entry["symbol"])
+        assert expected is not None
+        assert entry["address"].lower() == expected.lower(), (
+            f"{entry['symbol']} on {chain}: scaffold emitted {entry['address']}, chain data says {expected}"
         )
+
+
+@pytest.mark.parametrize("chain_ref", ["avax", "eip155:43114"])
+def test_default_anvil_funding_uses_canonical_chain_for_aliases(chain_ref: str) -> None:
+    """Aliases and CAIP-2 ids receive Avalanche's chain-specific funding spec."""
+    assert _default_anvil_funding(chain_ref) == _default_anvil_funding("avalanche")
 
 
 @pytest.mark.parametrize(
@@ -3567,39 +3579,32 @@ def test_slipstream_pool_tick_rejects_missing_quote_price() -> None:
         strat._pool_tick_for_price(_BadQuoteMarket(None), Decimal("3000"))
 
 
-def test_default_token_funding_degrades_on_unexpected_resolver_error(monkeypatch) -> None:
-    """A resolver failure that is NOT TokenResolutionError (e.g. ValueError from an
-    unsupported chain, or a helper bug) must omit the symbol, never crash the
-    scaffold (PR #3216 review)."""
+def test_default_token_funding_does_not_construct_symbol_resolver(monkeypatch) -> None:
+    """Address defaults are joined from static chain data without a resolver."""
     import almanak.framework.data.tokens as tokens_mod
     from almanak.framework.cli.new_strategy import _default_token_funding
 
-    class _BoomResolver:
-        def resolve(self, token, chain, *, log_errors=True, skip_gateway=False):
-            raise ValueError("unsupported chain")
+    def _unexpected_resolver():
+        raise AssertionError("scaffolding must not resolve token symbols")
 
-    monkeypatch.setattr(tokens_mod, "get_token_resolver", lambda: _BoomResolver())
-    assert _default_token_funding("arbitrum") == []
+    monkeypatch.setattr(tokens_mod, "get_token_resolver", _unexpected_resolver)
+    assert {entry["symbol"] for entry in _default_token_funding("arbitrum")} == {"WETH", "USDC"}
 
 
-@pytest.mark.parametrize("resolved", [None, "addressless"], ids=["none", "addressless"])
-def test_default_token_funding_omits_unmeasured_resolution(monkeypatch, resolved) -> None:
-    """Empty ≠ Zero: a resolver returning nothing, or a record without an address,
-    must omit the symbol -- never fabricate a placeholder (PR #3216 review)."""
-    import almanak.framework.data.tokens as tokens_mod
+@pytest.mark.parametrize(
+    ("chain", "label"),
+    [("not-a-chain", "USDC"), ("arbitrum", "NOT_A_TOKEN")],
+)
+def test_static_token_address_returns_none_for_unmeasured_identity(chain: str, label: str) -> None:
+    """Empty is preserved when static chain data cannot author an address."""
+    assert _static_token_address(chain, label) is None
+
+
+def test_default_token_funding_omits_unmeasured_static_identity() -> None:
+    """Empty ≠ Zero: unsupported static identities never fabricate addresses."""
     from almanak.framework.cli.new_strategy import _default_token_funding
 
-    class _Addressless:
-        address = None
-
-    payload = None if resolved is None else _Addressless()
-
-    class _Resolver:
-        def resolve(self, token, chain, *, log_errors=True, skip_gateway=False):
-            return payload
-
-    monkeypatch.setattr(tokens_mod, "get_token_resolver", lambda: _Resolver())
-    assert _default_token_funding("arbitrum") == []
+    assert _default_token_funding("not-a-chain") == []
 
 
 def test_new_strategy_cli_rejects_multi_step_slipstream(tmp_path: Path) -> None:

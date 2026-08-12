@@ -473,6 +473,10 @@ class AnvilProfile:
             Anvil funding (legacy ``fork_manager.TOKEN_ADDRESSES``).
         balance_slots: Display-cased symbol → ``balanceOf`` storage slot
             for slot-patch funding (legacy ``KNOWN_BALANCE_SLOTS``).
+        balance_storage_seeds: Exact ERC-20 address → Solady-style
+            ``balanceOf`` storage seed. These contracts derive the storage key
+            from ``keccak256(owner || padding || seed)`` rather than Solidity's
+            standard mapping layout, so the recipe is address-keyed directly.
         whale_funded_tokens: UPPERCASE symbol → whale address fallback for
             impersonation funding when slot-patching fails (legacy
             ``WHALE_FUNDED_TOKENS``).
@@ -488,12 +492,13 @@ class AnvilProfile:
 
     funding_tokens: Mapping[str, str] | None = None
     balance_slots: Mapping[str, int] | None = None
+    balance_storage_seeds: Mapping[str, int] | None = None
     whale_funded_tokens: Mapping[str, str] | None = None
     wrapped_native_deposit: bool = False
     block_gas_limit: int | None = None
 
     def __post_init__(self) -> None:
-        for attr in ("funding_tokens", "balance_slots", "whale_funded_tokens"):
+        for attr in ("funding_tokens", "balance_slots", "balance_storage_seeds", "whale_funded_tokens"):
             value = getattr(self, attr)
             if value is not None:
                 object.__setattr__(self, attr, MappingProxyType(dict(value)))

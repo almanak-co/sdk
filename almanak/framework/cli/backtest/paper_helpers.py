@@ -213,9 +213,24 @@ def load_funding_from_config(
             if anvil_funding:
                 if not isinstance(anvil_funding, dict):
                     raise ValueError(
-                        f"anvil_funding must be an object mapping TOKEN->AMOUNT, got {type(anvil_funding).__name__}"
+                        "anvil_funding must map an ERC-20 address or native gas symbol to an amount, "
+                        f"got {type(anvil_funding).__name__}"
                     )
                 click.echo(f"Found anvil_funding in config: {anvil_funding}", err=True)
+                # Managed multi-chain configs use {chain: {address: amount}}.
+                # Paper trading selects only the active chain's exact-address section.
+                if anvil_funding and all(isinstance(value, dict) for value in anvil_funding.values()):
+                    from almanak.core.constants import canonical_chain_name
+
+                    active_chain = canonical_chain_name(chain)
+                    matching_sections = [
+                        value
+                        for section_chain, value in anvil_funding.items()
+                        if isinstance(section_chain, str) and canonical_chain_name(section_chain) == active_chain
+                    ]
+                    if len(matching_sections) > 1:
+                        raise ValueError(f"anvil_funding defines duplicate alias sections for chain {chain!r}")
+                    anvil_funding = matching_sections[0] if matching_sections else {}
                 config_eth, config_tokens = parse_funding_dict(anvil_funding, native_symbols, "anvil_funding")
     except Exception as e:
         click.echo(

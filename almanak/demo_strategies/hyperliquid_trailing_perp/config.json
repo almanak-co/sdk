@@ -15,7 +15,7 @@
     "reenter_after_close": true,
     "force_action": "",
     "anvil_funding": {
-        "USDC": 100
+        "0xb88339cb7199b77e23db6e890353e22632ba630f": 100
     },
     "qa": {
         "sidecar_skip_ticket": "VIB-5576"

@@ -336,7 +336,7 @@ async def test_aave_v3_interest_accrues_with_time_advance(arbitrum_fork: Rolling
     wallet = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"  # Anvil default account
 
     # Step 1: Fund wallet with USDC
-    await arbitrum_fork.fund_tokens(wallet, {"USDC": Decimal("2000")})
+    await arbitrum_fork.fund_tokens(wallet, {USDC_ARBITRUM: Decimal("2000")})
     usdc_balance = await _get_balance(arbitrum_fork, USDC_ARBITRUM, wallet)
     assert usdc_balance >= SUPPLY_AMOUNT, f"USDC funding failed: balance={usdc_balance}"
     logger.info(f"Wallet funded with {usdc_balance / 1e6:.2f} USDC")
@@ -408,7 +408,9 @@ async def test_aave_v3_interest_accrues_with_time_advance(arbitrum_fork: Rolling
     # silently passing — if Aave V3 ever starts accepting zero-amount supplies.
     assert poke_status == 0, "supply(0) unexpectedly succeeded — Aave V3 no longer rejects zero amounts"
     # Capture the revert reason via eth_call for the spike evidence.
-    sim = await _rpc_full(arbitrum_fork, "eth_call", [{"from": wallet, "to": AAVE_V3_POOL_ARBITRUM, "data": poke_data}, "latest"])
+    sim = await _rpc_full(
+        arbitrum_fork, "eth_call", [{"from": wallet, "to": AAVE_V3_POOL_ARBITRUM, "data": poke_data}, "latest"]
+    )
     assert "error" in sim, "supply(0) eth_call no longer reports a revert"
     logger.info(f"supply(0) poke receipt status: {poke_status} (1=success, 0=reverted)")
     logger.info(f"supply(0) eth_call simulation: {sim.get('error', sim.get('result'))}")
@@ -438,8 +440,12 @@ async def test_aave_v3_interest_accrues_with_time_advance(arbitrum_fork: Rolling
 
     logger.info("SPIKE PASSED: Aave V3 accrues on an Anvil fork from the time advance alone.")
     logger.info(f"  Supply: {SUPPLY_AMOUNT / 1e6:.2f} USDC, duration 24h (simulated)")
-    logger.info(f"  Interest: {interest_earned / 1e6:.6f} USDC ({interest_pct:.4f}%/day, ~{interest_pct * 365:.2f}% APY)")
-    logger.info(f"  supply(0) poke status: {poke_status} — {'works' if poke_status == 1 else 'REVERTS; not a valid poke'}")
+    logger.info(
+        f"  Interest: {interest_earned / 1e6:.6f} USDC ({interest_pct:.4f}%/day, ~{interest_pct * 365:.2f}% APY)"
+    )
+    logger.info(
+        f"  supply(0) poke status: {poke_status} — {'works' if poke_status == 1 else 'REVERTS; not a valid poke'}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -464,7 +470,7 @@ async def test_compound_v3_interest_accrues_with_time_advance(arbitrum_fork: Rol
     wallet = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
 
     # Step 1: Fund USDC
-    await arbitrum_fork.fund_tokens(wallet, {"USDC": Decimal("2000")})
+    await arbitrum_fork.fund_tokens(wallet, {USDC_ARBITRUM: Decimal("2000")})
 
     # Step 2: Approve USDC for Compound V3
     approve_data = _encode_call(
@@ -486,9 +492,7 @@ async def test_compound_v3_interest_accrues_with_time_advance(arbitrum_fork: Rol
 
     # Step 4: Record initial balance and current supply rate
     balance_before = await _get_balance(arbitrum_fork, COMPOUND_V3_COMET_ARBITRUM, wallet)
-    assert balance_before > 0, (
-        "Compound V3 balanceOf is 0 after a successful supply — wrong Comet address?"
-    )
+    assert balance_before > 0, "Compound V3 balanceOf is 0 after a successful supply — wrong Comet address?"
     util_result = await _eth_call(arbitrum_fork, COMPOUND_V3_COMET_ARBITRUM, GET_UTILIZATION_SIG)
     assert util_result and util_result != "0x"
     utilization = int(util_result, 16)
@@ -569,7 +573,7 @@ async def test_aave_v3_eth_call_poke_vs_tx_poke(arbitrum_fork: RollingForkManage
     wallet = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
 
     # Fund and supply
-    await arbitrum_fork.fund_tokens(wallet, {"USDC": Decimal("2000")})
+    await arbitrum_fork.fund_tokens(wallet, {USDC_ARBITRUM: Decimal("2000")})
 
     # Approve max
     approve_data = _encode_call(
@@ -625,8 +629,7 @@ async def test_aave_v3_eth_call_poke_vs_tx_poke(arbitrum_fork: RollingForkManage
     # The balance must already have moved BEFORE any transaction: the view call
     # cannot mutate state, so this isolates the effect of the time advance.
     assert balance_after_view_poke > balance_after_supply, (
-        "aUSDC balance did not move after evm_increaseTime + evm_mine alone — "
-        "lazy index projection assumption broken"
+        "aUSDC balance did not move after evm_increaseTime + evm_mine alone — lazy index projection assumption broken"
     )
 
     view_only_accrual = balance_after_view_poke - balance_after_supply
@@ -679,7 +682,7 @@ async def test_morpho_blue_interest_accrual_ethereum(ethereum_fork: RollingForkM
     )
 
     # Step 1: Fund + approve + supply
-    await ethereum_fork.fund_tokens(wallet, {"USDC": Decimal("2000")})
+    await ethereum_fork.fund_tokens(wallet, {USDC_ETHEREUM: Decimal("2000")})
     usdc_balance = await _get_balance(ethereum_fork, USDC_ETHEREUM, wallet)
     assert usdc_balance >= SUPPLY_AMOUNT, f"USDC funding failed: balance={usdc_balance}"
 

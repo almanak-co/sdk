@@ -18,6 +18,11 @@ from almanak.gateway.managed import (
     is_port_in_use,
 )
 
+ARBITRUM_USDC = "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
+BSC_USDC = "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d"
+OPTIMISM_USDC = "0x0b2c639c533813f4aa9d7837caf62653d097ff85"
+JITOSOL_BASE = "0x97be14dd8f994a5364573bc035d85309e7cb34de"
+
 
 class TestIsPortInUse:
     """Tests for the is_port_in_use utility."""
@@ -728,7 +733,7 @@ class TestAnvilFundingNativeTokenWarning:
     @pytest.mark.asyncio
     async def test_eth_key_on_bsc_emits_warning(self):
         """Using 'ETH' in anvil_funding on BSC should log a warning."""
-        gw = self._make_gateway("bsc", {"ETH": 10, "USDC": 1000})
+        gw = self._make_gateway("bsc", {"ETH": 10, BSC_USDC: 1000})
 
         mock_manager = AsyncMock()
         mock_manager.fund_wallet = AsyncMock()
@@ -747,7 +752,7 @@ class TestAnvilFundingNativeTokenWarning:
     @pytest.mark.asyncio
     async def test_bnb_key_on_bsc_no_warning(self):
         """Using 'BNB' in anvil_funding on BSC should not warn."""
-        gw = self._make_gateway("bsc", {"BNB": 10, "USDC": 1000})
+        gw = self._make_gateway("bsc", {"BNB": 10, BSC_USDC: 1000})
 
         mock_manager = AsyncMock()
         mock_manager.fund_wallet = AsyncMock()
@@ -766,7 +771,7 @@ class TestAnvilFundingNativeTokenWarning:
     @pytest.mark.asyncio
     async def test_eth_key_on_arbitrum_no_warning(self):
         """Using 'ETH' in anvil_funding on Arbitrum (ETH-native) should not warn."""
-        gw = self._make_gateway("arbitrum", {"ETH": 1, "USDC": 1000})
+        gw = self._make_gateway("arbitrum", {"ETH": 1, ARBITRUM_USDC: 1000})
 
         mock_manager = AsyncMock()
         mock_manager.fund_wallet = AsyncMock()
@@ -845,7 +850,7 @@ class TestAnvilFundingDefaultNativeGas:
     @pytest.mark.asyncio
     async def test_funding_above_default_is_respected(self):
         """anvil_funding with a generous native amount -> not reduced."""
-        gw = self._make_gateway("optimism", anvil_funding={"ETH": 1000, "USDC": 5000})
+        gw = self._make_gateway("optimism", anvil_funding={"ETH": 1000, OPTIMISM_USDC: 5000})
 
         mock_manager = AsyncMock()
         mock_manager.fund_wallet = AsyncMock()
@@ -916,6 +921,94 @@ class TestAnvilFundingDefaultNativeGas:
         mock_manager.fund_wallet.assert_awaited_once()
         funded_amount = mock_manager.fund_wallet.await_args.args[1]
         assert funded_amount == ManagedGateway.DEFAULT_ANVIL_NATIVE_GAS_AMOUNT
+
+
+class TestAnvilFundingAddressIdentity:
+    """ALM-3255: managed ERC-20 funding is address-only and fail-loud."""
+
+    @staticmethod
+    def _gateway(anvil_funding: dict) -> ManagedGateway:
+        settings = GatewaySettings(
+            host="127.0.0.1",
+            port=59990,
+            rpc_url="http://localhost:8545",
+            chain="base",
+        )
+        gateway = ManagedGateway(settings, anvil_chains=["base"], anvil_funding=anvil_funding)
+        gateway._wallet_address = "0x" + "a" * 40
+        return gateway
+
+    @pytest.mark.asyncio
+    async def test_symbol_key_is_rejected_before_funding(self) -> None:
+        gateway = self._gateway({"ETH": 10, "JitoSOL": 10})
+        manager = AsyncMock()
+        gateway._anvil_managers["base"] = manager
+
+        with pytest.raises(ValueError, match="symbol, not a contract address"):
+            await gateway._fund_anvil_wallets()
+
+        manager.fund_wallet.assert_not_awaited()
+        manager.fund_tokens.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_exact_address_is_forwarded_and_false_result_aborts(self) -> None:
+        gateway = self._gateway({"ETH": 10, JITOSOL_BASE.upper().replace("0X", "0x"): 10})
+        manager = AsyncMock()
+        manager.fund_wallet = AsyncMock(return_value=True)
+        manager.fund_tokens = AsyncMock(return_value=False)
+        gateway._anvil_managers["base"] = manager
+
+        with pytest.raises(RuntimeError, match="refusing to start an under-funded fork"):
+            await gateway._fund_anvil_wallets()
+
+        manager.fund_tokens.assert_awaited_once_with(
+            gateway._wallet_address,
+            {JITOSOL_BASE: Decimal("10")},
+        )
+
+    @pytest.mark.asyncio
+    async def test_per_chain_sections_keep_contract_identity_chain_local(self) -> None:
+        gateway = self._gateway(
+            {
+                "base": {JITOSOL_BASE: 10},
+                "arbitrum": {ARBITRUM_USDC: 500},
+            }
+        )
+        gateway._anvil_chains = ["base", "arbitrum"]
+        base_manager = AsyncMock()
+        base_manager.fund_wallet = AsyncMock(return_value=True)
+        base_manager.fund_tokens = AsyncMock(return_value=True)
+        arbitrum_manager = AsyncMock()
+        arbitrum_manager.fund_wallet = AsyncMock(return_value=True)
+        arbitrum_manager.fund_tokens = AsyncMock(return_value=True)
+        gateway._anvil_managers = {"base": base_manager, "arbitrum": arbitrum_manager}
+
+        await gateway._fund_anvil_wallets()
+
+        base_manager.fund_tokens.assert_awaited_once_with(
+            gateway._wallet_address,
+            {JITOSOL_BASE: Decimal("10")},
+        )
+        arbitrum_manager.fund_tokens.assert_awaited_once_with(
+            gateway._wallet_address,
+            {ARBITRUM_USDC: Decimal("500")},
+        )
+
+    def test_per_chain_section_accepts_alias_and_caip_chain_refs(self) -> None:
+        gateway = self._gateway({"eip155:8453": {JITOSOL_BASE: 10}})
+
+        assert gateway._anvil_funding_for_chain("base") == {JITOSOL_BASE: 10}
+
+    def test_duplicate_alias_sections_remain_rejected(self) -> None:
+        gateway = self._gateway(
+            {
+                "base": {JITOSOL_BASE: 10},
+                "eip155:8453": {JITOSOL_BASE: 20},
+            }
+        )
+
+        with pytest.raises(ValueError, match="duplicate alias sections"):
+            gateway._anvil_funding_for_chain("base")
 
 
 class TestAnvilFundingPrivateKeyResolution:
@@ -1118,9 +1211,7 @@ class TestStartAnvilForksBranches:
         gw = self._make_gateway(["ethereum"])
         fake_env = {"ANVIL_ETHEREUM_PORT": "1111"}  # pre-existing value must be preserved
         manager = self._manager(start_ok=True)
-        rfm_cls, patches = self._patches(
-            fake_env, managers=[manager], free_ports=[7102], fork_block=123_456
-        )
+        rfm_cls, patches = self._patches(fake_env, managers=[manager], free_ports=[7102], fork_block=123_456)
         from contextlib import ExitStack
 
         with ExitStack() as stack:
@@ -1207,9 +1298,7 @@ class TestStartAnvilForksBranches:
         gw = self._make_gateway(["arbitrum"])
         fake_env: dict[str, str] = {}
         failed = self._manager(start_ok=False)
-        rfm_cls, patches = self._patches(
-            fake_env, managers=[failed], free_ports=[7101], public_rpc_urls={}
-        )
+        rfm_cls, patches = self._patches(fake_env, managers=[failed], free_ports=[7101], public_rpc_urls={})
         from contextlib import ExitStack
 
         with ExitStack() as stack:
@@ -1382,6 +1471,17 @@ class TestResetAnvilForks:
         with patch.object(gw, "_fund_anvil_wallets", AsyncMock()) as fund:
             assert gw.reset_anvil_forks() is False
         fund.assert_not_awaited()
+        assert gw._resetting_chains == set()
+
+    def test_funding_exception_returns_false_and_cleans_reset_guard(self, bg_loop):
+        gw = self._make_gateway()
+        manager = AsyncMock()
+        manager.reset_to_latest.return_value = True
+        gw._anvil_managers = {"arbitrum": manager}
+        gw._loop = bg_loop
+        with patch.object(gw, "_fund_anvil_wallets", AsyncMock(side_effect=RuntimeError("funding failed"))):
+            assert gw.reset_anvil_forks() is False
+        manager.reset_to_latest.assert_awaited_once()
         assert gw._resetting_chains == set()
 
     def test_timeout_returns_false(self, bg_loop):
