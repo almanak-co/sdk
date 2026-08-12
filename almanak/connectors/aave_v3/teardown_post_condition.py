@@ -73,18 +73,6 @@ def aave_v3_teardown_post_condition(
     block: int | str | None = None,
 ) -> ClosureCheckResult:
     """Verify one Aave reserve leg is flat at the pinned chain block."""
-    raw_type = getattr(position, "position_type", None)
-    position_type = (getattr(raw_type, "value", None) or str(raw_type or "")).upper()
-    # Connector-local until ALM-3224 generalizes this handoff across lending
-    # hooks. An absent/malformed type must remain loud and unmeasured below.
-    if position_type and position_type not in {"SUPPLY", "BORROW"}:
-        return ClosureCheckResult(
-            closed=True,
-            not_applicable=True,
-            protocol=str(getattr(position, "protocol", "") or "aave_v3").lower(),
-            position_id=str(getattr(position, "position_id", "") or ""),
-            residual={"skipped_reason": f"Aave lending closure does not apply to {position_type!r}"},
-        )
     return verify_lending_closure(
         position,
         wallet_address,

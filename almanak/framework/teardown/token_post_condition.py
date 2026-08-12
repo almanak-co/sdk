@@ -278,6 +278,15 @@ def token_balance_teardown_post_condition(
     except (TypeError, ValueError):
         balance = None
     if balance is None:
+        logger.error(
+            "TOKEN post-condition balance read returned None/non-numeric after retries: "
+            "protocol=%s token=%s wallet=%s "
+            "block=%s; closure remains unmeasured",
+            protocol,
+            token_address,
+            wallet,
+            block,
+        )
         return ClosureCheckResult(
             closed=False,
             unmeasured=True,

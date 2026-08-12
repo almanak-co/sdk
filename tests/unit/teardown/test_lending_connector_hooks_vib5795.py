@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from almanak.connectors.aave_v3.addresses import AAVE_V3, AAVE_V3_TOKENS
 from almanak.connectors.aave_v3.lending_read import LENDING_READ_SPEC
 from almanak.connectors.aave_v3.teardown_post_condition import aave_v3_teardown_post_condition
@@ -39,6 +41,51 @@ def _pos(protocol, position_type, chain, asset, position_id=None):
         position_type=position_type,
         details={"asset": asset, "type": "collateral" if position_type == "SUPPLY" else "borrow"},
     )
+
+
+_LENDING_HOOKS = (
+    ("aave_v3", aave_v3_teardown_post_condition),
+    ("euler_v2", euler_v2_teardown_post_condition),
+    ("silo_v2", silo_v2_teardown_post_condition),
+    ("benqi", benqi_teardown_post_condition),
+)
+
+
+@pytest.mark.parametrize(("protocol", "hook"), _LENDING_HOOKS)
+def test_token_is_not_applicable_for_every_real_lending_hook(protocol, hook):
+    """Every manifest hook reaches the shared TOKEN handoff before market guards."""
+    position = SimpleNamespace(
+        protocol=protocol,
+        position_id=f"{protocol}-wallet-token",
+        chain=None,
+        position_type="TOKEN",
+        details={},
+    )
+
+    result = hook(position, _WALLET, gateway_client=None, block=777)
+
+    assert result.closed is True
+    assert result.not_applicable is True
+    assert result.unmeasured is False
+
+
+@pytest.mark.parametrize(("protocol", "hook"), _LENDING_HOOKS)
+@pytest.mark.parametrize("position_type", [None, "", "LP", "GARBAGE"])
+def test_malformed_type_is_unmeasured_for_every_real_lending_hook(protocol, hook, position_type):
+    """Aave and the pre-existing hooks share the same fail-closed discriminator."""
+    position = SimpleNamespace(
+        protocol=protocol,
+        position_id=f"{protocol}-malformed",
+        chain="avalanche",
+        position_type=position_type,
+        details={"asset": "USDC"},
+    )
+
+    result = hook(position, _WALLET, gateway_client=None, block=777)
+
+    assert result.closed is False
+    assert result.unmeasured is True
+    assert result.not_applicable is False
 
 
 class _ScriptedGateway:

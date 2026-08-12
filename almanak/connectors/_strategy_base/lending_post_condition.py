@@ -31,9 +31,11 @@ supply-only shares read on the BORROW row would report "no shares → closed" an
 green-light a teardown that left live debt — a false ``CHAIN_VERIFIED`` on a
 position that can be liquidated. This template therefore routes SUPPLY rows to
 the connector's supply-residual reader and BORROW rows to its debt-residual
-reader, and treats ANY other ``position_type`` as ``unmeasured`` (never a
-silent closed=True skip: lending slugs never legitimately emit other types, and
-a silent skip is a false-green vector).
+reader. A TOKEN row is structurally outside the lending hook and returns
+``not_applicable`` so the framework's PositionType authority can perform its
+pinned-block ERC-20 balance read. Every other type — including absent or
+malformed values — remains ``unmeasured``; schema drift must never become a
+silent handoff or a false-green proof.
 
 Positions carry symbols, not addresses
 --------------------------------------
@@ -195,13 +197,53 @@ def verify_lending_closure(
     """Shared TD-14 closure check for a lending ``PositionInfo``.
 
     Dispatches on ``position.position_type``: SUPPLY → ``read_supply``,
-    BORROW → ``read_debt``, anything else → unmeasured. A reader returning
-    ``None`` is unmeasured (→ UNVERIFIED at the seam), a value ≤
+    BORROW → ``read_debt``, TOKEN → ``not_applicable`` so the framework's
+    PositionType authority can run, and anything else → unmeasured. A reader
+    returning ``None`` is unmeasured (→ UNVERIFIED at the seam), a value ≤
     ``_LENDING_ASSET_DUST_WEI`` is closed, and a larger value is a MEASURED
     residual (→ FAILED at the seam). Never raises.
     """
     protocol = (getattr(position, "protocol", "") or "").lower() or "lending"
     position_id = str(getattr(position, "position_id", "") or "")
+
+    # Classify before every lending-only guard. TOKEN rows can legitimately
+    # omit a lending market symbol (and the type authority, not this hook, owns
+    # their gateway requirement), so validating chain/gateway/details first
+    # would trap a structurally valid handoff as UNMEASURED. Accept only an
+    # actual string or a string-valued enum; arbitrary objects must not become
+    # TOKEN merely because their __str__ happens to say so.
+    raw_position_type = getattr(position, "position_type", None)
+    enum_value = getattr(raw_position_type, "value", None)
+    if isinstance(enum_value, str):
+        position_type = enum_value.upper()
+    elif isinstance(raw_position_type, str):
+        position_type = raw_position_type.upper()
+    else:
+        position_type = ""
+
+    if position_type == "SUPPLY":
+        leg, reader = "supply", read_supply
+    elif position_type == "BORROW":
+        leg, reader = "debt", read_debt
+    elif position_type == "TOKEN":
+        return ClosureCheckResult(
+            closed=True,
+            not_applicable=True,
+            protocol=protocol,
+            position_id=position_id,
+            residual={"skipped_reason": "lending closure does not apply to PositionType.TOKEN"},
+        )
+    else:
+        return ClosureCheckResult(
+            closed=False,
+            unmeasured=True,
+            protocol=protocol,
+            position_id=position_id,
+            error=(
+                f"{protocol} post-condition has no closure read for "
+                f"position_type={raw_position_type!r} — cannot verify (unmeasured)"
+            ),
+        )
 
     chain = getattr(position, "chain", None) or ""
     if not chain:
@@ -259,29 +301,6 @@ def verify_lending_closure(
         resolved = resolve_swap_token_symbol(asset, chain)
         if resolved and not resolved.lower().startswith("0x"):
             asset = resolved
-
-    # PositionType is a StrEnum, so plain string comparison is exact; the
-    # string form also keeps this connector-layer module free of framework
-    # imports (framework → connector is the only allowed direction).
-    position_type = str(getattr(position, "position_type", "") or "").upper()
-    if position_type == "SUPPLY":
-        leg, reader = "supply", read_supply
-    elif position_type == "BORROW":
-        leg, reader = "debt", read_debt
-    else:
-        # NOT a silent closed=True skip — lending slugs never legitimately
-        # emit other position types, and a silent skip is a false-green vector.
-        return ClosureCheckResult(
-            closed=False,
-            unmeasured=True,
-            protocol=protocol,
-            position_id=position_id,
-            error=(
-                f"{protocol} post-condition has no closure read for "
-                f"position_type={position_type!r} (chain={chain}, asset={asset}) — "
-                "cannot verify (unmeasured)"
-            ),
-        )
 
     try:
         residual = reader(gateway_client, chain, asset, wallet_address, block)

@@ -20,6 +20,11 @@ from almanak.connectors._strategy_base.teardown_post_condition import (
     _register_teardown_post_condition,
 )
 from almanak.framework.teardown.models import VerificationStatus
+from almanak.framework.teardown.plan_a_reconciliation import (
+    PositionReconciliation,
+    ReconciliationReport,
+    ReconciliationVerdict,
+)
 from almanak.framework.teardown.post_conditions import (
     ClosureCheckResult,
     get_teardown_post_condition,
@@ -56,34 +61,177 @@ def _make_strategy(open_positions: list | None = None) -> MagicMock:
     return strategy
 
 
-def test_aave_token_position_reaches_the_position_type_balance_authority():
-    token = "0x" + "22" * 20
-    wallet = "0x" + "11" * 20
-    gateway = MagicMock()
-    gateway.query_erc20_balance.return_value = 0
-    position = SimpleNamespace(
-        protocol="aave_v3",
+_LENDING_PROTOCOLS = ("aave_v3", "euler_v2", "silo_v2", "benqi")
+_TOKEN = "0x" + "22" * 20
+_WALLET = "0x" + "11" * 20
+
+
+class _TokenGateway:
+    """Gateway-only TOKEN reader that makes lending-reader use a hard failure."""
+
+    def __init__(self, balance):
+        self.balance = balance
+        self.balance_calls: list[dict] = []
+        self.eth_calls: list[dict] = []
+
+    def query_erc20_balance(self, **kwargs):
+        self.balance_calls.append(kwargs)
+        return self.balance
+
+    def eth_call(self, **kwargs):
+        self.eth_calls.append(kwargs)
+        raise AssertionError("a TOKEN row must not reach a lending eth_call")
+
+
+def _lending_token_position(protocol: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        protocol=protocol,
         position_type="TOKEN",
-        position_id=token,
-        chain="arbitrum",
-        details={"token_address": token},
+        position_id=_TOKEN,
+        chain="arbitrum" if protocol == "aave_v3" else "avalanche",
+        details={"token_address": _TOKEN},
+    )
+
+
+@pytest.mark.parametrize("protocol", _LENDING_PROTOCOLS)
+def test_lending_token_position_reaches_the_position_type_balance_authority(protocol):
+    """Real manifest dispatch: every lending hook delegates TOKEN exactly once."""
+    gateway = _TokenGateway(0)
+    position = SimpleNamespace(
+        **vars(_lending_token_position(protocol)),
     )
 
     result = _resolve_and_run_post_condition(
         position,
-        wallet_address=wallet,
+        wallet_address=_WALLET,
         gateway_client=gateway,
         rpc_url=None,
         block=777,
     )
 
     assert result is not None and result.closed is True and result.not_applicable is False
-    gateway.query_erc20_balance.assert_called_once_with(
-        chain="arbitrum",
-        token_address=token,
-        wallet_address=wallet,
-        block=777,
+    assert gateway.balance_calls == [
+        {
+            "chain": position.chain,
+            "token_address": _TOKEN,
+            "wallet_address": _WALLET,
+            "block": 777,
+        }
+    ]
+    assert gateway.eth_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("protocol", _LENDING_PROTOCOLS)
+@pytest.mark.parametrize(
+    ("balance", "expected_status", "expected_closed"),
+    [
+        (0, VerificationStatus.CHAIN_VERIFIED, True),
+        (10**18, VerificationStatus.FAILED, False),
+        (None, VerificationStatus.UNVERIFIED, True),
+    ],
+)
+async def test_lending_token_verdicts_use_only_measured_balance_evidence(
+    protocol, balance, expected_status, expected_closed, caplog
+):
+    """Zero proves closure; residual fails; a read fault never fabricates either."""
+    gateway = _TokenGateway(balance)
+    mgr = TeardownManager()
+    mgr.compiler = SimpleNamespace(gateway_client=gateway)
+    strategy = _make_strategy(open_positions=[])
+    strategy.wallet_address = _WALLET
+    caplog.set_level("ERROR", logger="almanak.framework.teardown.token_post_condition")
+
+    detailed = await mgr._verify_closure_detailed(
+        strategy=strategy,
+        pre_execution_positions=_make_position_snapshot(_lending_token_position(protocol)),
+        close_receipt_block=888,
     )
+
+    assert detailed.all_closed is expected_closed
+    assert detailed.verification_status is expected_status
+    expected_key = ((protocol, _lending_token_position(protocol).chain, _TOKEN.lower()),)
+    assert detailed.hook_proven_position_keys == (expected_key if balance == 0 else ())
+    assert gateway.balance_calls
+    assert {call["block"] for call in gateway.balance_calls} == {888}
+    assert gateway.eth_calls == []
+    error_messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelname == "ERROR" and record.name == "almanak.framework.teardown.token_post_condition"
+    ]
+    if balance is None:
+        assert any(
+                "TOKEN post-condition balance read returned None/non-numeric after retries" in message
+            and f"protocol={protocol}" in message
+            and "block=888" in message
+            for message in error_messages
+        )
+    else:
+        assert error_messages == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("balance", "expected_status", "expected_closed", "expected_unknown"),
+    [
+        (0, VerificationStatus.CHAIN_VERIFIED, True, False),
+        (None, VerificationStatus.UNVERIFIED, True, True),
+        (10**18, VerificationStatus.FAILED, False, False),
+    ],
+)
+async def test_lending_token_td15_ratchet_uses_measurement_not_handoff(
+    monkeypatch, balance, expected_status, expected_closed, expected_unknown
+):
+    """The lending N/A result is inert; only the TOKEN read can certify or fail."""
+    protocol = "euler_v2"
+    position = _lending_token_position(protocol)
+    gateway = _TokenGateway(balance)
+    mgr = TeardownManager()
+    mgr.compiler = SimpleNamespace(gateway_client=gateway)
+    strategy = _make_strategy(open_positions=[])
+    strategy.wallet_address = _WALLET
+    strategy.deployment_id = "deployment:alm3224"
+    strategy._gateway_network = position.chain
+    snapshot = _make_position_snapshot(position)
+
+    td14 = await mgr._verify_closure_detailed(
+        strategy=strategy,
+        pre_execution_positions=snapshot,
+        close_receipt_block=888,
+    )
+
+    async def _unverifiable_token_reconciliation(**_kwargs):
+        return ReconciliationReport(
+            deployment_id=strategy.deployment_id,
+            entries=(
+                PositionReconciliation(
+                    position_type="PositionType.TOKEN",
+                    position_id=_TOKEN,
+                    chain=position.chain,
+                    protocol=protocol,
+                    verdict=ReconciliationVerdict.UNVERIFIABLE,
+                    detail="scripted TD-15 read fault",
+                ),
+            ),
+        )
+
+    monkeypatch.setattr(
+        "almanak.framework.teardown.teardown_manager.reconcile_known_positions_against_chain",
+        _unverifiable_token_reconciliation,
+    )
+    monkeypatch.setattr(mgr, "_fresh_post_execution_market", lambda strategy, market: MagicMock())
+
+    final = await mgr.verify_closure_against_chain(
+        strategy,
+        verification=td14,
+        pre_execution_positions=snapshot,
+        market=None,
+    )
+
+    assert final.all_closed is expected_closed
+    assert final.verification_status is expected_status
+    assert final.closure_unknown is expected_unknown
 
 
 @pytest.mark.asyncio

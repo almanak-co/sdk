@@ -49,7 +49,7 @@ def reference_market_status(pair: str, *, as_of: datetime | None = None) -> Mark
     try:
         # Lazy import keeps the substantial pandas calendar registry off the
         # normal gateway startup path; only reference-price users pay the load.
-        import pandas_market_calendars as mcal  # type: ignore[import-untyped]
+        import pandas_market_calendars as mcal
 
         calendar = mcal.get_calendar(calendar_name)
         schedule = calendar.schedule(

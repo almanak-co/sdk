@@ -79,6 +79,46 @@ class TestCombineLegReads:
 
 
 class TestVerifyLendingClosureGuards:
+    def test_token_handoff_precedes_every_lending_only_guard(self):
+        """TOKEN is structurally out of scope even without lending metadata.
+
+        The framework PositionType authority owns the gateway and token-address
+        requirements after this handoff. Checking chain, gateway, or asset here
+        first would incorrectly trap a valid TOKEN row as UNMEASURED.
+        """
+        supply_reader, debt_reader = _reader(0), _reader(0)
+        position = _position(position_type="TOKEN", chain=None, details={})
+
+        result = verify_lending_closure(
+            position,
+            _WALLET,
+            None,
+            777,
+            read_supply=supply_reader,
+            read_debt=debt_reader,
+        )
+
+        assert result.closed is True
+        assert result.not_applicable is True
+        assert result.unmeasured is False
+        assert supply_reader.calls == []
+        assert debt_reader.calls == []
+
+    def test_string_valued_position_type_enum_is_supported(self):
+        position = _position(position_type="TOKEN", chain=None, details={})
+        position.position_type = SimpleNamespace(value="token")
+
+        result = verify_lending_closure(
+            position,
+            _WALLET,
+            None,
+            None,
+            read_supply=_reader(0),
+            read_debt=_reader(0),
+        )
+
+        assert result.not_applicable is True
+
     def test_missing_chain_is_unmeasured(self):
         result = verify_lending_closure(
             _position(chain=None),
@@ -132,20 +172,23 @@ class TestVerifyLendingClosureGuards:
             assert result.unmeasured is True, details
             assert result.error and "asset" in result.error
 
-    def test_unknown_position_type_is_unmeasured_not_silently_closed(self):
-        # NOT the closed=True skip: an unexpected type on a lending slug is a
-        # false-green vector if waved through.
-        result = verify_lending_closure(
-            _position(position_type="LP"),
-            _WALLET,
-            object(),
-            None,
-            read_supply=_reader(0),
-            read_debt=_reader(0),
-        )
-        assert result.unmeasured is True
-        assert result.closed is False
-        assert result.error and "LP" in result.error
+    def test_absent_malformed_and_unknown_position_types_remain_unmeasured(self):
+        """Only the exact TOKEN type may hand off; schema drift fails closed."""
+        for position_type in (None, "", "LP", "GARBAGE", 42, object(), SimpleNamespace(value=42)):
+            position = _position(position_type="SUPPLY")
+            position.position_type = position_type
+            result = verify_lending_closure(
+                position,
+                _WALLET,
+                object(),
+                None,
+                read_supply=_reader(0),
+                read_debt=_reader(0),
+            )
+            assert result.unmeasured is True, position_type
+            assert result.closed is False, position_type
+            assert result.not_applicable is False, position_type
+            assert result.error and "position_type" in result.error
 
     def test_registry_asset_symbol_is_measured_without_weakening_explicit_asset(self):
         supply_reader = _reader(0)

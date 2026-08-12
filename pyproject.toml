@@ -431,6 +431,7 @@ module = [
     "asyncpg.*",
     "tqdm.*",
     "pandas.*",
+    "pandas_market_calendars.*",
     "matplotlib.*",
     "structlog.*",
     "simple_term_menu.*",
