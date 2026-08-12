@@ -763,11 +763,12 @@ class CompilerQueries:
         - "TOKEN0/TOKEN1" (defaults to 3000 fee tier)
         - "0xTOKEN0/0xTOKEN1/FEE" (raw token addresses also work)
 
-        Bare pool addresses ("0x..." with no "/") are NOT supported. Resolving a
-        pool address to its token pair requires an on-chain lookup (calling the
-        pool contract's token0()/token1()/fee() view functions), which this
-        compiler doesn't currently implement. Use the TOKEN0/TOKEN1/FEE format
-        instead.
+        This generic, offline parser does not resolve bare pool addresses. The
+        Uniswap V3 connector intercepts an address-bound LP intent before this
+        method and resolves token0()/token1()/fee() through the gateway, then
+        authenticates the tuple against the registered factory. Other connector
+        families must implement an equivalent connector-owned resolver before
+        accepting a bare address; they must not infer a placeholder pair here.
 
         Args:
             pool: Pool identifier string
@@ -785,10 +786,9 @@ class CompilerQueries:
         # The previous behavior here silently substituted WETH/USDC as a
         # placeholder pair, which would compile a working LP intent against the
         # WRONG pool and only fail on-chain (or worse, succeed in a different
-        # pool entirely -- silent data corruption with real-money risk). Until
-        # we implement an on-chain pool resolver that calls the pool contract's
-        # token0()/token1()/fee() view functions, this path must fail hard.
-        # See compiler.py:_parse_pool_info docstring for supported formats.
+        # pool entirely -- silent data corruption with real-money risk). The
+        # Uniswap V3 connector owns its gateway-routed exact-address path;
+        # reaching this generic parser with a bare address remains a hard error.
         if pool.startswith("0x") and "/" not in pool:
             logger.error(
                 "Bare pool address '%s' is not supported by the LP compiler. "

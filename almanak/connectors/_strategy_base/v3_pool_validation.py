@@ -43,8 +43,11 @@ if TYPE_CHECKING:
 __all__ = [
     "V3_GET_POOL_SELECTOR",
     "V3PoolBinding",
+    "V3PositionBinding",
+    "V3PositionBindingReadError",
     "fetch_v3_pool_sqrt_price_x96",
     "read_v3_pool_binding",
+    "read_v3_position_binding",
     "validate_v3_pool",
 ]
 
@@ -142,6 +145,63 @@ class V3PoolBinding:
     token0: str
     token1: str
     fee_tier: int
+
+
+@dataclass(frozen=True)
+class V3PositionBinding:
+    """Pool identity recorded by a V3 NonfungiblePositionManager NFT."""
+
+    token0: str
+    token1: str
+    fee_tier: int
+
+
+class V3PositionBindingReadError(RuntimeError):
+    """The position binding could not be measured from the configured RPC boundary."""
+
+
+def read_v3_position_binding(
+    position_manager: str,
+    token_id: int,
+    rpc_url: str | None,
+    *,
+    chain: str | None = None,
+    gateway_client: GatewayClient | None = None,
+) -> V3PositionBinding | None:
+    """Read the pair and fee bound to one V3 position NFT.
+
+    ``positions(uint256)`` returns token0/token1/fee at tuple indexes 2/3/4.
+    An empty or malformed successful response returns ``None``. Transport,
+    gateway, and contract-call failures raise :class:`V3PositionBindingReadError`
+    so callers never misreport an unavailable read as a burned NFT.
+    """
+    selector = "0x99fbab88"  # positions(uint256)
+    calldata = selector + token_id.to_bytes(32, "big").hex()
+    try:
+        raw = eth_call(
+            rpc_url or "",
+            position_manager,
+            calldata,
+            chain=chain,
+            gateway_client=gateway_client,
+            raise_errors=True,
+            gateway_raise_on_error=True,
+        )
+    except ValueError as exc:
+        raise V3PositionBindingReadError(
+            f"positions({token_id}) read unavailable for {position_manager} on {chain or 'unknown chain'}"
+        ) from exc
+    if raw is None or len(raw) < 5 * 32:
+        return None
+
+    token0 = decode_address(raw[2 * 32 : 3 * 32])
+    token1 = decode_address(raw[3 * 32 : 4 * 32])
+    fee_tier = int.from_bytes(raw[4 * 32 : 5 * 32], "big")
+    if token0 == ZERO_ADDRESS or token1 == ZERO_ADDRESS:
+        return None
+    if fee_tier <= 0 or fee_tier > _MAX_SANE_FEE:
+        return None
+    return V3PositionBinding(token0=token0, token1=token1, fee_tier=fee_tier)
 
 
 def read_v3_pool_binding(

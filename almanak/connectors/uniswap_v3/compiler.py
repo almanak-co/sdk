@@ -273,17 +273,32 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
                 resolved_pool
             )
 
-            from almanak.connectors.uniswap_v3.pool_validation import validate_v3_pool
+            if self._looks_like_bare_address(intent.pool):
+                # _resolve_exact_lp_pool already performed the authoritative
+                # factory round-trip. Preserve that exact address for slot0 and
+                # metadata without issuing a duplicate factory read.
+                from almanak.connectors._strategy_base.pool_validation_base import (
+                    PoolValidationReason,
+                    PoolValidationResult,
+                )
 
-            pool_check = validate_v3_pool(
-                ctx.chain,
-                protocol,
-                token0_info.address,
-                token1_info.address,
-                fee_tier,
-                ctx.rpc_url,
-                gateway_client=ctx.gateway_client,
-            )
+                pool_check = PoolValidationResult(
+                    exists=True,
+                    reason=PoolValidationReason.CONFIRMED,
+                    pool_address=intent.pool,
+                )
+            else:
+                from almanak.connectors.uniswap_v3.pool_validation import validate_v3_pool
+
+                pool_check = validate_v3_pool(
+                    ctx.chain,
+                    protocol,
+                    token0_info.address,
+                    token1_info.address,
+                    fee_tier,
+                    ctx.rpc_url,
+                    gateway_client=ctx.gateway_client,
+                )
             failed = ctx.services.validate_pool(pool_check, intent.intent_id)
             if failed is not None:
                 return failed
@@ -538,6 +553,19 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
                 return state_or_fail
             liquidity, position_has_activity = state_or_fail
 
+            no_op = liquidity == 0 and not position_has_activity
+            if not no_op and intent.pool is not None and self._looks_like_bare_address(intent.pool):
+                identity_failure = self._validate_exact_lp_close_identity(
+                    ctx=ctx,
+                    protocol=protocol,
+                    pool_address=intent.pool,
+                    position_manager=position_manager,
+                    token_id=token_id,
+                    intent_id=intent.intent_id,
+                )
+                if identity_failure is not None:
+                    return identity_failure
+
             self._extend_lp_close_transactions(
                 ctx=ctx,
                 transactions=transactions,
@@ -590,6 +618,74 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
             result.status = CompilationStatus.FAILED
             result.error = str(e)
         return result
+
+    @staticmethod
+    def _validate_exact_lp_close_identity(
+        *,
+        ctx: CLCompilerContext,
+        protocol: str,
+        pool_address: str,
+        position_manager: str,
+        token_id: int,
+        intent_id: str,
+    ) -> CompilationResult | None:
+        """Require an address-bound close NFT to belong to that exact pool."""
+        exact = UniswapV3Compiler._resolve_exact_lp_pool(
+            ctx=ctx,
+            protocol=protocol,
+            pool_address=pool_address,
+            intent_id=intent_id,
+        )
+        if isinstance(exact, CompilationResult):
+            return exact
+        token0_info, token1_info, fee_tier = exact
+
+        from almanak.connectors.uniswap_v3.pool_validation import (
+            V3PositionBindingReadError,
+            read_v3_position_binding,
+        )
+
+        internal_rpc = ctx.rpc_url if ctx.gateway_internal_preflight else None
+        try:
+            position = read_v3_position_binding(
+                position_manager,
+                token_id,
+                internal_rpc,
+                chain=ctx.chain,
+                gateway_client=ctx.gateway_client,
+            )
+        except V3PositionBindingReadError:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"Cannot verify position #{token_id} against exact LP pool {pool_address}: "
+                    "positions(tokenId) read is unavailable."
+                ),
+                intent_id=intent_id,
+            )
+        if position is None:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"Cannot verify position #{token_id} against exact LP pool {pool_address}: "
+                    "positions(tokenId) returned an empty or malformed position."
+                ),
+                intent_id=intent_id,
+            )
+
+        expected = (token0_info.address.lower(), token1_info.address.lower(), fee_tier)
+        actual = (position.token0.lower(), position.token1.lower(), position.fee_tier)
+        if actual != expected:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"Position #{token_id} belongs to {position.token0}/{position.token1} "
+                    f"fee {position.fee_tier}, not exact LP pool {pool_address} "
+                    f"({token0_info.address}/{token1_info.address} fee {fee_tier})."
+                ),
+                intent_id=intent_id,
+            )
+        return None
 
     def compile_collect_fees(self, ctx: CLCompilerContext, intent: CollectFeesIntent) -> CompilationResult:
         protocol = self._protocol(ctx, intent.protocol)
@@ -1063,6 +1159,30 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
     def _resolve_lp_pool_and_amounts(
         ctx: CLCompilerContext, intent: LPOpenIntent
     ) -> tuple[TokenInfo, TokenInfo, int, Decimal, Decimal, Decimal, Decimal, bool] | CompilationResult:
+        if UniswapV3Compiler._looks_like_bare_address(intent.pool):
+            exact = UniswapV3Compiler._resolve_exact_lp_pool(
+                ctx=ctx,
+                protocol=UniswapV3Compiler._protocol(ctx, intent.protocol),
+                pool_address=intent.pool,
+                intent_id=intent.intent_id,
+            )
+            if isinstance(exact, CompilationResult):
+                return exact
+            token0_info, token1_info, fee_tier = exact
+            # For an address-bound pool the contract's canonical token0/token1
+            # order defines amount0/amount1 and the token1-per-token0 price band.
+            # There is no user-supplied pair orientation to invert.
+            return (
+                token0_info,
+                token1_info,
+                fee_tier,
+                intent.range_lower,
+                intent.range_upper,
+                intent.amount0,
+                intent.amount1,
+                False,
+            )
+
         pool_info = ctx.services.parse_pool_info(intent.pool)
         if pool_info is None:
             return CompilationResult(
@@ -1096,6 +1216,111 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
             amount1,
             tokens_swapped,
         )
+
+    @staticmethod
+    def _looks_like_bare_address(pool: str) -> bool:
+        return isinstance(pool, str) and pool.lower().startswith("0x") and "/" not in pool
+
+    @staticmethod
+    def _resolve_exact_lp_pool(
+        *,
+        ctx: CLCompilerContext,
+        protocol: str,
+        pool_address: str,
+        intent_id: str,
+    ) -> tuple[TokenInfo, TokenInfo, int] | CompilationResult:
+        """Resolve and authenticate a public exact-address V3 LP pool.
+
+        The address is authoritative: the compiler reads its pair and fee, then
+        asks the connector's registered factory for that exact tuple and
+        requires the factory to return the same address. No symbol inference,
+        fee auto-selection, or alternate-pool substitution is permitted.
+        """
+        from eth_utils import is_address
+
+        if not is_address(pool_address):
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Invalid exact LP pool address: {pool_address}",
+                intent_id=intent_id,
+            )
+
+        gateway_connected = ctx.gateway_client is not None and bool(getattr(ctx.gateway_client, "is_connected", False))
+        if not gateway_connected and not ctx.gateway_internal_preflight:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"Cannot resolve exact LP pool {pool_address} on {ctx.chain}: "
+                    "a connected gateway is required for token0()/token1()/fee() reads."
+                ),
+                intent_id=intent_id,
+            )
+
+        from almanak.connectors.uniswap_v3.pool_validation import read_v3_pool_binding, validate_v3_pool
+
+        # Direct RPC is permitted only while compiling inside the gateway
+        # process. Strategy/framework callers must cross the gateway channel.
+        internal_rpc = ctx.rpc_url if ctx.gateway_internal_preflight else None
+        binding = read_v3_pool_binding(
+            pool_address,
+            internal_rpc,
+            chain=ctx.chain,
+            gateway_client=ctx.gateway_client,
+        )
+        if binding is None:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"Cannot resolve exact LP pool {pool_address} on {ctx.chain}: "
+                    "token0()/token1()/fee() reads failed or returned non-pool values."
+                ),
+                intent_id=intent_id,
+            )
+
+        token0_info = ctx.services.resolve_token(binding.token0)
+        token1_info = ctx.services.resolve_token(binding.token1)
+        if token0_info is None or token1_info is None:
+            missing = binding.token0 if token0_info is None else binding.token1
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"Cannot resolve token metadata for {missing} from exact LP pool {pool_address} on {ctx.chain}."
+                ),
+                intent_id=intent_id,
+            )
+
+        factory_check = validate_v3_pool(
+            ctx.chain,
+            protocol,
+            binding.token0,
+            binding.token1,
+            binding.fee_tier,
+            internal_rpc,
+            gateway_client=ctx.gateway_client,
+        )
+        if factory_check.exists is not True:
+            detail = factory_check.error or factory_check.warning or "factory lookup unavailable"
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"Cannot authenticate exact LP pool {pool_address} against the registered "
+                    f"{protocol} factory on {ctx.chain}: {detail}"
+                ),
+                intent_id=intent_id,
+            )
+        canonical = factory_check.pool_address or ""
+        if canonical.lower() != pool_address.lower():
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"Exact LP pool {pool_address} is not the registered {protocol} pool for "
+                    f"{binding.token0}/{binding.token1} fee {binding.fee_tier} on {ctx.chain}; "
+                    f"the factory returned {canonical or 'no pool'}. Refusing alternate-pool substitution."
+                ),
+                intent_id=intent_id,
+            )
+
+        return token0_info, token1_info, binding.fee_tier
 
     @staticmethod
     def _compute_lp_ticks(

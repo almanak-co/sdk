@@ -87,6 +87,7 @@ def eth_call(
     chain: str | None = None,
     gateway_client: GatewayClient | None = None,
     raise_errors: bool = False,
+    gateway_raise_on_error: bool = False,
     from_address: str | None = None,
     value: int = 0,
 ) -> bytes | None:
@@ -102,6 +103,11 @@ def eth_call(
         raise_errors: When True, raise ``ValueError`` on gateway or direct-RPC
             failures. When False, the default, suppress those failures and
             return ``None`` so callers can treat the read as unavailable.
+        gateway_raise_on_error: When True, ask the gateway to propagate the
+            upstream call error instead of returning an empty result. This is
+            opt-in so existing connector reads retain their three-key gateway
+            call shape even when their local wrapper raises on transport
+            failures.
         from_address: Optional caller address for the simulated call
             (VIB-5716). Caller-state-dependent probes (e.g. the Curve LP
             deployability probe) set it; when ``None`` the call object is
@@ -121,9 +127,9 @@ def eth_call(
 
     if gateway_client is not None and getattr(gateway_client, "is_connected", False) and chain:
         try:
-            # The probe-only kwargs are passed ONLY when probing, so duck-typed
-            # gateway clients (test fakes with a narrower eth_call signature)
-            # and the legacy call shape stay byte-identical for plain reads.
+            # Optional kwargs are passed only when their behavior is requested,
+            # so legacy non-strict reads and duck-typed gateway fakes retain the
+            # original three-key call shape.
             if from_address is not None:
                 result = gateway_client.eth_call(
                     chain=chain,
@@ -134,6 +140,13 @@ def eth_call(
                     # Surface the upstream error (with any revert reason) to
                     # probe callers; a plain read keeps log-and-None.
                     raise_on_error=raise_errors,
+                )
+            elif gateway_raise_on_error:
+                result = gateway_client.eth_call(
+                    chain=chain,
+                    to=to,
+                    data=data,
+                    raise_on_error=True,
                 )
             else:
                 result = gateway_client.eth_call(chain=chain, to=to, data=data)

@@ -157,14 +157,26 @@ class AnvilEthCallAdapter:
     # ``with_v4_pool_key``). ``None`` ⇒ no V4 position-state read available.
     _v4_pool_key: Any = None
 
+    @property
+    def is_connected(self) -> bool:
+        """Mirror the gateway connectivity signal over the managed fork."""
+        return bool(self.web3.is_connected())
+
     def with_v4_pool_key(self, pool_key: Any) -> "AnvilEthCallAdapter":
         """Return a copy of this adapter bound to ``pool_key`` for getSlot0 reads."""
         import dataclasses
 
         return dataclasses.replace(self, _v4_pool_key=pool_key)
 
-    def eth_call(self, chain: str, to: str, data: str) -> str | None:
-        del chain
+    def eth_call(
+        self,
+        chain: str,
+        to: str,
+        data: str,
+        *,
+        raise_on_error: bool = False,
+    ) -> str | None:
+        del chain, raise_on_error
         result = self.web3.eth.call(
             {
                 "to": Web3.to_checksum_address(to),
@@ -172,6 +184,30 @@ class AnvilEthCallAdapter:
             }
         )
         return Web3.to_hex(result)
+
+    def query_position_liquidity(
+        self,
+        *,
+        chain: str,
+        position_manager: str,
+        token_id: int,
+    ) -> int | None:
+        """Mirror the gateway V3 position-liquidity query over Anvil."""
+        data = "0x99fbab88" + format(int(token_id), "064x")
+        try:
+            result = self.web3.eth.call(
+                {
+                    "to": Web3.to_checksum_address(position_manager),
+                    "data": data,
+                }
+            )
+        except Exception:
+            return None
+        del chain
+        if len(result) < 8 * 32:
+            return None
+        offset = 7 * 32
+        return int.from_bytes(result[offset : offset + 32], byteorder="big")
 
     def query_native_balance(self, chain: str, wallet_address: str, block: int | str | None = None) -> int | None:
         """Gateway-shaped block-pinned native balance, backed by the Anvil Web3.

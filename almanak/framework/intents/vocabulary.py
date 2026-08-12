@@ -636,7 +636,11 @@ class LPOpenIntent(BaseIntent):
     """Intent to open a liquidity position.
 
     Attributes:
-        pool: Pool address or identifier
+        pool: Pool address or identifier. For the Uniswap V3 family, a bare
+            address is an exact execution constraint authenticated on-chain
+            against the registered chain/protocol factory. In that form,
+            ``amount0``/``amount1`` and price bounds use the pool contract's
+            canonical token0/token1 orientation.
         amount0: Amount of token0 to provide
         amount1: Amount of token1 to provide
         range_spec: Canonical typed concentrated-liquidity range — a
@@ -881,7 +885,10 @@ class LPCloseIntent(BaseIntent):
             writes the chained wei integer into this field as its string form).
             When ``amount is None`` (the default), the literal ``position_id``
             is used unchanged — byte-identical to historical behaviour.
-        pool: Pool address (optional, for validation)
+        pool: Pool address (optional, for validation). For a Uniswap V3-family
+            bare address, compilation verifies both the registered factory
+            identity and that ``position_id`` records the same token pair and
+            fee before emitting any close transaction.
         collect_fees: Whether to collect accumulated fees
         protocol: LP protocol (e.g., "uniswap_v3", "camelot")
         chain: Optional target chain for execution (defaults to strategy's primary chain)

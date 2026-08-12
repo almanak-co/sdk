@@ -2567,7 +2567,7 @@ class ZodiacOrchestrator:
         LP open → close) extend the manifest incrementally instead of
         re-applying the full target set every time.
         """
-        self._apply_pending_manifest_targets()
+        self._apply_pending_manifest_targets(action_bundle)
         # Local imports keep this harness importable from test files without
         # pulling in the whole execution package at collection time.
         from almanak.framework.execution.interfaces import TransactionReceipt
@@ -2682,7 +2682,7 @@ class ZodiacOrchestrator:
         result.phase = ExecutionPhase.COMPLETE
         return result
 
-    def _apply_pending_manifest_targets(self) -> None:
+    def _apply_pending_manifest_targets(self, action_bundle: Any | None = None) -> None:
         """Derive a manifest from ``recorded_intents`` and apply NEW targets.
 
         No-op when the orchestrator wasn't constructed for late-binding
@@ -2701,6 +2701,21 @@ class ZodiacOrchestrator:
         protocols, intent_types, config = _derive_manifest_inputs(self.recorded_intents)
         if not protocols or not intent_types:
             return
+
+        # Address-bound LP intents intentionally carry no user-supplied token
+        # symbols: token0/token1 are authenticated from the pool at compile
+        # time. The compiled metadata is therefore the first trustworthy
+        # source for the ERC-20 approval targets. Feed those exact addresses
+        # into the same config surface used by deployment manifests so the
+        # default-on Zodiac harness authorises the production bundle rather
+        # than silently falling back to a synthetic symbolic pair.
+        funding = config.setdefault("anvil_funding", {})
+        metadata = getattr(action_bundle, "metadata", None) or {}
+        for key in ("token0", "token1"):
+            token = metadata.get(key)
+            address = token.get("address") if isinstance(token, dict) else None
+            if isinstance(address, str) and address.startswith("0x"):
+                funding.setdefault(address, address)
 
         manifest = generate_manifest(
             strategy_name=self.strategy_name,
