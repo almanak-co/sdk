@@ -7,7 +7,12 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 
 from almanak.framework.backtesting.pnl.data_provider import HistoricalDataConfig
+from scripts.ci import run_benchmarks as benchmark_module
 from scripts.ci.run_benchmarks import (
+    DAILY_SWAP_WORKLOAD,
+    HIGH_FREQUENCY_WORKLOAD,
+    HOLD_ONLY_WORKLOAD,
+    SHORT_LATENCY_WORKLOAD,
     BenchmarkResult,
     FastMockDataProvider,
     _run_benchmark_samples,
@@ -57,9 +62,15 @@ def test_fast_mock_data_provider_iterate_keeps_stablecoin_prices_pegged() -> Non
     assert prices == {"USDC": Decimal("1"), "USDT": Decimal("1")}
 
 
-def _benchmark_result(*, elapsed: float, ticks: int = 8761, trades: int = 0) -> BenchmarkResult:
+def _benchmark_result(
+    *,
+    elapsed: float,
+    name: str = "sample",
+    ticks: int = 8761,
+    trades: int = 0,
+) -> BenchmarkResult:
     return BenchmarkResult(
-        name="sample",
+        name=name,
         elapsed_seconds=elapsed,
         limit_seconds=30.0,
         passed=elapsed < 30.0,
@@ -68,6 +79,52 @@ def _benchmark_result(*, elapsed: float, ticks: int = 8761, trades: int = 0) -> 
         ticks_per_second=ticks / elapsed,
         trades_per_second=trades / elapsed,
     )
+
+
+def test_canonical_workload_expectations_reject_fast_noops() -> None:
+    assert DAILY_SWAP_WORKLOAD.validate(name="daily", ticks=8761, trades=365) is None
+    assert HOLD_ONLY_WORKLOAD.validate(name="hold", ticks=8761, trades=0) is None
+    assert HIGH_FREQUENCY_WORKLOAD.validate(name="high-frequency", ticks=8761, trades=8761) is None
+    assert SHORT_LATENCY_WORKLOAD.validate(name="short", ticks=169, trades=7) is None
+
+    invalid_daily = DAILY_SWAP_WORKLOAD.validate(name="daily", ticks=8761, trades=0)
+    invalid_hold = HOLD_ONLY_WORKLOAD.validate(name="hold", ticks=8761, trades=1)
+    invalid_high_frequency = HIGH_FREQUENCY_WORKLOAD.validate(name="high-frequency", ticks=0, trades=8761)
+    invalid_short_ticks = SHORT_LATENCY_WORKLOAD.validate(name="short", ticks=1, trades=7)
+    invalid_short_trades = SHORT_LATENCY_WORKLOAD.validate(name="short", ticks=169, trades=0)
+    assert invalid_daily is not None and "trades" in invalid_daily
+    assert invalid_hold is not None and "trades" in invalid_hold
+    assert invalid_high_frequency is not None and "ticks" in invalid_high_frequency
+    assert invalid_short_ticks is not None and "ticks" in invalid_short_ticks
+    assert invalid_short_trades is not None and "trades" in invalid_short_trades
+
+
+def test_all_benchmarks_share_one_short_suite_warmup(monkeypatch) -> None:
+    calls: list[str] = []
+
+    def fake_benchmark(name: str):
+        async def run(_verbose: bool) -> BenchmarkResult:
+            calls.append(name)
+            return _benchmark_result(elapsed=1.0, name=name, trades=1)
+
+        return run
+
+    monkeypatch.setattr(benchmark_module, "run_one_year_swap_benchmark", fake_benchmark("one_year_daily_swap"))
+    monkeypatch.setattr(benchmark_module, "run_one_year_hold_benchmark", fake_benchmark("one_year_hold_only"))
+    monkeypatch.setattr(benchmark_module, "run_high_frequency_benchmark", fake_benchmark("one_year_high_frequency"))
+    monkeypatch.setattr(benchmark_module, "run_short_latency_benchmark", fake_benchmark("one_week_latency"))
+
+    summary = asyncio.run(benchmark_module.run_all_benchmarks(samples=1, warmups=0, suite_warmups=1))
+
+    assert calls == [
+        "one_week_latency",
+        "one_year_daily_swap",
+        "one_year_hold_only",
+        "one_year_high_frequency",
+        "one_week_latency",
+    ]
+    assert summary["suite_warmup_count"] == 1
+    assert summary["warmup_count"] == 0
 
 
 def test_sample_runner_discards_warmup_and_uses_measured_median() -> None:

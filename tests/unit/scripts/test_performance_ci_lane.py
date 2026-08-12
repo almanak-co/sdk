@@ -22,16 +22,33 @@ def test_pytest_workflow_isolates_and_gates_performance_lane() -> None:
 
     assert performance["runs-on"] == "ubuntu-latest-l"
     run_blocks = [step.get("run", "") for step in performance["steps"]]
-    serial_command = next(block for block in run_blocks if "tests/performance" in block)
-    assert "tests/benchmark" in serial_command
+    serial_command = next(block for block in run_blocks if "test_parameter_sweep_performance.py" in block)
+    assert "tests/benchmark/backtesting/test_paper_trader_latency.py" in serial_command
     assert (
         "tests/unit/accounting/test_portfolio_metrics_gas_aggregator.py::test_aggregator_perf_10k_rows"
         in serial_command
     )
     assert "-n 0" in serial_command
     assert "--no-cov" in serial_command
-    assert any("scripts/ci/run_benchmarks.py" in block for block in run_blocks)
+    current_step = next(
+        step for step in performance["steps"] if step.get("name") == "Run current canonical PnL benchmarks"
+    )
+    current_command = current_step["run"]
+    assert "if" not in current_step
+    assert "--samples 3 --warmups 0 --suite-warmups 1" in current_command
+    assert "--record-only" not in current_command
+
+    baseline_command = next(block for block in run_blocks if '"${BASELINE_PYTHON}"' in block)
+    assert "--samples 3 --warmups 0 --suite-warmups 1" in baseline_command
+    assert "--record-only" in baseline_command
     assert any("scripts/ci/compare_benchmarks.py" in block for block in run_blocks)
+
+    duplicate_suites = [
+        REPO_ROOT / "tests" / "performance" / "test_pnl_performance.py",
+        REPO_ROOT / "tests" / "benchmark" / "backtesting" / "test_performance.py",
+        REPO_ROOT / "tests" / "benchmark" / "backtesting" / "test_pnl_backtest_throughput.py",
+    ]
+    assert not any(path.exists() for path in duplicate_suites)
 
     assert set(aggregate["needs"]) == {"shard", "performance"}
     assert any(step.get("run") == "bash scripts/ci/assert_test_jobs_succeeded.sh" for step in aggregate["steps"])
@@ -44,11 +61,7 @@ def test_pytest_workflow_isolates_and_gates_performance_lane() -> None:
     accounting_tests = (
         REPO_ROOT / "tests" / "unit" / "accounting" / "test_portfolio_metrics_gas_aggregator.py"
     ).read_text(encoding="utf-8")
-    assert (
-        "@pytest.mark.benchmark\n"
-        "@pytest.mark.asyncio\n"
-        "async def test_aggregator_perf_10k_rows" in accounting_tests
-    )
+    assert "@pytest.mark.benchmark\n@pytest.mark.asyncio\nasync def test_aggregator_perf_10k_rows" in accounting_tests
 
 
 def test_pr_and_main_supply_comparison_refs() -> None:
