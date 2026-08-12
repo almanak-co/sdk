@@ -234,7 +234,12 @@ class TestLPAccountingThreadsPositionHash:
         result.tx_hash = "0xtxhash"
         result.transaction_results = []
         result.lp_open_data = None
+        # Pin currency0/1=None: bare MagicMock is truthy for those attrs and
+        # incorrectly enters the V4 realign branch with non-str tokens
+        # (VIB-6100 / CodeRabbit #3694).
         lp_close = MagicMock()
+        lp_close.currency0 = None
+        lp_close.currency1 = None
         lp_close.amount0_collected = 95_000_000
         lp_close.amount1_collected = 95 * 10**18
         lp_close.fees0 = 500_000

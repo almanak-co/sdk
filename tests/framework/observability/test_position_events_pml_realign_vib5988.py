@@ -64,13 +64,17 @@ def _resolver(monkeypatch):
         # MEASURED first — a double stricter than production is a false-green
         # generator too, as the chain-alias case in #3472 showed.
         def resolve(self, token, chain, *, log_errors=True, skip_gateway=False):  # noqa: ARG002 — chain positional-or-keyword, as production
+            from almanak.framework.data.tokens.exceptions import TokenNotFoundError
+
             up = str(token).upper()
             if up in _ADDR_BOOK:
-                return SimpleNamespace(symbol=up, address=_ADDR_BOOK[up], decimals=_DECIMALS[up])
+                return SimpleNamespace(symbol=up, address=_ADDR_BOOK[up], decimals=_DECIMALS[up], chain=chain)
             for sym, addr in _ADDR_BOOK.items():
                 if addr.lower() == str(token).lower():
-                    return SimpleNamespace(symbol=sym, address=addr, decimals=_DECIMALS[sym])
-            return None
+                    return SimpleNamespace(symbol=sym, address=addr, decimals=_DECIMALS[sym], chain=chain)
+            # Production raises on miss; returning None is a VIB-6100 defect
+            # (CodeRabbit #3694).
+            raise TokenNotFoundError(token=str(token), chain=str(chain), reason="not in fixture address book")
 
     monkeypatch.setattr(
         "almanak.framework.data.tokens.resolver.get_token_resolver",
@@ -618,13 +622,16 @@ def test_ncoin_additional_amounts_guard_blocks_leg_adoption(_resolver):
 @pytest.fixture
 def _currency_resolver(monkeypatch):
     def _make():
+        from almanak.framework.data.tokens.exceptions import TokenNotFoundError
+
         class _Double:
             def resolve(self, token, chain, *, log_errors=True, skip_gateway=False):  # noqa: ARG002 — chain is positional
                 k = str(token).lower()
                 for sym, addr in _ADDR_BOOK.items():
                     if addr.lower() == k or sym == str(token).upper():
-                        return SimpleNamespace(symbol=sym, address=addr, decimals=_DECIMALS[sym])
-                return None
+                        return SimpleNamespace(symbol=sym, address=addr, decimals=_DECIMALS[sym], chain=chain)
+                # Business miss: production raises, never returns None (None is a defect).
+                raise TokenNotFoundError(token=str(token), chain=str(chain), reason="unknown")
 
         return _Double()
 

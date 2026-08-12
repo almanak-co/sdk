@@ -33,6 +33,22 @@ def _make_intent(intent_type_str: str, **kwargs):
     return intent
 
 
+def _lp_data(**fields):
+    """LPOpenData/LPCloseData stand-in that does NOT auto-create currency attrs.
+
+    Plain MagicMock is truthy for ``getattr(lp, "currency0", None)``, which
+    incorrectly takes the V4 realign branch and feeds MagicMock tokens into the
+    total resolver seam (VIB-6100 / CodeRabbit #3694). Explicit ``None`` keeps
+    these fixtures on the V3 / label-order path they intend to exercise.
+    """
+    data = MagicMock()
+    data.currency0 = None
+    data.currency1 = None
+    for key, value in fields.items():
+        setattr(data, key, value)
+    return data
+
+
 def _make_result(tx_hash: str = "0xtxhash", lp_open_data=None, lp_close_data=None):
     result = MagicMock()
     result.tx_hash = tx_hash
@@ -68,9 +84,10 @@ class TestLPAccountingBuilder:
     def test_lp_open_event_built(self) -> None:
         from almanak.framework.accounting.lp_accounting import build_lp_accounting_event
 
-        lp_open = MagicMock()
-        lp_open.amount0 = 100_000_000  # 100 USDC (6 decimals)
-        lp_open.amount1 = 100 * 10**18  # 100 DAI (18 decimals)
+        lp_open = _lp_data(
+            amount0=100_000_000,  # 100 USDC (6 decimals)
+            amount1=100 * 10**18,  # 100 DAI (18 decimals)
+        )
 
         intent = _make_intent("LP_OPEN", protocol="aerodrome", pool="USDC/DAI/0xpool")
         result_obj = _make_result(lp_open_data=lp_open)
@@ -90,11 +107,12 @@ class TestLPAccountingBuilder:
     def test_lp_close_event_built(self) -> None:
         from almanak.framework.accounting.lp_accounting import build_lp_accounting_event
 
-        lp_close = MagicMock()
-        lp_close.amount0_collected = 95_000_000  # 95 USDC
-        lp_close.amount1_collected = 95 * 10**18
-        lp_close.fees0 = 500_000
-        lp_close.fees1 = 5 * 10**17
+        lp_close = _lp_data(
+            amount0_collected=95_000_000,  # 95 USDC
+            amount1_collected=95 * 10**18,
+            fees0=500_000,
+            fees1=5 * 10**17,
+        )
 
         intent = _make_intent("LP_CLOSE", protocol="uniswap_v3", pool="USDC/DAI/0xpool2")
         result_obj = _make_result(lp_close_data=lp_close)
@@ -154,9 +172,10 @@ class TestLPAccountingBuilder:
         """VIB-3583: cost_basis_usd is computed when price_oracle is provided."""
         from almanak.framework.accounting.lp_accounting import build_lp_accounting_event
 
-        lp_open = MagicMock()
-        lp_open.amount0 = 1_000_000  # 1 USDC (6 decimals)
-        lp_open.amount1 = 1 * 10**18  # 1 WETH (18 decimals)
+        lp_open = _lp_data(
+            amount0=1_000_000,  # 1 USDC (6 decimals)
+            amount1=1 * 10**18,  # 1 WETH (18 decimals)
+        )
 
         intent = _make_intent(
             "LP_OPEN",
@@ -190,9 +209,10 @@ class TestLPAccountingBuilder:
         """Partial cost basis silently undercounts — must return None if any leg lacks a price."""
         from almanak.framework.accounting.lp_accounting import build_lp_accounting_event
 
-        lp_open = MagicMock()
-        lp_open.amount0 = 1_000_000  # 1 USDC
-        lp_open.amount1 = 1 * 10**18  # 1 LONGTOKEN
+        lp_open = _lp_data(
+            amount0=1_000_000,  # 1 USDC
+            amount1=1 * 10**18,  # 1 LONGTOKEN
+        )
 
         intent = _make_intent(
             "LP_OPEN",
@@ -216,9 +236,10 @@ class TestLPAccountingBuilder:
         """cost_basis_usd must be None when token decimals are assumed (18) — amounts may be off 1e12."""
         from almanak.framework.accounting.lp_accounting import build_lp_accounting_event
 
-        lp_open = MagicMock()
-        lp_open.amount0 = 1_000_000  # Would be 1 USDC at 6 dec, but 0.000001 at assumed 18
-        lp_open.amount1 = 1 * 10**18
+        lp_open = _lp_data(
+            amount0=1_000_000,  # Would be 1 USDC at 6 dec, but 0.000001 at assumed 18
+            amount1=1 * 10**18,
+        )
 
         intent = MagicMock()
         it = MagicMock()

@@ -83,11 +83,31 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# Metric functions already reported as failing, so a persistently broken
+# telemetry backend warns once per metric instead of once per resolve.
+_METRIC_FAILURES_REPORTED: set[str] = set()
+
+
 def _try_record_metric(func_name: str, *args: Any, **kwargs: Any) -> None:
-    """Attempt to record a Prometheus metric, silently ignoring import failures.
+    """Record a Prometheus metric if possible. **Never raises.**
 
     This allows the resolver to work without the gateway metrics module installed
     (e.g., in framework-only deployments or tests).
+
+    Why the catch is broad (VIB-6100 review of PR #3472)
+    ---------------------------------------------------
+    This used to catch only ``ImportError`` while the metric call itself sat
+    inside the ``try`` — so the *import* was tolerated but the *recording* was
+    not. Any fault in the metrics backend (a label-cardinality error, a
+    registry collision from a duplicated collector, a broken exporter) raised
+    straight out of the resolver into whatever called it.
+
+    That reaches every caller of the resolver, not only the best-effort seam:
+    connectors and adapters call ``resolve`` directly and have no tolerance arm,
+    so **telemetry skew could fail a ledger write with the trade already
+    on-chain**. Observability must never be able to break the thing it
+    observes. Any metric failure is tolerated here; the evidence is kept as a
+    once-per-metric WARNING with a traceback rather than swallowed.
     """
     try:
         from almanak.gateway import metrics
@@ -96,7 +116,21 @@ def _try_record_metric(func_name: str, *args: Any, **kwargs: Any) -> None:
         if func:
             func(*args, **kwargs)
     except ImportError:
+        # Expected in framework-only deployments — not a fault, stays silent.
         pass
+    except Exception:  # noqa: BLE001 — telemetry must not break the caller
+        if func_name not in _METRIC_FAILURES_REPORTED:
+            _METRIC_FAILURES_REPORTED.add(func_name)
+            # Log itself can raise (broken Handler.emit); never re-escape.
+            try:
+                logger.warning(
+                    "token-resolution metric %r failed and was skipped; further failures for this "
+                    "metric are suppressed. Telemetry is best-effort and never fails a resolve.",
+                    func_name,
+                    exc_info=True,
+                )
+            except Exception:  # noqa: BLE001 — evidence-keeping must not break resolve
+                pass
 
 
 # Chains whose symbol->address resolution is STATIC-REGISTRY-ONLY: an unknown

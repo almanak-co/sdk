@@ -187,10 +187,10 @@ class _Resolver:
         k = str(token).lower()
         if k in _DECIMALS:
             sym, dec = _DECIMALS[k]
-            return SimpleNamespace(symbol=sym, address=token, decimals=dec)
+            return SimpleNamespace(symbol=sym, address=token, decimals=dec, chain=chain)
         for addr, (sym, dec) in _DECIMALS.items():
             if sym == str(token).upper():
-                return SimpleNamespace(symbol=sym, address=addr, decimals=dec)
+                return SimpleNamespace(symbol=sym, address=addr, decimals=dec, chain=chain)
         return None
 
 

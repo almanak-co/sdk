@@ -29,6 +29,7 @@ import pytest
 
 from types import SimpleNamespace
 
+from almanak.framework.data.tokens.exceptions import TokenNotFoundError
 from almanak.framework.data.tokens.pair_order import (
     place_token_pair_by_observed_identity,
     realign_token_pair_by_address,
@@ -76,8 +77,13 @@ def _patch_resolver(monkeypatch, book: dict[str, str]):
             calls.append({"key": token, "chain": chain, "log_errors": log_errors, "skip_gateway": skip_gateway})
             up = str(token).upper()
             if up in book:
-                return SimpleNamespace(symbol=up, address=book[up], decimals=18)
-            return None
+                return SimpleNamespace(
+                    symbol=up,
+                    address=book[up],
+                    decimals=18,
+                    chain=chain or "ethereum",
+                )
+            raise TokenNotFoundError(token=str(token), chain=str(chain), reason="test double miss")
 
     monkeypatch.setattr(
         "almanak.framework.data.tokens.resolver.get_token_resolver",
@@ -175,6 +181,7 @@ class TestFailsClosed:
             is None
         )
 
+    @pytest.mark.expects_resolver_defect
     def test_resolver_raises(self, monkeypatch):
         class _Boom:
             def resolve(self, token, chain, *, log_errors=True, skip_gateway=False):
@@ -190,16 +197,22 @@ class TestFailsClosed:
         )
 
     def test_resolver_returns_none(self, monkeypatch):
+        """Business miss via TokenNotFoundError (production shape), not return None."""
         _patch_resolver(monkeypatch, {})  # neither symbol in the book
         assert (
             place_token_pair_by_observed_identity("WETH", "USDC", "ethereum", WETH_ADDR, USDC_ADDR)
             is None
         )
 
+    @pytest.mark.expects_resolver_defect
     def test_resolver_returns_entry_without_address(self, monkeypatch):
+        """Malformed success shape — empty address is a defect, fails closed."""
+
         class _NoAddress:
             def resolve(self, token, chain, *, log_errors=True, skip_gateway=False):  # noqa: ANN001, ARG002
-                return SimpleNamespace(symbol=str(token).upper(), address=None, decimals=18)
+                return SimpleNamespace(
+                    symbol=str(token).upper(), address=None, decimals=18, chain=chain or "ethereum"
+                )
 
         monkeypatch.setattr(
             "almanak.framework.data.tokens.resolver.get_token_resolver",

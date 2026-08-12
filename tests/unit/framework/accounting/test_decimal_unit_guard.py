@@ -723,19 +723,30 @@ def test_build_ledger_entry_flags_raw_wei_swap(
 
     from almanak.framework.execution.extracted_data import SwapAmounts
     from almanak.framework.observability import ledger as ledger_mod
+    from tests.support.token_resolver import FakeToken, FakeTokenResolver
 
-    # Stub token resolver to return decimals deterministically.
-    class _FakeInfo:
-        def __init__(self, decimals: int) -> None:
-            self.decimals = decimals
-
-    class _FakeResolver:
-        def resolve(self, symbol: str, chain: str, *, log_errors: bool = True, skip_gateway: bool = False):  # noqa: ARG002
-            return _FakeInfo(18) if symbol == "WETH" else _FakeInfo(6)
+    # Full ResolvedToken-shaped double (VIB-6100). A decimals-only stub is a
+    # defect under the total seam and trips the autouse observer at teardown.
+    mock_resolver = FakeTokenResolver(
+        {
+            "WETH": FakeToken(
+                symbol="WETH",
+                address="0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+                decimals=18,
+                chain="ethereum",
+            ),
+            "USDC": FakeToken(
+                symbol="USDC",
+                address="0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                decimals=6,
+                chain="ethereum",
+            ),
+        }
+    )
 
     import almanak.framework.data.tokens.resolver as resolver_mod
 
-    monkeypatch.setattr(resolver_mod, "get_token_resolver", lambda: _FakeResolver())
+    monkeypatch.setattr(resolver_mod, "get_token_resolver", lambda: mock_resolver)
 
     intent = SimpleNamespace(intent_type=SimpleNamespace(value="SWAP"), protocol="")
     swap = SwapAmounts(
@@ -779,6 +790,7 @@ def test_build_ledger_entry_flags_raw_wei_swap(
     assert after - before == 1
 
 
+@pytest.mark.expects_resolver_defect
 def test_build_ledger_entry_resolver_failure_falls_back_to_magnitude(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
@@ -787,6 +799,10 @@ def test_build_ledger_entry_resolver_failure_falls_back_to_magnitude(
 
     Pins the soft-fail contract on the resolver path: a broken resolver
     downgrades to magnitude-only detection, not a halt.
+
+    Deliberately raises a non-TokenNotFoundError so the seam classifies the
+    failure as a DEFECT (VIB-6100) while still soft-failing the write — that
+    is the point of the test, so the autouse observer is opted out.
     """
     from types import SimpleNamespace
 

@@ -19,6 +19,18 @@ from almanak.framework.accounting.category_handlers._price_helpers import (
 from almanak.framework.accounting.ids import make_accounting_event_id
 from almanak.framework.accounting.lp_accounting import LPAccountingEvent, compute_lp_cost_basis
 from almanak.framework.accounting.models import AccountingConfidence, AccountingIdentity, LPEventType
+
+# VIB-6100 — imported at MODULE level, deliberately. A function-local ``from ...
+# import`` is a deferred module-body execution: the first call runs the imported
+# module's body one frame ABOVE the seam's own handlers, so an import-time fault
+# escapes the seam entirely and lands in whatever the caller happens to be —
+# here, an accounting write with the trade already on-chain. Paying the import
+# at module load moves that risk to process start, where it is a boot failure
+# rather than a mid-run halt.
+from almanak.framework.data.tokens.best_effort import (
+    resolve_token_best_effort,
+    resolve_token_decimals_best_effort,
+)
 from almanak.framework.market.price_store import lookup_price
 from almanak.framework.models.run_mode import RunMode
 
@@ -159,18 +171,38 @@ def _resolve_lp_amounts(
     dec0: int | None = None
     dec1: int | None = None
     if (lp_open_data is not None or lp_close_data is not None) and (token0 or token1):
-        try:
-            from almanak.framework.data.tokens.resolver import get_token_resolver
-
-            resolver = get_token_resolver()
-            if token0:
-                ti0 = resolver.resolve(token0, chain=chain)
-                dec0 = ti0.decimals if ti0 is not None else None
-            if token1:
-                ti1 = resolver.resolve(token1, chain=chain)
-                dec1 = ti1.decimals if ti1 is not None else None
-        except Exception:  # noqa: BLE001
-            logger.debug("LP handler: token resolver failed for %s/%s on %s", token0, token1, chain)
+        # VIB-6100 — routed through the shared seam. This site was the verbatim
+        # pre-fix shape (a bare ``except Exception`` around ``resolver.resolve``)
+        # left unmigrated, and it carries the same blast radius as the five that
+        # were migrated: it feeds ``dec0``/``dec1`` for the LP money columns on
+        # an accounting write path, so a defect here was laundered into "no
+        # decimals" exactly as VIB-6100 describes.
+        #
+        # It resolves WITH the gateway, and deliberately still does — see the
+        # ``allow_gateway=True`` note below. An earlier revision of this PR pinned
+        # ``skip_gateway=True`` here and described that as closing a stall; it was
+        # in fact a silent measured-to-unmeasured regression.
+        #
+        # Raised by adversarial review of PR #3472: the "false greens un-hidden"
+        # result rested on the shared TEST double being strict, not on the
+        # production narrowing, precisely because this site was still fail-open.
+        #
+        # ``allow_gateway=True`` PRESERVES main's behaviour here. This site
+        # resolved with the gateway enabled before the seam existed, and pinning
+        # ``skip_gateway=True`` silently turned a measured decimals into an
+        # unmeasured ``None`` for any token the gateway can discover but the
+        # static registry cannot — which marks BOTH LP money columns unmeasured
+        # on a live accounting path. Honest under Empty != Zero, but a real loss
+        # of measurement that this PR never intended to make. Found by Codex
+        # review of #3472.
+        if token0:
+            dec0 = resolve_token_decimals_best_effort(
+                token0, chain, context="lp_handler decimals token0", allow_gateway=True
+            )
+        if token1:
+            dec1 = resolve_token_decimals_best_effort(
+                token1, chain, context="lp_handler decimals token1", allow_gateway=True
+            )
 
     if lp_open_data is not None and intent_type_str == "LP_OPEN":
         raw0 = getattr(lp_open_data, "amount0", None)
@@ -410,27 +442,31 @@ def _v4_realign_token_pair(
     else:
         c0 = getattr(lp_data, "currency0", None)
         c1 = getattr(lp_data, "currency1", None)
-    if not c0 or not c1:
+    # Parser currencies are address strings only (CodeRabbit #3694).
+    if not isinstance(c0, str) or not isinstance(c1, str) or not c0 or not c1:
         return token0, token1, False
-    try:
-        from almanak.framework.data.tokens.resolver import get_token_resolver
-
-        resolver = get_token_resolver()
-        ti0 = resolver.resolve(c0, chain=chain, log_errors=False)
-        ti1 = resolver.resolve(c1, chain=chain, log_errors=False)
-    except Exception:  # noqa: BLE001 — fail-open per docstring contract
-        logger.warning(
-            "V4 LP accounting: token resolver failed for currency pair (%s, %s) on %s; "
-            "falling back to user-intent token order — amounts may be misattributed",
-            c0,
-            c1,
-            chain,
-        )
-        return token0, token1, False
+    # VIB-6100 — routed through the shared seam, which is TOTAL: every failure
+    # mode returns ``None``, and it never raises ``Exception``. Laundering a
+    # defect here was the worst instance of the class in this file, because the
+    # fallback below is documented as possibly MISATTRIBUTING amounts between
+    # legs — so a signature or shape bug became wrong money attribution wearing
+    # the costume of an ordinary resolver miss. The seam separates those two in
+    # the LOG (a defect is ERROR with a traceback, a miss is DEBUG) while
+    # returning the identical fail-open value, so VIB-6476's ``realigned=False``
+    # contract is unchanged on every failure path.
+    #
+    # allow_gateway=True preserves pre-seam behaviour: main resolved without
+    # skip_gateway here. Pinning offline-only would leave gateway-only currencies
+    # as realigned=False and risk amount misattribution when intent label order is
+    # inverted relative to parser slot order (Codex/pr-auditor #3694). The seam
+    # still never raises; a miss/defect logs and returns None so VIB-6476's
+    # realigned=False fallback remains the fail-open contract.
+    ti0 = resolve_token_best_effort(c0, chain, context="v4 LP realign currency0", allow_gateway=True)
+    ti1 = resolve_token_best_effort(c1, chain, context="v4 LP realign currency1", allow_gateway=True)
     if ti0 is None or ti1 is None:
         logger.warning(
-            "V4 LP accounting: token resolver returned None for currency pair (%s, %s) on %s; "
-            "falling back to user-intent token order",
+            "V4 LP accounting: token resolver did not resolve currency pair (%s, %s) on %s; "
+            "falling back to user-intent token order — amounts may be misattributed",
             c0,
             c1,
             chain,
@@ -1165,14 +1201,13 @@ def _coin_decimals(symbol: str, chain: str) -> int | None:
     """
     if not symbol:
         return None
-    try:
-        from almanak.framework.data.tokens.resolver import get_token_resolver
-
-        info = get_token_resolver().resolve(symbol, chain=chain, skip_gateway=True)
-        return info.decimals if info is not None else None
-    except Exception:  # noqa: BLE001 — accounting path: degrade, never raise
-        logger.debug("LP handler: static decimals resolve failed for %s on %s", symbol, chain)
-        return None
+    # VIB-6100 — routed through the shared seam. This was the verbatim pre-fix
+    # anti-pattern (a bare ``except Exception`` around ``resolver.resolve``) left
+    # in a file this PR otherwise migrates: a signature/shape DEFECT here was
+    # laundered into "this coin has no decimals", which the caller then treats as
+    # an unmeasured leg. Same flags as before (``skip_gateway=True``), now pinned
+    # by the seam.
+    return resolve_token_decimals_best_effort(symbol, chain, context="lp_handler curve coin decimals")
 
 
 def _is_usd_stable_pool(coin_symbols: list[str]) -> bool:

@@ -81,11 +81,11 @@ def _patch_resolver(monkeypatch, book_key: str) -> None:
             up = str(token).upper()
             # Symbol lookups (decimals + address realignment).
             if up in book:
-                return SimpleNamespace(symbol=up, address=book[up], decimals=_DECIMALS[up])
+                return SimpleNamespace(symbol=up, address=book[up], decimals=_DECIMALS[up], chain=chain)
             # Address lookups (defensive; not used by the V3 path).
             for sym, addr in book.items():
                 if addr.lower() == str(token).lower():
-                    return SimpleNamespace(symbol=sym, address=addr, decimals=_DECIMALS[sym])
+                    return SimpleNamespace(symbol=sym, address=addr, decimals=_DECIMALS[sym], chain=chain)
             return None
 
     monkeypatch.setattr(
@@ -421,6 +421,7 @@ class TestV3RealignHelperGatesAndFailOpen:
         assert out == ("WETH", "USDC")
 
 
+    @pytest.mark.expects_resolver_defect
     def test_resolver_exception_fails_open(self, monkeypatch):
         class _Boom:
             def resolve(self, token, chain, *, log_errors=True, skip_gateway=False):  # noqa: ANN002, ANN003, ARG002
@@ -440,10 +441,11 @@ class TestV3RealignHelperGatesAndFailOpen:
         )
         assert out == ("WETH", "USDC")
 
+    @pytest.mark.expects_resolver_defect
     def test_missing_address_fails_open(self, monkeypatch):
         class _NoAddr:
             def resolve(self, token, chain, *, log_errors=True, skip_gateway=False):  # noqa: ANN001, ANN003, ARG002
-                return SimpleNamespace(symbol=str(token).upper(), address=None, decimals=18)
+                return SimpleNamespace(symbol=str(token).upper(), address=None, decimals=18, chain=chain)
 
         monkeypatch.setattr(
             "almanak.framework.data.tokens.resolver.get_token_resolver",

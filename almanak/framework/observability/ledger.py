@@ -64,6 +64,15 @@ from enum import Enum
 from typing import Any
 
 from almanak.core.chains import ChainRegistry
+
+# VIB-6167 — module level, not function level: a lazy import is a deferred
+# module-body execution, so an import-time fault lands one frame ABOVE the
+# seam's own guards, on an accounting write path. At module scope it is a
+# boot failure instead.
+from almanak.framework.data.tokens.best_effort import (
+    resolve_token_best_effort,
+    resolve_token_decimals_best_effort,
+)
 from almanak.framework.models.run_mode import RunMode, RunModeStamp, serialize_run_mode
 
 logger = logging.getLogger(__name__)
@@ -477,29 +486,17 @@ def _lp_amount_to_human(raw: Any, token: str, chain: str) -> str | None:
         return "0"
     if not token or not chain:
         return None
-    try:
-        from almanak.framework.data.tokens.resolver import get_token_resolver
-
-        resolver = get_token_resolver()
-        # skip_gateway/log_errors: this is the accounting write hot path —
-        # never risk a gateway round-trip stall on a best-effort scale; we pass
-        # a symbol (not an address), so the gateway lookup is a no-op anyway.
-        token_info = resolver.resolve(token, chain, log_errors=False, skip_gateway=True)
-        # Validate decimals explicitly (mirrors _scale_fee /
-        # _scale_raw_amount_to_human) rather than relying on the except below.
-        decimals = getattr(token_info, "decimals", None)
-        if decimals is None or decimals < 0:
-            return None
-        return str(d / Decimal(10**decimals))
-    except Exception as exc:
-        logger.debug(
-            "ledger LP_OPEN: failed to scale raw amount=%s token=%s chain=%s: %s",
-            raw,
-            token,
-            chain,
-            exc,
-        )
+    # VIB-6100 — routed through the shared seam, which is TOTAL: it returns
+    # ``None`` for every failure and never raises. An unresolvable token is the
+    # intended fallback (DEBUG); a signature/shape DEFECT returns the same value
+    # but is recorded at ERROR with a traceback and reported to the defect
+    # observer, so it can no longer masquerade as an ordinary resolver miss.
+    # The seam also pins ``skip_gateway``/``log_errors``: this is the accounting
+    # write hot path and must never risk a gateway round-trip stall.
+    decimals = resolve_token_decimals_best_effort(token, chain, context="ledger LP_OPEN")
+    if decimals is None:
         return None
+    return str(d / Decimal(10**decimals))
 
 
 def _record_lp_leg_identity_missing(intent_type: str, protocol: str, chain: str) -> None:
@@ -639,23 +636,16 @@ def _resolve_lp_close_symbol(currency: Any, chain: str) -> str:
         return native_token_for_chain(chain) or ""
     if not chain:
         return ""
-    try:
-        from almanak.framework.data.tokens.resolver import get_token_resolver
-
-        resolver = get_token_resolver()
-        # Pass the normalised lowercase string ``cur`` (not the raw ``currency``,
-        # which may be ``HexBytes`` / non-str) so the resolver's address handling
-        # never trips on a missing ``.startswith`` (Gemini).
-        token_info = resolver.resolve(cur, chain, log_errors=False, skip_gateway=True)
-        return getattr(token_info, "symbol", "") or ""
-    except Exception as exc:  # noqa: BLE001 — fail-open to intent fallback
-        logger.debug(
-            "ledger LP_CLOSE: failed to resolve currency=%s on chain=%s to a symbol: %s",
-            currency,
-            chain,
-            exc,
-        )
-        return ""
+    # VIB-6100 — routed through the shared seam (total; never raises). An
+    # unresolvable currency falls open to the intent fallback exactly as before;
+    # a signature/shape defect returns the same value but is logged at ERROR with
+    # a traceback and reported to the defect observer instead of masquerading as
+    # an ordinary miss.
+    # ``cur`` (normalised lowercase str, not the raw ``currency`` which may be
+    # ``HexBytes``) is passed so the resolver's address handling never trips on
+    # a missing ``.startswith`` (Gemini).
+    token_info = resolve_token_best_effort(cur, chain, context="ledger LP_CLOSE")
+    return getattr(token_info, "symbol", "") or ""
 
 
 def _coin_symbol_at(coin_symbols: Any, idx: int) -> str:
@@ -876,26 +866,19 @@ def _extract_from_lending(
     if not token_in or not chain:
         return (token_in, "", "", "", "", None)
 
-    try:
-        from almanak.framework.data.tokens.resolver import get_token_resolver
-
-        resolver = get_token_resolver()
-        # ``resolver.resolve`` is typed ``-> ResolvedToken`` and raises
-        # ``TokenNotFoundError`` / ``TokenResolutionError`` on failure (never
-        # returns None). The except below is the only honest failure path.
-        token_info = resolver.resolve(token_in, chain=chain)
-        scaled = Decimal(raw_int) / Decimal(10**token_info.decimals)
-    except Exception as exc:
-        logger.debug(
-            "ledger %s: failed to scale raw amount=%s for token=%s chain=%s: %s",
-            intent_type,
-            raw_int,
-            token_in,
-            chain,
-            exc,
-        )
+    # VIB-6100 — route through the shared seam (total; never raises). Historical
+    # shape was bare ``except Exception`` around ``resolver.resolve``: a defect
+    # was laundered into empty amount_in at DEBUG. Gateway stays allowed —
+    # main resolved without ``skip_gateway`` here (receipt-scale REPAY/WITHDRAW).
+    decimals = resolve_token_decimals_best_effort(
+        token_in,
+        chain,
+        context=f"ledger {intent_type} receipt amount scale",
+        allow_gateway=True,
+    )
+    if decimals is None:
         return (token_in, "", "", "", "", None)
-
+    scaled = Decimal(raw_int) / Decimal(10**decimals)
     return (token_in, "", _measured_amount_to_row(scaled), "", "", None)
 
 
@@ -2069,24 +2052,20 @@ def build_ledger_entry(
     needs_decimals_lookup = any(_is_integer_shaped(v) for v in (entry.amount_in, entry.amount_out))
 
     if needs_decimals_lookup:
-        try:
-            from almanak.framework.data.tokens.resolver import get_token_resolver
-
-            resolver = get_token_resolver()
-            for side, sym in (("in", token_in), ("out", token_out)):
-                if not sym:
-                    continue
-                token_symbols_map[side] = sym
-                try:
-                    info = resolver.resolve(sym, chain=chain_lc)
-                except Exception:
-                    info = None
-                if info is not None and info.decimals is not None:
-                    token_decimals_map[side] = info.decimals
-        except Exception:  # pragma: no cover - resolver path is best-effort
-            # Resolver unavailable — fall through; the magnitude rule will
-            # still run inside the guard without decimals plumbed.
-            pass
+        # VIB-6100 — seam is total; no try needed. Soft-fail guard only uses
+        # decimals when present; miss → rule runs without them.
+        for side, sym in (("in", token_in), ("out", token_out)):
+            if not sym:
+                continue
+            token_symbols_map[side] = sym
+            decimals = resolve_token_decimals_best_effort(
+                sym,
+                chain_lc,
+                context="ledger decimal-unit soft-fail",
+                allow_gateway=True,
+            )
+            if decimals is not None:
+                token_decimals_map[side] = decimals
 
     _check_decimal_unit_soft_fail(
         {"amount_in": entry.amount_in, "amount_out": entry.amount_out},

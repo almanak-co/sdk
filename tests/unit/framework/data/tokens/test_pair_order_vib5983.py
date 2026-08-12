@@ -12,6 +12,7 @@ import pytest
 
 from types import SimpleNamespace
 
+from almanak.framework.data.tokens.exceptions import TokenNotFoundError
 from almanak.framework.data.tokens.pair_order import realign_token_pair_by_address
 
 
@@ -44,8 +45,11 @@ def _patch_resolver(monkeypatch, book: dict[str, str]):
             calls.append({"key": token, "chain": chain, "log_errors": log_errors, "skip_gateway": skip_gateway})
             up = str(token).upper()
             if up in book:
-                return SimpleNamespace(symbol=up, address=book[up], decimals=18)
-            return None
+                # Full production-shaped success (chain required; None return is a defect).
+                return SimpleNamespace(
+                    symbol=up, address=book[up], decimals=18, chain=chain or "ethereum"
+                )
+            raise TokenNotFoundError(token=str(token), chain=str(chain), reason="test double miss")
 
     monkeypatch.setattr(
         "almanak.framework.data.tokens.resolver.get_token_resolver",
@@ -76,9 +80,11 @@ def test_keeps_order_when_already_address_sorted(monkeypatch):
 
 
 def test_fail_open_when_unresolved(monkeypatch):
+    """Business miss: production raises TokenNotFoundError (not return None)."""
+
     class _Empty:
-        def resolve(self, token, chain, *, log_errors=True, skip_gateway=False):
-            return None
+        def resolve(self, token, chain, *, log_errors=True, skip_gateway=False):  # noqa: ANN001
+            raise TokenNotFoundError(token=str(token), chain=str(chain), reason="unresolved")
 
     monkeypatch.setattr(
         "almanak.framework.data.tokens.resolver.get_token_resolver",
@@ -87,6 +93,7 @@ def test_fail_open_when_unresolved(monkeypatch):
     assert realign_token_pair_by_address("WETH", "USDC", "ethereum") == ("WETH", "USDC")
 
 
+@pytest.mark.expects_resolver_defect
 def test_fail_open_on_resolver_exception(monkeypatch):
     class _Boom:
         def resolve(self, token, chain, *, log_errors=True, skip_gateway=False):

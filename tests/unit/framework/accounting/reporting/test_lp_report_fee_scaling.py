@@ -47,21 +47,31 @@ def test_scale_fee_unresolvable_token_drops_leg_not_poison() -> None:
     assert _scale_fee("75817134186", "NOTATOKEN", "arbitrum") == Decimal("0")
 
 
+@pytest.mark.expects_resolver_defect
 def test_scale_fee_malformed_resolver_decimals_drops_leg(monkeypatch) -> None:
     """A resolver result with decimals=None or decimals<0 drops the leg (0),
-    never a mis-scaled / raw value (CodeRabbit regression pin)."""
-    import almanak.framework.data.tokens.resolver as resolver_mod
+    never a mis-scaled / raw value (CodeRabbit regression pin).
 
-    class _Info:
-        def __init__(self, decimals):
-            self.decimals = decimals
+    Full production shape so the seam rejects for *decimals* specifically —
+    a decimals-only stub was rejected for missing fields and never reached
+    the decimals branch this test claims to pin (CodeRabbit #3694).
+    Built locally because FakeToken refuses both bad values at construction.
+    """
+    from types import SimpleNamespace
+
+    import almanak.framework.data.tokens.resolver as resolver_mod
 
     class _Resolver:
         def __init__(self, decimals):
             self._d = decimals
 
         def resolve(self, token, chain, *, log_errors=True, skip_gateway=False):
-            return _Info(self._d)
+            return SimpleNamespace(
+                symbol="WETH",
+                address="0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+                decimals=self._d,
+                chain=chain,
+            )
 
     for bad in (None, -1):
         monkeypatch.setattr(resolver_mod, "get_token_resolver", lambda d=bad: _Resolver(d))

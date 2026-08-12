@@ -437,6 +437,7 @@ class TestV4RealignTokenPair:
             False,
         )
 
+    @pytest.mark.expects_resolver_defect
 
     def test_resolver_exception_fails_open(self, monkeypatch):
         """Resolver raising must not block the write — fall back to inputs, flag False.
@@ -454,41 +455,50 @@ class TestV4RealignTokenPair:
         lp_data = {"currency0": self.WETH, "currency1": self.USDC}
         assert self._realign()(lp_data, "optimism", "USDC", "WETH") == ("USDC", "WETH", False)
 
-    def test_blank_symbol_falls_back_to_address(self, monkeypatch):
-        """When the resolver yields an empty symbol, use the currency address.
+    @pytest.mark.expects_resolver_defect
+    def test_blank_symbol_is_a_defect_and_fails_open(self, monkeypatch):
+        """Empty symbol is production-impossible — seam reports defect, not success.
 
-        Both currencies RESOLVED here — an empty display symbol is not a resolution
-        failure — so this is a genuine realignment and the flag is True (VIB-6476).
-
-        The empty-symbol token is built LOCALLY and explicitly, not with
-        ``FakeToken``: ``ResolvedToken`` raises on an empty symbol, so no real
-        resolver can produce this and the shared double refuses it too. Keeping
-        the impossibility local is what documents it as defence-in-depth rather
-        than a shape this code must expect — the same treatment as the
-        negative-decimals case in the VIB-6100 seam suite. Teaching the SHARED
-        double to accept it instead would put a shape production cannot emit
-        into every suite that uses it, which is the false-green generator the
-        double exists to remove.
+        ``ResolvedToken`` rejects empty symbols; a double that returns
+        ``symbol=""`` with an otherwise complete payload used to pass through
+        the seam with an empty defect list (false-green). The seam now rejects
+        that shape: observer fires, realign fails open (``realigned=False``),
+        and the caller keeps label order rather than treating the pair as
+        established (VIB-6476 + Codex review of #3694).
         """
         from types import SimpleNamespace
 
-        weth, usdc = self.WETH, self.USDC
-
-        class _EmptySymbolResolver:
-            def resolve(self, token, chain, *, log_errors=True, skip_gateway=False):  # noqa: ARG002
-                key = str(token).lower()
-                if key == weth.lower():
-                    return SimpleNamespace(symbol="", address=weth, decimals=18, chain=chain)
-                if key == usdc.lower():
-                    return SimpleNamespace(symbol="USDC", address=usdc, decimals=6, chain=chain)
-                raise TokenNotFoundError(token=str(token), chain=str(chain))
-
-        monkeypatch.setattr(
-            "almanak.framework.data.tokens.resolver.get_token_resolver",
-            lambda: _EmptySymbolResolver(),
+        from almanak.framework.data.tokens.best_effort import (
+            ResolverDefect,
+            set_resolver_defect_observer,
         )
-        lp_data = {"currency0": self.WETH, "currency1": self.USDC}
-        assert self._realign()(lp_data, "optimism", "x", "y") == (self.WETH.upper(), "USDC", True)
+
+        weth, usdc = self.WETH, self.USDC
+        defects: list[ResolverDefect] = []
+        previous = set_resolver_defect_observer(defects.append)
+        try:
+
+            class _EmptySymbolResolver:
+                def resolve(self, token, chain, *, log_errors=True, skip_gateway=False):  # noqa: ARG002
+                    key = str(token).lower()
+                    if key == weth.lower():
+                        return SimpleNamespace(symbol="", address=weth, decimals=18, chain=chain)
+                    if key == usdc.lower():
+                        return SimpleNamespace(symbol="USDC", address=usdc, decimals=6, chain=chain)
+                    raise TokenNotFoundError(token=str(token), chain=str(chain))
+
+            monkeypatch.setattr(
+                "almanak.framework.data.tokens.resolver.get_token_resolver",
+                lambda: _EmptySymbolResolver(),
+            )
+            lp_data = {"currency0": self.WETH, "currency1": self.USDC}
+            # Fail-open: symbols unchanged, pair never established.
+            assert self._realign()(lp_data, "optimism", "x", "y") == ("x", "y", False)
+            assert any("empty or non-str symbol" in d.exc_type for d in defects), [
+                d.exc_type for d in defects
+            ]
+        finally:
+            set_resolver_defect_observer(previous)
 
 
 # =============================================================================
@@ -545,6 +555,8 @@ class TestV4ResolverFailureNoLongerShipsLabelOrder:
         """
         from types import SimpleNamespace
 
+        from almanak.framework.data.tokens.exceptions import TokenNotFoundError
+
         book = {"USDC": self.USDC_ADDR, "WETH": self.WETH_ADDR}
         addresses = {v.lower() for v in book.values()}
 
@@ -554,15 +566,19 @@ class TestV4ResolverFailureNoLongerShipsLabelOrder:
                 if text.lower() in addresses:
                     if address_lookup == "raise":
                         raise RuntimeError("resolver down for address lookups")
-                    return None
+                    # Production miss is raise, never return None (None is a defect).
+                    raise TokenNotFoundError(
+                        token=text, chain=str(chain), reason="address not in static registry"
+                    )
                 up = text.upper()
                 if up in book:
                     return SimpleNamespace(
                         symbol=up,
                         address=book[up],
                         decimals=TestV4ResolverFailureNoLongerShipsLabelOrder.DECIMALS[up],
+                        chain=chain or "ethereum",
                     )
-                return None
+                raise TokenNotFoundError(token=text, chain=str(chain), reason="unknown symbol")
 
         monkeypatch.setattr(
             "almanak.framework.data.tokens.resolver.get_token_resolver",
@@ -583,6 +599,7 @@ class TestV4ResolverFailureNoLongerShipsLabelOrder:
         )
 
     @pytest.mark.parametrize("address_lookup", ["none", "raise"])
+    @pytest.mark.expects_resolver_defect
     def test_v3_realign_corrects_the_pair_instead_of_returning_label_order(
         self, monkeypatch, address_lookup: str
     ):
@@ -618,6 +635,7 @@ class TestV4ResolverFailureNoLongerShipsLabelOrder:
         )
 
     @pytest.mark.parametrize("address_lookup", ["none", "raise"])
+    @pytest.mark.expects_resolver_defect
     def test_handle_lp_end_to_end_basis_is_not_phantom(self, monkeypatch, address_lookup: str):
         """The money consequence, through the real handler.
 

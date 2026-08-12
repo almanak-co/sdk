@@ -1694,8 +1694,9 @@ class TestHandleLpCostBasisUsd:
             position_key="lp:aerodrome:base:0xwallet:0x1111111111111111111111111111111111111111",
             market_id="0x1111111111111111111111111111111111111111",
         )
-        # extracted_data_json forces the resolver path; resolver returns None
-        # → assumed_decimals = True.
+        # extracted_data_json forces the resolver path; empty FakeTokenResolver
+        # raises TokenNotFoundError (the production miss shape) →
+        # assumed_decimals = True. Returning None is a VIB-6100 defect.
         extracted = json.dumps({
             "lp_open_data": {
                 "_type": "LPOpenData",
@@ -1714,8 +1715,10 @@ class TestHandleLpCostBasisUsd:
             price_inputs_json=json.dumps({"WEIRD": "1.0", "UNKNOWN": "1.0"}),
         )
 
-        # Resolver returns None → assumed_decimals=True
-        mock_resolver = MagicMock(resolve=MagicMock(return_value=None))
+        from tests.support.token_resolver import FakeTokenResolver
+
+        # Empty registry → every resolve is TokenNotFoundError → assumed_decimals
+        mock_resolver = FakeTokenResolver()
 
         with patch("almanak.framework.data.tokens.resolver.get_token_resolver", return_value=mock_resolver):
             result = handle_lp(outbox_row, ledger_row)
@@ -2930,8 +2933,9 @@ class TestLpImpermanentLoss:
             "cost_basis_usd": "200.0",
         }
         # Force the close handler down the ``assumed_decimals`` path so
-        # cost_basis_usd is skipped. Use the extracted-data resolver miss
-        # technique (resolver returns None → assumed_decimals = True).
+        # cost_basis_usd is skipped. Empty FakeTokenResolver raises
+        # TokenNotFoundError on every miss (production shape) →
+        # assumed_decimals = True. Returning None is a VIB-6100 defect.
         extracted = json.dumps({
             "lp_close_data": {
                 "_type": "LPCloseData",
@@ -2961,7 +2965,9 @@ class TestLpImpermanentLoss:
             price_inputs_json=json.dumps({"USDC": "1.00", "WETH": "3000.00"}),
         )
 
-        mock_resolver = MagicMock(resolve=MagicMock(return_value=None))
+        from tests.support.token_resolver import FakeTokenResolver
+
+        mock_resolver = FakeTokenResolver()
         with patch("almanak.framework.data.tokens.resolver.get_token_resolver", return_value=mock_resolver):
             result = handle_lp(outbox, ledger, prior_open_payload=prior_open)
 
@@ -3368,20 +3374,33 @@ class TestCurveCloseFeeUnavailabilityStamp:
 
     @staticmethod
     def _patch_resolver(monkeypatch, decimals: dict[str, int]) -> None:
-        mock_resolver = MagicMock()
+        # VIB-6100: full ResolvedToken shape + TokenNotFoundError on miss.
+        # The prior MagicMock returned None / omitted address+chain, which the
+        # defect observer correctly fails at teardown.
+        from tests.support.token_resolver import FakeToken, FakeTokenResolver
 
-        def _resolve(token: str, chain: str = "", **kwargs: Any):
-            if token in decimals:
-                ti = MagicMock()
-                ti.decimals = decimals[token]
-                ti.symbol = token
-                return ti
-            return None
-
-        mock_resolver.resolve = MagicMock(side_effect=_resolve)
+        # Curve tricrypto fixtures run on ethereum; real registry addresses so
+        # address-order code is not inert against empty placeholders.
+        eth_addrs = {
+            "USDT": "0xdac17f958d2ee523a2206206994597c13d831ec7",
+            "WBTC": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
+            "WETH": _ADDRESSES["ethereum"]["WETH"],
+            "USDC": _ADDRESSES["ethereum"]["USDC"],
+            "DAI": _ADDRESSES["ethereum"]["DAI"],
+        }
+        resolver = FakeTokenResolver()
+        for symbol, dec in decimals.items():
+            addr = eth_addrs.get(symbol)
+            if addr is None:
+                # Synthetic symbol still needs a non-empty address to construct.
+                addr = "0x" + ("ab" * 20)
+            resolver.add(
+                symbol,
+                FakeToken(symbol=symbol, address=addr, decimals=dec, chain="ethereum"),
+            )
         monkeypatch.setattr(
             "almanak.framework.data.tokens.resolver.get_token_resolver",
-            lambda: mock_resolver,
+            lambda: resolver,
         )
 
     @staticmethod

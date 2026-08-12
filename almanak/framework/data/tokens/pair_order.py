@@ -20,6 +20,13 @@ from __future__ import annotations
 
 import logging
 
+# Module-level import (VIB-6167): a function-local import is a deferred
+# module-body execution, so an import-time fault would land one frame above the
+# seam's guards — on an accounting write path. Paying it at load moves that to
+# boot. No cycle: ``best_effort`` imports the resolver, which imports neither
+# this module nor ``best_effort``.
+from almanak.framework.data.tokens.best_effort import resolve_token_best_effort
+
 logger = logging.getLogger(__name__)
 
 
@@ -30,27 +37,26 @@ def realign_token_pair_by_address(
 ) -> tuple[str, str]:
     """Return ``(token0, token1)`` reordered so token0 is the lower on-chain address.
 
-    Fail-open: on any resolution / parse failure returns the inputs unchanged
-    (no worse than pre-fix label order). Never raises, never hits the network
+    Fail-open: on any *resolution* / parse failure returns the inputs unchanged
+    (no worse than pre-fix label order) and never hits the network
     (``skip_gateway=True``).
+
+    VIB-6100: "fail-open" stays scoped to genuine token-resolution failures in
+    the LOG. A defect in the seam — a ``TypeError`` from a signature mismatch, an
+    ``AttributeError`` from a malformed resolver — still keeps the input order
+    (the seam is total and never raises), but it is recorded at ERROR with a
+    traceback and reported to the defect observer, so it can no longer pass for
+    a legitimate resolver miss. Under test, that observer fails the run.
     """
     if not token0 or not token1 or not chain:
         return token0, token1
 
-    try:
-        from almanak.framework.data.tokens.resolver import get_token_resolver
-
-        resolver = get_token_resolver()
-        ti0 = resolver.resolve(token0, chain=chain, skip_gateway=True, log_errors=False)
-        ti1 = resolver.resolve(token1, chain=chain, skip_gateway=True, log_errors=False)
-    except Exception:  # noqa: BLE001 — money path: fail-open, never raise/block
-        logger.warning(
-            "token pair address-sort: resolver failed for (%s, %s) on %s; keeping input order",
-            token0,
-            token1,
-            chain,
-        )
-        return token0, token1
+    # VIB-6100 — shared seam. It pins ``chain`` as a keyword and
+    # ``skip_gateway=True``, which is what removed the original trap: this site
+    # passed ``chain`` by keyword while the ledger passed it positionally, so one
+    # hand-rolled double worked here and raised ``TypeError`` there.
+    ti0 = resolve_token_best_effort(token0, chain, context="token pair address-sort")
+    ti1 = resolve_token_best_effort(token1, chain, context="token pair address-sort")
 
     addr0 = getattr(ti0, "address", None) if ti0 is not None else None
     addr1 = getattr(ti1, "address", None) if ti1 is not None else None
@@ -114,20 +120,17 @@ def place_token_pair_by_observed_identity(
     if not currency0 and not currency1:
         return None
 
-    try:
-        from almanak.framework.data.tokens.resolver import get_token_resolver
-
-        resolver = get_token_resolver()
-        ti0 = resolver.resolve(token0, chain=chain, skip_gateway=True, log_errors=False)
-        ti1 = resolver.resolve(token1, chain=chain, skip_gateway=True, log_errors=False)
-    except Exception:  # noqa: BLE001 — money path: fail-closed to None, never raise
-        logger.warning(
-            "token pair identity placement: resolver failed for (%s, %s) on %s",
-            token0,
-            token1,
-            chain,
-        )
-        return None
+    # VIB-6100 — routed through the shared seam. This site arrived after the
+    # original migration (VIB-6471) carrying the verbatim pre-fix shape: a bare
+    # ``except Exception`` around ``resolver.resolve``, with the same flags the
+    # seam pins. It fails CLOSED rather than open, which bounds the damage, but
+    # the swallow is identical — a broken double read as "resolver failed" and
+    # this function returned ``None``, so a test asserting the fallback stayed
+    # green while the placement logic it names was never entered.
+    #
+    # The seam is total, so no ``try`` is needed here at all.
+    ti0 = resolve_token_best_effort(token0, chain, context="token pair identity placement")
+    ti1 = resolve_token_best_effort(token1, chain, context="token pair identity placement")
 
     addr0 = getattr(ti0, "address", None) if ti0 is not None else None
     addr1 = getattr(ti1, "address", None) if ti1 is not None else None

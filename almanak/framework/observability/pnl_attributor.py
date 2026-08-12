@@ -103,6 +103,12 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+# VIB-6167 — module level, not function level: a lazy import is a deferred
+# module-body execution, so an import-time fault lands one frame ABOVE the
+# seam's own guards, on an accounting write path. At module scope it is a
+# boot failure instead.
+from almanak.framework.data.tokens.best_effort import resolve_token_decimals_best_effort
+
 logger = logging.getLogger(__name__)
 
 # v4 bumps the formula: VIB-4848 lands three coordinated LP attribution
@@ -348,16 +354,14 @@ def _scale_raw_amount_to_human(raw: Decimal, token: str, chain: str) -> Decimal 
         return Decimal(0)
     if not token or not chain:
         return None
-    try:
-        from almanak.framework.data.tokens.resolver import get_token_resolver
-
-        # skip_gateway/log_errors: best-effort scale on the OPEN-stamp path —
-        # a symbol input never reaches the gateway lookup, but pin it anyway.
-        resolved = get_token_resolver().resolve(token, chain, log_errors=False, skip_gateway=True)
-    except Exception:
-        return None
-    decimals = getattr(resolved, "decimals", None)
-    if decimals is None or decimals < 0:
+    # VIB-6100 — routed through the shared seam (total; never raises). An
+    # unresolvable token → None (caller skips the computation); a signature/shape
+    # defect returns the same value but is logged at ERROR and reported to the
+    # defect observer rather than silently becoming "no decimals".
+    # skip_gateway/log_errors are pinned by the seam — best-effort scale on the
+    # OPEN-stamp path must never stall.
+    decimals = resolve_token_decimals_best_effort(token, chain, context="pnl_attributor scale")
+    if decimals is None:
         return None
     return raw / (Decimal(10) ** decimals)
 

@@ -19,6 +19,8 @@ from __future__ import annotations
 from decimal import Decimal
 from types import SimpleNamespace
 
+from almanak.framework.data.tokens.exceptions import TokenNotFoundError
+
 from almanak.framework.data.tokens.pair_order import realign_token_pair_by_address
 from almanak.framework.execution.extracted_data import LPCloseData, LPOpenData
 from almanak.framework.observability.position_events import (
@@ -63,11 +65,11 @@ def _patch_resolver(monkeypatch, book_key: str) -> None:
         def resolve(self, token, chain, *, log_errors=True, skip_gateway=False):  # noqa: ANN001, ARG002
             up = str(token).upper()
             if up in book:
-                return SimpleNamespace(symbol=up, address=book[up], decimals=_DECIMALS[up])
+                return SimpleNamespace(symbol=up, address=book[up], decimals=_DECIMALS[up], chain=chain)
             for sym, addr in book.items():
                 if addr.lower() == str(token).lower():
-                    return SimpleNamespace(symbol=sym, address=addr, decimals=_DECIMALS[sym])
-            return None
+                    return SimpleNamespace(symbol=sym, address=addr, decimals=_DECIMALS[sym], chain=chain)
+            raise TokenNotFoundError(token=str(token), chain=str(chain), reason="unknown")
 
     monkeypatch.setattr(
         "almanak.framework.data.tokens.resolver.get_token_resolver",
@@ -127,7 +129,7 @@ def test_realign_noop_when_label_already_chain_order(monkeypatch):
 def test_realign_fail_open_on_unresolved(monkeypatch):
     class _Empty:
         def resolve(self, token, chain, *, log_errors=True, skip_gateway=False):
-            return None
+            raise TokenNotFoundError(token=str(token), chain=str(chain), reason="empty")
 
     monkeypatch.setattr(
         "almanak.framework.data.tokens.resolver.get_token_resolver",

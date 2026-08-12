@@ -188,18 +188,63 @@ def _apply_symbol_token_policy(
     if release is not None and release >= _SYMBOL_TOKEN_REMOVAL_RELEASE:
         raise SymbolTokenResolutionError(token=token, chain=chain_label, api=api)
 
-    warnings.warn_explicit(
-        (
-            f"{api} received symbol-based token reference {token!r} on {chain_label}. "
-            "Symbol-based token resolution is deprecated because it is unreliable. "
-            "Use the chain-specific token contract address or a CAIP-19 asset identifier instead. "
-            f"Symbol references will be rejected in Almanak SDK {SYMBOL_TOKEN_REMOVAL_VERSION} and later."
-        ),
-        SymbolTokenResolutionWarning,
-        filename,
-        lineno,
-        module=module_name,
-    )
+    try:
+        warnings.warn_explicit(
+            (
+                f"{api} received symbol-based token reference {token!r} on {chain_label}. "
+                "Symbol-based token resolution is deprecated because it is unreliable. "
+                "Use the chain-specific token contract address or a CAIP-19 asset identifier instead. "
+                f"Symbol references will be rejected in Almanak SDK {SYMBOL_TOKEN_REMOVAL_VERSION} and later."
+            ),
+            SymbolTokenResolutionWarning,
+            filename,
+            lineno,
+            module=module_name,
+        )
+    except SymbolTokenResolutionWarning:
+        # A filter set to "error" makes ``warn_explicit`` raise the warning
+        # CATEGORY itself. That is a deliberate user/CI escalation ("treat this
+        # deprecation as fatal"), not a broken hook, and it MUST keep working —
+        # ``simplefilter("error", SymbolTokenResolutionWarning)`` is asserted by
+        # tests/unit/intent/test_symbol_token_deprecation.py and
+        # tests/unit/data/tokens/test_symbol_resolution_deprecation.py.
+        # Only this category is re-raised: a broken third-party showwarning that
+        # raises some other Warning subclass is machinery failure and is
+        # tolerated below (Codex review of #3472).
+        raise
+    except Exception:  # noqa: BLE001 — a notice must never fail the call it annotates
+        # VIB-6100 review of PR #3472. ``warn_explicit`` reaches CPython's
+        # ``_showwarnmsg``, which calls the PROCESS-GLOBAL, third-party-owned
+        # ``warnings.showwarning`` hook. Anything in the process may replace it
+        # — a test harness, a logging shim, a notebook frontend — and a bad
+        # replacement raises straight out of this deprecation notice:
+        #
+        #   showwarning = None            -> TypeError
+        #   showwarning of wrong arity    -> TypeError
+        #   sys.stderr without .write     -> AttributeError
+        #
+        # (CPython guards only ``file is None`` and ``OSError``; a *replaced*
+        # stderr is not covered.) Every bare-symbol resolve passes through here,
+        # and all five accounting/observability call sites migrated by VIB-6100
+        # pass symbols, so this is the common path rather than a corner of it.
+        #
+        # This guard is kept even though the best-effort seam is now total and
+        # would degrade rather than halt (VIB-6167). Containment belongs to the
+        # layer that owns the fault: a caller that is NOT the seam — a connector,
+        # an adapter — gets no such tolerance, and would take the raise directly.
+        # Relying on a downstream reader to be forgiving is not containment.
+        #
+        # This is the same rule as ``_try_record_metric``, one layer over:
+        # observability must never break the thing it observes. A deprecation
+        # notice is advisory by construction — losing it costs a log line, while
+        # raising it costs a ledger row.
+        #
+        # NOT logged: this function is ``lru_cache``d per callsite, and the
+        # obvious cause is a broken logging/warnings setup, so a logger call
+        # here is the most likely thing to fail next. Silence is the correct
+        # tolerance for an advisory notice; the SymbolTokenResolutionError path
+        # above is unaffected and still raises.
+        pass
 
 
 def warn_or_reject_symbol_token_reference(

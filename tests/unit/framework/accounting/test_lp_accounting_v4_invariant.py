@@ -264,24 +264,20 @@ def test_v4_lp_accounting_aligns_tokens_to_canonical_currency_order(monkeypatch)
     from almanak.framework.accounting.lp_accounting import build_lp_accounting_event
     from almanak.framework.execution.extracted_data import LPOpenData
 
-    # Patch the token resolver to deterministic symbols/decimals.
-    class _FakeTokenInfo:
-        def __init__(self, symbol: str, decimals: int) -> None:
-            self.symbol = symbol
-            self.decimals = decimals
+    # VIB-6100: full ResolvedToken-shaped double. Prior double returned None on
+    # miss and omitted address/chain, so the seam defect observer failed the
+    # test at teardown and any "resolved" assertion was a false green.
+    from tests.support.token_resolver import FakeToken, FakeTokenResolver
 
-    class _FakeResolver:
-        _by_addr = {
-            WETH.lower(): _FakeTokenInfo("WETH", 18),
-            USDC.lower(): _FakeTokenInfo("USDC", 6),
+    mock_resolver = FakeTokenResolver(
+        {
+            "WETH": FakeToken(symbol="WETH", address=WETH, decimals=18, chain="arbitrum"),
+            "USDC": FakeToken(symbol="USDC", address=USDC, decimals=6, chain="arbitrum"),
         }
-
-        def resolve(self, token, chain, *, log_errors=True, skip_gateway=False):
-            return self._by_addr.get(token.lower())
-
+    )
     monkeypatch.setattr(
         "almanak.framework.data.tokens.resolver.get_token_resolver",
-        lambda: _FakeResolver(),
+        lambda: mock_resolver,
     )
 
     # Mock intent in USER ORDER (USDC first, WETH second) — opposite of canonical.

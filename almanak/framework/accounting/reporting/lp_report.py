@@ -12,6 +12,11 @@ from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+# VIB-6167 — module level, not function level: a lazy import is a deferred
+# module-body execution, so an import-time fault lands one frame ABOVE the
+# seam's own guards, on an accounting write path. At module scope it is a
+# boot failure instead.
+from almanak.framework.data.tokens.best_effort import resolve_token_decimals_best_effort
 from almanak.framework.observability.position_events import (
     PositionEventType,
     PositionType,
@@ -59,15 +64,12 @@ def _scale_fee(raw: Any, token: str, chain: str) -> Decimal:
     if not sym or not chain:
         logger.debug("lp_report._scale_fee: no token/chain for fee=%s — dropping leg", raw)
         return Decimal("0")
-    try:
-        from almanak.framework.data.tokens.resolver import get_token_resolver
-
-        resolved = get_token_resolver().resolve(sym, chain, log_errors=False, skip_gateway=True)
-    except Exception:
-        logger.debug("lp_report._scale_fee: resolver miss for %s on %s — dropping leg", sym, chain)
-        return Decimal("0")
-    decimals = getattr(resolved, "decimals", None)
-    if decimals is None or decimals < 0:
+    # VIB-6100 — routed through the shared seam (total; never raises). An
+    # unresolvable token drops the leg exactly as before; a signature/shape defect
+    # drops it too, but loudly — ERROR with a traceback plus a defect-observer
+    # report — instead of being indistinguishable from a resolver miss.
+    decimals = resolve_token_decimals_best_effort(sym, chain, context="lp_report._scale_fee")
+    if decimals is None:
         logger.debug("lp_report._scale_fee: no decimals for %s on %s — dropping leg", sym, chain)
         return Decimal("0")
     return d / (Decimal(10) ** decimals)

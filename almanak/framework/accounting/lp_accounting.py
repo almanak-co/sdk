@@ -20,6 +20,7 @@ from uuid import uuid4
 from almanak.framework.accounting.ids import make_accounting_event_id
 from almanak.framework.accounting.measured import encode_money_payload
 from almanak.framework.accounting.models import AccountingConfidence, AccountingIdentity, LPEventType
+from almanak.framework.data.tokens.best_effort import resolve_token_best_effort
 from almanak.framework.market.price_store import lookup_price
 from almanak.framework.models.run_mode import RunMode
 
@@ -322,29 +323,25 @@ def _v4_align_tokens_to_currency_order(
     """
     c0 = getattr(lp_data, "currency0", None)
     c1 = getattr(lp_data, "currency1", None)
-    if not c0 or not c1:
+    # Parser currencies are address strings. Non-str (including MagicMock
+    # auto-attrs in tests, or a buggy producer) is not a V4 observation —
+    # skip realign rather than feeding a non-token into the seam. Do not
+    # str()-coerce: that would launder a type defect into a miss
+    # (CodeRabbit #3694).
+    if not isinstance(c0, str) or not isinstance(c1, str) or not c0 or not c1:
         # V3 or single-sided V4 open — no canonical address pair available.
         return token0, token1, dec0, dec1, assumed_decimals
-    try:
-        from almanak.framework.data.tokens.resolver import get_token_resolver
 
-        resolver = get_token_resolver()
-        ti0 = resolver.resolve(c0, chain=chain, log_errors=False)
-        ti1 = resolver.resolve(c1, chain=chain, log_errors=False)
-    except Exception:  # noqa: BLE001
-        logger.warning(
-            "V4 LP accounting: token resolver failed for currency pair (%s, %s) on %s; "
-            "falling back to user-intent token order — amounts may be misattributed",
-            c0,
-            c1,
-            chain,
-        )
-        return token0, token1, dec0, dec1, assumed_decimals
+    # VIB-6100 — shared seam (total). Historical bare ``except Exception`` around
+    # ``resolver.resolve`` laundered defects into label-order fallback. Gateway
+    # stays allowed (main used log_errors=False only, not skip_gateway).
+    ti0 = resolve_token_best_effort(c0, chain, context="lp_accounting v4 currency0", allow_gateway=True)
+    ti1 = resolve_token_best_effort(c1, chain, context="lp_accounting v4 currency1", allow_gateway=True)
 
     if ti0 is None or ti1 is None:
         logger.warning(
-            "V4 LP accounting: token resolver returned None for (%s, %s) on %s; "
-            "falling back to user-intent token order",
+            "V4 LP accounting: token resolver did not resolve currency pair (%s, %s) on %s; "
+            "falling back to user-intent token order — amounts may be misattributed",
             c0,
             c1,
             chain,

@@ -25,6 +25,7 @@ import pytest
 
 from almanak.framework.execution.extracted_data import LPCloseData, LPOpenData
 from almanak.framework.observability.position_events import build_position_event_from_intent
+from tests.support.token_resolver import FakeToken, FakeTokenResolver
 
 USDC_RAW = 2_185_779  # 6 dec  -> 2.185779 USDC
 WETH_RAW = 1_032_114_889_479_681  # 18 dec -> ~0.001032 WETH
@@ -44,32 +45,37 @@ def _addr(byte: str) -> str:
 # human pool label is "WETH/USDC".
 _ADDR_BOOK = {"USDC": _addr("11"), "WETH": _addr("cc")}
 _DECIMALS = {"USDC": 6, "WETH": 18}
+_CHAIN = "ethereum"
 
 
 @pytest.fixture
 def _resolver(monkeypatch):
-    class _FakeResolver:
-        # NOTE: `chain` must be accepted POSITIONALLY. `_resolve_lp_close_symbol`
-        # calls `resolver.resolve(cur, chain, log_errors=…, skip_gateway=…)` while
-        # `pair_order.realign_token_pair_by_address` uses `chain=` as a keyword. A
-        # fake that only accepts the keyword form raises TypeError here, which the
-        # resolver's fail-open `except` swallows into `""` — the test then passes
-        # for the wrong reason (it exercises the unresolved branch, not the
-        # resolved one). Worth knowing when writing further fakes for this seam.
-        def resolve(self, token, chain, *, log_errors=True, skip_gateway=False):  # noqa: ARG002
-            up = str(token).upper()
-            if up in _ADDR_BOOK:
-                return SimpleNamespace(symbol=up, address=_ADDR_BOOK[up], decimals=_DECIMALS[up])
-            for sym, addr in _ADDR_BOOK.items():
-                if addr.lower() == str(token).lower():
-                    return SimpleNamespace(symbol=sym, address=addr, decimals=_DECIMALS[sym])
-            return None
-
+    # VIB-6100: use the shared double — full ResolvedToken shape (incl. chain),
+    # TokenNotFoundError on miss (not None), chain positional-or-keyword.
+    # The prior SimpleNamespace double omitted ``chain`` and returned None, so
+    # the seam reported defects and every "resolved" assertion was a false green
+    # on the fallback branch.
+    resolver = FakeTokenResolver(
+        {
+            "USDC": FakeToken(
+                symbol="USDC",
+                address=_ADDR_BOOK["USDC"],
+                decimals=_DECIMALS["USDC"],
+                chain=_CHAIN,
+            ),
+            "WETH": FakeToken(
+                symbol="WETH",
+                address=_ADDR_BOOK["WETH"],
+                decimals=_DECIMALS["WETH"],
+                chain=_CHAIN,
+            ),
+        }
+    )
     monkeypatch.setattr(
         "almanak.framework.data.tokens.resolver.get_token_resolver",
-        lambda: _FakeResolver(),
+        lambda: resolver,
     )
-    return _FakeResolver()
+    return resolver
 
 
 class _Intent:
