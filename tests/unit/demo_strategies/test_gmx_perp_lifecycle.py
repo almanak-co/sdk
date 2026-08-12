@@ -23,13 +23,9 @@ from almanak.connectors._strategy_base.perps_read_base import (
 from almanak.connectors.gmx_v2 import market_catalog
 from tests.unit.connectors.gmx_v2.market_fixtures import prime_catalog
 
-_SEED_DIR = (
-    Path(__file__).resolve().parents[3]
-    / "almanak"
-    / "demo_strategies"
-    / "gmx_perp_lifecycle"
-)
+_SEED_DIR = Path(__file__).resolve().parents[3] / "almanak" / "demo_strategies" / "gmx_perp_lifecycle"
 _ETH_USD_MARKET = "0x70d95587d40A2caf56bd97485aB3Eec10Bee6336"
+_WETH_ARBITRUM = "0x82af49447d8a07e3bd95bd0d56f35241523fbab1"
 _USDC_ARBITRUM = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
 
 
@@ -111,6 +107,38 @@ class TestFullCloseSemantics:
         assert len(intents) == 1
         assert intents[0].intent_type.value == "PERP_CLOSE"
         assert intents[0].size_usd is None
+
+
+class TestAddressFirstDataReads:
+    def test_tracked_tokens_are_chain_specific_addresses(self, strat):
+        assert strat._get_tracked_tokens() == [_WETH_ARBITRUM, _USDC_ARBITRUM]
+
+    def test_open_decision_prices_the_index_by_address(self, strat):
+        snapshot = MagicMock()
+        snapshot.price.return_value = Decimal("3000")
+        snapshot.collateral_value_usd.return_value = Decimal("5")
+
+        assert strat.decide(snapshot).intent_type.value == "PERP_OPEN"
+        snapshot.price.assert_called_once_with(_WETH_ARBITRUM)
+        snapshot.collateral_value_usd.assert_called_once_with(_USDC_ARBITRUM, Decimal("5"))
+
+    @pytest.mark.parametrize("key", ["market_address", "index_token_address", "collateral_token_address"])
+    @pytest.mark.parametrize("value", ["0x1", "0x" + "z" * 40])
+    def test_constructor_rejects_malformed_addresses(self, key, value):
+        module = _load_module()
+        cls = module.GMXPerpLifecycleStrategy
+        cfg = json.loads((_SEED_DIR / "config.json").read_text(encoding="utf-8"))
+        cfg[key] = value
+        with (
+            patch(
+                "almanak.framework.strategies.intent_strategy.IntentStrategy.__init__",
+                return_value=None,
+            ),
+            pytest.raises(ValueError, match=key),
+        ):
+            strategy = cls.__new__(cls)
+            strategy.get_config = lambda config_key, default=None: cfg.get(config_key, default)
+            cls.__init__(strategy)
 
 
 class TestVenueDerivedTeardown:

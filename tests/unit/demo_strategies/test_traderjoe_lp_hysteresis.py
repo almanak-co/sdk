@@ -15,17 +15,37 @@ from unittest.mock import MagicMock
 from almanak.demo_strategies.traderjoe_lp.strategy import TraderJoeLPConfig, TraderJoeLPStrategy
 
 _WALLET = "0x" + "1" * 40
+_WAVAX_ADDRESS = "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7"
+_USDT_ADDRESS = "0x9702230A8Ea53601f5cD2dc00fDBc13d4dF4A8c7"
 
 
 def _strategy(**cfg_over) -> TraderJoeLPStrategy:
-    cfg = TraderJoeLPConfig(force_action="", **cfg_over)
+    config = {
+        "force_action": "",
+        "token_x_address": _WAVAX_ADDRESS,
+        "token_y_address": _USDT_ADDRESS,
+        **cfg_over,
+    }
+    cfg = TraderJoeLPConfig(**config)
     return TraderJoeLPStrategy(chain="avalanche", wallet_address=_WALLET, config=cfg)
 
 
 def _market(wavax_price: float) -> MagicMock:
     m = MagicMock()
-    m.price.side_effect = lambda t: Decimal(str(wavax_price)) if t == "WAVAX" else Decimal("1")
+    m.price.side_effect = lambda t: Decimal(str(wavax_price)) if t == _WAVAX_ADDRESS else Decimal("1")
     return m
+
+
+def test_default_config_constructs_the_documented_pool() -> None:
+    strategy = TraderJoeLPStrategy(
+        chain="avalanche",
+        wallet_address=_WALLET,
+        config=TraderJoeLPConfig(),
+    )
+
+    assert strategy.pool == "WAVAX/USDT/20"
+    assert strategy.token_x_address == _WAVAX_ADDRESS
+    assert strategy.token_y_address == _USDT_ADDRESS
 
 
 def _open_position(s: TraderJoeLPStrategy, center: float, opened_min_ago: float = 999) -> TraderJoeLPStrategy:

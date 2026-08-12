@@ -26,6 +26,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
+from almanak.demo_strategies._address_config import require_evm_address
 from almanak.framework.intents import AnyIntent, Intent, IntentType
 from almanak.framework.market import MarketSnapshot
 from almanak.framework.strategies import IntentStrategy, almanak_strategy
@@ -88,6 +89,7 @@ class EulerV2SupplyEthereumStrategy(IntentStrategy):
         super().__init__(*args, **kwargs)
 
         self.supply_token = self.get_config("supply_token", "USDC")
+        self.supply_token_address = require_evm_address(self, "supply_token_address")
         self.supply_amount = Decimal(str(self.get_config("supply_amount", "1000")))
 
         # State machine
@@ -219,7 +221,7 @@ class EulerV2SupplyEthereumStrategy(IntentStrategy):
 
         try:
             market = self.create_market_snapshot()
-            supply_price = Decimal(str(market.price(self.supply_token)))
+            supply_price = Decimal(str(market.price(self.supply_token_address)))
         except Exception:
             logger.warning("Unable to fetch live prices for teardown valuation")
             supply_price = Decimal("0")

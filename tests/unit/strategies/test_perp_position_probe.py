@@ -36,6 +36,7 @@ def _verified_markets():
 ETH_USD_MARKET = "0x70d95587d40A2caf56bd97485aB3Eec10Bee6336"
 BTC_USD_MARKET = "0x47c031236e19d024b42f8AE6780E44A573170703"
 USDC_ARBITRUM = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
+WETH_ARBITRUM = "0x82af49447d8a07e3bd95bd0d56f35241523fbab1"
 
 
 def _gmx_position(
@@ -60,6 +61,25 @@ def _gmx_position(
     )
 
 
+def _hyperliquid_eth_position() -> PerpsPositionOnChain:
+    return PerpsPositionOnChain(
+        account="0x" + "1" * 40,
+        market="ETH",
+        collateral_token="USDC",
+        # Deliberately differs from 1.2345 * $3,000 so the test proves the
+        # notional comes from the trusted venue mark, not this stored value.
+        size_in_usd=2_000_000_000,
+        size_in_tokens=12_345,  # 1.2345 ETH at Hyperliquid's 4 szDecimals
+        collateral_amount=740_700_000,
+        is_long=True,
+        borrowing_factor=0,
+        funding_fee_amount_per_size=0,
+        increased_at_time=0,
+        decreased_at_time=0,
+        key_prefix="hyperliquid",
+    )
+
+
 def _snapshot(result: PerpsReadResult | Exception, price: str = "3000") -> MagicMock:
     market = MagicMock()
     if isinstance(result, Exception):
@@ -76,6 +96,7 @@ def _probe(result, **kwargs):
         protocol=kwargs.pop("protocol", "gmx_v2"),
         chain=kwargs.pop("chain", "arbitrum"),
         market_symbol=kwargs.pop("market_symbol", "ETH/USD"),
+        index_token_address=kwargs.pop("index_token_address", WETH_ARBITRUM),
         **kwargs,
     )
 
@@ -114,9 +135,7 @@ class TestVenueTruthBeatsCache:
         assert probe.reason == "read_unavailable"
 
     def test_absent_snapshot_is_unmeasured_not_flat(self):
-        probe = probe_perp_position(
-            None, protocol="gmx_v2", chain="arbitrum", market_symbol="ETH/USD"
-        )
+        probe = probe_perp_position(None, protocol="gmx_v2", chain="arbitrum", market_symbol="ETH/USD")
 
         assert probe.state is PerpProbeState.UNMEASURED
         assert probe.reason == "no_market_snapshot"
@@ -146,9 +165,7 @@ class TestNegativeClaimsAreHardToMake:
 
     def test_unidentifiable_live_position_cannot_prove_absence(self):
         """A live position whose market we cannot name might be ours."""
-        probe = _probe(
-            PerpsReadResult(positions=(_gmx_position(market="0x" + "e" * 40),), ok=True)
-        )
+        probe = _probe(PerpsReadResult(positions=(_gmx_position(market="0x" + "e" * 40),), ok=True))
 
         assert probe.state is PerpProbeState.UNMEASURED
         assert probe.reason == "unidentified_venue_position"
@@ -188,9 +205,7 @@ class TestNegativeClaimsAreHardToMake:
         assert probe.state is PerpProbeState.FLAT
 
     def test_zero_size_position_is_not_open(self):
-        probe = _probe(
-            PerpsReadResult(positions=(_gmx_position(size_in_usd=0, size_in_tokens=0),), ok=True)
-        )
+        probe = _probe(PerpsReadResult(positions=(_gmx_position(size_in_usd=0, size_in_tokens=0),), ok=True))
 
         assert probe.state is PerpProbeState.FLAT
 
@@ -199,17 +214,60 @@ class TestNotional:
     """A truthful row valued at $0 is dropped as dust by the teardown harness."""
 
     def test_notional_is_mark_valued_from_venue_size(self):
-        probe = _probe(PerpsReadResult(positions=(_gmx_position(),), ok=True))
+        market = _snapshot(PerpsReadResult(positions=(_gmx_position(),), ok=True))
+        probe = probe_perp_position(
+            market,
+            protocol="gmx_v2",
+            chain="arbitrum",
+            market_symbol="ETH/USD",
+            index_token_address=WETH_ARBITRUM,
+        )
 
         # 0.1 ETH (1e17 raw / 1e18) at $3000.
         assert probe.positions[0].notional_usd == Decimal("300.0")
+        market.price.assert_called_once_with(WETH_ARBITRUM, chain="arbitrum")
+
+    def test_gmx_without_index_address_stays_unmeasured(self):
+        market = _snapshot(PerpsReadResult(positions=(_gmx_position(),), ok=True))
+
+        probe = probe_perp_position(
+            market,
+            protocol="gmx_v2",
+            chain="arbitrum",
+            market_symbol="ETH/USD",
+        )
+
+        assert probe.positions[0].notional_usd is None
+        market.funding_rate.assert_not_called()
+        market.perp_mark_price.assert_not_called()
+        market.price.assert_not_called()
+
+    def test_hyperliquid_addressless_position_uses_venue_mark(self):
+        market = _snapshot(PerpsReadResult(positions=(_hyperliquid_eth_position(),), ok=True))
+        market.perp_mark_price.return_value = Decimal("3000")
+
+        probe = probe_perp_position(
+            market,
+            protocol="hyperliquid",
+            chain="hyperevm",
+            market_symbol="ETH",
+            index_token_address=None,
+        )
+
+        assert probe.positions[0].notional_usd == Decimal("3703.5000")
+        market.perp_mark_price.assert_called_once_with("hyperliquid", "ETH", chain="hyperevm")
+        market.price.assert_not_called()
 
     def test_unpriceable_notional_is_none_not_zero(self):
         market = _snapshot(PerpsReadResult(positions=(_gmx_position(),), ok=True))
         market.price.side_effect = ValueError("no oracle path")
 
         probe = probe_perp_position(
-            market, protocol="gmx_v2", chain="arbitrum", market_symbol="ETH/USD"
+            market,
+            protocol="gmx_v2",
+            chain="arbitrum",
+            market_symbol="ETH/USD",
+            index_token_address=WETH_ARBITRUM,
         )
 
         assert probe.state is PerpProbeState.OPEN
@@ -219,7 +277,11 @@ class TestNotional:
         market = _snapshot(PerpsReadResult(positions=(_gmx_position(),), ok=True), price="0")
 
         probe = probe_perp_position(
-            market, protocol="gmx_v2", chain="arbitrum", market_symbol="ETH/USD"
+            market,
+            protocol="gmx_v2",
+            chain="arbitrum",
+            market_symbol="ETH/USD",
+            index_token_address=WETH_ARBITRUM,
         )
 
         assert probe.positions[0].notional_usd is None
@@ -228,9 +290,7 @@ class TestNotional:
 class TestSideFilter:
     @pytest.mark.parametrize("wanted,expected", [(True, PerpProbeState.OPEN), (False, PerpProbeState.FLAT)])
     def test_is_long_filter_selects_the_side(self, wanted, expected):
-        probe = _probe(
-            PerpsReadResult(positions=(_gmx_position(is_long=True),), ok=True), is_long=wanted
-        )
+        probe = _probe(PerpsReadResult(positions=(_gmx_position(is_long=True),), ok=True), is_long=wanted)
 
         assert probe.state is expected
 

@@ -61,7 +61,9 @@ import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+from almanak.demo_strategies._address_config import require_evm_address
 
 # Timeline API for logging
 from almanak.framework.api.timeline import TimelineEvent, TimelineEventType, add_event
@@ -71,6 +73,9 @@ from almanak.framework.intents import AnyIntent, Intent, IntentType
 
 # Core strategy framework imports
 from almanak.framework.market import MarketSnapshot
+
+if TYPE_CHECKING:
+    from almanak.framework.teardown import TeardownMode, TeardownPositionSummary
 from almanak.framework.strategies import IntentStrategy, almanak_strategy
 
 # Logging utilities for user-friendly output
@@ -94,6 +99,8 @@ class UniswapLPConfig:
 
     Attributes:
         pool: Pool identifier in format "TOKEN0/TOKEN1/FEE" (e.g., "WETH/USDC/500")
+        token0_address: Chain-specific token0 address (required)
+        token1_address: Chain-specific token1 address (required)
         range_width_pct: Total width of price range as decimal (0.20 = 20%)
         amount0: Amount of token0 to provide (e.g., "0.001" WETH)
         amount1: Amount of token1 to provide (e.g., "0.1" USDC)
@@ -105,6 +112,8 @@ class UniswapLPConfig:
 
     # Pool configuration
     pool: str = "WETH/USDC/500"
+    token0_address: str = ""
+    token1_address: str = ""
     range_width_pct: Decimal = Decimal("0.20")
 
     # Token amounts
@@ -125,6 +134,8 @@ class UniswapLPConfig:
         """Convert the configuration to a dictionary for serialization."""
         return {
             "pool": self.pool,
+            "token0_address": self.token0_address,
+            "token1_address": self.token1_address,
             "range_width_pct": str(self.range_width_pct),
             "amount0": str(self.amount0),
             "amount1": str(self.amount1),
@@ -200,6 +211,8 @@ class UniswapLPStrategy(IntentStrategy[UniswapLPConfig]):
     Configuration Parameters (from config.json):
     --------------------------------------------
     - pool: Pool identifier (e.g., "WETH/USDC/500")
+    - token0_address: Chain-specific token0 address (required)
+    - token1_address: Chain-specific token1 address (required)
     - range_width_pct: Total width of price range (0.20 = 20%)
     - amount0: Amount of token0 to provide (e.g., "0.1" WETH)
     - amount1: Amount of token1 to provide (e.g., "340" USDC)
@@ -211,6 +224,8 @@ class UniswapLPStrategy(IntentStrategy[UniswapLPConfig]):
     ---------------
     {
         "pool": "WETH/USDC/500",
+        "token0_address": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+        "token1_address": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
         "range_width_pct": 0.20,
         "amount0": "0.1",
         "amount1": "340",
@@ -251,6 +266,8 @@ class UniswapLPStrategy(IntentStrategy[UniswapLPConfig]):
         pool_parts = self.pool.split("/")
         self.token0_symbol = pool_parts[0] if len(pool_parts) > 0 else "WETH"
         self.token1_symbol = pool_parts[1] if len(pool_parts) > 1 else "USDC"
+        self.token0_address = require_evm_address(self, "token0_address")
+        self.token1_address = require_evm_address(self, "token1_address")
         self.fee_tier = int(pool_parts[2]) if len(pool_parts) > 2 else 500
 
         # Range width as percentage
@@ -322,8 +339,8 @@ class UniswapLPStrategy(IntentStrategy[UniswapLPConfig]):
         # For WETH/USDC: price = USDC per WETH (e.g., 3400)
 
         try:
-            token0_price_usd = market.price(self.token0_symbol)
-            token1_price_usd = market.price(self.token1_symbol)
+            token0_price_usd = market.price(self.token0_address)
+            token1_price_usd = market.price(self.token1_address)
             oracle_ratio = token0_price_usd / token1_price_usd
             # VIB-exp19: center the range and test range-exit against the
             # POOL's own price, not the market.price() USD oracle -- oracle
@@ -390,9 +407,7 @@ class UniswapLPStrategy(IntentStrategy[UniswapLPConfig]):
 
         total_usd = token0_usd + token1_usd
         if total_usd < self.min_position_usd:
-            return Intent.hold(
-                reason=f"Total ${total_usd:.2f} below min_position_usd ${self.min_position_usd:.2f}"
-            )
+            return Intent.hold(reason=f"Total ${total_usd:.2f} below min_position_usd ${self.min_position_usd:.2f}")
 
         swap_intent = self._rebalance_swap_intent(token0_usd, token1_usd, total_usd)
         if swap_intent is not None:
@@ -550,9 +565,7 @@ class UniswapLPStrategy(IntentStrategy[UniswapLPConfig]):
             max_slippage=self.max_slippage,
         )
 
-    def _rebalance_swap_intent(
-        self, token0_usd: Decimal, token1_usd: Decimal, total_usd: Decimal
-    ) -> Intent | None:
+    def _rebalance_swap_intent(self, token0_usd: Decimal, token1_usd: Decimal, total_usd: Decimal) -> Intent | None:
         """Swap the heavy side toward a ~50/50 USD split before (re)opening.
 
         Returns a SWAP intent when inventory is skewed beyond a 10% tolerance
@@ -664,16 +677,17 @@ class UniswapLPStrategy(IntentStrategy[UniswapLPConfig]):
             self._current_position_id = None
             self._range_lower = None
             self._range_upper = None
-    
+
     def _load_position_from_state(self) -> None:
         """Load position ID from persistent state if available."""
         state = self.get_persistent_state()
         if state and "current_position_id" in state:
             self._current_position_id = str(state["current_position_id"])
             logger.info(f"Loaded position ID from state: {self._current_position_id}")
+
     def _save_position_to_state(self, position_id: int) -> None:
         """Save position ID to strategy state so it persists across runs.
-        
+
         Args:
             position_id: Position NFT token ID
         """
@@ -681,15 +695,15 @@ class UniswapLPStrategy(IntentStrategy[UniswapLPConfig]):
         # This method just updates the in-memory value
         self._current_position_id = str(position_id)
         logger.info(f"Updated position ID: {position_id}")
-    
+
     def get_persistent_state(self) -> dict[str, Any]:
         """Get persistent state including position ID.
-        
+
         Returns:
             Dictionary with strategy state including position tracking
         """
         state = super().get_persistent_state() if hasattr(super(), "get_persistent_state") else {}
-        
+
         # Add position tracking to state
         if self._current_position_id:
             state["current_position_id"] = self._current_position_id
@@ -702,15 +716,15 @@ class UniswapLPStrategy(IntentStrategy[UniswapLPConfig]):
             state["range_upper"] = str(self._range_upper)
 
         return state
-    
+
     def load_persistent_state(self, state: dict[str, Any]) -> None:
         """Load persistent state including position ID.
-        
+
         Args:
             state: Dictionary with strategy state
         """
         super().load_persistent_state(state) if hasattr(super(), "load_persistent_state") else None
-        
+
         # Load position ID from state
         if "current_position_id" in state:
             self._current_position_id = str(state["current_position_id"])
@@ -774,8 +788,8 @@ class UniswapLPStrategy(IntentStrategy[UniswapLPConfig]):
             # Calculate estimated value using live prices
             try:
                 snapshot = self.create_market_snapshot()
-                token0_price_usd = snapshot.price(self.token0_symbol)
-                token1_price_usd = snapshot.price(self.token1_symbol)
+                token0_price_usd = snapshot.price(self.token0_address)
+                token1_price_usd = snapshot.price(self.token1_address)
             except Exception:  # noqa: BLE001
                 logger.debug("Could not get live prices for LP value estimate, using fallback $0")
                 token0_price_usd = Decimal("0")

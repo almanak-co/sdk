@@ -54,6 +54,8 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
+from almanak.demo_strategies._address_config import require_evm_address
+
 # Intent is what your strategy returns - a high-level action description
 from almanak.framework.intents import AnyIntent, Intent, IntentType
 
@@ -157,7 +159,9 @@ class UniswapRSIStrategy(IntentStrategy):
     - max_slippage_bps: Maximum allowed slippage in basis points (default: 50 = 0.5%)
     - protocol: Swap connector to route through (default: "uniswap_v3")
     - base_token: Token to trade (default: "WETH")
+    - base_token_address: Chain-specific base-token address (required)
     - quote_token: Token to use as quote (default: "USDC")
+    - quote_token_address: Chain-specific quote-token address (required)
 
     Example Config:
     ---------------
@@ -169,7 +173,9 @@ class UniswapRSIStrategy(IntentStrategy):
         "max_slippage_bps": 50,
         "protocol": "uniswap_v3",
         "base_token": "WETH",
-        "quote_token": "USDC"
+        "base_token_address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+        "quote_token": "USDC",
+        "quote_token_address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
     }
     """
 
@@ -186,8 +192,8 @@ class UniswapRSIStrategy(IntentStrategy):
         - self.chain: The blockchain to operate on
         - self.wallet_address: The wallet executing trades
 
-        Here we extract our strategy-specific parameters from config.
-        We use .get() with defaults to make the strategy work without config.
+        Here we extract our strategy-specific parameters from config. Display
+        labels have defaults; token addresses are explicitly required.
 
         Parameters:
             *args: Positional arguments passed to base class
@@ -232,6 +238,8 @@ class UniswapRSIStrategy(IntentStrategy):
         self.protocol = str(self.get_config("protocol", DEFAULT_PROTOCOL)).strip()
         self.base_token = self.get_config("base_token", "WETH")
         self.quote_token = self.get_config("quote_token", "USDC")
+        self.base_token_address = require_evm_address(self, "base_token_address")
+        self.quote_token_address = require_evm_address(self, "quote_token_address")
         # Optional exact-pool pin (V3 forks): a pool address makes every swap
         # execute against that one pool — the same pool whose analytics the
         # strategy would read — instead of whichever tier quotes best at the
@@ -420,7 +428,7 @@ class UniswapRSIStrategy(IntentStrategy):
         # - Calculate how much ETH to sell for our USD trade size
         # - Log what's happening for debugging
 
-        base_price = market.price(self.base_token)
+        base_price = market.price(self.base_token_address)
         logger.debug(f"Current {self.base_token} price: ${base_price:,.2f}")
 
         # Capture snapshot context for the fill hook, which has no market
@@ -444,7 +452,7 @@ class UniswapRSIStrategy(IntentStrategy):
         # we should hold and wait.
 
         try:
-            rsi = market.rsi(self.base_token, period=self.rsi_period)
+            rsi = market.rsi(self.base_token_address, period=self.rsi_period)
             logger.debug(f"{self.base_token} RSI({self.rsi_period}): {rsi.value:.2f}")
         except ValueError as e:
             # RSI calculation failed - data might not be available

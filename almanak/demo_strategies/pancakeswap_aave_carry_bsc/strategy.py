@@ -60,6 +60,7 @@ from datetime import UTC, datetime
 from decimal import ROUND_DOWN, Decimal
 from typing import TYPE_CHECKING, Any
 
+from almanak.demo_strategies._address_config import require_evm_address
 from almanak.framework.intents import AnyIntent, Intent, IntentType
 from almanak.framework.market import HealthUnavailableError, MarketSnapshot
 from almanak.framework.strategies import IntentStrategy, almanak_strategy
@@ -125,8 +126,10 @@ class PancakeswapAaveCarryBscStrategy(IntentStrategy):
 
     Config parameters:
         collateral_token: Token to supply as collateral (default: WBNB)
+        collateral_token_address: Chain-specific collateral-token address (required)
         collateral_amount: Amount to supply (default: 0.5)
         borrow_token: Token to borrow (default: USDC)
+        borrow_token_address: Chain-specific borrow-token address (required)
         swap_to_token: Token to swap borrowed funds into (default: USDT)
         ltv_target: Target loan-to-value ratio (default: 0.3 = 30%)
         max_borrow_fraction: Cap the borrow at this fraction of Aave's live
@@ -140,8 +143,10 @@ class PancakeswapAaveCarryBscStrategy(IntentStrategy):
         super().__init__(*args, **kwargs)
 
         self.collateral_token = str(self.get_config("collateral_token", "WBNB"))
+        self.collateral_token_address = require_evm_address(self, "collateral_token_address")
         self.collateral_amount = Decimal(str(self.get_config("collateral_amount", "0.5")))
         self.borrow_token = str(self.get_config("borrow_token", "USDC"))
+        self.borrow_token_address = require_evm_address(self, "borrow_token_address")
         self.swap_to_token = str(self.get_config("swap_to_token", "USDT"))
         self.ltv_target = Decimal(str(self.get_config("ltv_target", "0.3")))
         # Enforced safety ceiling: never borrow more than this fraction of
@@ -244,8 +249,8 @@ class PancakeswapAaveCarryBscStrategy(IntentStrategy):
         fail-closed guard.
         """
         try:
-            collateral_price = market.price(self.collateral_token)
-            borrow_price = market.price(self.borrow_token)
+            collateral_price = market.price(self.collateral_token_address)
+            borrow_price = market.price(self.borrow_token_address)
         except (ValueError, KeyError) as e:
             return Intent.hold(reason=f"Price data unavailable: {e}")
 

@@ -25,11 +25,21 @@ def _create_strategy() -> TraderJoeLPStrategy:
     strategy.bin_step = 20
     strategy.token_x_symbol = "WAVAX"
     strategy.token_y_symbol = "USDC"
+    strategy.token_x_address = "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7"
+    strategy.token_y_address = "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E"
     strategy.amount_x = Decimal("1.0")
     strategy.amount_y = Decimal("30")
     strategy._position_bin_ids = []
 
     return strategy
+
+
+def _snapshot(strategy: TraderJoeLPStrategy) -> SimpleNamespace:
+    prices = {
+        strategy.token_x_address: Decimal("30"),
+        strategy.token_y_address: Decimal("1"),
+    }
+    return SimpleNamespace(price=prices.__getitem__)
 
 
 def test_get_open_positions_returns_valid_summary_without_position() -> None:
@@ -48,7 +58,7 @@ def test_get_open_positions_returns_valid_summary_with_position() -> None:
     strategy = _create_strategy()
     strategy._position_bin_ids = [8388608, 8388609, 8388610]
 
-    snapshot = SimpleNamespace(price=lambda symbol: Decimal("30") if symbol == "WAVAX" else Decimal("1"))
+    snapshot = _snapshot(strategy)
     with patch.object(TraderJoeLPStrategy, "create_market_snapshot", return_value=snapshot):
         summary = strategy.get_open_positions()
 
@@ -76,7 +86,7 @@ def test_get_open_positions_populates_lb_pair_address_vib4877() -> None:
     strategy = _create_strategy()
     strategy._position_bin_ids = [8388608, 8388609, 8388610]
 
-    snapshot = SimpleNamespace(price=lambda symbol: Decimal("30") if symbol == "WAVAX" else Decimal("1"))
+    snapshot = _snapshot(strategy)
 
     mock_adapter = MagicMock()
     mock_adapter.resolve_token_address.side_effect = lambda sym: (
@@ -115,7 +125,7 @@ def test_get_open_positions_failsoft_when_address_unresolvable_vib4877() -> None
     strategy = _create_strategy()
     strategy._position_bin_ids = [8388608]
 
-    snapshot = SimpleNamespace(price=lambda symbol: Decimal("30") if symbol == "WAVAX" else Decimal("1"))
+    snapshot = _snapshot(strategy)
 
     mock_adapter = MagicMock()
     mock_adapter.resolve_token_address.side_effect = lambda sym: "0x" + "1" * 40
@@ -144,7 +154,7 @@ def test_get_open_positions_failsoft_when_gateway_client_none_vib4877() -> None:
     strategy._position_bin_ids = [8388608, 8388609]
     strategy._gateway_client = None  # no gateway at preview time
 
-    snapshot = SimpleNamespace(price=lambda symbol: Decimal("30") if symbol == "WAVAX" else Decimal("1"))
+    snapshot = _snapshot(strategy)
 
     with patch.object(TraderJoeLPStrategy, "create_market_snapshot", return_value=snapshot):
         # Sanity: the real config genuinely raises for this input, so we know the

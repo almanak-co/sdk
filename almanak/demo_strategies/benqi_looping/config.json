@@ -1,7 +1,9 @@
 {
   "chain": "avalanche",
   "collateral_token": "AVAX",
+  "collateral_token_address": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE",
   "borrow_token": "USDC",
+  "borrow_token_address": "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E",
   "wrapped_native": "WAVAX",
   "initial_collateral": 0.3,
   "target_loops": 2,

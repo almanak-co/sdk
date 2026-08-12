@@ -17,8 +17,10 @@
         }
     ],
     "collateral_token": "USDC",
+    "collateral_token_address": "0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e",
     "collateral_amount": "400",
     "borrow_token": "USDT",
+    "borrow_token_address": "0x9702230a8ea53601f5cd2dc00fdbc13d4df4a8c7",
     "ltv_target": 0.2,
     "anvil_funding": {
         "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE": 10,

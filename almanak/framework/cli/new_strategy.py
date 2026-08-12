@@ -2482,6 +2482,7 @@ def _get_template_teardown(
             protocol=self.protocol,
             chain=self.chain,
             market_symbol=self.perp_market,
+            index_token_address=self.index_token_address,
         )
 
     def get_open_positions(self):
@@ -3119,6 +3120,10 @@ def _get_template_init_params(
         self.protocol = get_config("protocol", "__SCAFFOLD_PROTOCOL__")  # perp venue
         self.perp_market = get_config("perp_market", "ETH/USD")
         self.collateral_token = get_config("collateral_token", "USDC")
+        # EVM venues require an exact chain address for mark valuation.
+        # Addressless venues leave this unset and use their connector-declared
+        # market mark instead.
+        self.index_token_address = get_config("index_token_address", None)
         self.collateral_amount = Decimal(str(get_config("collateral_amount", "100")))
         self.position_size_usd = Decimal(str(get_config("position_size_usd", "1000")))
         self.leverage = Decimal(str(get_config("leverage", "5")))
@@ -4406,6 +4411,7 @@ def generate_config_json(
             }
         )
     elif template == StrategyTemplate.PERPS:
+        index_token_address = _static_token_address(chain, "WETH")
         data.update(
             {
                 "protocol": protocol,
@@ -4420,6 +4426,8 @@ def generate_config_json(
                 "direction": "LONG",
             }
         )
+        if index_token_address is not None:
+            data["index_token_address"] = index_token_address
     elif template == StrategyTemplate.MULTI_STEP:
         data.update(
             {

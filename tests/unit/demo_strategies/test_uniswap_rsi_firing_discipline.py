@@ -36,6 +36,8 @@ class _Balance:
 
 
 _T0 = datetime(2026, 6, 11, 12, 0, 0, tzinfo=UTC)
+_WETH_ARBITRUM = "0x82af49447d8a07e3bd95bd0d56f35241523fbab1"
+_USDC_ARBITRUM = "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
 
 
 class _Market:
@@ -61,7 +63,9 @@ _BASE_CONFIG: dict[str, object] = {
     "chain": "arbitrum",
     "protocol": "uniswap_v3",
     "base_token": "WETH",
+    "base_token_address": _WETH_ARBITRUM,
     "quote_token": "USDC",
+    "quote_token_address": _USDC_ARBITRUM,
     "trade_size_usd": 10,
     "rsi_oversold": 30,
     "rsi_overbought": 70,

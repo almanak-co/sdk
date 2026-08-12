@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from almanak.framework.teardown.models import TeardownMode, TeardownPositionSummary
 
+from almanak.demo_strategies._address_config import require_evm_address
 from almanak.framework.data import BalanceUnavailableError, MarketSnapshotError, PriceUnavailableError
 from almanak.framework.intents import AnyIntent, Intent, IntentType
 from almanak.framework.market import MarketSnapshot
@@ -79,6 +80,8 @@ class MantleMntAccumulator(IntentStrategy):
         # Tokens
         self.target_token: str = _cfg(c, "target_token", "WMNT")
         self.stable_token: str = _cfg(c, "stable_token", "USDT")
+        self.target_token_address = require_evm_address(self, "target_token_address")
+        self.stable_token_address = require_evm_address(self, "stable_token_address")
         self.protocol: str = _cfg(c, "protocol", "agni")
 
         # RSI
@@ -143,7 +146,7 @@ class MantleMntAccumulator(IntentStrategy):
         # Data-unavailable reads degrade to HOLD; any other exception
         # propagates (no blanket ``except -> hold`` masking a real bug).
         try:
-            rsi = market.rsi(self.target_token, period=self.rsi_period)
+            rsi = market.rsi(self.target_token_address, period=self.rsi_period)
         except _DATA_UNAVAILABLE_ERRORS:
             return Intent.hold(reason="RSI data unavailable for MNT")
 
@@ -369,7 +372,7 @@ class MantleMntAccumulator(IntentStrategy):
             market = self.create_market_snapshot()
             target_bal = market.balance(self.target_token)
             try:
-                price = market.price(self.target_token)
+                price = market.price(self.target_token_address)
                 value_usd = target_bal.balance * price
             except Exception:
                 pass

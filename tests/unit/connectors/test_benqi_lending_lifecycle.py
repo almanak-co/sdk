@@ -22,14 +22,17 @@ import pytest
 from almanak.demo_strategies.benqi_lending_lifecycle.strategy import BenqiLendingLifecycleStrategy
 from almanak.framework.teardown import TeardownMode
 
+USDC_ADDRESS = "0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e"
+USDT_ADDRESS = "0x9702230a8ea53601f5cd2dc00fdbc13d4df4a8c7"
+
 
 @pytest.fixture
 def mock_market():
     """Create a mock MarketSnapshot with Avalanche prices."""
     market = MagicMock()
     market.price.side_effect = lambda token: {
-        "USDC": Decimal("1.00"),
-        "USDT": Decimal("1.00"),
+        USDC_ADDRESS: Decimal("1.00"),
+        USDT_ADDRESS: Decimal("1.00"),
         "AVAX": Decimal("25.00"),
         "WAVAX": Decimal("25.00"),
     }.get(token, Decimal("0"))
@@ -56,8 +59,10 @@ def strategy():
         s = BenqiLendingLifecycleStrategy.__new__(BenqiLendingLifecycleStrategy)
         s._chain = "avalanche"
         s.collateral_token = "USDC"
+        s.collateral_token_address = USDC_ADDRESS
         s.collateral_amount = Decimal("500")
         s.borrow_token = "USDT"
+        s.borrow_token_address = USDT_ADDRESS
         s.ltv_target = Decimal("0.2")
         s._loop_state = "idle"
         s._previous_stable_state = "idle"

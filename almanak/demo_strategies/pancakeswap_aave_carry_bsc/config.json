@@ -24,8 +24,10 @@
         }
     ],
     "collateral_token": "WBNB",
+    "collateral_token_address": "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c",
     "collateral_amount": "0.5",
     "borrow_token": "USDC",
+    "borrow_token_address": "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d",
     "swap_to_token": "USDT",
     "ltv_target": "0.3",
     "max_borrow_fraction": "0.5",

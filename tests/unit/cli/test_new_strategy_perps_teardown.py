@@ -102,6 +102,7 @@ def _venue(strat, *, positions, ok=True, price="3000"):
     snapshot = MagicMock()
     snapshot.perp_positions.return_value = PerpsReadResult(positions=tuple(positions), ok=ok)
     snapshot.price.return_value = Decimal(price)
+    snapshot.funding_rate.return_value.mark_price = Decimal(price)
     strat.create_market_snapshot = lambda: snapshot
     return snapshot
 
@@ -129,7 +130,7 @@ class TestEmittedTeardownReadsTheVenue:
         module, strat = _strategy(emitted)
         strat._position_state = module.PerpsState.IDLE  # the cache missed the fill
         strat._is_long = True
-        _venue(strat, positions=[_position(is_long=False)])
+        snapshot = _venue(strat, positions=[_position(is_long=False)])
 
         summary = strat.get_open_positions()
         assert len(summary.positions) == 1
@@ -139,6 +140,7 @@ class TestEmittedTeardownReadsTheVenue:
         assert row.details["position_source"] == "venue"
         # A real notional: 0.1 ETH @ $3000. Zero would be dropped as dust.
         assert row.value_usd == Decimal("300.0")
+        snapshot.price.assert_called_once_with(strat.index_token_address, chain="arbitrum")
 
         intents = strat.generate_teardown_intents(TeardownMode.SOFT)
         assert len(intents) == 1

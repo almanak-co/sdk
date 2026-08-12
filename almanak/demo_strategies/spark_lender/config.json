@@ -18,6 +18,7 @@
     ],
     "min_supply_amount": "0.1",
     "supply_token": "WETH",
+    "supply_token_address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
     "force_action": "supply",
     "anvil_funding": {
         "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE": 100,

@@ -613,7 +613,11 @@ def test_demo_perp_strategy_funding_gate_receives_rate(no_gateway) -> None:
     # Address-first market contract: __init__ requires config `market_address`
     # (the audited arbitrum ETH/USD market-token address); every other knob
     # keeps its default. `_funding_hourly` reads funding by this address.
-    config = {"market_address": market_address("arbitrum", "ETH/USD")}
+    config = {
+        "market_address": market_address("arbitrum", "ETH/USD"),
+        "base_token_address": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+        "collateral_token_address": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+    }
     with patch(
         "almanak.framework.strategies.intent_strategy.IntentStrategy.__init__",
         return_value=None,

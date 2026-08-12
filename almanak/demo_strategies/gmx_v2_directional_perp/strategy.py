@@ -41,6 +41,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
+from almanak.demo_strategies._address_config import require_evm_address
 from almanak.framework.data import BalanceUnavailableError, MarketSnapshotError, PriceUnavailableError
 from almanak.framework.intents import AnyIntent, Intent, IntentType
 from almanak.framework.market import MarketSnapshot
@@ -88,14 +89,11 @@ class GmxV2DirectionalPerp(IntentStrategy):
         # ADDRESS; the SDK verifies it (dynamic registry, VIB-6561) but never
         # maps a symbol on the author's behalf. The label above remains
         # display/funding vocabulary only.
-        self.market_address = self.get_config("market_address", None)
-        if not (isinstance(self.market_address, str) and self.market_address[:2].lower() == "0x"):
-            raise ValueError(
-                "gmx_v2_directional_perp requires config 'market_address' — the GMX market-token "
-                "address for the configured market (address-first market contract)."
-            )
+        self.market_address = require_evm_address(self, "market_address")
         self.base_token = str(self.get_config("base_token", "ETH"))
+        self.base_token_address = require_evm_address(self, "base_token_address")
         self.collateral_token = str(self.get_config("collateral_token", "USDC"))
+        self.collateral_token_address = require_evm_address(self, "collateral_token_address")
 
         self.position_size_usd = Decimal(str(self.get_config("position_size_usd", "100")))
         self.leverage = Decimal(str(self.get_config("leverage", "2.0")))
@@ -152,16 +150,25 @@ class GmxV2DirectionalPerp(IntentStrategy):
             logger.warning(
                 "stop_loss_pct %.2f >= liquidation distance ~%.2f (1/leverage): the stop offers no "
                 "buffer before liquidation. Lower stop_loss_pct or leverage.",
-                self.stop_loss_pct, liq_distance,
+                self.stop_loss_pct,
+                liq_distance,
             )
 
         logger.info(
             "GmxV2DirectionalPerp initialized: market=%s, size=$%s, leverage=%sx, "
             "EMA(%d/%d), stop_loss=%.0f%%, funding_entry=%s/h",
-            self.market, self.position_size_usd, self.leverage,
-            self.ema_fast_period, self.ema_slow_period, self.stop_loss_pct * 100,
+            self.market,
+            self.position_size_usd,
+            self.leverage,
+            self.ema_fast_period,
+            self.ema_slow_period,
+            self.stop_loss_pct * 100,
             self.funding_entry_threshold,
         )
+
+    def _get_tracked_tokens(self) -> list[str]:
+        """Track the exact chain assets used by every snapshot lookup."""
+        return list(dict.fromkeys((self.base_token_address, self.collateral_token_address)))
 
     # ------------------------------------------------------------------ #
     # decide()
@@ -182,8 +189,8 @@ class GmxV2DirectionalPerp(IntentStrategy):
             return self._forced_intent(market)
 
         try:
-            ema_fast = market.ema(self.base_token, period=self.ema_fast_period).value
-            ema_slow = market.ema(self.base_token, period=self.ema_slow_period).value
+            ema_fast = market.ema(self.base_token_address, period=self.ema_fast_period).value
+            ema_slow = market.ema(self.base_token_address, period=self.ema_slow_period).value
         except _DATA_UNAVAILABLE_ERRORS as exc:
             return Intent.hold(reason=f"EMA data unavailable: {exc}")
 
@@ -221,12 +228,10 @@ class GmxV2DirectionalPerp(IntentStrategy):
         # floor: too-small a margin isn't worth opening.
         collateral_usd = self.position_size_usd / self.leverage
         if collateral_usd < self.min_collateral_usd:
-            return Intent.hold(
-                reason=f"Required margin ${collateral_usd:.2f} below min ${self.min_collateral_usd}"
-            )
+            return Intent.hold(reason=f"Required margin ${collateral_usd:.2f} below min ${self.min_collateral_usd}")
 
         try:
-            collateral = market.balance(self.collateral_token)
+            collateral = market.balance(self.collateral_token_address)
         except _DATA_UNAVAILABLE_ERRORS as exc:
             return Intent.hold(reason=f"Balance unavailable: {exc}")
         if collateral.balance_usd < collateral_usd:
@@ -236,8 +241,8 @@ class GmxV2DirectionalPerp(IntentStrategy):
             )
 
         try:
-            entry_price = market.price(self.base_token)
-            collateral_price = market.price(self.collateral_token)
+            entry_price = market.price(self.base_token_address)
+            collateral_price = market.price(self.collateral_token_address)
         except _DATA_UNAVAILABLE_ERRORS as exc:
             return Intent.hold(reason=f"Price unavailable: {exc}")
 
@@ -253,8 +258,13 @@ class GmxV2DirectionalPerp(IntentStrategy):
         self._awaiting_fill = True
         logger.info(
             "OPEN %s %s: size=$%s, collateral=%s %s, entry~%.2f, funding=%s/h",
-            signal.upper(), self.market, self.position_size_usd, collateral_amount,
-            self.collateral_token, entry_price, funding,
+            signal.upper(),
+            self.market,
+            self.position_size_usd,
+            collateral_amount,
+            self.collateral_token,
+            entry_price,
+            funding,
         )
         return Intent.perp_open(
             market=self.market_address,
@@ -275,7 +285,7 @@ class GmxV2DirectionalPerp(IntentStrategy):
         decide() runs FLAT — never by opening an opposite leg here.
         """
         try:
-            price = market.price(self.base_token)
+            price = market.price(self.base_token_address)
         except _DATA_UNAVAILABLE_ERRORS as exc:
             return Intent.hold(reason=f"Price unavailable, holding {side}: {exc}")
 
@@ -310,9 +320,7 @@ class GmxV2DirectionalPerp(IntentStrategy):
             logger.info("REVERSE %s -> %s: closing %s first (open opposite next tick)", side, signal, side)
             return self._close(side, reason="reverse")
 
-        return Intent.hold(
-            reason=f"{side} open, PnL {pnl_pct * 100:.2f}%, funding={funding}/h"
-        )
+        return Intent.hold(reason=f"{side} open, PnL {pnl_pct * 100:.2f}%, funding={funding}/h")
 
     def _close(self, side: str, *, reason: str) -> Intent:
         self._awaiting_fill = True
@@ -391,8 +399,8 @@ class GmxV2DirectionalPerp(IntentStrategy):
             # as _enter() does, so a forced open also commits a sensible entry on
             # fill (the result's fill price still takes precedence).
             try:
-                self._pending_entry_price = market.price(self.base_token)
-                collateral_price = market.price(self.collateral_token)
+                self._pending_entry_price = market.price(self.base_token_address)
+                collateral_price = market.price(self.collateral_token_address)
             except _DATA_UNAVAILABLE_ERRORS:
                 self._pending_entry_price = None
                 collateral_price = Decimal("1")  # forced-test fallback (assumes stable collateral)
@@ -528,6 +536,7 @@ class GmxV2DirectionalPerp(IntentStrategy):
             # the address is the exact-match probe key (the label would need
             # catalog metadata to resolve).
             market_symbol=self.market_address,
+            index_token_address=self.base_token_address,
         )
 
     def _position_row(self, *, side: str, value_usd: Decimal, measured: bool) -> "PositionInfo":
@@ -596,9 +605,7 @@ class GmxV2DirectionalPerp(IntentStrategy):
                         side=LONG if found.is_long else SHORT,
                         # Unpriceable notional degrades to the requested size WITH
                         # the unmeasured markers — never a measured $0.
-                        value_usd=(
-                            found.notional_usd if found.notional_usd is not None else self.position_size_usd
-                        ),
+                        value_usd=(found.notional_usd if found.notional_usd is not None else self.position_size_usd),
                         measured=found.notional_usd is not None,
                     )
                 )

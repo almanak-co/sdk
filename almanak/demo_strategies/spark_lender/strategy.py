@@ -66,6 +66,8 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
+from almanak.demo_strategies._address_config import require_evm_address
+
 # Intent is what your strategy returns - describes what action to take
 from almanak.framework.intents import AnyIntent, Intent, IntentType
 
@@ -121,6 +123,7 @@ class SparkLenderStrategy(IntentStrategy):
     -----------------------------------------------------------
     - min_supply_amount: Minimum token balance to trigger supply (default: "0.1")
     - supply_token: Token symbol to supply (default: "WETH")
+    - supply_token_address: Chain-specific supply-token address (required)
     - force_action: Force "supply" for testing
 
     Note: Spark automatically uses all supplied assets as collateral.
@@ -131,6 +134,7 @@ class SparkLenderStrategy(IntentStrategy):
     {
         "min_supply_amount": "0.1",
         "supply_token": "WETH",
+        "supply_token_address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
         "force_action": ""
     }
     """
@@ -159,6 +163,7 @@ class SparkLenderStrategy(IntentStrategy):
         # currently treats as "nothing to withdraw" (tracked separately).
         self.min_supply_amount = Decimal(str(self.get_config("min_supply_amount", "0.1")))
         self.supply_token = str(self.get_config("supply_token", "WETH"))
+        self.supply_token_address = require_evm_address(self, "supply_token_address")
 
         # Force action for testing
         self.force_action = str(self.get_config("force_action", "")).lower()
@@ -375,7 +380,7 @@ class SparkLenderStrategy(IntentStrategy):
             # used to size the exit (which resolves live via withdraw_all).
             try:
                 market = self.create_market_snapshot()
-                supply_price = Decimal(str(market.price(self.supply_token)))
+                supply_price = Decimal(str(market.price(self.supply_token_address)))
             except Exception:
                 logger.warning("Unable to fetch live price in Spark teardown valuation")
                 supply_price = Decimal("0")

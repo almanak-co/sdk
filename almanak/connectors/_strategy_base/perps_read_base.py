@@ -265,6 +265,9 @@ class PerpsReadSpec:
             honest unmeasured read (``ok=False``). ``None`` (undeclared) means
             the venue has no backtest observation parity and its backtest perp
             reads stay unmeasured.
+        index_token_address_required: whether mark-price consumers must identify
+            the index asset by an on-chain token address. EVM venues leave this
+            at the fail-closed default; addressless venues opt out explicitly.
     """
 
     contract_kinds: Mapping[str, tuple[str, ...]]
@@ -275,6 +278,7 @@ class PerpsReadSpec:
     position_key_prefix: str = "gmx"
     markets_for_chain: Callable[[str], tuple[str, ...]] | None = None
     simulate_position: Callable[[SimulatedPerpPosition], PerpsPositionOnChain | None] | None = None
+    index_token_address_required: bool = True
 
 
 @dataclass(frozen=True)

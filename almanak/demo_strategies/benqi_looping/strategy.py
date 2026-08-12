@@ -58,6 +58,7 @@ from datetime import UTC, datetime
 from decimal import ROUND_DOWN, Decimal
 from typing import TYPE_CHECKING, Any
 
+from almanak.demo_strategies._address_config import require_evm_address
 from almanak.framework.data import MarketSnapshotError, PriceUnavailableError
 from almanak.framework.intents import AnyIntent, Intent, IntentType
 from almanak.framework.market import MarketSnapshot
@@ -85,9 +86,23 @@ _SETTLE_BUFFER = Decimal("1.04")  # 4% over the debt's worth of collateral
 _MAX_UNWIND_ROUNDS = 12
 
 _STABLE_STATES = frozenset(
-    {"idle", "supplied", "borrowed", "swapped", "unwrapped", "levered", "unwind_withdraw", "unwind_wrap", "unwind_swap", "unwind_repay", "complete"}
+    {
+        "idle",
+        "supplied",
+        "borrowed",
+        "swapped",
+        "unwrapped",
+        "levered",
+        "unwind_withdraw",
+        "unwind_wrap",
+        "unwind_swap",
+        "unwind_repay",
+        "complete",
+    }
 )
-_TRANSITIONAL_STATES = frozenset({"supplying", "borrowing", "swapping", "unwrapping", "withdrawing", "wrapping", "repaying"})
+_TRANSITIONAL_STATES = frozenset(
+    {"supplying", "borrowing", "swapping", "unwrapping", "withdrawing", "wrapping", "repaying"}
+)
 _VALID_STATES = _STABLE_STATES | _TRANSITIONAL_STATES
 
 
@@ -124,6 +139,8 @@ class BenqiLoopingStrategy(IntentStrategy):
 
         self.collateral_token = str(self.get_config("collateral_token", "AVAX"))
         self.borrow_token = str(self.get_config("borrow_token", "USDC"))
+        self.collateral_token_address = require_evm_address(self, "collateral_token_address")
+        self.borrow_token_address = require_evm_address(self, "borrow_token_address")
         self.wrapped_native = str(self.get_config("wrapped_native", "WAVAX"))
         self.initial_collateral = Decimal(str(self.get_config("initial_collateral", "0.1")))  # AVAX
         self.target_loops = int(self.get_config("target_loops", 2))
@@ -191,10 +208,12 @@ class BenqiLoopingStrategy(IntentStrategy):
 
     def _prices(self, market: MarketSnapshot) -> tuple[Decimal, Decimal]:
         """(avax_price, usdc_price). Raises on data-unavailable (caller -> HOLD)."""
-        avax = Decimal(str(market.price(self.collateral_token)))
-        usdc = Decimal(str(market.price(self.borrow_token)))
+        avax = Decimal(str(market.price(self.collateral_token_address)))
+        usdc = Decimal(str(market.price(self.borrow_token_address)))
         if avax <= 0 or usdc <= 0:
-            raise PriceUnavailableError(f"Non-positive price: {self.collateral_token}={avax} {self.borrow_token}={usdc}")
+            raise PriceUnavailableError(
+                f"Non-positive price: {self.collateral_token}={avax} {self.borrow_token}={usdc}"
+            )
         return avax, usdc
 
     def _health_factor(self, avax_price: Decimal, usdc_price: Decimal) -> Decimal:
@@ -318,7 +337,9 @@ class BenqiLoopingStrategy(IntentStrategy):
                 if self._collateral_avax > _DUST_AVAX:
                     self._enter_transitional("withdrawing")
                     self._pending_withdraw_avax = self._collateral_avax
-                    logger.info("UNWIND: final WITHDRAW of %s residual collateral", self._fmt_avax(self._collateral_avax))
+                    logger.info(
+                        "UNWIND: final WITHDRAW of %s residual collateral", self._fmt_avax(self._collateral_avax)
+                    )
                     return self._withdraw_intent(withdraw_all=True)
                 self._state = "complete"
                 return Intent.hold(reason="Position flat — nothing left to unwind")
@@ -553,7 +574,7 @@ class BenqiLoopingStrategy(IntentStrategy):
         from almanak.framework.teardown import PositionInfo, PositionType, TeardownPositionSummary
 
         try:
-            avax_price = Decimal(str(self.create_market_snapshot().price(self.collateral_token)))
+            avax_price = Decimal(str(self.create_market_snapshot().price(self.collateral_token_address)))
         except Exception:
             logger.warning("Unable to fetch %s price for teardown valuation", self.collateral_token)
             avax_price = Decimal("0")
@@ -581,7 +602,9 @@ class BenqiLoopingStrategy(IntentStrategy):
                     details={"asset": self.borrow_token},
                 )
             )
-        return TeardownPositionSummary(deployment_id=self.STRATEGY_NAME, timestamp=datetime.now(UTC), positions=positions)
+        return TeardownPositionSummary(
+            deployment_id=self.STRATEGY_NAME, timestamp=datetime.now(UTC), positions=positions
+        )
 
     def generate_teardown_intents(self, mode: "TeardownMode", market: Any = None) -> list[AnyIntent]:
         """Unwind the levered position via the same HF-aware staircase as the live path.

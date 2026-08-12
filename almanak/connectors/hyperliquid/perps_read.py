@@ -343,6 +343,7 @@ PERPS_READ_SPEC = PerpsReadSpec(
     value_position=value_hyperliquid_position,
     position_key_prefix=_POSITION_KEY_PREFIX,
     markets_for_chain=_markets_for_chain,
+    index_token_address_required=False,
 )
 
 __all__ = ["PERPS_READ_SPEC", "value_hyperliquid_position"]

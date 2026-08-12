@@ -41,6 +41,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
+from almanak.demo_strategies._address_config import require_evm_address
 from almanak.framework.intents import AnyIntent, Intent, IntentType
 from almanak.framework.market import MarketSnapshot
 from almanak.framework.strategies import IntentStrategy, almanak_strategy
@@ -77,6 +78,7 @@ class MorphoBlueCollateralRotatorStrategy(IntentStrategy):
 
     Configuration (config.json):
         collateral_token: Token to supply as collateral (default: wstETH)
+        collateral_token_address: Chain-specific collateral-token address (required)
         collateral_amount: Amount to supply (default: 0.05)
         market_usdc_id: wstETH/USDC market ID
         market_weth_id: wstETH/WETH market ID
@@ -88,10 +90,13 @@ class MorphoBlueCollateralRotatorStrategy(IntentStrategy):
         super().__init__(*args, **kwargs)
 
         self.collateral_token: str = self.get_config("collateral_token", "wstETH")
+        self.collateral_token_address = require_evm_address(self, "collateral_token_address")
         self.collateral_amount: Decimal = Decimal(str(self.get_config("collateral_amount", "0.05")))
         self.market_usdc_id: str = self.get_config("market_usdc_id", MARKET_WSTETH_USDC)
         self.market_weth_id: str = self.get_config("market_weth_id", MARKET_WSTETH_WETH)
-        self.rotation_threshold: Decimal = Decimal(str(self.get_config("rotation_threshold_bps", 30))) / Decimal("10000")
+        self.rotation_threshold: Decimal = Decimal(str(self.get_config("rotation_threshold_bps", 30))) / Decimal(
+            "10000"
+        )
         self.cooldown_ticks: int = int(self.get_config("cooldown_ticks", 3))
 
         # State machine: idle -> supplying -> supplied -> withdrawing -> withdrawn -> supplying -> ...
@@ -126,7 +131,7 @@ class MorphoBlueCollateralRotatorStrategy(IntentStrategy):
     def decide(self, market: MarketSnapshot) -> Intent:
         """Evaluate rotation opportunity and advance the state machine."""
         try:
-            collateral_price = market.price(self.collateral_token)
+            collateral_price = market.price(self.collateral_token_address)
         except (ValueError, KeyError) as e:
             logger.warning(f"Price unavailable for {self.collateral_token}: {e}")
             return Intent.hold(reason=f"Price data unavailable: {e}")
@@ -177,10 +182,7 @@ class MorphoBlueCollateralRotatorStrategy(IntentStrategy):
         return Intent.hold(reason=f"Recovering (state={self._state})")
 
     def _do_supply(self, market: str, price: Decimal) -> Intent:
-        logger.info(
-            f"SUPPLY {self.collateral_amount} {self.collateral_token} "
-            f"-> {market} market (${price:.2f})"
-        )
+        logger.info(f"SUPPLY {self.collateral_amount} {self.collateral_token} -> {market} market (${price:.2f})")
         self._entry_price = price
         self._prev_stable_state = self._state
         self._state = "supplying"
@@ -194,10 +196,7 @@ class MorphoBlueCollateralRotatorStrategy(IntentStrategy):
         )
 
     def _do_withdraw(self, market: str, price: Decimal) -> Intent:
-        logger.info(
-            f"WITHDRAW {self.collateral_amount} {self.collateral_token} "
-            f"from {market} market (${price:.2f})"
-        )
+        logger.info(f"WITHDRAW {self.collateral_amount} {self.collateral_token} from {market} market (${price:.2f})")
         self._prev_stable_state = self._state
         self._state = "withdrawing"
         return Intent.withdraw(

@@ -38,9 +38,22 @@ class _Market:
 
 
 def _strategy(config: dict[str, object]) -> UniswapRSIStrategy:
+    config = dict(config)
+    chain = str(config["chain"])
+    if chain == "avalanche":
+        config.setdefault("base_token", "WAVAX")
+        config.setdefault("quote_token", "USDC")
+        if config["base_token"] == "WAVAX":
+            config.setdefault("base_token_address", "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7")
+        elif "base_token_address" not in config:
+            raise ValueError("Avalanche test configs with another base_token require base_token_address")
+        if config["quote_token"] == "USDC":
+            config.setdefault("quote_token_address", "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E")
+        elif "quote_token_address" not in config:
+            raise ValueError("Avalanche test configs with another quote_token require quote_token_address")
     return UniswapRSIStrategy(
         config=config,
-        chain=str(config["chain"]),
+        chain=chain,
         wallet_address="0x" + "11" * 20,
     )
 

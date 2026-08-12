@@ -109,7 +109,6 @@ DEFAULT_TIMEFRAME = OHLCVTimeframe.FOUR_HOURS
 _GATEWAY_RPC_TIMEOUT_SECONDS = 30.0
 
 _EVM_ADDRESS_RE = re.compile(r"^0[xX][a-fA-F0-9]{40}$")
-
 # Solana base58 mint/pool address (alphabet excludes 0, O, I, l). Mirrors the
 # gateway's `_SOLANA_BASE58_RE` — the two must agree, or an address this side
 # accepts is one the gateway rejects. CASE IS SIGNIFICANT: unlike EVM hex, a
@@ -4452,6 +4451,67 @@ class MarketSnapshot:
             else self._funding_rate_provider.get_funding_rate(venue_enum, market)
         )
         return self._run_async_bridged(request)
+
+    def perp_mark_price(
+        self,
+        venue: str,
+        market: str,
+        *,
+        index_token_address: str | None = None,
+        chain: str | None = None,
+    ) -> Decimal:
+        """Return a trustworthy mark for one perpetual market.
+
+        EVM venues must provide ``index_token_address`` and therefore use the
+        ordinary address-native price plane.  Addressless venues (currently
+        HyperCore) use their market-scoped mark.  A live funding response that
+        declares ``is_live_data=False`` is rejected even when it contains a
+        positive placeholder mark.  Backtests instead read the tick's already
+        seeded venue-candle price, so funding fallbacks never become prices.
+        """
+        from almanak.connectors._strategy_base.perps_read_registry import PerpsReadRegistry
+        from almanak.core.perp_markets import perp_market_funding_key
+
+        from .errors import PriceUnavailableError
+
+        requested_chain = self._resolve_chain(chain)
+        if index_token_address:
+            return self.price(index_token_address, chain=requested_chain)
+
+        if PerpsReadRegistry.requires_index_token_address(venue):
+            reason = "index_token_address is required for an EVM perp mark"
+            self._record_critical_data_failure("perp_mark_price", f"{venue}:{market}", reason)
+            raise PriceUnavailableError(f"{venue}:{market}", reason)
+
+        if self._funding_rate_provider is None:
+            reason = "venue mark unavailable: no funding rate provider configured"
+            self._record_critical_data_failure("perp_mark_price", f"{venue}:{market}", reason)
+            raise PriceUnavailableError(f"{venue}:{market}", reason)
+
+        rate = self.funding_rate(venue, market)
+        mark = Decimal(str(rate.mark_price)) if rate.mark_price is not None else None
+        if rate.is_live_data and mark is not None and mark.is_finite() and mark > 0:
+            return mark
+
+        # The PnL engine stamps this set on every simulated snapshot and seeds
+        # the venue-native candle under the addressless instrument's base key.
+        # Live snapshots leave it as None, so a gateway fallback can never
+        # cross this boundary merely by carrying a hard-coded mark value.
+        if self._backtest_soft_empty_noted is not None:
+            canonical_market = perp_market_funding_key(market) or market.strip().upper()
+            base = canonical_market.split("-", 1)[0]
+            cached = lookup_price(self._price_store, symbol=base, chain=requested_chain, quote="USD")
+            if cached is None:
+                reason = "backtest venue-candle mark is unavailable"
+                self._record_critical_data_failure("perp_mark_price", f"{venue}:{market}", reason)
+                raise PriceUnavailableError(f"{venue}:{market}", reason)
+            price = cached.price
+            if price.is_finite() and price > 0:
+                return price
+
+        reason = f"Trusted mark price unavailable for {venue}/{market}"
+        self._record_critical_data_failure("perp_mark_price", f"{venue}:{market}", reason)
+        raise PriceUnavailableError(f"{venue}:{market}", reason)
 
     def funding_rate_spread(
         self,

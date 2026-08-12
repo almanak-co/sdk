@@ -121,8 +121,10 @@ class HyperliquidTrailingPerp(IntentStrategy):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
 
-        # "ETH/USD" is the market (compiler normalises to the HyperCore asset);
-        # base_token is the symbol the price oracle is keyed on for PnL reads.
+        # "ETH/USD" is the market (compiler normalises to the HyperCore asset).
+        # HyperCore perp assets have no EVM token address, so price decisions
+        # read the venue's mark from the market-scoped funding response instead
+        # of sending this display symbol through the token price resolver.
         self.market = str(self.get_config("market", "ETH/USD"))
         self.base_token = str(self.get_config("base_token", "ETH"))
         # HyperCore perps are USDC-margined; carried for intent parity only
@@ -189,7 +191,8 @@ class HyperliquidTrailingPerp(IntentStrategy):
             logger.warning(
                 "size_usd $%s is below the HyperCore ~$%s minimum order value; opens will be rejected "
                 "on-chain (reduce-only closes are exempt). Raise size_usd.",
-                self.size_usd, _HYPERCORE_MIN_ORDER_USD,
+                self.size_usd,
+                _HYPERCORE_MIN_ORDER_USD,
             )
 
         # Liquidation distance ~ 1/leverage; the hard stop must sit inside it.
@@ -198,7 +201,8 @@ class HyperliquidTrailingPerp(IntentStrategy):
             logger.warning(
                 "stop_loss_pct %.2f >= liquidation distance ~%.2f (1/leverage): the stop offers no "
                 "buffer before liquidation. Lower stop_loss_pct or leverage.",
-                self.stop_loss_pct, liq_distance,
+                self.stop_loss_pct,
+                liq_distance,
             )
 
         self.force_action = str(self.get_config("force_action", "") or "").strip().lower()
@@ -220,9 +224,15 @@ class HyperliquidTrailingPerp(IntentStrategy):
         logger.info(
             "HyperliquidTrailingPerp initialized: market=%s, dir=%s, size=$%s, leverage=%sx, "
             "TP=%.1f%%, stop=%.1f%%, trail=%.1f%%@+%.1f%%, reenter=%s",
-            self.market, LONG if self.is_long else SHORT, self.size_usd, self.leverage,
-            self.take_profit_pct * 100, self.stop_loss_pct * 100,
-            self.trail_pct * 100, self.trail_activation_pct * 100, self.reenter_after_close,
+            self.market,
+            LONG if self.is_long else SHORT,
+            self.size_usd,
+            self.leverage,
+            self.take_profit_pct * 100,
+            self.stop_loss_pct * 100,
+            self.trail_pct * 100,
+            self.trail_activation_pct * 100,
+            self.reenter_after_close,
         )
 
     # ------------------------------------------------------------------ #
@@ -255,7 +265,7 @@ class HyperliquidTrailingPerp(IntentStrategy):
         (bridged USDC) out of band — see the README funding section.
         """
         try:
-            entry_price = market.price(self.base_token)
+            entry_price = self._venue_mark_price(market)
         except _DATA_UNAVAILABLE_ERRORS as exc:
             return Intent.hold(reason=f"Price unavailable, cannot open: {exc}")
 
@@ -266,7 +276,11 @@ class HyperliquidTrailingPerp(IntentStrategy):
         self._pending_entry_price = entry_price
         logger.info(
             "OPEN %s %s: size=$%s, entry~%.2f, leverage=%sx",
-            LONG if self.is_long else SHORT, self.market, self.size_usd, entry_price, self.leverage,
+            LONG if self.is_long else SHORT,
+            self.market,
+            self.size_usd,
+            entry_price,
+            self.leverage,
         )
         return Intent.perp_open(
             market=self.market,
@@ -284,7 +298,7 @@ class HyperliquidTrailingPerp(IntentStrategy):
         """Hold the open position; close on take-profit, hard stop, or trailing stop."""
         side = self._position_side
         try:
-            price = market.price(self.base_token)
+            price = self._venue_mark_price(market)
         except _DATA_UNAVAILABLE_ERRORS as exc:
             return Intent.hold(reason=f"Price unavailable, holding {side}: {exc}")
 
@@ -304,7 +318,9 @@ class HyperliquidTrailingPerp(IntentStrategy):
 
         # 1) Take-profit — bank the win.
         if pnl_pct >= self.take_profit_pct:
-            logger.info("TAKE-PROFIT %s: PnL %.2f%% >= %.1f%% — closing", side, pnl_pct * 100, self.take_profit_pct * 100)
+            logger.info(
+                "TAKE-PROFIT %s: PnL %.2f%% >= %.1f%% — closing", side, pnl_pct * 100, self.take_profit_pct * 100
+            )
             return self._close(side, reason="take_profit")
 
         # 2) Hard stop-loss (liq buffer) — reduce risk first.
@@ -318,13 +334,14 @@ class HyperliquidTrailingPerp(IntentStrategy):
             if giveback >= self.trail_pct:
                 logger.info(
                     "TRAILING-STOP %s: gave back %.2f%% from peak %.2f%% (trail %.1f%%) — closing",
-                    side, giveback * 100, self._high_water_pnl * 100, self.trail_pct * 100,
+                    side,
+                    giveback * 100,
+                    self._high_water_pnl * 100,
+                    self.trail_pct * 100,
                 )
                 return self._close(side, reason="trailing_stop")
 
-        return Intent.hold(
-            reason=f"{side} open, PnL {pnl_pct * 100:.2f}%, peak {self._high_water_pnl * 100:.2f}%"
-        )
+        return Intent.hold(reason=f"{side} open, PnL {pnl_pct * 100:.2f}%, peak {self._high_water_pnl * 100:.2f}%")
 
     def _close(self, side: str, *, reason: str) -> Intent:
         """Reduce-only market close of the current side (full position)."""
@@ -348,7 +365,7 @@ class HyperliquidTrailingPerp(IntentStrategy):
             else:
                 is_long = self.is_long
             try:
-                self._pending_entry_price = market.price(self.base_token)
+                self._pending_entry_price = self._venue_mark_price(market)
             except _DATA_UNAVAILABLE_ERRORS:
                 self._pending_entry_price = None
             return Intent.perp_open(
@@ -366,6 +383,10 @@ class HyperliquidTrailingPerp(IntentStrategy):
             side = self._position_side or (LONG if self.is_long else SHORT)
             return self._close(side, reason="forced")
         return Intent.hold(reason=f"Unsupported force_action: {self.force_action}")
+
+    def _venue_mark_price(self, market: MarketSnapshot) -> Decimal:
+        """Read the market-scoped HyperCore mark (the asset has no EVM address)."""
+        return market.perp_mark_price(_PROTOCOL, self.market)
 
     # ------------------------------------------------------------------ #
     # Lifecycle hooks — the ONLY place position state is committed

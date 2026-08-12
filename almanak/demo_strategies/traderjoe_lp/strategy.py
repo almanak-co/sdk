@@ -60,6 +60,8 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
+from almanak.demo_strategies._address_config import require_evm_address
+
 # Timeline API for logging
 from almanak.framework.api.timeline import TimelineEvent, TimelineEventType, add_event
 
@@ -85,7 +87,8 @@ class TraderJoeLPConfig:
     This dataclass properly loads all config fields from JSON.
     """
 
-    # Runtime config (used by CLI if no config.json)
+    # Runtime config. Token addresses are intentionally required from the
+    # selected config file; constructing the strategy without them fails fast.
     chain: str = "avalanche"
     network: str = "anvil"
 
@@ -99,6 +102,8 @@ class TraderJoeLPConfig:
     # WAVAX pair on the Avalanche LBFactory — re-verify reserves before
     # changing this again.
     pool: str = "WAVAX/USDT/20"
+    token_x_address: str = "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7"
+    token_y_address: str = "0x9702230A8Ea53601f5cD2dc00fDBc13d4dF4A8c7"
     range_width_pct: Decimal = field(default_factory=lambda: Decimal("0.10"))
     amount_x: Decimal = field(default_factory=lambda: Decimal("0.001"))
     amount_y: Decimal = field(default_factory=lambda: Decimal("3"))
@@ -139,6 +144,8 @@ class TraderJoeLPConfig:
             "chain": self.chain,
             "network": self.network,
             "pool": self.pool,
+            "token_x_address": self.token_x_address,
+            "token_y_address": self.token_y_address,
             "range_width_pct": str(self.range_width_pct),
             "amount_x": str(self.amount_x),
             "amount_y": str(self.amount_y),
@@ -267,6 +274,8 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
         pool_parts = self.pool.split("/")
         self.token_x_symbol = pool_parts[0] if len(pool_parts) > 0 else "WAVAX"
         self.token_y_symbol = pool_parts[1] if len(pool_parts) > 1 else "USDT"
+        self.token_x_address = require_evm_address(self, "token_x_address")
+        self.token_y_address = require_evm_address(self, "token_y_address")
         self.bin_step = int(pool_parts[2]) if len(pool_parts) > 2 else 20
 
         # Range width as percentage (e.g., 0.10 = 10% total width = ±5% from current price)
@@ -353,8 +362,8 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
         # For WAVAX/USDT: price = USDT per WAVAX (e.g., 6.5)
 
         try:
-            token_x_price_usd = market.price(self.token_x_symbol)
-            token_y_price_usd = market.price(self.token_y_symbol)
+            token_x_price_usd = market.price(self.token_x_address)
+            token_y_price_usd = market.price(self.token_y_address)
             current_price = token_x_price_usd / token_y_price_usd
             logger.debug(f"Current price: {current_price:.4f} {self.token_y_symbol}/{self.token_x_symbol}")
         except (ValueError, KeyError) as e:
@@ -414,9 +423,7 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
                 )
             # Band unknown (e.g. opened by an older version) -- hold rather than
             # rebalance blindly.
-            return Intent.hold(
-                reason=f"Position exists in bins {self._position_bin_ids[:3]}... - band unknown"
-            )
+            return Intent.hold(reason=f"Position exists in bins {self._position_bin_ids[:3]}... - band unknown")
 
         # =================================================================
         # STEP 4: No position -> balance inventory to ~50/50, then (re)open
@@ -436,9 +443,7 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
 
         total_usd = token_x_usd + token_y_usd
         if total_usd < self.min_position_usd:
-            return Intent.hold(
-                reason=f"Total ${total_usd:.2f} below min_position_usd ${self.min_position_usd:.2f}"
-            )
+            return Intent.hold(reason=f"Total ${total_usd:.2f} below min_position_usd ${self.min_position_usd:.2f}")
 
         swap_intent = self._rebalance_swap_intent(token_x_usd, token_y_usd, total_usd)
         if swap_intent is not None:
@@ -524,9 +529,7 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
             max_slippage=self.max_slippage,
         )
 
-    def _rebalance_swap_intent(
-        self, token_x_usd: Decimal, token_y_usd: Decimal, total_usd: Decimal
-    ) -> Intent | None:
+    def _rebalance_swap_intent(self, token_x_usd: Decimal, token_y_usd: Decimal, total_usd: Decimal) -> Intent | None:
         """Swap the heavy side toward a ~50/50 USD split before (re)opening.
 
         Returns a SWAP intent when inventory is skewed beyond a 10% tolerance
@@ -801,8 +804,8 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
             # Calculate estimated value using live prices
             try:
                 snapshot = self.create_market_snapshot()
-                token_x_price_usd = Decimal(str(snapshot.price(self.token_x_symbol)))
-                token_y_price_usd = Decimal(str(snapshot.price(self.token_y_symbol)))
+                token_x_price_usd = Decimal(str(snapshot.price(self.token_x_address)))
+                token_y_price_usd = Decimal(str(snapshot.price(self.token_y_address)))
             except Exception:
                 logger.warning(
                     f"Unable to fetch live prices for {self.token_x_symbol}/{self.token_y_symbol} in teardown valuation"

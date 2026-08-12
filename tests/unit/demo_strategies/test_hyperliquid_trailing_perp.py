@@ -22,12 +22,7 @@ import pytest
 
 from almanak.framework.teardown import TeardownMode as _TeardownMode
 
-_SEED_DIR = (
-    Path(__file__).resolve().parents[3]
-    / "almanak"
-    / "demo_strategies"
-    / "hyperliquid_trailing_perp"
-)
+_SEED_DIR = Path(__file__).resolve().parents[3] / "almanak" / "demo_strategies" / "hyperliquid_trailing_perp"
 
 
 def _load_module():
@@ -79,7 +74,7 @@ def module():
 
 def _market(price: str):
     m = MagicMock()
-    m.price.return_value = Decimal(price)
+    m.perp_mark_price.return_value = Decimal(price)
     return m
 
 
@@ -348,7 +343,7 @@ class TestTeardownReadsTheVenueNotTheCache:
 
         snapshot = MagicMock()
         snapshot.perp_positions.return_value = PerpsReadResult(positions=tuple(positions), ok=ok)
-        snapshot.price.return_value = Decimal(price)
+        snapshot.perp_mark_price.return_value = Decimal(price)
         strat.create_market_snapshot = lambda: snapshot
         return snapshot
 

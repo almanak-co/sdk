@@ -124,6 +124,12 @@ def test_registry_resolve_returns_none_for_unknown_protocol():
     assert PerpsReadRegistry.resolve_plan("unknown_perp", query) is None
     assert PerpsReadRegistry.market_metadata("unknown_perp", "0xMarket", "arbitrum") is None
     assert PerpsReadRegistry.value_position("unknown_perp") is None
+    assert PerpsReadRegistry.requires_index_token_address("unknown_perp") is True
+
+
+def test_index_token_address_capability_is_connector_owned():
+    assert PerpsReadRegistry.requires_index_token_address("gmx_v2") is True
+    assert PerpsReadRegistry.requires_index_token_address("hyperliquid") is False
 
 
 def test_markets_scoped_venue_not_deployed_off_its_chain():

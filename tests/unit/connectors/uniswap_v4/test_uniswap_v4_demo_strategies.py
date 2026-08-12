@@ -6,6 +6,8 @@ design documents that will run once V4 Phases 0-3 merge.
 """
 
 from decimal import Decimal
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from almanak.connectors.uniswap_v4.hooks import (
     BEFORE_SWAP_FLAG,
@@ -15,6 +17,7 @@ from almanak.connectors.uniswap_v4.hooks import (
     discover_pool,
     warn_empty_hook_data,
 )
+from almanak.demo_strategies.uniswap_v4_hooks.strategy import UniswapV4HooksStrategy
 from almanak.framework.intents import Intent
 from almanak.framework.intents.vocabulary import IntentType
 
@@ -155,6 +158,31 @@ class TestV4HooksIntegration:
         assert result.hook_flags.before_swap is True
         assert result.hook_flags.after_swap is True
         assert result.hook_flags.has_any_swap_hooks is True
+
+    def test_strategy_pool_discovery_uses_configured_addresses(self):
+        """Pool identity must not re-resolve the display symbols independently."""
+        strategy = UniswapV4HooksStrategy.__new__(UniswapV4HooksStrategy)
+        strategy.token0_address = self.WETH
+        strategy.token1_address = self.USDC
+        strategy.fee_tier = 3000
+        strategy.hook_address = "0x" + "0" * 40
+        result = SimpleNamespace(
+            pool_id="0x" + "1" * 64,
+            hook_flags=SimpleNamespace(active_flags=[]),
+        )
+
+        with patch(
+            "almanak.demo_strategies.uniswap_v4_hooks.strategy.discover_pool",
+            return_value=result,
+        ) as discover:
+            strategy._run_pool_discovery()
+
+        discover.assert_called_once_with(
+            token0=self.WETH,
+            token1=self.USDC,
+            fee=3000,
+            hooks="0x" + "0" * 40,
+        )
 
     def test_wider_range_for_hooked_pools(self):
         """Strategy should use wider ranges for hooked pools (0.30 vs 0.20)."""

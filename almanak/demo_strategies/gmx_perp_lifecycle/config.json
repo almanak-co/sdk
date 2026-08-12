@@ -1,7 +1,9 @@
 {
     "market": "ETH/USD",
     "market_address": "0x70d95587d40A2caf56bd97485aB3Eec10Bee6336",
+    "index_token_address": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
     "collateral_token": "USDC",
+    "collateral_token_address": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
     "collateral_amount": "5",
     "leverage": "2.0",
     "is_long": true,

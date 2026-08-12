@@ -54,6 +54,7 @@ from datetime import UTC, datetime
 from decimal import ROUND_DOWN, Decimal
 from typing import TYPE_CHECKING, Any
 
+from almanak.demo_strategies._address_config import require_evm_address
 from almanak.framework.data import MarketSnapshotError, PriceUnavailableError
 from almanak.framework.intents import AnyIntent, Intent, IntentType
 from almanak.framework.market import MarketSnapshot
@@ -91,8 +92,10 @@ class BenqiLendingLifecycleStrategy(IntentStrategy):
 
         # Borrow config
         self.collateral_token = self.get_config("collateral_token", "USDC")
+        self.collateral_token_address = require_evm_address(self, "collateral_token_address")
         self.collateral_amount = Decimal(str(self.get_config("collateral_amount", "500")))
         self.borrow_token = self.get_config("borrow_token", "USDT")
+        self.borrow_token_address = require_evm_address(self, "borrow_token_address")
         self.ltv_target = Decimal(str(self.get_config("ltv_target", "0.2")))
 
         # State machine:
@@ -126,8 +129,8 @@ class BenqiLendingLifecycleStrategy(IntentStrategy):
         # State: SUPPLIED -> BORROW (needs prices to calculate borrow amount)
         if self._loop_state == "supplied":
             try:
-                collateral_price = market.price(self.collateral_token)
-                borrow_price = market.price(self.borrow_token)
+                collateral_price = market.price(self.collateral_token_address)
+                borrow_price = market.price(self.borrow_token_address)
                 logger.info(
                     f"Prices: {self.collateral_token}=${collateral_price:.2f}, {self.borrow_token}=${borrow_price:.2f}"
                 )
@@ -377,8 +380,8 @@ class BenqiLendingLifecycleStrategy(IntentStrategy):
         # Fetch live prices for position valuation
         try:
             market = self.create_market_snapshot()
-            collateral_price = Decimal(str(market.price(self.collateral_token)))
-            borrow_price = Decimal(str(market.price(self.borrow_token)))
+            collateral_price = Decimal(str(market.price(self.collateral_token_address)))
+            borrow_price = Decimal(str(market.price(self.borrow_token_address)))
         except Exception:
             logger.warning("Unable to fetch live prices in teardown valuation")
             collateral_price = Decimal("0")

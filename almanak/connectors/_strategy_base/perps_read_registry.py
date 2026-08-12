@@ -232,6 +232,16 @@ class PerpsReadRegistry:
         return spec.market_metadata(market_address, canonical_chain_name(chain)) if spec is not None else None
 
     @classmethod
+    def requires_index_token_address(cls, protocol: str) -> bool:
+        """Return whether mark-price consumers must supply an index-token address.
+
+        Unknown protocols fail closed as address-requiring. Addressless venues
+        must publish that capability explicitly in their connector-owned spec.
+        """
+        spec = cls._load_spec(cls._normalize(protocol))
+        return spec is None or spec.index_token_address_required
+
+    @classmethod
     def simulate_position(cls, protocol: str, simulated: SimulatedPerpPosition) -> PerpsPositionOnChain | None:
         """Project an engine-simulated position into the venue's on-chain read shape.
 

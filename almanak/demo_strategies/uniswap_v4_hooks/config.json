@@ -17,6 +17,8 @@
         }
     ],
     "pool": "WETH/USDC/3000",
+    "token0_address": "0x4200000000000000000000000000000000000006",
+    "token1_address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
     "_hook_address_note": "Zero address = standard pool (no hooks). Replace with a real hook address to test hook-aware LP.",
     "hook_address": "0x0000000000000000000000000000000000000000",
     "range_width_pct": 0.3,

@@ -65,6 +65,13 @@ from ..intents.state_machine import (
     TransactionReceipt,
 )
 from ..intents.vocabulary import AnyIntent
+
+# VIB-4062: MarketSnapshot moved to almanak.framework.market.snapshot.
+# All helpers, constants, and the class itself live in the canonical package.
+# This module re-exports MarketSnapshot for backward compat with deep imports.
+from ..market import MarketSnapshot  # noqa: F401  (re-export for deep-import callers)
+from ..market.errors import ChainNotConfiguredError as MarketChainNotConfiguredError
+from ..market.snapshot import DEFAULT_TIMEFRAME
 from ..models.reproduction_bundle import ActionBundle
 from .base import (
     ConfigT,
@@ -127,19 +134,64 @@ from .strategy_models import (  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
-# VIB-4062: MarketSnapshot moved to almanak.framework.market.snapshot.
-# All helpers, constants, and the class itself live in the canonical package.
-# This module re-exports MarketSnapshot for backward compat with deep imports
-# like ``from almanak.framework.strategies.intent_strategy import MarketSnapshot``;
-# such deep imports remain DISCOURAGED — use ``from almanak import MarketSnapshot``
-# or ``from almanak.framework.market import MarketSnapshot`` instead.
-from ..market import MarketSnapshot  # noqa: F401  (re-export for deep-import callers)
-from ..market.errors import (
-    ChainNotConfiguredError as MarketChainNotConfiguredError,
-)
-from ..market.snapshot import (
-    DEFAULT_TIMEFRAME,
-)
+
+def _strategy_config_dict(config: Any) -> dict[str, Any]:
+    """Best-effort public config mapping for tracked-token discovery."""
+    config_dict: dict[str, Any] = {}
+    if hasattr(config, "to_dict"):
+        try:
+            config_dict = config.to_dict()
+        except Exception as exc:  # noqa: BLE001 - config types are user-provided
+            logger.debug("config.to_dict() failed, trying fallback: %s", exc)
+    if not config_dict and hasattr(config, "__dataclass_fields__"):
+        from dataclasses import asdict
+
+        try:
+            config_dict = asdict(config)
+        except Exception as exc:  # noqa: BLE001 - config types are user-provided
+            logger.debug("dataclasses.asdict() failed, trying fallback: %s", exc)
+    if not config_dict and hasattr(config, "__dict__"):
+        config_dict = {key: value for key, value in config.__dict__.items() if not key.startswith("_")}
+    return config_dict
+
+
+def _configured_token_addresses(config_dict: dict[str, Any]) -> dict[str, str]:
+    """Return the config's explicit token-funding symbol/address pairs."""
+    configured: dict[str, str] = {}
+    config_chain = str(config_dict.get("chain") or "").strip().lower()
+    raw_funding = config_dict.get("token_funding")
+    if not isinstance(raw_funding, list):
+        return configured
+    for entry in raw_funding:
+        if not isinstance(entry, dict):
+            continue
+        symbol = entry.get("symbol")
+        address = entry.get("address")
+        entry_chain = str(entry.get("chain") or "").strip().lower()
+        if config_chain and entry_chain and entry_chain != config_chain:
+            continue
+        if isinstance(symbol, str) and symbol.strip() and isinstance(address, str) and address.strip():
+            configured[symbol.strip().upper()] = address.strip()
+    return configured
+
+
+def _configured_token_identity(
+    config_dict: dict[str, Any],
+    configured_addresses: dict[str, str],
+    field: str,
+    symbol: str,
+) -> str:
+    """Prefer a companion or token-funding address for one display symbol."""
+    companion_fields: list[str] = []
+    if field.endswith("_symbol"):
+        companion_fields.append(f"{field.removesuffix('_symbol')}_address")
+    companion_fields.append(f"{field}_address")
+    for companion in companion_fields:
+        address = config_dict.get(companion)
+        if isinstance(address, str) and address.strip():
+            return address.strip()
+    return configured_addresses.get(symbol.strip().upper(), symbol.strip())
+
 
 # =============================================================================
 # Intent Strategy Base Class
@@ -1938,8 +1990,15 @@ class IntentStrategy(StrategyBase[ConfigT]):
         (e.g., base_token="WETH") and pool format fields
         (e.g., pool="WETH/USDC/500", "WETH/USDC/volatile").
 
+        Address-first configs may keep human-readable symbol fields alongside
+        ``*_address`` fields (and address-bearing ``token_funding`` entries).
+        In that shape the address is the tracked identity: wallet/NAV reads
+        must not quietly route the companion symbol back through token-price
+        resolution.
+
         Returns:
-            Deduplicated list of token symbols, or empty list if none found.
+            Deduplicated list of token addresses or legacy symbols, or empty
+            list if none found.
         """
         # Lazy import to avoid pulling in the full runner package at
         # strategies/ import time (strategies/__init__.py is loaded eagerly
@@ -1964,6 +2023,14 @@ class IntentStrategy(StrategyBase[ConfigT]):
             "token0",
             "token1",
             "base_token_symbol",
+            "supply_token",
+            "target_token",
+            "stable_token",
+            "swap_to_token",
+            "token_x_symbol",
+            "token_y_symbol",
+            "token0_symbol",
+            "token1_symbol",
         }
 
         # Field names whose value is a slash-separated pool descriptor
@@ -1973,21 +2040,19 @@ class IntentStrategy(StrategyBase[ConfigT]):
         seen: set[str] = set()
         tokens: list[str] = []
 
-        config_dict: dict = {}
-        if hasattr(config, "to_dict"):
-            try:
-                config_dict = config.to_dict()
-            except Exception as e:  # noqa: BLE001  # Intentional: config types are user-provided
-                logger.debug(f"config.to_dict() failed, trying fallback: {e}")
-        if not config_dict and hasattr(config, "__dataclass_fields__"):
-            from dataclasses import asdict
+        config_dict = _strategy_config_dict(config)
 
-            try:
-                config_dict = asdict(config)
-            except Exception as e:  # noqa: BLE001  # Intentional: config types are user-provided
-                logger.debug(f"dataclasses.asdict() failed, trying fallback: {e}")
-        if not config_dict and hasattr(config, "__dict__"):
-            config_dict = {k: v for k, v in config.__dict__.items() if not k.startswith("_")}
+        # Build an explicit symbol -> address bridge only from the strategy's
+        # own config.  token_funding is authoritative enough for this purpose:
+        # every entry carries chain + address + display symbol, so no registry
+        # guess or cross-chain symbol lookup is involved.
+        configured_addresses = _configured_token_addresses(config_dict)
+
+        def append_identity(identity: str) -> None:
+            dedup_key = identity.lower() if identity.startswith(("0x", "0X")) else identity
+            if dedup_key not in seen:
+                seen.add(dedup_key)
+                tokens.append(identity)
 
         for key, value in config_dict.items():
             if not isinstance(value, str) or not value:
@@ -1999,18 +2064,15 @@ class IntentStrategy(StrategyBase[ConfigT]):
                 # concentrated/cl) stays in one place. Bare strings like
                 # "usdc_e" have no "/" and return [] — correctly skipped.
                 for symbol in parse_pool_tokens(value):
-                    if symbol not in seen:
-                        seen.add(symbol)
-                        tokens.append(symbol)
+                    append_identity(configured_addresses.get(symbol.upper(), symbol))
             elif key in _TOKEN_FIELDS:
                 symbol = value.strip()
                 # Fiat quote symbols (e.g., quote_token="USD") name an
                 # accounting unit, not an on-chain token — skip them so the
                 # tracked-tokens loop doesn't try balance/price lookups that
                 # always fail (no ERC20, no USD/USD Chainlink feed).
-                if symbol and symbol not in seen and not is_fiat_quote_symbol(symbol):
-                    seen.add(symbol)
-                    tokens.append(symbol)
+                if symbol and not is_fiat_quote_symbol(symbol):
+                    append_identity(_configured_token_identity(config_dict, configured_addresses, key, symbol))
 
         return tokens
 

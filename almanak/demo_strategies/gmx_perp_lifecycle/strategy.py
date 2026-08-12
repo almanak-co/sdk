@@ -35,6 +35,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal
 
+from almanak.demo_strategies._address_config import require_evm_address
 from almanak.framework.intents import Intent, IntentType
 from almanak.framework.market import MarketSnapshot
 from almanak.framework.strategies import IntentStrategy, almanak_strategy
@@ -73,13 +74,10 @@ class GMXPerpLifecycleStrategy(IntentStrategy):
         # market-token ADDRESS; the SDK verifies it (dynamic registry,
         # VIB-6561) but never maps a symbol to an address on the author's
         # behalf. The label above stays as display/signal vocabulary only.
-        self.market_address = self.get_config("market_address", None)
-        if not (isinstance(self.market_address, str) and self.market_address[:2].lower() == "0x"):
-            raise ValueError(
-                "gmx_perp_lifecycle requires config 'market_address' — the GMX market-token "
-                "address for the configured market (address-first market contract)."
-            )
+        self.market_address = require_evm_address(self, "market_address")
+        self.index_token_address = require_evm_address(self, "index_token_address")
         self.collateral_token = self.get_config("collateral_token", "USDC")
+        self.collateral_token_address = require_evm_address(self, "collateral_token_address")
         self.collateral_amount = Decimal(str(self.get_config("collateral_amount", "10")))
         self.leverage = Decimal(str(self.get_config("leverage", "2.0")))
         self.is_long = self.get_config("is_long", True)
@@ -110,26 +108,12 @@ class GMXPerpLifecycleStrategy(IntentStrategy):
         )
 
     # ------------------------------------------------------------------
-    # Token tracking — override the default config-derived tracker.
-    # The perp market is configured as a quoted pair (e.g. "ETH/USD"), and
-    # the default ``_derive_tokens_from_config`` helper splits that on "/" so
-    # the tracked set ends up containing the literal "USD" string. "USD" is
-    # not a token and has no entry in the token resolver; the runner's
-    # price pre-warm then logs a TokenNotFoundError on every tick. Track only
-    # the real symbols: the index token (base of the pair) and the
-    # collateral token.
+    # Token tracking — use chain-specific addresses for every data lookup.
+    # ``market`` and ``collateral_token`` remain human-readable labels for logs
+    # and intents; they are never used as data-plane identities.
     # ------------------------------------------------------------------
     def _get_tracked_tokens(self) -> list[str]:
-        index_token = self.market.split("/")[0].strip() if "/" in self.market else self.market.strip()
-        collateral = (self.collateral_token or "").strip()
-
-        tokens: list[str] = []
-        for sym in (index_token, collateral):
-            # Skip empty values and the USD denomination sentinel so the runner
-            # never asks the resolver for a token called "USD".
-            if sym and sym.upper() != "USD" and sym not in tokens:
-                tokens.append(sym)
-        return tokens
+        return list(dict.fromkeys((self.index_token_address, self.collateral_token_address)))
 
     def decide(self, market: MarketSnapshot) -> Intent | None:  # noqa: C901
         """Main decision: open or close a perp position based on state.
@@ -144,7 +128,7 @@ class GMXPerpLifecycleStrategy(IntentStrategy):
 
         def _price_for_open() -> Decimal | None:
             try:
-                price = market.price(index_token)
+                price = market.price(self.index_token_address)
                 logger.info(f"{index_token} price: ${price:,.2f}")
                 return price
             except (ValueError, KeyError) as exc:
@@ -292,7 +276,10 @@ class GMXPerpLifecycleStrategy(IntentStrategy):
         WETH-collateralised BTC/USD trade is sized by WETH, not BTC), so the
         index-token price isn't needed here.
         """
-        collateral_value_usd = market.collateral_value_usd(self.collateral_token, self.collateral_amount)
+        collateral_value_usd = market.collateral_value_usd(
+            self.collateral_token_address,
+            self.collateral_amount,
+        )
         position_size_usd = collateral_value_usd * self.leverage
 
         max_slippage = self.max_slippage_pct / Decimal("100")
@@ -342,6 +329,7 @@ class GMXPerpLifecycleStrategy(IntentStrategy):
             protocol="gmx_v2",
             chain=self.chain,
             market_symbol=self.market_address,
+            index_token_address=self.index_token_address,
             is_long=is_long,
         )
 
@@ -607,10 +595,7 @@ class GMXPerpLifecycleStrategy(IntentStrategy):
             details["valuation_status"] = "no_path"
         return PositionInfo(
             position_type=PositionType.PERP,
-            position_id=(
-                f"gmx-{self.market_address.lower()}-"
-                f"{collateral_token.lower()}-{side}"
-            ),
+            position_id=(f"gmx-{self.market_address.lower()}-{collateral_token.lower()}-{side}"),
             chain=self.chain,
             protocol="gmx_v2",
             value_usd=value_usd,

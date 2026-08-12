@@ -73,6 +73,8 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
+from almanak.demo_strategies._address_config import require_evm_address
+
 # Timeline API for logging
 from almanak.framework.api.timeline import TimelineEvent, TimelineEventType, add_event
 
@@ -137,7 +139,9 @@ class MorphoLoopingStrategy(IntentStrategy):
     --------------------------------------------
     - market_id: Morpho Blue market ID (required)
     - collateral_token: Token to use as collateral (e.g., "wstETH")
+    - collateral_token_address: Chain-specific collateral-token address (required)
     - borrow_token: Token to borrow (e.g., "USDC")
+    - borrow_token_address: Chain-specific borrow-token address (required)
     - initial_collateral: Initial collateral amount (default: "1.0")
     - target_loops: Number of loops to execute (default: 3)
     - target_ltv: Target LTV per loop — strategy author's leverage knob (default: 0.50 = 50%)
@@ -152,7 +156,9 @@ class MorphoLoopingStrategy(IntentStrategy):
     {
         "market_id": "0xb323495f7e4148be5643a4ea4a8221eef163e4bccfdedc2a6f4696baacbc86cc",
         "collateral_token": "wstETH",
+        "collateral_token_address": "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0",
         "borrow_token": "USDC",
+        "borrow_token_address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
         "initial_collateral": "1.0",
         "target_loops": 3,
         "target_ltv": 0.50,
@@ -210,6 +216,8 @@ class MorphoLoopingStrategy(IntentStrategy):
         # Token configuration
         self.collateral_token = self.get_config("collateral_token", "wstETH")
         self.borrow_token = self.get_config("borrow_token", "USDC")
+        self.collateral_token_address = require_evm_address(self, "collateral_token_address")
+        self.borrow_token_address = require_evm_address(self, "borrow_token_address")
 
         # Collateral amount
         self.initial_collateral = Decimal(str(self.get_config("initial_collateral", "1.0")))
@@ -311,8 +319,8 @@ class MorphoLoopingStrategy(IntentStrategy):
         # =================================================================
 
         try:
-            collateral_price = market.price(self.collateral_token)
-            borrow_price = market.price(self.borrow_token)
+            collateral_price = market.price(self.collateral_token_address)
+            borrow_price = market.price(self.borrow_token_address)
         except (ValueError, KeyError) as e:
             logger.warning(f"Could not get prices: {e}")
             return Intent.hold(reason=f"Price data unavailable: {e}")
@@ -712,7 +720,7 @@ class MorphoLoopingStrategy(IntentStrategy):
             return None
         return amount_out
 
-    def on_intent_executed(self, intent: Intent, success: bool, result: Any) -> None:
+    def on_intent_executed(self, intent: Intent, success: bool, result: Any) -> None:  # noqa: C901
         """
         Called after an intent is executed.
 
@@ -1055,8 +1063,8 @@ class MorphoLoopingStrategy(IntentStrategy):
         # (e.g. a market built without the right indicator subscription). Treat
         # that the same way: a clear ValueError beats a propagated KeyError.
         try:
-            from_price = Decimal(str(snapshot.price(from_token)))
-            to_price = Decimal(str(snapshot.price(to_token)))
+            from_price = Decimal(str(snapshot.price(self._price_address(from_token))))
+            to_price = Decimal(str(snapshot.price(self._price_address(to_token))))
         except Exception as exc:  # noqa: BLE001 — surface as a clean teardown error
             raise ValueError(
                 f"Teardown cannot convert {amount} {from_token} to {to_token}: "
@@ -1069,6 +1077,16 @@ class MorphoLoopingStrategy(IntentStrategy):
                 f"oracle price unavailable (from={from_price}, to={to_price})"
             )
         return amount * from_price / to_price
+
+    def _price_address(self, token: str) -> str:
+        addresses = {
+            str(self.collateral_token).upper(): self.collateral_token_address,
+            str(self.borrow_token).upper(): self.borrow_token_address,
+        }
+        try:
+            return addresses[token.upper()]
+        except KeyError as exc:
+            raise ValueError(f"No configured price address for token {token!r}") from exc
 
     # =========================================================================
     # TEARDOWN INTERFACE
@@ -1106,11 +1124,11 @@ class MorphoLoopingStrategy(IntentStrategy):
         live = None
         if snapshot is not None:
             try:
-                collateral_price = Decimal(str(snapshot.price(self.collateral_token)))
+                collateral_price = Decimal(str(snapshot.price(self.collateral_token_address)))
             except Exception:  # noqa: BLE001
                 collateral_price = None
             try:
-                debt_price: Decimal | None = Decimal(str(snapshot.price(self.borrow_token)))
+                debt_price: Decimal | None = Decimal(str(snapshot.price(self.borrow_token_address)))
             except Exception:  # noqa: BLE001
                 debt_price = None
             live = redrive_lending_position(

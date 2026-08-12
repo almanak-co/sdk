@@ -25,6 +25,9 @@ from almanak.demo_strategies.pancakeswap_aave_carry_bsc.strategy import (
 )
 from almanak.framework.market import HealthUnavailableError
 
+WBNB_ADDRESS = "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c"
+USDC_ADDRESS = "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d"
+
 # =============================================================================
 # Fixtures
 # =============================================================================
@@ -34,8 +37,10 @@ def _make_strategy(**config_overrides) -> PancakeswapAaveCarryBscStrategy:
     """Create a strategy instance with mocked framework dependencies."""
     default_config = {
         "collateral_token": "WBNB",
+        "collateral_token_address": WBNB_ADDRESS,
         "collateral_amount": "0.5",
         "borrow_token": "USDC",
+        "borrow_token_address": USDC_ADDRESS,
         "swap_to_token": "USDT",
         "ltv_target": "0.3",
         "max_borrow_fraction": "0.5",
@@ -52,8 +57,10 @@ def _make_strategy(**config_overrides) -> PancakeswapAaveCarryBscStrategy:
     strategy._hot_config = None
 
     strategy.collateral_token = str(default_config["collateral_token"])
+    strategy.collateral_token_address = str(default_config["collateral_token_address"])
     strategy.collateral_amount = Decimal(str(default_config["collateral_amount"]))
     strategy.borrow_token = str(default_config["borrow_token"])
+    strategy.borrow_token_address = str(default_config["borrow_token_address"])
     strategy.swap_to_token = str(default_config["swap_to_token"])
     strategy.ltv_target = Decimal(str(default_config["ltv_target"]))
     strategy.max_borrow_fraction = Decimal(str(default_config["max_borrow_fraction"]))
@@ -83,7 +90,11 @@ def _make_market(
     market = MagicMock()
 
     def price_side_effect(token):
-        prices = {"WBNB": wbnb_price, "BNB": wbnb_price, "USDC": usdc_price, "USDT": usdt_price}
+        prices = {
+            WBNB_ADDRESS: wbnb_price,
+            USDC_ADDRESS: usdc_price,
+            "USDT": usdt_price,
+        }
         if token in prices:
             return prices[token]
         raise ValueError(f"Unknown token: {token}")

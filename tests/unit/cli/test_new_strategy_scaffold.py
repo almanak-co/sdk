@@ -1478,6 +1478,7 @@ def _make_perps_strategy(direction: str | None = "LONG"):
         "take_profit_pct": "0.05",
         "stop_loss_pct": "0.03",
         "base_token": "ETH",
+        "index_token_address": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
     }
     if direction is not None:
         defaults["direction"] = direction
@@ -1502,6 +1503,7 @@ def _make_perps_strategy(direction: str | None = "LONG"):
     strat.take_profit_pct = Decimal(str(get_config("take_profit_pct", "0.05")))
     strat.stop_loss_pct = Decimal(str(get_config("stop_loss_pct", "0.03")))
     strat.base_token = get_config("base_token", "ETH")
+    strat.index_token_address = get_config("index_token_address", None)
 
     _direction_raw = get_config("direction", None)
     if _direction_raw is None:
@@ -1537,6 +1539,13 @@ def test_perps_scaffold_config_default_is_long() -> None:
     config_str = generate_config_json("Test Perps", StrategyTemplate.PERPS, "arbitrum")
     config = json.loads(config_str)
     assert config.get("direction") == "LONG", "PERPS config.json must include direction='LONG' by default"
+    assert config["index_token_address"] == _static_token_address("arbitrum", "WETH")
+
+
+def test_perps_scaffold_assigns_index_token_address_from_config() -> None:
+    code = _scaffold_perps_code()
+
+    assert 'self.index_token_address = get_config("index_token_address", None)' in code
 
 
 def test_perps_scaffold_reads_direction_from_config() -> None:

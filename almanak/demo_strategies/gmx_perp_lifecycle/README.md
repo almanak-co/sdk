@@ -11,6 +11,7 @@ persistence, and teardown flow easier to audit.
 
 The lifecycle demo still follows the canonical teardown contract:
 
+- all price and collateral valuation reads use chain-specific token addresses;
 - `probe_perp_position()` converts raw `PerpsPositionOnChain` rows into
   normalized `PerpProbePosition` values;
 - OPEN, FLAT, and UNMEASURED remain distinct;

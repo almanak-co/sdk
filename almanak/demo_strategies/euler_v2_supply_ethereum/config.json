@@ -10,6 +10,7 @@
         }
     ],
     "supply_token": "USDC",
+    "supply_token_address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
     "supply_amount": "1000",
     "anvil_funding": {
         "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE": 1,

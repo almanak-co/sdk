@@ -15,9 +15,13 @@ import pytest
 from almanak.demo_strategies.benqi_looping import BenqiLoopingStrategy
 
 _WALLET = "0x" + "1" * 40
+_AVAX_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
+_USDC_ADDRESS = "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E"
 _BASE_CFG = {
     "collateral_token": "AVAX",
+    "collateral_token_address": _AVAX_ADDRESS,
     "borrow_token": "USDC",
+    "borrow_token_address": _USDC_ADDRESS,
     "wrapped_native": "WAVAX",
     "initial_collateral": "0.1",
     "target_loops": 2,
@@ -35,7 +39,7 @@ def _make(**overrides) -> BenqiLoopingStrategy:
 
 def _market(avax_price: float) -> MagicMock:
     m = MagicMock()
-    m.price.side_effect = lambda t: Decimal(str(avax_price)) if t in ("AVAX", "WAVAX") else Decimal("1")
+    m.price.side_effect = lambda t: Decimal(str(avax_price)) if t == _AVAX_ADDRESS else Decimal("1")
     return m
 
 

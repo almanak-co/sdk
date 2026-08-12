@@ -33,6 +33,10 @@ almanak strat run -d almanak/demo_strategies/gmx_v2_directional_perp --network a
 
 | Field | Meaning | Default |
 |---|---|---|
+| `market_address` | GMX market-token address used for execution and funding reads | ETH/USD GMX market |
+| `base_token_address` | Chain-specific base asset used for price and indicator reads | Arbitrum WETH |
+| `collateral_token_address` | Chain-specific collateral asset used for balance and price reads | Arbitrum USDC |
+| `data_granularity` | Indicator candle cadence; must not be finer than the historical price plane | 4h |
 | `position_size_usd` | Notional per position | 100 |
 | `leverage` | Perp leverage | 2.0 |
 | `ema_fast_period` / `ema_slow_period` | Crossover signal periods | 9 / 21 |

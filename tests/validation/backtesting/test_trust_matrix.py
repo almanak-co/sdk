@@ -1849,7 +1849,9 @@ def _observation_lifecycle_demo():
     demo.market = "ETH/USD"
     # Address-first market contract: the demo authors the market-token address.
     demo.market_address = "0x70d95587d40A2caf56bd97485aB3Eec10Bee6336"
+    demo.index_token_address = "0x82af49447d8a07e3bd95bd0d56f35241523fbab1"
     demo.collateral_token = "USDC"
+    demo.collateral_token_address = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
     demo.collateral_amount = Decimal("5")
     demo.leverage = Decimal("2.0")
     demo.is_long = True
@@ -1901,10 +1903,10 @@ def test_observation_gated_demo_lifecycle_closes_through_the_bridge(monkeypatch:
     try:
         demo = _observation_lifecycle_demo()
         series = flat_series(8)
-        # The demo prices its index token by the market's base symbol ("ETH");
-        # the address-form intent market resolves to that base through the
-        # primed venue-verified registry metadata, then prices off ETH/WETH.
-        series["ETH"] = list(series["WETH"])
+        # Mirror the real config: data-plane identity is the chain-specific
+        # address, while symbols remain display labels and intent metadata.
+        series[demo.index_token_address] = list(series["WETH"])
+        series[demo.collateral_token_address] = list(series["USDC"])
         result = run_backtest(
             demo,
             series,

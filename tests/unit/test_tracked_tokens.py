@@ -2,21 +2,21 @@
 
 from dataclasses import dataclass
 from decimal import Decimal
-from unittest.mock import MagicMock
 
 import pytest
 
 from almanak import IntentStrategy
 from almanak.framework.portfolio.models import ValueConfidence
 
-
 # ---------------------------------------------------------------------------
 # Minimal config fixtures
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class PoolConfig:
     """Config with pool field (LP strategies)."""
+
     pool: str = "WETH/USDC/500"
     range_width_pct: Decimal = Decimal("0.20")
     amount0: Decimal = Decimal("0.001")
@@ -42,6 +42,7 @@ class PoolConfig:
 @dataclass
 class SwapConfig:
     """Config with base_token/quote_token fields (swap strategies)."""
+
     base_token: str = "WETH"
     quote_token: str = "USDC"
     trade_amount: str = "100"
@@ -65,6 +66,7 @@ class SwapConfig:
 @dataclass
 class LendingConfig:
     """Config with collateral_token/borrow_token fields (lending strategies)."""
+
     collateral_token: str = "wstETH"
     borrow_token: str = "USDC"
     deployment_id: str = "test"
@@ -86,6 +88,7 @@ class LendingConfig:
 @dataclass
 class FromToConfig:
     """Config with from_token/to_token fields (simple swap strategies)."""
+
     from_token: str = "WETH"
     to_token: str = "USDC"
     deployment_id: str = "test"
@@ -107,6 +110,7 @@ class FromToConfig:
 @dataclass
 class EmptyConfig:
     """Config with no token-related fields."""
+
     interval: int = 60
     deployment_id: str = "test"
     strategy_name: str = "test"
@@ -125,6 +129,7 @@ class EmptyConfig:
 # Helper to create a strategy instance without the full framework
 # ---------------------------------------------------------------------------
 
+
 class _ConcreteStrategy(IntentStrategy):
     """Minimal concrete subclass for testing."""
 
@@ -133,6 +138,7 @@ class _ConcreteStrategy(IntentStrategy):
 
     def get_open_positions(self):
         from almanak.framework.teardown.models import TeardownPositionSummary
+
         return TeardownPositionSummary.empty(getattr(self, "_deployment_id", "test"))
 
     def generate_teardown_intents(self, mode=None, market=None):
@@ -151,6 +157,7 @@ def _make_strategy(config):
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
 
 class TestDeriveTokensFromConfig:
     """Test _derive_tokens_from_config extracts tokens correctly."""
@@ -178,6 +185,66 @@ class TestDeriveTokensFromConfig:
         assert "USDC" in tokens
         assert len(tokens) == 2
 
+    def test_companion_addresses_replace_display_symbols(self):
+        """NAV tracking uses configured addresses, never companion symbols."""
+
+        @dataclass
+        class AddressFirstConfig:
+            base_token: str = "WETH"
+            base_token_address: str = "0x" + "1" * 40
+            quote_token: str = "USDC"
+            quote_token_address: str = "0x" + "2" * 40
+            deployment_id: str = "test"
+            chain: str = "arbitrum"
+
+            def to_dict(self):
+                return {
+                    "base_token": self.base_token,
+                    "base_token_address": self.base_token_address,
+                    "quote_token": self.quote_token,
+                    "quote_token_address": self.quote_token_address,
+                }
+
+        tokens = _make_strategy(AddressFirstConfig())._derive_tokens_from_config()
+        assert tokens == ["0x" + "1" * 40, "0x" + "2" * 40]
+
+    @pytest.mark.parametrize("field", ["token0_symbol", "token1_symbol", "token_x_symbol", "token_y_symbol"])
+    def test_symbol_fields_use_matching_companion_address(self, field):
+        address_field = f"{field.removesuffix('_symbol')}_address"
+        address = "0x" + "5" * 40
+
+        class SymbolAddressConfig:
+            deployment_id = "test"
+            chain = "arbitrum"
+
+            def to_dict(self):
+                return {field: "WETH", address_field: address}
+
+        tokens = _make_strategy(SymbolAddressConfig())._derive_tokens_from_config()
+        assert tokens == [address]
+
+    def test_pool_symbols_resolve_through_address_bearing_token_funding(self):
+        """LP descriptors remain readable while tracked identities are addresses."""
+
+        @dataclass
+        class AddressFirstPoolConfig:
+            pool: str = "WAVAX/USDT/20"
+            token_funding: list[dict[str, str]] | None = None
+            deployment_id: str = "test"
+            chain: str = "avalanche"
+
+            def __post_init__(self):
+                self.token_funding = [
+                    {"symbol": "WAVAX", "address": "0x" + "3" * 40, "chain": self.chain},
+                    {"symbol": "USDT", "address": "0x" + "4" * 40, "chain": self.chain},
+                ]
+
+            def to_dict(self):
+                return {"pool": self.pool, "token_funding": self.token_funding}
+
+        tokens = _make_strategy(AddressFirstPoolConfig())._derive_tokens_from_config()
+        assert tokens == ["0x" + "3" * 40, "0x" + "4" * 40]
+
     def test_collateral_borrow_tokens(self):
         strategy = _make_strategy(LendingConfig(collateral_token="wstETH", borrow_token="USDC"))
         tokens = strategy._derive_tokens_from_config()
@@ -199,14 +266,17 @@ class TestDeriveTokensFromConfig:
 
     def test_no_duplicates(self):
         """If same token appears in multiple fields, it should appear once."""
+
         @dataclass
         class DupConfig:
             base_token: str = "USDC"
             quote_token: str = "USDC"
             deployment_id: str = "test"
             chain: str = "arbitrum"
+
             def to_dict(self):
                 return {"base_token": self.base_token, "quote_token": self.quote_token}
+
             def update(self, **kwargs):
                 pass
 
@@ -264,6 +334,7 @@ class TestDeriveTokensFromConfig:
         not a pool descriptor. Passing it to the token resolver causes 90s
         timeout loops on Polygon.
         """
+
         @dataclass
         class CompoundV3Config:
             market: str = "usdc_e"
@@ -271,12 +342,14 @@ class TestDeriveTokensFromConfig:
             borrow_token: str = "USDC"
             deployment_id: str = "test"
             chain: str = "polygon"
+
             def to_dict(self):
                 return {
                     "market": self.market,
                     "collateral_token": self.collateral_token,
                     "borrow_token": self.borrow_token,
                 }
+
             def update(self, **kwargs):
                 pass
 
@@ -288,14 +361,17 @@ class TestDeriveTokensFromConfig:
 
     def test_market_id_usdc_not_treated_as_token(self):
         """Single-word market IDs like 'usdc' are also excluded."""
+
         @dataclass
         class CompoundV3SimpleConfig:
             market: str = "usdc"
             base_token: str = "USDC"
             deployment_id: str = "test"
             chain: str = "arbitrum"
+
             def to_dict(self):
                 return {"market": self.market, "base_token": self.base_token}
+
             def update(self, **kwargs):
                 pass
 
@@ -305,13 +381,16 @@ class TestDeriveTokensFromConfig:
 
     def test_market_field_with_slash_still_parsed(self):
         """Market field with '/' format should still be parsed as a pool."""
+
         @dataclass
         class MarketPoolConfig:
             market: str = "WETH/USDC"
             deployment_id: str = "test"
             chain: str = "arbitrum"
+
             def to_dict(self):
                 return {"market": self.market}
+
             def update(self, **kwargs):
                 pass
 
@@ -327,13 +406,16 @@ class TestDeriveTokensFromConfig:
         both of which fail — USD is a quote denomination, not an ERC20, and
         Chainlink has no USD/USD feed.
         """
+
         @dataclass
         class PerpMarketConfig:
             market: str = "BTC/USD"
             deployment_id: str = "test"
             chain: str = "bsc"
+
             def to_dict(self):
                 return {"market": self.market}
+
             def update(self, **kwargs):
                 pass
 
@@ -387,14 +469,17 @@ class TestGetTrackedTokens:
 
     def test_config_with_none_value(self):
         """Config fields with None values should be skipped."""
+
         @dataclass
         class NullConfig:
             base_token: str = "WETH"
             quote_token: str | None = None
             deployment_id: str = "test"
             chain: str = "arbitrum"
+
             def to_dict(self):
                 return {"base_token": self.base_token, "quote_token": self.quote_token}
+
             def update(self, **kwargs):
                 pass
 
@@ -463,9 +548,7 @@ class TestVib3937NativeTokenInWalletSnapshot:
         snap = strategy.get_portfolio_snapshot(market=market)
 
         symbols = {b.symbol for b in snap.wallet_balances}
-        assert "ETH" in symbols, (
-            f"VIB-3937: native ETH must appear in wallet_balances; got {sorted(symbols)}"
-        )
+        assert "ETH" in symbols, f"VIB-3937: native ETH must appear in wallet_balances; got {sorted(symbols)}"
         eth_row = next(b for b in snap.wallet_balances if b.symbol == "ETH")
         assert eth_row.balance == Decimal("0.987654321")
         assert eth_row.price_usd == Decimal("2300")
@@ -499,9 +582,7 @@ class TestVib3937NativeTokenInWalletSnapshot:
         snap = strategy.get_portfolio_snapshot(market=market)
 
         symbols = {b.symbol for b in snap.wallet_balances}
-        assert "AVAX" in symbols, (
-            f"VIB-3937: chain=avalanche native must be AVAX; got {sorted(symbols)}"
-        )
+        assert "AVAX" in symbols, f"VIB-3937: chain=avalanche native must be AVAX; got {sorted(symbols)}"
         # WAVAX/USDC are zero so they're skipped by the `balance > 0` gate above.
         # Native is included even if it were 0 (it's non-zero here anyway).
         assert "WAVAX" not in symbols
@@ -558,9 +639,7 @@ class TestVib3937NativeTokenInWalletSnapshot:
         snap = strategy.get_portfolio_snapshot(market=market)
 
         eth_rows = [b for b in snap.wallet_balances if b.symbol == "ETH"]
-        assert len(eth_rows) == 1, (
-            f"VIB-3937: ETH already in tracked tokens must not be duplicated; got {eth_rows}"
-        )
+        assert len(eth_rows) == 1, f"VIB-3937: ETH already in tracked tokens must not be duplicated; got {eth_rows}"
 
 
 class TestVib5271FallbackTotalIsPositionsOnly:

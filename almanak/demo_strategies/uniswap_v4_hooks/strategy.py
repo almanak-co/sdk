@@ -29,9 +29,8 @@ import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from almanak.framework.api.timeline import TimelineEvent, TimelineEventType, add_event
 from almanak.connectors.uniswap_v4.hooks import (
     DynamicFeeHookEncoder,
     EmptyHookDataEncoder,
@@ -39,12 +38,17 @@ from almanak.connectors.uniswap_v4.hooks import (
     discover_pool,
     warn_empty_hook_data,
 )
+from almanak.demo_strategies._address_config import require_evm_address
+from almanak.framework.api.timeline import TimelineEvent, TimelineEventType, add_event
 from almanak.framework.intents import AnyIntent, Intent, IntentType
 from almanak.framework.market import MarketSnapshot
 from almanak.framework.strategies import IntentStrategy, almanak_strategy
 from almanak.framework.utils.log_formatters import format_token_amount_human, format_usd
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from almanak.framework.teardown import TeardownMode, TeardownPositionSummary
 
 
 @dataclass
@@ -62,6 +66,8 @@ class UniswapV4HooksConfig:
     """
 
     pool: str = "WETH/USDC/3000"
+    token0_address: str = ""
+    token1_address: str = ""
     hook_address: str = "0x0000000000000000000000000000000000000000"
     range_width_pct: Decimal = Decimal("0.30")
     amount0: Decimal = Decimal("0.01")
@@ -74,6 +80,8 @@ class UniswapV4HooksConfig:
     def to_dict(self) -> dict[str, Any]:
         return {
             "pool": self.pool,
+            "token0_address": self.token0_address,
+            "token1_address": self.token1_address,
             "hook_address": self.hook_address,
             "range_width_pct": str(self.range_width_pct),
             "amount0": str(self.amount0),
@@ -139,6 +147,8 @@ class UniswapV4HooksStrategy(IntentStrategy[UniswapV4HooksConfig]):
         pool_parts = self.pool.split("/")
         self.token0_symbol = pool_parts[0] if len(pool_parts) > 0 else "WETH"
         self.token1_symbol = pool_parts[1] if len(pool_parts) > 1 else "USDC"
+        self.token0_address = require_evm_address(self, "token0_address")
+        self.token1_address = require_evm_address(self, "token1_address")
         self.fee_tier = int(pool_parts[2]) if len(pool_parts) > 2 else 3000
 
         self.hook_address = self.config.hook_address
@@ -194,8 +204,8 @@ class UniswapV4HooksStrategy(IntentStrategy[UniswapV4HooksConfig]):
     def decide(self, market: MarketSnapshot) -> Intent | None:
         """Hook-aware LP decision."""
         try:
-            token0_price_usd = market.price(self.token0_symbol)
-            token1_price_usd = market.price(self.token1_symbol)
+            token0_price_usd = market.price(self.token0_address)
+            token1_price_usd = market.price(self.token1_address)
             if not token1_price_usd:
                 return Intent.hold(reason=f"Invalid price for {self.token1_symbol}")
             current_price = token0_price_usd / token1_price_usd
@@ -219,9 +229,7 @@ class UniswapV4HooksStrategy(IntentStrategy[UniswapV4HooksConfig]):
                 )
             # Range unknown (e.g. opened by an older version) -- hold rather than
             # rebalance blindly.
-            return Intent.hold(
-                reason=f"V4 hooked position {self._current_position_id} active — range unknown"
-            )
+            return Intent.hold(reason=f"V4 hooked position {self._current_position_id} active — range unknown")
 
         # =================================================================
         # No position -> balance inventory to ~50/50, then (re)open
@@ -241,9 +249,7 @@ class UniswapV4HooksStrategy(IntentStrategy[UniswapV4HooksConfig]):
 
         total_usd = token0_usd + token1_usd
         if total_usd < self.min_position_usd:
-            return Intent.hold(
-                reason=f"Total ${total_usd:.2f} below min_position_usd ${self.min_position_usd:.2f}"
-            )
+            return Intent.hold(reason=f"Total ${total_usd:.2f} below min_position_usd ${self.min_position_usd:.2f}")
 
         swap_intent = self._rebalance_swap_intent(token0_usd, token1_usd, total_usd)
         if swap_intent is not None:
@@ -332,9 +338,7 @@ class UniswapV4HooksStrategy(IntentStrategy[UniswapV4HooksConfig]):
             max_slippage=self.max_slippage,
         )
 
-    def _rebalance_swap_intent(
-        self, token0_usd: Decimal, token1_usd: Decimal, total_usd: Decimal
-    ) -> Intent | None:
+    def _rebalance_swap_intent(self, token0_usd: Decimal, token1_usd: Decimal, total_usd: Decimal) -> Intent | None:
         """Swap the heavy side toward a ~50/50 USD split before (re)opening.
 
         Returns a SWAP intent when inventory is skewed beyond a 10% tolerance
@@ -417,15 +421,9 @@ class UniswapV4HooksStrategy(IntentStrategy[UniswapV4HooksConfig]):
     def _run_pool_discovery(self) -> None:
         """Discover pool details and log hook information."""
         try:
-            from almanak.framework.data.tokens import get_token_resolver
-
-            resolver = get_token_resolver()
-            token0 = resolver.resolve_for_swap(self.token0_symbol, self.chain)
-            token1 = resolver.resolve_for_swap(self.token1_symbol, self.chain)
-
             self._pool_discovery = discover_pool(
-                token0=token0.address,
-                token1=token1.address,
+                token0=self.token0_address,
+                token1=self.token1_address,
                 fee=self.fee_tier,
                 hooks=self.hook_address,
             )
@@ -493,8 +491,8 @@ class UniswapV4HooksStrategy(IntentStrategy[UniswapV4HooksConfig]):
         if self._current_position_id:
             try:
                 snapshot = self.create_market_snapshot()
-                t0_price = snapshot.price(self.token0_symbol)
-                t1_price = snapshot.price(self.token1_symbol)
+                t0_price = snapshot.price(self.token0_address)
+                t1_price = snapshot.price(self.token1_address)
             except Exception:  # noqa: BLE001
                 t0_price = Decimal("0")
                 t1_price = Decimal("0")
@@ -552,9 +550,7 @@ class UniswapV4HooksStrategy(IntentStrategy[UniswapV4HooksConfig]):
         if not self._current_position_id:
             return []
 
-        logger.info(
-            f"V4 hooked teardown: closing position {self._current_position_id} (mode={mode.value})"
-        )
+        logger.info(f"V4 hooked teardown: closing position {self._current_position_id} (mode={mode.value})")
         hook_data = self._encoder.encode(fee_hint=self.fee_hint)
 
         from almanak.framework.teardown import TeardownMode

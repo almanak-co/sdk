@@ -13,19 +13,16 @@ import importlib.util
 import json
 from decimal import Decimal
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
 from almanak.connectors.gmx_v2 import market_catalog
 from tests.unit.connectors.gmx_v2.market_fixtures import prime_catalog
 
-_SEED_DIR = (
-    Path(__file__).resolve().parents[3]
-    / "almanak"
-    / "demo_strategies"
-    / "gmx_v2_directional_perp"
-)
+_SEED_DIR = Path(__file__).resolve().parents[3] / "almanak" / "demo_strategies" / "gmx_v2_directional_perp"
+_WETH_ARBITRUM = "0x82af49447d8a07e3bd95bd0d56f35241523fbab1"
+_USDC_ARBITRUM = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
 
 
 @pytest.fixture(autouse=True)
@@ -103,6 +100,45 @@ class TestCollateralUnits:
         intent = strat._enter(_market("100", collateral_price="2500"), module.LONG, Decimal("0"))
         assert intent.intent_type.value == "PERP_OPEN"
         assert intent.collateral_amount == Decimal("0.02")
+
+
+class TestAddressFirstDataReads:
+    def test_config_declares_compatible_indicator_cadence(self, gmx):
+        _, strat = gmx
+        assert strat._config["data_granularity"] == "4h"
+
+    def test_tracked_tokens_are_chain_specific_addresses(self, gmx):
+        _, strat = gmx
+        assert strat._get_tracked_tokens() == [_WETH_ARBITRUM, _USDC_ARBITRUM]
+
+    def test_entry_uses_addresses_for_balance_and_prices(self, gmx):
+        module, strat = gmx
+        market = _market("100", collateral_price="2500")
+
+        assert strat._enter(market, module.LONG, Decimal("0")).intent_type.value == "PERP_OPEN"
+        market.balance.assert_called_once_with(_USDC_ARBITRUM)
+        assert market.price.call_args_list == [
+            call(_WETH_ARBITRUM),
+            call(_USDC_ARBITRUM),
+        ]
+
+    @pytest.mark.parametrize("key", ["market_address", "base_token_address", "collateral_token_address"])
+    @pytest.mark.parametrize("value", ["0x1", "0x" + "z" * 40])
+    def test_constructor_rejects_malformed_addresses(self, key, value):
+        module = _load_module()
+        cls = module.GmxV2DirectionalPerp
+        cfg = json.loads((_SEED_DIR / "config.json").read_text(encoding="utf-8"))
+        cfg[key] = value
+        with (
+            patch(
+                "almanak.framework.strategies.intent_strategy.IntentStrategy.__init__",
+                return_value=None,
+            ),
+            pytest.raises(ValueError, match=key),
+        ):
+            strategy = cls.__new__(cls)
+            strategy.get_config = lambda config_key, default=None: cfg.get(config_key, default)
+            cls.__init__(strategy)
 
 
 class TestMarketIdentity:
@@ -405,9 +441,7 @@ class TestAwaitingFillLatch:
     @staticmethod
     def _signal_market(strat, *, signal="long", balance_usd="100"):
         market = _market(balance_usd)
-        fast, slow = (
-            (Decimal("110"), Decimal("100")) if signal == "long" else (Decimal("100"), Decimal("110"))
-        )
+        fast, slow = (Decimal("110"), Decimal("100")) if signal == "long" else (Decimal("100"), Decimal("110"))
 
         def _ema(token, period=12, **_kw):
             data = MagicMock()

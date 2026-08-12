@@ -40,7 +40,9 @@ def strategy():
         # Address-first contract: the author-declared market-token address that
         # __init__ now requires and every intent carries.
         s.market_address = "0x70d95587d40A2caf56bd97485aB3Eec10Bee6336"
+        s.index_token_address = "0x82af49447d8a07e3bd95bd0d56f35241523fbab1"
         s.collateral_token = "USDC"
+        s.collateral_token_address = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
         s.collateral_amount = Decimal("10")
         s.leverage = Decimal("2.0")
         s.is_long = True
@@ -194,19 +196,19 @@ class TestPerpCloseStateTransition:
 # ---------------------------------------------------------------------------
 
 
-class TestTrackedTokensExcludeUsd:
-    """Regression for the ``token_resolution_error token=USD`` warnings."""
+class TestTrackedTokensUseAddresses:
+    """Regression for ambiguous symbol lookups and the literal USD quote."""
 
     def test_tracked_tokens_excludes_usd(self, strategy):
         tokens = strategy._get_tracked_tokens()
         assert "USD" not in tokens
         assert "usd" not in [t.lower() for t in tokens]
 
-    def test_tracked_tokens_includes_index_and_collateral(self, strategy):
-        tokens = strategy._get_tracked_tokens()
-        # ETH is the index token (base of ETH/USD); USDC is the collateral.
-        assert "ETH" in tokens
-        assert "USDC" in tokens
+    def test_tracked_tokens_include_exact_index_and_collateral_addresses(self, strategy):
+        assert strategy._get_tracked_tokens() == [
+            "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+            "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+        ]
 
 
 class TestStrategyAuthoredCancelLifecycle:
@@ -458,19 +460,16 @@ class TestObservationDrivenDefaultLifecycle:
 
 class TestTrackedTokensAdditional:
     def test_tracked_tokens_dedups_when_index_equals_collateral(self, strategy):
-        strategy.market = "USDC/USD"
-        strategy.collateral_token = "USDC"
+        strategy.index_token_address = strategy.collateral_token_address
         tokens = strategy._get_tracked_tokens()
-        assert tokens == ["USDC"]
+        assert tokens == [strategy.collateral_token_address]
 
     def test_tracked_tokens_no_duplicates(self, strategy):
         tokens = strategy._get_tracked_tokens()
         assert len(tokens) == len(set(tokens))
 
     def test_tracked_tokens_handles_btc_usd_market(self, strategy):
-        strategy.market = "BTC/USD"
-        strategy.collateral_token = "USDC"
+        btc_address = "0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f"
+        strategy.index_token_address = btc_address
         tokens = strategy._get_tracked_tokens()
-        assert "USD" not in tokens
-        assert "BTC" in tokens
-        assert "USDC" in tokens
+        assert tokens == [btc_address, strategy.collateral_token_address]

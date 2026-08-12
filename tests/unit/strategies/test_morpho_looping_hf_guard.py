@@ -61,14 +61,14 @@ def test_borrow_refused_when_projected_hf_below_threshold() -> None:
     HF to ~1.06 (< 1.10) must be refused via HOLD intent."""
     strategy = _strategy(
         lltv=Decimal("0.86"),
-        target_ltv=Decimal("0.81"),   # very aggressive — collateral*0.81/borrow → HF ≈ 1.062
+        target_ltv=Decimal("0.81"),  # very aggressive — collateral*0.81/borrow → HF ≈ 1.062
         target_min_hf=Decimal("1.10"),
         total_collateral=Decimal("0.014"),
         total_borrowed=Decimal("0"),
     )
     intent = strategy._create_borrow_intent(
         collateral_price=Decimal("3400"),  # wstETH ≈ $3400
-        borrow_price=Decimal("1"),         # USDC ≈ $1
+        borrow_price=Decimal("1"),  # USDC ≈ $1
     )
     assert intent.intent_type == IntentType.HOLD, (
         f"expected HOLD, got {intent.intent_type}; reason={getattr(intent, 'reason', None)}"
@@ -95,8 +95,8 @@ def test_active_hf_uses_lltv_not_target_ltv() -> None:
     strategy = _strategy(
         lltv=Decimal("0.86"),
         target_ltv=Decimal("0.50"),
-        total_collateral=Decimal("1"),       # collateral_price * 1 = $100
-        total_borrowed=Decimal("50"),        # borrow_price * 50 = $50
+        total_collateral=Decimal("1"),  # collateral_price * 1 = $100
+        total_borrowed=Decimal("50"),  # borrow_price * 50 = $50
     )
     strategy._loop_state = "complete"
 
@@ -106,8 +106,7 @@ def test_active_hf_uses_lltv_not_target_ltv() -> None:
         borrow_price=Decimal("1"),
     )
     assert strategy._current_health_factor == Decimal("1.72"), (
-        f"_handle_complete_state must compute HF via LLTV (0.86), expected 1.72, "
-        f"got {strategy._current_health_factor}"
+        f"_handle_complete_state must compute HF via LLTV (0.86), expected 1.72, got {strategy._current_health_factor}"
     )
 
     # Verify the wrong formula (target_ltv) would give the bug value — keeps the
@@ -132,10 +131,10 @@ def test_strategy_hf_matches_gateway_formula() -> None:
     and inspecting the stamped ``_current_health_factor``, NOT by re-deriving
     the formula in test code (would regress to "tautology test")."""
     cases = [
-        (Decimal("100"),  Decimal("50"),   Decimal("0.86"),  Decimal("1.72")),
-        (Decimal("48"),   Decimal("33.6"), Decimal("0.86"),  Decimal("48") * Decimal("0.86") / Decimal("33.6")),
-        (Decimal("1000"), Decimal("500"),  Decimal("0.915"), Decimal("1.83")),
-        (Decimal("250"),  Decimal("100"),  Decimal("0.945"), Decimal("250") * Decimal("0.945") / Decimal("100")),
+        (Decimal("100"), Decimal("50"), Decimal("0.86"), Decimal("1.72")),
+        (Decimal("48"), Decimal("33.6"), Decimal("0.86"), Decimal("48") * Decimal("0.86") / Decimal("33.6")),
+        (Decimal("1000"), Decimal("500"), Decimal("0.915"), Decimal("1.83")),
+        (Decimal("250"), Decimal("100"), Decimal("0.945"), Decimal("250") * Decimal("0.945") / Decimal("100")),
     ]
     for cv, bv, lltv, expected in cases:
         # Encode (cv, bv) as (collateral_amount=1 @ price=cv, borrow_amount=1 @ price=bv)
@@ -180,11 +179,14 @@ def test_borrow_guard_works_for_base_chain_market() -> None:
 # ─── D2.M3 — target_min_hf threshold variance ────────────────────────────
 
 
-@pytest.mark.parametrize("target_min_hf,expected_type", [
-    (Decimal("1.05"), "BORROW"),   # 1.06 ≥ 1.05 ⇒ allow
-    (Decimal("1.10"), "HOLD"),     # 1.06 < 1.10 ⇒ refuse
-    (Decimal("1.20"), "HOLD"),     # 1.06 < 1.20 ⇒ refuse (more strict)
-])
+@pytest.mark.parametrize(
+    "target_min_hf,expected_type",
+    [
+        (Decimal("1.05"), "BORROW"),  # 1.06 ≥ 1.05 ⇒ allow
+        (Decimal("1.10"), "HOLD"),  # 1.06 < 1.10 ⇒ refuse
+        (Decimal("1.20"), "HOLD"),  # 1.06 < 1.20 ⇒ refuse (more strict)
+    ],
+)
 def test_target_min_hf_threshold_variance(target_min_hf: Decimal, expected_type: str) -> None:
     """Same borrow ratio, different target_min_hf — the guard activates at the threshold."""
     strategy = _strategy(
@@ -199,26 +201,27 @@ def test_target_min_hf_threshold_variance(target_min_hf: Decimal, expected_type:
         borrow_price=Decimal("1"),
     )
     name = intent.intent_type.name if hasattr(intent.intent_type, "name") else str(intent.intent_type)
-    assert name == expected_type, (
-        f"target_min_hf={target_min_hf}: expected {expected_type}, got {name}"
-    )
+    assert name == expected_type, f"target_min_hf={target_min_hf}: expected {expected_type}, got {name}"
 
 
 # ─── D2.M4 — LLTV variance across markets ─────────────────────────────────
 
 
-@pytest.mark.parametrize("lltv,expected_hf_approx", [
-    (Decimal("0.86"), Decimal("1.72")),
-    (Decimal("0.91"), Decimal("1.82")),
-    (Decimal("0.77"), Decimal("1.54")),
-])
+@pytest.mark.parametrize(
+    "lltv,expected_hf_approx",
+    [
+        (Decimal("0.86"), Decimal("1.72")),
+        (Decimal("0.91"), Decimal("1.82")),
+        (Decimal("0.77"), Decimal("1.54")),
+    ],
+)
 def test_lltv_variance_across_markets(lltv: Decimal, expected_hf_approx: Decimal) -> None:
     """Strategy HF scales linearly with LLTV — verified by driving the actual
     strategy method, not by re-deriving the formula in test code. (cv=$100, bv=$50.)"""
     strategy = _strategy(
         lltv=lltv,
-        total_collateral=Decimal("1"),   # × collateral_price=100 → cv=$100
-        total_borrowed=Decimal("50"),    # × borrow_price=1 → bv=$50
+        total_collateral=Decimal("1"),  # × collateral_price=100 → cv=$100
+        total_borrowed=Decimal("50"),  # × borrow_price=1 → bv=$50
     )
     strategy._loop_state = "complete"
     strategy._handle_complete_state(collateral_price=Decimal("100"), borrow_price=Decimal("1"))
@@ -243,9 +246,7 @@ def test_missing_oracle_refuses_borrow(caplog: pytest.LogCaptureFixture) -> None
     reason = getattr(intent, "reason", "") or ""
     # The guard refuses on None / zero / negative — the HOLD reason names the
     # broader "invalid_oracle" failure mode (matching strategy.py's contract).
-    assert "invalid_oracle" in reason, (
-        f"HOLD reason should name the failure: got {reason!r}"
-    )
+    assert "invalid_oracle" in reason, f"HOLD reason should name the failure: got {reason!r}"
     # Silent-error observability: no ERROR-level records emitted by this path.
     assert not any(
         rec.levelno >= logging.ERROR
@@ -284,7 +285,7 @@ def test_zero_collateral_safe_handling() -> None:
 
 def _build_config_only_strategy(
     cfg: dict[str, object],
-) -> "MorphoLoopingStrategy":
+) -> MorphoLoopingStrategy:
     """Construct a strategy with the real __init__ by mocking only the framework
     plumbing it touches before reaching the config-read branches under test.
 
@@ -311,7 +312,9 @@ def test_missing_target_min_hf_uses_safe_default(caplog: pytest.LogCaptureFixtur
     cfg = {
         "market_id": "0x" + "b" * 64,
         "collateral_token": "wstETH",
+        "collateral_token_address": "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0",
         "borrow_token": "USDC",
+        "borrow_token_address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
         "initial_collateral": "1.0",
         "target_loops": 1,
         "target_ltv": 0.81,
@@ -327,8 +330,7 @@ def test_missing_target_min_hf_uses_safe_default(caplog: pytest.LogCaptureFixtur
         f"target_min_hf must default to 1.10, got {strategy.target_min_hf}"
     )
     assert any("using default target_min_hf=1.10" in rec.message for rec in caplog.records), (
-        f"missing target_min_hf must emit a WARN with the fallback value; got: "
-        f"{[r.message for r in caplog.records]}"
+        f"missing target_min_hf must emit a WARN with the fallback value; got: {[r.message for r in caplog.records]}"
     )
 
     # Guard still fires when projected_hf < 1.10. cv=$47.6, bv=$38.55 ⇒ HF≈1.06 < 1.10.
@@ -350,7 +352,9 @@ def test_missing_lltv_refuses_to_start() -> None:
     cfg = {
         "market_id": "0x" + "b" * 64,
         "collateral_token": "wstETH",
+        "collateral_token_address": "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0",
         "borrow_token": "USDC",
+        "borrow_token_address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
         "initial_collateral": "1.0",
         "target_loops": 1,
         "target_ltv": 0.50,

@@ -17,6 +17,8 @@
         }
     ],
     "pool": "WETH/USDC/500",
+    "token0_address": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+    "token1_address": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
     "range_width_pct": 0.2,
     "amount0": "0.001",
     "amount1": "3",
