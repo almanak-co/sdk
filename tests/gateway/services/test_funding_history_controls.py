@@ -20,11 +20,19 @@ from almanak.gateway.services.rate_history_service import (
 
 
 class _Provider:
-    def __init__(self, venue: str, *, failures: int = 0, wait: asyncio.Event | None = None) -> None:
+    def __init__(
+        self,
+        venue: str,
+        *,
+        failures: int = 0,
+        wait: asyncio.Event | None = None,
+        source_key: str = "hyperliquid_info",
+    ) -> None:
         self._venue = venue
         self._failures = failures
         self._wait = wait
         self.calls = 0
+        self._source_key = source_key
 
     def funding_venue(self) -> str:
         return self._venue
@@ -34,7 +42,7 @@ class _Provider:
 
     def funding_history_source(self, chain: str) -> FundingHistorySource:
         return FundingHistorySource(
-            key="hyperliquid_info",
+            key=self._source_key,
             scope="",
             requests_per_minute=30,
             burst_size=6,
@@ -70,19 +78,20 @@ def servicer() -> RateHistoryServiceServicer:
     return RateHistoryServiceServicer(GatewaySettings())
 
 
-def test_gmx_and_hyperliquid_declare_one_upstream_budget(servicer: RateHistoryServiceServicer) -> None:
+def test_gmx_and_hyperliquid_have_independent_native_budgets(servicer: RateHistoryServiceServicer) -> None:
     gmx = servicer._funding_providers["gmx_v2"]
     hyperliquid = servicer._funding_providers["hyperliquid"]
 
-    assert gmx.funding_history_source("arbitrum") == hyperliquid.funding_history_source("")
+    assert gmx.funding_history_source("arbitrum") != hyperliquid.funding_history_source("")
 
 
 @pytest.mark.asyncio
-async def test_gmx_and_hyperliquid_share_source_cache(servicer: RateHistoryServiceServicer) -> None:
-    gmx = _Provider("gmx_v2")
+async def test_distinct_native_sources_do_not_share_cache(servicer: RateHistoryServiceServicer) -> None:
+    gmx = _Provider("gmx_v2", source_key="gmx_synthetics_subsquid")
     hyperliquid = _Provider("hyperliquid")
     kwargs = {
         "market": "ETH-USD",
+        "market_address": "",
         "chain": "arbitrum",
         "start_ts": 1_700_000_000,
         "end_ts": 1_700_003_600,
@@ -92,8 +101,24 @@ async def test_gmx_and_hyperliquid_share_source_cache(servicer: RateHistoryServi
     hyperliquid_result = await servicer._cached_funding_history(hyperliquid, **kwargs)
 
     assert gmx.calls == 1
-    assert hyperliquid.calls == 0
+    assert hyperliquid.calls == 1
     assert gmx_result.points == hyperliquid_result.points
+
+
+@pytest.mark.asyncio
+async def test_exact_address_cache_still_partitions_by_declared_market(servicer: RateHistoryServiceServicer) -> None:
+    provider = _Provider("gmx_v2", source_key="gmx_synthetics_subsquid")
+    shared = {
+        "market_address": "0x7c54d547fad72f8afbf6e5b04403a0168b654c6f",
+        "chain": "arbitrum",
+        "start_ts": 1_700_000_000,
+        "end_ts": 1_700_003_600,
+    }
+
+    await servicer._cached_funding_history(provider, market="XMR-USD", **shared)
+    await servicer._cached_funding_history(provider, market="BTC-USD", **shared)
+
+    assert provider.calls == 2
 
 
 @pytest.mark.asyncio
@@ -102,6 +127,7 @@ async def test_concurrent_cold_reads_share_one_upstream_fetch(servicer: RateHist
     provider = _Provider("hyperliquid", wait=release)
     kwargs = {
         "market": "ETH-USD",
+        "market_address": "",
         "chain": "",
         "start_ts": 1_700_000_000,
         "end_ts": 1_700_003_600,
@@ -132,6 +158,7 @@ async def test_429_retry_honors_retry_after(
     result = await servicer._cached_funding_history(
         provider,
         market="ETH-USD",
+        market_address="",
         chain="",
         start_ts=1_700_000_000,
         end_ts=1_700_003_600,

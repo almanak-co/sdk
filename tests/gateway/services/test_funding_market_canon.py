@@ -9,8 +9,6 @@ lookup now canonicalizes through ``almanak.core.perp_markets``.
 
 from __future__ import annotations
 
-from decimal import Decimal
-
 import pytest
 
 from almanak.connectors.gmx_v2.gateway.provider import GmxV2GatewayConnector
@@ -41,10 +39,9 @@ class TestDefaultRateTables:
         assert connector.default_funding_rate("ETH/USD") == _HYPERLIQUID_DEFAULT_RATES["ETH-USD"]
         assert connector.default_funding_rate("ETH/USD") != _UNKNOWN_MARKET_DEFAULT
 
-    def test_gmx_default_rate_slash_equals_dash(self) -> None:
+    def test_gmx_has_no_symbol_default_rate(self) -> None:
         connector = GmxV2GatewayConnector()
-        assert connector.default_funding_rate("ETH/USD") == connector.default_funding_rate("ETH-USD")
-        assert connector.default_funding_rate("ETH/USD") == Decimal("0.000012")
+        assert not hasattr(connector, "default_funding_rate")
 
 
 class TestIngressCanonicalization:

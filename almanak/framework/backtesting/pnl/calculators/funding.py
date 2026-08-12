@@ -403,8 +403,6 @@ class FundingCalculator:
         """Initialize protocol-specific funding rates."""
         if not self.protocol_rates:
             self.protocol_rates = {
-                "gmx": DEFAULT_FUNDING_FALLBACK_RATE,
-                "gmx_v2": DEFAULT_FUNDING_FALLBACK_RATE,
                 "hyperliquid": DEFAULT_FUNDING_FALLBACK_RATE,
                 "binance_perp": Decimal("0.000125"),  # 0.0125% per hour (~0.1% per 8h)
                 "bybit": Decimal("0.000125"),
@@ -416,6 +414,8 @@ class FundingCalculator:
         position: SimulatedPosition,
         funding_rate: Decimal,
         time_delta_hours: Decimal | timedelta,
+        *,
+        position_payment_rate: Decimal | None = None,
     ) -> FundingPaymentResult:
         """Calculate funding payment for a perpetual position over a time period.
 
@@ -426,6 +426,11 @@ class FundingCalculator:
             position: The perpetual position (PERP_LONG or PERP_SHORT)
             funding_rate: The hourly funding rate (positive = longs pay, negative = shorts pay)
             time_delta_hours: Time period in hours (Decimal) or as timedelta
+            position_payment_rate: Optional venue-native rate signed from this
+                position's perspective (positive receives, negative pays). When
+                supplied it replaces ``funding_rate`` for payment, ``is_payer``,
+                and the result's ``funding_rate`` field, and bypasses the legacy
+                symmetric-rate clamp because OI-amplified side rates can exceed it.
 
         Returns:
             FundingPaymentResult with payment amount and metadata
@@ -452,8 +457,17 @@ class FundingCalculator:
         else:
             hours = time_delta_hours
 
-        # Clamp funding rate to bounds
-        clamped_rate = max(self.min_funding_rate, min(self.max_funding_rate, funding_rate))
+        # Clamp the rate used for accounting. Side-specific venue rates are
+        # already signed from the position's perspective (positive receives,
+        # negative pays); the legacy scalar retains positive-longs-pay.
+        if position_payment_rate is not None:
+            # A venue-native side rate is already the measured amount this
+            # exact position pays or receives. GMX can legitimately amplify
+            # the receiving side by the open-interest ratio, so the generic
+            # symmetric-rate guard must not silently rewrite it.
+            clamped_rate = position_payment_rate
+        else:
+            clamped_rate = max(self.min_funding_rate, min(self.max_funding_rate, funding_rate))
 
         # Get position notional value
         position_value = position.notional_usd
@@ -464,7 +478,10 @@ class FundingCalculator:
         # Apply sign convention based on position type
         # PERP_LONG: pays when funding rate is positive
         # PERP_SHORT: receives when funding rate is positive
-        if position.position_type == PositionType.PERP_LONG:
+        if position_payment_rate is not None:
+            payment = raw_funding
+            is_payer = payment < Decimal("0")
+        elif position.position_type == PositionType.PERP_LONG:
             payment = -raw_funding  # Longs pay when rate is positive
             is_payer = raw_funding > Decimal("0")
         else:

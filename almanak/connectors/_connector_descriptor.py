@@ -186,6 +186,14 @@ def _validate_decl_aliases(decl_name: str, aliases: tuple[str, ...]) -> None:
         raise ValueError(f"{decl_name}.aliases must not contain hyphens, got {with_hyphens!r}")
 
 
+def _validate_dynamic_funding_markets(markets: tuple[str, ...], dynamic_markets: bool) -> None:
+    """Keep static and runtime-discovered funding catalogues mutually exclusive."""
+    if not isinstance(dynamic_markets, bool):
+        raise ValueError(f"FundingHistoryDecl.dynamic_markets must be a bool, got {dynamic_markets!r}")
+    if dynamic_markets and markets:
+        raise ValueError("FundingHistoryDecl.dynamic_markets=True cannot be combined with static markets")
+
+
 @dataclass(frozen=True)
 class LendingReadDecl:
     """Connector-owned lending-read dispatch declaration.
@@ -530,9 +538,12 @@ class FundingHistoryDecl:
     funding-scoped protocol aliases resolving to this connector's canonical key
     (e.g. the legacy ``"gmx"`` -> ``gmx_v2``).
 
-    ``markets`` lists the supported market symbols for this venue (e.g.
-    ``"ETH-USD"``, ``"BTC-USD"``). These derive the ``SUPPORTED_MARKETS``
-    framework table (plan 023) and replace the hand-maintained literal dict.
+    ``markets`` lists the statically supported market symbols for this venue
+    (e.g. ``"ETH-USD"``, ``"BTC-USD"``). These derive the legacy
+    ``SUPPORTED_MARKETS`` framework table (plan 023). ``dynamic_markets`` is
+    used by address-first on-chain venues whose catalogue is discovered and
+    verified at request time; such declarations must not also publish a
+    static market list.
 
     ``backtest_provider`` is a lazy reference to the
     ``HistoricalFundingProvider`` subclass used by the backtest perp adapter for
@@ -545,6 +556,7 @@ class FundingHistoryDecl:
     chains: tuple[str, ...] = ()
     aliases: tuple[str, ...] = ()
     markets: tuple[str, ...] = ()
+    dynamic_markets: bool = False
     backtest_provider: ImportRef | None = None
 
     def __post_init__(self) -> None:
@@ -573,6 +585,7 @@ class FundingHistoryDecl:
             )
         if len(set(self.markets)) != len(self.markets):
             raise ValueError(f"FundingHistoryDecl.markets contains duplicates: {self.markets!r}")
+        _validate_dynamic_funding_markets(self.markets, self.dynamic_markets)
         if self.backtest_provider is not None and not isinstance(self.backtest_provider, ImportRef):
             raise ValueError(
                 f"FundingHistoryDecl.backtest_provider must be None or an ImportRef, got {self.backtest_provider!r}"

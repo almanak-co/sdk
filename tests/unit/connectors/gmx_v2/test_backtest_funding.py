@@ -5,12 +5,12 @@ The provider is a thin ``RateHistoryService`` client since VIB-4851 Phase D —
 tests mock ``fetch_funding_points`` (the gateway seam), never HTTP:
 - Provider initialization and configuration
 - Manifest-derived supported chains
-- Carry-forward hourly grid built from measured history
-- Fallback behavior (never raises; LOW-confidence fill on failure)
+- Exact hourly grid built from measured native history
+- Fail-closed defaults and explicit legacy fallback behavior
 - Current-rate convenience method
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import patch
 
@@ -20,6 +20,7 @@ from almanak.connectors._strategy_base.funding_history_registry import FundingHi
 from almanak.connectors.gmx_v2.backtest_funding import (
     DATA_SOURCE,
     DEFAULT_REQUESTS_PER_MINUTE,
+    GMXAPIError,
     GMXClientConfig,
     GMXFundingProvider,
 )
@@ -81,7 +82,7 @@ class TestGMXFundingProviderInitialization:
         """Factory defaults to the connector's canonical backtest chain."""
         provider = GMXFundingProvider.for_backtest(BacktestProviderConfig())
         assert provider.config.chain == "arbitrum"
-        assert provider.config.fallback_rate == Decimal("0.00001")
+        assert provider.config.fallback_rate is None
 
     def test_for_backtest_uses_declared_chain_and_fallback_rate(self):
         """Declared chain config resolves through the funding-history registry."""
@@ -121,6 +122,7 @@ class TestGMXFundingProviderInitialization:
             provider = GMXFundingProvider.for_backtest(BacktestProviderConfig(chain="not_in_enum"))
 
         assert provider.config.chain == "arbitrum"
+        assert provider.config.fallback_rate is None
         assert "not a registered chain" in caplog.text
         assert "falling back to arbitrum" in caplog.text
 
@@ -162,24 +164,56 @@ class TestGetFundingRates:
         assert kwargs["venue"] == "gmx_v2"
         assert kwargs["chain"] == "arbitrum"
         assert kwargs["market"] == "ETH-USD"
+        assert kwargs["market_address"] == ""
 
     @pytest.mark.asyncio
-    async def test_carry_forward_fills_gaps(self):
-        """Hours without a fresh point carry the latest measured rate forward."""
+    async def test_exact_address_market_reaches_gateway_without_case_damage(self):
+        """Legacy standalone callers can select an ambiguous GMX market exactly."""
+        provider = GMXFundingProvider()
+        start = datetime(2024, 1, 1, tzinfo=UTC)
+        market_address = "0x7c54D547FAD72f8AFbf6E5b04403A0168b654C6f"
+
+        with patch(_GATEWAY_SEAM, return_value=_points(start, ["0.0001"])) as seam:
+            rates = await provider.get_funding_rates(market_address, start, start)
+
+        assert [rate.rate for rate in rates] == [Decimal("0.0001")]
+        kwargs = seam.call_args.kwargs
+        assert kwargs["market"] == market_address
+        assert kwargs["market_address"] == market_address
+
+    @pytest.mark.asyncio
+    async def test_partial_grid_fails_closed(self):
+        """A partial native response is not disguised by carry-forward."""
         provider = GMXFundingProvider()
         start = datetime(2024, 1, 1, tzinfo=UTC)
         end = datetime(2024, 1, 1, 4, tzinfo=UTC)
 
-        with patch(_GATEWAY_SEAM, return_value=_points(start, ["0.0001", "0.0002"])):
+        with (
+            patch(_GATEWAY_SEAM, return_value=_points(start, ["0.0001", "0.0002"])),
+            pytest.raises(GMXAPIError, match="Missing GMX funding observation"),
+        ):
+            await provider.get_funding_rates("ETH-USD", start, end)
+
+    @pytest.mark.asyncio
+    async def test_non_aligned_range_uses_native_hour_boundaries(self):
+        """A partial-hour request requires only the enclosed native hours."""
+        provider = GMXFundingProvider()
+        start = datetime(2024, 1, 1, 0, 30, tzinfo=UTC)
+        end = datetime(2024, 1, 1, 2, 30, tzinfo=UTC)
+        first_hour = datetime(2024, 1, 1, 1, tzinfo=UTC)
+
+        with patch(_GATEWAY_SEAM, return_value=_points(first_hour, ["0.0001", "0.0002"])):
             rates = await provider.get_funding_rates("ETH-USD", start, end)
 
-        assert len(rates) == 5
-        assert [str(r.rate) for r in rates] == ["0.0001", "0.0002", "0.0002", "0.0002", "0.0002"]
+        assert [result.source_info.timestamp for result in rates] == [
+            first_hour,
+            first_hour + timedelta(hours=1),
+        ]
 
     @pytest.mark.asyncio
     async def test_hours_before_first_point_fall_back(self):
         """Grid hours before the first measured point use the fallback rate."""
-        provider = GMXFundingProvider()
+        provider = GMXFundingProvider(GMXClientConfig(fallback_rate=Decimal("0.00001")))
         start = datetime(2024, 1, 1, tzinfo=UTC)
         end = datetime(2024, 1, 1, 2, tzinfo=UTC)
         late = _points(datetime(2024, 1, 1, 1, tzinfo=UTC), ["0.0005"])
@@ -190,7 +224,7 @@ class TestGetFundingRates:
         assert rates[0].source_info.source == "fallback"
         assert rates[0].source_info.confidence == DataConfidence.LOW
         assert rates[0].rate == provider.config.fallback_rate
-        assert [str(r.rate) for r in rates[1:]] == ["0.0005", "0.0005"]
+        assert [str(r.rate) for r in rates[1:]] == ["0.0005", "0.00001"]
 
     @pytest.mark.asyncio
     async def test_get_funding_rates_adds_timezone_if_missing(self):
@@ -199,7 +233,7 @@ class TestGetFundingRates:
         start = datetime(2024, 1, 1)  # noqa: DTZ001 - deliberate naive input
         end = datetime(2024, 1, 1, 1)  # noqa: DTZ001
 
-        with patch(_GATEWAY_SEAM, return_value=[]):
+        with patch(_GATEWAY_SEAM, return_value=_points(start.replace(tzinfo=UTC), ["0.0001", "0.0002"])):
             rates = await provider.get_funding_rates("ETH-USD", start, end)
 
         assert len(rates) == 2
@@ -207,12 +241,23 @@ class TestGetFundingRates:
 
 
 class TestErrorHandling:
-    """get_funding_rates never raises — every failure degrades to fallback."""
+    """Native GMX history fails closed unless fallback is explicitly opted in."""
+
+    @pytest.mark.asyncio
+    async def test_gateway_unavailable_fails_closed_by_default(self):
+        provider = GMXFundingProvider()
+        start = datetime(2024, 1, 1, tzinfo=UTC)
+
+        with (
+            patch(_GATEWAY_SEAM, side_effect=DataSourceUnavailable(source="gateway", reason="down")),
+            pytest.raises(GMXAPIError, match="Gateway funding history unavailable"),
+        ):
+            await provider.get_funding_rates("ETH-USD", start, start)
 
     @pytest.mark.asyncio
     async def test_gateway_unavailable_returns_fallback(self):
         """A failed gateway round-trip yields a LOW-confidence fill."""
-        provider = GMXFundingProvider()
+        provider = GMXFundingProvider(GMXClientConfig(fallback_rate=Decimal("0.00001")))
         start = datetime(2024, 1, 1, tzinfo=UTC)
         end = datetime(2024, 1, 1, 3, tzinfo=UTC)
 
@@ -225,17 +270,14 @@ class TestErrorHandling:
         assert all(r.rate == provider.config.fallback_rate for r in rates)
 
     @pytest.mark.asyncio
-    async def test_unexpected_error_returns_fallback(self):
-        """Even unexpected errors degrade to the fallback fill."""
-        provider = GMXFundingProvider()
+    async def test_unexpected_error_propagates(self):
+        """Programming errors never masquerade as market-data fallback."""
+        provider = GMXFundingProvider(GMXClientConfig(fallback_rate=Decimal("0.00001")))
         start = datetime(2024, 1, 1, tzinfo=UTC)
         end = datetime(2024, 1, 1, 1, tzinfo=UTC)
 
-        with patch(_GATEWAY_SEAM, side_effect=RuntimeError("boom")):
-            rates = await provider.get_funding_rates("ETH-USD", start, end)
-
-        assert len(rates) == 2
-        assert all(r.source_info.source == "fallback" for r in rates)
+        with patch(_GATEWAY_SEAM, side_effect=RuntimeError("boom")), pytest.raises(RuntimeError, match="boom"):
+            await provider.get_funding_rates("ETH-USD", start, end)
 
     @pytest.mark.asyncio
     async def test_transport_failure_memoizes_after_two_consecutive(self):
@@ -244,7 +286,7 @@ class TestErrorHandling:
         A single DEADLINE on a slow response must not disable the lane for
         the rest of the run.
         """
-        provider = GMXFundingProvider()
+        provider = GMXFundingProvider(GMXClientConfig(fallback_rate=Decimal("0.00001")))
         start = datetime(2024, 1, 1, tzinfo=UTC)
         end = datetime(2024, 1, 1, 1, tzinfo=UTC)
 
@@ -268,12 +310,13 @@ class TestErrorHandling:
         The threshold is two CONSECUTIVE transport failures; any
         non-transport failure in between breaks the streak.
         """
-        provider = GMXFundingProvider()
+        provider = GMXFundingProvider(GMXClientConfig(fallback_rate=Decimal("0.00001")))
         start = datetime(2024, 1, 1, tzinfo=UTC)
         end = datetime(2024, 1, 1, 1, tzinfo=UTC)
         transport_error = DataSourceUnavailable(source="gateway", reason="deadline", transport=True)
 
-        with patch(_GATEWAY_SEAM, side_effect=[transport_error, RuntimeError("boom"), transport_error]) as seam:
+        generic_error = DataSourceUnavailable(source="gateway", reason="bad data")
+        with patch(_GATEWAY_SEAM, side_effect=[transport_error, generic_error, transport_error]) as seam:
             await provider.get_funding_rates("ETH-USD", start, end)  # transport 1
             await provider.get_funding_rates("ETH-USD", start, end)  # generic: streak resets
             await provider.get_funding_rates("ETH-USD", start, end)  # transport 1 again
@@ -283,12 +326,15 @@ class TestErrorHandling:
     @pytest.mark.asyncio
     async def test_transport_streak_resets_on_success(self):
         """A success between transport failures resets the memo streak."""
-        provider = GMXFundingProvider()
+        provider = GMXFundingProvider(GMXClientConfig(fallback_rate=Decimal("0.00001")))
         start = datetime(2024, 1, 1, tzinfo=UTC)
         end = datetime(2024, 1, 1, 1, tzinfo=UTC)
         transport_error = DataSourceUnavailable(source="gateway", reason="deadline", transport=True)
 
-        with patch(_GATEWAY_SEAM, side_effect=[transport_error, [], transport_error, transport_error]) as seam:
+        with patch(
+            _GATEWAY_SEAM,
+            side_effect=[transport_error, _points(start, ["0.0001", "0.0001"]), transport_error, transport_error],
+        ) as seam:
             await provider.get_funding_rates("ETH-USD", start, end)  # failure 1
             await provider.get_funding_rates("ETH-USD", start, end)  # success: streak resets
             await provider.get_funding_rates("ETH-USD", start, end)  # failure 1 (again)
@@ -300,7 +346,7 @@ class TestErrorHandling:
     @pytest.mark.asyncio
     async def test_data_level_miss_is_not_memoized(self):
         """A data-level miss (success=False envelope) stays retryable."""
-        provider = GMXFundingProvider()
+        provider = GMXFundingProvider(GMXClientConfig(fallback_rate=Decimal("0.00001")))
         start = datetime(2024, 1, 1, tzinfo=UTC)
         end = datetime(2024, 1, 1, 1, tzinfo=UTC)
 
@@ -330,25 +376,20 @@ class TestGetCurrentFundingRate:
         assert result.source_info.confidence == DataConfidence.HIGH
 
     @pytest.mark.asyncio
-    async def test_get_current_funding_rate_no_data(self):
-        """No measured point in the window degrades to fallback."""
+    async def test_get_current_funding_rate_no_data_fails_closed(self):
+        """No measured point fails closed when no fallback was requested."""
         provider = GMXFundingProvider()
 
-        with patch(_GATEWAY_SEAM, return_value=[]):
-            result = await provider.get_current_funding_rate("ETH-USD")
-
-        assert result.source_info.source == "fallback"
-        assert result.rate == provider.config.fallback_rate
+        with patch(_GATEWAY_SEAM, return_value=[]), pytest.raises(GMXAPIError, match="no explicit fallback_rate"):
+            await provider.get_current_funding_rate("ETH-USD")
 
     @pytest.mark.asyncio
     async def test_chain_override_is_validated(self):
-        """An undeclared chain override degrades to fallback (never raises)."""
+        """An undeclared chain override fails closed."""
         provider = GMXFundingProvider()
 
-        with patch(_GATEWAY_SEAM, return_value=[]):
-            result = await provider.get_current_funding_rate("ETH-USD", chain="ethereum")
-
-        assert result.source_info.source == "fallback"
+        with patch(_GATEWAY_SEAM, return_value=[]), pytest.raises(ValueError, match="Unsupported chain"):
+            await provider.get_current_funding_rate("ETH-USD", chain="ethereum")
 
 
 class TestContextManager:

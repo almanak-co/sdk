@@ -209,13 +209,13 @@ def test_detect_strategy_type_lp(backtester, registered_adapters):
 @pytest.mark.asyncio
 async def test_snapshot_funding_is_prewarmed_from_declared_strategy_target() -> None:
     strategy = MockStrategy(protocols=["gmx_v2"])
-    calls: list[tuple[str, str]] = []
+    calls: list[tuple[str, str, str]] = []
 
     class _FundingSource:
         history_capable = True
 
-        async def materialize_history(self, venue: str, market: str) -> int:
-            calls.append((venue, market))
+        async def materialize_history(self, venue: str, market: str, market_address: str) -> int:
+            calls.append((venue, market, market_address))
             return 1
 
     await _engine_helpers._prewarm_declared_funding_history(
@@ -224,7 +224,7 @@ async def test_snapshot_funding_is_prewarmed_from_declared_strategy_target() -> 
         {"funding_market": "ETH-USD"},
     )
 
-    assert calls == [("gmx_v2", "ETH-USD")]
+    assert calls == [("gmx_v2", "ETH-USD", "")]
 
 
 @pytest.mark.asyncio
@@ -232,13 +232,13 @@ async def test_snapshot_funding_prewarm_isolates_data_source_failure_per_target(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     strategy = MockStrategy(protocols=["gmx_v2", "hyperliquid"])
-    calls: list[tuple[str, str]] = []
+    calls: list[tuple[str, str, str]] = []
 
     class _FundingSource:
         history_capable = True
 
-        async def materialize_history(self, venue: str, market: str) -> int:
-            calls.append((venue, market))
+        async def materialize_history(self, venue: str, market: str, market_address: str) -> int:
+            calls.append((venue, market, market_address))
             if venue == "gmx_v2":
                 raise DataSourceUnavailable(source=venue, reason="gateway unavailable")
             return 1
@@ -250,7 +250,7 @@ async def test_snapshot_funding_prewarm_isolates_data_source_failure_per_target(
             {"funding_market": "ETH-USD"},
         )
 
-    assert calls == [("gmx_v2", "ETH-USD"), ("hyperliquid", "ETH-USD")]
+    assert calls == [("gmx_v2", "ETH-USD", ""), ("hyperliquid", "ETH-USD", "")]
     assert "Snapshot funding prewarm unavailable for gmx_v2 ETH-USD" in caplog.text
 
 
@@ -261,7 +261,7 @@ async def test_readiness_funding_prewarm_propagates_data_source_failure() -> Non
     class _FundingSource:
         history_capable = True
 
-        async def materialize_history(self, venue: str, _market: str) -> int:
+        async def materialize_history(self, venue: str, _market: str, _market_address: str) -> int:
             raise DataSourceUnavailable(source=venue, reason="archive unavailable")
 
     with pytest.raises(DataSourceUnavailable, match="archive unavailable"):

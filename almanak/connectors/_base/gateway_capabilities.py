@@ -30,8 +30,8 @@ dispatch tables with registry queries by adding:
   which its pool history is queryable.
 * ``GatewayDefillamaSlugCapability`` — connector reports its DefiLlama
   project slug.
-* ``GatewayFundingRateCapability`` — perp connector publishes per-market
-  default rates + a funding-payment helper.
+* ``GatewayFundingRateCapability`` — perp connector publishes measured live
+  funding, including exact market identity and optional side-specific rates.
 * ``GatewaySubgraphCapability`` — connector publishes alias → validated
   The Graph deployment metadata for ``TheGraphIntegration``.
 * ``GatewayPriceIdCapability`` — connector publishes CoinGecko +
@@ -180,7 +180,7 @@ class GatewayPoolKeyCacheCapability(Protocol):
 
 @runtime_checkable
 class GatewayFundingRateCapability(Protocol):
-    """Perp connector publishes its venue ID + default funding rates.
+    """Perp connector publishes its venue ID and measured live funding.
 
     Replaces the hardcoded ``DEFAULT_RATES`` table and the venue-string
     ``if venue == "hyperliquid" ... elif venue == "gmx_v2" ...`` dispatch
@@ -197,15 +197,13 @@ class GatewayFundingRateCapability(Protocol):
     * ``venue() -> str`` — the venue identifier (e.g. ``"hyperliquid"``,
       ``"gmx_v2"``); matches the ``FundingRateRequest.venue`` string a
       strategy submits.
-    * ``default_funding_rate(market) -> Decimal`` — fallback hourly
-      funding rate when the live fetch fails. Returning a non-positive
-      Decimal is legal (the historical default is ``Decimal("0.00001")``
-      for unknown markets).
-    * ``fetch_funding_rate(servicer, market, chain) -> Awaitable`` —
+    * ``fetch_funding_rate(servicer, market, chain, market_address) -> Awaitable`` —
       venue-specific live fetch. Receives the servicer (its HTTP
       session, web3 cache, settings) so connector code stays free of
-      gateway plumbing. Returns the ``FundingRateData`` dataclass that
-      the servicer translates to the proto envelope.
+      gateway plumbing. Dynamic on-chain venues use ``market_address`` as
+      exact identity and fail closed instead of returning invented defaults.
+      Returns the ``FundingRateData`` dataclass that the servicer translates
+      to the proto envelope.
 
     The ``fetch_funding_rate`` callable is typed as ``Any`` because the
     ``FundingRateData`` return type lives in a gateway-side module and
@@ -215,13 +213,12 @@ class GatewayFundingRateCapability(Protocol):
 
     def venue(self) -> str: ...
 
-    def default_funding_rate(self, market: str) -> Any: ...
-
     async def fetch_funding_rate(
         self,
         servicer: Any,
         market: str,
         chain: str,
+        market_address: str = "",
     ) -> Any: ...
 
 
@@ -1120,9 +1117,9 @@ class GatewayFundingHistoryCapability(Protocol):
     * ``funding_venue() -> str`` — the venue identifier matching
       :meth:`GatewayFundingRateCapability.venue` so both capabilities on
       the same connector agree on identity.
-    * ``funding_supported_markets() -> frozenset[str]`` — markets the
-      connector serves for the historical lane (e.g. ``"ETH-USD"``,
-      ``"BTC-USD"``). Empty set is legal.
+    * ``funding_supported_markets() -> frozenset[str] | None`` — statically
+      known markets, or ``None`` when the connector resolves an address-first
+      venue catalogue dynamically at request time. Empty set is legal.
     * ``funding_history_source(chain) -> FundingHistorySource`` — upstream
       cache/throttle identity and request budget. Proxy venues that consume
       the same upstream return the same identity.
@@ -1131,15 +1128,14 @@ class GatewayFundingHistoryCapability(Protocol):
       never fake-success with empty (raise from the connector when the
       upstream window is empty).
 
-    Cross-venue fallback (GMX V2 historical funding is served by Hyperliquid
-    since GMX has no historical API) is connector-owned. Both capabilities
-    return the same upstream source identity so the gateway shares cache,
-    single-flight, throttle, and backoff state across the proxy boundary.
+    ``market_address`` is the exact venue market identity when the strategy
+    declared one. Dynamic on-chain venues must verify it against their venue
+    catalogue rather than guessing among pair-label variants.
     """
 
     def funding_venue(self) -> str: ...
 
-    def funding_supported_markets(self) -> frozenset[str]: ...
+    def funding_supported_markets(self) -> frozenset[str] | None: ...
 
     def funding_history_source(self, chain: str) -> FundingHistorySource:
         """Return the upstream cache/throttle identity for this request."""
@@ -1150,6 +1146,7 @@ class GatewayFundingHistoryCapability(Protocol):
         servicer: Any,
         *,
         market: str,
+        market_address: str,
         chain: str,
         start_ts: int,
         end_ts: int,

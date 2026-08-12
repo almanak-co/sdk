@@ -92,12 +92,16 @@ class FundingRateData:
     venue: str
     market: str
     rate_hourly: Decimal
-    open_interest_long: Decimal
-    open_interest_short: Decimal
-    mark_price: Decimal
-    index_price: Decimal
-    next_funding_time: datetime
+    open_interest_long: Decimal | None
+    open_interest_short: Decimal | None
+    mark_price: Decimal | None
+    index_price: Decimal | None
+    next_funding_time: datetime | None
     is_live_data: bool
+    long_rate_hourly: Decimal | None = None
+    short_rate_hourly: Decimal | None = None
+    market_address: str | None = None
+    observed_at: datetime | None = None
 
 
 # =============================================================================
@@ -246,16 +250,15 @@ class FundingRateServiceServicer(gateway_pb2_grpc.FundingRateServiceServicer):
     def _get_default_rate(self, venue: str, market: str) -> Decimal:
         """Get default funding rate for a market via the capability registry.
 
-        Each perp connector publishes its own per-market default table
-        through ``GatewayFundingRateCapability.default_funding_rate``;
-        the gateway no longer carries a hardcoded venue dict. Returns
-        the historical ``Decimal("0.00001")`` fallback for unknown
-        ``(venue, market)`` pairs.
+        Legacy connectors may publish a per-market default through a separate
+        ``default_funding_rate`` method. GMX deliberately does not: its native
+        lane fails closed when an exact market observation is unavailable.
         """
         connector = self._funding_rate_providers.get(venue.lower())
-        if connector is None:
-            return Decimal("0.00001")
-        return connector.default_funding_rate(market)
+        default_rate = getattr(connector, "default_funding_rate", None)
+        if not callable(default_rate):
+            raise ValueError(f"Venue {venue!r} does not permit a default funding rate")
+        return default_rate(market)
 
     def _get_default_mark_price(self, market: str) -> Decimal:
         """Get default mark price for a market."""
@@ -342,13 +345,17 @@ class FundingRateServiceServicer(gateway_pb2_grpc.FundingRateServiceServicer):
             rate_hourly=str(data.rate_hourly),
             rate_8h=str(rate_8h),
             rate_annualized=str(rate_annualized),
-            next_funding_time=int(data.next_funding_time.timestamp()),
-            open_interest_long=str(data.open_interest_long),
-            open_interest_short=str(data.open_interest_short),
-            mark_price=str(data.mark_price),
-            index_price=str(data.index_price),
+            next_funding_time=int(data.next_funding_time.timestamp()) if data.next_funding_time is not None else 0,
+            open_interest_long=str(data.open_interest_long) if data.open_interest_long is not None else "",
+            open_interest_short=str(data.open_interest_short) if data.open_interest_short is not None else "",
+            mark_price=str(data.mark_price) if data.mark_price is not None else "",
+            index_price=str(data.index_price) if data.index_price is not None else "",
             is_live_data=data.is_live_data,
             success=True,
+            long_rate_hourly=str(data.long_rate_hourly) if data.long_rate_hourly is not None else "",
+            short_rate_hourly=str(data.short_rate_hourly) if data.short_rate_hourly is not None else "",
+            market_address=data.market_address or "",
+            observed_at=int(data.observed_at.timestamp()) if data.observed_at is not None else 0,
         )
 
     async def GetFundingRate(
@@ -381,7 +388,7 @@ class FundingRateServiceServicer(gateway_pb2_grpc.FundingRateServiceServicer):
                 context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
                 context.set_details(f"Unknown venue: {venue}")
                 return gateway_pb2.FundingRateResponse(success=False, error=f"Unknown venue: {venue}")
-            rate_data = await connector.fetch_funding_rate(self, market, chain)
+            rate_data = await connector.fetch_funding_rate(self, market, chain, request.market_address)
 
             latency = time.time() - start_time
             logger.debug(
@@ -420,8 +427,8 @@ class FundingRateServiceServicer(gateway_pb2_grpc.FundingRateServiceServicer):
 
         try:
             # Fetch both rates concurrently
-            rate_a_future = self._fetch_rate(venue_a, market, chain)
-            rate_b_future = self._fetch_rate(venue_b, market, chain)
+            rate_a_future = self._fetch_rate(venue_a, market, chain, request.market_address)
+            rate_b_future = self._fetch_rate(venue_b, market, chain, request.market_address)
 
             rate_a, rate_b = await asyncio.gather(rate_a_future, rate_b_future)
 
@@ -463,7 +470,13 @@ class FundingRateServiceServicer(gateway_pb2_grpc.FundingRateServiceServicer):
             context.set_details(str(e))
             return gateway_pb2.FundingRateSpreadResponse(success=False, error=str(e))
 
-    async def _fetch_rate(self, venue: str, market: str, chain: str) -> FundingRateData:
+    async def _fetch_rate(
+        self,
+        venue: str,
+        market: str,
+        chain: str,
+        market_address: str = "",
+    ) -> FundingRateData:
         """Fetch rate for any supported venue via the capability registry."""
         # ``_funding_rate_providers`` is lower-case keyed; normalize the
         # incoming venue so spread-request callers that don't pre-lower
@@ -472,7 +485,7 @@ class FundingRateServiceServicer(gateway_pb2_grpc.FundingRateServiceServicer):
         if connector is None:
             logger.error("Unknown venue requested: %s", venue)
             raise ValueError("Unknown venue")
-        return await connector.fetch_funding_rate(self, market, chain)
+        return await connector.fetch_funding_rate(self, market, chain, market_address)
 
     async def close(self) -> None:
         """Close HTTP session and Web3 connections."""

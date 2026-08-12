@@ -846,3 +846,36 @@ class TestFundingEdgeCases:
 
         # Should be clamped to min (-1%)
         assert result.funding_rate == Decimal("-0.01")
+
+    def test_measured_side_specific_rate_is_not_clamped(self):
+        """Venue-native payment rates preserve legitimate OI-ratio amplification."""
+        position = SimulatedPosition.perp_short(
+            token="ETH",
+            collateral_usd=Decimal("10000"),
+            leverage=Decimal("5"),
+            entry_price=Decimal("2000"),
+            entry_time=datetime(2024, 1, 1, 0, 0, tzinfo=UTC),
+            protocol="gmx_v2",
+        )
+
+        result = FundingCalculator().calculate_funding_payment(
+            position=position,
+            funding_rate=Decimal("0.005"),
+            position_payment_rate=Decimal("0.02"),
+            time_delta_hours=Decimal("1"),
+        )
+
+        assert result.funding_rate == Decimal("0.02")
+        assert result.payment == Decimal("1000.00")
+        assert result.is_payer is False
+
+        paying = FundingCalculator().calculate_funding_payment(
+            position=position,
+            funding_rate=Decimal("0.005"),
+            position_payment_rate=Decimal("-0.03"),
+            time_delta_hours=Decimal("1"),
+        )
+
+        assert paying.funding_rate == Decimal("-0.03")
+        assert paying.payment == Decimal("-1500.00")
+        assert paying.is_payer is True

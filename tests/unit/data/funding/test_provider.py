@@ -46,6 +46,8 @@ def _make_response(
     is_live_data: bool = True,
     success: bool = True,
     error: str = "",
+    market_address: str = "",
+    observed_at: int = 0,
 ) -> SimpleNamespace:
     """Build a duck-typed FundingRateResponse used by the fake stub."""
     rate_hourly_dec = Decimal(rate_hourly)
@@ -67,6 +69,8 @@ def _make_response(
         is_live_data=is_live_data,
         success=success,
         error=error,
+        market_address=market_address,
+        observed_at=observed_at,
     )
 
 
@@ -189,6 +193,55 @@ class TestGetFundingRate:
         assert stub.calls[0].market == "ETH-USD"
 
     @pytest.mark.asyncio
+    async def test_dynamic_venue_exact_address_reaches_gateway_address_first(self) -> None:
+        market_address = "0x7c54d547fad72f8afbf6e5b04403a0168b654c6f"
+        provider, stub = _make_provider(
+            {
+                ("gmx_v2", market_address): _make_response(
+                    market=market_address,
+                    market_address=market_address,
+                )
+            }
+        )
+
+        rate = await provider.get_funding_rate("gmx_v2", market_address)
+
+        assert rate.market_address == market_address
+        assert stub.calls[0].market == market_address
+        assert stub.calls[0].market_address == market_address
+
+    @pytest.mark.asyncio
+    async def test_exact_address_response_identity_mismatch_fails_closed(self) -> None:
+        market_address = "0x7c54d547fad72f8afbf6e5b04403a0168b654c6f"
+        wrong_address = "0x0000000000000000000000000000000000000001"
+        provider, _ = _make_provider(
+            {
+                ("gmx_v2", market_address): _make_response(
+                    market=market_address,
+                    market_address=wrong_address,
+                )
+            }
+        )
+
+        with pytest.raises(FundingRateUnavailableError, match="did not preserve"):
+            await provider.get_funding_rate("gmx_v2", market_address)
+
+    @pytest.mark.asyncio
+    async def test_exact_address_cache_still_partitions_by_declared_market(self) -> None:
+        market_address = "0x7c54d547fad72f8afbf6e5b04403a0168b654c6f"
+        provider, stub = _make_provider(
+            {
+                ("gmx_v2", "XMR-USD"): _make_response(market="XMR-USD", market_address=market_address),
+                ("gmx_v2", "BTC-USD"): _make_response(market="BTC-USD", market_address=market_address),
+            }
+        )
+
+        await provider.get_funding_rate("gmx_v2", "XMR-USD", market_address)
+        await provider.get_funding_rate("gmx_v2", "BTC-USD", market_address)
+
+        assert len(stub.calls) == 2
+
+    @pytest.mark.asyncio
     async def test_unsupported_venue_raises(self) -> None:
         provider, _ = _make_provider()
         with pytest.raises(VenueNotSupportedError) as exc_info:
@@ -199,9 +252,9 @@ class TestGetFundingRate:
     async def test_unsupported_market_raises(self) -> None:
         provider, _ = _make_provider()
         with pytest.raises(MarketNotSupportedError) as exc_info:
-            await provider.get_funding_rate(Venue.GMX_V2, "INVALID-USD")
+            await provider.get_funding_rate(Venue.HYPERLIQUID, "INVALID-USD")
         assert exc_info.value.market == "INVALID-USD"
-        assert exc_info.value.venue == "gmx_v2"
+        assert exc_info.value.venue == "hyperliquid"
 
     @pytest.mark.asyncio
     async def test_gateway_failure_raises_unavailable(self) -> None:
@@ -273,6 +326,39 @@ class TestGetFundingRateSpread:
         assert spread.rate_b.rate_hourly == Decimal("0.00002")
         # spread_8h = (rate_a - rate_b) * 8
         assert spread.spread_8h == Decimal("-0.00008")
+
+    @pytest.mark.asyncio
+    async def test_spread_forwards_exact_dynamic_market_address(self) -> None:
+        market_address = "0x" + "7" * 40
+        provider, stub = _make_provider(
+            {
+                ("gmx_v2", "ETH-USD"): _make_response(
+                    venue="gmx_v2",
+                    market_address=market_address,
+                )
+            }
+        )
+
+        await provider.get_funding_rate_spread(
+            "ETH-USD",
+            Venue.GMX_V2,
+            Venue.HYPERLIQUID,
+            market_address=market_address,
+        )
+
+        assert stub.spread_calls[0].market_address == market_address
+
+    @pytest.mark.asyncio
+    async def test_spread_exact_address_response_mismatch_fails_closed(self) -> None:
+        provider, _ = _make_provider()
+
+        with pytest.raises(FundingRateUnavailableError, match="did not preserve"):
+            await provider.get_funding_rate_spread(
+                "ETH-USD",
+                Venue.GMX_V2,
+                Venue.HYPERLIQUID,
+                market_address="0x" + "7" * 40,
+            )
 
     @pytest.mark.asyncio
     async def test_recommended_direction_signed(self) -> None:
@@ -408,7 +494,7 @@ class TestConstants:
         assert len(SUPPORTED_VENUES) == 2
 
     def test_supported_markets(self) -> None:
-        assert "ETH-USD" in SUPPORTED_MARKETS["gmx_v2"]
+        assert SUPPORTED_MARKETS["gmx_v2"] == []
         assert "ETH-USD" in SUPPORTED_MARKETS["hyperliquid"]
 
     def test_hours_per_year(self) -> None:

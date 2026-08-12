@@ -2118,6 +2118,10 @@ message FundingRateRequest {
   string venue = 1;
   string market = 2;          // Market symbol (e.g., "ETH-USD", "BTC-USD")
   string chain = 3;           // Chain for on-chain venues
+  // Exact venue market-token address. Required by dynamic address-first
+  // venues when a pair label is ambiguous; empty remains valid for legacy
+  // static/off-chain venues.
+  string market_address = 4;
 }
 
 message FundingRateResponse {
@@ -2134,6 +2138,16 @@ message FundingRateResponse {
   bool is_live_data = 11;           // True if data is from live source
   bool success = 12;
   string error = 13;
+  // Signed payment rate for a long position. Positive receives, negative
+  // pays. Empty when the venue only exposes the legacy symmetric scalar.
+  string long_rate_hourly = 14;
+  // Signed payment rate for a short position. Positive receives, negative
+  // pays. Empty when the venue only exposes the legacy symmetric scalar.
+  string short_rate_hourly = 15;
+  string market_address = 16;
+  // Unix timestamp of the source observation. Zero means the source did not
+  // expose one and the SDK may retain its legacy receipt-time behavior.
+  int64 observed_at = 17;
 }
 
 message FundingRateSpreadRequest {
@@ -2141,6 +2155,7 @@ message FundingRateSpreadRequest {
   string venue_a = 2;         // First venue
   string venue_b = 3;         // Second venue
   string chain = 4;           // Chain for on-chain venues
+  string market_address = 5;  // Exact market address for dynamic on-chain venues
 }
 
 message FundingRateSpreadResponse {
@@ -2801,6 +2816,11 @@ message FundingRatePoint {
   // connectors MAY leave it empty if the connector body doesn't
   // pre-compute it; the framework reader can derive it client-side.
   string rate_annualized = 3;
+
+  // Signed side-specific payment rates. Positive receives, negative pays.
+  // Empty for symmetric legacy venues; GMX V2 publishes both.
+  string long_rate_hourly = 4;
+  string short_rate_hourly = 5;
 }
 
 message DexTwapPoint {
@@ -3001,6 +3021,10 @@ message GetFundingRateHistoryRequest {
   // Required. Unix seconds, UTC.
   int64 start_ts = 4;
   int64 end_ts = 5;
+
+  // Exact venue market-token address for dynamically discovered on-chain
+  // venues. Empty remains valid for static/off-chain venues.
+  string market_address = 6;
 }
 
 message FundingRateHistoryResponse {
@@ -3013,6 +3037,7 @@ message FundingRateHistoryResponse {
   string source = 5;
   bool success = 6;
   string error = 7;
+  string market_address = 8;
 }
 
 message GetGasPriceAtRequest {

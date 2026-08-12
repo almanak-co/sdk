@@ -11,26 +11,51 @@ Verifies that:
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+
 import pytest
+
+
+def test_funding_rate_preserves_legacy_positional_construction() -> None:
+    from almanak.framework.data.funding.models import FundingRate
+
+    observed_at = datetime(2025, 1, 1, tzinfo=UTC)
+    next_funding = observed_at + timedelta(hours=1)
+    rate = FundingRate(
+        "gmx_v2",
+        "XMR-USD",
+        Decimal("0.0001"),
+        Decimal("0.0008"),
+        Decimal("0.876"),
+        observed_at,
+        next_funding,
+        Decimal("100"),
+        Decimal("200"),
+        Decimal("50"),
+        Decimal("49"),
+        False,
+    )
+
+    assert rate.timestamp == observed_at
+    assert rate.next_funding_time == next_funding
+    assert rate.open_interest_long == Decimal("100")
+    assert rate.open_interest_short == Decimal("200")
+    assert rate.mark_price == Decimal("50")
+    assert rate.index_price == Decimal("49")
+    assert rate.is_live_data is False
+    assert rate.long_rate_hourly is None
+    assert rate.short_rate_hourly is None
+    assert rate.market_address is None
 
 
 class TestSupportedMarketsDerivation:
     """SUPPORTED_MARKETS is derived from connector manifests; content must be stable."""
 
-    # Pinned historical content — these are the values that were in the
-    # hand-maintained literal before plan 023.  A connector change that
-    # modifies these lists must update this pin AND file a changelog entry.
+    # Static suggestions only. GMX is address-first and discovers its venue
+    # catalogue dynamically, so it intentionally contributes no symbol list.
     _EXPECTED: dict[str, list[str]] = {
-        "gmx_v2": [
-            "ETH-USD",
-            "BTC-USD",
-            "ARB-USD",
-            "LINK-USD",
-            "SOL-USD",
-            "DOGE-USD",
-            "UNI-USD",
-            "AVAX-USD",
-        ],
+        "gmx_v2": [],
         "hyperliquid": [
             "ETH-USD",
             "BTC-USD",
@@ -59,11 +84,10 @@ class TestSupportedMarketsDerivation:
         for venue, markets in SUPPORTED_MARKETS.items():
             assert isinstance(markets, list), f"{venue}: expected list, got {type(markets)}"
 
-    def test_eth_usd_in_all_venues(self) -> None:
+    def test_static_venue_keeps_eth_usd(self) -> None:
         from almanak.framework.data.funding.models import SUPPORTED_MARKETS
 
-        for venue, markets in SUPPORTED_MARKETS.items():
-            assert "ETH-USD" in markets, f"{venue} missing ETH-USD"
+        assert "ETH-USD" in SUPPORTED_MARKETS["hyperliquid"]
 
     def test_import_via_package_init(self) -> None:
         """Ensure __init__.py lazy hook serves SUPPORTED_MARKETS correctly."""
@@ -116,6 +140,18 @@ class TestFundingHistoryDeclValidation:
         decl = FundingHistoryDecl(venue="test_venue")
         assert decl.markets == ()
 
+    def test_dynamic_markets_rejects_static_list(self) -> None:
+        from almanak.connectors._connector_descriptor import FundingHistoryDecl
+
+        with pytest.raises(ValueError, match="cannot be combined"):
+            FundingHistoryDecl(venue="test_venue", dynamic_markets=True, markets=("ETH-USD",))
+
+    def test_dynamic_markets_rejects_non_bool(self) -> None:
+        from almanak.connectors._connector_descriptor import FundingHistoryDecl
+
+        with pytest.raises(ValueError, match="must be a bool"):
+            FundingHistoryDecl(venue="test_venue", dynamic_markets=1)  # type: ignore[arg-type]
+
     def test_lowercase_market_rejected(self) -> None:
         from almanak.connectors._connector_descriptor import FundingHistoryDecl
 
@@ -161,10 +197,16 @@ class TestRegistryMarketsAccessor:
         from almanak.connectors._strategy_base.funding_history_registry import FundingHistoryRegistry
 
         FundingHistoryRegistry.reset_cache()
-        markets = FundingHistoryRegistry.markets("gmx_v2")
-        assert "ETH-USD" in markets
-        assert "BTC-USD" in markets
-        assert len(markets) == 8
+        assert FundingHistoryRegistry.markets("gmx_v2") == ()
+        assert FundingHistoryRegistry.discovers_markets("gmx_v2") is True
+
+    def test_static_and_unknown_venues_do_not_discover_markets(self) -> None:
+        from almanak.connectors._strategy_base.funding_history_registry import FundingHistoryRegistry
+
+        FundingHistoryRegistry.reset_cache()
+        assert FundingHistoryRegistry.discovers_markets("hyperliquid") is False
+        assert FundingHistoryRegistry.discovers_markets("unknown_proto") is False
+        assert FundingHistoryRegistry.discovers_markets(None) is False
 
     def test_gmx_alias_markets(self) -> None:
         from almanak.connectors._strategy_base.funding_history_registry import FundingHistoryRegistry

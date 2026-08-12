@@ -57,6 +57,7 @@ class FundingHistoryRegistry:
     _alias_map: ClassVar[dict[str, str] | None] = None
     _chains_map: ClassVar[dict[str, tuple[str, ...]] | None] = None
     _markets_map: ClassVar[dict[str, tuple[str, ...]] | None] = None
+    _dynamic_markets_map: ClassVar[dict[str, bool] | None] = None
     # raw ImportRef objects per canonical key; None means map not yet built
     _provider_ref_map: ClassVar[dict[str, Any] | None] = None
     # resolved class cache; keyed by canonical key; populated on first call
@@ -73,6 +74,7 @@ class FundingHistoryRegistry:
         aliases: dict[str, str] = {}
         chains: dict[str, tuple[str, ...]] = {}
         markets: dict[str, tuple[str, ...]] = {}
+        dynamic_markets: dict[str, bool] = {}
         providers: dict[str, Any] = {}
         for connector_manifest in CONNECTOR_REGISTRY.with_funding_history():
             decl = connector_manifest.funding_history
@@ -80,6 +82,7 @@ class FundingHistoryRegistry:
             venues[connector_manifest.name] = decl.venue
             chains[connector_manifest.name] = decl.chains
             markets[connector_manifest.name] = decl.markets
+            dynamic_markets[connector_manifest.name] = decl.dynamic_markets
             if decl.backtest_provider is not None:
                 providers[connector_manifest.name] = decl.backtest_provider
             for alias in decl.aliases:
@@ -88,6 +91,7 @@ class FundingHistoryRegistry:
         cls._alias_map = aliases
         cls._chains_map = chains
         cls._markets_map = markets
+        cls._dynamic_markets_map = dynamic_markets
         cls._provider_ref_map = providers
 
     @classmethod
@@ -121,6 +125,13 @@ class FundingHistoryRegistry:
             cls._build_dispatch()
         assert cls._markets_map is not None
         return cls._markets_map
+
+    @classmethod
+    def _dynamic_markets(cls) -> dict[str, bool]:
+        if cls._dynamic_markets_map is None:
+            cls._build_dispatch()
+        assert cls._dynamic_markets_map is not None
+        return cls._dynamic_markets_map
 
     @classmethod
     def _provider_refs(cls) -> dict[str, Any]:
@@ -207,6 +218,12 @@ class FundingHistoryRegistry:
         return cls._markets().get(key, ())
 
     @classmethod
+    def discovers_markets(cls, protocol: str | None) -> bool:
+        """Whether funding support is resolved dynamically by the connector."""
+        key = cls._normalize(protocol)
+        return cls._dynamic_markets().get(key, False)
+
+    @classmethod
     def all_markets(cls) -> dict[str, list[str]]:
         """Return the ``{canonical_key: [market, ...]}`` map across all venues.
 
@@ -247,5 +264,6 @@ class FundingHistoryRegistry:
         cls._alias_map = None
         cls._chains_map = None
         cls._markets_map = None
+        cls._dynamic_markets_map = None
         cls._provider_ref_map = None
         cls._provider_class_cache = {}

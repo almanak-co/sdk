@@ -13,9 +13,7 @@ fixes (CodeRabbit follow-up on PR #2436):
    must still resolve a request for ``"hyperliquid"`` (and vice-versa).
 2. Duplicate venue across two different connectors must raise ``RuntimeError``
    at servicer construction time, before any request is served.
-3. Unknown venue must raise the expected ``ValueError("Unknown venue")``
-   inside ``_fetch_rate`` and return the historical zero-fallback inside
-   ``_get_default_rate``.
+3. Unknown venues fail closed in both dispatch and default-rate lookup.
 
 Each test builds its own ``GatewayConnectorRegistry`` and patches the
 module-level ``GATEWAY_REGISTRY`` in ``funding_rate_service`` so the global
@@ -36,7 +34,9 @@ from almanak.connectors._base.gateway_capabilities import (
 from almanak.connectors._base.gateway_connector import GatewayConnector
 from almanak.connectors._base.gateway_registry import GatewayConnectorRegistry
 from almanak.connectors._base.types import ProtocolKind, ProtocolName
+from almanak.gateway.proto import gateway_pb2
 from almanak.gateway.services.funding_rate_service import (
+    FundingRateData,
     FundingRateServiceServicer,
 )
 
@@ -65,7 +65,13 @@ class _FundingConnector(GatewayConnector):
     def default_funding_rate(self, market: str) -> Decimal:
         return self._default_rate_value
 
-    async def fetch_funding_rate(self, service: Any, market: str, chain: str) -> Any:
+    async def fetch_funding_rate(
+        self,
+        service: Any,
+        market: str,
+        chain: str,
+        market_address: str = "",
+    ) -> Any:
         raise NotImplementedError
 
 
@@ -186,16 +192,75 @@ async def test_fetch_rate_unknown_venue_raises_value_error(
         await svc._fetch_rate("polymarket", "ETH-USD", "ethereum")
 
 
-def test_get_default_rate_unknown_venue_returns_fallback(
+@pytest.mark.asyncio
+async def test_spread_forwards_exact_market_address_to_connectors(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, str]] = []
+
+    class _Alpha(_FundingConnector):
+        protocol: ClassVar[ProtocolName] = ProtocolName("spread_alpha")
+        _venue_name: ClassVar[str] = "spread_alpha"
+
+        async def fetch_funding_rate(self, service, market, chain, market_address=""):
+            del service, chain
+            calls.append((self._venue_name, market_address))
+            return _funding_data(self._venue_name, market)
+
+    class _Beta(_FundingConnector):
+        protocol: ClassVar[ProtocolName] = ProtocolName("spread_beta")
+        _venue_name: ClassVar[str] = "spread_beta"
+
+        async def fetch_funding_rate(self, service, market, chain, market_address=""):
+            del service, chain
+            calls.append((self._venue_name, market_address))
+            return _funding_data(self._venue_name, market)
+
+    registry = GatewayConnectorRegistry()
+    registry.register(_Alpha())
+    registry.register(_Beta())
+    _install_registry(monkeypatch, registry)
+    service = FundingRateServiceServicer(_settings())  # type: ignore[arg-type]
+    market_address = "0x" + "7" * 40
+
+    response = await service.GetFundingRateSpread(
+        gateway_pb2.FundingRateSpreadRequest(
+            market="ETH-USD",
+            venue_a="spread_alpha",
+            venue_b="spread_beta",
+            chain="arbitrum",
+            market_address=market_address,
+        ),
+        SimpleNamespace(),  # success path does not mutate the gRPC context
+    )
+
+    assert response.success is True
+    assert calls == [("spread_alpha", market_address), ("spread_beta", market_address)]
+
+
+def _funding_data(venue: str, market: str) -> FundingRateData:
+    return FundingRateData(
+        venue=venue,
+        market=market,
+        rate_hourly=Decimal("0.0001"),
+        open_interest_long=None,
+        open_interest_short=None,
+        mark_price=None,
+        index_price=None,
+        next_funding_time=None,
+        is_live_data=False,
+    )
+
+
+def test_get_default_rate_unknown_venue_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Historical contract: unknown ``(venue, market)`` yields ``Decimal("0.00001")``."""
+    """Unknown ``(venue, market)`` cannot manufacture a funding rate."""
     registry = GatewayConnectorRegistry()
     _install_registry(monkeypatch, registry)
 
     svc = FundingRateServiceServicer(_settings())  # type: ignore[arg-type]
 
-    assert svc._get_default_rate("unknown_venue", "ETH-USD") == Decimal("0.00001")
+    with pytest.raises(ValueError, match="does not permit"):
+        svc._get_default_rate("unknown_venue", "ETH-USD")
 
 
 # ---------------------------------------------------------------------------

@@ -24,9 +24,7 @@ from almanak.framework.backtesting.pnl.providers.perp._gateway_history import (
 )
 from almanak.framework.data.interfaces import DataSourceUnavailable
 
-_CLIENT_SEAM = (
-    "almanak.framework.backtesting.pnl.providers.perp._gateway_history.get_connected_gateway_client"
-)
+_CLIENT_SEAM = "almanak.framework.backtesting.pnl.providers.perp._gateway_history.get_connected_gateway_client"
 
 
 class _FakeRequest:
@@ -39,8 +37,19 @@ class _FakeRequest:
 _FAKE_PB2 = SimpleNamespace(GetFundingRateHistoryRequest=_FakeRequest)
 
 
-def _proto_point(timestamp: int, rate_hourly: str) -> SimpleNamespace:
-    return SimpleNamespace(timestamp=timestamp, rate_hourly=rate_hourly)
+def _proto_point(
+    timestamp: int,
+    rate_hourly: str,
+    *,
+    long_rate_hourly: str = "",
+    short_rate_hourly: str = "",
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        timestamp=timestamp,
+        rate_hourly=rate_hourly,
+        long_rate_hourly=long_rate_hourly,
+        short_rate_hourly=short_rate_hourly,
+    )
 
 
 def _response(
@@ -49,8 +58,15 @@ def _response(
     success: bool = True,
     error: str = "",
     source: str = "gateway",
+    market_address: str = "",
 ) -> SimpleNamespace:
-    return SimpleNamespace(success=success, error=error, source=source, points=points or [])
+    return SimpleNamespace(
+        success=success,
+        error=error,
+        source=source,
+        market_address=market_address,
+        points=points or [],
+    )
 
 
 class _FakeClient:
@@ -80,9 +96,7 @@ class TestFetchFundingPoints:
 
     def test_decodes_points_and_sorts_by_timestamp(self):
         """Points come back as Decimals, ascending by timestamp."""
-        client = _FakeClient(
-            [_response([_proto_point(7200, "0.0002"), _proto_point(3600, "-0.0001")])]
-        )
+        client = _FakeClient([_response([_proto_point(7200, "0.0002"), _proto_point(3600, "-0.0001")])])
         points = _fetch(client, venue="gmx_v2", market="ETH-USD", start_ts=3600, end_ts=7200)
         assert points == [
             FundingHistoryPoint(timestamp=3600, rate_hourly=Decimal("-0.0001")),
@@ -100,19 +114,103 @@ class TestFetchFundingPoints:
         assert request.start_ts == 100
         assert request.end_ts == 200
 
+    def test_exact_market_address_and_side_rates_round_trip(self):
+        market_address = "0x7c54d547fad72f8afbf6e5b04403a0168b654c6f"
+        client = _FakeClient(
+            [
+                _response(
+                    [
+                        _proto_point(
+                            3600,
+                            "0.0002",
+                            long_rate_hourly="-0.0002",
+                            short_rate_hourly="0.00035",
+                        )
+                    ],
+                    source="gmx_synthetics_subsquid",
+                    market_address=market_address,
+                )
+            ]
+        )
+
+        points = _fetch(
+            client,
+            venue="gmx_v2",
+            market="XMR-USD",
+            market_address=market_address,
+            chain="arbitrum",
+            start_ts=3600,
+            end_ts=7200,
+        )
+
+        assert client.requests[0].market_address == market_address
+        assert points == [
+            FundingHistoryPoint(
+                timestamp=3600,
+                rate_hourly=Decimal("0.0002"),
+                long_rate_hourly=Decimal("-0.0002"),
+                short_rate_hourly=Decimal("0.00035"),
+                source="gmx_synthetics_subsquid",
+            )
+        ]
+
+    def test_exact_market_address_drift_fails_closed(self):
+        client = _FakeClient([_response(market_address="0x" + "1" * 40)])
+
+        with pytest.raises(DataSourceUnavailable, match="did not preserve"):
+            _fetch(
+                client,
+                venue="gmx_v2",
+                market="XMR-USD",
+                market_address="0x" + "2" * 40,
+                chain="arbitrum",
+                start_ts=3600,
+                end_ts=7200,
+            )
+
+    @pytest.mark.parametrize(
+        ("long_rate", "short_rate", "expected"),
+        [
+            ("0", "0.0001", "0"),
+            ("-0.0001", "0", "0.0001"),
+            ("0.0001", "0", "0"),
+            ("0", "-0.0001", "-0.0001"),
+        ],
+    )
+    def test_side_specific_zero_boundary_is_preserved(
+        self,
+        long_rate: str,
+        short_rate: str,
+        expected: str,
+    ) -> None:
+        client = _FakeClient(
+            [
+                _response(
+                    [
+                        _proto_point(
+                            3600,
+                            "",
+                            long_rate_hourly=long_rate,
+                            short_rate_hourly=short_rate,
+                        )
+                    ]
+                )
+            ]
+        )
+
+        points = _fetch(client, venue="gmx_v2", market="XMR-USD", start_ts=3600, end_ts=3600)
+
+        assert points[0].rate_hourly == Decimal(expected)
+
     def test_empty_rate_is_skipped_never_zeroed(self):
         """Empty ``rate_hourly`` means unmeasured — skipped, not Decimal(0)."""
-        client = _FakeClient(
-            [_response([_proto_point(3600, ""), _proto_point(7200, "0.0003")])]
-        )
+        client = _FakeClient([_response([_proto_point(3600, ""), _proto_point(7200, "0.0003")])])
         points = _fetch(client, venue="hyperliquid", market="ETH-USD", start_ts=3600, end_ts=7200)
         assert points == [FundingHistoryPoint(timestamp=7200, rate_hourly=Decimal("0.0003"))]
 
     def test_malformed_rate_is_discarded_with_warning(self, caplog: pytest.LogCaptureFixture):
         """A non-decimal rate drops that point and logs, keeping the rest."""
-        client = _FakeClient(
-            [_response([_proto_point(3600, "not-a-number"), _proto_point(7200, "0.0001")])]
-        )
+        client = _FakeClient([_response([_proto_point(3600, "not-a-number"), _proto_point(7200, "0.0001")])])
         with caplog.at_level(
             logging.WARNING,
             logger="almanak.framework.backtesting.pnl.providers.perp._gateway_history",
@@ -131,9 +229,7 @@ class TestFetchFundingPoints:
 
     def test_error_envelope_raises_with_gateway_source_and_reason(self):
         """``success=False`` propagates the response's source and error."""
-        client = _FakeClient(
-            [_response(success=False, error="venue not registered", source="rate_history")]
-        )
+        client = _FakeClient([_response(success=False, error="venue not registered", source="rate_history")])
         with pytest.raises(DataSourceUnavailable) as exc_info:
             _fetch(client, venue="vertex", market="ETH-USD", start_ts=0, end_ts=3600)
         assert exc_info.value.source == "rate_history"

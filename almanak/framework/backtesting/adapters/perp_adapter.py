@@ -44,8 +44,8 @@ Example:
 import asyncio
 import logging
 from collections.abc import Mapping
-from dataclasses import dataclass
-from datetime import datetime, timedelta
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -70,7 +70,12 @@ from almanak.framework.backtesting.pnl.calculators.liquidation import (
 from almanak.framework.backtesting.pnl.calculators.margin import (
     MarginValidator,
 )
-from almanak.framework.backtesting.pnl.data_provider import TokenRef, token_ref_display, token_ref_provider_symbol
+from almanak.framework.backtesting.pnl.data_provider import (
+    TokenRef,
+    is_address_like,
+    token_ref_display,
+    token_ref_provider_symbol,
+)
 from almanak.framework.backtesting.pnl.portfolio import PositionType
 from almanak.framework.backtesting.pnl.providers.base import BacktestProviderConfig, HistoricalFundingProvider
 from almanak.framework.backtesting.pnl.providers.funding_rates import (
@@ -87,7 +92,10 @@ if TYPE_CHECKING:
         SimulatedPortfolio,
         SimulatedPosition,
     )
-    from almanak.framework.backtesting.pnl.providers.perp.snapshot_funding import SnapshotFundingRateSource
+    from almanak.framework.backtesting.pnl.providers.perp.snapshot_funding import (
+        BacktestFundingObservation,
+        SnapshotFundingRateSource,
+    )
     from almanak.framework.intents.vocabulary import Intent
 
 logger = logging.getLogger(__name__)
@@ -273,7 +281,11 @@ class PerpBacktestConfig(StrategyBacktestConfig):
 class _FundingLookup:
     primary_token: str
     market: str
+    market_address: str
     timestamp: datetime | None
+
+
+_ResolvedFundingSlice = tuple[Decimal, Decimal, Decimal | None, str, str]
 
 
 @dataclass(frozen=True)
@@ -401,6 +413,7 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
         # Cache for funding rate data to avoid repeated queries
         # Key: (protocol, market, timestamp_hour) -> (rate, confidence, source)
         self._funding_cache: dict[tuple[str, str, datetime], tuple[Decimal, str, str]] = {}
+        self._funding_side_cache: dict[tuple[str, str, datetime], tuple[Decimal | None, Decimal | None]] = {}
         # Engine-owned run-wide funding plane. Direct adapter users retain the
         # connector-provider path below; engine runs bind this explicitly.
         self._funding_history_source: SnapshotFundingRateSource | None = None
@@ -573,9 +586,18 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
         # the prewarm.
         parsed_base = perp_market_base(raw_market)
         if parsed_base is None:
-            return
-        base = token_ref_provider_symbol(parsed_base, chain, unwrap_wrapped_native=True).upper()
-        market = f"{base}-USD"
+            # Standalone address-native positions read the funding cache by
+            # exact market address. The engine-owned source is already
+            # prewarmed from its typed pair+address declaration before tick 1;
+            # an address alone cannot recreate that pair identity here.
+            if self._funding_history_source is not None or not is_address_like(raw_market):
+                return
+            market = raw_market
+            cache_market = raw_market.lower()
+        else:
+            base = token_ref_provider_symbol(parsed_base, chain, unwrap_wrapped_native=True).upper()
+            market = f"{base}-USD"
+            cache_market = market
         if self._funding_history_source is not None:
             warmed = await self._funding_history_source.materialize_history(protocol, market)
             logger.info("Materialized %d funding points for %s %s", warmed, protocol, market)
@@ -598,7 +620,9 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
                 continue
             hour = self._normalize_timestamp_to_hour(info.timestamp)
             confidence = info.confidence.value if hasattr(info.confidence, "value") else str(info.confidence)
-            self._funding_cache[(protocol, market, hour)] = (rate.rate, confidence, f"historical:{info.source}")
+            cache_key = (protocol, cache_market, hour)
+            self._funding_cache[cache_key] = (rate.rate, confidence, f"historical:{info.source}")
+            self._funding_side_cache[cache_key] = (rate.long_rate_hourly, rate.short_rate_hourly)
             warmed += 1
         logger.info("Prewarmed %d hours of funding history for %s %s", warmed, protocol, market)
 
@@ -1223,12 +1247,10 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
     ) -> None:
         """Apply funding payments if due based on configured frequency.
 
-        Note: Current implementation applies cumulative funding for the elapsed
-        period, which is appropriate for PnL backtesting where we care about
-        total accumulated funding over the position lifetime. The frequency
-        config controls the minimum interval between funding applications but
-        the funding amount is always calculated for the full elapsed period.
-        Granular per-tick funding calculation may be added in a future iteration.
+        Connector-native historical funding is integrated over each underlying
+        hourly observation, independently of the simulation tick interval. The
+        frequency config controls when funding is applied; it never changes the
+        measured data cadence or collapses a multi-hour interval to one rate.
 
         Args:
             position: The perp position (modified in-place)
@@ -1303,18 +1325,33 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
         if time_hours <= Decimal("0"):
             return
 
+        if self._try_apply_timestamped_historical_funding_interval(position, time_hours, timestamp, chain):
+            return
+
         # Get funding rate based on source
         funding_rate: Decimal
         rate_source: str
         confidence: str
+        position_payment_rate: Decimal | None = None
 
-        if self._use_historical_funding():
+        if self._use_historical_funding() and self._funding_history_source is not None:
+            lookup = self._funding_lookup(position, timestamp, chain)
+            # Timestamped reads returned through the interval integrator above.
+            funding_rate, confidence, rate_source = self._funding_no_timestamp_result(position, lookup)
+        elif self._use_historical_funding():
             # Query historical funding rate from new providers (GMX or Hyperliquid)
             funding_rate, confidence, rate_source = self._get_historical_funding_rate_v2(
                 position=position,
                 timestamp=timestamp,
                 chain=chain,
             )
+            if timestamp is not None:
+                lookup = self._funding_lookup(position, timestamp, chain)
+                side_rates = self._funding_side_cache.get(self._funding_cache_key(position, lookup))
+                if side_rates is not None:
+                    position_payment_rate = (
+                        side_rates[0] if position.position_type == PositionType.PERP_LONG else side_rates[1]
+                    )
         elif self._config.funding_rate_source == "historical" and self._funding_rate_provider is not None:
             # Legacy provider path for backward compatibility
             funding_rate, rate_source = self._get_historical_funding_rate(
@@ -1337,6 +1374,7 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
             position=position,
             funding_rate=funding_rate,
             time_delta_hours=time_hours,
+            position_payment_rate=position_payment_rate,
         )
 
         # Apply to position
@@ -1355,6 +1393,215 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
             rate_source,
             confidence,
         )
+
+    def _try_apply_timestamped_historical_funding_interval(
+        self,
+        position: "SimulatedPosition",
+        time_hours: Decimal,
+        timestamp: datetime | None,
+        chain: str | None,
+    ) -> bool:
+        """Apply a timestamped historical interval through its truthful source."""
+        if self._use_historical_funding() and self._funding_history_source is not None and timestamp is not None:
+            self._apply_shared_funding_interval(position, time_hours, timestamp, chain)
+            return True
+        if self._use_historical_funding() and timestamp is not None:
+            self._apply_direct_funding_interval(position, time_hours, timestamp, chain)
+            return True
+        return False
+
+    def _apply_shared_funding_interval(
+        self,
+        position: "SimulatedPosition",
+        time_hours: Decimal,
+        timestamp: datetime,
+        chain: str | None,
+    ) -> None:
+        """Integrate the engine-owned hourly funding plane over one update.
+
+        A simulation may tick every 15 minutes, 4 hours, or one day. Funding
+        remains an hourly venue observation, so each piece of the elapsed
+        interval uses the observation in effect at that piece's start. This is
+        a no-look-ahead, piecewise-constant integral and avoids applying the
+        final tick's rate retroactively across the entire interval.
+        """
+        timestamp_utc = timestamp.replace(tzinfo=UTC) if timestamp.tzinfo is None else timestamp.astimezone(UTC)
+        interval_start = timestamp_utc - timedelta(seconds=float(time_hours * Decimal("3600")))
+        cursor = interval_start
+        confidence = "high"
+        sources: set[str] = set()
+        total_payment = Decimal("0")
+        base_lookup = self._funding_lookup(position, interval_start, chain)
+
+        while cursor < timestamp_utc:
+            next_hour = cursor.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+            segment_end = min(timestamp_utc, next_hour)
+            segment_hours = Decimal(str((segment_end - cursor).total_seconds())) / Decimal("3600")
+            lookup = replace(base_lookup, timestamp=cursor)
+            observation = self._shared_funding_observation(position, lookup)
+            result = self._funding_calculator.calculate_funding_payment(
+                position=position,
+                funding_rate=observation.rate,
+                time_delta_hours=segment_hours,
+                position_payment_rate=observation.payment_rate(
+                    is_long=position.position_type == PositionType.PERP_LONG
+                ),
+            )
+            self._funding_calculator.apply_funding_to_position(position, result)
+            total_payment += result.payment
+            confidence = self._worst_funding_confidence(confidence, observation.confidence)
+            sources.add(observation.source)
+            cursor = segment_end
+
+        rate_source = next(iter(sources)) if len(sources) == 1 else "historical:mixed"
+        position.funding_confidence = confidence
+        position.funding_data_source = rate_source
+        logger.debug(
+            "Applied interval funding: position=%s, payment=%.4f, hours=%.2f, source=%s, confidence=%s",
+            position.position_id,
+            float(total_payment),
+            float(time_hours),
+            rate_source,
+            confidence,
+        )
+
+    @staticmethod
+    def _funding_interval_grid(timestamp: datetime, time_hours: Decimal) -> tuple[tuple[datetime, Decimal], ...]:
+        """Partition ``[timestamp - time_hours, timestamp)`` on UTC hour boundaries."""
+        end = timestamp.replace(tzinfo=UTC) if timestamp.tzinfo is None else timestamp.astimezone(UTC)
+        cursor = end - timedelta(seconds=float(time_hours * Decimal("3600")))
+        slices: list[tuple[datetime, Decimal]] = []
+        while cursor < end:
+            hour = cursor.replace(minute=0, second=0, microsecond=0)
+            segment_end = min(end, hour + timedelta(hours=1))
+            hours = Decimal(str((segment_end - cursor).total_seconds())) / Decimal("3600")
+            slices.append((hour, hours))
+            cursor = segment_end
+        return tuple(slices)
+
+    def _apply_direct_funding_interval(
+        self,
+        position: "SimulatedPosition",
+        time_hours: Decimal,
+        timestamp: datetime,
+        chain: str | None,
+    ) -> None:
+        """Atomically resolve and integrate a connector provider's hourly series."""
+        grid = self._funding_interval_grid(timestamp, time_hours)
+        base_lookup = self._funding_lookup(position, grid[0][0], chain)
+        provider = self._get_provider_for_protocol(position.protocol, chain)
+        if provider is None:
+            rate, confidence, source = self._funding_provider_unavailable_result(position, base_lookup)
+            resolved: tuple[_ResolvedFundingSlice, ...] = tuple(
+                (hours, rate, None, confidence, source) for _, hours in grid
+            )
+            self._apply_resolved_funding_slices(position, resolved)
+            return
+
+        try:
+            fetched_hours = self._cache_direct_funding_range(position, provider, base_lookup, grid)
+        except HistoricalDataUnavailableError:
+            raise
+        except Exception as error:
+            rate, confidence, source = self._funding_fetch_error_result(position, base_lookup, error)
+            resolved = tuple((hours, rate, None, confidence, source) for _, hours in grid)
+            self._apply_resolved_funding_slices(position, resolved)
+            return
+
+        resolved = self._resolve_direct_funding_slices(position, base_lookup, grid, fetched_hours)
+        self._apply_resolved_funding_slices(position, resolved)
+
+    def _cache_direct_funding_range(
+        self,
+        position: "SimulatedPosition",
+        provider: Any,
+        base_lookup: _FundingLookup,
+        grid: tuple[tuple[datetime, Decimal], ...],
+    ) -> set[datetime]:
+        """Fetch one inclusive provider range and cache each distinct UTC hour."""
+        missing_hours = {
+            hour
+            for hour, _ in grid
+            if self._funding_cache.get(self._funding_cache_key(position, replace(base_lookup, timestamp=hour))) is None
+        }
+        if not missing_hours:
+            return set()
+        rates = self._fetch_historical_funding_rates(
+            provider,
+            base_lookup,
+            start_time=grid[0][0],
+            end_time=grid[-1][0],
+        )
+        by_hour: dict[datetime, Any] = {}
+        for rate_data in rates:
+            hour = self._normalize_timestamp_to_hour(rate_data.source_info.timestamp)
+            if hour in by_hour:
+                raise ValueError(f"Duplicate historical funding observation at {hour.isoformat()}")
+            by_hour[hour] = rate_data
+        cached_hours: set[datetime] = set()
+        for hour, rate_data in by_hour.items():
+            if grid[0][0] <= hour <= grid[-1][0]:
+                lookup = replace(base_lookup, timestamp=hour)
+                self._cache_latest_funding_rate(
+                    position,
+                    lookup,
+                    self._funding_cache_key(position, lookup),
+                    [rate_data],
+                )
+                cached_hours.add(hour)
+        return cached_hours
+
+    def _resolve_direct_funding_slices(
+        self,
+        position: "SimulatedPosition",
+        base_lookup: _FundingLookup,
+        grid: tuple[tuple[datetime, Decimal], ...],
+        fetched_hours: set[datetime],
+    ) -> tuple[_ResolvedFundingSlice, ...]:
+        """Resolve the full vector before position accounting mutates."""
+        resolved_slices: list[_ResolvedFundingSlice] = []
+        for hour, hours in grid:
+            lookup = replace(base_lookup, timestamp=hour)
+            cache_key = self._funding_cache_key(position, lookup)
+            cached = self._funding_cache.get(cache_key)
+            if cached is not None and hour not in fetched_hours:
+                self._record_funding_serve(lookup, "served", cached[2])
+            if cached is None or (self._is_strict_historical_mode() and cached[2] == "historical:fallback"):
+                cached = self._funding_no_data_result(position, lookup)
+            side_rates = self._funding_side_cache.get(cache_key)
+            payment_rate = None
+            if side_rates is not None:
+                payment_rate = side_rates[0] if position.position_type == PositionType.PERP_LONG else side_rates[1]
+            resolved_slices.append((hours, cached[0], payment_rate, cached[1], cached[2]))
+        return tuple(resolved_slices)
+
+    def _apply_resolved_funding_slices(
+        self,
+        position: "SimulatedPosition",
+        slices: tuple[_ResolvedFundingSlice, ...],
+    ) -> None:
+        """Apply an already validated interval without allowing partial resolution."""
+        sources: set[str] = set()
+        confidence = "high"
+        for hours, rate, payment_rate, item_confidence, source in slices:
+            result = self._funding_calculator.calculate_funding_payment(
+                position=position,
+                funding_rate=rate,
+                time_delta_hours=hours,
+                position_payment_rate=payment_rate,
+            )
+            self._funding_calculator.apply_funding_to_position(position, result)
+            sources.add(source)
+            confidence = self._worst_funding_confidence(confidence, item_confidence)
+        source = next(iter(sources)) if len(sources) == 1 else "historical:mixed"
+        position.funding_confidence = confidence
+        position.funding_data_source = source
+
+    @staticmethod
+    def _worst_funding_confidence(current: str, candidate: str) -> str:
+        """Keep the least trustworthy confidence observed across an interval."""
+        severity = {"high": 0, "medium": 1, "low": 2}
+        return candidate if severity.get(candidate, 3) > severity.get(current, 3) else current
 
     def _get_historical_funding_rate_v2(
         self,
@@ -1411,6 +1658,15 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
         lookup: _FundingLookup,
     ) -> tuple[Decimal, str, str]:
         """Resolve accrual from the engine-owned run-wide funding plane."""
+        observation = self._shared_funding_observation(position, lookup)
+        return observation.rate, observation.confidence, observation.source
+
+    def _shared_funding_observation(
+        self,
+        position: "SimulatedPosition",
+        lookup: _FundingLookup,
+    ) -> "BacktestFundingObservation":
+        """Resolve and record one side-aware observation from the shared plane."""
         assert lookup.timestamp is not None
         assert self._funding_history_source is not None
         try:
@@ -1418,6 +1674,7 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
                 position.protocol,
                 lookup.market,
                 lookup.timestamp,
+                lookup.market_address,
             )
         except FundingRateUnavailableError as exc:
             self._record_funding_serve(
@@ -1442,7 +1699,7 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
             observation.source,
             detail=observation.reason,
         )
-        return observation.rate, observation.confidence, observation.source
+        return observation
 
     def _funding_lookup(
         self,
@@ -1455,9 +1712,12 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
             chain,
             unwrap_wrapped_native=True,
         )
+        raw_market = position.metadata.get("perp_market")
+        market_address = str(raw_market) if isinstance(raw_market, str) and is_address_like(raw_market) else ""
         return _FundingLookup(
             primary_token=primary_token,
             market=f"{primary_token}-USD",
+            market_address=market_address,
             timestamp=timestamp,
         )
 
@@ -1468,7 +1728,7 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
 
         record_data_serve(
             lane=LANE_FUNDING,
-            key=lookup.market,
+            key=lookup.market_address.strip().lower() or lookup.market,
             consumer=CONSUMER_POSITION_ACCRUAL,
             source=source,
             outcome=outcome,
@@ -1529,7 +1789,8 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
 
     def _funding_cache_key(self, position: "SimulatedPosition", lookup: _FundingLookup) -> tuple[str, str, datetime]:
         assert lookup.timestamp is not None
-        return (position.protocol.lower(), lookup.market, self._normalize_timestamp_to_hour(lookup.timestamp))
+        market_identity = lookup.market_address.lower() or lookup.market
+        return (position.protocol.lower(), market_identity, self._normalize_timestamp_to_hour(lookup.timestamp))
 
     def _cached_funding_rate(
         self,
@@ -1556,8 +1817,11 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
         self,
         provider: Any,
         lookup: _FundingLookup,
+        *,
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
     ) -> list[Any]:
-        """Fetch the ``[T - 1h, T]`` funding window, bridging out of a running loop.
+        """Fetch an inclusive funding window, bridging out of a running loop.
 
         ``update_position`` runs inside the engine's async iteration task, and
         a running event loop cannot be re-entered with ``asyncio.run`` on its
@@ -1569,14 +1833,16 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
         while the open position accrued the fallback rate (PR #3153 review).
         """
         assert lookup.timestamp is not None
-        start_time = lookup.timestamp - timedelta(hours=1)
+        start_time = start_time or lookup.timestamp - timedelta(hours=1)
+        end_time = end_time or lookup.timestamp
+        requested_market = lookup.market_address or lookup.market
         if self._event_loop_is_running():
-            return self._run_funding_query_in_thread(provider, lookup.market, start_time, lookup.timestamp)
+            return self._run_funding_query_in_thread(provider, requested_market, start_time, end_time)
         return asyncio.run(
             provider.get_funding_rates(
-                market=lookup.market,
+                market=requested_market,
                 start_date=start_time,
-                end_date=lookup.timestamp,
+                end_date=end_time,
             )
         )
 
@@ -1652,6 +1918,10 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
         source = latest_rate.source_info.source
         result = (latest_rate.rate, confidence, f"historical:{source}")
         self._funding_cache[cache_key] = result
+        self._funding_side_cache[cache_key] = (
+            getattr(latest_rate, "long_rate_hourly", None),
+            getattr(latest_rate, "short_rate_hourly", None),
+        )
         self._record_funding_serve(lookup, "served", f"historical:{source}")
 
         logger.info(

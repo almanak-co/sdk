@@ -4,12 +4,9 @@ The funding-rate servicer dispatches by venue via the registry instead
 of an ``if venue == "...":`` chain. Tests pin:
 
 * ``isinstance(connector, GatewayFundingRateCapability)`` is True iff
-  the connector defines ``venue``, ``default_funding_rate``, and
-  ``fetch_funding_rate``.
-* The registered ``gmx_v2`` and ``hyperliquid`` connectors return their
-  expected venue ids and default rates.
-* The servicer's ``_get_default_rate`` is byte-identical to the
-  pre-refactor dict-lookup behaviour.
+  the connector defines ``venue`` and ``fetch_funding_rate``.
+* GMX does not advertise a fabricated default rate; Hyperliquid retains its
+  legacy fallback independently.
 """
 
 from __future__ import annotations
@@ -37,7 +34,14 @@ class _FundingRateImpl(GatewayConnector):
     def default_funding_rate(self, market: str) -> Decimal:
         return Decimal("0.0001")
 
-    async def fetch_funding_rate(self, servicer: Any, market: str, chain: str) -> Any:
+    async def fetch_funding_rate(
+        self,
+        servicer: Any,
+        market: str,
+        chain: str,
+        market_address: str = "",
+    ) -> Any:
+        del servicer, market_address
         return ("fetched", market, chain)
 
 
@@ -60,22 +64,11 @@ def test_registered_gmx_v2_and_hyperliquid_advertise_capability() -> None:
     assert {"gmx_v2", "hyperliquid"}.issubset(venues)
 
 
-def test_gmx_v2_default_funding_rate_matches_legacy_dict() -> None:
-    """GMX V2 connector returns the legacy ``DEFAULT_RATES`` values."""
+def test_gmx_v2_has_no_fabricated_default_funding_rate() -> None:
     from almanak.connectors.gmx_v2.gateway.provider import GmxV2GatewayConnector
 
     connector = GmxV2GatewayConnector()
-    expected = {
-        "ETH-USD": Decimal("0.000012"),
-        "BTC-USD": Decimal("0.000010"),
-        "ARB-USD": Decimal("0.000015"),
-        "LINK-USD": Decimal("0.000008"),
-        "SOL-USD": Decimal("0.000018"),
-    }
-    for market, rate in expected.items():
-        assert connector.default_funding_rate(market) == rate
-    # Unknown market falls back to the canonical ``0.00001``.
-    assert connector.default_funding_rate("DOGE-USD") == Decimal("0.00001")
+    assert not hasattr(connector, "default_funding_rate")
 
 
 def test_hyperliquid_default_funding_rate_matches_legacy_dict() -> None:
@@ -95,52 +88,24 @@ def test_hyperliquid_default_funding_rate_matches_legacy_dict() -> None:
     assert connector.default_funding_rate("DOGE-USD") == Decimal("0.00001")
 
 
-def test_servicer_dispatch_is_byte_identical_to_legacy() -> None:
-    """The servicer's default-rate lookup matches the pre-refactor dict.
-
-    Locks the venue-string -> Decimal behaviour across the registry
-    refactor end-to-end (capability provider lookup + ``_get_default_rate``).
-    """
+def test_servicer_default_lookup_is_not_used_as_a_gmx_capability() -> None:
     from almanak.gateway.services.funding_rate_service import (
         FundingRateServiceServicer,
     )
 
     servicer = FundingRateServiceServicer(settings=SimpleNamespace(network="mainnet"))
-    legacy = {
-        "gmx_v2": {
-            "ETH-USD": Decimal("0.000012"),
-            "BTC-USD": Decimal("0.000010"),
-            "ARB-USD": Decimal("0.000015"),
-            "LINK-USD": Decimal("0.000008"),
-            "SOL-USD": Decimal("0.000018"),
-        },
-        "hyperliquid": {
-            "ETH-USD": Decimal("0.000015"),
-            "BTC-USD": Decimal("0.000011"),
-            "ARB-USD": Decimal("0.000018"),
-            "LINK-USD": Decimal("0.000009"),
-            "SOL-USD": Decimal("0.000022"),
-        },
-    }
-    for venue, markets in legacy.items():
-        for market, rate in markets.items():
-            assert servicer._get_default_rate(venue, market) == rate, (venue, market)
-
-    # Unknown venue + unknown (venue, market): both fall back to 0.00001.
-    assert servicer._get_default_rate("unknown_venue", "ETH-USD") == Decimal("0.00001")
-    assert servicer._get_default_rate("gmx_v2", "DOGE-USD") == Decimal("0.00001")
+    with pytest.raises(ValueError, match="does not permit"):
+        servicer._get_default_rate("gmx_v2", "ETH-USD")
+    assert servicer._get_default_rate("hyperliquid", "ETH-USD") == Decimal("0.000015")
 
 
 @pytest.mark.asyncio
 async def test_capability_dispatch_routes_to_correct_connector() -> None:
     """``fetch_funding_rate`` is dispatched through the capability instance.
 
-    Hyperliquid still delegates to the servicer's ``_fetch_hyperliquid_rate``
-    (mocked here). GMX V2 owns its on-chain fetch connector-side, consuming
-    only the servicer's ``_get_web3`` / ``_get_default_mark_price``; with
-    ``_get_web3`` stubbed to ``None`` (no RPC in unit tests) the dispatch
-    must land on the GMX provider and return its offline default-rate
-    ``FundingRateData``.
+    Hyperliquid still delegates to the servicer's live implementation. GMX V2
+    owns its exact-market native fetch connector-side; this dispatch test
+    replaces that method at the capability seam so it performs no network.
     """
     from unittest.mock import AsyncMock
 
@@ -150,16 +115,13 @@ async def test_capability_dispatch_routes_to_correct_connector() -> None:
 
     servicer = FundingRateServiceServicer(settings=SimpleNamespace(network="mainnet"))
     servicer._fetch_hyperliquid_rate = AsyncMock(return_value="hyperliquid-result")  # type: ignore[method-assign]
-    servicer._get_web3 = AsyncMock(return_value=None)  # type: ignore[method-assign]
 
     hl = servicer._funding_rate_providers["hyperliquid"]
     gmx = servicer._funding_rate_providers["gmx_v2"]
+    gmx.fetch_funding_rate = AsyncMock(return_value="gmx-result")  # type: ignore[method-assign]
     assert await hl.fetch_funding_rate(servicer, "ETH-USD", "arbitrum") == "hyperliquid-result"
     servicer._fetch_hyperliquid_rate.assert_awaited_once_with("ETH-USD")
 
     gmx_result = await gmx.fetch_funding_rate(servicer, "ETH-USD", "arbitrum")
-    servicer._get_web3.assert_awaited_once_with("arbitrum")
-    assert gmx_result.venue == "gmx_v2"
-    assert gmx_result.market == "ETH-USD"
-    assert gmx_result.rate_hourly == Decimal("0.000012")
-    assert gmx_result.is_live_data is False
+    assert gmx_result == "gmx-result"
+    gmx.fetch_funding_rate.assert_awaited_once_with(servicer, "ETH-USD", "arbitrum")

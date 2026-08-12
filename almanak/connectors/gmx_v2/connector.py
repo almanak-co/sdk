@@ -101,16 +101,7 @@ CONNECTOR = Connector(
         venue="gmx_v2",
         chains=("arbitrum", "avalanche"),
         aliases=("gmx",),
-        markets=(
-            "ETH-USD",
-            "BTC-USD",
-            "ARB-USD",
-            "LINK-USD",
-            "SOL-USD",
-            "DOGE-USD",
-            "UNI-USD",
-            "AVAX-USD",
-        ),
+        dynamic_markets=True,
         backtest_provider=ImportRef(
             module="almanak.connectors.gmx_v2.backtest_funding",
             attribute="GMXFundingProvider",

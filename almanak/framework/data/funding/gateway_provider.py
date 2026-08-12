@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -50,6 +51,8 @@ if TYPE_CHECKING:
     from almanak.framework.gateway_client import GatewayClient
 
 logger = logging.getLogger(__name__)
+
+_EVM_ADDRESS_RE = re.compile(r"^0[xX][0-9a-fA-F]{40}$")
 
 
 def _normalize_venue(venue: Venue | str) -> str:
@@ -81,13 +84,23 @@ def _validate_market(venue: str, market: str) -> str:
     # pair they wrote. That is total over every spelling — including the
     # multi-separator ones ``perp_market_pair_key`` refuses to parse — and it
     # needs no list of quote currencies to rot.
+    from almanak.connectors._strategy_base.funding_history_registry import FundingHistoryRegistry
+
+    stripped_market = market.strip()
+    if _EVM_ADDRESS_RE.fullmatch(stripped_market):
+        if FundingHistoryRegistry.discovers_markets(venue):
+            return stripped_market.lower()
+        raise MarketNotSupportedError(stripped_market.upper(), venue)
+
     market_key = perp_market_funding_key(market)
     if any(separator in market for separator in PERP_MARKET_SEPARATORS):
         pair = perp_market_pair_key(market)
         if pair is None or market_key is None or pair.replace("/", "-") != market_key:
             raise MarketNotSupportedError(market.strip().upper(), venue)
 
-    if market_key is None or market_key not in SUPPORTED_MARKETS.get(venue, []):
+    if market_key is None or (
+        not FundingHistoryRegistry.discovers_markets(venue) and market_key not in SUPPORTED_MARKETS.get(venue, [])
+    ):
         rejected = market.strip().upper()
         raise MarketNotSupportedError(rejected, venue)
     return market_key
@@ -112,7 +125,7 @@ class GatewayFundingRateProvider:
         self._cache_ttl_seconds = cache_ttl_seconds
 
         # venue -> market -> (rate, monotonic_timestamp)
-        self._cache: dict[str, dict[str, tuple[FundingRate, float]]] = {}
+        self._cache: dict[str, dict[tuple[str, str], tuple[FundingRate, float]]] = {}
 
         logger.info(
             "GatewayFundingRateProvider initialized (chain=%s, cache_ttl=%ss)",
@@ -124,16 +137,16 @@ class GatewayFundingRateProvider:
     def chain(self) -> str:
         return self._chain
 
-    def _get_cached_rate(self, venue: str, market: str) -> FundingRate | None:
+    def _get_cached_rate(self, venue: str, market_identity: tuple[str, str]) -> FundingRate | None:
         venue_cache = self._cache.get(venue, {})
-        if market in venue_cache:
-            rate, ts = venue_cache[market]
+        if market_identity in venue_cache:
+            rate, ts = venue_cache[market_identity]
             if time.monotonic() - ts < self._cache_ttl_seconds:
                 return rate
         return None
 
-    def _set_cached_rate(self, venue: str, market: str, rate: FundingRate) -> None:
-        self._cache.setdefault(venue, {})[market] = (rate, time.monotonic())
+    def _set_cached_rate(self, venue: str, market_identity: tuple[str, str], rate: FundingRate) -> None:
+        self._cache.setdefault(venue, {})[market_identity] = (rate, time.monotonic())
 
     def _response_to_funding_rate(self, response) -> FundingRate:
         """Convert a gRPC FundingRateResponse to :class:`FundingRate`."""
@@ -141,12 +154,21 @@ class GatewayFundingRateProvider:
         next_funding = (
             datetime.fromtimestamp(response.next_funding_time, tz=UTC) if response.next_funding_time else None
         )
+        observed_at = getattr(response, "observed_at", 0)
         return FundingRate(
             venue=response.venue,
             market=response.market,
             rate_hourly=rate_hourly,
             rate_8h=Decimal(response.rate_8h),
             rate_annualized=Decimal(response.rate_annualized),
+            long_rate_hourly=(
+                Decimal(response.long_rate_hourly) if getattr(response, "long_rate_hourly", "") != "" else None
+            ),
+            short_rate_hourly=(
+                Decimal(response.short_rate_hourly) if getattr(response, "short_rate_hourly", "") != "" else None
+            ),
+            market_address=getattr(response, "market_address", "") or None,
+            timestamp=datetime.fromtimestamp(observed_at, tz=UTC) if observed_at else datetime.now(UTC),
             next_funding_time=next_funding,
             # Proto strings default to "" when unset; treat that as missing.
             open_interest_long=Decimal(response.open_interest_long) if response.open_interest_long != "" else None,
@@ -160,6 +182,7 @@ class GatewayFundingRateProvider:
         self,
         venue: Venue | str,
         market: str,
+        market_address: str = "",
     ) -> FundingRate:
         """Get the current funding rate for ``venue``/``market``.
 
@@ -170,8 +193,12 @@ class GatewayFundingRateProvider:
         """
         venue_str = _normalize_venue(venue)
         market_str = _validate_market(venue_str, market)
+        effective_market_address = market_address.strip()
+        if not effective_market_address and _EVM_ADDRESS_RE.fullmatch(market_str):
+            effective_market_address = market_str
 
-        cached = self._get_cached_rate(venue_str, market_str)
+        cache_key = (market_str, effective_market_address.lower())
+        cached = self._get_cached_rate(venue_str, cache_key)
         if cached is not None:
             return cached
 
@@ -181,6 +208,7 @@ class GatewayFundingRateProvider:
             venue=venue_str,
             market=market_str,
             chain=self._chain,
+            market_address=effective_market_address,
         )
 
         try:
@@ -194,9 +222,16 @@ class GatewayFundingRateProvider:
 
         if not response.success:
             raise FundingRateUnavailableError(venue_str, market_str, response.error or "gateway returned success=False")
+        response_market_address = getattr(response, "market_address", "")
+        if effective_market_address and response_market_address.lower() != effective_market_address.lower():
+            raise FundingRateUnavailableError(
+                venue_str,
+                market_str,
+                "gateway did not preserve the requested market address",
+            )
 
         rate = self._response_to_funding_rate(response)
-        self._set_cached_rate(venue_str, market_str, rate)
+        self._set_cached_rate(venue_str, cache_key, rate)
         return rate
 
     async def get_funding_rate_spread(
@@ -204,6 +239,7 @@ class GatewayFundingRateProvider:
         market: str,
         venue_a: Venue | str,
         venue_b: Venue | str,
+        market_address: str = "",
     ) -> FundingRateSpread:
         """Get the funding rate spread between ``venue_a`` and ``venue_b``.
 
@@ -217,6 +253,7 @@ class GatewayFundingRateProvider:
         venue_b_str = _normalize_venue(venue_b)
         market_str = _validate_market(venue_a_str, market)
         _validate_market(venue_b_str, market_str)
+        effective_market_address = market_address.strip()
 
         from almanak.gateway.proto import gateway_pb2
 
@@ -225,6 +262,7 @@ class GatewayFundingRateProvider:
             venue_a=venue_a_str,
             venue_b=venue_b_str,
             chain=self._chain,
+            market_address=effective_market_address,
         )
 
         try:
@@ -242,6 +280,22 @@ class GatewayFundingRateProvider:
                 market_str,
                 response.error or "gateway returned success=False",
             )
+
+        if effective_market_address:
+            from almanak.connectors._strategy_base.funding_history_registry import FundingHistoryRegistry
+
+            for venue, rate_response in (
+                (venue_a_str, response.venue_a_rate),
+                (venue_b_str, response.venue_b_rate),
+            ):
+                if FundingHistoryRegistry.discovers_markets(venue) and (
+                    getattr(rate_response, "market_address", "").lower() != effective_market_address.lower()
+                ):
+                    raise FundingRateUnavailableError(
+                        f"{venue_a_str}/{venue_b_str}",
+                        market_str,
+                        f"gateway did not preserve the requested market address for {venue}",
+                    )
 
         rate_a = self._response_to_funding_rate(response.venue_a_rate)
         rate_b = self._response_to_funding_rate(response.venue_b_rate)

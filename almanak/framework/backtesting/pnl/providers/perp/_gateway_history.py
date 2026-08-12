@@ -33,10 +33,10 @@ __all__ = [
     "run_sync_gateway_call",
 ]
 
-# Upstream funding-history endpoints cap one response at ~500 hourly entries
-# (Hyperliquid Info API; the GMX V2 venue proxies it). The gateway connector
-# issues one upstream call per RPC, so windows wider than this are chunked
-# client-side to preserve full-range coverage.
+# Keep each RPC at the strictest upstream page size (Hyperliquid is ~500 hourly
+# entries; GMX's native indexer permits more). The gateway connector issues one
+# upstream call/page sequence per RPC, so wider windows are chunked client-side
+# to preserve full-range coverage without coupling venues.
 MAX_WINDOW_SECONDS = 500 * 3600
 _GATEWAY_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="backtest-gateway")
 
@@ -47,6 +47,9 @@ class FundingHistoryPoint:
 
     timestamp: int
     rate_hourly: Decimal
+    long_rate_hourly: Decimal | None = None
+    short_rate_hourly: Decimal | None = None
+    source: str = "gateway"
 
 
 async def run_sync_gateway_call(
@@ -94,6 +97,7 @@ def fetch_funding_points(
     *,
     venue: str,
     market: str,
+    market_address: str = "",
     chain: str = "",
     start_ts: int,
     end_ts: int,
@@ -140,6 +144,7 @@ def fetch_funding_points(
                 gateway_pb2,
                 venue=venue,
                 market=market,
+                market_address=market_address,
                 chain=chain,
                 start_ts=chunk_start,
                 end_ts=chunk_end,
@@ -192,11 +197,13 @@ def _fetch_window(
     chain: str,
     start_ts: int,
     end_ts: int,
+    market_address: str = "",
 ) -> list[FundingHistoryPoint]:
     """Issue one ``GetFundingRateHistory`` RPC and decode its points."""
     request = gateway_pb2.GetFundingRateHistoryRequest(
         venue=venue,
         market=market,
+        market_address=market_address,
         chain=chain,
         start_ts=start_ts,
         end_ts=end_ts,
@@ -217,22 +224,51 @@ def _fetch_window(
             source=response.source or "gateway",
             reason=response.error or "GetFundingRateHistory returned success=false",
         )
+    if market_address and response.market_address.lower() != market_address.lower():
+        raise DataSourceUnavailable(
+            source=response.source or "gateway",
+            reason="GetFundingRateHistory did not preserve the requested market address",
+        )
 
     points: list[FundingHistoryPoint] = []
     for proto_point in response.points:
-        if proto_point.rate_hourly == "":
+        raw_long_rate = getattr(proto_point, "long_rate_hourly", "")
+        raw_short_rate = getattr(proto_point, "short_rate_hourly", "")
+        if proto_point.rate_hourly == "" and raw_long_rate == "" and raw_short_rate == "":
             # Unmeasured by the upstream — skip, never substitute zero.
             continue
         try:
-            rate = Decimal(proto_point.rate_hourly)
+            long_rate = Decimal(raw_long_rate) if raw_long_rate != "" else None
+            short_rate = Decimal(raw_short_rate) if raw_short_rate != "" else None
+            if proto_point.rate_hourly != "":
+                rate = Decimal(proto_point.rate_hourly)
+            elif long_rate is not None and short_rate is not None:
+                if long_rate <= 0 <= short_rate:
+                    rate = -long_rate
+                elif short_rate <= 0 <= long_rate:
+                    rate = short_rate
+                else:
+                    raise InvalidOperation("invalid side-specific funding signs")
+            else:
+                raise InvalidOperation("incomplete side-specific funding observation")
         except (InvalidOperation, ValueError):
             logger.warning(
-                "Discarding malformed funding point (venue=%s market=%s ts=%s rate=%r)",
+                "Discarding malformed funding point (venue=%s market=%s ts=%s rate=%r long=%r short=%r)",
                 venue,
                 market,
                 proto_point.timestamp,
                 proto_point.rate_hourly,
+                raw_long_rate,
+                raw_short_rate,
             )
             continue
-        points.append(FundingHistoryPoint(timestamp=proto_point.timestamp, rate_hourly=rate))
+        points.append(
+            FundingHistoryPoint(
+                timestamp=proto_point.timestamp,
+                rate_hourly=rate,
+                long_rate_hourly=long_rate,
+                short_rate_hourly=short_rate,
+                source=response.source or "gateway",
+            )
+        )
     return points

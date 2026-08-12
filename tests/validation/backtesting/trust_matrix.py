@@ -749,8 +749,9 @@ class FundingCoherenceProbeStrategy:
 
     deployment_id = "trust-matrix-funding-coherence"
 
-    def __init__(self, notional: Decimal = Decimal("5000")) -> None:
+    def __init__(self, notional: Decimal = Decimal("5000"), side: str = "long") -> None:
         self._notional = notional
+        self._side = side
         self._ticks = 0
         self.rates_seen: list[Decimal] = []
 
@@ -758,9 +759,9 @@ class FundingCoherenceProbeStrategy:
         self.rates_seen.append(market.funding_rate("gmx_v2", "ETH-USD").rate_hourly)
         self._ticks += 1
         if self._ticks == 1:
-            return PerpOpenDuck(size_usd=self._notional, collateral_usd=Decimal("1000"))
+            return PerpOpenDuck(size_usd=self._notional, collateral_usd=Decimal("1000"), side=self._side)
         if self._ticks == 3:
-            return PerpCloseDuck()
+            return PerpCloseDuck(side=self._side)
         return None
 
 

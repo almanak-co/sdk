@@ -9,7 +9,7 @@ This module tests the PerpBacktestAdapter, focusing on:
 """
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -1377,7 +1377,9 @@ class TestHistoricalFundingRateIntegration:
             source_info=DataSourceInfo(
                 source="gmx_api",
                 confidence=DataConfidence.HIGH,
-                timestamp=entry_time,
+                # Funding over [T-1h, T) uses the observation effective at T-1h;
+                # a row timestamped at T would be endpoint look-ahead.
+                timestamp=entry_time - timedelta(hours=1),
             ),
         )
 
@@ -2010,7 +2012,7 @@ class TestPrewarmHistory:
                 self.materialized.append((str(venue), market))
                 return 25
 
-            def observation_at(self, venue, market, timestamp):
+            def observation_at(self, venue, market, timestamp, market_address=""):
                 return BacktestFundingObservation(
                     rate=Decimal("0.00042"),
                     confidence="high",
@@ -2038,6 +2040,466 @@ class TestPrewarmHistory:
 
         assert source.materialized == [("gmx_v2", "ETH-USD")]
         assert (rate, confidence, label) == (Decimal("0.00042"), "high", "historical:gateway")
+
+    def test_engine_owned_source_applies_asymmetric_side_payments(self) -> None:
+        from almanak.framework.backtesting.pnl.providers.perp.snapshot_funding import BacktestFundingObservation
+
+        class _SharedSource:
+            def observation_at(self, venue, market, timestamp, market_address=""):
+                return BacktestFundingObservation(
+                    rate=Decimal("0.0002"),
+                    long_rate_hourly=Decimal("-0.0002"),
+                    short_rate_hourly=Decimal("0.00035"),
+                    confidence="high",
+                    source="historical:gmx_synthetics_subsquid",
+                    degraded=False,
+                )
+
+        config = PerpBacktestConfig(
+            strategy_type="perp",
+            funding_rate_source="historical",
+            funding_application_frequency="continuous",
+            protocol="gmx_v2",
+        )
+        adapter = PerpBacktestAdapter(config)
+        adapter.bind_funding_history_source(_SharedSource())  # type: ignore[arg-type]
+        timestamp = datetime(2025, 8, 1, tzinfo=UTC)
+        long_position = create_perp_long_position(
+            collateral_usd=Decimal("1000"), leverage=Decimal("5"), protocol="gmx_v2"
+        )
+        short_position = create_perp_short_position(
+            collateral_usd=Decimal("1000"), leverage=Decimal("5"), protocol="gmx_v2"
+        )
+
+        adapter._apply_funding_payment(long_position, Decimal("1"), timestamp, "arbitrum")
+        adapter._apply_funding_payment(short_position, Decimal("1"), timestamp, "arbitrum")
+
+        assert long_position.accumulated_funding == Decimal("-1.0000")
+        assert long_position.cumulative_funding_paid == Decimal("1.0000")
+        assert short_position.accumulated_funding == Decimal("1.75000")
+        assert short_position.cumulative_funding_received == Decimal("1.75000")
+        assert long_position.funding_data_source == "historical:gmx_synthetics_subsquid"
+
+    def test_legacy_provider_preserves_exact_address_and_asymmetric_side_payments(self, monkeypatch) -> None:
+        """Direct adapter users retain GMX address identity and side economics."""
+        from almanak.framework.backtesting.pnl.types import DataConfidence, DataSourceInfo, FundingResult
+
+        market_address = "0x7c54d547fad72f8afbf6e5b04403a0168b654c6f"
+
+        class _Provider:
+            def __init__(self) -> None:
+                self.markets: list[str] = []
+
+            async def get_funding_rates(self, *, market, start_date, end_date):
+                self.markets.append(market)
+                return [
+                    FundingResult(
+                        rate=Decimal("0.0002"),
+                        long_rate_hourly=Decimal("-0.0002"),
+                        short_rate_hourly=Decimal("0.00035"),
+                        source_info=DataSourceInfo(
+                            source="gmx_synthetics_subsquid",
+                            confidence=DataConfidence.HIGH,
+                            timestamp=end_date,
+                        ),
+                    )
+                ]
+
+        provider = _Provider()
+        adapter = PerpBacktestAdapter(
+            PerpBacktestConfig(
+                strategy_type="perp",
+                funding_rate_source="historical",
+                funding_application_frequency="continuous",
+                protocol="gmx_v2",
+            ),
+            data_config=BacktestDataConfig(use_historical_funding=True),
+        )
+        monkeypatch.setattr(adapter, "_get_provider_for_protocol", lambda *_args, **_kwargs: provider)
+        timestamp = datetime(2025, 8, 1, tzinfo=UTC)
+        long_position = create_perp_long_position(
+            token="XMR", collateral_usd=Decimal("1000"), leverage=Decimal("5"), protocol="gmx_v2"
+        )
+        short_position = create_perp_short_position(
+            token="XMR", collateral_usd=Decimal("1000"), leverage=Decimal("5"), protocol="gmx_v2"
+        )
+        long_position.metadata["perp_market"] = market_address
+        short_position.metadata["perp_market"] = market_address
+
+        adapter._apply_funding_payment(long_position, Decimal("1"), timestamp, "arbitrum")
+        adapter._apply_funding_payment(short_position, Decimal("1"), timestamp, "arbitrum")
+
+        assert provider.markets == [market_address]
+        assert long_position.accumulated_funding == Decimal("-1.0000")
+        assert short_position.accumulated_funding == Decimal("1.75000")
+
+    def test_direct_provider_15m_boundary_uses_pre_endpoint_hour(self, monkeypatch) -> None:
+        """The half-open interval never reads the rate first effective at its endpoint."""
+        from almanak.framework.backtesting.pnl.types import DataConfidence, DataSourceInfo, FundingResult
+
+        class _Provider:
+            def __init__(self) -> None:
+                self.calls: list[tuple[datetime, datetime]] = []
+
+            async def get_funding_rates(self, *, market, start_date, end_date):
+                self.calls.append((start_date, end_date))
+                return [
+                    FundingResult(
+                        rate=Decimal("0.0002"),
+                        long_rate_hourly=Decimal("-0.0002"),
+                        short_rate_hourly=Decimal("0.0003"),
+                        source_info=DataSourceInfo(
+                            source="gmx_synthetics_subsquid",
+                            confidence=DataConfidence.HIGH,
+                            timestamp=start_date,
+                        ),
+                    )
+                ]
+
+        provider = _Provider()
+        adapter = PerpBacktestAdapter(
+            PerpBacktestConfig(
+                strategy_type="perp",
+                funding_rate_source="historical",
+                funding_application_frequency="continuous",
+                protocol="gmx_v2",
+            ),
+            data_config=BacktestDataConfig(use_historical_funding=True),
+        )
+        monkeypatch.setattr(adapter, "_get_provider_for_protocol", lambda *_args, **_kwargs: provider)
+        position = create_perp_long_position(collateral_usd=Decimal("1000"), leverage=Decimal("5"), protocol="gmx_v2")
+
+        adapter._apply_funding_payment(position, Decimal("0.25"), datetime(2025, 8, 1, 1, tzinfo=UTC), "arbitrum")
+
+        hour_zero = datetime(2025, 8, 1, 0, tzinfo=UTC)
+        assert provider.calls == [(hour_zero, hour_zero)]
+        assert position.accumulated_funding == Decimal("-0.250000")
+
+    def test_direct_provider_integrates_four_varying_asymmetric_hours(self, monkeypatch) -> None:
+        """Direct users get the same piecewise side economics as engine-owned runs."""
+        from almanak.framework.backtesting.pnl.types import DataConfidence, DataSourceInfo, FundingResult
+
+        long_rates = [Decimal("-0.0001"), Decimal("-0.0002"), Decimal("0.0003"), Decimal("-0.0004")]
+        short_rates = [Decimal("0.00015"), Decimal("0.00035"), Decimal("-0.0001"), Decimal("0.0008")]
+
+        class _Provider:
+            def __init__(self) -> None:
+                self.calls: list[tuple[datetime, datetime]] = []
+
+            async def get_funding_rates(self, *, market, start_date, end_date):
+                self.calls.append((start_date, end_date))
+                return [
+                    FundingResult(
+                        rate=abs(long_rate),
+                        long_rate_hourly=long_rate,
+                        short_rate_hourly=short_rates[hour],
+                        source_info=DataSourceInfo(
+                            source="gmx_synthetics_subsquid",
+                            confidence=DataConfidence.HIGH,
+                            timestamp=start_date + timedelta(hours=hour),
+                        ),
+                    )
+                    for hour, long_rate in enumerate(long_rates)
+                ]
+
+        provider = _Provider()
+        adapter = PerpBacktestAdapter(
+            PerpBacktestConfig(
+                strategy_type="perp",
+                funding_rate_source="historical",
+                funding_application_frequency="continuous",
+                protocol="gmx_v2",
+            ),
+            data_config=BacktestDataConfig(use_historical_funding=True),
+        )
+        monkeypatch.setattr(adapter, "_get_provider_for_protocol", lambda *_args, **_kwargs: provider)
+        long_position = create_perp_long_position(
+            collateral_usd=Decimal("1000"), leverage=Decimal("5"), protocol="gmx_v2"
+        )
+        short_position = create_perp_short_position(
+            collateral_usd=Decimal("1000"), leverage=Decimal("5"), protocol="gmx_v2"
+        )
+        end = datetime(2025, 8, 1, 4, tzinfo=UTC)
+
+        adapter._apply_funding_payment(long_position, Decimal("4"), end, "arbitrum")
+        adapter._apply_funding_payment(short_position, Decimal("4"), end, "arbitrum")
+
+        assert provider.calls == [(datetime(2025, 8, 1, 0, tzinfo=UTC), datetime(2025, 8, 1, 3, tzinfo=UTC))]
+        assert long_position.accumulated_funding == Decimal("-2.0000")
+        assert long_position.cumulative_funding_paid == Decimal("3.5000")
+        assert long_position.cumulative_funding_received == Decimal("1.5000")
+        assert short_position.accumulated_funding == Decimal("6.00000")
+        assert short_position.cumulative_funding_paid == Decimal("0.5000")
+        assert short_position.cumulative_funding_received == Decimal("6.50000")
+
+    def test_direct_provider_strict_partial_interval_is_atomic(self, monkeypatch) -> None:
+        """A later missing hour refuses the whole interval before any funding mutates."""
+        from almanak.framework.backtesting.exceptions import HistoricalDataUnavailableError
+        from almanak.framework.backtesting.pnl.types import DataConfidence, DataSourceInfo, FundingResult
+
+        class _Provider:
+            async def get_funding_rates(self, *, market, start_date, end_date):
+                return [
+                    FundingResult(
+                        rate=Decimal("0.0001"),
+                        long_rate_hourly=Decimal("-0.0001"),
+                        short_rate_hourly=Decimal("0.0001"),
+                        source_info=DataSourceInfo(
+                            source="gmx_synthetics_subsquid",
+                            confidence=DataConfidence.HIGH,
+                            timestamp=start_date + timedelta(hours=hour),
+                        ),
+                    )
+                    for hour in (0, 1, 3)
+                ]
+
+        adapter = PerpBacktestAdapter(
+            PerpBacktestConfig(strategy_type="perp", funding_rate_source="historical", protocol="gmx_v2"),
+            data_config=BacktestDataConfig(use_historical_funding=True, strict_historical_mode=True),
+        )
+        monkeypatch.setattr(adapter, "_get_provider_for_protocol", lambda *_args, **_kwargs: _Provider())
+        position = create_perp_long_position(collateral_usd=Decimal("1000"), leverage=Decimal("5"), protocol="gmx_v2")
+
+        with pytest.raises(HistoricalDataUnavailableError, match="No historical funding rate data") as exc_info:
+            adapter._apply_funding_payment(
+                position,
+                Decimal("4"),
+                datetime(2025, 8, 1, 4, tzinfo=UTC),
+                "arbitrum",
+            )
+
+        assert exc_info.value.timestamp == datetime(2025, 8, 1, 2, tzinfo=UTC)
+        assert position.accumulated_funding == Decimal("0")
+        assert position.cumulative_funding_paid == Decimal("0")
+        assert position.cumulative_funding_received == Decimal("0")
+
+    def test_direct_range_refresh_records_each_fetched_hour_once(self, monkeypatch) -> None:
+        """A range refresh must not double-count an already-cached hour's serve."""
+        from almanak.framework.backtesting.pnl.types import DataConfidence, DataSourceInfo, FundingResult
+
+        start = datetime(2025, 8, 1, tzinfo=UTC)
+
+        class _Provider:
+            async def get_funding_rates(self, *, market, start_date, end_date):
+                return [
+                    FundingResult(
+                        rate=Decimal("0.0001"),
+                        source_info=DataSourceInfo(
+                            source="gmx_synthetics_subsquid",
+                            confidence=DataConfidence.HIGH,
+                            timestamp=start + timedelta(hours=hour),
+                        ),
+                    )
+                    for hour in (0, 1)
+                ]
+
+        adapter = PerpBacktestAdapter(
+            PerpBacktestConfig(strategy_type="perp", funding_rate_source="historical", protocol="gmx_v2"),
+            data_config=BacktestDataConfig(use_historical_funding=True),
+        )
+        monkeypatch.setattr(adapter, "_get_provider_for_protocol", lambda *_args, **_kwargs: _Provider())
+        serves: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            adapter,
+            "_record_funding_serve",
+            lambda _lookup, outcome, source, detail="": serves.append((outcome, source)),
+        )
+        position = create_perp_long_position(protocol="gmx_v2")
+        first_lookup = adapter._funding_lookup(position, start, "arbitrum")
+        first_key = adapter._funding_cache_key(position, first_lookup)
+        adapter._funding_cache[first_key] = (Decimal("0.0001"), "high", "historical:cached")
+
+        adapter._apply_funding_payment(position, Decimal("2"), start + timedelta(hours=2), "arbitrum")
+
+        assert serves == [
+            ("served", "historical:gmx_synthetics_subsquid"),
+            ("served", "historical:gmx_synthetics_subsquid"),
+        ]
+
+    def test_engine_owned_source_integrates_hourly_rates_across_four_hour_tick(self) -> None:
+        from almanak.framework.backtesting.pnl.providers.perp.snapshot_funding import BacktestFundingObservation
+
+        rates = {
+            0: Decimal("-0.0001"),
+            1: Decimal("-0.0002"),
+            2: Decimal("0.0003"),
+            3: Decimal("-0.0004"),
+        }
+
+        class _SharedSource:
+            def __init__(self) -> None:
+                self.requested_hours: list[int] = []
+
+            def observation_at(self, venue, market, timestamp, market_address=""):
+                self.requested_hours.append(timestamp.hour)
+                long_rate = rates[timestamp.hour]
+                return BacktestFundingObservation(
+                    rate=abs(long_rate),
+                    long_rate_hourly=long_rate,
+                    short_rate_hourly=-long_rate,
+                    confidence="high",
+                    source="historical:gmx_synthetics_subsquid",
+                    degraded=False,
+                )
+
+        adapter = PerpBacktestAdapter(
+            PerpBacktestConfig(
+                strategy_type="perp",
+                funding_rate_source="historical",
+                funding_application_frequency="continuous",
+                protocol="gmx_v2",
+            )
+        )
+        source = _SharedSource()
+        adapter.bind_funding_history_source(source)  # type: ignore[arg-type]
+        position = create_perp_long_position(collateral_usd=Decimal("1000"), leverage=Decimal("5"), protocol="gmx_v2")
+
+        adapter._apply_funding_payment(
+            position,
+            Decimal("4"),
+            datetime(2025, 8, 1, 4, tzinfo=UTC),
+            "arbitrum",
+        )
+
+        assert source.requested_hours == [0, 1, 2, 3]
+        assert position.accumulated_funding == Decimal("-2.0000")
+        assert position.cumulative_funding_paid == Decimal("3.5000")
+        assert position.cumulative_funding_received == Decimal("1.5000")
+
+    def test_interval_confidence_preserves_worst_observation(self) -> None:
+        """Later medium data must not overwrite an earlier low-confidence hour."""
+        from almanak.framework.backtesting.pnl.providers.perp.snapshot_funding import BacktestFundingObservation
+
+        class _SharedSource:
+            def observation_at(self, venue, market, timestamp, market_address=""):
+                return BacktestFundingObservation(
+                    rate=Decimal("0.0001"),
+                    confidence="low" if timestamp.hour == 0 else "medium",
+                    source="historical:test",
+                    degraded=False,
+                )
+
+        adapter = PerpBacktestAdapter(
+            PerpBacktestConfig(strategy_type="perp", funding_rate_source="historical", protocol="gmx_v2")
+        )
+        adapter.bind_funding_history_source(_SharedSource())  # type: ignore[arg-type]
+        shared_position = create_perp_long_position(protocol="gmx_v2")
+        adapter._apply_funding_payment(
+            shared_position,
+            Decimal("2"),
+            datetime(2025, 8, 1, 2, tzinfo=UTC),
+            "arbitrum",
+        )
+        assert shared_position.funding_confidence == "low"
+
+        direct_position = create_perp_long_position(protocol="gmx_v2")
+        adapter._apply_resolved_funding_slices(
+            direct_position,
+            (
+                (Decimal("1"), Decimal("0.0001"), None, "low", "historical:test"),
+                (Decimal("1"), Decimal("0.0001"), None, "medium", "historical:test"),
+            ),
+        )
+        assert direct_position.funding_confidence == "low"
+
+    def test_funding_manifest_separates_same_label_exact_addresses(self) -> None:
+        """Address-native GMX markets keep distinct position-accrual provenance."""
+        from almanak.framework.backtesting.pnl.data_broker import BacktestDataBroker, data_broker_scope
+
+        adapter = self._adapter()
+        broker = BacktestDataBroker()
+        addresses = ("0x" + "1" * 40, "0x" + "2" * 40)
+
+        with data_broker_scope(broker):
+            for address in addresses:
+                position = create_perp_long_position(token="ETH", protocol="gmx_v2")
+                position.metadata["perp_market"] = address
+                lookup = adapter._funding_lookup(position, datetime(2025, 8, 1, tzinfo=UTC), "arbitrum")
+                adapter._record_funding_serve(lookup, "served", "historical:test")
+
+        assert {entry["key"] for entry in broker.manifest.entries()} == set(addresses)
+
+    def test_engine_owned_source_prorates_sub_hour_boundaries(self) -> None:
+        from almanak.framework.backtesting.pnl.providers.perp.snapshot_funding import BacktestFundingObservation
+
+        class _SharedSource:
+            def observation_at(self, venue, market, timestamp, market_address=""):
+                long_rate = Decimal("-0.0001") if timestamp.hour == 0 else Decimal("-0.0003")
+                return BacktestFundingObservation(
+                    rate=abs(long_rate),
+                    long_rate_hourly=long_rate,
+                    short_rate_hourly=-long_rate,
+                    confidence="high",
+                    source="historical:gmx_synthetics_subsquid",
+                    degraded=False,
+                )
+
+        adapter = PerpBacktestAdapter(
+            PerpBacktestConfig(
+                strategy_type="perp",
+                funding_rate_source="historical",
+                funding_application_frequency="continuous",
+                protocol="gmx_v2",
+            )
+        )
+        adapter.bind_funding_history_source(_SharedSource())  # type: ignore[arg-type]
+        position = create_perp_long_position(collateral_usd=Decimal("1000"), leverage=Decimal("5"), protocol="gmx_v2")
+
+        adapter._apply_funding_payment(
+            position,
+            Decimal("1.5"),
+            datetime(2025, 8, 1, 2, tzinfo=UTC),
+            "arbitrum",
+        )
+
+        assert position.accumulated_funding == Decimal("-1.75000")
+
+    def test_engine_owned_source_integrates_on_utc_boundaries_for_non_utc_ticks(self) -> None:
+        from almanak.framework.backtesting.pnl.providers.perp.snapshot_funding import BacktestFundingObservation
+
+        rates = {0: Decimal("-0.0001"), 1: Decimal("-0.0002"), 2: Decimal("-0.0003")}
+
+        class _SharedSource:
+            def __init__(self) -> None:
+                self.requested_hours: list[int] = []
+
+            def observation_at(self, venue, market, timestamp, market_address=""):
+                utc_hour = timestamp.astimezone(UTC).hour
+                self.requested_hours.append(utc_hour)
+                long_rate = rates[utc_hour]
+                return BacktestFundingObservation(
+                    rate=abs(long_rate),
+                    long_rate_hourly=long_rate,
+                    short_rate_hourly=-long_rate,
+                    confidence="high",
+                    source="historical:gmx_synthetics_subsquid",
+                    degraded=False,
+                )
+
+        adapter = PerpBacktestAdapter(
+            PerpBacktestConfig(
+                strategy_type="perp",
+                funding_rate_source="historical",
+                funding_application_frequency="continuous",
+                protocol="gmx_v2",
+            )
+        )
+        source = _SharedSource()
+        adapter.bind_funding_history_source(source)  # type: ignore[arg-type]
+        position = create_perp_long_position(collateral_usd=Decimal("1000"), leverage=Decimal("5"), protocol="gmx_v2")
+        local_time = datetime(
+            2025,
+            8,
+            1,
+            8,
+            0,
+            tzinfo=timezone(timedelta(hours=5, minutes=30)),
+        )  # 02:30Z
+
+        adapter._apply_funding_payment(position, Decimal("2"), local_time, "arbitrum")
+
+        assert source.requested_hours == [0, 1, 2]
+        assert position.accumulated_funding == Decimal("-2.00000")
 
     @pytest.mark.asyncio
     async def test_measured_rates_fill_cache_with_hour_keys(self, monkeypatch):
@@ -2075,6 +2537,33 @@ class TestPrewarmHistory:
         assert provider.calls[0]["market"] == lookup.market  # fetched what the reader will ask for
         cache_key = ("gmx_v2", lookup.market, datetime(2024, 1, 1, 0, tzinfo=UTC))
         assert cache_key in adapter._funding_cache  # the per-tick read is a cache HIT
+
+    @pytest.mark.asyncio
+    async def test_address_native_prewarm_hits_exact_position_cache(self, monkeypatch):
+        """An exact-address open must reuse prewarm instead of fetching again."""
+        market_address = "0x7c54D547FAD72f8AFbf6E5b04403A0168b654C6f"
+        adapter = self._adapter()
+        provider = self._FakeProvider([self._funding_result(0)])
+        monkeypatch.setattr(adapter, "_get_provider_for_protocol", lambda protocol, chain=None: provider)
+        start, end = self._window()
+
+        await adapter.prewarm_history(self._intent(market=market_address), "arbitrum", start, end)
+
+        position = create_perp_long_position(token="XMR", protocol="gmx_v2")
+        position.metadata["perp_market"] = market_address
+        rate = adapter._get_historical_funding_rate_v2(
+            position,
+            timestamp=datetime(2024, 1, 1, 0, 45, tzinfo=UTC),
+            chain="arbitrum",
+        )
+
+        assert provider.calls == [{"market": market_address, "start": start, "end": end}]
+        assert rate == (Decimal("0.0001"), "high", "historical:gateway")
+        assert (
+            "gmx_v2",
+            market_address.lower(),
+            datetime(2024, 1, 1, 0, tzinfo=UTC),
+        ) in adapter._funding_cache
 
     @pytest.mark.asyncio
     async def test_fallback_rows_are_never_frozen_into_the_cache(self, monkeypatch):

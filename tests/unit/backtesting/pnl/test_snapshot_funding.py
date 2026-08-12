@@ -43,9 +43,10 @@ from almanak.framework.backtesting.pnl.providers.perp._gateway_history import (
 )
 from almanak.framework.backtesting.pnl.providers.perp.snapshot_funding import (
     DEFAULT_FALLBACK_RATE,
+    BacktestFundingObservation,
     SnapshotFundingRateSource,
 )
-from almanak.framework.data.funding import FundingRateUnavailableError, Venue
+from almanak.framework.data.funding import FundingRate, FundingRateUnavailableError, Venue
 from almanak.framework.data.interfaces import DataSourceUnavailable
 
 TICK = datetime(2024, 1, 15, 12, 30, tzinfo=UTC)
@@ -187,7 +188,6 @@ def test_historical_lane_resolves_latest_point_at_or_before_tick(monkeypatch: py
     # resolution still ignores observations after each simulated tick.
     assert calls[0]["start_ts"] == int((TICK_HOUR - timedelta(hours=24)).timestamp())
     assert calls[0]["end_ts"] == int((TICK_HOUR + timedelta(hours=2)).timestamp())
-
     # Same and later hours are served from the same run-wide series.
     _get_rate(source, timestamp=TICK + timedelta(minutes=15))
     assert len(calls) == 1
@@ -197,6 +197,84 @@ def test_historical_lane_resolves_latest_point_at_or_before_tick(monkeypatch: py
     assert entry["source"] == "historical:gateway"
     assert entry["outcome"] == OUTCOME_SERVED
     assert entry["count"] == 3
+
+
+def test_exact_gmx_address_and_side_rates_survive_materialization(monkeypatch: pytest.MonkeyPatch) -> None:
+    market_address = "0x7c54d547fad72f8afbf6e5b04403a0168b654c6f"
+    long_rate = Decimal("-0.0002")
+    short_rate = Decimal("0.00035")
+    calls: list[dict] = []
+
+    def _fetch(**kwargs):
+        calls.append(kwargs)
+        return [
+            FundingHistoryPoint(
+                timestamp=int(TICK_HOUR.timestamp()),
+                rate_hourly=Decimal("0.0002"),
+                long_rate_hourly=long_rate,
+                short_rate_hourly=short_rate,
+                source="gmx_synthetics_subsquid",
+            )
+        ]
+
+    monkeypatch.setattr(
+        "almanak.framework.backtesting.pnl.providers.perp.snapshot_funding.fetch_funding_points",
+        _fetch,
+    )
+    source = _historical_source(strict=True)
+
+    async def _exercise() -> tuple[FundingRate, BacktestFundingObservation]:
+        await source.materialize_history("gmx_v2", "XMR-USD", market_address)
+        rate = await source.funding_rate_at("gmx_v2", "XMR-USD", TICK_HOUR, market_address)
+        return rate, source.observation_at("gmx_v2", "XMR-USD", TICK_HOUR, market_address)
+
+    rate, observation = asyncio.run(_exercise())
+
+    assert calls[0]["market_address"] == market_address
+    assert rate.market_address == market_address
+    assert rate.long_rate_hourly == long_rate
+    assert rate.short_rate_hourly == short_rate
+    assert observation.payment_rate(is_long=True) == long_rate
+    assert observation.payment_rate(is_long=False) == short_rate
+    assert observation.source == "historical:gmx_synthetics_subsquid"
+
+
+def test_existing_address_as_market_read_reuses_declared_pair_series(monkeypatch: pytest.MonkeyPatch) -> None:
+    market_address = "0x7c54d547fad72f8afbf6e5b04403a0168b654c6f"
+    calls: list[dict] = []
+
+    def _fetch(**kwargs):
+        calls.append(kwargs)
+        return [
+            FundingHistoryPoint(
+                timestamp=int(TICK_HOUR.timestamp()),
+                rate_hourly=Decimal("0.0002"),
+                long_rate_hourly=Decimal("-0.0002"),
+                short_rate_hourly=Decimal("0.00035"),
+                source="gmx_synthetics_subsquid",
+            )
+        ]
+
+    monkeypatch.setattr(
+        "almanak.framework.backtesting.pnl.providers.perp.snapshot_funding.fetch_funding_points",
+        _fetch,
+    )
+    source = _historical_source(strict=True)
+
+    async def _exercise() -> tuple[FundingRate, BacktestFundingObservation]:
+        await source.materialize_history("gmx_v2", "XMR-USD", market_address)
+        rate = await source.funding_rate_at("gmx_v2", market_address, TICK_HOUR)
+        observation = source.observation_at("gmx_v2", market_address, TICK_HOUR)
+        return rate, observation
+
+    rate, observation = asyncio.run(_exercise())
+
+    assert len(calls) == 1
+    assert calls[0]["market"] == "XMR-USD"
+    assert calls[0]["market_address"] == market_address
+    assert rate.market == "XMR-USD"
+    assert rate.market_address == market_address
+    assert observation.long_rate_hourly == Decimal("-0.0002")
 
 
 def test_hour_normalization_floors_aware_offsets_in_utc(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -399,6 +477,45 @@ def test_served_observation_does_not_reuse_stale_degradation_reason(monkeypatch:
     assert served.degraded is False
     assert served.reason == ""
     assert served.rate == Decimal("0.00042")
+
+
+def test_degradation_isolated_by_exact_market_address(monkeypatch: pytest.MonkeyPatch) -> None:
+    address_a = "0x" + "1" * 40
+    address_b = "0x" + "2" * 40
+
+    def _fetch(**kwargs):
+        if kwargs["market_address"] == address_a:
+            return []
+        return [
+            FundingHistoryPoint(
+                timestamp=int(TICK_HOUR.timestamp()) - 60,
+                rate_hourly=Decimal("0.00042"),
+            )
+        ]
+
+    monkeypatch.setattr(
+        "almanak.framework.backtesting.pnl.providers.perp.snapshot_funding.fetch_funding_points",
+        _fetch,
+    )
+    source = _historical_source()
+
+    async def _materialize() -> None:
+        await source.materialize_history("gmx_v2", "XMR-USD", address_a)
+        await source.materialize_history("gmx_v2", "XMR-USD", address_b)
+
+    asyncio.run(_materialize())
+    degraded = source.observation_at("gmx_v2", "XMR-USD", TICK, address_a)
+    served = source.observation_at("gmx_v2", "XMR-USD", TICK, address_b)
+
+    assert degraded.degraded is True
+    assert degraded.reason
+    assert source.point_was_degraded("gmx_v2", "XMR-USD", TICK, address_a) is True
+    assert served.degraded is False
+    assert served.reason == ""
+    assert source.point_was_degraded("gmx_v2", "XMR-USD", TICK, address_b) is False
+    # History readers call this predicate without an address. Ambiguous exact
+    # markets must fail closed as degraded, never violate the bool contract.
+    assert source.point_was_degraded("gmx_v2", "XMR-USD", TICK) is True
 
 
 def test_upstream_calls_scale_with_history_chunks_not_ticks(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -445,6 +445,7 @@ class HyperliquidGatewayConnector(
         servicer: Any,
         market: str,
         chain: str,
+        market_address: str = "",
     ) -> Any:
         """Delegate to the servicer's existing REST fetch helper.
 
@@ -452,6 +453,7 @@ class HyperliquidGatewayConnector(
         but the capability contract takes it for parity with on-chain
         venues like GMX V2.
         """
+        del market_address
         return await servicer._fetch_hyperliquid_rate(market)
 
     # ---------------------------------------------------------------------
@@ -480,6 +482,7 @@ class HyperliquidGatewayConnector(
         servicer: Any,
         *,
         market: str,
+        market_address: str,
         chain: str,
         start_ts: int,
         end_ts: int,
@@ -494,6 +497,7 @@ class HyperliquidGatewayConnector(
         """
         from almanak.gateway.services.rate_history_service import RateHistoryUnavailable
 
+        del market_address  # Off-chain venue identity is the canonical coin code.
         coin = _hyperliquid_resolve_coin(market)
         session = await servicer._get_http_session()
 

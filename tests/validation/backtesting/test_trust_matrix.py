@@ -1945,13 +1945,23 @@ def test_perp_funding_lanes_agree_on_measured_rate(monkeypatch: pytest.MonkeyPat
     for zero elapsed time at its first mark; re-cut phase 2 fixed the
     one-period over-accrual) — one one-hour application at the measured rate.
     """
-    measured = Decimal("0.0004")
+    legacy_scalar = Decimal("0.0004")
+    long_payment_rate = Decimal("-0.0004")
+    short_payment_rate = Decimal("0.0007")
     calls = 0
 
     def _fetch(**kwargs):
         nonlocal calls
         calls += 1
-        return [FundingHistoryPoint(timestamp=kwargs["start_ts"] + 24 * 3600 - 60, rate_hourly=measured)]
+        return [
+            FundingHistoryPoint(
+                timestamp=kwargs["start_ts"] + 24 * 3600 - 60,
+                rate_hourly=legacy_scalar,
+                long_rate_hourly=long_payment_rate,
+                short_rate_hourly=short_payment_rate,
+                source="gmx_synthetics_subsquid",
+            )
+        ]
 
     monkeypatch.setattr(
         "almanak.framework.backtesting.pnl.providers.perp.snapshot_funding.fetch_funding_points",
@@ -1959,7 +1969,7 @@ def test_perp_funding_lanes_agree_on_measured_rate(monkeypatch: pytest.MonkeyPat
     )
 
     notional = Decimal("5000")
-    strategy = FundingCoherenceProbeStrategy(notional=notional)
+    strategy = FundingCoherenceProbeStrategy(notional=notional, side="short")
     result = run_backtest(
         strategy,
         flat_series(10),
@@ -1976,15 +1986,15 @@ def test_perp_funding_lanes_agree_on_measured_rate(monkeypatch: pytest.MonkeyPat
     assert all(trade.success for trade in result.trades)
     # decide() saw the measured rate on every tick...
     assert strategy.rates_seen, "decide() never observed a funding rate"
-    assert all(rate == measured for rate in strategy.rates_seen)
+    assert all(rate == legacy_scalar for rate in strategy.rates_seen)
     # ...the position's funding was stamped as measured history, not fallback...
-    assert result.data_coverage_metrics.perp_metrics.data_sources == ["historical:gateway"]
+    assert result.data_coverage_metrics.perp_metrics.data_sources == ["historical:gmx_synthetics_subsquid"]
     assert result.data_coverage_metrics.perp_metrics.funding_confidence_breakdown["high"] == 1
     assert calls == 1, "snapshot and accrual must share one run-wide funding series"
     # ...and the position accrued exactly that rate for its one funding hour.
-    expected_funding = measured * notional  # one funding hour (t2 mark)
-    assert result.final_capital_usd == INITIAL_CAPITAL - expected_funding
-    assert result.trades[-1].pnl_usd == -expected_funding
+    expected_funding_received = short_payment_rate * notional  # one funding hour (t2 mark)
+    assert result.final_capital_usd == INITIAL_CAPITAL + expected_funding_received
+    assert result.trades[-1].pnl_usd == expected_funding_received
 
 
 @pytest.mark.trust_cell("perp:rejection_no_state_change")

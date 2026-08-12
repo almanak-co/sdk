@@ -7,11 +7,11 @@ holds no API URLs, no market-token tables, and no HTTP session (VIB-4851
 Phase D; previously it called the GMX Stats API directly and extrapolated the
 *current* rate backwards over the whole requested range).
 
-GMX V2 has no native historical funding endpoint; the connector serves the
-history lane through the documented Hyperliquid cross-venue fallback (both
-venues quote the same reference markets). Real per-hour history replaces the
-old current-rate extrapolation, so results carry HIGH confidence where a
-measured point covers the hour and LOW-confidence fallback fills elsewhere.
+The gateway reads GMX's official Synthetics indexer by verified market-token
+address.  There is no symbol table, cross-venue substitution, current-rate
+extrapolation, or implicit fallback.  Every returned hour is measured GMX
+history; missing coverage fails closed unless a caller explicitly opts into a
+fallback rate for legacy simulations.
 
 Example:
     from almanak.connectors.gmx_v2.backtest_funding import GMXFundingProvider
@@ -37,7 +37,7 @@ from typing import Any
 
 from almanak.connectors._strategy_base.funding_history_registry import FundingHistoryRegistry
 from almanak.core.chains import ChainRegistry
-from almanak.framework.backtesting.config import DEFAULT_FUNDING_FALLBACK_RATE
+from almanak.framework.backtesting.pnl.data_provider import is_address_like
 from almanak.framework.backtesting.pnl.providers.base import BacktestProviderConfig, HistoricalFundingProvider
 from almanak.framework.backtesting.pnl.providers.perp._gateway_history import (
     FundingHistoryPoint,
@@ -103,13 +103,13 @@ class GMXClientConfig:
         requests_per_minute: Client-side RPC throttle (default: 30)
         timeout_seconds: Legacy config echo (default: 30)
         chain: Default chain for requests (default: "arbitrum")
-        fallback_rate: Fallback funding rate when data unavailable
+        fallback_rate: Explicit opt-in fallback; ``None`` fails closed
     """
 
     requests_per_minute: int = DEFAULT_REQUESTS_PER_MINUTE
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
     chain: str = "arbitrum"
-    fallback_rate: Decimal = DEFAULT_FUNDING_FALLBACK_RATE
+    fallback_rate: Decimal | None = None
 
 
 # =============================================================================
@@ -121,11 +121,9 @@ class GMXFundingProvider(HistoricalFundingProvider):
     """Historical funding rate provider for GMX V2 perpetuals.
 
     Fetches measured funding-rate history through the gateway and fills the
-    requested hourly grid with carry-forward semantics (the rate in effect at
-    hour ``t`` is the latest measured point at or before ``t``). Hours before
-    the first measured point fall back to ``config.fallback_rate`` at LOW
-    confidence — the provider never raises from :meth:`get_funding_rates`,
-    preserving the pre-cutover graceful-degradation contract.
+    requested hourly grid. Hours before the first measured point fail closed
+    by default. An explicit ``config.fallback_rate`` retains the legacy
+    low-confidence fill for callers that deliberately request simulation.
 
     Attributes:
         config: Client configuration
@@ -209,11 +207,7 @@ class GMXFundingProvider(HistoricalFundingProvider):
         return cls(
             config=GMXClientConfig(
                 chain=chain,
-                fallback_rate=(
-                    config.funding_fallback_rate
-                    if config.funding_fallback_rate is not None
-                    else DEFAULT_FUNDING_FALLBACK_RATE
-                ),
+                fallback_rate=config.funding_fallback_rate,
             )
         )
 
@@ -278,11 +272,14 @@ class GMXFundingProvider(HistoricalFundingProvider):
             raise GMXAPIError("No funding-history venue declared for GMX V2")
 
         await self._rate_limiter.acquire()
+        raw_market = market.strip()
+        market_address = raw_market if is_address_like(raw_market) else ""
         try:
             return await run_sync_gateway_call(
                 fetch_funding_points,
                 venue=venue,
-                market=market.upper(),
+                market=raw_market if market_address else raw_market.upper(),
+                market_address=market_address,
                 chain=self._validate_chain(chain),
                 start_ts=start_ts,
                 end_ts=end_ts,
@@ -299,6 +296,8 @@ class GMXFundingProvider(HistoricalFundingProvider):
         Returns:
             FundingResult with fallback rate and LOW confidence
         """
+        if self._config.fallback_rate is None:
+            raise GMXAPIError("GMX funding history unavailable and no explicit fallback_rate was configured")
         return FundingResult(
             rate=self._config.fallback_rate,
             source_info=DataSourceInfo(
@@ -313,6 +312,10 @@ class GMXFundingProvider(HistoricalFundingProvider):
         rate: Decimal,
         timestamp: datetime,
         confidence: DataConfidence = DataConfidence.HIGH,
+        *,
+        long_rate_hourly: Decimal | None = None,
+        short_rate_hourly: Decimal | None = None,
+        source: str = DATA_SOURCE,
     ) -> FundingResult:
         """Create a FundingResult.
 
@@ -326,8 +329,10 @@ class GMXFundingProvider(HistoricalFundingProvider):
         """
         return FundingResult(
             rate=rate,
+            long_rate_hourly=long_rate_hourly,
+            short_rate_hourly=short_rate_hourly,
             source_info=DataSourceInfo(
-                source=DATA_SOURCE,
+                source=source,
                 confidence=confidence,
                 timestamp=timestamp,
             ),
@@ -339,24 +344,46 @@ class GMXFundingProvider(HistoricalFundingProvider):
         start_date: datetime,
         end_date: datetime,
     ) -> list[FundingResult]:
-        """Fill the hourly grid with carry-forward rates from ``points``.
+        """Require one exact observation for every requested grid hour.
 
-        The rate in effect at grid hour ``t`` is the latest measured point at
-        or before ``t``; hours before the first point fall back at LOW
-        confidence so the grid is always fully covered (one result per hour,
-        ``start_date`` to ``end_date`` inclusive).
+        The gateway's GMX-native contract is a complete hourly series. This
+        second boundary check prevents a partial or duplicated response from
+        being disguised by carry-forward interpolation. Explicit fallback is
+        still honored for legacy callers that deliberately configured it.
         """
+        by_timestamp: dict[int, FundingHistoryPoint] = {}
+        for history_point in points:
+            if history_point.timestamp in by_timestamp:
+                raise GMXAPIError(f"Duplicate GMX funding observation at {history_point.timestamp}")
+            by_timestamp[history_point.timestamp] = history_point
+
+        start_ts = int(start_date.timestamp())
+        end_ts = int(end_date.timestamp())
+        grid_start_ts = ((start_ts + 3599) // 3600) * 3600
+        grid_end_ts = (end_ts // 3600) * 3600
+        if grid_start_ts > grid_end_ts:
+            return []
+
         results: list[FundingResult] = []
-        index = -1  # latest point applied so far
-        current = start_date
-        while current <= end_date:
+        current = datetime.fromtimestamp(grid_start_ts, tz=UTC)
+        grid_end = datetime.fromtimestamp(grid_end_ts, tz=UTC)
+        while current <= grid_end:
             current_ts = int(current.timestamp())
-            while index + 1 < len(points) and points[index + 1].timestamp <= current_ts:
-                index += 1
-            if index >= 0:
-                results.append(self._create_result(rate=points[index].rate_hourly, timestamp=current))
-            else:
+            point = by_timestamp.get(current_ts)
+            if point is not None:
+                results.append(
+                    self._create_result(
+                        rate=point.rate_hourly,
+                        timestamp=current,
+                        long_rate_hourly=point.long_rate_hourly,
+                        short_rate_hourly=point.short_rate_hourly,
+                        source=point.source,
+                    )
+                )
+            elif self._config.fallback_rate is not None:
                 results.append(self._create_fallback_result(current))
+            else:
+                raise GMXAPIError(f"Missing GMX funding observation at {current_ts}")
             current += timedelta(hours=FUNDING_INTERVAL_HOURS)
         return results
 
@@ -375,9 +402,9 @@ class GMXFundingProvider(HistoricalFundingProvider):
 
         Returns:
             List of FundingResult objects, one per hour in the date range.
-            Measured history yields HIGH confidence results; hours without
-            measured coverage (and any gateway failure) yield LOW confidence
-            fallback results. Never raises.
+            Measured history yields HIGH confidence results. Missing coverage
+            and gateway failures raise unless an explicit fallback was
+            configured.
 
         Example:
             rates = await provider.get_funding_rates(
@@ -436,14 +463,15 @@ class GMXFundingProvider(HistoricalFundingProvider):
             else:
                 self._transport_failure_streak = 0
                 logger.error("GMX funding history error: %s", str(e))
+            if self._config.fallback_rate is None:
+                raise
             return self._generate_fallback_results(start_date, end_date)
 
-        except Exception as e:
-            # A non-transport failure breaks the CONSECUTIVE-transport streak:
-            # transport -> generic -> transport must not memoize.
+        except Exception:
+            # Programming errors are not market-data fallbacks. A non-
+            # transport failure also breaks the consecutive-transport streak.
             self._transport_failure_streak = 0
-            logger.error("Unexpected error fetching funding rates: %s", str(e))
-            return self._generate_fallback_results(start_date, end_date)
+            raise
 
     def _generate_fallback_results(
         self,
@@ -480,8 +508,8 @@ class GMXFundingProvider(HistoricalFundingProvider):
             chain: Optional chain override (default: uses config.chain)
 
         Returns:
-            FundingResult with current rate (fallback at LOW confidence when
-            no measured point is available)
+            FundingResult with current rate. Missing data raises unless an
+            explicit fallback was configured.
         """
         chain = chain or self._config.chain
         now = datetime.now(UTC)
@@ -499,10 +527,15 @@ class GMXFundingProvider(HistoricalFundingProvider):
                 rate=points[-1].rate_hourly,
                 timestamp=now,
                 confidence=DataConfidence.HIGH,
+                long_rate_hourly=points[-1].long_rate_hourly,
+                short_rate_hourly=points[-1].short_rate_hourly,
+                source=points[-1].source,
             )
 
         except (GMXAPIError, ValueError) as e:
             logger.error("Error fetching current funding rate: %s", str(e))
+            if self._config.fallback_rate is None:
+                raise
             return self._create_fallback_result(now)
 
 

@@ -4423,12 +4423,13 @@ class MarketSnapshot:
             self._record_critical_data_failure("aave_health_factor", "unavailable", str(e))
             raise
 
-    def funding_rate(self, venue: str, market: str) -> FundingRate:
+    def funding_rate(self, venue: str, market: str, market_address: str = "") -> FundingRate:
         """Get the current funding rate for a perpetual market on a specific venue.
 
         Args:
             venue: Venue identifier (e.g., "gmx_v2", "hyperliquid")
             market: Market symbol (e.g., "ETH-USD")
+            market_address: Exact market address for dynamically discovered venues
 
         Returns:
             FundingRate dataclass with rate_hourly, rate_8h, rate_annualized, etc.
@@ -4445,15 +4446,27 @@ class MarketSnapshot:
         from almanak.framework.data.funding import Venue
 
         venue_enum = Venue(venue)
-        return self._run_async_bridged(self._funding_rate_provider.get_funding_rate(venue_enum, market))
+        request = (
+            self._funding_rate_provider.get_funding_rate(venue_enum, market, market_address)
+            if market_address
+            else self._funding_rate_provider.get_funding_rate(venue_enum, market)
+        )
+        return self._run_async_bridged(request)
 
-    def funding_rate_spread(self, market: str, venue_a: str, venue_b: str) -> FundingRateSpread:
+    def funding_rate_spread(
+        self,
+        market: str,
+        venue_a: str,
+        venue_b: str,
+        market_address: str = "",
+    ) -> FundingRateSpread:
         """Get the funding rate spread between two venues.
 
         Args:
             market: Market symbol (e.g., "ETH-USD")
             venue_a: First venue identifier
             venue_b: Second venue identifier
+            market_address: Exact market address for dynamically discovered venues
 
         Returns:
             FundingRateSpread dataclass with spread_hourly, spread_annualized, rate_a, rate_b
@@ -4471,9 +4484,17 @@ class MarketSnapshot:
 
         venue_a_enum = Venue(venue_a)
         venue_b_enum = Venue(venue_b)
-        return self._run_async_bridged(
-            self._funding_rate_provider.get_funding_rate_spread(market, venue_a_enum, venue_b_enum)
+        request = (
+            self._funding_rate_provider.get_funding_rate_spread(
+                market,
+                venue_a_enum,
+                venue_b_enum,
+                market_address,
+            )
+            if market_address
+            else self._funding_rate_provider.get_funding_rate_spread(market, venue_a_enum, venue_b_enum)
         )
+        return self._run_async_bridged(request)
 
     def wallet_activity(
         self,

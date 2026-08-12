@@ -6131,6 +6131,7 @@ class FundingRateRequest(_message.Message):
     VENUE_FIELD_NUMBER: _builtins.int
     MARKET_FIELD_NUMBER: _builtins.int
     CHAIN_FIELD_NUMBER: _builtins.int
+    MARKET_ADDRESS_FIELD_NUMBER: _builtins.int
     venue: _builtins.str
     """Venue name. One entry per perp connector that registers a
     ``GatewayFundingRateCapability``. The gateway rejects unknown values
@@ -6140,14 +6141,20 @@ class FundingRateRequest(_message.Message):
     """Market symbol (e.g., "ETH-USD", "BTC-USD")"""
     chain: _builtins.str
     """Chain for on-chain venues"""
+    market_address: _builtins.str
+    """Exact venue market-token address. Required by dynamic address-first
+    venues when a pair label is ambiguous; empty remains valid for legacy
+    static/off-chain venues.
+    """
     def __init__(
         self,
         *,
         venue: _builtins.str = ...,
         market: _builtins.str = ...,
         chain: _builtins.str = ...,
+        market_address: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "market", b"market", "venue", b"venue"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "market", b"market", "market_address", b"market_address", "venue", b"venue"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___FundingRateRequest: _TypeAlias = FundingRateRequest  # noqa: Y015
@@ -6169,6 +6176,10 @@ class FundingRateResponse(_message.Message):
     IS_LIVE_DATA_FIELD_NUMBER: _builtins.int
     SUCCESS_FIELD_NUMBER: _builtins.int
     ERROR_FIELD_NUMBER: _builtins.int
+    LONG_RATE_HOURLY_FIELD_NUMBER: _builtins.int
+    SHORT_RATE_HOURLY_FIELD_NUMBER: _builtins.int
+    MARKET_ADDRESS_FIELD_NUMBER: _builtins.int
+    OBSERVED_AT_FIELD_NUMBER: _builtins.int
     venue: _builtins.str
     market: _builtins.str
     rate_hourly: _builtins.str
@@ -6191,6 +6202,19 @@ class FundingRateResponse(_message.Message):
     """True if data is from live source"""
     success: _builtins.bool
     error: _builtins.str
+    long_rate_hourly: _builtins.str
+    """Signed payment rate for a long position. Positive receives, negative
+    pays. Empty when the venue only exposes the legacy symmetric scalar.
+    """
+    short_rate_hourly: _builtins.str
+    """Signed payment rate for a short position. Positive receives, negative
+    pays. Empty when the venue only exposes the legacy symmetric scalar.
+    """
+    market_address: _builtins.str
+    observed_at: _builtins.int
+    """Unix timestamp of the source observation. Zero means the source did not
+    expose one and the SDK may retain its legacy receipt-time behavior.
+    """
     def __init__(
         self,
         *,
@@ -6207,8 +6231,12 @@ class FundingRateResponse(_message.Message):
         is_live_data: _builtins.bool = ...,
         success: _builtins.bool = ...,
         error: _builtins.str = ...,
+        long_rate_hourly: _builtins.str = ...,
+        short_rate_hourly: _builtins.str = ...,
+        market_address: _builtins.str = ...,
+        observed_at: _builtins.int = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "index_price", b"index_price", "is_live_data", b"is_live_data", "mark_price", b"mark_price", "market", b"market", "next_funding_time", b"next_funding_time", "open_interest_long", b"open_interest_long", "open_interest_short", b"open_interest_short", "rate_8h", b"rate_8h", "rate_annualized", b"rate_annualized", "rate_hourly", b"rate_hourly", "success", b"success", "venue", b"venue"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "index_price", b"index_price", "is_live_data", b"is_live_data", "long_rate_hourly", b"long_rate_hourly", "mark_price", b"mark_price", "market", b"market", "market_address", b"market_address", "next_funding_time", b"next_funding_time", "observed_at", b"observed_at", "open_interest_long", b"open_interest_long", "open_interest_short", b"open_interest_short", "rate_8h", b"rate_8h", "rate_annualized", b"rate_annualized", "rate_hourly", b"rate_hourly", "short_rate_hourly", b"short_rate_hourly", "success", b"success", "venue", b"venue"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___FundingRateResponse: _TypeAlias = FundingRateResponse  # noqa: Y015
@@ -6221,6 +6249,7 @@ class FundingRateSpreadRequest(_message.Message):
     VENUE_A_FIELD_NUMBER: _builtins.int
     VENUE_B_FIELD_NUMBER: _builtins.int
     CHAIN_FIELD_NUMBER: _builtins.int
+    MARKET_ADDRESS_FIELD_NUMBER: _builtins.int
     market: _builtins.str
     """Market symbol (e.g., "ETH-USD")"""
     venue_a: _builtins.str
@@ -6229,6 +6258,8 @@ class FundingRateSpreadRequest(_message.Message):
     """Second venue"""
     chain: _builtins.str
     """Chain for on-chain venues"""
+    market_address: _builtins.str
+    """Exact market address for dynamic on-chain venues"""
     def __init__(
         self,
         *,
@@ -6236,8 +6267,9 @@ class FundingRateSpreadRequest(_message.Message):
         venue_a: _builtins.str = ...,
         venue_b: _builtins.str = ...,
         chain: _builtins.str = ...,
+        market_address: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "market", b"market", "venue_a", b"venue_a", "venue_b", b"venue_b"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "market", b"market", "market_address", b"market_address", "venue_a", b"venue_a", "venue_b", b"venue_b"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___FundingRateSpreadRequest: _TypeAlias = FundingRateSpreadRequest  # noqa: Y015
@@ -7061,6 +7093,8 @@ class FundingRatePoint(_message.Message):
     TIMESTAMP_FIELD_NUMBER: _builtins.int
     RATE_HOURLY_FIELD_NUMBER: _builtins.int
     RATE_ANNUALIZED_FIELD_NUMBER: _builtins.int
+    LONG_RATE_HOURLY_FIELD_NUMBER: _builtins.int
+    SHORT_RATE_HOURLY_FIELD_NUMBER: _builtins.int
     timestamp: _builtins.int
     """Unix seconds, UTC."""
     rate_hourly: _builtins.str
@@ -7072,14 +7106,21 @@ class FundingRatePoint(_message.Message):
     connectors MAY leave it empty if the connector body doesn't
     pre-compute it; the framework reader can derive it client-side.
     """
+    long_rate_hourly: _builtins.str
+    """Signed side-specific payment rates. Positive receives, negative pays.
+    Empty for symmetric legacy venues; GMX V2 publishes both.
+    """
+    short_rate_hourly: _builtins.str
     def __init__(
         self,
         *,
         timestamp: _builtins.int = ...,
         rate_hourly: _builtins.str = ...,
         rate_annualized: _builtins.str = ...,
+        long_rate_hourly: _builtins.str = ...,
+        short_rate_hourly: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["rate_annualized", b"rate_annualized", "rate_hourly", b"rate_hourly", "timestamp", b"timestamp"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["long_rate_hourly", b"long_rate_hourly", "rate_annualized", b"rate_annualized", "rate_hourly", b"rate_hourly", "short_rate_hourly", b"short_rate_hourly", "timestamp", b"timestamp"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___FundingRatePoint: _TypeAlias = FundingRatePoint  # noqa: Y015
@@ -7455,6 +7496,7 @@ class GetFundingRateHistoryRequest(_message.Message):
     CHAIN_FIELD_NUMBER: _builtins.int
     START_TS_FIELD_NUMBER: _builtins.int
     END_TS_FIELD_NUMBER: _builtins.int
+    MARKET_ADDRESS_FIELD_NUMBER: _builtins.int
     venue: _builtins.str
     """Required. Venue identifier matching
     ``GatewayFundingHistoryCapability.funding_venue()``
@@ -7470,6 +7512,10 @@ class GetFundingRateHistoryRequest(_message.Message):
     start_ts: _builtins.int
     """Required. Unix seconds, UTC."""
     end_ts: _builtins.int
+    market_address: _builtins.str
+    """Exact venue market-token address for dynamically discovered on-chain
+    venues. Empty remains valid for static/off-chain venues.
+    """
     def __init__(
         self,
         *,
@@ -7478,8 +7524,9 @@ class GetFundingRateHistoryRequest(_message.Message):
         chain: _builtins.str = ...,
         start_ts: _builtins.int = ...,
         end_ts: _builtins.int = ...,
+        market_address: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "end_ts", b"end_ts", "market", b"market", "start_ts", b"start_ts", "venue", b"venue"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "end_ts", b"end_ts", "market", b"market", "market_address", b"market_address", "start_ts", b"start_ts", "venue", b"venue"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___GetFundingRateHistoryRequest: _TypeAlias = GetFundingRateHistoryRequest  # noqa: Y015
@@ -7495,12 +7542,14 @@ class FundingRateHistoryResponse(_message.Message):
     SOURCE_FIELD_NUMBER: _builtins.int
     SUCCESS_FIELD_NUMBER: _builtins.int
     ERROR_FIELD_NUMBER: _builtins.int
+    MARKET_ADDRESS_FIELD_NUMBER: _builtins.int
     venue: _builtins.str
     market: _builtins.str
     chain: _builtins.str
     source: _builtins.str
     success: _builtins.bool
     error: _builtins.str
+    market_address: _builtins.str
     @_builtins.property
     def points(self) -> _containers.RepeatedCompositeFieldContainer[Global___FundingRatePoint]: ...
     def __init__(
@@ -7513,8 +7562,9 @@ class FundingRateHistoryResponse(_message.Message):
         source: _builtins.str = ...,
         success: _builtins.bool = ...,
         error: _builtins.str = ...,
+        market_address: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "error", b"error", "market", b"market", "points", b"points", "source", b"source", "success", b"success", "venue", b"venue"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "error", b"error", "market", b"market", "market_address", b"market_address", "points", b"points", "source", b"source", "success", b"success", "venue", b"venue"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___FundingRateHistoryResponse: _TypeAlias = FundingRateHistoryResponse  # noqa: Y015

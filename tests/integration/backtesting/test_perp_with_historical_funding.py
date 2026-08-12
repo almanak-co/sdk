@@ -109,10 +109,10 @@ class TestGMXFundingProvider:
             # Verify we got results
             assert len(rates) > 0, "Expected at least one funding rate result"
 
-            # Since the VIB-4851 Phase D gateway cutover, GMX serves real
-            # measured history (HIGH confidence) through the gateway's
-            # Hyperliquid cross-venue fallback; without a reachable gateway
-            # the provider degrades to the LOW-confidence fallback fill.
+            # GMX serves measured, exact-market history through its native
+            # Synthetics indexer. The default provider fails closed when the
+            # gateway or native history is unavailable; no cross-venue or
+            # implicit fallback participates in this integration path.
             high_confidence_count = sum(1 for r in rates if r.source_info.confidence == DataConfidence.HIGH)
 
             logger.info(

@@ -175,8 +175,8 @@ def _perp_price_success_response(
     )
 
 
-FundingHistoryCacheKey = tuple[str, str, str, int, int]
-#                                  source scope market start end
+FundingHistoryCacheKey = tuple[str, str, str, str, int, int]
+#                                  source scope market address start end
 FundingHistoryLimiterKey = tuple[str, str]
 
 # Reuse the gateway's established idempotent-read retry policy from
@@ -235,6 +235,8 @@ class FundingRatePoint:
     timestamp: int
     rate_hourly: Decimal | None = None
     rate_annualized: Decimal | None = None
+    long_rate_hourly: Decimal | None = None
+    short_rate_hourly: Decimal | None = None
 
 
 def _funding_history_response_size(response: gateway_pb2.FundingRateHistoryResponse) -> int:
@@ -718,6 +720,8 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
             timestamp=p.timestamp,
             rate_hourly=cls._encode_decimal(p.rate_hourly),
             rate_annualized=cls._encode_decimal(p.rate_annualized),
+            long_rate_hourly=cls._encode_decimal(p.long_rate_hourly),
+            short_rate_hourly=cls._encode_decimal(p.short_rate_hourly),
         )
 
     @classmethod
@@ -1256,6 +1260,7 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
         source: FundingHistorySource,
         *,
         market: str,
+        market_address: str,
         chain: str,
         start_ts: int,
         end_ts: int,
@@ -1268,6 +1273,7 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
                 return await provider.fetch_funding_history(
                     self,
                     market=market,
+                    market_address=market_address,
                     chain=chain,
                     start_ts=start_ts,
                     end_ts=end_ts,
@@ -1283,15 +1289,20 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
         provider: GatewayFundingHistoryCapability,
         *,
         market: str,
+        market_address: str,
         chain: str,
         start_ts: int,
         end_ts: int,
     ) -> gateway_pb2.FundingRateHistoryResponse:
+        from almanak.core.perp_markets import perp_market_funding_key
+
         source = provider.funding_history_source(chain)
+        market_key = perp_market_funding_key(market) or market.strip().upper()
         cache_key: FundingHistoryCacheKey = (
             source.key.strip().lower(),
             source.scope.strip().lower(),
-            market,
+            market_key,
+            market_address.strip().lower(),
             start_ts,
             end_ts,
         )
@@ -1301,12 +1312,15 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
                 provider,
                 source,
                 market=market,
+                market_address=market_address,
                 chain=chain,
                 start_ts=start_ts,
                 end_ts=end_ts,
             )
             cached = gateway_pb2.FundingRateHistoryResponse(
                 points=[self._encode_funding_point(point) for point in points],
+                source=source.key,
+                market_address=market_address,
             )
             return cached, self._funding_finality_band(end_ts)
 
@@ -1328,6 +1342,7 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
         from almanak.core.perp_markets import perp_market_funding_key
 
         market = perp_market_funding_key(request.market) or request.market.strip().upper()
+        market_address = request.market_address.strip()
         chain = _normalize_key(request.chain)
 
         if not venue:
@@ -1349,6 +1364,7 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
             cached = await self._cached_funding_history(
                 provider,
                 market=market,
+                market_address=market_address,
                 chain=chain,
                 start_ts=request.start_ts,
                 end_ts=request.end_ts,
@@ -1365,6 +1381,7 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
             return gateway_pb2.FundingRateHistoryResponse(
                 venue=venue,
                 market=market,
+                market_address=market_address,
                 chain=chain,
                 source=exc.source or "none",
                 success=False,
@@ -1374,6 +1391,7 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
             return gateway_pb2.FundingRateHistoryResponse(
                 venue=venue,
                 market=market,
+                market_address=market_address,
                 chain=chain,
                 source=exc.source or "none",
                 success=False,
@@ -1393,9 +1411,10 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
         return gateway_pb2.FundingRateHistoryResponse(
             venue=venue,
             market=market,
+            market_address=market_address,
             chain=chain,
             points=list(cached.points),
-            source=venue,
+            source=cached.source,
             success=True,
         )
 

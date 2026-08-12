@@ -60,7 +60,7 @@ class TestFundingRateProviderWiring:
         """market.funding_rate() delegates to provider when wired."""
         from decimal import Decimal
 
-        from almanak.framework.data.funding import FundingRate, Venue
+        from almanak.framework.data.funding import FundingRate
 
         strategy = _StubStrategy._create(chain="arbitrum")
 
@@ -85,11 +85,16 @@ class TestFundingRateProviderWiring:
         assert result.rate_hourly == Decimal("0.0001")
         assert result.venue == "gmx_v2"
 
+        market_address = "0x" + "7" * 40
+        mock_provider.get_funding_rate.reset_mock()
+        snapshot.funding_rate("gmx_v2", "ETH-USD", market_address)
+        assert mock_provider.get_funding_rate.await_args.args[2] == market_address
+
     def test_funding_rate_spread_calls_provider_when_wired(self):
         """market.funding_rate_spread() delegates to provider when wired."""
         from decimal import Decimal
 
-        from almanak.framework.data.funding import FundingRate, FundingRateSpread, Venue
+        from almanak.framework.data.funding import FundingRate, FundingRateSpread
 
         strategy = _StubStrategy._create(chain="arbitrum")
 
@@ -126,6 +131,11 @@ class TestFundingRateProviderWiring:
         mock_provider.get_funding_rate_spread.assert_awaited_once()
         assert result.market == "ETH-USD"
         assert result.spread_8h == Decimal("0.0008")
+
+        market_address = "0x" + "7" * 40
+        mock_provider.get_funding_rate_spread.reset_mock()
+        snapshot.funding_rate_spread("ETH-USD", "gmx_v2", "hyperliquid", market_address)
+        assert mock_provider.get_funding_rate_spread.await_args.args[3] == market_address
 
     def test_funding_rate_spread_raises_without_provider(self):
         """market.funding_rate_spread() raises ValueError when no provider configured."""

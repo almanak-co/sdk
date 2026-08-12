@@ -6,10 +6,12 @@ from typing import Any
 
 import pytest
 
+from almanak.framework.backtesting.config import BacktestDataConfig
 from almanak.framework.backtesting.pnl import _engine_helpers
 from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 from almanak.framework.backtesting.pnl.data_provider import HistoricalDataCapability, MarketState, token_ref_display
 from almanak.framework.backtesting.pnl.engine import DefaultFeeModel, DefaultSlippageModel, PnLBacktester
+from almanak.framework.backtesting.pnl.logging_utils import BacktestLogger
 from tests.backtesting_funding import pnl_token_funding
 
 
@@ -106,3 +108,47 @@ async def test_readiness_requires_complete_declared_funding_coverage(monkeypatch
 
     assert result.ready
     assert require_complete_values == [True]
+
+
+@pytest.mark.asyncio
+async def test_strict_runner_repeats_funding_coverage_before_decide(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The execution path repeats readiness's strict funding check before tick 1."""
+    strategy = _Strategy()
+    strategy.config = {
+        **strategy.config,
+        "protocol": "gmx_v2",
+        "funding_market": "XMR-USD",
+        "market_address": "0x7c54d547fad72f8afbf6e5b04403a0168b654c6f",
+    }
+    backtester = _backtester(_Provider())
+    backtester.data_config = BacktestDataConfig(
+        use_historical_funding=True,
+        strict_historical_mode=True,
+    )
+    config = _config()
+    logger = BacktestLogger(backtest_id="strict-funding-runner", json_format=False)
+    state = _engine_helpers.initialize_backtest(
+        backtester=backtester,
+        strategy=strategy,
+        config=config,
+        bt_logger=logger,
+    )
+    require_complete_values: list[bool] = []
+
+    async def unavailable(_source, _strategy, _strategy_config, *, require_complete: bool = False) -> None:
+        require_complete_values.append(require_complete)
+        raise RuntimeError("declared GMX funding coverage unavailable")
+
+    monkeypatch.setattr(_engine_helpers, "_prewarm_declared_funding_history", unavailable)
+
+    with pytest.raises(RuntimeError, match="declared GMX funding coverage unavailable"):
+        await _engine_helpers.execute_iteration_loop(
+            backtester=backtester,
+            strategy=strategy,
+            config=config,
+            bt_logger=logger,
+            state=state,
+        )
+
+    assert require_complete_values == [True]
+    assert strategy.decide_calls == 0

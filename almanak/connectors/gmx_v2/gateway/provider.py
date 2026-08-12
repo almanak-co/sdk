@@ -3,22 +3,16 @@
 Phase 3 (VIB-4811) introduces capability-keyed dispatch at the gateway
 boundary. GMX V2 contributes:
 
-* ``GatewayFundingRateCapability`` — venue identifier, per-market
-  default funding rates, and the live on-chain fetch. Previously these
-  lived as a venue branch in
-  ``almanak.gateway.services.funding_rate_service``.
+* ``GatewayFundingRateCapability`` — venue identifier and the latest completed
+  funding observation from GMX's own Synthetics indexer.
 
-The live fetch is implemented here, on the connector's audited address
-catalogue (``..addresses``): the gateway servicer contributes only the
-venue-agnostic pieces (its shared web3 cache and default mark prices).
-It originally delegated back to a servicer-side ``_fetch_gmx_v2_rate``
-whose hand-copied reader/market dicts sat outside the
-``tests/audit/test_gmx_v2_market_identity.py`` audit — and whose
-``getMarketInfo`` ABI declared a 9-word ``MarketInfo`` no deployed
-reader returns (both readers answer the 29-word struct), so every live
-fetch failed decode and silently served the default rates. Moving the
-fetch behind the connector boundary removes the copies; the ABI here is
-pinned on-chain by ``tests/audit/test_gmx_v2_funding_reader_abi.py``.
+The current-rate fetch uses the same official indexer as the historical lane
+and truthfully reports the completed observation as historical rather than
+pretending it is realtime. The gateway servicer contributes its shared HTTP
+session and premium RPC-backed market verification; the connector owns GMX
+identity and rate semantics.
+The complete ``getMarketInfo`` ABI remains here for the separate on-chain
+audit surface and is pinned by ``tests/audit/test_gmx_v2_funding_reader_abi.py``.
 
 W1 (VIB-4853) adds:
 
@@ -29,26 +23,17 @@ W1 (VIB-4853) adds:
   GMX addresses through this capability instead of importing the dict
   by name.
 
-W7 (VIB-4859) adds:
-
-* ``GatewayFundingHistoryCapability`` — GMX V2 has no native historical
-  funding-rate endpoint. The pre-W7 framework code in
-  ``framework/data/rates/history.py`` routed ``venue="gmx_v2"`` requests
-  through the Hyperliquid fallback (both venues quote the same
-  ETH-USD / BTC-USD markets, with Hyperliquid serving the public
-  reference rate). The capability is declared so the registry dispatcher
-  routes GMX history requests through this connector; the body delegates
-  to the Hyperliquid connector via ``GATEWAY_REGISTRY`` so the
-  cross-venue fallback survives the migration. Tracked separately under
-  VIB-4870 if a native GMX historical endpoint ever ships.
+Historical funding is address-first and GMX-native. The connector verifies the
+exact market token through :class:`GmxV2MarketRegistry`, then reads GMX's
+official chain-specific Synthetics indexer. No static market allowlist,
+invented default, or Hyperliquid proxy participates in this lane.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from collections.abc import Mapping, Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, ClassVar
 
@@ -75,26 +60,6 @@ from almanak.connectors._base.types import ProtocolKind, ProtocolName
 from ..addresses import GMX_V2
 
 logger = logging.getLogger(__name__)
-
-# Default per-market hourly funding rates — fallback when the on-chain
-# fetch fails / times out. Moved verbatim from
-# ``funding_rate_service.DEFAULT_RATES["gmx_v2"]``.
-_GMX_V2_DEFAULT_RATES: dict[str, Decimal] = {
-    "ETH-USD": Decimal("0.000012"),
-    "BTC-USD": Decimal("0.000010"),
-    "ARB-USD": Decimal("0.000015"),
-    "LINK-USD": Decimal("0.000008"),
-    "SOL-USD": Decimal("0.000018"),
-}
-
-# Historical fallback for unknown markets (matches the previous
-# ``_get_default_rate`` second arg to ``.get``).
-_UNKNOWN_MARKET_DEFAULT = Decimal("0.00001")
-
-# W7: markets the cross-venue Hyperliquid fallback can serve for GMX.
-# Equal to the intersection of the pre-W7 funding fallback chain
-# (history.py:L878–L894) and Hyperliquid's coverage.
-_GMX_HISTORICAL_MARKETS = frozenset({"ETH-USD", "BTC-USD", "ARB-USD", "LINK-USD", "SOL-USD"})
 
 # ``Reader.getMarketInfo`` ABI. The output struct must be declared in FULL:
 # eth-abi decodes strictly, so a partial ``MarketInfo`` (the pre-consolidation
@@ -409,130 +374,93 @@ class GmxV2GatewayConnector(
     def venue(self) -> str:
         return "gmx_v2"
 
-    def default_funding_rate(self, market: str) -> Decimal:
-        from almanak.core.perp_markets import perp_market_funding_key
+    async def _resolve_funding_market(
+        self,
+        servicer: Any,
+        *,
+        market: str,
+        market_address: str,
+        chain: str,
+    ) -> PerpMarketRecord:
+        """Resolve and verify one exact GMX market identity for funding."""
+        from almanak.core.perp_markets import perp_market_base
+        from almanak.gateway.services.pt_rpc_adapter import build_gateway_eth_call
+        from almanak.gateway.services.rate_history_service import RateHistoryUnavailable
 
-        return _GMX_V2_DEFAULT_RATES.get(perp_market_funding_key(market) or market, _UNKNOWN_MARKET_DEFAULT)
+        query = market_address.strip() or market
+        try:
+            record = await self._market_registry.resolve(
+                chain=chain,
+                market=query,
+                eth_call=build_gateway_eth_call(chain=chain, network=servicer.settings.network),
+                allow_delisted_address=False,
+            )
+        except Exception as exc:
+            raise RateHistoryUnavailable(
+                "gmx_market_registry",
+                f"GMX market identity could not be verified for {market!r} on {chain}: {exc}",
+            ) from exc
+        if record is None:
+            raise RateHistoryUnavailable(
+                "gmx_market_registry",
+                f"GMX market {query!r} does not exist or is not listed on {chain}",
+            )
+        requested_base = perp_market_base(market)
+        if requested_base is not None and requested_base.upper() != record.index_symbol.upper():
+            raise RateHistoryUnavailable(
+                "gmx_market_registry",
+                f"GMX market address {record.market_token} is {record.index_symbol}, not requested {market}",
+            )
+        return record
 
     async def fetch_funding_rate(
         self,
         servicer: Any,
         market: str,
         chain: str,
+        market_address: str = "",
     ) -> Any:
-        """Fetch the live GMX V2 funding rate via ``Reader.getMarketInfo``.
+        """Fetch the latest completed GMX-native hourly funding snapshot.
 
-        Reader / DataStore come from ``GMX_V2`` and the market token from
-        the dynamic market registry — venue-catalogue discovery whose address
-        tuple is verified on-chain via ``Reader.getMarket`` before use
-        (``GmxV2MarketRegistry``); the servicer contributes its shared web3
-        cache (``_get_web3``) and default mark prices. Any chain/market the
-        registry cannot resolve, and any RPC or decode failure, falls back to
-        the connector's default rate with ``is_live_data=False``.
-
-        Live funding requires an unambiguous market — an exact market
-        address, a full market name, or a pair label listing exactly one
-        market. GMX funding factors are per market token, so an ambiguous
-        pair label is never guessed at: it gets the default rate.
+        The indexer observation is not a realtime quote. Its actual timestamp
+        is returned and ``is_live_data`` remains false.
         """
-        from almanak.core.perp_markets import perp_market_funding_key, perp_market_pair_key
+        from almanak.core.perp_markets import perp_market_funding_key
         from almanak.gateway.services.funding_rate_service import FundingRateData
 
-        # Canonicalize defensively (the RPC ingress already does): the
-        # default-rate table is keyed by the dash form, the market
-        # catalogue by the slash form.
+        from .funding_history import fetch_latest_gmx_funding_snapshot
+
         market = perp_market_funding_key(market) or market
-        rate_hourly = self.default_funding_rate(market)
-        open_interest_long = Decimal("125000000")
-        open_interest_short = Decimal("118000000")
-        mark_price = servicer._get_default_mark_price(market)
-        is_live_data = False
-
-        contracts = GMX_V2.get(chain, {})
-        reader_address = contracts.get("reader")
-        data_store_address = contracts.get("data_store")
-
-        web3 = await servicer._get_web3(chain) if reader_address and data_store_address else None
-        market_address: str | None = None
-        if web3 is not None:
-            try:
-                from almanak.gateway.services.pt_rpc_adapter import build_gateway_eth_call
-
-                record = await self._market_registry.resolve(
-                    chain=chain,
-                    market=perp_market_pair_key(market) or market,
-                    eth_call=build_gateway_eth_call(chain=chain, network=servicer.settings.network),
-                    # No index-equivalence: GMX funding factors are scoped to
-                    # the individual market token, so two collateral variants
-                    # of one pair label carry different rates. An ambiguous
-                    # label raises inside this guarded block and falls through
-                    # to the default rate — refuse to guess rather than serve
-                    # an arbitrary variant's live rate under the pair's name.
-                    # Exact addresses and full market names resolve precisely.
-                )
-                market_address = record.market_token if record is not None else None
-                if market_address is None:
-                    logger.debug("GMX V2 market %s is not in the venue catalogue for %s", market, chain)
-            except Exception as e:
-                # Fail open to the default rate: resolution errors (catalogue
-                # outage, ambiguous/unknown market, verification failure) must
-                # degrade exactly like an RPC failure, never propagate.
-                logger.warning("Failed to resolve GMX V2 market %s on %s: %s", market, chain, e)
-                market_address = None
-
-        if web3 is not None and market_address is not None:
-            try:
-                reader = web3.eth.contract(
-                    address=web3.to_checksum_address(reader_address),
-                    abi=GMX_V2_READER_GET_MARKET_INFO_ABI,
-                )
-
-                # Approximate 30-decimal prices: getMarketInfo needs a price
-                # triple to value the pool for its borrowing-factor fields,
-                # but the funding factor this fetch consumes derives from USD
-                # open interest, so coarse prices do not distort it.
-                eth_price = 3000 * 10**30
-                btc_price = 60000 * 10**30
-                price = btc_price if "BTC" in market else eth_price
-                market_prices = (
-                    (price, price),  # indexTokenPrice (min, max)
-                    (price, price),  # longTokenPrice
-                    (1 * 10**30, 1 * 10**30),  # shortTokenPrice (USDC = $1)
-                )
-
-                market_info = await asyncio.wait_for(
-                    reader.functions.getMarketInfo(
-                        web3.to_checksum_address(data_store_address),
-                        market_prices,
-                        web3.to_checksum_address(market_address),
-                    ).call(),
-                    timeout=10.0,
-                )
-
-                funding_per_second = _signed_funding_factor_per_second(market_info)
-                rate_hourly = funding_per_second * Decimal("3600")
-                is_live_data = True
-                logger.debug("Fetched GMX V2 rate for %s: %s/hour (live)", market, rate_hourly)
-
-            except TimeoutError:
-                logger.warning("Timeout fetching GMX V2 rate for %s", market)
-            except Exception as e:
-                logger.warning("Failed to fetch GMX V2 rate for %s: %s", market, e)
-
-        # GMX V2 settles funding hourly.
-        now = datetime.now(UTC)
-        next_hour = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+        record = await self._resolve_funding_market(
+            servicer,
+            market=market,
+            market_address=market_address,
+            chain=chain,
+        )
+        completed_hour = int(datetime.now(UTC).timestamp() // 3600) * 3600 - 3600
+        point = await fetch_latest_gmx_funding_snapshot(
+            await servicer._get_http_session(),
+            chain=chain,
+            market_address=record.market_token,
+            end_ts=completed_hour,
+        )
+        assert point.rate_hourly is not None
+        observed_at = datetime.fromtimestamp(point.timestamp, tz=UTC)
 
         return FundingRateData(
             venue="gmx_v2",
             market=market,
-            rate_hourly=rate_hourly,
-            open_interest_long=open_interest_long,
-            open_interest_short=open_interest_short,
-            mark_price=mark_price,
-            index_price=mark_price,
-            next_funding_time=next_hour,
-            is_live_data=is_live_data,
+            rate_hourly=point.rate_hourly,
+            long_rate_hourly=point.long_rate_hourly,
+            short_rate_hourly=point.short_rate_hourly,
+            market_address=record.market_token,
+            open_interest_long=None,
+            open_interest_short=None,
+            mark_price=None,
+            index_price=None,
+            next_funding_time=None,
+            is_live_data=False,
+            observed_at=observed_at,
         )
 
     def coingecko_ids(self) -> dict[str, str]:
@@ -592,17 +520,17 @@ class GmxV2GatewayConnector(
         """Venue identifier matching :meth:`venue` for the live capability."""
         return "gmx_v2"
 
-    def funding_supported_markets(self) -> frozenset[str]:
-        """Markets the Hyperliquid cross-venue fallback can serve for GMX."""
-        return _GMX_HISTORICAL_MARKETS
+    def funding_supported_markets(self) -> frozenset[str] | None:
+        """GMX markets are discovered and verified dynamically by address."""
+        return None
 
     def funding_history_source(self, chain: str) -> FundingHistorySource:
-        """Identify the same upstream budget Hyperliquid history consumes."""
+        """Chain-scoped budget for GMX's official Synthetics indexer."""
         return FundingHistorySource(
-            key="hyperliquid_info",
-            scope="",
-            requests_per_minute=30,
-            burst_size=6,
+            key="gmx_synthetics_subsquid",
+            scope=chain,
+            requests_per_minute=60,
+            burst_size=10,
         )
 
     async def fetch_funding_history(
@@ -610,42 +538,24 @@ class GmxV2GatewayConnector(
         servicer: Any,
         *,
         market: str,
+        market_address: str,
         chain: str,
         start_ts: int,
         end_ts: int,
     ) -> Any:
-        """Cross-venue funding-history fallback through Hyperliquid.
+        """Verified exact-market funding history from GMX's own indexer."""
+        from .funding_history import fetch_gmx_funding_history
 
-        GMX V2 has no native historical funding endpoint. The pre-W7
-        ``framework/data/rates/history.py:_fetch_funding_with_fallback``
-        routed both ``venue="hyperliquid"`` and ``venue="gmx_v2"`` to the
-        Hyperliquid Info API because the two venues quote the same
-        reference markets (ETH-USD, BTC-USD, etc.). This capability
-        preserves that behaviour by delegating to the Hyperliquid
-        connector via ``GATEWAY_REGISTRY``.
-        """
-        from almanak.connectors._base.gateway_capabilities import (
-            GatewayFundingHistoryCapability,
-        )
-        from almanak.connectors._gateway_registry import GATEWAY_REGISTRY
-        from almanak.gateway.services.rate_history_service import RateHistoryUnavailable
-
-        hyperliquid_provider: GatewayFundingHistoryCapability | None = None
-        for provider in GATEWAY_REGISTRY.capability_providers(GatewayFundingHistoryCapability):  # type: ignore[type-abstract]
-            if provider.funding_venue().lower() == "hyperliquid":
-                hyperliquid_provider = provider
-                break
-
-        if hyperliquid_provider is None:
-            raise RateHistoryUnavailable(
-                "gmx_v2",
-                "GMX V2 historical funding requires the Hyperliquid connector to be registered (cross-venue fallback)",
-            )
-
-        return await hyperliquid_provider.fetch_funding_history(
+        record = await self._resolve_funding_market(
             servicer,
             market=market,
+            market_address=market_address,
             chain=chain,
+        )
+        return await fetch_gmx_funding_history(
+            await servicer._get_http_session(),
+            chain=chain,
+            market_address=record.market_token,
             start_ts=start_ts,
             end_ts=end_ts,
         )

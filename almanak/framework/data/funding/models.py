@@ -126,6 +126,11 @@ class FundingRate:
     mark_price: Decimal | None = None
     index_price: Decimal | None = None
     is_live_data: bool = True
+    # Additive fields remain after the legacy positional ABI. Signed payment
+    # rates are positive when the position receives and negative when it pays.
+    long_rate_hourly: Decimal | None = None
+    short_rate_hourly: Decimal | None = None
+    market_address: str | None = None
 
     @property
     def rate_percent_8h(self) -> Decimal:
@@ -150,6 +155,9 @@ class FundingRate:
             "rate_hourly": str(self.rate_hourly),
             "rate_8h": str(self.rate_8h),
             "rate_annualized": str(self.rate_annualized),
+            "long_rate_hourly": str(self.long_rate_hourly) if self.long_rate_hourly is not None else None,
+            "short_rate_hourly": str(self.short_rate_hourly) if self.short_rate_hourly is not None else None,
+            "market_address": self.market_address,
             "rate_percent_8h": float(self.rate_percent_8h),
             "rate_percent_annualized": float(self.rate_percent_annualized),
             "timestamp": self.timestamp.isoformat(),

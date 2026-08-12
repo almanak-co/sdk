@@ -201,15 +201,15 @@ async def test_engine_installs_one_provider_for_every_generated_basket_target(
 
 
 @pytest.mark.asyncio
-async def test_funding_prewarm_materializes_every_pair_label() -> None:
+async def test_funding_prewarm_materializes_every_exact_market_identity() -> None:
     source = SimpleNamespace(history_capable=True, materialize_history=AsyncMock(return_value=12))
 
     await _prewarm_declared_funding_history(source, SimpleNamespace(), STAGING_BASKET_CONFIG)
 
     assert [call.args for call in source.materialize_history.await_args_list] == [
-        ("gmx_v2", "SOL/USD"),
-        ("gmx_v2", "DOGE/USD"),
-        ("gmx_v2", "AVAX/USD"),
+        ("gmx_v2", "SOL/USD", "0x09400d9db990d5ed3f35d7be61dfaeb900af03c9"),
+        ("gmx_v2", "DOGE/USD", "0x6853ea96ff216fab11d2d930ce3c508556a4bdc4"),
+        ("gmx_v2", "AVAX/USD", "0x7bbbf946883a5701350007320f525c5379b8178a"),
     ]
 
 

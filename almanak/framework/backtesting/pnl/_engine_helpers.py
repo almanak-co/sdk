@@ -706,7 +706,11 @@ async def _prewarm_declared_funding_history(
         return
     for target in declared_perp_price_history_targets(strategy, strategy_config):
         try:
-            point_count = await source.materialize_history(target.protocol, target.market)
+            point_count = await source.materialize_history(
+                target.protocol,
+                target.market,
+                target.market_address or "",
+            )
         except DataSourceError as exc:
             if require_complete:
                 raise
@@ -718,7 +722,11 @@ async def _prewarm_declared_funding_history(
             )
             continue
         if require_complete:
-            checked_hours = await source.require_complete_history(target.protocol, target.market)
+            checked_hours = await source.require_complete_history(
+                target.protocol,
+                target.market,
+                target.market_address or "",
+            )
             logger.info(
                 "Validated %d hours of snapshot funding coverage for %s %s before tick 1",
                 checked_hours,
@@ -1358,6 +1366,12 @@ def _resolve_tick_ohlcv_timeframes(
     return tick_label, tick_timeframe, default_timeframe
 
 
+def _requires_complete_funding_history(backtester: PnLBacktester) -> bool:
+    """Whether the execution path must repeat strict funding readiness."""
+    data_config = backtester.data_config
+    return bool(data_config is not None and data_config.use_historical_funding and data_config.strict_historical_mode)
+
+
 async def execute_iteration_loop(
     backtester: PnLBacktester,
     strategy: BacktestableStrategy,
@@ -1399,6 +1413,7 @@ async def execute_iteration_loop(
         funding_rate_source,
         strategy,
         state.strategy_config,
+        require_complete=_requires_complete_funding_history(backtester),
     )
     twap_source = await _prepare_declared_historical_twap(
         strategy,

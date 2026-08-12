@@ -149,6 +149,8 @@ class FundingResult:
 
     rate: Decimal
     source_info: DataSourceInfo
+    long_rate_hourly: Decimal | None = None
+    short_rate_hourly: Decimal | None = None
 
 
 @dataclass
