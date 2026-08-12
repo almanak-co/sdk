@@ -135,6 +135,35 @@ class TestBacktestIndicatorEngineInit:
         assert default_timeframe is OHLCVTimeframe.ONE_HOUR
         bt_logger.warning.assert_not_called()
 
+    def test_strategy_data_granularity_is_snapshot_default(self) -> None:
+        bt_logger = MagicMock()
+
+        label, tick_timeframe, default_timeframe = _resolve_tick_ohlcv_timeframes(
+            3600,
+            bt_logger,
+            {"data_granularity": "4h"},
+        )
+
+        assert label == "1h"
+        assert tick_timeframe is OHLCVTimeframe.ONE_HOUR
+        assert default_timeframe is OHLCVTimeframe.FOUR_HOURS
+        bt_logger.warning.assert_not_called()
+
+    def test_noncanonical_tick_warning_identifies_configured_granularity(self) -> None:
+        bt_logger = MagicMock()
+
+        _, tick_timeframe, default_timeframe = _resolve_tick_ohlcv_timeframes(
+            1800,
+            bt_logger,
+            {"data_granularity": "4h"},
+        )
+
+        assert tick_timeframe is None
+        assert default_timeframe is OHLCVTimeframe.FOUR_HOURS
+        warning = bt_logger.warning.call_args.args[0]
+        assert "configured strategy data_granularity 4h" in warning
+        assert "derived exactly from the tick cadence" not in warning
+
 
 # =============================================================================
 # Price Buffer Tests

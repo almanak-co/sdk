@@ -113,6 +113,7 @@ async def check_backtest_readiness(
         )
         assert state.data_broker is not None
         observations_checked = 0
+        token_addresses = _engine_helpers._registered_token_addresses(backtester)
         with data_broker_scope(state.data_broker):
             funding_source = SnapshotFundingRateSource(
                 chain=readiness_config.chain,
@@ -143,8 +144,19 @@ async def check_backtest_readiness(
 
             async for timestamp, market_state in backtester.data_provider.iterate(state.data_config):
                 for token in state.data_config.tokens:
+                    price_token = _engine_helpers._normalize_token(
+                        token,
+                        readiness_config.chain,
+                        token_addresses,
+                    )
+                    # Cash equivalents are accounted for in ``portfolio.cash_usd``;
+                    # the execution engine does not consume provider prices for
+                    # them. Use the portfolio's canonical, address-aware identity
+                    # check so readiness enforces the same dependency contract.
+                    if state.portfolio.is_cash_equivalent(price_token):
+                        continue
                     try:
-                        price = market_state.get_price(token)
+                        price = market_state.get_price(price_token)
                     except KeyError as exc:
                         raise ValueError(
                             f"No historical USD price for {token!r} at {timestamp.isoformat()} "
