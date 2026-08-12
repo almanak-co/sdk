@@ -14,10 +14,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from almanak.connectors.curve.receipt_parser import (
+    CURVE_NATIVE_ETH_PLACEHOLDER,
     EVENT_TOPICS,
     CurveEventType,
     CurveReceiptParser,
 )
+from almanak.framework.execution.extract_result import ExtractError, ExtractOk
 
 
 def _make_topic(hex_str: str) -> str:
@@ -273,6 +275,152 @@ class TestExtractSwapAmountsDecimals:
         assert result.amount_in_decimal == Decimal("2000")
         assert result.amount_out_decimal == Decimal("1")
         assert result.effective_price == Decimal("0.0005")
+
+
+class TestNativeEthSwapLeg:
+    """ALM-3229: raw ETH has no Transfer log but remains a measured swap leg."""
+
+    STETH_POOL = "0xdc24316b9ae028f1497c275eb9192a3ea0f67022"
+    STETH = "0xae7ab96520de3a18e5e111b5eaab095312d7fe84"
+    NATIVE_ETH = CURVE_NATIVE_ETH_PLACEHOLDER.lower()
+
+    @pytest.mark.parametrize(
+        ("direction", "token_in", "token_out", "sold_id", "bought_id", "missing_log_index"),
+        [
+            ("entry", NATIVE_ETH, STETH, 0, 1, 0),
+            ("exit", STETH, NATIVE_ETH, 1, 0, -1),
+        ],
+    )
+    def test_native_leg_decodes_both_directions(
+        self,
+        direction: str,
+        token_in: str,
+        token_out: str,
+        sold_id: int,
+        bought_id: int,
+        missing_log_index: int,
+    ) -> None:
+        receipt = _build_swap_receipt(
+            pool=self.STETH_POOL,
+            token_in=token_in,
+            token_out=token_out,
+            sold_id=sold_id,
+            bought_id=bought_id,
+            tokens_sold=10**18,
+            tokens_bought=998_700_000_000_000_000,
+        )
+        receipt["logs"].pop(missing_log_index)
+
+        parser = CurveReceiptParser(chain="ethereum")
+        found_in, found_out = parser._find_swap_token_addresses(receipt)
+        if direction == "entry":
+            assert found_in == "", "raw ETH input must not fabricate an ERC-20 Transfer"
+            assert found_out == self.STETH
+        else:
+            assert found_in == self.STETH
+            assert found_out == "", "raw ETH output must not fabricate an ERC-20 Transfer"
+
+        resolver = _mock_resolver({self.NATIVE_ETH: 18, self.STETH: 18})
+        with patch("almanak.framework.data.tokens.get_token_resolver", return_value=resolver):
+            amounts = parser.extract_swap_amounts(receipt)
+            tagged = parser.extract_swap_amounts_result(receipt)
+
+        assert amounts is not None
+        assert amounts.amount_in_decimal == Decimal("1")
+        assert amounts.amount_out_decimal == Decimal("0.9987")
+        assert amounts.token_in == token_in
+        assert amounts.token_out == token_out
+        assert isinstance(tagged, ExtractOk)
+
+    def test_missing_non_native_transfer_still_fails_closed(self) -> None:
+        receipt = _build_swap_receipt(
+            pool=self.STETH_POOL,
+            token_in=self.STETH,
+            token_out=self.NATIVE_ETH,
+            sold_id=1,
+            bought_id=0,
+            tokens_sold=10**18,
+            tokens_bought=998_700_000_000_000_000,
+        )
+        # A real raw-ETH output has no Transfer; remove that synthetic log plus
+        # the stETH input Transfer whose absence this negative control targets.
+        receipt["logs"] = [receipt["logs"][1]]
+
+        parser = CurveReceiptParser(chain="ethereum")
+        resolver = _mock_resolver({self.NATIVE_ETH: 18, self.STETH: 18})
+        with patch("almanak.framework.data.tokens.get_token_resolver", return_value=resolver):
+            assert parser.extract_swap_amounts(receipt) is None
+            assert isinstance(parser.extract_swap_amounts_result(receipt), ExtractError)
+
+    def test_transfer_derived_identity_is_never_overwritten_by_native_slot(self) -> None:
+        transfer_token = "0x6b175474e89094c44da98b954eedeac495271d0f"
+        receipt = _build_swap_receipt(
+            pool=self.STETH_POOL,
+            token_in=transfer_token,
+            token_out=self.STETH,
+            sold_id=0,
+            bought_id=1,
+            tokens_sold=10**18,
+            tokens_bought=998_700_000_000_000_000,
+        )
+        receipt["logs"].pop(-1)
+
+        parser = CurveReceiptParser(chain="ethereum")
+        parsed = parser.parse_receipt(receipt)
+        found_in, found_out = parser._find_swap_token_addresses(receipt)
+        assert parsed.swap_events
+        assert found_in == transfer_token
+        assert found_out == ""
+
+        filled_in, filled_out = parser._fill_native_swap_leg(
+            parsed,
+            parsed.swap_events[0],
+            found_in,
+            found_out,
+        )
+
+        assert filled_in == transfer_token
+        assert filled_out == ""
+
+    def test_native_fill_cannot_hide_corrupt_exchange_decode(self) -> None:
+        receipt = _build_swap_receipt(
+            pool=self.STETH_POOL,
+            token_in=self.NATIVE_ETH,
+            token_out=self.STETH,
+            sold_id=0,
+            bought_id=1,
+            tokens_sold=10**18,
+            tokens_bought=998_700_000_000_000_000,
+        )
+        receipt["logs"].pop(0)
+        receipt["logs"][0]["data"] = "0x"
+
+        parser = CurveReceiptParser(chain="ethereum")
+        resolver = _mock_resolver({self.NATIVE_ETH: 18, self.STETH: 18})
+        with patch("almanak.framework.data.tokens.get_token_resolver", return_value=resolver):
+            tagged = parser.extract_swap_amounts_result(receipt)
+
+        assert isinstance(tagged, ExtractError)
+        assert "raw_data" in tagged.error
+
+    def test_underlying_indices_are_not_mapped_through_native_coin_vector(self) -> None:
+        receipt = _build_swap_receipt(
+            pool=self.STETH_POOL,
+            token_in=self.NATIVE_ETH,
+            token_out=self.STETH,
+            sold_id=0,
+            bought_id=1,
+            tokens_sold=10**18,
+            tokens_bought=998_700_000_000_000_000,
+        )
+        receipt["logs"].pop(0)
+        receipt["logs"][0]["topics"][0] = _make_topic(EVENT_TOPICS["TokenExchangeUnderlying"])
+
+        parser = CurveReceiptParser(chain="ethereum")
+        resolver = _mock_resolver({self.NATIVE_ETH: 18, self.STETH: 18})
+        with patch("almanak.framework.data.tokens.get_token_resolver", return_value=resolver):
+            assert parser.extract_swap_amounts(receipt) is None
+            assert isinstance(parser.extract_swap_amounts_result(receipt), ExtractError)
 
 
 # =============================================================================

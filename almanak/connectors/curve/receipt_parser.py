@@ -796,6 +796,17 @@ class CurveReceiptParser:
                                   uint256 bought_id, uint256 tokens_bought)
         """
         try:
+            # Every supported TokenExchange layout has four 32-byte data words.
+            # HexDecoder returns zero for missing words, so reject a truncated
+            # but valid EVM log before it becomes measured-zero accounting.
+            normalized_data = HexDecoder.normalize_hex(data)
+            if len(normalized_data) < 4 * 64:
+                logger.warning(
+                    "TokenExchange payload too short (%d hex chars, need >=256); failing closed to raw_data",
+                    len(normalized_data),
+                )
+                return {"raw_data": data}
+
             # Indexed: buyer
             buyer = HexDecoder.topic_to_address(topics[1]) if len(topics) > 1 else ""
 
@@ -1476,6 +1487,12 @@ class CurveReceiptParser:
 
             # Find token addresses from ERC-20 Transfer events in the receipt
             token_in_addr, token_out_addr = self._find_swap_token_addresses(receipt)
+            token_in_addr, token_out_addr = self._fill_native_swap_leg(
+                result,
+                swap,
+                token_in_addr,
+                token_out_addr,
+            )
 
             # Resolve actual decimals for accurate conversion
             decimals_in = self._resolve_decimals(token_in_addr)
@@ -1574,6 +1591,59 @@ class CurveReceiptParser:
                 token_out_addr = token_address  # last Transfer TO wallet wins
 
         return (token_in_addr, token_out_addr)
+
+    def _fill_native_swap_leg(
+        self,
+        parsed: ParseResult,
+        swap: SwapEventData,
+        token_in_addr: str,
+        token_out_addr: str,
+    ) -> tuple[str, str]:
+        """Recover a raw-native swap leg that has no ERC-20 Transfer (ALM-3229).
+
+        Curve pools such as Ethereum's stETH pool hold raw ETH. The native leg
+        moves as call value and therefore cannot be discovered by
+        :meth:`_find_swap_token_addresses`. Recover only that missing identity
+        from the emitting pool's ordered coin vector and the decoded
+        ``sold_id``/``bought_id``. Existing Transfer-derived identities are never
+        overwritten, and a missing non-native identity remains unresolved so the
+        caller fails closed.
+
+        ``TokenExchangeUnderlying`` indices address a metapool's combined coin
+        space rather than its native coin vector, so this native-vector fallback
+        does not apply to underlying swaps.
+        """
+        if token_in_addr and token_out_addr:
+            return token_in_addr, token_out_addr
+
+        first_swap_event = next(
+            (
+                event
+                for event in parsed.events
+                if event.event_type in (CurveEventType.TOKEN_EXCHANGE, CurveEventType.TOKEN_EXCHANGE_UNDERLYING)
+            ),
+            None,
+        )
+        if first_swap_event is None or first_swap_event.event_type is CurveEventType.TOKEN_EXCHANGE_UNDERLYING:
+            return token_in_addr, token_out_addr
+
+        pool_address = str(swap.pool_address or "").lower()
+        if not pool_address:
+            return token_in_addr, token_out_addr
+
+        coin_addresses = _pool_coin_addresses(pool_address, self.chain, self._pool_meta_lookup)
+        native_slots = [
+            index for index, address in enumerate(coin_addresses) if address.lower() == _NATIVE_ETH_PLACEHOLDER_LC
+        ]
+        if len(native_slots) != 1:
+            return token_in_addr, token_out_addr
+
+        native_slot = native_slots[0]
+        if not token_in_addr and swap.sold_id == native_slot:
+            token_in_addr = _NATIVE_ETH_PLACEHOLDER_LC
+        if not token_out_addr and swap.bought_id == native_slot:
+            token_out_addr = _NATIVE_ETH_PLACEHOLDER_LC
+        return token_in_addr, token_out_addr
 
     def _resolve_decimals(self, token_address: str) -> int | None:
         """Resolve token decimals via the token resolver.
