@@ -88,7 +88,6 @@ _ADDRESSES: dict[str, dict[str, str]] = {
         "LDO/USD": "0x4e844125952d32acdF339be976C98FE6D1F5F8bE",
         "WSTETH/USD": "0x164b276057258D81941072Eb5f9D7F71C3Dd94b8",
         "CBETH/USD": "0xF017fcB346A1885194689bA23Eff2fE6fA5C483b",
-        "RETH/USD": "0x536218f9E9Eb48863970252233c8F271f554C2d0",
         "SOL/USD": "0x4ffC43a60e009B551865A93d232E33Fce9f01507",
     },
     "linea": {
@@ -147,7 +146,13 @@ _REFERENCE_ADDRESSES: dict[str, dict[str, str]] = {
 _ETH_ADDRESSES: dict[str, dict[str, str]] = {
     "arbitrum": {"WSTETH/ETH": "0xb523AE262D20A936BC152e6023996e46FDC2A95D"},
     "base": {"WSTETH/ETH": "0x43a5C292A453A3bF3606fa856197f09D7B74251a"},
-    "ethereum": {"WSTETH/ETH": "0x86392dC19c0b719886221c78AB11eb8Cf5c52812"},
+    "ethereum": {
+        "WSTETH/ETH": "0x86392dC19c0b719886221c78AB11eb8Cf5c52812",
+        # Chainlink Data Feeds directory: RETH/ETH, 18 decimals. This is not
+        # a USD feed; public RETH/USD prices are derived with ETH/USD.
+        # https://data.chain.link/feeds/ethereum/mainnet/reth-eth
+        "RETH/ETH": "0x536218f9E9Eb48863970252233c8F271f554C2d0",
+    },
 }
 
 TOKEN_TO_PAIR: Mapping[str, str] = MappingProxyType(
@@ -173,7 +178,6 @@ TOKEN_TO_PAIR: Mapping[str, str] = MappingProxyType(
         "WSTETH": "WSTETH/USD",
         "STETH": "WSTETH/USD",
         "CBETH": "CBETH/USD",
-        "RETH": "RETH/USD",
         "SOL": "SOL/USD",
         "AVAX": "AVAX/USD",
         "WAVAX": "AVAX/USD",
@@ -190,7 +194,9 @@ TOKEN_TO_PAIR: Mapping[str, str] = MappingProxyType(
         "WS": "S/USD",
     }
 )
-TOKEN_TO_ETH_PAIR: Mapping[str, str] = MappingProxyType({"WSTETH": "WSTETH/ETH", "STETH": "WSTETH/ETH"})
+TOKEN_TO_ETH_PAIR: Mapping[str, str] = MappingProxyType(
+    {"WSTETH": "WSTETH/ETH", "STETH": "WSTETH/ETH", "RETH": "RETH/ETH"}
+)
 
 _HEARTBEATS = {
     "ETH/USD": 3600,
@@ -200,6 +206,7 @@ _HEARTBEATS = {
     "USDT/USD": 86400,
     "DAI/USD": 3600,
     "XAU/USD": 600,
+    "RETH/ETH": 86400,
 }
 _DEVIATIONS = {
     "ETH/USD": Decimal("0.5"),
@@ -208,6 +215,7 @@ _DEVIATIONS = {
     "USDC/USD": Decimal("0.25"),
     "USDT/USD": Decimal("0.25"),
     "DAI/USD": Decimal("0.25"),
+    "RETH/ETH": Decimal("2.0"),
 }
 
 
@@ -231,7 +239,14 @@ class ChainlinkCatalog:
             }
             for pair, address in _ETH_ADDRESSES.get(chain, {}).items():
                 chain_specs[pair] = FeedSpec(
-                    chain=chain, chain_id=chain_id, pair=pair, address=address, kind=FeedKind.ETH, decimals=18
+                    chain=chain,
+                    chain_id=chain_id,
+                    pair=pair,
+                    address=address,
+                    kind=FeedKind.ETH,
+                    decimals=18,
+                    heartbeat_seconds=_HEARTBEATS.get(pair, 3600),
+                    deviation_threshold_pct=_DEVIATIONS.get(pair, Decimal("1.0")),
                 )
             for pair, address in _REFERENCE_ADDRESSES.get(chain, {}).items():
                 chain_specs[pair] = FeedSpec(

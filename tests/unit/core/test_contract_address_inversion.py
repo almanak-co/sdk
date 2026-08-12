@@ -2,7 +2,7 @@
 
 Chainlink feeds, the Safe multisend map, LP position managers, and the
 Enso bridge token table move to integration / descriptor / connector ownership. Every
-legacy literal is frozen verbatim below; the four DELIBERATE divergences
+legacy literal is frozen verbatim below; the deliberate divergences
 are pinned individually, each backed by on-chain evidence gathered on
 2026-06-11 (eth_getCode: the legacy addresses are EMPTY, the registry
 addresses hold the real contracts).
@@ -41,7 +41,6 @@ FROZEN_CHAINLINK_PRICE_FEEDS: dict[str, dict[str, str]] = {
         "LDO/USD": "0x4e844125952d32acdF339be976C98FE6D1F5F8bE",
         "WSTETH/USD": "0x164b276057258D81941072Eb5f9D7F71C3Dd94b8",
         "CBETH/USD": "0xF017fcB346A1885194689bA23Eff2fE6fA5C483b",
-        "RETH/USD": "0x536218f9E9Eb48863970252233c8F271f554C2d0",
         "SOL/USD": "0x4ffC43a60e009B551865A93d232E33Fce9f01507",
     },
     "arbitrum": {
@@ -146,6 +145,9 @@ FROZEN_CHAINLINK_CHAIN_IDS: dict[str, int] = {
 FROZEN_ETH_DENOMINATED_FEEDS: dict[str, dict[str, str]] = {
     "ethereum": {
         "WSTETH/ETH": "0x86392dC19c0b719886221c78AB11eb8Cf5c52812",
+        # ALM-3252: Chainlink's Data Feeds directory identifies this as RETH/ETH;
+        # decimals() independently establishes its 18-decimal precision.
+        "RETH/ETH": "0x536218f9E9Eb48863970252233c8F271f554C2d0",
     },
     "arbitrum": {
         "WSTETH/ETH": "0xb523AE262D20A936BC152e6023996e46FDC2A95D",

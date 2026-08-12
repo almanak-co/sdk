@@ -1,6 +1,7 @@
 """Tests for ChainlinkPriceSource -- Chainlink on-chain pricing."""
 
 import time
+from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock, patch
 
@@ -8,6 +9,7 @@ import pytest
 
 from almanak.integrations.chainlink.catalog import CATALOG
 from almanak.integrations.chainlink.gateway.live import ChainlinkPriceSource
+from almanak.integrations.chainlink.models import ChainlinkFeedObservation
 
 
 @pytest.fixture(autouse=True)
@@ -192,7 +194,12 @@ class TestChainlinkPricing:
             source,
             "_fetch_chainlink",
             new_callable=AsyncMock,
-            return_value=(Decimal("0.92"), 0.95),
+            return_value=ChainlinkFeedObservation(
+                price=Decimal("0.92"),
+                updated_at=datetime.now(UTC),
+                confidence=0.95,
+                stale=False,
+            ),
         ) as fetch:
             result = await source.get_price("USDC", "USD", bypass_stablecoin_fallback=True)
 
@@ -216,6 +223,9 @@ class TestChainlinkPricing:
 
         assert result.price == Decimal("2500.12345678")
         assert result.source == "onchain_chainlink"
+        # Freshness and downstream staleness checks must use Chainlink's
+        # measured updatedAt, never the gateway receipt time.
+        assert result.timestamp == datetime.fromtimestamp(now, tz=UTC)
         assert result.confidence == 0.95
         assert result.stale is False
         await source.close()
@@ -302,6 +312,20 @@ class TestStaleness:
 
         assert result.confidence == 0.95
         assert result.stale is False
+        await source.close()
+
+    @pytest.mark.asyncio
+    async def test_direct_stablecoin_feed_retains_one_hour_safety_threshold(self) -> None:
+        source = ChainlinkPriceSource(chain="ethereum")
+        source._chain_id_validated = True
+        stale_time = int(time.time()) - 7_200
+        response = _build_chainlink_response(100_000_000, stale_time)
+
+        with patch.object(source, "_eth_call", new_callable=AsyncMock, return_value=response):
+            result = await source.get_price("USDC", "USD", bypass_stablecoin_fallback=True)
+
+        assert result.stale is True
+        assert result.confidence == 0.85
         await source.close()
 
 
@@ -452,6 +476,20 @@ class TestErrorHandling:
 
         with patch.object(source, "_eth_call", new_callable=AsyncMock, return_value=mock_response):
             with pytest.raises(DataSourceUnavailable, match="non-positive answer"):
+                await source.get_price("ETH", "USD")
+
+        await source.close()
+
+    @pytest.mark.asyncio
+    async def test_future_updated_at_fails_closed(self) -> None:
+        from almanak.framework.data.interfaces import DataSourceUnavailable
+
+        source = ChainlinkPriceSource(chain="ethereum")
+        source._chain_id_validated = True
+        response = _build_chainlink_response(250_000_000_000, int(time.time()) + 7_200)
+
+        with patch.object(source, "_eth_call", new_callable=AsyncMock, return_value=response):
+            with pytest.raises(DataSourceUnavailable, match="invalid updatedAt"):
                 await source.get_price("ETH", "USD")
 
         await source.close()
@@ -722,6 +760,78 @@ class TestDerivedPricing:
         assert result.source == "onchain_derived"
         # Confidence: min(0.95, 0.95) * 0.95 = 0.9025
         assert result.confidence == pytest.approx(0.9025, abs=0.001)
+        await source.close()
+
+    @pytest.mark.asyncio
+    async def test_reth_usd_uses_reth_eth_and_eth_usd_with_exact_provenance(self) -> None:
+        source = ChainlinkPriceSource(chain="ethereum")
+        source._chain_id_validated = True
+        now = int(time.time())
+        reth_updated_at = now - 20
+        eth_updated_at = now - 5
+        responses = [
+            _build_chainlink_response(1_090_000_000_000_000_000, reth_updated_at),
+            _build_chainlink_response(250_000_000_000, eth_updated_at),
+        ]
+
+        with patch.object(source, "_eth_call", new_callable=AsyncMock, side_effect=responses):
+            result = await source.get_price("RETH", "USD")
+
+        assert result.price == Decimal("2725.00000000000000000000000000")
+        assert result.timestamp == datetime.fromtimestamp(reth_updated_at, tz=UTC)
+        assert result.stale is False
+        assert result.source == "onchain_derived"
+        assert result.source_details == {
+            "method": "derived",
+            "formula": "RETH/ETH * ETH/USD",
+            "feeds": [
+                {
+                    "pair": "RETH/ETH",
+                    "address": "0x536218f9e9eb48863970252233c8f271f554c2d0",
+                    "observed_at": datetime.fromtimestamp(reth_updated_at, tz=UTC).isoformat(),
+                },
+                {
+                    "pair": "ETH/USD",
+                    "address": "0x5f4ec3df9cbd43714fe2740f5e3616155c5b8419",
+                    "observed_at": datetime.fromtimestamp(eth_updated_at, tz=UTC).isoformat(),
+                },
+            ],
+        }
+        await source.close()
+
+    @pytest.mark.asyncio
+    async def test_reth_usd_is_stale_when_either_leg_exceeds_its_heartbeat(self) -> None:
+        source = ChainlinkPriceSource(chain="ethereum")
+        source._chain_id_validated = True
+        now = int(time.time())
+        responses = [
+            _build_chainlink_response(1_090_000_000_000_000_000, now - 86_401),
+            _build_chainlink_response(250_000_000_000, now),
+        ]
+
+        with patch.object(source, "_eth_call", new_callable=AsyncMock, side_effect=responses):
+            result = await source.get_price("RETH", "USD")
+
+        assert result.stale is True
+        assert result.timestamp == datetime.fromtimestamp(now - 86_401, tz=UTC)
+        await source.close()
+
+    @pytest.mark.asyncio
+    async def test_reth_usd_remains_fresh_past_legacy_one_hour_threshold(self) -> None:
+        source = ChainlinkPriceSource(chain="ethereum")
+        source._chain_id_validated = True
+        now = int(time.time())
+        reth_updated_at = now - 7_200
+        responses = [
+            _build_chainlink_response(1_090_000_000_000_000_000, reth_updated_at),
+            _build_chainlink_response(250_000_000_000, now),
+        ]
+
+        with patch.object(source, "_eth_call", new_callable=AsyncMock, side_effect=responses):
+            result = await source.get_price("RETH", "USD")
+
+        assert result.stale is False
+        assert result.timestamp == datetime.fromtimestamp(reth_updated_at, tz=UTC)
         await source.close()
 
     @pytest.mark.asyncio

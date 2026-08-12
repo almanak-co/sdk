@@ -20,6 +20,7 @@ These tests pin, in order:
 ``test_price_source_chain_guard.py``.)
 """
 
+from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -29,6 +30,7 @@ import pytest
 from almanak.framework.data.interfaces import BalanceResult, PriceResult
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.services.market_service import _NO_CHAIN_KEY, MarketServiceServicer
+from almanak.integrations.chainlink.models import ChainlinkFeedObservation
 
 
 def _settings(chains: list[str]) -> GatewaySettings:
@@ -164,7 +166,14 @@ class TestEvmChainRouting:
         chainlink_source = next(s for s in arb_agg.sources if s.source_name == "onchain")
         arb_agg._sources = [chainlink_source]
         chainlink_source._chain_id_validated = True  # skip the eth_chainId RPC
-        fetch = AsyncMock(return_value=(Decimal("2500"), 1.0))
+        fetch = AsyncMock(
+            return_value=ChainlinkFeedObservation(
+                price=Decimal("2500"),
+                updated_at=datetime.now(UTC),
+                confidence=1.0,
+                stale=False,
+            )
+        )
 
         # The venue oracle must never be read for an arbitrum request.
         hyper_source = next(

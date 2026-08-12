@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 from almanak.integrations.chainlink.catalog import ChainlinkCatalog
 from almanak.integrations.chainlink.models import FeedKind
 
@@ -15,7 +17,7 @@ def test_feeds_normalizes_chain_and_filters_by_kind() -> None:
 
     assert all_feeds["ETH/USD"].kind is FeedKind.USD
     assert set(usd_feeds).isdisjoint(eth_feeds)
-    assert set(eth_feeds) == {"WSTETH/ETH"}
+    assert set(eth_feeds) == {"WSTETH/ETH", "RETH/ETH"}
     assert catalog.feeds("unknown") == {}
 
 
@@ -47,8 +49,24 @@ def test_token_alias_resolution_and_derived_feeds() -> None:
     assert catalog.feed_for_token("ethereum", "not-a-token") is None
     assert catalog.feed_for_token("unknown", "WETH") is None
     assert catalog.derived_feed_for_token(" ETHEREUM ", " steth ") == catalog.feed("ethereum", "WSTETH/ETH")
+    assert catalog.derived_feed_for_token("ethereum", "reth") == catalog.feed("ethereum", "RETH/ETH")
+    assert catalog.feed_for_token("ethereum", "reth") is None
     assert catalog.derived_feed_for_token("ethereum", "ETH") is None
     assert catalog.derived_feed_for_token("unknown", "WSTETH") is None
+
+
+def test_reth_address_is_catalogued_as_18_decimal_eth_feed_not_usd() -> None:
+    catalog = ChainlinkCatalog()
+
+    reth_eth = catalog.feed("ethereum", "RETH/ETH")
+
+    assert reth_eth is not None
+    assert reth_eth.address == "0x536218f9E9Eb48863970252233c8F271f554C2d0"
+    assert reth_eth.kind is FeedKind.ETH
+    assert reth_eth.decimals == 18
+    assert reth_eth.heartbeat_seconds == 86_400
+    assert reth_eth.deviation_threshold_pct == Decimal("2.0")
+    assert catalog.feed("ethereum", "RETH/USD") is None
 
 
 def test_chain_aliases_resolve_to_the_canonical_feed_catalogue() -> None:

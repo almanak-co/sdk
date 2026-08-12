@@ -55,6 +55,9 @@ from almanak.integrations.chainlink.models import CHAINLINK_SOURCE_NAME, Chainli
 
 logger = logging.getLogger(__name__)
 
+_DIRECT_PRICE_STALENESS_THRESHOLD_SECONDS = 3600
+_MAX_FUTURE_TIMESTAMP_SKEW_SECONDS = 60
+
 
 def _canonical_chain(chain: object | None) -> str | None:
     """Canonical lowercase chain name for cross-chain comparison, or ``None``.
@@ -68,12 +71,6 @@ def _canonical_chain(chain: object | None) -> str | None:
         return None
     desc = ChainRegistry.try_resolve(str(chain).lower())
     return desc.name if desc is not None else str(chain).lower()
-
-
-# Staleness threshold: warn if Chainlink updatedAt is older than this (seconds).
-# On Anvil forks, data is always "stale" by wall-clock since time doesn't advance,
-# so we log a warning but still return the price.
-_STALENESS_THRESHOLD = 3600  # 1 hour
 
 
 class RPCError(RuntimeError):
@@ -170,7 +167,7 @@ class ChainlinkPriceSource(BasePriceSource):
     @property
     def supported_tokens(self) -> list[str]:
         """Tokens supported via Chainlink feeds on this chain."""
-        return sorted(self._token_to_pair)
+        return sorted(set(self._token_to_pair) | set(self._token_to_eth_pair))
 
     @property
     def cache_ttl_seconds(self) -> int:
@@ -312,13 +309,18 @@ class ChainlinkPriceSource(BasePriceSource):
         pair = self._resolve_pair(token)
         if pair and pair in self._feeds:
             feed_address = self._feeds[pair]
-            price, confidence = await self._fetch_chainlink(feed_address, pair)
+            observation = await self._fetch_chainlink(feed_address, pair)
             result = PriceResult(
-                price=price,
+                price=observation.price,
                 source=f"{self.source_name}_chainlink",
-                timestamp=datetime.now(UTC),
-                confidence=confidence,
-                stale=confidence < 0.95,
+                timestamp=observation.updated_at,
+                confidence=observation.confidence,
+                stale=observation.stale,
+                source_details={
+                    "method": "direct",
+                    "pair": pair,
+                    "feed": feed_address.lower(),
+                },
             )
             self._cache[cache_key] = (result, time.time())
             return result
@@ -393,31 +395,48 @@ class ChainlinkPriceSource(BasePriceSource):
             return None
 
         try:
-            token_eth_price, token_eth_conf = await self._fetch_chainlink(self._eth_feeds[eth_pair], eth_pair)
-            eth_usd_price, eth_usd_conf = await self._fetch_chainlink(eth_usd_feed, "ETH/USD")
+            token_eth = await self._fetch_chainlink(self._eth_feeds[eth_pair], eth_pair)
+            eth_usd = await self._fetch_chainlink(eth_usd_feed, "ETH/USD")
         except DataSourceUnavailable as e:
             logger.debug("Derived price failed for %s: %s", token_upper, e)
             return None
 
-        derived_price = token_eth_price * eth_usd_price
+        derived_price = token_eth.price * eth_usd.price
         # Confidence is the minimum of both feeds, slightly penalized for composition
-        confidence = min(token_eth_conf, eth_usd_conf) * 0.95
+        confidence = min(token_eth.confidence, eth_usd.confidence) * 0.95
+        observed_at = min(token_eth.updated_at, eth_usd.updated_at)
 
         logger.info(
             "Derived %s/USD: %s (= %s × %s, confidence=%.2f)",
             token_upper,
             derived_price,
-            token_eth_price,
-            eth_usd_price,
+            token_eth.price,
+            eth_usd.price,
             confidence,
         )
 
         result = PriceResult(
             price=derived_price,
             source=f"{self.source_name}_derived",
-            timestamp=datetime.now(UTC),
+            timestamp=observed_at,
             confidence=confidence,
-            stale=confidence < 0.90,
+            stale=token_eth.stale or eth_usd.stale,
+            source_details={
+                "method": "derived",
+                "formula": f"{eth_pair} * ETH/USD",
+                "feeds": [
+                    {
+                        "pair": eth_pair,
+                        "address": self._eth_feeds[eth_pair].lower(),
+                        "observed_at": token_eth.updated_at.isoformat(),
+                    },
+                    {
+                        "pair": "ETH/USD",
+                        "address": eth_usd_feed.lower(),
+                        "observed_at": eth_usd.updated_at.isoformat(),
+                    },
+                ],
+            },
         )
         self._cache[cache_key] = (result, time.time())
         return result
@@ -436,7 +455,7 @@ class ChainlinkPriceSource(BasePriceSource):
 
         return self._token_to_pair.get(resolved.symbol.upper())
 
-    async def _fetch_chainlink(self, feed_address: str, pair: str) -> tuple[Decimal, float]:
+    async def _fetch_chainlink(self, feed_address: str, pair: str) -> ChainlinkFeedObservation:
         """Fetch price from a Chainlink aggregator via latestRoundData().
 
         Args:
@@ -444,7 +463,7 @@ class ChainlinkPriceSource(BasePriceSource):
             pair: Price pair name (e.g., "ETH/USD") for logging
 
         Returns:
-            Tuple of (price_decimal, confidence)
+            Decoded observation carrying the provider timestamp and freshness.
 
         Raises:
             DataSourceUnavailable: If RPC call fails or response is invalid
@@ -481,6 +500,12 @@ class ChainlinkPriceSource(BasePriceSource):
                 source=self.source_name,
                 reason=f"Chainlink returned non-positive answer for {pair}: {answer}",
             )
+        now = int(time.time())
+        if updated_at <= 0 or updated_at > now + _MAX_FUTURE_TIMESTAMP_SKEW_SECONDS:
+            raise DataSourceUnavailable(
+                source=self.source_name,
+                reason=f"Chainlink returned invalid updatedAt for {pair}: {updated_at}",
+            )
 
         # Convert to price
         spec = CATALOG.feed(self._chain, pair)
@@ -493,16 +518,22 @@ class ChainlinkPriceSource(BasePriceSource):
         price = Decimal(answer) / Decimal(10**decimals)
 
         # Check staleness
-        now = int(time.time())
         age = now - updated_at
         confidence = 0.95
 
-        if age > _STALENESS_THRESHOLD:
+        # Preserve the existing one-hour safety policy for direct USD prices.
+        # ETH-denominated exchange-rate legs use their provider heartbeat so a
+        # slow-moving, healthy rETH/ETH feed is not rejected as stale.
+        staleness_threshold = (
+            spec.heartbeat_seconds if spec.kind is FeedKind.ETH else _DIRECT_PRICE_STALENESS_THRESHOLD_SECONDS
+        )
+        stale = age > staleness_threshold
+        if stale:
             logger.debug(
                 "Chainlink %s data is %d seconds old (threshold %d) -- this is expected on Anvil forks",
                 pair,
                 age,
-                _STALENESS_THRESHOLD,
+                staleness_threshold,
             )
             confidence = 0.85
 
@@ -514,7 +545,20 @@ class ChainlinkPriceSource(BasePriceSource):
             age,
         )
 
-        return price, confidence
+        try:
+            observed_at = datetime.fromtimestamp(updated_at, tz=UTC)
+        except (OverflowError, OSError, ValueError) as exc:
+            raise DataSourceUnavailable(
+                source=self.source_name,
+                reason=f"Chainlink returned invalid updatedAt for {pair}: {updated_at}",
+            ) from exc
+
+        return ChainlinkFeedObservation(
+            price=price,
+            updated_at=observed_at,
+            confidence=confidence,
+            stale=stale,
+        )
 
     async def get_reference_price(self, instrument: str, quote: str = "USD") -> PriceResult:
         """Read one catalogued feed without generic symbol aggregation.
