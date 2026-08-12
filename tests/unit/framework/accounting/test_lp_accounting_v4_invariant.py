@@ -276,7 +276,7 @@ def test_v4_lp_accounting_aligns_tokens_to_canonical_currency_order(monkeypatch)
             USDC.lower(): _FakeTokenInfo("USDC", 6),
         }
 
-        def resolve(self, token: str, chain: str = "", **kw):
+        def resolve(self, token, chain, *, log_errors=True, skip_gateway=False):
             return self._by_addr.get(token.lower())
 
     monkeypatch.setattr(

@@ -12,7 +12,9 @@ class _MockResolver:
     def __init__(self, resolved_by: dict[str, SimpleNamespace]):
         self._resolved_by = resolved_by
 
-    def resolve(self, token: str, chain: str) -> SimpleNamespace:
+    def resolve(
+        self, token: str, chain: str, *, log_errors: bool = True, skip_gateway: bool = False
+    ) -> SimpleNamespace:  # noqa: ARG002
         key = f"{token.lower()}@{chain.lower()}"
         if key not in self._resolved_by:
             raise ValueError("not found")

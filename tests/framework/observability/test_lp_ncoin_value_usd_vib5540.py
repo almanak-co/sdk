@@ -20,25 +20,51 @@ import pytest
 
 import almanak.framework.observability.position_events as pe
 from almanak.framework.observability.position_events import compute_lp_ncoin_value_usd
+from tests.support.token_resolver import FakeToken, FakeTokenResolver
 
-# Well-known decimals for the fixture coins.
+# Well-known decimals AND real mainnet addresses for the fixture coins.
+#
+# The addresses are not decoration. ``FakeToken`` requires them (VIB-6100 review
+# of PR #3472) because a double that yields ``address=""`` returns a token
+# production cannot construct — ``ResolvedToken`` raises on an empty address —
+# and any address-dependent branch downstream is then silently inert against it.
+# These values are the static registry's own (verified with
+# ``resolve(symbol, chain=..., skip_gateway=True)``), lowercase as the resolver
+# emits them for EVM chains. Solana mints are base58 and case-sensitive, so the
+# resolver does NOT lowercase them — the mint below is verbatim.
+_COINS = {
+    "DAI": ("0x6b175474e89094c44da98b954eedeac495271d0f", 18, "ethereum"),
+    "USDC": ("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", 6, "ethereum"),
+    "USDT": ("0xdac17f958d2ee523a2206206994597c13d831ec7", 6, "ethereum"),
+    "WBTC": ("0x2260fac5e5542a773aa44fbcfedf7c193bc2c599", 8, "ethereum"),
+    "WETH": ("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", 18, "ethereum"),
+}
+
+# The Solana leg is keyed by MINT, not symbol — that is the identity the caller
+# passes for a Solana pool, and it is why this entry carries its own chain.
 _SOL_USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
-_DECIMALS = {"DAI": 18, "USDC": 6, "USDT": 6, "WBTC": 8, "WETH": 18, _SOL_USDC: 6}
 
 
 @pytest.fixture
 def stub_resolver(monkeypatch: pytest.MonkeyPatch) -> None:
     """Resolve token decimals from a static table — no network, no gateway."""
 
-    class _Resolver:
-        def resolve(self, symbol: str, chain: str = "", log_errors: bool = False):  # noqa: ARG002
-            if symbol not in _DECIMALS:
-                raise KeyError(f"unknown token {symbol}")
-            return SimpleNamespace(decimals=_DECIMALS[symbol])
+    # VIB-6100: use the SHARED double. The hand-rolled stub this replaced did
+    # not accept ``skip_gateway`` and raised a bare ``KeyError`` on a miss —
+    # both were swallowed by the old fail-open ``except Exception``, so
+    # ``test_two_coin_close_uses_canonical_path`` passed while exercising the
+    # fallback branch it was named for. Exactly the trap VIB-6100 documents.
+    resolver = FakeTokenResolver()
+    for symbol, (address, decimals, chain) in _COINS.items():
+        resolver.add(symbol, FakeToken(symbol=symbol, address=address, decimals=decimals, chain=chain))
+    resolver.add(
+        _SOL_USDC,
+        FakeToken(symbol="USDC", address=_SOL_USDC, decimals=6, chain="solana"),
+    )
 
     monkeypatch.setattr(
         "almanak.framework.data.tokens.resolver.get_token_resolver",
-        lambda: _Resolver(),
+        lambda *_a, **_k: resolver,
     )
 
 
@@ -185,16 +211,28 @@ class TestApplyLpCloseColumns:
     def test_two_coin_close_uses_canonical_path(self, stub_resolver: None) -> None:
         # A concentrated-liquidity close (no coin_symbols) keeps the 2-coin path;
         # tokens resolve from the pool descriptor and value = a0*p0 + a1*p1.
+        #
+        # Legs are in CHAIN order — USDC first, because on ethereum USDC
+        # (0xa0b8…) is the lower address than WETH (0xc02a…), so a real
+        # Uniswap V3 USDC/WETH pool reports token0=USDC and its parser emits
+        # amount0 as the USDC leg. The descriptor previously read "WETH/USDC"
+        # with a WETH amount0, which is not a pool that exists on this chain;
+        # it only passed because the stub resolver returned empty addresses and
+        # left the pair realignment inert — the very false-green this file's
+        # ``stub_resolver`` note describes, one layer down. With real addresses
+        # the realignment correctly sorts the symbols to (USDC, WETH) while the
+        # amounts stay put, mis-pairing 18-dec with 6-dec and turning $11,000
+        # into $2e12. (VIB-6100 review of PR #3472.)
         event = pe.PositionEvent(
             deployment_id="d1",
             position_id="uni-1",
             position_type="LP",
             event_type="CLOSE",
-            amount0=str(_raw("2", 18)),
-            amount1=str(_raw("5000", 6)),
+            amount0=str(_raw("5000", 6)),
+            amount1=str(_raw("2", 18)),
         )
-        lp_close = SimpleNamespace(coin_symbols=None, all_amounts=[_raw("2", 18), _raw("5000", 6)])
+        lp_close = SimpleNamespace(coin_symbols=None, all_amounts=[_raw("5000", 6), _raw("2", 18)])
         prices = {"WETH": Decimal("3000"), "USDC": Decimal("1")}
-        pe._apply_lp_close_columns(event, self._ctx(lp_close, "WETH/USDC/3000"), None, prices)
-        # 2*3000 + 5000*1 = 11000
+        pe._apply_lp_close_columns(event, self._ctx(lp_close, "USDC/WETH/3000"), None, prices)
+        # 5000*1 + 2*3000 = 11000
         assert Decimal(event.value_usd) == Decimal("11000")

@@ -149,7 +149,7 @@ class TestDefaultSwapAdapterFeeSelection:
         seen: list[tuple[str, str]] = []
 
         class _StubResolver:
-            def resolve(self, symbol: str, chain: str, log_errors: bool = True):
+            def resolve(self, symbol: str, chain: str, *, log_errors: bool = True, skip_gateway: bool = False):  # noqa: ARG002
                 seen.append((symbol, chain))
                 return None
 
@@ -191,7 +191,7 @@ class TestDefaultSwapAdapterFeeSelection:
         seen: list[tuple[str, str]] = []
 
         class _StubResolver:
-            def resolve(self, symbol: str, chain: str, log_errors: bool = True):
+            def resolve(self, symbol: str, chain: str, *, log_errors: bool = True, skip_gateway: bool = False):  # noqa: ARG002
                 seen.append((symbol, chain))
                 return None
 

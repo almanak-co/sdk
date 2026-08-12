@@ -57,12 +57,18 @@ _DECIMALS = {"USDC": 6, "WETH": 18}
 @pytest.fixture
 def _resolver(monkeypatch):
     class _FakeResolver:
-        def resolve(self, key, **_kwargs):
-            up = str(key).upper()
+        # VIB-6628: accepts kwargs loosely rather than mirroring production's exact
+        # acceptance surface. Conformance (does it accept every legal call?) is
+        # enforced by test_resolver_double_conformance_vib6100.py; strictness (does
+        # it reject illegal ones?) is tracked there. Tightening needs the surface
+        # MEASURED first — a double stricter than production is a false-green
+        # generator too, as the chain-alias case in #3472 showed.
+        def resolve(self, token, chain, *, log_errors=True, skip_gateway=False):  # noqa: ARG002 — chain positional-or-keyword, as production
+            up = str(token).upper()
             if up in _ADDR_BOOK:
                 return SimpleNamespace(symbol=up, address=_ADDR_BOOK[up], decimals=_DECIMALS[up])
             for sym, addr in _ADDR_BOOK.items():
-                if addr.lower() == str(key).lower():
+                if addr.lower() == str(token).lower():
                     return SimpleNamespace(symbol=sym, address=addr, decimals=_DECIMALS[sym])
             return None
 
@@ -613,10 +619,10 @@ def test_ncoin_additional_amounts_guard_blocks_leg_adoption(_resolver):
 def _currency_resolver(monkeypatch):
     def _make():
         class _Double:
-            def resolve(self, key, chain=None, **_kwargs):  # noqa: ARG002 — chain is positional
-                k = str(key).lower()
+            def resolve(self, token, chain, *, log_errors=True, skip_gateway=False):  # noqa: ARG002 — chain is positional
+                k = str(token).lower()
                 for sym, addr in _ADDR_BOOK.items():
-                    if addr.lower() == k or sym == str(key).upper():
+                    if addr.lower() == k or sym == str(token).upper():
                         return SimpleNamespace(symbol=sym, address=addr, decimals=_DECIMALS[sym])
                 return None
 

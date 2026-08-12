@@ -20,6 +20,7 @@ import pytest
 
 from almanak.framework.accounting.category_handlers.lp_handler import handle_lp
 from almanak.framework.execution.extracted_data import LPCloseData, LPOpenData
+from almanak.framework.data.tokens.exceptions import TokenNotFoundError
 
 POOL_ID_32_BYTE = "0x" + "be" * 32
 POOL_ID_REGEX = re.compile(r"^0x[0-9a-f]{64}$")
@@ -351,21 +352,43 @@ class TestV4RealignTokenPair:
     USDC = "0x" + "22" * 20
 
     @staticmethod
-    def _patch_resolver(monkeypatch, mapping: dict | None = None, *, raises: bool = False):
-        from types import SimpleNamespace
+    def _patch_resolver(monkeypatch, mapping: dict | None = None, *, raises: bool = False, chain: str = "optimism"):
+        """Install a resolver double behind ``get_token_resolver``.
 
-        class _FakeResolver:
-            def resolve(self, address, chain=None, log_errors=True):  # noqa: ARG002
-                if raises:
-                    raise RuntimeError("resolver down")
-                if mapping is None:
-                    return None
-                sym = mapping.get(address)
-                return None if sym is None else SimpleNamespace(symbol=sym)
+        VIB-6100: uses the SHARED double. The hand-rolled one this replaced had
+        the signature ``resolve(self, address, chain=None, log_errors=True)`` —
+        no ``skip_gateway`` — so once ``_v4_realign_token_pair`` was routed
+        through the narrow-tolerance seam (which pins that flag), every call
+        raised ``TypeError``. Under the OLD fail-open that would have been
+        swallowed and reported as "the resolver failed", and these tests would
+        have stayed green while silently exercising the user-order FALLBACK —
+        the branch whose own docstring warns it may misattribute amounts.
 
+        That is the VIB-6100 trap, third instance, caught by the narrowing
+        itself rather than by review.
+        """
+        from tests.support.token_resolver import FakeToken, FakeTokenResolver
+
+        class _RaisingResolver:
+            def resolve(self, token, chain, *, log_errors=True, skip_gateway=False):  # noqa: ARG002
+                raise RuntimeError("resolver down")
+
+        if raises:
+            monkeypatch.setattr(
+                "almanak.framework.data.tokens.resolver.get_token_resolver",
+                lambda: _RaisingResolver(),
+            )
+            return
+
+        resolver = FakeTokenResolver()
+        for address, symbol in (mapping or {}).items():
+            resolver.add(
+                address,
+                FakeToken(symbol=symbol, address=address, decimals=18, chain=chain),
+            )
         monkeypatch.setattr(
             "almanak.framework.data.tokens.resolver.get_token_resolver",
-            lambda: _FakeResolver(),
+            lambda: resolver,
         )
 
     def _realign(self):
@@ -390,7 +413,10 @@ class TestV4RealignTokenPair:
 
     def test_dict_fallback_input_reorders(self, monkeypatch):
         """Dict fallback (reconstruction failure) reads keys, not getattr→None."""
-        self._patch_resolver(monkeypatch, {self.WETH: "WETH", self.USDC: "USDC"})
+        # Seeded for the chain under test — the shared double refuses to answer a
+        # request for a DIFFERENT chain than the token was seeded on, because a
+        # cross-chain match is a false-green generator for address-order code.
+        self._patch_resolver(monkeypatch, {self.WETH: "WETH", self.USDC: "USDC"}, chain="polygon")
         lp_data = {"currency0": self.WETH, "currency1": self.USDC}
         assert self._realign()(lp_data, "polygon", "USDC", "WETH") == ("WETH", "USDC", True)
 
@@ -410,6 +436,7 @@ class TestV4RealignTokenPair:
             "USDC",
             False,
         )
+
 
     def test_resolver_exception_fails_open(self, monkeypatch):
         """Resolver raising must not block the write — fall back to inputs, flag False.
@@ -431,9 +458,35 @@ class TestV4RealignTokenPair:
         """When the resolver yields an empty symbol, use the currency address.
 
         Both currencies RESOLVED here — an empty display symbol is not a resolution
-        failure — so this is a genuine realignment and the flag is True.
+        failure — so this is a genuine realignment and the flag is True (VIB-6476).
+
+        The empty-symbol token is built LOCALLY and explicitly, not with
+        ``FakeToken``: ``ResolvedToken`` raises on an empty symbol, so no real
+        resolver can produce this and the shared double refuses it too. Keeping
+        the impossibility local is what documents it as defence-in-depth rather
+        than a shape this code must expect — the same treatment as the
+        negative-decimals case in the VIB-6100 seam suite. Teaching the SHARED
+        double to accept it instead would put a shape production cannot emit
+        into every suite that uses it, which is the false-green generator the
+        double exists to remove.
         """
-        self._patch_resolver(monkeypatch, {self.WETH: "", self.USDC: "USDC"})
+        from types import SimpleNamespace
+
+        weth, usdc = self.WETH, self.USDC
+
+        class _EmptySymbolResolver:
+            def resolve(self, token, chain, *, log_errors=True, skip_gateway=False):  # noqa: ARG002
+                key = str(token).lower()
+                if key == weth.lower():
+                    return SimpleNamespace(symbol="", address=weth, decimals=18, chain=chain)
+                if key == usdc.lower():
+                    return SimpleNamespace(symbol="USDC", address=usdc, decimals=6, chain=chain)
+                raise TokenNotFoundError(token=str(token), chain=str(chain))
+
+        monkeypatch.setattr(
+            "almanak.framework.data.tokens.resolver.get_token_resolver",
+            lambda: _EmptySymbolResolver(),
+        )
         lp_data = {"currency0": self.WETH, "currency1": self.USDC}
         assert self._realign()(lp_data, "optimism", "x", "y") == (self.WETH.upper(), "USDC", True)
 
@@ -496,8 +549,8 @@ class TestV4ResolverFailureNoLongerShipsLabelOrder:
         addresses = {v.lower() for v in book.values()}
 
         class _FakeResolver:
-            def resolve(self, key, **_kwargs):  # noqa: ANN001
-                text = str(key)
+            def resolve(self, token, chain, *, log_errors=True, skip_gateway=False):  # noqa: ANN001, ARG002
+                text = str(token)
                 if text.lower() in addresses:
                     if address_lookup == "raise":
                         raise RuntimeError("resolver down for address lookups")

@@ -730,7 +730,7 @@ def test_build_ledger_entry_flags_raw_wei_swap(
             self.decimals = decimals
 
     class _FakeResolver:
-        def resolve(self, symbol: str, chain: str | None = None):  # noqa: ARG002
+        def resolve(self, symbol: str, chain: str, *, log_errors: bool = True, skip_gateway: bool = False):  # noqa: ARG002
             return _FakeInfo(18) if symbol == "WETH" else _FakeInfo(6)
 
     import almanak.framework.data.tokens.resolver as resolver_mod
@@ -794,7 +794,7 @@ def test_build_ledger_entry_resolver_failure_falls_back_to_magnitude(
     from almanak.framework.observability import ledger as ledger_mod
 
     class _BrokenResolver:
-        def resolve(self, symbol: str, chain: str | None = None):  # noqa: ARG002
+        def resolve(self, symbol: str, chain: str, *, log_errors: bool = True, skip_gateway: bool = False):  # noqa: ARG002
             raise RuntimeError("resolver unavailable")
 
     import almanak.framework.data.tokens.resolver as resolver_mod

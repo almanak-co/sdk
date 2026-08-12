@@ -8,6 +8,8 @@ Producer integration lives in
 
 from __future__ import annotations
 
+import pytest
+
 from types import SimpleNamespace
 
 from almanak.framework.data.tokens.pair_order import realign_token_pair_by_address
@@ -27,9 +29,20 @@ def _patch_resolver(monkeypatch, book: dict[str, str]):
     calls: list[dict] = []
 
     class _Fake:
-        def resolve(self, key, **kwargs):  # noqa: ANN001
-            calls.append({"key": key, **kwargs})
-            up = str(key).upper()
+        # VIB-6628: accepts kwargs loosely rather than mirroring production's exact
+        # acceptance surface. Conformance (does it accept every legal call?) is
+        # enforced by test_resolver_double_conformance_vib6100.py; strictness (does
+        # it reject illegal ones?) is tracked there. Tightening needs the surface
+        # MEASURED first — a double stricter than production is a false-green
+        # generator too, as the chain-alias case in #3472 showed.
+        def resolve(self, token, chain, *, log_errors=True, skip_gateway=False):  # noqa: ANN001
+            # ``chain`` is recorded explicitly. It used to arrive inside
+            # ``**kwargs`` and be captured by the splat; once the double accepts
+            # it positionally (as production does), it stops appearing there —
+            # and ``_assert_offline_contract`` would read ``None`` for every
+            # call, silently asserting nothing about the chain.
+            calls.append({"key": token, "chain": chain, "log_errors": log_errors, "skip_gateway": skip_gateway})
+            up = str(token).upper()
             if up in book:
                 return SimpleNamespace(symbol=up, address=book[up], decimals=18)
             return None
@@ -64,7 +77,7 @@ def test_keeps_order_when_already_address_sorted(monkeypatch):
 
 def test_fail_open_when_unresolved(monkeypatch):
     class _Empty:
-        def resolve(self, *_a, **_k):
+        def resolve(self, token, chain, *, log_errors=True, skip_gateway=False):
             return None
 
     monkeypatch.setattr(
@@ -76,7 +89,7 @@ def test_fail_open_when_unresolved(monkeypatch):
 
 def test_fail_open_on_resolver_exception(monkeypatch):
     class _Boom:
-        def resolve(self, *_a, **_k):
+        def resolve(self, token, chain, *, log_errors=True, skip_gateway=False):
             raise RuntimeError("resolver down")
 
     monkeypatch.setattr(

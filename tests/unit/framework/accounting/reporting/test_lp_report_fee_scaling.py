@@ -60,7 +60,7 @@ def test_scale_fee_malformed_resolver_decimals_drops_leg(monkeypatch) -> None:
         def __init__(self, decimals):
             self._d = decimals
 
-        def resolve(self, *_a, **_k):
+        def resolve(self, token, chain, *, log_errors=True, skip_gateway=False):
             return _Info(self._d)
 
     for bad in (None, -1):

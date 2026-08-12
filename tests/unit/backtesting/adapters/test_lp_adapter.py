@@ -4753,8 +4753,8 @@ class TestResolveSymbolicPoolAddress:
                 self.address = address
 
         class _Resolver:
-            def resolve(self, symbol, chain, **_kwargs):
-                addr = addresses.get(symbol.upper())
+            def resolve(self, token, chain, *, log_errors=True, skip_gateway=False):
+                addr = addresses.get(str(token).upper())
                 return _Info(addr) if addr else None
 
         return _Resolver()

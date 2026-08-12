@@ -96,7 +96,7 @@ class _FakeTokenResolver:
     _BY_ADDR = {WBTC_ADDR.lower(): ("WBTC", 8), USDC_ADDR.lower(): ("USDC", 6)}
     _BY_SYMBOL = {"WBTC": (WBTC_ADDR, 8), "USDC": (USDC_ADDR, 6)}
 
-    def resolve(self, key: str, chain: str):  # noqa: ARG002
+    def resolve(self, key: str, chain: str, *, log_errors: bool = True, skip_gateway: bool = False):  # noqa: ARG002
         if key is None:
             return None
         low = key.lower()

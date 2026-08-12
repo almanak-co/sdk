@@ -142,7 +142,13 @@ def test_compute_value_usd_preserves_mixed_case_solana_mint(monkeypatch: pytest.
     seen: list[str] = []
 
     class _Resolver:
-        def resolve(self, token: str, **_kwargs):
+        # VIB-6628: accepts kwargs loosely rather than mirroring production's exact
+        # acceptance surface. Conformance (does it accept every legal call?) is
+        # enforced by test_resolver_double_conformance_vib6100.py; strictness (does
+        # it reject illegal ones?) is tracked there. Tightening needs the surface
+        # MEASURED first — a double stricter than production is a false-green
+        # generator too, as the chain-alias case in #3472 showed.
+        def resolve(self, token, chain, *, log_errors=True, skip_gateway=False):  # noqa: ARG002
             seen.append(token)
             return type("Token", (), {"decimals": 6})()
 

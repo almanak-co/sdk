@@ -474,7 +474,7 @@ class TestCurvePrimitiveMoneyLegs:
         from almanak.framework.data import tokens
 
         class _MissResolver:
-            def resolve(self, *_args, **_kwargs):
+            def resolve(self, token, chain, *, log_errors=True, skip_gateway=False):
                 # Symbol unknown, but decimals still resolvable (USDC = 6dp).
                 return SimpleNamespace(symbol="", decimals=6)
 

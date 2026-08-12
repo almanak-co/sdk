@@ -177,13 +177,19 @@ class _Resolver:
     (address -> symbol).
     """
 
-    def resolve(self, key, **_kwargs):  # noqa: ANN001, ANN003
-        k = str(key).lower()
+    # VIB-6628: accepts kwargs loosely rather than mirroring production's exact
+    # acceptance surface. Conformance (does it accept every legal call?) is
+    # enforced by test_resolver_double_conformance_vib6100.py; strictness (does
+    # it reject illegal ones?) is tracked there. Tightening needs the surface
+    # MEASURED first — a double stricter than production is a false-green
+    # generator too, as the chain-alias case in #3472 showed.
+    def resolve(self, token, chain, *, log_errors=True, skip_gateway=False):  # noqa: ANN001, ANN003, ARG002
+        k = str(token).lower()
         if k in _DECIMALS:
             sym, dec = _DECIMALS[k]
-            return SimpleNamespace(symbol=sym, address=key, decimals=dec)
+            return SimpleNamespace(symbol=sym, address=token, decimals=dec)
         for addr, (sym, dec) in _DECIMALS.items():
-            if sym == str(key).upper():
+            if sym == str(token).upper():
                 return SimpleNamespace(symbol=sym, address=addr, decimals=dec)
         return None
 

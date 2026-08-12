@@ -56,12 +56,12 @@ def _resolver(monkeypatch):
         # resolver's fail-open `except` swallows into `""` — the test then passes
         # for the wrong reason (it exercises the unresolved branch, not the
         # resolved one). Worth knowing when writing further fakes for this seam.
-        def resolve(self, key, chain=None, **_kwargs):  # noqa: ARG002
-            up = str(key).upper()
+        def resolve(self, token, chain, *, log_errors=True, skip_gateway=False):  # noqa: ARG002
+            up = str(token).upper()
             if up in _ADDR_BOOK:
                 return SimpleNamespace(symbol=up, address=_ADDR_BOOK[up], decimals=_DECIMALS[up])
             for sym, addr in _ADDR_BOOK.items():
-                if addr.lower() == str(key).lower():
+                if addr.lower() == str(token).lower():
                     return SimpleNamespace(symbol=sym, address=addr, decimals=_DECIMALS[sym])
             return None
 

@@ -64,12 +64,12 @@ class _StubToken:
 
 
 class _StubResolver:
-    def resolve(self, value, chain, **kwargs):
+    def resolve(self, token, chain, *, log_errors=True, skip_gateway=False):
         return _StubToken()
 
 
 class _FailingResolver:
-    def resolve(self, value, chain, **kwargs):
+    def resolve(self, token, chain, *, log_errors=True, skip_gateway=False):
         raise ValueError("no such token")
 
 

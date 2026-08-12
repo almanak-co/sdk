@@ -381,7 +381,7 @@ def test_lending_handler_reads_runner_serialized_post_state():
         decimals = 6
 
     class _MockResolver:
-        def resolve(self, *_, **__):
+        def resolve(self, token, chain, *, log_errors=True, skip_gateway=False):
             return _MockToken()
 
     with patch(

@@ -77,14 +77,14 @@ def _patch_resolver(monkeypatch, book_key: str) -> None:
     book = _ADDR_BOOKS[book_key]
 
     class _FakeResolver:
-        def resolve(self, key, **_kwargs):  # noqa: ANN001
-            up = str(key).upper()
+        def resolve(self, token, chain, *, log_errors=True, skip_gateway=False):  # noqa: ANN001, ARG002
+            up = str(token).upper()
             # Symbol lookups (decimals + address realignment).
             if up in book:
                 return SimpleNamespace(symbol=up, address=book[up], decimals=_DECIMALS[up])
             # Address lookups (defensive; not used by the V3 path).
             for sym, addr in book.items():
-                if addr.lower() == str(key).lower():
+                if addr.lower() == str(token).lower():
                     return SimpleNamespace(symbol=sym, address=addr, decimals=_DECIMALS[sym])
             return None
 
@@ -420,9 +420,10 @@ class TestV3RealignHelperGatesAndFailOpen:
         )
         assert out == ("WETH", "USDC")
 
+
     def test_resolver_exception_fails_open(self, monkeypatch):
         class _Boom:
-            def resolve(self, *a, **k):  # noqa: ANN002, ANN003, ARG002
+            def resolve(self, token, chain, *, log_errors=True, skip_gateway=False):  # noqa: ANN002, ANN003, ARG002
                 raise RuntimeError("resolver down")
 
         monkeypatch.setattr(
@@ -441,8 +442,8 @@ class TestV3RealignHelperGatesAndFailOpen:
 
     def test_missing_address_fails_open(self, monkeypatch):
         class _NoAddr:
-            def resolve(self, key, **k):  # noqa: ANN001, ANN003, ARG002
-                return SimpleNamespace(symbol=str(key).upper(), address=None, decimals=18)
+            def resolve(self, token, chain, *, log_errors=True, skip_gateway=False):  # noqa: ANN001, ANN003, ARG002
+                return SimpleNamespace(symbol=str(token).upper(), address=None, decimals=18)
 
         monkeypatch.setattr(
             "almanak.framework.data.tokens.resolver.get_token_resolver",

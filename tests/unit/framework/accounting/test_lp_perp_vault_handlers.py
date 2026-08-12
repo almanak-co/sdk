@@ -29,6 +29,98 @@ from almanak.framework.accounting.processor import AccountingProcessor
 from almanak.framework.accounting.vault_accounting import VaultAccountingEvent
 from almanak.framework.models.run_mode import RunMode, RunModeStamp
 
+# Real token addresses for the resolver doubles below (VIB-6100 review of PR
+# #3472). ``FakeToken`` requires a non-empty address because ``ResolvedToken``
+# does, and because address-order-dependent code — ``realign_token_pair_by_address``
+# in particular — is silently inert against an empty one, which is how a test
+# can "cover" a path it never entered. Values are the static registry's own,
+# lowercase as the resolver emits them.
+#
+# CHAIN CHOICE IS LOAD-BEARING in the LP fixtures below, because V3-family pools
+# order ``token0``/``token1`` by numeric address and receipt parsers emit
+# ``amount0``/``amount1`` in that same **chain** order. A fixture that labels
+# ``token0="USDC"`` while supplying a USDC ``amount0`` is only self-consistent on
+# a chain where USDC really is the lower address:
+#
+#     ethereum  USDC 0xa0b8… < WETH 0xc02a…   -> (USDC, WETH) IS chain order
+#     arbitrum  WETH 0x82af… < USDC 0xaf88…   -> (USDC, WETH) is NOT chain order
+#     base      WETH 0x4200… < USDC 0x8335…   -> (USDC, WETH) is NOT chain order
+#
+# The IL/basis fixtures below therefore run on **ethereum**. They previously said
+# "arbitrum" while describing a USDC-first pool, i.e. a pool that cannot exist —
+# harmless only for as long as the empty-address double kept the realignment
+# inert. With real addresses the seam correctly transposes the symbols (amounts
+# are authoritative and are never moved), which mis-pairs decimals and prices and
+# produced a $4e10 "cost basis" from a $240 close — the VIB-5851 / VIB-5983
+# phantom-basis class reproducing itself inside its own regression suite.
+#
+# The transposing direction is covered deliberately and separately by
+# ``TestLpPairRealignment`` rather than by accident here.
+_ADDRESSES: dict[str, dict[str, str]] = {
+    "ethereum": {
+        "USDC": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        "WETH": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+        "DAI": "0x6b175474e89094c44da98b954eedeac495271d0f",
+    },
+    "arbitrum": {
+        "USDC": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+        "WETH": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+        "DAI": "0xda10009cbd5d07dd0cecc66161fc93d7c9000da1",
+    },
+    "base": {
+        "USDC": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+        "DAI": "0x50c5725949a6f0c72e6c4a641f24049a917db0cb",
+        "WETH": "0x4200000000000000000000000000000000000006",
+    },
+}
+
+# The chain the USDC-first LP fixtures run on. Named rather than inlined so the
+# invariant "USDC must be the lower address here" is stated once and asserted
+# once, instead of being an unstated property of a string literal repeated at a
+# dozen call sites.
+_IL_CHAIN = "ethereum"
+
+
+def _chain_token0(chain: str, symbol_a: str, symbol_b: str) -> str:
+    """The symbol a V3-family pool on ``chain`` would report as ``token0``."""
+    addrs = _ADDRESSES[chain]
+    return symbol_a if int(addrs[symbol_a], 16) < int(addrs[symbol_b], 16) else symbol_b
+
+
+def test_il_fixture_chain_really_is_usdc_first() -> None:
+    """Guard the assumption the USDC-first LP fixtures silently depend on.
+
+    If a future registry/address edit made WETH the lower address on
+    ``_IL_CHAIN``, every fixture labelled ``token0="USDC"`` would quietly start
+    describing an impossible pool again, ``realign_token_pair_by_address`` would
+    transpose the symbols away from the amounts, and the suite would fail with
+    an inscrutable magnitude error instead of naming the cause. Fail here first.
+
+    Asserted against the **static registry**, not against ``_ADDRESSES``. An
+    earlier version of this test compared the local table to itself, so the
+    registry edit it names as the trigger could not have moved it — a guard that
+    cannot observe the thing it guards. (Caught by adversarial review of #3472.)
+    ``_ADDRESSES`` is checked against the registry too, so a stale literal in
+    this file fails here rather than silently diverging from production.
+    """
+    from almanak.framework.data.tokens.resolver import get_token_resolver
+
+    resolver = get_token_resolver()
+    resolved: dict[str, str] = {}
+    for symbol in ("USDC", "WETH"):
+        token = resolver.resolve(symbol, chain=_IL_CHAIN, skip_gateway=True, log_errors=False)
+        resolved[symbol] = token.address.lower()
+        assert resolved[symbol] == _ADDRESSES[_IL_CHAIN][symbol], (
+            f"_ADDRESSES[{_IL_CHAIN!r}][{symbol!r}] has drifted from the static registry "
+            f"({_ADDRESSES[_IL_CHAIN][symbol]} vs {resolved[symbol]}); update the table."
+        )
+
+    assert int(resolved["USDC"], 16) < int(resolved["WETH"], 16), (
+        f"{_IL_CHAIN} no longer sorts USDC before WETH; the USDC-first LP fixtures "
+        "must move to a chain that does, or be rewritten in chain order."
+    )
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Common builder helpers (mirror the style from test_accounting_processor.py)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -529,13 +621,22 @@ class TestHandleLpOpen:
             position_key="lp:aerodrome:base:0xwallet:0x1111111111111111111111111111111111111111",
             market_id="0x1111111111111111111111111111111111111111",
         )
-        # Build a serialized LPOpenData in extracted_data_json.
+        # Legs are in CHAIN order, which on base means DAI first: DAI 0x50c5… <
+        # USDC 0x8335…, so a real aerodrome DAI/USDC pool reports token0=DAI and
+        # its parser emits amount0 as the DAI leg. This fixture used to say
+        # token0=USDC with a USDC amount0 — a pool that cannot exist on base —
+        # and only passed because the resolver double returned empty addresses,
+        # which left ``realign_token_pair_by_address`` inert. With real addresses
+        # the seam correctly transposes the symbols (amounts are authoritative
+        # and never move), mis-pairing the 6-dec and 18-dec legs. Stating the
+        # legs in chain order is what makes the pair realignment a *verified*
+        # no-op here rather than an unexercised one. (VIB-6100 review of #3472.)
         extracted = json.dumps({
             "lp_open_data": {
                 "_type": "LPOpenData",
                 "position_id": 42,
-                "amount0": "100000000",   # 100 USDC (6 dec)
-                "amount1": "50000000000000000000",  # 50 DAI (18 dec)
+                "amount0": "50000000000000000000",  # 50 DAI (18 dec) — chain token0
+                "amount1": "100000000",  # 100 USDC (6 dec) — chain token1
                 "tick_lower": None,
                 "tick_upper": None,
                 "liquidity": None,
@@ -546,29 +647,38 @@ class TestHandleLpOpen:
             intent_type="LP_OPEN",
             protocol="aerodrome",
             chain="base",
-            token_in="USDC",
-            token_out="DAI",
+            token_in="DAI",
+            token_out="USDC",
             extracted_data_json=extracted,
         )
 
-        mock_ti_usdc = MagicMock()
-        mock_ti_usdc.decimals = 6
-        mock_ti_dai = MagicMock()
-        mock_ti_dai.decimals = 18
+        # VIB-6100: shared double — the inline one accepted neither
+        # ``log_errors`` nor ``skip_gateway``, so its TypeError was swallowed as
+        # an ordinary resolver miss. Real addresses (see ``_patch_token_resolver``).
+        from tests.support.token_resolver import FakeToken, FakeTokenResolver
 
-        def _resolve(token: str, chain: str = "") -> Any:
-            return mock_ti_usdc if token == "USDC" else mock_ti_dai
+        mock_resolver = FakeTokenResolver(
+            {
+                "USDC": FakeToken(
+                    symbol="USDC", address=_ADDRESSES["base"]["USDC"], decimals=6, chain="base"
+                ),
+                "DAI": FakeToken(
+                    symbol="DAI", address=_ADDRESSES["base"]["DAI"], decimals=18, chain="base"
+                ),
+            }
+        )
 
-        mock_resolver = MagicMock(resolve=MagicMock(side_effect=_resolve))
+        # Precondition: the labels above really are chain order on base.
+        assert _chain_token0("base", "DAI", "USDC") == "DAI"
 
         with patch("almanak.framework.data.tokens.resolver.get_token_resolver", return_value=mock_resolver):
             result = handle_lp(outbox_row, ledger_row)
 
         assert result is not None
-        # amount0 = 100_000_000 / 1e6 = 100
-        assert result.amount0 == Decimal("100")
-        # amount1 = 50_000_000_000_000_000_000 / 1e18 = 50
-        assert result.amount1 == Decimal("50")
+        # amount0 = 50_000_000_000_000_000_000 / 1e18 = 50 DAI
+        assert result.amount0 == Decimal("50")
+        # amount1 = 100_000_000 / 1e6 = 100 USDC
+        assert result.amount1 == Decimal("100")
 
     def test_pool_address_parsed_from_multi_segment_position_key(self) -> None:
         """Pool address is always the last ':' segment of position_key."""
@@ -2498,17 +2608,23 @@ class TestHandleLpWalletBasisHooks:
             fees0 = 1_000_000  # raw, 6 decimals → 1.0 USDC
             fees1 = 5_000_000_000_000_000  # raw, 18 decimals → 0.005 WETH
 
+        # ``_IL_CHAIN`` (ethereum), not arbitrum: the ``USDC/WETH/500`` position
+        # key puts USDC first, which is only a real pool on a chain where USDC is
+        # the lower address. See ``_ADDRESSES`` for why this matters — on
+        # arbitrum this fixture describes a pool that cannot exist, and with real
+        # addresses the pair realignment correctly transposes the symbols away
+        # from the fee legs, mis-pairing 6-dec USDC with 18-dec WETH.
         outbox = _make_outbox_row(
             led_id,
             intent_type="LP_COLLECT_FEES",
-            position_key="lp:uniswap_v3:arbitrum:0xwallet:USDC/WETH/500",
+            position_key=f"lp:uniswap_v3:{_IL_CHAIN}:0xwallet:USDC/WETH/500",
             market_id="0x1111111111111111111111111111111111111111",
         )
         ledger = _make_ledger_row(
             led_id,
             intent_type="LP_COLLECT_FEES",
             protocol="uniswap_v3",
-            chain="arbitrum",
+            chain=_IL_CHAIN,
             token_in="",
             token_out="",
             amount_in="",
@@ -2518,16 +2634,19 @@ class TestHandleLpWalletBasisHooks:
         from unittest.mock import MagicMock as _MM
         from unittest.mock import patch as _patch
 
-        usdc_info = _MM()
-        usdc_info.decimals = 6
-        weth_info = _MM()
-        weth_info.decimals = 18
+        # VIB-6100: shared double (see ``_patch_token_resolver``).
+        from tests.support.token_resolver import FakeToken, FakeTokenResolver
 
-        def _resolve(sym, chain=None):
-            return {"USDC": usdc_info, "WETH": weth_info}.get(sym.upper())
-
-        resolver = _MM()
-        resolver.resolve = _resolve
+        resolver = FakeTokenResolver(
+            {
+                "USDC": FakeToken(
+                    symbol="USDC", address=_ADDRESSES[_IL_CHAIN]["USDC"], decimals=6, chain=_IL_CHAIN
+                ),
+                "WETH": FakeToken(
+                    symbol="WETH", address=_ADDRESSES[_IL_CHAIN]["WETH"], decimals=18, chain=_IL_CHAIN
+                ),
+            }
+        )
 
         with (
             _patch(
@@ -2544,8 +2663,10 @@ class TestHandleLpWalletBasisHooks:
         assert result is not None
         # Both fee legs minted a basis lot — pre-fix, neither did because
         # amount0==0 and amount1==0 short-circuited the per-leg branches.
-        usdc_lots = basis._lots.get(basis._key("dep-1", "swap:arbitrum:0xwallet", "USDC"), [])
-        weth_lots = basis._lots.get(basis._key("dep-1", "swap:arbitrum:0xwallet", "WETH"), [])
+        # Scope key follows the ledger row's chain, which is ``_IL_CHAIN`` here.
+        wallet_scope = f"swap:{_IL_CHAIN}:0xwallet"
+        usdc_lots = basis._lots.get(basis._key("dep-1", wallet_scope, "USDC"), [])
+        weth_lots = basis._lots.get(basis._key("dep-1", wallet_scope, "WETH"), [])
         assert len(usdc_lots) == 1, "USDC fee lot must be minted on LP_COLLECT_FEES"
         assert len(weth_lots) == 1, "WETH fee lot must be minted on LP_COLLECT_FEES"
         # Lot amount = principal (0) + fees (resolved to human decimal).
@@ -2618,7 +2739,7 @@ class TestLpImpermanentLoss:
         outbox = _make_outbox_row(
             led_id,
             intent_type="LP_CLOSE",
-            position_key="lp:uniswap_v3:arbitrum:0xwallet:0x1111111111111111111111111111111111111111",
+            position_key=f"lp:uniswap_v3:{_IL_CHAIN}:0xwallet:0x1111111111111111111111111111111111111111",
             market_id="0x1111111111111111111111111111111111111111",
         )
         lp_close_data: dict[str, Any] = {
@@ -2637,7 +2758,7 @@ class TestLpImpermanentLoss:
             led_id,
             intent_type="LP_CLOSE",
             protocol="uniswap_v3",
-            chain="arbitrum",
+            chain=_IL_CHAIN,
             token_in="USDC",
             token_out="WETH",
             extracted_data_json=extracted,
@@ -2646,28 +2767,38 @@ class TestLpImpermanentLoss:
         return outbox, ledger
 
     @staticmethod
-    def _patch_token_resolver(monkeypatch, decimals: dict[str, int]) -> None:
+    def _patch_token_resolver(monkeypatch, decimals: dict[str, int], chain: str = _IL_CHAIN) -> None:
         """Inject a token resolver that returns the supplied decimals map.
 
         Required because the typed ``lp_close_data`` path resolves token
         decimals via :func:`get_token_resolver` to scale raw integers to
         human-decimal Decimals.
         """
-        from unittest.mock import patch
+        # VIB-6100: use the SHARED double. The hand-rolled one this replaced
+        # accepted neither ``log_errors`` nor ``skip_gateway``, so every call
+        # raised TypeError — swallowed by the old fail-open ``except Exception``
+        # and reported as an ordinary resolver miss. These tests were green
+        # while the resolver leg they set up never resolved anything.
+        #
+        # Addresses are REAL (VIB-6100 review of PR #3472). They were briefly
+        # left empty here, which fixed the raise but not the false green: an
+        # empty address is a token ``ResolvedToken`` cannot construct, and it
+        # left every address-dependent branch — ``realign_token_pair_by_address``
+        # above all — silently inert. The fallback branch stayed the branch
+        # under test; only the swallow it fell into changed. ``FakeToken`` now
+        # rejects an empty address so this cannot regress.
+        from tests.support.token_resolver import FakeToken, FakeTokenResolver
 
-        mock_resolver = MagicMock()
+        resolver = FakeTokenResolver()
+        for symbol, dec in decimals.items():
+            resolver.add(
+                symbol,
+                FakeToken(symbol=symbol, address=_ADDRESSES[chain][symbol], decimals=dec, chain=chain),
+            )
 
-        def _resolve(token: str, chain: str = ""):
-            if token in decimals:
-                ti = MagicMock()
-                ti.decimals = decimals[token]
-                return ti
-            return None
-
-        mock_resolver.resolve = MagicMock(side_effect=_resolve)
         monkeypatch.setattr(
             "almanak.framework.data.tokens.resolver.get_token_resolver",
-            lambda: mock_resolver,
+            lambda *_a, **_k: resolver,
         )
 
     def test_lp_close_emits_il_and_hodl_against_prior_open(

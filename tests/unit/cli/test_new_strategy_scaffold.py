@@ -3575,7 +3575,7 @@ def test_default_token_funding_degrades_on_unexpected_resolver_error(monkeypatch
     from almanak.framework.cli.new_strategy import _default_token_funding
 
     class _BoomResolver:
-        def resolve(self, *args, **kwargs):
+        def resolve(self, token, chain, *, log_errors=True, skip_gateway=False):
             raise ValueError("unsupported chain")
 
     monkeypatch.setattr(tokens_mod, "get_token_resolver", lambda: _BoomResolver())
@@ -3595,7 +3595,7 @@ def test_default_token_funding_omits_unmeasured_resolution(monkeypatch, resolved
     payload = None if resolved is None else _Addressless()
 
     class _Resolver:
-        def resolve(self, *args, **kwargs):
+        def resolve(self, token, chain, *, log_errors=True, skip_gateway=False):
             return payload
 
     monkeypatch.setattr(tokens_mod, "get_token_resolver", lambda: _Resolver())

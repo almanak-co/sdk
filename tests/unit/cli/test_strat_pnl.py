@@ -535,7 +535,7 @@ def test_amount_in_usd_falls_back_when_resolver_fails(monkeypatch) -> None:
     from almanak.framework.cli import strat_pnl as sp_module
 
     class _StubResolver:
-        def resolve(self, *args, **kwargs):
+        def resolve(self, token, chain, *, log_errors=True, skip_gateway=False):
             raise RuntimeError("resolver down in test")
 
     monkeypatch.setattr(
