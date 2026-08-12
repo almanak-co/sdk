@@ -714,7 +714,7 @@
                 <div class="summary-card">
                     <div class="label">Max Drawdown</div>
                     <div class="value negative">
-                        {{ "%.2f"|format((metrics.max_drawdown_pct|float) * 100) }}%
+                        {{ "%.2f"|format(metrics.max_drawdown_pct|float) }}%
                     </div>
                 </div>
                 <div class="summary-card">
@@ -798,7 +798,7 @@
                     </tr>
                     <tr>
                         <td>Max Drawdown</td>
-                        <td>{{ "%.2f"|format((metrics.max_drawdown_pct|float) * 100) }}%</td>
+                        <td>{{ "%.2f"|format(metrics.max_drawdown_pct|float) }}%</td>
                     </tr>
                     <tr>
                         <td>Volatility (Annualized)</td>

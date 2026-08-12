@@ -26,7 +26,7 @@ def _result_with_trades() -> BacktestResult:
         total_pnl_usd=Decimal("1500.25"),
         net_pnl_usd=Decimal("1234.56"),
         sharpe_ratio=Decimal("1.75"),
-        max_drawdown_pct=Decimal("0.05"),
+        max_drawdown_pct=Decimal("5"),
         win_rate=Decimal("0.5"),
         total_trades=2,
         profit_factor=Decimal("2.5"),

@@ -53,6 +53,7 @@ from almanak.connectors._base.gateway_capabilities import (
     GatewayAddressCapability,
     GatewayDefillamaSlugCapability,
     GatewayDexLwapCapability,
+    GatewayDexPoolStateCapability,
     GatewayDexQuoteCapability,
     GatewayDexTwapCapability,
     GatewayDexVolumeCapability,
@@ -65,6 +66,7 @@ from almanak.connectors._base.gateway_connector import GatewayConnector
 from almanak.connectors._base.types import ProtocolKind, ProtocolName
 from almanak.connectors._base.v3_gateway_twap import (
     _fetch_pool_tokens_and_decimals,
+    fetch_v3_pool_state_series,
     fetch_v3_twap_series,
 )
 from almanak.connectors._base.v3_gateway_twap import (
@@ -140,6 +142,7 @@ class UniswapV3GatewayConnector(
     GatewayPriceIdCapability,
     GatewayDexQuoteCapability,
     GatewayDexTwapCapability,
+    GatewayDexPoolStateCapability,
     GatewayDexLwapCapability,
     GatewayDexVolumeCapability,
 ):
@@ -258,6 +261,30 @@ class UniswapV3GatewayConnector(
                 "optimism",
                 "polygon",
             }
+        )
+
+    def pool_state_supported_chains(self) -> frozenset[str]:
+        """Chains where exact V3 pool state can be read from archive RPC."""
+        return self.twap_supported_chains()
+
+    async def fetch_pool_state_series(
+        self,
+        servicer: Any,
+        *,
+        chain: str,
+        pool_address: str,
+        start_ts: int,
+        end_ts: int,
+        interval_secs: int,
+    ) -> Any:
+        return await fetch_v3_pool_state_series(
+            servicer,
+            chain=chain,
+            pool_address=pool_address,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            interval_secs=interval_secs,
+            protocol="uniswap_v3",
         )
 
     async def fetch_twap(

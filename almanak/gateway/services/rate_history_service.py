@@ -60,6 +60,7 @@ import grpc
 from almanak.connectors._base.gateway_capabilities import (
     FundingHistorySource,
     GatewayDexLwapCapability,
+    GatewayDexPoolStateCapability,
     GatewayDexTwapCapability,
     GatewayDexVolumeCapability,
     GatewayFundingHistoryCapability,
@@ -105,6 +106,21 @@ def _build_perp_price_provider_dispatch() -> dict[str, GatewayPerpPriceHistoryCa
                 f"{type(existing).__qualname__} vs {type(connector).__qualname__}"
             )
         providers[venue] = connector
+    return providers
+
+
+def _build_pool_state_provider_dispatch() -> dict[str, GatewayDexPoolStateCapability]:
+    """Build the unique DEX -> exact historical pool-state provider map."""
+    providers: dict[str, GatewayDexPoolStateCapability] = {}
+    for connector in GATEWAY_REGISTRY.capability_providers(GatewayDexPoolStateCapability):  # type: ignore[type-abstract]
+        for key in _provider_dispatch_keys(connector):
+            existing = providers.get(key)
+            if existing is not None and existing is not connector:
+                raise RuntimeError(
+                    f"Duplicate DEX pool-state provider for dex {key!r}: "
+                    f"{type(existing).__qualname__} vs {type(connector).__qualname__}"
+                )
+            providers[key] = connector
     return providers
 
 
@@ -234,6 +250,24 @@ class DexTwapPoint:
     price: Decimal
     tick_observation_count: int = 0
     block_number: int | None = None
+
+
+@dataclass(frozen=True)
+class DexPoolStatePoint:
+    """One exact-pool V3 state observation anchored to an archive block."""
+
+    timestamp: int
+    block_number: int
+    sqrt_price_x96: int
+    tick: int
+    liquidity: int
+    token0: str
+    token1: str
+    token0_decimals: int
+    token1_decimals: int
+    fee_tier: int
+    reserve0_raw: int
+    reserve1_raw: int
 
 
 @dataclass(frozen=True)
@@ -374,6 +408,21 @@ def _validate_window(
         return msg
     if start_ts >= end_ts:
         msg = f"start_ts must be < end_ts (got start_ts={start_ts}, end_ts={end_ts})"
+        _invalid_argument(context, msg)
+        return msg
+    return None
+
+
+def _validate_grid_window(
+    start_ts: int,
+    end_ts: int,
+    context: grpc.aio.ServicerContext,
+) -> str | None:
+    """Validate an inclusive sampling grid; one-point ranges are valid."""
+    if start_ts <= 0 or end_ts <= 0:
+        return _validate_window(start_ts, end_ts, context)
+    if start_ts > end_ts:
+        msg = f"start_ts must be <= end_ts (got start_ts={start_ts}, end_ts={end_ts})"
         _invalid_argument(context, msg)
         return msg
     return None
@@ -554,6 +603,8 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
                     )
                 self._twap_providers[key] = twap_conn
 
+        self._pool_state_providers = _build_pool_state_provider_dispatch()
+
         self._lwap_providers: dict[str, GatewayDexLwapCapability] = {}
         for lwap_conn in GATEWAY_REGISTRY.capability_providers(GatewayDexLwapCapability):  # type: ignore[type-abstract]
             for key in _provider_dispatch_keys(lwap_conn):
@@ -678,6 +729,23 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
             as_of_block=p.block_number or 0,
         )
 
+    @staticmethod
+    def _encode_pool_state_point(p: DexPoolStatePoint) -> gateway_pb2.DexPoolStatePoint:
+        return gateway_pb2.DexPoolStatePoint(
+            timestamp=p.timestamp,
+            block_number=p.block_number,
+            sqrt_price_x96=str(p.sqrt_price_x96),
+            tick=p.tick,
+            liquidity=str(p.liquidity),
+            token0=p.token0,
+            token1=p.token1,
+            token0_decimals=p.token0_decimals,
+            token1_decimals=p.token1_decimals,
+            fee_tier=p.fee_tier,
+            reserve0_raw=str(p.reserve0_raw),
+            reserve1_raw=str(p.reserve1_raw),
+        )
+
     @classmethod
     def _encode_volume_point(cls, p: DexVolumePoint) -> gateway_pb2.DexVolumePoint:
         return gateway_pb2.DexVolumePoint(
@@ -767,7 +835,7 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
             if err is not None:
                 return err
         if ts_window is not None:
-            err = _validate_window(ts_window[0], ts_window[1], context)
+            err = _validate_grid_window(ts_window[0], ts_window[1], context)
             if err is not None:
                 return err
         return _validate_positive_interval(interval_secs, context)
@@ -876,6 +944,26 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
             msg = (
                 f"dex {dex!r} does not support TWAP on chain {chain!r} "
                 f"(supports: {sorted(provider.twap_supported_chains())})"
+            )
+            _invalid_argument(context, msg)
+            return None, msg
+        return provider, None
+
+    def _resolve_pool_state_provider(
+        self,
+        dex: str,
+        chain: str,
+        context: grpc.aio.ServicerContext,
+    ) -> tuple[Any | None, str | None]:
+        provider = self._pool_state_providers.get(dex)
+        if provider is None:
+            msg = f"unsupported dex (pool state): {dex!r} (known: {sorted(self._pool_state_providers)})"
+            _invalid_argument(context, msg)
+            return None, msg
+        if chain not in provider.pool_state_supported_chains():
+            msg = (
+                f"dex {dex!r} does not support pool state on chain {chain!r} "
+                f"(supports: {sorted(provider.pool_state_supported_chains())})"
             )
             _invalid_argument(context, msg)
             return None, msg
@@ -1599,6 +1687,65 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
             chain=chain,
             pool_address=pool_address,
             points=[self._encode_twap_point(p) for p in points],
+            source="on_chain_archive",
+            success=True,
+        )
+
+    async def GetDexPoolStateSeries(
+        self,
+        request: gateway_pb2.GetDexPoolStateSeriesRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.DexPoolStateHistoryResponse:
+        dex = _normalize_key(request.dex)
+        chain = _normalize_key(request.chain)
+        pool_address = request.pool_address.strip()
+        validation = self._validate_twap_dispatch_inputs(
+            dex=dex,
+            chain=chain,
+            pool_address=pool_address,
+            context=context,
+            window_secs=None,
+            ts_window=(request.start_ts, request.end_ts),
+            interval_secs=request.interval_secs,
+        )
+        if validation is not None:
+            return gateway_pb2.DexPoolStateHistoryResponse(success=False, error=validation)
+        provider, error = self._resolve_pool_state_provider(dex, chain, context)
+        if provider is None:
+            return gateway_pb2.DexPoolStateHistoryResponse(success=False, error=error or "no provider")
+        try:
+            points = await provider.fetch_pool_state_series(
+                self,
+                chain=chain,
+                pool_address=pool_address,
+                start_ts=request.start_ts,
+                end_ts=request.end_ts,
+                interval_secs=request.interval_secs,
+            )
+        except RateHistoryUnavailable as exc:
+            return gateway_pb2.DexPoolStateHistoryResponse(
+                dex=dex,
+                chain=chain,
+                pool_address=pool_address,
+                source=exc.source or "none",
+                success=False,
+                error=str(exc),
+            )
+        except Exception as exc:
+            return self._handle_twap_internal_error(
+                exc,
+                context,
+                "GetDexPoolStateSeries",
+                dex,
+                chain,
+                pool_address,
+                response_cls=gateway_pb2.DexPoolStateHistoryResponse,
+            )
+        return gateway_pb2.DexPoolStateHistoryResponse(
+            dex=dex,
+            chain=chain,
+            pool_address=pool_address,
+            points=[self._encode_pool_state_point(point) for point in points],
             source="on_chain_archive",
             success=True,
         )

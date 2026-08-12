@@ -227,7 +227,7 @@ def compute_numeraire_metrics(
         sharpe_ratio=sharpe,
         sortino_ratio=sortino,
         volatility=volatility,
-        max_drawdown_pct=max_drawdown,
+        max_drawdown_pct=max_drawdown * Decimal("100"),
         calmar_ratio=calmar,
     )
     return metrics, initial, final
@@ -278,7 +278,7 @@ def compute_numeraire_metrics_paper(
         total_return_pct=total_return * Decimal("100"),
         sharpe_ratio=sharpe,
         volatility=volatility,
-        max_drawdown_pct=max_drawdown,
+        max_drawdown_pct=max_drawdown * Decimal("100"),
     )
     return metrics, initial, final
 

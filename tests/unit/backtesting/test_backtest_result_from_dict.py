@@ -236,12 +236,12 @@ class TestV1SchemaMigration:
 
 
 # -----------------------------------------------------------------------------
-# v2 schema (current)
+# Current and legacy schema rehydration
 # -----------------------------------------------------------------------------
 
 
-class TestV2SchemaRehydration:
-    """Current schema: returns are whole percentages (10 == 10%)."""
+class TestMetricsSchemaRehydration:
+    """Current schema uses whole percentages; legacy schemas are migrated."""
 
     def test_v2_metrics_are_not_migrated(self) -> None:
         """schema_version == SCHEMA_VERSION must leave percentage values as-is."""
@@ -284,6 +284,7 @@ class TestV2SchemaRehydration:
         assert result.metrics.total_pnl_usd == Decimal("1234.56")
         assert result.metrics.net_pnl_usd == Decimal("1000.00")
         assert result.metrics.sharpe_ratio == Decimal("1.5")
+        assert result.metrics.max_drawdown_pct == Decimal("12")
         assert result.metrics.total_trades == 42
         assert result.metrics.winning_trades == 25
         assert result.metrics.losing_trades == 17

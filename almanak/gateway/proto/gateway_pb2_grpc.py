@@ -4424,6 +4424,11 @@ class RateHistoryServiceStub(object):
                 request_serializer=gateway__pb2.GetDexTwapSeriesRequest.SerializeToString,
                 response_deserializer=gateway__pb2.DexTwapHistoryResponse.FromString,
                 _registered_method=True)
+        self.GetDexPoolStateSeries = channel.unary_unary(
+                '/almanak.gateway.proto.RateHistoryService/GetDexPoolStateSeries',
+                request_serializer=gateway__pb2.GetDexPoolStateSeriesRequest.SerializeToString,
+                response_deserializer=gateway__pb2.DexPoolStateHistoryResponse.FromString,
+                _registered_method=True)
         self.GetDexVolumeHistory = channel.unary_unary(
                 '/almanak.gateway.proto.RateHistoryService/GetDexVolumeHistory',
                 request_serializer=gateway__pb2.GetDexVolumeHistoryRequest.SerializeToString,
@@ -4546,6 +4551,15 @@ class RateHistoryServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetDexPoolStateSeries(self, request, context):
+        """Exact-pool Uniswap-V3-shaped state sampled from archive blocks selected
+        at-or-before each grid timestamp. Address identity is authoritative;
+        independent token/USD prices are never substituted.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def GetDexVolumeHistory(self, request, context):
         """Historical DEX trading-volume series for a single pool.
         Replaces the per-DEX duplicate egress under
@@ -4628,6 +4642,11 @@ def add_RateHistoryServiceServicer_to_server(servicer, server):
                     servicer.GetDexTwapSeries,
                     request_deserializer=gateway__pb2.GetDexTwapSeriesRequest.FromString,
                     response_serializer=gateway__pb2.DexTwapHistoryResponse.SerializeToString,
+            ),
+            'GetDexPoolStateSeries': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetDexPoolStateSeries,
+                    request_deserializer=gateway__pb2.GetDexPoolStateSeriesRequest.FromString,
+                    response_serializer=gateway__pb2.DexPoolStateHistoryResponse.SerializeToString,
             ),
             'GetDexVolumeHistory': grpc.unary_unary_rpc_method_handler(
                     servicer.GetDexVolumeHistory,
@@ -4835,6 +4854,33 @@ class RateHistoryService(object):
             '/almanak.gateway.proto.RateHistoryService/GetDexTwapSeries',
             gateway__pb2.GetDexTwapSeriesRequest.SerializeToString,
             gateway__pb2.DexTwapHistoryResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetDexPoolStateSeries(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.RateHistoryService/GetDexPoolStateSeries',
+            gateway__pb2.GetDexPoolStateSeriesRequest.SerializeToString,
+            gateway__pb2.DexPoolStateHistoryResponse.FromString,
             options,
             channel_credentials,
             insecure,

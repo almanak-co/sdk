@@ -171,6 +171,8 @@ class SnapshotFundingRateSource:
         if run_end < run_start:
             raise ValueError("end_time must be greater than or equal to start_time")
         self._chain = chain.strip().lower()
+        self._run_start = run_start
+        self._run_end = run_end
         self._history_start = run_start - _POINT_LOOKBACK
         self._history_end = run_end
         self._use_historical = bool(data_config is not None and data_config.use_historical_funding)
@@ -268,6 +270,23 @@ class SnapshotFundingRateSource:
         market_upper = perp_market_funding_key(market) or market.upper()
         series = await self._ensure_series(venue_value, market_upper)
         return len(series.points)
+
+    async def require_complete_history(self, venue: Venue | str, market: str) -> int:
+        """Fail unless measured history can serve every hour in the run window."""
+        if not self._use_historical:
+            return 0
+        venue_value = str(venue).lower()
+        market_upper = perp_market_funding_key(market) or market.upper()
+        series = await self._ensure_series(venue_value, market_upper)
+        checked_hours = 0
+        hour = self._run_start
+        while hour <= self._run_end:
+            reason = self._series_unavailability_reason(series, hour)
+            if reason is not None:
+                raise FundingRateUnavailableError(venue=venue_value, market=market_upper, reason=reason)
+            checked_hours += 1
+            hour += timedelta(hours=1)
+        return checked_hours
 
     def observation_at(
         self,
@@ -417,39 +436,36 @@ class SnapshotFundingRateSource:
         hour: datetime,
         series: _FundingSeries,
     ) -> _FundingResolution:
-        if series.failure_reason is not None:
+        reason = self._series_unavailability_reason(series, hour)
+        if reason is not None:
             return self._degraded(
                 venue,
                 market,
-                series.failure_reason,
+                reason,
                 hour=hour,
-                source=series.failure_source or "fallback:error",
+                source=series.failure_source or "fallback:no_data",
             )
 
         hour_ts = _unix_seconds(hour)
         point_index = bisect_right(series.timestamps, hour_ts) - 1
-        if point_index < 0:
-            return self._degraded(
-                venue,
-                market,
-                "no measured funding point at or before the tick",
-                hour=hour,
-                source="fallback:no_data",
-            )
         point = series.points[point_index]
-        if hour_ts - point.timestamp > _POINT_LOOKBACK_SECONDS:
-            return self._degraded(
-                venue,
-                market,
-                "latest measured funding point is more than 24 hours old",
-                hour=hour,
-                source="fallback:no_data",
-            )
         return _FundingResolution(
             rate=point.rate_hourly,
             source="historical:gateway",
             outcome=OUTCOME_SERVED,
         )
+
+    @staticmethod
+    def _series_unavailability_reason(series: _FundingSeries, hour: datetime) -> str | None:
+        if series.failure_reason is not None:
+            return series.failure_reason
+        hour_ts = _unix_seconds(hour)
+        point_index = bisect_right(series.timestamps, hour_ts) - 1
+        if point_index < 0:
+            return "no measured funding point at or before the tick"
+        if hour_ts - series.points[point_index].timestamp > _POINT_LOOKBACK_SECONDS:
+            return "latest measured funding point is more than 24 hours old"
+        return None
 
     def _degraded(
         self,
@@ -466,7 +482,7 @@ class SnapshotFundingRateSource:
                 source="",
                 outcome=OUTCOME_REFUSED,
                 detail=reason,
-                error=FundingRateUnavailableError(venue, market, reason),
+                error=FundingRateUnavailableError(venue=venue, market=market, reason=reason),
             )
         should_log = False
         with self._state_lock:

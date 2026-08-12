@@ -698,6 +698,8 @@ async def _prewarm_declared_funding_history(
     source: SnapshotFundingRateSource,
     strategy: BacktestableStrategy,
     strategy_config: Mapping[str, Any],
+    *,
+    require_complete: bool = False,
 ) -> None:
     """Materialize declared snapshot funding series before data iteration."""
     if not source.history_capable:
@@ -706,6 +708,8 @@ async def _prewarm_declared_funding_history(
         try:
             point_count = await source.materialize_history(target.protocol, target.market)
         except DataSourceError as exc:
+            if require_complete:
+                raise
             logger.warning(
                 "Snapshot funding prewarm unavailable for %s %s; continuing without prewarm: %s",
                 target.protocol,
@@ -713,6 +717,14 @@ async def _prewarm_declared_funding_history(
                 exc,
             )
             continue
+        if require_complete:
+            checked_hours = await source.require_complete_history(target.protocol, target.market)
+            logger.info(
+                "Validated %d hours of snapshot funding coverage for %s %s before tick 1",
+                checked_hours,
+                target.protocol,
+                target.market,
+            )
         logger.info(
             "Prewarmed %d snapshot funding points for %s %s before tick 1",
             point_count,
@@ -797,6 +809,67 @@ async def _prepare_declared_historical_twap(
             count,
             target.manifest_key,
         )
+    return source
+
+
+async def _prepare_declared_historical_pool_state(
+    strategy: BacktestableStrategy,
+    strategy_config: Mapping[str, Any],
+    config: PnLBacktestConfig,
+    manifest: Any | None,
+) -> Any | None:
+    """Prewarm exact-address archive pool state before simulation tick 1."""
+    from almanak.framework.backtesting.pnl.providers.snapshot_pool_state import (
+        SnapshotPoolStateSource,
+        declared_historical_pool_state_targets,
+    )
+
+    try:
+        targets = declared_historical_pool_state_targets(
+            strategy,
+            strategy_config,
+            default_chain=config.chain,
+        )
+    except ValueError as exc:
+        raise PreflightValidationError(
+            message=f"Historical exact-pool state declaration is invalid: {exc}",
+            failed_checks=["historical_exact_pool_state"],
+            recommendations=["Declare exact HistoricalPoolStateTarget values for every required pool."],
+            error_count=1,
+            warning_count=0,
+        ) from exc
+    if not targets:
+        return None
+    run_chain = config.chain.strip().lower()
+    mismatched = [target.chain for target in targets if target.chain != run_chain]
+    if mismatched:
+        raise PreflightValidationError(
+            message=f"Historical pool-state targets must use backtest chain {run_chain!r}: {sorted(set(mismatched))!r}",
+            failed_checks=["historical_exact_pool_state"],
+            recommendations=["Run one chain per backtest or update the pool-state target chain."],
+            error_count=1,
+            warning_count=0,
+        )
+    source = SnapshotPoolStateSource(
+        start_time=config.start_time,
+        end_time=config.end_time,
+        sample_interval_seconds=config.interval_seconds,
+        manifest=manifest,
+    )
+    for target in targets:
+        try:
+            count = await source.materialize_history(target)
+        except (DataSourceError, ValueError) as exc:
+            raise PreflightValidationError(
+                message=f"Historical exact-pool state preflight failed for {target.manifest_key}: {exc}",
+                failed_checks=["historical_exact_pool_state"],
+                recommendations=[
+                    "Verify the exact pool existed throughout the requested window and configure an archive-capable gateway RPC."
+                ],
+                error_count=1,
+                warning_count=0,
+            ) from exc
+        logger.info("Prewarmed %d exact-pool state observations for %s before tick 1", count, target.manifest_key)
     return source
 
 
@@ -1333,6 +1406,12 @@ async def execute_iteration_loop(
         config,
         state.data_broker.manifest if state.data_broker is not None else None,
     )
+    pool_state_source = await _prepare_declared_historical_pool_state(
+        strategy,
+        state.strategy_config,
+        config,
+        state.data_broker.manifest if state.data_broker is not None else None,
+    )
 
     # Stable for the whole run: provider registrations happen during
     # initialize_backtest, before this loop starts.
@@ -1491,6 +1570,11 @@ async def execute_iteration_loop(
             pool_history_reader.bind(timestamp)
             pool_analytics_reader.bind(timestamp)
             rate_history_reader.bind(timestamp)
+            exact_pool_view = (
+                pool_state_source.view_at(timestamp, fallback=pool_price_view)
+                if pool_state_source is not None
+                else None
+            )
             snapshot = create_market_snapshot_from_state(
                 market_state=market_state,
                 chain=config.chain,
@@ -1505,7 +1589,8 @@ async def execute_iteration_loop(
                 ohlcv_module=ohlcv_view,
                 lending_rates=lending_rates,
                 position_view=position_view,
-                pool_price_view=pool_price_view,
+                pool_price_view=exact_pool_view or pool_price_view,
+                pool_reader=exact_pool_view,
                 slippage_view=slippage_view,
                 volatility_calculator=volatility_calculator,
                 il_calculator=il_calculator,
@@ -2047,6 +2132,76 @@ def _append_fallback_compliance_violations(
         )
 
 
+def _log_decision_input_classification(
+    *,
+    state: BacktestState,
+    decision_summary: dict[str, Any],
+    decision_input_failures: list[dict[str, Any]],
+    bt_logger: BacktestLogger,
+) -> tuple[list[Any], list[dict[str, Any]]]:
+    """Log hollow/partially-starved attribution and return its inputs."""
+    executed_fills = [trade for trade in state.portfolio.trades if trade.success]
+    non_warm_up = [failure for failure in decision_input_failures if failure["pattern"] != "warm_up"]
+    terminal_execution_count = sum(decision_summary["executions"].values())
+    if decision_summary["intent_ticks"] > 0 and terminal_execution_count == 0:
+        bt_logger.warning(
+            f"HOLLOW BACKTEST: {decision_summary['intent_ticks']} intent(s) emitted but 0 reached a terminal "
+            f"fill-or-rejection outcome; the execution ledger is incomplete and performance metrics are not trustworthy"
+        )
+    elif non_warm_up and not executed_fills:
+        top = "; ".join(
+            f"{failure['source']}:{failure['key']} ({failure['ticks']} ticks, {failure['pattern']})"
+            for failure in non_warm_up[:3]
+        )
+        bt_logger.warning(
+            f"HOLLOW BACKTEST: 0 executed fills, {state.no_intent_ticks}/{state.tick_count} no-intent ticks, "
+            f"and {len(non_warm_up)} decision-input failure(s) — the strategy held because "
+            f"inputs were missing, not because it chose to. Top: {top}"
+        )
+    elif executed_fills:
+        starved = [failure for failure in non_warm_up if failure["pattern"] == "persistent"]
+        if starved:
+            top = "; ".join(
+                f"{failure['source']}:{failure['key']} ({failure['ticks']}/{state.tick_count} ticks)"
+                for failure in starved[:3]
+            )
+            bt_logger.warning(
+                f"PARTIALLY STARVED BACKTEST: the run traded ({len(executed_fills)} fill(s)) but "
+                f"{len(starved)} decision input(s) failed persistently — strategy branches gated on "
+                f"them may never have run; the result is NOT a faithful test of the full strategy. "
+                f"Starved: {top}"
+            )
+    return executed_fills, non_warm_up
+
+
+def _unsupported_data_error(
+    *,
+    state: BacktestState,
+    decision_summary: dict[str, Any],
+    executed_fills: list[Any],
+    non_warm_up: list[dict[str, Any]],
+) -> str | None:
+    """Return the strict failure for a run-wide required-input outage."""
+    run_wide = [
+        failure
+        for failure in non_warm_up
+        if failure["pattern"] == "persistent" and state.tick_count > 0 and failure["ticks"] >= state.tick_count
+    ]
+    if not run_wide or executed_fills or decision_summary["intent_ticks"] != 0:
+        return None
+    blocking = "; ".join(
+        f"{failure['source']}:{failure['key']} ({failure['ticks']}/{state.tick_count} ticks: {failure['detail']})"
+        for failure in run_wide[:3]
+    )
+    return (
+        "BACKTEST_UNSUPPORTED_DATA: no executable simulation was performed. "
+        f"{len(run_wide)} required decision input(s) were unavailable on every one of "
+        f"{state.tick_count} tick(s), and the strategy emitted zero intents. "
+        f"Blocking input(s): {blocking}. Any return, PnL, Sharpe, or drawdown in the "
+        "diagnostic artifact describes passive mark-to-market of funded assets, not strategy performance."
+    )
+
+
 def finalize_backtest_result(
     *,
     backtester: PnLBacktester,
@@ -2102,13 +2257,6 @@ def finalize_backtest_result(
 
     run_ended_at = datetime.now(UTC)
 
-    bt_logger.info(
-        f"Backtest completed for {strategy.deployment_id}: "
-        f"PnL=${metrics.net_pnl_usd:,.2f}, "
-        f"Return={metrics.total_return_pct:.2f}%, "
-        f"Sharpe={metrics.sharpe_ratio:.3f}"
-    )
-
     # Log phase summary
     phase_summary = bt_logger.get_phase_summary()
     bt_logger.info(f"Phase timing summary - Total: {phase_summary['total_duration_seconds']:.2f}s")
@@ -2126,10 +2274,6 @@ def finalize_backtest_result(
     fallback_usage = backtester._fallback_usage.copy() if backtester._fallback_usage else {}
     _append_fallback_compliance_violations(fallback_usage, state.compliance_violations)
 
-    # Determine institutional compliance status
-    # Compliance is True only if there are no violations
-    institutional_compliance = len(state.compliance_violations) == 0
-
     # Decision telemetry aggregate (iteration_summary counterpart): one block
     # that answers "what did the strategy decide, and why did it hold" — the
     # per-tick records themselves ship as a separate artifact, not result.json.
@@ -2145,31 +2289,40 @@ def finalize_backtest_result(
     #   RSI warm-up is not why a 2161-tick run held);
     # - a run that DID trade but starved one input persistently gets its own
     #   warning (a dead strategy leg hides behind a busy one).
-    executed_fills = [t for t in state.portfolio.trades if t.success]
-    non_warm_up = [f for f in decision_input_failures if f["pattern"] != "warm_up"]
-    terminal_execution_count = sum(decision_summary["executions"].values())
-    if decision_summary["intent_ticks"] > 0 and terminal_execution_count == 0:
-        bt_logger.warning(
-            f"HOLLOW BACKTEST: {decision_summary['intent_ticks']} intent(s) emitted but 0 reached a terminal "
-            f"fill-or-rejection outcome; the execution ledger is incomplete and performance metrics are not trustworthy"
+    executed_fills, non_warm_up = _log_decision_input_classification(
+        state=state,
+        decision_summary=decision_summary,
+        decision_input_failures=decision_input_failures,
+        bt_logger=bt_logger,
+    )
+
+    # ALM-3245: a run-wide required-input outage with no emitted or executed
+    # action did not evaluate the strategy.  Make the existing hollow-run
+    # detector load-bearing so the hosted runner returns FAILED and omits the
+    # headline metric summary.  The predicate is deliberately narrow: an
+    # intermittent failure, a warm-up, or a strategy that simply chose to hold
+    # remains a valid completed run.
+    unsupported_data_error = _unsupported_data_error(
+        state=state,
+        decision_summary=decision_summary,
+        executed_fills=executed_fills,
+        non_warm_up=non_warm_up,
+    )
+    if unsupported_data_error is not None:
+        state.compliance_violations.append(unsupported_data_error)
+        bt_logger.error(unsupported_data_error)
+
+    # Compliance is derived only after hollow-run classification so a run
+    # rejected as unsupported data cannot certify as institutionally compliant.
+    institutional_compliance = len(state.compliance_violations) == 0
+
+    if unsupported_data_error is None:
+        bt_logger.info(
+            f"Backtest completed for {strategy.deployment_id}: "
+            f"PnL=${metrics.net_pnl_usd:,.2f}, "
+            f"Return={metrics.total_return_pct:.2f}%, "
+            f"Sharpe={metrics.sharpe_ratio:.3f}"
         )
-    elif non_warm_up and not executed_fills:
-        top = "; ".join(f"{f['source']}:{f['key']} ({f['ticks']} ticks, {f['pattern']})" for f in non_warm_up[:3])
-        bt_logger.warning(
-            f"HOLLOW BACKTEST: 0 executed fills, {state.no_intent_ticks}/{state.tick_count} no-intent ticks, "
-            f"and {len(non_warm_up)} decision-input failure(s) — the strategy held because "
-            f"inputs were missing, not because it chose to. Top: {top}"
-        )
-    elif executed_fills:
-        starved = [f for f in non_warm_up if f["pattern"] == "persistent"]
-        if starved:
-            top = "; ".join(f"{f['source']}:{f['key']} ({f['ticks']}/{state.tick_count} ticks)" for f in starved[:3])
-            bt_logger.warning(
-                f"PARTIALLY STARVED BACKTEST: the run traded ({len(executed_fills)} fill(s)) but "
-                f"{len(starved)} decision input(s) failed persistently — strategy branches gated on "
-                f"them may never have run; the result is NOT a faithful test of the full strategy. "
-                f"Starved: {top}"
-            )
 
     bt_logger.info(
         f"Decision summary: {decision_summary['ticks']} ticks — "
@@ -2198,6 +2351,7 @@ def finalize_backtest_result(
         price_series=state.portfolio.price_series,
         price_series_display_labels=price_series_display_labels(state.portfolio.price_series),
         chain=config.chain,
+        error=unsupported_data_error,
         decision_input_failures=decision_input_failures or None,
         run_started_at=run_started_at,
         run_ended_at=run_ended_at,

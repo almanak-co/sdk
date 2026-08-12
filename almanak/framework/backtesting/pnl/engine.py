@@ -75,6 +75,7 @@ from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
+    from almanak.framework.backtesting.pnl.readiness import BacktestReadinessResult
     from almanak.framework.backtesting.pnl.sizing import SizingRejection
 
 from almanak.core.chains import DEFAULT_CHAIN, ChainRegistry
@@ -715,6 +716,7 @@ def create_market_snapshot_from_state(
     lending_rates: "list[Any] | None" = None,
     position_view: "SimulatedPositionView | None" = None,
     pool_price_view: Any | None = None,
+    pool_reader: Any | None = None,
     slippage_view: Any | None = None,
     volatility_calculator: Any | None = None,
     il_calculator: Any | None = None,
@@ -801,6 +803,7 @@ def create_market_snapshot_from_state(
         # state (ALM-2943); None keeps the documented no-provider contract.
         aave_health_factor_provider=(position_view.aave_health_factor if position_view is not None else None),
         pool_reader_registry=pool_price_view,
+        pool_reader=pool_reader,
         slippage_estimator=slippage_view,
         volatility_calculator=volatility_calculator,
         il_calculator=il_calculator,
@@ -822,7 +825,7 @@ def create_market_snapshot_from_state(
     )
     # Views that refuse must land their refusals in THIS tick's
     # decision-input ledger (the snapshot is fresh per tick).
-    for view in (pool_price_view, slippage_view):
+    for view in (pool_price_view, pool_reader, slippage_view):
         bind_snapshot = getattr(view, "bind_snapshot", None)
         if callable(bind_snapshot):
             bind_snapshot(snapshot)
@@ -4280,6 +4283,16 @@ class PnLBacktester:
                     await self.close()
                 except (OSError, RuntimeError):
                     logger.debug("Error during async resource cleanup", exc_info=True)
+
+    async def check_readiness(
+        self,
+        strategy: BacktestableStrategy,
+        config: PnLBacktestConfig,
+    ) -> "BacktestReadinessResult":
+        """Validate historical data dependencies without executing strategy decisions."""
+        from almanak.framework.backtesting.pnl.readiness import check_backtest_readiness
+
+        return await check_backtest_readiness(self, strategy, config)
 
     async def _run_backtest(
         self,

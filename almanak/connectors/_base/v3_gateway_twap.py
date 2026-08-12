@@ -33,6 +33,10 @@ _TOKEN1_SELECTOR = "d21220a7"
 
 # ERC20 decimals() selector.
 _DECIMALS_SELECTOR = "313ce567"
+_SLOT0_SELECTOR = "3850c7bd"
+_LIQUIDITY_SELECTOR = "1a686502"
+_FEE_SELECTOR = "ddca3f43"
+_BALANCE_OF_SELECTOR = "70a08231"
 
 
 # =============================================================================
@@ -577,3 +581,111 @@ async def fetch_v3_twap_series(
     # instead of silently returning fewer observations than the caller asked
     # for. The duplicated point retains the real block timestamp.
     return [point_by_block[sample] for sample in block_samples]
+
+
+async def fetch_v3_pool_state_series(
+    servicer: Any,
+    *,
+    chain: str,
+    pool_address: str,
+    start_ts: int,
+    end_ts: int,
+    interval_secs: int,
+    protocol: str,
+) -> list[Any]:
+    """Read exact Uniswap-V3-shaped pool state at historical archive blocks."""
+    from almanak.gateway.services.rate_history_service import (
+        DexPoolStatePoint,
+        RateHistoryUnavailable,
+    )
+
+    web3, pool_checksum = await _twap_resolve_web3_and_pool(
+        servicer,
+        chain,
+        pool_address,
+        protocol=protocol,
+    )
+    block_samples = await _historical_blocks_for_grid(
+        web3,
+        start_ts=start_ts,
+        end_ts=end_ts,
+        interval_secs=interval_secs,
+        protocol=protocol,
+    )
+    unique_blocks = list(dict.fromkeys(block_samples))
+    if not unique_blocks:
+        return []
+
+    try:
+        token0, token1, token0_decimals, token1_decimals = await _fetch_pool_tokens_and_decimals(
+            web3,
+            pool_checksum,
+            unique_blocks[-1][0],
+        )
+        fee_raw = await web3.eth.call(
+            {"to": pool_checksum, "data": f"0x{_FEE_SELECTOR}"},
+            block_identifier=unique_blocks[-1][0],
+        )
+        if len(fee_raw) < 32:
+            raise ValueError(f"fee() returned {len(fee_raw)} bytes; need 32")
+        fee_tier = int.from_bytes(fee_raw[-32:], byteorder="big")
+    except Exception as exc:
+        raise RateHistoryUnavailable(
+            protocol,
+            f"failed to read immutable pool identity for {pool_address!r}: {exc}",
+        ) from exc
+
+    balance0_call = "0x" + _BALANCE_OF_SELECTOR + pool_checksum.lower().removeprefix("0x").zfill(64)
+    balance1_call = balance0_call
+
+    async def read_state(block_sample: tuple[int, int]) -> DexPoolStatePoint:
+        block_number, block_timestamp = block_sample
+        try:
+            slot0_raw, liquidity_raw, reserve0_raw, reserve1_raw = await asyncio.gather(
+                web3.eth.call(
+                    {"to": pool_checksum, "data": f"0x{_SLOT0_SELECTOR}"},
+                    block_identifier=block_number,
+                ),
+                web3.eth.call(
+                    {"to": pool_checksum, "data": f"0x{_LIQUIDITY_SELECTOR}"},
+                    block_identifier=block_number,
+                ),
+                web3.eth.call(
+                    {"to": web3.to_checksum_address(token0), "data": balance0_call},
+                    block_identifier=block_number,
+                ),
+                web3.eth.call(
+                    {"to": web3.to_checksum_address(token1), "data": balance1_call},
+                    block_identifier=block_number,
+                ),
+            )
+            if len(slot0_raw) < 64 or min(len(liquidity_raw), len(reserve0_raw), len(reserve1_raw)) < 32:
+                raise ValueError("slot0/liquidity/balanceOf returned truncated data")
+            sqrt_price_x96 = int.from_bytes(slot0_raw[0:32], byteorder="big")
+            tick = int.from_bytes(slot0_raw[32:64], byteorder="big", signed=True)
+            return DexPoolStatePoint(
+                timestamp=block_timestamp,
+                block_number=block_number,
+                sqrt_price_x96=sqrt_price_x96,
+                tick=tick,
+                liquidity=int.from_bytes(liquidity_raw[-32:], byteorder="big"),
+                token0=token0,
+                token1=token1,
+                token0_decimals=token0_decimals,
+                token1_decimals=token1_decimals,
+                fee_tier=fee_tier,
+                reserve0_raw=int.from_bytes(reserve0_raw[-32:], byteorder="big"),
+                reserve1_raw=int.from_bytes(reserve1_raw[-32:], byteorder="big"),
+            )
+        except Exception as exc:
+            raise RateHistoryUnavailable(
+                protocol,
+                f"pool-state archive read failed for {pool_address!r} at block {block_number}: {exc}",
+            ) from exc
+
+    by_block: dict[tuple[int, int], DexPoolStatePoint] = {}
+    for offset in range(0, len(unique_blocks), 32):
+        chunk = unique_blocks[offset : offset + 32]
+        points = await asyncio.gather(*(read_state(sample) for sample in chunk))
+        by_block.update(zip(chunk, points, strict=True))
+    return [by_block[sample] for sample in block_samples]

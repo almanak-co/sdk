@@ -29,6 +29,7 @@ from almanak.connectors._base.v3_gateway_twap import (
     _tick_to_price,
     _twap_call_observe,
     _twap_tick_from_cumulatives,
+    fetch_v3_pool_state_series,
     fetch_v3_twap_observation,
     fetch_v3_twap_series,
 )
@@ -39,6 +40,10 @@ _OBSERVE = "883bdbfd"
 _TOKEN0 = "0dfe1681"
 _TOKEN1 = "d21220a7"
 _DECIMALS = "313ce567"
+_SLOT0 = "3850c7bd"
+_LIQUIDITY = "1a686502"
+_FEE = "ddca3f43"
+_BALANCE_OF = "70a08231"
 
 # Base canonical addresses (any checksum-free lowercase addresses work for the fake).
 _WETH = "0x4200000000000000000000000000000000000006"
@@ -128,6 +133,14 @@ def _make_historical_web3(*, latest_block: int = 10, genesis_timestamp: int = 1_
             return _addr_word(_USDC)
         if sel == _DECIMALS:
             return _uint_word(18 if to == _WETH.lower() else 6)
+        if sel == _SLOT0:
+            return _uint_word(2**96 + int(block_identifier)) + _int_word(-7) + bytes(32 * 5)
+        if sel == _LIQUIDITY:
+            return _uint_word(123 + int(block_identifier))
+        if sel == _FEE:
+            return _uint_word(500)
+        if sel == _BALANCE_OF:
+            return _uint_word((10**18 if to == _WETH.lower() else 2 * 10**6) + int(block_identifier))
         raise AssertionError(f"unexpected eth.call sel={sel} to={to}")
 
     web3 = SimpleNamespace(
@@ -233,6 +246,55 @@ def test_historical_block_grid_resolves_latest_block_at_or_before_each_target() 
     )
 
     assert samples == [(2, 1_020), (4, 1_040)]
+
+
+def test_historical_pool_state_uses_exact_archive_blocks_and_identity() -> None:
+    web3, calls = _make_historical_web3()
+
+    points = asyncio.run(
+        fetch_v3_pool_state_series(
+            _make_servicer(web3),
+            chain="base",
+            pool_address="0x0000000000000000000000000000000000000003",
+            start_ts=1_025,
+            end_ts=1_045,
+            interval_secs=20,
+            protocol="uniswap_v3",
+        )
+    )
+
+    assert [(point.block_number, point.timestamp) for point in points] == [(2, 1_020), (4, 1_040)]
+    assert all(point.token0 == _WETH and point.token1 == _USDC for point in points)
+    assert all(point.fee_tier == 500 and point.tick == -7 for point in points)
+    assert points[0].reserve0_raw == 10**18 + 2
+    assert points[1].reserve1_raw == 2 * 10**6 + 4
+    state_calls = [call for call in calls if call[0] in {_SLOT0, _LIQUIDITY, _BALANCE_OF}]
+    assert {call[1] for call in state_calls} == {2, 4}
+
+
+def test_historical_pool_state_rejects_truncated_slot0_tick_word() -> None:
+    web3, _calls = _make_historical_web3()
+    original_call = web3.eth.call
+
+    async def truncated_slot0(tx, block_identifier=None):
+        if tx["data"][2:10] == _SLOT0:
+            return _uint_word(2**96)
+        return await original_call(tx, block_identifier=block_identifier)
+
+    web3.eth.call = truncated_slot0
+
+    with pytest.raises(RateHistoryUnavailable, match="truncated data"):
+        asyncio.run(
+            fetch_v3_pool_state_series(
+                _make_servicer(web3),
+                chain="base",
+                pool_address="0x0000000000000000000000000000000000000003",
+                start_ts=1_025,
+                end_ts=1_025,
+                interval_secs=20,
+                protocol="uniswap_v3",
+            )
+        )
 
 
 def test_historical_block_resolver_bisects_after_interpolation_stalls() -> None:

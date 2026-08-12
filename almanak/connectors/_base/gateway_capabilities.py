@@ -1276,6 +1276,32 @@ class GatewayDexTwapCapability(Protocol):
 
 
 @runtime_checkable
+class GatewayDexPoolStateCapability(Protocol):
+    """DEX connector publishes timestamp-aligned exact-pool state history.
+
+    The v1 capability is intentionally address-first and V3-shaped. It reads
+    immutable pool identity plus ``slot0()``, in-range liquidity, and the two
+    pool token balances at archive blocks selected at-or-before each requested
+    timestamp. Callers may never substitute independent token/USD prices.
+    """
+
+    def dex_name(self) -> str: ...
+
+    def pool_state_supported_chains(self) -> frozenset[str]: ...
+
+    async def fetch_pool_state_series(
+        self,
+        servicer: Any,
+        *,
+        chain: str,
+        pool_address: str,
+        start_ts: int,
+        end_ts: int,
+        interval_secs: int,
+    ) -> Any: ...
+
+
+@runtime_checkable
 class GatewayDexLwapCapability(Protocol):
     """DEX connector publishes liquidity-weighted spot price (LWAP) over pools.
 

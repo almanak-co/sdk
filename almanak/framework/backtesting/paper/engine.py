@@ -4176,7 +4176,7 @@ class PaperTrader:
             total_pnl_usd=total_pnl,
             net_pnl_usd=net_pnl,
             sharpe_ratio=sharpe,
-            max_drawdown_pct=max_drawdown,
+            max_drawdown_pct=max_drawdown * Decimal("100"),
             win_rate=win_rate,
             total_trades=total_trades_count,
             profit_factor=profit_factor,

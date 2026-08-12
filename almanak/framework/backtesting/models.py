@@ -1726,8 +1726,9 @@ class NumeraireMetrics:
     (fees / slippage / gas / MEV) are NOT re-denominated and stay USD on
     ``BacktestMetrics``.
 
-    Conventions match ``BacktestMetrics`` exactly: ``*_return_pct`` are whole
-    percentages (10 == 10%); ``max_drawdown_pct`` / ``volatility`` are ratios.
+    Conventions match ``BacktestMetrics`` exactly: ``*_return_pct`` and
+    ``max_drawdown_pct`` are whole percentages (10 == 10%); ``volatility`` is
+    a ratio.
 
     Attributes:
         numeraire: Canonical UPPERCASE symbol of the numeraire token (e.g. "WETH").
@@ -1737,7 +1738,7 @@ class NumeraireMetrics:
         sharpe_ratio: Sharpe ratio of the numeraire-denominated returns.
         sortino_ratio: Sortino ratio of the numeraire-denominated returns.
         volatility: Annualized volatility of numeraire returns (ratio).
-        max_drawdown_pct: Maximum peak-to-trough decline in numeraire terms (ratio).
+        max_drawdown_pct: Maximum peak-to-trough decline as a whole percentage.
         calmar_ratio: Annualized numeraire return / max drawdown.
     """
 
@@ -1766,8 +1767,16 @@ class NumeraireMetrics:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "NumeraireMetrics":
+    def from_dict(
+        cls,
+        data: dict[str, Any],
+        *,
+        legacy_drawdown_ratio: bool = False,
+    ) -> "NumeraireMetrics":
         """Deserialize from dictionary."""
+        max_drawdown_pct = Decimal(data.get("max_drawdown_pct", "0"))
+        if legacy_drawdown_ratio:
+            max_drawdown_pct *= Decimal("100")
         return cls(
             numeraire=data["numeraire"],
             total_pnl=Decimal(data.get("total_pnl", "0")),
@@ -1776,7 +1785,7 @@ class NumeraireMetrics:
             sharpe_ratio=Decimal(data.get("sharpe_ratio", "0")),
             sortino_ratio=Decimal(data.get("sortino_ratio", "0")),
             volatility=Decimal(data.get("volatility", "0")),
-            max_drawdown_pct=Decimal(data.get("max_drawdown_pct", "0")),
+            max_drawdown_pct=max_drawdown_pct,
             calmar_ratio=Decimal(data.get("calmar_ratio", "0")),
         )
 
@@ -1785,7 +1794,8 @@ class NumeraireMetrics:
 class BacktestMetrics:
     """Performance metrics calculated from backtest results.
 
-    Ratios are decimal (0.1 = 10%). ``performance_denomination`` names the
+    Percentage fields use whole percentages (10 = 10%); other ratios are
+    decimal fractions (0.1 = 10%). ``performance_denomination`` names the
     canonical performance expression (schema v3, blueprint 31 §7): for
     ``fiat_usd`` strategies everything is USD as before; for token-quoted
     strategies the equity-derived fields are computed on the numeraire equity
@@ -1802,7 +1812,8 @@ class BacktestMetrics:
             reflected in the equity curve. The cost breakdown lives in
             total_fees_usd / total_slippage_usd / total_gas_usd.
         sharpe_ratio: Risk-adjusted return (annualized, assuming 0 risk-free rate)
-        max_drawdown_pct: Maximum peak-to-trough decline as decimal (0.1 = 10%)
+        max_drawdown_pct: Maximum peak-to-trough decline as a whole percentage
+            (10 = 10%). Schema v4 migrated this field from a decimal ratio.
         win_rate: Percentage of profitable trades as decimal (0.6 = 60%)
         total_trades: Total number of trades executed
         profit_factor: Ratio of gross profit to gross loss
@@ -1960,7 +1971,7 @@ class BacktestMetrics:
     #: v2 artifact survives a load/save cycle without losing its numeraire view.
     numeraire_metrics: "NumeraireMetrics | None" = None
 
-    SCHEMA_VERSION: ClassVar[int] = 3
+    SCHEMA_VERSION: ClassVar[int] = 4
 
     def __post_init__(self) -> None:
         """Populate token display labels from attribution keys when omitted."""
@@ -2512,7 +2523,7 @@ class BacktestResult:
             f"Annualized Return:  {self.metrics.annualized_return_pct:.2f}%",
             f"Sharpe Ratio:       {self.metrics.sharpe_ratio:.3f}",
             f"Sortino Ratio:      {self.metrics.sortino_ratio:.3f}",
-            f"Max Drawdown:       {self.metrics.max_drawdown_pct * 100:.2f}%",
+            f"Max Drawdown:       {self.metrics.max_drawdown_pct:.2f}%",
             f"Calmar Ratio:       {self.metrics.calmar_ratio:.3f}",
             "",
             "TRADING STATISTICS",
@@ -2788,9 +2799,9 @@ class BacktestResult:
         VIB-2915: v1 stored total_return_pct / annualized_return_pct as ratios
         (0.10 for 10%); v2+ stores them as whole percentages (10 for 10%).
         Artifacts without a schema_version are treated as v1 and migrated. The
-        migration keys off ``schema_version < 2`` — NOT ``< SCHEMA_VERSION`` —
-        so later schema bumps (v3: numeraire-canonical fields) never re-apply
-        the x100 percentage migration to a v2 artifact.
+        Return migration keys off ``schema_version < 2`` and drawdown migration
+        keys off ``schema_version < 4`` — never ``< SCHEMA_VERSION`` — so later
+        schema bumps cannot re-apply either conversion.
 
         v2 artifacts load with their stored (USD-canonical) semantics; nothing
         is re-canonicalized on load — ``schema_version`` discriminates and the
@@ -2801,12 +2812,17 @@ class BacktestResult:
         artifacts; `to_dict` itself always emits a dict.
         """
         metrics_data = metrics_data or {}
-        legacy_metrics_schema = metrics_data.get("schema_version", 1) < 2
+        schema_version = metrics_data.get("schema_version", 1)
+        legacy_metrics_schema = schema_version < 2
+        legacy_drawdown_schema = schema_version < 4
         total_return_pct = Decimal(metrics_data.get("total_return_pct", "0"))
         annualized_return_pct = Decimal(metrics_data.get("annualized_return_pct", "0"))
+        max_drawdown_pct = Decimal(metrics_data.get("max_drawdown_pct", "0"))
         if legacy_metrics_schema:
             total_return_pct *= Decimal("100")
             annualized_return_pct *= Decimal("100")
+        if legacy_drawdown_schema:
+            max_drawdown_pct *= Decimal("100")
 
         opt_dec = BacktestResult._optional_decimal
 
@@ -2814,7 +2830,7 @@ class BacktestResult:
             total_pnl_usd=Decimal(metrics_data.get("total_pnl_usd", "0")),
             net_pnl_usd=Decimal(metrics_data.get("net_pnl_usd", "0")),
             sharpe_ratio=Decimal(metrics_data.get("sharpe_ratio", "0")),
-            max_drawdown_pct=Decimal(metrics_data.get("max_drawdown_pct", "0")),
+            max_drawdown_pct=max_drawdown_pct,
             win_rate=Decimal(metrics_data.get("win_rate", "0")),
             total_trades=metrics_data.get("total_trades", 0),
             profit_factor=Decimal(metrics_data.get("profit_factor", "0")),
@@ -2897,7 +2913,10 @@ class BacktestResult:
             numeraire_price_usd_end=opt_dec(metrics_data, "numeraire_price_usd_end"),
             # Legacy v2 sub-block (VIB-5127): absent key -> None.
             numeraire_metrics=(
-                NumeraireMetrics.from_dict(metrics_data["numeraire_metrics"])
+                NumeraireMetrics.from_dict(
+                    metrics_data["numeraire_metrics"],
+                    legacy_drawdown_ratio=legacy_drawdown_schema,
+                )
                 if metrics_data.get("numeraire_metrics")
                 else None
             ),

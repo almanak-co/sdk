@@ -46,6 +46,7 @@ from almanak.framework.backtesting.pnl.providers.perp.snapshot_funding import (
     SnapshotFundingRateSource,
 )
 from almanak.framework.data.funding import FundingRateUnavailableError, Venue
+from almanak.framework.data.interfaces import DataSourceUnavailable
 
 TICK = datetime(2024, 1, 15, 12, 30, tzinfo=UTC)
 TICK_HOUR = datetime(2024, 1, 15, 12, 0, tzinfo=UTC)
@@ -275,6 +276,46 @@ def test_historical_unmeasured_hour_raises_in_strict_mode(monkeypatch: pytest.Mo
     assert entry["source"] == ""
     assert entry["outcome"] == OUTCOME_REFUSED
     assert entry["count"] == 3
+
+
+def test_readiness_coverage_rejects_empty_funding_series(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "almanak.framework.backtesting.pnl.providers.perp.snapshot_funding.fetch_funding_points",
+        lambda **_kwargs: [],
+    )
+    source = _historical_source()
+
+    with pytest.raises(FundingRateUnavailableError, match="no measured funding points") as caught:
+        asyncio.run(source.require_complete_history("gmx_v2", "ETH-USD"))
+
+    assert caught.value.venue == "gmx_v2"
+    assert caught.value.market == "ETH-USD"
+
+
+def test_readiness_coverage_rejects_funding_provider_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    def unavailable(**_kwargs):
+        raise DataSourceUnavailable(source="gateway", reason="archive unavailable")
+
+    monkeypatch.setattr(
+        "almanak.framework.backtesting.pnl.providers.perp.snapshot_funding.fetch_funding_points",
+        unavailable,
+    )
+    source = _historical_source()
+
+    with pytest.raises(FundingRateUnavailableError, match="archive unavailable"):
+        asyncio.run(source.require_complete_history("gmx_v2", "ETH-USD"))
+
+
+def test_readiness_coverage_rejects_run_wide_funding_gap(monkeypatch: pytest.MonkeyPatch) -> None:
+    start = TICK_HOUR
+    source = _historical_source(start_time=start, end_time=start + timedelta(hours=25))
+    monkeypatch.setattr(
+        "almanak.framework.backtesting.pnl.providers.perp.snapshot_funding.fetch_funding_points",
+        lambda **_kwargs: [FundingHistoryPoint(timestamp=int(start.timestamp()), rate_hourly=Decimal("0.0004"))],
+    )
+
+    with pytest.raises(FundingRateUnavailableError, match="more than 24 hours old"):
+        asyncio.run(source.require_complete_history("gmx_v2", "ETH-USD"))
 
 
 def test_unexpected_history_load_failure_propagates_and_is_not_cached(monkeypatch: pytest.MonkeyPatch) -> None:

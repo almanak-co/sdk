@@ -343,7 +343,7 @@ def test_merge_numeraire_canonical_overwrites_primary_fields() -> None:
     assert metrics.total_pnl_usd == Decimal("-1250")
     assert metrics.net_pnl_usd == Decimal("-1250")
     assert metrics.total_return_pct == Decimal("-10")
-    assert metrics.max_drawdown_pct == Decimal("0.1")
+    assert metrics.max_drawdown_pct == Decimal("10")
     # Trade stats convert at the trade tick: +1,240 net at 2,500 -> +0.496 WETH.
     assert metrics.trades_with_realized_pnl == 1
     assert metrics.winning_trades == 1
@@ -421,7 +421,7 @@ def test_v2_artifact_with_numeraire_metrics_preserves_legacy_block() -> None:
     assert metrics.numeraire_metrics.total_pnl == Decimal("-0.5")
     # Re-emission keeps the legacy block (now under the v3 schema version).
     payload = metrics.to_dict()
-    assert payload["schema_version"] == 3
+    assert payload["schema_version"] == 4
     assert payload["numeraire_metrics"]["numeraire"] == "WETH"
 
 

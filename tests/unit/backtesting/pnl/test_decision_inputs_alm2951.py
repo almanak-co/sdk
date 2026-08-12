@@ -247,6 +247,24 @@ class _TwapReadingStrategy:
         return None
 
 
+class _IntermittentTwapReadingStrategy:
+    """Reads the unavailable lane on alternating ticks across a long run."""
+
+    deployment_id = "intermittent_twap_reader"
+
+    def __init__(self) -> None:
+        self._tick = 0
+
+    def decide(self, market: Any) -> Any:
+        self._tick += 1
+        if self._tick % 2:
+            try:
+                market.twap("WETH/USDC")
+            except ValueError:
+                pass
+        return None
+
+
 class _GasReadingStrategy:
     def __init__(self) -> None:
         self._deployment_id = "gas_reader"
@@ -360,6 +378,10 @@ class TestRunLevelReport:
         twap_entries = [f for f in result.decision_input_failures if f["source"] == "twap"]
         assert twap_entries and twap_entries[0]["ticks"] == 6
         assert any("HOLLOW BACKTEST" in r.message for r in caplog.records)
+        assert result.success is False
+        assert result.error is not None and result.error.startswith("BACKTEST_UNSUPPORTED_DATA:")
+        assert result.institutional_compliance is False
+        assert result.error in result.compliance_violations
 
     @pytest.mark.asyncio
     async def test_clean_run_has_no_report(self):
@@ -372,6 +394,18 @@ class TestRunLevelReport:
         backtester = _backtester(num_ticks=4)
         result = await backtester.backtest(_Holder(), _config(4))
         assert result.decision_input_failures is None
+        assert result.success is True
+
+    @pytest.mark.asyncio
+    async def test_intermittent_input_failure_does_not_fail_the_run(self):
+        backtester = _backtester(num_ticks=100)
+
+        result = await backtester.backtest(_IntermittentTwapReadingStrategy(), _config(100))
+
+        assert result.success is True
+        assert result.error is None
+        assert result.decision_input_failures
+        assert result.decision_input_failures[0]["pattern"] == "intermittent"
 
     @pytest.mark.asyncio
     async def test_gas_helpers_served_by_engine_model(self):

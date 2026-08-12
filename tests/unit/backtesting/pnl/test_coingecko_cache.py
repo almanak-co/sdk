@@ -27,6 +27,7 @@ from almanak.framework.backtesting.pnl.providers.coingecko import (
     HistoricalCacheEntry,
     HistoricalCacheStats,
     HistoricalPriceCache,
+    HistoricalPriceUnitError,
     OHLCVCache,
     RetryConfig,
 )
@@ -664,6 +665,123 @@ class TestCoinGeckoIteration:
         price = await provider.get_price(address, datetime(2024, 1, 1, 2, 0, tzinfo=UTC))
 
         assert price == Decimal("1")
+
+
+class TestHistoricalPriceUnitIntegrity:
+    """ALM-3243: a mixed quote unit must fail before funding consumes it."""
+
+    @staticmethod
+    def _candle(ts: datetime, close: str) -> OHLCV:
+        price = Decimal(close)
+        return OHLCV(timestamp=ts, open=price, high=price, low=price, close=price, volume=None)
+
+    @pytest.mark.asyncio
+    async def test_prefetch_rejects_reported_weth_pair_ratio_inside_usd_series(self):
+        start = datetime(2026, 2, 11, 0, 0, tzinfo=UTC)
+        candles = [
+            self._candle(start, "0.029375000000000002"),
+            self._candle(start + timedelta(hours=1), "2016.5499065124814"),
+            self._candle(start + timedelta(hours=2), "1988.12"),
+        ]
+        provider = CoinGeckoDataProvider(retry_config=RetryConfig(max_retries=0))
+        provider.get_ohlcv = AsyncMock(return_value=candles)  # type: ignore[method-assign]
+        config = HistoricalDataConfig(
+            start_time=start,
+            end_time=start + timedelta(hours=2),
+            interval_seconds=3600,
+            tokens=["WETH"],
+            include_ohlcv=True,
+        )
+
+        with pytest.raises(HistoricalPriceUnitError, match=r"WETH.*>=20x.*mix quote units"):
+            async for _ in provider.iterate(config):
+                pass
+
+        assert provider._cache is None
+
+    @pytest.mark.asyncio
+    async def test_prefetch_rejects_bad_prior_seed_before_first_tick(self):
+        start = datetime(2026, 2, 11, 0, 0, tzinfo=UTC)
+        prior = self._candle(start - timedelta(hours=1), "0.029375")
+        first = self._candle(start + timedelta(seconds=48), "2016.55")
+
+        async def fake_get_ohlcv(token, _start, end, _interval_seconds):
+            return [prior] if end == start else [first]
+
+        provider = CoinGeckoDataProvider(retry_config=RetryConfig(max_retries=0))
+        provider.get_ohlcv = AsyncMock(side_effect=fake_get_ohlcv)  # type: ignore[method-assign]
+        config = HistoricalDataConfig(
+            start_time=start,
+            end_time=start + timedelta(hours=1),
+            interval_seconds=3600,
+            tokens=["WETH"],
+            include_ohlcv=True,
+        )
+
+        with pytest.raises(HistoricalPriceUnitError, match="funding or valuation"):
+            await provider._prefetch_ohlcv_data(config)
+
+    @pytest.mark.asyncio
+    async def test_prefetch_accepts_large_but_subthreshold_market_move(self):
+        start = datetime(2026, 2, 11, 0, 0, tzinfo=UTC)
+        candles = [
+            self._candle(start, "100"),
+            self._candle(start + timedelta(hours=1), "1999"),
+        ]
+        provider = CoinGeckoDataProvider(retry_config=RetryConfig(max_retries=0))
+        provider.get_ohlcv = AsyncMock(return_value=candles)  # type: ignore[method-assign]
+        config = HistoricalDataConfig(
+            start_time=start,
+            end_time=start + timedelta(hours=1),
+            interval_seconds=3600,
+            tokens=["TOKEN"],
+            include_ohlcv=True,
+        )
+
+        cache = await provider._prefetch_ohlcv_data(config)
+
+        assert cache.data["TOKEN"] == candles
+
+    @pytest.mark.asyncio
+    async def test_prefetch_rejects_exact_threshold_for_daily_candles(self):
+        start = datetime(2026, 2, 11, 0, 0, tzinfo=UTC)
+        candles = [
+            self._candle(start, "1"),
+            self._candle(start + timedelta(days=1), "20"),
+        ]
+        provider = CoinGeckoDataProvider(retry_config=RetryConfig(max_retries=0))
+        provider.get_ohlcv = AsyncMock(return_value=candles)  # type: ignore[method-assign]
+        config = HistoricalDataConfig(
+            start_time=start,
+            end_time=start + timedelta(days=1),
+            interval_seconds=86_400,
+            tokens=["TOKEN"],
+            include_ohlcv=True,
+        )
+
+        with pytest.raises(HistoricalPriceUnitError, match=r">=20x"):
+            await provider._prefetch_ohlcv_data(config)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bad_close", ["0", "-1"])
+    async def test_prefetch_rejects_nonpositive_usd_closes(self, bad_close: str):
+        start = datetime(2026, 2, 11, 0, 0, tzinfo=UTC)
+        candles = [
+            self._candle(start, "100"),
+            self._candle(start + timedelta(hours=1), bad_close),
+        ]
+        provider = CoinGeckoDataProvider(retry_config=RetryConfig(max_retries=0))
+        provider.get_ohlcv = AsyncMock(return_value=candles)  # type: ignore[method-assign]
+        config = HistoricalDataConfig(
+            start_time=start,
+            end_time=start + timedelta(hours=1),
+            interval_seconds=3_600,
+            tokens=["TOKEN"],
+            include_ohlcv=True,
+        )
+
+        with pytest.raises(HistoricalPriceUnitError, match="nonpositive"):
+            await provider._prefetch_ohlcv_data(config)
 
 
 class TestPrefetchSeedPriorCandle:

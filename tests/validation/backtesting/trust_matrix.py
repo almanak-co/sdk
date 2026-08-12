@@ -82,6 +82,7 @@ INVARIANT_ROWS: tuple[str, ...] = (
     "snapshot_price_case_insensitive",
     "historical_price_provenance",
     "historical_exact_pool_twap",
+    "historical_exact_pool_state",
     "snapshot_total_counts_cash_once",
     "trade_pnl_attribution",
     "math_il_closed_form",
@@ -241,6 +242,13 @@ CELLS: tuple[TrustCell, ...] = (
         "An exact-pool TWAP dependency is prewarmed from archive observe() evidence, preserves its pool/window/"
         "block identity and actual observation time, and is never replaced by the funded tokens' USD ratio "
         "(ALM-3232).",
+    ),
+    _cell(
+        "historical_exact_pool_state",
+        "lp",
+        "An exact Uniswap V3 pool address is prewarmed from archive slot0/liquidity/balanceOf state and serves "
+        "execution-grade pool_price() plus pool_reserves() without static-registry membership or a token/USD proxy "
+        "(ALM-3225/ALM-3244/ALM-3245).",
     ),
     # --- LP column ---
     _cell(

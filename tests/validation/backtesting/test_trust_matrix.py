@@ -63,6 +63,7 @@ from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 from almanak.framework.backtesting.pnl.data_manifest import (
     CONSUMER_STRATEGY_DECISION,
     LANE_FUNDING,
+    LANE_POOL_STATE,
     LANE_PRICE,
     LANE_TWAP,
     OUTCOME_DEGRADED,
@@ -80,8 +81,10 @@ from almanak.framework.backtesting.pnl.metrics_calculator import (
 from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
 from almanak.framework.backtesting.pnl.position_models import PositionType, SimulatedPosition
 from almanak.framework.backtesting.pnl.providers.perp._gateway_history import FundingHistoryPoint
+from almanak.framework.backtesting.pnl.providers.snapshot_pool_state import HistoricalPoolStatePoint
 from almanak.framework.backtesting.pnl.providers.twap import HistoricalTWAPPoint
 from almanak.framework.backtesting.pnl.types import DataConfidence
+from almanak.framework.data.models import DataClassification
 from almanak.framework.intents.lending_intents import (
     BorrowIntent,
     RepayIntent,
@@ -306,7 +309,7 @@ def test_swap_numeraire_canonical_metrics_reconcile() -> None:
     assert metrics.total_return_pct == Decimal("-10")
     assert result.total_return_pct == Decimal("-10")  # top-level property agrees
     # 5 -> 4.5 WETH peak-to-trough on the numeraire equity series.
-    assert metrics.max_drawdown_pct == Decimal("0.1")
+    assert metrics.max_drawdown_pct == Decimal("10")
 
     # Trade statistics convert per-trade at the trade tick: the sell realized
     # +$1,250 at a $2,500 WETH price -> a +0.5 WETH win (trade-time conversion;
@@ -328,9 +331,9 @@ def test_swap_numeraire_canonical_metrics_reconcile() -> None:
     assert metrics.total_fees_numeraire == Decimal("0")
     assert metrics.total_fees_usd == Decimal("0")
 
-    # The artifact carries the merged expression only (schema v3).
+    # The artifact carries the merged expression only (schema v4).
     payload = result.to_dict()
-    assert payload["metrics"]["schema_version"] == 3
+    assert payload["metrics"]["schema_version"] == 4
     assert payload["metrics"]["performance_denomination"] == "WETH"
     assert "numeraire_metrics" not in payload["metrics"]
     assert payload["metrics"]["total_pnl_numeraire"] == "-0.5"
@@ -693,6 +696,119 @@ def test_historical_exact_pool_twap_reaches_unchanged_strategy_call(monkeypatch:
     assert entries[0]["ladder"] == ["archive_observe"]
     assert "window_seconds=1800" in entries[0]["detail"]
     assert "sample_interval_seconds=3600" in entries[0]["detail"]
+
+
+@pytest.mark.trust_cell("lp:historical_exact_pool_state")
+def test_historical_exact_pool_state_reaches_unchanged_lp_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Address-first archive state serves both exact-pool snapshot APIs."""
+    link = "0x514910771af9ca656af840dff83e8264ecf986ca"
+    weth = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+    exact_pool = "0xa6cc3c2531fdaa6ae1a3ca84c2855806728693e8"
+    fetch_calls = []
+
+    def archive_fetch(**kwargs):
+        fetch_calls.append(kwargs)
+        targets = range(kwargs["start_ts"], kwargs["end_ts"] + 1, kwargs["interval_secs"])
+        return [
+            HistoricalPoolStatePoint(
+                timestamp=target - 10,
+                block_number=19_000_000 + index,
+                sqrt_price_x96=2**96,
+                tick=0,
+                liquidity=100_000 + index,
+                token0=link,
+                token1=weth,
+                token0_decimals=18,
+                token1_decimals=18,
+                fee_tier=3_000,
+                reserve0_raw=10**20,
+                reserve1_raw=2 * 10**19,
+                source="on_chain_archive",
+            )
+            for index, target in enumerate(targets)
+        ]
+
+    monkeypatch.setattr(
+        "almanak.framework.backtesting.pnl.providers.snapshot_pool_state.fetch_historical_pool_state_points",
+        archive_fetch,
+    )
+
+    class Provider:
+        provider_name = "synthetic"
+
+        async def iterate(self, config):
+            for hour in range(3):
+                timestamp = config.start_time + timedelta(hours=hour)
+                yield (
+                    timestamp,
+                    MarketState(
+                        timestamp=timestamp,
+                        prices={token: Decimal("10") for token in config.tokens},
+                        chain="ethereum",
+                    ),
+                )
+
+    class ExactPoolProbe:
+        deployment_id = "exact_pool_state_probe"
+        pool = exact_pool
+        protocol = "uniswap_v3"
+        config = {
+            "pool": exact_pool,
+            "protocol": "uniswap_v3",
+            "fee_tier": 3_000,
+            "base_token": {"symbol": "LINK", "address": link},
+            "quote_token": {"symbol": "WETH", "address": weth},
+        }
+        STRATEGY_METADATA = SimpleNamespace(tags=["lp"], supported_protocols=["uniswap_v3"], intent_types=["HOLD"])
+
+        def __init__(self) -> None:
+            self.observations = []
+
+        def decide(self, market):
+            price = market.pool_price(self.pool, chain="ethereum")
+            reserves = market.pool_reserves(self.pool, chain="ethereum")
+            self.observations.append((price, reserves))
+            return None
+
+    config = PnLBacktestConfig(
+        start_time=START,
+        end_time=START + timedelta(hours=2),
+        interval_seconds=3_600,
+        chain="ethereum",
+        tokens=[link, weth],
+        token_funding=[
+            {"symbol": "LINK", "address": link, "chain": "ethereum", "amount": "1", "amount_type": "token"},
+            {"symbol": "WETH", "address": weth, "chain": "ethereum", "amount": "1", "amount_type": "token"},
+        ],
+        include_gas_costs=False,
+        preflight_validation=False,
+        inclusion_delay_blocks=0,
+    )
+    strategy = ExactPoolProbe()
+    result = asyncio.run(
+        PnLBacktester(
+            data_provider=Provider(),
+            fee_models={"default": DefaultFeeModel()},
+            slippage_models={"default": DefaultSlippageModel()},
+            token_addresses={"LINK": ("ethereum", link), "WETH": ("ethereum", weth)},
+        ).backtest(strategy, config)
+    )
+
+    assert result.success
+    assert len(fetch_calls) == 1 and fetch_calls[0]["pool_address"] == exact_pool
+    assert len(strategy.observations) == 3
+    for price, reserves in strategy.observations:
+        assert price.classification is DataClassification.EXECUTION_GRADE
+        assert price.value.pool_address == exact_pool
+        assert price.value.tick == 0
+        assert reserves.pool_address == exact_pool
+        assert {reserves.token0.address, reserves.token1.address} == {link, weth}
+        assert reserves.fee_tier == 3_000
+    assert result.data_manifest is not None
+    entries = [entry for entry in result.data_manifest["entries"] if entry["lane"] == LANE_POOL_STATE]
+    assert len(entries) == 1
+    assert entries[0]["count"] == 6
+    assert entries[0]["outcome"] == OUTCOME_SERVED
 
 
 @pytest.mark.trust_cell("swap:rejection_no_state_change")

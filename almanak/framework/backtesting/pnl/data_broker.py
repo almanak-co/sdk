@@ -78,7 +78,8 @@ class BacktestDataBroker:
         # cached here (the perp adapter's own tried-memo handles those).
         self._funding_providers: dict[Any, Any] = {}
         # TODO(ALM-2943): self._lending_apy_providers — lending seam.
-        # TODO(ALM-2943): self._pool_state_reader — pool-state history seam.
+        # Exact historical pool state is run-scoped by SnapshotPoolStateSource;
+        # unlike pool-history fallbacks it has no process-global construction.
 
     def pool_history(self) -> PoolHistoryFallback:
         """The pool-history ladder helper (process-wide by design, see module doc)."""

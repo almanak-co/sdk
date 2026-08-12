@@ -1,0 +1,179 @@
+"""Canonical pre-launch data-readiness check for historical PnL backtests."""
+
+from __future__ import annotations
+
+import copy
+import logging
+import uuid
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any, Literal
+
+from almanak.framework.backtesting.pnl.logging_utils import BacktestLogger
+
+if TYPE_CHECKING:
+    from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
+    from almanak.framework.backtesting.pnl.engine import BacktestableStrategy, PnLBacktester
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class BacktestReadinessResult:
+    """Versioned, user-facing verdict produced without executing strategy logic."""
+
+    status: Literal["ready", "ready_with_warnings", "not_ready"]
+    checked_at: datetime
+    checks: tuple[str, ...]
+    blockers: tuple[dict[str, Any], ...] = ()
+    warnings: tuple[str, ...] = ()
+    observations_checked: int = 0
+    schema_version: int = field(default=1, init=False)
+
+    @property
+    def ready(self) -> bool:
+        return self.status != "not_ready"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "status": self.status,
+            "ready": self.ready,
+            "checked_at": self.checked_at.isoformat(),
+            "checks": list(self.checks),
+            "blockers": list(self.blockers),
+            "warnings": list(self.warnings),
+            "observations_checked": self.observations_checked,
+        }
+
+
+def _blocker(exc: BaseException) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "code": type(exc).__name__,
+        "message": str(exc),
+    }
+    for field_name in ("failed_checks", "recommendations", "error_count", "warning_count"):
+        value = getattr(exc, field_name, None)
+        if value is not None:
+            payload[field_name] = list(value) if isinstance(value, list | tuple) else value
+    return payload
+
+
+async def check_backtest_readiness(
+    backtester: PnLBacktester,
+    strategy: BacktestableStrategy,
+    config: PnLBacktestConfig,
+) -> BacktestReadinessResult:
+    """Validate every discoverable data dependency without calling ``decide``.
+
+    This deliberately shares the runner's canonical discovery and provider
+    preparation functions. Runner-side strict preflight remains authoritative
+    in case provider state changes between this check and execution.
+    """
+    from almanak.framework.backtesting.pnl import _engine_helpers
+    from almanak.framework.backtesting.pnl.data_broker import data_broker_scope
+    from almanak.framework.backtesting.pnl.providers.perp.snapshot_funding import SnapshotFundingRateSource
+
+    checked_at = datetime.now(UTC)
+    checks = (
+        "support_matrix",
+        "funded_price_coverage",
+        "perp_price_history",
+        "funding_history",
+        "historical_exact_pool_twap",
+        "historical_exact_pool_state",
+    )
+    readiness_config = copy.deepcopy(config)
+    readiness_config.preflight_validation = True
+    readiness_config.fail_on_preflight_error = True
+    bt_logger = BacktestLogger(
+        backtest_id=f"readiness-{uuid.uuid4()}",
+        json_format=False,
+        logger=logger,
+    )
+
+    try:
+        await _engine_helpers.prepare_perp_price_history(
+            backtester=backtester,
+            strategy=strategy,
+            config=readiness_config,
+            bt_logger=bt_logger,
+        )
+        preflight_report, _ = await _engine_helpers.run_preflight(
+            backtester=backtester,
+            config=readiness_config,
+            bt_logger=bt_logger,
+            strategy=strategy,
+        )
+        state = _engine_helpers.initialize_backtest(
+            backtester=backtester,
+            strategy=strategy,
+            config=readiness_config,
+            bt_logger=bt_logger,
+        )
+        assert state.data_broker is not None
+        observations_checked = 0
+        with data_broker_scope(state.data_broker):
+            funding_source = SnapshotFundingRateSource(
+                chain=readiness_config.chain,
+                start_time=readiness_config.start_time,
+                end_time=readiness_config.end_time,
+                data_config=backtester.data_config,
+                manifest=state.data_broker.manifest,
+            )
+            backtester._bind_funding_history_source(funding_source)
+            await _engine_helpers._prewarm_declared_funding_history(
+                funding_source,
+                strategy,
+                state.strategy_config,
+                require_complete=True,
+            )
+            await _engine_helpers._prepare_declared_historical_twap(
+                strategy,
+                state.strategy_config,
+                readiness_config,
+                state.data_broker.manifest,
+            )
+            await _engine_helpers._prepare_declared_historical_pool_state(
+                strategy,
+                state.strategy_config,
+                readiness_config,
+                state.data_broker.manifest,
+            )
+
+            async for timestamp, market_state in backtester.data_provider.iterate(state.data_config):
+                for token in state.data_config.tokens:
+                    try:
+                        price = market_state.get_price(token)
+                    except KeyError as exc:
+                        raise ValueError(
+                            f"No historical USD price for {token!r} at {timestamp.isoformat()} "
+                            f"in requested range {readiness_config.start_time.isoformat()} -> "
+                            f"{readiness_config.end_time.isoformat()} with cadence "
+                            f"{readiness_config.interval_seconds}s"
+                        ) from exc
+                    if not price.is_finite() or price <= 0:
+                        raise ValueError(
+                            f"Invalid historical USD price for {token!r} at {timestamp.isoformat()}: {price!r}"
+                        )
+                    observations_checked += 1
+
+        warnings: list[str] = []
+        if preflight_report is not None:
+            warnings.extend(check.message for check in preflight_report.failed_checks if check.severity != "error")
+            if preflight_report.support is not None:
+                warnings.extend(preflight_report.support.warnings)
+        return BacktestReadinessResult(
+            status="ready_with_warnings" if warnings else "ready",
+            checked_at=checked_at,
+            checks=checks,
+            warnings=tuple(dict.fromkeys(warnings)),
+            observations_checked=observations_checked,
+        )
+    except Exception as exc:  # noqa: BLE001 - structured fail-closed boundary
+        return BacktestReadinessResult(
+            status="not_ready",
+            checked_at=checked_at,
+            checks=checks,
+            blockers=(_blocker(exc),),
+        )

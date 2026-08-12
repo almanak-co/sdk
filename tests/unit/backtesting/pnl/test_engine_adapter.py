@@ -254,6 +254,25 @@ async def test_snapshot_funding_prewarm_isolates_data_source_failure_per_target(
     assert "Snapshot funding prewarm unavailable for gmx_v2 ETH-USD" in caplog.text
 
 
+@pytest.mark.asyncio
+async def test_readiness_funding_prewarm_propagates_data_source_failure() -> None:
+    strategy = MockStrategy(protocols=["gmx_v2"])
+
+    class _FundingSource:
+        history_capable = True
+
+        async def materialize_history(self, venue: str, _market: str) -> int:
+            raise DataSourceUnavailable(source=venue, reason="archive unavailable")
+
+    with pytest.raises(DataSourceUnavailable, match="archive unavailable"):
+        await _engine_helpers._prewarm_declared_funding_history(
+            _FundingSource(),
+            strategy,
+            {"funding_market": "ETH-USD"},
+            require_complete=True,
+        )
+
+
 def test_detect_strategy_type_perp(backtester, registered_adapters):
     """Test detection of perp strategy type."""
     strategy = MockStrategy(tags=["perpetual", "leverage"])

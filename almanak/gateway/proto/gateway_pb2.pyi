@@ -7983,6 +7983,121 @@ class DexTwapHistoryResponse(_message.Message):
 Global___DexTwapHistoryResponse: _TypeAlias = DexTwapHistoryResponse  # noqa: Y015
 
 @_typing.final
+class GetDexPoolStateSeriesRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    DEX_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    POOL_ADDRESS_FIELD_NUMBER: _builtins.int
+    START_TS_FIELD_NUMBER: _builtins.int
+    END_TS_FIELD_NUMBER: _builtins.int
+    INTERVAL_SECS_FIELD_NUMBER: _builtins.int
+    dex: _builtins.str
+    chain: _builtins.str
+    pool_address: _builtins.str
+    start_ts: _builtins.int
+    end_ts: _builtins.int
+    interval_secs: _builtins.int
+    def __init__(
+        self,
+        *,
+        dex: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        pool_address: _builtins.str = ...,
+        start_ts: _builtins.int = ...,
+        end_ts: _builtins.int = ...,
+        interval_secs: _builtins.int = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "dex", b"dex", "end_ts", b"end_ts", "interval_secs", b"interval_secs", "pool_address", b"pool_address", "start_ts", b"start_ts"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetDexPoolStateSeriesRequest: _TypeAlias = GetDexPoolStateSeriesRequest  # noqa: Y015
+
+@_typing.final
+class DexPoolStatePoint(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    TIMESTAMP_FIELD_NUMBER: _builtins.int
+    BLOCK_NUMBER_FIELD_NUMBER: _builtins.int
+    SQRT_PRICE_X96_FIELD_NUMBER: _builtins.int
+    TICK_FIELD_NUMBER: _builtins.int
+    LIQUIDITY_FIELD_NUMBER: _builtins.int
+    TOKEN0_FIELD_NUMBER: _builtins.int
+    TOKEN1_FIELD_NUMBER: _builtins.int
+    TOKEN0_DECIMALS_FIELD_NUMBER: _builtins.int
+    TOKEN1_DECIMALS_FIELD_NUMBER: _builtins.int
+    FEE_TIER_FIELD_NUMBER: _builtins.int
+    RESERVE0_RAW_FIELD_NUMBER: _builtins.int
+    RESERVE1_RAW_FIELD_NUMBER: _builtins.int
+    timestamp: _builtins.int
+    block_number: _builtins.int
+    sqrt_price_x96: _builtins.str
+    tick: _builtins.int
+    liquidity: _builtins.str
+    token0: _builtins.str
+    token1: _builtins.str
+    token0_decimals: _builtins.int
+    token1_decimals: _builtins.int
+    fee_tier: _builtins.int
+    reserve0_raw: _builtins.str
+    reserve1_raw: _builtins.str
+    def __init__(
+        self,
+        *,
+        timestamp: _builtins.int = ...,
+        block_number: _builtins.int = ...,
+        sqrt_price_x96: _builtins.str = ...,
+        tick: _builtins.int = ...,
+        liquidity: _builtins.str = ...,
+        token0: _builtins.str = ...,
+        token1: _builtins.str = ...,
+        token0_decimals: _builtins.int = ...,
+        token1_decimals: _builtins.int = ...,
+        fee_tier: _builtins.int = ...,
+        reserve0_raw: _builtins.str = ...,
+        reserve1_raw: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["block_number", b"block_number", "fee_tier", b"fee_tier", "liquidity", b"liquidity", "reserve0_raw", b"reserve0_raw", "reserve1_raw", b"reserve1_raw", "sqrt_price_x96", b"sqrt_price_x96", "tick", b"tick", "timestamp", b"timestamp", "token0", b"token0", "token0_decimals", b"token0_decimals", "token1", b"token1", "token1_decimals", b"token1_decimals"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___DexPoolStatePoint: _TypeAlias = DexPoolStatePoint  # noqa: Y015
+
+@_typing.final
+class DexPoolStateHistoryResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    DEX_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    POOL_ADDRESS_FIELD_NUMBER: _builtins.int
+    POINTS_FIELD_NUMBER: _builtins.int
+    SOURCE_FIELD_NUMBER: _builtins.int
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    dex: _builtins.str
+    chain: _builtins.str
+    pool_address: _builtins.str
+    source: _builtins.str
+    success: _builtins.bool
+    error: _builtins.str
+    @_builtins.property
+    def points(self) -> _containers.RepeatedCompositeFieldContainer[Global___DexPoolStatePoint]: ...
+    def __init__(
+        self,
+        *,
+        dex: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        pool_address: _builtins.str = ...,
+        points: _abc.Iterable[Global___DexPoolStatePoint] | None = ...,
+        source: _builtins.str = ...,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "dex", b"dex", "error", b"error", "points", b"points", "pool_address", b"pool_address", "source", b"source", "success", b"success"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___DexPoolStateHistoryResponse: _TypeAlias = DexPoolStateHistoryResponse  # noqa: Y015
+
+@_typing.final
 class GetDexVolumeHistoryRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 

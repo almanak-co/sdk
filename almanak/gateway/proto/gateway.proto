@@ -2723,6 +2723,12 @@ service RateHistoryService {
   rpc GetDexTwapSeries(GetDexTwapSeriesRequest)
       returns (DexTwapHistoryResponse);
 
+  // Exact-pool Uniswap-V3-shaped state sampled from archive blocks selected
+  // at-or-before each grid timestamp. Address identity is authoritative;
+  // independent token/USD prices are never substituted.
+  rpc GetDexPoolStateSeries(GetDexPoolStateSeriesRequest)
+      returns (DexPoolStateHistoryResponse);
+
   // Historical DEX trading-volume series for a single pool.
   // Replaces the per-DEX duplicate egress under
   // ``backtesting/pnl/providers/dex/``.
@@ -3175,6 +3181,40 @@ message DexTwapHistoryResponse {
 
   repeated DexTwapPoint points = 4;
 
+  string source = 5;
+  bool success = 6;
+  string error = 7;
+}
+
+message GetDexPoolStateSeriesRequest {
+  string dex = 1;
+  string chain = 2;
+  string pool_address = 3;
+  int64 start_ts = 4;
+  int64 end_ts = 5;
+  int64 interval_secs = 6;
+}
+
+message DexPoolStatePoint {
+  int64 timestamp = 1;
+  int64 block_number = 2;
+  string sqrt_price_x96 = 3;
+  int64 tick = 4;
+  string liquidity = 5;
+  string token0 = 6;
+  string token1 = 7;
+  int32 token0_decimals = 8;
+  int32 token1_decimals = 9;
+  int32 fee_tier = 10;
+  string reserve0_raw = 11;
+  string reserve1_raw = 12;
+}
+
+message DexPoolStateHistoryResponse {
+  string dex = 1;
+  string chain = 2;
+  string pool_address = 3;
+  repeated DexPoolStatePoint points = 4;
   string source = 5;
   bool success = 6;
   string error = 7;

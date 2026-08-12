@@ -46,6 +46,7 @@ COPY --from=builder --chown=almanak:almanak /app/.venv /app/.venv
 COPY --from=builder --chown=almanak:almanak /app/almanak /app/almanak
 COPY --from=builder --chown=almanak:almanak /app/pyproject.toml /app/
 COPY --chown=almanak:almanak scripts/platform_backtest_runner.py /app/runner.py
+COPY --chown=almanak:almanak scripts/platform_backtest_readiness_server.py /app/readiness_server.py
 
 USER almanak
 

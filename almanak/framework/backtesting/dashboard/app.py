@@ -238,7 +238,7 @@ def render_comparison_metrics(results: dict[str, BacktestResult], selected_resul
                 "Return": f"{float(metrics.total_return_pct):.2f}%" if metrics.total_return_pct else "-",
                 "Sharpe": f"{float(metrics.sharpe_ratio):.3f}" if metrics.sharpe_ratio else "-",
                 "Sortino": f"{float(metrics.sortino_ratio):.3f}" if metrics.sortino_ratio else "-",
-                "Max DD": format_percentage(metrics.max_drawdown_pct),
+                "Max DD": f"{float(metrics.max_drawdown_pct):.2f}%",
                 "Win Rate": format_percentage(metrics.win_rate),
                 "Total Trades": str(metrics.total_trades),
                 "Profit Factor": f"{float(metrics.profit_factor):.2f}" if metrics.profit_factor else "-",
@@ -273,8 +273,8 @@ def render_summary_metrics(result: BacktestResult) -> None:
     col1, col2, col3, col4 = st.columns(4)
 
     # VIB-2915: total_return_pct is already a percentage (e.g. 10 for 10%), not a
-    # decimal ratio. Format inline instead of via format_percentage() (which multiplies
-    # by 100 for ratio inputs used by max_drawdown_pct/win_rate/etc.).
+    # decimal ratio. Format inline instead of via format_percentage() (which
+    # multiplies by 100 for ratio inputs such as win_rate and volatility).
     total_return_display = f"{float(metrics.total_return_pct):.2f}%" if metrics.total_return_pct else "-"
 
     with col1:
@@ -308,8 +308,8 @@ def render_summary_metrics(result: BacktestResult) -> None:
         drawdown = float(metrics.max_drawdown_pct) if metrics.max_drawdown_pct else 0
         st.metric(
             label="Max Drawdown",
-            value=format_percentage(metrics.max_drawdown_pct),
-            delta=f"{abs(drawdown) * 100:.1f}% peak decline",
+            value=f"{drawdown:.2f}%",
+            delta=f"{abs(drawdown):.1f}% peak decline",
             delta_color="inverse",
         )
 
@@ -751,7 +751,7 @@ def render_enhanced_metrics_comparison(  # noqa: C901
                     "Sharpe": f"{float(m.sharpe_ratio):.3f}" if m.sharpe_ratio else "-",
                     "Sortino": f"{float(m.sortino_ratio):.3f}" if m.sortino_ratio else "-",
                     "Calmar": f"{float(m.calmar_ratio):.3f}" if m.calmar_ratio else "-",
-                    "Max Drawdown": format_percentage(m.max_drawdown_pct),
+                    "Max Drawdown": f"{float(m.max_drawdown_pct):.2f}%",
                     "Volatility": format_percentage(m.volatility),
                     "Profit Factor": f"{float(m.profit_factor):.2f}" if m.profit_factor else "-",
                 }

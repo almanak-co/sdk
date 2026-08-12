@@ -2632,7 +2632,7 @@ class SimulatedPortfolio:
             total_pnl_usd=equity.total_pnl,
             net_pnl_usd=equity.total_pnl,
             sharpe_ratio=risk.sharpe,
-            max_drawdown_pct=risk.max_drawdown,
+            max_drawdown_pct=risk.max_drawdown * Decimal("100"),
             win_rate=stats.win_rate,
             # Successful trades only -- rejected fills are reported separately
             # as failed_trades and must stay out of the performance denominator
@@ -2641,7 +2641,8 @@ class SimulatedPortfolio:
             profit_factor=stats.profit_factor,
             # VIB-2915: `*_return_pct` fields store actual percentages (e.g. 10 for 10%),
             # not decimal ratios. Local `total_return`/`annualized_return` stay as ratios
-            # so the calmar calculation above (which divides by `max_drawdown`, still a ratio) stays correct.
+            # so the calmar calculation above (which divides by ratio-valued
+            # `max_drawdown`) stays correct.
             total_return_pct=equity.total_return * Decimal("100"),
             annualized_return_pct=equity.annualized_return * Decimal("100"),
             total_fees_usd=costs.fees,

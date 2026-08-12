@@ -175,6 +175,25 @@ def test_build_platform_backtest_config_parses_platform_payload() -> None:
     assert config.allow_hardcoded_fallback is True
 
 
+def test_build_platform_backtest_config_infers_address_first_token_objects() -> None:
+    class Strategy:
+        STRATEGY_METADATA = type("Meta", (), {"default_chain": "polygon", "supported_chains": ["polygon"]})()
+
+    config = runner.build_platform_backtest_config(
+        json.dumps({"start_time": "2026-02-11", "end_time": "2026-02-12"}),
+        {
+            "base_token": {"symbol": "WBTC", "address": "0x1bfd67037b42cf73acf2047067bd4f2c47d9bfd6"},
+            "quote_token": {"symbol": "WETH", "address": "0x7ceb23fd6bc0add59e62ac25578270cff1b9f619"},
+            "token_funding": _TOKEN_FUNDING,
+        },
+        Strategy,
+    )
+
+    # Known addresses canonicalize back to their symbols; importantly the
+    # object-valued config no longer falls through to the WETH/USDC default.
+    assert config.tokens == ["WBTC", "WETH"]
+
+
 def test_platform_native_perp_price_timeframe_defaults_to_auto() -> None:
     config = SimpleNamespace(timeframe=None)
     strategy = SimpleNamespace(config={"protocol": "gmx_v2", "market": "ETH/USD"})
@@ -559,6 +578,7 @@ def test_build_result_summary_uses_metrics_and_trade_fallback() -> None:
     )
 
     assert summary == {
+        "metrics_schema_version": 3,
         "performance_denomination": "USD",
         "total_return_pct": "12.4",
         "sharpe_ratio": "1.8",
@@ -592,6 +612,15 @@ def test_build_result_summary_carries_numeraire_denomination() -> None:
     assert summary["net_pnl_usd"] == "-14.96"
     assert summary["net_pnl_numeraire"] == "-0.000255625736414282553855967989"
     assert summary["total_trades"] == 46
+
+
+def test_build_result_summary_carries_metrics_schema_version() -> None:
+    summary = runner.build_result_summary(
+        {"metrics": {"schema_version": 4}, "trades": []},
+        elapsed_seconds=1.0,
+    )
+
+    assert summary["metrics_schema_version"] == 4
 
 
 def test_clone_strategy_repo_separates_options_from_clone_url(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -631,6 +660,7 @@ def test_redact_masks_general_url_credentials() -> None:
     assert "token" not in redacted
     assert "pass" not in redacted
     assert "callback-secret" not in redacted
+    assert str(env.strategy_dir) not in runner._redact(f"failed in {env.strategy_dir}", env)
     assert "GITHUB_CLONE_URL" in redacted
     assert "https://***@host/repo.git" in redacted
 

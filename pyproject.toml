@@ -117,6 +117,7 @@ backtest-service = [
 # Cloud Run Job entrypoint for platform-triggered strategy PnL backtests.
 platform-runner = [
     "google-cloud-storage>=2.18.0,<4.0.0",
+    "uvicorn[standard]>=0.30.0",
 ]
 
 # Python LSP for the `almanak code` native binary, which spawns

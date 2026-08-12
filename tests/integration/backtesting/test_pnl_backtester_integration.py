@@ -582,7 +582,7 @@ class TestMetricsCalculation:
         # But because of how portfolio value is calculated and timing, we allow wide range
         assert result.metrics.max_drawdown_pct > Decimal("0")
         # The drawdown should be less than 100% (not a total loss)
-        assert result.metrics.max_drawdown_pct < Decimal("1")
+        assert result.metrics.max_drawdown_pct < Decimal("100")
 
     @pytest.mark.asyncio
     async def test_win_rate_calculation(

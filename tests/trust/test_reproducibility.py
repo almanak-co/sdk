@@ -156,7 +156,7 @@ async def test_bit_for_bit_reproducibility():
 
     print("PASS: Results are bit-for-bit reproducible")
     print(f"   Total PnL: ${result1.metrics.total_pnl_usd}")
-    print(f"   Max Drawdown: {result1.metrics.max_drawdown_pct:.2%}")
+    print(f"   Max Drawdown: {result1.metrics.max_drawdown_pct:.2f}%")
     print(f"   Total Trades: {result1.metrics.total_trades}")
 
 

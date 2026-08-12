@@ -535,14 +535,14 @@ def calculate_metrics(
     # VIB-2915: `total_return_pct` and `annualized_return_pct` are stored as actual
     # percentages (e.g. 10 for 10%), not decimal ratios. Local `total_return`/`annualized_return`
     # are kept as ratios to preserve the calmar/sharpe/sortino chain that divides by
-    # `max_drawdown_pct` (still a ratio in this module).
+    # `max_drawdown` (kept as a ratio inside this module).
     return BacktestMetrics(
         total_pnl_usd=equity.total_pnl,
         # The equity curve already accounts for costs deducted during execution,
         # so net PnL equals total PnL and cost fields are informational only.
         net_pnl_usd=equity.total_pnl,
         sharpe_ratio=risk.sharpe,
-        max_drawdown_pct=risk.max_drawdown,
+        max_drawdown_pct=risk.max_drawdown * Decimal("100"),
         win_rate=stats.win_rate,
         # Successful trades only -- failed fills are reported as failed_trades
         # and excluded from the performance denominator (VIB-5083, CodeRabbit).

@@ -332,7 +332,7 @@ class TestRunSinglePathBacktest:
                 initial_portfolio_value_usd=Decimal("10000"),
                 final_capital_usd=Decimal("11000"),
                 metrics=_FakeMetrics(
-                    max_drawdown_pct=Decimal("0.05"),
+                    max_drawdown_pct=Decimal("5"),
                     sharpe_ratio=Decimal("1.2"),
                     total_trades=7,
                 ),
@@ -461,7 +461,7 @@ def _results_for(
                 initial_portfolio_value_usd=Decimal(initial),
                 final_capital_usd=Decimal(final),
                 metrics=_FakeMetrics(
-                    max_drawdown_pct=md,
+                    max_drawdown_pct=md * Decimal("100"),
                     sharpe_ratio=sr,
                     total_trades=10 + i,
                 ),
@@ -696,7 +696,7 @@ class TestRunMonteCarloBranches:
             _FakeBacktestResult(
                 initial_portfolio_value_usd=Decimal("10000"),
                 final_capital_usd=Decimal("11000"),
-                metrics=_FakeMetrics(max_drawdown_pct=Decimal("0.04"), sharpe_ratio=Decimal("1.5")),
+                metrics=_FakeMetrics(max_drawdown_pct=Decimal("4"), sharpe_ratio=Decimal("1.5")),
             ),
         )
         paths = _make_paths([["100", "110"], ["200", "220"]])

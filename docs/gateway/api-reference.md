@@ -18,7 +18,7 @@ This document describes the gRPC API exposed by the Almanak Gateway.
 | SimulationService | 1 | Transaction bundle simulation (Tenderly/Alchemy) |
 | PoolAnalyticsService | 2 | DEX pool analytics (TVL, volume, fees) + product-distinct token-pool listing |
 | PoolHistoryService | 1 | Historical pool snapshots (TVL, volume, fees over time). Disabled by default; hosted rollout enables via `ALMANAK_GATEWAY_POOL_HISTORY_ENABLED=true` deployment config |
-| RateHistoryService | 11 | Lending APY (live + historical), perp funding and venue-native index-price history, DEX TWAP (single + series), DEX LWAP (liquidity-weighted spot), DEX volume history, gas prices, and provider-exact oracle prices (current + historical). Strategy-side `RateMonitor` / backtesting rate providers are thin gRPC clients of this service. |
+| RateHistoryService | 12 | Lending APY (live + historical), perp funding and venue-native index-price history, DEX TWAP (single + series), exact-pool state series, DEX LWAP (liquidity-weighted spot), DEX volume history, gas prices, and provider-exact oracle prices (current + historical). Strategy-side `RateMonitor` / backtesting rate providers are thin gRPC clients of this service. |
 | PolymarketService | 20 | Polymarket CLOB API proxy (market data, orders, positions, price history, trade tape) |
 | EnsoService | 4 | Enso Finance routing and bundling |
 | TokenService | 4 | Token resolution and on-chain metadata |
@@ -1841,6 +1841,43 @@ TWAP series at `interval_secs` spacing over `[start_ts, end_ts)`.
 
 ```protobuf
 rpc GetDexTwapSeries(GetDexTwapSeriesRequest) returns (DexTwapHistoryResponse)
+```
+
+### GetDexPoolStateSeries
+
+Historical exact-address pool state at `interval_secs` spacing over the
+inclusive `[start_ts, end_ts]` grid. The gateway resolves each grid timestamp
+to the latest block at-or-before it and reads that pool's `slot0`, liquidity,
+fee, immutable token identities/decimals, and token balances from archive
+state. It never discovers a substitute pool or derives state from token/USD
+prices.
+
+```protobuf
+rpc GetDexPoolStateSeries(GetDexPoolStateSeriesRequest) returns (DexPoolStateHistoryResponse)
+
+message GetDexPoolStateSeriesRequest {
+  string dex = 1;
+  string chain = 2;
+  string pool_address = 3;
+  int64 start_ts = 4;
+  int64 end_ts = 5;
+  int64 interval_secs = 6;
+}
+
+message DexPoolStatePoint {
+  int64 timestamp = 1;
+  int64 block_number = 2;
+  string sqrt_price_x96 = 3;
+  int64 tick = 4;
+  string liquidity = 5;
+  string token0 = 6;
+  string token1 = 7;
+  int32 token0_decimals = 8;
+  int32 token1_decimals = 9;
+  int32 fee_tier = 10;
+  string reserve0_raw = 11;
+  string reserve1_raw = 12;
+}
 ```
 
 ### GetDexLwap

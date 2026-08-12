@@ -1073,7 +1073,7 @@ class TestPortfolioGetMetrics:
         metrics = portfolio.get_metrics()
 
         # Max drawdown should be (11000 - 9900) / 11000 = 0.1 (10%)
-        assert metrics.max_drawdown_pct == Decimal("0.1")
+        assert metrics.max_drawdown_pct == Decimal("10")
 
     def test_get_metrics_win_rate_and_profit_factor(
         self, portfolio: SimulatedPortfolio, base_timestamp: datetime

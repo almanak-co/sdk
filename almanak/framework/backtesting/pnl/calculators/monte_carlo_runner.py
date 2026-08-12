@@ -472,7 +472,8 @@ async def _run_single_path_backtest(
             path_index=path_index,
             final_return=final_return,
             final_value_usd=final,
-            max_drawdown=result.metrics.max_drawdown_pct,
+            # Monte Carlo path statistics retain their internal ratio contract.
+            max_drawdown=result.metrics.max_drawdown_pct / Decimal("100"),
             sharpe_ratio=result.metrics.sharpe_ratio,
             total_trades=result.metrics.total_trades,
             metrics=result.metrics if mc_config.collect_individual_results else None,

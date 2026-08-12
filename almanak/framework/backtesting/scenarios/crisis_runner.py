@@ -263,7 +263,7 @@ class CrisisBacktestResult:
             f"\n"
             f"Performance:\n"
             f"  Total Return: {self.total_return_during_crisis:.2f}%\n"
-            f"  Max Drawdown: {self.max_drawdown_during_crisis * 100:.2f}%\n"
+            f"  Max Drawdown: {self.max_drawdown_during_crisis:.2f}%\n"
             f"  Sharpe Ratio: {self.result.metrics.sharpe_ratio:.3f}\n"
             f"  Total Trades: {self.result.metrics.total_trades}\n"
             f"\n"
@@ -464,7 +464,7 @@ async def run_crisis_backtest(
     logger.info(
         f"Crisis backtest completed for '{scenario.name}': "
         f"Return={result.metrics.total_return_pct:.2f}%, "
-        f"Max DD={result.metrics.max_drawdown_pct * 100:.2f}%, "
+        f"Max DD={result.metrics.max_drawdown_pct:.2f}%, "
         f"Recovery={crisis_metrics_obj.recovery_pct * 100:.1f}%"
     )
 
@@ -583,7 +583,8 @@ def build_crisis_metrics(
         CrisisMetrics object with detailed crisis analysis
     """
     # Initialize with basic scenario info
-    max_drawdown_pct = result.metrics.max_drawdown_pct
+    # CrisisMetrics retains its historical ratio contract.
+    max_drawdown_pct = result.metrics.max_drawdown_pct / Decimal("100")
     drawdown_start: datetime | None = None
     drawdown_trough: datetime | None = None
     days_to_trough = 0

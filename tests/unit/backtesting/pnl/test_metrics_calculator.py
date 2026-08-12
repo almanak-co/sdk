@@ -116,6 +116,24 @@ class TestVIB2915ReturnPercentage:
         assert abs(metrics.annualized_return_pct - Decimal("10")) < Decimal("0.01")
 
 
+class TestALM3246DrawdownPercentage:
+    """Drawdown and return ``*_pct`` fields use the same whole-percent unit."""
+
+    def test_50pct_loss_reports_both_metrics_as_50(self) -> None:
+        t0 = datetime(2024, 1, 1)
+        portfolio = _make_portfolio(
+            [
+                (t0, Decimal("100")),
+                (t0 + timedelta(days=365), Decimal("50")),
+            ]
+        )
+
+        metrics = calculate_metrics(portfolio, trades=[], config=_make_config(Decimal("100")))
+
+        assert metrics.total_return_pct == Decimal("-50")
+        assert metrics.max_drawdown_pct == Decimal("50")
+
+
 class TestVIB2915SchemaMigration:
     """Legacy backtest artifacts (pre-VIB-2915) stored returns as ratios.
 
@@ -175,6 +193,28 @@ class TestVIB2915SchemaMigration:
 
         assert second.metrics.total_return_pct == first.metrics.total_return_pct
         assert second.metrics.annualized_return_pct == first.metrics.annualized_return_pct
+
+    def test_v3_drawdown_ratio_is_migrated_to_whole_percentage(self) -> None:
+        from almanak.framework.backtesting.models import BacktestResult
+
+        payload = self._legacy_payload("10", "12")
+        payload["metrics"].update({"schema_version": 3, "max_drawdown_pct": "0.7135"})
+
+        result = BacktestResult.from_dict(payload)
+
+        assert result.metrics.max_drawdown_pct == Decimal("71.3500")
+
+    def test_v4_drawdown_percentage_is_not_migrated(self) -> None:
+        from almanak.framework.backtesting.models import BacktestMetrics, BacktestResult
+
+        payload = self._legacy_payload("10", "12")
+        payload["metrics"].update(
+            {"schema_version": BacktestMetrics.SCHEMA_VERSION, "max_drawdown_pct": "71.35"}
+        )
+
+        result = BacktestResult.from_dict(payload)
+
+        assert result.metrics.max_drawdown_pct == Decimal("71.35")
 
 
 class TestNetPnlEqualsEquityCurvePnl:

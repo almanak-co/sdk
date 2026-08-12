@@ -21,6 +21,7 @@ import pytest
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2
 from almanak.gateway.services.rate_history_service import (
+    DexPoolStatePoint,
     DexTwapPoint,
     GasPricePoint,
     LendingRatePoint,
@@ -449,6 +450,70 @@ def test_twap_series_forwards_observation_window_independently_from_cadence(
     assert captured["interval_secs"] == 3_600
     assert captured["window_secs"] == expected_window
     assert response.points[0].as_of_block == 18_000_000
+
+
+def test_pool_state_series_forwards_exact_identity_and_encodes_archive_point(
+    servicer: RateHistoryServiceServicer,
+) -> None:
+    captured = {}
+
+    class Provider:
+        def pool_state_supported_chains(self):
+            return frozenset({"polygon"})
+
+        async def fetch_pool_state_series(self, _servicer, **kwargs):
+            captured.update(kwargs)
+            return [
+                DexPoolStatePoint(
+                    timestamp=1_700_000_000,
+                    block_number=50_000_000,
+                    sqrt_price_x96=2**96,
+                    tick=-1,
+                    liquidity=123,
+                    token0="0x0000000000000000000000000000000000000001",
+                    token1="0x0000000000000000000000000000000000000002",
+                    token0_decimals=18,
+                    token1_decimals=6,
+                    fee_tier=500,
+                    reserve0_raw=10**18,
+                    reserve1_raw=2 * 10**6,
+                ),
+                DexPoolStatePoint(
+                    timestamp=1_700_003_600,
+                    block_number=50_000_100,
+                    sqrt_price_x96=2**96,
+                    tick=-1,
+                    liquidity=124,
+                    token0="0x0000000000000000000000000000000000000001",
+                    token1="0x0000000000000000000000000000000000000002",
+                    token0_decimals=18,
+                    token1_decimals=6,
+                    fee_tier=500,
+                    reserve0_raw=10**18,
+                    reserve1_raw=2 * 10**6,
+                ),
+            ]
+
+    servicer._pool_state_providers["uniswap_v3"] = Provider()  # type: ignore[assignment]
+    ctx = _MockContext()
+    request = gateway_pb2.GetDexPoolStateSeriesRequest(
+        dex="uniswap_v3",
+        chain="polygon",
+        pool_address="0x9b08288c3be4f62bbf8d1c20ac9c5e6f9467d8b7",
+        start_ts=1_700_000_000,
+        end_ts=1_700_003_600,
+        interval_secs=3_600,
+    )
+
+    response = asyncio.run(servicer.GetDexPoolStateSeries(request, ctx))  # type: ignore[arg-type]
+
+    assert response.success is True
+    assert response.source == "on_chain_archive"
+    assert captured["pool_address"] == request.pool_address
+    assert response.points[0].block_number == 50_000_000
+    assert response.points[0].sqrt_price_x96 == str(2**96)
+    assert response.points[0].tick == -1
+    assert response.points[0].reserve1_raw == str(2 * 10**6)
 
 
 def test_volume_rejects_empty_pool_address(

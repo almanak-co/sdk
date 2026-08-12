@@ -150,6 +150,7 @@ from .rate_limiter import (
     create_coingecko_rate_limiter,
 )
 from .registry import ProviderMetadata, ProviderRegistry
+from .snapshot_pool_state import HistoricalPoolStateTarget, SnapshotPoolStateSource, SnapshotPoolStateView
 from .snapshot_twap import HistoricalTWAPTarget, SnapshotTWAPSource, SnapshotTWAPView
 from .subgraph_client import (
     SubgraphQueryError,
@@ -190,6 +191,9 @@ __all__ = [
     "HistoricalTWAPTarget",
     "SnapshotTWAPSource",
     "SnapshotTWAPView",
+    "HistoricalPoolStateTarget",
+    "SnapshotPoolStateSource",
+    "SnapshotPoolStateView",
     "AggregatedDataProvider",
     # Gas Price Providers
     "GasPriceProvider",

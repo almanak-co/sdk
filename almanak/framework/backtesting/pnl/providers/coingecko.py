@@ -113,6 +113,22 @@ _HTTP_STATUS_RE = re.compile(r"CoinGecko API error (\d{3}):")
 #: windows are fetched in chunks of this size and stitched.
 _CG_HOURLY_SAFE_RANGE_SECONDS = 80 * 86400
 
+#: A point-over-point magnitude change at or above this bounded ratio is
+#: treated as a quote-unit integrity failure, not usable USD history
+#: (ALM-3243). Quote-unit integrity is independent of vendor candle spacing:
+#: daily aggregation must not permit a hundreds-fold discontinuity that the
+#: hourly feed would reject.
+_UNIT_ERROR_MAGNITUDE_RATIO = Decimal("20")
+
+
+class HistoricalPriceUnitError(ValueError):
+    """A historical USD price series contains points expressed in another unit.
+
+    The error is raised before the series reaches funding or valuation.  Those
+    consumers correctly trust the provider's asserted quote unit and therefore
+    cannot safely repair, interpolate, or ignore a mismatched point.
+    """
+
 
 def _is_transient_request_error(exc: BaseException) -> bool:
     """Return True if ``exc`` is a transient request failure, not a resolution miss.
@@ -1566,6 +1582,7 @@ class CoinGeckoDataProvider:
                 if seed is not None and seed.timestamp < ohlcv[0].timestamp:
                     ohlcv = [seed, *ohlcv]
 
+            self._reject_unit_error_points(fetch_token, ohlcv)
             data[cache_key] = ohlcv
             logger.info(f"Prefetched {len(ohlcv)} data points for {token_ref_display(fetch_token)}")
 
@@ -1576,6 +1593,47 @@ class CoinGeckoDataProvider:
         self.measured_granularity_seconds = self._measure_granularity(data)
 
         return OHLCVCache(data=data, fetched_at=datetime.now(UTC), default_chain=default_chain)
+
+    @staticmethod
+    def _reject_unit_error_points(token: TokenRef, candles: list[OHLCV]) -> None:
+        """Reject a series that changes quote units between adjacent points.
+
+        This intentionally runs after the prior-candle seed and outside the
+        per-token fetch ``ValueError`` handler.  A mismatched unit poisons every
+        downstream consumer, so it is a run-stopping integrity failure rather
+        than an unavailable-token degradation.
+        """
+        nonpositive = [candle for candle in candles if candle.close <= 0]
+        if nonpositive:
+            shown_points = "; ".join(f"{candle.timestamp.isoformat()}={candle.close}" for candle in nonpositive[:5])
+            suffix = f" (+{len(nonpositive) - 5} more)" if len(nonpositive) > 5 else ""
+            raise HistoricalPriceUnitError(
+                f"Historical USD price series for {token_ref_display(token)} contains "
+                f"{len(nonpositive)} nonpositive close(s). USD prices must be positive before funding or valuation. "
+                f"Offending points: {shown_points}{suffix}"
+            )
+
+        offenders: list[str] = []
+        for previous, current in zip(candles, candles[1:], strict=False):
+            low, high = sorted((previous.close, current.close))
+            if high / low >= _UNIT_ERROR_MAGNITUDE_RATIO:
+                offenders.append(
+                    f"{previous.timestamp.isoformat()}={previous.close} -> "
+                    f"{current.timestamp.isoformat()}={current.close}"
+                )
+
+        if not offenders:
+            return
+
+        shown = offenders[:5]
+        remaining = len(offenders) - len(shown)
+        suffix = f" (+{remaining} more)" if remaining else ""
+        raise HistoricalPriceUnitError(
+            f"Historical USD price series for {token_ref_display(token)} contains "
+            f"{len(offenders)} adjacent change(s) of >={_UNIT_ERROR_MAGNITUDE_RATIO}x. "
+            "The series appears to mix quote units and cannot be used for funding or valuation. "
+            f"Offending transitions: {'; '.join(shown)}{suffix}"
+        )
 
     async def prefetch_ohlcv_data(self, config: HistoricalDataConfig) -> OHLCVCache:
         """Public composition hook preserving CoinGecko's full cache policy.
@@ -1950,6 +2008,7 @@ __all__ = [
     "CoinGeckoDataProvider",
     "CoinGeckoRateLimitError",
     "HistoricalCacheStats",
+    "HistoricalPriceUnitError",
     "HistoricalPriceCache",
     "RetryConfig",
 ]
