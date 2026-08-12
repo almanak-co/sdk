@@ -20,6 +20,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
+from enum import StrEnum
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -123,6 +124,84 @@ class PriceData:
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
     source: str = ""
     confidence: str = "HIGH"
+
+
+class ReferenceMarketStatus(StrEnum):
+    """Session state originated by the gateway's reference-market calendar."""
+
+    OPEN = "open"
+    CLOSED = "closed"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class ReferencePriceData:
+    """Exact-provider reference price with freshness and session provenance."""
+
+    instrument: str
+    quote: str
+    chain: str
+    price: Decimal | None
+    confidence: float | None
+    source: str
+    observed_at: datetime | None
+    stale: bool
+    market_status: ReferenceMarketStatus
+    market_status_as_of: datetime | None
+    market_status_source: str
+    reason: str = ""
+
+    def trade_block_reason(
+        self,
+        *,
+        max_age_seconds: int,
+        min_confidence: float = 0.0,
+        now: datetime | None = None,
+    ) -> str | None:
+        """Return ``None`` only when this observation is safe for a new trade."""
+        if max_age_seconds <= 0:
+            raise ValueError("max_age_seconds must be positive")
+        if not 0.0 <= min_confidence <= 1.0:
+            raise ValueError("min_confidence must be between 0 and 1")
+        if self.price is None or not self.price.is_finite() or self.price <= 0:
+            return self.reason or "reference_price_unavailable"
+        if self.market_status is not ReferenceMarketStatus.OPEN:
+            return f"reference_market_{self.market_status.value}"
+        if self.stale:
+            return "reference_price_provider_stale"
+        if self.observed_at is None:
+            return "reference_price_timestamp_missing"
+        current = now or datetime.now(UTC)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=UTC)
+        observed_at = self.observed_at
+        if observed_at.tzinfo is None:
+            observed_at = observed_at.replace(tzinfo=UTC)
+        age_seconds = (current.astimezone(UTC) - observed_at.astimezone(UTC)).total_seconds()
+        if age_seconds < 0:
+            return "reference_price_timestamp_in_future"
+        if age_seconds > max_age_seconds:
+            return "reference_price_too_old"
+        if self.confidence is None or self.confidence < min_confidence:
+            return "reference_price_confidence_too_low"
+        return None
+
+    def is_tradeable(
+        self,
+        *,
+        max_age_seconds: int,
+        min_confidence: float = 0.0,
+        now: datetime | None = None,
+    ) -> bool:
+        """Whether every fail-closed reference-price gate passes."""
+        return (
+            self.trade_block_reason(
+                max_age_seconds=max_age_seconds,
+                min_confidence=min_confidence,
+                now=now,
+            )
+            is None
+        )
 
 
 @dataclass

@@ -19,6 +19,16 @@ def test_feeds_normalizes_chain_and_filters_by_kind() -> None:
     assert catalog.feeds("unknown") == {}
 
 
+def test_reference_feeds_are_catalogued_but_excluded_from_generic_usd_feeds() -> None:
+    catalog = ChainlinkCatalog()
+
+    reference = catalog.feed("bsc", "XAU/USD")
+
+    assert reference is not None
+    assert reference.kind is FeedKind.REFERENCE
+    assert "XAU/USD" not in catalog.feeds("bsc", kind=FeedKind.USD)
+
+
 def test_feed_normalizes_chain_and_pair_and_fails_closed() -> None:
     catalog = ChainlinkCatalog()
 

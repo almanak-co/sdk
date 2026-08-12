@@ -130,6 +130,20 @@ _ADDRESSES: dict[str, dict[str, str]] = {
     },
 }
 
+# Provider-exact reference feeds are intentionally separate from the legacy
+# token-price map. They are reachable only through GetReferencePrice and can
+# never enter generic symbol aggregation or its public compatibility views.
+_REFERENCE_ADDRESSES: dict[str, dict[str, str]] = {
+    "bsc": {
+        # Chainlink Data Feeds directory: XAU/USD-RefPrice-DF-Binance-001,
+        # 10-minute heartbeat. ALM-3223's 300s entry limit is intentionally
+        # stricter than provider heartbeat freshness.
+        # https://data.chain.link/feeds/bsc/mainnet/xau-usd
+        # This is the proxy (consumer) address, not the underlying aggregator.
+        "XAU/USD": "0x86896fEB19D8A607c3b11f2aF50A0f239Bd71CD0",
+    }
+}
+
 _ETH_ADDRESSES: dict[str, dict[str, str]] = {
     "arbitrum": {"WSTETH/ETH": "0xb523AE262D20A936BC152e6023996e46FDC2A95D"},
     "base": {"WSTETH/ETH": "0x43a5C292A453A3bF3606fa856197f09D7B74251a"},
@@ -185,6 +199,7 @@ _HEARTBEATS = {
     "USDC/USD": 86400,
     "USDT/USD": 86400,
     "DAI/USD": 3600,
+    "XAU/USD": 600,
 }
 _DEVIATIONS = {
     "ETH/USD": Decimal("0.5"),
@@ -217,6 +232,16 @@ class ChainlinkCatalog:
             for pair, address in _ETH_ADDRESSES.get(chain, {}).items():
                 chain_specs[pair] = FeedSpec(
                     chain=chain, chain_id=chain_id, pair=pair, address=address, kind=FeedKind.ETH, decimals=18
+                )
+            for pair, address in _REFERENCE_ADDRESSES.get(chain, {}).items():
+                chain_specs[pair] = FeedSpec(
+                    chain=chain,
+                    chain_id=chain_id,
+                    pair=pair,
+                    address=address,
+                    kind=FeedKind.REFERENCE,
+                    heartbeat_seconds=_HEARTBEATS[pair],
+                    deviation_threshold_pct=_DEVIATIONS.get(pair, Decimal("1.0")),
                 )
             specs[chain] = chain_specs
         self._specs: Mapping[str, Mapping[str, FeedSpec]] = MappingProxyType(

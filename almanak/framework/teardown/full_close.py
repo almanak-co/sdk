@@ -233,10 +233,31 @@ def _close_intent_for_position(
         # only ``pt_symbol`` must still resolve a swap-back token here, else the
         # close is silently skipped and the teardown gets stuck (fail-safe, but
         # avoidable) (VIB-5590 / CodeRabbit).
-        token = _first(details, "asset", "asset_symbol", "token", "address", "pt_token", "pt_symbol")
+        # Prefer an explicit canonical address over display symbols. This keeps
+        # non-standard assets safe without a network-backed or ambiguous symbol
+        # resolver inside the pure teardown planner.
+        token = _first(
+            details,
+            "token_address",
+            "asset",
+            "asset_symbol",
+            "token",
+            "address",
+            "pt_token",
+            "pt_symbol",
+        )
         if not token:
             return None
-        if str(token).upper() == target_token.upper():
+        # Routing prefers the canonical address, but no-op detection must also
+        # honour a producer's equivalent display identity. Position producers
+        # are required to keep these identities consistent; checking all of
+        # them preserves the established symbol-target no-op contract when a
+        # canonical address is also supplied (VIB-5494 / ALM-3223).
+        if any(
+            str(details.get(key)).upper() == target_token.upper()
+            for key in ("token_address", "asset", "asset_symbol", "token", "address", "pt_token", "pt_symbol")
+            if details.get(key)
+        ):
             # Already the target asset — nothing to swap.
             return None
         # A held protocol-token (e.g. a Pendle PT/YT) is NOT a plain ERC20: a
@@ -249,7 +270,13 @@ def _close_intent_for_position(
         # protocol-agnostic (blueprint 22) and generalises to YT / any future
         # routing-required protocol-token. A plain held token carries no flag and
         # keeps the generic protocol-less swap, so this cannot misroute it.
-        swap_protocol = protocol if _first(details, "protocol_routed_close") else None
+        swap_params = details.get("close_swap_params") or None
+        if swap_params and not protocol:
+            # A connector-specific pool pin without a connector cannot be
+            # compiled safely. Skip loudly via the caller's existing failed-
+            # build path instead of silently routing through another venue.
+            raise ValueError("close_swap_params requires a position protocol")
+        swap_protocol = protocol if _first(details, "protocol_routed_close") or swap_params else None
         # amount="all" -> live wallet balance of the KNOWN held token, resolved
         # at execution and clamped to the strategy's tracked quantity (ALM-2766).
         return Intent.swap(
@@ -259,6 +286,7 @@ def _close_intent_for_position(
             max_slippage=max_slippage,
             chain=chain,
             protocol=swap_protocol,
+            swap_params=swap_params,
         )
 
     # PREDICTION / CEX / anything else: not generically closable here.

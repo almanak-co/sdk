@@ -7,7 +7,7 @@ This document describes the gRPC API exposed by the Almanak Gateway.
 | Service | Methods | Description |
 |---------|---------|-------------|
 | Health | 3 | Standard gRPC health checks and chain registration |
-| MarketService | 9 | Price data, Pendle PT/YT-USD price, balances, batch balances, technical indicators, Uniswap V4 pool key lookup, and verified lending/perpetual-market resolution |
+| MarketService | 10 | Price data, provider-exact reference prices, Pendle PT/YT-USD price, balances, batch balances, technical indicators, Uniswap V4 pool key lookup, and verified lending/perpetual-market resolution |
 | StateService | 31 | Strategy state persistence, portfolio snapshots/metrics, transaction ledger, accounting events, position events, accounting outbox, atomic ledger+registry writes, and cutover migration state |
 | ExecutionService | 3 | Intent compilation and transaction execution |
 | ObserveService | 4 | Logging, alerts, metrics, and timeline events |
@@ -108,6 +108,67 @@ from almanak.framework.data.price import GatewayPriceOracle
 oracle = GatewayPriceOracle(gateway_client)
 price = await oracle.get_price("ETH", "USD")
 ```
+
+### GetReferencePrice
+
+Get a named non-crypto reference price from one gateway-verified feed. Unlike
+`GetPrice`, this RPC never aggregates same-symbol crypto assets. The gateway
+owns the exact feed selection, provider timestamp and heartbeat evaluation, and
+reference-market session status. Unsupported pairs and unavailable, malformed,
+stale, or errored observations fail closed without a numeric price.
+
+```protobuf
+rpc GetReferencePrice(ReferencePriceRequest) returns (ReferencePriceResponse)
+```
+
+**Request:**
+```protobuf
+message ReferencePriceRequest {
+  string instrument = 1;  // e.g. XAU
+  string quote = 2;       // USD only in the initial contract
+  string chain = 3;       // Chain hosting the verified feed
+}
+```
+
+**Response:**
+```protobuf
+message ReferencePriceResponse {
+  string instrument = 1;
+  string quote = 2;
+  string chain = 3;
+  string price = 4;                         // Empty when unavailable; never "0" as a sentinel
+  ReferencePriceAvailability availability = 5;
+  double confidence = 6;
+  string source = 7;                        // Provider, pair, and verified feed address
+  int64 observed_at = 8;                    // Provider updatedAt, not gateway wall clock
+  bool stale = 9;                           // Evaluated against the provider heartbeat
+  ReferenceMarketStatus market_status = 10;
+  int64 market_status_as_of = 11;
+  string market_status_source = 12;
+  string reason = 13;
+}
+```
+
+**Availability and market status:**
+```protobuf
+enum ReferencePriceAvailability {
+  REFERENCE_PRICE_AVAILABILITY_UNSPECIFIED = 0;
+  REFERENCE_PRICE_AVAILABILITY_AVAILABLE = 1;
+  REFERENCE_PRICE_AVAILABILITY_UNMEASURED = 2;
+  REFERENCE_PRICE_AVAILABILITY_ERRORED = 3;
+}
+
+enum ReferenceMarketStatus {
+  REFERENCE_MARKET_STATUS_UNSPECIFIED = 0;
+  REFERENCE_MARKET_STATUS_OPEN = 1;
+  REFERENCE_MARKET_STATUS_CLOSED = 2;
+  REFERENCE_MARKET_STATUS_UNKNOWN = 3;
+}
+```
+
+Only `REFERENCE_PRICE_AVAILABILITY_AVAILABLE` carries a measured price. Clients
+must also enforce their own maximum age and require an open reference market
+before using the observation to authorize a trade.
 
 ### GetPtPrice
 

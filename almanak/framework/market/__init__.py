@@ -68,6 +68,8 @@ from .models import (
     OBVData,
     PriceData,
     PriceOracle,
+    ReferenceMarketStatus,
+    ReferencePriceData,
     RSIData,
     RSIProvider,
     StochasticData,
@@ -147,6 +149,8 @@ __all__ = [
     # Models
     "TokenBalance",
     "PriceData",
+    "ReferencePriceData",
+    "ReferenceMarketStatus",
     "PriceOracle",
     "PriceStore",
     "StoredPrice",

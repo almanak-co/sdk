@@ -19,6 +19,44 @@ else:
 
 DESCRIPTOR: _descriptor.FileDescriptor
 
+class _ReferencePriceAvailability:
+    ValueType = _typing.NewType("ValueType", _builtins.int)
+    V: _TypeAlias = ValueType  # noqa: Y015
+
+class _ReferencePriceAvailabilityEnumTypeWrapper(_enum_type_wrapper._EnumTypeWrapper[_ReferencePriceAvailability.ValueType], _builtins.type):
+    DESCRIPTOR: _descriptor.EnumDescriptor
+    REFERENCE_PRICE_AVAILABILITY_UNSPECIFIED: _ReferencePriceAvailability.ValueType  # 0
+    REFERENCE_PRICE_AVAILABILITY_AVAILABLE: _ReferencePriceAvailability.ValueType  # 1
+    REFERENCE_PRICE_AVAILABILITY_UNMEASURED: _ReferencePriceAvailability.ValueType  # 2
+    REFERENCE_PRICE_AVAILABILITY_ERRORED: _ReferencePriceAvailability.ValueType  # 3
+
+class ReferencePriceAvailability(_ReferencePriceAvailability, metaclass=_ReferencePriceAvailabilityEnumTypeWrapper): ...
+
+REFERENCE_PRICE_AVAILABILITY_UNSPECIFIED: ReferencePriceAvailability.ValueType  # 0
+REFERENCE_PRICE_AVAILABILITY_AVAILABLE: ReferencePriceAvailability.ValueType  # 1
+REFERENCE_PRICE_AVAILABILITY_UNMEASURED: ReferencePriceAvailability.ValueType  # 2
+REFERENCE_PRICE_AVAILABILITY_ERRORED: ReferencePriceAvailability.ValueType  # 3
+Global___ReferencePriceAvailability: _TypeAlias = ReferencePriceAvailability  # noqa: Y015
+
+class _ReferenceMarketStatus:
+    ValueType = _typing.NewType("ValueType", _builtins.int)
+    V: _TypeAlias = ValueType  # noqa: Y015
+
+class _ReferenceMarketStatusEnumTypeWrapper(_enum_type_wrapper._EnumTypeWrapper[_ReferenceMarketStatus.ValueType], _builtins.type):
+    DESCRIPTOR: _descriptor.EnumDescriptor
+    REFERENCE_MARKET_STATUS_UNSPECIFIED: _ReferenceMarketStatus.ValueType  # 0
+    REFERENCE_MARKET_STATUS_OPEN: _ReferenceMarketStatus.ValueType  # 1
+    REFERENCE_MARKET_STATUS_CLOSED: _ReferenceMarketStatus.ValueType  # 2
+    REFERENCE_MARKET_STATUS_UNKNOWN: _ReferenceMarketStatus.ValueType  # 3
+
+class ReferenceMarketStatus(_ReferenceMarketStatus, metaclass=_ReferenceMarketStatusEnumTypeWrapper): ...
+
+REFERENCE_MARKET_STATUS_UNSPECIFIED: ReferenceMarketStatus.ValueType  # 0
+REFERENCE_MARKET_STATUS_OPEN: ReferenceMarketStatus.ValueType  # 1
+REFERENCE_MARKET_STATUS_CLOSED: ReferenceMarketStatus.ValueType  # 2
+REFERENCE_MARKET_STATUS_UNKNOWN: ReferenceMarketStatus.ValueType  # 3
+Global___ReferenceMarketStatus: _TypeAlias = ReferenceMarketStatus  # noqa: Y015
+
 class _PtPriceAvailability:
     ValueType = _typing.NewType("ValueType", _builtins.int)
     V: _TypeAlias = ValueType  # noqa: Y015
@@ -728,6 +766,87 @@ class PriceResponse(_message.Message):
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___PriceResponse: _TypeAlias = PriceResponse  # noqa: Y015
+
+@_typing.final
+class ReferencePriceRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    INSTRUMENT_FIELD_NUMBER: _builtins.int
+    QUOTE_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    instrument: _builtins.str
+    """e.g. XAU"""
+    quote: _builtins.str
+    """USD only in the initial contract"""
+    chain: _builtins.str
+    """chain hosting the verified feed"""
+    def __init__(
+        self,
+        *,
+        instrument: _builtins.str = ...,
+        quote: _builtins.str = ...,
+        chain: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "instrument", b"instrument", "quote", b"quote"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___ReferencePriceRequest: _TypeAlias = ReferencePriceRequest  # noqa: Y015
+
+@_typing.final
+class ReferencePriceResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    INSTRUMENT_FIELD_NUMBER: _builtins.int
+    QUOTE_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    PRICE_FIELD_NUMBER: _builtins.int
+    AVAILABILITY_FIELD_NUMBER: _builtins.int
+    CONFIDENCE_FIELD_NUMBER: _builtins.int
+    SOURCE_FIELD_NUMBER: _builtins.int
+    OBSERVED_AT_FIELD_NUMBER: _builtins.int
+    STALE_FIELD_NUMBER: _builtins.int
+    MARKET_STATUS_FIELD_NUMBER: _builtins.int
+    MARKET_STATUS_AS_OF_FIELD_NUMBER: _builtins.int
+    MARKET_STATUS_SOURCE_FIELD_NUMBER: _builtins.int
+    REASON_FIELD_NUMBER: _builtins.int
+    instrument: _builtins.str
+    quote: _builtins.str
+    chain: _builtins.str
+    price: _builtins.str
+    """absent when unmeasured; never "0" as a sentinel"""
+    availability: Global___ReferencePriceAvailability.ValueType
+    confidence: _builtins.float
+    source: _builtins.str
+    """includes provider, pair, and verified feed address"""
+    observed_at: _builtins.int
+    """source feed's updatedAt, not gateway wall clock"""
+    stale: _builtins.bool
+    """evaluated against catalogued provider heartbeat"""
+    market_status: Global___ReferenceMarketStatus.ValueType
+    market_status_as_of: _builtins.int
+    market_status_source: _builtins.str
+    reason: _builtins.str
+    def __init__(
+        self,
+        *,
+        instrument: _builtins.str = ...,
+        quote: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        price: _builtins.str = ...,
+        availability: Global___ReferencePriceAvailability.ValueType = ...,
+        confidence: _builtins.float = ...,
+        source: _builtins.str = ...,
+        observed_at: _builtins.int = ...,
+        stale: _builtins.bool = ...,
+        market_status: Global___ReferenceMarketStatus.ValueType = ...,
+        market_status_as_of: _builtins.int = ...,
+        market_status_source: _builtins.str = ...,
+        reason: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["availability", b"availability", "chain", b"chain", "confidence", b"confidence", "instrument", b"instrument", "market_status", b"market_status", "market_status_as_of", b"market_status_as_of", "market_status_source", b"market_status_source", "observed_at", b"observed_at", "price", b"price", "quote", b"quote", "reason", b"reason", "source", b"source", "stale", b"stale"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___ReferencePriceResponse: _TypeAlias = ReferencePriceResponse  # noqa: Y015
 
 @_typing.final
 class PtPriceRequest(_message.Message):

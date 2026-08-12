@@ -390,6 +390,31 @@ def test_address_keyed_token_position_is_covered_by_full_close_swap():
     assert check_intent_coverage([pos], intents).complete
 
 
+def test_nonstandard_token_address_close_is_covered_despite_symbol_metadata():
+    """Canonical address coverage must not depend on resolving an unknown symbol."""
+    from almanak.framework.teardown.full_close import full_close_intents
+
+    token = "0x21caef8a43163eea865baee23b9c2e327696a3bf"
+    pool = "0xc655e1a100a084d9ac91c269b0a7cb0e62263fcf"
+    pos = PositionInfo(
+        position_type=PositionType.TOKEN,
+        position_id="held-XAUT0",
+        chain="bsc",
+        protocol="pancakeswap_v3",
+        value_usd=Decimal("5"),
+        details={
+            "asset_symbol": "XAUT0",
+            "token_address": token,
+            "close_swap_params": {"pool": pool},
+        },
+    )
+
+    intents = full_close_intents([pos], target_token="0x55d398326f99059ff775485246999027b3197955")
+
+    assert intents[0].from_token.lower() == token
+    assert check_intent_coverage([pos], intents).complete
+
+
 def test_address_keyed_vault_position_is_covered_by_full_close_redeem():
     """A VAULT position whose address lives in ``details['address']`` (and whose
     position_id is a logical name) yields a VAULT_REDEEM(vault_address=<addr>)
@@ -706,9 +731,7 @@ def test_pendle_pt_uncovered_despite_correct_swap_VIB_5590():
             "base_token": "WSTETH",
         },
     )
-    swap = Intent.swap(
-        from_token="PT-stETH-30DEC2027", to_token="WSTETH", amount="all", protocol="pendle"
-    )
+    swap = Intent.swap(from_token="PT-stETH-30DEC2027", to_token="WSTETH", amount="all", protocol="pendle")
     report = check_intent_coverage(_summary([pt]), [swap])
     assert report.complete, f"PT SWAP should cover the PT TOKEN position; uncovered={report.uncovered}"
 
@@ -751,9 +774,7 @@ def test_non_pt_token_not_false_matched_by_pt_swap_VIB_5590():
         value_usd=Decimal("10"),
         details={"asset": "USDC"},
     )
-    pt_swap = Intent.swap(
-        from_token="PT-stETH-30DEC2027", to_token="WSTETH", amount="all", protocol="pendle"
-    )
+    pt_swap = Intent.swap(from_token="PT-stETH-30DEC2027", to_token="WSTETH", amount="all", protocol="pendle")
     assert not check_intent_coverage(_summary([other]), [pt_swap]).complete
 
 
@@ -790,6 +811,20 @@ def test_token_already_in_target_is_covered_no_op_VIB_5494():
     assert report.complete, f"held target-token position must be a no-op close; uncovered={report.uncovered}"
     # It still counts toward the enforceable denominator (satisfied, not absent).
     assert report.total_enforceable == 1
+
+
+def test_token_address_and_matching_target_symbol_is_covered_no_op_VIB_5494():
+    pos = _held_token(
+        "USDC",
+        details={
+            "token_address": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+            "asset": "USDC",
+        },
+    )
+
+    report = check_intent_coverage(_summary([pos]), [], consolidation_target_token="USDC")
+
+    assert report.complete
 
 
 def test_stake_already_in_target_is_covered_no_op_VIB_5494():

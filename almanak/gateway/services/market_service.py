@@ -43,6 +43,7 @@ from almanak.framework.data.timeframes import (
 )
 from almanak.framework.data.tokens.exceptions import AmbiguousTokenError
 from almanak.gateway.core.settings import GatewaySettings
+from almanak.gateway.data.price.market_hours import ReferenceMarketStatus, reference_market_status
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
 from almanak.gateway.services._grpc_errors import set_error_from_upstream
 from almanak.gateway.validation import (
@@ -1768,6 +1769,118 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         except Exception as e:
             logger.debug("GetPtPrice: could not build %s reader for %s: %s", protocol, chain, e)
             return None
+
+    async def GetReferencePrice(
+        self,
+        request: gateway_pb2.ReferencePriceRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.ReferencePriceResponse:
+        """Read one verified non-crypto reference feed with session metadata."""
+        await self._ensure_initialized()
+
+        instrument = request.instrument.strip().upper()
+        quote = (request.quote or "USD").strip().upper()
+        if not instrument or quote != "USD":
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("instrument is required and only USD reference quotes are supported")
+            return gateway_pb2.ReferencePriceResponse(
+                instrument=instrument,
+                quote=quote,
+                availability=gateway_pb2.REFERENCE_PRICE_AVAILABILITY_UNMEASURED,
+                market_status=gateway_pb2.REFERENCE_MARKET_STATUS_UNKNOWN,
+                reason="invalid_request",
+            )
+
+        try:
+            chain = validate_chain(request.chain)
+        except ValidationError as exc:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(exc))
+            return gateway_pb2.ReferencePriceResponse(
+                instrument=instrument,
+                quote=quote,
+                availability=gateway_pb2.REFERENCE_PRICE_AVAILABILITY_UNMEASURED,
+                market_status=gateway_pb2.REFERENCE_MARKET_STATUS_UNKNOWN,
+                reason="invalid_chain",
+            )
+
+        configured_chains = {configured.lower() for configured in self.settings.chains if configured}
+        if configured_chains and chain not in configured_chains:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(f"chain is not configured on this gateway: {chain}")
+            return gateway_pb2.ReferencePriceResponse(
+                instrument=instrument,
+                quote=quote,
+                chain=chain,
+                availability=gateway_pb2.REFERENCE_PRICE_AVAILABILITY_UNMEASURED,
+                market_status=gateway_pb2.REFERENCE_MARKET_STATUS_UNKNOWN,
+                reason="chain_not_configured",
+            )
+
+        if chain not in self._price_aggregators:
+            await self.reinitialize(chain)
+        aggregator = self._price_aggregators.get(chain)
+        source = next(
+            (
+                candidate
+                for candidate in getattr(aggregator, "sources", [])
+                if callable(getattr(candidate, "get_reference_price", None))
+            ),
+            None,
+        )
+        pair = f"{instrument}/{quote}"
+        # Calendar construction/schedule expansion is synchronous pandas work;
+        # keep it off the shared async gRPC event loop.
+        status = await asyncio.to_thread(reference_market_status, pair)
+        status_value = {
+            ReferenceMarketStatus.OPEN: gateway_pb2.REFERENCE_MARKET_STATUS_OPEN,
+            ReferenceMarketStatus.CLOSED: gateway_pb2.REFERENCE_MARKET_STATUS_CLOSED,
+            ReferenceMarketStatus.UNKNOWN: gateway_pb2.REFERENCE_MARKET_STATUS_UNKNOWN,
+        }[status.status]
+
+        if source is None:
+            return gateway_pb2.ReferencePriceResponse(
+                instrument=instrument,
+                quote=quote,
+                chain=chain,
+                availability=gateway_pb2.REFERENCE_PRICE_AVAILABILITY_UNMEASURED,
+                market_status=status_value,
+                market_status_as_of=int(status.as_of.timestamp()),
+                market_status_source=status.source,
+                reason="verified_reference_provider_unavailable",
+            )
+
+        try:
+            result = await source.get_reference_price(instrument, quote)
+            if not result.price.is_finite() or result.price <= 0:
+                raise ValueError(f"non-positive/non-finite reference price: {result.price}")
+        except Exception as exc:  # noqa: BLE001 - typed errored response is the wire contract
+            logger.warning("GetReferencePrice failed for %s on %s: %s", pair, chain, type(exc).__name__)
+            return gateway_pb2.ReferencePriceResponse(
+                instrument=instrument,
+                quote=quote,
+                chain=chain,
+                availability=gateway_pb2.REFERENCE_PRICE_AVAILABILITY_ERRORED,
+                market_status=status_value,
+                market_status_as_of=int(status.as_of.timestamp()),
+                market_status_source=status.source,
+                reason="reference_price_unavailable",
+            )
+
+        return gateway_pb2.ReferencePriceResponse(
+            instrument=instrument,
+            quote=quote,
+            chain=chain,
+            price=str(result.price),
+            availability=gateway_pb2.REFERENCE_PRICE_AVAILABILITY_AVAILABLE,
+            confidence=result.confidence,
+            source=result.source,
+            observed_at=int(result.timestamp.timestamp()),
+            stale=result.stale,
+            market_status=status_value,
+            market_status_as_of=int(status.as_of.timestamp()),
+            market_status_source=status.source,
+        )
 
     async def GetBalance(
         self,

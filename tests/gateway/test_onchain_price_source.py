@@ -531,7 +531,8 @@ class TestChainIdValidation:
             await source._validate_chain_id()
 
         assert source._rpc_url is None
-        assert source._chain_id_validated is True
+        assert source._chain_id_validation_attempted is True
+        assert source._chain_id_validated is False
         await source.close()
 
     @pytest.mark.asyncio
@@ -544,7 +545,8 @@ class TestChainIdValidation:
             await source._validate_chain_id()
 
         assert source._rpc_url == original_rpc
-        assert source._chain_id_validated is True
+        assert source._chain_id_validation_attempted is True
+        assert source._chain_id_validated is False
         await source.close()
 
     @pytest.mark.asyncio
@@ -649,7 +651,8 @@ class TestBSCRouting:
             await source._validate_chain_id()
 
         assert source._rpc_url is None
-        assert source._chain_id_validated is True
+        assert source._chain_id_validation_attempted is True
+        assert source._chain_id_validated is False
         await source.close()
 
 

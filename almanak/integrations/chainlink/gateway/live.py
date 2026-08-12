@@ -51,7 +51,7 @@ from almanak.integrations.chainlink.catalog import (
     TOKEN_TO_PAIR,
 )
 from almanak.integrations.chainlink.codec import DECIMALS_SELECTOR, LATEST_ROUND_DATA_SELECTOR, decode_uint8
-from almanak.integrations.chainlink.models import CHAINLINK_SOURCE_NAME
+from almanak.integrations.chainlink.models import CHAINLINK_SOURCE_NAME, ChainlinkFeedObservation, FeedKind
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +127,7 @@ class ChainlinkPriceSource(BasePriceSource):
         self._session: aiohttp.ClientSession | None = None
 
         # chainId validation deferred to first get_price() call (async)
+        self._chain_id_validation_attempted = False
         self._chain_id_validated = False
         self._chain_id_lock = asyncio.Lock()
 
@@ -186,10 +187,10 @@ class ChainlinkPriceSource(BasePriceSource):
         in-flight validation.
         """
         async with self._chain_id_lock:
-            if self._chain_id_validated or not self._rpc_url:
+            if self._chain_id_validated or self._chain_id_validation_attempted or not self._rpc_url:
                 return
 
-            self._chain_id_validated = True
+            self._chain_id_validation_attempted = True
             expected_chain_id = CHAINLINK_CHAIN_IDS.get(self._chain)
             if expected_chain_id is None:
                 return  # Unknown chain, skip validation
@@ -222,6 +223,7 @@ class ChainlinkPriceSource(BasePriceSource):
                     )
                     self._rpc_url = None
                 else:
+                    self._chain_id_validated = True
                     logger.debug("ChainlinkPriceSource: chainId validated: %d (%s)", actual_chain_id, self._chain)
             except Exception as e:
                 # Broad catch intentional: chainId validation is best-effort and must never crash the gateway
@@ -297,7 +299,7 @@ class ChainlinkPriceSource(BasePriceSource):
             return result
 
         # Validate chainId on first RPC-dependent call (after cache/stablecoin fast-paths)
-        if not self._chain_id_validated and self._rpc_url:
+        if not self._chain_id_validated and not self._chain_id_validation_attempted and self._rpc_url:
             await self._validate_chain_id()
 
         if not self._rpc_url:
@@ -513,6 +515,87 @@ class ChainlinkPriceSource(BasePriceSource):
         )
 
         return price, confidence
+
+    async def get_reference_price(self, instrument: str, quote: str = "USD") -> PriceResult:
+        """Read one catalogued feed without generic symbol aggregation.
+
+        This isolated path intentionally leaves :meth:`get_price` unchanged.
+        Commodity symbols must never be medianed with same-symbol crypto assets,
+        and freshness must use Chainlink's ``updatedAt`` rather than gateway time.
+        """
+        pair = f"{instrument.strip().upper()}/{quote.strip().upper()}"
+        spec = CATALOG.feed(self._chain, pair)
+        if spec is None or spec.kind is not FeedKind.REFERENCE:
+            raise DataSourceUnavailable(
+                source=self.source_name,
+                reason=f"No catalogued Chainlink reference feed for {pair} on {self._chain}",
+            )
+
+        # Reference reads are RPC-dependent and must preserve the same
+        # chain-correctness guard as generic Chainlink pricing. A misconfigured
+        # endpoint is unavailable, never an opportunity to read the catalogued
+        # address on a different chain.
+        if not self._chain_id_validated and not self._chain_id_validation_attempted and self._rpc_url:
+            await self._validate_chain_id()
+        if not self._rpc_url or not self._chain_id_validated:
+            raise DataSourceUnavailable(
+                source=self.source_name,
+                reason=f"No positively chain-validated RPC URL available for chain={self._chain}",
+            )
+
+        observation = await self._fetch_reference_feed(spec.address, pair)
+        return PriceResult(
+            price=observation.price,
+            source=f"chainlink:{self._chain}:{pair}:{spec.address.lower()}",
+            timestamp=observation.updated_at,
+            confidence=observation.confidence,
+            stale=observation.stale,
+        )
+
+    async def _fetch_reference_feed(self, feed_address: str, pair: str) -> ChainlinkFeedObservation:
+        """Decode an exact reference feed under its catalogued heartbeat."""
+        try:
+            response_hex = await self._eth_call(feed_address, LATEST_ROUND_DATA_SELECTOR)
+            data = bytes.fromhex(response_hex.removeprefix("0x"))
+        except Exception as exc:
+            raise DataSourceUnavailable(
+                source=self.source_name,
+                reason=f"Chainlink RPC call failed for reference feed {pair}: {exc}",
+            ) from exc
+
+        if len(data) < 160:
+            raise DataSourceUnavailable(
+                source=self.source_name,
+                reason=f"Chainlink response too short for reference feed {pair}: {len(data)} bytes",
+            )
+
+        answer = int.from_bytes(data[32:64], byteorder="big", signed=True)
+        updated_at = int.from_bytes(data[96:128], byteorder="big")
+        if answer <= 0 or updated_at <= 0:
+            raise DataSourceUnavailable(
+                source=self.source_name,
+                reason=f"Chainlink returned invalid answer/updatedAt for reference feed {pair}",
+            )
+
+        spec = CATALOG.feed(self._chain, pair)
+        if spec is None or spec.address.lower() != feed_address.lower():
+            raise DataSourceUnavailable(
+                source=self.source_name,
+                reason=f"Chainlink catalogue mismatch for reference feed {pair} on {self._chain}",
+            )
+        decimals = await self._verified_feed_decimals(feed_address, pair, spec.decimals)
+        now = int(time.time())
+        age = now - updated_at
+        # A future provider timestamp is invalid, but it is not heartbeat
+        # staleness. Preserve the timestamp so ReferencePriceData reports the
+        # more precise ``reference_price_timestamp_in_future`` block reason.
+        stale = age > spec.heartbeat_seconds
+        return ChainlinkFeedObservation(
+            price=Decimal(answer) / Decimal(10**decimals),
+            updated_at=datetime.fromtimestamp(updated_at, tz=UTC),
+            confidence=0.85 if stale else 0.95,
+            stale=stale,
+        )
 
     async def _verified_feed_decimals(self, feed_address: str, pair: str, expected: int) -> int:
         """Measure feed decimals once and fail closed on catalogue drift."""

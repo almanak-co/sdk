@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
 
@@ -17,6 +18,7 @@ class FeedKind(StrEnum):
 
     USD = "usd"
     ETH = "eth"
+    REFERENCE = "reference"
 
 
 @dataclass(frozen=True)
@@ -39,3 +41,13 @@ class FeedSpec:
             raise ValueError(f"FeedSpec.pair must be an uppercase BASE/QUOTE pair, got {self.pair!r}")
         if self.chain_id <= 0 or self.decimals < 0 or self.heartbeat_seconds <= 0:
             raise ValueError(f"Invalid Chainlink feed metadata for {self.chain}:{self.pair}")
+
+
+@dataclass(frozen=True)
+class ChainlinkFeedObservation:
+    """Decoded exact-feed value with the provider's own timestamp."""
+
+    price: Decimal
+    updated_at: datetime
+    confidence: float
+    stale: bool

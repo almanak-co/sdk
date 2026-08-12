@@ -77,7 +77,7 @@ _ENFORCEABLE_TYPES: frozenset[PositionType] = frozenset(
 # in. Mirrors the lookup ``full_close._close_intent_for_position`` uses so the
 # coverage check reads the same identity the close builder reads. ``address`` is
 # included because the STAKE / TOKEN close builder resolves its swap token via
-# ``_first(details, "asset", "token", "address")`` — an address-keyed held token
+# the ordered :data:`_SWAP_CLOSE_TOKEN_KEYS` list — an address-keyed held token
 # yields a valid ``SWAP(from_token=<address>)``, so the coverage check must see
 # that same address or it would falsely fail a legitimate close (VIB-5469).
 # ``asset_symbol`` is included because a registry-sourced lending position
@@ -92,6 +92,10 @@ _ENFORCEABLE_TYPES: frozenset[PositionType] = frozenset(
 # here, so the deliberate separation that keeps the valuer from double-counting
 # these legs as wallet tokens is preserved.
 _TOKEN_DETAIL_KEYS: tuple[str, ...] = (
+    # Canonical address wins in full_close when both it and a display symbol
+    # are present. Keep it in the wider match set too so an address-based close
+    # covers the same position without unsafe symbol->address inference.
+    "token_address",
     "asset",
     "asset_symbol",
     "token",
@@ -116,15 +120,12 @@ _TOKEN_DETAIL_KEYS: tuple[str, ...] = (
     "pt_symbol",
 )
 
-# The EXACT key order ``full_close._close_intent_for_position`` uses to resolve
-# the swap-close token for a STAKE / TOKEN position (its
-# ``_first(details, "asset", "asset_symbol", "token", "address", "pt_token",
-# "pt_symbol")`` call). ``full_close`` emits NO closing intent when that token
-# already equals the consolidation target (nothing to swap). Mirroring the same
-# ordered first-truthy resolution — NOT the wider ``_TOKEN_DETAIL_KEYS`` set —
-# is what lets the completeness gate credit the SAME no-op close ``full_close``
-# makes, and only that one (VIB-5494 Item 1).
+# Identity keys ``full_close._close_intent_for_position`` accepts for a STAKE /
+# TOKEN position. Routing uses the first truthy value in this order, while no-op
+# detection checks every supplied equivalent identity so a canonical address
+# does not hide a matching consolidation-target symbol (VIB-5494 / ALM-3223).
 _SWAP_CLOSE_TOKEN_KEYS: tuple[str, ...] = (
+    "token_address",
     "asset",
     "asset_symbol",
     "token",
@@ -149,21 +150,6 @@ _NON_SWAP_CLOSE_MARKERS: tuple[str, ...] = (
     "debt_token",
     "supply_token",
 )
-
-
-def _swap_close_token(position: PositionInfo) -> str | None:
-    """The upper-cased swap-close token full_close resolves for a STAKE/TOKEN.
-
-    First truthy value among :data:`_SWAP_CLOSE_TOKEN_KEYS`, in that exact order
-    (mirrors ``full_close._close_intent_for_position``); ``None`` when none is
-    present — the same "missing details → hand-roll" case full_close skips loud.
-    """
-    details = position.details or {}
-    for key in _SWAP_CLOSE_TOKEN_KEYS:
-        value = details.get(key)
-        if value:
-            return str(value).upper()
-    return None
 
 
 def _is_noop_target_close(position: PositionInfo, consolidation_target_token: str | None) -> bool:
@@ -200,8 +186,11 @@ def _is_noop_target_close(position: PositionInfo, consolidation_target_token: st
     leg = str(details.get("leg") or "").lower()
     if leg in ("collateral", "debt"):
         return False
-    token = _swap_close_token(position)
-    return token is not None and token == consolidation_target_token.upper()
+    target = consolidation_target_token.upper()
+    # full_close routes from the first identity (canonical address preferred),
+    # but no-op detection considers every equivalent producer identity so an
+    # address + matching target symbol does not become a self-swap.
+    return any(str(details.get(key)).upper() == target for key in _SWAP_CLOSE_TOKEN_KEYS if details.get(key))
 
 
 def resolve_consolidation_noop_target(

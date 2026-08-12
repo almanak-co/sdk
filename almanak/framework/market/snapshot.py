@@ -47,6 +47,8 @@ from .models import (
     PriceData,
     PriceOracle,
     PtPriceData,
+    ReferenceMarketStatus,
+    ReferencePriceData,
     RSIData,
     RSIProvider,
     StochasticData,
@@ -1020,6 +1022,121 @@ class MarketSnapshot:
         cached = lookup_price(self._price_store, token=token, chain=requested_chain, quote=quote)
         return (
             cached.raw if cached is not None and isinstance(cached.raw, PriceData) else PriceData(price=current_price)
+        )
+
+    def reference_price(
+        self,
+        instrument: str,
+        chain: str | None = None,
+        *,
+        quote: str = "USD",
+    ) -> ReferencePriceData:
+        """Read one gateway-verified non-crypto reference price.
+
+        This surface is deliberately separate from :meth:`price`: it selects a
+        single catalogued provider feed, preserves that feed's ``updatedAt``,
+        and carries an explicit market-session status. Transport, unavailable,
+        malformed, stale, closed, and unknown states all remain representable so
+        callers can fail closed through :meth:`ReferencePriceData.is_tradeable`.
+        """
+        requested_chain = self._resolve_chain(chain)
+        client = self._gateway_client
+
+        from almanak.gateway.proto import gateway_pb2
+
+        def _timestamp(raw: int) -> datetime | None:
+            if raw <= 0:
+                return None
+            try:
+                return datetime.fromtimestamp(raw, tz=UTC)
+            except (OverflowError, OSError, ValueError):
+                return None
+
+        def _unavailable(
+            reason: str,
+            *,
+            response: object | None = None,
+        ) -> ReferencePriceData:
+            raw_market_status = getattr(response, "market_status", None)
+            if raw_market_status == gateway_pb2.REFERENCE_MARKET_STATUS_OPEN:
+                market_status = ReferenceMarketStatus.OPEN
+            elif raw_market_status == gateway_pb2.REFERENCE_MARKET_STATUS_CLOSED:
+                market_status = ReferenceMarketStatus.CLOSED
+            else:
+                market_status = ReferenceMarketStatus.UNKNOWN
+
+            return ReferencePriceData(
+                instrument=getattr(response, "instrument", "") or instrument.strip().upper(),
+                quote=getattr(response, "quote", "") or quote.strip().upper(),
+                chain=getattr(response, "chain", "") or requested_chain,
+                price=None,
+                confidence=None,
+                source=getattr(response, "source", ""),
+                observed_at=_timestamp(getattr(response, "observed_at", 0)),
+                # No usable price is never a fresh observation. Proto3's
+                # default ``false`` must not leak through an ERRORED response.
+                stale=True,
+                market_status=market_status,
+                market_status_as_of=_timestamp(getattr(response, "market_status_as_of", 0)),
+                market_status_source=getattr(response, "market_status_source", ""),
+                reason=reason,
+            )
+
+        if client is None or not getattr(client, "is_connected", False):
+            reason = "reference_price unavailable: no connected GatewayClient"
+            self._record_critical_data_failure("reference_price", f"{instrument}@{requested_chain}", reason)
+            return _unavailable(reason)
+
+        request = gateway_pb2.ReferencePriceRequest(
+            instrument=instrument,
+            quote=quote,
+            chain=requested_chain,
+        )
+        config_timeout = getattr(getattr(client, "config", None), "timeout", None)
+        rpc_timeout = config_timeout if isinstance(config_timeout, int | float) else _GATEWAY_RPC_TIMEOUT_SECONDS
+        try:
+            response = client.market.GetReferencePrice(request, timeout=rpc_timeout)
+        except Exception as exc:  # noqa: BLE001 - fail-closed data contract
+            self._record_critical_data_failure("reference_price", f"{instrument}@{requested_chain}", exc)
+            return _unavailable(str(exc))
+
+        if response.availability != gateway_pb2.REFERENCE_PRICE_AVAILABILITY_AVAILABLE:
+            return _unavailable(response.reason or "reference_price_unavailable", response=response)
+
+        try:
+            price = Decimal(response.price)
+        except InvalidOperation:
+            self._record_critical_data_failure(
+                "reference_price", f"{instrument}@{requested_chain}", "malformed_reference_price"
+            )
+            return _unavailable("malformed_reference_price", response=response)
+        if not price.is_finite() or price <= 0:
+            self._record_critical_data_failure(
+                "reference_price",
+                f"{instrument}@{requested_chain}",
+                "non_positive_or_non_finite_reference_price",
+            )
+            return _unavailable("non_positive_or_non_finite_reference_price", response=response)
+
+        market_status = {
+            gateway_pb2.REFERENCE_MARKET_STATUS_OPEN: ReferenceMarketStatus.OPEN,
+            gateway_pb2.REFERENCE_MARKET_STATUS_CLOSED: ReferenceMarketStatus.CLOSED,
+        }.get(response.market_status, ReferenceMarketStatus.UNKNOWN)
+        confidence = response.confidence if 0.0 <= response.confidence <= 1.0 else None
+        self._critical_data_failures.pop(("reference_price", f"{instrument}@{requested_chain}"), None)
+        return ReferencePriceData(
+            instrument=response.instrument or instrument.strip().upper(),
+            quote=response.quote or quote.strip().upper(),
+            chain=response.chain or requested_chain,
+            price=price,
+            confidence=confidence,
+            source=response.source,
+            observed_at=_timestamp(response.observed_at),
+            stale=response.stale,
+            market_status=market_status,
+            market_status_as_of=_timestamp(response.market_status_as_of),
+            market_status_source=response.market_status_source,
+            reason=response.reason,
         )
 
     def pt_price(
@@ -5266,6 +5383,8 @@ class MarketSnapshot:
         amount: Decimal,
         chain: str | None = None,
         protocol: str | None = None,
+        pool_address: str | None = None,
+        fee_tier: int | None = None,
     ) -> DataEnvelope[SlippageEstimate]:
         """Estimate price impact and slippage for a potential swap.
 
@@ -5277,6 +5396,11 @@ class MarketSnapshot:
             amount: Amount of token_in to swap (human-readable units).
             chain: Chain name. Defaults to this snapshot's chain.
             protocol: Protocol name. Auto-detected if None.
+            pool_address: Exact pool to simulate. Pass the same address used in
+                ``SwapIntent.swap_params["pool"]`` so the risk check and the
+                compiled swap cannot silently evaluate different pools.
+            fee_tier: Exact pool discriminator when ``pool_address`` is omitted.
+                Pass the same value used in ``SwapIntent.swap_params["fee_tier"]``.
 
         Returns:
             DataEnvelope[SlippageEstimate] with price impact data.
@@ -5295,12 +5419,25 @@ class MarketSnapshot:
 
         target_chain = (chain or self._chain).lower()
         try:
+            # Preserve compatibility with pre-ALM-3223 estimator capabilities.
+            # Exact discriminators are opt-in; the legacy call shape remains
+            # valid when neither discriminator was requested.
+            if pool_address is None and fee_tier is None:
+                return self._slippage_estimator.estimate_slippage(
+                    token_in=token_in,
+                    token_out=token_out,
+                    amount=amount,
+                    chain=target_chain,
+                    protocol=protocol,
+                )
             return self._slippage_estimator.estimate_slippage(
                 token_in=token_in,
                 token_out=token_out,
                 amount=amount,
                 chain=target_chain,
                 protocol=protocol,
+                pool_address=pool_address,
+                fee_tier=fee_tier,
             )
         except SlippageEstimateUnavailableError:
             raise

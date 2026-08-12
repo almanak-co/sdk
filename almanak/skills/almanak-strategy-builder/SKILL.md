@@ -405,6 +405,7 @@ Intent.swap(
     protocol="uniswap_v3",      # Optional: specific DEX
     chain="arbitrum",            # Optional: override chain
     destination_chain="base",    # Optional: cross-chain swap
+    swap_params=None,             # Optional connector-owned exact-route constraints
 )
 ```
 
@@ -413,6 +414,32 @@ Use `amount="all"` to swap the entire balance.
 **`amount=` vs `amount_usd=`**: Use `amount_usd=` to specify trade size in USD (requires a live
 price oracle from the gateway). Use `amount=` to specify exact token units (more reliable for live
 trading since it bypasses USD-to-token conversion). When in doubt, prefer `amount=` for mainnet.
+
+#### Pinning one V3 execution pool
+
+For `uniswap_v3`, `sushiswap_v3`, `pancakeswap_v3`, and `agni_finance`, pin a same-chain
+swap to one immutable pool with `swap_params={"pool": <address>}`. The compiler reads
+`token0()`, `token1()`, and `fee()` from that pool and verifies `factory.getPool(...)` before
+building the transaction. A wrong pair, foreign factory, unsupported protocol, or unreadable
+pool fails compilation; it never falls back to another pool or route.
+
+```python
+APPROVED_POOL = "0xc655e1a100a084d9ac91c269b0a7cb0e62263fcf"
+
+Intent.swap(
+    from_token=self.quote_token_address,
+    to_token=self.base_token_address,
+    amount=Decimal("100"),
+    max_slippage=Decimal("0.0075"),
+    protocol="pancakeswap_v3",
+    chain="bsc",
+    swap_params={"pool": APPROVED_POOL},
+)
+```
+
+Use `swap_params={"fee_tier": 500}` only when any factory pool at that fee tier is acceptable;
+use `pool` when the address itself is an invariant. Pool pinning is not supported for cross-chain
+aggregator swaps. Use the same `swap_params` in normal execution and teardown.
 
 ### Liquidity Provision
 
@@ -793,6 +820,28 @@ pd.low_24h           # Decimal
 pd.timestamp         # datetime
 ```
 
+For a non-crypto reference such as XAU/USD, use the dedicated exact-feed API. Never substitute
+`market.price("XAU")`: generic token pricing does not carry the required feed identity or market
+session state.
+
+```python
+reference = market.reference_price("XAU", chain="bsc", quote="USD")
+reason = reference.trade_block_reason(max_age_seconds=300, min_confidence=0.90)
+if reason is not None:
+    return Intent.hold(reason=reason)
+
+reference.price                 # Decimal | None
+reference.source                # exact provider/feed identity
+reference.observed_at           # provider observation time, not gateway receipt time
+reference.market_status         # OPEN | CLOSED | UNKNOWN
+reference.market_status_as_of   # time at which the gateway evaluated the session
+reference.stale                 # provider heartbeat result
+```
+
+The API returns a typed unavailable result rather than an inferred value. `is_tradeable(...)` and
+`trade_block_reason(...)` fail closed for unavailable, malformed, stale, closed/unknown-session,
+future-dated, over-age, or low-confidence observations.
+
 ### Balances
 
 ```python
@@ -971,6 +1020,40 @@ slip = market.estimate_slippage("WETH", "USDC", Decimal("10000"))  # DataEnvelop
 prices = market.price_across_dexs("WETH", "USDC", Decimal("1"))   # list[DexQuote]
 best_dex = market.best_dex_price("WETH", "USDC", Decimal("1"))    # BestDexResult
 ```
+
+For an approved-pool strategy, pin every execution-facing read to the same address. A useful USD
+depth contract is to simulate a trade equal to the configured minimum depth and require its
+effective slippage to remain inside the limit. Check both directions when both entry and exit are
+possible; convert the base-side USD amount with the already-validated reference price.
+
+```python
+pool = market.pool_price(APPROVED_POOL, chain="bsc")
+depth = market.liquidity_depth(APPROVED_POOL, chain="bsc")
+
+quote_side = market.estimate_slippage(
+    self.quote_token_address,
+    self.base_token_address,
+    Decimal("27000"),
+    chain="bsc",
+    protocol="pancakeswap_v3",
+    pool_address=APPROVED_POOL,
+)
+base_side = market.estimate_slippage(
+    self.base_token_address,
+    self.quote_token_address,
+    Decimal("27000") / reference.price,
+    chain="bsc",
+    protocol="pancakeswap_v3",
+    pool_address=APPROVED_POOL,
+)
+if max(quote_side.value.effective_slippage_bps, base_side.value.effective_slippage_bps) > 75:
+    return Intent.hold(reason="approved pool fails the $27k / 75 bps depth contract")
+```
+
+`pool_price` includes the exact pool address, fee, block number, and timestamp. `liquidity_depth`
+contains current tick/liquidity plus initialized ticks. `estimate_slippage(pool_address=...)`
+simulates those ticks and is the execution-grade pre-trade quote/impact check. If any read is
+unavailable, propagate the typed data error or return `HOLD`; do not retry against another pool.
 
 > **Explicit-pool decimals contract (`twap`):** any call that supplies
 > `pool_address` directly must either pass
@@ -2060,11 +2143,34 @@ def generate_teardown_intents(self, mode, market=None) -> list[Intent]:
     intents.append(Intent.swap(
         from_token=self.base_token, to_token=self.quote_token,
         amount="all", max_slippage=max_slippage,
+        protocol="pancakeswap_v3",
+        swap_params={"pool": self.approved_pool},
     ))
     return intents
 ```
 
 `TeardownMode.SOFT` = graceful exit (minimize costs), `TeardownMode.HARD` = emergency (speed over cost).
+
+When delegating to `self.teardown_full_close_intents()`, describe non-standard token holdings with
+canonical address identity and their exact close route. `token_address` takes precedence over a
+display symbol, and `close_swap_params` is copied into the generated `SwapIntent`. A pool pin
+without `protocol` is skipped fail-closed rather than routed generically.
+
+```python
+PositionInfo(
+    position_type=PositionType.TOKEN,
+    position_id="held-XAUT0",
+    chain="bsc",
+    protocol="pancakeswap_v3",
+    value_usd=xaut0_value_usd,
+    details={
+        "asset_symbol": "XAUT0",
+        "token_address": self.base_token_address,
+        "amount": str(xaut0_balance),
+        "close_swap_params": {"pool": self.approved_pool},
+    },
+)
+```
 
 #### Lending strategy teardown example (Aave V3)
 

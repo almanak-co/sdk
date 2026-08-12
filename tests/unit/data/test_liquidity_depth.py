@@ -30,7 +30,6 @@ from almanak.framework.data.market_snapshot import (
     LiquidityDepthUnavailableError,
     SlippageEstimateUnavailableError,
 )
-from almanak.framework.market import MarketSnapshot
 from almanak.framework.data.models import DataClassification, DataEnvelope
 from almanak.framework.data.pools.liquidity import (
     FEE_TO_TICK_SPACING,
@@ -44,6 +43,7 @@ from almanak.framework.data.pools.liquidity import (
     _encode_int24,
     _tick_to_price,
 )
+from almanak.framework.market import MarketSnapshot, MarketSnapshotBuilder
 
 # ---------------------------------------------------------------------------
 # Helpers to build mock RPC responses
@@ -1021,6 +1021,34 @@ class TestMarketSnapshotLiquidity:
             amount=Decimal("10"),
             chain="arbitrum",
             protocol="pancakeswap_v3",
+        )
+
+    def test_estimate_slippage_forwards_exact_pool_discriminators(self):
+        """The public snapshot must not drop the pool used by execution."""
+        mock_estimator = MagicMock()
+        pool = "0x" + "ab" * 20
+        snapshot = MarketSnapshotBuilder.for_strategy_runner(
+            strategy=SimpleNamespace(chain="bsc", wallet_address="0x1", slippage_estimator=mock_estimator),
+            runtime_surface="unit_test",
+        )
+
+        snapshot.estimate_slippage(
+            "0x" + "21" * 20,
+            "0x" + "55" * 20,
+            Decimal("0.001"),
+            protocol="pancakeswap_v3",
+            pool_address=pool,
+            fee_tier=2500,
+        )
+
+        mock_estimator.estimate_slippage.assert_called_once_with(
+            token_in="0x" + "21" * 20,
+            token_out="0x" + "55" * 20,
+            amount=Decimal("0.001"),
+            chain="bsc",
+            protocol="pancakeswap_v3",
+            pool_address=pool,
+            fee_tier=2500,
         )
 
 

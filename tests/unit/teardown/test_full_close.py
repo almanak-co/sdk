@@ -61,9 +61,7 @@ def test_supply_maps_to_withdraw_all_live_supply():
 
 def test_vault_maps_to_redeem_all_shares():
     """VAULT -> vault_redeem(shares='all') (live share->asset)."""
-    out = full_close_intents(
-        [_pos(PositionType.VAULT, protocol="metamorpho", vault_address=_VAULT, asset="USDC")]
-    )
+    out = full_close_intents([_pos(PositionType.VAULT, protocol="metamorpho", vault_address=_VAULT, asset="USDC")])
     assert len(out) == 1
     vr = out[0]
     assert vr.intent_type == IntentType.VAULT_REDEEM
@@ -110,6 +108,18 @@ def test_token_already_target_is_skipped():
     """A held token that already IS the target needs no swap."""
     out = full_close_intents([_pos(PositionType.TOKEN, asset="USDC")], target_token="USDC")
     assert out == []
+
+
+def test_token_address_and_matching_target_symbol_is_skipped():
+    """A canonical address must not defeat the established symbol no-op."""
+    held = _pos(
+        PositionType.TOKEN,
+        protocol="wallet",
+        token_address="0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+        asset="USDC",
+    )
+
+    assert full_close_intents([held], target_token="USDC") == []
 
 
 def test_missing_details_skipped_not_fabricated():
@@ -232,3 +242,63 @@ def test_plain_token_close_swap_has_no_protocol_stamp():
     )
     assert len(intents) == 1
     assert not getattr(intents[0], "protocol", None)
+
+
+def test_empty_close_swap_params_does_not_force_protocol_routing():
+    held = PositionInfo(
+        position_type=PositionType.TOKEN,
+        position_id="held-WETH",
+        chain="ethereum",
+        protocol="wallet",
+        value_usd=Decimal("10"),
+        details={"asset": "WETH", "close_swap_params": {}},
+    )
+
+    intents = full_close_intents([held], target_token="USDC")
+
+    assert len(intents) == 1
+    assert intents[0].swap_params is None
+    assert not getattr(intents[0], "protocol", None)
+
+
+def test_nonstandard_token_close_prefers_address_and_preserves_exact_pool():
+    """An exact-pool teardown uses canonical token identity and the approved pool."""
+    token = "0x21caef8a43163eea865baee23b9c2e327696a3bf"
+    pool = "0xc655e1a100a084d9ac91c269b0a7cb0e62263fcf"
+    held = PositionInfo(
+        position_type=PositionType.TOKEN,
+        position_id="held-XAUT0",
+        chain="bsc",
+        protocol="pancakeswap_v3",
+        value_usd=Decimal("5"),
+        details={
+            "asset_symbol": "XAUT0",
+            "token_address": token,
+            "close_swap_params": {"pool": pool},
+        },
+    )
+
+    intents = full_close_intents([held], target_token="0x55d398326f99059ff775485246999027b3197955")
+
+    assert len(intents) == 1
+    swap = intents[0]
+    assert swap.from_token.lower() == token
+    assert swap.protocol == "pancakeswap_v3"
+    assert swap.swap_params == {"pool": pool}
+
+
+def test_exact_pool_close_without_protocol_fails_closed():
+    """A pool pin without its owning compiler must never fall back to generic routing."""
+    held = PositionInfo(
+        position_type=PositionType.TOKEN,
+        position_id="held-XAUT0",
+        chain="bsc",
+        protocol="",
+        value_usd=Decimal("5"),
+        details={
+            "token_address": "0x21caef8a43163eea865baee23b9c2e327696a3bf",
+            "close_swap_params": {"pool": "0xc655e1a100a084d9ac91c269b0a7cb0e62263fcf"},
+        },
+    )
+
+    assert full_close_intents([held], target_token="0x55d398326f99059ff775485246999027b3197955") == []

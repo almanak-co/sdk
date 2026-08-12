@@ -222,6 +222,11 @@ class MarketServiceStub(object):
                 request_serializer=gateway__pb2.PriceRequest.SerializeToString,
                 response_deserializer=gateway__pb2.PriceResponse.FromString,
                 _registered_method=True)
+        self.GetReferencePrice = channel.unary_unary(
+                '/almanak.gateway.proto.MarketService/GetReferencePrice',
+                request_serializer=gateway__pb2.ReferencePriceRequest.SerializeToString,
+                response_deserializer=gateway__pb2.ReferencePriceResponse.FromString,
+                _registered_method=True)
         self.GetPtPrice = channel.unary_unary(
                 '/almanak.gateway.proto.MarketService/GetPtPrice',
                 request_serializer=gateway__pb2.PtPriceRequest.SerializeToString,
@@ -273,6 +278,15 @@ class MarketServiceServicer(object):
 
     def GetPrice(self, request, context):
         """Get token price from aggregated sources.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetReferencePrice(self, request, context):
+        """ALM-3223 — named non-crypto reference price from one verified feed.
+        Unlike GetPrice this never aggregates same-symbol crypto assets. The
+        gateway owns feed selection, feed timestamp/freshness, and market hours.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -381,6 +395,11 @@ def add_MarketServiceServicer_to_server(servicer, server):
                     request_deserializer=gateway__pb2.PriceRequest.FromString,
                     response_serializer=gateway__pb2.PriceResponse.SerializeToString,
             ),
+            'GetReferencePrice': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetReferencePrice,
+                    request_deserializer=gateway__pb2.ReferencePriceRequest.FromString,
+                    response_serializer=gateway__pb2.ReferencePriceResponse.SerializeToString,
+            ),
             'GetPtPrice': grpc.unary_unary_rpc_method_handler(
                     servicer.GetPtPrice,
                     request_deserializer=gateway__pb2.PtPriceRequest.FromString,
@@ -453,6 +472,33 @@ class MarketService(object):
             '/almanak.gateway.proto.MarketService/GetPrice',
             gateway__pb2.PriceRequest.SerializeToString,
             gateway__pb2.PriceResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetReferencePrice(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.MarketService/GetReferencePrice',
+            gateway__pb2.ReferencePriceRequest.SerializeToString,
+            gateway__pb2.ReferencePriceResponse.FromString,
             options,
             channel_credentials,
             insecure,
