@@ -247,6 +247,8 @@ value is frozen at boot and is not hot-reloadable.
 | `UnstakeIntent` | Unstake tokens |
 | `PerpOpenIntent` | Open perpetuals position |
 | `PerpCloseIntent` | Close perpetuals position |
+| `PerpWithdrawIntent` | Withdraw collateral from a perp venue (e.g., Hyperliquid account to L1) |
+| `PerpCancelIntent` | Cancel a pending perp order and recover committed collateral |
 | `FlashLoanIntent` | Flash loan operations _(experimental — pending testing; not listed in `almanak info matrix`)_ |
 | `CollectFeesIntent` | Collect LP fees |
 | `PredictionBuyIntent` | Buy prediction market shares _(experimental — pending testing; not listed in `almanak info matrix`)_ |

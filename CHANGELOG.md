@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.25.0] - 2026-08-13
+
 ### Changed
 
 - **GMX V2 markets are address-first — the curated symbol→address table is
@@ -99,6 +101,54 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `intentsKnown: false` marks compiler-only rows no connector descriptor
   describes, where absence means *unknown*, not unsupported.
 
+- **Venue discovery — `MarketSnapshot.token_pools()`, `almanak ax dex-pools`,
+  and a `list_token_pools` agent tool (VIB-6599).** Strategies and operators can
+  enumerate where a token actually trades and how deep each venue is (24h volume
+  + reserves) through the `PoolAnalyticsService.ListTokenPools` volume field,
+  with an opt-in keyless DexScreener fallback. (#3658)
+
+- **Venue-native OHLCV routing with a configurable source (ALM-3148 /
+  ALM-3152).** Indicators for `(base, venue)` synthetic markets (e.g. a GMX
+  XRP/USD perp) now route candles to the venue's own feed; new per-strategy
+  `ohlcv_source` (`venue_native` / `auto` / provider) and `ohlcv_venue` config
+  keys select the plane. Behavioural note: `market.obv()` now raises
+  `VolumeUnavailableError` instead of substituting `0.0` when volume is
+  unmeasured. (#3635)
+
+- **GMX V2 strategy-authored order cancellation and resting/trigger orders
+  (ALM-3101).** Publishes `PERP_CANCEL_ORDER` (`Intent.perp_cancel_order`) on
+  Arbitrum and Avalanche, and author-facing resting orders via
+  `Intent.perp_open(trigger_price=…, settlement_mode="submission")`. (#3572)
+
+- **`almanak ax perp-market <protocol> <market>` (ALM-3179).** Live
+  perp-market resolution through the gateway `GetPerpMarket` RPC with on-chain
+  tuple verification and a found / not_found / invalid / unverified exit-code
+  contract. (#3641)
+
+- **Backtest per-tick decision telemetry.** Hold reasons now surface in logs,
+  in `result.json` (`decision_summary` / `decision_events`), and in a
+  `decisions.jsonl` sidecar, so a zero-trade backtest is explainable without
+  re-tracing the strategy. (#3591)
+
+- **Backtests observe the simulated perp book via `market.perp_positions()`.**
+  Observation-gated perp strategies (open → observe fill → close) now run under
+  the PnL backtester instead of holding forever; GMX markets resolve
+  address-first in the backtest pricing and close lanes. (#3652)
+
+- **Safe exact-pool reference-price strategies (ALM-3223).** A new
+  gateway-owned exact reference-price RPC (catalogued Chainlink feed, fail-closed
+  on a stale or closed session) and exact pool/fee discriminators threaded
+  through `MarketSnapshot.estimate_slippage()` let pre-trade simulation use the
+  same pool the compiler enforces; `token_address` / `close_swap_params` are
+  preserved through generic full-close teardown for non-standard assets (e.g.
+  tokenized gold). (#3692)
+
+- **Canonical `OHLCVTimeframe` vocabulary (ALM-3084).** A dependency-safe
+  `OHLCVTimeframe` StrEnum is threaded through snapshots, providers, cache,
+  indicators, backtesting, and dashboards; string wire / JSON / SQLite values are
+  preserved. Behavioural note: invalid or non-canonical timeframes now raise a
+  validation error instead of silently falling back. (#3530)
+
 ### Deprecated
 
 - **`almanak.framework.utils.retry` is deprecated; removal in 3.0.0.** The module
@@ -189,6 +239,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and router — so Agni's `protocol_overrides` entry pins the alias, it does not
   mean Uniswap V3 is absent from Mantle.)
 
+- **Aave V3 drops `BORROW` on Mantle (VIB-6111).** An intent-chain exclusion in
+  the connector descriptor narrows the support matrix, capability matrix,
+  backtesting engine, docs generators, and CI scripts in lockstep: the Mantle
+  deployment keeps `SUPPLY` / `WITHDRAW` / `REPAY` but no longer advertises a
+  `BORROW` it cannot compile. (#3476)
+
 ### Fixed
 
 - **`aerodrome_slipstream` is no longer published on optimism.** Slipstream —
@@ -208,6 +264,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   a live over-advertisement the moment per-intent coverage is published. The
   truth moved to `SupportedChainsSpec.intent_overrides`, and the matrix rows are
   now derived from it (rendering output unchanged).
+
+- Execution refuses to broadcast a deferred bundle it cannot refresh, instead of
+  submitting stale calldata (#3503, VIB-6228).
+- GMX V2 perp opens/closes derive a real `acceptablePrice` instead of an
+  accept-anything sentinel, restoring slippage protection (#3497, VIB-6219).
+- `max_slippage` is now exclusive at 1, and the `protocol_params` LP slippage
+  bypass fails closed (#3496, VIB-6217 / VIB-6218).
+- Uniswap V4 swaps size gas from the estimate instead of a static floor that ran
+  out of gas mid-swap (#3568, VIB-6413).
+- Uniswap V3 concentrated-liquidity mints apply tolerance as a price band rather
+  than a per-leg haircut (#3579, VIB-6269).
+- A fungible-LP teardown burns only this deployment's own liquidity in a shared
+  pool (#3596, VIB-6162; #3605, VIB-6517).
+- A single physical perp position is enumerated and closed exactly once at
+  teardown (#3574, VIB-6341; #3534, VIB-6287).
+- An unmeasured teardown no longer certifies success (#3531, VIB-6285).
+- Hyperliquid perp positions get a real teardown closure authority instead of
+  being reported stranded (#3553, VIB-6387; #3551, VIB-6316).
+- Copy-trading attributes a copy signal to the leader, not the signer (#3479,
+  VIB-6049).
+- A Safe-authorised withdrawal is classified as `WITHDRAWAL` rather than
+  `UNCLASSIFIED_OUT` (#3471, VIB-6050).
+- Settlement-carried perp fees are folded into the dashboard PnL roll-up and the
+  gateway cost-stack wire (#3610, VIB-6541).
+- The V3 pre-trade slippage estimator reads `fee_tier` as pips instead of
+  misreading it as `fee_bps` (#3667, VIB-6609).
+- Aave's zero-LTV compile guard now actually runs in production (#3477,
+  VIB-6111).
+- The shared token disk cache no longer corrupts the file that every process
+  reads (#3488, VIB-6168).
 
 ### Removed
 
@@ -230,14 +316,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `supported_chains`; its seven other chain configs are unaffected. aave_v3 has
   not claimed `sonic` since #3338 — its pool and token addresses stay in
   `addresses.py` so existing Sonic positions can still be exited.
-
-- **`almanak info capabilities` CLI.** The VIB-5112 phase-1 capability matrix
-  remains available as a library-only QA API
-  (`almanak.framework.cli.capability_matrix.build_capability_matrix` /
-  `filter_capability_matrix` / `CapabilityMatrix.to_dict`). The product support
-  catalogue is **`almanak info matrix` only** — the sibling command was removed
-  because it was being read as a second support surface by Edge/Platform and
-  agents.
 
 ## [2.24.0] - 2026-07-28
 

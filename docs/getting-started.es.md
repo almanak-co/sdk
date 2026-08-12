@@ -205,6 +205,8 @@ class MyStrategy(IntentStrategy):
 | `UnstakeIntent` | Deshacer staking de tokens |
 | `PerpOpenIntent` | Abrir posición de perpetuos |
 | `PerpCloseIntent` | Cerrar posición de perpetuos |
+| `PerpWithdrawIntent` | Retirar garantía de una plataforma de perpetuos (p. ej., cuenta de Hyperliquid a L1) |
+| `PerpCancelIntent` | Cancelar una orden de perpetuos pendiente y recuperar la garantía comprometida |
 | `FlashLoanIntent` | Operaciones de préstamo flash _(experimental — en pruebas; no listado en `almanak info matrix`)_ |
 | `CollectFeesIntent` | Recolectar comisiones de LP |
 | `PredictionBuyIntent` | Comprar acciones de mercado de predicción _(experimental — en pruebas; no listado en `almanak info matrix`)_ |

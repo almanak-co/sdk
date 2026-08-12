@@ -201,6 +201,8 @@ class MyStrategy(IntentStrategy):
 | `UnstakeIntent` | 取消质押代币 |
 | `PerpOpenIntent` | 开设永续合约头寸 |
 | `PerpCloseIntent` | 关闭永续合约头寸 |
+| `PerpWithdrawIntent` | 从永续合约场所提取抵押品（例如 Hyperliquid 账户到 L1） |
+| `PerpCancelIntent` | 取消未成交的永续合约订单并回收已投入的抵押品 |
 | `FlashLoanIntent` | 闪电贷操作 _（实验性 — 测试中；未列入 `almanak info matrix`）_ |
 | `CollectFeesIntent` | 收取 LP 费用 |
 | `PredictionBuyIntent` | 购买预测市场份额 _（实验性 — 测试中；未列入 `almanak info matrix`）_ |
