@@ -26,7 +26,7 @@
     "rebalance_cooldown_minutes": 30,
     "max_slippage": "0.005",
     "anvil_funding": {
-        "AVAX": 100,
+        "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE": 100,
         "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7": 100,
         "0x9702230A8Ea53601f5cD2dc00fDBc13d4dF4A8c7": 10000
     }

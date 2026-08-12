@@ -31,7 +31,7 @@
     "max_position_pct": 90,
     "swap_fee_tier": null,
     "anvil_funding": {
-        "MNT": 1000,
+        "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE": 1000,
         "0x78c1b0C915c4FAA5FffA6CAbf0219DA63d7f4cb8": 100,
         "0x201EBa5CC46D216Ce6DC03F6a759e8E766e956aE": 200
     }

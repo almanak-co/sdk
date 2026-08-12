@@ -2749,7 +2749,7 @@ def _funding_key_for_token_ref(ref: str, chain: str) -> str | None:
     from almanak.core.chains._helpers import native_symbols_for
     from almanak.core.constants import canonical_chain_name
     from almanak.framework.data.tokens.address_resolution import looks_like_evm_address
-    from almanak.framework.data.tokens.defaults import DEFAULT_TOKENS
+    from almanak.framework.data.tokens.defaults import DEFAULT_TOKENS, NATIVE_SENTINEL
 
     stripped = ref.strip()
     if not stripped:
@@ -2762,7 +2762,7 @@ def _funding_key_for_token_ref(ref: str, chain: str) -> str | None:
     if descriptor is None:
         return None
     if stripped.upper() in native_symbols_for(active_chain):
-        return descriptor.native.symbol
+        return NATIVE_SENTINEL
 
     candidates = {
         address.lower()
@@ -2801,8 +2801,8 @@ def _derive_manifest_inputs(
     than into the per-intent-type ``_TOKEN_CONFIG_FIELDS`` keys. Every ERC-20
     label is converted to its exact chain address first, so a multi-step test
     that compiles intents with different asset pairs gets approvals for all
-    referenced contracts without symbol-based funding identity. Native gas is
-    the only symbol-form key because it has no ERC-20 contract address.
+    referenced contracts without symbol-based funding identity. Native gas
+    uses the same address-shaped sentinel as managed-Anvil funding.
     """
     protocols: set[str] = set()
     intent_types: set[str] = set()

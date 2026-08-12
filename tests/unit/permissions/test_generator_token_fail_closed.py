@@ -34,11 +34,7 @@ NATIVE_SENTINEL = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
 
 
 def _approve_targets(permissions) -> set[str]:
-    return {
-        p.target
-        for p in permissions
-        if any(s.selector == ERC20_APPROVE_SELECTOR for s in p.function_selectors)
-    }
+    return {p.target for p in permissions if any(s.selector == ERC20_APPROVE_SELECTOR for s in p.function_selectors)}
 
 
 class TestAddressFormEmitsWithoutRegistry:
@@ -66,9 +62,8 @@ class TestAddressFormEmitsWithoutRegistry:
         assert _approve_targets(permissions) == {SPCXB_ADDR}
 
     def test_anvil_funding_address_keys_emit(self):
-        """The exact ALM-3173 config shape: address-keyed anvil_funding plus
-        the native symbol."""
-        config = {"anvil_funding": {USDT_BSC_ADDR: 10000, SPCXB_ADDR: 10000, "BNB": 10}}
+        """The exact ALM-3173 config shape is entirely address-keyed."""
+        config = {"anvil_funding": {USDT_BSC_ADDR: 10000, SPCXB_ADDR: 10000, NATIVE_SENTINEL: 10}}
         permissions, warnings = _extract_token_permissions("bsc", config)
         assert _approve_targets(permissions) == {USDT_BSC_ADDR, SPCXB_ADDR}
         assert any("native asset" in w for w in warnings)
@@ -149,7 +144,7 @@ class TestGenerateManifestIntegration:
             chain="bsc",
             supported_protocols=[],
             intent_types=["SWAP"],
-            config={"base_token": SPCXB_ADDR, "anvil_funding": {"BNB": 10}},
+            config={"base_token": SPCXB_ADDR, "anvil_funding": {NATIVE_SENTINEL: 10}},
         )
         assert SPCXB_ADDR in {p.target for p in manifest.permissions}
         assert any("native asset" in w for w in manifest.warnings)

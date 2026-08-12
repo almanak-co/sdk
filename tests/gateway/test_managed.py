@@ -10,6 +10,7 @@ import grpc
 import pytest
 from grpc_health.v1 import health_pb2, health_pb2_grpc
 
+from almanak.framework.data.tokens.defaults import NATIVE_SENTINEL
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.managed import (
     GatewayPortUnavailableError,
@@ -713,8 +714,8 @@ class TestAnvilForkBlockPinning:
         await gw._stop_anvil_forks()
 
 
-class TestAnvilFundingNativeTokenWarning:
-    """VIB-1579: warn when anvil_funding uses 'ETH' on non-ETH chains."""
+class TestAnvilFundingNativeIdentity:
+    """Native funding uses the same address-shaped identity on every EVM chain."""
 
     def _make_gateway(self, chain: str, anvil_funding: dict) -> "ManagedGateway":
         from almanak.gateway.core.settings import GatewaySettings
@@ -731,60 +732,31 @@ class TestAnvilFundingNativeTokenWarning:
         return gw
 
     @pytest.mark.asyncio
-    async def test_eth_key_on_bsc_emits_warning(self):
-        """Using 'ETH' in anvil_funding on BSC should log a warning."""
-        gw = self._make_gateway("bsc", {"ETH": 10, BSC_USDC: 1000})
-
-        mock_manager = AsyncMock()
-        mock_manager.fund_wallet = AsyncMock()
-        mock_manager.fund_tokens = AsyncMock()
-        gw._anvil_managers["bsc"] = mock_manager
-
-        with patch("almanak.gateway.managed.logger") as mock_logger:
-            await gw._fund_anvil_wallets()
-
-        # Should have warned about ETH on BSC
-        warning_calls = [str(call) for call in mock_logger.warning.call_args_list]
-        assert any("ETH" in w and "BNB" in w for w in warning_calls), (
-            f"Expected warning about ETH on BSC, got: {warning_calls}"
-        )
-
-    @pytest.mark.asyncio
-    async def test_bnb_key_on_bsc_no_warning(self):
-        """Using 'BNB' in anvil_funding on BSC should not warn."""
+    async def test_native_symbol_is_rejected_before_any_funding(self):
         gw = self._make_gateway("bsc", {"BNB": 10, BSC_USDC: 1000})
 
         mock_manager = AsyncMock()
-        mock_manager.fund_wallet = AsyncMock()
-        mock_manager.fund_tokens = AsyncMock()
         gw._anvil_managers["bsc"] = mock_manager
 
-        with patch("almanak.gateway.managed.logger") as mock_logger:
+        with pytest.raises(ValueError, match="is not an address"):
             await gw._fund_anvil_wallets()
 
-        # Should NOT have warned about native token mismatch
-        warning_calls = [str(call) for call in mock_logger.warning.call_args_list]
-        assert not any("BNB" in w and "ETH" in w for w in warning_calls), (
-            f"Unexpected native token mismatch warning: {warning_calls}"
-        )
+        mock_manager.fund_wallet.assert_not_awaited()
+        mock_manager.fund_tokens.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_eth_key_on_arbitrum_no_warning(self):
-        """Using 'ETH' in anvil_funding on Arbitrum (ETH-native) should not warn."""
-        gw = self._make_gateway("arbitrum", {"ETH": 1, ARBITRUM_USDC: 1000})
+    async def test_native_sentinel_funds_bsc_native_balance(self):
+        gw = self._make_gateway("bsc", {NATIVE_SENTINEL: 250, BSC_USDC: 1000})
 
         mock_manager = AsyncMock()
-        mock_manager.fund_wallet = AsyncMock()
-        mock_manager.fund_tokens = AsyncMock()
-        gw._anvil_managers["arbitrum"] = mock_manager
+        mock_manager.fund_wallet = AsyncMock(return_value=True)
+        mock_manager.fund_tokens = AsyncMock(return_value=True)
+        gw._anvil_managers["bsc"] = mock_manager
 
-        with patch("almanak.gateway.managed.logger") as mock_logger:
-            await gw._fund_anvil_wallets()
+        await gw._fund_anvil_wallets()
 
-        # Arbitrum is ETH-native -- no warning expected
-        warning_calls = [str(call) for call in mock_logger.warning.call_args_list]
-        native_mismatch = [w for w in warning_calls if "Did you mean" in w]
-        assert not native_mismatch, f"Unexpected mismatch warning: {native_mismatch}"
+        mock_manager.fund_wallet.assert_awaited_once_with(gw._wallet_address, Decimal("250"))
+        mock_manager.fund_tokens.assert_awaited_once_with(gw._wallet_address, {BSC_USDC: Decimal("1000")})
 
 
 class TestAnvilFundingDefaultNativeGas:
@@ -832,7 +804,7 @@ class TestAnvilFundingDefaultNativeGas:
     @pytest.mark.asyncio
     async def test_partial_funding_below_default_is_topped_up(self):
         """anvil_funding with a small native amount -> topped up to default."""
-        gw = self._make_gateway("optimism", anvil_funding={"ETH": "0.5"})
+        gw = self._make_gateway("optimism", anvil_funding={NATIVE_SENTINEL: "0.5"})
 
         mock_manager = AsyncMock()
         mock_manager.fund_wallet = AsyncMock()
@@ -850,7 +822,7 @@ class TestAnvilFundingDefaultNativeGas:
     @pytest.mark.asyncio
     async def test_funding_above_default_is_respected(self):
         """anvil_funding with a generous native amount -> not reduced."""
-        gw = self._make_gateway("optimism", anvil_funding={"ETH": 1000, OPTIMISM_USDC: 5000})
+        gw = self._make_gateway("optimism", anvil_funding={NATIVE_SENTINEL: 1000, OPTIMISM_USDC: 5000})
 
         mock_manager = AsyncMock()
         mock_manager.fund_wallet = AsyncMock()
@@ -940,11 +912,11 @@ class TestAnvilFundingAddressIdentity:
 
     @pytest.mark.asyncio
     async def test_symbol_key_is_rejected_before_funding(self) -> None:
-        gateway = self._gateway({"ETH": 10, "JitoSOL": 10})
+        gateway = self._gateway({"JitoSOL": 10})
         manager = AsyncMock()
         gateway._anvil_managers["base"] = manager
 
-        with pytest.raises(ValueError, match="symbol, not a contract address"):
+        with pytest.raises(ValueError, match="is not an address"):
             await gateway._fund_anvil_wallets()
 
         manager.fund_wallet.assert_not_awaited()
@@ -952,7 +924,7 @@ class TestAnvilFundingAddressIdentity:
 
     @pytest.mark.asyncio
     async def test_exact_address_is_forwarded_and_false_result_aborts(self) -> None:
-        gateway = self._gateway({"ETH": 10, JITOSOL_BASE.upper().replace("0X", "0x"): 10})
+        gateway = self._gateway({NATIVE_SENTINEL: 10, JITOSOL_BASE.upper().replace("0X", "0x"): 10})
         manager = AsyncMock()
         manager.fund_wallet = AsyncMock(return_value=True)
         manager.fund_tokens = AsyncMock(return_value=False)
@@ -1034,7 +1006,7 @@ class TestAnvilFundingPrivateKeyResolution:
             private_key=settings_private_key,
         )
         # No explicit ``wallet_address`` — exercise the fallback path.
-        return ManagedGateway(settings, anvil_chains=["base"], anvil_funding={"ETH": 10})
+        return ManagedGateway(settings, anvil_chains=["base"], anvil_funding={NATIVE_SENTINEL: 10})
 
     @pytest.mark.asyncio
     async def test_settings_private_key_used_when_env_unset(self, monkeypatch):

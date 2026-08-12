@@ -2,6 +2,7 @@
 
 import pytest
 
+from almanak.framework.data.tokens.defaults import NATIVE_SENTINEL
 from tests.intents._permission_onchain_harness import _funding_key_for_token_ref
 
 
@@ -23,3 +24,18 @@ def test_long_tail_and_synthetic_labels_join_to_exact_addresses(
     expected_address: str,
 ) -> None:
     assert _funding_key_for_token_ref(label, chain) == expected_address.lower()
+
+
+@pytest.mark.parametrize(
+    ("chain", "label"),
+    [
+        ("arbitrum", "ETH"),
+        ("base", "ETH"),
+        ("avalanche", "AVAX"),
+        ("bnb", "BNB"),
+        ("polygon", "MATIC"),
+        ("polygon", "POL"),
+    ],
+)
+def test_native_labels_join_to_shared_sentinel(chain: str, label: str) -> None:
+    assert _funding_key_for_token_ref(label, chain) == NATIVE_SENTINEL

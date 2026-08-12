@@ -2,10 +2,9 @@
 
 from decimal import Decimal
 
-import pytest
-
 from almanak.connectors.enso.adapter import ENSO_FUNCTION_SELECTORS
 from almanak.connectors.enso.client import CHAIN_MAPPING, ROUTER_ADDRESSES
+from almanak.framework.data.tokens.defaults import NATIVE_SENTINEL
 from almanak.framework.execution.signer.safe.constants import (
     MULTISEND_ADDRESSES,
     MULTISEND_SELECTOR,
@@ -92,18 +91,18 @@ class TestGenerateManifest:
 
     def test_deterministic_output(self):
         """Two runs should produce the same permissions (order, content)."""
-        kwargs = dict(
-            strategy_name="test",
-            chain="arbitrum",
-            supported_protocols=["uniswap_v3"],
-            intent_types=["SWAP"],
-        )
+        kwargs = {
+            "strategy_name": "test",
+            "chain": "arbitrum",
+            "supported_protocols": ["uniswap_v3"],
+            "intent_types": ["SWAP"],
+        }
         m1 = generate_manifest(**kwargs)
         m2 = generate_manifest(**kwargs)
 
         # Compare permissions (ignoring generated_at timestamp)
         assert len(m1.permissions) == len(m2.permissions)
-        for p1, p2 in zip(m1.permissions, m2.permissions):
+        for p1, p2 in zip(m1.permissions, m2.permissions, strict=True):
             assert p1.target == p2.target
             assert p1.operation == p2.operation
             assert p1.send_allowed == p2.send_allowed
@@ -173,10 +172,10 @@ class TestTokenExtraction:
         ethereum_usdc = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
         config = {
             "chain": "ethereum",
-            "anvil_funding": {"ETH": 100, ethereum_usdc: 10_000},
+            "anvil_funding": {NATIVE_SENTINEL: 100, ethereum_usdc: 10_000},
         }
 
-        assert _anvil_funding_refs(config, "ethereum") == {"ETH", ethereum_usdc}
+        assert _anvil_funding_refs(config, "ethereum") == {NATIVE_SENTINEL, ethereum_usdc}
         assert _anvil_funding_refs(config, "avalanche") == set()
 
     def test_flat_anvil_funding_is_ignored_for_ambiguous_multi_chain_config(self):
@@ -184,7 +183,7 @@ class TestTokenExtraction:
         ethereum_usdc = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
         config = {
             "chains": ["ethereum", "avalanche"],
-            "anvil_funding": {"ETH": 100, ethereum_usdc: 10_000},
+            "anvil_funding": {NATIVE_SENTINEL: 100, ethereum_usdc: 10_000},
         }
 
         assert _anvil_funding_refs(config, "ethereum") == set()
@@ -194,10 +193,10 @@ class TestTokenExtraction:
         ethereum_usdc = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
         config = {
             "chains": ["eth"],
-            "anvil_funding": {"ETH": 100, ethereum_usdc: 10_000},
+            "anvil_funding": {NATIVE_SENTINEL: 100, ethereum_usdc: 10_000},
         }
 
-        assert _anvil_funding_refs(config, "eip155:1") == {"ETH", ethereum_usdc}
+        assert _anvil_funding_refs(config, "eip155:1") == {NATIVE_SENTINEL, ethereum_usdc}
         assert _anvil_funding_refs(config, "avalanche") == set()
 
     def test_no_config_no_token_permissions(self):
@@ -629,7 +628,6 @@ class TestOverridesTeardown:
         assert _overrides_teardown(StatelessStrategy) is False
 
     def test_plain_class(self):
-
         class NoMethod:
             pass
 

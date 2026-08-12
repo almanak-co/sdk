@@ -147,32 +147,42 @@ def parse_initial_tokens_arg(initial_tokens: str) -> dict[str, Decimal]:
 
 def parse_funding_dict(
     funding: dict,
-    native_symbols: frozenset[str],
+    native_refs: frozenset[str],
     source: str,
+    *,
+    addresses_only: bool = False,
 ) -> tuple[Decimal | None, dict[str, Decimal]]:
     """Parse a flat token->amount dict into (native_eth, erc20_tokens).
 
-    Native tokens (ETH/MNT/AVAX/...) collapse onto a single eth_val slot;
-    addresses are checksummed; ambiguous addresses log a warning and skip.
+    References in ``native_refs`` collapse onto a single eth_val slot;
+    addresses are checksummed. ``anvil_funding`` sets ``addresses_only`` so
+    neither native nor ERC-20 symbols can enter the paper funding path.
     """
     eth_val: Decimal | None = None
     tokens: dict[str, Decimal] = {}
+    normalized_native_refs = {ref.lower() for ref in native_refs}
     for token_name, amount in funding.items():
         token_str = str(token_name)
-        if token_str.upper() in native_symbols:
-            eth_val = Decimal(str(amount))
+        if token_str.lower() in normalized_native_refs:
+            eth_val = (eth_val or Decimal("0")) + Decimal(str(amount))
             continue
         if token_str.startswith(("0x", "0X")) and len(token_str) == 42:
             from eth_utils import to_checksum_address
 
             try:
-                tokens[to_checksum_address(token_str)] = Decimal(str(amount))
+                address = to_checksum_address(token_str)
+                tokens[address] = tokens.get(address, Decimal("0")) + Decimal(str(amount))
             except (ValueError, TypeError) as e:
                 click.echo(
                     f"Warning: ignoring invalid token address in {source}: {token_str} ({e})",
                     err=True,
                 )
             continue
+        if addresses_only:
+            raise ValueError(
+                f"{source} key {token_str!r} is not an address; use the exact ERC-20 contract address or "
+                "the EVM native sentinel"
+            )
         tokens[token_str] = Decimal(str(amount))
     return eth_val, tokens
 
@@ -193,16 +203,12 @@ def load_funding_from_config(
 
     try:
         strategy_config = load_strategy_config(strategy, chain)
-        from almanak.gateway.managed import ManagedGateway
-
-        native_symbols = ManagedGateway.NATIVE_TOKEN_SYMBOLS
-
         paper_block = strategy_config.get("paper_trading", {})
         bootstrap_raw = paper_block.get("bootstrap", {}) if isinstance(paper_block, dict) else {}
 
         if bootstrap_raw and isinstance(bootstrap_raw, dict):
             click.echo(f"Found paper_trading.bootstrap in config: {bootstrap_raw}", err=True)
-            config_bootstrap = _build_bootstrap_map(bootstrap_raw, native_symbols)
+            config_bootstrap = _build_bootstrap_map(bootstrap_raw)
             current = dict(config_bootstrap.get(chain.lower(), {}))
             if current:
                 config_eth = current.pop("ETH", None)
@@ -213,7 +219,7 @@ def load_funding_from_config(
             if anvil_funding:
                 if not isinstance(anvil_funding, dict):
                     raise ValueError(
-                        "anvil_funding must map an ERC-20 address or native gas symbol to an amount, "
+                        "anvil_funding must map an ERC-20 address or the EVM native sentinel to an amount, "
                         f"got {type(anvil_funding).__name__}"
                     )
                 click.echo(f"Found anvil_funding in config: {anvil_funding}", err=True)
@@ -231,7 +237,14 @@ def load_funding_from_config(
                     if len(matching_sections) > 1:
                         raise ValueError(f"anvil_funding defines duplicate alias sections for chain {chain!r}")
                     anvil_funding = matching_sections[0] if matching_sections else {}
-                config_eth, config_tokens = parse_funding_dict(anvil_funding, native_symbols, "anvil_funding")
+                from almanak.framework.data.tokens.defaults import NATIVE_SENTINEL
+
+                config_eth, config_tokens = parse_funding_dict(
+                    anvil_funding,
+                    frozenset({NATIVE_SENTINEL}),
+                    "anvil_funding",
+                    addresses_only=True,
+                )
     except Exception as e:
         click.echo(
             f"Warning: ignoring invalid bootstrap/anvil_funding in strategy config: {e}",
@@ -243,16 +256,17 @@ def load_funding_from_config(
 
 def _build_bootstrap_map(
     bootstrap_raw: dict,
-    native_symbols: frozenset[str],
 ) -> dict[str, dict[str, Decimal]]:
     """Convert a `paper_trading.bootstrap` block into a chain->{TOKEN: amount} map."""
+    from almanak.core.chains._helpers import native_symbols_for
+
     result: dict[str, dict[str, Decimal]] = {}
     for chain_key, chain_tokens_raw in bootstrap_raw.items():
         if not isinstance(chain_tokens_raw, dict):
             continue
         chain_eth, chain_toks = parse_funding_dict(
             chain_tokens_raw,
-            native_symbols,
+            native_symbols_for(str(chain_key)),
             f"paper_trading.bootstrap[{chain_key}]",
         )
         entry: dict[str, Decimal] = {}

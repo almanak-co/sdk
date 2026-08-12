@@ -63,7 +63,7 @@ def _normalize_anvil_funding(raw: Any) -> NormalizedAnvilFunding:
     ``{chain: {address: amount}}`` object) and emit a warning + safe fallback
     for malformed values, rather than letting the gateway boot fail with an
     opaque ``AttributeError`` mid-startup. ERC-20 address enforcement happens
-    at the managed gateway boundary, which also permits native gas symbols.
+    at the managed gateway boundary; native gas uses the shared EVM sentinel.
 
     Token amounts may be ints, floats, or strings (the gateway accepts strings
     for high-precision Decimal values like wstETH); other value types

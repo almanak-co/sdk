@@ -25,7 +25,7 @@
     "max_slippage": "0.005",
     "fee_hint": null,
     "anvil_funding": {
-        "ETH": 100,
+        "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE": 100,
         "0x4200000000000000000000000000000000000006": 1,
         "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913": 10000
     }

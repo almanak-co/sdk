@@ -4,21 +4,20 @@ Polygon renamed its native gas token MATIC -> POL (Sept 2024, 1:1). The codebase
 deliberately keeps TWO canonical views and bridges them with aliases, because
 each is correct for its own domain:
 
-* **Gas / price / funding canonical = ``MATIC``.** ``ChainRegistry`` and
+* **Gas / price canonical = ``MATIC``.** ``ChainRegistry`` and
   ``gas_pricing._CHAIN_NATIVE_TOKEN`` pin Polygon native to ``MATIC`` (matches
-  the Chainlink ``MATIC/USD`` feed key, the gateway ``CHAIN_NATIVE_SYMBOL``
-  derived from the registry, and the ``anvil_funding`` key every shipped
-  Polygon demo config uses). The gas/price coverage test pins this side.
+  the Chainlink ``MATIC/USD`` feed key and the gateway display label derived
+  from the registry). The gas/price coverage test pins this side.
 * **Token-identity canonical = ``POL``.** The token resolver canonicalizes the
   native sentinel address to ``POL`` (the current official ticker) for the
   address -> symbol reverse lookup, while keeping ``MATIC`` forward-resolvable.
 
 These two canonicals MUST stay bridged: any path that recognizes one symbol
-must recognize the other, or native price / gas / funding silently breaks on
+must recognize the other, or native price / gas silently breaks on
 Polygon. This test pins that bridge so a future "make it consistent" change
 cannot flip one side and break the money path. If you genuinely want to migrate
 everything to POL, that is a deliberate cross-cutting change (registry + gas
-invariant + every price-provider feed key + every Polygon config's funding key)
+invariant + every price-provider feed key)
 — not a drive-by edit, and this test is where you would start.
 
 See: VIB-3136 (compiler native<->wrapped expansion), the Polygon investigation
@@ -62,18 +61,6 @@ class TestPolygonNativeSymbolParity:
 
         assert NATIVE_PRICE_ALIASES["MATIC"] == "WMATIC"
         assert NATIVE_PRICE_ALIASES["POL"] == "WMATIC"
-
-    def test_both_symbols_are_fundable_native_tokens(self) -> None:
-        """Anvil funding must accept both MATIC and POL as native-gas symbols.
-
-        Every shipped Polygon demo config funds native gas under the ``MATIC``
-        key; POL must also be honored so a POL-keyed config does not silently
-        fall back to the default native amount.
-        """
-        from almanak.gateway.managed import ManagedGateway
-
-        assert "MATIC" in ManagedGateway.NATIVE_TOKEN_SYMBOLS
-        assert "POL" in ManagedGateway.NATIVE_TOKEN_SYMBOLS
 
     def test_both_symbols_forward_resolve_to_native_sentinel(self) -> None:
         """The token resolver must forward-resolve BOTH symbols on Polygon.

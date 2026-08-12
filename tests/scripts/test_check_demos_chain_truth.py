@@ -259,9 +259,10 @@ def test_load_chain_exceptions_duplicate_raises(module, tmp_path):
         module._load_chain_exceptions(path)
 
 
-def test_flat_native_funding_must_be_native_on_every_declared_chain(module):
-    assert module._valid_funding_token_ref("ETH", ("base", "arbitrum")) is True
-    assert module._valid_funding_token_ref("ETH", ("base", "avalanche")) is False
+def test_funding_refs_are_address_only_for_every_chain_shape(module):
+    sentinel = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
+    assert module._valid_funding_token_ref(sentinel, ("base", "avalanche")) is True
+    assert module._valid_funding_token_ref("ETH", ("base", "arbitrum")) is False
 
 
 def test_real_corpus_reconciles_clean(module):

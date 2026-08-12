@@ -106,14 +106,14 @@ almanak strat run --network anvil --once
 {
     "chain": "arbitrum",
     "anvil_funding": {
-        "ETH": 10,
+        "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE": 10,
         "0xaf88d065e77c8cc2239327c5edb3a432268e5831": 10000,
         "0x82af49447d8a07e3bd95bd0d56f35241523fbab1": 5
     }
 }
 ```
 
-原生代币（ETH、AVAX 等）通过 `anvil_setBalance` 充值。ERC-20 的键必须是该链上精确的合约地址；符号会被拒绝。每次分叉启动时都会自动执行。
+所有充值键都必须采用地址形式。活动链的原生资产使用 `0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE`，并通过 `anvil_setBalance` 充值。其他键必须是该链上精确的 ERC-20 合约地址；符号会被拒绝。每次分叉启动时都会自动执行。
 
 ### 更好的 RPC 性能（可选）
 

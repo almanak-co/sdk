@@ -282,7 +282,7 @@ def _anvil_funding_refs(config: dict[str, Any], chain: str) -> set[str]:
     every chain, so flat funding is ignored in that case.
     This matters for manifest discovery across a strategy's wider
     ``supported_chains`` set: an Ethereum config must not leak its addresses
-    or native gas symbol into an Avalanche manifest.
+    or native sentinel into an Avalanche manifest.
     """
     funding = config.get("anvil_funding", {})
     if not isinstance(funding, dict):
@@ -349,8 +349,8 @@ def _extract_token_permissions(
         if key in _TOKEN_CONFIG_FIELDS and isinstance(value, str) and value:
             token_refs.add(value)
 
-    # Scan flat or active per-chain anvil_funding address keys. Native symbols
-    # are still accepted as the gas-asset exception and filtered below.
+    # Scan flat or active per-chain anvil_funding address keys. The native
+    # sentinel is address-shaped and is filtered by ``_address_form_entry``.
     funding_refs = _anvil_funding_refs(config, chain)
     token_refs.update(funding_refs)
 
@@ -362,15 +362,11 @@ def _extract_token_permissions(
     from almanak.framework.data.tokens.address_resolution import looks_like_evm_address
 
     native_symbols = native_symbols_for(chain)
-    invalid_funding_symbols = sorted(
-        ref
-        for ref in funding_refs
-        if not looks_like_evm_address(ref.strip()) and ref.strip().upper() not in native_symbols
-    )
-    if invalid_funding_symbols:
+    invalid_funding_refs = sorted(ref for ref in funding_refs if not looks_like_evm_address(ref.strip()))
+    if invalid_funding_refs:
         raise PermissionGenerationError(
-            "anvil_funding ERC-20 keys must be exact contract addresses; bare symbols are not token identity: "
-            + ", ".join(invalid_funding_symbols)
+            "anvil_funding keys must be exact addresses (the native gas asset uses the EVM native sentinel); "
+            "bare symbols are not token identity: " + ", ".join(invalid_funding_refs)
         )
 
     # Resolver construction failure propagates: it would drop EVERY token

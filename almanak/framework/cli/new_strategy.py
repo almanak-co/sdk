@@ -19,6 +19,7 @@ import click
 from almanak.core.chains import DEFAULT_CHAIN, ChainRegistry
 from almanak.framework.anvil.accounts import anvil_default_address
 from almanak.framework.cli.chain_params import ChainChoice
+from almanak.framework.data.tokens.defaults import NATIVE_SENTINEL
 
 
 class StrategyTemplate(StrEnum):
@@ -248,9 +249,9 @@ class _AnvilFundingSpec:
     erc20_amounts: dict[str, object]
 
 
-# Native gas keeps its canonical chain symbol because it has no ERC-20
-# contract; every ERC-20 label is joined to its exact chain address by
-# ``_default_anvil_funding``. One chain table avoids parallel dispatch maps.
+# Native gas uses the SDK's address-shaped sentinel identity; every ERC-20
+# label is joined to its exact chain address by ``_default_anvil_funding``.
+# One chain table avoids parallel dispatch maps.
 _CHAIN_ANVIL_FUNDING_SPECS: dict[str, _AnvilFundingSpec] = {
     "mantle": _AnvilFundingSpec(1000, {"WMNT": 10, "WETH": 5, "USDC": 10000}),
     "avalanche": _AnvilFundingSpec(100, {"WAVAX": 10, "WETH": 5, "USDC": 10000}),
@@ -315,7 +316,7 @@ def _default_anvil_funding(chain: str) -> dict[str, object]:
         return {}
 
     spec = _CHAIN_ANVIL_FUNDING_SPECS.get(descriptor.name, _DEFAULT_ANVIL_FUNDING_SPEC)
-    funding: dict[str, object] = {descriptor.native.symbol: spec.native_amount}
+    funding: dict[str, object] = {NATIVE_SENTINEL: spec.native_amount}
     for label, amount in spec.erc20_amounts.items():
         address = _static_token_address(chain, label)
         if address is not None:
@@ -4460,8 +4461,8 @@ def generate_config_json(
         if token_funding:
             data["token_funding"] = token_funding
 
-    # Add anvil_funding for all templates (unless already set). Native gas is
-    # represented by the chain's native symbol; ERC-20 keys are exact addresses.
+    # Add anvil_funding for all templates (unless already set). Native gas uses
+    # the EVM native sentinel; ERC-20 keys are exact addresses.
     if "anvil_funding" not in data:
         data["anvil_funding"] = _default_anvil_funding(chain)
 

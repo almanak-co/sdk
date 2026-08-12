@@ -25,7 +25,7 @@
     "base_token": "WETH",
     "quote_token": "USDC",
     "anvil_funding": {
-        "MATIC": 100,
+        "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE": 100,
         "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619": 1,
         "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359": 10000
     }

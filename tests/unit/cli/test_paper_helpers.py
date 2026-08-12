@@ -128,7 +128,7 @@ class TestPaperStartHelpers:
         """`parse_funding_dict` collapses native tokens, checksums addresses, skips bad ones."""
         native = frozenset({"ETH", "AVAX"})
 
-        # Native token is split out into eth_val (overwritten by last hit per current shape).
+        # Native token is split out into eth_val.
         # ERC-20 by symbol passes through; ERC-20 by address is checksummed.
         eth_val, tokens = ph.parse_funding_dict(
             {
@@ -180,6 +180,46 @@ class TestPaperStartHelpers:
         assert config_bootstrap == {}
         assert loaded is strategy_config
         assert {address.lower(): amount for address, amount in config_tokens.items()} == {base_usdc: Decimal("500")}
+
+    def test_anvil_funding_requires_address_shaped_native_identity(self):
+        from almanak.framework.data.tokens.defaults import NATIVE_SENTINEL
+
+        eth_val, tokens = ph.parse_funding_dict(
+            {NATIVE_SENTINEL: "250"},
+            frozenset({NATIVE_SENTINEL}),
+            source="anvil_funding",
+            addresses_only=True,
+        )
+        assert eth_val == Decimal("250")
+        assert tokens == {}
+
+        with pytest.raises(ValueError, match="is not an address"):
+            ph.parse_funding_dict(
+                {"ETH": "250"},
+                frozenset({NATIVE_SENTINEL}),
+                source="anvil_funding",
+                addresses_only=True,
+            )
+
+    def test_parse_funding_dict_aggregates_case_normalized_addresses(self):
+        from almanak.framework.data.tokens.defaults import NATIVE_SENTINEL
+
+        token_address = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+        eth_val, tokens = ph.parse_funding_dict(
+            {
+                NATIVE_SENTINEL: "1.25",
+                NATIVE_SENTINEL.lower(): "0.75",
+                token_address: "100",
+                token_address.upper(): "50",
+            },
+            frozenset({NATIVE_SENTINEL}),
+            source="anvil_funding",
+            addresses_only=True,
+        )
+
+        assert eth_val == Decimal("2")
+        assert len(tokens) == 1
+        assert next(iter(tokens.values())) == Decimal("150")
 
 
 # ---------------------------------------------------------------------------

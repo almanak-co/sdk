@@ -80,9 +80,9 @@ class StrategyConfig(BaseModel):
     max_slippage: Decimal | None = None
 
     # Funding / token-resolution maps. ``anvil_funding`` is either a flat
-    # ``contract_address -> amount`` object or a per-chain object of those
-    # maps. Native gas is the only symbol-keyed exception because it has no
-    # ERC-20 address (heterogeneous amounts preserve high-precision strings).
+    # ``address -> amount`` object or a per-chain object of those maps. Native
+    # gas uses the shared EVM sentinel address (heterogeneous amounts preserve
+    # high-precision strings).
     # ``token_funding`` shape varies — list of token records is the dominant
     # form across the 102 demo configs; a dict form also exists in some
     # strategies. Phase 3 accepts both as ``Any``-typed because the framework

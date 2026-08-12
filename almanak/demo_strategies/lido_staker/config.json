@@ -5,7 +5,7 @@
     "force_action": "",
     "chain": "ethereum",
     "anvil_funding": {
-        "ETH": 100
+        "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE": 100
     },
     "token_funding": [
         {

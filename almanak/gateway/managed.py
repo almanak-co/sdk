@@ -460,16 +460,10 @@ class ManagedGateway:
             await self._stop_anvil_forks(force=True)
             raise
 
-    # Native gas tokens that are funded via anvil_setBalance (not ERC-20
-    # transfer). Deliberately the chain-BLIND union across all EVM chains:
-    # funding configs may fund a foreign native symbol on another chain's fork
-    # (e.g. ``{"ETH": 10}`` on a polygon fork) and rely on the setBalance
-    # path, so this must not be narrowed per-chain. Populated below via
-    # _populate_chain_native_symbol_from_registry; frozen-verbatim equivalence
-    # pinned in tests/unit/gateway/test_managed_native_symbols.py.
-    NATIVE_TOKEN_SYMBOLS: frozenset[str] = frozenset()
-    # Per-chain native symbols. Derived from :class:`ChainRegistry`
-    # (VIB-4801) — only EVM chains, matches legacy coverage.
+    # Per-chain native symbols are display metadata only. Funding identity is
+    # always address-shaped: the shared EVM native sentinel selects
+    # ``anvil_setBalance`` and every other accepted address selects ERC-20
+    # funding. Derived from :class:`ChainRegistry` (VIB-4801).
     CHAIN_NATIVE_SYMBOL: dict[str, str] = {  # noqa: RUF012
         # Populated below via _populate_chain_native_symbol_from_registry.
     }
@@ -514,40 +508,33 @@ class ManagedGateway:
     def _parse_anvil_funding_for_chain(
         self,
         chain: str,
-    ) -> tuple[str | None, dict[str, Decimal], dict[str, Decimal]]:
+    ) -> tuple[str | None, Decimal, dict[str, Decimal]]:
         """Validate and normalize one chain's native/address funding section."""
         from almanak.core.chains import ChainRegistry
+        from almanak.framework.data.tokens.defaults import NATIVE_SENTINEL
 
         descriptor = ChainRegistry.try_resolve(chain)
         chain_native = descriptor.native.symbol if descriptor is not None else None
-        native_amounts: dict[str, Decimal] = {}
+        native_amount = Decimal("0")
         erc20_tokens: dict[str, Decimal] = {}
         for token_ref, amount in self._anvil_funding_for_chain(chain).items():
+            if not isinstance(token_ref, str):
+                raise ValueError(f"anvil_funding key must be a string address, got {token_ref!r}")
             try:
                 parsed = Decimal(str(amount))
             except Exception as e:
                 raise ValueError(f"Invalid anvil_funding value for {token_ref}: {amount!r}") from e
-            if token_ref.upper() in self.NATIVE_TOKEN_SYMBOLS:
-                symbol = token_ref.upper()
-                if chain_native is not None and symbol == chain_native.upper():
-                    native_amounts[symbol] = native_amounts.get(symbol, Decimal("0")) + parsed
-                else:
-                    logger.warning(
-                        "anvil_funding contains native symbol '%s' but chain='%s' uses '%s'; "
-                        "the foreign native entry is ignored",
-                        symbol,
-                        chain,
-                        chain_native or "an unregistered native asset",
-                    )
+            if token_ref.lower() == NATIVE_SENTINEL.lower():
+                native_amount += parsed
             elif _EVM_TOKEN_ADDRESS_RE.fullmatch(token_ref):
                 normalized_address = token_ref.lower()
                 erc20_tokens[normalized_address] = erc20_tokens.get(normalized_address, Decimal("0")) + parsed
             else:
                 raise ValueError(
-                    f"anvil_funding ERC-20 key {token_ref!r} is a symbol, not a contract address. "
-                    "Use the exact chain-specific 0x address; native gas funding remains symbol-keyed."
+                    f"anvil_funding key {token_ref!r} is not an address. Use the exact chain-specific ERC-20 "
+                    f"contract address, or {NATIVE_SENTINEL} for the chain's native gas asset."
                 )
-        return chain_native, native_amounts, erc20_tokens
+        return chain_native, native_amount, erc20_tokens
 
     async def _fund_anvil_wallets(self, chains: list[str] | None = None) -> None:
         """Fund the wallet on each Anvil fork.
@@ -555,17 +542,15 @@ class ManagedGateway:
         Behaviour (VIB-3752):
 
         * Reads token amounts from ``self._anvil_funding`` (set from
-          ``config.json``). Native gas symbols (ETH, AVAX, etc.) go through
-          ``anvil_setBalance``; every ERC-20 key must be a contract address.
-          Multi-chain configs use ``{chain: {address: amount}}`` sections.
+          ``config.json``). The shared EVM native sentinel goes through
+          ``anvil_setBalance``; every other key must be an ERC-20 contract
+          address. Multi-chain configs use ``{chain: {address: amount}}``
+          sections.
         * Even when ``anvil_funding`` does not specify the chain's native token
           (or is empty entirely), every Anvil fork wallet receives a baseline
           ``DEFAULT_ANVIL_NATIVE_GAS_AMOUNT`` of native gas. Without this,
-          strategies whose author forgot to add ``anvil_funding`` (or who
-          configured another chain's native symbol — e.g. ``ETH`` on Optimism
-          when the per-chain lookup expected ``ETH`` and the strategy listed
-          something else) would hit ``Insufficient funds for gas`` on every
-          submission.
+          strategies whose author forgot to add ``anvil_funding`` would hit
+          ``Insufficient funds for gas`` on every submission.
         * Any requested funding failure aborts startup; an under-funded fork
           is never exposed to the strategy as a valid test environment.
 
@@ -619,8 +604,7 @@ class ManagedGateway:
         funding_failures: list[str] = []
         for chain, manager in managers_to_fund.items():
             try:
-                chain_native, native_amounts, erc20_tokens = parsed_funding[chain]
-                native_amount = native_amounts.get(chain_native, Decimal("0")) if chain_native else Decimal("0")
+                chain_native, native_amount, erc20_tokens = parsed_funding[chain]
 
                 # VIB-3752: ensure baseline native gas funding even when the
                 # strategy's config.json omits anvil_funding for this chain.
@@ -930,24 +914,19 @@ class ManagedGateway:
 
 
 def _populate_chain_native_symbol_from_registry() -> None:
-    """Populate ``ManagedGateway``'s native-symbol class attrs from the registry.
+    """Populate ``ManagedGateway``'s native display labels from the registry.
 
     Done at module import time after the class is fully defined. VIB-4801:
-    keeps the legacy class-attribute shapes but sources values from the
-    single source of truth. ``NATIVE_TOKEN_SYMBOLS`` is the union of
-    ``native_symbols_for`` over EVM chains (includes accepted_symbols, e.g.
-    polygon's POL) — byte-identical to the legacy hand-maintained set.
+    keeps the legacy per-chain display map but sources values from the single
+    source of truth. This map never classifies funding input; native funding is
+    identified exclusively by the shared EVM sentinel address.
     """
     from almanak.core.chains import ChainRegistry
-    from almanak.core.chains._helpers import native_symbols_for
     from almanak.core.enums import ChainFamily
 
-    native_union: set[str] = set()
     for descriptor in ChainRegistry.all():
         if descriptor.family is ChainFamily.EVM:
             ManagedGateway.CHAIN_NATIVE_SYMBOL[descriptor.name] = descriptor.native.symbol
-            native_union.update(native_symbols_for(descriptor.name))
-    ManagedGateway.NATIVE_TOKEN_SYMBOLS = frozenset(native_union)
 
 
 _populate_chain_native_symbol_from_registry()

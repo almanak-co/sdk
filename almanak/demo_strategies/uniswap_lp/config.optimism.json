@@ -24,7 +24,7 @@
     "min_position_usd": "3",
     "max_slippage": "0.005",
     "anvil_funding": {
-        "ETH": 100,
+        "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE": 100,
         "0x4200000000000000000000000000000000000006": 1,
         "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85": 10000
     }

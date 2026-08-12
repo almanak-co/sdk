@@ -20,6 +20,7 @@ from almanak.framework.cli.new_strategy import (
     generate_pyproject_toml,
     generate_strategy_file,
 )
+from almanak.framework.data.tokens.defaults import NATIVE_SENTINEL
 
 ALL_TEMPLATES = list(StrategyTemplate)
 
@@ -514,7 +515,7 @@ def _funding_address(chain: str, symbol: str) -> str:
 
 
 def test_generate_config_json_mantle_includes_anvil_funding() -> None:
-    """Mantle keeps native MNT but emits ERC-20 contract addresses."""
+    """Mantle emits the native sentinel and ERC-20 contract addresses."""
     import json
 
     config_str = generate_config_json(
@@ -525,7 +526,7 @@ def test_generate_config_json_mantle_includes_anvil_funding() -> None:
     config = json.loads(config_str)
     assert "anvil_funding" in config, "Mantle config must include anvil_funding"
     funding = config["anvil_funding"]
-    assert funding.get("MNT") == 1000
+    assert funding.get(NATIVE_SENTINEL) == 1000
     assert funding.get(_funding_address("mantle", "WMNT")) == 10
     assert funding.get(_funding_address("mantle", "WETH")) == 5
     assert funding.get(_funding_address("mantle", "USDC")) == 10000
@@ -544,14 +545,14 @@ def test_generate_config_json_all_chains_include_anvil_funding() -> None:
         config = json.loads(config_str)
         assert "anvil_funding" in config, f"Chain {chain} must include anvil_funding"
         funding = config["anvil_funding"]
-        assert funding.get("ETH") == 10, f"Chain {chain} must fund 10 ETH"
+        assert funding.get(NATIVE_SENTINEL) == 10, f"Chain {chain} must fund 10 native units"
         assert funding.get(_funding_address(chain, "WETH")) == 5, f"Chain {chain} must fund 5 WETH"
         assert funding.get(_funding_address(chain, "USDC")) == 10000, f"Chain {chain} must fund 10000 USDC"
-        assert all(key == "ETH" or key.startswith("0x") for key in funding)
+        assert all(key.startswith("0x") for key in funding)
 
 
 def test_generate_config_json_bsc_uses_native_tokens() -> None:
-    """BSC anvil_funding uses BNB/WBNB instead of ETH/WETH."""
+    """BSC anvil_funding uses the native sentinel plus WBNB."""
     import json
 
     config_str = generate_config_json(
@@ -561,14 +562,14 @@ def test_generate_config_json_bsc_uses_native_tokens() -> None:
     )
     config = json.loads(config_str)
     funding = config["anvil_funding"]
-    assert funding.get("BNB") == 10
+    assert funding.get(NATIVE_SENTINEL) == 10
     assert funding.get(_funding_address("bsc", "WBNB")) == 5
     assert funding.get(_funding_address("bsc", "WETH")) == 5
     assert funding.get(_funding_address("bsc", "USDC")) == 10000
 
 
 def test_generate_config_json_sonic_uses_native_tokens() -> None:
-    """Sonic anvil_funding uses S instead of ETH."""
+    """Sonic anvil_funding uses the native sentinel."""
     import json
 
     config_str = generate_config_json(
@@ -578,13 +579,13 @@ def test_generate_config_json_sonic_uses_native_tokens() -> None:
     )
     config = json.loads(config_str)
     funding = config["anvil_funding"]
-    assert funding.get("S") == 100
+    assert funding.get(NATIVE_SENTINEL) == 100
     assert funding.get(_funding_address("sonic", "WETH")) == 5
     assert funding.get(_funding_address("sonic", "USDC")) == 10000
 
 
 def test_generate_config_json_avalanche_uses_native_tokens() -> None:
-    """Avalanche anvil_funding uses AVAX/WAVAX instead of ETH/WETH."""
+    """Avalanche anvil_funding uses the native sentinel plus WAVAX."""
     import json
 
     config_str = generate_config_json(
@@ -594,7 +595,7 @@ def test_generate_config_json_avalanche_uses_native_tokens() -> None:
     )
     config = json.loads(config_str)
     funding = config["anvil_funding"]
-    assert funding.get("AVAX") == 100
+    assert funding.get(NATIVE_SENTINEL) == 100
     assert funding.get(_funding_address("avalanche", "WAVAX")) == 10
     assert funding.get(_funding_address("avalanche", "WETH")) == 5
     assert funding.get(_funding_address("avalanche", "USDC")) == 10000

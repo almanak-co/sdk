@@ -1386,8 +1386,9 @@ Each entry specifies the token symbol, on-chain address, amount, and how to inte
 
 When running on Anvil (`--network anvil`), the framework auto-funds the wallet
 with tokens specified in `anvil_funding`. ERC-20 keys must be exact chain-specific
-contract addresses; symbols are display metadata and are rejected. The chain's
-native gas symbol is the only exception because native gas has no ERC-20 address.
+contract addresses; symbols are display metadata and are rejected. Use the shared
+EVM native sentinel `0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE` for the active
+chain's native gas asset.
 Values are in token units (not USD). Funding failure aborts managed gateway startup.
 
 <!-- almanak-sdk-end: configuration -->

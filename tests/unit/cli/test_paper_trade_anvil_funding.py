@@ -8,9 +8,13 @@ Verifies:
 
 import json
 from decimal import Decimal
-from pathlib import Path
 
 from almanak.framework.cli.backtest import load_strategy_config
+from almanak.framework.cli.backtest.paper_helpers import parse_funding_dict
+from almanak.framework.data.tokens.defaults import NATIVE_SENTINEL
+
+BASE_USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+BASE_WETH = "0x4200000000000000000000000000000000000006"
 
 
 class TestAnvilFundingConfigLoading:
@@ -20,7 +24,7 @@ class TestAnvilFundingConfigLoading:
         """Config with anvil_funding returns the funding block."""
         config = {
             "chain": "base",
-            "anvil_funding": {"ETH": 100, "USDC": 10000, "WETH": 5},
+            "anvil_funding": {NATIVE_SENTINEL: 100, BASE_USDC: 10000, BASE_WETH: 5},
         }
         config_dir = tmp_path / "configs"
         config_dir.mkdir()
@@ -29,61 +33,44 @@ class TestAnvilFundingConfigLoading:
 
         monkeypatch.chdir(tmp_path)
         result = load_strategy_config("test_strat", "base")
-        assert result["anvil_funding"] == {"ETH": 100, "USDC": 10000, "WETH": 5}
+        assert result["anvil_funding"] == {NATIVE_SENTINEL: 100, BASE_USDC: 10000, BASE_WETH: 5}
 
     def test_anvil_funding_parsing_eth_and_tokens(self):
-        """anvil_funding block correctly separates ETH from ERC-20 tokens."""
-        from almanak.gateway.managed import ManagedGateway
-
-        anvil_funding = {"ETH": 100, "USDC": 10000, "WETH": 5}
-        native_symbols = ManagedGateway.NATIVE_TOKEN_SYMBOLS
-
-        config_eth = None
-        config_tokens = {}
-        for token_name, amount in anvil_funding.items():
-            token_upper = str(token_name).upper()
-            if token_upper in native_symbols:
-                config_eth = Decimal(str(amount))
-            else:
-                config_tokens[token_upper] = Decimal(str(amount))
+        """anvil_funding separates the native sentinel from ERC-20 addresses."""
+        anvil_funding = {NATIVE_SENTINEL: 100, BASE_USDC: 10000, BASE_WETH: 5}
+        config_eth, config_tokens = parse_funding_dict(
+            anvil_funding,
+            frozenset({NATIVE_SENTINEL}),
+            "anvil_funding",
+            addresses_only=True,
+        )
 
         assert config_eth == Decimal("100")
-        assert config_tokens == {"USDC": Decimal("10000"), "WETH": Decimal("5")}
+        assert {key.lower(): value for key, value in config_tokens.items()} == {
+            BASE_USDC: Decimal("10000"),
+            BASE_WETH: Decimal("5"),
+        }
 
     def test_anvil_funding_non_eth_native_token(self):
-        """Native tokens other than ETH (MNT, AVAX, etc.) route to config_eth."""
-        from almanak.gateway.managed import ManagedGateway
-
-        anvil_funding = {"MNT": 100, "USDC": 10000}
-        native_symbols = ManagedGateway.NATIVE_TOKEN_SYMBOLS
-
-        config_eth = None
-        config_tokens = {}
-        for token_name, amount in anvil_funding.items():
-            token_upper = str(token_name).upper()
-            if token_upper in native_symbols:
-                config_eth = Decimal(str(amount))
-            else:
-                config_tokens[token_upper] = Decimal(str(amount))
+        """The sentinel represents the active chain's native asset, not ETH specifically."""
+        config_eth, config_tokens = parse_funding_dict(
+            {NATIVE_SENTINEL: 100, BASE_USDC: 10000},
+            frozenset({NATIVE_SENTINEL}),
+            "anvil_funding",
+            addresses_only=True,
+        )
 
         assert config_eth == Decimal("100")
-        assert config_tokens == {"USDC": Decimal("10000")}
+        assert {key.lower(): value for key, value in config_tokens.items()} == {BASE_USDC: Decimal("10000")}
 
     def test_empty_anvil_funding(self):
         """Empty anvil_funding produces no overrides."""
-        from almanak.gateway.managed import ManagedGateway
-
-        anvil_funding = {}
-        native_symbols = ManagedGateway.NATIVE_TOKEN_SYMBOLS
-
-        config_eth = None
-        config_tokens = {}
-        for token_name, amount in anvil_funding.items():
-            token_upper = str(token_name).upper()
-            if token_upper in native_symbols:
-                config_eth = Decimal(str(amount))
-            else:
-                config_tokens[token_upper] = Decimal(str(amount))
+        config_eth, config_tokens = parse_funding_dict(
+            {},
+            frozenset({NATIVE_SENTINEL}),
+            "anvil_funding",
+            addresses_only=True,
+        )
 
         assert config_eth is None
         assert config_tokens == {}

@@ -27,7 +27,7 @@ class _GenericBase[ConfigT]:
 class _UnionConfig:
     plain: Decimal = field(default_factory=lambda: Decimal("1"))
     pep604_optional: Decimal | None = None
-    typing_optional: Optional[Decimal] = None  # noqa: UP045 -- typing.Union spelling is the point
+    typing_optional: Optional[Decimal] = None  # noqa: UP007,UP045 -- typing.Union spelling is the point
     not_decimal: str = "keep"
 
 
@@ -88,7 +88,7 @@ class TestInjectedKeyFiltering:
         "deployment_id": "deployment:abc123",
         "chain": "arbitrum",
         "wallet_address": "0x" + "0" * 40,
-        "anvil_funding": {"ETH": 100},
+        "anvil_funding": {"0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE": 100},
         "strategy_display_name": "Test Strategy",
     }
 

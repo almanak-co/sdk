@@ -30,7 +30,7 @@
     "rotation_threshold_bps": 30,
     "cooldown_ticks": 3,
     "anvil_funding": {
-        "ETH": 10,
+        "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE": 10,
         "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0": 2,
         "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48": 5000,
         "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2": 1
