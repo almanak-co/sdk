@@ -17,6 +17,7 @@ PROTOCOL_CAPABILITIES: dict[str, dict[str, Any]] = {
         "supports_interest_rate_mode": True,
         "interest_rate_modes": ["variable"],
         "supports_collateral_toggle": True,
+        "supports_expected_pool_binding": True,
         "operations": ["supply", "withdraw", "borrow", "repay"],
     },
 }

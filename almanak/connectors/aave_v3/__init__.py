@@ -4,6 +4,27 @@ This module provides an adapter for interacting with Aave V3 lending protocol,
 supporting supply, borrow, repay, withdraw, flash loans, E-Mode, isolation mode,
 and comprehensive event parsing.
 
+Exact Pool assertion:
+    ``SupplyIntent`` and ``WithdrawIntent`` accept an optional
+    ``expected_pool`` address. The value is a caller assertion, never a routing
+    override: the compiler independently selects the canonical Pool from the
+    connector registry, compares the two addresses case-insensitively, and
+    refuses compilation before approvals or protocol calldata are built when
+    they differ. Valid assertions are checksum-normalized at intent creation.
+
+    Example::
+
+        from decimal import Decimal
+        from almanak.framework.intents import Intent
+
+        intent = Intent.supply(
+            protocol="aave_v3",
+            token="0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+            amount=Decimal("100"),
+            chain="polygon",
+            expected_pool="0x794a61358D6845594F94dc1DB02A252b5b4814aD",
+        )
+
 Aave V3 is a decentralized lending protocol supporting:
 - Supply assets to earn yield
 - Borrow against collateral

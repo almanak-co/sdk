@@ -1970,6 +1970,8 @@ class Intent:
         market_id: str | None = None,
         chain: str | None = None,
         registry_handle: str | None = None,
+        *,
+        expected_pool: str | None = None,
     ) -> SupplyIntent:
         """Create a supply intent.
 
@@ -1980,6 +1982,8 @@ class Intent:
             use_as_collateral: Whether to enable as collateral (default True)
             market_id: Market identifier for isolated lending protocols (e.g., Morpho Blue).
                 Required for morpho/morpho_blue, ignored for aave_v3.
+            expected_pool: Optional exact Aave V3 Pool-address assertion. Compilation
+                fails if it differs from the canonical registry-selected Pool.
             chain: Target chain for execution (defaults to strategy's primary chain)
 
         Returns:
@@ -2009,6 +2013,7 @@ class Intent:
             amount=amount,
             use_as_collateral=use_as_collateral,
             market_id=market_id,
+            expected_pool=expected_pool,
             chain=chain,
             registry_handle=registry_handle,
         )
@@ -2024,6 +2029,7 @@ class Intent:
         *,
         is_collateral: bool = True,
         registry_handle: str | None = None,
+        expected_pool: str | None = None,
     ) -> WithdrawIntent:
         """Create a withdraw intent.
 
@@ -2037,6 +2043,8 @@ class Intent:
                 Other protocols ignore this field.
             market_id: Market identifier for isolated lending protocols (e.g., Morpho Blue).
                 Required for morpho/morpho_blue, ignored for aave_v3.
+            expected_pool: Optional exact Aave V3 Pool-address assertion. Compilation
+                fails if it differs from the canonical registry-selected Pool.
             chain: Target chain for execution (defaults to strategy's primary chain)
 
         Returns:
@@ -2066,6 +2074,7 @@ class Intent:
             withdraw_all=withdraw_all,
             is_collateral=is_collateral,
             market_id=market_id,
+            expected_pool=expected_pool,
             chain=chain,
             registry_handle=registry_handle,
         )

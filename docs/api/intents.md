@@ -64,6 +64,30 @@ Factory class for creating intents.
     options:
       show_root_heading: true
 
+### Aave V3 exact Pool binding
+
+For Aave V3 supply and withdraw operations, pass `expected_pool="0x..."` to
+assert the exact Pool address supplied by an upstream verifier. The SDK still
+routes through its connector-owned canonical registry; compilation fails before
+approval or protocol calldata construction if the registry-selected Pool does
+not match. The assertion is validated as a 20-byte EVM address and normalized
+to checksum form. It is never used as a routing override.
+
+```python
+from decimal import Decimal
+
+from almanak.framework.intents import Intent
+
+
+intent = Intent.supply(
+    protocol="aave_v3",
+    token="0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+    amount=Decimal("100"),
+    chain="polygon",
+    expected_pool="0x794a61358D6845594F94dc1DB02A252b5b4814aD",
+)
+```
+
 ## WithdrawIntent
 
 ::: almanak.framework.intents.WithdrawIntent

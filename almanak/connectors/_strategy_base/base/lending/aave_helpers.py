@@ -46,6 +46,25 @@ _AAVE_GET_ALL_RESERVES_TOKENS_SELECTOR = "0xb316ff89"
 MAX_DECODABLE_RESERVES = 4096
 
 
+def _expected_pool_binding_failure(
+    *, intent: SupplyIntent | WithdrawIntent, canonical_pool: str, chain: str
+) -> CompilationResult | None:
+    """Fail when a caller assertion disagrees with canonical Aave routing."""
+    expected_pool = intent.expected_pool
+    if expected_pool is None or expected_pool.lower() == canonical_pool.lower():
+        return None
+    return CompilationResult(
+        status=CompilationStatus.FAILED,
+        is_safety_refusal=True,
+        error=(
+            f"Aave V3 Pool binding mismatch on {chain}: "
+            f"expected {expected_pool}, canonical registry selected {canonical_pool}. "
+            "Refusing to compile; expected_pool is an assertion and never overrides canonical routing."
+        ),
+        intent_id=intent.intent_id,
+    )
+
+
 class AssetNotCollateralEligibleError(ValueError):
     """An asset cannot be enabled as collateral on the target Aave V3 market.
 
@@ -4534,6 +4553,11 @@ def _compile_supply_aave_compatible(
             intent_id=intent.intent_id,
         )
 
+    if binding_failure := _expected_pool_binding_failure(
+        intent=intent, canonical_pool=pool_address, chain=compiler.chain
+    ):
+        return binding_failure
+
     supply_amount = int(amount_decimal * Decimal(10**supply_token.decimals))
 
     # Handle native token vs ERC20
@@ -4693,6 +4717,7 @@ def _compile_supply_aave_compatible(
         metadata={
             "protocol": intent.protocol,
             "pool_address": pool_address,
+            **({"expected_pool": intent.expected_pool} if intent.expected_pool is not None else {}),
             "supply_token": supply_token.to_dict(),
             "supply_amount": str(supply_amount),
             "use_as_collateral": intent.use_as_collateral,
@@ -5601,6 +5626,11 @@ def _compile_withdraw_aave_compatible(
             intent_id=intent.intent_id,
         )
 
+    if binding_failure := _expected_pool_binding_failure(
+        intent=intent, canonical_pool=pool_address, chain=compiler.chain
+    ):
+        return binding_failure
+
     if intent.withdraw_all:
         withdraw_amount = MAX_UINT256
     else:
@@ -5647,6 +5677,7 @@ def _compile_withdraw_aave_compatible(
         metadata={
             "protocol": intent.protocol,
             "pool_address": pool_address,
+            **({"expected_pool": intent.expected_pool} if intent.expected_pool is not None else {}),
             "withdraw_token": withdraw_token.to_dict(),
             "withdraw_amount": str(withdraw_amount),
             "withdraw_all": intent.withdraw_all,

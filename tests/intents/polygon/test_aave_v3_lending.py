@@ -138,6 +138,7 @@ class TestAaveV3SupplyIntent:
             protocol="aave_v3",
             token="USDC",
             amount=supply_amount,
+            expected_pool=AAVE_V3_POOL_ADDRESSES[CHAIN_NAME],
             chain=CHAIN_NAME,
         )
 
@@ -166,6 +167,7 @@ class TestAaveV3SupplyIntent:
         print(f"Execution successful! {len(execution_result.transaction_results)} transactions confirmed")
 
         # Parse receipts
+        parsed_supply_amounts: list[Decimal] = []
         for i, tx_result in enumerate(execution_result.transaction_results):
             print(f"\nTransaction {i+1}:")
             print(f"  Hash: {tx_result.tx_hash[:16]}...")
@@ -177,8 +179,11 @@ class TestAaveV3SupplyIntent:
 
                 if parse_result.success and parse_result.supplies:
                     for supply_event in parse_result.supplies:
+                        parsed_supply_amounts.append(supply_event.amount)
                         print(f"  Supply amount:  {supply_event.amount}")
                         print(f"  Reserve: {supply_event.reserve}")
+
+        assert any(amount > 0 for amount in parsed_supply_amounts), "Receipt must contain a positive Supply event"
 
         # Verify balance changes
         usdc_after = get_token_balance(web3, usdc, funded_wallet)
@@ -231,6 +236,7 @@ class TestAaveV3SupplyIntent:
             protocol="aave_v3",
             token="USDC",
             amount=supply_amount,
+            expected_pool=AAVE_V3_POOL_ADDRESSES[CHAIN_NAME],
             chain=CHAIN_NAME,
         )
 
@@ -258,6 +264,7 @@ class TestAaveV3SupplyIntent:
             protocol="aave_v3",
             token="USDC",
             amount=withdraw_amount,
+            expected_pool=AAVE_V3_POOL_ADDRESSES[CHAIN_NAME],
             chain=CHAIN_NAME,
         )
 
@@ -270,6 +277,15 @@ class TestAaveV3SupplyIntent:
 
         execution_result = await orchestrator.execute(compilation_result.action_bundle, execution_context)
         assert execution_result.success, f"Execution failed: {execution_result.error}"
+
+        parsed_withdraw_amounts: list[Decimal] = []
+        for tx_result in execution_result.transaction_results:
+            if tx_result.receipt:
+                parse_result = AaveV3ReceiptParser().parse_receipt(tx_result.receipt.to_dict())
+                if parse_result.success:
+                    parsed_withdraw_amounts.extend(event.amount for event in parse_result.withdraws)
+
+        assert any(amount > 0 for amount in parsed_withdraw_amounts), "Receipt must contain a positive Withdraw event"
 
         # Verify balance changes
         usdc_after = get_token_balance(web3, usdc, funded_wallet)

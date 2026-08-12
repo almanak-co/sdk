@@ -8,6 +8,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
+from eth_utils import is_address, to_checksum_address
 from pydantic import Field, model_validator
 
 from almanak.framework.models.base import (
@@ -41,6 +42,33 @@ def _capabilities_for(protocol_lower: str) -> dict[str, Any]:
     from almanak.connectors._strategy_base.capabilities_registry import get_protocol_capabilities
 
     return get_protocol_capabilities(protocol_lower)
+
+
+def _validate_expected_pool(protocol: str, expected_pool: str | None, capabilities: dict[str, Any]) -> str | None:
+    """Validate and canonicalize an optional caller assertion for a lending Pool.
+
+    ``expected_pool`` is an assertion only: connector compilers must continue to
+    select their transaction destination from the canonical address registry.
+    Capability-gating the field prevents another lending connector from silently
+    ignoring a safety constraint it does not implement.
+    """
+    if expected_pool is None:
+        return None
+    if not capabilities.get("supports_expected_pool_binding", False):
+        raise InvalidProtocolParameterError(
+            protocol=protocol,
+            parameter="expected_pool",
+            value=expected_pool,
+            reason=f"Protocol '{protocol}' does not support exact Pool-address binding",
+        )
+    if not is_address(expected_pool):
+        raise InvalidProtocolParameterError(
+            protocol=protocol,
+            parameter="expected_pool",
+            value=expected_pool,
+            reason="expected_pool must be a 20-byte EVM address",
+        )
+    return to_checksum_address(expected_pool)
 
 
 class BorrowIntent(BaseIntent):
@@ -339,6 +367,9 @@ class SupplyIntent(BaseIntent):
         use_as_collateral: Whether to enable the asset as collateral (default True).
             Also known as 'enable_as_collateral' - this is an Aave-specific parameter
             that controls whether the supplied asset can be used as collateral for borrowing.
+        expected_pool: Optional exact Aave V3 Pool-address assertion. The compiler
+            compares it with the canonical registry-selected Pool and fails closed
+            on a mismatch; it never uses this value as a transaction destination.
         chain: Optional target chain for execution (defaults to strategy's primary chain)
         intent_id: Unique identifier for this intent
         created_at: Timestamp when the intent was created
@@ -363,6 +394,7 @@ class SupplyIntent(BaseIntent):
     amount: PydanticChainedAmount
     use_as_collateral: bool = True
     market_id: str | None = None
+    expected_pool: str | None = None
     chain: str | None = None
     intent_id: str = Field(default_factory=default_intent_id)
     created_at: datetime = Field(default_factory=default_timestamp)
@@ -382,6 +414,10 @@ class SupplyIntent(BaseIntent):
         """Validate protocol-specific parameters."""
         protocol_lower = self.protocol.lower()
         capabilities = _capabilities_for(protocol_lower)
+
+        canonical_expected_pool = _validate_expected_pool(self.protocol, self.expected_pool, capabilities)
+        if canonical_expected_pool != self.expected_pool:
+            object.__setattr__(self, "expected_pool", canonical_expected_pool)
 
         # Validate market_id for protocols that require it
         if capabilities.get("requires_market_id", False):
@@ -421,6 +457,9 @@ class SupplyIntent(BaseIntent):
         data["type"] = self.intent_type.value
         if self.amount == "all":
             data["amount"] = "all"
+        # Omit an unset optional assertion so legacy strict deserializers retain the established wire shape.
+        if self.expected_pool is None:
+            data.pop("expected_pool", None)
         return data
 
     @classmethod
@@ -440,6 +479,9 @@ class WithdrawIntent(BaseIntent):
         token: Token to withdraw
         amount: Amount to withdraw, or "all" to use output from previous step
         withdraw_all: If True, withdraw all available balance
+        expected_pool: Optional exact Aave V3 Pool-address assertion. The compiler
+            compares it with the canonical registry-selected Pool and fails closed
+            on a mismatch; it never uses this value as a transaction destination.
         chain: Optional target chain for execution (defaults to strategy's primary chain)
         intent_id: Unique identifier for this intent
         created_at: Timestamp when the intent was created
@@ -462,6 +504,7 @@ class WithdrawIntent(BaseIntent):
     """For Morpho Blue: True withdraws collateral, False withdraws loan token.
     Other protocols ignore this field. Defaults to True for backward compat."""
     market_id: str | None = None
+    expected_pool: str | None = None
     chain: str | None = None
     intent_id: str = Field(default_factory=default_intent_id)
     created_at: datetime = Field(default_factory=default_timestamp)
@@ -482,6 +525,10 @@ class WithdrawIntent(BaseIntent):
         """Validate protocol-specific parameters."""
         protocol_lower = self.protocol.lower()
         capabilities = _capabilities_for(protocol_lower)
+
+        canonical_expected_pool = _validate_expected_pool(self.protocol, self.expected_pool, capabilities)
+        if canonical_expected_pool != self.expected_pool:
+            object.__setattr__(self, "expected_pool", canonical_expected_pool)
 
         # Validate market_id for protocols that require it
         if capabilities.get("requires_market_id", False):
@@ -509,6 +556,9 @@ class WithdrawIntent(BaseIntent):
         data["type"] = self.intent_type.value
         if self.amount == "all":
             data["amount"] = "all"
+        # Preserve the pre-ALM-3250 wire shape when no assertion was supplied.
+        if self.expected_pool is None:
+            data.pop("expected_pool", None)
         return data
 
     @classmethod
