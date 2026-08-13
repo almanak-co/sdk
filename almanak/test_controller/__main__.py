@@ -50,11 +50,14 @@ Run with::
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+import re
 import signal
 import socket
 import sys
+import tempfile
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -124,6 +127,78 @@ class StatusResponse(BaseModel):
     workspace_path: str | None = None
     started_at_unix: float | None = None
     age_seconds: float | None = None
+
+
+# === Startup-failure cause surfacing (ALM-3274 / ALM-3264 / ALM-3266) ===
+
+# Known-safe startup-failure causes the controller is allowed to forward to
+# its (unprivileged) caller. Everything else stays on the redacted generic
+# 500 — the allowlist is the second gate after the child's own redaction
+# (``managed_serve._record_startup_error``), so a novel exception whose text
+# embeds an RPC URL never reaches the worker container. Each pattern captures
+# a bounded, module-generated message:
+#   1. Managed-Anvil funding refusal (managed.py _fund_anvil_wallets) — the
+#      cause behind the 2026-08-12 "Prod: gateway cannot start" cluster.
+#   2. anvil_funding config validation (managed.py _parse_anvil_funding_for_chain),
+#      e.g. the zero-address-as-native-key mistake.
+#   3. The archive-RPC gate (managed.py _check_archive_rpc_availability) —
+#      multi-line but fully module-generated (public endpoints + env var
+#      NAMES only), and its "Fix —" section is the actionable part.
+_STARTUP_CAUSE_SENTINELS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"Managed Anvil funding could not provision[^\n]*"),
+    re.compile(r"anvil_funding key [^\n]*"),
+    re.compile(r"Refusing to start Anvil fork\(s\) against state-pruned public RPC\(s\):.*", re.DOTALL),
+)
+
+# Bound on the cause text forwarded in the HTTP error detail.
+_STARTUP_CAUSE_MAX_CHARS = 1000
+
+
+def _read_startup_error_detail(path: str) -> str | None:
+    """Read the child's startup-failure summary; None on absent/malformed."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    message = data.get("message") if isinstance(data, dict) else None
+    return message if isinstance(message, str) and message.strip() else None
+
+
+def _classify_startup_cause(summary: str | None) -> str | None:
+    """Extract an allowlisted, caller-safe cause from the child's summary.
+
+    Returns the matched (bounded) cause text, or None when no known-safe
+    sentinel matches — the caller then keeps today's opaque-500 behaviour.
+    """
+    if not summary:
+        return None
+    for sentinel in _STARTUP_CAUSE_SENTINELS:
+        match = sentinel.search(summary)
+        if match:
+            return match.group(0)[:_STARTUP_CAUSE_MAX_CHARS]
+    return None
+
+
+def _unlink_quiet(path: str) -> None:
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+class _GatewayStartupError(RuntimeError):
+    """Early managed_serve exit with a cause classified safe to surface.
+
+    Only raised when ``_classify_startup_cause`` matched an allowlisted
+    sentinel; ``cause`` is that matched text. Unclassified early exits keep
+    raising plain ``RuntimeError`` so the endpoint's redacted-500 invariant
+    (and its secret-leak test) is untouched.
+    """
+
+    def __init__(self, message: str, cause: str) -> None:
+        super().__init__(message)
+        self.cause = cause
 
 
 # === Gateway lifecycle handle ===
@@ -208,9 +283,9 @@ def _find_free_port() -> int:
         return s.getsockname()[1]
 
 
-def _build_gateway_env(workspace: Path, port: int) -> dict[str, str]:
+def _build_gateway_env(workspace: Path, port: int, startup_error_file: str | None = None) -> dict[str, str]:
     """Subprocess env for managed_serve: inherit ours + per-call overrides."""
-    return {
+    env = {
         **os.environ,
         "ALMANAK_GATEWAY_NETWORK": "anvil",
         "ALMANAK_GATEWAY_GRPC_PORT": str(port),
@@ -225,6 +300,11 @@ def _build_gateway_env(workspace: Path, port: int) -> dict[str, str]:
         # sidecar boot.
         "ALMANAK_GATEWAY_ALLOW_INSECURE": "true",
     }
+    if startup_error_file is not None:
+        # Typed as GatewaySettings.startup_error_file in the child — the
+        # one-shot handoff path for a redacted startup-failure summary.
+        env["ALMANAK_GATEWAY_STARTUP_ERROR_FILE"] = startup_error_file
+    return env
 
 
 async def _wait_for_port(proc: asyncio.subprocess.Process, port: int, deadline: float) -> bool:
@@ -272,40 +352,62 @@ async def _spawn_gateway(workspace: Path, port: int) -> _Gateway:
     """Launch managed_serve and wait for the gRPC port to accept connections."""
     startup_budget = _compute_startup_budget(workspace)
 
-    proc = await asyncio.create_subprocess_exec(
-        sys.executable,
-        "-m",
-        "almanak.gateway.managed_serve",
-        env=_build_gateway_env(workspace, port),
-        stdout=None,
-        stderr=None,
-    )
-    logger.info("managed_serve subprocess: pid=%d, startup_budget=%.0fs", proc.pid, startup_budget)
+    # One-shot handoff file for a redacted startup-failure summary (ALM-3274).
+    # Deliberately NOT a pipe: managed_serve keeps inheriting stdout/stderr so
+    # its full logs still reach Cloud Logging, and a pipe would deadlock a
+    # healthy long-lived gateway once the buffer fills.
+    err_fd, err_path = tempfile.mkstemp(prefix="gw_startup_err_", suffix=".json")
+    os.close(err_fd)
 
-    # Catch BaseException (not just Exception) so an HTTP-request cancellation
-    # — which delivers asyncio.CancelledError mid-await — still kills the
-    # subprocess instead of leaving it orphaned. We re-raise after cleanup so
-    # the caller's exception semantics are preserved.
+    # The outer try/finally owns the handoff file from the moment it exists,
+    # so a subprocess-creation failure (or cancellation) cannot leak it.
     try:
-        deadline = time.monotonic() + startup_budget
-        if await _wait_for_port(proc, port, deadline):
-            return _Gateway(proc=proc, port=port, workspace=workspace)
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "almanak.gateway.managed_serve",
+            env=_build_gateway_env(workspace, port, startup_error_file=err_path),
+            stdout=None,
+            stderr=None,
+        )
+        logger.info("managed_serve subprocess: pid=%d, startup_budget=%.0fs", proc.pid, startup_budget)
 
-        if proc.returncode is None:
-            proc.kill()
-            await proc.wait()
-            raise TimeoutError(f"managed_serve did not become reachable on port {port} within {startup_budget:.0f}s")
-        raise RuntimeError(f"managed_serve exited early with code {proc.returncode}")
-    except BaseException:
-        if proc.returncode is None:
-            try:
+        # Catch BaseException (not just Exception) so an HTTP-request cancellation
+        # — which delivers asyncio.CancelledError mid-await — still kills the
+        # subprocess instead of leaving it orphaned. We re-raise after cleanup so
+        # the caller's exception semantics are preserved.
+        try:
+            deadline = time.monotonic() + startup_budget
+            if await _wait_for_port(proc, port, deadline):
+                return _Gateway(proc=proc, port=port, workspace=workspace)
+
+            if proc.returncode is None:
                 proc.kill()
                 await proc.wait()
-            except BaseException:
-                # Swallow secondary errors during cleanup — the original
-                # exception is what we want to surface.
-                pass
-        raise
+                raise TimeoutError(
+                    f"managed_serve did not become reachable on port {port} within {startup_budget:.0f}s"
+                )
+            cause = _classify_startup_cause(_read_startup_error_detail(err_path))
+            if cause is not None:
+                raise _GatewayStartupError(
+                    f"managed_serve exited early with code {proc.returncode}: {cause}",
+                    cause=cause,
+                )
+            raise RuntimeError(f"managed_serve exited early with code {proc.returncode}")
+        except BaseException:
+            if proc.returncode is None:
+                try:
+                    proc.kill()
+                    await proc.wait()
+                except BaseException:
+                    # Swallow secondary errors during cleanup — the original
+                    # exception is what we want to surface.
+                    pass
+            raise
+    finally:
+        # The summary is only ever written during a failed startup, so the
+        # file is dead weight the moment we return OR raise.
+        _unlink_quiet(err_path)
 
 
 # === FastAPI app ===
@@ -404,6 +506,14 @@ async def start_gateway(req: StartGatewayRequest) -> StartGatewayResponse:
         port = _find_free_port()
         try:
             gw = await _spawn_gateway(workspace, port)
+        except _GatewayStartupError as e:
+            # The child reported a cause that matched the caller-safe
+            # allowlist (funding refusal, anvil_funding validation, archive
+            # gate) — all user-actionable workspace/config problems. Surface
+            # it as a 422 so the test ladder stops misreporting fixable
+            # config gaps as opaque infra failures (ALM-3274/3264/3266).
+            logger.exception("gateway startup failed (classified cause surfaced to caller)")
+            raise HTTPException(422, f"gateway startup failed: {e.cause}") from e
         except Exception as e:
             # Privileged service — full error stays in the log; client gets
             # a generic message so internal paths/RPC URLs don't leak.

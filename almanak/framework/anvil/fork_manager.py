@@ -818,12 +818,27 @@ class RollingForkManager:
     # Each tier exists to fund a class of token the prior tier can't handle safely.
     # Branch-local gates stop unsafe fallthrough: whale-listed proxy tokens are
     # transfer-funded or fail, while seeded-layout tokens may still use anvil_deal.
-    async def fund_tokens(  # noqa: C901
+    async def fund_tokens(
         self,
         address: str,
         tokens: dict[str, Decimal],
     ) -> bool:
         """Fund a wallet with address-keyed ERC-20 amounts.
+
+        Boolean wrapper around :meth:`fund_tokens_report` for callers that
+        only need all-or-nothing semantics.
+
+        Returns:
+            True if all tokens funded successfully, False otherwise
+        """
+        return not await self.fund_tokens_report(address, tokens)
+
+    async def fund_tokens_report(  # noqa: C901
+        self,
+        address: str,
+        tokens: dict[str, Decimal],
+    ) -> list[str]:
+        """Fund a wallet with address-keyed ERC-20 amounts, reporting failures per token.
 
         Token symbols are display metadata and are never accepted as asset
         identity here. Every key must be the exact ERC-20 contract address on
@@ -844,11 +859,14 @@ class RollingForkManager:
             tokens: Dict mapping ERC-20 contract address to amount
 
         Returns:
-            True if all tokens funded successfully, False otherwise
+            The token keys that could NOT be funded, in request order; empty
+            list means every requested token funded. ALM-3264: callers must
+            blame only these keys — naming the whole batch sent debuggers
+            chasing tokens that funded fine.
         """
         if not self.is_running:
             logger.error("Cannot fund tokens: Anvil fork not running")
-            return False
+            return list(tokens)
 
         from almanak.framework.data.tokens import get_token_resolver
         from almanak.framework.data.tokens.exceptions import TokenNotFoundError, TokenResolutionError
@@ -857,7 +875,7 @@ class RollingForkManager:
         known_slots = KNOWN_BALANCE_SLOTS.get(self.chain, {})
         balance_storage_seeds = BALANCE_STORAGE_SEEDS.get(self.chain, {})
 
-        success = True
+        failed: list[str] = []
 
         for token_key, amount in tokens.items():
             if not isinstance(token_key, str) or _EVM_TOKEN_ADDRESS_RE.fullmatch(token_key) is None:
@@ -867,7 +885,7 @@ class RollingForkManager:
                     self.chain,
                     token_key,
                 )
-                success = False
+                failed.append(token_key)
                 continue
 
             token_address = token_key.lower()
@@ -890,7 +908,7 @@ class RollingForkManager:
                 logger.error(
                     f"Unknown decimals for {display_name} on {self.chain}, skipping (refusing to default to 18)"
                 )
-                success = False
+                failed.append(token_key)
                 continue
 
             # Convert to token units (hex string)
@@ -983,13 +1001,13 @@ class RollingForkManager:
 
                 if not funded:
                     logger.error(f"Failed to fund {display_name} for {address[:10]}...")
-                    success = False
+                    failed.append(token_key)
 
             except Exception as e:
                 logger.exception(f"Error funding {display_name}: {e}")
-                success = False
+                failed.append(token_key)
 
-        return success
+        return failed
 
     async def _fetch_decimals_onchain(self, token_address: str) -> int | None:
         """Fetch ERC-20 decimals via on-chain eth_call.

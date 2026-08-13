@@ -25,6 +25,7 @@ def _stub_main_dependencies(
     network: str = "anvil",
     chains: tuple[str, ...] = ("base",),
     funding: dict[str, str] | None = None,
+    startup_error_file: str | None = None,
 ):
     """Patch everything ``managed_serve.main`` consults before instantiating ManagedGateway."""
     settings = MagicMock()
@@ -32,6 +33,9 @@ def _stub_main_dependencies(
     settings.grpc_port = 50051
     settings.chains = list(chains)
     settings.grpc_host = "127.0.0.1"
+    # Explicit None default: a bare MagicMock attribute is truthy, which would
+    # silently route every startup-failure test through the handoff writer.
+    settings.startup_error_file = startup_error_file
 
     config = MagicMock()
     config.gateway = settings
@@ -205,6 +209,69 @@ def test_signal_handler_sets_stop_event() -> None:
     assert rc == 0
     # The handler installed by main() must call .set() on the stop event.
     fake_event.set.assert_called()
+
+
+# ─── startup-error handoff (ALM-3274) ─────────────────────────────────────
+
+
+def test_record_startup_error_writes_redacted_bounded_summary(tmp_path, monkeypatch):
+    """The summary must be redacted IN THIS (privileged) process and bounded,
+    so the unprivileged test-controller never sees a raw secret."""
+    import json
+
+    from almanak.gateway import managed_serve
+
+    monkeypatch.setattr(
+        "almanak.core.redaction.redact",
+        lambda message: message.replace("tok_secret", "tok_***"),
+    )
+
+    path = tmp_path / "startup_err.json"
+    exc = RuntimeError("Managed gateway failed to start: upstream tok_secret rejected " + "x" * 5000)
+    managed_serve._record_startup_error(str(path), exc)
+
+    data = json.loads(path.read_text())
+    assert "tok_secret" not in data["message"]
+    assert "tok_***" in data["message"]
+    assert len(data["message"]) <= managed_serve._STARTUP_ERROR_SUMMARY_MAX_CHARS
+
+
+def test_record_startup_error_is_noop_without_path(tmp_path):
+    """No handoff path configured (every non-test-controller deployment) —
+    must be a silent no-op, never a crash in the failure path."""
+    from almanak.gateway import managed_serve
+
+    managed_serve._record_startup_error(None, RuntimeError("boom"))
+    managed_serve._record_startup_error("", RuntimeError("boom"))
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_record_startup_error_swallows_write_failures(tmp_path):
+    """An unwritable path must not mask the original startup exception."""
+    from almanak.gateway import managed_serve
+
+    managed_serve._record_startup_error(str(tmp_path / "no" / "such" / "dir" / "x.json"), RuntimeError("boom"))
+
+
+def test_main_records_startup_error_on_start_failure(tmp_path):
+    """main() must write the handoff summary when ManagedGateway.start raises
+    and ``settings.startup_error_file`` is configured (the test-controller path)."""
+    import json
+
+    mg = MagicMock()
+    mg.start.side_effect = RuntimeError(
+        "Managed gateway failed to start: Managed Anvil funding could not provision every requested asset"
+    )
+    mg_class = MagicMock(return_value=mg)
+
+    err_file = tmp_path / "startup_err.json"
+    patches = _stub_main_dependencies(mg_class=mg_class, startup_error_file=str(err_file))
+
+    rc = _run_main_with_patches(patches, mg_class)
+
+    assert rc == 1
+    data = json.loads(err_file.read_text())
+    assert "Managed Anvil funding could not provision" in data["message"]
 
 
 # Silence the "Failed to import strategy" warning collected by pytest from the

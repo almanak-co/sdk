@@ -1,7 +1,7 @@
 """Unit tests for RollingForkManager Anvil flag detection and command building."""
 
 from decimal import Decimal
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, PropertyMock, patch
 
 import pytest
 
@@ -927,3 +927,68 @@ class TestAssertChainIdAfterReset:
         with patch.object(mgr, "_rpc_call_raw", AsyncMock(side_effect=_dispatch)):
             await mgr._assert_chain_id_after_reset()  # must not raise
         assert call_count == 2
+
+
+class TestFundTokensReport:
+    """ALM-3264: funding failures must be attributed per token — naming the
+    whole batch sent debuggers chasing tokens that funded fine."""
+
+    def _manager(self) -> RollingForkManager:
+        return RollingForkManager(rpc_url="http://rpc.test", chain="arbitrum", anvil_port=9999)
+
+    @pytest.mark.asyncio()
+    async def test_not_running_reports_every_requested_key(self):
+        mgr = self._manager()
+        tokens = {
+            "0xaf88d065e77c8cc2239327c5edb3a432268e5831": Decimal("1"),
+            "0x82af49447d8a07e3bd95bd0d56f35241523fbab1": Decimal("2"),
+        }
+        failed = await mgr.fund_tokens_report("0x" + "1" * 40, tokens)
+        assert failed == list(tokens)
+
+    @pytest.mark.asyncio()
+    async def test_bool_wrapper_preserves_all_or_nothing_contract(self):
+        mgr = self._manager()
+        assert await mgr.fund_tokens("0x" + "1" * 40, {"0x" + "a" * 40: Decimal("1")}) is False
+
+    @pytest.mark.asyncio()
+    async def test_non_address_key_lands_in_failed_list_verbatim(self):
+        """Symbol keys are rejected per-token; the report must name the bad
+        key, not just flip a global bool."""
+        mgr = self._manager()
+        with patch.object(RollingForkManager, "is_running", new_callable=PropertyMock, return_value=True):
+            failed = await mgr.fund_tokens_report("0x" + "1" * 40, {"USDC": Decimal("1")})
+        assert failed == ["USDC"]
+
+    @pytest.mark.asyncio()
+    async def test_unknown_decimals_token_reported_alone(self):
+        """A token whose decimals cannot be discovered fails alone — siblings
+        that fund fine must not appear in the report."""
+        good = "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
+        bad = "0x80f3d493ebce97e343c53d29a137942416b4ffc0"
+        mgr = self._manager()
+
+        with (
+            patch.object(RollingForkManager, "is_running", new_callable=PropertyMock, return_value=True),
+            patch.object(mgr, "_fetch_decimals_onchain", new=AsyncMock(return_value=None)),
+            patch.object(mgr, "_fund_token_via_storage", new=AsyncMock(return_value=True)),
+            patch.object(mgr, "_rpc_call_raw", new=AsyncMock(return_value=(False, None))),
+            patch("almanak.framework.data.tokens.get_token_resolver") as resolver_factory,
+        ):
+            from almanak.framework.data.tokens.exceptions import TokenNotFoundError
+
+            resolver = resolver_factory.return_value
+
+            def _resolve(address, chain, **kwargs):
+                if address == good:
+                    resolved = type("R", (), {"decimals": 6, "symbol": "USDC"})()
+                    return resolved
+                raise TokenNotFoundError(token=address, chain=chain)
+
+            resolver.resolve.side_effect = _resolve
+            failed = await mgr.fund_tokens_report(
+                "0x" + "1" * 40,
+                {good: Decimal("1"), bad: Decimal("1")},
+            )
+
+        assert failed == [bad]

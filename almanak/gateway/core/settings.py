@@ -374,6 +374,17 @@ class GatewaySettings(_GatewaySettingsBase):  # type: ignore[valid-type,misc]
     # always its own writer.
     lifecycle_writer: bool = False
 
+    # ALM-3274: path the managed_serve entrypoint writes a redacted, bounded
+    # startup-failure summary to when ``ManagedGateway.start`` raises. Set by
+    # the test-controller (``ALMANAK_GATEWAY_STARTUP_ERROR_FILE``) so an
+    # actionable cause — e.g. "Managed Anvil funding could not provision …" —
+    # can cross the privileged-process boundary without the controller
+    # inheriting the child's full stderr. Unset everywhere else; the entrypoint
+    # skips the write when empty. Redaction happens in the privileged child
+    # (``managed_serve._record_startup_error``), and the controller additionally
+    # allowlists which causes it forwards, so nothing secret rides this file.
+    startup_error_file: str | None = None
+
     model_config = {
         "env_prefix": "ALMANAK_GATEWAY_",
         # Intentionally no ``env_file`` — the dotenv boundary lives in

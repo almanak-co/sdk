@@ -527,6 +527,17 @@ class ManagedGateway:
             if token_ref.lower() == NATIVE_SENTINEL.lower():
                 native_amount += parsed
             elif _EVM_TOKEN_ADDRESS_RE.fullmatch(token_ref):
+                if int(token_ref, 16) == 0:
+                    # ALM-3269/3270: strategies keyed native ETH by the zero
+                    # address. Treated as an ERC-20 it fails decimals discovery
+                    # and poisons the whole funding batch, so the fork refuses
+                    # to start with every OTHER token blamed too. Reject it at
+                    # parse time and name the one key that means "native".
+                    raise ValueError(
+                        f"anvil_funding key {token_ref!r} is the zero address, which is not an "
+                        f"ERC-20 contract. To fund the chain's native gas asset, use "
+                        f"{NATIVE_SENTINEL} as the key instead."
+                    )
                 normalized_address = token_ref.lower()
                 erc20_tokens[normalized_address] = erc20_tokens.get(normalized_address, Decimal("0")) + parsed
             else:
@@ -631,11 +642,12 @@ class ManagedGateway:
                 if erc20_tokens:
                     # VIB-2570: Log each ERC20 token being funded so failures are traceable
                     logger.info(f"Funding ERC20 tokens on {chain}: {list(erc20_tokens.keys())}")
-                    tokens_funded = await manager.fund_tokens(wallet, erc20_tokens)
-                    if not tokens_funded:
-                        funding_failures.append(
-                            f"{chain}: could not provision ERC-20 addresses {list(erc20_tokens.keys())}"
-                        )
+                    failed_tokens = await manager.fund_tokens_report(wallet, erc20_tokens)
+                    if failed_tokens:
+                        # Name ONLY the tokens that actually failed. Listing the
+                        # whole batch sent debuggers chasing tokens (e.g. USDT)
+                        # that funded fine on the same chain (ALM-3264).
+                        funding_failures.append(f"{chain}: could not provision ERC-20 addresses {failed_tokens}")
                 if not any(failure.startswith(f"{chain}:") for failure in funding_failures):
                     logger.info(f"Anvil funding complete for {chain}")
             except Exception as e:

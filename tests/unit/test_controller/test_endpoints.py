@@ -148,9 +148,7 @@ def test_start_gateway_returns_409_when_already_running(client: TestClient, work
     assert "already running" in resp.json()["detail"]
 
 
-def test_start_gateway_returns_500_with_sanitized_message_on_spawn_failure(
-    client: TestClient, workspace: Path
-) -> None:
+def test_start_gateway_returns_500_with_sanitized_message_on_spawn_failure(client: TestClient, workspace: Path) -> None:
     """Internal exception text must NOT leak to the client (reviewer-flagged)."""
     with patch(
         "almanak.test_controller.__main__._spawn_gateway",
@@ -166,9 +164,7 @@ def test_start_gateway_returns_500_with_sanitized_message_on_spawn_failure(
     assert "secret" not in detail.lower()
 
 
-def test_start_gateway_returns_400_with_real_message_on_invalid_config(
-    client: TestClient, tmp_path: Path
-) -> None:
+def test_start_gateway_returns_400_with_real_message_on_invalid_config(client: TestClient, tmp_path: Path) -> None:
     """A config.json that fails StrategyConfig schema validation must surface the
     actual error as a 400 — NOT get masked as the opaque 500 "gateway startup
     failed", which made the test ladder misreport fixable config bugs as
@@ -192,9 +188,7 @@ def test_start_gateway_returns_400_with_real_message_on_invalid_config(
     assert detail != "gateway startup failed"
 
 
-def test_start_gateway_after_stale_subprocess_clears_state_and_succeeds(
-    client: TestClient, workspace: Path
-) -> None:
+def test_start_gateway_after_stale_subprocess_clears_state_and_succeeds(client: TestClient, workspace: Path) -> None:
     """If the previous gateway crashed silently, /start_gateway should reap and proceed."""
     from almanak.test_controller import __main__ as ctrl
 
@@ -319,10 +313,13 @@ async def test_spawn_gateway_kills_subprocess_on_cancellation() -> None:
     async def cancel_during_wait(*_args, **_kwargs):
         raise asyncio.CancelledError("client disconnected")
 
-    with patch(
-        "almanak.test_controller.__main__.asyncio.create_subprocess_exec",
-        new=AsyncMock(return_value=fake_proc),
-    ), patch("almanak.test_controller.__main__._wait_for_port", new=cancel_during_wait):
+    with (
+        patch(
+            "almanak.test_controller.__main__.asyncio.create_subprocess_exec",
+            new=AsyncMock(return_value=fake_proc),
+        ),
+        patch("almanak.test_controller.__main__._wait_for_port", new=cancel_during_wait),
+    ):
         with pytest.raises(asyncio.CancelledError):
             await ctrl._spawn_gateway(Path("/tmp/some-workspace"), 58000)
 
@@ -395,6 +392,213 @@ def test_build_gateway_env_preconfigures_managed_serve(tmp_path: Path) -> None:
     # Loopback-only sidecar shape — auth_token adds no security, allow_insecure
     # lets the gateway boot without a per-deploy ALMANAK_GATEWAY_AUTH_TOKEN.
     assert env["ALMANAK_GATEWAY_ALLOW_INSECURE"] == "true"
+
+
+# ─── startup-cause surfacing (ALM-3274 / ALM-3264 / ALM-3266) ─────────────
+
+# Verbatim shape of the prod 2026-08-12 cluster's underlying cause: the
+# managed-Anvil funding refusal that the controller used to collapse into an
+# opaque "HTTP 500: gateway startup failed".
+_FUNDING_CAUSE = (
+    "Managed Anvil funding could not provision every requested asset; "
+    "refusing to start an under-funded fork. Failures: bsc: could not "
+    "provision ERC-20 addresses ['0xab78b89b5bb00236be0b4b20704cbfa04efc711c']"
+)
+
+
+def test_start_gateway_surfaces_classified_cause_as_422(client: TestClient, workspace: Path) -> None:
+    """A classified (allowlisted) startup cause must reach the caller as a 422
+    with the actual reason — not the opaque 500 that made every funding gap
+    look like a platform outage."""
+    from almanak.test_controller import __main__ as ctrl
+
+    err = ctrl._GatewayStartupError(
+        f"managed_serve exited early with code 1: {_FUNDING_CAUSE}",
+        cause=_FUNDING_CAUSE,
+    )
+    with patch(
+        "almanak.test_controller.__main__._spawn_gateway",
+        new=AsyncMock(side_effect=err),
+    ):
+        resp = client.post("/start_gateway", json={"workspace_path": str(workspace)})
+
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert detail.startswith("gateway startup failed: ")
+    assert "could not provision ERC-20 addresses" in detail
+    assert "0xab78b89b" in detail
+
+
+def test_classify_startup_cause_matches_funding_refusal() -> None:
+    from almanak.test_controller import __main__ as ctrl
+
+    summary = f"Managed gateway failed to start: {_FUNDING_CAUSE}"
+    cause = ctrl._classify_startup_cause(summary)
+    assert cause is not None
+    assert cause.startswith("Managed Anvil funding could not provision")
+    assert "0xab78b89b" in cause
+
+
+def test_classify_startup_cause_matches_anvil_funding_key_validation() -> None:
+    """The zero-address-as-native mistake (ALM-3269/3270) is rejected at parse
+    time with an ``anvil_funding key …`` message — it must classify."""
+    from almanak.test_controller import __main__ as ctrl
+
+    summary = (
+        "Managed gateway failed to start: anvil_funding key "
+        "'0x0000000000000000000000000000000000000000' is the zero address, which is not an "
+        "ERC-20 contract. To fund the chain's native gas asset, use "
+        "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE as the key instead."
+    )
+    cause = ctrl._classify_startup_cause(summary)
+    assert cause is not None
+    assert cause.startswith("anvil_funding key ")
+    assert "zero address" in cause
+
+
+def test_classify_startup_cause_matches_archive_gate() -> None:
+    from almanak.test_controller import __main__ as ctrl
+
+    summary = (
+        "Managed gateway failed to start: Refusing to start Anvil fork(s) against "
+        "state-pruned public RPC(s):\n  - polygon: https://polygon-bor-rpc.publicnode.com "
+        "serves ~134s of state\n\nFix — configure an archive-capable RPC"
+    )
+    cause = ctrl._classify_startup_cause(summary)
+    assert cause is not None
+    assert cause.startswith("Refusing to start Anvil fork(s)")
+    assert "archive-capable RPC" in cause
+
+
+def test_classify_startup_cause_rejects_unallowlisted_text() -> None:
+    """Novel exception text — which could embed an RPC URL — must NOT classify;
+    the endpoint then keeps today's redacted generic 500."""
+    from almanak.test_controller import __main__ as ctrl
+
+    assert ctrl._classify_startup_cause("RuntimeError: https://eth-mainnet.g.alchemy.com/v2/tok_secret") is None
+    assert ctrl._classify_startup_cause("") is None
+    assert ctrl._classify_startup_cause(None) is None
+
+
+def test_classify_startup_cause_bounds_length() -> None:
+    from almanak.test_controller import __main__ as ctrl
+
+    summary = "Managed Anvil funding could not provision " + "x" * 5000
+    cause = ctrl._classify_startup_cause(summary)
+    assert cause is not None
+    assert len(cause) <= ctrl._STARTUP_CAUSE_MAX_CHARS
+
+
+def test_read_startup_error_detail_handles_missing_and_malformed(tmp_path: Path) -> None:
+    from almanak.test_controller import __main__ as ctrl
+
+    assert ctrl._read_startup_error_detail(str(tmp_path / "nope.json")) is None
+
+    malformed = tmp_path / "bad.json"
+    malformed.write_text("{not json")
+    assert ctrl._read_startup_error_detail(str(malformed)) is None
+
+    empty_message = tmp_path / "empty.json"
+    empty_message.write_text(json.dumps({"message": "   "}))
+    assert ctrl._read_startup_error_detail(str(empty_message)) is None
+
+    ok = tmp_path / "ok.json"
+    ok.write_text(json.dumps({"message": _FUNDING_CAUSE}))
+    assert ctrl._read_startup_error_detail(str(ok)) == _FUNDING_CAUSE
+
+
+def _early_exit_spawn_patches(ctrl, summary: str | None):
+    """Patches for driving ``_spawn_gateway`` down the early-exit branch with a
+    fake child that wrote ``summary`` to the handoff file (None = wrote nothing)."""
+
+    async def fake_create_subprocess_exec(*args, env=None, **kwargs):
+        if summary is not None:
+            Path(env["ALMANAK_GATEWAY_STARTUP_ERROR_FILE"]).write_text(json.dumps({"message": summary}))
+        proc = MagicMock()
+        proc.pid = 4242
+        proc.returncode = 1
+        return proc
+
+    return (
+        patch(
+            "almanak.test_controller.__main__.asyncio.create_subprocess_exec",
+            new=fake_create_subprocess_exec,
+        ),
+        patch(
+            "almanak.test_controller.__main__._wait_for_port",
+            new=AsyncMock(return_value=False),
+        ),
+        patch(
+            "almanak.test_controller.__main__._compute_startup_budget",
+            new=MagicMock(return_value=0.1),
+        ),
+    )
+
+
+@pytest.mark.asyncio()
+async def test_spawn_gateway_early_exit_surfaces_child_summary(tmp_path: Path) -> None:
+    from almanak.test_controller import __main__ as ctrl
+
+    p1, p2, p3 = _early_exit_spawn_patches(ctrl, f"Managed gateway failed to start: {_FUNDING_CAUSE}")
+    with p1, p2, p3:
+        with pytest.raises(ctrl._GatewayStartupError) as excinfo:
+            await ctrl._spawn_gateway(tmp_path, 55555)
+
+    assert excinfo.value.cause.startswith("Managed Anvil funding could not provision")
+    assert "exited early with code 1" in str(excinfo.value)
+
+
+@pytest.mark.asyncio()
+async def test_spawn_gateway_unlinks_handoff_file_when_subprocess_creation_fails(tmp_path: Path) -> None:
+    """A create_subprocess_exec failure must not leak the handoff temp file."""
+    import glob
+    import tempfile as _tempfile
+
+    from almanak.test_controller import __main__ as ctrl
+
+    before = set(glob.glob(f"{_tempfile.gettempdir()}/gw_startup_err_*.json"))
+    with (
+        patch(
+            "almanak.test_controller.__main__.asyncio.create_subprocess_exec",
+            new=AsyncMock(side_effect=OSError("spawn refused")),
+        ),
+        patch("almanak.test_controller.__main__._compute_startup_budget", new=MagicMock(return_value=0.1)),
+    ):
+        with pytest.raises(OSError, match="spawn refused"):
+            await ctrl._spawn_gateway(tmp_path, 55555)
+
+    after = set(glob.glob(f"{_tempfile.gettempdir()}/gw_startup_err_*.json"))
+    assert after - before == set(), "handoff file leaked on subprocess-creation failure"
+
+
+@pytest.mark.asyncio()
+async def test_spawn_gateway_early_exit_without_summary_stays_generic(tmp_path: Path) -> None:
+    """No handoff summary (crash before the except arm, older child image) →
+    the plain RuntimeError path, i.e. the redacted 500, is preserved."""
+    from almanak.test_controller import __main__ as ctrl
+
+    p1, p2, p3 = _early_exit_spawn_patches(ctrl, None)
+    with p1, p2, p3:
+        with pytest.raises(RuntimeError) as excinfo:
+            await ctrl._spawn_gateway(tmp_path, 55555)
+
+    assert not isinstance(excinfo.value, ctrl._GatewayStartupError)
+    assert str(excinfo.value) == "managed_serve exited early with code 1"
+
+
+@pytest.mark.asyncio()
+async def test_spawn_gateway_early_exit_with_secret_summary_stays_generic(tmp_path: Path) -> None:
+    """A summary that doesn't match the allowlist — e.g. an exception whose
+    text embeds an upstream URL — must not be surfaced."""
+    from almanak.test_controller import __main__ as ctrl
+
+    p1, p2, p3 = _early_exit_spawn_patches(ctrl, "boom: https://eth-mainnet.g.alchemy.com/v2/tok_secret")
+    with p1, p2, p3:
+        with pytest.raises(RuntimeError) as excinfo:
+            await ctrl._spawn_gateway(tmp_path, 55555)
+
+    assert not isinstance(excinfo.value, ctrl._GatewayStartupError)
+    assert "alchemy" not in str(excinfo.value)
 
 
 # silence the unrelated incubating-strategy import collected as a warning

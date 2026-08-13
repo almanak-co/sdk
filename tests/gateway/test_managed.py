@@ -742,7 +742,7 @@ class TestAnvilFundingNativeIdentity:
             await gw._fund_anvil_wallets()
 
         mock_manager.fund_wallet.assert_not_awaited()
-        mock_manager.fund_tokens.assert_not_awaited()
+        mock_manager.fund_tokens_report.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_native_sentinel_funds_bsc_native_balance(self):
@@ -750,13 +750,13 @@ class TestAnvilFundingNativeIdentity:
 
         mock_manager = AsyncMock()
         mock_manager.fund_wallet = AsyncMock(return_value=True)
-        mock_manager.fund_tokens = AsyncMock(return_value=True)
+        mock_manager.fund_tokens_report = AsyncMock(return_value=[])
         gw._anvil_managers["bsc"] = mock_manager
 
         await gw._fund_anvil_wallets()
 
         mock_manager.fund_wallet.assert_awaited_once_with(gw._wallet_address, Decimal("250"))
-        mock_manager.fund_tokens.assert_awaited_once_with(gw._wallet_address, {BSC_USDC: Decimal("1000")})
+        mock_manager.fund_tokens_report.assert_awaited_once_with(gw._wallet_address, {BSC_USDC: Decimal("1000")})
 
 
 class TestAnvilFundingDefaultNativeGas:
@@ -787,7 +787,7 @@ class TestAnvilFundingDefaultNativeGas:
 
         mock_manager = AsyncMock()
         mock_manager.fund_wallet = AsyncMock()
-        mock_manager.fund_tokens = AsyncMock()
+        mock_manager.fund_tokens_report = AsyncMock(return_value=[])
         gw._anvil_managers["optimism"] = mock_manager
 
         await gw._fund_anvil_wallets()
@@ -799,7 +799,7 @@ class TestAnvilFundingDefaultNativeGas:
         assert call_args.args[0] == gw._wallet_address
         assert call_args.args[1] == ManagedGateway.DEFAULT_ANVIL_NATIVE_GAS_AMOUNT
         # No ERC20 funding when the dict is empty.
-        mock_manager.fund_tokens.assert_not_called()
+        mock_manager.fund_tokens_report.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_partial_funding_below_default_is_topped_up(self):
@@ -808,7 +808,7 @@ class TestAnvilFundingDefaultNativeGas:
 
         mock_manager = AsyncMock()
         mock_manager.fund_wallet = AsyncMock()
-        mock_manager.fund_tokens = AsyncMock()
+        mock_manager.fund_tokens_report = AsyncMock(return_value=[])
         gw._anvil_managers["optimism"] = mock_manager
 
         await gw._fund_anvil_wallets()
@@ -826,14 +826,14 @@ class TestAnvilFundingDefaultNativeGas:
 
         mock_manager = AsyncMock()
         mock_manager.fund_wallet = AsyncMock()
-        mock_manager.fund_tokens = AsyncMock()
+        mock_manager.fund_tokens_report = AsyncMock(return_value=[])
         gw._anvil_managers["optimism"] = mock_manager
 
         await gw._fund_anvil_wallets()
 
         funded_amount = mock_manager.fund_wallet.await_args.args[1]
         assert funded_amount == Decimal("1000"), "User-specified amount must not be reduced"
-        mock_manager.fund_tokens.assert_awaited_once()
+        mock_manager.fund_tokens_report.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_default_uses_chain_native_token_not_eth(self):
@@ -842,7 +842,7 @@ class TestAnvilFundingDefaultNativeGas:
 
         mock_manager = AsyncMock()
         mock_manager.fund_wallet = AsyncMock()
-        mock_manager.fund_tokens = AsyncMock()
+        mock_manager.fund_tokens_report = AsyncMock(return_value=[])
         gw._anvil_managers["avalanche"] = mock_manager
 
         await gw._fund_anvil_wallets()
@@ -884,7 +884,7 @@ class TestAnvilFundingDefaultNativeGas:
 
         mock_manager = AsyncMock()
         mock_manager.fund_wallet = AsyncMock()
-        mock_manager.fund_tokens = AsyncMock()
+        mock_manager.fund_tokens_report = AsyncMock(return_value=[])
         gw._anvil_managers["newchain"] = mock_manager
 
         await gw._fund_anvil_wallets()
@@ -920,23 +920,41 @@ class TestAnvilFundingAddressIdentity:
             await gateway._fund_anvil_wallets()
 
         manager.fund_wallet.assert_not_awaited()
-        manager.fund_tokens.assert_not_awaited()
+        manager.fund_tokens_report.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_exact_address_is_forwarded_and_false_result_aborts(self) -> None:
         gateway = self._gateway({NATIVE_SENTINEL: 10, JITOSOL_BASE.upper().replace("0X", "0x"): 10})
         manager = AsyncMock()
         manager.fund_wallet = AsyncMock(return_value=True)
-        manager.fund_tokens = AsyncMock(return_value=False)
+        manager.fund_tokens_report = AsyncMock(return_value=[JITOSOL_BASE])
         gateway._anvil_managers["base"] = manager
 
         with pytest.raises(RuntimeError, match="refusing to start an under-funded fork"):
             await gateway._fund_anvil_wallets()
 
-        manager.fund_tokens.assert_awaited_once_with(
+        manager.fund_tokens_report.assert_awaited_once_with(
             gateway._wallet_address,
             {JITOSOL_BASE: Decimal("10")},
         )
+
+    @pytest.mark.asyncio
+    async def test_failure_message_blames_only_the_failed_token(self) -> None:
+        """ALM-3264: two tokens requested, one un-fundable -> the startup
+        refusal names ONLY the failed address. Prod failure lists used to name
+        the whole batch, sending debuggers after tokens that funded fine."""
+        gateway = self._gateway({JITOSOL_BASE: 10, ARBITRUM_USDC: 500})
+        manager = AsyncMock()
+        manager.fund_wallet = AsyncMock(return_value=True)
+        manager.fund_tokens_report = AsyncMock(return_value=[JITOSOL_BASE])
+        gateway._anvil_managers["base"] = manager
+
+        with pytest.raises(RuntimeError) as excinfo:
+            await gateway._fund_anvil_wallets()
+
+        message = str(excinfo.value)
+        assert JITOSOL_BASE in message
+        assert ARBITRUM_USDC not in message, "tokens that funded fine must not be blamed"
 
     @pytest.mark.asyncio
     async def test_per_chain_sections_keep_contract_identity_chain_local(self) -> None:
@@ -949,19 +967,19 @@ class TestAnvilFundingAddressIdentity:
         gateway._anvil_chains = ["base", "arbitrum"]
         base_manager = AsyncMock()
         base_manager.fund_wallet = AsyncMock(return_value=True)
-        base_manager.fund_tokens = AsyncMock(return_value=True)
+        base_manager.fund_tokens_report = AsyncMock(return_value=[])
         arbitrum_manager = AsyncMock()
         arbitrum_manager.fund_wallet = AsyncMock(return_value=True)
-        arbitrum_manager.fund_tokens = AsyncMock(return_value=True)
+        arbitrum_manager.fund_tokens_report = AsyncMock(return_value=[])
         gateway._anvil_managers = {"base": base_manager, "arbitrum": arbitrum_manager}
 
         await gateway._fund_anvil_wallets()
 
-        base_manager.fund_tokens.assert_awaited_once_with(
+        base_manager.fund_tokens_report.assert_awaited_once_with(
             gateway._wallet_address,
             {JITOSOL_BASE: Decimal("10")},
         )
-        arbitrum_manager.fund_tokens.assert_awaited_once_with(
+        arbitrum_manager.fund_tokens_report.assert_awaited_once_with(
             gateway._wallet_address,
             {ARBITRUM_USDC: Decimal("500")},
         )
@@ -1016,7 +1034,7 @@ class TestAnvilFundingPrivateKeyResolution:
 
         mock_manager = AsyncMock()
         mock_manager.fund_wallet = AsyncMock()
-        mock_manager.fund_tokens = AsyncMock()
+        mock_manager.fund_tokens_report = AsyncMock(return_value=[])
         gw._anvil_managers["base"] = mock_manager
 
         await gw._fund_anvil_wallets()
@@ -1038,7 +1056,7 @@ class TestAnvilFundingPrivateKeyResolution:
 
         mock_manager = AsyncMock()
         mock_manager.fund_wallet = AsyncMock()
-        mock_manager.fund_tokens = AsyncMock()
+        mock_manager.fund_tokens_report = AsyncMock(return_value=[])
         gw._anvil_managers["base"] = mock_manager
 
         await gw._fund_anvil_wallets()
@@ -1055,14 +1073,14 @@ class TestAnvilFundingPrivateKeyResolution:
 
         mock_manager = AsyncMock()
         mock_manager.fund_wallet = AsyncMock()
-        mock_manager.fund_tokens = AsyncMock()
+        mock_manager.fund_tokens_report = AsyncMock(return_value=[])
         gw._anvil_managers["base"] = mock_manager
 
         with patch("almanak.gateway.managed.logger") as mock_logger:
             await gw._fund_anvil_wallets()
 
         mock_manager.fund_wallet.assert_not_called()
-        mock_manager.fund_tokens.assert_not_called()
+        mock_manager.fund_tokens_report.assert_not_called()
         warning_calls = [str(call) for call in mock_logger.warning.call_args_list]
         assert any("skipping Anvil funding" in w for w in warning_calls), (
             f"Expected the skip-funding warning, got: {warning_calls}"

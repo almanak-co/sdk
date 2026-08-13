@@ -43,6 +43,38 @@ logger = logging.getLogger(__name__)
 # Once forks are warm, runtime calls are sub-second.
 _SHUTDOWN_TIMEOUT_SECONDS = 30.0
 
+# Upper bound on the startup-failure summary written for the test-controller.
+# Big enough for the multi-line archive-RPC gate message; small enough that a
+# pathological exception repr can't balloon the handoff file.
+_STARTUP_ERROR_SUMMARY_MAX_CHARS = 2000
+
+
+def _record_startup_error(path: str | None, exc: BaseException) -> None:
+    """Best-effort: write a redacted, bounded summary of a startup failure.
+
+    ALM-3274: the test-controller spawns this process with inherited
+    stdout/stderr (so the full logs keep flowing to Cloud Logging) and has no
+    other channel to learn WHY startup failed — it used to collapse every
+    early exit into an opaque ``HTTP 500: gateway startup failed``. When the
+    controller supplies ``ALMANAK_GATEWAY_STARTUP_ERROR_FILE`` (surfaced here
+    as ``settings.startup_error_file``), we hand it a one-shot summary of the
+    startup exception. Redaction happens HERE, in the privileged process, so
+    no secret crosses the boundary; the controller additionally allowlists
+    which causes it forwards to its caller.
+    """
+    if not path:
+        return
+    import json
+
+    from almanak.core.redaction import redact
+
+    try:
+        message = redact(str(exc))[:_STARTUP_ERROR_SUMMARY_MAX_CHARS]
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"message": message}, fh)
+    except Exception:
+        logger.debug("Failed to record gateway startup error summary", exc_info=True)
+
 
 def main() -> int:
     """Entrypoint — run ManagedGateway as a long-lived sidecar process.
@@ -150,8 +182,9 @@ def main() -> int:
 
     try:
         mg.start(timeout=startup_timeout)
-    except Exception:
+    except Exception as exc:
         logger.exception("Managed gateway sidecar failed to start")
+        _record_startup_error(getattr(settings, "startup_error_file", None), exc)
         # ManagedGateway.start() already cleans up its own partial state on
         # failure (see _cleanup_on_failure) — no extra stop() call needed.
         return 1
