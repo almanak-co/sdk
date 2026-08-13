@@ -528,16 +528,23 @@ class ManagedGateway:
                 native_amount += parsed
             elif _EVM_TOKEN_ADDRESS_RE.fullmatch(token_ref):
                 if int(token_ref, 16) == 0:
-                    # ALM-3269/3270: strategies keyed native ETH by the zero
-                    # address. Treated as an ERC-20 it fails decimals discovery
-                    # and poisons the whole funding batch, so the fork refuses
-                    # to start with every OTHER token blamed too. Reject it at
-                    # parse time and name the one key that means "native".
-                    raise ValueError(
-                        f"anvil_funding key {token_ref!r} is the zero address, which is not an "
-                        f"ERC-20 contract. To fund the chain's native gas asset, use "
-                        f"{NATIVE_SENTINEL} as the key instead."
+                    # ALM-3269/3270/3288: the zero address unambiguously means
+                    # "native" — no ERC-20 can exist there, and the platform's
+                    # deploy-side funding surfaces (token_funding, the funding
+                    # widget) use it as their native representation, so agents
+                    # and users carry it here. Treated as an ERC-20 it fails
+                    # decimals discovery and poisons the whole funding batch.
+                    # Canonicalize to the native lane instead of rejecting;
+                    # symbols stay rejected below — identity remains
+                    # address-shaped.
+                    logger.warning(
+                        "anvil_funding key %s interpreted as the chain's native gas asset; "
+                        "prefer %s as the native key.",
+                        token_ref,
+                        NATIVE_SENTINEL,
                     )
+                    native_amount += parsed
+                    continue
                 normalized_address = token_ref.lower()
                 erc20_tokens[normalized_address] = erc20_tokens.get(normalized_address, Decimal("0")) + parsed
             else:
