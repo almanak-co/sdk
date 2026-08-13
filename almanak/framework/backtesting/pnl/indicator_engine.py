@@ -50,6 +50,8 @@ from almanak.framework.market import (
 )
 from almanak.framework.market.models import IndicatorProvider
 
+from .cadence import cadence_is_coarser, canonical_timeframe_for_cadence
+
 logger = logging.getLogger(__name__)
 
 # Default indicators PRE-POPULATED each tick when the strategy doesn't declare
@@ -84,12 +86,19 @@ class IndicatorTimeframeMismatchError(ValueError):
     def __init__(self, *, native_seconds: int, requested_seconds: int) -> None:
         self.native_seconds = int(native_seconds)
         self.requested_seconds = int(requested_seconds)
-        self.native_timeframe = timeframe_label(self.native_seconds)
+        compatible = canonical_timeframe_for_cadence(self.native_seconds)
+        self.compatible_timeframe = compatible.value if compatible is not None else None
+        self.native_timeframe = self.compatible_timeframe or timeframe_label(self.native_seconds)
         self.requested_timeframe = timeframe_label(self.requested_seconds)
+        recovery = (
+            f"request {self.compatible_timeframe} or coarser"
+            if self.compatible_timeframe is not None
+            else "no supported canonical indicator timeframe is coarse enough"
+        )
         super().__init__(
             f"underlying price data has {self.native_timeframe} resolution; a "
             f"{self.requested_timeframe} indicator would be computed from flat upsampled "
-            f"ticks and saturate (ALM-2957) — request {self.native_timeframe} or coarser"
+            f"ticks and saturate (ALM-2957) — {recovery}"
         )
 
 
@@ -168,24 +177,6 @@ def native_series_aliases(chain: str) -> dict[str, tuple[str, ...]]:
     alias_keys.update(str(symbol).upper() for symbol in native.accepted_symbols)
     resolved = tuple(candidates)
     return dict.fromkeys(alias_keys, resolved)
-
-
-#: Cadence jitter cap (ALM-2962): vendors emit slightly irregular timestamps
-#: (CoinGecko hourly points are sometimes spaced 3601s apart), so on short
-#: windows the measured cadence can read a hair coarser than the true one.
-_CADENCE_JITTER_CAP_SECONDS = 60
-
-
-def cadence_is_coarser(cadence_seconds: int, timeframe_seconds: int) -> bool:
-    """True when a measured data cadence is GENUINELY coarser than a timeframe.
-
-    Measured cadence within 2% of the timeframe (capped at 60s absolute)
-    counts as matching: 3601s-spaced hourly points still serve 1h candles.
-    Real upsampling still refuses (ALM-2957 doctrine) — 1h data asked for
-    15m candles is 2700s coarser, far past any jitter tolerance.
-    """
-    tolerance = min(_CADENCE_JITTER_CAP_SECONDS, int(timeframe_seconds) * 2 // 100)
-    return int(cadence_seconds) - int(timeframe_seconds) > tolerance
 
 
 # Maximum price history to keep per token (covers all standard indicator periods)

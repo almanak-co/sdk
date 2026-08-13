@@ -1482,6 +1482,7 @@ async def execute_iteration_loop(
 
     # decide()-time data lanes (ALM-2951): on-demand indicators (any period,
     # tick-derivable timeframes) and engine-modeled gas, per-tick bound.
+    from almanak.framework.backtesting.pnl.cadence import cadence_is_coarser
     from almanak.framework.backtesting.pnl.engine import (
         BacktestOHLCVView,
         BacktestPoolAnalyticsReader,
@@ -1496,11 +1497,7 @@ async def execute_iteration_loop(
         build_backtest_lending_rates,
         sync_il_calculator_positions,
     )
-    from almanak.framework.backtesting.pnl.indicator_engine import (
-        cadence_is_coarser,
-        native_series_aliases,
-        timeframe_label,
-    )
+    from almanak.framework.backtesting.pnl.indicator_engine import native_series_aliases, timeframe_label
     from almanak.framework.data.lp import ILCalculator
     from almanak.framework.data.risk.metrics import PortfolioRiskCalculator
 
@@ -1892,6 +1889,7 @@ def _raise_on_indicator_timeframe_mismatch(snapshot: Any, *, tick_count: int) ->
     strategy that catches ``ValueError`` and returns HOLD, while avoiding false
     preflight failures for price-only strategies that never read indicators.
     """
+    from almanak.framework.backtesting.pnl.cadence import canonical_timeframe_for_cadence
     from almanak.framework.backtesting.pnl.indicator_engine import IndicatorTimeframeMismatchError
 
     causes = getattr(snapshot, "_critical_data_failure_causes", {})
@@ -1907,21 +1905,52 @@ def _raise_on_indicator_timeframe_mismatch(snapshot: Any, *, tick_count: int) ->
         return
 
     source, cause = mismatch
+    compatible_timeframe = canonical_timeframe_for_cadence(cause.native_seconds)
+    available_timeframe = compatible_timeframe.value if compatible_timeframe is not None else None
+    availability = available_timeframe or f"an unsupported {cause.native_seconds}s cadence"
+    recommendations = (
+        [
+            f"For an explicit indicator timeframe, request {available_timeframe} or coarser in the indicator call.",
+            f"For a strategy-default timeframe, set data_granularity to {available_timeframe} or coarser.",
+            f"Alternatively select a historical price plane with complete {cause.requested_timeframe} coverage "
+            "for the requested window, or shorten the window.",
+        ]
+        if available_timeframe is not None
+        else [
+            "Choose a historical provider or window whose native cadence is no coarser than the SDK's 1d "
+            "indicator maximum."
+        ]
+    )
+    details: dict[str, Any] = {
+        "reason_code": "PRICE_TIMEFRAME_TOO_FINE" if available_timeframe else "PRICE_CADENCE_UNSUPPORTED",
+        "source": source,
+        "requested_timeframe": cause.requested_timeframe,
+        "available_timeframe": available_timeframe,
+        "observed_interval_seconds": cause.native_seconds,
+    }
+    if available_timeframe is not None:
+        details.update(
+            {
+                "suggested_indicator_timeframe_patch": {
+                    "indicator": source,
+                    "timeframe": available_timeframe,
+                },
+                "suggested_strategy_config_patch": {"data_granularity": available_timeframe},
+            }
+        )
     raise PreflightValidationError(
         message=(
             f"Strategy indicator timeframe is incompatible with the resolved historical price data: "
             f"{source} requested {cause.requested_timeframe}, but the data plane provides "
-            f"{cause.native_timeframe}. The backtest stopped at tick {tick_count} rather than treating "
+            f"{availability}. The backtest stopped at tick {tick_count} rather than treating "
             "the unavailable indicator as a valid HOLD."
         ),
         failed_checks=["indicator_timeframe_compatibility"],
-        recommendations=[
-            f"Request {cause.native_timeframe} or a coarser timeframe in the strategy indicator call.",
-            f"Alternatively select a historical price plane with complete {cause.requested_timeframe} coverage "
-            "for the requested window, or shorten the window.",
-        ],
+        recommendations=recommendations,
         error_count=1,
         warning_count=0,
+        code="INDICATOR_TIMEFRAME_MISMATCH",
+        details=details,
     ) from cause
 
 

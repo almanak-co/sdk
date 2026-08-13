@@ -530,6 +530,16 @@ class TestGranularityHandoff:
 
         assert strategy.served == [False]
         assert exc_info.value.failed_checks == ["indicator_timeframe_compatibility"]
+        assert exc_info.value.code == "INDICATOR_TIMEFRAME_MISMATCH"
+        assert exc_info.value.details == {
+            "reason_code": "PRICE_TIMEFRAME_TOO_FINE",
+            "source": "rsi",
+            "requested_timeframe": "1h",
+            "available_timeframe": "1d",
+            "observed_interval_seconds": 86400,
+            "suggested_indicator_timeframe_patch": {"indicator": "rsi", "timeframe": "1d"},
+            "suggested_strategy_config_patch": {"data_granularity": "1d"},
+        }
         message = str(exc_info.value)
         assert "rsi requested 1h" in message
         assert "data plane provides 1d" in message

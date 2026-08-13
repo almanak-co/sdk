@@ -252,6 +252,10 @@ class HistoricalCoverage:
     provider can serve every requested tick through the requested end without
     look-ahead.  A provider may therefore report ``partial`` with a null
     contiguous bound when it has isolated data but no safe shorter window.
+    ``resolved_interval_seconds`` is the canonical cadence selected from the
+    measured observations. ``resolved_coverage_complete`` proves whether
+    every tick at that cadence is covered without look-ahead; ``None`` means
+    the provider did not establish that fact.
     """
 
     status: Literal["full", "partial", "none", "unknown"]
@@ -265,6 +269,8 @@ class HistoricalCoverage:
     source_id: str | None
     interval_seconds: int
     observed_interval_seconds: int | None = None
+    resolved_interval_seconds: int | None = None
+    resolved_coverage_complete: bool | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return a stable, JSON-safe coverage payload."""
@@ -280,6 +286,8 @@ class HistoricalCoverage:
             "source_id": self.source_id,
             "interval_seconds": self.interval_seconds,
             "observed_interval_seconds": self.observed_interval_seconds,
+            "resolved_interval_seconds": self.resolved_interval_seconds,
+            "resolved_coverage_complete": self.resolved_coverage_complete,
         }
 
 

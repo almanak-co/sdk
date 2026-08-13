@@ -107,6 +107,7 @@ from almanak.framework.backtesting.models import (
 
 # Phase helpers extracted from _run_backtest (Phase 6C.2).
 from almanak.framework.backtesting.pnl import _engine_helpers
+from almanak.framework.backtesting.pnl.cadence import cadence_is_coarser, canonical_timeframe_for_cadence
 from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 from almanak.framework.backtesting.pnl.data_provider import (
     HistoricalCoverage,
@@ -128,7 +129,9 @@ from almanak.framework.backtesting.pnl.error_handling import (
     BacktestErrorHandler,
     PreflightValidationError,
 )
-from almanak.framework.backtesting.pnl.indicator_engine import BacktestIndicatorEngine
+from almanak.framework.backtesting.pnl.indicator_engine import (
+    BacktestIndicatorEngine,
+)
 from almanak.framework.backtesting.pnl.intent_support import GENERIC_SIMULATED_INTENT_TYPES
 from almanak.framework.backtesting.pnl.logging_utils import (
     BacktestLogger,
@@ -3021,12 +3024,143 @@ def _cash_equivalent_symbol(token: TokenRef) -> str | None:
     return symbol if symbol in CASH_EQUIVALENT_STABLECOINS else None
 
 
-def _canonical_coverage_timeframe(observed_interval_seconds: int) -> OHLCVTimeframe:
-    """Return the finest canonical cadence no finer than provider observations."""
-    for timeframe in CANONICAL_OHLCV_TIMEFRAMES:
-        if timeframe.seconds >= observed_interval_seconds:
-            return timeframe
-    return CANONICAL_OHLCV_TIMEFRAMES[-1]
+def _canonical_coverage_timeframe(observed_interval_seconds: int) -> OHLCVTimeframe | None:
+    """Return the finest compatible canonical cadence, if one exists."""
+    return canonical_timeframe_for_cadence(observed_interval_seconds)
+
+
+def _coverage_timeframe_label(interval_seconds: int) -> str:
+    """Render canonical coverage cadences without inventing aliases."""
+    return next(
+        (timeframe.value for timeframe in CANONICAL_OHLCV_TIMEFRAMES if timeframe.seconds == interval_seconds),
+        f"{interval_seconds}s",
+    )
+
+
+def _coverage_cadence_mismatches(
+    discoveries: list[_TokenCoverageDiscovery],
+) -> list[dict[str, Any]]:
+    """Describe assets whose provider-native spacing is coarser than requested."""
+    mismatches: list[dict[str, Any]] = []
+    for item in discoveries:
+        coverage = item.coverage
+        observed = coverage.observed_interval_seconds
+        if (
+            coverage.status == "full"
+            or observed is None
+            or not cadence_is_coarser(
+                observed,
+                coverage.interval_seconds,
+            )
+        ):
+            continue
+        compatible_timeframe = _canonical_coverage_timeframe(observed)
+        mismatches.append(
+            {
+                "token": token_ref_display(item.token),
+                "provider": coverage.provider,
+                "requested_interval_seconds": coverage.interval_seconds,
+                "requested_timeframe": _coverage_timeframe_label(coverage.interval_seconds),
+                "observed_interval_seconds": observed,
+                "minimum_available_timeframe": (
+                    compatible_timeframe.value if compatible_timeframe is not None else None
+                ),
+            }
+        )
+    return mismatches
+
+
+def _partial_history_cadence_feedback(
+    discoveries: list[_TokenCoverageDiscovery],
+    common_range: dict[str, str] | None,
+) -> tuple[str, dict[str, Any], list[str]] | None:
+    """Build cadence-specific feedback for a partial coverage result."""
+    cadence_mismatches = _coverage_cadence_mismatches(discoveries)
+    if not cadence_mismatches:
+        return None
+
+    blocking_discoveries = [item for item in discoveries if item.coverage.status != "full"]
+    unsupported_cadence = any(item["minimum_available_timeframe"] is None for item in cadence_mismatches)
+    if unsupported_cadence:
+        return (
+            "The provider's observed price cadence is coarser than the SDK's maximum supported "
+            f"{CANONICAL_OHLCV_TIMEFRAMES[-1].value} timeframe.",
+            {
+                "reason_code": "PRICE_CADENCE_UNSUPPORTED",
+                "reason_codes": ["PRICE_CADENCE_UNSUPPORTED"],
+                "cadence_mismatches": cadence_mismatches,
+                "maximum_supported_timeframe": CANONICAL_OHLCV_TIMEFRAMES[-1].value,
+            },
+            [
+                "Choose a historical provider or window with observations no coarser than 1d; no supported "
+                "timeframe or data_granularity patch can make this series compatible."
+            ],
+        )
+
+    minimum_timeframe = max(
+        (parse_ohlcv_timeframe(item["minimum_available_timeframe"]) for item in cadence_mismatches),
+        key=lambda timeframe: timeframe.seconds,
+    )
+    cadence_only = len(cadence_mismatches) == len(blocking_discoveries) and all(
+        item.coverage.resolved_coverage_complete is True for item in blocking_discoveries
+    )
+    if cadence_only:
+        requested_timeframes = sorted({item["requested_timeframe"] for item in cadence_mismatches})
+        return (
+            "The requested price timeframe is finer than the provider's native history: "
+            f"{', '.join(requested_timeframes)} was requested, but the affected assets require "
+            f"{minimum_timeframe.value} or coarser data.",
+            {
+                "reason_code": "PRICE_TIMEFRAME_TOO_FINE",
+                "reason_codes": ["PRICE_TIMEFRAME_TOO_FINE"],
+                "cadence_mismatches": cadence_mismatches,
+                "suggested_backtest_config_patch": {"timeframe": "auto"},
+                "suggested_strategy_config_patch": {"data_granularity": minimum_timeframe.value},
+            },
+            [
+                "Set backtest timeframe='auto' so the provider can select a complete native cadence.",
+                f"If the strategy reads indicators, update data_granularity and explicit indicator timeframes to "
+                f"{minimum_timeframe.value} or coarser; otherwise the run will stop with "
+                "INDICATOR_TIMEFRAME_MISMATCH.",
+                "Alternatively choose a historical provider/window that supplies the originally requested cadence.",
+            ],
+        )
+
+    has_resolved_gap = any(item.coverage.resolved_coverage_complete is False for item in blocking_discoveries)
+    has_unverified_resolved_coverage = any(
+        item.coverage.resolved_coverage_complete is None for item in blocking_discoveries
+    )
+    reason_codes = ["PRICE_TIMEFRAME_TOO_FINE"]
+    if has_resolved_gap:
+        reason_codes.append("PRICE_RANGE_INCOMPLETE")
+    if has_unverified_resolved_coverage:
+        reason_codes.append("RESOLVED_PRICE_COVERAGE_UNVERIFIED")
+    cadence_details: dict[str, Any] = {
+        "reason_code": "MULTIPLE_PRICE_HISTORY_CONSTRAINTS",
+        "reason_codes": reason_codes,
+        "cadence_mismatches": cadence_mismatches,
+    }
+    if common_range is not None:
+        cadence_details["suggested_backtest_config_patch"] = {
+            "timeframe": "auto",
+            "start_time": common_range["start"],
+            "end_time": common_range["end"],
+        }
+    continuity_issue = (
+        "the requested date range is not fully covered"
+        if not has_unverified_resolved_coverage
+        else "complete coverage at the resolved cadence could not be verified"
+    )
+    return (
+        "Historical price coverage has multiple constraints: the requested timeframe is finer than the "
+        f"provider's {minimum_timeframe.value} native data, and {continuity_issue}.",
+        cadence_details,
+        [
+            f"Resolve both constraints before retrying: use timeframe='auto' (and {minimum_timeframe.value} or "
+            "coarser strategy indicators), then choose a date range covered by every asset.",
+            "Alternatively choose a historical provider that supplies the requested cadence and full date range.",
+        ],
+    )
 
 
 def _build_historical_coverage_check(
@@ -3072,7 +3206,13 @@ def _build_historical_coverage_check(
         "common_supported_range": common_range,
     }
     recommendations: list[str]
-    if common_range is not None:
+    cadence_feedback = (
+        _partial_history_cadence_feedback(discoveries, common_range) if code == "PARTIAL_PRICE_HISTORY" else None
+    )
+    if cadence_feedback is not None:
+        message, cadence_details, recommendations = cadence_feedback
+        details.update(cadence_details)
+    elif common_range is not None:
         patch = {"start_time": common_range["start"], "end_time": common_range["end"]}
         details["suggested_backtest_config_patch"] = patch
         recommendations = [
@@ -4445,7 +4585,27 @@ class PnLBacktester:
                     code="PRICE_TIMEFRAME_UNRESOLVED",
                     details={"assets": [_coverage_asset_details(item) for item in non_cash]},
                 )
-            resolved = _canonical_coverage_timeframe(max(observed) if observed else config.interval_seconds)
+            observed_interval = max(observed) if observed else config.interval_seconds
+            resolved_candidate = _canonical_coverage_timeframe(observed_interval)
+            if resolved_candidate is None:
+                raise PreflightValidationError(
+                    message=(
+                        f"Observed historical price cadence ({observed_interval}s) is coarser than the SDK's "
+                        f"maximum supported {CANONICAL_OHLCV_TIMEFRAMES[-1].value} timeframe"
+                    ),
+                    failed_checks=["spot_price_history"],
+                    recommendations=[
+                        "Choose a historical provider or window whose native observations are no coarser than 1d."
+                    ],
+                    error_count=1,
+                    warning_count=0,
+                    code="PRICE_CADENCE_UNSUPPORTED",
+                    details={
+                        "observed_interval_seconds": observed_interval,
+                        "maximum_supported_timeframe": CANONICAL_OHLCV_TIMEFRAMES[-1].value,
+                    },
+                )
+            resolved = resolved_candidate
             discoveries = (
                 probe
                 if resolved.seconds == probe_interval

@@ -733,6 +733,18 @@ class TestGranularityHonesty:
         with pytest.raises(ValueError, match="ALM-2957"):
             rsi_provider("WETH", period=14)  # default = tick timeframe
 
+    def test_jittered_hourly_cadence_uses_valid_canonical_patch_label(self) -> None:
+        mismatch = IndicatorTimeframeMismatchError(native_seconds=3601, requested_seconds=900)
+
+        assert mismatch.native_timeframe == "1h"
+
+    def test_cadence_coarser_than_daily_has_no_invalid_patch_label(self) -> None:
+        mismatch = IndicatorTimeframeMismatchError(native_seconds=86461, requested_seconds=3600)
+
+        assert mismatch.compatible_timeframe is None
+        assert mismatch.native_timeframe == "86461s"
+        assert "no supported canonical indicator timeframe" in str(mismatch)
+
     def test_on_demand_at_data_resolution_serves(self) -> None:
         engine = self._daily_under_hourly_engine()
         rsi_provider, _ = engine.snapshot_providers(None, 3600)

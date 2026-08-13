@@ -52,6 +52,7 @@ from almanak.framework.backtesting.config import BacktestDataConfig
 from almanak.framework.data.tokens import NATIVE_SENTINEL, TokenResolutionError, get_token_resolver
 from almanak.integrations.chains import integration_chain_id, integration_chain_map
 
+from ..cadence import canonical_timeframe_for_cadence
 from ..data_provider import (
     OHLCV,
     HistoricalCoverage,
@@ -1772,6 +1773,19 @@ class CoinGeckoDataProvider:
             contiguous_start = None
 
         observed_interval = cls._measure_granularity({source_id: usable})
+        resolved_interval: int | None = None
+        resolved_coverage_complete: bool | None = None
+        if observed_interval is not None:
+            resolved_timeframe = canonical_timeframe_for_cadence(observed_interval)
+            if resolved_timeframe is not None:
+                resolved_interval = resolved_timeframe.seconds
+                resolved_covered, resolved_total, _ = cls._coverage_grid(
+                    usable,
+                    start=start,
+                    end=end,
+                    interval_seconds=resolved_interval,
+                )
+                resolved_coverage_complete = resolved_total > 0 and resolved_covered == resolved_total
 
         return HistoricalCoverage(
             status=status,
@@ -1785,6 +1799,8 @@ class CoinGeckoDataProvider:
             source_id=source_id,
             interval_seconds=interval_seconds,
             observed_interval_seconds=observed_interval,
+            resolved_interval_seconds=resolved_interval,
+            resolved_coverage_complete=resolved_coverage_complete,
         )
 
     @staticmethod

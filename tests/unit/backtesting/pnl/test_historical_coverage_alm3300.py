@@ -248,6 +248,13 @@ async def test_preflight_rejects_cross_chain_token_ref_after_mutation() -> None:
 
 
 def test_coverage_rejects_interior_gaps_missing_end_and_lookahead() -> None:
+    coarse_but_complete = CoinGeckoDataProvider._coverage_from_candles(
+        _candles(0, 1, 2, 3, 4, 5, 6),
+        start=_START,
+        end=_END,
+        interval_seconds=900,
+        source_id="asset",
+    )
     gap = CoinGeckoDataProvider._coverage_from_candles(
         _candles(0, 1, 3, 4, 5, 6),
         start=_START,
@@ -286,7 +293,11 @@ def test_coverage_rejects_interior_gaps_missing_end_and_lookahead() -> None:
         source_id="asset",
     )
 
+    assert coarse_but_complete.status == "partial"
+    assert coarse_but_complete.resolved_interval_seconds == 3600
+    assert coarse_but_complete.resolved_coverage_complete is True
     assert gap.status == "partial"
+    assert gap.resolved_coverage_complete is False
     assert gap.earliest_contiguous_at == _START + timedelta(hours=3)
     assert missing_end.status == "partial"
     assert missing_end.earliest_contiguous_at is None
@@ -294,6 +305,8 @@ def test_coverage_rejects_interior_gaps_missing_end_and_lookahead() -> None:
     assert future_first.earliest_contiguous_at == _START + timedelta(hours=1)
     assert coarse.status == "partial"
     assert coarse.earliest_contiguous_at is None
+    assert coarse.resolved_interval_seconds == 14400
+    assert coarse.resolved_coverage_complete is True
 
 
 def test_sparse_long_window_coverage_uses_exact_grid_arithmetic() -> None:
@@ -396,10 +409,7 @@ async def test_coingecko_prior_seed_gateway_failure_is_provider_unavailable(
         if int(params["from"]) < int(_START.timestamp()):
             raise CoinGeckoGatewayProviderError("seed gateway upstream 500")
         return {
-            "prices": [
-                [int((_START + timedelta(hours=hour)).timestamp() * 1000), 10 + hour]
-                for hour in range(1, 7)
-            ]
+            "prices": [[int((_START + timedelta(hours=hour)).timestamp() * 1000), 10 + hour] for hour in range(1, 7)]
         }
 
     monkeypatch.setattr(provider._gateway_transport, "request", AsyncMock(side_effect=request))
@@ -643,6 +653,209 @@ async def test_preflight_preserves_chain_and_intersects_all_required_assets() ->
     assert ("arbitrum", _TOKEN_B) in provider.tokens_seen
     asset_a = next(asset for asset in token_check.details["assets"] if asset.get("address") == _TOKEN_A)
     assert asset_a["chain"] == "arbitrum"
+
+
+@pytest.mark.asyncio
+async def test_preflight_explains_provider_cadence_mismatch_and_config_changes() -> None:
+    class CoarseCoverageProvider(_CoverageProvider):
+        async def get_price_coverage(
+            self,
+            token: object,
+            start: datetime,
+            end: datetime,
+            interval_seconds: int,
+        ) -> HistoricalCoverage:
+            return HistoricalCoverage(
+                status="partial",
+                requested_start=start,
+                requested_end=end,
+                first_available_at=start,
+                last_available_at=end,
+                earliest_contiguous_at=None,
+                coverage_ratio=Decimal("0.25"),
+                provider="coingecko",
+                source_id=token_ref_display(token),
+                interval_seconds=interval_seconds,
+                observed_interval_seconds=3601,
+                resolved_interval_seconds=3600,
+                resolved_coverage_complete=True,
+            )
+
+    config = _config()
+    config.timeframe = "15m"
+    backtester = PnLBacktester(data_provider=CoarseCoverageProvider(), fee_models={}, slippage_models={})
+
+    with pytest.raises(PreflightValidationError) as raised:
+        await _engine_helpers.run_preflight(
+            backtester,
+            config,
+            BacktestLogger(backtest_id="cadence-feedback", json_format=False),
+        )
+
+    error = raised.value
+    assert error.code == "PARTIAL_PRICE_HISTORY"
+    assert error.details["reason_code"] == "PRICE_TIMEFRAME_TOO_FINE"
+    assert error.details["suggested_backtest_config_patch"] == {"timeframe": "auto"}
+    assert error.details["suggested_strategy_config_patch"] == {"data_granularity": "1h"}
+    assert error.details["cadence_mismatches"][0] == {
+        "token": f"arbitrum:{_TOKEN_A}",
+        "provider": "coingecko",
+        "requested_interval_seconds": 900,
+        "requested_timeframe": "15m",
+        "observed_interval_seconds": 3601,
+        "minimum_available_timeframe": "1h",
+    }
+    assert "15m was requested" in str(error)
+    assert "1h or coarser" in str(error)
+    assert any("data_granularity" in recommendation for recommendation in error.recommendations)
+
+
+@pytest.mark.asyncio
+async def test_preflight_requires_combined_patch_for_cadence_and_range_gaps() -> None:
+    class CoarseAndLateCoverageProvider(_CoverageProvider):
+        async def get_price_coverage(
+            self,
+            token: object,
+            start: datetime,
+            end: datetime,
+            interval_seconds: int,
+        ) -> HistoricalCoverage:
+            first = start + timedelta(hours=2)
+            return HistoricalCoverage(
+                status="partial",
+                requested_start=start,
+                requested_end=end,
+                first_available_at=first,
+                last_available_at=end,
+                earliest_contiguous_at=first,
+                coverage_ratio=Decimal("0.2"),
+                provider="coingecko",
+                source_id=token_ref_display(token),
+                interval_seconds=interval_seconds,
+                observed_interval_seconds=3600,
+                resolved_interval_seconds=3600,
+                resolved_coverage_complete=False,
+            )
+
+    config = _config()
+    config.timeframe = "15m"
+    backtester = PnLBacktester(
+        data_provider=CoarseAndLateCoverageProvider(),
+        fee_models={},
+        slippage_models={},
+    )
+
+    with pytest.raises(PreflightValidationError) as raised:
+        await _engine_helpers.run_preflight(
+            backtester,
+            config,
+            BacktestLogger(backtest_id="mixed-cadence-range-feedback", json_format=False),
+        )
+
+    error = raised.value
+    assert error.details["reason_code"] == "MULTIPLE_PRICE_HISTORY_CONSTRAINTS"
+    assert error.details["reason_codes"] == ["PRICE_TIMEFRAME_TOO_FINE", "PRICE_RANGE_INCOMPLETE"]
+    assert error.details["suggested_backtest_config_patch"] == {
+        "timeframe": "auto",
+        "start_time": "2026-07-15T02:00:00Z",
+        "end_time": "2026-07-15T06:00:00Z",
+    }
+    assert "multiple constraints" in str(error)
+
+
+@pytest.mark.asyncio
+async def test_preflight_does_not_claim_cadence_only_without_continuity_proof() -> None:
+    class UnverifiedCoarseCoverageProvider(_CoverageProvider):
+        async def get_price_coverage(
+            self,
+            token: object,
+            start: datetime,
+            end: datetime,
+            interval_seconds: int,
+        ) -> HistoricalCoverage:
+            return HistoricalCoverage(
+                status="partial",
+                requested_start=start,
+                requested_end=end,
+                first_available_at=start + timedelta(hours=1),
+                last_available_at=end,
+                earliest_contiguous_at=None,
+                coverage_ratio=Decimal("0.25"),
+                provider=self.provider_name,
+                source_id=token_ref_display(token),
+                interval_seconds=interval_seconds,
+                observed_interval_seconds=3600,
+            )
+
+    config = _config()
+    config.timeframe = "15m"
+    backtester = PnLBacktester(
+        data_provider=UnverifiedCoarseCoverageProvider(),
+        fee_models={},
+        slippage_models={},
+    )
+
+    with pytest.raises(PreflightValidationError) as raised:
+        await _engine_helpers.run_preflight(
+            backtester,
+            config,
+            BacktestLogger(backtest_id="unverified-cadence-feedback", json_format=False),
+        )
+
+    error = raised.value
+    assert error.details["reason_code"] == "MULTIPLE_PRICE_HISTORY_CONSTRAINTS"
+    assert error.details["reason_codes"] == [
+        "PRICE_TIMEFRAME_TOO_FINE",
+        "RESOLVED_PRICE_COVERAGE_UNVERIFIED",
+    ]
+    assert "suggested_backtest_config_patch" not in error.details
+
+
+@pytest.mark.asyncio
+async def test_preflight_does_not_patch_cadence_coarser_than_daily() -> None:
+    class UnsupportedCadenceProvider(_CoverageProvider):
+        async def get_price_coverage(
+            self,
+            token: object,
+            start: datetime,
+            end: datetime,
+            interval_seconds: int,
+        ) -> HistoricalCoverage:
+            return HistoricalCoverage(
+                status="partial",
+                requested_start=start,
+                requested_end=end,
+                first_available_at=start,
+                last_available_at=end,
+                earliest_contiguous_at=None,
+                coverage_ratio=Decimal("0.01"),
+                provider=self.provider_name,
+                source_id=token_ref_display(token),
+                interval_seconds=interval_seconds,
+                observed_interval_seconds=86461,
+            )
+
+    config = _config()
+    config.timeframe = "1h"
+    backtester = PnLBacktester(
+        data_provider=UnsupportedCadenceProvider(),
+        fee_models={},
+        slippage_models={},
+    )
+
+    with pytest.raises(PreflightValidationError) as raised:
+        await _engine_helpers.run_preflight(
+            backtester,
+            config,
+            BacktestLogger(backtest_id="unsupported-cadence-feedback", json_format=False),
+        )
+
+    error = raised.value
+    assert error.details["reason_code"] == "PRICE_CADENCE_UNSUPPORTED"
+    assert error.details["maximum_supported_timeframe"] == "1d"
+    assert error.details["cadence_mismatches"][0]["minimum_available_timeframe"] is None
+    assert "suggested_backtest_config_patch" not in error.details
+    assert "suggested_strategy_config_patch" not in error.details
 
 
 @pytest.mark.asyncio
