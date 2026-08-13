@@ -123,6 +123,7 @@ class ConsolidationOutcome:
 
     planned: int = 0
     succeeded: int = 0
+    skipped: int = 0
     failed: int = 0
     warnings: list[str] = field(default_factory=list)
     decisions: list[ConsolidationDecision] = field(default_factory=list)
@@ -878,6 +879,7 @@ def fold_consolidation_outcome(result: TeardownResult, outcome: ConsolidationOut
         result,
         consolidation_planned=outcome.planned,
         consolidation_succeeded=outcome.succeeded,
+        consolidation_skipped=outcome.skipped,
         consolidation_failed=outcome.failed,
         consolidation_warnings=list(outcome.warnings),
         consolidation_target=outcome.target,

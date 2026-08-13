@@ -1241,19 +1241,25 @@ def _render_consolidation_summary(manager: Any, deployment_id: str) -> None:
     if consolidation is None:
         return
     succeeded = consolidation.get("succeeded") or 0
+    skipped = consolidation.get("skipped") or 0
     warnings = consolidation.get("warnings") or []
-    if consolidation.get("failed"):
+    failed = consolidation.get("failed") or 0
+    if failed:
         click.secho(
-            f"  WARNING: {consolidation['failed']} consolidation swap(s) failed; "
-            "wallet holds residual non-target tokens.",
+            f"  WARNING: {failed} consolidation swap(s) failed; wallet holds residual non-target tokens.",
             fg="yellow",
         )
-        _echo_warnings(warnings, "    - ")
-    elif succeeded:
+    if succeeded:
         target = consolidation.get("target_token") or "target token"
         click.echo(f"  consolidated {succeeded} token(s) → {target}")
-        # Warnings matter on success too — e.g. the wallet-scope disclosure
-        # or per-token skips (no price) ride along with a successful run.
+    if skipped:
+        click.secho(
+            f"  consolidation: {skipped} planned swap(s) skipped; no transaction executed.",
+            fg="yellow",
+        )
+    if failed or succeeded or skipped:
+        # Warnings can describe any mixture of landed, failed, and skipped
+        # swaps. Emit them once after rendering every applicable count.
         _echo_warnings(warnings, "    - ")
     elif not consolidation.get("planned"):
         _echo_warnings(warnings, "  consolidation: ")

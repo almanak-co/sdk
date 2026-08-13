@@ -1083,9 +1083,16 @@ def map_teardown_result(
     if teardown_result.success:
         logger.info(
             f"🛑 {deployment_id} teardown complete via TeardownManager "
-            f"({teardown_result.intents_succeeded}/{teardown_result.intents_total} intents, "
+            f"({teardown_result.intents_executed}/{teardown_result.intents_total} intents executed, "
             f"{teardown_result.duration_seconds:.1f}s)"
         )
+        if teardown_result.intents_skipped > 0:
+            logger.warning(
+                "%s teardown execution: %d planned intent(s) skipped; "
+                "no transaction submitted for the skipped intent(s)",
+                deployment_id,
+                teardown_result.intents_skipped,
+            )
         # VIB-5011: surface the token-consolidation summary. Consolidation
         # failure never flips success — log loud so the operator knows the
         # wallet holds residual non-target tokens.
@@ -1104,7 +1111,19 @@ def map_teardown_result(
                 deployment_id,
                 teardown_result.consolidation_succeeded,
             )
-        elif teardown_result.consolidation_warnings:
+        if teardown_result.consolidation_skipped > 0:
+            logger.warning(
+                "%s token consolidation: %d planned swap(s) skipped; "
+                "no transaction submitted for the skipped swap(s). Warnings: %s",
+                deployment_id,
+                teardown_result.consolidation_skipped,
+                "; ".join(teardown_result.consolidation_warnings) or "none",
+            )
+        elif (
+            teardown_result.consolidation_failed == 0
+            and teardown_result.consolidation_succeeded == 0
+            and teardown_result.consolidation_warnings
+        ):
             # VIB-5393 (Case A): a below-dust material residual produces
             # planned=succeeded=failed=0, so it hits neither branch above. On a
             # hosted run the passive operator surface IS this runner log — the
@@ -1150,6 +1169,10 @@ def map_teardown_result(
             # not intents landed. ``mark_completed`` lifts ``result["positions_closed"]``
             # onto the column (preferring it over the legacy ``result["intents"]``).
             # The intent signal is preserved alongside under intent-named keys.
+            # VIB-5993: keep the legacy successful-intent fallback until skip
+            # outcomes carry typed reasons. A zero-balance skip may already be
+            # closed, while a clamp skip may be stranded; the aggregate skipped
+            # count cannot truthfully decide a position count between them.
             positions_closed_count = (
                 teardown_result.positions_closed
                 if teardown_result.has_position_breakdown
@@ -1169,6 +1192,8 @@ def map_teardown_result(
                     "verification_status": teardown_result.verification_status.value,
                     "intents": teardown_result.intents_succeeded,  # back-compat alias
                     "intents_succeeded": teardown_result.intents_succeeded,
+                    "intents_skipped": teardown_result.intents_skipped,
+                    "intents_executed": teardown_result.intents_executed,
                     "intents_total": teardown_result.intents_total,
                     "mode": mode_str,
                     "duration_s": teardown_result.duration_seconds,
@@ -1177,6 +1202,7 @@ def map_teardown_result(
                     "consolidation": {
                         "planned": teardown_result.consolidation_planned,
                         "succeeded": teardown_result.consolidation_succeeded,
+                        "skipped": teardown_result.consolidation_skipped,
                         "failed": teardown_result.consolidation_failed,
                         "warnings": list(teardown_result.consolidation_warnings),
                         # The target the phase ACTUALLY consolidated into, read

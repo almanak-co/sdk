@@ -1757,10 +1757,18 @@ class TeardownManager:
                 market=market,
             )
 
-            # _execute_intents counts only the loop it ran (offset onward),
-            # so its succeeded/failed totals ARE the consolidation counts.
-            succeeded = min(result.intents_succeeded, len(plan.intents))
-            failed = max(len(plan.intents) - succeeded, 0)
+            # ``_execute_intents`` treats safety/no-balance skips as successful
+            # completion for resume and ``all_succeeded`` semantics. They are
+            # not executed transactions, however, and must not be reported as
+            # successful consolidation swaps.
+            skipped = min(result.intents_skipped, len(plan.intents))
+            succeeded = min(max(result.intents_succeeded - skipped, 0), len(plan.intents))
+            failed = max(len(plan.intents) - succeeded - skipped, 0)
+            if skipped:
+                warnings.append(
+                    f"{skipped} planned consolidation swap(s) skipped by execution safety guards; "
+                    "no transaction was executed for those intents"
+                )
             if failed:
                 warnings.append(
                     f"{failed} consolidation swap(s) failed ({result.error or 'see logs'}) — "
@@ -1769,6 +1777,7 @@ class TeardownManager:
             return ConsolidationOutcome(
                 planned=len(plan.intents),
                 succeeded=succeeded,
+                skipped=skipped,
                 failed=failed,
                 warnings=warnings,
                 decisions=plan.decisions,
@@ -3043,6 +3052,7 @@ class TeardownManager:
                         intents_total=len(intents),
                         intents_succeeded=succeeded,
                         intents_failed=failed,
+                        intents_skipped=skipped,
                         starting_value_usd=positions.total_value_usd,
                         final_value_usd=positions.total_value_usd - total_costs,
                         total_costs_usd=total_costs,
@@ -3098,6 +3108,7 @@ class TeardownManager:
             intents_total=len(intents),
             intents_succeeded=succeeded,
             intents_failed=failed,
+            intents_skipped=skipped,
             starting_value_usd=positions.total_value_usd,
             final_value_usd=final_value,
             total_costs_usd=total_costs,

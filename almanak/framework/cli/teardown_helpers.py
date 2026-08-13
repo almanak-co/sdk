@@ -1648,7 +1648,9 @@ def display_teardown_result(
         click.echo(click.style(f"[FAILED] Teardown failed: {result.error}", fg="red"))
 
     click.echo(f"  Duration: {result.duration_seconds:.1f}s")
-    click.echo(f"  Intents executed: {result.intents_succeeded}/{result.intents_total}")
+    click.echo(f"  Intents executed: {result.intents_executed}/{result.intents_total}")
+    if result.intents_skipped > 0:
+        click.echo(f"  Intents skipped: {result.intents_skipped}")
     if result.intents_failed > 0:
         click.echo(f"  Intents failed: {result.intents_failed}")
     click.echo(f"  Starting value: ${result.starting_value_usd:,.2f}")
@@ -1727,6 +1729,9 @@ def update_teardown_requests_lifecycle(
             existing.positions_failed = max(result.positions_total - result.positions_closed, 0)
         else:
             existing.positions_total = max(existing.positions_total, result.intents_total)
+            # VIB-5993: aggregate skips cannot distinguish an already-flat
+            # zero-balance no-op from a clamp-stranded position. Preserve the
+            # legacy fallback until typed skip reasons can drive this count.
             existing.positions_closed = result.intents_succeeded
             existing.positions_failed = result.intents_failed
         existing.completed_at = datetime.now(UTC)

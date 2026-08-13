@@ -607,6 +607,17 @@ class TeardownResult:
     # Final state
     final_balances: dict[str, Decimal]  # {token: amount}
 
+    # No-op intents are complete for resume/all_succeeded semantics, so they
+    # remain included in ``intents_succeeded``. Keep the subset explicit as
+    # well: callers that report transactions executed must subtract skips
+    # rather than presenting a safety-guard refusal as an on-chain action.
+    intents_skipped: int = 0
+
+    @property
+    def intents_executed(self) -> int:
+        """Return intents that produced execution, excluding completed no-ops."""
+        return max(self.intents_succeeded - self.intents_skipped, 0)
+
     # If failed
     error: str | None = None
     recovery_options: list[str] = field(default_factory=list)
@@ -631,6 +642,7 @@ class TeardownResult:
     # keep seeing COMPLETED.
     consolidation_planned: int = 0
     consolidation_succeeded: int = 0
+    consolidation_skipped: int = 0
     consolidation_failed: int = 0
     consolidation_warnings: list[str] = field(default_factory=list)
     # The target the consolidation phase ACTUALLY used, after chain-aware

@@ -849,6 +849,7 @@ def _result(
     intents_total=2,
     intents_succeeded=2,
     intents_failed=0,
+    intents_skipped=0,
     duration=10.0,
     starting=Decimal("100"),
     final=Decimal("99"),
@@ -865,6 +866,8 @@ def _result(
         intents_total=intents_total,
         intents_succeeded=intents_succeeded,
         intents_failed=intents_failed,
+        intents_skipped=intents_skipped,
+        intents_executed=max(intents_succeeded - intents_skipped, 0),
         duration_seconds=duration,
         starting_value_usd=starting,
         final_value_usd=final,
@@ -897,6 +900,19 @@ class TestDisplayTeardownResult:
             output = out.getvalue().decode()
         assert "[FAILED] Teardown failed: oops" in output
         assert "Intents failed: 1" in output
+
+    def test_skipped_intent_is_not_rendered_as_executed(self):
+        runner = CliRunner()
+        with runner.isolation() as (out, _err):
+            th.display_teardown_result(
+                _result(intents_total=2, intents_succeeded=2, intents_skipped=1),
+                "my-strat",
+                lambda sid: f"NOOP {sid}",
+            )
+            output = out.getvalue().decode()
+        assert "Intents executed: 1/2" in output
+        assert output.count("Intents executed:") == 1
+        assert "Intents skipped: 1" in output
 
     def test_no_op_path_uses_canonical_message(self):
         # VIB-3705: success + intents_total=0 → no-op message instead of
@@ -1014,6 +1030,32 @@ class TestUpdateTeardownRequestsLifecycle:
         assert existing.positions_closed == 2
         assert existing.positions_failed == 1
         assert existing.status == TeardownStatus.FAILED
+
+    def test_existing_request_preserves_successful_fallback_for_ambiguous_skip(self):
+        """VIB-5993: aggregate skips cannot decide whether a position is closed."""
+        from almanak.framework.teardown import TeardownStatus
+
+        existing = SimpleNamespace(
+            positions_total=0,
+            positions_closed=0,
+            positions_failed=0,
+            completed_at=None,
+            status=None,
+        )
+        tsm = MagicMock()
+        tsm.get_active_request.return_value = existing
+
+        th.update_teardown_requests_lifecycle(
+            deployment_id="my-strat",
+            mode="SOFT",
+            result=_result(intents_total=2, intents_succeeded=2, intents_skipped=1),
+            state_manager_provider=lambda: tsm,
+        )
+
+        assert existing.positions_closed == 2
+        assert existing.positions_failed == 0
+        assert existing.status == TeardownStatus.COMPLETED
+        tsm.update_request.assert_called_once_with(existing)
 
     def test_updates_existing_request_prefers_verified_positions(self):
         """VIB-5085: when ``execute()`` stamped a verified position breakdown

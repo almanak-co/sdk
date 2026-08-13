@@ -571,6 +571,13 @@ class TestFoldOutcome:
         assert folded.accounting_degraded is True
         assert folded.accounting_degraded_count == 2
 
+    def test_skipped_count_propagates_without_fabricating_success(self):
+        outcome = ConsolidationOutcome(planned=1, succeeded=0, skipped=1, failed=0)
+        folded = fold_consolidation_outcome(self._result(), outcome)
+        assert folded.success is True
+        assert folded.consolidation_succeeded == 0
+        assert folded.consolidation_skipped == 1
+
 
 class MemoMarket(FakeMarket):
     """Snapshot double with a memoized balance layer mirroring MarketSnapshot:
@@ -813,9 +820,7 @@ class TestSwapProtocolRouting:
             balances={"WETH": Decimal("0.011"), "ARB": Decimal("50"), "USDC": Decimal("12")},
             prices={"WETH": Decimal("1650"), "ARB": Decimal("1.2"), "USDC": Decimal("1")},
         )
-        plan = _plan(
-            market=market, universe={"WETH", "ARB", "USDC"}, swap_protocol="aerodrome"
-        )
+        plan = _plan(market=market, universe={"WETH", "ARB", "USDC"}, swap_protocol="aerodrome")
         assert len(plan.intents) == 2
         assert {i.protocol for i in plan.intents} == {"aerodrome"}
 

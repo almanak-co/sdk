@@ -589,8 +589,13 @@ class TestRunnerLaneHook:
 
 
 class TestRunTokenConsolidationExecution:
-    def _manager(self, *, market_prices=None, commit_outcomes=None):
+    def _manager(self, *, market_prices=None, commit_outcomes=None, tracked_map=None):
         helpers, commit_calls = _make_commit_helpers(commit_outcomes=commit_outcomes)
+        if tracked_map is not None:
+            helpers = TeardownRunnerHelpers(
+                commit=helpers.commit,
+                get_tracked_swap_inventory=lambda _strategy: tracked_map,
+            )
         sm = MagicMock(name="state_adapter")
         sm.save_teardown_state = AsyncMock()
         mgr = TeardownManager(
@@ -643,6 +648,36 @@ class TestRunTokenConsolidationExecution:
         assert state.completed_intents == 2
         # Wallet-scope disclosure lands on the outcome (and thus result_json).
         assert any("wallet-scoped" in w for w in outcome.warnings)
+
+    @pytest.mark.asyncio
+    async def test_safety_skipped_swap_is_not_reported_as_executed(self):
+        """A clamp no-op completes the plan without becoming a transaction."""
+        mgr, commit_calls = self._manager(tracked_map={"USDT": Decimal("1")})
+        market = FakeMarket(
+            balances={"WETH": Decimal("0.011"), "USDC": Decimal("12")},
+            prices={"WETH": Decimal("1650"), "USDC": Decimal("1")},
+        )
+        state = _make_state(pending=[{"intent_type": "LP_CLOSE", "chain": CHAIN}], completed=1)
+
+        outcome = await mgr.run_token_consolidation(
+            _make_strategy(),
+            teardown_id=state.teardown_id,
+            teardown_state=state,
+            mode=TeardownMode.SOFT,
+            market=market,
+            price_oracle={"WETH": Decimal("1650"), "USDC": Decimal("1")},
+            positions=_make_positions(),
+            closing_intents=[{"intent_type": "LP_CLOSE", "chain": CHAIN}],
+            is_auto_mode=True,
+        )
+
+        assert outcome.planned == 1
+        assert outcome.succeeded == 0
+        assert outcome.skipped == 1
+        assert outcome.failed == 0
+        assert mgr.orchestrator.execute.await_count == 0
+        assert commit_calls == []
+        assert any("no transaction was executed" in warning for warning in outcome.warnings)
 
     @pytest.mark.asyncio
     async def test_aerodrome_closing_intents_route_consolidation_through_aerodrome(self):
@@ -985,6 +1020,7 @@ class TestResultJsonContract:
 
         teardown_result = _replace(
             _result(success=True),
+            intents_skipped=1,
             consolidation_planned=1,
             consolidation_succeeded=0,
             consolidation_failed=1,
@@ -1010,10 +1046,92 @@ class TestResultJsonContract:
         _, kwargs = state_manager.mark_completed.call_args
         consolidation = kwargs["result"]["consolidation"]
         assert consolidation["planned"] == 1
+        assert consolidation["skipped"] == 0
         assert consolidation["failed"] == 1
         # Reads the RESOLVED target off the result, NOT request.target_token.
         assert consolidation["target_token"] == "USDG"
         assert consolidation["warnings"] == ["1 consolidation swap(s) failed"]
+        assert kwargs["result"]["intents_skipped"] == 1
+        assert kwargs["result"]["intents_executed"] == teardown_result.intents_executed
+
+    def test_closing_skip_fires_runner_warning_and_is_not_executed(self, caplog):
+        """A closing-phase no-op stays successful without masquerading as a transaction."""
+        import logging
+        from dataclasses import replace as _replace
+
+        from almanak.framework.runner._teardown_helpers import map_teardown_result
+
+        runner = MagicMock()
+        runner._calculate_duration_ms = MagicMock(return_value=10)
+        state_manager = MagicMock()
+        teardown_result = _replace(
+            _result(success=True),
+            intents_total=2,
+            intents_succeeded=2,
+            intents_skipped=1,
+            has_position_breakdown=False,
+        )
+
+        with caplog.at_level(logging.INFO, logger="almanak.framework.runner.strategy_runner"):
+            map_teardown_result(
+                runner,
+                _make_strategy(),
+                datetime.now(UTC),
+                teardown_result,
+                TeardownMode.SOFT,
+                MagicMock(),
+                state_manager,
+            )
+
+        messages = [record.getMessage() for record in caplog.records]
+        assert any("1/2 intents executed" in message for message in messages)
+        assert any(
+            "1 planned intent(s) skipped; no transaction submitted for the skipped intent(s)" in message
+            for message in messages
+        )
+        assert not any("🛑" in message for message in messages if "planned intent(s) skipped" in message)
+        result = state_manager.mark_completed.call_args.kwargs["result"]
+        assert result["positions_closed"] == teardown_result.intents_succeeded
+        assert result["intents_executed"] == 1
+
+    def test_safety_skip_fires_runner_warning(self, caplog):
+        """Hosted operators see a mixed execution/skip outcome without actively polling."""
+        import logging
+        from dataclasses import replace as _replace
+
+        from almanak.framework.runner._teardown_helpers import map_teardown_result
+
+        runner = MagicMock()
+        runner._calculate_duration_ms = MagicMock(return_value=10)
+        state_manager = MagicMock()
+        teardown_result = _replace(
+            _result(success=True),
+            consolidation_planned=2,
+            consolidation_succeeded=1,
+            consolidation_skipped=1,
+            consolidation_failed=0,
+            consolidation_warnings=["one swap was safety-skipped"],
+        )
+
+        with caplog.at_level(logging.INFO, logger="almanak.framework.runner.strategy_runner"):
+            map_teardown_result(
+                runner,
+                _make_strategy(),
+                datetime.now(UTC),
+                teardown_result,
+                TeardownMode.SOFT,
+                MagicMock(),
+                state_manager,
+            )
+
+        messages = [record.getMessage() for record in caplog.records]
+        assert any("1 swap(s) executed" in message for message in messages)
+        assert any(
+            "1 planned swap(s) skipped; no transaction submitted for the skipped swap(s)" in message
+            for message in messages
+        )
+        assert not any("🛑" in message for message in messages if "planned swap(s) skipped" in message)
+        assert any("one swap was safety-skipped" in record.getMessage() for record in caplog.records)
 
     def test_below_dust_only_residual_fires_runner_warning(self, caplog):
         """VIB-5393 (Case A): a below-dust material residual produces

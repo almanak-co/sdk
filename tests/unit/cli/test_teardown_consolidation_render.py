@@ -116,6 +116,44 @@ class TestRenderConsolidationSummary:
         out = _render_output(manager)
         assert "consolidated 1 token(s) → target token" in out
 
+    def test_safety_skip_does_not_render_as_consolidated(self):
+        manager = _manager_with(
+            {
+                "consolidation": {
+                    "planned": 1,
+                    "succeeded": 0,
+                    "skipped": 1,
+                    "failed": 0,
+                    "warnings": ["no transaction was executed for those intents"],
+                }
+            }
+        )
+        out = _render_output(manager)
+        assert "1 planned swap(s) skipped; no transaction executed" in out
+        assert "consolidated" not in out
+        assert "no transaction was executed" in out
+
+    @pytest.mark.parametrize("failed", [0, 1])
+    def test_mixed_outcome_renders_skip_independently(self, failed):
+        manager = _manager_with(
+            {
+                "consolidation": {
+                    "planned": 3,
+                    "succeeded": 1,
+                    "skipped": 1,
+                    "failed": failed,
+                    "warnings": ["one swap was safety-skipped"],
+                    "target_token": "USDC",
+                }
+            }
+        )
+        out = _render_output(manager)
+        assert "consolidated 1 token(s) → USDC" in out
+        assert "1 planned swap(s) skipped; no transaction executed" in out
+        assert out.count("one swap was safety-skipped") == 1
+        if failed:
+            assert "WARNING: 1 consolidation swap(s) failed" in out
+
     def test_nothing_planned_prints_skip_warnings(self):
         manager = _manager_with(
             {
