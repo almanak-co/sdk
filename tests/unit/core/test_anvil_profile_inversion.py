@@ -17,8 +17,8 @@ from __future__ import annotations
 from almanak.core.chains import ChainRegistry
 from almanak.core.chains._helpers import (
     anvil_balance_slots_by_address_map,
-    anvil_balance_storage_seeds_by_address_map,
     anvil_balance_slots_map,
+    anvil_balance_storage_seeds_by_address_map,
     anvil_block_gas_limit_map,
     anvil_funding_tokens_map,
     anvil_whale_tokens_by_address_map,
@@ -53,6 +53,7 @@ FROZEN_TOKEN_ADDRESSES: dict[str, dict[str, str]] = {
         "swETH": "0xf951E335afb289353dc249e82926178EaC7DEd78",
         "ankrETH": "0xE95A203B1a91a908F9B9CE46459d101078c2c3cb",
         "pufETH": "0xD9A442856C234a39a81a089C06451EBAa4306a72",
+        "USDf": "0xFa2B947eEc368f42195f24F36d2aF29f7c24CeC2",
     },
     "optimism": {
         "WETH": "0x4200000000000000000000000000000000000006",
@@ -219,6 +220,7 @@ FROZEN_KNOWN_BALANCE_SLOTS: dict[str, dict[str, int]] = {
 FROZEN_WHALE_FUNDED_TOKENS: dict[str, dict[str, str]] = {
     "ethereum": {
         "USDC": "0x37305B1cD40574E4C5Ce33f8e8306Be057fD7341",
+        "USDf": "0x77134cbC06cB00b66F4c7e623D5fdBF6777635EC",
     },
     "base": {
         "CBBTC": "0xBdb9300b7CDE636d9cD4AFF00f6F009fFBBc8EE6",

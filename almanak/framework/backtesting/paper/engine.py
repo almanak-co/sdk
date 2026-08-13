@@ -1500,9 +1500,33 @@ class PaperTrader:
         if not balances:
             return
 
-        success = await self.fork_manager.fund_tokens(wallet_address, balances)
+        resolver = _get_resolver()
+        address_balances: dict[str, Decimal] = {}
+        identities: dict[str, str] = {}
+        for token_key, amount in balances.items():
+            address = self._bootstrap_token_address(token_key, resolver)
+            if address is None:
+                raise RuntimeError(
+                    f"Paper Anvil funding could not resolve ERC-20 token {token_key!r} "
+                    f"on {self.config.chain}; refusing to continue"
+                )
+
+            identity = address.lower()
+            if identity in identities:
+                raise RuntimeError(
+                    "Paper Anvil funding received duplicate token identities "
+                    f"{identities[identity]!r} and {token_key!r} for {address}; refusing to continue"
+                )
+            identities[identity] = token_key
+            address_balances[address] = amount
+
+        success = await self.fork_manager.fund_tokens(wallet_address, address_balances)
         if not success:
-            logger.warning(f"[{self._backtest_id}] Failed to fund some ERC-20 tokens")
+            raise RuntimeError(
+                "Paper Anvil funding could not provision every requested ERC-20 asset; "
+                "refusing to continue with an under-funded fork. "
+                f"Token addresses: {list(address_balances)}"
+            )
 
     async def _fund_sync_wallet_balances(
         self,

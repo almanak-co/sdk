@@ -534,6 +534,57 @@ def test_cbbtc_base_whale_entry_present():
     assert "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf" in fm.WHALE_FUNDED_TOKENS["base"]
 
 
+class TestUsdfWhaleFunding:
+    """ALM-3254: exact Ethereum USDf uses a real transfer, not proxy-slot probing."""
+
+    USDF_ADDRESS = "0xfa2b947eec368f42195f24f36d2af29f7c24cec2"
+    PASSIVE_HOLDER = "0x77134cbC06cB00b66F4c7e623D5fdBF6777635EC"
+    WALLET = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+
+    def test_exact_usdf_address_has_pinned_whale_recipe(self) -> None:
+        assert fm.WHALE_FUNDED_TOKENS["ethereum"][self.USDF_ADDRESS] == self.PASSIVE_HOLDER
+
+    @pytest.mark.asyncio()
+    async def test_exact_usdf_address_selects_whale_and_never_storage(self) -> None:
+        manager = _make_running_manager(chain="ethereum")
+        with (
+            patch.object(manager, "_fund_token_via_whale", new_callable=AsyncMock, return_value=True) as whale,
+            patch.object(manager, "_set_balance_at_slot", new_callable=AsyncMock) as known_slot,
+            patch.object(manager, "_fund_token_via_storage", new_callable=AsyncMock) as brute_force,
+            patch.object(manager, "_rpc_call_raw", new_callable=AsyncMock) as rpc,
+        ):
+            result = await manager.fund_tokens(
+                self.WALLET,
+                {self.USDF_ADDRESS.upper().replace("0X", "0x"): Decimal("1")},
+            )
+
+        assert result is True
+        whale.assert_awaited_once_with(
+            self.WALLET,
+            self.USDF_ADDRESS,
+            hex(10**18),
+            self.PASSIVE_HOLDER,
+            "USDF",
+        )
+        known_slot.assert_not_awaited()
+        brute_force.assert_not_awaited()
+        rpc.assert_not_awaited()
+
+    @pytest.mark.asyncio()
+    async def test_failed_usdf_whale_transfer_fails_loud_without_anvil_deal(self) -> None:
+        manager = _make_running_manager(chain="ethereum")
+        with (
+            patch.object(manager, "_fund_token_via_whale", new_callable=AsyncMock, return_value=False),
+            patch.object(manager, "_rpc_call_raw", new_callable=AsyncMock) as rpc,
+            patch.object(manager, "_fund_token_via_storage", new_callable=AsyncMock) as brute_force,
+        ):
+            result = await manager.fund_tokens(self.WALLET, {self.USDF_ADDRESS: Decimal("1")})
+
+        assert result is False
+        rpc.assert_not_awaited()
+        brute_force.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 async def test_symbol_funding_key_is_rejected_before_any_rpc() -> None:
     """ALM-3255: a valid token symbol must never select an ERC-20 contract."""

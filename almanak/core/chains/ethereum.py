@@ -139,6 +139,7 @@ DESCRIPTOR = register_chain(
                 "swETH": "0xf951E335afb289353dc249e82926178EaC7DEd78",
                 "ankrETH": "0xE95A203B1a91a908F9B9CE46459d101078c2c3cb",
                 "pufETH": "0xD9A442856C234a39a81a089C06451EBAa4306a72",
+                "USDf": "0xFa2B947eEc368f42195f24F36d2aF29f7c24CeC2",
             },
             balance_slots={
                 "USDC": 9,
@@ -150,6 +151,12 @@ DESCRIPTOR = register_chain(
             },
             whale_funded_tokens={
                 "USDC": "0x37305B1cD40574E4C5Ce33f8e8306Be057fD7341",
+                # Passive USDf holder (no contract code; 42.5M USDf observed at
+                # Ethereum block 25,741,451). Do not use the sUSDf ERC-4626
+                # vault: transferring its underlying without burning shares
+                # corrupts its exchange rate on the fork. A real holder
+                # transfer also preserves USDf's upgradeable bookkeeping.
+                "USDf": "0x77134cbC06cB00b66F4c7e623D5fdBF6777635EC",
             },
             wrapped_native_deposit=True,
         ),

@@ -12,6 +12,8 @@ import pytest
 from almanak.framework.backtesting.paper.config import PaperTraderConfig
 from almanak.framework.backtesting.paper.engine import PaperTrader
 
+ARBITRUM_USDC = "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
+
 
 @dataclass
 class _MockForkManager:
@@ -94,7 +96,7 @@ async def test_sync_wallet_uses_current_tracker_balances_for_fork_refresh() -> N
 
     assert fork.funded_eth == [("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266", Decimal("2"))]
     assert fork.funded_tokens == [
-        ("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266", {"USDC": Decimal("25")})
+        ("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266", {ARBITRUM_USDC: Decimal("25")})
     ]
     trader._validate_bootstrap.assert_not_awaited()
 
@@ -112,12 +114,47 @@ async def test_sync_wallet_initial_bootstrap_funds_config_balances_and_validates
 
     assert fork.funded_eth == [("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266", Decimal("5"))]
     assert fork.funded_tokens == [
-        ("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266", {"USDC": Decimal("100")})
+        ("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266", {ARBITRUM_USDC: Decimal("100")})
     ]
     trader._validate_bootstrap.assert_awaited_once_with(
         "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
         {"USDC": Decimal("100")},
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_initial", [True, False])
+async def test_sync_wallet_refuses_underfunded_erc20_fork(use_initial: bool) -> None:
+    config = _make_config(initial_tokens={"USDC": Decimal("100")})
+    tracker = _MockPortfolioTracker(current_balances={"USDC": Decimal("25")})
+    trader, fork, _portfolio = _make_trader(config=config, tracker=tracker)
+    fork.fund_tokens_success = False
+
+    with pytest.raises(RuntimeError, match="refusing to continue with an under-funded fork"):
+        await trader._sync_wallet_to_fork(use_initial=use_initial)
+
+    assert fork.funded_tokens == [
+        (
+            "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+            {ARBITRUM_USDC: Decimal("100") if use_initial else Decimal("25")},
+        )
+    ]
+    trader._validate_bootstrap.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sync_wallet_refuses_unresolved_or_duplicate_token_identities() -> None:
+    for initial_tokens, error in (
+        ({"NOT_A_TOKEN": Decimal("1")}, "could not resolve ERC-20 token"),
+        ({"USDC": Decimal("1"), ARBITRUM_USDC: Decimal("2")}, "duplicate token identities"),
+    ):
+        trader, fork, _portfolio = _make_trader(config=_make_config(initial_tokens=initial_tokens))
+
+        with pytest.raises(RuntimeError, match=error):
+            await trader._sync_wallet_to_fork(use_initial=True)
+
+        assert fork.funded_tokens == []
+        trader._validate_bootstrap.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -135,7 +172,7 @@ async def test_sync_wallet_infers_bootstrap_tokens_when_config_has_no_explicit_t
     infer.assert_called_once_with(trader._current_strategy, "arbitrum")
     assert fork.funded_eth == [("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266", Decimal("10"))]
     assert fork.funded_tokens == [
-        ("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266", {"USDC": Decimal("150")})
+        ("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266", {ARBITRUM_USDC: Decimal("150")})
     ]
     assert portfolio.current_balances["USDC"] == Decimal("150")
     assert portfolio.initial_balances["USDC"] == Decimal("150")
@@ -167,7 +204,7 @@ async def test_sync_wallet_checks_divergence_when_explicit_tokens_are_configured
         explicit_inferred,
     )
     assert fork.funded_tokens == [
-        ("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266", {"USDC": Decimal("100")})
+        ("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266", {ARBITRUM_USDC: Decimal("100")})
     ]
     assert "WETH" not in portfolio.current_balances
     trader._validate_bootstrap.assert_awaited_once_with(

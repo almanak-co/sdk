@@ -815,9 +815,9 @@ class RollingForkManager:
     # crap-allowlist: 6-tier funding fallback — wrapped-native deposit() / whale
     # impersonation / known balance slot / seeded balance key / anvil_deal /
     # brute-force slot probe.
-    # Each tier exists to fund a class of token the prior tier can't handle safely,
-    # and the "first-that-succeeds-wins" sequencing relies on shared skip_storage_fallback
-    # state that doesn't cleanly split across helper boundaries.
+    # Each tier exists to fund a class of token the prior tier can't handle safely.
+    # Branch-local gates stop unsafe fallthrough: whale-listed proxy tokens are
+    # transfer-funded or fail, while seeded-layout tokens may still use anvil_deal.
     async def fund_tokens(  # noqa: C901
         self,
         address: str,
@@ -833,6 +833,7 @@ class RollingForkManager:
         Funding priority:
         1. Wrapped-native ``deposit()`` (WETH/WAVAX/WBNB and equivalents)
         2. Whale impersonation for tokens that cannot be safely slot-patched
+           (terminal on failure; never continue to storage mutation)
         3. Known storage slots (fast, reliable -- verified in intent tests)
         4. Address-keyed seeded storage recipes (non-standard layouts)
         5. ``anvil_deal`` RPC (works on newer Anvil versions)
@@ -899,6 +900,7 @@ class RollingForkManager:
             try:
                 funded = False
                 skip_storage_fallback = False
+                skip_anvil_deal = False
 
                 # Priority 0a: Wrapped native deposit() (VIB-2571)
                 # For WETH/WAVAX/WBNB etc., calling deposit() with ETH value is
@@ -932,6 +934,7 @@ class RollingForkManager:
                         # of whale outcome — falling through would corrupt proxy
                         # state on tokens we know are unsafe for slot patching.
                         skip_storage_fallback = True
+                        skip_anvil_deal = True
                         if not funded:
                             # `_fund_token_via_whale` logs only at debug; surface
                             # the failure so the cause (e.g. whale has no gas,
@@ -939,7 +942,8 @@ class RollingForkManager:
                             # instead of just "Failed to fund X" with no reason.
                             logger.error(
                                 f"Whale impersonation failed for {display_name} on {self.chain}; "
-                                f"refusing storage-slot fallback (would corrupt proxy state)"
+                                f"refusing storage-mutation fallback, including anvil_deal "
+                                f"(would corrupt proxy state)"
                             )
 
                 # Priority 1: Known storage slot (fast and reliable)
@@ -964,7 +968,7 @@ class RollingForkManager:
                         skip_storage_fallback = True
 
                 # Priority 2: anvil_deal RPC (returns null on success)
-                if not funded:
+                if not funded and not skip_anvil_deal:
                     deal_success, _ = await self._rpc_call_raw(
                         "anvil_deal",
                         [token_address, address, amount_hex],
