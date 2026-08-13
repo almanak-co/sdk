@@ -200,6 +200,43 @@ class TestBuildSingleChainPriceOracle:
         called = {call.args[0] for call in market.price.call_args_list}
         assert "ETH" in called
 
+    def test_prefetches_verified_index_for_address_form_perp_market(self) -> None:
+        """ALM-3217 negative control: ordinary strategy execution must warm
+        the index symbol that only the verified perp-market record exposes."""
+        from types import SimpleNamespace
+
+        from almanak.framework.intents.vocabulary import PerpOpenIntent
+
+        intent = PerpOpenIntent(
+            protocol="gmx_v2",
+            market="0x7c54d547fad72f8afbf6e5b04403a0168b654c6f",
+            collateral_token="USDC",
+            collateral_amount=Decimal("50"),
+            size_usd=Decimal("100"),
+            is_long=True,
+            leverage=Decimal("2"),
+            chain="arbitrum",
+        )
+        service = MagicMock()
+        service.GetPerpMarket.return_value = SimpleNamespace(
+            success=True,
+            market=SimpleNamespace(index_symbol="XMR", verified=True),
+        )
+        market = MagicMock()
+        market.chain = "arbitrum"
+        market._gateway_client = SimpleNamespace(market=service)
+        market.get_price_oracle_dict.side_effect = [
+            {"USDC": Decimal("1")},
+            {"USDC": Decimal("1"), "XMR": Decimal("390")},
+            {"USDC": Decimal("1"), "XMR": Decimal("390"), "ETH": Decimal("4500")},
+        ]
+
+        result = StrategyRunner._build_single_chain_price_oracle(market, intent)
+
+        assert result is not None and result["XMR"] == Decimal("390")
+        market.price.assert_any_call("XMR")
+        assert service.GetPerpMarket.call_args.args[0].market == intent.market
+
     def test_prefetches_native_gas_token_on_non_native_swap(self) -> None:
         """VIB-3804: a polygon USDC->WETH swap never references MATIC, but the
         chain's native gas token must still be in the oracle so

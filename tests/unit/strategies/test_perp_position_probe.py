@@ -242,6 +242,20 @@ class TestNotional:
         market.perp_mark_price.assert_not_called()
         market.price.assert_not_called()
 
+    def test_synthetic_gmx_index_uses_verified_symbol(self):
+        market = _snapshot(PerpsReadResult(positions=(_gmx_position(),), ok=True))
+
+        probe = probe_perp_position(
+            market,
+            protocol="gmx_v2",
+            chain="arbitrum",
+            market_symbol=ETH_USD_MARKET,
+            index_token_symbol="XMR",
+        )
+
+        assert probe.positions[0].notional_usd == Decimal("300.0")
+        market.price.assert_called_once_with("XMR", chain="arbitrum")
+
     def test_hyperliquid_addressless_position_uses_venue_mark(self):
         market = _snapshot(PerpsReadResult(positions=(_hyperliquid_eth_position(),), ok=True))
         market.perp_mark_price.return_value = Decimal("3000")

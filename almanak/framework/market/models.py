@@ -32,6 +32,15 @@ if TYPE_CHECKING:
 # =============================================================================
 
 
+@dataclass(frozen=True)
+class PerpMarketData:
+    """Gateway-verified perpetual market identity for strategy data reads."""
+
+    protocol: str
+    chain: str
+    index_symbol: str
+
+
 @dataclass
 class TokenBalance:
     """Balance information for a single token.
@@ -742,6 +751,7 @@ def __getattr__(name: str):
 
 
 __all__ = [
+    "PerpMarketData",
     "TokenBalance",
     "PriceData",
     "PriceOracle",

@@ -8829,6 +8829,20 @@ class StrategyRunner:
             intent_tokens: set[str] = set(
                 _extract_tokens_from_intent(intent, default_chain=getattr(market, "chain", None))
             )
+            # Address-first perp intents name the venue market token in
+            # ``intent.market``. That address is not itself a priceable token,
+            # so resolve the verified market record through the gateway and
+            # warm its index symbol before compiling. This is the ordinary
+            # strategy-runner counterpart of teardown's ALM-3217 warm.
+            from almanak.framework.teardown.oracle_warmup import resolve_perp_index_chains_via_gateway
+
+            intent_tokens.update(
+                resolve_perp_index_chains_via_gateway(
+                    market,
+                    [intent],
+                    getattr(market, "chain", None) or getattr(intent, "chain", None),
+                )
+            )
             missing_tokens = [t for t in intent_tokens if not price_oracle or t not in price_oracle]
             if missing_tokens:
                 # ALM-3183: this loop used to be ``except Exception: pass``. A

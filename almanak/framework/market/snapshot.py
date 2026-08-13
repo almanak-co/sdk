@@ -19,6 +19,7 @@ import asyncio
 import concurrent.futures
 import inspect
 import logging
+import math
 import re
 from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
@@ -44,6 +45,7 @@ from .models import (
     MACDData,
     MAData,
     OBVData,
+    PerpMarketData,
     PriceData,
     PriceOracle,
     PtPriceData,
@@ -1021,6 +1023,66 @@ class MarketSnapshot:
         cached = lookup_price(self._price_store, token=token, chain=requested_chain, quote=quote)
         return (
             cached.raw if cached is not None and isinstance(cached.raw, PriceData) else PriceData(price=current_price)
+        )
+
+    def perp_market(self, protocol: str, market: str, *, chain: str | None = None) -> PerpMarketData:
+        """Resolve one verified perpetual market through the gateway.
+
+        This binds strategy market-data reads to the same venue-verified
+        identity used by compilation. Unavailable, unsuccessful, unverified,
+        or symbol-less responses fail closed; callers must not substitute a
+        parallel config label.
+        """
+        from almanak.connectors._strategy_base.perps_read_registry import PerpsReadRegistry
+        from almanak.gateway.proto import gateway_pb2
+
+        from .errors import MarketSnapshotError
+
+        requested_chain = self._resolve_chain(chain)
+        cached = PerpsReadRegistry.market_metadata(protocol, market, requested_chain)
+        if cached is not None and cached.index_token_symbol:
+            return PerpMarketData(
+                protocol=protocol,
+                chain=requested_chain,
+                index_symbol=cached.index_token_symbol.strip().upper(),
+            )
+        client = self._gateway_client
+        stub = getattr(getattr(client, "market", None), "GetPerpMarket", None)
+        if stub is None:
+            raise MarketSnapshotError("perpetual market discovery is unavailable")
+        configured_timeout = getattr(getattr(client, "config", None), "timeout", 30.0)
+        timeout = (
+            float(configured_timeout)
+            if isinstance(configured_timeout, int | float)
+            and not isinstance(configured_timeout, bool)
+            and math.isfinite(configured_timeout)
+            and configured_timeout > 0
+            else 30.0
+        )
+        try:
+            response = stub(
+                gateway_pb2.GetPerpMarketRequest(
+                    protocol=protocol,
+                    chain=requested_chain,
+                    market=market,
+                    # Identity remains valid after delisting; the compiler
+                    # independently requires current listing for new opens.
+                    require_listed=False,
+                ),
+                timeout=timeout,
+            )
+        except Exception as exc:  # noqa: BLE001 - normalize transport failures for strategies
+            raise MarketSnapshotError(f"perpetual market discovery failed: {exc}") from exc
+        item = getattr(response, "market", None)
+        if not getattr(response, "success", False) or not getattr(item, "verified", False):
+            raise MarketSnapshotError(getattr(response, "error", "") or "perpetual market is not verified")
+        index_symbol = str(getattr(item, "index_symbol", "") or "").strip().upper()
+        if not index_symbol:
+            raise MarketSnapshotError("verified perpetual market has no index symbol")
+        return PerpMarketData(
+            protocol=protocol,
+            chain=requested_chain,
+            index_symbol=index_symbol,
         )
 
     def reference_price(

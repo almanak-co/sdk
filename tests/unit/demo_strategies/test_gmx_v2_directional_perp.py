@@ -18,6 +18,7 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 
 from almanak.connectors.gmx_v2 import market_catalog
+from almanak.framework.data import MarketSnapshotError
 from tests.unit.connectors.gmx_v2.market_fixtures import prime_catalog
 
 _SEED_DIR = Path(__file__).resolve().parents[3] / "almanak" / "demo_strategies" / "gmx_v2_directional_perp"
@@ -68,7 +69,10 @@ def gmx():
 
 
 def _market(balance_usd: str, collateral_price: str = "2500"):
+    from types import SimpleNamespace
+
     market = MagicMock()
+    market.perp_market.return_value = SimpleNamespace(index_symbol="ETH")
     bal = MagicMock()
     bal.balance_usd = Decimal(balance_usd)
     market.balance.return_value = bal
@@ -107,20 +111,62 @@ class TestAddressFirstDataReads:
         _, strat = gmx
         assert strat._config["data_granularity"] == "4h"
 
-    def test_tracked_tokens_are_chain_specific_addresses(self, gmx):
+    def test_tracked_tokens_include_wallet_collateral_not_perp_index(self, gmx):
         _, strat = gmx
-        assert strat._get_tracked_tokens() == [_WETH_ARBITRUM, _USDC_ARBITRUM]
+        assert strat._get_tracked_tokens() == [_USDC_ARBITRUM]
 
-    def test_entry_uses_addresses_for_balance_and_prices(self, gmx):
+    def test_entry_uses_collateral_address_and_index_symbol_for_market_data(self, gmx):
         module, strat = gmx
         market = _market("100", collateral_price="2500")
 
         assert strat._enter(market, module.LONG, Decimal("0")).intent_type.value == "PERP_OPEN"
         market.balance.assert_called_once_with(_USDC_ARBITRUM)
         assert market.price.call_args_list == [
-            call(_WETH_ARBITRUM),
+            call("ETH"),
             call(_USDC_ARBITRUM),
         ]
+
+    def test_synthetic_market_data_uses_verified_symbol_not_config_label(self, gmx):
+        """Every signal/risk read follows verified XMR, even with stale ETH config."""
+        from types import SimpleNamespace
+
+        module, strat = gmx
+        strat.base_token = "ETH"
+        market = _market("100")
+        market.perp_market.return_value = SimpleNamespace(index_symbol="XMR")
+        market.ema.return_value.value = Decimal("1")
+
+        strat.decide(market)
+        assert [item.args[0] for item in market.ema.call_args_list] == ["XMR", "XMR"]
+
+        strat._verified_index_symbol = None
+        strat._position_side = module.LONG
+        strat._entry_price = Decimal("400")
+        market.price.reset_mock()
+        strat._manage(market, side=module.LONG, signal=module.LONG, funding=None)
+        market.price.assert_called_once_with("XMR")
+
+        strat._verified_index_symbol = None
+        strat._position_side = None
+        strat.force_action = "open_long"
+        market.price.reset_mock()
+        strat._forced_intent(market)
+        assert market.price.call_args_list[0] == call("XMR")
+
+    def test_verified_symbol_is_cached_but_failures_are_not(self, gmx):
+        from types import SimpleNamespace
+
+        _, strat = gmx
+        market = MagicMock()
+        market.perp_market.side_effect = [
+            MarketSnapshotError("unavailable"),
+            SimpleNamespace(index_symbol="XMR"),
+        ]
+
+        assert strat._index_symbol(market) == strat.base_token_address
+        assert strat._index_symbol(market) == "XMR"
+        assert strat._index_symbol(market) == "XMR"
+        assert market.perp_market.call_count == 2
 
     @pytest.mark.parametrize("key", ["market_address", "base_token_address", "collateral_token_address"])
     @pytest.mark.parametrize("value", ["0x1", "0x" + "z" * 40])
@@ -212,6 +258,7 @@ class TestForcedOpenLatch:
 
         snapshot = MagicMock()
         snapshot.perp_positions.return_value = PerpsReadResult(positions=tuple(positions), ok=ok)
+        snapshot.perp_market.return_value.index_symbol = "ETH"
         snapshot.price.return_value = Decimal(price)
         return snapshot
 
@@ -341,11 +388,12 @@ class TestTeardownReadsTheVenueNotTheCache:
     ETH_USD_MARKET = "0x70d95587d40A2caf56bd97485aB3Eec10Bee6336"
     USDC_ARBITRUM = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
 
-    def _venue(self, strat, *, positions, ok=True, price="3000"):
+    def _venue(self, strat, *, positions, ok=True, price="3000", index_symbol="ETH"):
         from almanak.connectors._strategy_base.perps_read_base import PerpsReadResult
 
         snapshot = MagicMock()
         snapshot.perp_positions.return_value = PerpsReadResult(positions=tuple(positions), ok=ok)
+        snapshot.perp_market.return_value.index_symbol = index_symbol
         snapshot.price.return_value = Decimal(price)
         strat.create_market_snapshot = lambda: snapshot
         return snapshot
@@ -390,11 +438,24 @@ class TestTeardownReadsTheVenueNotTheCache:
         """``value_usd=0`` is dropped as dust (<= $0.01) by the teardown harness."""
         _, strat = gmx
         strat._position_side = None
-        self._venue(strat, positions=[self._position()], price="3000")
+        snapshot = self._venue(strat, positions=[self._position()], price="3000")
 
         row = strat.get_open_positions().positions[0]
+        assert strat._verified_index_symbol == "ETH"
+        snapshot.perp_market.assert_called_once_with("gmx_v2", self.ETH_USD_MARKET)
+        snapshot.price.assert_called_once_with("ETH", chain="arbitrum")
         assert row.value_usd == Decimal("300.0")  # 0.1 ETH @ $3000
         assert "value_usd_unknown" not in row.details
+
+    def test_synthetic_index_is_priced_by_verified_symbol(self, gmx):
+        _, strat = gmx
+        strat.base_token_address = "0x" + "13" * 20
+        snapshot = self._venue(strat, positions=[self._position()], index_symbol="XMR")
+
+        row = strat.get_open_positions().positions[0]
+
+        assert row.value_usd == Decimal("300.0")
+        snapshot.price.assert_called_once_with("XMR", chain="arbitrum")
 
     def test_measured_flat_venue_overrides_a_stale_open_cache(self, gmx):
         """The phantom residual in ALM-3109: cache open, venue measured flat."""

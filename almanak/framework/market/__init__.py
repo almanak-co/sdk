@@ -66,6 +66,7 @@ from .models import (
     MACDData,
     MAData,
     OBVData,
+    PerpMarketData,
     PriceData,
     PriceOracle,
     ReferenceMarketStatus,
@@ -114,6 +115,7 @@ __all__ = [
     "MarketSnapshot",
     "MultiChainMarketSnapshot",
     "MarketSnapshotBuilder",
+    "PerpMarketData",
     # Errors
     "MarketSnapshotError",
     "ChainNotConfiguredError",

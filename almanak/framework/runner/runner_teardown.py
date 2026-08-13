@@ -2739,12 +2739,26 @@ def build_teardown_compiler(
         return None
 
 
-def _extract_perp_index_chains(intents: list) -> dict[str, str | None]:
-    """Return shared teardown index-symbol extraction without blocking unwind."""
-    try:
-        from ..teardown.oracle_warmup import extract_warmable_token_chains
+def _extract_perp_index_chains(intents: list, market: Any = None) -> dict[str, str | None]:
+    """Return shared teardown index-symbol extraction without blocking unwind.
 
-        return extract_warmable_token_chains(intents, None)
+    ``market`` is optional so the symbol-shaped path keeps working without a
+    gateway; when supplied, address-first perp markets are additionally
+    resolved to their index symbol through the gateway's verified market
+    record — the shape every GMX demo actually emits (ALM-3217; see
+    ``resolve_perp_index_chains_via_gateway``).
+    """
+    try:
+        from ..teardown.oracle_warmup import (
+            extract_warmable_token_chains,
+            resolve_perp_index_chains_via_gateway,
+        )
+
+        chains = extract_warmable_token_chains(intents, None)
+        fallback = getattr(market, "chain", None) or getattr(market, "_chain", None)
+        for symbol, symbol_chain in resolve_perp_index_chains_via_gateway(market, intents, fallback).items():
+            chains.setdefault(symbol, symbol_chain)
+        return chains
     except Exception as e:  # noqa: BLE001 - price warming is best-effort
         logger.warning("Could not extract perp index symbols for teardown price prefetch: %s", e)
         return {}
@@ -2804,7 +2818,7 @@ def prefetch_teardown_prices(market: Any, intents: list) -> None:
             if val and isinstance(val, str):
                 tokens.add(val)
 
-    index_chains = _extract_perp_index_chains(intents)
+    index_chains = _extract_perp_index_chains(intents, market)
     tokens.update(index_chains)
 
     if not tokens:

@@ -317,6 +317,76 @@ def extract_warmable_token_chains(intents: list[Any], fallback_chain: str | None
     return token_chains
 
 
+def resolve_perp_index_chains_via_gateway(
+    market: Any, intents: list[Any], fallback_chain: str | None
+) -> dict[str, str | None]:
+    """Map ADDRESS-shaped perp markets to their index price symbol via the gateway.
+
+    :func:`extract_warmable_token_chains` parses ``intent.market`` as a SYMBOL
+    descriptor (``"XMR/USD"``, ``"ETH"``) and correctly rejects a raw ``0x``
+    address — but perp intents are address-first (every GMX demo and the perps
+    scaffold build them with ``market=self.market_address``), so on the shape
+    production actually emits that extractor returns nothing and the index
+    price is never warmed. Teardown builds a fresh snapshot with an empty
+    price store, the GMX V2 compiler fails ``assert_prices_available`` on the
+    missing index price, and the close refuses with ``is_safety_refusal=True``
+    — stranding an open leveraged position (ALM-3217). ``ETH/USD`` escapes
+    only because the chain's native gas symbol is warmed unconditionally and
+    on Arbitrum that IS the market's index symbol; a synthetic index (XMR,
+    DOGE, ZEC, …) has nothing else warming it.
+
+    ``GetPerpMarket`` is the same verified resolution the pre-compile warm on
+    the agent-tools lane already uses (``inner_runner._resolve_perp_index_symbol``,
+    VIB-6561); this applies it to the teardown lanes. Verified-only and
+    best-effort: an unresolved market stays absent, so the compiler still
+    refuses with its own precise error rather than trading against a guessed
+    symbol.
+    """
+    client = getattr(market, "_gateway_client", None) if market is not None else None
+    if client is None:
+        return {}
+    from almanak.gateway.proto import gateway_pb2
+
+    resolved: dict[str, str | None] = {}
+    for intent in intents:
+        market_ref = _intent_field(intent, "market")
+        if not isinstance(market_ref, str) or market_ref[:2].lower() != "0x":
+            continue
+        protocol = _intent_field(intent, "protocol")
+        if not isinstance(protocol, str) or not protocol:
+            continue
+        raw_chain = _intent_field(intent, "chain")
+        intent_chain = raw_chain.strip() if isinstance(raw_chain, str) and raw_chain.strip() else fallback_chain
+        if intent_chain is None:
+            # The CLI/standalone TeardownManager lane derives its chain from the
+            # intents (`_teardown_chain`), which GMX teardown intents commonly
+            # omit — GetPerpMarket requires a chain, so fall back to the
+            # snapshot's own before giving up.
+            intent_chain = getattr(market, "chain", None) or getattr(market, "_chain", None)
+        try:
+            # Keep this best-effort teardown warm bounded: a stuck discovery
+            # call must not delay the rest of the unwind indefinitely. A slow
+            # response beyond this deadline can still leave the index absent
+            # even if compile-time market verification later succeeds with its
+            # longer configured deadline; the compiler then fails closed on the
+            # missing price rather than submitting an unprotected close.
+            response = client.market.GetPerpMarket(
+                gateway_pb2.GetPerpMarketRequest(protocol=protocol, chain=intent_chain or "", market=market_ref),
+                timeout=10.0,
+            )
+        except Exception as exc:  # noqa: BLE001 - a warm miss must never block the unwind
+            logger.debug("Teardown perp index warm: GetPerpMarket failed for %s: %s", market_ref, exc)
+            continue
+        if not getattr(response, "success", False) or not getattr(response.market, "verified", False):
+            continue
+        symbol = (response.market.index_symbol or "").strip().upper()
+        if not symbol:
+            continue
+        if symbol not in resolved or (resolved[symbol] is None and intent_chain is not None):
+            resolved[symbol] = intent_chain
+    return resolved
+
+
 def extract_required_tokens(intents: list[Any], chain: str | None) -> set[str]:
     """Collect the token symbols a teardown plan needs priced.
 
@@ -509,7 +579,14 @@ def warm_and_validate_oracle(
     # also a collateral token) keeps its required status — `setdefault` never
     # downgrades.
     best_effort: set[str] = set()
-    for symbol, symbol_chain in extract_warmable_token_chains(intents, chain).items():
+    warmable = extract_warmable_token_chains(intents, chain)
+    # Address-first perp intents carry the market-token ADDRESS, which the
+    # symbol parser cannot turn into a price symbol. Resolve those through the
+    # gateway's verified market record so a synthetic index (XMR, DOGE, ...)
+    # reaches the oracle and PERP_CLOSE can derive an acceptablePrice.
+    for symbol, symbol_chain in resolve_perp_index_chains_via_gateway(market, intents, chain).items():
+        warmable.setdefault(symbol, symbol_chain)
+    for symbol, symbol_chain in warmable.items():
         if symbol not in token_chains:
             token_chains[symbol] = symbol_chain
             best_effort.add(symbol)

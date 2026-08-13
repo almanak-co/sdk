@@ -133,6 +133,7 @@ def probe_perp_position(
     chain: str,
     market_symbol: str,
     index_token_address: str | None = None,
+    index_token_symbol: str | None = None,
     is_long: bool | None = None,
 ) -> PerpProbe:
     """Read the venue and classify this strategy's exposure on ``market_symbol``.
@@ -146,10 +147,12 @@ def probe_perp_position(
             Matched against the venue's market key directly and, failing that,
             through the connector's index-token metadata, so an address-keyed
             venue and a symbol-keyed venue resolve through the same call.
-        index_token_address: Chain-specific token address used to mark the
-            position. It is required for EVM venues. The one supported
-            addressless venue uses the snapshot's provenance-checked,
-            market-scoped perp mark and never a symbol token-price lookup.
+        index_token_address: Chain-specific deployed ERC-20 address used to
+            mark the position. The one supported addressless venue uses the
+            snapshot's provenance-checked, market-scoped perp mark and never a
+            symbol token-price lookup.
+        index_token_symbol: Venue-verified symbol used instead when the index
+            identifier is synthetic rather than a deployed ERC-20 contract.
         is_long: Restrict the match to one side. Leave ``None`` (the teardown
             default) to let the venue tell you the side — the cache's idea of the
             side is exactly what may be missing.
@@ -202,6 +205,7 @@ def probe_perp_position(
                     protocol=protocol,
                     chain=chain,
                     index_token_address=index_token_address,
+                    index_token_symbol=index_token_symbol,
                 ),
             )
         )
@@ -298,6 +302,7 @@ def _notional_usd(
     protocol: str,
     chain: str,
     index_token_address: str | None,
+    index_token_symbol: str | None,
 ) -> Decimal | None:
     """Mark-value the position's notional, or ``None`` when it cannot be priced.
 
@@ -319,14 +324,16 @@ def _notional_usd(
         tokens = Decimal(int(position.size_in_tokens)) / Decimal(10 ** int(meta.index_token_decimals))
         if tokens <= 0:
             return None
-        if index_token_address is not None:
+        if index_token_symbol is not None:
+            price = Decimal(str(market.price(index_token_symbol, chain=chain)))
+        elif index_token_address is not None:
             price = Decimal(str(market.price(index_token_address, chain=chain)))
         elif not PerpsReadRegistry.requires_index_token_address(protocol):
             price = Decimal(str(market.perp_mark_price(protocol, position.market, chain=chain)))
         else:
             return None
-    except Exception:  # noqa: BLE001 — unpriceable ⇒ unmeasured, never a measured $0
-        logger.debug("perp probe: notional valuation failed for %s", protocol, exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — unpriceable ⇒ unmeasured, never a measured $0
+        logger.debug("perp probe: notional valuation failed for %s: %s", protocol, exc, exc_info=True)
         return None
     if price <= 0:
         return None

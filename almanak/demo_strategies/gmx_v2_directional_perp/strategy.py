@@ -143,6 +143,7 @@ class GmxV2DirectionalPerp(IntentStrategy):
         # True would brick decide() forever — resetting re-derives intent from
         # _position_side (same doctrine as the forced-open latch, VIB-6527).
         self._awaiting_fill = False
+        self._verified_index_symbol: str | None = None
 
         # Liquidation distance ~ 1/leverage; the stop must sit inside it.
         liq_distance = Decimal("1") / self.leverage if self.leverage > 0 else Decimal("1")
@@ -167,8 +168,24 @@ class GmxV2DirectionalPerp(IntentStrategy):
         )
 
     def _get_tracked_tokens(self) -> list[str]:
-        """Track the exact chain assets used by every snapshot lookup."""
-        return list(dict.fromkeys((self.base_token_address, self.collateral_token_address)))
+        """Track wallet assets, excluding the GMX index identifier.
+
+        GMX synthetic indexes use address-shaped identifiers that have no
+        deployed ERC-20 contract. They are valid for venue position matching
+        and market-data reads, but balance discovery must never treat them as
+        wallet tokens. A perp wallet holds collateral, not the index asset.
+        """
+        return [self.collateral_token_address]
+
+    def _index_symbol(self, market: MarketSnapshot) -> str:
+        """Return the index symbol bound to the verified execution market."""
+        if self._verified_index_symbol is None:
+            try:
+                metadata = market.perp_market("gmx_v2", self.market_address)
+            except MarketSnapshotError:
+                return self.base_token_address  # gateway-less paper: preserve exact-address behavior
+            self._verified_index_symbol = metadata.index_symbol
+        return self._verified_index_symbol
 
     # ------------------------------------------------------------------ #
     # decide()
@@ -189,8 +206,9 @@ class GmxV2DirectionalPerp(IntentStrategy):
             return self._forced_intent(market)
 
         try:
-            ema_fast = market.ema(self.base_token_address, period=self.ema_fast_period).value
-            ema_slow = market.ema(self.base_token_address, period=self.ema_slow_period).value
+            index_symbol = self._index_symbol(market)
+            ema_fast = market.ema(index_symbol, period=self.ema_fast_period).value
+            ema_slow = market.ema(index_symbol, period=self.ema_slow_period).value
         except _DATA_UNAVAILABLE_ERRORS as exc:
             return Intent.hold(reason=f"EMA data unavailable: {exc}")
 
@@ -241,7 +259,10 @@ class GmxV2DirectionalPerp(IntentStrategy):
             )
 
         try:
-            entry_price = market.price(self.base_token_address)
+            # Synthetic GMX indexes have no ERC-20 contract. Market data is
+            # keyed by the verified index symbol; the address-shaped index
+            # identifier is reserved for exact venue position matching.
+            entry_price = market.price(self._index_symbol(market))
             collateral_price = market.price(self.collateral_token_address)
         except _DATA_UNAVAILABLE_ERRORS as exc:
             return Intent.hold(reason=f"Price unavailable: {exc}")
@@ -285,7 +306,7 @@ class GmxV2DirectionalPerp(IntentStrategy):
         decide() runs FLAT — never by opening an opposite leg here.
         """
         try:
-            price = market.price(self.base_token_address)
+            price = market.price(self._index_symbol(market))
         except _DATA_UNAVAILABLE_ERRORS as exc:
             return Intent.hold(reason=f"Price unavailable, holding {side}: {exc}")
 
@@ -399,7 +420,7 @@ class GmxV2DirectionalPerp(IntentStrategy):
             # as _enter() does, so a forced open also commits a sensible entry on
             # fill (the result's fill price still takes precedence).
             try:
-                self._pending_entry_price = market.price(self.base_token_address)
+                self._pending_entry_price = market.price(self._index_symbol(market))
                 collateral_price = market.price(self.collateral_token_address)
             except _DATA_UNAVAILABLE_ERRORS:
                 self._pending_entry_price = None
@@ -528,6 +549,7 @@ class GmxV2DirectionalPerp(IntentStrategy):
             except Exception as exc:  # noqa: BLE001 — no snapshot ⇒ UNMEASURED, never flat
                 logger.warning("teardown: no market snapshot for the venue probe (%s)", exc)
                 snapshot = None
+        index_symbol = self._index_symbol(snapshot) if snapshot is not None else self.base_token_address
         return probe_perp_position(
             snapshot,
             protocol="gmx_v2",
@@ -536,7 +558,10 @@ class GmxV2DirectionalPerp(IntentStrategy):
             # the address is the exact-match probe key (the label would need
             # catalog metadata to resolve).
             market_symbol=self.market_address,
-            index_token_address=self.base_token_address,
+            # Dynamic GMX indexes can be synthetic identifiers, not ERC-20s.
+            # Price only a venue-verified symbol; an unresolved identity leaves
+            # notional unmeasured instead of probing a non-contract address.
+            index_token_symbol=index_symbol if not index_symbol.startswith("0x") else None,
         )
 
     def _position_row(self, *, side: str, value_usd: Decimal, measured: bool) -> "PositionInfo":
