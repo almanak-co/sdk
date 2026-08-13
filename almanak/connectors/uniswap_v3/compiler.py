@@ -1159,16 +1159,51 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
     def _resolve_lp_pool_and_amounts(
         ctx: CLCompilerContext, intent: LPOpenIntent
     ) -> tuple[TokenInfo, TokenInfo, int, Decimal, Decimal, Decimal, Decimal, bool] | CompilationResult:
+        from almanak.framework.intents.lp_fees import (
+            fee_rate_from_units,
+            lp_fee_declaration_from_intent,
+            pool_fee_tier_units,
+        )
+
+        try:
+            fee_declaration = lp_fee_declaration_from_intent(intent)
+        except ValueError as exc:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=f"Invalid LP fee declaration: {exc}",
+                intent_id=intent.intent_id,
+            )
+        protocol = UniswapV3Compiler._protocol(ctx, intent.protocol)
+        if fee_declaration.fee_rate is not None and protocol not in SWAP_ROUTER_ALGEBRA_PROTOCOLS:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    "Uniswap V3 pool selection requires fee_tier_units (factory identity), not fee_rate; "
+                    "pass fee_tier_units or include the tier in TOKEN0/TOKEN1/TIER."
+                ),
+                intent_id=intent.intent_id,
+            )
         if UniswapV3Compiler._looks_like_bare_address(intent.pool):
             exact = UniswapV3Compiler._resolve_exact_lp_pool(
                 ctx=ctx,
-                protocol=UniswapV3Compiler._protocol(ctx, intent.protocol),
+                protocol=protocol,
                 pool_address=intent.pool,
                 intent_id=intent.intent_id,
             )
             if isinstance(exact, CompilationResult):
                 return exact
             token0_info, token1_info, fee_tier = exact
+            declared_rate = fee_declaration.economic_rate
+            actual_rate = fee_rate_from_units(fee_tier)
+            if declared_rate is not None and declared_rate != actual_rate:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=(
+                        f"Exact LP pool {intent.pool} has immutable fee tier {fee_tier} "
+                        f"({actual_rate}), but the intent declares {declared_rate}."
+                    ),
+                    intent_id=intent.intent_id,
+                )
             # For an address-bound pool the contract's canonical token0/token1
             # order defines amount0/amount1 and the token1-per-token0 price band.
             # There is no user-supplied pair orientation to invert.
@@ -1183,6 +1218,27 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
                 False,
             )
 
+        pool_fee_units = pool_fee_tier_units(intent.pool)
+        declared_rate = fee_declaration.economic_rate
+        if pool_fee_units is not None:
+            try:
+                pool_rate = fee_rate_from_units(pool_fee_units)
+            except ValueError as exc:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=f"Invalid LP pool fee tier: {exc}",
+                    intent_id=intent.intent_id,
+                )
+            if declared_rate is not None and declared_rate != pool_rate:
+                return CompilationResult(
+                    status=CompilationStatus.FAILED,
+                    error=(
+                        f"LP pool {intent.pool!r} declares immutable fee tier {pool_fee_units} ({pool_rate}), "
+                        f"but the intent declares {declared_rate}."
+                    ),
+                    intent_id=intent.intent_id,
+                )
+
         pool_info = ctx.services.parse_pool_info(intent.pool)
         if pool_info is None:
             return CompilationResult(
@@ -1191,6 +1247,14 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
                 intent_id=intent.intent_id,
             )
         token0_info, token1_info, fee_tier, tokens_swapped = pool_info
+        if pool_fee_units is not None:
+            # The parsed suffix is the same declaration validated above. Keep
+            # it authoritative even if a generic parser supplies a default.
+            fee_tier = pool_fee_units
+        elif fee_declaration.fee_tier_units is not None:
+            # A pair without a suffix uses the typed factory-unit constraint.
+            # The factory lookup below authenticates that exact pair+tier.
+            fee_tier = fee_declaration.fee_tier_units
         # The user's price band stays in the user's pair orientation here; the
         # reciprocal-when-swapped inversion is owned by the shared cl_range seam
         # (VIB-5556), so it is computed and tested in exactly one place. Only the

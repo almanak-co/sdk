@@ -740,6 +740,41 @@ class TestLPUnrealizedPnL:
         # Result depends on position's current token amounts
         assert isinstance(pnl, Decimal)
 
+    def test_lp_pnl_uses_display_keyed_entry_amounts_for_address_tokens(self):
+        """Address-native positions read entry amounts from serialized display keys."""
+        entry_time = datetime(2024, 1, 1, tzinfo=UTC)
+        token0 = ("ethereum", "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2")
+        token1 = ("ethereum", "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48")
+        position = SimulatedPosition.lp(
+            token0=token0,
+            token1=token1,
+            amount0=Decimal("1"),
+            amount1=Decimal("2000"),
+            liquidity=Decimal("1000000"),
+            tick_lower=-887220,
+            tick_upper=887220,
+            fee_tier=Decimal("0.003"),
+            entry_price=Decimal("2000"),
+            entry_time=entry_time,
+            protocol="uniswap_v3",
+        )
+        position.metadata["entry_amounts"] = {
+            f"{token0[0]}:{token0[1]}": "1.25",
+            f"{token1[0]}:{token1[1]}": "1250",
+        }
+        market_state = MarketState(
+            timestamp=entry_time,
+            prices={token0: Decimal("2000"), token1: Decimal("1")},
+            chain="ethereum",
+        )
+
+        pnl = SimulatedPortfolio(initial_capital_usd=Decimal("100000"))._calculate_lp_unrealized_pnl(
+            position, market_state
+        )
+
+        # Current value is $4,000 and the serialized entry composition is $3,750.
+        assert pnl == Decimal("250")
+
 
 class TestLPPnLEdgeCases:
     """Edge case tests for LP position valuation."""

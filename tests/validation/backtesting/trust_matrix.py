@@ -83,6 +83,7 @@ INVARIANT_ROWS: tuple[str, ...] = (
     "historical_price_provenance",
     "historical_exact_pool_twap",
     "historical_exact_pool_state",
+    "lp_fee_unit_normalization",
     "snapshot_total_counts_cash_once",
     "trade_pnl_attribution",
     "math_il_closed_form",
@@ -150,13 +151,15 @@ CELLS: tuple[TrustCell, ...] = (
     _cell(
         "rejection_no_state_change",
         "swap",
-        "A SWAP overspend fill is recorded as a failed trade with zeroed costs and zero state mutation.",
+        "A SWAP overspend fill is recorded with structured diagnostics, zeroed costs, zero state mutation, "
+        "and a non-publishable result.",
     ),
     _cell(
         "execution_error_terminality",
         "swap",
         "A non-fatal exception raised during intent execution records exactly one rejected trade, "
-        "increments failed_trades, and leaves portfolio value unchanged (ALM-3141).",
+        "increments failed_trades, leaves portfolio value unchanged, and makes the result non-publishable "
+        "when no SWAP fills (ALM-3141/ALM-3301).",
     ),
     _cell(
         "cost_accounting",
@@ -246,9 +249,9 @@ CELLS: tuple[TrustCell, ...] = (
     _cell(
         "historical_exact_pool_state",
         "lp",
-        "An exact Uniswap V3 pool address is prewarmed from archive slot0/liquidity/balanceOf state and serves "
-        "execution-grade pool_price() plus pool_reserves() without static-registry membership or a token/USD proxy "
-        "(ALM-3225/ALM-3244/ALM-3245).",
+        "An exact Uniswap V3 pool address is factory-authenticated and prewarmed from archive "
+        "slot0/liquidity/balanceOf state, then executes LP_OPEN from its canonical descriptor without "
+        "static-registry membership or a token/USD proxy (ALM-3225/ALM-3244/ALM-3245/ALM-3301).",
     ),
     # --- LP column ---
     _cell(
@@ -273,7 +276,14 @@ CELLS: tuple[TrustCell, ...] = (
     _cell(
         "rejection_no_state_change",
         "lp",
-        "An LP_OPEN beyond available cash is rejected with zero state mutation.",
+        "An LP_OPEN beyond available cash is rejected with zero state mutation, structured diagnostics, "
+        "and a non-publishable result.",
+    ),
+    _cell(
+        "lp_fee_unit_normalization",
+        "lp",
+        "Raw V3 fee_tier_units normalize exactly once (500 -> 0.0005); first-hour LP fees obey the "
+        "closed form and cannot exceed total pool fee revenue (ALM-3302).",
     ),
     _cell(
         "math_il_closed_form",
@@ -362,7 +372,7 @@ CELLS: tuple[TrustCell, ...] = (
     _cell(
         "rejection_no_state_change",
         "lending",
-        "A SUPPLY beyond available cash is rejected with zero state mutation.",
+        "A SUPPLY beyond available cash is rejected with zero state mutation and a non-publishable result.",
     ),
     _cell(
         "snapshot_price_case_insensitive",
@@ -440,7 +450,8 @@ CELLS: tuple[TrustCell, ...] = (
     _cell(
         "rejection_no_state_change",
         "perp",
-        "A PERP_OPEN whose collateral exceeds cash is rejected with zero state mutation.",
+        "A PERP_OPEN whose collateral exceeds cash is rejected with structured diagnostics, zero state mutation, "
+        "and a non-publishable result (ALM-3302).",
     ),
     # --- key-plane uniqueness (re-cut phase 1: single-owner token identity) ---
     _cell(

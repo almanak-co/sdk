@@ -44,7 +44,7 @@ Example:
 import logging
 import math
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -482,8 +482,8 @@ class LPPoolResolutionError(ValueError):
 
 @dataclass(frozen=True)
 class _LPOpenPlan:
-    token0: str
-    token1: str
+    token0: TokenRef
+    token1: TokenRef
     amount0: Decimal
     amount1: Decimal
     token0_price: Decimal
@@ -494,6 +494,7 @@ class _LPOpenPlan:
     range_upper: Decimal
     tick_lower: int
     tick_upper: int
+    chain: str
     protocol: str
     fee_tier: Decimal
     liquidity: Decimal
@@ -679,9 +680,11 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         self._resolved_pool_addresses: dict[tuple[str, frozenset[str], int | None], str] = {}
         # resolved address -> how it was chosen (result-doc provenance).
         self._resolved_pool_provenance: dict[str, str] = {}
-        # pool address -> real fee tier (fraction) fetched from the v3-family
-        # subgraph at prewarm; corrects slug-guessed position tiers.
-        self._resolved_fee_tiers: dict[str, Decimal] = {}
+        # (chain, protocol, pool address) -> authenticated real fee tier
+        # (fraction). Address-only caching can leak one venue's tier into an
+        # intent that merely reuses the same hexadecimal address on another
+        # chain or under another protocol identity.
+        self._resolved_fee_tiers: dict[tuple[str, str, str], Decimal] = {}
         # Whether the most recent _lp_open_fee_tier call used an explicit
         # caller override (single-threaded per-fill; read when annotating).
         self._last_fee_tier_explicit = False
@@ -707,6 +710,36 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         # Cache for liquidity depth data to avoid repeated queries
         # Key: (pool_address, date) -> LiquidityResult
         self._liquidity_cache: dict[tuple[str, date], LiquidityResult] = {}
+        # (chain, protocol, address) -> archive/gateway-authenticated immutable
+        # descriptor. Address alone cannot authenticate venue identity: the
+        # same address under a different chain/protocol must fail closed.
+        self._pool_descriptors: dict[tuple[str, str, str], Any] = {}
+
+    def bind_pool_descriptors(self, descriptors: Iterable[Any]) -> None:
+        """Bind run-scoped, preflight-authenticated pool descriptors."""
+        from almanak.framework.data.pools.descriptor import PoolDescriptor
+
+        for descriptor in descriptors:
+            if not isinstance(descriptor, PoolDescriptor):
+                raise TypeError("bind_pool_descriptors requires PoolDescriptor values")
+            self._pool_descriptors[descriptor.key] = descriptor
+            self._resolved_fee_tiers[descriptor.key] = descriptor.fee_rate
+
+    @staticmethod
+    def _pool_identity_key(chain: str, protocol: str, address: str) -> tuple[str, str, str]:
+        """Normalize the complete pool identity used by authenticated caches."""
+        return (
+            str(chain).strip().lower(),
+            str(protocol).strip().lower().replace("-", "_"),
+            str(address).strip().lower(),
+        )
+
+    def _pool_descriptor_for_intent(self, intent: "LPOpenIntent") -> Any | None:
+        """Resolve an exact-pool descriptor by its complete execution identity."""
+        pool = str(getattr(intent, "pool", "") or "").strip().lower()
+        chain = str(getattr(intent, "chain", None) or self._config.chain).strip().lower()
+        protocol = str(getattr(intent, "protocol", "") or "").strip().lower().replace("-", "_")
+        return self._pool_descriptors.get((chain, protocol, pool))
 
     @property
     def adapter_name(self) -> str:
@@ -1525,7 +1558,8 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         v3-family subgraph schemas expose ``feeTier``, and failures leave the
         guessed tier in place.
         """
-        if pool_lower in self._resolved_fee_tiers:
+        identity = self._pool_identity_key(chain, protocol, pool_lower)
+        if identity in self._resolved_fee_tiers:
             return
         from almanak.connectors._strategy_base.dex_volume_registry import DexVolumeRegistry
 
@@ -1566,7 +1600,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             # would otherwise install an unbounded multiplier into
             # volume * fee_tier * share and mint arbitrary simulated fees.
             if tier.is_finite() and Decimal("0") < tier <= Decimal("1"):
-                self._resolved_fee_tiers[pool_lower] = tier
+                self._resolved_fee_tiers[identity] = tier
                 logger.info("Resolved pool %s real feeTier: %s", pool_lower[:10], tier)
             else:
                 logger.warning(
@@ -2715,6 +2749,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
                 market_state=market_state,
                 protocol=str(getattr(intent, "protocol", "") or "unknown").lower(),
                 reason=str(exc),
+                intent_id=getattr(intent, "intent_id", None),
             )
         coin_amounts = getattr(intent, "coin_amounts", None) or []
         has_coin_vector = any(amount and Decimal(str(amount)) > 0 for amount in coin_amounts)
@@ -2730,6 +2765,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
                 market_state=market_state,
                 protocol=plan.protocol,
                 reason="zero-notional LP_OPEN: no deposit amounts resolved",
+                intent_id=getattr(intent, "intent_id", None),
             )
         if plan.amount_usd <= 0 and has_coin_vector:
             # Multi-coin allocation vectors are not modeled: proceeding would
@@ -2744,6 +2780,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
                     "unsupported: multi-coin allocation vector (coin_amounts) is not yet modeled by "
                     "the backtest LP adapter — use amount0/amount1 pairs, or forward-test"
                 ),
+                intent_id=getattr(intent, "intent_id", None),
             )
         position = self._lp_open_position(plan, market_state)
         self._annotate_lp_open_position(position, intent.pool, plan)
@@ -2755,10 +2792,20 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         market_state: "MarketState",
         protocol: str,
         reason: str,
+        intent_id: str | None = None,
     ) -> "SimulatedFill":
         from almanak.core.intent_types import IntentType
         from almanak.framework.backtesting.pnl.portfolio import SimulatedFill
 
+        prefix, separator, _detail = reason.partition(":")
+        if separator and re.fullmatch(r"[A-Z][A-Z0-9_]*", prefix):
+            rejection_code = prefix
+        elif reason.startswith("zero-notional"):
+            rejection_code = "ZERO_NOTIONAL"
+        elif reason.startswith("unsupported:"):
+            rejection_code = "UNSUPPORTED_LP_SHAPE"
+        else:
+            rejection_code = "LP_OPEN_REJECTED"
         return SimulatedFill(
             timestamp=market_state.timestamp,
             intent_type=IntentType.LP_OPEN,
@@ -2772,17 +2819,23 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             tokens_in={},
             tokens_out={},
             success=False,
-            metadata={"failure_reason": reason},
+            metadata={
+                "failure_reason": reason,
+                "rejection_code": rejection_code,
+                "intent_id": intent_id,
+                "retryable": False,
+            },
         )
 
     def _build_lp_open_plan(self, intent: "LPOpenIntent", market_state: "MarketState") -> _LPOpenPlan:
         token0, token1 = self._lp_open_tokens(intent)
+        chain = str(getattr(intent, "chain", None) or self._config.chain).strip().lower()
         amount0 = Decimal(str(intent.amount0))
         amount1 = Decimal(str(intent.amount1))
         token0_price, token1_price = self._lp_open_prices(token0, token1, market_state)
         amount_usd = amount0 * token0_price + amount1 * token1_price
         entry_price = token0_price / token1_price if token1_price > 0 else token0_price
-        range_lower, range_upper, tick_lower, tick_upper = self._lp_open_range(intent)
+        range_lower, range_upper, tick_lower, tick_upper = self._lp_open_range(intent, token0, token1)
         protocol = intent.protocol.lower()
         fee_tier = self._lp_open_fee_tier(intent, protocol)
         liquidity = self._lp_open_liquidity(
@@ -2805,26 +2858,22 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             range_upper=range_upper,
             tick_lower=tick_lower,
             tick_upper=tick_upper,
+            chain=chain,
             protocol=protocol,
             fee_tier=fee_tier,
             liquidity=liquidity,
         )
 
-    def _lp_open_tokens(self, intent: "LPOpenIntent") -> tuple[str, str]:
-        """Resolve the ``(token0, token1)`` symbols an LP intent's pool declares.
+    def _lp_open_tokens(self, intent: "LPOpenIntent") -> tuple[TokenRef, TokenRef]:
+        """Resolve the ``(token0, token1)`` references an LP intent declares.
 
         ``"TOKEN0/TOKEN1[/fee]"`` parses positionally (unchanged). An
-        address-style pool resolves through the offline pool registry
-        (``known_pool_pair``) to the pool's REAL pair in registry
-        orientation, then to symbols via the token registry — mirroring
-        ``engine.get_pool_ohlcv``. Registry-unknown addresses and other
-        unparseable names raise :class:`LPPoolResolutionError` so the open
-        is rejected with a named reason instead of inheriting the old
-        fabricated ``("WETH", "USDC")`` default.
+        address-style pool resolves only through the run's authenticated
+        descriptor plane. Static registries are discovery caches, not proof of
+        historical chain/factory identity. Unknown addresses reject; no pair
+        is fabricated.
         """
         from almanak.framework.backtesting.pnl.data_provider import is_address_like
-        from almanak.framework.data.pools.reader import known_pool_pair
-        from almanak.framework.data.tokens import TokenResolutionError, get_token_resolver
 
         pool = str(getattr(intent, "pool", "") or "").strip()
         if "/" in pool:
@@ -2832,29 +2881,14 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             return token0.strip().upper(), token1.strip().upper()
         chain = str(getattr(intent, "chain", None) or self._config.chain)
         if is_address_like(pool):
-            pair = known_pool_pair(chain, pool)
-            if pair is None:
+            descriptor = self._pool_descriptor_for_intent(intent)
+            if descriptor is None:
                 raise LPPoolResolutionError(
-                    f"pool {pool!r} is not registry-known on {chain!r}; "
-                    "pass a TOKEN0/TOKEN1 pool or a registry-known pool address"
+                    f"POOL_METADATA_UNAVAILABLE: exact pool {pool!r} has no authenticated descriptor on {chain!r}; "
+                    "declare/prewarm its historical pool state or pass TOKEN0/TOKEN1/TIER"
                 )
-            if len(pair) != 2:
-                raise LPPoolResolutionError(
-                    f"pool {pool!r} resolved to {len(pair)} tokens on {chain!r}; a token pair is required"
-                )
-            symbols: list[str] = []
-            for token_address in pair:
-                try:
-                    resolved = get_token_resolver().resolve(token_address, chain, log_errors=False, skip_gateway=True)
-                except TokenResolutionError:
-                    resolved = None
-                if resolved is None or not getattr(resolved, "symbol", None):
-                    raise LPPoolResolutionError(
-                        f"pool {pool!r} token {token_address!r} is not registry-resolvable on {chain!r}; "
-                        "pass a TOKEN0/TOKEN1 pool instead"
-                    )
-                symbols.append(str(resolved.symbol).upper())
-            return symbols[0], symbols[1]
+            normalized_chain = str(chain).strip().lower()
+            return (normalized_chain, descriptor.token0), (normalized_chain, descriptor.token1)
         raise LPPoolResolutionError(
             f"pool {pool!r} does not declare a token pair: pass a TOKEN0/TOKEN1 pool "
             "(e.g. 'WETH/USDC') or a registry-known pool address"
@@ -2862,8 +2896,8 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
 
     def _lp_open_prices(
         self,
-        token0: str,
-        token1: str,
+        token0: TokenRef,
+        token1: TokenRef,
         market_state: "MarketState",
     ) -> tuple[Decimal, Decimal]:
         try:
@@ -2882,7 +2916,12 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             token1_price = self._price_fallback(token1, Decimal("1"), "execute_open")
         return token0_price, token1_price
 
-    def _lp_open_range(self, intent: "LPOpenIntent") -> tuple[Decimal, Decimal, int, int]:
+    def _lp_open_range(
+        self,
+        intent: "LPOpenIntent",
+        token0: TokenRef | None = None,
+        token1: TokenRef | None = None,
+    ) -> tuple[Decimal, Decimal, int, int]:
         # Resolve through the shared extractor — tick/price discrimination and
         # decimals-aware raw-tick conversion (ALM-2948) — so the routed lane
         # can never re-interpret a range differently from the generic lane.
@@ -2890,11 +2929,16 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         from almanak.framework.backtesting.pnl.intent_extraction import get_lp_tick_range
         from almanak.framework.intents.vocabulary import lp_range_bounds
 
-        token0, token1 = self._lp_open_tokens(intent)
+        if token0 is None or token1 is None:
+            token0, token1 = self._lp_open_tokens(intent)
         chain = str(getattr(intent, "chain", None) or self._config.chain)
-        tick_lower, tick_upper = get_lp_tick_range(
-            intent, self._price_to_tick_int, decimals=_lp_pair_decimals(token0, token1, chain)
+        descriptor = self._pool_descriptor_for_intent(intent)
+        decimals = (
+            (descriptor.token0_decimals, descriptor.token1_decimals)
+            if descriptor is not None
+            else _lp_pair_decimals(token0, token1, chain)
         )
+        tick_lower, tick_upper = get_lp_tick_range(intent, self._price_to_tick_int, decimals=decimals)
         if tick_upper <= tick_lower:
             # Degenerate range (both bounds floor to the same tick): widen by
             # one tick so the position has a valid V3 range and non-zero value.
@@ -2920,9 +2964,10 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
     def _lp_open_fee_tier(self, intent: "LPOpenIntent", protocol: str) -> Decimal:
         """Resolve the LP fee tier, honoring a caller-declared tier.
 
-        Declaration order: an explicit ``protocol_params["fee_tier"]`` fraction
-        wins; else a V3-family pool id's fee segment ("WETH/USDC/3000" — raw
-        factory units, ALM-2949) is the declared tier. Only then fall back to
+        The archive-authenticated pool descriptor is authoritative. Typed
+        ``fee_tier_units`` are normalized once; ``fee_rate`` is a separately
+        named economic fraction. A V3 pool id's fee segment is also raw
+        factory units. Only then fall back to
         ``_lp_fee_tier_from_protocol``, which defaults to 0.30% for any pool
         whose fee tier is not encoded in its protocol slug (e.g.
         ``aerodrome_slipstream``), overstating fees ~60x for low-fee pools
@@ -2931,52 +2976,41 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         declared tiers never are.
         """
         from almanak.framework.backtesting.pnl.intent_extraction import lp_pool_fee_units
+        from almanak.framework.intents.lp_fees import lp_fee_declaration_from_intent
 
         self._last_fee_tier_explicit = False
         pool = getattr(intent, "pool", None)
         fee_units = lp_pool_fee_units(pool)
-        declared = (
-            Decimal(fee_units) / Decimal("1000000")
-            if fee_units is not None and self._is_v3_factory_family(protocol) and self._valid_v3_fee_units(fee_units)
-            else None
-        )
-        params = getattr(intent, "protocol_params", None) or {}
-        override = params.get("fee_tier")
-        if override is not None:
-            try:
-                tier = Decimal(str(override))
-            except (TypeError, ValueError, ArithmeticError):
-                tier = Decimal("-1")
-            if tier > 0:
-                if declared is not None and tier != declared:
-                    # Both knobs set and disagreeing: the pool id names WHICH
-                    # pool (identity — resolution and volume/liquidity follow
-                    # it, like live getPool); the params override sets the fee
-                    # ECONOMICS (e.g. dynamic-fee venues). Legitimate, but
-                    # never silent (Codex review, #3308).
-                    logger.warning(
-                        "protocol_params['fee_tier']=%s differs from the tier declared in pool id %r "
-                        "(%s): the position PRICES fees at the override while volume/liquidity come "
-                        "from the declared pool.",
-                        tier,
-                        pool,
-                        declared,
-                    )
-                self._last_fee_tier_explicit = True
-                return tier
-            logger.warning("Ignoring invalid protocol_params['fee_tier']=%r for %s", override, protocol)
-        if declared is not None:
-            self._last_fee_tier_explicit = True
-            return declared
-        if fee_units is not None and self._is_v3_factory_family(protocol) and not self._valid_v3_fee_units(fee_units):
-            # Malformed declaration ("WETH/USDC/0"): resolution already fails
-            # closed on it; pricing falls to the slug guess, loudly.
-            logger.warning(
-                "Declared fee tier %d in pool id %r is outside the V3 domain; falling back to the "
-                "slug-guessed tier for pricing",
-                fee_units,
-                pool,
+        v3_factory_family = self._is_v3_factory_family(protocol)
+        if fee_units is not None and v3_factory_family and not self._valid_v3_fee_units(fee_units):
+            raise LPPoolResolutionError(
+                f"INVALID_FEE_TIER: declared fee tier {fee_units} in pool {pool!r} must be between "
+                "1 and 999999 raw factory units"
             )
+        declared = Decimal(fee_units) / Decimal("1000000") if fee_units is not None and v3_factory_family else None
+        try:
+            fee_declaration = lp_fee_declaration_from_intent(intent)
+        except ValueError as exc:
+            raise LPPoolResolutionError(f"INVALID_FEE_TIER: {exc}") from exc
+        if fee_declaration.fee_rate is not None and v3_factory_family:
+            raise LPPoolResolutionError(
+                "INVALID_FEE_TIER: V3-family pools require fee_tier_units as an immutable factory constraint; "
+                "fee_rate is only for explicitly fractional/dynamic-fee protocols"
+            )
+        descriptor = self._pool_descriptor_for_intent(intent)
+        descriptor_rate = descriptor.fee_rate if descriptor is not None else None
+        declared_rate = fee_declaration.economic_rate
+        authoritative_rate = descriptor_rate if descriptor_rate is not None else declared
+        if authoritative_rate is not None and declared_rate is not None and declared_rate != authoritative_rate:
+            raise LPPoolResolutionError(
+                f"POOL_FEE_MISMATCH: pool {pool!r} fee is {authoritative_rate}, intent declares {declared_rate}"
+            )
+        if authoritative_rate is not None:
+            self._last_fee_tier_explicit = True
+            return authoritative_rate
+        if declared_rate is not None:
+            self._last_fee_tier_explicit = True
+            return declared_rate
         return self._lp_fee_tier_from_protocol(protocol)
 
     def _lp_open_liquidity(
@@ -3025,11 +3059,12 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
 
     def _annotate_lp_open_position(self, position: "SimulatedPosition", pool: str, plan: _LPOpenPlan) -> None:
         position.metadata["entry_amounts"] = {
-            plan.token0: str(plan.amount0),
-            plan.token1: str(plan.amount1),
+            token_ref_display(plan.token0): str(plan.amount0),
+            token_ref_display(plan.token1): str(plan.amount1),
         }
         position.metadata["entry_price_ratio"] = str(plan.entry_price)
         position.metadata["pool_address"] = self._lp_open_pool_address(pool)
+        position.metadata["chain"] = plan.chain
         # Guessed tiers may be corrected from the pool's real subgraph feeTier
         # at prewarm (the 0.30% slug default overstates fees 6x on a real
         # 0.05% pool); declared tiers (params override or pool-id fee segment)
@@ -3264,8 +3299,12 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         entry_amounts = position.metadata.get("entry_amounts", {})
         if entry_amounts:
             return (
-                Decimal(str(entry_amounts.get(prices.token0, "0"))),
-                Decimal(str(entry_amounts.get(prices.token1, "0"))),
+                Decimal(
+                    str(entry_amounts.get(prices.token0, entry_amounts.get(token_ref_display(prices.token0), "0")))
+                ),
+                Decimal(
+                    str(entry_amounts.get(prices.token1, entry_amounts.get(token_ref_display(prices.token1), "0")))
+                ),
             )
 
         tick_lower, tick_upper = self._lp_tick_bounds_or_full_range(position)
@@ -3631,7 +3670,12 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         # feeTier (never an explicit caller override).
         pool_address = position.metadata.get("pool_address")
         if pool_address and position.metadata.get("fee_tier_source") == "slug_guess":
-            real_tier = self._resolved_fee_tiers.get(str(pool_address).lower())
+            identity = self._pool_identity_key(
+                str(position.metadata.get("chain") or self._config.chain),
+                position.protocol,
+                str(pool_address),
+            )
+            real_tier = self._resolved_fee_tiers.get(identity)
             if real_tier is not None:
                 # A verified tier is "subgraph" even when it equals the guess:
                 # fee-confidence handling keys on whether the tier is verified,
@@ -4091,7 +4135,41 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         timestamp: datetime | None,
     ) -> _FeeAmountResult:
         resolution = context.resolution
+        if not position.fee_tier.is_finite() or not Decimal("0") < position.fee_tier <= Decimal("1"):
+            raise ValueError(
+                f"LP_FEE_INVARIANT_VIOLATION: position {position.position_id} has economic fee_rate="
+                f"{position.fee_tier}; expected a finite fraction in (0, 1]. Raw V3 factory units must be "
+                "normalized through fee_tier_units before fee accrual."
+            )
+        if (
+            not context.liquidity_share.is_finite()
+            or not Decimal("0") <= context.liquidity_share <= Decimal("1")
+            or not context.days_elapsed.is_finite()
+            or context.days_elapsed < 0
+        ):
+            raise ValueError(
+                f"LP_FEE_INVARIANT_VIOLATION: invalid liquidity share/time for {position.position_id}: "
+                f"share={context.liquidity_share}, days={context.days_elapsed}"
+            )
+        if (
+            not resolution.volume_usd.is_finite()
+            or resolution.volume_usd < 0
+            or not context.base_apr.is_finite()
+            or context.base_apr < 0
+            or not position_value_usd.is_finite()
+            or position_value_usd < 0
+        ):
+            raise ValueError(
+                f"LP_FEE_INVARIANT_VIOLATION: non-finite/negative fee input for {position.position_id}: "
+                f"volume={resolution.volume_usd}, base_apr={context.base_apr}, value={position_value_usd}"
+            )
+        pool_fee_revenue = resolution.volume_usd * position.fee_tier * context.days_elapsed
         volume_based_fees = resolution.volume_usd * position.fee_tier * context.liquidity_share * context.days_elapsed
+        if volume_based_fees > pool_fee_revenue:
+            raise ValueError(
+                f"LP_FEE_INVARIANT_VIOLATION: attributed fees {volume_based_fees} exceed total modeled "
+                f"pool fee revenue {pool_fee_revenue} for {position.position_id}"
+            )
         apr_based_fees = position_value_usd * (context.base_apr / Decimal("365")) * context.days_elapsed
         tier_is_guess = position.metadata.get("fee_tier_source") == "slug_guess"
         if tier_is_guess:
@@ -4101,8 +4179,17 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             data_source = f"fallback_multiplier:{self._get_volume_fallback_multiplier()}x"
             if tier_is_guess:
                 data_source = f"{data_source}:guessed_fee_tier"
+            fallback_fees = (volume_based_fees + apr_based_fees) / Decimal("2")
+            if fallback_fees > pool_fee_revenue:
+                logger.warning(
+                    "Capping fallback LP fees for %s from %s to modeled pool revenue %s",
+                    position.position_id,
+                    fallback_fees,
+                    pool_fee_revenue,
+                )
+                fallback_fees = pool_fee_revenue
             return _FeeAmountResult(
-                fees_usd=(volume_based_fees + apr_based_fees) / Decimal("2"),
+                fees_usd=fallback_fees,
                 fee_confidence="low",
                 data_source=data_source,
                 volume_usd=resolution.volume_usd,
@@ -4138,7 +4225,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         self._guessed_tier_warned_positions.add(position.position_id)
         logger.warning(
             "LP fee tier for %s %s is a slug guess (%s) with no verifiable subgraph source — "
-            "fee confidence capped at medium; pass protocol_params['fee_tier'] for exact fees",
+            "fee confidence capped at medium; pass fee_tier_units for exact factory-fee identity",
             position.protocol,
             position.position_id,
             position.fee_tier,
@@ -4294,8 +4381,8 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
 
         base_apr = self._base_apr_for_fee_tier(sample.fee_tier)
         apr_based_fees = sample.position_value_usd * (base_apr / Decimal("365")) * days_elapsed
-
-        return (volume_based_fees + apr_based_fees) / Decimal("2")
+        pool_fee_revenue = estimated_daily_volume * sample.fee_tier * days_elapsed
+        return min((volume_based_fees + apr_based_fees) / Decimal("2"), pool_fee_revenue)
 
     def validate_heuristics(
         self,

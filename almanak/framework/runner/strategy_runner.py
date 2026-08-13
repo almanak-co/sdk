@@ -6067,17 +6067,12 @@ class StrategyRunner:
 
     @staticmethod
     def _intent_fee_tier(intent: Any) -> int | None:
-        """Recover ``fee_tier`` from an LP intent's protocol_params if set."""
+        """Recover and validate the canonical raw fee tier from an LP intent."""
         if intent is None:
             return None
-        params = getattr(intent, "protocol_params", None) or {}
-        if isinstance(params, dict):
-            ft = params.get("fee_tier") or params.get("feeTier")
-            try:
-                return int(ft) if ft is not None else None
-            except (TypeError, ValueError):
-                return None
-        return None
+        from almanak.framework.intents.lp_fees import lp_fee_declaration_from_intent
+
+        return lp_fee_declaration_from_intent(intent).fee_tier_units
 
     async def _lookup_open_registry_payload(
         self,

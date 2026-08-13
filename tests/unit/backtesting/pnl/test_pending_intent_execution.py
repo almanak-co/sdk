@@ -909,7 +909,7 @@ async def test_rejected_fill_at_simulation_end_notifies_failure():
 
     result = await backtester.backtest(strategy, config)
 
-    assert result.error is None, f"Backtest failed: {result.error}"
+    assert result.error is not None and result.error.startswith("BACKTEST_EXECUTION_REJECTED:")
     rejected = [(i, s, r) for i, s, r in strategy.executed_callbacks if i is sell_unheld]
     assert len(rejected) == 1
     _, success, callback_result = rejected[0]
@@ -993,7 +993,7 @@ async def test_nonfatal_drain_error_is_rejected_and_serialized(monkeypatch):
 
     result = await backtester.backtest(strategy, config)
 
-    assert result.error is None
+    assert result.error is not None and result.error.startswith("BACKTEST_EXECUTION_REJECTED:")
     assert len(result.trades) == 1
     assert result.trades[0].success is False
     assert result.trades[0].delayed_at_end is True

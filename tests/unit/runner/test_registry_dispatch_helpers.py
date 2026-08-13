@@ -36,6 +36,7 @@ behaviour exercised within the function body.
 from __future__ import annotations
 
 import functools
+from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -354,7 +355,7 @@ class TestExtractBlockNumberFromResult:
 
 
 class TestIntentFeeTier:
-    """Recover ``fee_tier`` from intent.protocol_params."""
+    """Recover canonical raw fee units, with legacy params fallback."""
 
     def test_none_intent_returns_none(self) -> None:
         assert _intent_fee_tier(None) is None
@@ -376,9 +377,18 @@ class TestIntentFeeTier:
         intent = SimpleNamespace(protocol_params={"fee_tier": 3000})
         assert _intent_fee_tier(intent) == 3000
 
-    def test_fee_tier_takes_precedence_over_camelcase(self) -> None:
+    def test_typed_fee_tier_conflict_is_rejected(self) -> None:
+        intent = SimpleNamespace(fee_tier_units=500, protocol_params={"fee_tier": 3000})
+        with pytest.raises(ValueError, match="conflicts"):
+            _intent_fee_tier(intent)
+
+    def test_legacy_alias_conflict_is_rejected(self) -> None:
         intent = SimpleNamespace(protocol_params={"fee_tier": 500, "feeTier": 3000})
-        # snake_case wins (the `or` short-circuit on truthy).
+        with pytest.raises(ValueError, match="conflict"):
+            _intent_fee_tier(intent)
+
+    def test_matching_typed_and_legacy_declarations_are_accepted(self) -> None:
+        intent = SimpleNamespace(fee_tier_units=500, protocol_params={"fee_tier": "500"})
         assert _intent_fee_tier(intent) == 500
 
     def test_missing_fee_tier_returns_none(self) -> None:
@@ -387,22 +397,25 @@ class TestIntentFeeTier:
 
     def test_non_dict_protocol_params(self) -> None:
         intent = SimpleNamespace(protocol_params=["unexpected"])
-        assert _intent_fee_tier(intent) is None
+        with pytest.raises(ValueError, match="mapping"):
+            _intent_fee_tier(intent)
 
     def test_string_fee_tier_coerced(self) -> None:
         intent = SimpleNamespace(protocol_params={"fee_tier": "500"})
         assert _intent_fee_tier(intent) == 500
 
-    def test_garbage_fee_tier_returns_none(self) -> None:
+    def test_garbage_fee_tier_is_rejected(self) -> None:
         intent = SimpleNamespace(protocol_params={"fee_tier": "not-a-number"})
-        assert _intent_fee_tier(intent) is None
+        with pytest.raises(ValueError, match="integer in raw factory units"):
+            _intent_fee_tier(intent)
 
-    def test_zero_fee_tier_returns_none_via_or_short_circuit(self) -> None:
-        # ``params.get("fee_tier") or params.get("feeTier")`` — 0 is falsy,
-        # so it falls to feeTier (also missing) → returns None. This is
-        # arguably a bug (0 is a valid fee tier on test pools) but the
-        # current contract is what's documented; pin it.
+    def test_zero_fee_tier_is_rejected(self) -> None:
         intent = SimpleNamespace(protocol_params={"fee_tier": 0})
+        with pytest.raises(ValueError, match="between 1 and 999999"):
+            _intent_fee_tier(intent)
+
+    def test_fractional_fee_rate_is_not_factory_units(self) -> None:
+        intent = SimpleNamespace(fee_rate=Decimal("0.0005"), protocol_params=None)
         assert _intent_fee_tier(intent) is None
 
 

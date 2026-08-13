@@ -1796,8 +1796,8 @@ class SimulatedPortfolio:
         # Entry value is typically: entry_token0 * entry_price + entry_token1 * 1 (for stablecoin quote)
         entry_amounts = position.metadata.get("entry_amounts", {})
         if entry_amounts:
-            entry_token0 = Decimal(str(entry_amounts.get(token0, "0")))
-            entry_token1 = Decimal(str(entry_amounts.get(token1, "0")))
+            entry_token0 = Decimal(str(entry_amounts.get(token0, entry_amounts.get(token_ref_display(token0), "0"))))
+            entry_token1 = Decimal(str(entry_amounts.get(token1, entry_amounts.get(token_ref_display(token1), "0"))))
         else:
             # Fallback: derive the entry token amounts from the position's V3
             # liquidity units at the entry price (VIB-5096 — liquidity holds

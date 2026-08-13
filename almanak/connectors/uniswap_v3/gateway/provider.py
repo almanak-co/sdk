@@ -277,6 +277,15 @@ class UniswapV3GatewayConnector(
         end_ts: int,
         interval_secs: int,
     ) -> Any:
+        from almanak.gateway.services.rate_history_service import RateHistoryUnavailable
+
+        deployment = UNISWAP_V3.get(chain.lower())
+        factory_address = deployment.get("factory") if deployment is not None else None
+        if not isinstance(factory_address, str) or not factory_address.strip():
+            raise RateHistoryUnavailable(
+                "uniswap_v3",
+                f"no authenticated Uniswap V3 factory configured for chain {chain!r}",
+            )
         return await fetch_v3_pool_state_series(
             servicer,
             chain=chain,
@@ -285,6 +294,7 @@ class UniswapV3GatewayConnector(
             end_ts=end_ts,
             interval_secs=interval_secs,
             protocol="uniswap_v3",
+            factory_address=factory_address,
         )
 
     async def fetch_twap(

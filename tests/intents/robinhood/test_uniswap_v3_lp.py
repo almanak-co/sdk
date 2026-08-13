@@ -261,6 +261,84 @@ class TestUniswapV3LPOpenIntent:
 
         print("\nALL CHECKS PASSED")
 
+    @pytest.mark.parametrize("legacy_alias", [False, True], ids=["typed", "legacy"])
+    @pytest.mark.intent(IntentType.LP_OPEN)
+    @pytest.mark.asyncio
+    async def test_suffixless_pool_uses_declared_fee_tier_through_all_layers(
+        self,
+        legacy_alias: bool,
+        web3: Web3,
+        funded_wallet: str,
+        orchestrator: ExecutionOrchestrator,
+        price_oracle: dict[str, Decimal],
+        anvil_rpc_url: str,
+    ) -> None:
+        """A suffix-less pair preserves its typed or legacy 500-unit identity."""
+        tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
+        usdg_addr = tokens["USDG"]
+        weth_addr = tokens["WETH"]
+        usdg_before = get_token_balance(web3, usdg_addr, funded_wallet)
+        weth_before = get_token_balance(web3, weth_addr, funded_wallet)
+        if legacy_alias:
+            with pytest.warns(DeprecationWarning, match="fee_tier_units"):
+                intent = LPOpenIntent(
+                    pool="WETH/USDG",
+                    amount0=LP_AMOUNT_WETH,
+                    amount1=LP_AMOUNT_USDG,
+                    range_lower=RANGE_LOWER,
+                    range_upper=RANGE_UPPER,
+                    protocol="uniswap_v3",
+                    chain=CHAIN_NAME,
+                    protocol_params={"fee_tier": 500},
+                )
+        else:
+            intent = LPOpenIntent(
+                pool="WETH/USDG",
+                amount0=LP_AMOUNT_WETH,
+                amount1=LP_AMOUNT_USDG,
+                range_lower=RANGE_LOWER,
+                range_upper=RANGE_UPPER,
+                protocol="uniswap_v3",
+                chain=CHAIN_NAME,
+                fee_tier_units=500,
+            )
+
+        # Layer 1: compile the suffix-less pair against the declared factory tier.
+        compiler = IntentCompiler(
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            price_oracle=price_oracle,
+            rpc_url=anvil_rpc_url,
+        )
+        compilation_result = compiler.compile(intent)
+        assert compilation_result.status.value == "SUCCESS", compilation_result.error
+        assert compilation_result.action_bundle is not None
+
+        # Layer 2: execute the compiled bundle on the managed fork.
+        execution_result = await orchestrator.execute(compilation_result.action_bundle)
+        assert execution_result.success, execution_result.error
+
+        # Layer 3: every receipt parses and the mint identifies a live position.
+        parser = UniswapV3ReceiptParser(chain=CHAIN_NAME)
+        position_id = None
+        for tx_result in execution_result.transaction_results:
+            if tx_result.receipt is None:
+                continue
+            receipt = tx_result.receipt.to_dict()
+            parse_result = parser.parse_receipt(receipt)
+            assert parse_result.success, parse_result.error
+            position_id = parser.extract_position_id(receipt) or position_id
+        assert position_id is not None
+        assert query_position_liquidity(web3, POSITION_MANAGER, position_id) > 0
+
+        # Layer 4: the wide range consumes both assets without exceeding maxima.
+        usdg_spent = usdg_before - get_token_balance(web3, usdg_addr, funded_wallet)
+        weth_spent = weth_before - get_token_balance(web3, weth_addr, funded_wallet)
+        usdg_decimals = get_token_decimals(web3, usdg_addr)
+        weth_decimals = get_token_decimals(web3, weth_addr)
+        assert 0 < usdg_spent <= int(LP_AMOUNT_USDG * Decimal(10**usdg_decimals))
+        assert 0 < weth_spent <= int(LP_AMOUNT_WETH * Decimal(10**weth_decimals))
+
 
 # =============================================================================
 # LPCloseIntent Tests

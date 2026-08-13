@@ -127,6 +127,94 @@ def test_exact_pool_resolves_contract_binding_and_factory_identity(monkeypatch: 
     assert (token0.address, token1.address, fee) == (USDC, WETH, 500)
 
 
+def test_exact_pool_rejects_declared_fee_units_that_do_not_match_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        UniswapV3Compiler,
+        "_resolve_exact_lp_pool",
+        lambda **_kwargs: (TokenInfo("USDC", USDC, 6), TokenInfo("WETH", WETH, 18), 500),
+    )
+    intent = LPOpenIntent(
+        pool=POOL,
+        amount0=Decimal("1"),
+        amount1=Decimal("1"),
+        range_lower=Decimal("0.9"),
+        range_upper=Decimal("1.1"),
+        protocol="uniswap_v3",
+        fee_tier_units=3_000,
+    )
+
+    result = UniswapV3Compiler._resolve_lp_pool_and_amounts(_ctx(gateway=_Gateway()), intent)
+
+    assert isinstance(result, CompilationResult)
+    assert result.status is CompilationStatus.FAILED
+    assert "immutable fee tier 500" in (result.error or "")
+    assert "declares 0.003" in (result.error or "")
+
+
+def test_v3_compiler_rejects_fractional_fee_representation() -> None:
+    intent = LPOpenIntent(
+        pool=POOL,
+        amount0=Decimal("1"),
+        amount1=Decimal("1"),
+        range_lower=Decimal("0.9"),
+        range_upper=Decimal("1.1"),
+        protocol="uniswap_v3",
+        fee_rate=Decimal("0.0005"),
+    )
+
+    result = UniswapV3Compiler._resolve_lp_pool_and_amounts(_ctx(gateway=_Gateway()), intent)
+
+    assert isinstance(result, CompilationResult)
+    assert result.status is CompilationStatus.FAILED
+    assert "requires fee_tier_units" in (result.error or "")
+
+
+@pytest.mark.parametrize("pool", ["WETH/USDC/0", "WETH/USDC/1000000"])
+def test_v3_compiler_rejects_out_of_domain_symbolic_fee_tier(pool: str) -> None:
+    intent = LPOpenIntent(
+        pool=pool,
+        amount0=Decimal("1"),
+        amount1=Decimal("1"),
+        range_lower=Decimal("0.9"),
+        range_upper=Decimal("1.1"),
+        protocol="uniswap_v3",
+    )
+
+    result = UniswapV3Compiler._resolve_lp_pool_and_amounts(_ctx(gateway=_Gateway()), intent)
+
+    assert isinstance(result, CompilationResult)
+    assert result.status is CompilationStatus.FAILED
+    assert result.intent_id == intent.intent_id
+    assert "Invalid LP pool fee tier" in (result.error or "")
+
+
+def test_dynamic_fee_protocol_accepts_separately_named_fractional_rate() -> None:
+    ctx = _ctx(gateway=_Gateway())
+    object.__setattr__(ctx, "protocol", "camelot")
+    ctx.services.parse_pool_info.return_value = (
+        TokenInfo("USDC", USDC, 6),
+        TokenInfo("WETH", WETH, 18),
+        60,
+        False,
+    )
+    intent = LPOpenIntent(
+        pool="USDC/WETH",
+        amount0=Decimal("1"),
+        amount1=Decimal("1"),
+        range_lower=Decimal("0.9"),
+        range_upper=Decimal("1.1"),
+        protocol="camelot",
+        fee_rate=Decimal("0.0005"),
+    )
+
+    result = UniswapV3Compiler._resolve_lp_pool_and_amounts(ctx, intent)
+
+    assert not isinstance(result, CompilationResult)
+    assert result[2] == 60
+
+
 def test_lp_open_compiles_mint_for_exact_address_without_substitution(monkeypatch: pytest.MonkeyPatch) -> None:
     ctx = _ctx(gateway=_Gateway())
     adapter = MagicMock()

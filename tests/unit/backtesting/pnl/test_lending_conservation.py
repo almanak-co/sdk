@@ -45,8 +45,6 @@ Companion to ``test_perp_conservation.py`` (collateral lane) and
 ``test_portfolio_conservation.py`` (token-flow lanes).
 """
 
-from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
-
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
@@ -76,6 +74,7 @@ from almanak.framework.intents.lending_intents import (
     SupplyIntent,
     WithdrawIntent,
 )
+from tests.backtesting_funding import pnl_token_funding as _pnl_token_funding
 from tests.unit.backtesting.pnl._mocks import MockDataProvider
 from tests.validation.backtesting.trust_matrix import (
     INITIAL_CAPITAL,
@@ -859,7 +858,9 @@ class TestEngineLoopBothLanes:
             strategy_type=strategy_type,
         )
 
-        assert result.success
+        assert not result.success
+        assert result.error is not None
+        assert result.error.startswith("BACKTEST_EXECUTION_REJECTED:")
         # Rejected fill is recorded but not counted as a trade; it
         # surfaces as failed_trades (VIB-5083, CodeRabbit).
         assert result.metrics.total_trades == 0
@@ -1559,7 +1560,9 @@ class TestEngineLoopBorrowRepayBothLanes:
             strategy_type=strategy_type,
         )
 
-        assert result.success
+        assert not result.success
+        assert result.error is not None
+        assert result.error.startswith("BACKTEST_EXECUTION_REJECTED:")
         # Rejected fill is recorded but not counted as a trade; it
         # surfaces as failed_trades (VIB-5083, CodeRabbit).
         assert result.metrics.total_trades == 0

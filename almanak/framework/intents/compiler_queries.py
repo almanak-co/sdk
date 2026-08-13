@@ -810,10 +810,13 @@ class CompilerQueries:
         # Parse fee tier if provided
         fee_tier = default_fee
         if len(parts) >= 3:
-            try:
-                fee_tier = int(parts[2].strip())
-            except ValueError:
+            from .lp_fees import pool_fee_tier_units
+
+            parsed_fee_tier = pool_fee_tier_units("/".join(parts[:3]))
+            if parsed_fee_tier is None:
                 logger.warning(f"Invalid fee tier: {parts[2]}, using default {default_fee}")
+            else:
+                fee_tier = parsed_fee_tier
 
         # Resolve token addresses — go through host wrappers so instance-level patches propagate
         token0 = self._host._resolve_token(token0_symbol)

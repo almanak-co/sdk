@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
@@ -88,6 +89,14 @@ def test_snapshot_serves_execution_grade_pool_price_and_reserves() -> None:
         fetcher=_fetcher,
     )
     assert asyncio.run(source.materialize_history(TARGET)) == 2
+    descriptor = source.pool_descriptor("POLYGON", "Uniswap-V3", POOL.upper())
+    assert descriptor is not None
+    assert (descriptor.token0, descriptor.token1) == (TOKEN0, TOKEN1)
+    assert descriptor.fee_tier_units == 500
+    assert descriptor.fee_rate == Decimal("0.0005")
+    assert descriptor.provenance == "historical:on_chain_archive"
+    assert descriptor.factory == "0x1f98431c8ad98523631ae4a59f267346ea31f984"
+    assert source.descriptors() == (descriptor,)
     view = source.view_at(END)
 
     price = view.read_pool_price(POOL, "polygon")

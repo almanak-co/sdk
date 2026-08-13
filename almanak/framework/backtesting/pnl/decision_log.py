@@ -236,8 +236,54 @@ class DecisionLog:
             self._groups.values(),
             key=lambda g: (-g.ticks, g.first_tick, g.reason_template),
         )
-        fills = sum(1 for t in (trades or []) if getattr(t, "success", False))
-        rejected = sum(1 for t in (trades or []) if not getattr(t, "success", True))
+        trade_rows = trades or []
+        fills = sum(1 for t in trade_rows if getattr(t, "success", False))
+        rejected = sum(1 for t in trade_rows if not getattr(t, "success", True))
+        by_intent_type: dict[str, dict[str, int]] = {}
+        rejection_groups: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+        for trade in trade_rows:
+            raw_type = getattr(trade, "intent_type", "UNKNOWN")
+            intent_type = str(getattr(raw_type, "value", raw_type)).upper()
+            counts = by_intent_type.setdefault(intent_type, {"fills": 0, "rejected": 0})
+            if getattr(trade, "success", False):
+                counts["fills"] += 1
+                continue
+            counts["rejected"] += 1
+            metadata = getattr(trade, "metadata", None) or {}
+            reason = str(getattr(trade, "error", None) or metadata.get("failure_reason") or "fill rejected")
+            code = str(metadata.get("rejection_code") or "UNCLASSIFIED")
+            protocol = str(getattr(trade, "protocol", "") or "unknown").lower()
+            key = (intent_type, protocol, code, _reason_template(reason))
+            group = rejection_groups.get(key)
+            if group is None:
+                if len(rejection_groups) >= _MAX_REASON_GROUPS:
+                    key = ("OTHER", "other", "OTHER", "(other)")
+                    group = rejection_groups.get(key)
+                if group is None:
+                    timestamp = getattr(trade, "timestamp", None)
+                    serialized_ts = timestamp.isoformat() if isinstance(timestamp, datetime) else None
+                    group = {
+                        "intent_type": key[0],
+                        "protocol": key[1],
+                        "rejection_code": key[2],
+                        "reason_template": key[3],
+                        "example": reason,
+                        "count": 0,
+                        "first_timestamp": serialized_ts,
+                        "last_timestamp": serialized_ts,
+                        "intent_id": metadata.get("intent_id"),
+                        "position_id": getattr(trade, "position_id", None),
+                        "retryable": metadata.get("retryable"),
+                    }
+                    rejection_groups[key] = group
+            group["count"] += 1
+            timestamp = getattr(trade, "timestamp", None)
+            if isinstance(timestamp, datetime):
+                group["last_timestamp"] = timestamp.isoformat()
+        sorted_rejections = sorted(
+            rejection_groups.values(),
+            key=lambda group: (-group["count"], group["intent_type"], group["reason_template"]),
+        )
         return {
             "schema_version": DECISION_SUMMARY_SCHEMA_VERSION,
             "ticks": self._last_tick_recorded,
@@ -257,4 +303,6 @@ class DecisionLog:
                 for g in reasons
             ],
             "executions": {"fills": fills, "rejected": rejected},
+            "execution_by_intent_type": dict(sorted(by_intent_type.items())),
+            "rejections": sorted_rejections,
         }

@@ -592,12 +592,24 @@ async def fetch_v3_pool_state_series(
     end_ts: int,
     interval_secs: int,
     protocol: str,
+    factory_address: str,
 ) -> list[Any]:
-    """Read exact Uniswap-V3-shaped pool state at historical archive blocks."""
+    """Read and factory-authenticate exact V3 pool state at archive blocks."""
     from almanak.gateway.services.rate_history_service import (
         DexPoolStatePoint,
         RateHistoryUnavailable,
     )
+
+    normalized_factory = factory_address.strip().lower() if isinstance(factory_address, str) else ""
+    if (
+        len(normalized_factory) != 42
+        or not normalized_factory.startswith("0x")
+        or any(char not in "0123456789abcdef" for char in normalized_factory[2:])
+    ):
+        raise RateHistoryUnavailable(
+            protocol,
+            f"invalid or missing factory address for {protocol} on {chain!r}: {factory_address!r}",
+        )
 
     web3, pool_checksum = await _twap_resolve_web3_and_pool(
         servicer,
@@ -629,6 +641,18 @@ async def fetch_v3_pool_state_series(
         if len(fee_raw) < 32:
             raise ValueError(f"fee() returned {len(fee_raw)} bytes; need 32")
         fee_tier = int.from_bytes(fee_raw[-32:], byteorder="big")
+        from almanak.connectors._base.v3_pool_abi import encode_v3_get_pool
+
+        factory_checksum = web3.to_checksum_address(normalized_factory)
+        canonical_raw = await web3.eth.call(
+            {"to": factory_checksum, "data": encode_v3_get_pool(token0, token1, fee_tier)},
+            block_identifier=unique_blocks[-1][0],
+        )
+        if len(canonical_raw) < 32:
+            raise ValueError(f"factory getPool returned {len(canonical_raw)} bytes; need 32")
+        canonical_pool = "0x" + bytes(canonical_raw)[-20:].hex()
+        if canonical_pool.lower() != pool_checksum.lower():
+            raise ValueError(f"registered factory returned {canonical_pool}, not requested pool {pool_address.lower()}")
     except Exception as exc:
         raise RateHistoryUnavailable(
             protocol,

@@ -20,7 +20,7 @@ from typing import Any
 
 import pytest
 
-from almanak.framework.backtesting.pnl._engine_helpers import _invoke_strategy_decide
+from almanak.framework.backtesting.pnl._engine_helpers import _invoke_strategy_decide, _rejected_execution_error
 from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 from almanak.framework.backtesting.pnl.data_provider import normalize_token_key
 from almanak.framework.backtesting.pnl.decision_log import DecisionLog
@@ -97,6 +97,58 @@ class TestDecisionLog:
         assert len(summary["hold_reasons"]) <= module._MAX_REASON_GROUPS + 1
         other = [g for g in summary["hold_reasons"] if g["reason_template"] == "(other)"]
         assert other and other[0]["ticks"] >= 1
+
+    def test_rejections_are_grouped_and_expose_dominant_reason(self):
+        log = DecisionLog()
+        trades = [
+            SimpleNamespace(
+                success=False,
+                intent_type=SimpleNamespace(value="PERP_OPEN"),
+                protocol="gmx_v2",
+                error="insufficient USDC balance: required 8.80, held 8.53",
+                metadata={"rejection_code": "INSUFFICIENT_BALANCE", "retryable": False},
+                timestamp=_ts(hour),
+                position_id=None,
+            )
+            for hour in range(3)
+        ]
+
+        summary = log.summary(trades=trades)
+
+        assert summary["execution_by_intent_type"] == {"PERP_OPEN": {"fills": 0, "rejected": 3}}
+        (rejection,) = summary["rejections"]
+        assert rejection["count"] == 3
+        assert rejection["rejection_code"] == "INSUFFICIENT_BALANCE"
+        assert rejection["reason_template"] == "insufficient USDC balance: required N, held N"
+        assert rejection["retryable"] is False
+
+    def test_fully_rejected_intent_family_invalidates_otherwise_busy_run(self):
+        log = DecisionLog()
+        trades = [
+            SimpleNamespace(
+                success=True,
+                intent_type=SimpleNamespace(value="LP_OPEN"),
+                protocol="uniswap_v3",
+                error=None,
+                metadata={},
+                timestamp=_ts(),
+                position_id="lp-1",
+            ),
+            SimpleNamespace(
+                success=False,
+                intent_type=SimpleNamespace(value="PERP_OPEN"),
+                protocol="gmx_v2",
+                error="insufficient USDC balance",
+                metadata={"rejection_code": "INSUFFICIENT_BALANCE"},
+                timestamp=_ts(1),
+                position_id=None,
+            ),
+        ]
+
+        error = _rejected_execution_error(log.summary(trades=trades))
+
+        assert error is not None and error.startswith("BACKTEST_EXECUTION_REJECTED:")
+        assert "PERP_OPEN" in error
 
     def test_string_intent_type_and_serialize_fallback(self):
         @dataclass

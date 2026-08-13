@@ -112,6 +112,7 @@ if TYPE_CHECKING:
     from almanak.framework.backtesting.pnl.indicator_engine import BacktestIndicatorEngine
     from almanak.framework.backtesting.pnl.logging_utils import BacktestLogger
     from almanak.framework.backtesting.pnl.providers.perp.snapshot_funding import SnapshotFundingRateSource
+    from almanak.framework.backtesting.pnl.providers.snapshot_pool_state import SnapshotPoolStateSource
     from almanak.framework.data.timeframes import OHLCVTimeframe
     from almanak.framework.market import MarketSnapshot
 
@@ -1405,6 +1406,15 @@ def _requires_complete_funding_history(backtester: PnLBacktester) -> bool:
     return bool(data_config is not None and data_config.use_historical_funding and data_config.strict_historical_mode)
 
 
+def _bind_historical_pool_descriptors(
+    backtester: PnLBacktester,
+    source: SnapshotPoolStateSource | None,
+) -> None:
+    """Bind materialized exact-pool identities without growing loop branching."""
+    if source is not None:
+        backtester._bind_pool_descriptors(source.descriptors())
+
+
 async def execute_iteration_loop(
     backtester: PnLBacktester,
     strategy: BacktestableStrategy,
@@ -1460,6 +1470,7 @@ async def execute_iteration_loop(
         config,
         state.data_broker.manifest if state.data_broker is not None else None,
     )
+    _bind_historical_pool_descriptors(backtester, pool_state_source)
 
     # Stable for the whole run: provider registrations happen during
     # initialize_backtest, before this loop starts.
@@ -2251,6 +2262,39 @@ def _unsupported_data_error(
     )
 
 
+def _rejected_execution_error(decision_summary: dict[str, Any]) -> str | None:
+    """Reject a run when an emitted intent family never reaches a fill.
+
+    A busy secondary leg must not hide a completely unmodeled/rejected core
+    leg. Intermittent failures remain valid once that same intent family has a
+    successful fill; only 100%-rejected families make the result non-publishable.
+    """
+    blocked = [
+        (intent_type, counts)
+        for intent_type, counts in decision_summary.get("execution_by_intent_type", {}).items()
+        if counts.get("rejected", 0) > 0 and counts.get("fills", 0) == 0
+    ]
+    if not blocked:
+        return None
+    blocked_types = {intent_type for intent_type, _counts in blocked}
+    dominant: dict[str, Any] = next(
+        (
+            rejection
+            for rejection in decision_summary.get("rejections", [])
+            if rejection.get("intent_type") in blocked_types
+        ),
+        {},
+    )
+    families = ", ".join(f"{intent_type} ({counts['rejected']} rejected)" for intent_type, counts in blocked[:5])
+    reason = dominant.get("example", "fill rejected")
+    return (
+        "BACKTEST_EXECUTION_REJECTED: no successful execution was modeled for emitted intent family/families "
+        f"{families}. Dominant rejection: {reason}. Headline return, PnL, Sharpe, and drawdown are invalid "
+        "because at least one strategy action lane never executed. See decision_summary.rejections for the "
+        "bounded structured breakdown."
+    )
+
+
 def finalize_backtest_result(
     *,
     backtester: PnLBacktester,
@@ -2357,15 +2401,16 @@ def finalize_backtest_result(
         executed_fills=executed_fills,
         non_warm_up=non_warm_up,
     )
-    if unsupported_data_error is not None:
-        state.compliance_violations.append(unsupported_data_error)
-        bt_logger.error(unsupported_data_error)
+    terminal_error = unsupported_data_error or _rejected_execution_error(decision_summary)
+    if terminal_error is not None:
+        state.compliance_violations.append(terminal_error)
+        bt_logger.error(terminal_error)
 
     # Compliance is derived only after hollow-run classification so a run
     # rejected as unsupported data cannot certify as institutionally compliant.
     institutional_compliance = len(state.compliance_violations) == 0
 
-    if unsupported_data_error is None:
+    if terminal_error is None:
         bt_logger.info(
             f"Backtest completed for {strategy.deployment_id}: "
             f"PnL=${metrics.net_pnl_usd:,.2f}, "
@@ -2400,7 +2445,7 @@ def finalize_backtest_result(
         price_series=state.portfolio.price_series,
         price_series_display_labels=price_series_display_labels(state.portfolio.price_series),
         chain=config.chain,
-        error=unsupported_data_error,
+        error=terminal_error,
         decision_input_failures=decision_input_failures or None,
         run_started_at=run_started_at,
         run_ended_at=run_ended_at,

@@ -46,6 +46,7 @@ from almanak.connectors.gmx_v2.backtest_prices import (
     GMXPriceHistoryCoverageError,
     _GMXOracleMarketSource,
 )
+from almanak.connectors.uniswap_v3.addresses import UNISWAP_V3
 from almanak.core.models.quote_asset import QuoteAsset
 from almanak.framework.backtesting.adapters.lp_adapter import (
     LPBacktestAdapter,
@@ -700,11 +701,12 @@ def test_historical_exact_pool_twap_reaches_unchanged_strategy_call(monkeypatch:
 
 @pytest.mark.trust_cell("lp:historical_exact_pool_state")
 def test_historical_exact_pool_state_reaches_unchanged_lp_calls(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Address-first archive state serves both exact-pool snapshot APIs."""
+    """Address-first archive state serves APIs and the exact LP execution."""
     link = "0x514910771af9ca656af840dff83e8264ecf986ca"
     weth = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
     exact_pool = "0xa6cc3c2531fdaa6ae1a3ca84c2855806728693e8"
     fetch_calls = []
+    bound_descriptors = []
 
     def archive_fetch(**kwargs):
         fetch_calls.append(kwargs)
@@ -732,6 +734,18 @@ def test_historical_exact_pool_state_reaches_unchanged_lp_calls(monkeypatch: pyt
         "almanak.framework.backtesting.pnl.providers.snapshot_pool_state.fetch_historical_pool_state_points",
         archive_fetch,
     )
+    monkeypatch.setattr(
+        "almanak.framework.data.pools.reader.known_pool_pair",
+        lambda *_args: pytest.fail("exact-address execution must not consult the static pool registry"),
+    )
+    original_bind_pool_descriptors = LPBacktestAdapter.bind_pool_descriptors
+
+    def capture_bound_descriptors(adapter, descriptors):
+        descriptor_batch = tuple(descriptors)
+        bound_descriptors.extend(descriptor_batch)
+        original_bind_pool_descriptors(adapter, descriptor_batch)
+
+    monkeypatch.setattr(LPBacktestAdapter, "bind_pool_descriptors", capture_bound_descriptors)
 
     class Provider:
         provider_name = "synthetic"
@@ -759,7 +773,9 @@ def test_historical_exact_pool_state_reaches_unchanged_lp_calls(monkeypatch: pyt
             "base_token": {"symbol": "LINK", "address": link},
             "quote_token": {"symbol": "WETH", "address": weth},
         }
-        STRATEGY_METADATA = SimpleNamespace(tags=["lp"], supported_protocols=["uniswap_v3"], intent_types=["HOLD"])
+        STRATEGY_METADATA = SimpleNamespace(
+            tags=["lp"], supported_protocols=["uniswap_v3"], intent_types=["LP_OPEN", "HOLD"]
+        )
 
         def __init__(self) -> None:
             self.observations = []
@@ -768,6 +784,17 @@ def test_historical_exact_pool_state_reaches_unchanged_lp_calls(monkeypatch: pyt
             price = market.pool_price(self.pool, chain="ethereum")
             reserves = market.pool_reserves(self.pool, chain="ethereum")
             self.observations.append((price, reserves))
+            if len(self.observations) == 2:
+                return LPOpenIntent(
+                    pool=self.pool,
+                    amount0=Decimal("0.1"),
+                    amount1=Decimal("0.1"),
+                    range_lower=Decimal("0.5"),
+                    range_upper=Decimal("2"),
+                    protocol=self.protocol,
+                    chain="ethereum",
+                    fee_tier_units=3_000,
+                )
             return None
 
     config = PnLBacktestConfig(
@@ -791,11 +818,18 @@ def test_historical_exact_pool_state_reaches_unchanged_lp_calls(monkeypatch: pyt
             fee_models={"default": DefaultFeeModel()},
             slippage_models={"default": DefaultSlippageModel()},
             token_addresses={"LINK": ("ethereum", link), "WETH": ("ethereum", weth)},
+            data_config=BacktestDataConfig(explicit_pool_volume_usd_daily=Decimal("0")),
         ).backtest(strategy, config)
     )
 
     assert result.success
     assert len(fetch_calls) == 1 and fetch_calls[0]["pool_address"] == exact_pool
+    assert len(bound_descriptors) == 1
+    assert bound_descriptors[0].key == ("ethereum", "uniswap_v3", exact_pool)
+    assert bound_descriptors[0].factory == UNISWAP_V3["ethereum"]["factory"].lower()
+    assert len(result.trades) == 1 and result.trades[0].success
+    assert result.trades[0].tokens == [f"ethereum:{link}", f"ethereum:{weth}"]
+    assert Decimal(result.trades[0].metadata["fee_tier"]) == Decimal("0.003")
     assert len(strategy.observations) == 3
     for price, reserves in strategy.observations:
         assert price.classification is DataClassification.EXECUTION_GRADE
@@ -828,7 +862,8 @@ def test_swap_overspend_is_rejected_without_state_change() -> None:
         slippage_pct=Decimal("0.001"),
     )
 
-    assert result.success  # the backtest completes; the trade fails
+    assert not result.success
+    assert result.error is not None and result.error.startswith("BACKTEST_EXECUTION_REJECTED:")
     # Rejected fill is recorded but is NOT a trade: total_trades excludes
     # it; it surfaces as failed_trades (VIB-5083, CodeRabbit).
     assert result.metrics.total_trades == 0
@@ -877,7 +912,8 @@ def test_swap_execution_error_records_terminal_rejection() -> None:
 
     result = asyncio.run(backtester.backtest(ScriptedStrategy([SwapDuck()]), config))
 
-    assert result.success
+    assert not result.success
+    assert result.error is not None and result.error.startswith("BACKTEST_EXECUTION_REJECTED:")
     assert len(result.trades) == 1
     rejected = result.trades[0]
     assert rejected.success is False
@@ -887,6 +923,7 @@ def test_swap_execution_error_records_terminal_rejection() -> None:
     assert result.metrics.failed_trades == 1
     assert result.decision_summary is not None
     assert result.decision_summary["executions"] == {"fills": 0, "rejected": 1}
+    assert result.decision_summary["rejections"][0]["rejection_code"] == "execution_error"
     assert result.final_capital_usd == INITIAL_CAPITAL
     assert all(point.value_usd == INITIAL_CAPITAL for point in result.equity_curve)
 
@@ -1349,7 +1386,8 @@ def test_lp_open_beyond_cash_is_rejected() -> None:
         hours=4,
     )
 
-    assert result.success
+    assert not result.success
+    assert result.error is not None and result.error.startswith("BACKTEST_EXECUTION_REJECTED:")
     # Rejected fill is recorded but is NOT a trade: total_trades excludes
     # it; it surfaces as failed_trades (VIB-5083, CodeRabbit).
     assert result.metrics.total_trades == 0
@@ -1432,6 +1470,40 @@ def _accrue_generic_lane_lp_fee(position_value_usd: Decimal, *, fee_tier: Decima
     )
     # last_updated is None -> elapsed measured from entry_time == one day.
     return portfolio._simulate_lp_fee_accrual(position, position_value_usd, START + timedelta(days=1))
+
+
+@pytest.mark.trust_cell("lp:lp_fee_unit_normalization")
+def test_lp_factory_fee_units_normalize_once_and_bound_first_hour_revenue() -> None:
+    """ALM-3302: 500 factory units mean 0.05%, never a 500x fee rate."""
+    daily_volume = Decimal("10464")
+    pool_tvl = Decimal("5000000")
+    adapter = LPBacktestAdapter(
+        config=LPBacktestConfig(
+            strategy_type="lp",
+            fee_tracking_enabled=True,
+            explicit_pool_volume_usd_daily=daily_volume,
+            explicit_pool_liquidity_usd=pool_tvl,
+        )
+    )
+    portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CAPITAL)
+    intent = _lp_open_intent().model_copy(update={"pool": "WETH/USDC/500", "fee_tier_units": 500})
+    open_state = _market_state(0)
+    fill = adapter.execute_intent(intent, portfolio, open_state)
+    assert fill is not None and fill.success
+    assert portfolio.apply_fill(fill, market_state=open_state)
+    position = portfolio.positions[0]
+    assert position.fee_tier == Decimal("0.0005")
+
+    update_state = _market_state(1)
+    position_value = adapter.value_position(position, update_state)
+    before = position.accumulated_fees_usd
+    adapter.update_position(position, update_state, float(TICK_SECONDS), update_state.timestamp)
+    accrued = position.accumulated_fees_usd - before
+    expected = daily_volume * Decimal("0.0005") * (position_value / pool_tvl) / Decimal("24")
+    total_pool_revenue = daily_volume * Decimal("0.0005") / Decimal("24")
+
+    assert accrued == expected == Decimal("0.000218")
+    assert accrued <= total_pool_revenue
 
 
 @pytest.mark.trust_cell("lp:fee_share_scaling")
@@ -1648,7 +1720,8 @@ def test_supply_beyond_cash_is_rejected() -> None:
         hours=4,
     )
 
-    assert result.success
+    assert not result.success
+    assert result.error is not None and result.error.startswith("BACKTEST_EXECUTION_REJECTED:")
     # Rejected fill is recorded but is NOT a trade: total_trades excludes
     # it; it surfaces as failed_trades (VIB-5083, CodeRabbit).
     assert result.metrics.total_trades == 0
@@ -2008,7 +2081,8 @@ def test_perp_open_beyond_cash_is_rejected() -> None:
         hours=4,
     )
 
-    assert result.success
+    assert not result.success
+    assert result.error is not None and result.error.startswith("BACKTEST_EXECUTION_REJECTED:")
     # Rejected fill is recorded but is NOT a trade: total_trades excludes
     # it; it surfaces as failed_trades (VIB-5083, CodeRabbit).
     assert result.metrics.total_trades == 0

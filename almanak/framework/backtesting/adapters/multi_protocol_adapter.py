@@ -39,6 +39,7 @@ Example:
 """
 
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
@@ -642,6 +643,12 @@ class MultiProtocolBacktestAdapter(StrategyBacktestAdapter):
         bind = getattr(self._sub_adapters.get("perp"), "bind_funding_history_source", None)
         if bind is not None:
             bind(source)
+
+    def bind_pool_descriptors(self, descriptors: Iterable[Any]) -> None:
+        """Bind exact-address identities into the LP sub-adapter."""
+        bind = getattr(self._sub_adapters.get("lp"), "bind_pool_descriptors", None)
+        if bind is not None:
+            bind(descriptors)
 
     async def prewarm_history(
         self,

@@ -3911,6 +3911,14 @@ class PnLBacktester:
         if bind is not None:
             bind(source)
 
+    def _bind_pool_descriptors(self, descriptors: Iterable[Any]) -> None:
+        """Bind preflight-authenticated exact pool identities to the adapter."""
+        if self._adapter is None:
+            return
+        bind = getattr(self._adapter, "bind_pool_descriptors", None)
+        if bind is not None:
+            bind(descriptors)
+
     def _init_mev_simulator(self, config: PnLBacktestConfig) -> None:
         """Initialize MEV simulator based on config.
 

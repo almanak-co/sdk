@@ -657,7 +657,17 @@ class LPOpenIntent(BaseIntent):
             kept for backward compatibility — see ``range_spec``)
         protocol: LP protocol (e.g., "uniswap_v3", "camelot")
         chain: Optional target chain for execution (defaults to strategy's primary chain)
-        protocol_params: Optional protocol-specific parameters (e.g., {"bin_range": 10} for TraderJoe V2)
+        fee_tier_units: Canonical V3-style fee tier in raw factory units
+            (``500 == 0.05%``). This is a pool-identity constraint, not a
+            fractional rate.
+        fee_rate: Explicit economic fee fraction for protocols with a dynamic
+            or non-factory fee. Mutually exclusive with ``fee_tier_units``.
+        protocol_params: Optional protocol-specific parameters (e.g., {"bin_range": 10} for TraderJoe V2).
+            The legacy ``fee_tier`` key is accepted as raw factory units and
+            normalized into ``fee_tier_units`` with a deprecation warning. For
+            example, migrate ``{"fee_tier": 500}`` to ``fee_tier_units=500``.
+            Fractional legacy values such as ``0.0005`` are rejected; protocols
+            with dynamic or non-factory fees must use ``fee_rate=Decimal("0.0005")``.
         coin_amounts: Optional pool-coin-aligned full allocation vector for multi-coin
             pools (e.g. Curve 3pool/4pool). When set, ``coin_amounts[i]`` is the amount to
             deposit for pool coin index ``i``, indexed exactly as the pool orders its
@@ -722,6 +732,8 @@ class LPOpenIntent(BaseIntent):
     range_spec: RangeSpec | None = None
     protocol: str = "uniswap_v3"
     chain: str | None = None
+    fee_tier_units: int | None = None
+    fee_rate: OptionalSafeDecimal = None
     protocol_params: dict[str, Any] | None = None
     coin_amounts: list[SafeDecimal] | None = None
     max_slippage: OptionalSafeDecimal = None
@@ -766,6 +778,39 @@ class LPOpenIntent(BaseIntent):
         data.setdefault("range_lower", spec_lower)
         data.setdefault("range_upper", spec_upper)
         return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_fee_declaration(cls, data: Any) -> Any:
+        """Migrate the legacy fee key to the typed, factory-unit field."""
+        if not isinstance(data, dict):
+            return data
+        from .lp_fees import parse_lp_fee_declaration
+
+        params = data.get("protocol_params")
+        if params is not None and not isinstance(params, dict):
+            return data  # the existing after-validator owns this error message
+        declaration = parse_lp_fee_declaration(
+            fee_tier_units=data.get("fee_tier_units"),
+            fee_rate=data.get("fee_rate"),
+            protocol_params=params,
+        )
+        normalized = dict(data)
+        if declaration.fee_tier_units is not None:
+            normalized["fee_tier_units"] = declaration.fee_tier_units
+        if declaration.fee_rate is not None:
+            normalized["fee_rate"] = declaration.fee_rate
+        if declaration.source == "legacy_protocol_params":
+            warnings.warn(
+                "LPOpenIntent protocol_params['fee_tier'] is deprecated; pass fee_tier_units instead",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+            # Keep the legacy key serialized during the compatibility window:
+            # older gateways/receipt parsers still read it. Every current
+            # consumer uses the typed field first, so retaining it cannot
+            # reintroduce ambiguous fee arithmetic.
+        return normalized
 
     @model_validator(mode="after")
     def validate_lp_open_intent(self) -> "LPOpenIntent":
@@ -863,6 +908,12 @@ class LPOpenIntent(BaseIntent):
     def serialize(self) -> dict[str, Any]:
         """Serialize the intent to a dictionary."""
         data = self.model_dump(mode="json")
+        # Preserve the pre-fee-typing wire shape for intents that do not use
+        # the additive fields; emit them only when explicitly populated.
+        if self.fee_tier_units is None:
+            data.pop("fee_tier_units", None)
+        if self.fee_rate is None:
+            data.pop("fee_rate", None)
         data["type"] = self.intent_type.value
         return data
 
@@ -1480,6 +1531,8 @@ class Intent:
         range_spec: RangeSpec | None = None,
         protocol: str = "uniswap_v3",
         chain: str | None = None,
+        fee_tier_units: int | None = None,
+        fee_rate: Decimal | None = None,
         protocol_params: dict[str, Any] | None = None,
         coin_amounts: list[Decimal] | None = None,
         max_slippage: Decimal | None = None,
@@ -1506,6 +1559,9 @@ class Intent:
                 are derived from it (do not pass conflicting legacy bounds).
             protocol: LP protocol (default "uniswap_v3")
             chain: Target chain for execution (defaults to strategy's primary chain)
+            fee_tier_units: V3-style raw factory fee units (500 = 0.05%).
+            fee_rate: Economic fee fraction for non-factory/dynamic-fee pools.
+                Mutually exclusive with ``fee_tier_units``.
             protocol_params: Optional protocol-specific parameters (e.g., {"bin_range": 10} for TraderJoe V2)
             coin_amounts: Optional pool-coin-aligned full allocation vector for
                 multi-coin pools (e.g. Curve 3pool/4pool). ``coin_amounts[i]`` is the
@@ -1592,6 +1648,8 @@ class Intent:
             "range_spec": range_spec,
             "protocol": protocol,
             "chain": chain,
+            "fee_tier_units": fee_tier_units,
+            "fee_rate": fee_rate,
             "protocol_params": protocol_params,
             "coin_amounts": coin_amounts,
             "max_slippage": max_slippage,

@@ -20,6 +20,7 @@ from almanak.framework.backtesting.adapters.lp_adapter import (
     HeuristicValidationSample,
     LPBacktestAdapter,
     LPBacktestConfig,
+    LPPoolResolutionError,
     RangeStatus,
     RangeStatusResult,
 )
@@ -1061,12 +1062,12 @@ class TestExecuteIntentLPOpen:
         fill = adapter.execute_intent(mock_intent, portfolio, market)
         assert fill is None
 
-    def test_execute_lp_open_with_address_pool_resolves_registry_pair(self) -> None:
-        """Address pools resolve via the pool registry in registry orientation.
+    def test_execute_lp_open_with_static_registry_pool_without_descriptor_rejects(self) -> None:
+        """A static registry entry is discovery metadata, not historical proof.
 
-        0x88e6...5640 is the ethereum USDC/WETH 0.05% pool with token0=USDC,
-        token1=WETH — the old fabricated ("WETH", "USDC") default swapped the
-        legs, pricing amount0 as WETH (~1000x notional on a USDC amount0).
+        0x88e6...5640 is known locally, but exact-address execution must still
+        require a run-scoped descriptor that authenticates chain, protocol,
+        token order, and immutable fee tier.
         """
         from almanak.framework.intents.vocabulary import LPOpenIntent
 
@@ -1090,13 +1091,144 @@ class TestExecuteIntentLPOpen:
 
         fill = adapter.execute_intent(intent, portfolio, market)
 
-        assert fill is not None
-        assert fill.success is True
-        # Registry orientation: token0=USDC, token1=WETH (NOT the old WETH/USDC default)
-        assert fill.tokens == ["USDC", "WETH"]
-        # Notional derives from the correctly-oriented legs: 1000 USDC + 0.25 WETH
-        assert fill.amount_usd == Decimal("1000") * Decimal("1") + Decimal("0.25") * Decimal("2000")
-        assert fill.tokens_out == {"USDC": Decimal("1000"), "WETH": Decimal("0.25")}
+        assert fill is not None and fill.success is False
+        assert fill.metadata["rejection_code"] == "POOL_METADATA_UNAVAILABLE"
+        assert fill.metadata["intent_id"] == intent.intent_id
+        assert fill.metadata["retryable"] is False
+        assert fill.tokens == []
+        assert fill.amount_usd == Decimal("0")
+        assert fill.position_delta is None
+
+    def test_exact_address_pool_uses_authenticated_descriptor_without_static_pool_registry(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ALM-3301: a valid noncanonical pool is not an SDK allowlist decision."""
+        import almanak.framework.data.pools.reader as reader_module
+        from almanak.framework.data.pools.descriptor import PoolDescriptor
+        from almanak.framework.intents.vocabulary import LPOpenIntent
+
+        pool = "0x9b08288c3be4f62bbf8d1c20ac9c5e6f9467d8b7"
+        token0 = "0x00000000000000000000000000000000000000a1"
+        token1 = "0x00000000000000000000000000000000000000b2"
+        monkeypatch.setattr(
+            reader_module,
+            "known_pool_pair",
+            lambda *_args: pytest.fail("exact descriptor must not consult the static pool registry"),
+        )
+        adapter = LPBacktestAdapter()
+        adapter.bind_pool_descriptors(
+            [PoolDescriptor("polygon", "uniswap_v3", pool, token0, token1, 18, 6, 500, "historical:test")]
+        )
+        intent = LPOpenIntent(
+            pool=pool,
+            amount0=Decimal("1"),
+            amount1=Decimal("1"),
+            range_lower=Decimal("0.4"),
+            range_upper=Decimal("0.6"),
+            protocol="uniswap_v3",
+            chain="polygon",
+            fee_tier_units=500,
+        )
+        market = MockMarketStateWithTimestamp(
+            prices={
+                ("polygon", token0): Decimal("0.5"),
+                ("polygon", token1): Decimal("1"),
+            },
+            timestamp=datetime.now(),
+        )
+
+        fill = adapter.execute_intent(intent, MockPortfolio(), market)
+
+        assert fill is not None and fill.success is True
+        assert fill.tokens == [("polygon", token0), ("polygon", token1)]
+        assert fill.position_delta is not None
+        assert fill.position_delta.fee_tier == Decimal("0.0005")
+
+    @pytest.mark.parametrize(
+        ("chain", "protocol"),
+        [("ethereum", "uniswap_v3"), ("polygon", "sushiswap_v3")],
+    )
+    def test_exact_address_descriptor_requires_matching_chain_and_protocol(self, chain: str, protocol: str) -> None:
+        """An address match alone cannot authorize a different venue identity."""
+        from almanak.framework.data.pools.descriptor import PoolDescriptor
+        from almanak.framework.intents.vocabulary import LPOpenIntent
+
+        pool = "0x9b08288c3be4f62bbf8d1c20ac9c5e6f9467d8b7"
+        adapter = LPBacktestAdapter()
+        adapter.bind_pool_descriptors(
+            [
+                PoolDescriptor(
+                    "polygon",
+                    "uniswap_v3",
+                    pool,
+                    "0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270",
+                    "0xc2132d05d31c914a87c6611c10748aeb04b58e8f",
+                    18,
+                    6,
+                    500,
+                    "historical:test",
+                )
+            ]
+        )
+        intent = LPOpenIntent(
+            pool=pool,
+            amount0=Decimal("1"),
+            amount1=Decimal("1"),
+            range_lower=Decimal("0.4"),
+            range_upper=Decimal("0.6"),
+            protocol=protocol,
+            chain=chain,
+            fee_tier_units=500,
+        )
+        market = MockMarketStateWithTimestamp(
+            prices={"WMATIC": Decimal("0.5"), "USDT": Decimal("1")}, timestamp=datetime.now()
+        )
+
+        fill = adapter.execute_intent(intent, MockPortfolio(), market)
+
+        assert fill is not None and fill.success is False
+        assert fill.metadata["rejection_code"] == "POOL_METADATA_UNAVAILABLE"
+        assert fill.position_delta is None
+
+    def test_exact_address_pool_rejects_fee_constraint_mismatch(self) -> None:
+        from almanak.framework.data.pools.descriptor import PoolDescriptor
+        from almanak.framework.intents.vocabulary import LPOpenIntent
+
+        pool = "0x9b08288c3be4f62bbf8d1c20ac9c5e6f9467d8b7"
+        adapter = LPBacktestAdapter()
+        adapter.bind_pool_descriptors(
+            [
+                PoolDescriptor(
+                    "polygon",
+                    "uniswap_v3",
+                    pool,
+                    "0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270",
+                    "0xc2132d05d31c914a87c6611c10748aeb04b58e8f",
+                    18,
+                    6,
+                    500,
+                    "historical:test",
+                )
+            ]
+        )
+        intent = LPOpenIntent(
+            pool=pool,
+            amount0=Decimal("1"),
+            amount1=Decimal("1"),
+            range_lower=Decimal("0.4"),
+            range_upper=Decimal("0.6"),
+            protocol="uniswap_v3",
+            chain="polygon",
+            fee_tier_units=3000,
+        )
+        market = MockMarketStateWithTimestamp(
+            prices={"WMATIC": Decimal("0.5"), "USDT": Decimal("1")}, timestamp=datetime.now()
+        )
+
+        fill = adapter.execute_intent(intent, MockPortfolio(), market)
+
+        assert fill is not None and fill.success is False
+        assert fill.metadata["rejection_code"] == "POOL_FEE_MISMATCH"
 
     def test_execute_lp_open_with_unknown_address_pool_rejects(self) -> None:
         """Registry-unknown address pools reject with a named reason."""
@@ -1115,7 +1247,10 @@ class TestExecuteIntentLPOpen:
         )
 
         market = MockMarketStateWithTimestamp(
-            prices={"WETH": Decimal("2000"), "USDC": Decimal("1")},
+            prices={
+                ("ethereum", "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"): Decimal("1"),
+                ("ethereum", "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"): Decimal("2000"),
+            },
             timestamp=datetime.now(),
         )
         portfolio = MockPortfolio()
@@ -1126,7 +1261,7 @@ class TestExecuteIntentLPOpen:
         assert fill.success is False
         reason = fill.metadata["failure_reason"]
         assert "0x000000000000000000000000000000000000dead" in reason.lower()
-        assert "not registry-known" in reason
+        assert "POOL_METADATA_UNAVAILABLE" in reason
         assert "ethereum" in reason
         # Fail-honest: no fabricated WETH/USDC legs on the reject
         assert fill.tokens == []
@@ -1148,7 +1283,10 @@ class TestExecuteIntentLPOpen:
         )
 
         market = MockMarketStateWithTimestamp(
-            prices={"WETH": Decimal("2000"), "USDC": Decimal("1")},
+            prices={
+                ("ethereum", "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"): Decimal("1"),
+                ("ethereum", "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"): Decimal("2000"),
+            },
             timestamp=datetime.now(),
         )
         portfolio = MockPortfolio()
@@ -1690,9 +1828,25 @@ class TestHistoricalVolumeIntegration:
 
     def test_adapter_stores_pool_address_in_metadata(self) -> None:
         """Test LP open stores pool address in position metadata."""
+        from almanak.framework.data.pools.descriptor import PoolDescriptor
         from almanak.framework.intents.vocabulary import LPOpenIntent
 
         adapter = LPBacktestAdapter()
+        adapter.bind_pool_descriptors(
+            [
+                PoolDescriptor(
+                    "ethereum",
+                    "uniswap_v3",
+                    "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640",
+                    "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                    "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+                    6,
+                    18,
+                    500,
+                    "historical:test",
+                )
+            ]
+        )
 
         # Use address format pool (registry-known ethereum USDC/WETH 0.05% pool)
         intent = LPOpenIntent(
@@ -1720,9 +1874,25 @@ class TestHistoricalVolumeIntegration:
 
     def test_adapter_normalizes_uppercase_pool_address_in_metadata(self) -> None:
         """Pool-address detection is case-insensitive and stores lowercase."""
+        from almanak.framework.data.pools.descriptor import PoolDescriptor
         from almanak.framework.intents.vocabulary import LPOpenIntent
 
         adapter = LPBacktestAdapter()
+        adapter.bind_pool_descriptors(
+            [
+                PoolDescriptor(
+                    "ethereum",
+                    "uniswap_v3",
+                    "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640",
+                    "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                    "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+                    6,
+                    18,
+                    500,
+                    "historical:test",
+                )
+            ]
+        )
         intent = LPOpenIntent(
             pool="0X88E6A0C2DDD26FEEB64F039A2C41296FCB3F5640",
             amount0=Decimal("1000"),
@@ -2107,6 +2277,25 @@ class TestValidateHeuristics:
         # 25% relative error -> OK under default 50%, FAIL under 10%.
         assert adapter.validate_heuristics([sample], warn_threshold_pct=Decimal("0.5"))[0].exceeds_threshold is False
         assert adapter.validate_heuristics([sample], warn_threshold_pct=Decimal("0.1"))[0].exceeds_threshold is True
+
+    def test_heuristic_estimate_is_capped_by_modeled_pool_revenue(self) -> None:
+        adapter = LPBacktestAdapter(
+            LPBacktestConfig(
+                strategy_type="lp",
+                allow_volume_fallback=True,
+                volume_multiplier=Decimal("0.01"),
+            )
+        )
+        sample = HeuristicValidationSample(
+            position_value_usd=Decimal("10000"),
+            liquidity=Decimal("1000000"),
+            fee_tier=Decimal("0.0001"),
+            elapsed_seconds=86400,
+            observed_fees_usd=Decimal("0"),
+            label="low-tier-low-volume",
+        )
+
+        assert adapter._estimate_heuristic_fees(sample) == Decimal("0.01")
 
 
 class TestMeasuredZeroVolume:
@@ -4531,7 +4720,8 @@ class TestGuessedTierConfidenceCap:
         position = TestRangeGatingScope._position("uniswap_v3")
         position.metadata["fee_tier_source"] = "slug_guess"
         position.metadata["pool_address"] = "0xpool"
-        adapter._resolved_fee_tiers["0xpool"] = position.fee_tier  # equals the guess
+        position.metadata["chain"] = "ethereum"
+        adapter._resolved_fee_tiers[("ethereum", "uniswap_v3", "0xpool")] = position.fee_tier
 
         from almanak.framework.backtesting.pnl.data_provider import MarketState
 
@@ -4544,6 +4734,30 @@ class TestGuessedTierConfidenceCap:
         adapter.update_position(position, state, elapsed_seconds=3600)
 
         assert position.metadata["fee_tier_source"] == "subgraph"
+
+    def test_verified_tier_requires_matching_chain_and_protocol_identity(self) -> None:
+        adapter = LPBacktestAdapter()
+        position = TestRangeGatingScope._position("sushiswap_v3")
+        position.metadata.update(
+            fee_tier_source="slug_guess",
+            pool_address="0xpool",
+            chain="polygon",
+        )
+        original_tier = position.fee_tier
+        adapter._resolved_fee_tiers[("polygon", "uniswap_v3", "0xpool")] = Decimal("0.0005")
+
+        from almanak.framework.backtesting.pnl.data_provider import MarketState
+
+        state = MarketState(
+            timestamp=datetime.now(),
+            prices={"WETH": Decimal("1765"), "USDT": Decimal("1")},
+            chain="polygon",
+            block_number=1,
+        )
+        adapter.update_position(position, state, elapsed_seconds=3600)
+
+        assert position.fee_tier == original_tier
+        assert position.metadata["fee_tier_source"] == "slug_guess"
 
     def test_fee_data_source_persists_to_position_metadata(self) -> None:
         # Invariant: provenance must be result-visible — the metrics
@@ -4617,18 +4831,19 @@ class TestPrewarmFeeTier:
 
         await adapter._prewarm_fee_tier("0xpool", "uniswap_v3", "ethereum")
 
-        assert adapter._resolved_fee_tiers["0xpool"] == Decimal("0.0005")  # 500 hundredths-of-a-bip
+        assert adapter._resolved_fee_tiers[("ethereum", "uniswap_v3", "0xpool")] == Decimal("0.0005")
         assert calls[0]["variables"] == {"poolAddress": "0xpool"}
 
     @pytest.mark.asyncio
     async def test_memoized_pool_skips_the_query(self):
         adapter, calls = self._adapter_with_client({"pool": {"feeTier": "500"}})
-        adapter._resolved_fee_tiers["0xpool"] = Decimal("0.003")
+        identity = ("ethereum", "uniswap_v3", "0xpool")
+        adapter._resolved_fee_tiers[identity] = Decimal("0.003")
 
         await adapter._prewarm_fee_tier("0xpool", "uniswap_v3", "ethereum")
 
         assert calls == []
-        assert adapter._resolved_fee_tiers["0xpool"] == Decimal("0.003")  # untouched
+        assert adapter._resolved_fee_tiers[identity] == Decimal("0.003")  # untouched
 
     @pytest.mark.asyncio
     async def test_non_v3_family_and_unknown_protocol_never_query(self):
@@ -4639,14 +4854,14 @@ class TestPrewarmFeeTier:
         await adapter._prewarm_fee_tier("0xpool", "uniswap_v3", "bsc")  # no declared deployment
 
         assert calls == []
-        assert "0xpool" not in adapter._resolved_fee_tiers
+        assert adapter._resolved_fee_tiers == {}
 
     @pytest.mark.asyncio
     async def test_missing_fee_tier_and_zero_tier_leave_the_guess(self):
         for payload in ({"pool": {"feeTier": None}}, {"pool": None}, None, {"pool": {"feeTier": "0"}}):
             adapter, _calls = self._adapter_with_client(payload)
             await adapter._prewarm_fee_tier("0xpool", "uniswap_v3", "ethereum")
-            assert "0xpool" not in adapter._resolved_fee_tiers
+            assert adapter._resolved_fee_tiers == {}
 
     @pytest.mark.asyncio
     async def test_out_of_range_fee_tier_is_rejected(self):
@@ -4656,11 +4871,11 @@ class TestPrewarmFeeTier:
         for raw in ("2000000", "1000001", "Infinity", "1e30"):
             adapter, _calls = self._adapter_with_client({"pool": {"feeTier": raw}})
             await adapter._prewarm_fee_tier("0xpool", "uniswap_v3", "ethereum")
-            assert "0xpool" not in adapter._resolved_fee_tiers, raw
+            assert adapter._resolved_fee_tiers == {}, raw
         # The 100% boundary is accepted (0, 1].
         adapter, _calls = self._adapter_with_client({"pool": {"feeTier": "1000000"}})
         await adapter._prewarm_fee_tier("0xpool", "uniswap_v3", "ethereum")
-        assert adapter._resolved_fee_tiers["0xpool"] == Decimal("1")
+        assert adapter._resolved_fee_tiers[("ethereum", "uniswap_v3", "0xpool")] == Decimal("1")
 
     @pytest.mark.asyncio
     async def test_query_failure_is_best_effort(self):
@@ -4668,7 +4883,7 @@ class TestPrewarmFeeTier:
 
         await adapter._prewarm_fee_tier("0xpool", "uniswap_v3", "ethereum")  # must not raise
 
-        assert "0xpool" not in adapter._resolved_fee_tiers
+        assert adapter._resolved_fee_tiers == {}
 
     @pytest.mark.asyncio
     async def test_missing_provider_client_is_a_noop(self, monkeypatch):
@@ -4677,7 +4892,7 @@ class TestPrewarmFeeTier:
 
         await adapter._prewarm_fee_tier("0xpool", "uniswap_v3", "ethereum")
 
-        assert "0xpool" not in adapter._resolved_fee_tiers
+        assert adapter._resolved_fee_tiers == {}
 
 
 class TestFeeAccrualRoutesProtocol:
@@ -4979,9 +5194,7 @@ class TestFeeExactPoolResolution:
                 {"WETH": "0x" + "a" * 40, "USDC": "0x" + "b" * 40}
             ),
         )
-        monkeypatch.setattr(
-            dex_mod, "DexScreenerClient", TestResolveSymbolicPoolAddress._dexscreener_returning([])
-        )
+        monkeypatch.setattr(dex_mod, "DexScreenerClient", TestResolveSymbolicPoolAddress._dexscreener_returning([]))
         monkeypatch.setattr(
             adapter, "_pick_deepest_pair_candidate", lambda *a, **k: TestResolveSymbolicPoolAddress._best(pool_address)
         )
@@ -5045,9 +5258,7 @@ class TestResolveFeeExactPool:
 
     @pytest.mark.asyncio
     async def test_confirmed_pool_returns_lowercased_address(self, monkeypatch):
-        adapter, calls = self._patched(
-            monkeypatch, result=self._result(True, pool_address="0x" + "AB" * 20)
-        )
+        adapter, calls = self._patched(monkeypatch, result=self._result(True, pool_address="0x" + "AB" * 20))
 
         resolved = await adapter._resolve_fee_exact_pool(
             "WETH/USDC/3000", "uniswap_v3", "base", "0xtoken0", "0xtoken1", 3000
@@ -5062,25 +5273,19 @@ class TestResolveFeeExactPool:
     async def test_zero_address_fails_closed(self, monkeypatch):
         adapter, _ = self._patched(monkeypatch, result=self._result(False, error="no pool"))
 
-        assert (
-            await adapter._resolve_fee_exact_pool("WETH/USDC/123", "uniswap_v3", "base", "0xa", "0xb", 123) is None
-        )
+        assert await adapter._resolve_fee_exact_pool("WETH/USDC/123", "uniswap_v3", "base", "0xa", "0xb", 123) is None
 
     @pytest.mark.asyncio
     async def test_unverifiable_fails_closed(self, monkeypatch):
         adapter, _ = self._patched(monkeypatch, result=self._result(None, warning="rpc down"))
 
-        assert (
-            await adapter._resolve_fee_exact_pool("WETH/USDC/500", "uniswap_v3", "base", "0xa", "0xb", 500) is None
-        )
+        assert await adapter._resolve_fee_exact_pool("WETH/USDC/500", "uniswap_v3", "base", "0xa", "0xb", 500) is None
 
     @pytest.mark.asyncio
     async def test_gateway_unavailable_fails_closed_without_validating(self, monkeypatch):
         adapter, calls = self._patched(monkeypatch, gateway_exc=RuntimeError("gateway down"))
 
-        assert (
-            await adapter._resolve_fee_exact_pool("WETH/USDC/500", "uniswap_v3", "base", "0xa", "0xb", 500) is None
-        )
+        assert await adapter._resolve_fee_exact_pool("WETH/USDC/500", "uniswap_v3", "base", "0xa", "0xb", 500) is None
         assert calls == []
 
 
@@ -5097,12 +5302,95 @@ class TestPoolDeclaredFeeTier:
         assert tier == Decimal("0.003")
         assert adapter._last_fee_tier_explicit is True
 
-    def test_params_override_wins_over_pool_segment(self):
+    @pytest.mark.parametrize("fee_units", [0, 1_000_000])
+    def test_invalid_symbolic_v3_fee_tier_rejects_without_position(self, fee_units: int) -> None:
+        from almanak.framework.intents.vocabulary import LPOpenIntent
+
+        adapter = LPBacktestAdapter()
+        intent = LPOpenIntent(
+            pool=f"WETH/USDC/{fee_units}",
+            amount0=Decimal("1"),
+            amount1=Decimal("2000"),
+            range_lower=Decimal("0.5"),
+            range_upper=Decimal("2"),
+            protocol="uniswap_v3",
+            chain="ethereum",
+        )
+        market = MockMarketStateWithTimestamp(
+            prices={"WETH": Decimal("2000"), "USDC": Decimal("1")}, timestamp=datetime.now()
+        )
+
+        fill = adapter.execute_intent(intent, MockPortfolio(), market)
+
+        assert fill is not None and fill.success is False
+        assert fill.metadata["rejection_code"] == "INVALID_FEE_TIER"
+        assert fill.position_delta is None
+
+    def test_raw_500_units_produces_bounded_first_hour_fee(self):
+        """ALM-3302 regression: 500 units is 0.05%, never a 500x rate."""
+        from almanak.framework.backtesting.adapters.lp_adapter import _FeeFormulaContext, _VolumeResolution
+        from almanak.framework.backtesting.pnl.types import DataConfidence
+
+        adapter = LPBacktestAdapter()
+        position = TestRangeGatingScope._position("uniswap_v3")
+        position.fee_tier = Decimal("500") / Decimal("1000000")
+        position.metadata["fee_tier_source"] = "explicit"
+        context = _FeeFormulaContext(
+            days_elapsed=Decimal("1") / Decimal("24"),
+            liquidity_share=Decimal("0.001"),
+            base_apr=Decimal("0"),
+            resolution=_VolumeResolution(
+                volume_usd=Decimal("10464"), source="historical", confidence=DataConfidence.HIGH
+            ),
+        )
+
+        result = adapter._fee_amount_from_resolution(position, Decimal("22"), context, "0xpool", None)
+
+        assert result.fees_usd == Decimal("0.000218")
+
+    def test_raw_fee_units_cannot_reach_accrual_math(self):
+        from almanak.framework.backtesting.adapters.lp_adapter import _FeeFormulaContext, _VolumeResolution
+        from almanak.framework.backtesting.pnl.types import DataConfidence
+
+        adapter = LPBacktestAdapter()
+        position = TestRangeGatingScope._position("uniswap_v3")
+        position.fee_tier = Decimal("500")
+        context = _FeeFormulaContext(
+            days_elapsed=Decimal("1") / Decimal("24"),
+            liquidity_share=Decimal("0.001"),
+            base_apr=Decimal("0"),
+            resolution=_VolumeResolution(
+                volume_usd=Decimal("10464"), source="historical", confidence=DataConfidence.HIGH
+            ),
+        )
+
+        with pytest.raises(ValueError, match="LP_FEE_INVARIANT_VIOLATION"):
+            adapter._fee_amount_from_resolution(position, Decimal("22"), context, "0xpool", None)
+
+    def test_fallback_fee_credit_cannot_exceed_total_pool_revenue(self):
+        from almanak.framework.backtesting.adapters.lp_adapter import _FeeFormulaContext, _VolumeResolution
+        from almanak.framework.backtesting.pnl.types import DataConfidence
+
+        adapter = LPBacktestAdapter()
+        position = TestRangeGatingScope._position("uniswap_v3")
+        position.fee_tier = Decimal("0.0005")
+        context = _FeeFormulaContext(
+            days_elapsed=Decimal("1") / Decimal("24"),
+            liquidity_share=Decimal("0.001"),
+            base_apr=Decimal("0.25"),
+            resolution=_VolumeResolution(volume_usd=Decimal("0"), source="fallback", confidence=DataConfidence.LOW),
+        )
+
+        result = adapter._fee_amount_from_resolution(position, Decimal("22"), context, "0xpool", None)
+
+        assert result.fees_usd == Decimal("0")
+
+    def test_legacy_fraction_is_rejected_instead_of_overriding_pool_identity(self):
         adapter = LPBacktestAdapter()
         intent = SimpleNamespace(pool="WETH/USDC/3000", protocol_params={"fee_tier": "0.0005"})
 
-        assert adapter._lp_open_fee_tier(intent, "uniswap_v3") == Decimal("0.0005")
-        assert adapter._last_fee_tier_explicit is True
+        with pytest.raises(LPPoolResolutionError, match="INVALID_FEE_TIER"):
+            adapter._lp_open_fee_tier(intent, "uniswap_v3")
 
     def test_bin_step_segment_is_not_a_declared_fee(self):
         adapter = LPBacktestAdapter()
@@ -5113,6 +5401,20 @@ class TestPoolDeclaredFeeTier:
         assert tier == Decimal("0.003")  # slug default, not 25/1e6
         assert adapter._last_fee_tier_explicit is False
 
+    def test_dynamic_protocol_uses_separately_named_fractional_fee_rate(self):
+        adapter = LPBacktestAdapter()
+        intent = SimpleNamespace(
+            pool="WETH/USDC",
+            fee_tier_units=None,
+            fee_rate=Decimal("0.0025"),
+            protocol_params={},
+        )
+
+        tier = adapter._lp_open_fee_tier(intent, "traderjoe_v2")
+
+        assert tier == Decimal("0.0025")
+        assert adapter._last_fee_tier_explicit is True
+
     def test_declared_tier_survives_subgraph_correction(self):
         from almanak.framework.backtesting.pnl.data_provider import MarketState
 
@@ -5121,7 +5423,7 @@ class TestPoolDeclaredFeeTier:
         position.metadata["fee_tier_source"] = "explicit"
         position.metadata["pool_address"] = "0xpool"
         declared = position.fee_tier
-        adapter._resolved_fee_tiers["0xpool"] = declared * 6  # the WRONG pool's tier
+        adapter._resolved_fee_tiers[("ethereum", "uniswap_v3", "0xpool")] = declared * 6
 
         state = MarketState(
             timestamp=datetime.now(),
@@ -5165,6 +5467,7 @@ class TestPoolDeclaredFeeTier:
             amount0=Decimal("1"),
             amount1=Decimal("3000"),
             entry_price=Decimal("3000"),
+            chain="ethereum",
         )
 
         adapter._annotate_lp_open_position(position, "WETH/USDC/3000", plan)
@@ -5192,9 +5495,7 @@ class TestFeeExactReviewRound:
 
         monkeypatch.setattr(v3v, "validate_v3_pool", boom)
 
-        assert (
-            await adapter._resolve_fee_exact_pool("WETH/USDC/500", "uniswap_v3", "base", "0xa", "0xb", 500) is None
-        )
+        assert await adapter._resolve_fee_exact_pool("WETH/USDC/500", "uniswap_v3", "base", "0xa", "0xb", 500) is None
 
     @pytest.mark.asyncio
     async def test_malformed_declared_tier_fails_closed_never_depth_ranked(self, monkeypatch):
@@ -5224,33 +5525,25 @@ class TestFeeExactReviewRound:
         assert await adapter._resolve_symbolic_pool_address("WETH/USDC/1000000", "uniswap_v3", "base") is None
         assert adapter._resolved_pool_addresses == {}
 
-    def test_malformed_declared_tier_prices_at_slug_guess(self):
+    def test_malformed_declared_tier_rejects_instead_of_pricing_at_slug_guess(self):
         adapter = LPBacktestAdapter()
         intent = SimpleNamespace(pool="WETH/USDC/0", protocol_params={})
 
-        tier = adapter._lp_open_fee_tier(intent, "uniswap_v3")
+        with pytest.raises(LPPoolResolutionError, match="INVALID_FEE_TIER"):
+            adapter._lp_open_fee_tier(intent, "uniswap_v3")
 
-        assert tier == Decimal("0.003")  # slug default
-        assert adapter._last_fee_tier_explicit is False
-
-    def test_override_segment_mismatch_warns_but_override_prices(self, caplog):
-        import logging
-
+    def test_typed_units_cannot_override_a_different_pool_segment(self):
         adapter = LPBacktestAdapter()
-        intent = SimpleNamespace(pool="WETH/USDC/3000", protocol_params={"fee_tier": "0.0005"})
+        intent = SimpleNamespace(pool="WETH/USDC/3000", fee_tier_units=500, protocol_params={})
 
-        with caplog.at_level(logging.WARNING, logger="almanak.framework.backtesting.adapters.lp_adapter"):
-            tier = adapter._lp_open_fee_tier(intent, "uniswap_v3")
-
-        assert tier == Decimal("0.0005")
-        assert adapter._last_fee_tier_explicit is True
-        assert any("differs from the tier declared in pool id" in r.message for r in caplog.records)
+        with pytest.raises(LPPoolResolutionError, match="POOL_FEE_MISMATCH"):
+            adapter._lp_open_fee_tier(intent, "uniswap_v3")
 
     def test_override_matching_segment_does_not_warn(self, caplog):
         import logging
 
         adapter = LPBacktestAdapter()
-        intent = SimpleNamespace(pool="WETH/USDC/3000", protocol_params={"fee_tier": "0.003"})
+        intent = SimpleNamespace(pool="WETH/USDC/3000", fee_tier_units=3000, protocol_params={})
 
         with caplog.at_level(logging.WARNING, logger="almanak.framework.backtesting.adapters.lp_adapter"):
             tier = adapter._lp_open_fee_tier(intent, "uniswap_v3")

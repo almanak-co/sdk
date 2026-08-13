@@ -19,6 +19,7 @@ from almanak.framework.backtesting.pnl.data_provider import is_address_like
 from almanak.framework.backtesting.pnl.providers.perp._gateway_history import run_sync_gateway_call
 from almanak.framework.data.interfaces import DataSourceUnavailable, data_source_error_from_grpc
 from almanak.framework.data.models import DataClassification, DataEnvelope, DataMeta
+from almanak.framework.data.pools.descriptor import PoolDescriptor
 from almanak.framework.data.pools.reader import PoolPrice
 from almanak.framework.market.errors import PoolPriceUnavailableError, PoolReservesUnavailableError
 
@@ -313,6 +314,36 @@ class SnapshotPoolStateSource:
                 )
         self._series[target.key] = _Series(target, samples, tuple(points))
         return len(points)
+
+    def pool_descriptor(self, chain: str, protocol: str, pool_address: str) -> PoolDescriptor | None:
+        """Return the archive-authenticated immutable identity for one pool."""
+        key = (chain.strip().lower(), protocol.strip().lower().replace("-", "_"), pool_address.strip().lower())
+        series = self._series.get(key)
+        if series is None:
+            return None
+        point = series.points[0]
+        from almanak.connectors._strategy_pool_reader_registry import POOL_READER_REGISTRY
+
+        spec = POOL_READER_REGISTRY.lookup(series.target.protocol)
+        factory = spec.factory_addresses.get(series.target.chain) if spec is not None else None
+        return PoolDescriptor(
+            chain=series.target.chain,
+            protocol=series.target.protocol,
+            address=series.target.pool_address,
+            token0=point.token0,
+            token1=point.token1,
+            token0_decimals=point.token0_decimals,
+            token1_decimals=point.token1_decimals,
+            fee_tier_units=point.fee_tier,
+            provenance=f"historical:{point.source}",
+            factory=factory,
+        )
+
+    def descriptors(self) -> tuple[PoolDescriptor, ...]:
+        """Return every materialized descriptor in deterministic key order."""
+        return tuple(
+            descriptor for key in sorted(self._series) if (descriptor := self.pool_descriptor(*key)) is not None
+        )
 
     def view_at(self, timestamp: datetime, fallback: Any | None = None) -> SnapshotPoolStateView:
         return SnapshotPoolStateView(self, _unix_seconds(timestamp), fallback=fallback)

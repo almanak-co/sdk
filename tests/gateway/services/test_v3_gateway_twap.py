@@ -33,6 +33,8 @@ from almanak.connectors._base.v3_gateway_twap import (
     fetch_v3_twap_observation,
     fetch_v3_twap_series,
 )
+from almanak.connectors._base.v3_pool_abi import encode_v3_get_pool
+from almanak.connectors.uniswap_v3.gateway.provider import UniswapV3GatewayConnector
 from almanak.gateway.services.rate_history_service import RateHistoryUnavailable
 
 # Stable Uniswap-V3 ABI selectors (no 0x prefix), mirroring the module's constants.
@@ -43,11 +45,14 @@ _DECIMALS = "313ce567"
 _SLOT0 = "3850c7bd"
 _LIQUIDITY = "1a686502"
 _FEE = "ddca3f43"
+_GET_POOL = "1698ee82"
 _BALANCE_OF = "70a08231"
 
 # Base canonical addresses (any checksum-free lowercase addresses work for the fake).
 _WETH = "0x4200000000000000000000000000000000000006"
 _USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+_POOL = "0x0000000000000000000000000000000000000003"
+_FACTORY = "0x0000000000000000000000000000000000000004"
 
 
 # --------------------------------------------------------------------------- #
@@ -112,7 +117,7 @@ def _make_servicer(web3) -> SimpleNamespace:
 
 def _make_historical_web3(*, latest_block: int = 10, genesis_timestamp: int = 1_000):
     """Linear fake chain plus archive-call ledger for historical series tests."""
-    calls: list[tuple[str, int | str | None, str]] = []
+    calls: list[tuple[str, int | str | None, str, str]] = []
 
     async def _get_block(block_identifier):
         number = latest_block if block_identifier == "latest" else int(block_identifier)
@@ -121,7 +126,7 @@ def _make_historical_web3(*, latest_block: int = 10, genesis_timestamp: int = 1_
     async def _call(tx, block_identifier=None):
         to = tx["to"].lower()
         sel = tx["data"][2:10]
-        calls.append((sel, block_identifier, to))
+        calls.append((sel, block_identifier, to, tx["data"]))
         if sel == _OBSERVE:
             # First dynamic-array element is secondsAgos[0].
             window = int(tx["data"][10 + 64 + 64 : 10 + 64 + 128], 16)
@@ -139,6 +144,8 @@ def _make_historical_web3(*, latest_block: int = 10, genesis_timestamp: int = 1_
             return _uint_word(123 + int(block_identifier))
         if sel == _FEE:
             return _uint_word(500)
+        if sel == _GET_POOL:
+            return _addr_word(_POOL)
         if sel == _BALANCE_OF:
             return _uint_word((10**18 if to == _WETH.lower() else 2 * 10**6) + int(block_identifier))
         raise AssertionError(f"unexpected eth.call sel={sel} to={to}")
@@ -255,11 +262,12 @@ def test_historical_pool_state_uses_exact_archive_blocks_and_identity() -> None:
         fetch_v3_pool_state_series(
             _make_servicer(web3),
             chain="base",
-            pool_address="0x0000000000000000000000000000000000000003",
+            pool_address=_POOL,
             start_ts=1_025,
             end_ts=1_045,
             interval_secs=20,
             protocol="uniswap_v3",
+            factory_address=_FACTORY,
         )
     )
 
@@ -270,6 +278,8 @@ def test_historical_pool_state_uses_exact_archive_blocks_and_identity() -> None:
     assert points[1].reserve1_raw == 2 * 10**6 + 4
     state_calls = [call for call in calls if call[0] in {_SLOT0, _LIQUIDITY, _BALANCE_OF}]
     assert {call[1] for call in state_calls} == {2, 4}
+    factory_calls = [call for call in calls if call[0] == _GET_POOL]
+    assert factory_calls == [(_GET_POOL, 4, _FACTORY.lower(), encode_v3_get_pool(_WETH, _USDC, 500))]
 
 
 def test_historical_pool_state_rejects_truncated_slot0_tick_word() -> None:
@@ -293,6 +303,67 @@ def test_historical_pool_state_rejects_truncated_slot0_tick_word() -> None:
                 end_ts=1_025,
                 interval_secs=20,
                 protocol="uniswap_v3",
+                factory_address=_FACTORY,
+            )
+        )
+
+
+def test_historical_pool_state_rejects_wrong_factory_pool() -> None:
+    web3, _calls = _make_historical_web3()
+    original_call = web3.eth.call
+
+    async def wrong_factory(tx, block_identifier=None):
+        if tx["data"][2:10] == _GET_POOL and tx["to"].lower() == _FACTORY.lower():
+            return _addr_word("0x0000000000000000000000000000000000000005")
+        return await original_call(tx, block_identifier=block_identifier)
+
+    web3.eth.call = wrong_factory
+    with pytest.raises(RateHistoryUnavailable, match="registered factory returned"):
+        asyncio.run(
+            fetch_v3_pool_state_series(
+                _make_servicer(web3),
+                chain="base",
+                pool_address=_POOL,
+                start_ts=1_025,
+                end_ts=1_025,
+                interval_secs=20,
+                protocol="uniswap_v3",
+                factory_address=_FACTORY,
+            )
+        )
+
+
+@pytest.mark.parametrize("factory_address", ["", "0x1234", "not-an-address"])
+def test_historical_pool_state_rejects_invalid_factory_address(factory_address: str) -> None:
+    web3, calls = _make_historical_web3()
+
+    with pytest.raises(RateHistoryUnavailable, match="invalid or missing factory address"):
+        asyncio.run(
+            fetch_v3_pool_state_series(
+                _make_servicer(web3),
+                chain="base",
+                pool_address=_POOL,
+                start_ts=1_025,
+                end_ts=1_025,
+                interval_secs=20,
+                protocol="uniswap_v3",
+                factory_address=factory_address,
+            )
+        )
+
+    assert calls == []
+
+
+def test_uniswap_pool_state_rejects_chain_without_factory() -> None:
+    with pytest.raises(RateHistoryUnavailable, match="no authenticated Uniswap V3 factory"):
+        asyncio.run(
+            UniswapV3GatewayConnector().fetch_pool_state_series(
+                SimpleNamespace(),
+                chain="unsupported",
+                pool_address=_POOL,
+                start_ts=1_025,
+                end_ts=1_025,
+                interval_secs=20,
             )
         )
 
@@ -345,7 +416,7 @@ def test_historical_series_preserves_grid_cardinality_and_block_provenance() -> 
     assert [point.block_number for point in points] == [2, 2]
     assert [point.price for point in points] == [_tick_to_price(2, 18, 6)] * 2
     observe_calls = [call for call in calls if call[0] == _OBSERVE]
-    assert observe_calls == [(_OBSERVE, 2, "0xpool")]
+    assert [call[:3] for call in observe_calls] == [(_OBSERVE, 2, "0xpool")]
     # Immutable pool metadata is measured once for the series, not per tick.
     assert sum(call[0] in {_TOKEN0, _TOKEN1, _DECIMALS} for call in calls) == 4
 

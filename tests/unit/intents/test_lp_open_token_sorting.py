@@ -74,6 +74,14 @@ class TestParsePoolInfoTokenSwapFlag:
         assert fee == 500
         assert swapped is True
 
+    def test_integral_decimal_fee_format_matches_shared_parser(self, compiler):
+        """Whitespace and integral decimal formatting still declare raw units."""
+        with patch.object(compiler, "_resolve_token", side_effect=[USDC, WETH]):
+            result = compiler._parse_pool_info(" USDC / WETH / 500.0 ")
+        assert result is not None
+        _, _, fee, _ = result
+        assert fee == 500
+
     def test_bare_pool_address_fails_hard(self, compiler, caplog):
         """Bare pool address (no '/') must fail hard with a clear error.
 
@@ -205,6 +213,8 @@ class TestCompileLPOpenInversion:
         intent.intent_type = IntentType.LP_OPEN
         intent.max_slippage = None
         intent.protocol_params = None
+        intent.fee_tier_units = None
+        intent.fee_rate = None
         return intent
 
     @patch("almanak.connectors.uniswap_v3.pool_validation.validate_v3_pool")

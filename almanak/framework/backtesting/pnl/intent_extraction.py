@@ -247,17 +247,9 @@ def lp_pool_fee_units(pool: Any) -> int | None:
     which fail closed on an out-of-domain declaration instead of silently
     treating it as undeclared (CodeRabbit #3308).
     """
-    if not isinstance(pool, str):
-        return None
-    candidate = pool.strip()
-    if not candidate or candidate.lower().startswith("0x"):
-        return None
-    segments = [segment.strip() for segment in candidate.split("/")]
-    if len(segments) < 3 or not segments[2]:
-        return None
-    if not segments[2].isdigit():
-        return None
-    return int(segments[2])
+    from almanak.framework.intents.lp_fees import pool_fee_tier_units
+
+    return pool_fee_tier_units(pool)
 
 
 def lp_explicit_pair(intent: Any) -> tuple[Any, Any]:
