@@ -6,6 +6,63 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.25.1] - 2026-08-13
+
+### Added
+
+- **Aave V3 `expected_pool` intent assertion.** Supply and withdraw intents
+  accept an optional `expected_pool` address that is validated, checksummed, and
+  matched against the canonical registry Pool before approval or calldata
+  construction, failing closed on mismatch. It is never a routing override — the
+  compiler still routes only to the registry address, and the field is rejected
+  for connectors that cannot enforce it. (#3707)
+- **`almanak strat test` lifecycle path coverage.** Test results now classify
+  action evidence (executed / held / unmeasured / failed / not-run) and teardown
+  evidence (proved / nothing-to-unwind / unmeasured / residual / failed / not-run
+  / not-requested) and expose `requested_paths_exercised`, so a HOLD or an empty
+  teardown is no longer presented as lifecycle validation. The safe no-op exit
+  contract is preserved. (#3708)
+
+### Changed
+
+- **Packaged demo strategies use address-first market-data lookups.** Every demo
+  token price, valuation, and indicator read now resolves through explicit
+  chain-specific addresses instead of display symbols; affected demo configs
+  require the new address fields and validate them at strategy construction, the
+  shared perp position probe uses a supplied token address or a connector-declared
+  venue mark, and new-strategy scaffolding gains optional index-token address
+  configuration. This removes the symbol/address key mismatch that produced hollow
+  or immediately-held demo backtests — both GMX demos now complete one-year
+  backtests. (#3711)
+
+### Fixed
+
+- **Chainlink rETH/USD is derived from exact feeds.** Corrected the Ethereum
+  catalogue (`0x536218…` is the 18-decimal rETH/ETH feed, not rETH/USD) and now
+  derives rETH/USD as rETH/ETH × ETH/USD while preserving per-leg provider
+  timestamps, feed provenance, and a provider-correct freshness envelope; it fails
+  closed on invalid or future-dated timestamps and decimal mismatches. (#3712)
+- **Backtesting readiness aligns with address-native execution.** Readiness price
+  checks canonicalize through the run's registered `(chain, address)` map,
+  portfolio cash equivalents no longer require provider price history, and a
+  strategy's configured `data_granularity` is honored as the default indicator
+  timeframe instead of the simulation tick cadence. (#3705)
+- **Teardown reports skipped consolidation swaps honestly.** Executed, skipped,
+  successful, and failed teardown operations are counted independently; a
+  safety-clamped untracked-token swap that submits zero transactions is no longer
+  rendered as a completed consolidation across the runner and CLI. (#3697)
+- **Exact Ethereum USDf funding on managed Anvil.** Added a USDf funding recipe
+  that sources from a verified no-code EOA holder — avoiding sUSDf ERC-4626
+  exchange-rate corruption — and fails loudly instead of falling through to
+  `anvil_deal` or storage probing; paper trading now stops with a clear error when
+  required token funding fails. (#3709)
+- **Managed gateway surfaces actionable startup causes.** `almanak strat test`
+  now returns a typed `422` carrying the real, redacted cause (funding refusal,
+  `anvil_funding` validation, archive-RPC gate) instead of an opaque HTTP 500; the
+  EVM zero address is rejected as an ERC-20 `anvil_funding` key (use the
+  `0xEeee…EEeE` native sentinel), and per-token funding failures blame only the
+  tokens that actually failed. (#3713)
+
 ## [2.25.0] - 2026-08-13
 
 ### Changed
