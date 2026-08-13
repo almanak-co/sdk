@@ -67,12 +67,14 @@ Examples:
 import hashlib
 import json
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
 from almanak.core.chains import DEFAULT_CHAIN, LEGACY_SERIALIZED_CHAIN, ChainRegistry
+from almanak.framework.backtesting.pnl.data_provider import TokenRef, is_token_key, normalize_token_key
 from almanak.framework.data.timeframes import parse_ohlcv_timeframe
 
 
@@ -127,13 +129,13 @@ def _stable_json_value(value: Any) -> Any:
     return json.loads(json.dumps(value, sort_keys=True, default=str))
 
 
-def _tokens_for_hash(tokens: list[Any]) -> list[Any]:
+def _tokens_for_hash(tokens: Sequence[Any]) -> list[Any]:
     """Return a stable, JSON-safe token list for config hashing."""
     normalized = [_stable_json_value(token) for token in tokens]
     return sorted(normalized, key=lambda token: json.dumps(token, sort_keys=True))
 
 
-def _tokens_for_serialization(tokens: list[Any]) -> list[Any]:
+def _tokens_for_serialization(tokens: Sequence[Any]) -> list[Any]:
     """Return a JSON-safe token list while preserving user-provided order."""
     return [_stable_json_value(token) for token in tokens]
 
@@ -251,7 +253,10 @@ class PnLBacktestConfig:
 
     # Chain and token configuration
     chain: str = DEFAULT_CHAIN
-    tokens: list[str] = field(default_factory=lambda: ["WETH", "USDC"])
+    # Read-only at the config boundary. Sequence is intentionally covariant so
+    # existing list[str] callers remain valid while exact contracts can retain
+    # their chain-qualified TokenRef identity.
+    tokens: Sequence[TokenRef] = field(default_factory=lambda: ["WETH", "USDC"])
 
     # Metrics configuration
     benchmark_token: str = "WETH"
@@ -563,6 +568,18 @@ class PnLBacktestConfig:
             )
         self.resolved_timeframe = resolved.value
 
+    @property
+    def price_interval_seconds(self) -> int:
+        """Return the persisted price cadence without changing simulation ticks."""
+        if self.resolved_timeframe is not None:
+            return parse_ohlcv_timeframe(
+                self.resolved_timeframe,
+                field_name="PnLBacktestConfig.resolved_timeframe",
+            ).seconds
+        if self.timeframe not in (None, "auto"):
+            return parse_ohlcv_timeframe(self.timeframe, field_name="PnLBacktestConfig.timeframe").seconds
+        return self.interval_seconds
+
     def _validate_token_funding_config(self) -> None:
         if self.token_funding is not None and not isinstance(self.token_funding, list):
             raise ValueError("token_funding must be a list")
@@ -574,6 +591,28 @@ class PnLBacktestConfig:
     def _validate_tokens_config(self) -> None:
         if not self.tokens:
             raise ValueError("tokens list cannot be empty")
+        if isinstance(self.tokens, str | bytes):
+            raise ValueError("tokens must be a sequence of token references, not a string")
+
+        run_descriptor = ChainRegistry.try_resolve(self.chain)
+        run_chain = run_descriptor.name if run_descriptor is not None else self.chain.lower()
+        normalized: list[TokenRef] = []
+        for token in self.tokens:
+            if isinstance(token, str):
+                if not token:
+                    raise ValueError("token references cannot be empty")
+                normalized.append(token)
+                continue
+            if not is_token_key(token):
+                raise ValueError(f"Invalid token reference {token!r}; expected a symbol or (chain, address)")
+            if not token[0].strip() or not token[1].strip():
+                raise ValueError(f"Invalid token reference {token!r}; chain and address cannot be empty")
+            token_descriptor = ChainRegistry.try_resolve(token[0])
+            token_chain = token_descriptor.name if token_descriptor is not None else token[0].lower()
+            if token_chain != run_chain:
+                raise ValueError(f"Token reference chain {token[0]!r} does not match backtest chain {self.chain!r}")
+            normalized.append(normalize_token_key(run_chain, token[1]))
+        self.tokens = normalized
 
     def _validate_margin_ratios(self) -> None:
         if self.initial_margin_ratio <= Decimal("0") or self.initial_margin_ratio > Decimal("1"):
@@ -928,7 +967,10 @@ class PnLBacktestConfig:
             gas_price_gwei=gas_price,
             inclusion_delay_blocks=data.get("inclusion_delay_blocks", 1),
             chain=data.get("chain", LEGACY_SERIALIZED_CHAIN),
-            tokens=data.get("tokens", ["WETH", "USDC"]),
+            tokens=[
+                tuple(token) if isinstance(token, list) and len(token) == 2 else token
+                for token in data.get("tokens", ["WETH", "USDC"])
+            ],
             benchmark_token=data.get("benchmark_token", "WETH"),
             risk_free_rate=risk_free_rate,
             trading_days_per_year=data.get("trading_days_per_year", 365),

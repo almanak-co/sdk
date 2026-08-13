@@ -109,6 +109,7 @@ from almanak.framework.backtesting.models import (
 from almanak.framework.backtesting.pnl import _engine_helpers
 from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 from almanak.framework.backtesting.pnl.data_provider import (
+    HistoricalCoverage,
     HistoricalDataCapability,
     HistoricalDataProvider,
     HistoricalPriceObservation,
@@ -119,6 +120,8 @@ from almanak.framework.backtesting.pnl.data_provider import (
     normalize_token_key,
     normalize_token_ref,
     token_ref_display,
+    token_ref_provider_symbol,
+    utc_isoformat,
 )
 from almanak.framework.backtesting.pnl.data_quality import DataQualityTracker
 from almanak.framework.backtesting.pnl.error_handling import (
@@ -153,7 +156,17 @@ from almanak.framework.backtesting.pnl.support_matrix import (
     evaluate_backtest_support,
 )
 from almanak.framework.backtesting.pnl.types import DataConfidence
-from almanak.framework.data.timeframes import OHLCVTimeframe, parse_ohlcv_timeframe
+from almanak.framework.data.timeframes import (
+    CANONICAL_OHLCV_TIMEFRAMES,
+    OHLCVTimeframe,
+    parse_ohlcv_timeframe,
+)
+
+if not CANONICAL_OHLCV_TIMEFRAMES or any(
+    current.seconds >= following.seconds
+    for current, following in zip(CANONICAL_OHLCV_TIMEFRAMES, CANONICAL_OHLCV_TIMEFRAMES[1:], strict=False)
+):
+    raise RuntimeError("CANONICAL_OHLCV_TIMEFRAMES must be non-empty and strictly ascending by seconds")
 
 # Import strategy-related types
 from almanak.framework.market import MarketSnapshot, PriceData, TokenBalance
@@ -166,6 +179,37 @@ class _TokenAvailabilityConfig:
     use_membership: bool
     resolution_based: bool
     membership_upper: frozenset[str]
+
+
+@dataclass(frozen=True)
+class _TokenCoverageDiscovery:
+    token: TokenRef
+    coverage: HistoricalCoverage
+
+
+@dataclass(frozen=True)
+class _SpotPriceHistoryPreparation:
+    """Coverage result retained between spot negotiation and preflight."""
+
+    config_id: int
+    provider_id: int
+    start_time: datetime
+    end_time: datetime
+    resolved_timeframe: str
+    interval_seconds: int
+    tokens: tuple[TokenRef, ...]
+    discoveries: tuple[_TokenCoverageDiscovery, ...]
+
+    def matches(self, config: PnLBacktestConfig, tokens: list[TokenRef], provider: object) -> bool:
+        """Return whether this preparation exactly matches the current preflight."""
+        return (
+            self.config_id == id(config)
+            and self.provider_id == id(provider)
+            and self.start_time == config.start_time
+            and self.end_time == config.end_time
+            and self.interval_seconds == config.price_interval_seconds
+            and self.tokens == tuple(tokens)
+        )
 
 
 @dataclass(frozen=True)
@@ -2932,6 +2976,169 @@ async def classify_token_availability(
     return tokens_available, tokens_unavailable
 
 
+async def discover_token_coverage(
+    data_provider: Any,
+    tokens: list[TokenRef],
+    start_time: datetime,
+    end_time: datetime,
+    interval_seconds: int,
+) -> list[_TokenCoverageDiscovery]:
+    """Discover measured range coverage when the provider supports it.
+
+    This is intentionally separate from :func:`classify_token_availability`:
+    providers without the additive range capability keep their established
+    membership/point-probe behavior byte-for-byte.
+    """
+    get_coverage = getattr(data_provider, "get_price_coverage", None)
+    if not callable(get_coverage):
+        raise TypeError("data provider does not implement get_price_coverage")
+
+    discoveries: list[_TokenCoverageDiscovery] = []
+    for token in tokens:
+        cash_symbol = _cash_equivalent_symbol(token)
+        if cash_symbol is not None:
+            coverage = HistoricalCoverage(
+                status="full",
+                requested_start=start_time,
+                requested_end=end_time,
+                first_available_at=start_time,
+                last_available_at=end_time,
+                earliest_contiguous_at=start_time,
+                coverage_ratio=Decimal("1"),
+                provider="cash_equivalent",
+                source_id=cash_symbol,
+                interval_seconds=interval_seconds,
+            )
+        else:
+            coverage = await get_coverage(token, start_time, end_time, interval_seconds)
+        discoveries.append(_TokenCoverageDiscovery(token=token, coverage=coverage))
+    return discoveries
+
+
+def _cash_equivalent_symbol(token: TokenRef) -> str | None:
+    """Return the registered cash-plane symbol for a token reference."""
+    symbol = token_ref_provider_symbol(token).upper()
+    return symbol if symbol in CASH_EQUIVALENT_STABLECOINS else None
+
+
+def _canonical_coverage_timeframe(observed_interval_seconds: int) -> OHLCVTimeframe:
+    """Return the finest canonical cadence no finer than provider observations."""
+    for timeframe in CANONICAL_OHLCV_TIMEFRAMES:
+        if timeframe.seconds >= observed_interval_seconds:
+            return timeframe
+    return CANONICAL_OHLCV_TIMEFRAMES[-1]
+
+
+def _build_historical_coverage_check(
+    discoveries: list[_TokenCoverageDiscovery],
+) -> tuple[list[str], list[str], PreflightCheckResult, list[str]]:
+    """Build the compatibility ``token_availability`` row from range coverage."""
+    available = [token_ref_display(item.token).upper() for item in discoveries if item.coverage.status == "full"]
+    unavailable = [token_ref_display(item.token).upper() for item in discoveries if item.coverage.status != "full"]
+    assets = [_coverage_asset_details(item) for item in discoveries]
+
+    if not unavailable:
+        return (
+            available,
+            unavailable,
+            PreflightCheckResult(
+                check_name="token_availability",
+                passed=True,
+                message=f"All {len(available)} token(s) have full price history for the requested range",
+                details={"available": available, "assets": assets},
+            ),
+            [],
+        )
+
+    if any(item.coverage.status == "unknown" for item in discoveries):
+        code = "PRICE_PROVIDER_UNAVAILABLE"
+        message = "The historical price provider could not determine coverage for every tracked token."
+    elif any(item.coverage.status == "none" for item in discoveries):
+        code = "NO_PRICE_HISTORY"
+        missing = [token_ref_display(item.token).upper() for item in discoveries if item.coverage.status == "none"]
+        message = f"No price history exists in the requested range for: {', '.join(missing)}."
+    else:
+        code = "PARTIAL_PRICE_HISTORY"
+        partial = [token_ref_display(item.token).upper() for item in discoveries if item.coverage.status == "partial"]
+        message = f"Price history covers only part of the requested range for: {', '.join(partial)}."
+
+    common_range = _common_supported_price_range(discoveries)
+    details: dict[str, Any] = {
+        "code": code,
+        "available": available,
+        "unavailable": unavailable,
+        "blocking_unavailable": unavailable,
+        "assets": assets,
+        "common_supported_range": common_range,
+    }
+    recommendations: list[str]
+    if common_range is not None:
+        patch = {"start_time": common_range["start"], "end_time": common_range["end"]}
+        details["suggested_backtest_config_patch"] = patch
+        recommendations = [
+            "Price data is available for a shorter common range. Adjust the backtest window to "
+            f"{common_range['start']} through {common_range['end']}."
+        ]
+    elif code == "NO_PRICE_HISTORY":
+        recommendations = [
+            "Choose a covered asset/window, wait for provider indexing, or configure a coverage-aware historical provider."
+        ]
+    elif code == "PRICE_PROVIDER_UNAVAILABLE":
+        recommendations = ["Retry the provider or verify its credentials and availability."]
+    else:
+        recommendations = [
+            "The returned history has gaps, stale end coverage, or insufficient candle granularity; "
+            "choose a provider/window with continuous coverage at the requested interval."
+        ]
+
+    return (
+        available,
+        unavailable,
+        PreflightCheckResult(
+            check_name="token_availability",
+            passed=False,
+            message=message,
+            details=details,
+            severity="error",
+        ),
+        recommendations,
+    )
+
+
+def _coverage_asset_details(item: _TokenCoverageDiscovery) -> dict[str, Any]:
+    details = {"token": token_ref_display(item.token), **item.coverage.to_dict()}
+    if is_token_key(item.token):
+        chain, address = normalize_token_key(item.token[0], item.token[1])
+        details["chain"] = chain
+        details["address"] = address
+    return details
+
+
+def _common_supported_price_range(
+    discoveries: list[_TokenCoverageDiscovery],
+) -> dict[str, str] | None:
+    if not discoveries or any(item.coverage.status not in ("full", "partial") for item in discoveries):
+        return None
+
+    starts = [
+        item.coverage.earliest_contiguous_at for item in discoveries if item.coverage.earliest_contiguous_at is not None
+    ]
+    ends = [
+        min(item.coverage.last_available_at, item.coverage.requested_end)
+        for item in discoveries
+        if item.coverage.last_available_at is not None
+    ]
+    if len(starts) != len(discoveries) or len(ends) != len(discoveries):
+        return None
+
+    start = max(starts)
+    end = min(ends)
+    if start >= end:
+        return None
+
+    return {"start": utc_isoformat(start), "end": utc_isoformat(end)}
+
+
 def _token_availability_config(data_provider: Any) -> _TokenAvailabilityConfig:
     supported_tokens = getattr(data_provider, "supported_tokens", [])
     resolution_based = getattr(data_provider, "resolution_based_availability", False)
@@ -2953,7 +3160,7 @@ async def _is_token_available(
     availability_config: _TokenAvailabilityConfig,
 ) -> bool:
     token_upper = token_ref_display(token).upper()
-    if token_upper in CASH_EQUIVALENT_STABLECOINS:
+    if _cash_equivalent_symbol(token) is not None:
         return True
     if availability_config.use_membership:
         return token_upper in availability_config.membership_upper
@@ -3337,6 +3544,11 @@ class PnLBacktester:
     _error_handler: BacktestErrorHandler | None = None
     _fallback_usage: dict[str, int] | None = None
     _gas_price_records: list["GasPriceRecord"] | None = None
+    _prepared_spot_price_history: _SpotPriceHistoryPreparation | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
     #: Positions whose accrual update already reported a data gap (log-once
     #: bookkeeping for the non-strict skip path, ALM-2930).
     _accrual_data_gap_positions: set[str] = field(default_factory=set)
@@ -4075,16 +4287,28 @@ class PnLBacktester:
         self,
         config: PnLBacktestConfig,
     ) -> tuple[list[str], list[str], PreflightCheckResult, list[str]]:
-        from almanak.framework.backtesting.pnl.initial_portfolio import funded_token_refs
+        preparation = self._prepared_spot_price_history
+        if (
+            config.timeframe == "auto"
+            and config.resolved_timeframe is None
+            and callable(getattr(self.data_provider, "get_price_coverage", None))
+        ):
+            preparation = await self.prepare_spot_price_history(config)
 
-        tokens_to_check: list[TokenRef] = list(config.tokens)
-        existing = {normalize_token_ref(token, config.chain) for token in tokens_to_check}
-        if config.token_funding:
-            for funded_token in funded_token_refs(config.token_funding, chain=config.chain):
-                identity = normalize_token_ref(funded_token, config.chain)
-                if identity not in existing:
-                    tokens_to_check.append(funded_token)
-                    existing.add(identity)
+        tokens_to_check = self._required_price_tokens(config)
+
+        if callable(getattr(self.data_provider, "get_price_coverage", None)):
+            if preparation is not None and preparation.matches(config, tokens_to_check, self.data_provider):
+                discoveries = list(preparation.discoveries)
+            else:
+                self._begin_price_coverage_batch()
+                discoveries = await self._discover_required_price_coverage(
+                    config,
+                    tokens_to_check,
+                    config.price_interval_seconds,
+                )
+            return _build_historical_coverage_check(discoveries)
+
         tokens_available, tokens_unavailable = await classify_token_availability(
             self.data_provider,
             tokens_to_check,
@@ -4096,6 +4320,165 @@ class PnLBacktester:
             tokens_unavailable,
         )
         return tokens_available, tokens_unavailable, token_check, token_recommendations
+
+    @staticmethod
+    def _required_price_tokens(config: PnLBacktestConfig) -> list[TokenRef]:
+        from almanak.framework.backtesting.pnl.initial_portfolio import funded_token_refs
+
+        # Preserve exact-contract identity all the way into the provider. A bare
+        # address is ambiguous to CoinGecko; normalizing only a shadow key for
+        # deduplication and then probing the original string dropped the run
+        # chain before contract resolution (ALM-3300).
+        tokens_to_check: list[TokenRef] = []
+        existing: set[TokenRef] = set()
+        run_descriptor = ChainRegistry.try_resolve(config.chain)
+        run_chain = run_descriptor.name if run_descriptor is not None else config.chain.lower()
+        for token in config.tokens:
+            identity = normalize_token_ref(token, run_chain)
+            if is_token_key(identity):
+                token_descriptor = ChainRegistry.try_resolve(identity[0])
+                token_chain = token_descriptor.name if token_descriptor is not None else identity[0].lower()
+                if token_chain != run_chain:
+                    raise PreflightValidationError(
+                        message=(
+                            f"Token reference chain {identity[0]!r} does not match backtest chain {config.chain!r}"
+                        ),
+                        failed_checks=["token_chain_identity"],
+                        recommendations=["Use the exact token contract deployed on the configured backtest chain."],
+                        error_count=1,
+                        warning_count=0,
+                        code="TOKEN_CHAIN_MISMATCH",
+                        details={"token": token_ref_display(identity), "token_chain": token_chain, "chain": run_chain},
+                    )
+            if identity not in existing:
+                tokens_to_check.append(identity)
+                existing.add(identity)
+        if config.token_funding:
+            for funded_token in funded_token_refs(config.token_funding, chain=run_chain):
+                identity = normalize_token_ref(funded_token, run_chain)
+                if identity not in existing:
+                    tokens_to_check.append(identity)
+                    existing.add(identity)
+        return tokens_to_check
+
+    async def _discover_required_price_coverage(
+        self,
+        config: PnLBacktestConfig,
+        tokens: list[TokenRef],
+        interval_seconds: int,
+    ) -> list[_TokenCoverageDiscovery]:
+        try:
+            return await discover_token_coverage(
+                self.data_provider,
+                tokens,
+                config.start_time,
+                config.end_time,
+                interval_seconds,
+            )
+        except Exception as exc:
+            raise PreflightValidationError(
+                message=f"Historical price provider coverage discovery failed: {exc}",
+                failed_checks=["token_availability"],
+                recommendations=["Retry the provider or verify its credentials and availability."],
+                error_count=1,
+                warning_count=0,
+                code="PRICE_PROVIDER_UNAVAILABLE",
+                details={
+                    "provider": getattr(self.data_provider, "provider_name", "unknown"),
+                    "error_type": type(exc).__name__,
+                },
+            ) from exc
+
+    async def prepare_spot_price_history(self, config: PnLBacktestConfig) -> _SpotPriceHistoryPreparation:
+        """Negotiate and persist one coverage-validated spot price cadence."""
+        self._prepared_spot_price_history = None
+        if not callable(getattr(self.data_provider, "get_price_coverage", None)):
+            raise PreflightValidationError(
+                message="Spot timeframe='auto' requires a range-aware historical price provider",
+                failed_checks=["spot_price_history"],
+                recommendations=[
+                    "Configure a provider implementing get_price_coverage or choose an explicit timeframe."
+                ],
+                error_count=1,
+                warning_count=0,
+            )
+
+        self._begin_price_coverage_batch()
+        tokens = self._required_price_tokens(config)
+        if config.resolved_timeframe is not None:
+            resolved = parse_ohlcv_timeframe(
+                config.resolved_timeframe,
+                field_name="PnLBacktestConfig.resolved_timeframe",
+            )
+            discoveries = await self._discover_required_price_coverage(config, tokens, resolved.seconds)
+        else:
+            # Probe once at the finest canonical cadence. Coverage providers
+            # report their observed native spacing; the selected canonical
+            # cadence is then validated explicitly before it is persisted.
+            probe_interval = CANONICAL_OHLCV_TIMEFRAMES[0].seconds
+            probe = await self._discover_required_price_coverage(config, tokens, probe_interval)
+            if any(item.coverage.status in ("none", "unknown") for item in probe):
+                self._raise_for_failed_price_coverage(probe)
+            observed = [
+                item.coverage.observed_interval_seconds
+                for item in probe
+                if item.coverage.provider != "cash_equivalent" and item.coverage.observed_interval_seconds is not None
+            ]
+            non_cash = [item for item in probe if item.coverage.provider != "cash_equivalent"]
+            if non_cash and len(observed) != len(non_cash):
+                raise PreflightValidationError(
+                    message="The historical price provider did not report an observed native cadence for every asset",
+                    failed_checks=["spot_price_history"],
+                    recommendations=[
+                        "Choose an explicit timeframe or configure a provider that reports native spacing."
+                    ],
+                    error_count=1,
+                    warning_count=0,
+                    code="PRICE_TIMEFRAME_UNRESOLVED",
+                    details={"assets": [_coverage_asset_details(item) for item in non_cash]},
+                )
+            resolved = _canonical_coverage_timeframe(max(observed) if observed else config.interval_seconds)
+            discoveries = (
+                probe
+                if resolved.seconds == probe_interval
+                else await self._discover_required_price_coverage(config, tokens, resolved.seconds)
+            )
+
+        self._raise_for_failed_price_coverage(discoveries)
+        config.apply_resolved_timeframe(resolved.value, resolved.seconds)
+        preparation = _SpotPriceHistoryPreparation(
+            config_id=id(config),
+            provider_id=id(self.data_provider),
+            start_time=config.start_time,
+            end_time=config.end_time,
+            resolved_timeframe=resolved.value,
+            interval_seconds=resolved.seconds,
+            tokens=tuple(tokens),
+            discoveries=tuple(discoveries),
+        )
+        self._prepared_spot_price_history = preparation
+        return preparation
+
+    def _begin_price_coverage_batch(self) -> None:
+        """Start one provider cache lifecycle spanning all cadence probes."""
+        begin_batch = getattr(self.data_provider, "begin_price_coverage_batch", None)
+        if callable(begin_batch):
+            begin_batch()
+
+    @staticmethod
+    def _raise_for_failed_price_coverage(discoveries: list[_TokenCoverageDiscovery]) -> None:
+        """Raise the structured preflight error for blocking coverage results."""
+        _, _, check, recommendations = _build_historical_coverage_check(discoveries)
+        if not check.passed:
+            raise PreflightValidationError(
+                message=check.message,
+                failed_checks=[check.check_name],
+                recommendations=recommendations,
+                error_count=1,
+                warning_count=0,
+                code=str(check.details.get("code", "PreflightValidationError")),
+                details=check.details,
+            )
 
     async def _preflight_archive_access(self) -> _ArchiveAccessPreflight:
         if not hasattr(self.data_provider, "verify_archive_access"):

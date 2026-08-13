@@ -14,6 +14,7 @@ import pytest
 
 from almanak.framework.backtesting.pnl.providers.coingecko import CoinGeckoDataProvider
 from almanak.framework.backtesting.pnl.providers.coingecko_gateway import (
+    CoinGeckoGatewayProviderError,
     CoinGeckoGatewayResolutionError,
     CoinGeckoGatewayUnavailableError,
     GatewayCoinGeckoTransport,
@@ -145,7 +146,7 @@ class TestEndpointMapping:
         )
         transport = _transport_with_stub(stub)
 
-        with pytest.raises(ValueError, match="upstream 500"):
+        with pytest.raises(CoinGeckoGatewayProviderError, match="upstream 500"):
             await transport.request("/coins/bitcoin/market_chart/range", {"from": "1", "to": "2"})
         assert transport._dead is False
 
@@ -169,7 +170,7 @@ class TestRpcErrorClassification:
         stub.CoinGeckoGetMarketChartRange.side_effect = _FakeRpcError(grpc.StatusCode.INTERNAL, "upstream CG 500")
         transport = _transport_with_stub(stub)
 
-        with pytest.raises(ValueError, match="upstream CG 500"):
+        with pytest.raises(CoinGeckoGatewayProviderError, match="upstream CG 500"):
             await transport.request("/coins/bitcoin/market_chart/range", {"from": "1", "to": "2"})
         assert transport._dead is False
 

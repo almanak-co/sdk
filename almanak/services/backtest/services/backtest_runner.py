@@ -25,7 +25,7 @@ from almanak.core.models.quote_asset import QuoteAsset
 from almanak.framework.backtesting.config import BacktestDataConfig
 from almanak.framework.backtesting.models import BacktestResult
 from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
-from almanak.framework.backtesting.pnl.data_provider import native_token_map_entry
+from almanak.framework.backtesting.pnl.data_provider import TokenRef, native_token_map_entry, normalize_token_ref
 from almanak.framework.backtesting.pnl.engine import (
     DefaultFeeModel,
     DefaultSlippageModel,
@@ -220,17 +220,25 @@ def _display_symbol_for_ref(ref: str, chain: str) -> str:
     return cleaned.lower() if cleaned.lower().startswith("0x") else cleaned
 
 
-def normalize_backtest_token_refs(token_refs: Iterable[str], chain: str) -> list[str]:
-    """Normalize token refs into the symbol-keyed token list expected today."""
-    normalized: list[str] = []
-    seen: set[str] = set()
+def normalize_backtest_token_refs(token_refs: Iterable[str], chain: str) -> list[TokenRef]:
+    """Normalize refs while preserving exact-contract chain identity.
+
+    Registered assets retain their strategy-facing symbol. An unregistered
+    contract cannot safely become a bare address: CoinGecko needs the run chain
+    to select the correct asset-platform endpoint, so it remains a canonical
+    ``(chain, address)`` token key.
+    """
+    normalized: list[TokenRef] = []
+    seen: set[TokenRef] = set()
     for raw in token_refs:
         if not isinstance(raw, str) or not raw.strip():
             continue
-        display = _display_symbol_for_ref(raw.strip(), chain)
-        if display not in seen:
-            seen.add(display)
-            normalized.append(display)
+        cleaned = raw.strip()
+        resolved = _resolve_backtest_token(cleaned, chain)
+        identity: TokenRef = resolved.symbol.upper() if resolved is not None else normalize_token_ref(cleaned, chain)
+        if identity not in seen:
+            seen.add(identity)
+            normalized.append(identity)
     return normalized
 
 

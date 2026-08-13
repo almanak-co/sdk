@@ -49,11 +49,13 @@ class BacktestReadinessResult:
 
 def _blocker(exc: BaseException) -> dict[str, Any]:
     payload: dict[str, Any] = {
-        "code": type(exc).__name__,
+        "code": getattr(exc, "code", type(exc).__name__),
         "message": str(exc),
     }
-    for field_name in ("failed_checks", "recommendations", "error_count", "warning_count"):
+    for field_name in ("failed_checks", "recommendations", "error_count", "warning_count", "details"):
         value = getattr(exc, field_name, None)
+        if field_name == "details" and not value:
+            continue
         if value is not None:
             payload[field_name] = list(value) if isinstance(value, list | tuple) else value
     return payload

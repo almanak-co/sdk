@@ -932,7 +932,7 @@ def test_swap_gas_cost_uses_chain_native_asset_price() -> None:
     """
     result = run_backtest(
         ScriptedStrategy([SwapDuck(amount_usd=Decimal("1000"))]),
-        flat_series(8),
+        flat_series(8, chain="polygon"),
         hours=4,
         chain="polygon",
         include_gas_costs=True,

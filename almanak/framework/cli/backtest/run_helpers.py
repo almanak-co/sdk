@@ -11,11 +11,15 @@ implementations so that extracting them does not change observable behaviour:
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import click
+
+if TYPE_CHECKING:
+    from ...backtesting.pnl.data_provider import TokenRef
 
 from ...backtesting import PnLBacktestConfig
 from ...strategies import get_strategy
@@ -58,7 +62,7 @@ def _resolve_registry_token_address(
 
 def _registry_token_address_map(
     *,
-    tracked_tokens: list[str],
+    tracked_tokens: Sequence[TokenRef],
     chain: str,
     existing: dict[str, tuple[str, str]],
     native_symbols: set[str],
@@ -67,6 +71,10 @@ def _registry_token_address_map(
 ) -> dict[str, tuple[str, str]]:
     registry_map: dict[str, tuple[str, str]] = {}
     for raw_symbol in tracked_tokens:
+        # Exact (chain, address) refs already carry everything the provider
+        # needs and must not be reinterpreted as registry symbols.
+        if not isinstance(raw_symbol, str):
+            continue
         symbol = raw_symbol.upper()
         if symbol in existing or symbol in native_symbols:
             continue
@@ -83,7 +91,7 @@ def _registry_token_address_map(
 
 def build_token_address_map(
     strategy_config: dict[str, Any],
-    tracked_tokens: list[str],
+    tracked_tokens: Sequence[TokenRef],
     chain: str,
 ) -> dict[str, tuple[str, str]]:
     """Build the ``SYMBOL_UPPER -> (chain, address)`` map for CoinGecko resolution.
@@ -118,7 +126,7 @@ def build_token_address_map(
 
     Args:
         strategy_config: Loaded strategy config dict (may carry ``token_funding``).
-        tracked_tokens: Upper-cased tracked symbols for the run.
+        tracked_tokens: Tracked symbols or exact chain-qualified token refs.
         chain: Run chain used for both the funding default and registry lookups.
 
     Returns:

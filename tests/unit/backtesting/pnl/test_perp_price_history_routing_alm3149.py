@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -11,6 +12,8 @@ import pytest
 from almanak.connectors._strategy_base.perp_price_history_registry import PerpPriceHistoryRegistry
 from almanak.framework.backtesting.pnl._engine_helpers import prepare_perp_price_history
 from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
+from almanak.framework.backtesting.pnl.data_provider import HistoricalCoverage
+from almanak.framework.backtesting.pnl.engine import PnLBacktester
 from almanak.framework.backtesting.pnl.error_handling import PreflightValidationError
 
 
@@ -86,13 +89,112 @@ async def test_auto_without_eligible_declared_market_fails_preflight() -> None:
         timeframe="auto",
     )
 
-    with pytest.raises(PreflightValidationError, match="one declared connector-native perp market"):
+    with pytest.raises(PreflightValidationError, match="coverage-aware spot token provider"):
         await prepare_perp_price_history(
             backtester,
             SimpleNamespace(),
             config,
             SimpleNamespace(info=Mock()),
         )
+
+
+@pytest.mark.asyncio
+async def test_auto_spot_strategy_uses_coverage_aware_token_provider() -> None:
+    class SpotProvider:
+        def __init__(self) -> None:
+            self.requested_intervals: list[int] = []
+
+        async def get_price_coverage(self, token, start, end, interval_seconds):
+            self.requested_intervals.append(interval_seconds)
+            return HistoricalCoverage(
+                status="partial" if interval_seconds < 3600 else "full",
+                requested_start=start,
+                requested_end=end,
+                first_available_at=start,
+                last_available_at=end,
+                earliest_contiguous_at=start,
+                coverage_ratio=Decimal("0.5") if interval_seconds < 3600 else Decimal("1"),
+                provider="spot_fixture",
+                source_id=str(token),
+                interval_seconds=interval_seconds,
+                observed_interval_seconds=3600,
+            )
+
+    provider = SpotProvider()
+    backtester = PnLBacktester(data_provider=provider, fee_models={}, slippage_models={})
+    start = datetime(2025, 1, 1, tzinfo=UTC)
+    config = PnLBacktestConfig(
+        start_time=start,
+        end_time=start + timedelta(days=1),
+        chain="bsc",
+        timeframe="auto",
+    )
+    logger = SimpleNamespace(info=Mock(), warning=Mock())
+
+    await prepare_perp_price_history(backtester, SimpleNamespace(), config, logger)
+
+    assert backtester.data_provider is provider
+    assert config.resolved_timeframe == "1h"
+    assert config.interval_seconds == 3600
+    assert provider.requested_intervals == [60, 3600]
+    logger.info.assert_called_once_with(
+        "Resolved timeframe='auto' to provider-validated spot price cadence '1h' "
+        "without changing the 3600s simulation tick cadence"
+    )
+
+    _, _, check, _ = await backtester._preflight_token_availability(config)
+
+    assert check.passed
+    assert provider.requested_intervals == [60, 3600]
+
+    replay_provider = SpotProvider()
+    replay = PnLBacktestConfig.from_dict(config.to_dict())
+    replay_backtester = PnLBacktester(data_provider=replay_provider, fee_models={}, slippage_models={})
+
+    await prepare_perp_price_history(replay_backtester, SimpleNamespace(), replay, logger)
+
+    _, _, replay_check, _ = await replay_backtester._preflight_token_availability(replay)
+
+    assert replay.resolved_timeframe == "1h"
+    assert replay_check.passed
+    assert replay_provider.requested_intervals == [3600]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "expected_code"),
+    [("none", "NO_PRICE_HISTORY"), ("unknown", "PRICE_PROVIDER_UNAVAILABLE")],
+)
+async def test_auto_spot_preserves_terminal_coverage_diagnostics(status: str, expected_code: str) -> None:
+    class TerminalCoverageProvider:
+        async def get_price_coverage(self, token, start, end, interval_seconds):
+            return HistoricalCoverage(
+                status=status,
+                requested_start=start,
+                requested_end=end,
+                first_available_at=None,
+                last_available_at=None,
+                earliest_contiguous_at=None,
+                coverage_ratio=Decimal("0"),
+                provider="spot_fixture",
+                source_id=str(token),
+                interval_seconds=interval_seconds,
+                observed_interval_seconds=None,
+            )
+
+    start = datetime(2025, 1, 1, tzinfo=UTC)
+    config = PnLBacktestConfig(
+        start_time=start,
+        end_time=start + timedelta(days=1),
+        chain="bsc",
+        timeframe="auto",
+    )
+    backtester = PnLBacktester(data_provider=TerminalCoverageProvider(), fee_models={}, slippage_models={})
+
+    with pytest.raises(PreflightValidationError) as raised:
+        await backtester.prepare_spot_price_history(config)
+
+    assert raised.value.code == expected_code
 
 
 @pytest.mark.asyncio

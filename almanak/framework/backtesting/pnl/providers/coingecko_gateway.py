@@ -35,6 +35,10 @@ class CoinGeckoGatewayUnavailableError(CoinGeckoGatewayResolutionError):
     """Configured gateway cannot serve contract resolution; direct fallback is forbidden."""
 
 
+class CoinGeckoGatewayProviderError(ValueError):
+    """The gateway was reachable but could not serve the CoinGecko operation."""
+
+
 class GatewayCoinGeckoTransport(GatewayTransportBase):
     """Serves CoinGecko REST-shaped requests over the gateway's CG RPCs.
 
@@ -90,11 +94,11 @@ class GatewayCoinGeckoTransport(GatewayTransportBase):
             client.integration.CoinGeckoGetMarketChartRange, request, rpc_name="CoinGeckoGetMarketChartRange"
         )
         if app_error is not None:
-            raise ValueError(f"CoinGecko API error via gateway: {app_error}")
+            raise CoinGeckoGatewayProviderError(f"CoinGecko API error via gateway: {app_error}")
         if response is None:
             return None
         if not response.success:
-            raise ValueError(f"CoinGecko API error via gateway: {response.error or 'unknown error'}")
+            raise CoinGeckoGatewayProviderError(f"CoinGecko API error via gateway: {response.error or 'unknown error'}")
         self._announce_serving()
         # Values stay strings: consumers parse Decimal(str(x)), lossless.
         return {
@@ -116,11 +120,11 @@ class GatewayCoinGeckoTransport(GatewayTransportBase):
             client.integration.CoinGeckoGetHistoricalPrice, request, rpc_name="CoinGeckoGetHistoricalPrice"
         )
         if app_error is not None:
-            raise ValueError(f"CoinGecko API error via gateway: {app_error}")
+            raise CoinGeckoGatewayProviderError(f"CoinGecko API error via gateway: {app_error}")
         if response is None:
             return None
         if not response.success:
-            raise ValueError(f"CoinGecko API error via gateway: {response.error or 'unknown error'}")
+            raise CoinGeckoGatewayProviderError(f"CoinGecko API error via gateway: {response.error or 'unknown error'}")
         self._announce_serving()
         price_usd = response.price_usd
         if not price_usd or price_usd == "0":

@@ -458,7 +458,7 @@ class TestBacktestTokenRefs:
         assert normalize_backtest_token_refs(
             [UNKNOWN_MIXED_CASE_ADDRESS, UNKNOWN_MIXED_CASE_ADDRESS.lower(), BASE_CBBTC],
             "base",
-        ) == [UNKNOWN_MIXED_CASE_ADDRESS.lower(), "CBBTC"]
+        ) == [("base", UNKNOWN_MIXED_CASE_ADDRESS.lower()), "CBBTC"]
 
     def test_build_backtest_token_address_map_registers_native_alongside_wrapped_native(self):
         """Natives are registered at the sentinel, distinctly from wrapped (ALM-3067).

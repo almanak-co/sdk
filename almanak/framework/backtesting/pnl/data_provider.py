@@ -32,10 +32,10 @@ Example:
 import re
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any, Protocol, TypeGuard, runtime_checkable
+from typing import Any, Literal, Protocol, TypeGuard, overload, runtime_checkable
 
 from almanak.core.chains import DEFAULT_CHAIN
 from almanak.framework.backtesting.pnl.types import DataConfidence
@@ -45,6 +45,22 @@ TokenRef = str | TokenKey
 
 _EVM_ADDRESS_RE = re.compile(r"^0[xX][a-fA-F0-9]{40}$")
 _MISSING = object()
+
+
+@overload
+def utc_isoformat(value: datetime) -> str: ...
+
+
+@overload
+def utc_isoformat(value: None) -> None: ...
+
+
+def utc_isoformat(value: datetime | None) -> str | None:
+    """Format a datetime as a UTC ISO-8601 value with a trailing ``Z``."""
+    if value is None:
+        return None
+    aware = value if value.tzinfo is not None and value.utcoffset() is not None else value.replace(tzinfo=UTC)
+    return aware.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
 def normalize_token_key(chain: str, address: str) -> TokenKey:
@@ -225,6 +241,46 @@ class HistoricalDataCapability(StrEnum):
     FULL = "full"
     CURRENT_ONLY = "current_only"
     PRE_CACHE = "pre_cache"
+
+
+@dataclass(frozen=True)
+class HistoricalCoverage:
+    """Measured historical price coverage for one requested token/window.
+
+    ``earliest_contiguous_at`` is deliberately stronger than the oldest
+    returned candle: it is the first interval-aligned timestamp from which the
+    provider can serve every requested tick through the requested end without
+    look-ahead.  A provider may therefore report ``partial`` with a null
+    contiguous bound when it has isolated data but no safe shorter window.
+    """
+
+    status: Literal["full", "partial", "none", "unknown"]
+    requested_start: datetime
+    requested_end: datetime
+    first_available_at: datetime | None
+    last_available_at: datetime | None
+    earliest_contiguous_at: datetime | None
+    coverage_ratio: Decimal
+    provider: str
+    source_id: str | None
+    interval_seconds: int
+    observed_interval_seconds: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a stable, JSON-safe coverage payload."""
+        return {
+            "status": self.status,
+            "requested_start": utc_isoformat(self.requested_start),
+            "requested_end": utc_isoformat(self.requested_end),
+            "first_available_at": utc_isoformat(self.first_available_at),
+            "last_available_at": utc_isoformat(self.last_available_at),
+            "earliest_contiguous_at": utc_isoformat(self.earliest_contiguous_at),
+            "coverage_ratio": str(self.coverage_ratio),
+            "provider": self.provider,
+            "source_id": self.source_id,
+            "interval_seconds": self.interval_seconds,
+            "observed_interval_seconds": self.observed_interval_seconds,
+        }
 
 
 @dataclass
@@ -575,6 +631,9 @@ class HistoricalDataConfig:
         start_time: Start of the historical period (inclusive)
         end_time: End of the historical period (inclusive)
         interval_seconds: Time between data points in seconds (default: 3600 = 1 hour)
+        price_interval_seconds: Provider-validated price-candle cadence. This
+            is independent from the simulation tick cadence in
+            ``interval_seconds``.
         tokens: List of resolved ``(chain, address)`` token identities or
             legacy token symbols to fetch prices for.
         chains: List of chain identifiers to fetch data for (default: [DEFAULT_CHAIN])
@@ -585,6 +644,7 @@ class HistoricalDataConfig:
     start_time: datetime
     end_time: datetime
     interval_seconds: int = 3600  # 1 hour default
+    price_interval_seconds: int | None = field(default=None, kw_only=True)
     tokens: list[TokenRef] = field(default_factory=lambda: ["WETH", "USDC"])
     chains: list[str] = field(default_factory=lambda: [DEFAULT_CHAIN])
     include_ohlcv: bool = True
@@ -596,6 +656,8 @@ class HistoricalDataConfig:
             raise ValueError("end_time must be after start_time")
         if self.interval_seconds <= 0:
             raise ValueError("interval_seconds must be positive")
+        if self.price_interval_seconds is not None and self.price_interval_seconds <= 0:
+            raise ValueError("price_interval_seconds must be positive")
         if not self.tokens:
             raise ValueError("tokens list cannot be empty")
         if not self.chains:
@@ -623,6 +685,7 @@ class HistoricalDataConfig:
             "start_time": self.start_time.isoformat(),
             "end_time": self.end_time.isoformat(),
             "interval_seconds": self.interval_seconds,
+            "price_interval_seconds": self.price_interval_seconds,
             "tokens": [token_ref_display(token) for token in self.tokens],
             "chains": self.chains,
             "include_ohlcv": self.include_ohlcv,
@@ -758,8 +821,35 @@ class HistoricalDataProvider(Protocol):
         ...
 
 
+@runtime_checkable
+class HistoricalCoverageProvider(Protocol):
+    """Additive range-coverage capability for historical data providers.
+
+    This deliberately does not extend :class:`HistoricalDataProvider`:
+    existing third-party providers remain valid, while callers feature-detect
+    this richer contract when range-aware preflight or automatic price-cadence
+    negotiation is required.
+    """
+
+    async def get_price_coverage(
+        self,
+        token: TokenRef,
+        start: datetime,
+        end: datetime,
+        interval_seconds: int,
+    ) -> HistoricalCoverage:
+        """Discover full, partial, absent, or unknown range coverage.
+
+        Provider, authentication, and transient failures must propagate rather
+        than being mislabeled as absent history.
+        """
+        ...
+
+
 __all__ = [
     "HistoricalDataCapability",
+    "HistoricalCoverage",
+    "HistoricalCoverageProvider",
     "HistoricalPriceObservation",
     "OHLCV",
     "TokenKey",

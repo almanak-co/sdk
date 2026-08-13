@@ -827,12 +827,18 @@ class StakeDuck:
     protocol: str = "lido"
 
 
-def flat_series(n_ticks: int, weth: str = "2000") -> dict[TokenRef, list[Decimal]]:
+def flat_series(
+    n_ticks: int,
+    weth: str = "2000",
+    *,
+    chain: str = "arbitrum",
+) -> dict[TokenRef, list[Decimal]]:
     """Flat WETH/USDC price series: the conservation baseline."""
+    chain_name = chain.lower()
     return {
         "WETH": [Decimal(weth)] * n_ticks,
         "USDC": [Decimal("1")] * n_ticks,
-        ("arbitrum", USDC_ARBITRUM): [Decimal("1")] * n_ticks,
+        (chain_name, USDC_BY_CHAIN[chain_name]): [Decimal("1")] * n_ticks,
     }
 
 

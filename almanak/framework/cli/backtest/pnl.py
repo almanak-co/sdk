@@ -7,6 +7,7 @@ import asyncio
 import json
 import logging
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -30,6 +31,7 @@ from ...backtesting.config import BacktestDataConfig
 from ...backtesting.exceptions import NoAcceptableDataSourceError
 from ...backtesting.models import BacktestResult
 from ...backtesting.pnl.config_loader import ConfigLoadError, load_config_from_result
+from ...backtesting.pnl.data_provider import TokenRef, token_ref_display
 from ...backtesting.pnl.error_handling import PreflightValidationError
 from ...backtesting.pnl.logging_utils import configure_backtest_logging
 from ...backtesting.visualization import save_chart
@@ -229,6 +231,8 @@ def _validate_and_build_context(
     strategy = resolve_backtest_strategy_name(strategy)
     validate_strategy_is_registered(strategy)
 
+    token_list: Sequence[TokenRef]
+
     # Create PnL backtest config if not loaded from result
     if not loaded_from_result:
         token_list = parse_token_list(tokens)
@@ -310,7 +314,7 @@ def _print_pnl_configuration(
         click.echo(f"Price Timeframe: {pnl_config.timeframe} (explicit)")
     if pnl_config.token_funding:
         click.echo(f"Token Funding Entries: {len(pnl_config.token_funding)}")
-    click.echo(f"Tokens: {', '.join(ctx.token_list)}")
+    click.echo(f"Tokens: {', '.join(token_ref_display(token) for token in ctx.token_list)}")
     gas_suffix = " (chain default)" if pnl_config.gas_price_gwei_is_default else ""
     click.echo(f"Gas Price: {pnl_config.gas_price_gwei} Gwei{gas_suffix}")
     click.echo(f"Estimated Ticks: ~{pnl_config.estimated_ticks:,}")
@@ -625,7 +629,7 @@ def _print_pnl_followup_tip() -> None:
 async def _warm_cache_async(
     data_provider: CoinGeckoDataProvider,
     cache: DataCache,
-    token_list: list[str],
+    token_list: Sequence[TokenRef],
     start: datetime | None,
     end: datetime | None,
     interval: int,
@@ -651,6 +655,7 @@ async def _warm_cache_async(
     total_tokens = len(token_list)
     try:
         for token in token_list:
+            token_label = token_ref_display(token)
             try:
                 cache_start = start or pnl_config.start_time
                 cache_end = end or pnl_config.end_time
@@ -658,7 +663,7 @@ async def _warm_cache_async(
                 items = []
                 for ohlcv in ohlcv_data:
                     key = CacheKey(
-                        token=token.upper(),
+                        token=token_label.upper(),
                         timestamp=ohlcv.timestamp,
                         interval=f"{interval}s",
                     )
@@ -674,10 +679,10 @@ async def _warm_cache_async(
                 cached_count = cache.set_batch(items)
                 total_cached += cached_count
                 successful_warms += 1
-                click.echo(f"  Cached {cached_count} data points for {token}")
+                click.echo(f"  Cached {cached_count} data points for {token_label}")
 
             except Exception as e:
-                click.echo(f"  Warning: Failed to cache data for {token}: {e}", err=True)
+                click.echo(f"  Warning: Failed to cache data for {token_label}: {e}", err=True)
     finally:
         await data_provider.close()
 

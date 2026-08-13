@@ -241,6 +241,47 @@ class TestWarmCacheAsync:
         assert "Cached 1 data points for WETH" in captured.out
         data_provider.close.assert_awaited_once()
 
+    def test_chain_qualified_token_reaches_provider_and_cache_intact(self, capsys: pytest.CaptureFixture[str]) -> None:
+        token = ("bsc", "0x02fca66c1d1afb4e2a7884261eb00f63598a7436")
+        data_provider = MagicMock()
+        data_provider.close = AsyncMock()
+        data_provider.get_ohlcv = AsyncMock(
+            return_value=[
+                _FakeOHLCV(
+                    timestamp=datetime(2024, 1, 1, 0, tzinfo=UTC),
+                    open=Decimal("100"),
+                    high=Decimal("110"),
+                    low=Decimal("90"),
+                    close=Decimal("105"),
+                )
+            ]
+        )
+        cache = MagicMock()
+        cache.set_batch = MagicMock(return_value=1)
+
+        outcome = asyncio.run(
+            _warm_cache_async(
+                data_provider=data_provider,
+                cache=cache,
+                token_list=[token],
+                start=datetime(2024, 1, 1, tzinfo=UTC),
+                end=datetime(2024, 2, 1, tzinfo=UTC),
+                interval=3600,
+                pnl_config=_make_pnl_config(),
+            )
+        )
+
+        assert outcome.total_cached == 1
+        data_provider.get_ohlcv.assert_awaited_once_with(
+            token,
+            datetime(2024, 1, 1, tzinfo=UTC),
+            datetime(2024, 2, 1, tzinfo=UTC),
+            3600,
+        )
+        [(cache_key, _)] = cache.set_batch.call_args.args[0]
+        assert cache_key.token == "BSC:0X02FCA66C1D1AFB4E2A7884261EB00F63598A7436"
+        assert "Cached 1 data points for bsc:0x02fca66c1d1afb4e2a7884261eb00f63598a7436" in capsys.readouterr().out
+
     def test_swallows_per_token_error(self, capsys: pytest.CaptureFixture[str]) -> None:
         """Issue #1698 — per-token failures warn but do not abort.
 

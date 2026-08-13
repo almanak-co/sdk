@@ -33,12 +33,13 @@ import random
 import re
 import sqlite3
 import time
+from collections import OrderedDict
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import aiohttp
 
@@ -53,6 +54,7 @@ from almanak.integrations.chains import integration_chain_id, integration_chain_
 
 from ..data_provider import (
     OHLCV,
+    HistoricalCoverage,
     HistoricalDataConfig,
     HistoricalPriceObservation,
     MarketState,
@@ -64,7 +66,12 @@ from ..data_provider import (
     token_ref_display,
 )
 from ..types import DataConfidence
-from .coingecko_gateway import GatewayCoinGeckoTransport, gateway_coingecko_configured
+from .coingecko_gateway import (
+    CoinGeckoGatewayProviderError,
+    CoinGeckoGatewayUnavailableError,
+    GatewayCoinGeckoTransport,
+    gateway_coingecko_configured,
+)
 from .rate_limiter import TokenBucketRateLimiter
 
 logger = logging.getLogger(__name__)
@@ -112,6 +119,11 @@ _HTTP_STATUS_RE = re.compile(r"CoinGecko API error (\d{3}):")
 #: to DAILY above; 80 days keeps a safety margin under the cliff. Longer
 #: windows are fetched in chunks of this size and stitched.
 _CG_HOURLY_SAFE_RANGE_SECONDS = 80 * 86400
+
+#: Bound full-range candle retention when sweep/optimization runners reuse one
+#: provider across many windows. Thirty-two entries preserve preflight-to-run
+#: reuse for broad token baskets without allowing lifetime-unbounded growth.
+_OHLCV_RANGE_CACHE_MAX_ENTRIES = 32
 
 #: A point-over-point magnitude change at or above this bounded ratio is
 #: treated as a quote-unit integrity failure, not usable USD history
@@ -841,6 +853,15 @@ class CoinGeckoDataProvider:
         # OHLCV cache (per-backtest, for iterate())
         self._cache: OHLCVCache | None = None
 
+        # Exact range fetches discovered during preflight are reused by the
+        # eventual iterate/prefetch pass. A coverage check must not spend a
+        # second full CoinGecko request for data the runner is about to consume.
+        self._ohlcv_range_cache: OrderedDict[tuple[str, int, int, int], tuple[OHLCV, ...]] = OrderedDict()
+        # Coverage ranges are pinned until prefetch consumes them. The boolean
+        # records whether the successful probe was gateway-only, so an
+        # unexpected cache miss still cannot weaken that transport policy.
+        self._coverage_range_pins: dict[tuple[str, int, int, int], bool] = {}
+
         # Historical price cache (persistent across calls, keyed by token+date)
         # Uses 1-hour TTL by default since historical data is immutable
         self._historical_cache = HistoricalPriceCache(
@@ -1010,6 +1031,8 @@ class CoinGeckoDataProvider:
         if self._session and not self._session.closed:
             await self._session.close()
             self._session = None
+        self._ohlcv_range_cache.clear()
+        self._coverage_range_pins.clear()
         self._historical_cache.close()
 
     def register_token_addresses(self, token_addresses: dict[str, tuple[str, str]]) -> None:
@@ -1415,12 +1438,44 @@ class CoinGeckoDataProvider:
 
         return price
 
+    async def _make_gateway_only_request(self, endpoint: str, params: dict[str, Any]) -> dict[str, Any]:
+        """Serve a CoinGecko request through gRPC without direct-HTTP fallback."""
+        if self._gateway_transport is None:
+            raise CoinGeckoGatewayUnavailableError(
+                "CoinGecko historical coverage requires a configured gateway; direct HTTP is disabled"
+            )
+        served = await self._gateway_transport.request(endpoint, params)
+        if served is None:
+            raise CoinGeckoGatewayUnavailableError(
+                "CoinGecko historical coverage is unavailable via the configured gateway; direct HTTP is disabled"
+            )
+        return served
+
     async def get_ohlcv(
         self,
         token: TokenRef,
         start: datetime,
         end: datetime,
         interval_seconds: int = 3600,
+    ) -> list[OHLCV]:
+        """Get OHLCV data for a token over a time range."""
+        return await self._get_ohlcv(
+            token,
+            start,
+            end,
+            interval_seconds,
+            gateway_only=False,
+        )
+
+    async def _get_ohlcv(
+        self,
+        token: TokenRef,
+        start: datetime,
+        end: datetime,
+        interval_seconds: int = 3600,
+        *,
+        gateway_only: bool,
+        retain_for_prefetch: bool = False,
     ) -> list[OHLCV]:
         """Get OHLCV data for a token over a time range.
 
@@ -1453,6 +1508,8 @@ class CoinGeckoDataProvider:
         Raises:
             ValueError: If data is not available for the token/range
         """
+        start = _as_utc(start)
+        end = _as_utc(end)
         token_id = await self._resolve_token_id(token)
         if token_id is None:
             if self._stablecoin_fallback_cache_id(token) is not None:
@@ -1462,6 +1519,22 @@ class CoinGeckoDataProvider:
         # Convert to Unix timestamps
         start_ts = int(start.timestamp())
         end_ts = int(end.timestamp())
+        # Every sub-daily request uses the same hourly-safe chunking plan and
+        # therefore returns the same provider-native points. Share that fetch
+        # across auto-cadence probes, coverage validation, and prefetch. Daily
+        # requests use a distinct plan and cache class.
+        request_class = 86400 if interval_seconds >= 86400 else 0
+        range_cache_key = (token_id, start_ts, end_ts, request_class)
+        effective_gateway_only = gateway_only or self._coverage_range_pins.get(range_cache_key, False)
+        cached_range = self._ohlcv_range_cache.get(range_cache_key)
+        if cached_range is not None:
+            self._ohlcv_range_cache.move_to_end(range_cache_key)
+            if retain_for_prefetch:
+                self._coverage_range_pins[range_cache_key] = effective_gateway_only
+            else:
+                self._coverage_range_pins.pop(range_cache_key, None)
+                self._trim_ohlcv_range_cache()
+            return list(cached_range)
 
         # Chunking exists to keep CG in its HOURLY auto-granularity regime;
         # a backtest ticking at daily-or-coarser is honestly served by daily
@@ -1480,7 +1553,12 @@ class CoinGeckoDataProvider:
                 "from": str(chunk_start),
                 "to": str(chunk_end),
             }
-            data = await self._make_request(f"/coins/{token_id}/market_chart/range", params)
+            endpoint = f"/coins/{token_id}/market_chart/range"
+            data = (
+                await self._make_gateway_only_request(endpoint, params)
+                if effective_gateway_only
+                else await self._make_request(endpoint, params)
+            )
             chunk_count += 1
             for row in data.get("prices", []):
                 # Chunk edges are inclusive both sides — dedup the seam candle.
@@ -1521,7 +1599,254 @@ class CoinGeckoDataProvider:
         # Sort by timestamp ascending
         ohlcv_list.sort(key=lambda x: x.timestamp)
 
+        self._ohlcv_range_cache[range_cache_key] = tuple(ohlcv_list)
+        self._ohlcv_range_cache.move_to_end(range_cache_key)
+        if retain_for_prefetch:
+            self._coverage_range_pins[range_cache_key] = effective_gateway_only
+        else:
+            self._coverage_range_pins.pop(range_cache_key, None)
+        self._trim_ohlcv_range_cache()
+
         return ohlcv_list
+
+    def _trim_ohlcv_range_cache(self) -> None:
+        """Evict the oldest unpinned ranges until the ordinary LRU bound holds."""
+        while len(self._ohlcv_range_cache) > _OHLCV_RANGE_CACHE_MAX_ENTRIES:
+            evictable = next(
+                (key for key in self._ohlcv_range_cache if key not in self._coverage_range_pins),
+                None,
+            )
+            if evictable is None:
+                return
+            del self._ohlcv_range_cache[evictable]
+
+    def begin_price_coverage_batch(self) -> None:
+        """Release any abandoned prior batch before pinning the next one."""
+        self._coverage_range_pins.clear()
+        self._trim_ohlcv_range_cache()
+
+    async def get_price_coverage(
+        self,
+        token: TokenRef,
+        start: datetime,
+        end: datetime,
+        interval_seconds: int,
+    ) -> HistoricalCoverage:
+        """Measure full/partial/absent CoinGecko coverage for one token range.
+
+        A configured gateway is fail-closed for coverage discovery; local
+        operator runs without one retain blueprint 31's accepted direct-provider
+        fallback. The exact range result is pinned in ``_ohlcv_range_cache`` for
+        the subsequent prefetch. Provider failures propagate. Only an honest
+        resolution/range miss becomes ``status='none'``.
+        """
+        if interval_seconds <= 0:
+            raise ValueError("interval_seconds must be positive")
+
+        start = _as_utc(start)
+        end = _as_utc(end)
+        if end <= start:
+            raise ValueError("end must be after start")
+        gateway_only = self._gateway_transport is not None
+        token_id = await self._resolve_token_id(token)
+        if token_id is None:
+            stablecoin_id = self._stablecoin_fallback_cache_id(token)
+            if stablecoin_id is None:
+                return self._empty_coverage(
+                    start=start,
+                    end=end,
+                    interval_seconds=interval_seconds,
+                    source_id=None,
+                )
+            token_id = stablecoin_id
+
+        try:
+            candles = await self._get_ohlcv(
+                token,
+                start,
+                end,
+                interval_seconds,
+                gateway_only=gateway_only,
+                retain_for_prefetch=True,
+            )
+        except CoinGeckoGatewayProviderError:
+            raise
+        except ValueError as exc:
+            if _is_transient_request_error(exc) or _is_auth_error(exc):
+                raise
+            return self._empty_coverage(
+                start=start,
+                end=end,
+                interval_seconds=interval_seconds,
+                source_id=token_id,
+            )
+
+        # Match execution prefetch exactly: an unaligned first tick may safely
+        # forward-fill a genuine prior close. Never use a future candle and
+        # never fabricate history for a token that has no in-window points.
+        if candles and candles[0].timestamp > start:
+            seed = await self._fetch_prior_candle(
+                token,
+                start,
+                interval_seconds,
+                gateway_only=gateway_only,
+                retain_for_prefetch=True,
+            )
+            if seed is not None and seed.timestamp < candles[0].timestamp:
+                candles = [seed, *candles]
+
+        return self._coverage_from_candles(
+            candles,
+            start=start,
+            end=end,
+            interval_seconds=interval_seconds,
+            source_id=token_id,
+        )
+
+    @staticmethod
+    def _empty_coverage(
+        *,
+        start: datetime,
+        end: datetime,
+        interval_seconds: int,
+        source_id: str | None,
+    ) -> HistoricalCoverage:
+        return HistoricalCoverage(
+            status="none",
+            requested_start=start,
+            requested_end=end,
+            first_available_at=None,
+            last_available_at=None,
+            earliest_contiguous_at=None,
+            coverage_ratio=Decimal("0"),
+            provider="coingecko",
+            source_id=source_id,
+            interval_seconds=interval_seconds,
+        )
+
+    @classmethod
+    def _coverage_from_candles(
+        cls,
+        candles: list[OHLCV],
+        *,
+        start: datetime,
+        end: datetime,
+        interval_seconds: int,
+        source_id: str,
+    ) -> HistoricalCoverage:
+        usable = sorted(
+            (candle for candle in candles if _as_utc(candle.timestamp) <= end),
+            key=lambda candle: candle.timestamp,
+        )
+        if not usable:
+            return cls._empty_coverage(
+                start=start,
+                end=end,
+                interval_seconds=interval_seconds,
+                source_id=source_id,
+            )
+
+        covered, total, _ = cls._coverage_grid(
+            usable,
+            start=start,
+            end=end,
+            interval_seconds=interval_seconds,
+        )
+        ratio = Decimal(covered) / Decimal(total) if total else Decimal("0")
+        status: Literal["full", "partial", "none", "unknown"] = "full" if total > 0 and covered == total else "partial"
+
+        aligned_start = cls._ceil_to_interval(start, interval_seconds)
+        _, aligned_total, last_uncovered = cls._coverage_grid(
+            usable,
+            start=aligned_start,
+            end=end,
+            interval_seconds=interval_seconds,
+        )
+        contiguous_candidate = (
+            aligned_start if last_uncovered is None else last_uncovered + timedelta(seconds=interval_seconds)
+        )
+        contiguous_start: datetime | None = contiguous_candidate
+        # A one-candle suffix is not a meaningful backtest window and can occur
+        # when the requested cadence is finer than the provider's candles.
+        if aligned_total < 2 or contiguous_candidate + timedelta(seconds=interval_seconds) > end:
+            contiguous_start = None
+
+        observed_interval = cls._measure_granularity({source_id: usable})
+
+        return HistoricalCoverage(
+            status=status,
+            requested_start=start,
+            requested_end=end,
+            first_available_at=_as_utc(usable[0].timestamp),
+            last_available_at=_as_utc(usable[-1].timestamp),
+            earliest_contiguous_at=contiguous_start,
+            coverage_ratio=ratio,
+            provider="coingecko",
+            source_id=source_id,
+            interval_seconds=interval_seconds,
+            observed_interval_seconds=observed_interval,
+        )
+
+    @staticmethod
+    def _ceil_to_interval(timestamp: datetime, interval_seconds: int) -> datetime:
+        timestamp = _as_utc(timestamp)
+        seconds = int(timestamp.timestamp())
+        remainder = seconds % interval_seconds
+        if remainder == 0 and timestamp.microsecond == 0:
+            return timestamp
+        return datetime.fromtimestamp(seconds - remainder + interval_seconds, tz=UTC)
+
+    @staticmethod
+    def _coverage_grid(
+        candles: list[OHLCV],
+        *,
+        start: datetime,
+        end: datetime,
+        interval_seconds: int,
+    ) -> tuple[int, int, datetime | None]:
+        """Return covered ticks, total ticks, and the last uncovered tick.
+
+        Each tick may use only an at-or-before candle no older than one
+        requested interval. This makes interior gaps, stale end coverage, and
+        provider granularity coarser than the requested cadence visible without
+        ever backfilling from a future observation.
+        """
+        start = _as_utc(start)
+        end = _as_utc(end)
+        interval = timedelta(seconds=interval_seconds)
+        interval_microseconds = interval_seconds * 1_000_000
+        window = end - start
+        window_microseconds = window.days * 86_400_000_000 + window.seconds * 1_000_000 + window.microseconds
+        total = max(0, window_microseconds // interval_microseconds + 1)
+        if total == 0:
+            return 0, 0, None
+
+        # A candle can cover only the first grid tick at-or-after it: the next
+        # tick is exactly one requested interval older and therefore stale.
+        # Map each sorted candle to that tick arithmetically, then count unique
+        # indices. This is O(candles), independent of window/cadence length.
+        covered_indices: list[int] = []
+        for candle_time in sorted(_as_utc(candle.timestamp) for candle in candles):
+            offset = candle_time - start
+            offset_microseconds = offset.days * 86_400_000_000 + offset.seconds * 1_000_000 + offset.microseconds
+            tick_index = max(0, -(-offset_microseconds // interval_microseconds))
+            if tick_index >= total:
+                break
+            tick = start + timedelta(seconds=tick_index * interval_seconds)
+            if candle_time <= tick and tick - candle_time < interval:
+                if not covered_indices or covered_indices[-1] != tick_index:
+                    covered_indices.append(tick_index)
+
+        last_uncovered_index = total - 1
+        for tick_index in reversed(covered_indices):
+            if tick_index == last_uncovered_index:
+                last_uncovered_index -= 1
+            elif tick_index < last_uncovered_index:
+                break
+        last_uncovered = (
+            None if last_uncovered_index < 0 else start + timedelta(seconds=last_uncovered_index * interval_seconds)
+        )
+        return len(covered_indices), total, last_uncovered
 
     async def _prefetch_ohlcv_data(self, config: HistoricalDataConfig) -> OHLCVCache:
         """Prefetch all OHLCV data needed for the backtest.
@@ -1553,6 +1878,7 @@ class CoinGeckoDataProvider:
         data: dict[TokenRef, list[OHLCV]] = {}
         start_time = _as_utc(config.start_time)
         end_time = _as_utc(config.end_time)
+        price_interval_seconds = config.price_interval_seconds or config.interval_seconds
         default_chain = config.chains[0] if config.chains else DEFAULT_CHAIN
 
         for token in config.tokens:
@@ -1563,7 +1889,7 @@ class CoinGeckoDataProvider:
                     fetch_token,
                     start_time,
                     end_time,
-                    config.interval_seconds,
+                    price_interval_seconds,
                 )
             except ValueError as e:
                 logger.warning(f"Failed to prefetch data for {token_ref_display(fetch_token)}: {e}")
@@ -1577,7 +1903,7 @@ class CoinGeckoDataProvider:
                 seed = await self._fetch_prior_candle(
                     fetch_token,
                     start_time,
-                    config.interval_seconds,
+                    price_interval_seconds,
                 )
                 if seed is not None and seed.timestamp < ohlcv[0].timestamp:
                     ohlcv = [seed, *ohlcv]
@@ -1664,6 +1990,9 @@ class CoinGeckoDataProvider:
         token: TokenRef,
         start: datetime,
         interval_seconds: int,
+        *,
+        gateway_only: bool = False,
+        retain_for_prefetch: bool = False,
     ) -> OHLCV | None:
         """Return the latest candle at or before ``start``, or ``None``.
 
@@ -1679,13 +2008,28 @@ class CoinGeckoDataProvider:
         """
         start = _as_utc(start)
         try:
-            prior = await self.get_ohlcv(
-                token,
-                start - timedelta(days=1),
-                start,
-                interval_seconds,
+            prior = (
+                await self._get_ohlcv(
+                    token,
+                    start - timedelta(days=1),
+                    start,
+                    interval_seconds,
+                    gateway_only=gateway_only,
+                    retain_for_prefetch=retain_for_prefetch,
+                )
+                if gateway_only or retain_for_prefetch
+                else await self.get_ohlcv(
+                    token,
+                    start - timedelta(days=1),
+                    start,
+                    interval_seconds,
+                )
             )
-        except ValueError:
+        except CoinGeckoGatewayProviderError:
+            raise
+        except ValueError as exc:
+            if _is_transient_request_error(exc) or _is_auth_error(exc):
+                raise
             return None
         candidates = [candle for candle in prior if candle.timestamp <= start]
         return candidates[-1] if candidates else None

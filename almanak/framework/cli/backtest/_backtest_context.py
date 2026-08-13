@@ -8,6 +8,7 @@ plan.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -15,6 +16,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ...backtesting import PnLBacktestConfig
+    from ...backtesting.pnl.data_provider import TokenRef
 
 
 @dataclass
@@ -28,7 +30,7 @@ class PnLBacktestContext:
 
     strategy: str
     pnl_config: PnLBacktestConfig
-    token_list: list[str]
+    token_list: Sequence[TokenRef]
     output_path: Path | None
     loaded_from_result: bool
     # Original CLI args preserved for downstream phases that still need them

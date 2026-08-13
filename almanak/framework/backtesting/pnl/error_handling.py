@@ -211,6 +211,8 @@ class PreflightValidationError(Exception):
         recommendations: List of actionable recommendations
         error_count: Number of error-severity check failures
         warning_count: Number of warning-severity check failures
+        code: Stable machine-readable failure code
+        details: Structured failure details for API/readiness consumers
 
     Example:
         try:
@@ -228,6 +230,8 @@ class PreflightValidationError(Exception):
         recommendations: list[str] | None = None,
         error_count: int = 0,
         warning_count: int = 0,
+        code: str = "PreflightValidationError",
+        details: dict[str, Any] | None = None,
     ) -> None:
         """Initialize PreflightValidationError.
 
@@ -237,6 +241,8 @@ class PreflightValidationError(Exception):
             recommendations: List of actionable recommendations
             error_count: Number of error-severity failures
             warning_count: Number of warning-severity failures
+            code: Stable machine-readable failure code
+            details: Structured failure details preserved through readiness
         """
         super().__init__(message)
         self.message = message
@@ -244,6 +250,8 @@ class PreflightValidationError(Exception):
         self.recommendations = recommendations or []
         self.error_count = error_count
         self.warning_count = warning_count
+        self.code = code
+        self.details = dict(details) if details else {}
 
     def __str__(self) -> str:
         """Format error message with details."""

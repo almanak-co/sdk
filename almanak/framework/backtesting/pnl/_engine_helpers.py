@@ -598,15 +598,23 @@ async def prepare_perp_price_history(
     if not targets:
         _raise_on_undeclared_perp_market(strategy, strategy_config)
         if config.timeframe == "auto":
+            if callable(getattr(backtester.data_provider, "get_price_coverage", None)):
+                preparation = await backtester.prepare_spot_price_history(config)
+                bt_logger.info(
+                    "Resolved timeframe='auto' to provider-validated spot price cadence "
+                    f"{preparation.resolved_timeframe!r} "
+                    f"without changing the {config.interval_seconds}s simulation tick cadence"
+                )
+                return
             raise PreflightValidationError(
                 message=(
-                    "timeframe='auto' requires a strategy with one declared connector-native "
-                    "perp market; no eligible price-history route was discovered"
+                    "timeframe='auto' requires either a coverage-aware spot token provider or one declared "
+                    "connector-native perp market; no eligible price-history route was discovered"
                 ),
                 failed_checks=["perp_price_history"],
                 recommendations=[
-                    "Declare the strategy protocol and market, choose an explicit timeframe, "
-                    "or provide a coverage-aware historical data provider."
+                    "Configure a coverage-aware spot historical provider, declare the strategy's perp protocol "
+                    "and market, or choose an explicit timeframe."
                 ],
                 error_count=1,
                 warning_count=0,
@@ -1022,16 +1030,27 @@ async def run_preflight(
                 # Fail fast if configured to do so
                 if config.fail_on_preflight_error:
                     failed_check_names = [c.check_name for c in preflight_report.failed_checks]
+                    primary_error = next(
+                        (check for check in preflight_report.failed_checks if check.severity == "error"),
+                        None,
+                    )
+                    primary_details = primary_error.details if primary_error is not None else {}
                     raise PreflightValidationError(
                         message=(
-                            f"Preflight validation failed with {preflight_report.error_count} errors "
-                            f"and {preflight_report.warning_count} warnings. "
-                            "Set fail_on_preflight_error=False to continue with degraded mode."
+                            primary_error.message
+                            if primary_error is not None and primary_details.get("code")
+                            else (
+                                f"Preflight validation failed with {preflight_report.error_count} errors "
+                                f"and {preflight_report.warning_count} warnings. "
+                                "Set fail_on_preflight_error=False to continue with degraded mode."
+                            )
                         ),
                         failed_checks=failed_check_names,
                         recommendations=preflight_report.recommendations,
                         error_count=preflight_report.error_count,
                         warning_count=preflight_report.warning_count,
+                        code=str(primary_details.get("code", "PreflightValidationError")),
+                        details=primary_details,
                     )
                 else:
                     bt_logger.warning(
@@ -1225,6 +1244,7 @@ def initialize_backtest(
             start_time=config.start_time,
             end_time=config.end_time,
             interval_seconds=config.interval_seconds,
+            price_interval_seconds=config.price_interval_seconds,
             tokens=data_tokens,
             chains=[config.chain],
         )

@@ -60,6 +60,8 @@ from .config_loader import (
 )
 from .data_provider import (
     OHLCV,
+    HistoricalCoverage,
+    HistoricalCoverageProvider,
     HistoricalDataCapability,
     HistoricalDataConfig,
     HistoricalDataProvider,
@@ -239,6 +241,8 @@ __all__ = [
     "MarketState",
     "HistoricalDataConfig",
     "HistoricalDataProvider",
+    "HistoricalCoverage",
+    "HistoricalCoverageProvider",
     # Concrete providers
     "CoinGeckoDataProvider",
     "ChainlinkDataProvider",
