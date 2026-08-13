@@ -1320,6 +1320,17 @@ def _strat_test_skip_reason(working_dir: str, config_file: str | None) -> str | 
     return None
 
 
+def _strat_test_unstarted_coverage(actions: list[str], *, teardown: bool) -> dict[str, object]:
+    """Describe requested lifecycle paths when execution never started."""
+    action_coverage = [{"action": action, "outcome": "not_run"} for action in actions if action]
+    requested = bool(action_coverage) or teardown
+    return {
+        "requested_paths_exercised": False if requested else None,
+        "actions": action_coverage,
+        "teardown": "not_run" if teardown else "not_requested",
+    }
+
+
 # crap-allowlist: Phase 5e (#2097) replaces the inline ``os.environ.get("ALMANAK_PRIVATE_KEY")``
 # probe + the strategy-local ``load_dotenv(env_file)`` call with the typed
 # ``load_config().gateway.private_key`` read and the ``_load_dotenv_once`` boundary
@@ -1536,6 +1547,7 @@ def strategy_test(
                             "steps_run": 0,
                             "actions_passed": None,
                             "teardown_passed": None,
+                            "coverage": _strat_test_unstarted_coverage(parsed_actions, teardown=teardown),
                         },
                         "steps": [],
                     }
@@ -1604,6 +1616,7 @@ def strategy_test(
                             "steps_run": 0,
                             "actions_passed": False,
                             "teardown_passed": False if teardown else None,
+                            "coverage": _strat_test_unstarted_coverage(parsed_actions, teardown=teardown),
                             "error": str(e),
                         },
                         "steps": [],

@@ -11,7 +11,10 @@ import re
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from almanak.framework.cli.run_helpers import _run_test_lifecycle
+from almanak.framework.execution.orchestrator import ExecutionPhase, ExecutionResult, TransactionResult
 from almanak.framework.runner.runner_models import IterationResult, IterationStatus
 from almanak.framework.teardown.models import TeardownPositionSummary
 
@@ -97,6 +100,38 @@ def _result(status: IterationStatus, error: str | None = None) -> IterationResul
     return IterationResult(status=status, deployment_id="TestStrategy:abc", error=error)
 
 
+def _executed_result(*, tx_hashes: list[str] | None = None) -> IterationResult:
+    intent = MagicMock()
+    intent.serialize.return_value = {"type": "LP_OPEN", "pool": "USDF/USDT"}
+    execution_result = MagicMock()
+    execution_result.to_dict.return_value = {
+        "success": True,
+        "tx_hashes": ["0xabc"] if tx_hashes is None else tx_hashes,
+    }
+    return IterationResult(
+        status=IterationStatus.SUCCESS,
+        intent=intent,
+        execution_result=execution_result,
+        deployment_id="TestStrategy:abc",
+    )
+
+
+def _orchestrator_executed_result(*, tx_hash: str) -> IterationResult:
+    intent = MagicMock()
+    intent.serialize.return_value = {"type": "LP_OPEN", "pool": "USDF/USDT"}
+    execution_result = ExecutionResult(
+        success=True,
+        phase=ExecutionPhase.COMPLETE,
+        transaction_results=[TransactionResult(tx_hash=tx_hash, success=True)],
+    )
+    return IterationResult(
+        status=IterationStatus.SUCCESS,
+        intent=intent,
+        execution_result=execution_result,
+        deployment_id="TestStrategy:abc",
+    )
+
+
 def test_teardown_only_succeeds(capsys, monkeypatch):
     """`almanak strat test --teardown` (no actions) must return 0 when teardown completes."""
     # No-op teardown state manager; the lifecycle creates a teardown request and
@@ -157,6 +192,138 @@ def test_action_failure_attaches_failure_logs_and_breaks(capsys):
     assert payload["steps"][0]["status"] == "EXECUTION_FAILED"
     assert "failure_logs" in payload["steps"][0]
     assert any("synthetic on-chain error" in r for r in payload["steps"][0]["failure_logs"])
+    assert payload["summary"]["coverage"]["actions"] == [
+        {"action": "open", "outcome": "failed"},
+        {"action": "close", "outcome": "not_run"},
+    ]
+    assert payload["summary"]["coverage"]["requested_paths_exercised"] is False
+
+
+def test_empty_transaction_hash_does_not_prove_action_coverage(capsys):
+    """A serialized placeholder hash is not trade-effective evidence."""
+    runner = _make_runner(_executed_result(tx_hashes=[""]))
+
+    exit_code = _run_test_lifecycle(
+        runner=runner,
+        strategy_instance=_make_strategy(),
+        state_manager=MagicMock(),
+        cleanup_fn=_noop_cleanup(),
+        actions=["open"],
+        teardown=False,
+        json_output=True,
+    )
+    payload = _parse_last_json_object(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert payload["summary"]["coverage"] == {
+        "requested_paths_exercised": False,
+        "actions": [{"action": "open", "outcome": "unmeasured"}],
+        "teardown": "not_requested",
+    }
+
+
+def test_real_orchestrator_result_requires_usable_transaction_hash(capsys):
+    """The production ExecutionResult serializer rejects whitespace-only hashes."""
+    runner = _make_runner(_orchestrator_executed_result(tx_hash="   "))
+
+    exit_code = _run_test_lifecycle(
+        runner=runner,
+        strategy_instance=_make_strategy(),
+        state_manager=MagicMock(),
+        cleanup_fn=_noop_cleanup(),
+        actions=["open"],
+        teardown=False,
+        json_output=True,
+    )
+    payload = _parse_last_json_object(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert payload["summary"]["coverage"]["actions"] == [{"action": "open", "outcome": "unmeasured"}]
+    assert payload["summary"]["coverage"]["requested_paths_exercised"] is False
+
+
+def test_accepted_clob_order_is_trade_effective_evidence(capsys):
+    """An accepted order id covers the asynchronous prediction-market lane."""
+    result = _executed_result(tx_hashes=[])
+    result.execution_result.to_dict.return_value["extracted_data"] = {"order_id": "order-123"}
+    runner = _make_runner(result)
+
+    exit_code = _run_test_lifecycle(
+        runner=runner,
+        strategy_instance=_make_strategy(),
+        state_manager=MagicMock(),
+        cleanup_fn=_noop_cleanup(),
+        actions=["buy"],
+        teardown=False,
+        json_output=True,
+    )
+    payload = _parse_last_json_object(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert payload["summary"]["coverage"]["actions"] == [{"action": "buy", "outcome": "executed"}]
+    assert payload["summary"]["coverage"]["requested_paths_exercised"] is True
+
+
+@pytest.mark.parametrize("order_id", ["", "   ", 123])
+def test_invalid_clob_order_id_does_not_prove_action_coverage(capsys, order_id):
+    result = _executed_result(tx_hashes=[])
+    result.execution_result.to_dict.return_value["extracted_data"] = {"order_id": order_id}
+    runner = _make_runner(result)
+
+    exit_code = _run_test_lifecycle(
+        runner=runner,
+        strategy_instance=_make_strategy(),
+        state_manager=MagicMock(),
+        cleanup_fn=_noop_cleanup(),
+        actions=["buy"],
+        teardown=False,
+        json_output=True,
+    )
+    payload = _parse_last_json_object(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert payload["summary"]["coverage"]["actions"] == [{"action": "buy", "outcome": "unmeasured"}]
+    assert payload["summary"]["coverage"]["requested_paths_exercised"] is False
+
+
+def test_inject_sentinel_is_not_reported_as_requested_force_action(capsys):
+    """An empty force_action runs natural decide() and is not a requested path."""
+    runner = _make_runner(_result(IterationStatus.HOLD))
+
+    exit_code = _run_test_lifecycle(
+        runner=runner,
+        strategy_instance=_make_strategy(),
+        state_manager=MagicMock(),
+        cleanup_fn=_noop_cleanup(),
+        actions=[""],
+        teardown=False,
+        json_output=True,
+    )
+    payload = _parse_last_json_object(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert payload["summary"]["coverage"] == {
+        "requested_paths_exercised": None,
+        "actions": [],
+        "teardown": "not_requested",
+    }
+
+
+def test_inject_sentinel_keeps_natural_decide_human_verdict(capsys):
+    runner = _make_runner(_result(IterationStatus.HOLD))
+
+    exit_code = _run_test_lifecycle(
+        runner=runner,
+        strategy_instance=_make_strategy(),
+        state_manager=MagicMock(),
+        cleanup_fn=_noop_cleanup(),
+        actions=[""],
+        teardown=False,
+        json_output=False,
+    )
+
+    assert exit_code == 0
+    assert "Test lifecycle passed." in capsys.readouterr().out
 
 
 def test_action_hold_counts_as_pass(capsys, monkeypatch):
@@ -186,6 +353,82 @@ def test_action_hold_counts_as_pass(capsys, monkeypatch):
     assert len(payload["steps"]) == 3  # 2 actions + 1 teardown, no fail-fast
     assert "failure_logs" not in payload["steps"][0]
     assert "failure_logs" not in payload["steps"][1]
+    assert payload["summary"]["coverage"] == {
+        "requested_paths_exercised": False,
+        "actions": [
+            {"action": "maybe_buy", "outcome": "held"},
+            {"action": "buy", "outcome": "unmeasured"},
+        ],
+        "teardown": "unmeasured",
+    }
+    assert payload["steps"][0]["coverage"] == "held"
+    assert payload["steps"][2]["coverage"] == "unmeasured"
+
+
+def test_trustworthy_zero_position_breakdown_reports_nothing_to_unwind(capsys, monkeypatch):
+    monkeypatch.setattr(
+        "almanak.framework.teardown.get_teardown_state_manager",
+        lambda *a, **k: MagicMock(create_request=MagicMock()),
+    )
+    runner = _make_runner(_result(IterationStatus.TEARDOWN))
+    runner._teardown_closure_verification = {
+        "positions_total": 0,
+        "positions_closed": 0,
+        "has_position_breakdown": True,
+    }
+
+    exit_code = _run_test_lifecycle(
+        runner=runner,
+        strategy_instance=_make_strategy(),
+        state_manager=MagicMock(),
+        cleanup_fn=_noop_cleanup(),
+        actions=[],
+        teardown=True,
+        json_output=True,
+    )
+    payload = _parse_last_json_object(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert payload["summary"]["coverage"]["teardown"] == "nothing_to_unwind"
+    assert payload["summary"]["coverage"]["requested_paths_exercised"] is False
+
+
+def test_positive_execution_and_chain_closure_prove_requested_paths(capsys, monkeypatch):
+    """Only execution evidence plus measured closure certifies lifecycle coverage."""
+    monkeypatch.setattr(
+        "almanak.framework.teardown.get_teardown_state_manager",
+        lambda *a, **k: MagicMock(create_request=MagicMock()),
+    )
+    runner = _make_runner(_orchestrator_executed_result(tx_hash="0xabc"), _result(IterationStatus.TEARDOWN))
+    runner._teardown_closure_verification = {
+        "all_closed": True,
+        "closure_unknown": False,
+        "has_position_breakdown": True,
+        "protocols_to_prove": ["curve"],
+        "measured_closed_protocols": ["curve"],
+        "positions_total": 1,
+        "positions_closed": 1,
+    }
+
+    exit_code = _run_test_lifecycle(
+        runner=runner,
+        strategy_instance=_make_strategy(),
+        state_manager=MagicMock(),
+        cleanup_fn=_noop_cleanup(),
+        actions=["open"],
+        teardown=True,
+        json_output=True,
+    )
+    payload = _parse_last_json_object(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert payload["summary"]["coverage"] == {
+        "requested_paths_exercised": True,
+        "actions": [{"action": "open", "outcome": "executed"}],
+        "teardown": "proved",
+    }
+    assert payload["steps"][0]["coverage"] == "executed"
+    assert payload["steps"][1]["coverage"] == "proved"
 
 
 def test_action_requires_terminal_settlement_but_teardown_uses_recovery_lane(capsys, monkeypatch):

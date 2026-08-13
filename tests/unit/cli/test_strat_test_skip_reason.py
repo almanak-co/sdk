@@ -17,8 +17,48 @@ import json
 from pathlib import Path
 
 import pytest
+from click.testing import CliRunner
 
-from almanak.cli.cli import _strat_test_skip_reason
+from almanak.cli.cli import _strat_test_skip_reason, _strat_test_unstarted_coverage, almanak
+
+
+def test_unstarted_requested_paths_are_explicitly_not_run():
+    assert _strat_test_unstarted_coverage(["open", "close"], teardown=True) == {
+        "requested_paths_exercised": False,
+        "actions": [
+            {"action": "open", "outcome": "not_run"},
+            {"action": "close", "outcome": "not_run"},
+        ],
+        "teardown": "not_run",
+    }
+
+
+def test_unstarted_natural_decide_coverage_is_not_applicable():
+    assert _strat_test_unstarted_coverage([""], teardown=False) == {
+        "requested_paths_exercised": None,
+        "actions": [],
+        "teardown": "not_requested",
+    }
+
+
+def test_json_skip_payload_includes_unstarted_coverage(tmp_path):
+    _write_json_config(tmp_path, {"chains": ["solana"]})
+
+    result = CliRunner().invoke(
+        almanak,
+        ["strat", "test", "--working-dir", str(tmp_path), "--actions", "open,close", "--teardown", "--json"],
+    )
+    payload = json.loads(result.output[result.output.index("{") :])
+
+    assert result.exit_code == 0
+    assert payload["summary"]["coverage"] == {
+        "requested_paths_exercised": False,
+        "actions": [
+            {"action": "open", "outcome": "not_run"},
+            {"action": "close", "outcome": "not_run"},
+        ],
+        "teardown": "not_run",
+    }
 
 
 def _write_json_config(directory: Path, payload: dict, name: str = "config.json") -> Path:

@@ -135,6 +135,8 @@ def test_residual_open_position_fails_teardown(capsys, monkeypatch):
     assert residuals[0]["position_id"] == "aave-supply-wbtc"
     assert residuals[0]["value_usd"] == "6500"
     assert "failure_logs" in step
+    assert step["coverage"] == "residual"
+    assert payload["summary"]["coverage"]["teardown"] == "residual"
 
 
 def test_clean_teardown_passes(capsys, monkeypatch):
@@ -144,6 +146,11 @@ def test_clean_teardown_passes(capsys, monkeypatch):
     assert exit_code == 0
     assert payload["summary"]["teardown_passed"] is True
     assert "open_positions_after_teardown" not in payload["steps"][0]
+    assert payload["summary"]["coverage"] == {
+        "requested_paths_exercised": False,
+        "actions": [],
+        "teardown": "unmeasured",
+    }
 
 
 def test_dust_residual_is_ignored(capsys, monkeypatch):
@@ -188,6 +195,7 @@ def test_unmeasured_check_does_not_pass_teardown(capsys, monkeypatch):
     assert exit_code == 1
     assert payload["summary"]["teardown_passed"] is False
     assert "unmeasured" in payload["steps"][0]["open_positions_check"]
+    assert payload["steps"][0]["coverage"] == "unmeasured"
     # Never fabricated into a residual — the two states stay distinct.
     assert "open_positions_after_teardown" not in payload["steps"][0]
 

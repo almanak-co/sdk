@@ -829,6 +829,109 @@ def _chain_certified_closure(step: dict) -> bool:
     )
 
 
+def _action_step_coverage(step: dict) -> str:
+    """Classify whether a requested force-action path was actually exercised.
+
+    ``SUCCESS`` alone is deliberately insufficient: the lifecycle runner has
+    historically used it as a completion status even when no execution result
+    was attached.  Positive coverage requires the normal intent + successful
+    execution-result evidence emitted by the production runner.
+    """
+    from ..runner import IterationStatus
+
+    status = step.get("status")
+    if status == IterationStatus.HOLD.value:
+        return "held"
+    if status != IterationStatus.SUCCESS.value:
+        return "failed"
+    execution_result = step.get("execution_result")
+    if (
+        step.get("intent")
+        and isinstance(execution_result, dict)
+        and execution_result.get("success") is True
+        and _execution_result_has_effective_evidence(execution_result)
+    ):
+        return "executed"
+    return "unmeasured"
+
+
+def _execution_result_has_effective_evidence(execution_result: dict) -> bool:
+    """Apply the lifecycle's stricter evidence gate to serialized output."""
+    tx_hashes = execution_result.get("tx_hashes")
+    if isinstance(tx_hashes, list) and any(isinstance(tx_hash, str) and tx_hash.strip() for tx_hash in tx_hashes):
+        return True
+    transaction_results = execution_result.get("transaction_results")
+    if isinstance(transaction_results, list) and any(
+        isinstance(item, dict) and isinstance(item.get("tx_hash"), str) and bool(item["tx_hash"].strip())
+        for item in transaction_results
+    ):
+        return True
+    extracted_data = execution_result.get("extracted_data")
+    if not isinstance(extracted_data, dict):
+        return False
+    order_id = extracted_data.get("order_id")
+    return isinstance(order_id, str) and bool(order_id.strip())
+
+
+def _teardown_step_coverage(step: dict | None, *, requested: bool) -> str:
+    """Classify teardown path coverage separately from safe completion.
+
+    A teardown that finds no position is a valid no-op, but it did not exercise
+    the unwind path.  Keeping that distinct from a chain-proved close prevents
+    a destructive earlier force action from yielding a false lifecycle proof.
+    """
+    from ..runner import IterationStatus
+
+    if not requested:
+        return "not_requested"
+    if step is None:
+        return "not_run"
+    if step.get("status") != IterationStatus.TEARDOWN.value:
+        return "failed"
+    if step.get("open_positions_check"):
+        return "unmeasured"
+    if step.get("open_positions_after_teardown") and not _chain_certified_closure(step):
+        return "residual"
+    if _chain_certified_closure(step):
+        return "proved"
+
+    evidence = step.get("teardown_closure")
+    if isinstance(evidence, dict):
+        try:
+            if int(evidence.get("positions_total", 0)) > 0:
+                return "unmeasured"
+        except (TypeError, ValueError):
+            return "unmeasured"
+        if evidence.get("has_position_breakdown") is True:
+            return "nothing_to_unwind"
+    return "unmeasured"
+
+
+def _lifecycle_coverage(
+    action_results: list[dict],
+    teardown_result: dict | None,
+    *,
+    requested_actions: list[str],
+    teardown_requested: bool,
+) -> dict[str, Any]:
+    """Build explicit path-coverage evidence for ``strat test`` JSON output."""
+    action_coverage = []
+    for index, action in enumerate(requested_actions):
+        if not action:
+            continue
+        outcome = _action_step_coverage(action_results[index]) if index < len(action_results) else "not_run"
+        action_coverage.append({"action": action, "outcome": outcome})
+    teardown_coverage = _teardown_step_coverage(teardown_result, requested=teardown_requested)
+    requested_outcomes = [item["outcome"] == "executed" for item in action_coverage]
+    if teardown_requested:
+        requested_outcomes.append(teardown_coverage == "proved")
+    return {
+        "requested_paths_exercised": all(requested_outcomes) if requested_outcomes else None,
+        "actions": action_coverage,
+        "teardown": teardown_coverage,
+    }
+
+
 def _teardown_step_ok(step: dict) -> bool:
     """Pass criterion for a teardown step (ALM-2900, VIB-6285, ALM-3109).
 
@@ -1082,17 +1185,18 @@ def _run_test_lifecycle(  # noqa: C901
                         error=f"run_iteration raised: {exc!r}",
                         deployment_id=deployment_id,
                     )
-                    action_results.append(
-                        {
-                            "action": action,
-                            **synthetic.to_dict(),
-                            "failure_logs": log_buffer.slice_since(logs_before),
-                        }
-                    )
+                    failed_entry = {
+                        "action": action,
+                        **synthetic.to_dict(),
+                        "failure_logs": log_buffer.slice_since(logs_before),
+                    }
+                    failed_entry["coverage"] = _action_step_coverage(failed_entry)
+                    action_results.append(failed_entry)
                     if not json_output:
                         click.echo(f"  raised: {exc!r}", err=True)
                     break
                 entry = {"action": action, **result.to_dict()}
+                entry["coverage"] = _action_step_coverage(entry)
                 action_passed = result.status.value in action_pass_statuses
                 if not action_passed:
                     entry["failure_logs"] = log_buffer.slice_since(logs_before)
@@ -1185,6 +1289,10 @@ def _run_test_lifecycle(  # noqa: C901
                         **synthetic.to_dict(),
                         "failure_logs": log_buffer.slice_since(logs_before),
                     }
+                    teardown_result_dict["coverage"] = _teardown_step_coverage(
+                        teardown_result_dict,
+                        requested=True,
+                    )
                     if not json_output:
                         click.echo(f"  teardown raised: {exc!r}", err=True)
                 else:
@@ -1239,6 +1347,10 @@ def _run_test_lifecycle(  # noqa: C901
                                 "tracking (ALM-3109)."
                             )
                     teardown_passed = _teardown_step_ok(teardown_result_dict)
+                    teardown_result_dict["coverage"] = _teardown_step_coverage(
+                        teardown_result_dict,
+                        requested=True,
+                    )
                     if not teardown_passed:
                         teardown_result_dict["failure_logs"] = log_buffer.slice_since(logs_before)
                         if not json_output:
@@ -1339,6 +1451,12 @@ def _run_test_lifecycle(  # noqa: C901
                             "steps_run": len(partial_steps),
                             "actions_passed": partial_actions_ok,
                             "teardown_passed": partial_teardown_ok,
+                            "coverage": _lifecycle_coverage(
+                                action_results,
+                                teardown_result_dict,
+                                requested_actions=actions,
+                                teardown_requested=teardown,
+                            ),
                             "error": str(e),
                         },
                         "steps": partial_steps,
@@ -1367,6 +1485,12 @@ def _run_test_lifecycle(  # noqa: C901
     actions_ok = all(r["status"] in (IterationStatus.SUCCESS.value, IterationStatus.HOLD.value) for r in action_results)
     # Treat teardown_ok=None (not applicable) as a non-blocker for all_passed.
     all_passed = actions_ok and (teardown_ok is None or teardown_ok)
+    coverage = _lifecycle_coverage(
+        action_results,
+        teardown_result_dict,
+        requested_actions=actions,
+        teardown_requested=teardown,
+    )
 
     if json_output:
         steps: list[dict] = list(action_results)
@@ -1382,6 +1506,7 @@ def _run_test_lifecycle(  # noqa: C901
                 "steps_run": len(steps),
                 "actions_passed": actions_ok,
                 "teardown_passed": teardown_ok,
+                "coverage": coverage,
             },
             "steps": steps,
         }
@@ -1389,7 +1514,12 @@ def _run_test_lifecycle(  # noqa: C901
     else:
         click.echo()
         if all_passed:
-            click.echo("Test lifecycle passed.")
+            if coverage["requested_paths_exercised"] is True:
+                click.echo("Test lifecycle passed with all requested paths exercised.")
+            elif coverage["requested_paths_exercised"] is None:
+                click.echo("Test lifecycle passed.")
+            else:
+                click.echo("Test lifecycle completed safely, but requested path coverage is incomplete.")
         else:
             click.echo("Test lifecycle failed.")
 
