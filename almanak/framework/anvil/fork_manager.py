@@ -221,6 +221,31 @@ WRAPPED_NATIVE_TOKENS: Mapping[str, str] = wrapped_native_deposit_address_map()
 
 _EVM_TOKEN_ADDRESS_RE = re.compile(r"^0[xX][0-9a-fA-F]{40}$")
 
+# Canonical OpenZeppelin v5 ERC-7201 storage location for ``ERC20Storage``:
+# keccak256(abi.encode(uint256(keccak256("openzeppelin.storage.ERC20")) - 1))
+# masked to a 256-byte namespace boundary. The ``_balances`` mapping is the
+# first field in that namespace, so this value is its mapping base slot.
+_OPENZEPPELIN_ERC20_STORAGE_LOCATION = int(
+    "52c63247e1f47db19d5ce0460030c497f067ca4cebf71ba98eeadabe20bace00",
+    16,
+)
+
+# Preserve legacy probe ordering so commonly encountered layouts keep their
+# existing fast path. The ERC-7201 namespace is checked only as the final,
+# standards-based fallback.
+_ERC20_BALANCE_MAPPING_SLOTS_TO_PROBE = (
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    9,
+    51,
+    52,
+    _OPENZEPPELIN_ERC20_STORAGE_LOCATION,
+)
+
 
 # =============================================================================
 # Fork Manager Configuration
@@ -1283,7 +1308,7 @@ class RollingForkManager:
         amount_hex: str,
         token_symbol: str,
     ) -> bool:
-        """Fund tokens by brute-force probing common storage slots.
+        """Fund tokens by probing common and namespaced balance mapping slots.
 
         Last-resort fallback when known slots and anvil_deal both fail.
 
@@ -1296,10 +1321,10 @@ class RollingForkManager:
         Returns:
             True if successful
         """
-        common_slots = [0, 1, 2, 3, 4, 5, 9, 51, 52]
         expected = int(amount_hex, 16)
 
-        for slot in common_slots:
+        for slot in _ERC20_BALANCE_MAPPING_SLOTS_TO_PROBE:
+            slot_label = hex(slot) if slot == _OPENZEPPELIN_ERC20_STORAGE_LOCATION else str(slot)
             snap_id: str | None = None
             try:
                 # Snapshot before the probe so wrong-slot writes can be rolled
@@ -1335,7 +1360,9 @@ class RollingForkManager:
                         # Right slot — keep the write. The snapshot is left
                         # uncommitted; evm_revert is never called for this
                         # iteration so the write persists.
-                        logger.info(f"Funded {wallet_address[:10]}... with {token_symbol} via brute-force slot {slot}")
+                        logger.info(
+                            f"Funded {wallet_address[:10]}... with {token_symbol} via brute-force slot {slot_label}"
+                        )
                         return True
 
                 # Wrong slot — revert the write before trying the next one.
@@ -1346,13 +1373,13 @@ class RollingForkManager:
                 snap_id = None
                 if not reverted:
                     logger.warning(
-                        f"evm_revert failed while probing slot {slot} for {token_symbol}; "
+                        f"evm_revert failed while probing slot {slot_label} for {token_symbol}; "
                         f"aborting probe to avoid leaving corrupt state from earlier writes"
                     )
                     return False
 
             except Exception as e:
-                logger.debug(f"Storage slot {slot} failed for {token_symbol}: {e}")
+                logger.debug(f"Storage slot {slot_label} failed for {token_symbol}: {e}")
                 # Best-effort revert if we took a snapshot before the failure.
                 # Same hard-abort rule as the wrong-slot path: a revert that
                 # silently fails leaves the fork dirty.
@@ -1361,7 +1388,8 @@ class RollingForkManager:
                         reverted, _ = await self._rpc_call_raw("evm_revert", [snap_id])
                         if not reverted:
                             logger.warning(
-                                f"evm_revert failed while cleaning up slot {slot} for {token_symbol}; aborting probe"
+                                f"evm_revert failed while cleaning up slot {slot_label} for {token_symbol}; "
+                                f"aborting probe"
                             )
                             return False
                     except Exception:

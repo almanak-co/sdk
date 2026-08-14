@@ -410,6 +410,85 @@ class TestFundTokenViaStorageSnapshotRevert:
             )
 
     @pytest.mark.asyncio()
+    async def test_openzeppelin_erc7201_root_is_probed_after_legacy_slots(self, manager, caplog):
+        """The canonical OZ namespace is the tenth probe and keeps its successful write."""
+        caplog.set_level("INFO", logger=fm.__name__)
+        handlers = {
+            "evm_snapshot": (True, "0xsnap"),
+            "anvil_setStorageAt": (True, None),
+            "evm_mine": (True, None),
+            "evm_revert": (True, True),
+        }
+        rpc_mock = _make_rpc_dispatcher(handlers)
+
+        balance_call_count = 0
+
+        async def fake_balance(_token, _wallet):
+            nonlocal balance_call_count
+            balance_call_count += 1
+            return 1_000_000 if balance_call_count == 10 else 0
+
+        with (
+            patch.object(manager, "_rpc_call_raw", rpc_mock),
+            patch.object(manager, "_get_token_balance", side_effect=fake_balance),
+        ):
+            result = await manager._fund_token_via_storage(self.WALLET, self.TOKEN, self.AMOUNT_HEX, "TEST")
+
+        assert result is True
+        snapshot_calls = [call for call in rpc_mock.call_args_list if call.args[0] == "evm_snapshot"]
+        revert_calls = [call for call in rpc_mock.call_args_list if call.args[0] == "evm_revert"]
+        storage_calls = [call for call in rpc_mock.call_args_list if call.args[0] == "anvil_setStorageAt"]
+        assert len(snapshot_calls) == 10
+        assert len(revert_calls) == 9
+        assert len(storage_calls) == 10
+
+        expected_probe_slots = (0, 1, 2, 3, 4, 5, 9, 51, 52, fm._OPENZEPPELIN_ERC20_STORAGE_LOCATION)
+        assert [call.args[1][1] for call in storage_calls] == [
+            manager._calculate_mapping_slot(self.WALLET, slot) for slot in expected_probe_slots
+        ]
+
+        # Independently calculated keccak256(pad32(wallet) || pad32(OZ root)).
+        expected_root_key = "0x00234118d1a2e51ba1b4fbb0a262d354b2c35d7510ec11bc5fd2c912bffd86ec"
+        assert storage_calls[-1].args[1][1] == expected_root_key
+        assert storage_calls[-1].args[1][2] == manager._pad_hex_to_32_bytes(self.AMOUNT_HEX)
+        assert f"slot {hex(fm._OPENZEPPELIN_ERC20_STORAGE_LOCATION)}" in caplog.text
+
+        methods = [call.args[0] for call in rpc_mock.call_args_list]
+        assert methods[-2:] == ["anvil_setStorageAt", "evm_mine"]
+
+    @pytest.mark.asyncio()
+    async def test_all_failed_probes_are_reverted_including_erc7201_root(self, manager):
+        """An unsuccessful ERC-7201 probe must not leak its storage write."""
+        handlers = {
+            "evm_snapshot": (True, "0xsnap"),
+            "anvil_setStorageAt": (True, None),
+            "evm_mine": (True, None),
+            "evm_revert": (True, True),
+        }
+        rpc_mock = _make_rpc_dispatcher(handlers)
+
+        with (
+            patch.object(manager, "_rpc_call_raw", rpc_mock),
+            patch.object(manager, "_get_token_balance", AsyncMock(return_value=0)),
+        ):
+            result = await manager._fund_token_via_storage(self.WALLET, self.TOKEN, self.AMOUNT_HEX, "TEST")
+
+        assert result is False
+        snapshot_calls = [call for call in rpc_mock.call_args_list if call.args[0] == "evm_snapshot"]
+        revert_calls = [call for call in rpc_mock.call_args_list if call.args[0] == "evm_revert"]
+        storage_calls = [call for call in rpc_mock.call_args_list if call.args[0] == "anvil_setStorageAt"]
+        assert len(snapshot_calls) == 10
+        assert len(revert_calls) == 10
+        assert len(storage_calls) == 10
+
+        root_storage_key = manager._calculate_mapping_slot(
+            self.WALLET,
+            fm._OPENZEPPELIN_ERC20_STORAGE_LOCATION,
+        )
+        assert storage_calls[-1].args[1][1] == root_storage_key
+        assert rpc_mock.call_args_list[-1].args == ("evm_revert", ["0xsnap"])
+
+    @pytest.mark.asyncio()
     async def test_aborts_when_snapshot_unsupported(self, manager):
         """If evm_snapshot returns (False, _), probing must abort without writes."""
         handlers = {
