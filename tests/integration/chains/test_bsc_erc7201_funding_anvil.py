@@ -106,7 +106,7 @@ async def test_managed_funding_and_transfer_for_bsc_erc7201_tokens(bsc_fork: Rol
         params: list[Any],
         timeout_override: float | None = None,
     ) -> tuple[bool, Any]:
-        if method == "anvil_deal":
+        if method == "anvil_dealERC20":
             return False, None
         return await original_rpc_call_raw(method, params, timeout_override=timeout_override)
 

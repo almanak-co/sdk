@@ -244,7 +244,7 @@ class TestFundTokensWrappedNativeFallback:
     """Test that fund_tokens falls back to storage-slot when deposit() fails.
 
     VIB-2690: WAVAX on Avalanche (and any other wrapped native) must fall back
-    to known storage-slot / anvil_deal when the deposit() path fails silently
+    to known storage-slot / anvil_dealERC20 when the deposit() path fails silently
     (e.g., transient Alchemy RPC outage causes Anvil to use a public fallback
     RPC that doesn't support impersonation, or wallet balance exactly equals
     the deposit amount leaving nothing for gas).
@@ -288,7 +288,7 @@ class TestFundTokensWrappedNativeFallback:
         with (
             patch.object(manager, "_fund_wrapped_native_via_deposit", new_callable=AsyncMock, return_value=False),
             patch.object(manager, "_set_balance_at_slot", new_callable=AsyncMock, return_value=True) as mock_slot,
-            # anvil_deal not needed since slot succeeds; but mock to avoid real RPC calls
+            # anvil_dealERC20 not needed since slot succeeds; but mock to avoid real RPC calls
             patch.object(manager, "_rpc_call_raw", new_callable=AsyncMock, return_value=(False, None)),
         ):
             result = await manager.fund_tokens(self.WALLET, {self.WAVAX_ADDRESS: Decimal("10")})
@@ -301,18 +301,102 @@ class TestFundTokensWrappedNativeFallback:
         assert call_args[0][3] == 3, f"Expected slot 3 for WAVAX, got {call_args[0][3]}"
 
     @pytest.mark.asyncio()
-    async def test_deposit_failure_falls_back_to_anvil_deal(self, manager):
-        """When deposit() and slot both fail, anvil_deal must be tried."""
+    async def test_deposit_failure_falls_back_to_anvil_deal_erc20(self, manager):
+        """When deposit() and slot both fail, anvil_dealERC20 must be tried.
+
+        Regression (2026-08-14 funding probe): this tier used to call
+        "anvil_deal", which has never been a Foundry RPC method — every call
+        returned -32601 and the tier was silently dead. The assertions below
+        pin both the real method name and its (account, token, balance) param
+        order so neither can regress unnoticed.
+
+        The tier order is asserted too: the cheap known-slot write must be
+        attempted BEFORE the node-side slot search, otherwise every funding call
+        would pay for a trace it usually does not need.
+        """
+        events: list[str] = []
+
+        async def record_slot(*_args, **_kwargs):
+            events.append("slot")
+            return False
+
+        async def record_rpc(method, *_args, **_kwargs):
+            events.append(f"rpc:{method}")
+            return (True, None)
+
+        with (
+            patch.object(manager, "_fund_wrapped_native_via_deposit", new_callable=AsyncMock, return_value=False),
+            patch.object(manager, "_set_balance_at_slot", side_effect=record_slot) as mock_slot,
+            patch.object(manager, "_rpc_call_raw", side_effect=record_rpc) as mock_rpc,
+        ):
+            result = await manager.fund_tokens(self.WALLET, {self.WAVAX_ADDRESS: Decimal("10")})
+        assert result is True
+        deal_calls = [c for c in mock_rpc.call_args_list if c[0][0] == "anvil_dealERC20"]
+        assert len(deal_calls) == 1, "anvil_dealERC20 must be called as fallback"
+        account, token, amount_hex = deal_calls[0][0][1]
+        assert account == self.WALLET, "first param must be the funded account"
+        assert token == self.WAVAX_ADDRESS, "second param must be the token contract"
+        assert amount_hex == hex(10 * 10**18), "third param must be the balance in token units"
+        legacy_calls = [c for c in mock_rpc.call_args_list if c[0][0] == "anvil_deal"]
+        assert not legacy_calls, "the nonexistent anvil_deal method must never be called"
+        mock_slot.assert_awaited()
+        assert events.index("slot") < events.index("rpc:anvil_dealERC20"), (
+            f"known-slot must be attempted before anvil_dealERC20; got {events}"
+        )
+
+    @pytest.mark.asyncio()
+    async def test_deal_erc20_timeout_aborts_batch_and_blames_only_unfunded(self, manager):
+        """A dealERC20 timeout must abort the batch instead of poisoning it.
+
+        The slot search runs inside the node, so a client-side timeout leaves it
+        running and every later token fails for reasons that have nothing to do
+        with that token (measured: an unrelated whale-funded USDC went from 1.6s
+        to a hard failure after one such call). The tier must therefore stop the
+        batch, report the untouched remainder as failed, and never re-enter the
+        deal tier for them.
+        """
+        second_token = "0x1f9840a85d5af5bf1d1762f925bdaddc4201f984"
+
+        async def timing_out_rpc(method, *_args, **_kwargs):
+            if method == "anvil_dealERC20":
+                raise TimeoutError("slot search still running server-side")
+            return (True, None)
+
+        with (
+            patch.object(manager, "_fund_wrapped_native_via_deposit", new_callable=AsyncMock, return_value=False),
+            patch.object(manager, "_set_balance_at_slot", new_callable=AsyncMock, return_value=False),
+            patch.object(manager, "_fund_token_via_storage", new_callable=AsyncMock, return_value=True) as brute,
+            patch.object(manager, "_rpc_call_raw", side_effect=timing_out_rpc) as mock_rpc,
+        ):
+            failed = await manager.fund_tokens_report(
+                self.WALLET, {self.WAVAX_ADDRESS: Decimal("10"), second_token: Decimal("5")}
+            )
+
+        assert failed == [self.WAVAX_ADDRESS, second_token], (
+            "the timed-out token and every unprocessed token must be reported failed"
+        )
+        deal_calls = [c for c in mock_rpc.call_args_list if c[0][0] == "anvil_dealERC20"]
+        assert len(deal_calls) == 1, "the degraded fork must not be asked to deal a second token"
+        brute.assert_not_awaited()
+
+    @pytest.mark.asyncio()
+    async def test_deal_erc20_call_is_time_bounded(self, manager):
+        """The deal tier must cap its own timeout, not inherit an unbounded budget."""
+        from almanak.framework.anvil.fork_manager import _DEAL_ERC20_TIMEOUT_SECONDS
+
         with (
             patch.object(manager, "_fund_wrapped_native_via_deposit", new_callable=AsyncMock, return_value=False),
             patch.object(manager, "_set_balance_at_slot", new_callable=AsyncMock, return_value=False),
             patch.object(manager, "_rpc_call_raw", new_callable=AsyncMock, return_value=(True, None)) as mock_rpc,
         ):
-            result = await manager.fund_tokens(self.WALLET, {self.WAVAX_ADDRESS: Decimal("10")})
-        assert result is True
-        # anvil_deal should have been called (returns True = success)
-        deal_calls = [c for c in mock_rpc.call_args_list if c[0][0] == "anvil_deal"]
-        assert len(deal_calls) == 1, "anvil_deal must be called as fallback"
+            await manager.fund_tokens(self.WALLET, {self.WAVAX_ADDRESS: Decimal("10")})
+
+        deal_call = next(c for c in mock_rpc.call_args_list if c[0][0] == "anvil_dealERC20")
+        assert deal_call.kwargs["timeout_override"] == _DEAL_ERC20_TIMEOUT_SECONDS, (
+            "the deal tier must use its own budget, not the general rpc_timeout_seconds: "
+            "tying them together lets a latency knob abort funding batches"
+        )
+        assert deal_call.kwargs["raise_on_timeout"] is True, "timeouts must be distinguishable from errors"
 
 
 # =============================================================================
@@ -650,7 +734,7 @@ class TestUsdfWhaleFunding:
         rpc.assert_not_awaited()
 
     @pytest.mark.asyncio()
-    async def test_failed_usdf_whale_transfer_fails_loud_without_anvil_deal(self) -> None:
+    async def test_failed_usdf_whale_transfer_fails_loud_without_anvil_deal_erc20(self) -> None:
         manager = _make_running_manager(chain="ethereum")
         with (
             patch.object(manager, "_fund_token_via_whale", new_callable=AsyncMock, return_value=False),

@@ -221,6 +221,39 @@ WRAPPED_NATIVE_TOKENS: Mapping[str, str] = wrapped_native_deposit_address_map()
 
 _EVM_TOKEN_ADDRESS_RE = re.compile(r"^0[xX][0-9a-fA-F]{40}$")
 
+# Upper bound for a single ``anvil_dealERC20`` call. The node discovers the
+# balance slot by tracing ``balanceOf``, and a few pathological contracts make
+# that trace run effectively forever; because the work happens server-side, a
+# client-side timeout cannot cancel it and the fork stays degraded afterwards
+# (the funding batch is aborted on timeout — see ``fund_tokens_report``).
+#
+# Deliberately NOT bounded by ``rpc_timeout_seconds`` (default 8s), the same way
+# the readiness probe gets its own ``health_timeout_seconds``: that budget is
+# sized for ordinary instant RPCs (eth_call / setBalance / evm_mine), whereas
+# this call asks the node to execute and trace a contract call. Tying the two
+# together would let a latency knob decide funding correctness — tightening the
+# general budget would start turning slow-but-legitimate deals into aborted
+# batches.
+#
+# 20s is ~7x the slowest success measured over the Edge token universe (207
+# timed successful calls across ethereum/base/bsc: max 2.98s, median ~0.5s, none
+# above 3s; see docs/internal/anvil-funding-probe-2026-08-14.md).
+# The distribution is bimodal — the trace either resolves almost immediately or
+# never terminates — so there is no realistic middle ground for this threshold
+# to misjudge.
+_DEAL_ERC20_TIMEOUT_SECONDS = 20.0
+
+
+class _ForkDegradedError(RuntimeError):
+    """The fork can no longer fund tokens; the batch must stop.
+
+    Raised when a node-side operation is still running after its client-side
+    timeout, which leaves the fork starving every subsequent request. Internal
+    to the funding ladder: ``fund_tokens_report`` converts it into a failed
+    batch rather than letting it escape.
+    """
+
+
 # Canonical OpenZeppelin v5 ERC-7201 storage location for ``ERC20Storage``:
 # keccak256(abi.encode(uint256(keccak256("openzeppelin.storage.ERC20")) - 1))
 # masked to a 256-byte namespace boundary. The ``_balances`` mapping is the
@@ -838,11 +871,11 @@ class RollingForkManager:
             return False
 
     # crap-allowlist: 6-tier funding fallback — wrapped-native deposit() / whale
-    # impersonation / known balance slot / seeded balance key / anvil_deal /
+    # impersonation / known balance slot / seeded balance key / anvil_dealERC20 /
     # brute-force slot probe.
     # Each tier exists to fund a class of token the prior tier can't handle safely.
     # Branch-local gates stop unsafe fallthrough: whale-listed proxy tokens are
-    # transfer-funded or fail, while seeded-layout tokens may still use anvil_deal.
+    # transfer-funded or fail, while seeded-layout tokens may still use anvil_dealERC20.
     async def fund_tokens(
         self,
         address: str,
@@ -876,7 +909,9 @@ class RollingForkManager:
            (terminal on failure; never continue to storage mutation)
         3. Known storage slots (fast, reliable -- verified in intent tests)
         4. Address-keyed seeded storage recipes (non-standard layouts)
-        5. ``anvil_deal`` RPC (works on newer Anvil versions)
+        5. ``anvil_dealERC20`` RPC (Anvil discovers the slot by tracing
+           ``balanceOf``; handles Vyper/Solady/proxy layouts the numeric
+           probe below cannot)
         6. Brute-force storage slot probing (slow fallback)
 
         Args:
@@ -901,8 +936,9 @@ class RollingForkManager:
         balance_storage_seeds = BALANCE_STORAGE_SEEDS.get(self.chain, {})
 
         failed: list[str] = []
+        token_items = list(tokens.items())
 
-        for token_key, amount in tokens.items():
+        for token_index, (token_key, amount) in enumerate(token_items):
             if not isinstance(token_key, str) or _EVM_TOKEN_ADDRESS_RE.fullmatch(token_key) is None:
                 logger.error(
                     "ERC-20 funding keys must be contract addresses on %s; got %r. "
@@ -943,7 +979,7 @@ class RollingForkManager:
             try:
                 funded = False
                 skip_storage_fallback = False
-                skip_anvil_deal = False
+                skip_deal_erc20 = False
 
                 # Priority 0a: Wrapped native deposit() (VIB-2571)
                 # For WETH/WAVAX/WBNB etc., calling deposit() with ETH value is
@@ -958,7 +994,7 @@ class RollingForkManager:
                         # producing mixed on-chain state (balanceOf vs internal).
                         skip_storage_fallback = True
                     # else: deposit() failed (e.g. transient RPC error, insufficient
-                    # native balance); fall through to known-slot / anvil_deal / brute-force.
+                    # native balance); fall through to known-slot / anvil_dealERC20 / brute-force.
                     # WAVAX slot 3 is a reliable fallback on Avalanche (VIB-2690).
 
                 # Priority 0b: Whale impersonation (VIB-2571)
@@ -977,7 +1013,7 @@ class RollingForkManager:
                         # of whale outcome — falling through would corrupt proxy
                         # state on tokens we know are unsafe for slot patching.
                         skip_storage_fallback = True
-                        skip_anvil_deal = True
+                        skip_deal_erc20 = True
                         if not funded:
                             # `_fund_token_via_whale` logs only at debug; surface
                             # the failure so the cause (e.g. whale has no gas,
@@ -985,7 +1021,7 @@ class RollingForkManager:
                             # instead of just "Failed to fund X" with no reason.
                             logger.error(
                                 f"Whale impersonation failed for {display_name} on {self.chain}; "
-                                f"refusing storage-mutation fallback, including anvil_deal "
+                                f"refusing storage-mutation fallback, including anvil_dealERC20 "
                                 f"(would corrupt proxy state)"
                             )
 
@@ -1007,18 +1043,19 @@ class RollingForkManager:
                         )
                         # Numeric slot probing cannot discover this layout and
                         # would only write unrelated contract state. Keep
-                        # anvil_deal as a safe fallback, but skip brute force.
+                        # anvil_dealERC20 as a safe fallback, but skip brute force.
                         skip_storage_fallback = True
 
-                # Priority 2: anvil_deal RPC (returns null on success)
-                if not funded and not skip_anvil_deal:
-                    deal_success, _ = await self._rpc_call_raw(
-                        "anvil_deal",
-                        [token_address, address, amount_hex],
+                # Priority 2: anvil_dealERC20 RPC (returns null on success).
+                # The method was previously invoked as "anvil_deal", which has
+                # never existed in Foundry (-32601 Method not found on every
+                # release; the real name is anvil_dealERC20, alias
+                # anvil_setERC20Balance) — so this tier was silently dead.
+                # Param order is (account, token, balance), NOT (token, account).
+                if not funded and not skip_deal_erc20:
+                    funded = await self._fund_token_via_deal_erc20(
+                        address, token_address, amount_hex, amount, display_name
                     )
-                    if deal_success:
-                        logger.info(f"Funded {address[:10]}... with {amount} {display_name} via anvil_deal")
-                        funded = True
 
                 # Priority 3: Brute-force storage slot probing
                 if not funded and not skip_storage_fallback:
@@ -1028,11 +1065,70 @@ class RollingForkManager:
                     logger.error(f"Failed to fund {display_name} for {address[:10]}...")
                     failed.append(token_key)
 
+            except _ForkDegradedError:
+                # Ordered before the generic handler below: the fork can no
+                # longer fund anything, so every remaining token is unfunded for
+                # a reason that has nothing to do with the token itself.
+                # Continuing would blame healthy tokens (measured: an unrelated
+                # whale-funded USDC went from 1.6s to a hard failure), so stop
+                # here and report the untouched remainder honestly.
+                failed.append(token_key)
+                failed.extend(key for key, _ in token_items[token_index + 1 :])
+                return failed
+
             except Exception as e:
                 logger.exception(f"Error funding {display_name}: {e}")
                 failed.append(token_key)
 
         return failed
+
+    async def _fund_token_via_deal_erc20(
+        self,
+        address: str,
+        token_address: str,
+        amount_hex: str,
+        amount: Decimal,
+        display_name: str,
+    ) -> bool:
+        """Fund one token via ``anvil_dealERC20`` (funding-ladder tier 5).
+
+        Anvil discovers the balance slot by tracing ``balanceOf``, which handles
+        Vyper / Solady / proxy layouts that numeric slot probing cannot.
+
+        The call is bounded by :data:`_DEAL_ERC20_TIMEOUT_SECONDS` rather than
+        ``rpc_timeout_seconds`` — see that constant for why the budgets are kept
+        separate.
+
+        Returns:
+            True when the node reports the balance was written.
+
+        Raises:
+            _ForkDegradedError: The call timed out. The slot search continues to
+                run inside the node, so the fork is spent for funding purposes.
+                Deliberately not recovered here: ``reset_to_latest()`` would fix
+                the node but discard every balance funded earlier in the batch,
+                and only the caller knows whether that state still matters.
+        """
+        try:
+            deal_success, _ = await self._rpc_call_raw(
+                "anvil_dealERC20",
+                [address, token_address, amount_hex],
+                timeout_override=_DEAL_ERC20_TIMEOUT_SECONDS,
+                raise_on_timeout=True,
+            )
+        except TimeoutError as exc:
+            message = (
+                f"anvil_dealERC20 timed out for {display_name} on {self.chain} after "
+                f"{_DEAL_ERC20_TIMEOUT_SECONDS:.0f}s; the slot search is still running inside "
+                f"the fork, which is now degraded. Aborting the remaining funding batch — "
+                f"recreate the fork (or call reset_to_latest() if the balances funded so far "
+                f"are expendable) before funding anything else."
+            )
+            logger.error(message)
+            raise _ForkDegradedError(message) from exc
+        if deal_success:
+            logger.info(f"Funded {address[:10]}... with {amount} {display_name} via anvil_dealERC20")
+        return deal_success
 
     async def _fetch_decimals_onchain(self, token_address: str) -> int | None:
         """Fetch ERC-20 decimals via on-chain eth_call.
@@ -1310,7 +1406,7 @@ class RollingForkManager:
     ) -> bool:
         """Fund tokens by probing common and namespaced balance mapping slots.
 
-        Last-resort fallback when known slots and anvil_deal both fail.
+        Last-resort fallback when known slots and anvil_dealERC20 both fail.
 
         Args:
             wallet_address: Address to fund
@@ -1540,6 +1636,7 @@ class RollingForkManager:
         method: str,
         params: list[Any],
         timeout_override: float | None = None,
+        raise_on_timeout: bool = False,
     ) -> tuple[bool, Any]:
         """Make a JSON-RPC call and return success status separately from result.
 
@@ -1555,10 +1652,20 @@ class RollingForkManager:
                 ``rpc_timeout_seconds``; the readiness health probe in
                 ``_wait_for_ready`` passes ``health_timeout_seconds`` so the
                 readiness-probe and steady-state RPC budgets are tuned separately.
+            raise_on_timeout: When True, a client-side timeout propagates as
+                ``TimeoutError`` instead of collapsing into ``(False, None)``.
+                Callers need this to tell "the node answered 'no'" apart from
+                "the node never answered" — the latter means the request is
+                still executing server-side and the fork may be degraded.
+                Defaults to False so every existing caller is unaffected.
 
         Returns:
             Tuple of (success, result). success is True when the JSON-RPC response
             has no "error" field, even if result is None.
+
+        Raises:
+            TimeoutError: Only when ``raise_on_timeout`` is True and the call
+                exceeded its timeout budget.
         """
         import aiohttp
 
@@ -1581,6 +1688,11 @@ class RollingForkManager:
                         logger.debug(f"RPC error for {method}: {result_data['error']}")
                         return (False, None)
                     return (True, result_data.get("result"))
+        except TimeoutError:
+            if raise_on_timeout:
+                raise
+            logger.debug(f"RPC call timed out for {method}")
+            return (False, None)
         except Exception as e:
             logger.debug(f"RPC call failed for {method}: {e}")
             return (False, None)

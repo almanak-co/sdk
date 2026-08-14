@@ -114,11 +114,11 @@ class TestFundTokens:
             token="0xf951E335afb289353dc249e82926178EaC7DEd78", chain="ethereum"
         )
 
-        # _rpc_call_raw returns: decimals call -> 18, then anvil_deal -> success
-        async def mock_rpc(method, params):
+        # _rpc_call_raw returns: decimals call -> 18, then anvil_dealERC20 -> success
+        async def mock_rpc(method, params, **_kwargs):
             if method == "eth_call":
                 return (True, hex(18))  # decimals() returns 18
-            if method == "anvil_deal":
+            if method == "anvil_dealERC20":
                 return (True, None)
             return (False, None)
 
