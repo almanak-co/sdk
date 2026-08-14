@@ -28,6 +28,7 @@ TOKEN1 = "0xc2132d05d31c914a87c6611c10748aeb04b58e8f"
 START = datetime.fromtimestamp(1_000, UTC)
 END = datetime.fromtimestamp(4_600, UTC)
 TARGET = HistoricalPoolStateTarget("polygon", "uniswap_v3", POOL, (TOKEN0, TOKEN1), 500)
+ADDRESS_ONLY_TARGET = HistoricalPoolStateTarget("bsc", "pancakeswap_v3", POOL)
 
 
 def _fetcher(**kwargs):
@@ -79,6 +80,61 @@ def test_legacy_generated_pool_binding_is_decoded_address_first() -> None:
     assert declared_historical_pool_state_targets(strategy, config, default_chain="polygon") == ()
 
 
+def test_generated_swap_pool_binding_derives_metadata_from_address() -> None:
+    config = {"swap_pool": POOL, "protocol": "pancakeswap_v3"}
+    strategy = SimpleNamespace(
+        swap_pool=POOL,
+        protocol="pancakeswap_v3",
+        STRATEGY_METADATA=SimpleNamespace(supported_protocols=["pancakeswap_v3"]),
+    )
+
+    assert declared_historical_pool_state_targets(strategy, config, default_chain="bsc") == (ADDRESS_ONLY_TARGET,)
+
+    strategy.swap_pool = "0x0000000000000000000000000000000000000001"
+    assert declared_historical_pool_state_targets(strategy, config, default_chain="bsc") == ()
+
+
+def test_slipstream_legacy_fee_tier_is_not_an_economic_fee_assertion() -> None:
+    config = {
+        "swap_pool": POOL,
+        "protocol": "aerodrome_slipstream",
+        # Slipstream's legacy config calls this a fee tier, but the factory
+        # discriminator is tick spacing.  The archive reader derives fee().
+        "fee_tier": 200,
+    }
+    strategy = SimpleNamespace(
+        swap_pool=POOL,
+        protocol="aerodrome_slipstream",
+        STRATEGY_METADATA=SimpleNamespace(supported_protocols=["aerodrome_slipstream"]),
+    )
+
+    assert declared_historical_pool_state_targets(strategy, config, default_chain="base") == (
+        HistoricalPoolStateTarget("base", "aerodrome_slipstream", POOL),
+    )
+
+
+def test_generated_swap_pool_binding_fails_preflight_for_curve_state() -> None:
+    config = {"swap_pool": POOL, "protocol": "curve"}
+    strategy = SimpleNamespace(
+        swap_pool=POOL,
+        protocol="curve",
+        STRATEGY_METADATA=SimpleNamespace(supported_protocols=["curve"]),
+    )
+
+    with pytest.raises(ValueError, match="Curve archive state has not been migrated"):
+        declared_historical_pool_state_targets(strategy, config, default_chain="ethereum")
+
+
+def test_typed_pool_state_declaration_takes_precedence_over_generated_shape() -> None:
+    custom_target = HistoricalPoolStateTarget("ethereum", "custom_pool_provider", POOL)
+    strategy = SimpleNamespace(
+        backtest_pool_state_targets=[custom_target],
+        swap_pool="0x0000000000000000000000000000000000000001",
+    )
+
+    assert declared_historical_pool_state_targets(strategy, {}, default_chain="bsc") == (custom_target,)
+
+
 def test_snapshot_serves_execution_grade_pool_price_and_reserves() -> None:
     manifest = RunDataManifest()
     source = SnapshotPoolStateSource(
@@ -116,7 +172,7 @@ def test_snapshot_serves_execution_grade_pool_price_and_reserves() -> None:
     assert reserves.sqrt_price_x96 == 2**97
     assert view.resolve_pool_address(TOKEN1, TOKEN0, "POLYGON", 500) == POOL
     assert view.resolve_pool_address(TOKEN0, TOKEN1, "polygon", 3000) is None
-    untiered = HistoricalPoolStateTarget("polygon", "uniswap_v3", POOL, (TOKEN0, TOKEN1))
+    untiered = HistoricalPoolStateTarget("polygon", "uniswap_v3", POOL)
     untiered_source = SnapshotPoolStateSource(
         start_time=START,
         end_time=END,
@@ -252,6 +308,21 @@ def test_materialization_rejects_pool_token_identity_mismatch() -> None:
     )
     with pytest.raises(ValueError, match="pool token identity mismatch"):
         asyncio.run(source.materialize_history(TARGET))
+
+
+def test_materialization_rejects_derived_pool_token_metadata_drift() -> None:
+    def drifting_fetcher(**_kwargs):
+        point = _fetcher(pool_address=POOL)[0]
+        return [point, replace(point, timestamp=4_590, token1_decimals=8)]
+
+    source = SnapshotPoolStateSource(
+        start_time=START,
+        end_time=END,
+        sample_interval_seconds=3_600,
+        fetcher=drifting_fetcher,
+    )
+    with pytest.raises(ValueError, match="pool token metadata drift"):
+        asyncio.run(source.materialize_history(HistoricalPoolStateTarget("polygon", "uniswap_v3", POOL)))
 
 
 def test_undeclared_pool_refuses_instead_of_using_token_ratio() -> None:

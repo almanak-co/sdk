@@ -32,6 +32,10 @@ CONNECTOR = Connector(
         attribute="RaydiumGatewayConnector",
         order=21,
     ),
+    pool_data=ImportRef(
+        module="almanak.connectors.raydium.pool_data",
+        attribute="POOL_DATA_SPEC",
+    ),
     receipt_parser_connector=ImportRef(
         module="almanak.connectors.raydium.receipt_parser_provider",
         attribute="RaydiumReceiptParserConnector",

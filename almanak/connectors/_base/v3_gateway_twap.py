@@ -593,8 +593,17 @@ async def fetch_v3_pool_state_series(
     interval_secs: int,
     protocol: str,
     factory_address: str,
+    factory_get_pool_selector: str = "0x1698ee82",
+    factory_pool_key_selector: str = "0xddca3f43",
+    factory_pool_key_signed: bool = False,
 ) -> list[Any]:
-    """Read and factory-authenticate exact V3 pool state at archive blocks."""
+    """Read and factory-authenticate exact V3-compatible state.
+
+    Canonical V3 factories key pools by ``fee()``. Some compatible families,
+    notably Aerodrome Slipstream, key them by signed ``tickSpacing()`` and use
+    a different factory selector. The connector supplies those two ABI facts;
+    the archive state reader remains shared.
+    """
     from almanak.gateway.services.rate_history_service import (
         DexPoolStatePoint,
         RateHistoryUnavailable,
@@ -641,11 +650,32 @@ async def fetch_v3_pool_state_series(
         if len(fee_raw) < 32:
             raise ValueError(f"fee() returned {len(fee_raw)} bytes; need 32")
         fee_tier = int.from_bytes(fee_raw[-32:], byteorder="big")
-        from almanak.connectors._base.v3_pool_abi import encode_v3_get_pool
+
+        normalized_key_selector = factory_pool_key_selector.removeprefix("0x").lower()
+        if normalized_key_selector == _FEE_SELECTOR:
+            pool_key_raw = fee_raw
+        else:
+            pool_key_raw = await web3.eth.call(
+                {"to": pool_checksum, "data": f"0x{normalized_key_selector}"},
+                block_identifier=unique_blocks[-1][0],
+            )
+            if len(pool_key_raw) < 32:
+                raise ValueError(
+                    f"pool key selector {factory_pool_key_selector} returned {len(pool_key_raw)} bytes; need 32"
+                )
+        factory_pool_key = int.from_bytes(
+            pool_key_raw[-32:],
+            byteorder="big",
+            signed=factory_pool_key_signed,
+        )
+        from almanak.connectors._base.v3_pool_abi import encode_get_pool
 
         factory_checksum = web3.to_checksum_address(normalized_factory)
         canonical_raw = await web3.eth.call(
-            {"to": factory_checksum, "data": encode_v3_get_pool(token0, token1, fee_tier)},
+            {
+                "to": factory_checksum,
+                "data": encode_get_pool(factory_get_pool_selector, token0, token1, factory_pool_key),
+            },
             block_identifier=unique_blocks[-1][0],
         )
         if len(canonical_raw) < 32:

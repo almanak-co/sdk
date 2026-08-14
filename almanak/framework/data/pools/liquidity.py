@@ -1154,17 +1154,18 @@ class SlippageEstimator:
     # ----- internal helpers -----
 
     def _is_tick_simulatable(self, protocol: str) -> bool:
-        """True when the protocol's pools speak the v3 slot0/tick ABI.
+        """True when the connector advertises concentrated tick liquidity.
 
         The estimator's pool lane is the V3 tick-walk simulation; any other
-        ``reader_kind`` (Curve's get_dy shape, and every future non-slot0
-        kind automatically) is excluded so those protocols route through the
+        pool-data capability is excluded so those protocols route through the
         connector swap-quote fallback instead. Registries without a
-        ``reader_kind`` accessor (e.g. the backtest null registry) predate
-        non-slot0 kinds and are all-v3 by construction.
+        capability accessor (e.g. the backtest null registry) predate the
+        interface and are all-v3 by construction.
         """
-        kind_of = getattr(self._pool_reader_registry, "reader_kind", None)
-        return kind_of is None or kind_of(protocol) == "v3_slot0"
+        from almanak.connectors._strategy_base.pool_data import PoolDataFacet
+
+        supports = getattr(self._pool_reader_registry, "supports", None)
+        return supports is None or bool(supports(protocol, PoolDataFacet.TICK_LIQUIDITY))
 
     def _resolve_pool(
         self,
@@ -1182,7 +1183,7 @@ class SlippageEstimator:
         Uniswap-style DEXs, tick spacings for Aerodrome Slipstream — so a blind
         ``fee_tier=3000`` no longer wrongly fails tick-spacing-keyed pools.
 
-        Only ``v3_slot0``-kind protocols participate in resolution: the
+        Only tick-liquidity-capable protocols participate in resolution: the
         estimator's downstream math is the V3 tick-walk simulation, and a
         resolved non-slot0 pool (e.g. Curve, ``tick=None``) would be fed into
         the tick reads INSTEAD of reaching the connector swap-quote fallback

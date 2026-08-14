@@ -5125,13 +5125,19 @@ class MarketSnapshot:
     def _resolve_token_address(self, token: str, chain: str) -> str | None:
         """Resolve a token symbol/address to a lowercase address (orientation only).
 
-        Address-shaped inputs (``0x`` + 40 hex) pass through; symbols go through
-        the registry-backed ``TokenResolver`` (``get_token_resolver()`` — no
-        egress, gateway-boundary safe). Returns ``None`` when unresolvable.
+        Address-shaped inputs (``0x`` + 40 hex) pass through. Backtests first
+        consult the engine-registered symbol-to-``chain:address`` aliases, then
+        fall back to the static ``TokenResolver`` (no egress). Returns ``None``
+        when unresolvable.
         """
         s = token.strip()
         if s.lower().startswith("0x") and len(s) == 42:
             return s.lower()
+        alias_key = self._symbol_alias_keys.get(s.upper())
+        if alias_key is not None:
+            alias_chain, separator, alias_address = alias_key.partition(":")
+            if separator and alias_chain == chain.strip().lower() and _is_evm_address(alias_address):
+                return alias_address.lower()
         try:
             from almanak.framework.data.tokens import get_token_resolver
 

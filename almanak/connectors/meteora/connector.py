@@ -34,6 +34,10 @@ CONNECTOR = Connector(
         module="almanak.connectors.meteora.compiler",
         attribute="MeteoraCompiler",
     ),
+    pool_data=ImportRef(
+        module="almanak.connectors.meteora.pool_data",
+        attribute="POOL_DATA_SPEC",
+    ),
     compiler_protocols=("meteora_dlmm",),
     capabilities=CapabilitiesSpec(
         keys=("meteora_dlmm",),

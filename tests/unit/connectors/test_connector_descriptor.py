@@ -354,6 +354,7 @@ EXPECTED_RECEIPT_PROVIDER_MODULES = {
 EXPECTED_GATEWAY_PROVIDER_MODULES = {
     "aave_v3": "almanak.connectors.aave_v3.gateway.provider",
     "aerodrome": "almanak.connectors.aerodrome.gateway.provider",
+    "aerodrome_slipstream": "almanak.connectors.aerodrome.gateway.provider",
     "agni_finance": "almanak.connectors.uniswap_v3.gateway.agni_provider",
     "aster_perps": "almanak.connectors._aster_perps_core.gateway.provider",
     "balancer_v2": "almanak.connectors.balancer_v2.gateway.provider",
@@ -413,6 +414,7 @@ EXPECTED_GATEWAY_PROVIDER_ORDER = (
     "morpho_blue",
     "aster_perps",
     "spark",
+    "aerodrome_slipstream",
 )
 
 EXPECTED_GATEWAY_SETTINGS_MODULES = {

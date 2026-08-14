@@ -96,9 +96,16 @@ CONNECTOR = Connector(
         attribute="AerodromeGatewayConnector",
         order=13,
     ),
-    pool_reader=ImportRef(
+    gateway_connectors=(
+        ImportRef(
+            module="almanak.connectors.aerodrome.gateway.provider",
+            attribute="AerodromeSlipstreamGatewayConnector",
+            order=30,
+        ),
+    ),
+    pool_data=ImportRef(
         module="almanak.connectors.aerodrome.pool_reader",
-        attribute="POOL_READER_SPEC",
+        attribute="POOL_DATA_SPECS",
     ),
     agent_read_connector=ImportRef(
         module="almanak.connectors.aerodrome.agent_read_provider",

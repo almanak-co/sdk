@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+from almanak.connectors._connector import ImportRef
+from almanak.connectors._strategy_base.pool_data import (
+    PoolDataFacet,
+    PoolDataSource,
+    PoolDataSpec,
+    PoolReferenceKind,
+)
 from almanak.connectors._strategy_base.pool_reader import PoolReaderSpec
 from almanak.connectors._strategy_base.v3_pool_abi import V3_GET_POOL_SELECTOR
 
-from .addresses import UNISWAP_V3
-
-_FACTORY_CHAINS = ("ethereum", "arbitrum", "optimism", "polygon", "base", "bsc")
+from .addresses import AGNI_FINANCE, UNISWAP_V3
 
 _KNOWN_POOLS: dict[str, dict[tuple[str, str, int], str]] = {
     "ethereum": {
@@ -47,9 +52,59 @@ _KNOWN_POOLS: dict[str, dict[tuple[str, str, int], str]] = {
 
 POOL_READER_SPEC = PoolReaderSpec(
     protocol="uniswap_v3",
-    factory_addresses={chain: UNISWAP_V3[chain]["factory"] for chain in _FACTORY_CHAINS},
+    factory_addresses={
+        chain: deployment["factory"] for chain, deployment in UNISWAP_V3.items() if "factory" in deployment
+    },
+    reader=ImportRef(
+        module="almanak.framework.data.pools.reader",
+        attribute="UniswapV3PoolPriceReader",
+    ),
     known_pools=_KNOWN_POOLS,
     get_pool_selector=V3_GET_POOL_SELECTOR,
 )
 
-__all__ = ["POOL_READER_SPEC"]
+_V3_BINDINGS = {
+    PoolDataFacet.METADATA: PoolDataSource.GATEWAY_POOL_STATE,
+    PoolDataFacet.BALANCES: PoolDataSource.GATEWAY_POOL_STATE,
+    PoolDataFacet.SPOT_PRICE: PoolDataSource.LIVE_PRICE_READER,
+    PoolDataFacet.LIQUIDITY: PoolDataSource.LIVE_PRICE_READER,
+    PoolDataFacet.HISTORICAL_STATE: PoolDataSource.GATEWAY_POOL_STATE,
+    PoolDataFacet.TWAP: PoolDataSource.GATEWAY_TWAP,
+    PoolDataFacet.TICK_LIQUIDITY: PoolDataSource.LIVE_PRICE_READER,
+}
+
+POOL_DATA_SPEC = PoolDataSpec(
+    protocol="uniswap_v3",
+    reference_kind=PoolReferenceKind.EVM_CONTRACT,
+    bindings=_V3_BINDINGS,
+    unsupported={},
+    price_reader=POOL_READER_SPEC,
+)
+
+AGNI_POOL_READER_SPEC = PoolReaderSpec(
+    protocol="agni_finance",
+    factory_addresses={chain: addresses["factory"] for chain, addresses in AGNI_FINANCE.items()},
+    reader=ImportRef(
+        module="almanak.framework.data.pools.reader",
+        attribute="UniswapV3PoolPriceReader",
+    ),
+    get_pool_selector=V3_GET_POOL_SELECTOR,
+)
+
+AGNI_POOL_DATA_SPEC = PoolDataSpec(
+    protocol="agni_finance",
+    reference_kind=PoolReferenceKind.EVM_CONTRACT,
+    bindings=_V3_BINDINGS,
+    unsupported={},
+    price_reader=AGNI_POOL_READER_SPEC,
+)
+
+POOL_DATA_SPECS = (POOL_DATA_SPEC, AGNI_POOL_DATA_SPEC)
+
+__all__ = [
+    "AGNI_POOL_DATA_SPEC",
+    "AGNI_POOL_READER_SPEC",
+    "POOL_DATA_SPEC",
+    "POOL_DATA_SPECS",
+    "POOL_READER_SPEC",
+]

@@ -50,6 +50,10 @@ CONNECTOR = Connector(
         attribute="BalancerV2GatewayConnector",
         order=16,
     ),
+    pool_data=ImportRef(
+        module="almanak.connectors.balancer_v2.pool_data",
+        attribute="POOL_DATA_SPEC",
+    ),
     gas_estimate_connector=ImportRef(
         module="almanak.connectors.balancer_v2.gas_estimate_provider",
         attribute="BalancerV2GasEstimateConnector",

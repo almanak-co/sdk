@@ -44,6 +44,10 @@ CONNECTOR = Connector(
         attribute="TraderJoeV2GatewayConnector",
         order=19,
     ),
+    pool_data=ImportRef(
+        module="almanak.connectors.traderjoe_v2.pool_data",
+        attribute="POOL_DATA_SPEC",
+    ),
     receipt_parser_connector=ImportRef(
         module="almanak.connectors.traderjoe_v2.receipt_parser_provider",
         attribute="TraderJoeV2ReceiptParserConnector",

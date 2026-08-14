@@ -1191,6 +1191,9 @@ class Connector:
     # ``_strategy_base/perp_identity.py`` for the emission contract.
     perp_identity: ImportRef | None = None
     deferred_refresh: ImportRef | None = None
+    pool_data: ImportRef | None = None
+    # Deprecated compatibility seam. New connectors publish ``pool_data``;
+    # its optional ``price_reader`` is projected into the legacy registry.
     pool_reader: ImportRef | None = None
     capabilities: CapabilitiesSpec | None = None
     supported_chains: SupportedChainsSpec | None = None
@@ -1292,6 +1295,7 @@ class Connector:
         self._validate_swap_route_inference()
         self._validate_teardown_post_condition()
         self._validate_deferred_refresh()
+        self._validate_pool_data()
         self._validate_pool_reader()
         self._validate_capabilities()
         self._validate_supported_chains()
@@ -1524,6 +1528,11 @@ class Connector:
         """Validate the strategy-side pool reader spec import reference."""
         if self.pool_reader is not None and not isinstance(self.pool_reader, ImportRef):
             raise ValueError(f"Connector.pool_reader must be None or an ImportRef, got {self.pool_reader!r}")
+
+    def _validate_pool_data(self) -> None:
+        """Validate the protocol-neutral pool-data declaration reference."""
+        if self.pool_data is not None and not isinstance(self.pool_data, ImportRef):
+            raise ValueError(f"Connector.pool_data must be None or an ImportRef, got {self.pool_data!r}")
 
     def _validate_capabilities(self) -> None:
         """Validate the protocol-capabilities ownership spec."""
@@ -2195,6 +2204,10 @@ class ConnectorRegistry:
     def with_pool_reader(self) -> tuple[Connector, ...]:
         """Return connectors that publish pool reader specs."""
         return tuple(d for d in self.all() if d.pool_reader is not None)
+
+    def with_pool_data(self) -> tuple[Connector, ...]:
+        """Return connectors that publish protocol-neutral pool-data specs."""
+        return tuple(d for d in self.all() if d.pool_data is not None)
 
     def with_capabilities(self) -> tuple[Connector, ...]:
         """Return connectors that publish protocol-capability ownership specs."""

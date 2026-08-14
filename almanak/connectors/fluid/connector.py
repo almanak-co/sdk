@@ -60,6 +60,10 @@ CONNECTOR = Connector(
         module="almanak.connectors.fluid.compiler",
         attribute="FluidCompiler",
     ),
+    pool_data=ImportRef(
+        module="almanak.connectors.fluid.pool_data",
+        attribute="POOL_DATA_SPEC",
+    ),
     # fToken aggregate account-state read (VIB-5030): market-scoped on the
     # per-underlying fToken; powers lending pre/post-state capture
     # (confidence=HIGH) and valuation. Compound V3 / Silo V2 shape.

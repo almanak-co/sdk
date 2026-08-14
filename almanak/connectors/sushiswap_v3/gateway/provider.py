@@ -26,6 +26,7 @@ from typing import Any, ClassVar
 
 from almanak.connectors._base.gateway_capabilities import (
     GatewayAddressCapability,
+    GatewayDexPoolStateCapability,
     GatewayDexTwapCapability,
     GatewayDexVolumeCapability,
 )
@@ -48,6 +49,7 @@ class SushiSwapV3GatewayConnector(
     GatewayConnector,
     GatewayAddressCapability,
     GatewayDexTwapCapability,
+    GatewayDexPoolStateCapability,
     GatewayDexVolumeCapability,
 ):
     """Gateway-side connector for SushiSwap V3."""
@@ -120,12 +122,54 @@ class SushiSwapV3GatewayConnector(
         interval_secs: int,
         window_secs: int,
     ) -> Any:
-        """TWAP series — block-by-block bisect fan-out tracked in VIB-4870."""
+        """Read timestamp-aligned exact-pool TWAPs from archive state."""
+        from almanak.connectors._base.v3_gateway_twap import fetch_v3_twap_series
+
+        return await fetch_v3_twap_series(
+            servicer,
+            chain=chain,
+            pool_address=pool_address,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            interval_secs=interval_secs,
+            window_secs=window_secs,
+            protocol="sushiswap_v3",
+        )
+
+    def pool_state_supported_chains(self) -> frozenset[str]:
+        """Chains whose SushiSwap V3 pools can be read from archive RPC."""
+        return frozenset(SUSHISWAP_V3.keys())
+
+    async def fetch_pool_state_series(
+        self,
+        servicer: Any,
+        *,
+        chain: str,
+        pool_address: str,
+        start_ts: int,
+        end_ts: int,
+        interval_secs: int,
+    ) -> Any:
+        """Read metadata and state after authenticating the pool via its factory."""
+        from almanak.connectors._base.v3_gateway_twap import fetch_v3_pool_state_series
         from almanak.gateway.services.rate_history_service import RateHistoryUnavailable
 
-        raise RateHistoryUnavailable(
-            "sushiswap_v3",
-            "TWAP series surface tracked in VIB-4870 (deferred protocols ticket)",
+        deployment = SUSHISWAP_V3.get(chain.strip().lower())
+        factory_address = deployment.get("factory") if deployment is not None else None
+        if not isinstance(factory_address, str) or not factory_address.strip():
+            raise RateHistoryUnavailable(
+                "sushiswap_v3",
+                f"no authenticated SushiSwap V3 factory configured for chain {chain!r}",
+            )
+        return await fetch_v3_pool_state_series(
+            servicer,
+            chain=chain,
+            pool_address=pool_address,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            interval_secs=interval_secs,
+            protocol="sushiswap_v3",
+            factory_address=factory_address,
         )
 
     # ---------------------------------------------------------------------

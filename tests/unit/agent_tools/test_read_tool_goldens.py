@@ -345,11 +345,10 @@ def _calldata_of(req: Any) -> tuple[str, str]:
 
 
 @pytest.mark.asyncio
-async def test_get_pool_state_aerodrome_alias_slug_accepted() -> None:
-    """``protocol="aerodrome"`` (pool-reader manifest canonical key) must
-    dispatch to the ``aerodrome_slipstream`` agent-read capability instead of
-    being rejected. The Slipstream int24 getPool selector in the
-    factory calldata proves the right capability was resolved."""
+async def test_get_pool_state_aerodrome_slipstream_slug_accepted() -> None:
+    """``protocol="aerodrome_slipstream"`` must dispatch to the concentrated-
+    liquidity agent-read capability. The Slipstream int24 getPool selector in
+    the factory calldata proves the right capability was resolved."""
     pool_addr = "0xb2cc224c1c9fee385f8ad6a55b4d94e92359dc59"
     factory_calls: list[str] = []
 
@@ -376,7 +375,7 @@ async def test_get_pool_state_aerodrome_alias_slug_accepted() -> None:
             "token_b": "USDC",
             "fee_tier": 100,  # Slipstream tick spacing
             "chain": "base",
-            "protocol": "aerodrome",
+            "protocol": "aerodrome_slipstream",
         },
     )
 
@@ -534,14 +533,14 @@ async def test_get_pool_state_sweep_uses_slipstream_tick_spacings() -> None:
             "token_a": "WETH",
             "token_b": "USDC",
             "chain": "base",
-            "protocol": "aerodrome",
+            "protocol": "aerodrome_slipstream",
         },
     )
 
     assert result.status == "error"  # scripted all-zero factory
     from almanak.connectors._strategy_pool_reader_registry import POOL_READER_REGISTRY
 
-    spec = POOL_READER_REGISTRY.require("aerodrome")
+    spec = POOL_READER_REGISTRY.require("aerodrome_slipstream")
     assert tuple(swept_keys) == spec.candidate_pool_keys
 
 

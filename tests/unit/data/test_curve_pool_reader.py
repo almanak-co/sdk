@@ -1,4 +1,4 @@
-"""Unit tests for CurvePoolReader (reader_kind ``curve_pool``).
+"""Unit tests for the connector-bound CurvePoolReader.
 
 Scripted-RPC tests: every on-chain byte the reader consumes is encoded here
 exactly as a Curve pool returns it (32-byte ABI words), covering both index

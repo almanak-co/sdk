@@ -4,9 +4,9 @@ Reads live prices from DEX pool contracts. The v3 slot0 family (Uniswap V3,
 Aerodrome CL, PancakeSwap V3, SushiSwap V3) decodes slot0() responses and
 converts sqrtPriceX96 to human-readable prices using token decimals from
 TokenResolver; those readers share one ABI and differ only in factory
-addresses and known pool registries. Non-slot0 AMMs bind their own reader
-class via the connector spec's ``reader_kind`` (Curve: ``CurvePoolReader``,
-quoting get_dy on the pool's leading coin pair).
+addresses and known pool registries. Every connector binds its reader class
+directly in its pool-data declaration; the framework never dispatches through
+a family-name string or protocol allowlist.
 
 All returns are wrapped in DataEnvelope[PoolPrice] with provenance metadata
 including block number, finality, and source identification.
@@ -22,18 +22,21 @@ Example:
     # Use PoolReaderRegistry for dynamic dispatch:
     from almanak.framework.data.pools.reader import PoolReaderRegistry
     registry = PoolReaderRegistry(rpc_call=my_rpc_call_fn)
-    reader = registry.get_reader("base", "aerodrome")
+    reader = registry.get_reader("base", "aerodrome_slipstream")
 """
 
 from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
+
+if TYPE_CHECKING:
+    from almanak.connectors._strategy_base.pool_data import PoolDataFacet
 
 from almanak.connectors._strategy_base.concentrated_liquidity_math import Q96
 from almanak.connectors._strategy_base.curve_pool_abi import (
@@ -90,7 +93,7 @@ FEE_SELECTOR = V3_FEE_SELECTOR
 GET_POOL_SELECTOR = V3_GET_POOL_SELECTOR
 
 _UNISWAP_POOL_READER_SPEC = POOL_READER_REGISTRY.require("uniswap_v3")
-_AERODROME_POOL_READER_SPEC = POOL_READER_REGISTRY.require("aerodrome")
+_AERODROME_POOL_READER_SPEC = POOL_READER_REGISTRY.require("aerodrome_slipstream")
 _PANCAKESWAP_POOL_READER_SPEC = POOL_READER_REGISTRY.require("pancakeswap_v3")
 _SUSHISWAP_POOL_READER_SPEC = POOL_READER_REGISTRY.require("sushiswap_v3")
 
@@ -151,6 +154,43 @@ class PoolPrice:
     pool_address: str = ""
     token0_decimals: int = 18
     token1_decimals: int = 6
+
+
+@runtime_checkable
+class PoolPriceReader(Protocol):
+    """Family-neutral live pool-price reader surface used by the registry.
+
+    Implementations may read V3 ``slot0``, Curve ``get_dy``, V4 StateView,
+    Algebra global state, or another connector-owned representation.  The
+    registry depends only on these operations and never requires inheritance
+    from a particular AMM implementation.
+    """
+
+    def read_pool_price(
+        self,
+        pool_address: str,
+        chain: str,
+        block_number: int | None = None,
+        finality: DataFinality = DataFinality.LATEST,
+    ) -> DataEnvelope[PoolPrice]: ...
+
+    def resolve_pool_address(
+        self,
+        token_a: str,
+        token_b: str,
+        chain: str,
+        fee_tier: int = 3000,
+    ) -> str | None: ...
+
+    def resolve_best_pool_address(
+        self,
+        token_a: str,
+        token_b: str,
+        chain: str,
+        fee_tiers: list[int] | None = None,
+    ) -> str | None: ...
+
+    def resolve_token_address(self, token: str, chain: str) -> str | None: ...
 
 
 # ---------------------------------------------------------------------------
@@ -672,6 +712,10 @@ class UniswapV3PoolPriceReader:
 
         return None
 
+    def resolve_token_address(self, token: str, chain: str) -> str | None:
+        """Resolve a token identity through the reader's configured resolver."""
+        return self._resolve_to_address(token, chain)
+
 
 # ---------------------------------------------------------------------------
 # AerodromePoolReader
@@ -693,7 +737,7 @@ class AerodromePoolReader(UniswapV3PoolPriceReader):
 
     _factory_addresses: Mapping[str, str] = AERODROME_CL_FACTORY
     _known_pools: Mapping[str, Mapping[tuple[str, str, int], str]] = _AERODROME_KNOWN_POOLS
-    protocol_name: str = "aerodrome"
+    protocol_name: str = "aerodrome_slipstream"
     # int24 (tick_spacing) getPool variant + the tick-spacing sweep — both
     # connector-owned on the manifest spec (see aerodrome/pool_reader.py).
     _get_pool_selector: str = _AERODROME_POOL_READER_SPEC.get_pool_selector
@@ -756,7 +800,7 @@ class SushiSwapV3PoolReader(UniswapV3PoolPriceReader):
 
 
 class CurvePoolReader(UniswapV3PoolPriceReader):
-    """Reads live prices from Curve pool contracts (reader_kind ``curve_pool``).
+    """Reads live prices from Curve pool contracts.
 
     Curve pools have no slot0()/tick/fee-tier machinery, so this reader
     derives everything from the pool's own state via the injected
@@ -794,8 +838,8 @@ class CurvePoolReader(UniswapV3PoolPriceReader):
     """
 
     # No class-level spec attributes and no protocol literal: this class is
-    # KIND-dispatched (``reader_kind="curve_pool"``), so the registry always
-    # constructs it with its connector manifest spec, and the base ``__init__``
+    # manifest-bound, so the registry always constructs it with its connector
+    # PoolReaderSpec, and the base ``__init__``
     # binds identity/factories/known-pools/sweep-keys from that spec. Naming
     # the protocol here would re-couple the framework to a connector name
     # (blueprint 22; enforced by the chain/protocol coupling ratchet).
@@ -1049,9 +1093,9 @@ class UniswapV4PoolReader(UniswapV3PoolPriceReader):
       dynamic-fee pools this is the CURRENT fee, measured not assumed.
     """
 
-    # No class-level spec attributes and no protocol literal: KIND-dispatched
-    # (``reader_kind="uniswap_v4_stateview"``), so the registry always
-    # constructs it with its connector manifest spec and the base ``__init__``
+    # No class-level spec attributes and no protocol literal: the direct
+    # connector binding means the registry always constructs it with its
+    # manifest spec and the base ``__init__``
     # binds identity/StateView-table/sweep-keys from that spec. Naming the
     # protocol here would re-couple the framework to a connector name
     # (blueprint 22; chain/protocol coupling ratchet).
@@ -1324,37 +1368,6 @@ class UniswapV4PoolReader(UniswapV3PoolPriceReader):
 # PoolReaderRegistry
 # ---------------------------------------------------------------------------
 
-# Framework reader classes keyed by CANONICAL protocol only. Dispatch keys —
-# including aliases like "aerodrome_slipstream" — and every per-protocol data
-# knob derive from the connector manifest specs (POOL_READER_REGISTRY); this
-# map associates a canonical protocol with the framework class implementing
-# its read shape (the entries here are all v3 slot0-family subclasses that
-# differ only in data). A manifest spec with no entry here dispatches by its
-# ``reader_kind`` through ``_READER_CLASS_BY_KIND`` below, so adding a
-# connector for any KNOWN read shape requires NO edit to this module
-# (VIB-5047 / blueprint 05 "dispatch by manifest, not a hardcoded
-# protocol-name set").
-_READER_CLASS_BY_PROTOCOL: dict[str, type[UniswapV3PoolPriceReader]] = {
-    UniswapV3PoolPriceReader.protocol_name: UniswapV3PoolPriceReader,
-    AerodromePoolReader.protocol_name: AerodromePoolReader,
-    PancakeSwapV3PoolReader.protocol_name: PancakeSwapV3PoolReader,
-    SushiSwapV3PoolReader.protocol_name: SushiSwapV3PoolReader,
-}
-
-# Read-shape (``PoolReaderSpec.reader_kind``) -> framework reader class.
-# Consulted when a spec's protocol has no dedicated class entry above:
-# ``"v3_slot0"`` (the default) keeps dispatching the spec-bound base reader
-# exactly as before; non-slot0 shapes (Curve's get_dy/coins ABI) bind their
-# own class. An UNKNOWN kind fails loudly at registry construction — a
-# manifest that declares a shape the framework cannot read is a connector
-# bug, and silently reading it with the wrong ABI would produce garbage
-# prices on a money path.
-_READER_CLASS_BY_KIND: dict[str, type[UniswapV3PoolPriceReader]] = {
-    "v3_slot0": UniswapV3PoolPriceReader,
-    "curve_pool": CurvePoolReader,
-    "uniswap_v4_stateview": UniswapV4PoolReader,
-}
-
 
 def known_pool_pair(chain: str, pool_address: str) -> tuple[str, str] | None:
     """Resolve a known pool address to its ``(token0, token1)`` addresses.
@@ -1380,7 +1393,7 @@ class PoolReaderRegistry:
 
     Example:
         registry = PoolReaderRegistry(rpc_call=my_rpc_fn)
-        reader = registry.get_reader("base", "aerodrome")
+        reader = registry.get_reader("base", "aerodrome_slipstream")
         envelope = reader.read_pool_price("0x...", "base")
 
     Args:
@@ -1402,33 +1415,24 @@ class PoolReaderRegistry:
         self._cache_ttl = cache_ttl_seconds
         self._source_name = source_name
         # Lazy cache: {protocol_name: reader_instance}
-        self._readers: dict[str, UniswapV3PoolPriceReader] = {}
-        # Dispatch table derived from the connector manifest registry
-        # (VIB-5047): every spec key (canonical + aliases) maps to the
-        # framework class for the spec's protocol, falling back to the
-        # class for the spec's declared ``reader_kind`` (the "v3_slot0"
-        # default -> spec-bound base reader) for manifest specs with no
-        # dedicated class. An unknown kind fails loudly here — never a
-        # silent wrong-ABI read.
-        self._protocol_classes: dict[str, type[UniswapV3PoolPriceReader]] = {}
+        self._readers: dict[str, PoolPriceReader] = {}
+        # Dispatch is derived entirely from connector-owned class bindings.
+        # There is no protocol map and no family-string switch in framework.
+        self._protocol_classes: dict[str, type[Any]] = {}
         self._protocol_specs: dict[str, PoolReaderSpec] = {}
+        self._custom_supported_facets: dict[str, frozenset[PoolDataFacet]] = {}
         for spec in POOL_READER_REGISTRY.all():
-            reader_cls = _READER_CLASS_BY_PROTOCOL.get(spec.protocol.lower())
-            if reader_cls is None:
-                reader_cls = _READER_CLASS_BY_KIND.get(spec.reader_kind)
-            if reader_cls is None:
-                known_kinds = ", ".join(sorted(_READER_CLASS_BY_KIND))
-                raise ValueError(
-                    f"Pool reader spec '{spec.protocol}' declares unknown reader_kind "
-                    f"'{spec.reader_kind}' (known kinds: {known_kinds}). The framework "
-                    "has no reader for this on-chain shape — fix the connector manifest "
-                    "or add a reader class + kind mapping."
+            reader_cls = spec.reader.load()
+            if not isinstance(reader_cls, type) or not issubclass(reader_cls, PoolPriceReader):
+                raise TypeError(
+                    f"Pool reader spec {spec.protocol!r} resolved {spec.reader!r} to "
+                    f"{reader_cls!r}, expected the PoolPriceReader interface"
                 )
             for key in spec.keys:
                 self._protocol_classes[key.lower()] = reader_cls
                 self._protocol_specs[key.lower()] = spec
 
-    def get_reader(self, chain: str, protocol: str) -> UniswapV3PoolPriceReader:
+    def get_reader(self, chain: str, protocol: str) -> PoolPriceReader:
         """Get or create a pool reader for a given protocol.
 
         Args:
@@ -1457,12 +1461,15 @@ class PoolReaderRegistry:
         # binding exists (register_protocol drops it for custom overrides).
         spec = self._protocol_specs.get(protocol_lower)
         kwargs: dict[str, Any] = {} if spec is None else {"spec": spec}
-        reader = reader_cls(
-            rpc_call=self._rpc_call,
-            token_resolver=self._token_resolver,
-            cache_ttl_seconds=self._cache_ttl,
-            source_name=self._source_name,
-            **kwargs,
+        reader = cast(
+            PoolPriceReader,
+            reader_cls(
+                rpc_call=self._rpc_call,
+                token_resolver=self._token_resolver,
+                cache_ttl_seconds=self._cache_ttl,
+                source_name=self._source_name,
+                **kwargs,
+            ),
         )
         self._readers[protocol_lower] = reader
         return reader
@@ -1470,39 +1477,62 @@ class PoolReaderRegistry:
     def register_protocol(
         self,
         protocol_name: str,
-        reader_class: type[UniswapV3PoolPriceReader],
+        reader_class: type[PoolPriceReader],
+        *,
+        supported_facets: Iterable[PoolDataFacet] | None = None,
     ) -> None:
         """Register a custom protocol reader class.
 
         Args:
             protocol_name: Protocol identifier (e.g. "sushiswap_v3").
-            reader_class: Reader class (must be UniswapV3PoolPriceReader or subclass).
+            reader_class: Class implementing the family-neutral PoolPriceReader interface.
+            supported_facets: Facets implemented by the custom reader. Omit
+                only for the legacy V3 extension path, which preserves its
+                historical tick-liquidity default.
         """
-        self._protocol_classes[protocol_name.lower()] = reader_class
+        from almanak.connectors._strategy_base.pool_data import PoolDataFacet
+
+        if not isinstance(reader_class, type) or not issubclass(reader_class, PoolPriceReader):
+            raise TypeError(
+                f"reader_class for protocol {protocol_name!r} resolved to {reader_class!r}, "
+                "expected the PoolPriceReader interface"
+            )
+        normalized = protocol_name.strip().lower().replace("-", "_")
+        if not normalized:
+            raise ValueError("protocol_name must be non-empty")
+        facets = frozenset({PoolDataFacet.TICK_LIQUIDITY}) if supported_facets is None else frozenset(supported_facets)
+        if any(not isinstance(facet, PoolDataFacet) for facet in facets):
+            raise TypeError("supported_facets must contain PoolDataFacet values")
+        self._protocol_classes[normalized] = reader_class
+        self._custom_supported_facets[normalized] = facets
         # A custom class owns its config outright — drop any manifest spec
         # binding so its class attributes are not overridden at instantiation.
-        self._protocol_specs.pop(protocol_name.lower(), None)
+        self._protocol_specs.pop(normalized, None)
         # Clear cached instance if overriding
-        self._readers.pop(protocol_name.lower(), None)
+        self._readers.pop(normalized, None)
 
     @property
     def supported_protocols(self) -> list[str]:
         """List of registered protocol names."""
         return sorted(self._protocol_classes)
 
-    def reader_kind(self, protocol: str) -> str:
-        """Read-shape kind for a registered protocol (``PoolReaderSpec.reader_kind``).
+    def supports(self, protocol: str, facet: PoolDataFacet) -> bool:
+        """Whether a connector explicitly advertises a pool-data facet.
 
-        Consumers whose downstream math only works for one shape (e.g. the
-        V3 tick-walk swap simulator, the gateway slot0 LWAP profile) gate
-        their protocol sweeps on this instead of hardcoding protocol names,
-        so any future non-slot0 kind is excluded automatically. Custom
-        classes registered via ``register_protocol()`` carry no manifest
-        spec; they are v3-family subclasses by that method's contract, so
-        they report the ``"v3_slot0"`` default.
+        Custom classes carry an explicit facet set. Omitting that set preserves
+        the legacy custom-V3 registration behavior. Manifest readers always
+        use the connector-owned capability registry.
         """
-        spec = self._protocol_specs.get(protocol.lower())
-        return spec.reader_kind if spec is not None else "v3_slot0"
+        from almanak.connectors._strategy_base.pool_data import PoolDataFacet, PoolDataSource
+        from almanak.connectors._strategy_pool_data_registry import POOL_DATA_REGISTRY
+
+        if not isinstance(facet, PoolDataFacet):
+            raise TypeError("facet must be a PoolDataFacet")
+        normalized = protocol.strip().lower().replace("-", "_")
+        custom = self._custom_supported_facets.get(normalized)
+        if custom is not None:
+            return facet in custom
+        return POOL_DATA_REGISTRY.supports_from(protocol, facet, PoolDataSource.LIVE_PRICE_READER)
 
     def protocols_for_chain(self, chain: str) -> list[str]:
         """List protocols that have factory addresses for a given chain.

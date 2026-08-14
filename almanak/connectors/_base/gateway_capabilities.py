@@ -1276,10 +1276,13 @@ class GatewayDexTwapCapability(Protocol):
 class GatewayDexPoolStateCapability(Protocol):
     """DEX connector publishes timestamp-aligned exact-pool state history.
 
-    The v1 capability is intentionally address-first and V3-shaped. It reads
-    immutable pool identity plus ``slot0()``, in-range liquidity, and the two
-    pool token balances at archive blocks selected at-or-before each requested
-    timestamp. Callers may never substitute independent token/USD prices.
+    This is the compatibility transport consumed by the current protobuf,
+    whose point payload is still V3-shaped. Connector discovery must require
+    the protocol-neutral ``HISTORICAL_STATE -> GATEWAY_POOL_STATE`` binding
+    first; a connector never acquires historical support merely by resembling
+    V3. The next transport revision can carry generic N-asset
+    ``PoolStateObservation`` values without changing the manifest/discovery
+    contract. Callers may never substitute independent token/USD prices.
     """
 
     def dex_name(self) -> str: ...

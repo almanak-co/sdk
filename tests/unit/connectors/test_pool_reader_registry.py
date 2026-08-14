@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import pytest
 
-from almanak.connectors._strategy_base.pool_reader import PoolReaderSpec
+from almanak.connectors._connector import ImportRef
+from almanak.connectors._strategy_base.pool_reader import PoolDiscriminatorKind, PoolReaderSpec
 from almanak.connectors._strategy_base.pool_reader_registry import (
     PoolReaderRegistry,
     PoolReaderRegistryError,
@@ -19,8 +20,41 @@ _ADDR_1 = "0x" + "1" * 40
 _ADDR_2 = "0x" + "2" * 40
 
 
+def test_legacy_spec_without_reader_keeps_v3_compatibility_default() -> None:
+    spec = PoolReaderSpec(protocol="legacy_v3", factory_addresses={}, reader_kind="v3_slot0")
+
+    assert spec.reader == ImportRef(
+        module="almanak.framework.data.pools.reader",
+        attribute="UniswapV3PoolPriceReader",
+    )
+
+
+def test_legacy_non_v3_kind_requires_an_explicit_reader_binding() -> None:
+    with pytest.raises(ValueError, match="pass reader=ImportRef"):
+        PoolReaderSpec(protocol="legacy_curve", factory_addresses={}, reader_kind="curve_pool")
+
+
+def test_pool_discriminator_kind_is_typed() -> None:
+    with pytest.raises(TypeError, match="PoolDiscriminatorKind"):
+        PoolReaderSpec(  # type: ignore[arg-type]
+            protocol="bad_discriminator",
+            factory_addresses={},
+            discriminator_kind="tick_spacing",
+        )
+
+    assert _spec("canonical_v3").discriminator_kind is PoolDiscriminatorKind.FEE_TIER
+
+
 def _spec(protocol: str, *, factory: str = _ADDR_1, aliases: tuple[str, ...] = ()) -> PoolReaderSpec:
-    return PoolReaderSpec(protocol=protocol, factory_addresses={"ethereum": factory}, aliases=aliases)
+    return PoolReaderSpec(
+        protocol=protocol,
+        factory_addresses={"ethereum": factory},
+        reader=ImportRef(
+            module="almanak.framework.data.pools.reader",
+            attribute="UniswapV3PoolPriceReader",
+        ),
+        aliases=aliases,
+    )
 
 
 class TestPoolReaderRegistryDedup:

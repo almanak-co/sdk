@@ -33,7 +33,9 @@ from almanak.connectors._base.v3_gateway_twap import (
     fetch_v3_twap_observation,
     fetch_v3_twap_series,
 )
-from almanak.connectors._base.v3_pool_abi import encode_v3_get_pool
+from almanak.connectors._base.v3_pool_abi import encode_get_pool, encode_v3_get_pool
+from almanak.connectors.aerodrome.gateway import provider as aerodrome_provider
+from almanak.connectors.aerodrome.gateway.provider import AerodromeSlipstreamGatewayConnector
 from almanak.connectors.uniswap_v3.gateway.provider import UniswapV3GatewayConnector
 from almanak.gateway.services.rate_history_service import RateHistoryUnavailable
 
@@ -46,6 +48,8 @@ _SLOT0 = "3850c7bd"
 _LIQUIDITY = "1a686502"
 _FEE = "ddca3f43"
 _GET_POOL = "1698ee82"
+_SLIPSTREAM_GET_POOL = "28af8d0b"
+_TICK_SPACING = "d0c93a7c"
 _BALANCE_OF = "70a08231"
 
 # Base canonical addresses (any checksum-free lowercase addresses work for the fake).
@@ -280,6 +284,77 @@ def test_historical_pool_state_uses_exact_archive_blocks_and_identity() -> None:
     assert {call[1] for call in state_calls} == {2, 4}
     factory_calls = [call for call in calls if call[0] == _GET_POOL]
     assert factory_calls == [(_GET_POOL, 4, _FACTORY.lower(), encode_v3_get_pool(_WETH, _USDC, 500))]
+
+
+def test_historical_pool_state_supports_connector_owned_factory_key_abi() -> None:
+    web3, calls = _make_historical_web3()
+    original_call = web3.eth.call
+
+    async def slipstream_call(tx, block_identifier=None):
+        selector = tx["data"][2:10]
+        if selector == _TICK_SPACING:
+            calls.append((selector, block_identifier, tx["to"].lower(), tx["data"]))
+            return _int_word(100)
+        if selector == _SLIPSTREAM_GET_POOL:
+            calls.append((selector, block_identifier, tx["to"].lower(), tx["data"]))
+            return _addr_word(_POOL)
+        return await original_call(tx, block_identifier=block_identifier)
+
+    web3.eth.call = slipstream_call
+
+    points = asyncio.run(
+        fetch_v3_pool_state_series(
+            _make_servicer(web3),
+            chain="base",
+            pool_address=_POOL,
+            start_ts=1_025,
+            end_ts=1_025,
+            interval_secs=20,
+            protocol="aerodrome_slipstream",
+            factory_address=_FACTORY,
+            factory_get_pool_selector=f"0x{_SLIPSTREAM_GET_POOL}",
+            factory_pool_key_selector=f"0x{_TICK_SPACING}",
+            factory_pool_key_signed=True,
+        )
+    )
+
+    assert points[0].fee_tier == 500
+    factory_calls = [call for call in calls if call[0] == _SLIPSTREAM_GET_POOL]
+    assert factory_calls == [
+        (
+            _SLIPSTREAM_GET_POOL,
+            2,
+            _FACTORY.lower(),
+            encode_get_pool(f"0x{_SLIPSTREAM_GET_POOL}", _WETH, _USDC, 100),
+        )
+    ]
+
+
+def test_aerodrome_slipstream_provider_binds_its_factory_key_abi(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_fetch(_servicer, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(aerodrome_provider, "fetch_v3_pool_state_series", fake_fetch)
+
+    points = asyncio.run(
+        AerodromeSlipstreamGatewayConnector().fetch_pool_state_series(
+            SimpleNamespace(),
+            chain="base",
+            pool_address=_POOL,
+            start_ts=1_025,
+            end_ts=1_025,
+            interval_secs=20,
+        )
+    )
+
+    assert points == []
+    assert captured["protocol"] == "aerodrome_slipstream"
+    assert captured["factory_get_pool_selector"] == "0x28af8d0b"
+    assert captured["factory_pool_key_selector"] == "0xd0c93a7c"
+    assert captured["factory_pool_key_signed"] is True
 
 
 def test_historical_pool_state_rejects_truncated_slot0_tick_word() -> None:

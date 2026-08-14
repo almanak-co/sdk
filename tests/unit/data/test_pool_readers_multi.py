@@ -131,8 +131,8 @@ class TestAerodromePoolReader:
         assert issubclass(AerodromePoolReader, UniswapV3PoolPriceReader)
 
     def test_protocol_name(self):
-        """Protocol name is 'aerodrome'."""
-        assert AerodromePoolReader.protocol_name == "aerodrome"
+        """Protocol name is 'aerodrome_slipstream'."""
+        assert AerodromePoolReader.protocol_name == "aerodrome_slipstream"
 
     def test_factory_addresses(self):
         """Uses Aerodrome CL factory addresses."""
@@ -449,20 +449,17 @@ class TestPoolReaderRegistry:
         assert not isinstance(reader, AerodromePoolReader)
         assert not isinstance(reader, PancakeSwapV3PoolReader)
 
-    def test_get_reader_aerodrome(self):
-        """Get an AerodromePoolReader from the registry."""
-        registry = PoolReaderRegistry(rpc_call=self._noop_rpc)
-        reader = registry.get_reader("base", "aerodrome")
-        assert isinstance(reader, AerodromePoolReader)
-
-    def test_get_reader_aerodrome_slipstream_alias(self):
-        """The canonical 'aerodrome_slipstream' name resolves to AerodromePoolReader."""
+    def test_get_reader_aerodrome_slipstream(self):
+        """Get the concentrated-liquidity Aerodrome reader from the registry."""
         registry = PoolReaderRegistry(rpc_call=self._noop_rpc)
         reader = registry.get_reader("base", "aerodrome_slipstream")
         assert isinstance(reader, AerodromePoolReader)
-        # And resolves to the same class as the legacy 'aerodrome' alias
-        legacy = registry.get_reader("base", "aerodrome")
-        assert type(reader) is type(legacy)
+
+    def test_get_reader_aerodrome_classic_is_not_a_slipstream_alias(self):
+        """Classic Solidly pools never dispatch through the Slipstream ABI."""
+        registry = PoolReaderRegistry(rpc_call=self._noop_rpc)
+        with pytest.raises(ValueError, match="Unknown protocol"):
+            registry.get_reader("base", "aerodrome")
 
     def test_get_reader_pancakeswap(self):
         """Get a PancakeSwapV3PoolReader from the registry."""
@@ -473,7 +470,7 @@ class TestPoolReaderRegistry:
     def test_case_insensitive(self):
         """Protocol names are case-insensitive."""
         registry = PoolReaderRegistry(rpc_call=self._noop_rpc)
-        reader = registry.get_reader("base", "Aerodrome")
+        reader = registry.get_reader("base", "Aerodrome_Slipstream")
         assert isinstance(reader, AerodromePoolReader)
 
     def test_lazy_instantiation(self):
@@ -481,17 +478,17 @@ class TestPoolReaderRegistry:
         registry = PoolReaderRegistry(rpc_call=self._noop_rpc)
         assert len(registry._readers) == 0
 
-        registry.get_reader("base", "aerodrome")
+        registry.get_reader("base", "aerodrome_slipstream")
         assert len(registry._readers) == 1
 
-        registry.get_reader("base", "aerodrome")
+        registry.get_reader("base", "aerodrome_slipstream")
         assert len(registry._readers) == 1  # same instance reused
 
     def test_same_instance_returned(self):
         """Same reader instance is returned for same protocol."""
         registry = PoolReaderRegistry(rpc_call=self._noop_rpc)
-        r1 = registry.get_reader("base", "aerodrome")
-        r2 = registry.get_reader("ethereum", "aerodrome")
+        r1 = registry.get_reader("base", "aerodrome_slipstream")
+        r2 = registry.get_reader("ethereum", "aerodrome_slipstream")
         assert r1 is r2
 
     def test_unknown_protocol_raises(self):
@@ -504,7 +501,7 @@ class TestPoolReaderRegistry:
         """Lists all supported protocols."""
         registry = PoolReaderRegistry(rpc_call=self._noop_rpc)
         protos = registry.supported_protocols
-        assert "aerodrome" in protos
+        assert "aerodrome_slipstream" in protos
         assert "pancakeswap_v3" in protos
         assert "uniswap_v3" in protos
 
@@ -512,7 +509,7 @@ class TestPoolReaderRegistry:
         """Base chain supports all three protocols."""
         registry = PoolReaderRegistry(rpc_call=self._noop_rpc)
         protos = registry.protocols_for_chain("base")
-        assert "aerodrome" in protos
+        assert "aerodrome_slipstream" in protos
         assert "pancakeswap_v3" in protos
         assert "uniswap_v3" in protos
 
@@ -522,7 +519,7 @@ class TestPoolReaderRegistry:
         protos = registry.protocols_for_chain("arbitrum")
         assert "uniswap_v3" in protos
         assert "pancakeswap_v3" in protos
-        assert "aerodrome" not in protos
+        assert "aerodrome_slipstream" not in protos
 
     def test_protocols_for_chain_bsc(self):
         """BSC dispatches the V3-family readers with a bsc factory (no CL/aerodrome)."""
@@ -533,7 +530,7 @@ class TestPoolReaderRegistry:
         # uniswap_v3 ships a bsc factory (addresses.py) and joined _FACTORY_CHAINS
         # with the bnb/bsc alias-normalization fix (VIB-5293 class).
         assert "uniswap_v3" in protos
-        assert "aerodrome" not in protos
+        assert "aerodrome_slipstream" not in protos
 
     def test_protocols_for_unknown_chain(self):
         """Unknown chain returns empty list."""
@@ -582,7 +579,7 @@ class TestPoolReaderRegistry:
             cache_ttl_seconds=5.0,
             source_name="custom_rpc",
         )
-        reader = registry.get_reader("base", "aerodrome")
+        reader = registry.get_reader("base", "aerodrome_slipstream")
         assert reader._token_resolver is mock_resolver
         assert reader._cache_ttl == 5.0
         assert reader._source_name == "custom_rpc"
@@ -597,7 +594,7 @@ class TestPoolReaderRegistry:
             fee=100,
         )
         registry = PoolReaderRegistry(rpc_call=rpc_call, cache_ttl_seconds=0)
-        reader = registry.get_reader("base", "aerodrome")
+        reader = registry.get_reader("base", "aerodrome_slipstream")
         envelope = reader.read_pool_price("0xb2cc224c1c9feE385f8ad6a55b4d94E92359DC59", "base")
 
         assert isinstance(envelope, DataEnvelope)
@@ -671,10 +668,9 @@ class TestManifestPoolReaderSpecs:
         assert spec.get_pool_selector == V3_GET_POOL_SELECTOR
         assert GET_POOL_SELECTOR == V3_GET_POOL_SELECTOR
 
-    def test_aerodrome_alias_resolves_to_same_spec(self):
-        spec = POOL_READER_REGISTRY.require("aerodrome")
-        alias = POOL_READER_REGISTRY.require("aerodrome_slipstream")
-        assert alias is spec
+    def test_aerodrome_slipstream_spec_feeds_reader(self):
+        spec = POOL_READER_REGISTRY.require("aerodrome_slipstream")
+        assert POOL_READER_REGISTRY.lookup("aerodrome") is None
         assert spec.factory_addresses is AERODROME_CL_FACTORY
         assert spec.known_pools is _AERODROME_KNOWN_POOLS
         assert spec.get_pool_selector == "0x28af8d0b"

@@ -24,6 +24,7 @@ POOL = "0xc756bba710d45647715079ce50aa16aab36ded42"
 START = datetime.fromtimestamp(1_000, UTC)
 END = datetime.fromtimestamp(4_600, UTC)
 TARGET = HistoricalTWAPTarget("ethereum", "uniswap_v3", POOL, 1_800)
+GENERATED_TARGET = HistoricalTWAPTarget("bsc", "pancakeswap_v3", POOL, 300)
 
 
 def _fetcher(**kwargs):
@@ -37,12 +38,13 @@ def _fetcher(**kwargs):
 
 
 def test_typed_declaration_takes_precedence() -> None:
+    custom_target = HistoricalTWAPTarget("ethereum", "custom_pool_provider", POOL, 1_800)
     strategy = SimpleNamespace(
-        backtest_twap_targets=[TARGET],
+        backtest_twap_targets=[custom_target],
         pool="0x0000000000000000000000000000000000000001",
     )
 
-    assert declared_historical_twap_targets(strategy, {}, default_chain="ethereum") == (TARGET,)
+    assert declared_historical_twap_targets(strategy, {}, default_chain="ethereum") == (custom_target,)
 
 
 def test_narrow_legacy_decoder_accepts_only_matching_generated_shape() -> None:
@@ -57,6 +59,43 @@ def test_narrow_legacy_decoder_accepts_only_matching_generated_shape() -> None:
 
     strategy.pool = "0x0000000000000000000000000000000000000001"
     assert declared_historical_twap_targets(strategy, config, default_chain="ethereum") == ()
+
+
+def test_decoder_accepts_current_generated_pool_and_window_names() -> None:
+    config = {
+        "swap_pool": POOL,
+        "protocol": "pancakeswap_v3",
+        "pool_twap_window_seconds": 300,
+    }
+    strategy = SimpleNamespace(
+        swap_pool=POOL,
+        protocol="pancakeswap_v3",
+        STRATEGY_METADATA=SimpleNamespace(supported_protocols=["pancakeswap_v3"]),
+    )
+
+    assert declared_historical_twap_targets(strategy, config, default_chain="bsc") == (GENERATED_TARGET,)
+
+    # The generated strategy passes ``window_seconds=300`` literally.  A
+    # same-named instance attribute is optional, but when present it remains a
+    # consistency assertion against the config declaration.
+    strategy.pool_twap_window_seconds = 301
+    assert declared_historical_twap_targets(strategy, config, default_chain="bsc") == ()
+
+
+def test_decoder_fails_preflight_for_curve_twap() -> None:
+    config = {
+        "swap_pool": POOL,
+        "protocol": "curve",
+        "pool_twap_window_seconds": 300,
+    }
+    strategy = SimpleNamespace(
+        swap_pool=POOL,
+        protocol="curve",
+        STRATEGY_METADATA=SimpleNamespace(supported_protocols=["curve"]),
+    )
+
+    with pytest.raises(ValueError, match="Curve pools do not expose one uniform native TWAP"):
+        declared_historical_twap_targets(strategy, config, default_chain="ethereum")
 
 
 def test_snapshot_view_serves_exact_archived_pool_observation_with_provenance() -> None:

@@ -1,8 +1,8 @@
 """Connector-owned pool reader spec for Curve.
 
-Curve pools are NOT fee-tier-keyed and do not speak the v3 slot0() ABI, so
-this spec declares ``reader_kind="curve_pool"`` — the framework dispatches it
-onto ``CurvePoolReader`` (get_dy/coins-based) instead of the slot0 family.
+Curve pools are NOT fee-tier-keyed and do not speak the v3 slot0() ABI.  This
+spec therefore binds ``CurvePoolReader`` directly; framework dispatch depends
+on the family-neutral reader interface, not a family-name switch.
 
 Pool resolution is CURATED-ONLY: the pair table below is derived from the
 adapter's hand-verified ``CURVE_POOLS`` registry (single source of truth —
@@ -36,8 +36,15 @@ from __future__ import annotations
 
 import logging
 
+from almanak.connectors._connector import ImportRef
 from almanak.connectors._strategy_base.curve_pool_abi import CURVE_POOL_KEY
-from almanak.connectors._strategy_base.pool_reader import PoolReaderSpec
+from almanak.connectors._strategy_base.pool_data import (
+    PoolDataFacet,
+    PoolDataSource,
+    PoolDataSpec,
+    PoolReferenceKind,
+)
+from almanak.connectors._strategy_base.pool_reader import PoolDiscriminatorKind, PoolReaderSpec
 from almanak.connectors.curve.adapter import CURVE_POOLS
 
 logger = logging.getLogger(__name__)
@@ -78,6 +85,10 @@ def _build_known_pools() -> dict[str, dict[tuple[str, str, int], str]]:
 POOL_READER_SPEC = PoolReaderSpec(
     protocol="curve",
     reader_kind="curve_pool",
+    reader=ImportRef(
+        module="almanak.framework.data.pools.reader",
+        attribute="CurvePoolReader",
+    ),
     # Curve's pairwise resolver (MetaRegistry find_pool_for_coins) is a live
     # registry lookup, not a static factory address — so this slot stays empty
     # and reader-lane resolution is curated-only (see module docstring).
@@ -85,6 +96,26 @@ POOL_READER_SPEC = PoolReaderSpec(
     known_pools=_build_known_pools(),
     # Single total sweep: Curve has no fee-tier discriminator.
     candidate_pool_keys=(CURVE_POOL_KEY,),
+    discriminator_kind=PoolDiscriminatorKind.NONE,
 )
 
-__all__ = ["CURVE_POOL_KEY", "POOL_READER_SPEC"]
+_UNSUPPORTED = {
+    PoolDataFacet.METADATA: "Curve metadata is consumed internally by the live reader but has no generic adapter.",
+    PoolDataFacet.BALANCES: "Curve's live reader does not expose arbitrary N-asset pool balances.",
+    PoolDataFacet.HISTORICAL_STATE: "Curve archive state has not been migrated to the generic N-asset transport.",
+    PoolDataFacet.TWAP: "Curve pools do not expose one uniform native TWAP primitive.",
+    PoolDataFacet.TICK_LIQUIDITY: "Curve StableSwap has no concentrated-liquidity tick model.",
+}
+
+POOL_DATA_SPEC = PoolDataSpec(
+    protocol="curve",
+    reference_kind=PoolReferenceKind.EVM_CONTRACT,
+    bindings={
+        PoolDataFacet.SPOT_PRICE: PoolDataSource.LIVE_PRICE_READER,
+        PoolDataFacet.LIQUIDITY: PoolDataSource.LIVE_PRICE_READER,
+    },
+    unsupported=_UNSUPPORTED,
+    price_reader=POOL_READER_SPEC,
+)
+
+__all__ = ["CURVE_POOL_KEY", "POOL_DATA_SPEC", "POOL_READER_SPEC"]

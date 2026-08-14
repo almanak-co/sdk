@@ -249,19 +249,11 @@ class UniswapV3GatewayConnector(
     def twap_supported_chains(self) -> frozenset[str]:
         """Chains where Uniswap V3 ``observe()`` is queryable.
 
-        Same set as ``pool_history_supported_chains`` — wherever we have
-        a V3 deployment, the pool exposes ``observe`` (it's the standard
-        V3 pool ABI).
+        Every connector-owned deployment with a factory speaks the same V3
+        pool ABI.  Vendor/subgraph history coverage is unrelated to archive
+        RPC capability and must not narrow exact-pool reads.
         """
-        return frozenset(
-            {
-                "ethereum",
-                "arbitrum",
-                "base",
-                "optimism",
-                "polygon",
-            }
-        )
+        return frozenset(chain for chain, deployment in UNISWAP_V3.items() if "factory" in deployment)
 
     def pool_state_supported_chains(self) -> frozenset[str]:
         """Chains where exact V3 pool state can be read from archive RPC."""

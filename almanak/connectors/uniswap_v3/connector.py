@@ -144,9 +144,9 @@ CONNECTOR = Connector(
         module="almanak.connectors.uniswap_v3.gas_estimate_provider",
         attribute="UniswapV3GasEstimateConnector",
     ),
-    pool_reader=ImportRef(
+    pool_data=ImportRef(
         module="almanak.connectors.uniswap_v3.pool_reader",
-        attribute="POOL_READER_SPEC",
+        attribute="POOL_DATA_SPECS",
     ),
     agent_read_connector=ImportRef(
         module="almanak.connectors.uniswap_v3.agent_read_provider",

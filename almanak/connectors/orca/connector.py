@@ -36,6 +36,10 @@ CONNECTOR = Connector(
         attribute="OrcaGatewayConnector",
         order=22,
     ),
+    pool_data=ImportRef(
+        module="almanak.connectors.orca.pool_data",
+        attribute="POOL_DATA_SPEC",
+    ),
     receipt_parser_connector=ImportRef(
         module="almanak.connectors.orca.receipt_parser_provider",
         attribute="OrcaReceiptParserConnector",

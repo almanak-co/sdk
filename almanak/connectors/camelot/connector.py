@@ -36,6 +36,10 @@ CONNECTOR = Connector(
         module="almanak.connectors.camelot.compiler",
         attribute="CamelotCompiler",
     ),
+    pool_data=ImportRef(
+        module="almanak.connectors.camelot.pool_data",
+        attribute="POOL_DATA_SPEC",
+    ),
     strategy_intents=(IntentType.SWAP,),
     supported_chains=SupportedChainsSpec(chains=(ARBITRUM,)),
 )

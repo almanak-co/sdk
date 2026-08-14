@@ -152,16 +152,18 @@ def test_solidly_stable_contract_enforced():
         )
 
 
-def test_invalid_dex_type_still_rejected():
-    with pytest.raises(ValueError, match="Invalid dex type"):
-        _solidly_pool(stable=False, reserve0="1", reserve1="1").__class__(
-            pool_address=_POOL,
-            dex="not_a_dex",  # type: ignore[arg-type]
-            token0=_chain_token("USDC", 6, "0x1111111111111111111111111111111111111111"),
-            token1=_chain_token("DAI", 18, "0x2222222222222222222222222222222222222222"),
-            reserve0=Decimal("1"),
-            reserve1=Decimal("1"),
-            fee_tier=500,
-            tvl_usd=Decimal("0"),
-            last_updated=datetime.now(UTC),
-        )
+def test_connector_protocol_namespace_is_open_ended():
+    pool = _solidly_pool(stable=False, reserve0="1", reserve1="1").__class__(
+        pool_address=_POOL,
+        dex="pancakeswap_v3",
+        token0=_chain_token("USDC", 6, "0x1111111111111111111111111111111111111111"),
+        token1=_chain_token("DAI", 18, "0x2222222222222222222222222222222222222222"),
+        reserve0=Decimal("1"),
+        reserve1=Decimal("1"),
+        fee_tier=500,
+        tvl_usd=Decimal("0"),
+        last_updated=datetime.now(UTC),
+        sqrt_price_x96=2**96,
+    )
+    assert pool.dex == "pancakeswap_v3"
+    assert pool.is_v3

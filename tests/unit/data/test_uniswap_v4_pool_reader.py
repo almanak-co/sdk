@@ -1,4 +1,4 @@
-"""Unit tests for UniswapV4PoolReader (reader_kind ``uniswap_v4_stateview``).
+"""Unit tests for the connector-bound UniswapV4PoolReader.
 
 Scripted-RPC tests against an impersonated StateView periphery: V4 pool state
 lives in the PoolManager singleton keyed by ``bytes32 PoolId``, so the reader

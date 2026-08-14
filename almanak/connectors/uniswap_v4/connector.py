@@ -70,12 +70,11 @@ CONNECTOR = Connector(
         module="almanak.connectors.uniswap_v4.compiler",
         attribute="UniswapV4Compiler",
     ),
-    # StateView-backed pool reader spec (reader_kind="uniswap_v4_stateview"):
-    # V4 pool state lives in the PoolManager singleton, read via StateView by
-    # bytes32 PoolId — never a per-pool slot0() contract call.
-    pool_reader=ImportRef(
+    # StateView-backed pool-data spec: V4 pool state lives in the PoolManager
+    # singleton and is keyed by bytes32 PoolId, never a per-pool contract.
+    pool_data=ImportRef(
         module="almanak.connectors.uniswap_v4.pool_reader",
-        attribute="POOL_READER_SPEC",
+        attribute="POOL_DATA_SPEC",
     ),
     # VIB-5634: TD-14 on-chain closure verifier. Registered under the connector's
     # slugs by the framework manifest loader; the LP_V4 primitive-label alias

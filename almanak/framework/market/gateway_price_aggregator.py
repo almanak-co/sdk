@@ -200,17 +200,19 @@ class GatewayMarketPriceAggregator(PriceAggregator):
         # protocol-agnostic ACROSS THE SLOT0 FAMILY (slot0/liquidity), so all
         # resolved pools go in one call under the uniswap_v3 read profile (the
         # registered LWAP-capable dex); unreadable pools are skipped
-        # server-side. Non-slot0 reader kinds (e.g. Curve's get_dy shape) are
-        # excluded up front — their pools cannot be read under this profile,
-        # so shipping them would only add doomed server-side reads; the
-        # framework PriceAggregator.lwap lane covers those protocols with
-        # their own reader.
+        # server-side. Connectors without the TICK_LIQUIDITY facet (e.g.
+        # Curve's get_dy shape) are excluded up front — their pools cannot be
+        # read under this profile, so shipping them would only add doomed
+        # server-side reads; the framework PriceAggregator.lwap lane covers
+        # those protocols with their own reader.
+        from almanak.connectors._strategy_base.pool_data import PoolDataFacet
+
         pool_addresses: list[str] = []
         seen: set[str] = set()
         base_addr: str | None = None
         quote_addr: str | None = None
         for protocol in protocols:
-            if self._registry.reader_kind(protocol) != "v3_slot0":
+            if not self._registry.supports(protocol, PoolDataFacet.TICK_LIQUIDITY):
                 continue
             try:
                 reader = self._registry.get_reader(chain_lower, protocol)
@@ -222,8 +224,8 @@ class GatewayMarketPriceAggregator(PriceAggregator):
             # known-pools entry pointing at a different pair would otherwise
             # poison the liquidity-weighted aggregate (VIB-4924 B2 follow-on).
             if base_addr is None:
-                base_addr = reader._resolve_to_address(token_a, chain_lower)
-                quote_addr = reader._resolve_to_address(token_b, chain_lower)
+                base_addr = reader.resolve_token_address(token_a, chain_lower)
+                quote_addr = reader.resolve_token_address(token_b, chain_lower)
             for fee_tier in fee_tiers:
                 addr = reader.resolve_pool_address(token_a, token_b, chain_lower, fee_tier)
                 if not addr or addr.lower() in seen:

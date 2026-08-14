@@ -154,7 +154,7 @@ def test_curve_pool_resolution_does_not_hijack_quote_fallback():
     curated Curve 2pool resolves for USDC.e/USDT on arbitrum. That pool must
     NOT be fed into the V3 tick-walk lane (its PoolPrice has tick=None) —
     protocol='curve' still routes through the connector swap-quote fallback.
-    Without the reader_kind gate this exact call regressed back to the
+    Without the tick-liquidity capability gate this exact call regressed back to the
     permanent-HOLD DataUnavailableError this file exists to prevent.
     """
     pool_registry = PoolReaderRegistry(
@@ -162,7 +162,7 @@ def test_curve_pool_resolution_does_not_hijack_quote_fallback():
         token_resolver=_StubRegistryTokenResolver(),
     )
     # Guard the guard: with the resolver wired, the Curve reader DOES resolve
-    # the curated pool — the estimator must skip it by reader_kind, not
+    # the curated pool — the estimator must skip it by connector capability, not
     # accidentally by failed resolution.
     curve_reader = pool_registry.get_reader("arbitrum", "curve")
     assert curve_reader.resolve_pool_address("USDC.e", "USDT", "arbitrum") is not None

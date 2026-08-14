@@ -31,6 +31,10 @@ CONNECTOR = Connector(
         attribute="PendleGatewayConnector",
         order=6,
     ),
+    pool_data=ImportRef(
+        module="almanak.connectors.pendle.pool_data",
+        attribute="POOL_DATA_SPEC",
+    ),
     gateway_settings=ImportRef(
         module="almanak.connectors.pendle.gateway.settings",
         attribute="PendleGatewaySettings",

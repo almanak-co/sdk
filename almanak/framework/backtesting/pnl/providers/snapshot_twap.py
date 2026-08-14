@@ -8,8 +8,9 @@ Strategies declare their prewarm requirements with
 :class:`HistoricalTWAPTarget` through ``get_backtest_twap_targets()`` or a
 ``backtest_twap_targets`` attribute. A deliberately narrow compatibility
 decoder recognizes the generated strategy shape that predates that typed
-contract (``swap_pool`` / ``protocol`` / ``twap_window_seconds`` config plus
-matching instance attributes). It never searches arbitrary config or discovers
+contract (``swap_pool`` / ``protocol`` plus either
+``pool_twap_window_seconds`` or ``twap_window_seconds`` and matching pool /
+protocol instance attributes). It never searches arbitrary config or discovers
 pools from pair labels.
 """
 
@@ -93,6 +94,17 @@ def _typed_declarations(strategy: Any) -> object | None:
     return getattr(strategy, "backtest_twap_targets", None)
 
 
+def _require_historical_twap(protocol: str) -> None:
+    """Require the connector's native historical-TWAP facet."""
+    from almanak.connectors._strategy_base.pool_data import PoolDataFacet, PoolDataSource
+    from almanak.connectors._strategy_pool_data_registry import POOL_DATA_REGISTRY
+
+    if POOL_DATA_REGISTRY.supports_from(protocol, PoolDataFacet.TWAP, PoolDataSource.GATEWAY_TWAP):
+        return
+    reason = POOL_DATA_REGISTRY.unsupported_reason(protocol, PoolDataFacet.TWAP)
+    raise ValueError(f"protocol {protocol!r} does not support historical pool TWAP: {reason}")
+
+
 def _legacy_exact_pool_target(
     strategy: Any,
     strategy_config: Mapping[str, Any],
@@ -101,18 +113,26 @@ def _legacy_exact_pool_target(
 ) -> HistoricalTWAPTarget | None:
     """Decode only the pre-contract generated exact-pool strategy shape.
 
-    Compatibility is intentionally conjunctive: all three historical config
-    keys must be present, the initialized strategy attributes must match them,
-    and strategy metadata must declare the same protocol. This supports the
-    unchanged generated artifact without treating an arbitrary ``swap_pool``
-    key as permission to fetch archive data.
+    Compatibility is intentionally conjunctive: the exact pool, protocol, and
+    one recognized window key must be present; initialized pool and protocol
+    attributes must match them; and strategy metadata must declare the same
+    protocol.  The current generator emits ``pool_twap_window_seconds`` as a
+    config-only dependency while passing its value literally to ``market.twap``;
+    if a same-named strategy attribute is present, it remains an assertion.
+    This supports both generated artifacts without treating an arbitrary
+    ``swap_pool`` key as permission to fetch archive data.
     """
-    required = ("swap_pool", "protocol", "twap_window_seconds")
-    if any(key not in strategy_config for key in required):
+    if "swap_pool" not in strategy_config or "protocol" not in strategy_config:
         return None
     raw_pool = strategy_config.get("swap_pool")
     raw_protocol = strategy_config.get("protocol")
-    raw_window = strategy_config.get("twap_window_seconds")
+    window_key = next(
+        (key for key in ("pool_twap_window_seconds", "twap_window_seconds") if key in strategy_config),
+        None,
+    )
+    if window_key is None:
+        return None
+    raw_window = strategy_config.get(window_key)
     if not isinstance(raw_pool, str) or not isinstance(raw_protocol, str) or raw_window is None:
         return None
     try:
@@ -121,10 +141,18 @@ def _legacy_exact_pool_target(
         return None
     pool = raw_pool.strip().lower()
     protocol = raw_protocol.strip().lower().replace("-", "_")
+    strategy_pool_matches = any(
+        str(getattr(strategy, attribute, "")).strip().lower() == pool for attribute in ("swap_pool", "pool")
+    )
+    missing = object()
+    strategy_window = getattr(strategy, window_key, missing)
+    strategy_window_matches = (
+        strategy_window == window if window_key == "twap_window_seconds" or strategy_window is not missing else True
+    )
     if (
-        str(getattr(strategy, "pool", "")).strip().lower() != pool
+        not strategy_pool_matches
         or str(getattr(strategy, "protocol", "")).strip().lower().replace("-", "_") != protocol
-        or getattr(strategy, "twap_window_seconds", None) != window
+        or not strategy_window_matches
     ):
         return None
     metadata = getattr(strategy, "STRATEGY_METADATA", None)
@@ -136,6 +164,7 @@ def _legacy_exact_pool_target(
     }
     if protocol not in supported:
         return None
+    _require_historical_twap(protocol)
     return HistoricalTWAPTarget(
         chain=default_chain,
         protocol=protocol,
@@ -164,6 +193,10 @@ def declared_historical_twap_targets(
         targets = tuple(values)
         if not all(isinstance(target, HistoricalTWAPTarget) for target in targets):
             raise ValueError("every backtest TWAP declaration must be a HistoricalTWAPTarget")
+        # Explicit typed declarations remain the highest-precedence extension
+        # seam.  They may be served by a caller-provided provider that is not a
+        # connector-manifest capability, so only generated/config-shape
+        # discovery is gated by POOL_DATA_REGISTRY.
         return tuple(dict.fromkeys(cast(tuple[HistoricalTWAPTarget, ...], targets)))
 
     legacy = _legacy_exact_pool_target(strategy, strategy_config, default_chain=default_chain)

@@ -579,7 +579,7 @@ def _build_gateway_price_providers(
         # VIB-4924 B1: wire the registry-based TokenResolver so the readers can
         # map the canonical *symbols* produced by ``resolve_instrument``
         # ("WETH", "USDC") to pool-key addresses. Without it,
-        # ``reader._resolve_to_address("WETH")`` returns None and
+        # ``reader.resolve_token_address("WETH")`` returns None and
         # ``twap("WETH/USDC")`` / ``lwap("WETH/USDC")`` resolve no pool and HOLD
         # forever (ALM-2770's own call site). ``get_token_resolver()`` is
         # registry-backed (no egress) — gateway-boundary safe.

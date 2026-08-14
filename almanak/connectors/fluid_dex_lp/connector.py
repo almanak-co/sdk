@@ -41,6 +41,10 @@ CONNECTOR = Connector(
         module="almanak.connectors._fluid_core.dex_lp_compiler",
         attribute="FluidDexLpCompiler",
     ),
+    pool_data=ImportRef(
+        module="almanak.connectors.fluid_dex_lp.pool_data",
+        attribute="POOL_DATA_SPEC",
+    ),
     receipt_parser_connector=ImportRef(
         module="almanak.connectors.fluid_dex_lp.receipt_parser_provider",
         attribute="FluidDexLpReceiptParserConnector",

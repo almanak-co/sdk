@@ -279,7 +279,7 @@ def test_snapshot_twap_resolves_best_pool_then_calls_gateway():
     reader = MagicMock()
     reader.resolve_best_pool_address.return_value = "0xbest"
     registry = MagicMock()
-    registry.reader_kind.return_value = "v3_slot0"
+    registry.supports.return_value = True
     registry.get_reader.return_value = reader
 
     rh = _FakeRateHistory(response=_twap_resp(price="2500", source="on_chain"))
@@ -300,6 +300,32 @@ def test_snapshot_twap_resolves_best_pool_then_calls_gateway():
     assert env.value.price == Decimal("2500")
 
 
+def test_snapshot_twap_orients_engine_registered_strategy_token_aliases():
+    """Generated backtests can name a configured address-backed token in the pair."""
+    rh = _FakeRateHistory(response=_twap_resp(price="2", source="on_chain"))
+    agg = GatewayMarketPriceAggregator(
+        gateway_client=_FakeGatewayClient(rate_history=rh),
+        pool_registry=MagicMock(),
+        rpc_call=lambda *a: b"",
+    )
+    snap = MarketSnapshot(chain="bsc", price_aggregator=agg)
+    usdt = "0x55d398326f99059ff775485246999027b3197955"
+    nvdab = "0x9999999999999999999999999999999999999999"
+    snap._register_symbol_alias_keys({"USDT": f"bsc:{usdt}", "NVDAB": f"bsc:{nvdab}"})
+
+    env = snap.twap(
+        "USDT/NVDAB",
+        pool_address="0x1111111111111111111111111111111111111111",
+        protocol="pancakeswap_v3",
+        window_seconds=300,
+    )
+
+    assert env.value.price == Decimal("2")
+    assert rh.last_request.pool_address == "0x1111111111111111111111111111111111111111"
+    assert rh.last_request.dex == "pancakeswap_v3"
+    assert rh.last_request.secs_ago_start == 300
+
+
 # --------------------------------------------------------------------------- #
 # 5. Unsupported protocol surfaced via gateway success=false (F4)
 # --------------------------------------------------------------------------- #
@@ -309,7 +335,7 @@ def test_snapshot_twap_unsupported_protocol_via_gateway_success_false():
     reader = MagicMock()
     reader.resolve_best_pool_address.return_value = "0xpool"
     registry = MagicMock()
-    registry.reader_kind.return_value = "v3_slot0"
+    registry.supports.return_value = True
     registry.get_reader.return_value = reader
 
     rh = _FakeRateHistory(response=_twap_resp(success=False, error="dex 'aerodrome' not TWAP-capable"))
@@ -341,9 +367,9 @@ def test_lwap_routes_through_gateway_getdexlwap():
     # Framework resolves candidate pools; the gateway does the reads (L3 / VIB-4948).
     reader = MagicMock()
     reader.resolve_pool_address.side_effect = lambda a, b, c, fee: "0xpool500" if fee == 500 else None
-    reader._resolve_to_address.side_effect = _stub_resolve
+    reader.resolve_token_address.side_effect = _stub_resolve
     registry = MagicMock()
-    registry.reader_kind.return_value = "v3_slot0"
+    registry.supports.return_value = True
     registry.protocols_for_chain.return_value = ["uniswap_v3"]
     registry.get_reader.return_value = reader
 
@@ -372,9 +398,9 @@ def test_lwap_routes_through_gateway_getdexlwap():
 def test_lwap_no_pools_resolved_raises():
     reader = MagicMock()
     reader.resolve_pool_address.return_value = None  # nothing resolves
-    reader._resolve_to_address.side_effect = _stub_resolve
+    reader.resolve_token_address.side_effect = _stub_resolve
     registry = MagicMock()
-    registry.reader_kind.return_value = "v3_slot0"
+    registry.supports.return_value = True
     registry.protocols_for_chain.return_value = ["uniswap_v3"]
     registry.get_reader.return_value = reader
 
@@ -390,9 +416,9 @@ def test_lwap_no_pools_resolved_raises():
 def test_lwap_gateway_success_false_raises():
     reader = MagicMock()
     reader.resolve_pool_address.side_effect = lambda a, b, c, fee: "0xpool500" if fee == 500 else None
-    reader._resolve_to_address.side_effect = _stub_resolve
+    reader.resolve_token_address.side_effect = _stub_resolve
     registry = MagicMock()
-    registry.reader_kind.return_value = "v3_slot0"
+    registry.supports.return_value = True
     registry.protocols_for_chain.return_value = ["uniswap_v3"]
     registry.get_reader.return_value = reader
 
@@ -415,9 +441,9 @@ def test_lwap_pinned_aerodrome_slipstream_dispatches_uniswap_v3_profile():
     reader = MagicMock()
     # Slipstream USDC/CBBTC pool keyed by tick spacing 100 (not a uni fee tier).
     reader.resolve_pool_address.side_effect = lambda a, b, c, fee: "0xslip100" if fee == 100 else None
-    reader._resolve_to_address.side_effect = _stub_resolve
+    reader.resolve_token_address.side_effect = _stub_resolve
     registry = MagicMock()
-    registry.reader_kind.return_value = "v3_slot0"
+    registry.supports.return_value = True
     registry.protocols_for_chain.return_value = ["uniswap_v3", "aerodrome_slipstream"]
     registry.get_reader.return_value = reader
 
@@ -442,9 +468,9 @@ def test_lwap_default_sweep_covers_aerodrome_tick_spacings():
     sweep ([100, 500, 3000, 10000]) would skip them."""
     reader = MagicMock()
     reader.resolve_pool_address.side_effect = lambda a, b, c, fee: "0xspacing200" if fee == 200 else None
-    reader._resolve_to_address.side_effect = _stub_resolve
+    reader.resolve_token_address.side_effect = _stub_resolve
     registry = MagicMock()
-    registry.reader_kind.return_value = "v3_slot0"
+    registry.supports.return_value = True
     registry.protocols_for_chain.return_value = ["aerodrome_slipstream"]
     registry.get_reader.return_value = reader
 
@@ -461,21 +487,21 @@ def test_lwap_default_sweep_covers_aerodrome_tick_spacings():
     assert req.dex == "uniswap_v3"
 
 
-def test_lwap_excludes_non_slot0_reader_kinds():
+def test_lwap_excludes_connectors_without_tick_liquidity():
     """PR #3204 (codex P1): GetDexLwap reads slot0()+liquidity(), so pools of a
-    non-slot0 reader kind (Curve's get_dy shape) must never be shipped in
+    connector without tick liquidity (Curve's get_dy shape) must never be shipped in
     pool_addresses — they are unreadable under the uniswap_v3 profile. The
     framework PriceAggregator lane covers those protocols with their own
     reader."""
     v3_reader = MagicMock()
     v3_reader.resolve_pool_address.side_effect = lambda a, b, c, fee: "0xpool500" if fee == 500 else None
-    v3_reader._resolve_to_address.side_effect = _stub_resolve
+    v3_reader.resolve_token_address.side_effect = _stub_resolve
     curve_reader = MagicMock()
     curve_reader.resolve_pool_address.return_value = "0xcurvepool"
-    curve_reader._resolve_to_address.side_effect = _stub_resolve
+    curve_reader.resolve_token_address.side_effect = _stub_resolve
     registry = MagicMock()
     registry.protocols_for_chain.return_value = ["curve", "uniswap_v3"]  # sorted() puts curve first
-    registry.reader_kind.side_effect = lambda p: "curve_pool" if p == "curve" else "v3_slot0"
+    registry.supports.side_effect = lambda protocol, _facet: protocol != "curve"
     registry.get_reader.side_effect = lambda chain, proto: curve_reader if proto == "curve" else v3_reader
 
     rh = _FakeRateHistory(lwap_response=_lwap_resp(price="2500.5", pool_count=1, source="gateway_rpc"))
@@ -646,9 +672,9 @@ def _orient_snapshot(chain, *, twap_price=None, lwap_price=None):
     reader = MagicMock()
     reader.resolve_best_pool_address.return_value = "0xpool"
     reader.resolve_pool_address.side_effect = lambda a, b, c, fee: "0xpool500" if fee == 500 else None
-    reader._resolve_to_address.side_effect = _stub_resolve
+    reader.resolve_token_address.side_effect = _stub_resolve
     registry = MagicMock()
-    registry.reader_kind.return_value = "v3_slot0"
+    registry.supports.return_value = True
     registry.get_reader.return_value = reader
     registry.protocols_for_chain.return_value = ["uniswap_v3"]
     rh = _FakeRateHistory(
@@ -715,9 +741,9 @@ def test_lwap_skips_bytes32_v4_pool_ids_but_forwards_contract_addresses():
     v4_pool_id = "0x" + "ab" * 32  # 64 hex chars
     reader = MagicMock()
     reader.resolve_pool_address.side_effect = lambda a, b, c, fee: {500: "0xpool500", 3000: v4_pool_id}.get(fee)
-    reader._resolve_to_address.side_effect = _stub_resolve
+    reader.resolve_token_address.side_effect = _stub_resolve
     registry = MagicMock()
-    registry.reader_kind.return_value = "v3_slot0"
+    registry.supports.return_value = True
     registry.protocols_for_chain.return_value = ["uniswap_v3"]
     registry.get_reader.return_value = reader
 
@@ -739,9 +765,9 @@ def test_lwap_all_candidates_bytes32_raises_no_pools():
     # empty and lwap must fail loudly, not issue guaranteed-dead reads.
     reader = MagicMock()
     reader.resolve_pool_address.side_effect = lambda a, b, c, fee: "0x" + "cd" * 32
-    reader._resolve_to_address.side_effect = _stub_resolve
+    reader.resolve_token_address.side_effect = _stub_resolve
     registry = MagicMock()
-    registry.reader_kind.return_value = "v3_slot0"
+    registry.supports.return_value = True
     registry.protocols_for_chain.return_value = ["uniswap_v3"]
     registry.get_reader.return_value = reader
 

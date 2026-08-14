@@ -35,12 +35,14 @@ class TestPoolFeeTierDisplayTitle:
         for alias in ("aerodrome-slipstream", "Aerodrome Slipstream", "AERODROME_SLIPSTREAM"):
             assert _compute_title_suffix(alias, fee_tier=100) == "tick_spacing=100"
 
-    def test_aerodrome_manifest_alias_shares_family_membership(self) -> None:
-        """``aerodrome`` (the pool-reader manifest's canonical key) is
-        widened through the manifest key set to its sibling key
-        ``aerodrome_slipstream``, which carries TICK_SPACING_FEE_DISPLAY."""
-        assert _compute_title_suffix("aerodrome", fee_tier=100) == "tick_spacing=100"
-        assert _compute_title_suffix("Aerodrome", fee_tier=200) == "tick_spacing=200"
+    def test_aerodrome_classic_does_not_inherit_slipstream_membership(self) -> None:
+        """Classic and Slipstream publish distinct pool-data identities.
+
+        The Classic protocol must not inherit Slipstream's tick-spacing
+        semantics merely because both products share a connector package.
+        """
+        assert _compute_title_suffix("aerodrome", fee_tier=100) == "0.01%"
+        assert _compute_title_suffix("Aerodrome", fee_tier=200) == "0.02%"
 
     def test_uniswap_v3_uses_percentage_suffix(self) -> None:
         """uniswap_v3 is NOT in TICK_SPACING_FEE_DISPLAY -> percent format."""

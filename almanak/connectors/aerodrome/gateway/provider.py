@@ -21,12 +21,12 @@ W7-followup (VIB-4870) adds:
 * ``GatewayDexTwapCapability`` — single-observation TWAP via the pool's
   ``observe()`` oracle. Aerodrome **V2** (Solidly volatile/stable pairs) has
   no ``observe()``, but **Slipstream** (the concentrated-liquidity product) is
-  a Uniswap-V3 fork that does, so this capability is scoped to Slipstream and
-  reuses the shared V3 ``observe()`` helper.
+  a V3-compatible pool that does, so a separate Slipstream provider owns this
+  capability and reuses the shared archive helpers.
 
-This connector's ``dex_name()`` is the legacy ``"aerodrome"`` key; it also
-declares ``dex_aliases()`` so RateHistoryService routes the canonical
-``"aerodrome_slipstream"`` slug (used by strategies / the executor) here too.
+The classic connector keeps the legacy ``"aerodrome"`` key and volume alias.
+Pool-state/TWAP dispatch does not alias classic to Slipstream: the two pool
+families have different ABIs and capability contracts.
 """
 
 from __future__ import annotations
@@ -37,6 +37,7 @@ from typing import Any, ClassVar
 from almanak.connectors._base.gateway_capabilities import (
     GatewayAddressCapability,
     GatewayDefillamaSlugCapability,
+    GatewayDexPoolStateCapability,
     GatewayDexTwapCapability,
     GatewayDexVolumeCapability,
     GatewayPoolHistoryCapability,
@@ -44,7 +45,11 @@ from almanak.connectors._base.gateway_capabilities import (
 )
 from almanak.connectors._base.gateway_connector import GatewayConnector
 from almanak.connectors._base.types import ProtocolKind, ProtocolName
-from almanak.connectors._base.v3_gateway_twap import fetch_v3_twap_observation
+from almanak.connectors._base.v3_gateway_twap import (
+    fetch_v3_pool_state_series,
+    fetch_v3_twap_observation,
+    fetch_v3_twap_series,
+)
 
 from ..addresses import AERODROME
 
@@ -65,7 +70,6 @@ class AerodromeGatewayConnector(
     GatewayDefillamaSlugCapability,
     GatewayPriceIdCapability,
     GatewayDexVolumeCapability,
-    GatewayDexTwapCapability,
 ):
     """Gateway-side connector for Aerodrome."""
 
@@ -173,19 +177,25 @@ class AerodromeGatewayConnector(
         The Slipstream concentrated-liquidity product is addressed as
         ``aerodrome_slipstream`` by strategies and the executor, while this
         connector's ``dex_name()`` is the legacy ``aerodrome`` key. Declaring
-        the alias lets ``RateHistoryService`` route TWAP / volume requests for
-        either name to this connector.
+        the alias lets ``RateHistoryService`` route volume requests for either
+        name to this connector. Historical pool state and TWAP use the separate
+        Slipstream provider below.
         """
         return ("aerodrome_slipstream",)
 
-    # ---------------------------------------------------------------------
-    # GatewayDexTwapCapability (Slipstream only)
-    #
-    # Aerodrome **Slipstream** pools are a Uniswap-V3 fork and expose the
-    # standard ``observe()`` oracle, so TWAP rides the shared V3 helper.
-    # Aerodrome **V2** (Solidly pairs) has no ``observe()`` — but those are
-    # not concentrated-liquidity pools and are not resolved through this path.
-    # ---------------------------------------------------------------------
+
+class AerodromeSlipstreamGatewayConnector(
+    GatewayConnector,
+    GatewayDexTwapCapability,
+    GatewayDexPoolStateCapability,
+):
+    """Historical pool-data provider for Aerodrome Slipstream only."""
+
+    protocol: ClassVar[ProtocolName] = ProtocolName("aerodrome_slipstream")
+    kind: ClassVar[ProtocolKind] = ProtocolKind.LP
+
+    def dex_name(self) -> str:
+        return "aerodrome_slipstream"
 
     def twap_supported_chains(self) -> frozenset[str]:
         """Aerodrome Slipstream is deployed on Base only."""
@@ -227,17 +237,55 @@ class AerodromeGatewayConnector(
         interval_secs: int,
         window_secs: int,
     ) -> Any:
-        """TWAP series — not yet implemented (mirrors the Uniswap V3 lane).
+        """Read Slipstream TWAPs from the shared V3 archive pipeline."""
+        return await fetch_v3_twap_series(
+            servicer,
+            chain=chain,
+            pool_address=pool_address,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            interval_secs=interval_secs,
+            window_secs=window_secs,
+            protocol="aerodrome_slipstream",
+        )
 
-        The block-by-block bisect for ``interval_secs`` sampling lands with the
-        W7 step-3 DEX TWAP cluster; until then the series lane raises.
-        """
+    def pool_state_supported_chains(self) -> frozenset[str]:
+        """Aerodrome Slipstream is deployed on Base only."""
+        return frozenset({"base"})
+
+    async def fetch_pool_state_series(
+        self,
+        servicer: Any,
+        *,
+        chain: str,
+        pool_address: str,
+        start_ts: int,
+        end_ts: int,
+        interval_secs: int,
+    ) -> Any:
+        """Read and authenticate exact Slipstream state at archive blocks."""
         from almanak.gateway.services.rate_history_service import RateHistoryUnavailable
 
-        raise RateHistoryUnavailable(
-            "aerodrome_slipstream",
-            "DEX TWAP series fan-out lands in W7 step 3 (DEX cluster)",
+        deployment = AERODROME.get(chain.strip().lower())
+        factory_address = deployment.get("cl_factory") if deployment is not None else None
+        if not isinstance(factory_address, str) or not factory_address.strip():
+            raise RateHistoryUnavailable(
+                "aerodrome_slipstream",
+                f"no authenticated Aerodrome Slipstream factory configured for chain {chain!r}",
+            )
+        return await fetch_v3_pool_state_series(
+            servicer,
+            chain=chain,
+            pool_address=pool_address,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            interval_secs=interval_secs,
+            protocol="aerodrome_slipstream",
+            factory_address=factory_address,
+            factory_get_pool_selector="0x28af8d0b",
+            factory_pool_key_selector="0xd0c93a7c",
+            factory_pool_key_signed=True,
         )
 
 
-__all__ = ["AerodromeGatewayConnector"]
+__all__ = ["AerodromeGatewayConnector", "AerodromeSlipstreamGatewayConnector"]

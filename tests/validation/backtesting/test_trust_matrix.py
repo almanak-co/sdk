@@ -572,6 +572,7 @@ def test_historical_exact_pool_twap_reaches_unchanged_strategy_call(monkeypatch:
     exact_pool = pool
     pool_twap = Decimal("1.042")
     fetch_calls = []
+    pool_state_fetch_calls = []
 
     def archive_fetch(**kwargs):
         fetch_calls.append(kwargs)
@@ -587,9 +588,35 @@ def test_historical_exact_pool_twap_reaches_unchanged_strategy_call(monkeypatch:
             for index, target in enumerate(targets)
         ]
 
+    def archive_pool_state_fetch(**kwargs):
+        pool_state_fetch_calls.append(kwargs)
+        targets = range(kwargs["start_ts"], kwargs["end_ts"] + 1, kwargs["interval_secs"])
+        return [
+            HistoricalPoolStatePoint(
+                timestamp=target - 10,
+                block_number=19_000_000 + index,
+                sqrt_price_x96=2**96,
+                tick=0,
+                liquidity=100_000,
+                token0=paxg,
+                token1=xaut,
+                token0_decimals=18,
+                token1_decimals=6,
+                fee_tier=3_000,
+                reserve0_raw=10**20,
+                reserve1_raw=10**8,
+                source="on_chain_archive",
+            )
+            for index, target in enumerate(targets)
+        ]
+
     monkeypatch.setattr(
         "almanak.framework.backtesting.pnl.providers.snapshot_twap.fetch_historical_twap_points",
         archive_fetch,
+    )
+    monkeypatch.setattr(
+        "almanak.framework.backtesting.pnl.providers.snapshot_pool_state.fetch_historical_pool_state_points",
+        archive_pool_state_fetch,
     )
 
     class RWAProvider:
@@ -626,10 +653,9 @@ def test_historical_exact_pool_twap_reaches_unchanged_strategy_call(monkeypatch:
 
     class ExactPoolTWAPProbe:
         deployment_id = "exact_pool_twap_probe"
-        config = {"swap_pool": exact_pool, "protocol": "uniswap_v3", "twap_window_seconds": 1_800}
-        pool = exact_pool
+        config = {"swap_pool": exact_pool, "protocol": "uniswap_v3", "pool_twap_window_seconds": 1_800}
+        swap_pool = exact_pool
         protocol = "uniswap_v3"
-        twap_window_seconds = 1_800
         STRATEGY_METADATA = SimpleNamespace(
             tags=["swap"],
             supported_protocols=["uniswap_v3"],
@@ -644,8 +670,8 @@ def test_historical_exact_pool_twap_reaches_unchanged_strategy_call(monkeypatch:
                 market.twap(
                     "PAXG/XAUT",
                     chain="ethereum",
-                    window_seconds=self.twap_window_seconds,
-                    pool_address=self.pool,
+                    window_seconds=1_800,
+                    pool_address=self.swap_pool,
                     protocol=self.protocol,
                     token0_decimals=18,
                     token1_decimals=6,
@@ -682,6 +708,8 @@ def test_historical_exact_pool_twap_reaches_unchanged_strategy_call(monkeypatch:
     assert fetch_calls[0]["pool_address"] == pool
     assert fetch_calls[0]["window_secs"] == 1_800
     assert fetch_calls[0]["interval_secs"] == 3_600
+    assert len(pool_state_fetch_calls) == 1
+    assert pool_state_fetch_calls[0]["pool_address"] == pool
     assert len(strategy.envelopes) == 3
     assert all(envelope.price == pool_twap for envelope in strategy.envelopes)
     # The independently sourced USD ratio is intentionally different; serving
@@ -764,14 +792,11 @@ def test_historical_exact_pool_state_reaches_unchanged_lp_calls(monkeypatch: pyt
 
     class ExactPoolProbe:
         deployment_id = "exact_pool_state_probe"
-        pool = exact_pool
+        swap_pool = exact_pool
         protocol = "uniswap_v3"
         config = {
-            "pool": exact_pool,
+            "swap_pool": exact_pool,
             "protocol": "uniswap_v3",
-            "fee_tier": 3_000,
-            "base_token": {"symbol": "LINK", "address": link},
-            "quote_token": {"symbol": "WETH", "address": weth},
         }
         STRATEGY_METADATA = SimpleNamespace(
             tags=["lp"], supported_protocols=["uniswap_v3"], intent_types=["LP_OPEN", "HOLD"]
@@ -781,12 +806,12 @@ def test_historical_exact_pool_state_reaches_unchanged_lp_calls(monkeypatch: pyt
             self.observations = []
 
         def decide(self, market):
-            price = market.pool_price(self.pool, chain="ethereum")
-            reserves = market.pool_reserves(self.pool, chain="ethereum")
+            price = market.pool_price(self.swap_pool, chain="ethereum")
+            reserves = market.pool_reserves(self.swap_pool, chain="ethereum")
             self.observations.append((price, reserves))
             if len(self.observations) == 2:
                 return LPOpenIntent(
-                    pool=self.pool,
+                    pool=self.swap_pool,
                     amount0=Decimal("0.1"),
                     amount1=Decimal("0.1"),
                     range_lower=Decimal("0.5"),

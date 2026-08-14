@@ -6,7 +6,7 @@ Solidly forks (Aerodrome / Velodrome, dex="solidly_v2").
 
 Key Components:
     - PoolReserves: Dataclass representing DEX pool state
-    - DexType: Literal type for supported DEX protocols
+    - DexType: Connector protocol identifier used by the observation
 
 Example:
     from almanak.framework.data.defi.pools import PoolReserves, DexType
@@ -62,17 +62,18 @@ Example:
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Literal, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
     from ..tokens.models import ChainToken
 
-# Supported DEX protocols. "solidly_v2" is the Solidly-fork AMM family
-# (Aerodrome on Base, Velodrome V2 on Optimism) — the same family key the
-# connector descriptors and backtesting providers use.
-DexType = Literal["uniswap_v2", "uniswap_v3", "sushiswap", "solidly_v2"]
+# Protocol identity is connector-owned and open-ended.  The former closed
+# Literal rejected valid protocols such as ``pancakeswap_v3`` after an exact
+# pool had already been authenticated by that connector.
+DexType = str
 
-# Valid DEX types for validation
+# Retained as a compatibility/documentation set for callers that render the
+# original four families; it is no longer an allowlist.
 VALID_DEX_TYPES: set[str] = {"uniswap_v2", "uniswap_v3", "sushiswap", "solidly_v2"}
 
 
@@ -81,11 +82,13 @@ class PoolReserves:
     """DEX pool reserve data with support for various AMM protocols.
 
     This dataclass represents the current state of a DEX liquidity pool,
-    including reserves, pricing data, and protocol-specific fields.
+    including reserves, pricing data, and protocol-specific fields. The
+    connector registry, rather than this value object, owns the protocol
+    namespace and its capabilities.
 
     Common fields (all DEX types):
         - pool_address: Contract address of the pool
-        - dex: DEX protocol type ('uniswap_v2', 'uniswap_v3', 'sushiswap', 'solidly_v2')
+        - dex: Normalized connector protocol identifier
         - token0: First token in the pool pair
         - token1: Second token in the pool pair
         - reserve0: Reserve of token0 in human-readable units
@@ -138,9 +141,9 @@ class PoolReserves:
 
     def __post_init__(self) -> None:
         """Validate and normalize fields."""
-        # Validate DEX type
-        if self.dex not in VALID_DEX_TYPES:
-            raise ValueError(f"Invalid dex type: '{self.dex}'. Must be one of: {', '.join(sorted(VALID_DEX_TYPES))}")
+        if not isinstance(self.dex, str) or not self.dex.strip():
+            raise ValueError("dex must be a non-empty connector protocol")
+        self.dex = self.dex.strip().lower().replace("-", "_")
 
         # Validate pool address
         if not self.pool_address:
@@ -173,20 +176,13 @@ class PoolReserves:
         if self.reserve1 < 0:
             raise ValueError("reserve1 must be non-negative")
 
-        # Validate V3-specific fields only set for V3 pools
-        if self.dex == "uniswap_v3":
-            # V3 pools should have these fields
-            if self.sqrt_price_x96 is not None and self.sqrt_price_x96 < 0:
-                raise ValueError("sqrt_price_x96 must be non-negative")
-        else:
-            # Non-V3 pools shouldn't have V3 fields set
-            # But we allow them as None (already the default)
-            pass
+        if self.sqrt_price_x96 is not None and self.sqrt_price_x96 < 0:
+            raise ValueError("sqrt_price_x96 must be non-negative")
 
     @property
     def is_v3(self) -> bool:
-        """Check if this is a Uniswap V3 pool."""
-        return self.dex == "uniswap_v3"
+        """Whether this observation carries concentrated Q64.96 price state."""
+        return self.sqrt_price_x96 is not None
 
     @property
     def is_v2(self) -> bool:

@@ -79,42 +79,104 @@ def _address_from_token_config(value: object) -> str | None:
     return address.strip().lower() if isinstance(address, str) and is_address_like(address.strip()) else None
 
 
+def _require_historical_pool_state(protocol: str) -> None:
+    """Require the connector's historical-state facet with its own reason."""
+    from almanak.connectors._strategy_base.pool_data import PoolDataFacet, PoolDataSource
+    from almanak.connectors._strategy_pool_data_registry import POOL_DATA_REGISTRY
+
+    if POOL_DATA_REGISTRY.supports_from(
+        protocol,
+        PoolDataFacet.HISTORICAL_STATE,
+        PoolDataSource.GATEWAY_POOL_STATE,
+    ):
+        return
+    reason = POOL_DATA_REGISTRY.unsupported_reason(protocol, PoolDataFacet.HISTORICAL_STATE)
+    raise ValueError(f"protocol {protocol!r} does not support historical pool state: {reason}")
+
+
+def _legacy_fee_tier_assertion(protocol: str, value: Any) -> int | None:
+    """Decode ``fee_tier`` only when the connector says it means a fee tier.
+
+    Some compatibility configs reuse this field for a different factory
+    discriminator.  Aerodrome Slipstream, for example, stores tick spacing in
+    ``fee_tier``.  Its archive provider separately authenticates that spacing
+    through the factory, while the returned pool metadata correctly reports
+    the economic ``fee()`` value.  Comparing those two quantities would reject
+    a canonical pool.
+    """
+    from almanak.connectors._strategy_base.pool_reader import PoolDiscriminatorKind
+    from almanak.connectors._strategy_pool_data_registry import POOL_DATA_REGISTRY
+
+    pool_data = POOL_DATA_REGISTRY.require(protocol)
+    reader = pool_data.price_reader
+    if reader is None or reader.discriminator_kind is not PoolDiscriminatorKind.FEE_TIER:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        # The archive-authenticated fee remains authoritative.  A malformed
+        # redundant compatibility field must not suppress address discovery.
+        return None
+
+
 def _legacy_target(
     strategy: Any,
     config: Mapping[str, Any],
     *,
     default_chain: str,
 ) -> HistoricalPoolStateTarget | None:
-    required = ("pool", "protocol", "fee_tier", "base_token", "quote_token")
-    if any(key not in config for key in required):
-        return None
-    pool = config.get("pool")
+    """Decode the two generated exact-pool config shapes.
+
+    Pool identity is address-first: token addresses and the fee tier are
+    optional assertions, never prerequisites for archive prewarm.  The newer
+    generated shape stores the address as ``swap_pool`` / ``self.swap_pool``;
+    the original compatibility shape used ``pool`` / ``self.pool``.
+    """
     protocol = config.get("protocol")
-    base = _address_from_token_config(config.get("base_token"))
-    quote = _address_from_token_config(config.get("quote_token"))
-    if not isinstance(pool, str) or not isinstance(protocol, str) or base is None or quote is None:
+    if not isinstance(protocol, str):
         return None
-    try:
-        fee_tier = int(config["fee_tier"])
-    except (TypeError, ValueError):
-        return None
-    if str(getattr(strategy, "pool", "")).strip().lower() != pool.strip().lower():
-        return None
-    if str(getattr(strategy, "protocol", "")).strip().lower().replace("-", "_") != protocol.strip().lower().replace(
-        "-", "_"
+
+    pool: str | None = None
+    for config_key, strategy_attributes in (
+        ("swap_pool", ("swap_pool", "pool")),
+        ("pool", ("pool",)),
     ):
+        candidate = config.get(config_key)
+        if not isinstance(candidate, str):
+            continue
+        normalized_candidate = candidate.strip().lower()
+        if any(
+            str(getattr(strategy, attribute, "")).strip().lower() == normalized_candidate
+            for attribute in strategy_attributes
+        ):
+            pool = candidate
+            break
+    if pool is None:
+        return None
+
+    normalized_protocol = protocol.strip().lower().replace("-", "_")
+    if str(getattr(strategy, "protocol", "")).strip().lower().replace("-", "_") != normalized_protocol:
         return None
     metadata = getattr(strategy, "STRATEGY_METADATA", None)
+    if metadata is None:
+        get_metadata = getattr(strategy, "get_metadata", None)
+        metadata = get_metadata() if callable(get_metadata) else None
     supported = {
         str(value).strip().lower().replace("-", "_") for value in (getattr(metadata, "supported_protocols", None) or ())
     }
-    if protocol.strip().lower().replace("-", "_") not in supported:
+    if normalized_protocol not in supported:
         return None
+    _require_historical_pool_state(normalized_protocol)
+
+    base = _address_from_token_config(config.get("base_token"))
+    quote = _address_from_token_config(config.get("quote_token"))
+    token_addresses = (base, quote) if base is not None and quote is not None else None
+    fee_tier = _legacy_fee_tier_assertion(normalized_protocol, config.get("fee_tier"))
     return HistoricalPoolStateTarget(
         chain=default_chain,
         protocol=protocol,
         pool_address=pool,
-        token_addresses=(base, quote),
+        token_addresses=token_addresses,
         fee_tier=fee_tier,
     )
 
@@ -137,6 +199,10 @@ def declared_historical_pool_state_targets(
         targets = tuple(values)
         if not all(isinstance(target, HistoricalPoolStateTarget) for target in targets):
             raise ValueError("every pool-state declaration must be a HistoricalPoolStateTarget")
+        # Explicit typed declarations remain the highest-precedence extension
+        # seam.  They may be served by a caller-provided provider that is not a
+        # connector-manifest capability, so only generated/config-shape
+        # discovery is gated by POOL_DATA_REGISTRY.
         return tuple(dict.fromkeys(cast(tuple[HistoricalPoolStateTarget, ...], targets)))
     legacy = _legacy_target(strategy, strategy_config, default_chain=default_chain)
     return (legacy,) if legacy is not None else ()
@@ -217,7 +283,12 @@ def _pool_state_point(raw: Any, *, sample: int, source: str) -> HistoricalPoolSt
         or point.liquidity < 0
         or not is_address_like(point.token0)
         or not is_address_like(point.token1)
+        or point.token0 == point.token1
+        or not 0 <= point.token0_decimals <= 255
+        or not 0 <= point.token1_decimals <= 255
         or point.fee_tier <= 0
+        or point.reserve0_raw < 0
+        or point.reserve1_raw < 0
     ):
         raise DataSourceUnavailable(
             source=source,
@@ -312,6 +383,13 @@ class SnapshotPoolStateSource:
                 raise ValueError(
                     f"pool fee mismatch for {target.manifest_key}: expected={target.fee_tier}, got={point.fee_tier}"
                 )
+        observed_token_metadata = {
+            (point.token0, point.token1, point.token0_decimals, point.token1_decimals) for point in points
+        }
+        if len(observed_token_metadata) != 1:
+            raise ValueError(
+                f"pool token metadata drift for {target.manifest_key}: observed={sorted(observed_token_metadata)}"
+            )
         self._series[target.key] = _Series(target, samples, tuple(points))
         return len(points)
 
@@ -413,8 +491,7 @@ class SnapshotPoolStateView:
                 series.target.pool_address
                 for series in self._source._series.values()
                 if series.target.chain == chain_key
-                and series.target.token_addresses is not None
-                and requested == set(series.target.token_addresses)
+                and requested == {series.points[0].token0, series.points[0].token1}
                 and fee_tier == series.points[0].fee_tier
             ),
             None,
@@ -472,7 +549,7 @@ class SnapshotPoolStateView:
         return self._pool_price(target, point)
 
     async def get_pool_reserves(self, pool_address: str, chain: str) -> Any:
-        from almanak.framework.data.defi.pools import DexType, PoolReserves
+        from almanak.framework.data.defi.pools import PoolReserves
         from almanak.framework.data.tokens.models import ChainToken, Token
 
         try:
@@ -494,7 +571,7 @@ class SnapshotPoolStateView:
         self._source.record(target, point, self._tick_ts, OUTCOME_SERVED, "slot0/liquidity/balanceOf archive state")
         return PoolReserves(
             pool_address=target.pool_address,
-            dex=cast(DexType, target.protocol),
+            dex=target.protocol,
             token0=token0,
             token1=token1,
             reserve0=Decimal(point.reserve0_raw) / Decimal(10**point.token0_decimals),

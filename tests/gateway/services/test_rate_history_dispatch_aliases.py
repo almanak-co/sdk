@@ -1,11 +1,10 @@
-"""Dispatch aliases + Aerodrome Slipstream TWAP registration.
+"""Dispatch aliases + Aerodrome Slipstream historical-data registration.
 
 Covers the gateway-side fixes from this session:
-  - Aerodrome (Slipstream) now declares ``GatewayDexTwapCapability`` — the
+  - Aerodrome Slipstream declares ``GatewayDexTwapCapability`` — the
     Slipstream pool exposes the Uniswap-V3 ``observe()`` oracle.
-  - ``dex_aliases()`` lets the connector answer to the canonical
-    ``aerodrome_slipstream`` slug (callers / the executor pass this), not only
-    its legacy ``dex_name()`` of ``aerodrome`` — for BOTH TWAP and volume.
+  - Classic and Slipstream have distinct historical-data dispatch keys, while
+    the classic connector retains its volume alias for compatibility.
 """
 
 from __future__ import annotations
@@ -25,12 +24,9 @@ def servicer() -> RateHistoryServiceServicer:
 
 
 def test_aerodrome_registered_as_twap_provider(servicer):
-    # Slipstream pools expose observe(); the connector now publishes TWAP.
-    assert "aerodrome" in servicer._twap_providers
-    # ...and is reachable under the canonical slug callers actually pass.
+    # Classic Solidly pools do not expose observe(); only Slipstream publishes TWAP.
+    assert "aerodrome" not in servicer._twap_providers
     assert "aerodrome_slipstream" in servicer._twap_providers
-    # Both names route to the same connector instance.
-    assert servicer._twap_providers["aerodrome"] is servicer._twap_providers["aerodrome_slipstream"]
 
 
 def test_aerodrome_twap_supported_on_base(servicer):
@@ -45,9 +41,23 @@ def test_aerodrome_volume_reachable_under_slipstream_alias(servicer):
     assert servicer._volume_providers["aerodrome"] is servicer._volume_providers["aerodrome_slipstream"]
 
 
-def test_sushiswap_v3_remains_twap_provider(servicer):
-    # Unchanged here, but confirms the alias refactor didn't drop other dexes.
-    assert "sushiswap_v3" in servicer._twap_providers
+def test_v3_forks_register_both_historical_facets(servicer):
+    for protocol, chain in (
+        ("sushiswap_v3", "ethereum"),
+        ("pancakeswap_v3", "bsc"),
+        ("agni_finance", "mantle"),
+        ("uniswap_v3", "bsc"),
+        ("aerodrome_slipstream", "base"),
+    ):
+        assert chain in servicer._pool_state_providers[protocol].pool_state_supported_chains()
+        assert chain in servicer._twap_providers[protocol].twap_supported_chains()
+
+
+def test_pancakeswap_v3_registered_for_bsc_pool_state_and_twap(servicer):
+    assert "pancakeswap_v3" in servicer._pool_state_providers
+    assert "bsc" in servicer._pool_state_providers["pancakeswap_v3"].pool_state_supported_chains()
+    assert "pancakeswap_v3" in servicer._twap_providers
+    assert "bsc" in servicer._twap_providers["pancakeswap_v3"].twap_supported_chains()
 
 
 def test_provider_dispatch_keys_includes_dex_name_and_aliases():

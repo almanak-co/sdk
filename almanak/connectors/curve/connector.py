@@ -81,11 +81,11 @@ CONNECTOR = Connector(
         module="almanak.connectors.curve.compiler",
         attribute="CurveCompiler",
     ),
-    # Curated-pair pool reader spec (reader_kind="curve_pool"): dispatches the
-    # framework's get_dy/coins-based CurvePoolReader, never the slot0 family.
-    pool_reader=ImportRef(
+    # Protocol-neutral pool-data declaration with a connector-selected
+    # get_dy/coins reader. It never dispatches through the slot0 family.
+    pool_data=ImportRef(
         module="almanak.connectors.curve.pool_reader",
-        attribute="POOL_READER_SPEC",
+        attribute="POOL_DATA_SPEC",
     ),
     # Curve's SWAP compiler ships amount_in as a human-readable Decimal (VIB-3747).
     metadata_amount_encoding=MetadataAmountEncoding(swap="human"),
